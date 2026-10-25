@@ -351,8 +351,11 @@ pub(crate) fn render(
     mouse: Option<(f32, f32)>,
 ) {
     if !pane.is_active() || win_w <= 0.0 || win_h <= 0.0 {
+        pane.row_ui.invalidate_presentation();
+        pane.row_geometry_valid = false;
         return;
     }
+    pane.row_geometry_valid = false;
     let s = scale.clamp(0.75, 2.0);
     let occ: &[[f32; 4]] = &[];
 
@@ -735,7 +738,7 @@ pub(crate) fn render(
         color: theme.u8(theme.dim),
         ..label_opts
     };
-    let layouts: Vec<_> = visible
+    let details: Vec<_> = visible
         .iter()
         .map(|&idx| {
             let def = pane.row(idx);
@@ -756,13 +759,86 @@ pub(crate) fn render(
                     detail.push_str(unit);
                 }
             }
-            setting_layout(&def.label, &detail, cw, s, |text, font_size| {
-                sugarloaf
-                    .text_mut()
-                    .measure(text, &DrawOpts { font_size, ..base })
-            })
+            detail
         })
         .collect();
+    let mut layouts: Vec<_> = visible
+        .iter()
+        .zip(&details)
+        .map(|(&idx, detail)| {
+            let def = pane.row(idx);
+            if def.control == RowControl::Toggle {
+                // The declarative tree, not a parallel hand-written measure,
+                // supplies these row heights below.
+                SettingLayout {
+                    labels: Vec::new(),
+                    details: Vec::new(),
+                    detail_y: 0.0,
+                    control_y: 0.0,
+                    height: 0.0,
+                }
+            } else {
+                setting_layout(&def.label, detail, cw, s, |text, font_size| {
+                    sugarloaf
+                        .text_mut()
+                        .measure(text, &DrawOpts { font_size, ..base })
+                })
+            }
+        })
+        .collect();
+    let row_props = super::neoui::SettingsRowsProps {
+        rows: visible
+            .iter()
+            .zip(&details)
+            .zip(&layouts)
+            .map(|((&idx, detail), layout)| {
+                let row = pane.row(idx);
+                super::neoui::RowSnapshot {
+                    path: row.path.clone(),
+                    label: row.label.clone(),
+                    detail: detail.clone(),
+                    checked: (row.control == RowControl::Toggle)
+                        .then(|| pane.bool_at(idx)),
+                    legacy_height: layout.height,
+                }
+            })
+            .collect(),
+        width: cw,
+        scale: s,
+        palette: super::neoui::RowPalette::new(theme),
+        focused_key: pane.row_ui.runtime().focused_key().map(str::to_owned),
+    };
+    match pane
+        .row_ui
+        .set_root::<super::neoui::SettingsRows>("settings/rows", row_props)
+    {
+        Ok(handle) => pane.row_component = Some(handle),
+        Err(error) => {
+            tracing::error!(%error, "NeoUI settings owner reconciliation failed");
+            pane.control_rects.clear();
+            return;
+        }
+    }
+    let old_scroll = pane.scroll_offset();
+    let row_origin = [cx, content_top + pad - old_scroll];
+    let row_clip = crate::neoui_renderer::rect(content_clip);
+    pane.row_viewport = content_clip;
+    let mut metrics = crate::neoui_renderer::TextMetrics { sugarloaf, base };
+    if let Err(error) = pane.row_ui.present(row_origin, cw, row_clip, &mut metrics) {
+        tracing::error!(%error, "NeoUI settings layout failed");
+        pane.control_rects.clear();
+        return;
+    }
+    for (&idx, layout) in visible.iter().zip(&mut layouts) {
+        if pane.row(idx).control == RowControl::Toggle {
+            layout.height = pane
+                .row_ui
+                .runtime()
+                .frame()
+                .bounds_for(&super::neoui::row_key(&pane.row(idx).path))
+                .map_or(0.0, |bounds| bounds.height);
+        }
+    }
     let descriptor_h: f32 = layouts.iter().map(|layout| layout.height).sum();
     let kb_header_h = 52.0 * s;
     let keybind_layouts: Vec<_> = if pane.is_keybinds() {
@@ -802,6 +878,21 @@ pub(crate) fn render(
     }
     pane.set_content_metrics(content_h + pad * 0.5, viewport_h);
     let scroll = pane.scroll_offset();
+    // Clamping after filtering/resizing may move the content. Present the same
+    // retained tree at the final origin; do not render/clone the tree or rerun
+    // layout just to translate and clip its paint and input geometry.
+    if scroll != old_scroll {
+        let mut metrics = crate::neoui_renderer::TextMetrics { sugarloaf, base };
+        if let Err(error) = pane.row_ui.present(
+            [cx, content_top + pad - scroll],
+            cw,
+            row_clip,
+            &mut metrics,
+        ) {
+            tracing::error!(%error, "NeoUI settings layout failed after scroll clamp");
+            return;
+        }
+    }
 
     // Pre-compute the open dropdown's popover rect so the row text under
     // it can be occluded (an opaque popover can't hide text on its own —
@@ -850,9 +941,21 @@ pub(crate) fn render(
         None => &[],
     };
 
+    pane.row_geometry_valid = true;
+    crate::neoui_renderer::paint(
+        sugarloaf,
+        pane.row_ui.runtime().frame(),
+        base,
+        ORDER_CTRL,
+        row_occ,
+    );
     let mut ry = content_top + pad - scroll;
     for (&idx, layout) in visible.iter().zip(&layouts) {
         let setting_row_h = layout.height;
+        if pane.row(idx).control == RowControl::Toggle {
+            ry += setting_row_h;
+            continue;
+        }
         if ry + setting_row_h < clip_top || ry > clip_bottom {
             ry += setting_row_h;
             continue;
@@ -881,38 +984,7 @@ pub(crate) fn render(
         let control_y = ry + layout.control_y;
 
         match def.control {
-            RowControl::Toggle => {
-                let on = pane.bool_at(idx);
-                let tw = (40.0 * s).min(cw);
-                let th = 22.0 * s;
-                let tx = cx;
-                let ty = control_y + 3.0 * s;
-                clip_rrect(
-                    sugarloaf,
-                    [tx, ty, tw, th],
-                    content_clip,
-                    theme.f32(if on { theme.accent } else { theme.border }),
-                    th * 0.5,
-                    ORDER_CTRL,
-                );
-                let knob = th - 6.0 * s;
-                let kx = if on {
-                    tx + tw - knob - 3.0 * s
-                } else {
-                    tx + 3.0 * s
-                };
-                clip_rrect(
-                    sugarloaf,
-                    [kx, ty + 3.0 * s, knob, knob],
-                    content_clip,
-                    theme.f32(theme.bg),
-                    knob * 0.5,
-                    ORDER_TEXT,
-                );
-                if let Some(hit) = intersect_rect([tx, ty, tw, th], content_clip) {
-                    pane.push_control_rect(hit, idx);
-                }
-            }
+            RowControl::Toggle => unreachable!("boolean rows are painted by NeoUI"),
             RowControl::Select | RowControl::FontFamily => {
                 let raw = pane.string_at(idx);
                 let value = if raw.is_empty() {
@@ -975,8 +1047,9 @@ pub(crate) fn render(
                 let pxr = cx;
                 let pyr = control_y;
                 let editing = pane.is_editing(idx);
-                let value = if editing {
-                    pane.edit_buffer().to_string()
+                let edit = editing.then(|| pane.edit_presentation());
+                let value = if let Some((text, _, _, _)) = &edit {
+                    text.clone()
                 } else {
                     let current = pane.string_at(idx);
                     if current.is_empty() {
@@ -1008,13 +1081,43 @@ pub(crate) fn render(
                     ),
                     ..base
                 };
-                let width = sugarloaf.text_mut().measure(&value, &value_opts);
+                let caret_width = edit.as_ref().map_or(0.0, |(_, _, caret, _)| {
+                    sugarloaf
+                        .text_mut()
+                        .measure(value.get(..*caret).unwrap_or(&value), &value_opts)
+                });
                 let text_x = pxr + 10.0 * s
                     - if editing {
-                        (width - (pill_w - 24.0 * s).max(0.0)).max(0.0)
+                        (caret_width - (pill_w - 24.0 * s).max(0.0)).max(0.0)
                     } else {
                         0.0
                     };
+                let text_clip = value_opts.clip_rect.unwrap_or([0.0; 4]);
+                if let Some((_, selection, _, _)) = &edit {
+                    if !selection.is_empty() {
+                        let left = sugarloaf.text_mut().measure(
+                            value.get(..selection.start).unwrap_or(""),
+                            &value_opts,
+                        );
+                        let right = sugarloaf.text_mut().measure(
+                            value.get(..selection.end).unwrap_or(&value),
+                            &value_opts,
+                        );
+                        clip_rrect(
+                            sugarloaf,
+                            [
+                                text_x + left,
+                                pyr + 4.0 * s,
+                                (right - left).max(0.0),
+                                pill_h - 8.0 * s,
+                            ],
+                            text_clip,
+                            theme.f32_alpha(theme.accent, 0.28),
+                            0.0,
+                            ORDER_CTRL,
+                        );
+                    }
+                }
                 draw_text_with_occlusion(
                     sugarloaf,
                     text_x,
@@ -1023,11 +1126,37 @@ pub(crate) fn render(
                     &value_opts,
                     row_occ,
                 );
+                if let Some((_, _, _, Some(preedit))) = &edit {
+                    let left = sugarloaf
+                        .text_mut()
+                        .measure(value.get(..preedit.start).unwrap_or(""), &value_opts);
+                    let right = sugarloaf
+                        .text_mut()
+                        .measure(value.get(..preedit.end).unwrap_or(&value), &value_opts);
+                    clip_rrect(
+                        sugarloaf,
+                        [
+                            text_x + left,
+                            pyr + pill_h - 5.0 * s,
+                            (right - left).max(0.0),
+                            s,
+                        ],
+                        text_clip,
+                        theme.f32(theme.accent),
+                        0.0,
+                        ORDER_TEXT,
+                    );
+                }
                 if editing {
                     clip_rrect(
                         sugarloaf,
-                        [text_x + width, pyr + 5.0 * s, 1.5 * s, pill_h - 10.0 * s],
-                        content_clip,
+                        [
+                            text_x + caret_width,
+                            pyr + 5.0 * s,
+                            1.5 * s,
+                            pill_h - 10.0 * s,
+                        ],
+                        text_clip,
                         theme.f32(theme.accent),
                         0.0,
                         ORDER_TEXT,
@@ -1539,6 +1668,99 @@ mod geometry_tests {
 
     fn measure(text: &str, size: f32) -> f32 {
         text.chars().count() as f32 * size * 0.6
+    }
+
+    fn boolean_row(description: &str) -> super::super::state::SettingRow {
+        super::super::state::SettingRow {
+            category: super::super::state::Category::General,
+            path: "general.toggle".into(),
+            label: "Automatically animate the splash screen".into(),
+            description: description.into(),
+            value_kind: neoism_protocol::config::ConfigValueKind::Boolean,
+            default: serde_json::Value::Bool(false),
+            suggestions: Vec::new(),
+            options: Vec::new(),
+            constraints: Default::default(),
+            extensible: false,
+            control: RowControl::Toggle,
+        }
+    }
+
+    #[test]
+    fn neoui_boolean_rows_match_existing_wrapped_geometry_at_all_widths_and_scales() {
+        let theme = IdeTheme::default();
+        for scale in [0.75, 1.0, 2.0] {
+            for width in [180.0, 340.0, 900.0] {
+                for description in ["", "Description.",
+                    "Automatically play the splash animation when the terminal is idle. This should wrap at compact widths.",
+                    "\n\nFirst paragraph.\n\nSecond paragraph.\n\n",
+                    "/home/somebody/a-very-long-directory-name/background.png\nSecond line."]
+                {
+                    let row = boolean_row(description);
+                    let width = width * scale;
+                    let old = setting_layout(&row.label, description, width, scale, measure);
+                    for checked in [false, true] {
+                        let root = super::super::neoui::toggle_row(
+                            &row, description, checked, false, width, scale, &theme,
+                        );
+                        let mut runtime = neoui::Runtime::new();
+                        let frame = runtime.layout(root, [5.0, 10.0], width,
+                            neoui::Rect::new(0.0, 0.0, 4000.0, 4000.0),
+                            &mut |text: &str, style: &neoui::TextStyle| measure(text, style.size),
+                        ).unwrap();
+                        assert!((frame.bounds.height - old.height).abs() < 0.01,
+                            "width={width}, scale={scale}, description={description:?}: {} != {}", frame.bounds.height, old.height);
+                        let toggle = frame.bounds_for(&super::super::neoui::toggle_key(&row.path)).unwrap();
+                        assert!((toggle.y - (10.0 + old.control_y + 3.0 * scale)).abs() < 0.01);
+                        let knob = frame.bounds_for("setting:general.toggle/toggle/knob").unwrap();
+                        let expected_x = if checked { toggle.right() - 19.0 * scale } else { toggle.x + 3.0 * scale };
+                        assert!((knob.x - expected_x).abs() < 0.01);
+                        assert!((knob.y - (toggle.y + 3.0 * scale)).abs() < 0.01);
+                        assert_eq!(frame.semantics.iter().find(|node| node.key == super::super::neoui::toggle_key(&row.path))
+                            .unwrap().semantics.checked, Some(checked));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn neoui_mixed_rows_share_offsets_and_content_extent() {
+        let row = boolean_row("A wrapped description for the declarative control.");
+        let theme = IdeTheme::default();
+        let tree = neoui::Element::column(
+            "settings/root",
+            [
+                neoui::Element::spacer("legacy-before").height(neoui::Size::Px(123.0)),
+                super::super::neoui::toggle_row(
+                    &row,
+                    &row.description,
+                    false,
+                    false,
+                    180.0,
+                    1.0,
+                    &theme,
+                ),
+                neoui::Element::spacer("legacy-after").height(neoui::Size::Px(97.0)),
+            ],
+        );
+        let mut runtime = neoui::Runtime::new();
+        let frame = runtime
+            .layout(
+                tree,
+                [20.0, -40.0],
+                180.0,
+                neoui::Rect::new(20.0, 0.0, 180.0, 600.0),
+                &mut |text: &str, style: &neoui::TextStyle| measure(text, style.size),
+            )
+            .unwrap();
+        let boolean = frame
+            .bounds_for(&super::super::neoui::row_key(&row.path))
+            .unwrap();
+        let after = frame.bounds_for("legacy-after").unwrap();
+        assert_eq!(boolean.y, -40.0 + 123.0);
+        assert_eq!(after.y, boolean.bottom());
+        assert!((frame.bounds.height - (123.0 + boolean.height + 97.0)).abs() < 0.01);
     }
 
     #[test]

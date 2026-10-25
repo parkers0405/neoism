@@ -1,0 +1,11 @@
+[package]
+name = "neoui"
+version = "0.7.138"
+edition = "2021"
+rust-version = "1.92"
+license = "MIT"
+description = "Renderer-independent declarative layout, paint, and interaction core for Neoism"
+
+[dependencies]
+taffy = "=0.9.2"
+unicode-segmentation = "1.12"

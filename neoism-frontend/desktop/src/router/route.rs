@@ -800,6 +800,37 @@ impl Route<'_> {
                     self.request_overlay_redraw();
                     return true;
                 }
+                #[cfg(feature = "neoui")]
+                {
+                let edit_key = match &key_event.logical_key {
+                    Key::Character(text) => Some(neoism_ui::neoui::input::Key::Character(text.to_string())),
+                    Key::Named(named) => neoism_ui::neoui_input::key_from_name(&format!("{named:?}")),
+                    _ => None,
+                };
+                if let Some(key) = edit_key {
+                    use neoism_ui::neoui::input::{ClipboardRequest, InputEvent, Modifiers};
+                    let mods = self.window.screen.modifiers.state();
+                    let event = InputEvent::Key {
+                        key, repeat: key_event.repeat,
+                        modifiers: Modifiers { shift: mods.shift_key(), control: mods.control_key(),
+                            alt: mods.alt_key(), meta: mods.super_key() },
+                    };
+                    if let Some(outcome) = self.window.screen.renderer.settings.handle_edit_event(&event) {
+                        if outcome.consumed && !outcome.submitted {
+                            match outcome.clipboard {
+                                Some(ClipboardRequest::Read) => {
+                                    let text = clipboard.get(ClipboardType::Clipboard);
+                                    self.window.screen.renderer.settings.handle_edit_event(&InputEvent::Paste(text));
+                                }
+                                Some(ClipboardRequest::Write(text)) => clipboard.set(ClipboardType::Clipboard, text),
+                                None => {}
+                            }
+                            self.request_overlay_redraw();
+                            return true;
+                        }
+                    }
+                }
+                }
                 match &key_event.logical_key {
                     Key::Named(NamedKey::Escape) => {
                         self.window.screen.renderer.settings.on_escape();
@@ -807,11 +838,55 @@ impl Route<'_> {
                     Key::Named(NamedKey::Backspace) => {
                         self.window.screen.renderer.settings.backspace();
                     }
+                    #[cfg(feature = "neoui")]
+                    Key::Named(NamedKey::Tab) => {
+                        let backwards = self.window.screen.modifiers.state().shift_key();
+                        self.window
+                            .screen
+                            .renderer
+                            .settings
+                            .focus_next_toggle(backwards);
+                    }
                     Key::Named(NamedKey::Enter) => {
-                        if let Some(action) =
-                            self.window.screen.renderer.settings.commit_edit()
-                        {
+                        #[cfg(not(feature = "neoui"))]
+                        let action = self.window.screen.renderer.settings.commit_edit();
+                        #[cfg(feature = "neoui")]
+                        let action =
+                            self.window.screen.renderer.settings.commit_edit().or_else(
+                                || {
+                                    (!key_event.repeat)
+                                        .then(|| {
+                                            self.window
+                                                .screen
+                                                .renderer
+                                                .settings
+                                                .activate_focused_toggle()
+                                        })
+                                        .flatten()
+                                },
+                            );
+                        if let Some(action) = action {
                             self.window.screen.apply_settings_action(action);
+                        }
+                    }
+                    #[cfg(feature = "neoui")]
+                    key if matches!(key, Key::Named(NamedKey::Space))
+                        || matches!(key, Key::Character(text) if text.as_str() == " ") =>
+                    {
+                        let action = (!key_event.repeat)
+                            .then(|| {
+                                self.window
+                                    .screen
+                                    .renderer
+                                    .settings
+                                    .activate_focused_toggle()
+                            })
+                            .flatten();
+                        if let Some(action) = action {
+                            self.window.screen.apply_settings_action(action);
+                        } else {
+                            // input_char only types into the active search/editor path.
+                            self.window.screen.renderer.settings.input_char(' ');
                         }
                     }
                     Key::Character(text) => {

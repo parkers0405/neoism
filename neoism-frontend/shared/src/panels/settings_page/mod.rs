@@ -2,7 +2,11 @@
 //! `config.json`. See [`state`] for the data model + interaction and
 //! [`view`] for the painter.
 
+#[cfg(feature = "neoui")]
+mod neoui;
+#[cfg_attr(not(feature = "neoui"), path = "legacy_state.rs")]
 mod state;
+#[cfg_attr(not(feature = "neoui"), path = "legacy_view.rs")]
 mod view;
 
 pub use state::{NeoismSettingsPane, PointerOutcome, SettingsAction};

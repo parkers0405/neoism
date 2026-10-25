@@ -537,6 +537,10 @@ pub struct Chrome<A: Send + Copy + 'static = ()> {
     /// Settings actions queued for the host to persist/route —
     /// drained via [`Chrome::drain_settings_actions`].
     pending_settings_actions: Vec<crate::panels::settings_page::SettingsAction>,
+    #[cfg(feature = "neoui")]
+    pending_settings_clipboard: Vec<neoui::input::ClipboardRequest>,
+    #[cfg(feature = "neoui")]
+    pending_settings_ime_text: Option<String>,
     /// Extensions page intents for the host (OpenRepository) —
     /// drained via [`Chrome::drain_extensions_actions`].
     pending_extensions_actions: Vec<crate::panels::extensions_page::PaneAction>,

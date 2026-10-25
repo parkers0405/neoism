@@ -13,6 +13,7 @@ description = "wasm-bindgen bindings around neoism-terminal-core (scaffolding)."
 crate-type = ["cdylib", "rlib"]
 
 [features]
+neoui = ["neoism-ui/neoui"]
 # `--features web` is the documented invocation for wasm32 builds (see
 # the task brief + sugarloaf's own `web` feature). Sugarloaf's `web`
 # feature is already activated unconditionally in the wasm32-only dep

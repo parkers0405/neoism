@@ -11,6 +11,9 @@
 //! still live under `frontends/neoism/src/chrome/` and will be lifted
 //! in a follow-up phase.
 
+#[cfg(feature = "neoui")]
+pub use neoui;
+
 pub mod animation;
 pub mod chrome;
 pub mod chrome_policy;
@@ -30,6 +33,10 @@ pub mod key_policy;
 pub mod layout;
 pub mod lifecycle_policy;
 pub mod mouse_policy;
+#[cfg(feature = "neoui")]
+pub mod neoui_input;
+#[cfg(feature = "neoui")]
+mod neoui_renderer;
 pub mod panels;
 pub mod paste_policy;
 pub mod primitives;

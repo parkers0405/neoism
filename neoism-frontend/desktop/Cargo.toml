@@ -163,6 +163,7 @@ features = ["wgpu"]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("server-transport-contract"))'] }
 
 [features]
+neoui = ["neoism-ui/neoui"]
 default = ["wayland", "x11", "wgpu", "cef-artifacts"]
 audio = ["cpal"]
 # Optional reMarkable sync extension (work in progress). Off by default —

@@ -767,6 +767,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         // can't reach the panels underneath an overlay — desktop
         // parity with router/route.rs's settings/modal arms.
         if self.handle_chrome_page_event(event) {
+            #[cfg(feature = "neoui")]
+            for request in std::mem::take(&mut self.pending_settings_clipboard) {
+                match request {
+                    neoui::input::ClipboardRequest::Write(text) => ctx.services.clipboard.write(&text),
+                    neoui::input::ClipboardRequest::Read => {
+                        if let Some(text) = ctx.services.clipboard.read() {
+                            self.settings_page.handle_edit_event(&neoui::input::InputEvent::Paste(text));
+                        }
+                    }
+                }
+            }
             if let Some(url) = self.modal.take_invite_copy() {
                 ctx.services.clipboard.write(&url);
             }

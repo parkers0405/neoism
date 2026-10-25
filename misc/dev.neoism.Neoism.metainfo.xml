@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.139" date="2026-10-25">
+      <description>
+        <p>Agent streaming memory improvements, bounded live-event retention and reply queues, improved provider readiness, and opt-in NeoUI foundations.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.139</url>
+    </release>
     <release version="0.7.138" date="2026-10-24">
       <description>
         <p>Stable background model discovery, offline model picker recovery, rendering caches, and bounded scaled glyph sampling across rendering backends.</p>

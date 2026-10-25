@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.139] - 2026-10-25
+
+### Agent streaming, readiness, and experimental UI foundations
+
+- Reduces repeated agent catalog/database reads and conversation-search index work, preserving scope-valid provider readiness during background refreshes.
+- Streams incremental tool-input deltas across native, web, and SDK reducers instead of repeatedly cloning growing snapshots.
+- Bounds retained live events and queued WebSocket reply bytes, closing lagging streams for client reconciliation, and spools external-agent output to managed files with bounded previews.
+- Loads prompt context from the latest completed compaction boundary while preserving persisted conversation history.
+- Adds experimental NeoUI layout, input, component, and Settings foundations behind an opt-in feature; stable packages retain the existing Settings UI.
+- Optimizes development-profile code and dependencies without changing the release profile.
+
+This stable release includes the merged `feature/neoui` work. Event and reply limits reduce memory amplification but do not impose a global daemon heap or output-disk bound. Servo and CEF runtimes remain excluded from production packages.
+
 ## [0.7.138] - 2026-10-24
 
 ### Model discovery and scaled text correction

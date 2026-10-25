@@ -31,6 +31,38 @@ const timed = (id: string, role: "user" | "assistant", created?: number, parentI
 });
 const ids = (messages: MessageWithParts[]) => messages.map((m) => m.info.id);
 
+describe("pending tool raw deltas", () => {
+    let serial = 0;
+    const apply = (state: typeof emptyChat, input: Event) => reduceEvent(state, { ...input, id: String(++serial) }, "s");
+    it("reconstructs raw across a late baseline and authoritative end without top-level raw", () => {
+        const pending = (raw: string) => event("message.part.updated", { sessionID: "s", part: {
+            id: "tool", messageId: "m", sessionId: "s", type: "tool", tool: "apply_patch", callId: "c",
+            state: { status: "pending", input: {}, raw },
+        } });
+        const fragment = '\n+🦀\\"patch';
+        const delta = event("message.part.delta", { sessionID: "s", messageID: "m", partID: "tool",
+            partType: "tool", field: "raw", delta: fragment });
+        let state = apply(emptyChat, pending(""));
+        for (let i = 0; i < 50; i++) state = apply(state, delta);
+        let late = apply(emptyChat, pending(fragment.repeat(50)));
+        for (let i = 0; i < 50; i++) {
+            state = apply(state, delta);
+            late = apply(late, delta);
+        }
+        expect(late.messages).toEqual(state.messages);
+        const part = state.messages[0].parts[0];
+        expect(part.state).toEqual({ status: "pending", input: {}, raw: fragment.repeat(100) });
+        expect(part.raw).toBeUndefined();
+        state = apply(state, pending(fragment.repeat(100)));
+        expect(state.messages[0].parts[0]).toEqual(part);
+        const running = event("message.part.updated", { sessionID: "s", part: { ...part,
+            state: { status: "running", input: { patchText: "done" }, time: { start: 1 } } } });
+        state = apply(state, running);
+        expect(apply(state, delta).messages).toEqual(state.messages);
+        expect(apply(emptyChat, delta).messages).toEqual([]);
+    });
+});
+
 describe("opaque-ID causal ordering", () => {
     const user = timed("ffe2-uuid-user", "user", 100);
     const step = timed("aaa-response", "assistant", 110, user.info.id);

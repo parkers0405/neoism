@@ -590,7 +590,11 @@ pub(crate) async fn append_prompt_admission(
         run_guard.disarm();
         return Ok(user_message);
     }
-    let mut history = state.inner.store.list_messages(&session_id_text).await?;
+    let mut history = state
+        .inner
+        .store
+        .list_context_messages(&session_id_text)
+        .await?;
     if let Err(error) =
         prune_old_tool_outputs_in_messages(state, &session_id_text, &mut history).await
     {
@@ -614,6 +618,7 @@ pub(crate) async fn append_prompt_admission(
         run_system.as_deref(),
         goals_enabled,
     );
+    drop(history);
     let step_limit = agent_info
         .steps
         .filter(|steps| *steps > 0)
@@ -697,7 +702,11 @@ pub(crate) async fn append_prompt_admission(
         }
         step_number += 1;
         info = ensure_session(state, &session_id_text).await?;
-        let mut history = state.inner.store.list_messages(&session_id_text).await?;
+        let mut history = state
+            .inner
+            .store
+            .list_context_messages(&session_id_text)
+            .await?;
         // A Neoism run can stay alive across queued user steering and active-goal
         // continuations. Waiting until the entire run exits means the
         // tool-output pruner may never run, allowing every old read/grep
@@ -721,6 +730,7 @@ pub(crate) async fn append_prompt_admission(
             run_system.as_deref(),
             goals_enabled,
         );
+        drop(history);
         let max_steps_reached = step_number >= step_limit;
         if max_steps_reached {
             provider_messages.push(ProviderMessage::text(
@@ -823,7 +833,7 @@ async fn prune_old_tool_outputs(
     state: &AppState,
     session_id: &str,
 ) -> Result<(), ApiError> {
-    let mut messages = state.inner.store.list_messages(session_id).await?;
+    let mut messages = state.inner.store.list_context_messages(session_id).await?;
     prune_old_tool_outputs_in_messages(state, session_id, &mut messages).await
 }
 
@@ -2630,7 +2640,7 @@ async fn rebuilt_compaction_messages(
     goals_enabled: bool,
     max_steps_reached: bool,
 ) -> Result<Vec<ProviderMessage>, ApiError> {
-    let history = state.inner.store.list_messages(session_id).await?;
+    let history = state.inner.store.list_context_messages(session_id).await?;
     let mut messages = provider_messages_for_session_with_plugins(
         snapshot,
         info,
@@ -2735,13 +2745,19 @@ async fn run_assistant_step(
         Some(&chat_hook_ctx),
     )
     .await;
-    let history = state.inner.store.list_messages(session_id_text).await?;
+    let should_compact = if enabled && !cancellation.load(Ordering::SeqCst) {
+        let history = state
+            .inner
+            .store
+            .list_context_messages(session_id_text)
+            .await?;
+        !summary_covers_all_messages(info, &history)
+            && compaction_usage_tokens(&request, &history) >= threshold
+    } else {
+        false
+    };
     let mut compacted = false;
-    if enabled
-        && !summary_covers_all_messages(info, &history)
-        && compaction_usage_tokens(&request, &history) >= threshold
-        && !cancellation.load(Ordering::SeqCst)
-    {
+    if should_compact {
         match compact_session_context_for_run(state, session_id_text).await {
             Ok(info) => {
                 request.messages = rebuilt_compaction_messages(

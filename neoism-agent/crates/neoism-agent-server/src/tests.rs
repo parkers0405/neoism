@@ -2927,6 +2927,42 @@ async fn v2_event_stream_closes_on_receiver_lag_so_client_can_reconcile() {
 }
 
 #[tokio::test]
+async fn v2_event_stream_closes_on_byte_budget_before_count_limit() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-byte-lagged-events-{}.db",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    state.inner.store.insert_session(&store_test_session(&session_id, now_millis()))
+        .await.unwrap();
+    let response = app(state.clone()).oneshot(
+        Request::builder().method(Method::GET)
+            .uri(format!("/v2/events?sessionId={}&tail=true", session_id))
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    // Far fewer than 16,384 events must still evict a stalled reader when
+    // their payloads exhaust the byte budget. Unknown message IDs deliberately
+    // avoid creating a live baseline, isolating the subscriber backlog.
+    for _ in 0..10 {
+        state.publish_live(EventPayload::new(event_type::MESSAGE_PART_DELTA, json!({
+            "sessionID": session_id,
+            "messageID": "message-large",
+            "partID": "part-large",
+            "field": "text",
+            "delta": "x".repeat(1024 * 1024)
+        })));
+    }
+    let next = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await.expect("byte-lagged stream should close for reconciliation");
+    assert!(next.is_none());
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn v2_live_events_carry_monotone_wire_sequences() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-wire-seq-{}.sqlite3",

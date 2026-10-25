@@ -170,7 +170,7 @@ thread_local! {
 }
 
 pub(crate) fn forward_sse_event(
-    tx: &UnboundedSender<AgentServerMessage>,
+    tx: &AgentReplySender,
     session_id: &str,
     payload: &str,
     accum: &mut String,
@@ -277,7 +277,7 @@ pub(crate) fn forward_sse_event(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn emit_error(
-    tx: &UnboundedSender<AgentServerMessage>,
+    tx: &AgentReplySender,
     message: impl Into<String>,
 ) {
     let _ = tx.send(AgentServerMessage::Error {

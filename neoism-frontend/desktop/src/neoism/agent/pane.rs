@@ -2019,7 +2019,8 @@ fn merge_part_message(
         if incoming.text.trim().is_empty() {
             incoming.text = existing.text;
         }
-        if incoming.detail.trim().is_empty() {
+        // Pending detail is verbatim raw input, not output to carry into a new state.
+        if incoming.detail.trim().is_empty() && existing.status != "pending" {
             incoming.detail = existing.detail;
         }
         if incoming.todos.is_empty() {
@@ -2287,6 +2288,15 @@ pub(super) fn apply_cached_part_delta(
     kind: Option<&str>,
     delta: &str,
 ) {
+    if kind == Some("tool-input") {
+        if let Some(message) = messages.iter_mut().find(|m| {
+            Some(m.id.as_str()) == part_id
+                && m.kind == NeoismAgentMessageKind::Tool && m.status == "pending"
+        }) {
+            message.detail.push_str(delta);
+        }
+        return;
+    }
     if delta.is_empty() {
         return;
     }

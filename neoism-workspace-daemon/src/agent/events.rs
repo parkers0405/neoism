@@ -203,7 +203,7 @@ async fn run_event_stream_inner(
 }
 
 fn report_stream_error(
-    tx: &UnboundedSender<AgentServerMessage>,
+    tx: &AgentReplySender,
     catalog: bool,
     error: String,
 ) {
@@ -214,7 +214,7 @@ fn report_stream_error(
     }
 }
 
-fn forward_catalog_event(tx: &UnboundedSender<AgentServerMessage>, event: Value) {
+fn forward_catalog_event(tx: &AgentReplySender, event: Value) {
     let kind = event
         .get("type")
         .and_then(Value::as_str)
@@ -280,7 +280,7 @@ fn normalize_v2_event(event: Value) -> Value {
 }
 
 pub(crate) fn forward_agent_server_event(
-    tx: &UnboundedSender<AgentServerMessage>,
+    tx: &AgentReplySender,
     bound_session_id: &str,
     event: Value,
 ) {
@@ -1197,7 +1197,7 @@ mod tests {
 
     #[test]
     fn catalog_family_forwards_and_decodes_without_a_session_stream_or_pane() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         let snapshot = json!({
             "executionId": "execution-1",
             "familyRevision": 7,
@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn catalog_activity_is_global_and_does_not_forward_parent_idle_as_family_idle() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         for activity in ["running", "background", "permission", "idle"] {
             forward_catalog_event(
                 &tx,
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn catalog_activity_proxy_retains_metadata_but_rejects_unknown_activity() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_catalog_event(
             &tx,
             json!({"type": "session.updated", "properties": {
@@ -1288,14 +1288,14 @@ mod tests {
     }
 
     fn provider_state(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentServerMessage>,
+        rx: &mut reply_queue::AgentReplyReceiver,
     ) -> AgentServerMessage {
         rx.try_recv().expect("provider snapshot")
     }
 
     #[test]
     fn root_activity_sequence_carries_busy_metadata_and_part_semantics() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn queued_compaction_transport_preserves_scope_and_continuation() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1405,7 +1405,7 @@ mod tests {
 
     #[test]
     fn queue_envelope_preserves_dequeue_identity_and_running_evidence() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         let properties = json!({
             "sessionID": "root", "action": "dequeue", "messageID": "primary",
             "request": {"messageID": "primary", "parts": [{"type": "text", "text": "hello"}]},
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn compaction_delta_uses_assistant_message_identity() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1475,8 +1475,8 @@ mod tests {
                 }
             }
         });
-        let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (first_tx, mut first_rx) = reply_queue::channel();
+        let (second_tx, mut second_rx) = reply_queue::channel();
 
         // Each WebSocket attached to the chat owns an SSE subscriber; the
         // agent-server publishes the same event to both subscribers.
@@ -1514,7 +1514,7 @@ mod tests {
 
     #[test]
     fn provider_snapshot_uses_source_session_not_bound_session() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "chat-a",
@@ -1538,7 +1538,7 @@ mod tests {
 
     #[test]
     fn parent_task_part_discovers_child_and_tracks_running_lifecycle() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1580,7 +1580,7 @@ mod tests {
 
     #[test]
     fn child_retry_and_tool_only_activity_map_to_roster_updates() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1639,7 +1639,7 @@ mod tests {
 
     #[test]
     fn child_session_metadata_update_is_forwarded_without_terminal_authority() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1692,7 +1692,7 @@ mod tests {
 
     #[test]
     fn mcp_generation_change_maps_to_typed_refresh() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1713,7 +1713,7 @@ mod tests {
 
     #[test]
     fn execution_activity_event_maps_to_protocol_snapshot() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1743,7 +1743,7 @@ mod tests {
 
     #[test]
     fn background_runtime_empty_family_event_survives_proxy() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1771,7 +1771,7 @@ mod tests {
 
     #[test]
     fn background_runtime_event_maps_to_versioned_protocol_update() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1805,7 +1805,7 @@ mod tests {
 
     #[test]
     fn execution_runtime_event_maps_authoritative_branches_and_session_activity() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1853,7 +1853,7 @@ mod tests {
 
     #[test]
     fn terminal_subtask_event_maps_once_by_child_id() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1888,7 +1888,7 @@ mod tests {
 
     #[test]
     fn waiting_subagents_status_does_not_create_independent_streaming_state() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1905,7 +1905,7 @@ mod tests {
 
     #[test]
     fn terminal_task_tool_result_synthesizes_child_completion() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",
@@ -1937,7 +1937,7 @@ mod tests {
 
     #[test]
     fn background_task_launch_result_does_not_synthesize_completion() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
             "root",

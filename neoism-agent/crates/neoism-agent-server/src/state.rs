@@ -12,10 +12,14 @@ use neoism_agent_core::{
 use neoism_agent_service_api::AgentServices;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock};
 use turso::Value as SqlValue;
 
+mod event_bus;
 mod live_messages;
+
+pub use event_bus::EventReceiver;
+use event_bus::EventBus;
 
 pub(crate) const EVENT_BROADCAST_CAPACITY: usize = 16_384;
 
@@ -70,7 +74,7 @@ pub(crate) struct InnerState {
     pub(crate) workflow_reconcile: Mutex<()>,
     pub(crate) workflow_notify: Arc<Notify>,
     pub(crate) workflow_scheduler_started: AtomicBool,
-    events: broadcast::Sender<EventPayload>,
+    events: EventBus,
     event_writer: mpsc::UnboundedSender<EventPayload>,
     /// Wire-monotone sequence allocator for broadcast events, seeded from
     /// the durable log's high-water mark so live and replayed events share
@@ -491,7 +495,8 @@ impl Db {
         sql: &str,
         params: Vec<SqlValue>,
     ) -> anyhow::Result<Vec<DbRow>> {
-        Ok(turso_busy_retry(|| {
+        let started = std::time::Instant::now();
+        let result = turso_busy_retry(|| {
             let params = params.clone();
             async move {
                 let conn = self.database.connect()?;
@@ -510,7 +515,21 @@ impl Db {
                 Ok(out)
             }
         })
-        .await?)
+        .await;
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_millis(250) {
+            // Include row stepping and retries, but never bind values or results:
+            // these contain conversation text and potentially credentials.
+            tracing::warn!(
+                target: "neoism_agent::database",
+                elapsed_ms = elapsed.as_millis() as u64,
+                rows = result.as_ref().map_or(0, |rows| rows.len()),
+                failed = result.is_err(),
+                sql = %sql.chars().take(512).collect::<String>(),
+                "slow agent database read"
+            );
+        }
+        Ok(result?)
     }
 
     async fn fetch_optional(
@@ -982,11 +1001,11 @@ impl AppState {
             services.with_builtin_mcp(Arc::new(crate::computer_use::ComputerUse));
         tokio::fs::create_dir_all(&artifact_root).await?;
         // Single ordered bus for every event (live deltas + committed edges).
-        // Capacity must absorb a full streaming burst per subscriber. A
-        // subscriber that exceeds it is disconnected so reconnect recovery
-        // can reconcile the lost transient deltas instead of silently
-        // continuing with a permanently incomplete timeline.
-        let (events, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        // Bound retained payloads by both event count and an 8 MiB estimated
+        // heap budget; a fixed count cannot bound a full streaming burst.
+        // Lagged subscribers disconnect so reconnect recovery reconciles lost
+        // transient deltas rather than leaving an incomplete timeline.
+        let events = EventBus::new(EVENT_BROADCAST_CAPACITY, 8 * 1024 * 1024);
         let (event_writer, mut event_reader) = mpsc::unbounded_channel();
         let provider_service: Arc<dyn neoism_agent_plugin_api::ProviderService> =
             Arc::new(neoism_agent_builtins::ProviderPlatform::new(
@@ -1644,7 +1663,7 @@ impl AppState {
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<EventPayload> {
+    pub fn subscribe(&self) -> EventReceiver {
         self.inner.events.subscribe()
     }
 
@@ -1652,7 +1671,7 @@ impl AppState {
     /// critical section. No IO or provider work occurs under this lock.
     pub(crate) fn subscribe_with_messages(
         &self,
-    ) -> (broadcast::Receiver<EventPayload>, Vec<EventPayload>) {
+    ) -> (EventReceiver, Vec<EventPayload>) {
         let messages = self
             .inner
             .event_order
@@ -4877,6 +4896,36 @@ impl SessionStore {
         rows.into_iter()
             .map(|row| decode_json(row.get_str("message_json")?))
             .collect()
+    }
+
+    /// Walk the position index backwards and stop at the latest completed
+    /// compaction (including its protected tail), instead of decoding history
+    /// that the provider will immediately discard. UI/history reads stay uncut.
+    pub(crate) async fn list_context_messages(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<MessageWithParts>> {
+        const PAGE_SIZE: usize = 32;
+        let mut messages = Vec::new();
+        let mut cursor = None;
+        loop {
+            let mut page = self
+                .list_messages_page(session_id, cursor.as_deref(), Some(PAGE_SIZE), true)
+                .await?;
+            let exhausted = page.len() < PAGE_SIZE;
+            cursor = page.last().map(crate::session_helpers::message_id_of);
+            page.reverse();
+            page.append(&mut messages);
+            messages = page;
+            if let Some(start) = crate::session_context::context_history_start(&messages)
+            {
+                messages.drain(..start);
+                return Ok(messages);
+            }
+            if exhausted {
+                return Ok(messages);
+            }
+        }
     }
 
     /// Page through a session's messages without decoding the whole

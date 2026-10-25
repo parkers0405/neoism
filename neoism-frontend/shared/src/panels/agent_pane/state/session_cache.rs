@@ -414,6 +414,15 @@ pub(in crate::panels::agent_pane::state) fn apply_cached_part_delta(
     kind: Option<&str>,
     delta: &str,
 ) {
+    if kind == Some("tool-input") {
+        if let Some(message) = messages.iter_mut().find(|m| {
+            Some(m.id.as_str()) == part_id
+                && m.kind == NeoismAgentMessageKind::Tool && m.status == "pending"
+        }) {
+            message.detail.push_str(delta);
+        }
+        return;
+    }
     if delta.is_empty() {
         return;
     }

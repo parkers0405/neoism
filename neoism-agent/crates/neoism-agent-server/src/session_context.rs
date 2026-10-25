@@ -381,7 +381,7 @@ async fn run_compaction_body(
         .as_ref()
         .map(user_model_from_model_ref)
         .unwrap_or_else(default_user_model);
-    let existing_messages = state.inner.store.list_messages(session_id).await?;
+    let existing_messages = state.inner.store.list_context_messages(session_id).await?;
     let tail_start_message_id = protected_tail_start_message_id(
         state,
         &info.directory,
@@ -1023,6 +1023,21 @@ fn completed_compactions(messages: &[MessageWithParts]) -> Vec<CompletedCompacti
         });
     }
     completed
+}
+
+/// The oldest row needed to reconstruct the latest completed compaction and
+/// its protected tail. A missing tail means the reverse history scan must
+/// continue; an unfinished compaction must not hide an earlier conversation.
+pub(crate) fn context_history_start(messages: &[MessageWithParts]) -> Option<usize> {
+    let completed = completed_compactions(messages);
+    let latest = completed.last()?;
+    let tail = match latest.tail_start_message_id.as_deref() {
+        Some(id) => messages
+            .iter()
+            .position(|message| message_id(message) == id)?,
+        None => latest.user_index,
+    };
+    Some(tail.min(latest.user_index))
 }
 
 fn previous_compaction_summary(messages: &[MessageWithParts]) -> Option<String> {
@@ -2454,6 +2469,150 @@ mod tests {
         assert!(workspace_system_message(&info, "stub")
             .content
             .contains("optional injected context"));
+    }
+
+    #[tokio::test]
+    async fn context_history_pages_stop_at_completed_compaction_and_preserve_tail() {
+        for tail_len in [0, 70] {
+            let path = std::env::temp_dir().join(format!(
+                "neoism-context-history-{}.db",
+                Id::ascending(IdKind::Event)
+            ));
+            let store = crate::state::SessionStore::open(path.clone())
+                .await
+                .unwrap();
+            let info = test_session_info();
+            let model = default_user_model();
+            store.insert_session(&info).await.unwrap();
+            let mut all = Vec::new();
+            for _ in 0..40 {
+                all.push(text_user_message(&info, &model, "obsolete raw history"));
+            }
+            for message in &all {
+                store
+                    .append_message(info.id.as_str(), message)
+                    .await
+                    .unwrap();
+            }
+            // Without a completed summary, nothing may be dropped, even across pages.
+            assert_eq!(
+                serde_json::to_value(
+                    store.list_context_messages(info.id.as_str()).await.unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(&all).unwrap()
+            );
+            let retained_start = all.len();
+            let mut active = Vec::new();
+            for _ in 0..tail_len {
+                active.push(text_user_message(&info, &model, "protected tail"));
+            }
+            let tail_id = active.first().map(message_id);
+            let marker =
+                compaction_user_message(&info, &model, "auto", tail_id.as_deref(), 2);
+            let summary = compaction_assistant_message(
+                &info,
+                &model,
+                &message_id(&marker),
+                "Completed summary",
+                2,
+                3,
+            )
+            .unwrap();
+            active.extend([marker, summary]);
+            for _ in 0..40 {
+                active.push(text_user_message(&info, &model, "recent turn"));
+            }
+            // A newer unfinished compaction must not cut off the protected tail.
+            active.push(compaction_user_message(&info, &model, "manual", None, 4));
+            for message in &active {
+                store
+                    .append_message(info.id.as_str(), message)
+                    .await
+                    .unwrap();
+            }
+            all.extend(active);
+            let context = store.list_context_messages(info.id.as_str()).await.unwrap();
+            assert_eq!(context.len(), all.len() - retained_start);
+            assert_eq!(
+                serde_json::to_value(&context).unwrap(),
+                serde_json::to_value(&all[retained_start..]).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(provider_messages_for_session(
+                    &info, &context, "stub", None, false
+                ))
+                .unwrap(),
+                serde_json::to_value(provider_messages_for_session(
+                    &info, &all, "stub", None, false
+                ))
+                .unwrap()
+            );
+            // Persisted transcript/history remains complete.
+            assert_eq!(
+                store.list_messages(info.id.as_str()).await.unwrap().len(),
+                all.len()
+            );
+            store.close().await;
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn context_history_uses_latest_completed_boundary_not_failed_summary() {
+        let info = test_session_info();
+        let model = default_user_model();
+        let old = text_user_message(&info, &model, "old history");
+        let first = compaction_user_message(&info, &model, "auto", None, 2);
+        let first_summary = compaction_assistant_message(
+            &info,
+            &model,
+            &message_id(&first),
+            "First summary",
+            2,
+            3,
+        )
+        .unwrap();
+        let recent = text_user_message(&info, &model, "recent history");
+        let second = compaction_user_message(&info, &model, "auto", None, 4);
+        let second_summary = compaction_assistant_message(
+            &info,
+            &model,
+            &message_id(&second),
+            "Second summary",
+            4,
+            5,
+        )
+        .unwrap();
+        let failed = compaction_user_message(&info, &model, "manual", None, 6);
+        let failed_summary =
+            compaction_assistant_message(&info, &model, &message_id(&failed), "", 6, 7)
+                .unwrap();
+        let messages = vec![
+            old,
+            first,
+            first_summary,
+            recent,
+            second,
+            second_summary,
+            failed,
+            failed_summary,
+        ];
+        assert_eq!(context_history_start(&messages), Some(4));
+        assert_eq!(
+            serde_json::to_value(provider_messages_for_session(
+                &info, &messages, "stub", None, false
+            ))
+            .unwrap(),
+            serde_json::to_value(provider_messages_for_session(
+                &info,
+                &messages[4..],
+                "stub",
+                None,
+                false
+            ))
+            .unwrap()
+        );
     }
 
     #[test]

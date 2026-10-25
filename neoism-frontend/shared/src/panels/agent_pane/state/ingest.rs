@@ -250,6 +250,17 @@ impl NeoismAgentPane {
         kind: Option<String>,
         delta: &str,
     ) {
+        if kind.as_deref() == Some("tool-input") {
+            // Pending raw lives verbatim in detail; never synthesize a missing part.
+            if let Some(index) = self.messages.iter().position(|m| {
+                Some(m.id.as_str()) == part_id.as_deref()
+                    && m.kind == NeoismAgentMessageKind::Tool && m.status == "pending"
+            }) {
+                self.messages[index].detail.push_str(delta);
+                self.mark_timeline_message_dirty_at(index);
+            }
+            return;
+        }
         if delta.is_empty() {
             return;
         }

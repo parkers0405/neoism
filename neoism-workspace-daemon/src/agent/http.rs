@@ -305,7 +305,7 @@ mod readiness_wait_tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             // A proxy path intentionally avoids the separate owned-local health gate.
             let base = format!("http://{}/agent", listener.local_addr().unwrap());
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _rx) = reply_queue::channel();
             let mut session = AgentSession::spawn(Some("test".into()), String::new(), tx);
             let inner = Arc::get_mut(&mut session.inner).unwrap();
             inner.agent_server = base;

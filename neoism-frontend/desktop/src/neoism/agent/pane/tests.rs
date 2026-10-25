@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn pending_tool_raw_delta_reconstructs_late_baseline_and_respects_boundary() {
+    let snapshot = |raw: &str, status: &str| crate::neoism::agent::api::part_block(&serde_json::json!({
+        "id":"tool", "messageID":"m", "sessionID":"s", "type":"tool", "tool":"apply_patch",
+        "state":{"status":status, "input":{}, "raw":raw}
+    })).unwrap();
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(snapshot("", "pending"));
+    let fragment = "\n+🦀\\\"patch";
+    for _ in 0..100 {
+        pane.apply_part_delta(Some("m".into()), Some("tool".into()), Some("tool-input".into()), fragment);
+    }
+    assert_eq!(pane.messages[0].detail, fragment.repeat(100));
+    let text = pane.messages[0].text.clone();
+    let mut late = NeoismAgentPane::default();
+    late.upsert_part_message(snapshot(&fragment.repeat(100), "pending"));
+    late.apply_part_delta(Some("m".into()), Some("tool".into()), Some("tool-input".into()), fragment);
+    assert_eq!(late.messages[0].detail, fragment.repeat(101));
+    assert_eq!(late.messages[0].text, text);
+    let mut cached = vec![snapshot(&fragment.repeat(100), "pending")];
+    apply_cached_part_delta(&mut cached, Some("tool"), Some("tool-input"), fragment);
+    assert_eq!(cached[0].detail, fragment.repeat(101));
+    pane.upsert_part_message(snapshot("", "running"));
+    assert!(pane.messages[0].detail.is_empty());
+    pane.apply_part_delta(None, Some("tool".into()), Some("tool-input".into()), "ignored");
+    assert!(pane.messages[0].detail.is_empty());
+    pane.apply_part_delta(None, Some("missing".into()), Some("tool-input".into()), "ignored");
+    assert_eq!(pane.messages.len(), 1);
+}
+
+#[test]
 fn question_rail_rejects_non_user_targets_without_moving() {
     use neoism_ui::panels::agent_pane::question_rail::TimelineQuestionTarget;
 

@@ -2906,6 +2906,13 @@ fn tool_block(part: &Value) -> NeoismAgentMessage {
         .and_then(Value::as_str)
         .unwrap_or("pending");
     let display_status = task_runtime_status(tool, state).unwrap_or(status);
+    if status == "pending" {
+        let mut message = ordinary_tool_block(tool, state, part.get("metadata"));
+        // Retain pending input verbatim for raw deltas and reconnect baselines.
+        // Running/completed snapshots replace this with the semantic tool detail.
+        message.detail = state.get("raw").and_then(Value::as_str).unwrap_or_default().to_owned();
+        return message;
+    }
     if tool == "compose" {
         // Do not serialize generic input/output first: composition values can be
         // enormous, and the bounded projection is the only visible detail.

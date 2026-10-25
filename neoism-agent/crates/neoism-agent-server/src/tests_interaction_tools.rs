@@ -1953,7 +1953,7 @@ async fn v2_prompt_accepts_subtask_parts_and_children_page() {
 #[tokio::test]
 async fn permission_and_question_replies_publish_events() {
     async fn next_matching_event(
-        events: &mut tokio::sync::broadcast::Receiver<EventPayload>,
+        events: &mut crate::state::EventReceiver,
         expected: &str,
     ) {
         tokio::time::timeout(Duration::from_secs(2), async {

@@ -2588,7 +2588,8 @@ fn merge_part_message(
         if incoming.text.trim().is_empty() {
             incoming.text = existing.text;
         }
-        if incoming.detail.trim().is_empty() {
+        // Pending detail is verbatim raw input, not output to carry into a new state.
+        if incoming.detail.trim().is_empty() && existing.status != "pending" {
             incoming.detail = existing.detail;
         }
         if incoming.todos.is_empty() {

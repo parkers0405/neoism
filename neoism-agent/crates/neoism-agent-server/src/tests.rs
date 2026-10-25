@@ -1,3 +1,4 @@
+mod event_storage_replay;
 mod live_messages;
 
 use super::*;

@@ -115,3 +115,59 @@ async fn scoped_sse_headers_and_child_replay_do_not_require_unrelated_session_hy
     drop(body);
     state.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn child_queries_and_task_trees_do_not_hydrate_unrelated_history() {
+    use axum::extract::{Path, State};
+
+    let state = AppState::open_database(std::env::temp_dir().join(format!(
+        "scoped-children-{}.db", neoism_agent_core::new_session_id()
+    ))).await.unwrap();
+    let mut child = session("child", Some("root"), None);
+    child.extra.insert("subtaskCompletions".into(), json!([{"pending": true, "result": "saved completion"}]));
+    let mut sibling = session("sibling", Some("root"), None);
+    sibling.time.updated = 2;
+    for info in [session("root", None, None), child.clone(), sibling, session("leaf", Some("child"), None), session("bad", None, None)] {
+        state.inner.store.insert_session(&info).await.unwrap();
+    }
+    let legacy = state.inner.store.list_sessions().await.unwrap().into_iter()
+        .filter(|info| info.parent_id.as_ref().map(|id| id.as_str()) == Some("root"))
+        .collect::<Vec<_>>();
+    let scoped = state.inner.store.list_child_sessions("root").await.unwrap();
+    assert_eq!(serde_json::to_value(&scoped).unwrap(), serde_json::to_value(&legacy).unwrap());
+    let plan = state.inner.store.db.fetch_all(
+        "EXPLAIN QUERY PLAN SELECT info_json FROM sessions WHERE json_extract(info_json, '$.parentId') = ? ORDER BY updated DESC",
+        vec![text("root")],
+    ).await.unwrap();
+    assert!(plan.iter().any(|row| row.get_str("detail").unwrap().contains("idx_sessions_catalog_parent")));
+    state.inner.store.db.execute("UPDATE sessions SET info_json = '{}' WHERE id = 'bad'", vec![]).await.unwrap();
+    // These lookups must work even before the compact list sidecar is available.
+    state.inner.store.db.execute("DELETE FROM session_list_index", vec![]).await.unwrap();
+    assert!(state.inner.store.list_sessions().await.is_err());
+    let children = state.inner.store.list_child_sessions("root").await.unwrap();
+    assert_eq!(children.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["sibling", "child"]);
+    assert_eq!(children[1].extra["subtaskCompletions"], child.extra["subtaskCompletions"]);
+    assert!(state.inner.store.list_child_sessions("absent").await.unwrap().is_empty());
+    let page = crate::v2_routes::v2_session_children(State(state.clone()), Path("root".into()), None).await.unwrap().0;
+    assert_eq!(page.items.len(), 2);
+    let descendants = crate::tool_runtime::descendant_sessions(&state, "root").await.unwrap();
+    assert_eq!(descendants.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["sibling", "child", "leaf"]);
+    assert_eq!(descendants[1].extra["subtaskCompletions"], child.extra["subtaskCompletions"]);
+    assert!(crate::tool_runtime::descendant_sessions(&state, "absent").await.unwrap().is_empty());
+    state.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_tree_queries_terminate_cycles_and_do_not_return_the_root() {
+    let state = AppState::open_database(std::env::temp_dir().join(format!(
+        "scoped-child-cycles-{}.db", neoism_agent_core::new_session_id()
+    ))).await.unwrap();
+    for info in [session("root", Some("child"), None), session("child", Some("root"), None), session("leaf", Some("child"), None)] {
+        state.inner.store.insert_session(&info).await.unwrap();
+    }
+    let descendants = tokio::time::timeout(std::time::Duration::from_secs(2),
+        crate::tool_runtime::descendant_sessions(&state, "root")
+    ).await.unwrap().unwrap();
+    assert_eq!(descendants.iter().map(|s| s.id.as_str()).collect::<HashSet<_>>(), HashSet::from(["child", "leaf"]));
+    state.shutdown().await.unwrap();
+}

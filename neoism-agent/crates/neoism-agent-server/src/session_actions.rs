@@ -1108,27 +1108,18 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
         }
     };
     for child in deferred {
-        let Ok(runtime) = state
+        // The durable generation, not an optional plugin tracker, owns this
+        // completion. A missing/retired runtime must not erase recovery state.
+        if let Ok(runtime) = state
             .workspace_runtime_for_tenant(
                 crate::caller::session_tenant(&child),
                 &child.directory,
             )
             .await
-        else {
-            clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
-            continue;
-        };
-        if !runtime
-            .snapshot()
-            .manifests
-            .iter()
-            .any(|plugin| plugin.id == neoism_agent_builtins::plugin::subagents::ID)
         {
-            clear_subtask_completion_for_teardown(state, child.id.as_str()).await;
-            continue;
-        }
-        if let Ok(subagents) = runtime.subagents() {
-            subagents.track(child.id.to_string()).await;
+            if let Ok(subagents) = runtime.subagents() {
+                subagents.track(child.id.to_string()).await;
+            }
         }
         publish_deferred_subtask_completion_if_idle(state, child.id.as_str()).await;
     }
@@ -1182,12 +1173,9 @@ async fn pending_parent_subtask_completions(
     let mut pending = state
         .inner
         .store
-        .list_sessions()
+        .list_child_sessions(parent_id)
         .await?
         .into_iter()
-        .filter(|session| {
-            session.parent_id.as_ref().map(|id| id.as_str()) == Some(parent_id)
-        })
         .flat_map(|child| {
             child
                 .extra
@@ -1227,6 +1215,43 @@ async fn pending_parent_subtask_completions(
         .collect::<Vec<_>>();
     pending.sort_by_key(|completion| completion.completed_at);
     Ok(pending)
+}
+
+/// A fresh queue admission may recover an already-persisted runtime turn only
+/// when the child outbox still owes this exact notification. Ordinary duplicate
+/// user turns (and already-consumed notifications) must remain idempotent no-ops.
+/// The caller holds the parent's prompt-admission guard and has checked that no
+/// run owns the session before using this authorization to save a recovery token.
+pub(crate) async fn parent_subtask_completion_needs_recovery(
+    state: &AppState,
+    parent_id: &str,
+    request: &PromptRequest,
+) -> Result<bool, ApiError> {
+    let Some(message_id) = request.message_id.as_ref() else {
+        return Ok(false);
+    };
+    if !request
+        .system
+        .as_deref()
+        .is_some_and(|system| system.starts_with(SUBTASK_COMPLETION_SYSTEM_MARKER))
+    {
+        return Ok(false);
+    }
+    let pending = pending_parent_subtask_completions(state, parent_id).await?;
+    let Some(completion) = pending
+        .iter()
+        .find(|completion| &completion.message_id == message_id)
+    else {
+        return Ok(false);
+    };
+    let expected = parent_subtask_completions_request(std::slice::from_ref(completion));
+    if serde_json::to_value(&expected).map_err(anyhow::Error::from)?
+        != serde_json::to_value(request).map_err(anyhow::Error::from)?
+    {
+        return Ok(false);
+    }
+    let messages = state.inner.store.list_messages(parent_id).await?;
+    Ok(!successful_parent_reply_ids(&messages).contains(message_id.as_str()))
 }
 
 pub(crate) async fn acknowledge_parent_subtask_completion_delivery(
@@ -1565,6 +1590,23 @@ mod tests {
             .await;
     }
 
+    async fn seed_parent_execution(state: &AppState, parent: &mut SessionInfo) {
+        // Runtime notifications continue an existing execution; they must not
+        // mint one. Use an explicit local model so these tests never depend on
+        // provider/model environment variables or credentials.
+        parent.model = model_ref_from_config("neoism/stub");
+        crate::execution_activity::ensure_for_prompt(
+            state,
+            parent,
+            Id::ascending(IdKind::Message).as_str(),
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("parent execution");
+        state.inner.store.update_session(parent).await.unwrap();
+    }
+
     fn completion_pending(child: &SessionInfo, index: usize) -> Option<bool> {
         child
             .extra
@@ -1573,6 +1615,32 @@ mod tests {
             .and_then(|items| items.get(index))
             .and_then(|item| item.get("pending"))
             .and_then(Value::as_bool)
+    }
+
+    #[tokio::test]
+    async fn pending_completions_ignore_unrelated_session_history() {
+        let path = std::env::temp_dir().join(format!("scoped-completions-{}.db", Id::ascending(IdKind::Session)));
+        let state = AppState::open_database(path.clone()).await.unwrap();
+        let mut child = test_child_session();
+        let parent_id = child.parent_id.as_ref().unwrap().to_string();
+        let message_id = Id::ascending(IdKind::Message);
+        child.extra.insert(SUBTASK_COMPLETIONS_EXTRA_KEY.into(), json!([
+            {"id": message_id, "pending": true, "result": "ready", "completedAt": 2},
+            {"id": Id::ascending(IdKind::Message), "pending": false, "result": "already delivered"}
+        ]));
+        state.inner.store.insert_session(&child).await.unwrap();
+        let mut unrelated = test_child_session();
+        unrelated.extra.insert(SUBTASK_COMPLETIONS_EXTRA_KEY.into(), json!([
+            {"id": Id::ascending(IdKind::Message), "pending": true, "result": "other parent"}
+        ]));
+        state.inner.store.insert_session(&unrelated).await.unwrap();
+        let pending = pending_parent_subtask_completions(&state, &parent_id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, message_id);
+        assert_eq!(pending[0].text, "ready");
+        assert_eq!(pending[0].child.id, child.id);
+        state.shutdown().await.unwrap();
+        cleanup_test_database(&path);
     }
 
     #[test]
@@ -2063,15 +2131,35 @@ mod tests {
         barrier.wait().await;
         aborter.await.unwrap();
         wrapper.await.unwrap();
-        // Keep the run id live in the test assertion: abort must have removed
-        // exactly the run that was racing the wrapper.
-        assert!(!state
+        // Cancellation retains ownership until the run owner durably tears
+        // down. A wrapper racing that boundary may correctly defer publication
+        // to the idle hook; abort itself must not free the execution slot.
+        let active = state
             .inner
             .session_coordinator
             .active_run(child.id.as_str())
             .await
-            .is_some());
-        assert!(!run.id.is_empty());
+            .expect("cancelled run remains owned until teardown");
+        assert_eq!(active.id, run.id);
+        assert!(run.cancel.load(Ordering::SeqCst));
+        crate::session_run::finish_session_run(&state, child.id.as_str(), &run.id)
+            .await;
+        // The delayed wrapper retries after teardown; the idle hook already
+        // recorded this generation, so this must not create a second record.
+        publish_background_subtask_finished(
+            &state,
+            child.id.as_str(),
+            &generation,
+            "error",
+            "wrapper observed abort",
+        )
+        .await;
+        assert!(state
+            .inner
+            .session_coordinator
+            .active_run(child.id.as_str())
+            .await
+            .is_none());
         assert_eq!(
             state
                 .inner
@@ -2430,6 +2518,7 @@ mod tests {
         child.parent_id = Some(parent.id.clone());
         insert_session(&state, &parent).await;
         insert_session(&state, &child).await;
+        seed_parent_execution(&state, &mut parent).await;
 
         let generation = owe_completion(&state, child.id.as_str()).await;
         mark_subtask_completion_pending(
@@ -2527,7 +2616,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(queue_actions, vec!["enqueue", "dequeue"]);
+        assert_eq!(queue_actions, vec!["enqueue", "dequeue", "snapshot"]);
     }
 
     #[tokio::test]
@@ -2595,6 +2684,7 @@ mod tests {
         child.parent_id = Some(parent.id.clone());
         insert_session(&state, &parent).await;
         insert_session(&state, &child).await;
+        seed_parent_execution(&state, &mut parent).await;
         hold_parent_run(&state, &parent).await;
 
         let generation = owe_completion(&state, child.id.as_str()).await;
@@ -2699,6 +2789,102 @@ mod tests {
                     && info.error.is_none()
         )));
 
+        state.shutdown().await.unwrap();
+        cleanup_test_database(&db_path);
+    }
+
+    #[tokio::test]
+    async fn completion_recovery_token_survives_post_save_failure_and_replay() {
+        let db_path = std::env::temp_dir().join(format!(
+            "neoism-agent-subtask-recovery-token-{}.sqlite3",
+            Id::ascending(IdKind::Event)
+        ));
+        let state = AppState::open_database(db_path.clone()).await.unwrap();
+        let mut parent = test_child_session();
+        parent.parent_id = None;
+        let mut child = test_child_session();
+        child.parent_id = Some(parent.id.clone());
+        insert_session(&state, &parent).await;
+        insert_session(&state, &child).await;
+        seed_parent_execution(&state, &mut parent).await;
+        let generation = owe_completion(&state, child.id.as_str()).await;
+        mark_subtask_completion_pending(
+            &state, child.id.as_str(), &generation, "completed", "durable result",
+        ).await.unwrap();
+        let completion = pending_parent_subtask_completions(&state, parent.id.as_str())
+            .await.unwrap().remove(0);
+        let request = parent_subtask_completions_request(&[completion]);
+        let message_id = request.message_id.clone().unwrap();
+        assert!(parent_subtask_completion_needs_recovery(
+            &state, parent.id.as_str(), &request,
+        ).await.unwrap());
+        let mut altered = request.clone();
+        altered.parts = vec![PromptPart::Text { text: "not the durable result".to_string() }];
+        assert!(!parent_subtask_completion_needs_recovery(
+            &state, parent.id.as_str(), &altered,
+        ).await.unwrap(), "a runtime marker and matching id alone cannot authorize replay");
+        append_prompt(&state, parent.id.as_str(), request.clone(), false)
+            .await.unwrap();
+
+        // A new queue admission of the already-durable notification must get
+        // its own recovery token, without consuming/replacing that admission.
+        state.inner.store.enqueue_prompt_with_delivery(
+            parent.id.as_str(), &request, "continue",
+        ).await.unwrap();
+        let (admission_id, queued, delivery, saved) = state.inner.store
+            .peek_prompt_admission(parent.id.as_str(), false)
+            .await.unwrap().unwrap();
+        assert!(!saved);
+        state.inner.session_coordinator.fail_prompt_after_save.lock().await
+            .insert(parent.id.to_string());
+        let error = crate::session_prompt::append_prompt_admission(
+            &state, parent.id.as_str(), queued, true,
+            Some((&admission_id, saved, &delivery)),
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("injected post-save admission failure"));
+        let (retained_id, _, retained_delivery, saved) = state.inner.store
+            .peek_prompt_admission(parent.id.as_str(), false)
+            .await.unwrap().unwrap();
+        assert_eq!(retained_id, admission_id);
+        assert_eq!(retained_delivery, "continue");
+        assert!(saved, "the recovery token must survive another initialization failure");
+        let stored_child = state.inner.store.get_session(child.id.as_str())
+            .await.unwrap().unwrap();
+        assert_eq!(completion_pending(&stored_child, 0), Some(true));
+        let messages = state.inner.store.list_messages(parent.id.as_str()).await.unwrap();
+        assert_eq!(messages.len(), 1, "recovery must not append a duplicate user turn");
+        assert!(matches!(&messages[0].info, MessageInfo::User(info) if info.id == message_id));
+
+        // Retry from the retained token. Only a real successful generation may
+        // acknowledge this outbox entry.
+        assert!(state.inner.session_coordinator.wake(parent.id.as_str()).await);
+        crate::session_queue::drain_prompt_queue(state.clone(), parent.id.to_string()).await;
+        let stored_child = state.inner.store.get_session(child.id.as_str())
+            .await.unwrap().unwrap();
+        assert_eq!(completion_pending(&stored_child, 0), Some(false));
+        let messages = state.inner.store.list_messages(parent.id.as_str()).await.unwrap();
+        assert_eq!(messages.iter().filter(|message| matches!(
+            &message.info, MessageInfo::User(info) if info.id == message_id
+        )).count(), 1);
+        assert_eq!(messages.iter().filter(|message| matches!(
+            &message.info, MessageInfo::Assistant(info)
+                if info.parent_id == message_id
+                    && info.time.completed.is_some() && info.error.is_none()
+        )).count(), 1);
+        let message_count = messages.len();
+
+        // A later duplicate admission is not recovery: delivery already has a
+        // successful reply. It must neither generate again nor duplicate text.
+        assert!(!parent_subtask_completion_needs_recovery(
+            &state, parent.id.as_str(), &request,
+        ).await.unwrap());
+        state.inner.store.enqueue_prompt_with_delivery(
+            parent.id.as_str(), &request, "continue",
+        ).await.unwrap();
+        assert!(state.inner.session_coordinator.wake(parent.id.as_str()).await);
+        crate::session_queue::drain_prompt_queue(state.clone(), parent.id.to_string()).await;
+        assert_eq!(state.inner.store.list_messages(parent.id.as_str()).await.unwrap().len(), message_count);
+        assert!(state.inner.store.list_queued_prompt_entries(parent.id.as_str()).await.unwrap().is_empty());
         state.shutdown().await.unwrap();
         cleanup_test_database(&db_path);
     }
@@ -2932,7 +3118,10 @@ mod tests {
         let mut child = test_child_session();
         child.parent_id = Some(parent.id.clone());
         insert_session(&state, &parent).await;
-        insert_session(&state, &child).await;
+        insert_session_without_subagent_tracker(&state, &child).await;
+        // Inspect durable admission, not a race with an immediately spawned
+        // worker consuming the queue before this assertion can read it.
+        hold_parent_run(&state, &parent).await;
         let generation = Id::ascending(IdKind::Message);
         mark_subtask_notify_on_idle(&state, child.id.as_str(), &generation)
             .await

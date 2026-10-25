@@ -899,27 +899,19 @@ pub(crate) async fn descendant_sessions(
     state: &AppState,
     root_id: &str,
 ) -> Result<Vec<SessionInfo>, String> {
-    let sessions = state
-        .inner
-        .store
-        .list_sessions()
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut children_by_parent: BTreeMap<String, Vec<SessionInfo>> = BTreeMap::new();
-    for session in sessions {
-        if let Some(parent_id) = session.parent_id.as_ref() {
-            children_by_parent
-                .entry(parent_id.as_str().to_string())
-                .or_default()
-                .push(session);
-        }
-    }
     let mut queue = vec![root_id.to_string()];
+    let mut visited = std::collections::HashSet::from([root_id.to_string()]);
     let mut descendants = Vec::new();
     while let Some(id) = queue.pop() {
-        if let Some(children) = children_by_parent.remove(&id) {
-            for child in children {
-                queue.push(child.id.as_str().to_string());
+        let children = state
+            .inner
+            .store
+            .list_child_sessions(&id)
+            .await
+            .map_err(|error| error.to_string())?;
+        for child in children {
+            if visited.insert(child.id.to_string()) {
+                queue.push(child.id.to_string());
                 descendants.push(child);
             }
         }

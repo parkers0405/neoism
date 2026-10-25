@@ -359,7 +359,7 @@ pub(crate) async fn v2_events(
                 // An exact `events.session_id = root` query excludes every
                 // child and cannot represent the desktop's one-stream
                 // session-family model.
-                let replay = state
+                let replay = match state
                     .inner
                     .store
                     .list_events_after(
@@ -372,7 +372,13 @@ pub(crate) async fn v2_events(
                         None,
                     )
                     .await
-                    .unwrap_or_default();
+                {
+                    Ok(events) => events,
+                    Err(error) => {
+                        tracing::warn!(%error, cursor, "event replay failed; closing stream for recovery");
+                        return;
+                    }
+                };
                 let replayed = replay.len();
                 // Merge current descendants into connection-owned membership.
                 // Missing members remain until their authoritative deletion
@@ -422,7 +428,9 @@ pub(crate) async fn v2_events(
                         }
                     }
                 }
-                if replayed < page_size {
+                // Stored/decoded byte budgets can end a page before the
+                // requested row limit. Only an empty seek proves catch-up done.
+                if replayed == 0 {
                     break;
                 }
             }
@@ -1250,19 +1258,18 @@ pub(crate) async fn v2_session_children(
     let items = state
         .inner
         .store
-        .list_sessions()
+        .list_child_sessions(&session_id)
         .await?
         .into_iter()
         .filter(|session| {
-            session.parent_id.as_ref().map(|id| id.as_str()) == Some(session_id.as_str())
-                && claims
-                    .as_ref()
-                    .map(|Extension(claims)| {
-                        crate::caller::allows_session(claims, session)
-                    })
-                    .unwrap_or_else(|| {
-                        crate::caller::local_collaboration_session(false, session)
-                    })
+            claims
+                .as_ref()
+                .map(|Extension(claims)| {
+                    crate::caller::allows_session(claims, session)
+                })
+                .unwrap_or_else(|| {
+                    crate::caller::local_collaboration_session(false, session)
+                })
         })
         .collect();
     Ok(Json(Page {

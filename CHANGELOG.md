@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.140] - 2026-10-25
+
+### Official Turso upgrade and history I/O
+
+- Upgrades to the official crates.io Turso 0.8.3 release, pinned exactly, with matching application and transport-contract lockfiles.
+- Replaces whole-session enumeration with indexed child-session queries, handles parent cycles, and limits permission/question authorization to sessions with pending requests while failing closed on unreadable sessions.
+- Skips unchanged native FTS projections with revision and race guards, and migrates the derived search index transactionally on first upgraded startup.
+- Losslessly compresses eligible journal payloads using a versioned, checksummed envelope and resumable bounded background migration; bounds replay by rows and stored/decoded bytes without truncating history at short pages.
+- Recovers durable child-completion notifications after parent initialization failures without duplicate user turns, and closes streams on decode/replay failures rather than silently presenting empty history.
+- Adds codec, replay, authorization, family-query, completion-recovery, and isolated old-format FTS migration fixtures, plus an optional development-derived activation profile.
+
+**Upgrade and rollback:** preserve a consistent pre-upgrade database backup. New and migrated compressed event records cannot be replayed by older TEXT-only backends, so a binary-only downgrade is unsafe. The first upgraded startup rebuilds the derived FTS index synchronously and can take longer for large indexes. Canonical history is retained; this release does not prune events, run VACUUM, or promise physical database-file shrinkage.
+
 ## [0.7.139] - 2026-10-25
 
 ### Agent streaming, readiness, and experimental UI foundations

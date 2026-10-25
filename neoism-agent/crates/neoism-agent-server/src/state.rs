@@ -157,6 +157,7 @@ pub(crate) enum ExecutionSubtaskRegistration {
 }
 
 mod conversation_search;
+mod event_storage;
 mod hosting;
 #[cfg(test)]
 mod catalog_family_tests;
@@ -167,6 +168,7 @@ mod session_descendant_tests;
 pub(crate) struct SessionStore {
     db: Db,
     _search_worker: Option<Arc<conversation_search::SearchWorker>>,
+    _event_compactor: Option<Arc<event_storage::Compactor>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -389,7 +391,7 @@ fn session_list_info_from_row(row: &DbRow) -> anyhow::Result<SessionInfo> {
     decode_json(value.to_string())
 }
 
-fn event_statements(
+async fn event_statements(
     event: &EventPayload,
     aggregate_id: &str,
     session_id: Option<String>,
@@ -428,7 +430,7 @@ fn event_statements(
                 text(aggregate_id),
                 opt_text(owner_id.map(ToOwned::to_owned)),
                 opt_text(session_id),
-                text(serde_json::to_string(event)?),
+                event_storage::encode_event_async(event).await?,
                 int(store_i64(crate::now_millis())),
             ],
         ),
@@ -1606,6 +1608,9 @@ impl AppState {
     pub async fn shutdown(
         &self,
     ) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        if let Some(worker) = self.inner.store._event_compactor.as_ref() {
+            worker.shutdown().await;
+        }
         if let Some(worker) = self.inner.store._search_worker.as_ref() {
             worker.shutdown().await;
         }
@@ -1985,7 +1990,7 @@ impl SessionStore {
             &aggregate_id,
             session_id,
             owner_id,
-        )?);
+        ).await?);
         self.db.execute_transaction(projection).await
     }
 
@@ -2028,11 +2033,13 @@ impl SessionStore {
         let mut store = Self {
             db,
             _search_worker: None,
+            _event_compactor: None,
         };
         let migration_started = crate::perf::now();
         store.migrate().await?;
         conversation_search::migrate(&store.db).await?;
         store._search_worker = Some(Arc::new(conversation_search::spawn(store.db.clone())));
+        store._event_compactor = Some(Arc::new(event_storage::spawn(store.db.clone())));
         tracing::info!(
             target: "neoism_agent::perf",
             migration_ms = crate::perf::elapsed_ms(migration_started),
@@ -3415,6 +3422,24 @@ impl SessionStore {
         }
         self.hydrate_host_associations(std::slice::from_mut(&mut session)).await?;
         Ok(Some(session))
+    }
+
+    /// Load only one parent's canonical children. Callers which need completion
+    /// records or authorization extras must retain full rows, not list summaries.
+    pub(crate) async fn list_child_sessions(
+        &self,
+        parent_id: &str,
+    ) -> anyhow::Result<Vec<SessionInfo>> {
+        let rows = self.db.fetch_all(
+            "SELECT info_json FROM sessions WHERE json_extract(info_json, '$.parentId') = ? ORDER BY updated DESC",
+            vec![text(parent_id)],
+        ).await?;
+        let mut sessions = rows
+            .into_iter()
+            .map(|row| decode_json(row.get_str("info_json")?))
+            .collect::<anyhow::Result<Vec<SessionInfo>>>()?;
+        self.hydrate_host_associations(&mut sessions).await?;
+        Ok(sessions)
     }
 
     pub(crate) async fn list_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {
@@ -5306,6 +5331,30 @@ impl SessionStore {
         row.map(|row| Ok(row.get_opt_str("saved_message_id")?.is_some())).transpose()
     }
 
+    /// Attach an existing runtime user turn to this exact retained admission.
+    /// The caller must hold the prompt-admission guard and first authorize
+    /// recovery against the pending child-completion outbox. This does not
+    /// insert a message, change queue order/delivery, or create another row.
+    pub(crate) async fn recover_saved_subtask_completion_admission(
+        &self,
+        id: &str,
+        session_id: &str,
+        request: &PromptRequest,
+    ) -> anyhow::Result<()> {
+        let message_id = request.message_id.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Completion recovery requires a message id"))?;
+        let changed = self.db.execute(
+            "UPDATE prompt_queue SET saved_message_id = ? WHERE id = ? AND session_id = ? AND kind = 'prompt' AND delivery = 'continue' AND request_json = ? AND (saved_message_id IS NULL OR saved_message_id = ?) AND EXISTS (SELECT 1 FROM messages WHERE id = ? AND session_id = ?)",
+            vec![
+                text(message_id.as_str()), text(id), text(session_id),
+                text(serde_json::to_string(request)?), text(message_id.as_str()),
+                text(message_id.as_str()), text(session_id),
+            ],
+        ).await?;
+        anyhow::ensure!(changed == 1, "Completion recovery admission was cancelled or changed");
+        Ok(())
+    }
+
     pub(crate) async fn handoff_prompt_admission(&self, id: &str, session_id: &str, run_id: &str) -> anyhow::Result<()> {
         let now = store_i64(crate::now_millis());
         // start_session_run's store write is best effort. Confirm durable run
@@ -5540,7 +5589,7 @@ impl SessionStore {
                 &aggregate_id,
                 session_id,
                 owner_id,
-            )?)
+            ).await?)
             .await?;
         Ok(())
     }
@@ -5552,35 +5601,85 @@ impl SessionStore {
         limit: usize,
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<PersistedEvent>> {
-        let limit = limit.clamp(1, 5_000) as i64;
+        // Replay is cursor-paged; bounding decoded pages also bounds memory
+        // when a small stored blob expands into a large historical snapshot.
+        let limit = limit.clamp(1, 128) as i64;
         let (sql, params) = match (scope, session_id) {
             (TenantQueryScope::Tenant(tenant), Some(session)) => (
-                "SELECT seq, created, event_json FROM events WHERE tenant_id = ? AND seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
+                "SELECT seq FROM events WHERE tenant_id = ? AND seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
                 vec![text(tenant), int(since), text(session), int(limit)],
             ),
             (TenantQueryScope::Tenant(tenant), None) => (
-                "SELECT seq, created, event_json FROM events WHERE tenant_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
+                "SELECT seq FROM events WHERE tenant_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
                 vec![text(tenant), int(since), int(limit)],
             ),
             (TenantQueryScope::LocalAll, Some(session)) => (
-                    "SELECT seq, created, event_json FROM events WHERE seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
+                    "SELECT seq FROM events WHERE seq > ? AND session_id = ? ORDER BY seq ASC LIMIT ?",
                 vec![int(since), text(session), int(limit)],
             ),
             (TenantQueryScope::LocalAll, None) => (
-                    "SELECT seq, created, event_json FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+                    "SELECT seq FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?",
                     vec![int(since), int(limit)],
             ),
         };
-        let rows = self.db.fetch_all(sql, params).await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(PersistedEvent {
+        let candidates = self.db.fetch_all(sql, params).await?;
+        let tenant = match scope {
+            TenantQueryScope::Tenant(tenant) => Some(tenant.to_owned()),
+            TenantQueryScope::LocalAll => None,
+        };
+        let mut rows = Vec::with_capacity(candidates.len());
+        let mut decoded_bytes = 0usize;
+        let mut stored_bytes = 0usize;
+        for candidate in candidates {
+            // Materialize only one stored payload at a time. Revalidate scope
+            // on the point read, rather than retaining an unbounded raw page.
+            let row = self.db.fetch_optional(
+                "SELECT seq, created, event_json FROM events WHERE seq = ? AND (? IS NULL OR tenant_id = ?) AND (? IS NULL OR session_id = ?)",
+                vec![int(candidate.get_i64("seq")?), opt_text(tenant.clone()), opt_text(tenant.clone()), opt_text(session_id.map(str::to_owned)), opt_text(session_id.map(str::to_owned))],
+            ).await?;
+            let Some(row) = row else { continue };
+            let stored = row.value("event_json")?;
+            let bytes = event_storage::decoded_len(stored)?;
+            let retained = match stored {
+                SqlValue::Text(json) => json.len(),
+                SqlValue::Blob(blob) => blob.len(),
+                _ => unreachable!("decoded_len validates event storage types"),
+            };
+            if !rows.is_empty()
+                && (decoded_bytes.saturating_add(bytes) > 8 * 1024 * 1024
+                    || stored_bytes.saturating_add(retained) > 8 * 1024 * 1024)
+            {
+                break;
+            }
+            decoded_bytes = decoded_bytes.saturating_add(bytes);
+            stored_bytes = stored_bytes.saturating_add(retained);
+            rows.push(row);
+            if decoded_bytes >= 8 * 1024 * 1024 || stored_bytes >= 8 * 1024 * 1024 {
+                break;
+            }
+        }
+        tokio::task::spawn_blocking(move || {
+            let mut events = Vec::with_capacity(rows.len());
+            let mut decoded_bytes = 0usize;
+            for row in rows {
+                let stored = row.value("event_json")?;
+                let bytes = event_storage::decoded_len(stored)?;
+                if !events.is_empty()
+                    && decoded_bytes.saturating_add(bytes) > 8 * 1024 * 1024
+                {
+                    break;
+                }
+                events.push(PersistedEvent {
                     seq: row.get_i64("seq")?,
                     created: row.get_i64("created")?,
-                    payload: decode_json(row.get_str("event_json")?)?,
-                })
-            })
-            .collect()
+                    payload: event_storage::decode_event(stored)?,
+                });
+                decoded_bytes = decoded_bytes.saturating_add(bytes);
+            }
+            Ok(events)
+        })
+        .await
+        .context("event replay decoder stopped")?
     }
 
     pub(crate) async fn latest_event_sequence(&self) -> anyhow::Result<u64> {

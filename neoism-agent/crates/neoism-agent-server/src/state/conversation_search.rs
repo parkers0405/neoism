@@ -120,12 +120,12 @@ pub(super) fn spawn(db: Db) -> SearchWorker {
                 break;
             }
             delay = match tick_inner(&db, false, Some(&receiver)).await {
-                Ok(true) => {
-                    maintenance.pending = true;
+                Ok(tick) if tick.worked => {
+                    maintenance.pending |= tick.index_changed;
                     idle_since = std::time::Instant::now();
                     Duration::from_millis(100)
                 }
-                Ok(false) => {
+                Ok(_) => {
                     if maintenance.due(std::time::Instant::now(), idle_since.elapsed())
                         && !*receiver.borrow()
                     {
@@ -155,8 +155,8 @@ pub(super) fn spawn(db: Db) -> SearchWorker {
     }
 }
 
-// Turso 0.6.1 disables Tantivy's automatic merges. Small projection commits
-// otherwise accumulate segments forever, including indexes from older releases.
+// Explicit idle maintenance bounds segment accumulation from small projection
+// commits, including indexes created by older releases.
 // Only start after the worker has been idle; never queue ahead of canonical writes
 // or perform the native blocking merge on an async executor thread.
 async fn optimize_idle(db: &Db) -> anyhow::Result<bool> {
@@ -191,12 +191,72 @@ pub(super) async fn migrate(db: &Db) -> anyhow::Result<()> {
         ("CREATE TABLE IF NOT EXISTS conversation_search_dirty (key TEXT PRIMARY KEY, session_id TEXT NOT NULL, message_id TEXT NOT NULL, revision TEXT NOT NULL, ready_at INTEGER NOT NULL)".into(), vec![]),
         ("CREATE INDEX IF NOT EXISTS conversation_search_ready ON conversation_search_dirty(ready_at, key)".into(), vec![]),
         ("CREATE INDEX IF NOT EXISTS conversation_search_dirty_session ON conversation_search_dirty(session_id)".into(), vec![]),
-        // See turso_core 0.6.1 index_method/fts.rs: patterns 0..6 and field_weights.
-        ("CREATE INDEX IF NOT EXISTS conversation_search_fts ON conversation_search_docs USING fts (title, body) WITH (weights='title=3.0,body=1.0')".into(), vec![]),
+        // Do not open/create the FTS index until migrate_fts has dropped the
+        // incompatible pre-0.8.3 format. All other projection data survives.
     ]).await?;
+    migrate_fts(db).await?;
     for (name, _) in MIGRATIONS {
         db.execute("INSERT OR IGNORE INTO data_migrations(name, state, cursor_id, rows_done, updated_at) VALUES (?, 'pending', '', 0, ?)", vec![text(name), int(store_i64(crate::now_millis()))]).await?;
     }
+    Ok(())
+}
+
+const FTS_FORMAT_MIGRATION: &str = "conversation-search-fts-format-v2";
+const CREATE_FTS: &str = "CREATE INDEX conversation_search_fts ON conversation_search_docs USING fts (title, body) WITH (weights='title=3.0,body=1.0')";
+
+// Turso 0.8.3 requires DROP + CREATE for FTS format v2. DROP deliberately
+// bypasses opening the old format; never probe it with MATCH/OPTIMIZE first.
+// SessionStore awaits this before exposing the store or spawning its worker.
+async fn migrate_fts(db: &Db) -> anyhow::Result<()> {
+    let _writer = db.lock_writer().await;
+    turso_busy_retry(|| async {
+        let connection = db.database.connect()?;
+        connection.execute("BEGIN IMMEDIATE", ()).await?;
+        let result = async {
+            let mut rows = connection.query(
+                "SELECT 1 FROM data_migrations WHERE name = ? AND state = 'complete'",
+                [FTS_FORMAT_MIGRATION],
+            ).await?;
+            let complete = rows.next().await?.is_some();
+            drop(rows);
+            if !complete {
+                rebuild_fts(&connection).await?;
+            }
+            connection.execute("COMMIT", ()).await?;
+            Ok::<_, turso::Error>(())
+        }.await;
+        finish_fts_transaction(&connection, result).await
+    }).await??;
+    Ok(())
+}
+
+// The outer error is retryable only AFTER rollback has completed. A rollback
+// failure is an inner terminal error, so even a Busy rollback cannot trigger a
+// fresh migration attempt. No Transaction object/dangling_tx defers this work.
+async fn finish_fts_transaction(
+    connection: &turso::Connection,
+    result: turso::Result<()>,
+) -> turso::Result<anyhow::Result<()>> {
+    if let Err(error) = result {
+        if let Err(rollback) = connection.execute("ROLLBACK", ()).await {
+            return Ok(Err(anyhow::anyhow!(
+                "conversation FTS migration failed ({error}); rollback failed ({rollback})"
+            )));
+        }
+        return Err(error);
+    }
+    Ok(Ok(()))
+}
+
+async fn rebuild_fts(connection: &turso::Connection) -> turso::Result<()> {
+    connection.execute("DROP INDEX IF EXISTS conversation_search_fts", ()).await?;
+    connection.execute(CREATE_FTS, ()).await?;
+    // The completion record and rebuilt index commit together. Do not reset the
+    // independent resumable sessions/messages backfills or enqueue history.
+    connection.execute(
+        "INSERT INTO data_migrations(name, state, cursor_id, rows_done, updated_at) VALUES (?, 'complete', '', 0, ?) ON CONFLICT(name) DO UPDATE SET state='complete', updated_at=excluded.updated_at",
+        vec![text(FTS_FORMAT_MIGRATION), int(store_i64(crate::now_millis()))],
+    ).await?;
     Ok(())
 }
 
@@ -340,6 +400,11 @@ fn truncate_body(mut body: String) -> String {
     body
 }
 
+// Read canonical and projected fields in the same snapshot. A no-op must omit
+// projection DML entirely: even a guarded UPSERT can open Turso's FTS write cursor
+// and invalidate its blob-backed directory cache on commit.
+const SNAPSHOT_SQL: &str = "SELECT q.key, q.session_id, q.message_id, q.revision, CASE WHEN q.message_id='' THEN s.info_json ELSE m.message_json END AS source, d.key AS projected_key, d.session_id AS projected_session, d.message_id AS projected_message, d.role AS projected_role, d.created AS projected_created, d.title AS projected_title, d.body AS projected_body FROM conversation_search_dirty q LEFT JOIN sessions s ON s.id=q.session_id LEFT JOIN messages m ON m.id=q.message_id LEFT JOIN conversation_search_docs d ON d.key=q.key WHERE q.key=? AND q.revision=?";
+
 const PROJECTION_INSERT: &str = "INSERT INTO conversation_search_docs(key, session_id, message_id, role, created, title, body) ";
 const PROJECTION_UPDATE: &str = " ON CONFLICT(key) DO UPDATE SET session_id=excluded.session_id, message_id=excluded.message_id, role=excluded.role, created=excluded.created, title=excluded.title, body=excluded.body";
 const PROJECTION_DELETE: &str = "DELETE FROM conversation_search_docs WHERE ";
@@ -384,6 +449,22 @@ fn projection_statements(row: DbRow) -> anyhow::Result<Vec<(String, Vec<SqlValue
     let mut statements = Vec::with_capacity(2);
     let valid = format!("EXISTS (SELECT 1 FROM conversation_search_dirty WHERE key=? AND revision=?) AND EXISTS (SELECT 1 FROM {table} WHERE id=? AND {column}=?)");
     if let Some((role, created, title, body)) = document {
+        let unchanged = row.get_opt_str("projected_key")?.as_deref() == Some(key.as_str())
+            && row.get_str("projected_session")? == session
+            && row.get_str("projected_message")? == message
+            && row.get_str("projected_role")? == role
+            && row.get_i64("projected_created")? == store_i64(created)
+            && row.get_str("projected_title")? == title
+            && row.get_str("projected_body")? == body;
+        if unchanged {
+            // The snapshot may race a delete or another projection writer. Only
+            // consume its token if BOTH canonical source and the complete current
+            // projection still match; otherwise leave the token for a fresh read.
+            return Ok(vec![(
+                format!("DELETE FROM conversation_search_dirty WHERE key=? AND revision=? AND {valid} AND EXISTS (SELECT 1 FROM conversation_search_docs WHERE key=? AND session_id=? AND message_id=? AND role=? AND created=? AND title=? AND body=?)"),
+                vec![text(&key), text(&revision), text(&key), text(&revision), text(id), text(source.clone().unwrap_or_default()), text(&key), text(&session), text(&message), text(role), int(store_i64(created)), text(title), text(body)],
+            )]);
+        }
         statements.push((format!("{PROJECTION_INSERT}SELECT ?, ?, ?, ?, ?, ?, ? WHERE {valid}{PROJECTION_UPDATE}"), vec![text(&key), text(&session), text(&message), text(role), int(store_i64(created)), text(title), text(body), text(&key), text(&revision), text(id), text(source.clone().unwrap_or_default())]));
     } else {
         if source.is_some() {
@@ -463,17 +544,23 @@ fn projection_source_bytes(row: &DbRow) -> usize {
 
 #[cfg(test)]
 async fn tick(db: &Db, force: bool) -> anyhow::Result<bool> {
-    tick_inner(db, force, None).await
+    Ok(tick_inner(db, force, None).await?.worked)
+}
+
+#[derive(Default)]
+struct ProjectionTick {
+    worked: bool,
+    index_changed: bool,
 }
 
 async fn tick_inner(
     db: &Db,
     force: bool,
     cancel: Option<&tokio::sync::watch::Receiver<bool>>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<ProjectionTick> {
     let cancelled = || cancel.is_some_and(|cancel| *cancel.borrow());
     if cancelled() {
-        return Ok(false);
+        return Ok(ProjectionTick::default());
     }
     let rows = db.fetch_all("SELECT key, revision FROM conversation_search_dirty WHERE ready_at <= ? ORDER BY ready_at, key LIMIT ?", vec![int(if force { i64::MAX } else { store_i64(crate::now_millis()) }), int(BATCH as i64)]).await?;
     let count = rows.len();
@@ -481,12 +568,12 @@ async fn tick_inner(
     let mut source_bytes = 0usize;
     for row in rows {
         if cancelled() {
-            return Ok(false);
+            return Ok(ProjectionTick::default());
         }
         // Load one canonical payload at a time, not sixteen potentially huge
         // histories in fetch_all. An intervening edit simply skips this token.
-        if let Some(snapshot) = db.fetch_optional("SELECT q.key, q.session_id, q.message_id, q.revision, CASE WHEN q.message_id='' THEN s.info_json ELSE m.message_json END AS source FROM conversation_search_dirty q LEFT JOIN sessions s ON s.id=q.session_id LEFT JOIN messages m ON m.id=q.message_id WHERE q.key=? AND q.revision=?", vec![text(row.get_str("key")?), text(row.get_str("revision")?)]).await? {
-            if cancelled() { return Ok(false); }
+        if let Some(snapshot) = db.fetch_optional(SNAPSHOT_SQL, vec![text(row.get_str("key")?), text(row.get_str("revision")?)]).await? {
+            if cancelled() { return Ok(ProjectionTick::default()); }
             let bytes = projection_source_bytes(&snapshot);
             if !statements.is_empty() && source_bytes.saturating_add(bytes) > BATCH_SOURCE_BYTES {
                 // This token stays queued. Do not retain its source alongside
@@ -500,8 +587,11 @@ async fn tick_inner(
         tokio::task::yield_now().await;
     }
     if cancelled() {
-        return Ok(false);
+        return Ok(ProjectionTick::default());
     }
+    let index_changed = statements.iter().any(|(sql, _)| {
+        sql.starts_with(PROJECTION_INSERT) || sql.starts_with(PROJECTION_DELETE)
+    });
     if !statements.is_empty() {
         // One writer transaction and one native UPSERT cursor per batch,
         // plus at most one deletion cursor for invalid legacy documents.
@@ -510,7 +600,7 @@ async fn tick_inner(
             .await?;
     }
     if cancelled() {
-        return Ok(false);
+        return Ok(ProjectionTick::default());
     }
     // Live work has priority; cold history advances only when capacity remains.
     let backfilled = if count < BATCH {
@@ -518,7 +608,7 @@ async fn tick_inner(
     } else {
         false
     };
-    Ok(count > 0 || backfilled)
+    Ok(ProjectionTick { worked: count > 0 || backfilled, index_changed })
 }
 
 /// Constant-size status probes; never COUNT/scan canonical history.
@@ -748,7 +838,7 @@ fn tenant_predicate(alias: &str, parameter: &str) -> String {
 
 // Keep canonical checks separate from native FTS so its LIMIT stays pushed down.
 // Look up messages directly, not docs -> correlated sessions -> messages EXISTS:
-// that query shape repeatedly scans canonical history in Turso 0.6.1. Tenant and
+// that query shape can repeatedly scan canonical history. Tenant and
 // caller authorization is enforced once per session by cache_canonical below.
 fn eligibility_query(message_ids: &[String]) -> (String, Vec<SqlValue>) {
     (
@@ -1125,6 +1215,8 @@ async fn search_inner(
 mod tests {
     use super::*;
 
+    include!("../../tests/helpers/conversation_search_fts_migration.rs");
+
     #[test]
     fn idle_maintenance_requires_changes_after_first_merge_and_backs_off_errors() {
         let now = std::time::Instant::now();
@@ -1204,8 +1296,117 @@ mod tests {
         .unwrap()
     }
 
+    async fn snapshot_key(db: &Db, key: &str) -> DbRow {
+        let token = db.fetch_optional(
+            "SELECT revision FROM conversation_search_dirty WHERE key=?", vec![text(key)],
+        ).await.unwrap().unwrap();
+        db.fetch_optional(SNAPSHOT_SQL, vec![text(key), text(token.get_str("revision").unwrap())])
+            .await.unwrap().unwrap()
+    }
+
     async fn snapshot(db: &Db, id: &str) -> DbRow {
-        db.fetch_optional("SELECT q.key,q.session_id,q.message_id,q.revision,m.message_json AS source FROM conversation_search_dirty q LEFT JOIN messages m ON m.id=q.message_id WHERE q.message_id=?", vec![text(id)]).await.unwrap().unwrap()
+        snapshot_key(db, &format!("message:{id}")).await
+    }
+
+    fn cleanup_only(row: DbRow) -> Vec<(String, Vec<SqlValue>)> {
+        let statements = combine_projection_statements(projection_statements(row).unwrap());
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].0.starts_with("DELETE FROM conversation_search_dirty WHERE "));
+        for verb in ["INSERT INTO conversation_search_docs", "UPDATE conversation_search_docs", "DELETE FROM conversation_search_docs"] {
+            assert!(!statements[0].0.contains(verb));
+        }
+        statements
+    }
+
+    #[tokio::test]
+    async fn unchanged_projections_only_clean_dirty_tokens() {
+        let _search_test = SEARCH_TEST.lock().await;
+        let store = store().await;
+        let db = &store.db;
+        session(db, "ses_noop", "originaltitleword", "/project", None, "local").await;
+        let body = "a".repeat(BODY_BYTES);
+        message(db, "msg_noop", "ses_noop", &body, "local").await;
+        flush(db).await.unwrap();
+
+        // Unchanged title with changed session metadata/context/status.
+        session(db, "ses_noop", "originaltitleword", "/moved", None, "local").await;
+        db.execute("UPDATE sessions SET info_json=json_set(info_json,'$.time.updated',42,'$.context','new context','$.status','idle') WHERE id='ses_noop'", vec![]).await.unwrap();
+        let mut statements = cleanup_only(snapshot_key(db, "session:ses_noop").await);
+        // Changed canonical JSON, but only outside the bounded indexed body.
+        message(db, "msg_noop", "ses_noop", &(body + " ignored tail"), "local").await;
+        db.execute("UPDATE messages SET message_json=json_set(message_json,'$.info.agent','plan') WHERE id='msg_noop'", vec![]).await.unwrap();
+        statements.extend(cleanup_only(snapshot(db, "msg_noop").await));
+        let statements = combine_projection_statements(statements);
+        assert_eq!(statements.len(), 2);
+        db.execute_transaction(statements).await.unwrap();
+        assert_eq!(db.fetch_scalar_i64("SELECT count(*) FROM conversation_search_dirty", vec![]).await.unwrap(), 0);
+
+        // Queue housekeeping must not schedule another expensive native merge.
+        session(db, "ses_noop", "originaltitleword", "/moved-again", None, "local").await;
+        let tick = tick_inner(db, true, None).await.unwrap();
+        assert!(tick.worked);
+        assert!(!tick.index_changed);
+
+        // A genuinely changed title/body still uses the existing native write path.
+        session(db, "ses_noop", "replacementtitleword", "/moved", None, "local").await;
+        message(db, "msg_noop", "ses_noop", "replacementbodyword", "local").await;
+        let tick = tick_inner(db, true, None).await.unwrap();
+        assert!(tick.worked);
+        assert!(tick.index_changed);
+        flush(db).await.unwrap();
+        assert!(find(db, "originaltitleword", true, 10).await.is_empty());
+        assert_eq!(find(db, "replacementtitleword", true, 10).await.len(), 1);
+        assert_eq!(find(db, "replacementbodyword", false, 10).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn noop_cleanup_revalidates_revision_source_and_every_projected_field() {
+        let _search_test = SEARCH_TEST.lock().await;
+        let store = store().await;
+        let db = &store.db;
+        session(db, "ses_race", "race title", "/project", None, "local").await;
+        message(db, "msg_race", "ses_race", "racebodyword", "local").await;
+        flush(db).await.unwrap();
+
+        for change in [
+            "UPDATE conversation_search_dirty SET revision='new-token' WHERE message_id='msg_race'",
+            "UPDATE messages SET message_json=json_set(message_json,'$.info.agent','plan') WHERE id='msg_race'",
+            "UPDATE conversation_search_docs SET session_id='different' WHERE message_id='msg_race'",
+            "UPDATE conversation_search_docs SET message_id='different' WHERE key='message:msg_race'",
+            "UPDATE conversation_search_docs SET role='assistant' WHERE key='message:msg_race'",
+            "UPDATE conversation_search_docs SET created=99 WHERE key='message:msg_race'",
+            "UPDATE conversation_search_docs SET title='different' WHERE key='message:msg_race'",
+            "UPDATE conversation_search_docs SET body='different' WHERE key='message:msg_race'",
+            "DELETE FROM conversation_search_docs WHERE key='message:msg_race'",
+            "DELETE FROM messages WHERE id='msg_race'",
+        ] {
+            let dirty = dirty_message("msg_race");
+            db.execute(&dirty.0, dirty.1).await.unwrap();
+            let statements = cleanup_only(snapshot(db, "msg_race").await);
+            // No new nonce for canonical/projection mutations: the SQL predicates
+            // themselves must detect the race, including disappearance of rows.
+            db.execute(change, vec![]).await.unwrap();
+            db.execute_transaction(statements).await.unwrap();
+            assert_eq!(db.fetch_scalar_i64("SELECT count(*) FROM conversation_search_dirty WHERE message_id='msg_race'", vec![]).await.unwrap(), 1, "{change}");
+            if change.starts_with("DELETE FROM conversation_search_docs") {
+                assert_eq!(db.fetch_scalar_i64("SELECT count(*) FROM conversation_search_docs WHERE key='message:msg_race'", vec![]).await.unwrap(), 0);
+            }
+            // Restore canonical source and let a fresh snapshot repair the index.
+            message(db, "msg_race", "ses_race", "racebodyword", "local").await;
+            flush(db).await.unwrap();
+        }
+
+        // Synchronous canonical deletion removes the queue too; the stale no-op
+        // must neither recreate the projection nor recreate a token.
+        let dirty = dirty_message("msg_race");
+        db.execute(&dirty.0, dirty.1).await.unwrap();
+        let statements = cleanup_only(snapshot(db, "msg_race").await);
+        let mut deletes = delete_message("msg_race");
+        deletes.push(("DELETE FROM messages WHERE id='msg_race'".into(), vec![]));
+        db.execute_transaction(deletes).await.unwrap();
+        db.execute_transaction(statements).await.unwrap();
+        assert_eq!(db.fetch_scalar_i64("SELECT count(*) FROM conversation_search_docs WHERE key='message:msg_race'", vec![]).await.unwrap(), 0);
+        assert_eq!(db.fetch_scalar_i64("SELECT count(*) FROM conversation_search_dirty WHERE message_id='msg_race'", vec![]).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -2159,8 +2360,9 @@ mod tests {
         let mut prepared = Vec::new();
         for i in 0..3 {
             let id = format!("msg_batch{i:02}");
-            let dirty = dirty_message(&id);
-            db.execute(&dirty.0, dirty.1).await.unwrap();
+            // Exercise genuine mutations here; re-queuing identical documents
+            // deliberately bypasses the native UPSERT in the no-op path.
+            message(db, &id, "ses_batch", "batched edited", "local").await;
             prepared.extend(projection_statements(snapshot(db, &id).await).unwrap());
         }
         message(db, "msg_batch00", "ses_batch", "batchreplacement", "local").await;

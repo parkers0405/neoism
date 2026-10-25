@@ -305,6 +305,16 @@ pub(crate) async fn append_prompt_admission(
     };
     let mut resume_saved_admission = admission.is_some_and(|(_, saved, _)| saved);
     let mut newly_persisted = false;
+    if create_stub_reply && !resume_saved_admission {
+        resume_saved_admission = recover_pending_subtask_admission(
+            state,
+            &session_id_text,
+            admission,
+            queued_request.as_ref(),
+            &user_message,
+        )
+        .await?;
+    }
     if let Some(existing) = state
         .inner
         .store
@@ -360,6 +370,16 @@ pub(crate) async fn append_prompt_admission(
                     .prompt_admission_saved(id)
                     .await?
                     .unwrap_or(false);
+            }
+            if create_stub_reply && !resume_saved_admission {
+                resume_saved_admission = recover_pending_subtask_admission(
+                    state,
+                    &session_id_text,
+                    admission,
+                    queued_request.as_ref(),
+                    &user_message,
+                )
+                .await?;
             }
             if let Some(existing) = state
                 .inner
@@ -950,6 +970,54 @@ fn tool_replay_tokens(output: &str, metadata: &Value) -> u64 {
         .map(estimate_tokens)
         .fold(0_u64, u64::saturating_add);
     estimate_tokens(output).saturating_add(attachment_tokens)
+}
+
+/// Recover only the exact queued continuation owed by a durable child outbox.
+/// `append_prompt_admission` holds the prompt-admission guard and has rejected
+/// an active run before reaching here. Saving the token before initialization
+/// makes another failure/restart retryable without appending the user turn again.
+async fn recover_pending_subtask_admission(
+    state: &AppState,
+    session_id: &str,
+    admission: Option<(&str, bool, &str)>,
+    request: Option<&PromptRequest>,
+    proposed: &MessageWithParts,
+) -> Result<bool, ApiError> {
+    let (Some((id, false, "continue")), Some(request)) = (admission, request) else {
+        return Ok(false);
+    };
+    let Some(message_id) = request.message_id.as_ref() else {
+        return Ok(false);
+    };
+    if !request
+        .system
+        .as_deref()
+        .is_some_and(crate::message_model::is_runtime_system_notification)
+    {
+        return Ok(false);
+    }
+    let Some(existing) = state
+        .inner
+        .store
+        .get_message(session_id, message_id.as_str())
+        .await?
+    else {
+        return Ok(false);
+    };
+    if !same_runtime_user_prompt(&existing, proposed)
+        || !crate::session_actions::parent_subtask_completion_needs_recovery(
+            state, session_id, request,
+        )
+        .await?
+    {
+        return Ok(false);
+    }
+    state
+        .inner
+        .store
+        .recover_saved_subtask_completion_admission(id, session_id, request)
+        .await?;
+    Ok(true)
 }
 
 fn same_user_prompt(existing: &MessageWithParts, proposed: &MessageWithParts) -> bool {

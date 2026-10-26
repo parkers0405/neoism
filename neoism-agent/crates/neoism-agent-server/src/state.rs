@@ -157,6 +157,7 @@ pub(crate) enum ExecutionSubtaskRegistration {
 }
 
 mod conversation_search;
+mod event_retention;
 mod event_storage;
 mod hosting;
 #[cfg(test)]
@@ -169,6 +170,7 @@ pub(crate) struct SessionStore {
     db: Db,
     _search_worker: Option<Arc<conversation_search::SearchWorker>>,
     _event_compactor: Option<Arc<event_storage::Compactor>>,
+    _event_retention: Option<Arc<event_retention::RetentionWorker>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1611,6 +1613,9 @@ impl AppState {
         if let Some(worker) = self.inner.store._event_compactor.as_ref() {
             worker.shutdown().await;
         }
+        if let Some(worker) = self.inner.store._event_retention.as_ref() {
+            worker.shutdown().await;
+        }
         if let Some(worker) = self.inner.store._search_worker.as_ref() {
             worker.shutdown().await;
         }
@@ -2034,12 +2039,14 @@ impl SessionStore {
             db,
             _search_worker: None,
             _event_compactor: None,
+            _event_retention: None,
         };
         let migration_started = crate::perf::now();
         store.migrate().await?;
         conversation_search::migrate(&store.db).await?;
         store._search_worker = Some(Arc::new(conversation_search::spawn(store.db.clone())));
         store._event_compactor = Some(Arc::new(event_storage::spawn(store.db.clone())));
+        store._event_retention = event_retention::spawn(store.db.clone()).map(Arc::new);
         tracing::info!(
             target: "neoism_agent::perf",
             migration_ms = crate::perf::elapsed_ms(migration_started),
@@ -2661,6 +2668,7 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        self.db.execute(event_retention::SCHEMA, Vec::new()).await?;
         self.db
             .execute(
                 r#"
@@ -5683,14 +5691,72 @@ impl SessionStore {
     }
 
     pub(crate) async fn latest_event_sequence(&self) -> anyhow::Result<u64> {
-        Ok(self
+        let stored = self
             .db
             .fetch_scalar_i64(
                 "SELECT COALESCE((SELECT seq FROM events ORDER BY seq DESC LIMIT 1), 0)",
                 vec![],
             )
-            .await?
-            .max(0) as u64)
+            .await?;
+        // Retention may have pruned the newest rows; never reuse a sequence.
+        let high_water = event_retention::journal_state(&self.db).await?.high_water;
+        Ok(stored.max(high_water).max(0) as u64)
+    }
+
+    /// Every sequence `<=` this value may have been pruned from the journal.
+    pub(crate) async fn event_replay_floor(&self) -> anyhow::Result<u64> {
+        Ok(event_retention::journal_state(&self.db).await?.replay_floor.max(0) as u64)
+    }
+
+    /// Raw journal rows with incompressible payloads, for maintenance tests.
+    #[cfg(test)]
+    pub(crate) async fn insert_test_events(
+        &self,
+        sequences: std::ops::RangeInclusive<i64>,
+        created: i64,
+        payload_bytes: usize,
+    ) -> anyhow::Result<()> {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for seq in sequences {
+            let mut filler = String::with_capacity(payload_bytes);
+            while filler.len() < payload_bytes {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                filler.push_str(&format!("{state:016x}"));
+            }
+            let json = format!(
+                r#"{{"id":"evt_{seq}","type":"session.updated","properties":{{"sessionID":"ses_t","pad":"{filler}"}}}}"#
+            );
+            self.db
+                .execute(
+                    "INSERT INTO events (seq, event_id, tenant_id, kind, aggregate_id, aggregate_seq, owner_id, session_id, event_json, created) VALUES (?, ?, 'local', 'session.updated', 'agg', ?, NULL, 'ses_t', ?, ?)",
+                    vec![int(seq), text(format!("evt_{seq}")), int(seq), text(json), int(created)],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Offline maintenance owns the database exclusively; stop the workers.
+    pub(crate) async fn stop_background_workers(&self) {
+        if let Some(worker) = &self._search_worker {
+            worker.shutdown().await;
+        }
+        if let Some(worker) = &self._event_compactor {
+            worker.shutdown().await;
+        }
+        if let Some(worker) = &self._event_retention {
+            worker.shutdown().await;
+        }
+    }
+
+    /// Offline maintenance: prune every journal row older than `window`.
+    pub(crate) async fn prune_event_journal(
+        &self,
+        window: std::time::Duration,
+    ) -> anyhow::Result<u64> {
+        event_retention::prune_all(&self.db, event_retention::cutoff_ms(window)).await
     }
 
     pub(crate) async fn append_skill_version(
@@ -6463,6 +6529,11 @@ fn message_created(message: &MessageWithParts) -> u64 {
         MessageInfo::User(message) => message.time.created,
         MessageInfo::Assistant(message) => message.time.created,
     }
+}
+
+#[cfg(test)]
+pub(crate) fn store_i64_for_test(value: u64) -> i64 {
+    store_i64(value)
 }
 
 fn store_i64(value: u64) -> i64 {

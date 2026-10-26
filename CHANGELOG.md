@@ -13,7 +13,12 @@ All notable user-facing changes to Neoism are documented here.
 - Recovers durable child-completion notifications after parent initialization failures without duplicate user turns, and closes streams on decode/replay failures rather than silently presenting empty history.
 - Adds codec, replay, authorization, family-query, completion-recovery, and isolated old-format FTS migration fixtures, plus an optional development-derived activation profile.
 
-**Upgrade and rollback:** preserve a consistent pre-upgrade database backup. New and migrated compressed event records cannot be replayed by older TEXT-only backends, so a binary-only downgrade is unsafe. The first upgraded startup rebuilds the derived FTS index synchronously and can take longer for large indexes. Canonical history is retained; this release does not prune events, run VACUUM, or promise physical database-file shrinkage.
+- Preserves provider/model-scoped OpenAI Responses replay and reasoning phases across tool continuations; enables batch patch editing by default with explicit opt-out.
+- Adds slim history projections, targeted exact-glob file search, deduplicated nearby project instructions, faster streaming Markdown layout, persistent copy selection, and immediate idle-compaction feedback.
+- Retains seven days of event-journal replay by default (`NEOISM_AGENT_EVENT_RETENTION_DAYS=0` disables pruning), with durable sequence high-water marks and explicit replay-expired notifications. Canonical conversation history is preserved.
+- Adds manual offline `neoism-agent db compact` and opt-in frame timing diagnostics. Stop all database users and make an independent backup before manual compaction: its retained copy is post-pruning, active-user detection is best-effort, and the file swap is not guaranteed failure-atomic.
+
+**Upgrade and rollback:** preserve a consistent pre-upgrade database backup. New and migrated compressed event records cannot be replayed by older TEXT-only backends, so a binary-only downgrade is unsafe. The first upgraded startup rebuilds the derived FTS index synchronously and can take longer for large indexes. Online journal retention reuses pages rather than shrinking the file; physical shrinking requires explicit offline maintenance.
 
 ## [0.7.139] - 2026-10-25
 

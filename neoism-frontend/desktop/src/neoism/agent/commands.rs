@@ -1673,15 +1673,25 @@ impl NeoismAgentPane {
             return;
         }
         if self.pending_compact.is_some()
+            || self.optimistic_compact.is_some()
             || self.queued_prompt_preview() == Some("Compaction queued")
         {
             return;
         }
+        let session_id = self.session_id.clone().unwrap();
         let request_id =
             neoism_ui::panels::agent_pane::outbound::next_prompt_message_id();
-        self.pending_compact = Some(request_id.clone());
+        if self.is_streaming() {
+            // Mid-run compaction queues; the queue line shows it immediately.
+            self.pending_compact = Some(request_id.clone());
+        } else {
+            // Idle: show Compacting now instead of after the POST + SSE round
+            // trip. CompactionStarted/Ended take over; a failed POST reverts.
+            self.note_streaming(NeoismAgentStreamingState::Compacting, None);
+            self.optimistic_compact = Some((session_id.clone(), request_id.clone()));
+        }
         self.push_outbound(OutboundAgentCommand::CompactSessionRequest {
-            session_id: self.session_id.clone().unwrap(),
+            session_id,
             request_id,
         });
     }

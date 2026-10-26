@@ -2,6 +2,7 @@
 // welcome-screen renderer lives in the `welcome` submodule. Part of the
 // `impl Screen<'_>` block — see `screen/mod.rs` for the struct itself.
 
+pub(crate) mod frame_spike;
 pub mod welcome;
 
 use super::*;
@@ -449,11 +450,21 @@ impl Screen<'_> {
         is_fullscreen: bool,
         mut before_present: impl FnMut(),
     ) -> Option<crate::context::renderable::WindowUpdate> {
+        let mut spike = frame_spike::FrameSpike::begin(Instant::now());
+        macro_rules! spike {
+            ($phase:literal) => {
+                if let Some(spike) = spike.as_mut() {
+                    spike.mark($phase);
+                }
+            };
+        }
         #[cfg(feature = "cef-artifacts")]
         self.begin_html_artifact_frame();
         self.poll_notes_sidebar_refresh();
+        spike!("poll_notes_sidebar");
         self.pump_agent_image_browser();
         self.pump_conversation_navigator();
+        spike!("pump_agent_image_browser+conversation_navigator");
         self.renderer.background_effects_animating = false;
         let window_id = self.context_manager.window_id();
         crate::app::freeze_watchdog::mark_render_stage(window_id, "screen.render.enter");
@@ -478,6 +489,7 @@ impl Screen<'_> {
         // Surface any background reMarkable auto-sync results (no-op unless
         // the optional `remarkable` extension is compiled in).
         self.poll_remarkable_autosync();
+        spike!("prelude");
         // Frame-time tally for the editor scroll FPS log — wraps the
         // entire render path (cell emission + Vulkan submit + present)
         // so the log line can answer "where did the 13ms go" by
@@ -559,7 +571,9 @@ impl Screen<'_> {
             effect_occlusions,
         );
 
+        spike!("occlusions+fps");
         self.sync_status_and_chrome(&frame_ctx);
+        spike!("sync_status_and_chrome");
 
         if self.poll_notebook_executions() {
             self.mark_dirty();
@@ -577,14 +591,17 @@ impl Screen<'_> {
         // scroll settle limps at blink-timer cadence (~4fps tail on
         // long jumps). The bools are OR-ed into `frame_ctx
         // .has_animation` AFTER `draw_overlays` (which assigns it).
+        spike!("notebook_poll");
         let markdown_panels_animating = self.render_markdown_panels();
         if markdown_panels_animating {
             self.mark_dirty();
         }
+        spike!("markdown_panels");
         let code_panels_animating = self.render_code_panels();
         if code_panels_animating {
             self.mark_dirty();
         }
+        spike!("code_panels");
         if self.render_draw_panels() {
             self.mark_dirty();
         }
@@ -602,13 +619,16 @@ impl Screen<'_> {
         if neoworld_animating {
             self.mark_dirty();
         }
+        spike!("draw/tags/extensions/git_diff/neoworld_panels");
         self.render_neoism_agent_panels();
+        spike!("agent_panels");
 
         let (window_update, any_panel_dirty) = self.renderer.run(
             &mut self.sugarloaf,
             &mut self.context_manager,
             &self.search_state.focused_match,
         );
+        spike!("renderer.run");
         frame_ctx.window_update = window_update;
         frame_ctx.any_panel_dirty = any_panel_dirty;
         if self.renderer.conversations_visible
@@ -618,6 +638,7 @@ impl Screen<'_> {
         }
 
         self.draw_overlays(&mut frame_ctx, animation_dt);
+        spike!("draw_overlays");
         // A later successful pane gate must not erase an earlier host metadata
         // retry. Keep it alive through the common cadence, without cell damage.
         frame_ctx.has_animation |= self.renderer.terminal_paint_retry_requested();
@@ -628,6 +649,7 @@ impl Screen<'_> {
 
         self.snapshot_panels(&mut frame_ctx);
         self.ensure_panel_grids(&frame_ctx);
+        spike!("snapshot+grids");
         self.emit_and_present_grids(
             &frame_ctx,
             animation_dt,
@@ -678,6 +700,10 @@ impl Screen<'_> {
             .elapsed()
             .as_micros()
             .min(u64::MAX as u128) as u64;
+        spike!("emit_and_present+tail");
+        if let Some(spike) = spike {
+            spike.finish();
+        }
 
         crate::app::freeze_watchdog::mark_render_stage(
             frame_ctx.window_id,

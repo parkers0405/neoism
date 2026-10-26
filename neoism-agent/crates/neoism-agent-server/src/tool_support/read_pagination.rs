@@ -564,6 +564,36 @@ mod tests {
     }
 
     #[test]
+    fn session_reads_keep_nearby_instructions_outside_file_text() {
+        use super::super::read_tool;
+        use serde_json::json;
+        let fixture = Fixture::new(b"");
+        std::fs::remove_file(&fixture.0).unwrap();
+        std::fs::create_dir_all(fixture.0.join("nested")).unwrap();
+        std::fs::write(
+            fixture.0.join("nested/AGENTS.md"),
+            "Directory-specific rule",
+        )
+        .unwrap();
+        std::fs::write(fixture.0.join("nested/source.rs"), "fn source() {}\n").unwrap();
+        for path in ["nested/source.rs", "nested"] {
+            let result = read_tool(
+                read_context(&fixture.0).with_session_id(Some("session".into())),
+                json!({"filePath":path}),
+            )
+            .unwrap();
+            assert!(!result.output.contains("Directory-specific rule"));
+            assert!(!result.output.contains("<system-reminder>"));
+            let metadata = result.metadata.unwrap();
+            assert_eq!(metadata["instructionContext"].as_array().unwrap().len(), 1);
+            assert!(metadata["instructionContext"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Directory-specific rule"));
+        }
+    }
+
+    #[test]
     fn read_tool_default_line_limit_reserves_envelope_rows_without_loss() {
         use super::super::super::truncate;
         use super::super::read_tool;

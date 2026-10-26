@@ -122,6 +122,9 @@ pub struct UserMessage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
+    /// Original provider output; opaque state is replayed only to its source model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<crate::ProviderReplay>,
     pub id: MessageId,
     pub session_id: SessionId,
     pub time: CompletedTime,

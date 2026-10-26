@@ -76,9 +76,31 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+enum DbCommand {
+    /// Prune the event journal to the retention window and shrink the file.
+    /// Quit Neoism first: the database must not be open elsewhere.
+    Compact {
+        /// Database file (defaults to the agent state directory).
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+        /// Keep journal events from the last N days (0 keeps all events).
+        #[arg(long, default_value = "7")]
+        retention_days: u64,
+        /// Delete the pre-compaction copy after a verified swap.
+        #[arg(long)]
+        no_backup: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Print the canonical V2 OpenAPI document without starting a server.
     Openapi,
+    /// Agent database maintenance.
+    Db {
+        #[command(subcommand)]
+        command: DbCommand,
+    },
     Serve {
         #[arg(long, default_value = "4096")]
         port: u16,
@@ -381,6 +403,28 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     match Cli::parse().command {
+        Command::Db { command: DbCommand::Compact { path, retention_days, no_backup } } => {
+            let path = path.unwrap_or_else(neoism_agent_server::db_maintenance::default_database_path);
+            let retention = (retention_days > 0)
+                .then(|| std::time::Duration::from_secs(retention_days * 24 * 60 * 60));
+            eprintln!("compacting {} ...", path.display());
+            let report = neoism_agent_server::db_maintenance::compact_database(
+                &path,
+                retention,
+                !no_backup,
+            )
+            .await?;
+            let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            println!(
+                "pruned {} journal events; {:.2} GiB -> {:.2} GiB",
+                report.pruned_events,
+                gib(report.bytes_before),
+                gib(report.bytes_after)
+            );
+            if let Some(backup) = report.backup {
+                println!("previous database kept at {} (delete it once Neoism works)", backup.display());
+            }
+        }
         Command::Openapi => {
             use std::io::Write;
             let stdout = std::io::stdout();

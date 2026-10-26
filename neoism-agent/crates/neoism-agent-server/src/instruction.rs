@@ -5,7 +5,7 @@ use crate::config;
 
 const INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(crate) struct LoadedInstruction {
     pub(crate) filepath: String,
     pub(crate) content: String,
@@ -67,10 +67,14 @@ pub(crate) fn nearby(directory: &Path, filepath: &Path) -> Vec<LoadedInstruction
     let target = filepath
         .canonicalize()
         .unwrap_or_else(|_| filepath.to_path_buf());
-    let mut current = target
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| root.clone());
+    let mut current = if target.is_dir() {
+        target.clone()
+    } else {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| root.clone())
+    };
     let mut loaded = Vec::new();
     let mut seen = BTreeSet::new();
 

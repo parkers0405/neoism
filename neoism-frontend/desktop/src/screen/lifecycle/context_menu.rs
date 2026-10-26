@@ -36,6 +36,7 @@ impl Screen<'_> {
 
         if Self::is_command_neoism_agent_key(key, mods) {
             if key.state == ElementState::Pressed {
+                crate::screen::render::frame_spike::note_agent_open_pressed();
                 self.close_global_shortcut_overlays();
                 self.renderer.file_tree.set_focused(false);
                 self.open_neoism_agent_tab();

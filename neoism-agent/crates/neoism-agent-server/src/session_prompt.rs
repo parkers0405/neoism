@@ -637,6 +637,7 @@ pub(crate) async fn append_prompt_admission(
         &reply_model.model_id,
         run_system.as_deref(),
         goals_enabled,
+        plugin_snapshot.config().experimental.batch_tool,
     );
     drop(history);
     let step_limit = agent_info
@@ -749,6 +750,7 @@ pub(crate) async fn append_prompt_admission(
             &reply_model.model_id,
             run_system.as_deref(),
             goals_enabled,
+            plugin_snapshot.config().experimental.batch_tool,
         );
         drop(history);
         let max_steps_reached = step_number >= step_limit;
@@ -1188,6 +1190,7 @@ async fn run_parent_subtasks(
         let tool_part_id = Id::ascending(IdKind::Part);
         let input = subtask_tool_input(subtask);
         let assistant = AssistantMessage {
+            provider_replay: None,
             id: assistant_id.clone(),
             session_id: session_id.clone(),
             time: CompletedTime {
@@ -1638,6 +1641,19 @@ pub(crate) fn estimated_provider_prompt_tokens(messages: &[ProviderMessage]) -> 
                             )
                         })
                         .sum::<u64>(),
+                )
+                .max(
+                    message
+                        .provider_replay
+                        .as_ref()
+                        .map(|replay| {
+                            replay
+                                .items
+                                .iter()
+                                .map(|entry| estimate_tokens(&entry.item.to_string()))
+                                .sum()
+                        })
+                        .unwrap_or(0),
                 )
                 .saturating_add(
                     message
@@ -2458,6 +2474,26 @@ mod tests {
     }
 
     #[test]
+    fn replay_payload_is_budgeted_without_counting_flattened_text_twice() {
+        let text = "source context ".repeat(2048);
+        let mut message = ProviderMessage::text(ProviderRole::Assistant, text.clone());
+        let flattened = estimated_provider_prompt_tokens(&[message.clone()]);
+        message.provider_replay = Some(neoism_agent_core::ProviderReplay {
+            format: "openai-responses".into(),
+            items: vec![neoism_agent_core::ProviderReplayItem {
+                index: 0,
+                item: json!({"id":"msg","type":"message","role":"assistant",
+                    "phase":"commentary","content":[{"type":"output_text","text":text,"annotations":[]}]}),
+            }],
+        });
+        let replay = estimated_provider_prompt_tokens(&[message.clone()]);
+        assert!(replay >= flattened);
+        assert!(replay < 2 * flattened);
+        message.content.clear();
+        assert_eq!(estimated_provider_prompt_tokens(&[message]), replay);
+    }
+
+    #[test]
     fn tool_replay_tokens_counts_media_attachment_payloads() {
         let metadata = json!({
             "attachments": [{
@@ -2716,6 +2752,7 @@ async fn rebuilt_compaction_messages(
         &model.model_id,
         run_system,
         goals_enabled,
+        snapshot.config().experimental.batch_tool,
     );
     push_compaction_continuation(&mut messages, &history);
     if max_steps_reached {

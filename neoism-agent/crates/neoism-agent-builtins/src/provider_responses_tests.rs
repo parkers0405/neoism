@@ -1,6 +1,148 @@
 use super::*;
 
 #[test]
+fn replay_preserves_original_items_after_out_of_order_completion_and_restart() {
+    let output = vec![
+        json!({"id":"msg_1","type":"message","role":"assistant","status":"completed","phase":"commentary",
+            "content":[{"type":"output_text","text":"Checking.","annotations":[]}]}),
+        json!({"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"Inspect code"}],"encrypted_content":"opaque-state"}),
+        json!({"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{ \"filePath\": \"src/lib.rs\" }","status":"completed"}),
+        json!({"id":"msg_2","type":"message","role":"assistant","status":"completed","phase":"commentary",
+            "content":[{"type":"output_text","text":"Then tests.","annotations":[]}]}),
+        json!({"id":"fc_2","type":"function_call","call_id":"call_2","name":"bash","arguments":"{\"command\":\"cargo test\"}","status":"completed"}),
+    ];
+    let mut parser = ResponsesSseParser::default();
+    let mut events = Vec::new();
+    for index in [2, 0, 4, 1, 3] {
+        events.extend(parser.push_line(&format!("data: {}", json!({
+            "type":"response.output_item.done", "output_index":index, "item":output[index],
+        }))).unwrap());
+    }
+    events.extend(
+        parser
+            .push_line(&format!(
+                "data: {}",
+                json!({
+                    "type":"response.completed", "response":{"output":output},
+                })
+            ))
+            .unwrap(),
+    );
+    let mut replay = neoism_agent_core::ProviderReplay {
+        format: "openai-responses".into(),
+        items: Vec::new(),
+    };
+    let mut captured = 0;
+    for event in events {
+        if let ProviderStreamEvent::ReplayItem {
+            format,
+            index,
+            item,
+        } = event
+        {
+            assert_eq!(format, replay.format);
+            replay.record(index, item);
+            captured += 1;
+        }
+    }
+    assert_eq!(
+        captured,
+        output.len(),
+        "terminal snapshot must not duplicate items"
+    );
+    let mut message = ProviderMessage::assistant_tool_call(
+        "Checking.Then tests.",
+        vec![
+            neoism_agent_core::ProviderToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                input: json!({"filePath":"src/lib.rs"}),
+            },
+            neoism_agent_core::ProviderToolCall {
+                id: "call_2".into(),
+                name: "bash".into(),
+                input: json!({"command":"cargo test"}),
+            },
+        ],
+    );
+    message
+        .reasoning
+        .push(neoism_agent_core::ProviderReasoning {
+            summary: vec![json!({"type":"summary_text","text":"Inspect code"})],
+            encrypted_content: "opaque-state".into(),
+        });
+    message.provider_replay = Some(replay);
+    // Exercise the durable JSON boundary, including unknown provider fields.
+    let message: ProviderMessage =
+        serde_json::from_value(serde_json::to_value(message).unwrap()).unwrap();
+    let body = responses_request_body(
+        "gpt-6.1-sol",
+        None,
+        &[
+            message,
+            ProviderMessage::tool_result("call_1", "read", "source", false),
+            ProviderMessage::tool_result("call_2", "bash", "tests passed", false),
+        ],
+        &[],
+    );
+    let items = body["input"].as_array().unwrap();
+    assert_eq!(&items[..output.len()], output.as_slice());
+    assert_eq!(items.len(), output.len() + 2);
+    assert_eq!(items[output.len()]["call_id"], "call_1");
+    assert_eq!(items[output.len() + 1]["call_id"], "call_2");
+}
+
+#[test]
+fn replay_keeps_interrupted_calls_paired_and_unfinished_text_visible() {
+    let mut message = ProviderMessage::assistant_tool_call(
+        "Partial update",
+        vec![neoism_agent_core::ProviderToolCall {
+            id: "call".into(),
+            name: "read".into(),
+            input: json!({"filePath":"x"}),
+        }],
+    );
+    message.provider_replay = Some(neoism_agent_core::ProviderReplay {
+        format: "openai-responses".into(),
+        items: vec![neoism_agent_core::ProviderReplayItem {
+            index: 0,
+            item: json!({
+                "id":"rs", "type":"reasoning", "summary":[], "encrypted_content":"opaque",
+            }),
+        }],
+    });
+    let body = responses_request_body(
+        "gpt-6.1-sol",
+        None,
+        &[
+            message,
+            ProviderMessage::tool_result("call", "read", "source", false),
+        ],
+        &[],
+    );
+    assert_eq!(body["input"][0]["id"], "rs");
+    assert_eq!(body["input"][1]["content"][0]["text"], "Partial update");
+    assert_eq!(body["input"][2]["call_id"], "call");
+    assert_eq!(body["input"][3]["call_id"], "call");
+}
+
+#[test]
+fn replay_terminal_only_snapshots_keep_final_answer_phase_and_item_identity() {
+    let output = json!([{"id":"msg_final","type":"message","role":"assistant",
+        "status":"completed","phase":"final_answer", "content":[{"type":"output_text","text":"Done","annotations":[]}]}]);
+    let events = ResponsesSseParser::default()
+        .push_line(&format!(
+            "data: {}",
+            json!({
+                "type":"response.completed","response":{"output":output},
+            })
+        ))
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(event,
+        ProviderStreamEvent::ReplayItem {index:0,item,..} if item == &output[0])));
+}
+
+#[test]
 fn future_reasoning_models_get_summaries_without_name_gates() {
     for model in ["future-reasoner", "gpt-6.1-sol", "openai/gpt-6.1-sol"] {
         let body = responses_request_body(model, Some("high"), &[], &[]);
@@ -491,7 +633,7 @@ fn parses_reasoning_summary_events() {
             )
             .unwrap();
 
-    assert_eq!(done.len(), 2);
+    assert_eq!(done.len(), 3);
     match &done[0] {
         ProviderStreamEvent::ReasoningMetadata { id, metadata } => {
             assert_eq!(id, "rs_1:0");
@@ -504,6 +646,8 @@ fn parses_reasoning_summary_events() {
         ProviderStreamEvent::ReasoningEnd { id } => assert_eq!(id, "rs_1:0"),
         other => panic!("expected reasoning end, got {other:?}"),
     }
+    assert!(matches!(&done[2], ProviderStreamEvent::ReplayItem {index:0,item,..}
+        if item["id"] == "rs_1" && item["encrypted_content"] == "ciphertext"));
 }
 
 #[test]

@@ -82,6 +82,9 @@ pub mod event_type {
     pub const TODO_UPDATED: &str = "todo.updated";
     pub const WORKFLOW_UPDATED: &str = "workflow.updated";
     pub const WORKFLOW_RUN_UPDATED: &str = "workflow.run.updated";
+    /// A replay cursor fell below the retained journal; resynchronize from
+    /// canonical state. Carries `sequence = replayFloor` as the new cursor.
+    pub const EVENTS_REPLAY_EXPIRED: &str = "events.replay.expired";
 
     /// Every event type the server can publish, in one place, so the OpenAPI
     /// contract (and anything else that must stay exhaustive) can be tested
@@ -126,5 +129,6 @@ pub mod event_type {
         TODO_UPDATED,
         WORKFLOW_UPDATED,
         WORKFLOW_RUN_UPDATED,
+        EVENTS_REPLAY_EXPIRED,
     ];
 }

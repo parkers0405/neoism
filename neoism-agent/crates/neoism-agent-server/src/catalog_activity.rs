@@ -445,13 +445,19 @@ pub(crate) async fn project_one(
     Ok(CatalogSessionInfo { info, catalog_activity })
 }
 
+/// Rows are independent read-only projections (family walk + runtime
+/// snapshot, several queries each). Awaiting them one by one made a 24-row
+/// sidebar page cost ~24x one row; run a bounded window, preserving order.
+const PROJECT_CONCURRENCY: usize = 8;
+
 pub(crate) async fn project(
     state: &AppState,
     items: Vec<SessionInfo>,
 ) -> anyhow::Result<Vec<CatalogSessionInfo>> {
-    let mut projected = Vec::with_capacity(items.len());
-    for info in items {
-        projected.push(project_one(state, info).await?);
-    }
-    Ok(projected)
+    use futures::{StreamExt, TryStreamExt};
+    futures::stream::iter(items)
+        .map(|info| project_one(state, info))
+        .buffered(PROJECT_CONCURRENCY)
+        .try_collect()
+        .await
 }

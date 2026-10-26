@@ -67,6 +67,9 @@ pub(crate) async fn message_list(
 }
 
 fn slim_message(message: &mut MessageWithParts) {
+    if let neoism_agent_core::MessageInfo::Assistant(assistant) = &mut message.info {
+        assistant.provider_replay = None;
+    }
     for part in &mut message.parts {
         match part {
             Part::Tool(part) => {
@@ -95,7 +98,34 @@ fn slim_metadata(metadata: Option<Value>) -> Option<Value> {
     if metadata.remove("snapshots").is_some() {
         metadata.insert("snapshotsOmitted".to_string(), Value::Bool(true));
     }
+    if let Some(Value::Array(entries)) = metadata.get_mut("diagnostics") {
+        for entry in entries {
+            slim_diagnostics_entry(entry);
+        }
+    }
+    // Opaque provider replay state; display clients never read it, and it
+    // can be most of a reasoning-heavy page.
+    if let Some(Value::Object(openai)) = metadata.get_mut("openai") {
+        openai.remove("encryptedContent");
+    }
     Some(Value::Object(metadata))
+}
+
+/// Display clients render `{ message, severity, range.start }` per LSP
+/// diagnostic. Drop the bulky remainder (rustc's full `data.rendered`
+/// output, related information, code descriptions), which dominated
+/// history pages for edit-heavy sessions.
+fn slim_diagnostics_entry(entry: &mut Value) {
+    let Some(Value::Array(items)) = entry.get_mut("diagnostics") else {
+        return;
+    };
+    for item in items {
+        if let Value::Object(item) = item {
+            item.retain(|key, _| {
+                matches!(key.as_str(), "message" | "severity" | "range" | "source" | "code")
+            });
+        }
+    }
 }
 
 fn slim_metadata_value(metadata: Value) -> Value {
@@ -149,6 +179,9 @@ pub(crate) async fn part_delete(
     if message.parts.len() == before {
         return Err(ApiError::not_found("Part not found"));
     }
+    if let neoism_agent_core::MessageInfo::Assistant(assistant) = &mut message.info {
+        assistant.provider_replay = None;
+    }
     state
         .inner
         .store
@@ -183,6 +216,9 @@ pub(crate) async fn part_update(
         return Err(ApiError::not_found("Part not found"));
     };
     *existing = part.clone();
+    if let neoism_agent_core::MessageInfo::Assistant(assistant) = &mut message.info {
+        assistant.provider_replay = None;
+    }
     state
         .inner
         .store
@@ -193,4 +229,45 @@ pub(crate) async fn part_update(
         json!({ "sessionID": session_id, "part": part, "time": now_millis() }),
     ));
     Ok(Json(part))
+}
+
+#[cfg(test)]
+mod slim_tests {
+    use super::*;
+
+    #[test]
+    fn slim_metadata_keeps_displayed_diagnostic_fields_only() {
+        let metadata = json!({
+            "snapshots": [1, 2],
+            "diff": "keep",
+            "diagnostics": [{
+                "path": "src/lib.rs",
+                "source": "rust-analyzer",
+                "diagnostics": [{
+                    "message": "mismatched types",
+                    "severity": "error",
+                    "range": { "start": { "line": 3, "character": 4 } },
+                    "code": "E0308",
+                    "data": { "rendered": "error[E0308]: ... long rustc output" },
+                    "related_information": [{ "path": "src/x.rs", "message": "here" }],
+                    "codeDescription": { "href": "https://doc.rust-lang.org" }
+                }]
+            }],
+            "openai": { "itemId": "rs_1", "encryptedContent": "opaque" }
+        });
+        let slim = slim_metadata_value(metadata);
+        assert_eq!(slim["snapshotsOmitted"], json!(true));
+        assert_eq!(slim["diff"], json!("keep"));
+        assert_eq!(slim["diagnostics"][0]["path"], json!("src/lib.rs"));
+        assert_eq!(
+            slim["diagnostics"][0]["diagnostics"][0],
+            json!({
+                "message": "mismatched types",
+                "severity": "error",
+                "range": { "start": { "line": 3, "character": 4 } },
+                "code": "E0308"
+            })
+        );
+        assert_eq!(slim["openai"], json!({ "itemId": "rs_1" }));
+    }
 }

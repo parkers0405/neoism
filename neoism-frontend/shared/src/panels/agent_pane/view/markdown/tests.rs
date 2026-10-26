@@ -810,3 +810,40 @@ fn reveal_projection_uses_displayed_identity_across_full_body_and_reflow() {
         displayed_projection(&wide, |_| false).canonical
     );
 }
+
+#[test]
+fn stable_prefix_boundary_skips_fenced_blank_lines() {
+    assert_eq!(stable_markdown_prefix_end("one paragraph"), None);
+    assert_eq!(stable_markdown_prefix_end("\n\nlead"), None);
+    let text = "intro\n\n```rust\nfn a() {}\n\nfn b() {}\n";
+    assert_eq!(stable_markdown_prefix_end(text), Some("intro\n\n".len()));
+    let closed = "intro\n\n```\ncode\n\nmore\n```\n\ntail";
+    assert_eq!(
+        stable_markdown_prefix_end(closed),
+        Some(closed.len() - "tail".len())
+    );
+    // A trailing blank without its newline is not yet a settled boundary.
+    assert_eq!(stable_markdown_prefix_end("a\n\nb\n  "), Some("a\n\n".len()));
+}
+
+#[test]
+fn stable_prefix_split_preserves_semantic_lines() {
+    let samples = [
+        "# Title\n\nsome prose that\nwraps across lines\n\n- item\n  continued\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\nx\n\ny\n```\n\n\nfinal words",
+        "para one\n\n\n\npara two\n\n1. first\n\n   indented\n\ntail",
+        "> quote\n\n---\n\n| not | table |\n\nprose\n",
+    ];
+    for text in samples {
+        let Some(split) = stable_markdown_prefix_end(text) else {
+            panic!("sample has a boundary: {text:?}");
+        };
+        let (prefix, tail) = text.split_at(split);
+        let mut joined = semantic_markdown_lines(prefix);
+        let mut tail_lines = semantic_markdown_lines(tail).into_iter().peekable();
+        if joined.last().is_some_and(String::is_empty) {
+            while tail_lines.next_if(String::is_empty).is_some() {}
+        }
+        joined.extend(tail_lines);
+        assert_eq!(joined, semantic_markdown_lines(text), "{text:?}");
+    }
+}

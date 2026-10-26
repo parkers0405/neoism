@@ -1098,6 +1098,19 @@ impl Screen<'_> {
     }
 
     pub fn open_neoism_agent_tab(&mut self) -> Option<usize> {
+        let started =
+            crate::screen::render::frame_spike::enabled().then(std::time::Instant::now);
+        let route_id = self.open_neoism_agent_tab_inner();
+        if let Some(started) = started {
+            eprintln!(
+                "[frame-spike] open_neoism_agent_tab (main thread): {}µs",
+                started.elapsed().as_micros()
+            );
+        }
+        route_id
+    }
+
+    fn open_neoism_agent_tab_inner(&mut self) -> Option<usize> {
         self.renderer.buffer_tabs.ensure_terminal_tab();
         let directory = self
             .workspace_root_for_new_shell()
@@ -1376,6 +1389,15 @@ impl Screen<'_> {
     }
 
     pub fn handle_neoism_agent_click(&mut self, clipboard: &mut Clipboard) -> bool {
+        if self
+            .context_manager
+            .current_mut()
+            .neoism_agent
+            .as_mut()
+            .is_some_and(|agent| agent.clear_selection())
+        {
+            self.mark_dirty();
+        }
         let scale = self.sugarloaf.scale_factor();
         let mx = self.mouse.x as f32 / scale;
         let my = self.mouse.y as f32 / scale;

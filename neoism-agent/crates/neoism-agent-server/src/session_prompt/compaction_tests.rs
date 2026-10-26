@@ -349,6 +349,7 @@ fn provider_usage_wins_over_request_estimate_for_compaction() {
 
     let history = vec![MessageWithParts {
         info: MessageInfo::Assistant(AssistantMessage {
+            provider_replay: None,
             id: Id::ascending(IdKind::Message),
             session_id,
             time: CompletedTime {
@@ -474,7 +475,7 @@ async fn compaction_default_trigger_and_bypass_run_end_to_end() {
         if auto {
             let snapshot = state.plugin_snapshot(root.to_string_lossy().as_ref()).await;
             let messages = provider_messages_for_session_with_plugins(
-                &snapshot, &info, &history, "stub", None, false,
+                &snapshot, &info, &history, "stub", None, false, None,
             );
             assert!(!messages
                 .iter()

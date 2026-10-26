@@ -3651,6 +3651,12 @@ fn event_data_schema(event_type: &str) -> Value {
                 "sessionID": { "type": "string" }, "epoch": { "type": "object", "additionalProperties": true }
             }})
         }
+        _ if event_type == et::EVENTS_REPLAY_EXPIRED => {
+            json!({ "type": "object", "additionalProperties": false, "required": ["requestedSequence", "replayFloor"], "properties": {
+                "requestedSequence": { "type": "integer", "minimum": 0 },
+                "replayFloor": { "type": "integer", "minimum": 0 }
+            }})
+        }
         _ if event_type == et::SESSION_CATALOG_ACTIVITY => {
             json!({ "type": "object", "additionalProperties": false, "required": ["sessionID", "activity"], "properties": {
                 "sessionID": { "type": "string" }, "activity": r("CatalogActivity")

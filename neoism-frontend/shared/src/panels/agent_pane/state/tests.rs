@@ -423,6 +423,14 @@ fn selection_copies_rows_from_previous_render_windows() {
     assert!(pane.drag_selection_to(40.0, 10.0));
     assert_eq!(pane.end_selection().as_deref(), Some("first\nmiddle\nlast"));
     assert!(pane.selection_history.is_empty());
+    assert!(pane.selectable_line_highlight(0).is_some());
+    assert!(!pane.has_active_selection());
+    assert!(!pane.drag_selection_to(0.0, 10.0));
+    assert_eq!(pane.end_selection(), None);
+    pane.register_selectable_line("another row", [0.0, 30.0, 60.0, 18.0]);
+    assert!(!pane.has_active_selection());
+    assert!(pane.clear_selection());
+    assert!(pane.selectable_line_highlight(0).is_none());
 }
 
 #[test]

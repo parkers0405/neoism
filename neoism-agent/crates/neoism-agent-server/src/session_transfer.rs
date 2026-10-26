@@ -386,6 +386,7 @@ mod tests {
     ) -> MessageWithParts {
         MessageWithParts {
             info: MessageInfo::Assistant(AssistantMessage {
+                provider_replay: None,
                 id: Id::ascending(IdKind::Message),
                 session_id: session_id.clone(),
                 time: CompletedTime {

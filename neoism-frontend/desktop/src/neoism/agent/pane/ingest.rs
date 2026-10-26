@@ -1678,6 +1678,7 @@ impl NeoismAgentPane {
                         changed = true;
                         continue;
                     }
+                    self.optimistic_compact = None;
                     self.start_compaction_message(id, reason);
                     self.note_streaming(NeoismAgentStreamingState::Compacting, None);
                     changed = true;
@@ -1721,6 +1722,7 @@ impl NeoismAgentPane {
                         continue;
                     }
                     self.pending_compact = None;
+                    self.optimistic_compact = None;
                     self.finish_compaction_message(&summary, &kind);
                     if self.streaming_state == NeoismAgentStreamingState::Compacting {
                         self.note_streaming(
@@ -3754,6 +3756,20 @@ impl NeoismAgentPane {
         if let Some(pending) = pending {
             if request_id.is_some() && pending.as_deref() == request_id {
                 *pending = None;
+            }
+        }
+        if self.optimistic_compact.as_ref().is_some_and(|(session, request)| {
+            session == session_id && Some(request.as_str()) == request_id
+        }) {
+            self.optimistic_compact = None;
+            if self.session_id.as_deref() == Some(session_id) {
+                if self.streaming_state == NeoismAgentStreamingState::Compacting {
+                    self.note_streaming(NeoismAgentStreamingState::Idle, None);
+                }
+            } else if let Some(cached) = self.session_cache.get_mut(session_id) {
+                if cached.runtime.streaming_state == NeoismAgentStreamingState::Compacting {
+                    cached.runtime.note_streaming(NeoismAgentStreamingState::Idle, None);
+                }
             }
         }
         if self.session_id.as_deref() == Some(session_id) {

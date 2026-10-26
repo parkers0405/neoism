@@ -898,6 +898,7 @@ pub(crate) async fn external_import(
                 continue;
             };
             MessageInfo::Assistant(AssistantMessage {
+                provider_replay: None,
                 id: message_id.clone(),
                 session_id: info.id.clone(),
                 time: CompletedTime {

@@ -1108,6 +1108,7 @@ async fn project_nested_output(
         });
         let message = MessageWithParts {
             info: MessageInfo::Assistant(AssistantMessage {
+                provider_replay: None,
                 id: message_id,
                 session_id: child.id.clone(),
                 time: CompletedTime {

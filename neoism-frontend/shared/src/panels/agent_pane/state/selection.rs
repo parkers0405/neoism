@@ -12,7 +12,7 @@ impl NeoismAgentPane {
         let content_y = self.content_y_for_screen_y(rect[1]);
         let index = self.selectable_lines_len;
         let line = SelectableLine::from_geometry(geometry, rect, content_y, origin_x);
-        if self.selection_anchor.is_some() {
+        if self.has_active_selection() {
             self.selection_history.insert(
                 crate::panels::agent_pane::selection_model::selection_line_key(&line),
                 line.clone(),
@@ -51,7 +51,7 @@ impl NeoismAgentPane {
             self.selectable_lines.push(line);
         }
         self.selectable_lines_len += 1;
-        if self.selection_anchor.is_some() {
+        if self.has_active_selection() {
             let line = &self.selectable_lines[index];
             self.selection_history.insert(
                 crate::panels::agent_pane::selection_model::selection_line_key(line),
@@ -252,7 +252,7 @@ impl NeoismAgentPane {
         {
             return false;
         }
-        if self.selection_anchor.is_none() {
+        if !self.has_active_selection() {
             return false;
         }
         let index = self
@@ -277,7 +277,19 @@ impl NeoismAgentPane {
     }
 
     pub fn has_active_selection(&self) -> bool {
-        self.selection_anchor.is_some() && self.selection_focus.is_some()
+        // Drag history is released on mouse-up; endpoints stay for highlighting.
+        !self.selection_history.is_empty()
+            && self.selection_anchor.is_some()
+            && self.selection_focus.is_some()
+    }
+
+    pub fn clear_selection(&mut self) -> bool {
+        let changed = self.selection_anchor.is_some() || self.selection_focus.is_some();
+        self.selection_anchor = None;
+        self.selection_focus = None;
+        self.selection_history.clear();
+        self.touch_word_edges = None;
+        changed
     }
 
     pub fn selection_is_plain_click(&self) -> bool {
@@ -361,12 +373,16 @@ impl NeoismAgentPane {
     }
 
     pub fn end_selection(&mut self) -> Option<String> {
-        let anchor = self.selection_anchor.take()?;
-        let focus = self.selection_focus.take()?;
+        if !self.has_active_selection() {
+            return None;
+        }
+        let anchor = self.selection_anchor?;
+        let focus = self.selection_focus?;
         let history = std::mem::take(&mut self.selection_history);
         let (start, end) = order_endpoints(anchor, focus);
         let single_row = same_selection_row(start, end);
         if single_row && (start.x - end.x).abs() < 1.0 {
+            self.clear_selection();
             return None;
         }
         // Include rows that scrolled out of the render window during the drag.
@@ -398,7 +414,12 @@ impl NeoismAgentPane {
             .map(|s| s.trim_end_matches('\n'))
             .collect::<Vec<_>>()
             .join("\n");
-        (!joined.trim().is_empty()).then_some(joined)
+        if joined.trim().is_empty() {
+            self.clear_selection();
+            None
+        } else {
+            Some(joined)
+        }
     }
 
     pub(in crate::panels::agent_pane::state) fn selectable_line_at(

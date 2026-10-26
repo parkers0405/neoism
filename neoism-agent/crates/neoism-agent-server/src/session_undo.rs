@@ -123,6 +123,9 @@ async fn revert_session_with_history(
                 return Err(ApiError::not_found("Part not found"));
             };
             removed_parts = message.parts.split_off(index);
+            if let MessageInfo::Assistant(assistant) = &mut message.info {
+                assistant.provider_replay = None;
+            }
             target_update = Some(message);
         } else {
             removed_messages.push(message);

@@ -1280,6 +1280,9 @@ pub struct NeoismAgentPane {
     queued_prompt_count: usize,
     queued_prompt_preview: Option<String>,
     pub(super) pending_compact: Option<String>,
+    /// `(session_id, request_id)` of an idle `/compact` shown as Compacting
+    /// the instant it was submitted, before the server's CompactionStarted.
+    pub(super) optimistic_compact: Option<(String, String)>,
     sent_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -1626,6 +1629,7 @@ impl Default for NeoismAgentPane {
             queued_prompt_count: 0,
             queued_prompt_preview: None,
             pending_compact: None,
+            optimistic_compact: None,
             sent_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),

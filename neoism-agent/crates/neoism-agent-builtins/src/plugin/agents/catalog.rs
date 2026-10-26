@@ -196,7 +196,7 @@ mod tests {
             .unwrap()
             .prompt
             .unwrap()
-            .contains("GOLDEN STANDARD"));
+            .contains("architectural reorganization"));
         assert!(catalog
             .get("plan")
             .unwrap()

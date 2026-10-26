@@ -161,9 +161,14 @@ pub(crate) struct EffectSink {
     audit: Arc<Mutex<Audit>>,
 }
 impl EffectSink {
-    pub(crate) async fn record(&self, call_id: &str, metadata: Option<&Value>) {
+    pub(crate) async fn record(
+        &self,
+        call_id: &str,
+        tool: &str,
+        metadata: Option<&Value>,
+    ) {
         let Some(metadata) = metadata else { return };
-        let metadata = retained_effect_metadata(metadata);
+        let metadata = retained_effect_metadata(tool, metadata);
         if metadata.as_object().is_none_or(|object| object.is_empty()) {
             return;
         }
@@ -366,7 +371,7 @@ impl Host {
                 }
             }
             // Account effects before turning protocol isError into a catchable failure.
-            let mut effects = result.metadata.as_ref().map(retained_effect_metadata);
+            let mut effects = result.metadata.as_ref().map(|metadata| retained_effect_metadata(name, metadata));
             let mut hydration_error = None;
             if let Some(artifact_id) = effects.as_ref().and_then(|m| m.pointer("/snapshotArtifact/id")).and_then(Value::as_str).map(str::to_string) {
                 match crate::snapshot::hydrate_snapshot_artifact(&self.state, &self.tenant_id,
@@ -380,7 +385,7 @@ impl Host {
                     Err(error) => hydration_error = Some(format!("snapshot artifact hydration failed: {error}")),
                 }
             }
-            EffectSink {audit:self.audit.clone()}.record(&id, effects.as_ref()).await;
+            EffectSink {audit:self.audit.clone()}.record(&id, name, effects.as_ref()).await;
             if let Some(error) = hydration_error { return Err(error); }
             let envelope = envelope(&result);
             if envelope["isError"] == true { return Err(format!("{path}: {}", result.output)); }
@@ -551,7 +556,7 @@ fn envelope(result: &ToolExecutionResult) -> Value {
 }
 // The effect ledger must never retain full MCP protocol bodies or unrelated
 // result metadata outside the interpreter's own data accounting.
-fn retained_effect_metadata(metadata: &Value) -> Value {
+fn retained_effect_metadata(tool: &str, metadata: &Value) -> Value {
     let mut effects = serde_json::Map::new();
     for key in [
         "snapshotArtifact",
@@ -566,6 +571,13 @@ fn retained_effect_metadata(metadata: &Value) -> Value {
     ] {
         if let Some(value) = metadata.get(key) {
             effects.insert(key.to_string(), value.clone());
+        }
+    }
+    // Only workspace reads may admit project instructions. Other tool output,
+    // including MCP metadata, must not become system context through compose.
+    if tool == "read" {
+        if let Some(instructions) = metadata.get("instructionContext") {
+            effects.insert("instructionContext".into(), instructions.clone());
         }
     }
     Value::Object(effects)
@@ -602,6 +614,7 @@ fn merge_effects(root: &mut Value, child: Option<&Value>) {
         "attachments",
         "media",
         "generatedFiles",
+        "instructionContext",
     ] {
         if let Some(items) = child.get(key).and_then(Value::as_array) {
             let target = root
@@ -1183,8 +1196,9 @@ mod tests {
         };
         let metadata = json!({"mcp":{"result":{"structuredContent":{"body":"x".repeat(1_000_000)}}},
             "unrelatedBody":"y".repeat(1_000_000),"snapshotArtifact":{"id":"artifact"},
-            "snapshots":[{"path":"a","before":{"kind":"missing"}}],"attachments":[{"url":"recovery"}],"generatedFiles":[{"name":"known.png"}]});
-        sink.record("child", Some(&metadata)).await;
+            "snapshots":[{"path":"a","before":{"kind":"missing"}}],"attachments":[{"url":"recovery"}],"generatedFiles":[{"name":"known.png"}],
+            "instructionContext":[{"filepath":"/project/src/AGENTS.md","content":"directory rule"}]});
+        sink.record("child", "read", Some(&metadata)).await;
         let audit = audit.lock().await;
         let retained = &audit.effects[0].1;
         assert!(retained.get("mcp").is_none());
@@ -1192,6 +1206,12 @@ mod tests {
         assert_eq!(retained["attachments"][0]["url"], "recovery");
         assert_eq!(retained["snapshots"][0]["path"], "a");
         assert_eq!(retained["snapshotArtifact"]["id"], "artifact");
+        let mut merged = json!({});
+        merge_effects(&mut merged, Some(retained));
+        assert_eq!(merged["instructionContext"][0]["content"], "directory rule");
+        assert!(retained_effect_metadata("execute", &metadata)
+            .get("instructionContext")
+            .is_none());
         assert!(serialized_size(retained, 4096).is_ok());
     }
     #[test]

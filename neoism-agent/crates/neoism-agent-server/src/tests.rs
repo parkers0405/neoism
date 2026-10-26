@@ -43,17 +43,17 @@ mod tool_part_tests;
 
 #[test]
 fn gpt_models_get_apply_patch_toolset() {
-    assert!(use_apply_patch_for_model("gpt-5.5"));
-    assert!(use_apply_patch_for_model("openai/gpt-5.4-codex"));
-    assert!(use_apply_patch_for_model("codex-mini-latest"));
-    assert!(tool_allowed_for_model("apply_patch", "gpt-5.5"));
-    assert!(!tool_allowed_for_model("edit", "gpt-5.5"));
-    assert!(!tool_allowed_for_model("write", "gpt-5.5"));
+    assert!(use_apply_patch_for_model("gpt-5.5", None));
+    assert!(use_apply_patch_for_model("openai/gpt-5.4-codex", None));
+    assert!(use_apply_patch_for_model("codex-mini-latest", None));
+    assert!(tool_allowed_for_model("apply_patch", "gpt-5.5", None));
+    assert!(!tool_allowed_for_model("edit", "gpt-5.5", None));
+    assert!(!tool_allowed_for_model("write", "gpt-5.5", None));
 
-    assert!(!use_apply_patch_for_model("gpt-4.1"));
-    assert!(!tool_allowed_for_model("apply_patch", "gpt-4.1"));
-    assert!(tool_allowed_for_model("edit", "gpt-4.1"));
-    assert!(tool_allowed_for_model("write", "gpt-4.1"));
+    assert!(!use_apply_patch_for_model("gpt-4.1", None));
+    assert!(!tool_allowed_for_model("apply_patch", "gpt-4.1", None));
+    assert!(tool_allowed_for_model("edit", "gpt-4.1", None));
+    assert!(tool_allowed_for_model("write", "gpt-4.1", None));
 
     let available = provider_tool_map(
         &tool::workspace_tool_items()
@@ -388,6 +388,7 @@ fn test_compaction_pair(
         },
         MessageWithParts {
             info: MessageInfo::Assistant(AssistantMessage {
+                provider_replay: None,
                 id: assistant_id.clone(),
                 session_id: session_id.clone(),
                 time: CompletedTime {
@@ -5084,6 +5085,7 @@ async fn sessions_import_route_round_trips_a_transferred_session() {
             session_id.as_str(),
             &MessageWithParts {
                 info: MessageInfo::Assistant(AssistantMessage {
+                    provider_replay: None,
                     id: Id::ascending(IdKind::Message),
                     session_id: session_id.clone(),
                     time: CompletedTime {
@@ -5417,6 +5419,7 @@ async fn append_snapshot_test_messages(
             session.id.as_str(),
             &MessageWithParts {
                 info: MessageInfo::Assistant(AssistantMessage {
+                    provider_replay: None,
                     id: assistant_id.clone(),
                     session_id: session.id.clone(),
                     time: CompletedTime {
@@ -6618,3 +6621,84 @@ async fn disabled_workspace_tools_do_not_warm_search() {
 
 #[path = "tests_mcp_config.rs"]
 mod mcp_config_tests;
+
+#[tokio::test]
+async fn v2_event_replay_below_retention_floor_is_explicitly_expired() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-replay-floor-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let session = store_test_session(&session_id, now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+    for title in ["one", "two", "three"] {
+        state.publish(EventPayload::new(
+            event_type::SESSION_UPDATED,
+            json!({ "sessionID": session_id, "title": title }),
+        ));
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.inner.store.latest_event_sequence().await.unwrap_or_default() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let high_water = state.inner.store.latest_event_sequence().await.unwrap();
+    // A zero window expires everything already persisted.
+    let pruned = state
+        .inner
+        .store
+        .prune_event_journal(Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(pruned >= 3, "pruned {pruned}");
+    let floor = state.inner.store.event_replay_floor().await.unwrap();
+    assert!(floor > 0);
+    // The wire counter must never reuse a pruned sequence.
+    assert_eq!(state.inner.store.latest_event_sequence().await.unwrap(), high_water);
+
+    for uri in [
+        format!("/v2/events?sessionId={session_id}&since=0"),
+        format!("/v2/events?sessionId={session_id}&since=1&tail=true"),
+    ] {
+        let response = app(state.clone())
+            .oneshot(Request::builder().method(Method::GET).uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let frame = String::from_utf8_lossy(&first).to_string();
+        assert!(frame.contains("event: events.replay.expired"), "{uri}: {frame}");
+        assert!(frame.contains(&format!("id: {floor}")), "{uri}: {frame}");
+        assert!(frame.contains("\"replayFloor\":") , "{uri}: {frame}");
+    }
+
+    // A cursor at or above the floor replays normally, with no marker.
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v2/events?sessionId={session_id}&since={floor}&tail=true"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_millis(300), body.next()).await;
+    if let Ok(Some(Ok(chunk))) = first {
+        assert!(!String::from_utf8_lossy(&chunk).contains("events.replay.expired"));
+    }
+
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}

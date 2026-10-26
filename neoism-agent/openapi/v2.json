@@ -1028,6 +1028,9 @@
           },
           {
             "$ref": "#/components/schemas/EventWorkflowRunUpdated"
+          },
+          {
+            "$ref": "#/components/schemas/EventEventsReplayExpired"
           }
         ]
       },
@@ -1056,6 +1059,61 @@
           },
           "type": {
             "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "type",
+          "source",
+          "schemaVersion",
+          "timestamp",
+          "data"
+        ],
+        "type": "object"
+      },
+      "EventEventsReplayExpired": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "additionalProperties": false,
+            "properties": {
+              "replayFloor": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "requestedSequence": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "requestedSequence",
+              "replayFloor"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/EventSubject"
+          },
+          "timestamp": {
+            "type": "integer"
+          },
+          "type": {
+            "const": "events.replay.expired"
           }
         },
         "required": [

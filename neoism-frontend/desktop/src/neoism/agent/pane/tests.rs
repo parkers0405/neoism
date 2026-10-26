@@ -5051,7 +5051,47 @@ fn compact_session_queues_outbound_command_for_runtime() {
         [OutboundAgentCommand::CompactSessionRequest { session_id, .. }] if session_id == "sess-1"
     ));
     assert!(pane.messages.is_empty());
-    assert_ne!(pane.streaming_label(), "Compacting");
+    // Idle /compact shows Compacting the instant it is submitted, without
+    // the mid-run "Compaction queued" line.
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Compacting);
+    assert!(pane.pending_compact.is_none());
+    assert_eq!(pane.queued_prompt_count(), 0);
+    // A second /compact while it is pending does not double-submit.
+    pane.execute_slash_text("/compact");
+    assert!(pane.drain_pending_outbound().is_empty());
+}
+
+#[test]
+fn idle_compact_failure_reverts_optimistic_compacting() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("sess-1".to_string());
+    pane.execute_slash_text("/compact");
+    let (_, request_id) = pane.optimistic_compact.clone().unwrap();
+    pane.compact_request_failed("sess-1", Some(&request_id), "rejected".into());
+    assert!(pane.optimistic_compact.is_none());
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Idle);
+}
+
+#[test]
+fn idle_compact_hands_off_to_server_lifecycle() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("root".into());
+    pane.execute_slash_text("/compact");
+    let (_, request_id) = pane.optimistic_compact.clone().unwrap();
+    pane.event_stream = Some(AgentSessionEventStream::with_updates_for_test(
+        "root",
+        [AgentSessionUpdate::CompactionStarted {
+            session_id: "root".into(),
+            id: "compact".into(),
+            reason: "manual".into(),
+        }],
+    ));
+    pane.drain_server_updates();
+    assert!(pane.optimistic_compact.is_none());
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Compacting);
+    // A late failure for the confirmed request must not stop the real run.
+    pane.compact_request_failed("root", Some(&request_id), "late".into());
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Compacting);
 }
 
 #[test]
@@ -8000,6 +8040,14 @@ fn transcript_selection_distinguishes_plain_click_from_drag() {
     assert!(pane.drag_selection_to(70.0, 40.0));
     assert!(!pane.selection_is_plain_click());
     assert!(pane.end_selection().is_some());
+    assert!(pane.selectable_line_highlight(0).is_some());
+    assert!(!pane.has_active_selection());
+    assert!(!pane.drag_selection_to(90.0, 40.0));
+    assert_eq!(pane.end_selection(), None);
+    pane.register_selectable_line("another row", [20.0, 60.0, 100.0, 20.0]);
+    assert!(!pane.has_active_selection());
+    assert!(pane.clear_selection());
+    assert!(pane.selectable_line_highlight(0).is_none());
 }
 
 #[test]

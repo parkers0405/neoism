@@ -45,6 +45,7 @@ mod message_part_mutation;
 mod model_selection;
 mod openapi;
 pub use openapi::canonical_openapi;
+pub mod db_maintenance;
 mod perf;
 mod permission;
 mod permission_runtime;

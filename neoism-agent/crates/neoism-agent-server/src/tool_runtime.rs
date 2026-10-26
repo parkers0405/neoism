@@ -1356,7 +1356,9 @@ pub(crate) fn execute_tool_call_scoped<'a>(
                     // Preserve known leaf effects before after-hooks, including
                     // hooks that fail or outlive composition's cleanup budget.
                     if let Some(effects) = &scope.effects {
-                        effects.record(call_id, result.metadata.as_ref()).await;
+                        effects
+                            .record(call_id, tool_name, result.metadata.as_ref())
+                            .await;
                     }
                     plugin::tool_execute_after(&snapshot, &ctx, &mut result)
                         .map_err(|error| error.to_string())?;

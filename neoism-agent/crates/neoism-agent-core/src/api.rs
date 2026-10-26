@@ -294,12 +294,13 @@ impl Default for LspConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ExperimentalConfig {
     #[serde(default)]
     pub disable_paste_summary: Option<bool>,
-    #[serde(default)]
+    /// Multi-file apply_patch editing defaults on for Codex/GPT models.
+    /// Explicit false selects edit/write instead.
     pub batch_tool: Option<bool>,
     #[serde(default)]
     pub open_telemetry: Option<bool>,
@@ -308,6 +309,18 @@ pub struct ExperimentalConfig {
     /// Explicit extension point for experimental implementation-specific flags.
     #[serde(default)]
     pub options: BTreeMap<String, Value>,
+}
+
+impl Default for ExperimentalConfig {
+    fn default() -> Self {
+        Self {
+            disable_paste_summary: None,
+            batch_tool: Some(true),
+            open_telemetry: None,
+            primary_tools: Vec::new(),
+            options: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -795,6 +808,22 @@ mod tests {
         assert_eq!(config.experimental.open_telemetry, Some(true));
         assert_eq!(config.experimental.primary_tools, vec!["read", "grep"]);
         assert_eq!(config.experimental.options["futureFlag"], "kept");
+    }
+
+    #[test]
+    fn experimental_batch_tool_defaults_on_and_respects_explicit_off() {
+        assert_eq!(ExperimentalConfig::default().batch_tool, Some(true));
+        for raw in [
+            json!({}),
+            json!({"experimental":{}}),
+            json!({"experimental":{"batchTool":true}}),
+        ] {
+            let config: AgentConfigDocument = serde_json::from_value(raw).unwrap();
+            assert_eq!(config.experimental.batch_tool, Some(true));
+        }
+        let config: AgentConfigDocument =
+            serde_json::from_value(json!({"experimental":{"batchTool":false}})).unwrap();
+        assert_eq!(config.experimental.batch_tool, Some(false));
     }
 
     #[test]

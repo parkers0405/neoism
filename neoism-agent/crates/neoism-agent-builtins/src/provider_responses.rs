@@ -21,6 +21,7 @@ pub(crate) struct ResponsesSseParser {
     active_reasoning_item_id: Option<String>,
     tool_calls: BTreeMap<String, ResponsesToolCallState>,
     emitted_tool_items: BTreeSet<String>,
+    replay_items: BTreeMap<u64, Value>,
     tool_call_emitted: bool,
 }
 
@@ -272,10 +273,11 @@ impl ResponsesSseParser {
                     .and_then(|response| response.get("output"))
                     .and_then(Value::as_array)
                 {
-                    for item in output {
+                    for (index, item) in output.iter().enumerate() {
                         self.remember_tool_call(item);
                         events.extend(self.finish_tool_call(item));
                         events.extend(self.finish_reasoning_item(item));
+                        events.extend(self.replay_item(index as u64, item));
                     }
                 }
                 if self.text_started {
@@ -344,6 +346,10 @@ impl ResponsesSseParser {
                     self.remember_tool_call(item);
                     events.extend(self.finish_tool_call(item));
                     events.extend(self.finish_reasoning_item(item));
+                    if let Some(index) = value.get("output_index").and_then(Value::as_u64)
+                    {
+                        events.extend(self.replay_item(index, item));
+                    }
                 } else {
                     events.extend(self.finish_tool_call_from_value(&value));
                 }
@@ -351,6 +357,18 @@ impl ResponsesSseParser {
             _ => {}
         }
         Ok(events)
+    }
+
+    fn replay_item(&mut self, index: u64, item: &Value) -> Option<ProviderStreamEvent> {
+        if !item.is_object() || self.replay_items.get(&index) == Some(item) {
+            return None;
+        }
+        self.replay_items.insert(index, item.clone());
+        Some(ProviderStreamEvent::ReplayItem {
+            format: "openai-responses".into(),
+            index,
+            item: item.clone(),
+        })
     }
 
     fn remember_tool_call(&mut self, item: &Value) {
@@ -653,6 +671,49 @@ fn responses_input_items(messages: &[ProviderMessage]) -> Vec<Value> {
         match message.role {
             ProviderRole::User => input.push(responses_input_message(message)),
             ProviderRole::Assistant => {
+                if let Some(replay) = message.provider_replay.as_ref().filter(|replay| {
+                    replay.format == "openai-responses" && !replay.items.is_empty()
+                }) {
+                    input.extend(replay.items.iter().map(|entry| entry.item.clone()));
+                    // A stream can end after arguments were dispatched but
+                    // before output_item.done. Keep its result paired with a
+                    // call even when only earlier items were captured.
+                    let captured_calls = replay
+                        .items
+                        .iter()
+                        .filter_map(|entry| {
+                            entry.item.get("call_id").and_then(Value::as_str)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let captured_text = replay
+                        .items
+                        .iter()
+                        .filter_map(|entry| {
+                            (entry.item["type"] == "message").then_some(&entry.item)
+                        })
+                        .filter_map(|item| item.get("content").and_then(Value::as_array))
+                        .flatten()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<String>();
+                    if let Some(tail) = message
+                        .content
+                        .strip_prefix(&captured_text)
+                        .filter(|tail| !tail.trim().is_empty())
+                    {
+                        input.push(responses_input_message(&ProviderMessage::text(
+                            ProviderRole::Assistant,
+                            tail,
+                        )));
+                    }
+                    input.extend(
+                        message
+                            .tool_calls
+                            .iter()
+                            .filter(|call| !captured_calls.contains(call.id.as_str()))
+                            .map(responses_function_call),
+                    );
+                    continue;
+                }
                 input.extend(message.reasoning.iter().map(|reasoning| {
                     json!({
                         "type": "reasoning",

@@ -433,6 +433,7 @@ fn event_is_progress(event: &ProviderStreamEvent) -> bool {
         | ProviderStreamEvent::TextEnd { .. }
         | ProviderStreamEvent::ReasoningStart { .. }
         | ProviderStreamEvent::ReasoningMetadata { .. }
+        | ProviderStreamEvent::ReplayItem { .. }
         | ProviderStreamEvent::ReasoningEnd { .. }
         | ProviderStreamEvent::ToolInputStart { .. }
         | ProviderStreamEvent::ToolInputEnd { .. }
@@ -465,6 +466,21 @@ pub(crate) async fn process_provider_stream_event(
     event: ProviderStreamEvent,
 ) -> Result<(), ApiError> {
     match event {
+        ProviderStreamEvent::ReplayItem {
+            format,
+            index,
+            item,
+        } => {
+            let mut message = ctx.live_message.lock().await;
+            record_provider_replay_item(&mut message, format, index, item);
+            // Persist item boundaries, rather than every streamed token. This
+            // also keeps completed output available after an interrupted stream.
+            ctx.state
+                .inner
+                .store
+                .update_message(ctx.session_id_text, &message)
+                .await?;
+        }
         ProviderStreamEvent::TextDelta { delta, .. } => {
             if delta.is_empty() {
                 return Ok(());
@@ -933,6 +949,26 @@ pub(crate) async fn process_provider_stream_event(
         _ => {}
     }
     Ok(())
+}
+
+fn record_provider_replay_item(
+    message: &mut MessageWithParts,
+    format: String,
+    index: u64,
+    item: serde_json::Value,
+) {
+    let neoism_agent_core::MessageInfo::Assistant(assistant) = &mut message.info else {
+        return;
+    };
+    let replay = assistant.provider_replay.get_or_insert_with(|| {
+        neoism_agent_core::ProviderReplay {
+            format: format.clone(),
+            items: Vec::new(),
+        }
+    });
+    if replay.format == format {
+        replay.record(index, item);
+    }
 }
 
 async fn flush_pending_tool_calls(

@@ -1273,10 +1273,102 @@ pub fn layout_assistant_markdown_cached<P: AgentMarkdownPane>(
         return hit;
     }
     super::derivations::bump_markdown_layout();
-    let blocks =
-        std::rc::Rc::new(layout_assistant_markdown(sugarloaf, text, width, theme, s));
+    let blocks = std::rc::Rc::new(layout_assistant_markdown_with_stable_prefix(
+        sugarloaf, pane, text, width, theme, s,
+    ));
     pane.store_markdown_blocks_for(text, width, s, blocks.clone());
     blocks
+}
+
+/// Below this size a full relayout is cheaper than the prefix bookkeeping.
+const STABLE_PREFIX_MIN_BYTES: usize = 2048;
+/// Distinguishes untrimmed prefix layouts from whole-message layouts that
+/// share the pane's block cache.
+const STABLE_PREFIX_KEY_TAG: &str = "\u{1}neoism-md-stable-prefix\u{1}";
+
+/// Streaming appends to the end of an answer, so every chunk used to miss the
+/// cache and re-wrap the whole message: O(answer) shaping per frame. The
+/// block loop flushes all of its state (paragraph, table, pending header) at
+/// a blank line outside a fence and the blocks carry no source offsets, so
+/// the layout of everything before the last such line is independent of what
+/// follows. Cache that prefix and lay out only the growing tail.
+fn layout_assistant_markdown_with_stable_prefix<P: AgentMarkdownPane>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &P,
+    text: &str,
+    width: f32,
+    theme: &IdeTheme,
+    s: f32,
+) -> Vec<AssistantMarkdownBlock> {
+    let safe_text = safe_canvas_markdown(text);
+    let normalized_links = normalize_multiline_markdown_links(safe_text.as_ref());
+    let text = normalized_links.as_ref();
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let split = (text.len() >= STABLE_PREFIX_MIN_BYTES)
+        .then(|| stable_markdown_prefix_end(text))
+        .flatten();
+    let Some(split) = split else {
+        let mut blocks = layout_normalized_markdown_blocks(sugarloaf, text, width, theme, s);
+        trim_outer_blank_blocks(&mut blocks);
+        return blocks;
+    };
+    let (prefix, tail) = text.split_at(split);
+    let mut key = String::with_capacity(STABLE_PREFIX_KEY_TAG.len() + prefix.len());
+    key.push_str(STABLE_PREFIX_KEY_TAG);
+    key.push_str(prefix);
+    let prefix_blocks = match pane.cached_markdown_blocks_for(&key, width, s) {
+        Some(hit) => hit,
+        None => {
+            let laid_out = std::rc::Rc::new(layout_normalized_markdown_blocks(
+                sugarloaf, prefix, width, theme, s,
+            ));
+            pane.store_markdown_blocks_for(&key, width, s, laid_out.clone());
+            laid_out
+        }
+    };
+    let tail_blocks = layout_normalized_markdown_blocks(sugarloaf, tail, width, theme, s);
+    let mut blocks = Vec::with_capacity(prefix_blocks.len() + tail_blocks.len());
+    blocks.extend(prefix_blocks.iter().cloned());
+    // A whole-text layout dedupes consecutive blank lines across the seam.
+    let mut tail_blocks = tail_blocks.into_iter().peekable();
+    if matches!(blocks.last(), Some(AssistantMarkdownBlock::Blank)) {
+        while tail_blocks.next_if(|block| matches!(block, AssistantMarkdownBlock::Blank)).is_some() {}
+    }
+    blocks.extend(tail_blocks);
+    trim_outer_blank_blocks(&mut blocks);
+    blocks
+}
+
+/// Byte offset just past the last blank line that sits outside a code fence
+/// and follows real content, or `None` when no such boundary exists.
+fn stable_markdown_prefix_end(text: &str) -> Option<usize> {
+    let mut fence: Option<md::FenceDelimiter> = None;
+    let mut offset = 0usize;
+    let mut seen_content = false;
+    let mut boundary = None;
+    for line in text.split_inclusive('\n') {
+        let end = offset + line.len();
+        let raw = line.strip_suffix('\n').unwrap_or(line);
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+        if let Some(active) = fence {
+            if active.closes(raw) {
+                fence = None;
+            }
+        } else if let Some((opening, _)) = md::fence_open(raw) {
+            fence = Some(opening);
+            seen_content = true;
+        } else if raw.trim().is_empty() {
+            if seen_content && line.ends_with('\n') {
+                boundary = Some(end);
+            }
+        } else {
+            seen_content = true;
+        }
+        offset = end;
+    }
+    boundary
 }
 
 pub fn layout_assistant_markdown(
@@ -1303,6 +1395,24 @@ pub fn layout_assistant_markdown(
     if text.trim().is_empty() {
         return Vec::new();
     }
+    let mut blocks = layout_normalized_markdown_blocks(sugarloaf, text, width, theme, s);
+    // Blank source lines separate Markdown blocks; they are not visible DOM
+    // nodes of their own. Keep internal paragraph spacing, but never let
+    // leading/trailing blank lines (including those left around a removed HTML
+    // comment) inflate a message card.
+    trim_outer_blank_blocks(&mut blocks);
+    blocks
+}
+
+/// Block layout of already sanitized/normalized Markdown, without trimming
+/// outer blank blocks (the stable-prefix path concatenates these).
+fn layout_normalized_markdown_blocks(
+    sugarloaf: &mut Sugarloaf,
+    text: &str,
+    width: f32,
+    theme: &IdeTheme,
+    s: f32,
+) -> Vec<AssistantMarkdownBlock> {
     let paragraph_opts = DrawOpts {
         font_size: 13.5 * s,
         color: theme.u8(theme.fg),
@@ -1469,12 +1579,6 @@ pub fn layout_assistant_markdown(
         s,
         &paragraph_opts,
     );
-
-    // Blank source lines separate Markdown blocks; they are not visible DOM
-    // nodes of their own. Keep internal paragraph spacing, but never let
-    // leading/trailing blank lines (including those left around a removed HTML
-    // comment) inflate a message card.
-    trim_outer_blank_blocks(&mut blocks);
 
     blocks
 }

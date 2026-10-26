@@ -1,7 +1,7 @@
 //! FFF-backed workspace-search adapter for the transport-neutral Agent service API.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, Metadata};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -303,6 +303,9 @@ fn find_files(
     if request.query.trim().is_empty() {
         return directory_entries(request);
     }
+    let glob = is_glob_query(&request.query)
+        .then(|| PathMatcher::glob(request.query.trim()))
+        .transpose()?;
     // The index deliberately favors the fast, ordinary-project path. An
     // explicit hidden-file query uses the bounded streaming walker so its
     // behavior does not depend on platform/indexer dotfile defaults.
@@ -314,6 +317,9 @@ fn find_files(
             request,
             "indexed search is disabled for home and filesystem roots",
         );
+    }
+    if let Some(matcher) = glob {
+        return indexed_glob(registry, request, matcher);
     }
     let started = Instant::now();
     match registry.with_picker(&request.root, |picker| {
@@ -387,6 +393,92 @@ fn find_files(
                 .timeout_ms
                 .saturating_sub(started.elapsed().as_millis() as u64)
                 .saturating_sub(500)
+                .max(1);
+            streaming_find(&fallback, &error.to_string())
+        }
+    }
+}
+
+fn is_glob_query(query: &str) -> bool {
+    query.contains(['*', '?', '[', '{'])
+}
+
+fn indexed_glob(
+    registry: &PickerRegistry,
+    request: &FindFilesRequest,
+    matcher: PathMatcher,
+) -> anyhow::Result<FindFilesResult> {
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(request.control.timeout_ms);
+    let excluded = PathMatcher::patterns(DEFAULT_EXCLUDES.iter().copied())?;
+    match registry.with_picker(&request.root, |picker| -> anyhow::Result<_> {
+        let mut items = BTreeMap::new();
+        let mut total = 0usize;
+        let mut timed_out = false;
+        let wanted = request
+            .offset
+            .saturating_add(request.limit)
+            .saturating_add(1);
+        // Enumerate the full FFF candidate set: filtering ranked top-N results
+        // would lose exact matches before the glob's pagination is applied.
+        for file in picker.get_files().iter().chain(picker.get_overflow_files()) {
+            check_cancel(request.control.cancel.as_ref(), "glob")?;
+            if Instant::now() >= deadline {
+                timed_out = true;
+                break;
+            }
+            if file.is_deleted() {
+                continue;
+            }
+            let path = file.relative_path(picker);
+            if !discoverable_path(&path, false)
+                || excluded.excludes(&path)
+                || !matcher.matches(&path)
+            {
+                continue;
+            }
+            total += 1;
+            items.insert(
+                PathBuf::from(&path),
+                WorkspaceFileMatch {
+                    path,
+                    score: 0,
+                    git_status: file.git_status.map(git_status_label),
+                    size: file.size,
+                    modified: file.modified,
+                },
+            );
+            if items.len() > wanted {
+                items.pop_last();
+            }
+        }
+        let items = items
+            .into_values()
+            .skip(request.offset)
+            .take(request.limit)
+            .collect::<Vec<_>>();
+        let mut bounds = bounds(
+            (!timed_out).then_some(total),
+            total,
+            request.offset,
+            items.len(),
+            timed_out,
+        );
+        bounds.truncated |= timed_out;
+        Ok(FindFilesResult {
+            bounds,
+            items,
+            engine: Some(ENGINE_ID.into()),
+            fallback_reason: None,
+        })
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            let mut fallback = request.clone();
+            fallback.control.timeout_ms = request
+                .control
+                .timeout_ms
+                .saturating_sub(started.elapsed().as_millis() as u64)
                 .max(1);
             streaming_find(&fallback, &error.to_string())
         }
@@ -722,7 +814,12 @@ fn streaming_find(
     reason: &str,
 ) -> anyhow::Result<FindFilesResult> {
     let deadline = Instant::now() + Duration::from_millis(request.control.timeout_ms);
-    let matcher = PathMatcher::query(&request.query)?;
+    let exact = is_glob_query(&request.query);
+    let matcher = if exact {
+        PathMatcher::glob(request.query.trim())?
+    } else {
+        PathMatcher::query(&request.query)?
+    };
     let excluded = PathMatcher::patterns(DEFAULT_EXCLUDES.iter().copied())?;
     let root = request.root.clone();
     let (filter_root, filter_excluded) = (root.clone(), excluded.clone());
@@ -738,6 +835,11 @@ fn streaming_find(
             relative_path(&filter_root, entry.path())
                 .is_none_or(|path| !filter_excluded.excludes(&path))
         });
+    if exact {
+        // Match the index's component ordering while stopping after one page
+        // plus a lookahead match; broad globs need not walk the entire tree.
+        builder.sort_by_file_name(|a, b| a.cmp(b));
+    }
     let wanted = request
         .offset
         .saturating_add(request.limit)
@@ -1182,6 +1284,18 @@ struct PathMatcher {
     patterns: Vec<(GlobMatcher, bool)>,
 }
 impl PathMatcher {
+    fn glob(pattern: &str) -> anyhow::Result<Self> {
+        let matcher = GlobBuilder::new(pattern)
+            .case_insensitive(false)
+            .literal_separator(true)
+            .backslash_escape(false)
+            .build()?
+            .compile_matcher();
+        Ok(Self {
+            patterns: vec![(matcher, !pattern.contains(['/', '\\']))],
+        })
+    }
+
     fn query(query: &str) -> anyhow::Result<Self> {
         let q = query.trim();
         let q = if q.contains(['*', '?', '[', '{']) {
@@ -1656,6 +1770,85 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+
+    #[test]
+    fn exact_globs_match_before_pagination_in_index_and_fallback() {
+        let root = Root::new("exact-glob");
+        for name in [
+            "src/a.rs",
+            "src/nested/b.rs",
+            "src/nested/c.RS",
+            "src/unrelated.txt",
+            "other/out.rs",
+            "target/generated.rs",
+        ] {
+            let path = root.0.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "fixture\n").unwrap();
+        }
+        let service = FffWorkspaceSearchService::new();
+        let mut request = FindFilesRequest {
+            root: root.0.clone(),
+            query: "src/**/*.rs".into(),
+            include_hidden: false,
+            offset: 0,
+            limit: 1,
+            control: Default::default(),
+        };
+        for (offset, expected) in [(0, "src/a.rs"), (1, "src/nested/b.rs")] {
+            request.offset = offset;
+            let indexed = service.find_files(&request).unwrap();
+            let walked = streaming_find(&request, "test fallback").unwrap();
+            assert_eq!(indexed.engine.as_deref(), Some("fff"));
+            for result in [&indexed, &walked] {
+                assert_eq!(result.items.len(), 1);
+                assert_eq!(result.items[0].path, expected);
+                assert_eq!(result.bounds.total_at_least, 2);
+                assert_eq!(result.bounds.truncated, offset == 0);
+            }
+            assert_eq!(indexed.bounds.total, Some(2));
+        }
+        request.query = "*.rs".into();
+        request.offset = 0;
+        request.limit = 20;
+        let indexed = service.find_files(&request).unwrap();
+        let walked = streaming_find(&request, "test fallback").unwrap();
+        let paths = |result: &FindFilesResult| {
+            result
+                .items
+                .iter()
+                .map(|item| item.path.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(&indexed),
+            vec!["other/out.rs", "src/a.rs", "src/nested/b.rs"]
+        );
+        assert_eq!(paths(&indexed), paths(&walked));
+        request.query = "[".into();
+        assert!(service.find_files(&request).is_err());
+        assert!(streaming_find(&request, "test fallback").is_err());
+    }
+
+    #[test]
+    fn plain_file_queries_keep_fff_fuzzy_ranking() {
+        let root = Root::new("fuzzy-file");
+        std::fs::write(root.0.join("authentication_provider.rs"), "fixture\n").unwrap();
+        let result = FffWorkspaceSearchService::new()
+            .find_files(&FindFilesRequest {
+                root: root.0.clone(),
+                query: "auth".into(),
+                include_hidden: false,
+                offset: 0,
+                limit: 10,
+                control: Default::default(),
+            })
+            .unwrap();
+        assert_eq!(result.engine.as_deref(), Some("fff"));
+        assert_eq!(result.items[0].path, "authentication_provider.rs");
+        assert!(result.items[0].score > 0);
+    }
+
     #[test]
     fn registry_is_bounded_and_lru() {
         let a = Root::new("a");

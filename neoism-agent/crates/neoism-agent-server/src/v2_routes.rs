@@ -322,12 +322,31 @@ pub(crate) async fn v2_events(
     // A cursor (`since` / Last-Event-ID) asks for durable catch-up first.
     // A live tail starts with the atomic in-memory baseline; REST supplies
     // completed history, never the missing prefix of an active response.
-    let replay_from = if explicit_cursor.is_none() && query.tail.unwrap_or(false) {
+    let mut replay_from = if explicit_cursor.is_none() && query.tail.unwrap_or(false) {
         None
     } else {
         Some(explicit_cursor.unwrap_or(0))
     };
+    // Retention may have pruned rows at or below the floor. Never answer an
+    // older cursor with a silently incomplete replay: say so explicitly, then
+    // start from the live baseline (tail clients) or the oldest retained row.
+    let replay_floor = match state.inner.store.event_replay_floor().await {
+        Ok(floor) => floor,
+        Err(error) => {
+            tracing::warn!(%error, "event replay floor unavailable; assuming full journal");
+            0
+        }
+    };
+    let replay_expired = replay_from
+        .filter(|cursor| *cursor < replay_floor)
+        .map(|requested| replay_expired_event(requested, replay_floor));
+    if replay_expired.is_some() {
+        replay_from = if query.tail.unwrap_or(false) { None } else { Some(replay_floor) };
+    }
     let stream = async_stream::stream! {
+        if let Some(expired) = replay_expired {
+            yield Ok(v2_sse_event(expired));
+        }
         let mut tenant_sessions = std::collections::HashMap::<String, bool>::new();
         let mut admitted_live_messages = Vec::new();
         for event in live_messages {
@@ -793,6 +812,25 @@ fn event_source(kind: &str) -> &'static str {
         "vcs" => "dev.neoism.vcs",
         "subagent" => "dev.neoism.subagents",
         _ => "neoism.core",
+    }
+}
+
+/// Stamped with `sequence = replay_floor` so a resuming client (EventSource
+/// `Last-Event-ID`, ACP) continues from the oldest retained position.
+fn replay_expired_event(requested: u64, replay_floor: u64) -> EventEnvelope<Value> {
+    let kind = neoism_agent_core::event_type::EVENTS_REPLAY_EXPIRED.to_string();
+    EventEnvelope {
+        id: format!("replay-expired-{replay_floor}"),
+        sequence: replay_floor,
+        source: event_source(&kind).to_string(),
+        schema_version: "1.0.0".to_string(),
+        timestamp: crate::server_util::now_millis() as i64,
+        subject: None,
+        kind,
+        data: serde_json::json!({
+            "requestedSequence": requested,
+            "replayFloor": replay_floor,
+        }),
     }
 }
 

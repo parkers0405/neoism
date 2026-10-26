@@ -272,7 +272,13 @@ pub(crate) async fn composition_tools_for_agent(
         .into_iter()
         .filter(|tool| !disabled.contains(&tool.id))
         .filter(|tool| !tool.id.starts_with("mcp__") || !gateway_disabled)
-        .filter(|tool| tool_allowed_for_model(&tool.id, model_id))
+        .filter(|tool| {
+            tool_allowed_for_model(
+                &tool.id,
+                model_id,
+                snapshot.config().experimental.batch_tool,
+            )
+        })
         .filter(|tool| {
             crate::caller::native_execution_allowed(execution)
                 || !tool_contribution(snapshot, &tool.id).is_some_and(|item| {

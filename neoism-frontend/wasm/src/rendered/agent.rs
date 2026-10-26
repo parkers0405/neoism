@@ -1772,6 +1772,9 @@ impl ChromeBridge {
             selecting: bool,
         }
         let mut result = ClickResult::default();
+        if let Some(pane) = self.chrome.agent_pane_mut() {
+            pane.clear_selection();
+        }
         if self.chrome.modal.is_image_open() {
             self.modal_pointer_down(x, y);
             result.handled = true;

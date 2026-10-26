@@ -98,7 +98,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "read",
-            "Read one file or directory. Use this tool instead of shell cat, head, tail, sed, ls, or Get-Content for reading files and listing directories. filePath is required; offset is 1-indexed, the default limit is 2000 lines, and content is bounded to 50 KB per page. Use the returned cursor to continue file reads, including within long lines; keep filePath unchanged; a non-empty cursor takes precedence over offset. Omit cursor or pass an empty string for ordinary offset-based reads. Directory reads continue with offset. Call multiple read tools in parallel for independent files. Use grep before reading a large file when you need specific content.",
+            "Read one file or directory. Use this tool instead of shell cat, head, tail, sed, ls, or Get-Content for reading files and listing directories. filePath is required; offset is 1-indexed, the default limit is 2000 lines, and content is bounded to 50 KB per page. Use grep to locate specific content in large files, then read a coherent function or section. Prefer one sufficiently sized read over many small slices. Continue only when more content is needed for the task. Use the returned cursor to continue file reads, including within long lines; keep filePath unchanged; a non-empty cursor takes precedence over offset. Omit cursor or pass an empty string for ordinary offset-based reads. Directory reads continue with offset. Call multiple read tools in parallel for independent files.",
             json!({
                 "type": "object",
                 "properties": {
@@ -177,7 +177,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Workspace, owner,
             "glob",
-            "Find files with fuzzy path search and query constraints. Use this tool instead of shell find, ls, or Get-ChildItem for file discovery. pattern is a filename, path fragment, or glob expression. Keep broad queries short and scope with path when possible.",
+            "Find files using FFF. Use this tool instead of shell find, ls, or Get-ChildItem for file discovery. Glob expressions such as src/**/*.rs match exactly before pagination; plain filenames or path fragments use ranked fuzzy search. Keep broad queries short and scope with path when possible.",
             json!({
                 "type": "object",
                 "properties": {
@@ -440,7 +440,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Subagents, owner,
             "task",
-            "Delegate work to a subagent. For broad read-only codebase research, launch the explore subagent as the only tool call in the step. Strongly prefer stopping the parent turn and waiting for the Agent runtime to deliver its concise completion result when further work depends on it. The parent may continue user conversation or genuinely independent light work, but must not duplicate the exploration with parent-session tools or poll while it runs.",
+            "Delegate a self-contained task that benefits from separate context or independent parallel work. Use direct read, grep, and glob tools for known files, definitions, and ordinary implementation context; keep work in the main session when investigation and editing need the same context or latency matters. Give the child the actual task, constraints, and expected result. Delegate independent coding work through implementation and verification when appropriate. Background tasks notify the parent automatically; continue independent work, avoid duplicating the child's investigation, and wait when all remaining work depends on its result.",
             json!({
                 "type": "object",
                 "properties": {
@@ -454,7 +454,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                     },
                     "subagent_type": {
                         "type": "string",
-                        "description": "Configured subagent name. Use \"general\" for broad research or multi-step work, \"explore\" for fast read-only codebase discovery, and \"opencode\", \"codex\", or \"claude\" only when the user explicitly asks to delegate to that external ACP-backed agent. Do not invent names like \"research\" unless the user configured that agent."
+                        "description": "Configured subagent name. Use \"general\" for independent implementation or multi-step work, \"explore\" for self-contained read-only discovery, and \"opencode\", \"codex\", or \"claude\" only when the user explicitly asks to delegate to that external ACP-backed agent. Use direct tools for ordinary implementation context. Do not invent names like \"research\" unless the user configured that agent."
                     },
                     "task_id": {
                         "type": "string",
@@ -462,7 +462,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "Defaults to true. When true, start the subagent and then stop your turn unless the user explicitly asked you to continue with independent work; the Agent runtime will notify you when it finishes. Set false only when the next step truly must synchronously wait inside this same model turn."
+                        "description": "Defaults to true. Start the child and continue useful independent work. If all remaining work depends on the child, end the turn and wait for the runtime's automatic completion notification; do not poll repeatedly. Set false when a synchronous result is needed."
                     },
                     "command": {
                         "type": "string",

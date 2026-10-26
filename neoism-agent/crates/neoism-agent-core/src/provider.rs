@@ -38,6 +38,31 @@ pub struct ProviderReasoning {
     pub encrypted_content: String,
 }
 
+/// Completed provider output, kept in its original order for stateless replay.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderReplay {
+    pub format: String,
+    pub items: Vec<ProviderReplayItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProviderReplayItem {
+    pub index: u64,
+    pub item: Value,
+}
+
+impl ProviderReplay {
+    pub fn record(&mut self, index: u64, item: Value) {
+        match self.items.binary_search_by_key(&index, |entry| entry.index) {
+            Ok(position) => self.items[position].item = item,
+            Err(position) => self
+                .items
+                .insert(position, ProviderReplayItem { index, item }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderMessage {
@@ -49,6 +74,8 @@ pub struct ProviderMessage {
     pub tool_calls: Vec<ProviderToolCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning: Vec<ProviderReasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<ProviderReplay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +92,7 @@ impl ProviderMessage {
             attachments: Vec::new(),
             tool_calls: Vec::new(),
             reasoning: Vec::new(),
+            provider_replay: None,
             tool_call_id: None,
             tool_name: None,
             tool_error: None,
@@ -81,6 +109,7 @@ impl ProviderMessage {
             attachments: Vec::new(),
             tool_calls,
             reasoning: Vec::new(),
+            provider_replay: None,
             tool_call_id: None,
             tool_name: None,
             tool_error: None,
@@ -99,6 +128,7 @@ impl ProviderMessage {
             attachments: Vec::new(),
             tool_calls: Vec::new(),
             reasoning: Vec::new(),
+            provider_replay: None,
             tool_call_id: Some(call_id.into()),
             tool_name: Some(name.into()),
             tool_error: error.then_some(true),
@@ -162,6 +192,11 @@ pub struct ProviderGenerationResponse {
 pub enum ProviderStreamEvent {
     Start,
     StartStep,
+    ReplayItem {
+        format: String,
+        index: u64,
+        item: Value,
+    },
     TextStart {
         id: String,
     },

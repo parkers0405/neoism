@@ -69,6 +69,21 @@ pub(crate) fn compaction_provider_messages(
     )
 }
 
+pub(crate) fn compaction_provider_messages_for_model(
+    messages: &[MessageWithParts],
+    provider_id: &str,
+    model_id: &str,
+) -> Vec<ProviderMessage> {
+    provider_messages_with_options(
+        messages,
+        MessageModelOptions {
+            include_attachments: false,
+            tool_output_max_chars: Some(COMPACTION_TOOL_OUTPUT_MAX_CHARS),
+            current_model: Some((provider_id.to_string(), model_id.to_string())),
+        },
+    )
+}
+
 struct MessageModelOptions {
     include_attachments: bool,
     /// Normal provider turns replay the centrally-bounded result verbatim.
@@ -119,28 +134,90 @@ fn provider_messages_with_options(
                 ));
                 values
             }
-            MessageInfo::Assistant(assistant) => assistant_provider_messages(
-                &message.parts,
-                &options,
-                options
-                    .current_model
-                    .as_ref()
-                    .is_none_or(|(provider, model)| {
-                        assistant.provider_id == *provider && assistant.model_id == *model
-                    }),
-            ),
+            MessageInfo::Assistant(assistant) => {
+                let same_model =
+                    options
+                        .current_model
+                        .as_ref()
+                        .is_none_or(|(provider, model)| {
+                            assistant.provider_id == *provider
+                                && assistant.model_id == *model
+                        });
+                let mut replay =
+                    assistant_provider_messages(&message.parts, &options, same_model);
+                if same_model {
+                    if let Some(first) = replay
+                        .first_mut()
+                        .filter(|message| matches!(message.role, ProviderRole::Assistant))
+                    {
+                        first.provider_replay = assistant.provider_replay.clone();
+                    } else if assistant.provider_replay.is_some() {
+                        let mut first =
+                            ProviderMessage::text(ProviderRole::Assistant, "");
+                        first.provider_replay = assistant.provider_replay.clone();
+                        replay.insert(0, first);
+                    }
+                }
+                replay
+            }
         })
         .filter(|message| {
             !message.content.trim().is_empty()
                 || !message.tool_calls.is_empty()
                 || !message.reasoning.is_empty()
+                || message.provider_replay.is_some()
                 || matches!(message.role, ProviderRole::Tool)
         })
         .collect::<Vec<_>>();
     if options.include_attachments {
         bound_tool_media_replay(&mut provider_messages, NORMAL_TOOL_MEDIA_MAX_BYTES);
     }
+    if let Some(instructions) = nearby_instruction_context(messages) {
+        provider_messages.insert(0, instructions);
+    }
     provider_messages
+}
+
+fn nearby_instruction_context(messages: &[MessageWithParts]) -> Option<ProviderMessage> {
+    let mut loaded = std::collections::BTreeMap::new();
+    for message in messages {
+        for part in &message.parts {
+            let Part::Tool(tool) = part else { continue };
+            if !matches!(tool.tool.as_str(), "read" | "compose")
+                || tool_output_was_compacted(tool)
+            {
+                continue;
+            }
+            let Some(items) = tool_state_metadata(tool)
+                .and_then(|metadata| metadata.get("instructionContext"))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            for item in items {
+                if let Ok(instruction) = serde_json::from_value::<
+                    crate::instruction::LoadedInstruction,
+                >(item.clone())
+                {
+                    loaded.insert(instruction.filepath, instruction.content);
+                }
+            }
+        }
+    }
+    if loaded.is_empty() {
+        return None;
+    }
+    let mut loaded = loaded.into_iter().collect::<Vec<_>>();
+    // Broader rules precede more specific directory rules.
+    loaded.sort_by_key(|(path, _)| std::path::Path::new(path).components().count());
+    Some(ProviderMessage::text(
+        ProviderRole::System,
+        loaded
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    ))
 }
 
 fn bound_tool_media_replay(messages: &mut [ProviderMessage], max_bytes: usize) {
@@ -537,6 +614,7 @@ mod tests {
         let part_id = Id::ascending(IdKind::Part);
         let messages = provider_messages(&[MessageWithParts {
             info: MessageInfo::Assistant(AssistantMessage {
+                provider_replay: None,
                 id: message_id.clone(),
                 session_id: session_id.clone(),
                 time: CompletedTime {
@@ -822,6 +900,7 @@ mod tests {
         let part_id = Id::ascending(IdKind::Part);
         let messages = provider_messages(&[MessageWithParts {
             info: MessageInfo::Assistant(AssistantMessage {
+                provider_replay: None,
                 id: message_id.clone(),
                 session_id: session_id.clone(),
                 time: CompletedTime {
@@ -980,6 +1059,7 @@ mod tests {
 
     fn assistant_info(message_id: Id, session_id: Id) -> MessageInfo {
         MessageInfo::Assistant(AssistantMessage {
+            provider_replay: None,
             id: message_id,
             session_id,
             time: CompletedTime {
@@ -1001,6 +1081,158 @@ mod tests {
             finish: Some("tool-calls".to_string()),
             error: None,
         })
+    }
+
+    #[test]
+    fn canonical_replay_is_durable_model_scoped_and_keeps_tool_result_bounds() {
+        let session = Id::ascending(IdKind::Session);
+        let id = Id::ascending(IdKind::Message);
+        let mut info = assistant_info(id.clone(), session.clone());
+        let MessageInfo::Assistant(assistant) = &mut info else {
+            unreachable!()
+        };
+        assistant.provider_id = "openai".into();
+        assistant.model_id = "gpt-6.1-sol".into();
+        assistant.provider_replay = Some(neoism_agent_core::ProviderReplay {
+            format: "openai-responses".into(),
+            items: vec![neoism_agent_core::ProviderReplayItem {
+                index: 0,
+                item: serde_json::json!({"id":"msg","type":"message","role":"assistant","phase":"commentary",
+                    "content":[{"type":"output_text","text":"Checking","annotations":[]}]}),
+            }],
+        });
+        let history = vec![MessageWithParts {
+            info,
+            parts: vec![Part::Tool(ToolPart {
+                id: Id::ascending(IdKind::Part),
+                session_id: session,
+                message_id: id,
+                tool: "read".into(),
+                call_id: "call".into(),
+                metadata: None,
+                state: ToolState::Completed {
+                    input: serde_json::json!({"filePath":"x"}),
+                    output: "x".repeat(100_000),
+                    metadata: serde_json::json!({}),
+                    title: "read".into(),
+                    time: PartTime {
+                        start: 1,
+                        end: Some(2),
+                    },
+                },
+            })],
+        }];
+        let history: Vec<MessageWithParts> =
+            serde_json::from_value(serde_json::to_value(history).unwrap()).unwrap();
+        let replay = provider_messages_for_model(&history, "openai", "gpt-6.1-sol");
+        assert_eq!(
+            replay[0].provider_replay.as_ref().unwrap().items[0].item["phase"],
+            "commentary"
+        );
+        assert!(replay[1].content.len() < 52_000);
+        for (provider, model) in
+            [("openai", "gpt-6-astra"), ("other-provider", "gpt-6.1-sol")]
+        {
+            assert!(provider_messages_for_model(&history, provider, model)
+                .iter()
+                .all(|m| m.provider_replay.is_none()));
+            assert!(
+                compaction_provider_messages_for_model(&history, provider, model)
+                    .iter()
+                    .all(|m| m.provider_replay.is_none())
+            );
+        }
+        let compacted =
+            compaction_provider_messages_for_model(&history, "openai", "gpt-6.1-sol");
+        assert!(compacted[0].provider_replay.is_some());
+        assert!(compacted[1].content.len() < 3_000);
+        assert!(compacted[1].content.contains("Tool output truncated"));
+        let mut legacy = serde_json::to_value(&history).unwrap();
+        legacy[0]["info"]
+            .as_object_mut()
+            .unwrap()
+            .remove("providerReplay");
+        let legacy: Vec<MessageWithParts> = serde_json::from_value(legacy).unwrap();
+        assert!(provider_messages(&legacy)[0].provider_replay.is_none());
+    }
+
+    #[test]
+    fn nearby_instructions_are_deduplicated_updated_and_readmitted_after_pruning() {
+        let session = Id::ascending(IdKind::Session);
+        let message = Id::ascending(IdKind::Message);
+        let part = |name: &str, call: &str, content: &str| {
+            Part::Tool(ToolPart {
+                id: Id::ascending(IdKind::Part),
+                session_id: session.clone(),
+                message_id: message.clone(),
+                tool: name.into(),
+                call_id: call.into(),
+                metadata: None,
+                state: ToolState::Completed {
+                    input: serde_json::json!({"filePath":"src/lib.rs"}),
+                    output: "1: source code".into(),
+                    metadata: serde_json::json!({"instructionContext":[{
+                        "filepath":"/project/src/AGENTS.md", "content":content,
+                    }]}),
+                    title: "Read source".into(),
+                    time: PartTime {
+                        start: 1,
+                        end: Some(2),
+                    },
+                },
+            })
+        };
+        let mut history = vec![MessageWithParts {
+            info: assistant_info(message.clone(), session.clone()),
+            parts: vec![
+                part("read", "first", "old directory rule"),
+                part("read", "second", "old directory rule"),
+            ],
+        }];
+        let replay = provider_messages(&history);
+        assert!(matches!(replay[0].role, ProviderRole::System));
+        assert_eq!(replay[0].content.matches("old directory rule").count(), 1);
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|m| matches!(m.role, ProviderRole::Tool))
+                .count(),
+            2
+        );
+        history[0]
+            .parts
+            .push(part("compose", "composed", "updated directory rule"));
+        assert_eq!(
+            provider_messages(&history)[0].content,
+            "updated directory rule"
+        );
+        assert_eq!(
+            compaction_provider_messages(&history)[0].content,
+            "updated directory rule"
+        );
+        for part in &mut history[0].parts {
+            if let Part::Tool(ToolPart {
+                state: ToolState::Completed { metadata, .. },
+                ..
+            }) = part
+            {
+                metadata["compacted"] = serde_json::json!(123);
+            }
+        }
+        assert!(!provider_messages(&history)
+            .iter()
+            .any(|m| matches!(m.role, ProviderRole::System)));
+        history[0]
+            .parts
+            .push(part("read", "after-pruning", "updated directory rule"));
+        assert_eq!(
+            provider_messages(&history)[0].content,
+            "updated directory rule"
+        );
+        history[0].parts = vec![part("execute", "external-tool", "untrusted metadata")];
+        assert!(!provider_messages(&history)
+            .iter()
+            .any(|m| matches!(m.role, ProviderRole::System)));
     }
 
     #[test]
@@ -1228,6 +1460,7 @@ mod tests {
             let message_id = Id::ascending(IdKind::Message);
             history.push(MessageWithParts {
                 info: MessageInfo::Assistant(AssistantMessage {
+                    provider_replay: None,
                     id: message_id.clone(),
                     session_id: session_id.clone(),
                     time: CompletedTime {

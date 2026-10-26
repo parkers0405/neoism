@@ -704,9 +704,11 @@ async fn generate_model_compaction_summary(
         .iter()
         .map(|message| {
             crate::session_prompt::estimated_provider_prompt_tokens(
-                &message_model::compaction_provider_messages(std::slice::from_ref(
-                    message,
-                )),
+                &message_model::compaction_provider_messages_for_model(
+                    std::slice::from_ref(message),
+                    &model.provider_id,
+                    &model.model_id,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -715,7 +717,11 @@ async fn generate_model_compaction_summary(
         head.remove(0);
         total -= message_tokens.remove(0);
     }
-    let mut provider_messages = message_model::compaction_provider_messages(&head);
+    let mut provider_messages = message_model::compaction_provider_messages_for_model(
+        &head,
+        &model.provider_id,
+        &model.model_id,
+    );
     provider_messages.push(ProviderMessage::text(ProviderRole::User, prompt));
     let Ok(runtime) = state
         .workspace_runtime_for_tenant(
@@ -1452,6 +1458,7 @@ fn compaction_assistant_message(
     let compaction_part_id = Id::ascending(IdKind::Part);
     Ok(MessageWithParts {
         info: MessageInfo::Assistant(AssistantMessage {
+            provider_replay: None,
             id: message_id.clone(),
             session_id: session_id.clone(),
             time: CompletedTime {
@@ -1569,6 +1576,7 @@ pub(crate) fn provider_messages_for_session(
         model_id,
         run_system,
         goals_enabled,
+        None,
     )
 }
 
@@ -1594,6 +1602,7 @@ pub(crate) fn provider_messages_for_session_with_plugins(
     model_id: &str,
     run_system: Option<&str>,
     goals_enabled: bool,
+    batch_tool: Option<bool>,
 ) -> Vec<ProviderMessage> {
     let mut provider_messages = Vec::new();
     provider_messages.extend(plugin_system_messages(
@@ -1601,6 +1610,7 @@ pub(crate) fn provider_messages_for_session_with_plugins(
         info,
         model_id,
         goals_enabled,
+        batch_tool,
     ));
     if let Some(update) = context_epoch_update_message(info) {
         provider_messages.push(update);
@@ -1672,6 +1682,7 @@ fn plugin_system_messages(
     info: &SessionInfo,
     model_id: &str,
     goals_enabled: bool,
+    batch_tool: Option<bool>,
 ) -> Vec<ProviderMessage> {
     let mut instructions = Vec::new();
     let mut service_fragments = Vec::new();
@@ -1698,7 +1709,7 @@ fn plugin_system_messages(
         (
             "editingTool".to_string(),
             Value::String(
-                if use_apply_patch_for_model(model_id) {
+                if use_apply_patch_for_model(model_id, batch_tool) {
                     "apply_patch"
                 } else {
                     "edit"
@@ -2242,14 +2253,39 @@ mod tests {
     }
 
     fn workspace_system_message(info: &SessionInfo, model_id: &str) -> ProviderMessage {
-        plugin_system_messages(&system_prompt_snapshot(), info, model_id, true)
+        plugin_system_messages(&system_prompt_snapshot(), info, model_id, true, None)
             .into_iter()
             .next()
             .expect("workspace context")
     }
 
+    #[test]
+    fn batch_edit_setting_controls_codex_prompt_guidance() {
+        let info = test_session_info();
+        for setting in [None, Some(true), Some(false)] {
+            let messages = plugin_system_messages(
+                &system_prompt_snapshot(),
+                &info,
+                "gpt-6.1-sol",
+                false,
+                setting,
+            );
+            let text = messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if setting == Some(false) {
+                assert!(text.contains("Use edit for targeted replacements"));
+                assert!(!text.contains("Use apply_patch with"));
+            } else {
+                assert!(text.contains("Use apply_patch with"));
+            }
+        }
+    }
+
     fn goal_system_message(info: &SessionInfo) -> Option<ProviderMessage> {
-        plugin_system_messages(&system_prompt_snapshot(), info, "stub", true)
+        plugin_system_messages(&system_prompt_snapshot(), info, "stub", true, None)
             .into_iter()
             .find(|message| message.content.contains("Persistent goal"))
     }

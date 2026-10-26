@@ -113,6 +113,7 @@ pub(crate) async fn start_assistant_step(
         }),
     });
     let assistant = AssistantMessage {
+        provider_replay: None,
         id: assistant_id.clone(),
         session_id: session_id.clone(),
         time: CompletedTime {
@@ -215,6 +216,7 @@ pub(crate) async fn reset_live_message_for_retry(
             assistant.tokens = TokenUsage::default();
             assistant.cost = 0.0;
             assistant.time.completed = None;
+            assistant.provider_replay = None;
         }
         (
             assistant_message.clone(),

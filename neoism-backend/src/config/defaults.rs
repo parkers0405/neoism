@@ -323,6 +323,7 @@ pub fn default_config_file_content() -> String {
     //     "videoModel": "xai/grok-imagine-video-1.5", // enables generate_video
     //     "variant": "high",       // low | medium | high | xhigh | max
     //     "textVerbosity": "low",  // low | medium | high
+    //     "experimental": { "batch-tool": true }, // Codex/GPT multi-file edits; false uses edit/write
     //     "compaction": { "auto": true, "threshold-percent": 65 }, // auto: false bypasses automatic compaction
     //     "permission": { "edit": "ask", "bash": "ask" },
     //     "mcp": { "my-server": { "type": "local", "command": ["my-mcp"] } },

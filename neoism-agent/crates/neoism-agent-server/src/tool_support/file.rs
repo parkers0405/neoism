@@ -64,6 +64,10 @@ pub(super) fn read_tool(
     let limit = usize_arg(&arguments, "limit")
         .unwrap_or(DEFAULT_READ_LIMIT)
         .max(1);
+    let loaded = crate::instruction::nearby(&context.cwd, &path);
+    // Session reads admit instructions separately from file text. Standalone
+    // reads retain inline reminders for callers without a conversation renderer.
+    let instruction_context = context.session_id.as_ref().map(|_| &loaded);
 
     if path.is_dir() {
         anyhow::ensure!(cursor.is_none(), "directories use offset, not cursor");
@@ -110,6 +114,8 @@ pub(super) fn read_tool(
                 "offset": offset,
                 "limit": limit,
                 "truncated": truncated,
+                "instructionContext": instruction_context,
+                "loaded": loaded.iter().map(|item| &item.filepath).collect::<Vec<_>>(),
                 "preview": entries.iter().skip(start).take(20).cloned().collect::<Vec<_>>().join("\n"),
             })),
         });
@@ -185,7 +191,6 @@ pub(super) fn read_tool(
                 && read_pagination::version(&path, &path.metadata()?) == version,
             "{display} changed while being read; retry"
         );
-        let loaded = crate::instruction::nearby(&context.cwd, &path);
         let loaded_paths = loaded
             .iter()
             .map(|item| item.filepath.clone())
@@ -210,6 +215,7 @@ pub(super) fn read_tool(
                 "preview": format!("{media_kind} read successfully"),
                 "truncated": false,
                 "loaded": loaded_paths,
+                "instructionContext": instruction_context,
                 "attachments": [{
                     "type": "file",
                     "mime": mime,
@@ -226,9 +232,8 @@ pub(super) fn read_tool(
         .with_context(|| format!("failed to rewind {}", path.display()))?;
     // Instructions are part of the output budget, not an afterthought: the
     // central limiter must not discard a long fragment from an ordinary page.
-    let loaded = crate::instruction::nearby(&context.cwd, &path);
     check_cancel()?;
-    let reminder = if loaded.is_empty() {
+    let reminder = if instruction_context.is_some() || loaded.is_empty() {
         String::new()
     } else {
         format!(
@@ -327,6 +332,7 @@ pub(super) fn read_tool(
             "continuation": continuation,
             "preview": page.preview.join("\n"),
             "loaded": loaded_paths,
+            "instructionContext": instruction_context,
         })),
     })
 }

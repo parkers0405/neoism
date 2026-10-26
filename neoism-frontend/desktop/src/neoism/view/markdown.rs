@@ -142,6 +142,10 @@ impl AgentMarkdownPane for NeoismAgentPane {
         NeoismAgentPane::selectable_line_highlight(self, index)
     }
 
+    fn has_selection(&self) -> bool {
+        NeoismAgentPane::has_selection(self)
+    }
+
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]) {
         NeoismAgentPane::register_link_hit_rect(self, target, rect);
     }

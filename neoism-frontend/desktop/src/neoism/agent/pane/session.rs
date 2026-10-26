@@ -293,6 +293,15 @@ impl NeoismAgentPane {
         if self.visible_running_tool_active {
             return Some("running_tool");
         }
+        if neoism_ui::panels::agent_pane::view::image_preview::image_decodes_pending() {
+            return Some("image_decode");
+        }
+        if neoism_ui::syntax::highlighters_compiling() {
+            return Some("syntax_compile");
+        }
+        if self.staged_older_page.is_some() {
+            return Some("history_warm");
+        }
         if self.visible_user_orb_active() {
             return Some("user_orb");
         }

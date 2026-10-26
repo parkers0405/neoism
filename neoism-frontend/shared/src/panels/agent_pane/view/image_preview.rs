@@ -65,8 +65,124 @@ fn decode_image(image: &NeoismAgentImage) -> Option<image_rs::RgbaImage> {
     decoded
 }
 
+/// Off-render-thread attachment decoding. A full-resolution screenshot takes
+/// tens of milliseconds to base64 + PNG decode; doing that inline stalled the
+/// frame in which an image first scrolled into view.
+#[cfg(not(target_arch = "wasm32"))]
+mod background_decode {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{channel, Sender};
+    use std::sync::{Mutex, OnceLock};
+
+    use crate::panels::agent_pane::state::NeoismAgentImage;
+
+    enum Slot {
+        Decoding,
+        Ready(image_rs::RgbaImage, std::time::Instant),
+    }
+
+    /// A finished decode keeps frames coming only briefly: if its thumbnail
+    /// already scrolled away, the pixels wait for the next sighting without
+    /// pinning the render loop awake.
+    const READY_REPAINT_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+    static SLOTS: OnceLock<Mutex<HashMap<u32, Slot>>> = OnceLock::new();
+    static PENDING: AtomicUsize = AtomicUsize::new(0);
+
+    fn slots() -> &'static Mutex<HashMap<u32, Slot>> {
+        SLOTS.get_or_init(Default::default)
+    }
+
+    fn worker() -> Option<&'static Mutex<Sender<(u32, NeoismAgentImage)>>> {
+        static WORKER: OnceLock<Option<Mutex<Sender<(u32, NeoismAgentImage)>>>> =
+            OnceLock::new();
+        WORKER
+            .get_or_init(|| {
+                let (sender, receiver) = channel::<(u32, NeoismAgentImage)>();
+                std::thread::Builder::new()
+                    .name("agent-image-decode".into())
+                    .spawn(move || {
+                        for (id, image) in receiver {
+                            let decoded = super::decode_image(&image);
+                            if let Ok(mut slots) = slots().lock() {
+                                match decoded {
+                                    Some(decoded) => {
+                                        slots.insert(id, Slot::Ready(decoded, std::time::Instant::now()));
+                                    }
+                                    None => {
+                                        slots.remove(&id);
+                                    }
+                                }
+                            }
+                            PENDING.fetch_sub(1, Ordering::Release);
+                        }
+                    })
+                    .ok()?;
+                Some(Mutex::new(sender))
+            })
+            .as_ref()
+    }
+
+    /// `Some(pixels)` once decoded; `None` while decoding or after a failure
+    /// (failures set the payload's shared `decode_failed` flag).
+    pub(super) fn poll(id: u32, image: &NeoismAgentImage) -> Option<image_rs::RgbaImage> {
+        let mut slots = slots().lock().ok()?;
+        match slots.remove(&id) {
+            Some(Slot::Ready(decoded, _)) => return Some(decoded),
+            Some(Slot::Decoding) => {
+                slots.insert(id, Slot::Decoding);
+                return None;
+            }
+            None => {}
+        }
+        let Some(worker) = worker() else {
+            drop(slots);
+            return super::decode_image(image);
+        };
+        slots.insert(id, Slot::Decoding);
+        PENDING.fetch_add(1, Ordering::AcqRel);
+        if worker
+            .lock()
+            .ok()
+            .and_then(|sender| sender.send((id, image.clone())).ok())
+            .is_none()
+        {
+            slots.remove(&id);
+            PENDING.fetch_sub(1, Ordering::Release);
+        }
+        None
+    }
+
+    pub(super) fn pending() -> bool {
+        PENDING.load(Ordering::Acquire) > 0
+            || slots()
+                .lock()
+                .is_ok_and(|slots| {
+                    slots.values().any(|slot| {
+                        matches!(slot, Slot::Ready(_, at) if at.elapsed() < READY_REPAINT_WINDOW)
+                    })
+                })
+    }
+}
+
+/// True while an attachment is decoding (or decoded but not yet uploaded):
+/// the host must keep painting so the finished image appears without input.
+pub fn image_decodes_pending() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        background_decode::pending()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
 /// Register the original-resolution attachment for both strips and inspection modals.
 /// Cache hits inspect only the precomputed identity; no URL hashing or decoding.
+/// The first sighting schedules a background decode and returns `None` (the
+/// caller's placeholder frame stays visible) until the pixels are ready.
 pub fn register_image(
     sugarloaf: &mut Sugarloaf,
     image: &NeoismAgentImage,
@@ -78,6 +194,9 @@ pub fn register_image(
     if let Some(entry) = sugarloaf.image_data.get(&id) {
         return Some((id, entry.width / entry.height.max(1.0)));
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let decoded = background_decode::poll(id, image)?;
+    #[cfg(target_arch = "wasm32")]
     let decoded = decode_image(image)?;
     let (width, height) = decoded.dimensions();
     sugarloaf.image_data.insert(

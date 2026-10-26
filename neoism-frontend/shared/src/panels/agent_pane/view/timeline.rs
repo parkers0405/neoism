@@ -466,6 +466,13 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn take_timeline_prepend(&mut self) -> Option<usize> {
         None
     }
+    /// Next not-yet-measured message of a fetched history page that has not
+    /// been prepended yet. The renderer pre-measures these within a small
+    /// per-frame budget so the eventual prepend hits warm caches instead of
+    /// laying out a whole page of long answers in one frame.
+    fn next_timeline_warm_message(&mut self) -> Option<Self::Message> {
+        None
+    }
 
     fn set_measured_timeline_prepend(
         &mut self,
@@ -858,6 +865,10 @@ macro_rules! neoism_ui_impl_agent_timeline_pane {
 
             fn take_timeline_prepend(&mut self) -> Option<usize> {
                 <$pane>::take_timeline_prepend(self)
+            }
+
+            fn next_timeline_warm_message(&mut self) -> Option<Self::Message> {
+                <$pane>::next_timeline_warm_message(self)
             }
 
             fn set_measured_timeline_prepend(

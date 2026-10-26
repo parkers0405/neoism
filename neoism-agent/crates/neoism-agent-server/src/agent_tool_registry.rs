@@ -94,35 +94,81 @@ async fn configured_mcp_tools_with_snapshot(
     execution: &neoism_agent_service_api::ExecutionPolicy,
     auth_store: &mcp_auth::McpAuthStore,
 ) -> Vec<McpToolInfo> {
-    if tool_contribution(snapshot, MCP_GATEWAY_TOOL).is_none() {
-        return Vec::new();
+    configured_mcp_tools_for_request(
+        directory,
+        runtime_state,
+        snapshot,
+        execution,
+        auth_store,
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_default()
+}
+
+async fn configured_mcp_tools_for_request(
+    directory: &str,
+    runtime_state: AppState,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    execution: &neoism_agent_service_api::ExecutionPolicy,
+    auth_store: &mcp_auth::McpAuthStore,
+    namespace: Option<&str>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> anyhow::Result<Vec<McpToolInfo>> {
+    let discovery = async {
+        if tool_contribution(snapshot, MCP_GATEWAY_TOOL).is_none() {
+            return Vec::new();
+        }
+        let mut config = snapshot.config().clone();
+        crate::config::inject_builtin_mcp(&mut config, runtime_state.services());
+        let mut config = config.mcp;
+        if !crate::caller::native_execution_allowed(execution) {
+            config.retain(|_, server| {
+                matches!(server, neoism_agent_core::McpConfig::Remote { .. })
+            });
+        }
+        mcp::reconcile_configured_servers(directory, &config, snapshot).await;
+        let names = config.keys().cloned().collect::<Vec<_>>();
+        let mut tools = Vec::new();
+        for name in names {
+            // A scoped lookup must not start unrelated OAuth/stdio servers. Keep
+            // reconciliation above scoped to the complete configuration so this
+            // lookup also cannot disconnect another server's active calls.
+            if namespace.is_some_and(|namespace| {
+                !mcp_canonical_namespace(&name).eq_ignore_ascii_case(namespace.trim())
+            }) {
+                continue;
+            }
+            let Ok(mut items) = mcp::tools_with_snapshot(
+                directory,
+                &name,
+                auth_store,
+                runtime_state.clone(),
+                snapshot,
+            )
+            .await
+            else {
+                continue;
+            };
+            tools.append(&mut items);
+        }
+        tools
+    };
+    if let Some(cancel) = cancel {
+        tokio::select! {
+            biased;
+            _ = wait_for_cancellation(cancel.clone()) => anyhow::bail!("MCP catalog discovery aborted"),
+            tools = discovery => {
+                if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                    anyhow::bail!("MCP catalog discovery aborted");
+                }
+                Ok(tools)
+            },
+        }
+    } else {
+        Ok(discovery.await)
     }
-    let mut config = snapshot.config().clone();
-    crate::config::inject_builtin_mcp(&mut config, runtime_state.services());
-    let mut config = config.mcp;
-    if !crate::caller::native_execution_allowed(execution) {
-        config.retain(|_, server| {
-            matches!(server, neoism_agent_core::McpConfig::Remote { .. })
-        });
-    }
-    mcp::reconcile_configured_servers(directory, &config, snapshot).await;
-    let names = config.keys().cloned().collect::<Vec<_>>();
-    let mut tools = Vec::new();
-    for name in names {
-        let Ok(mut items) = mcp::tools_with_snapshot(
-            directory,
-            &name,
-            auth_store,
-            runtime_state.clone(),
-            snapshot,
-        )
-        .await
-        else {
-            continue;
-        };
-        tools.append(&mut items);
-    }
-    tools
 }
 
 pub(crate) async fn available_tools_for_directory(
@@ -540,14 +586,17 @@ pub(crate) async fn execute_mcp_tool_by_runtime_id(
     let runtime_state = state
         .clone()
         .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
-    let Some(tool) = configured_mcp_tools_with_snapshot(
+    let namespace = mcp_path(runtime_id).map(|(namespace, _)| namespace);
+    let Some(tool) = configured_mcp_tools_for_request(
         directory,
         runtime_state,
         snapshot,
         execution,
         auth_store,
+        namespace.as_deref(),
+        cancel.clone(),
     )
-    .await
+    .await?
     .into_iter()
     .find(|tool| mcp::tool_runtime_id(&tool.client, &tool.name) == runtime_id) else {
         anyhow::bail!("unknown MCP tool {runtime_id}");
@@ -688,14 +737,31 @@ pub(crate) async fn execute_mcp_gateway(
     let runtime_state = state
         .clone()
         .ok_or_else(|| anyhow::anyhow!("MCP tool runtime requires AppState"))?;
-    let mut tools = configured_mcp_tools_with_snapshot(
+    let namespace = match arguments.get("action").and_then(Value::as_str) {
+        Some("call") => arguments
+            .get("tool")
+            .and_then(Value::as_str)
+            .and_then(|path| {
+                mcp_path(path).map(|(namespace, _)| namespace).or_else(|| {
+                    path.split_once('.')
+                        .map(|(namespace, _)| namespace.to_string())
+                })
+            }),
+        _ => arguments
+            .get("namespace")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    let mut tools = configured_mcp_tools_for_request(
         directory,
         runtime_state,
         snapshot,
         execution,
         auth_store,
+        namespace.as_deref(),
+        cancel.clone(),
     )
-    .await;
+    .await?;
     let runtime_ids = tools
         .iter()
         .map(|tool| mcp::tool_runtime_id(&tool.client, &tool.name))
@@ -748,13 +814,21 @@ pub(crate) async fn execute_mcp_gateway(
                     let runtime_state = state.clone().ok_or_else(|| {
                         anyhow::anyhow!("MCP tool runtime requires AppState")
                     })?;
-                    let mut requested = mcp::tools_with_state(
+                    let requested = mcp::tools_with_state(
                         directory,
                         &name,
                         auth_store,
                         runtime_state,
-                    )
-                    .await?;
+                    );
+                    let mut requested = if let Some(cancel) = cancel.clone() {
+                        tokio::select! {
+                            biased;
+                            _ = wait_for_cancellation(cancel) => anyhow::bail!("MCP catalog discovery aborted"),
+                            tools = requested => tools?,
+                        }
+                    } else {
+                        requested.await?
+                    };
                     tools.append(&mut requested);
                 }
             }
@@ -948,6 +1022,10 @@ fn search_score(
         })
         .sum()
 }
+
+#[cfg(test)]
+#[path = "agent_tool_registry_cancellation_tests.rs"]
+mod cancellation_tests;
 
 #[cfg(test)]
 mod tests {

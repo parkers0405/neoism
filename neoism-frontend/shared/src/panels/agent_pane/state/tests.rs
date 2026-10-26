@@ -410,6 +410,47 @@ fn side_panel_hover_clears_immediately_without_a_pointer_target() {
 }
 
 #[test]
+fn transcript_selection_keeps_highlight_during_fractional_scroll() {
+    use crate::panels::agent_pane::view::markdown::AgentMarkdownPane;
+
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 20.0, 400.0, 100.0], 1000.0, 100.0);
+    pane.timeline_scroll_px = 900.0 - 10.4;
+    pane.register_selectable_line("selected region", [0.0, 70.0, 150.0, 18.0]);
+    assert!(pane.begin_selection_at(0.0, 75.0));
+    assert!(pane.drag_selection_to(80.0, 75.0));
+    assert_eq!(pane.end_selection().as_deref(), Some("selected"));
+    assert!(!pane.has_active_selection());
+
+    // Render the same content row at pixel-snapped positions while the
+    // underlying smooth-scroll offset crosses fractional pixel boundaries.
+    for scroll_top in [20.6_f32, 35.25, 0.6, 10.4] {
+        pane.timeline_scroll_px = 900.0 - scroll_top;
+        pane.timeline_wheel_target_px = Some(pane.timeline_scroll_px);
+        pane.timeline_last_scroll_at = Some(Instant::now());
+        pane.clear_tool_hit_rects();
+        assert!(pane.suppress_markdown_interactions());
+        assert!(pane.should_register_selection(true));
+        let screen_y = 80.0 - scroll_top.round();
+        let index = pane.register_selectable_line(
+            "selected region", [0.0, screen_y, 150.0, 18.0],
+        );
+        assert_eq!(pane.selectable_line_highlight(index), Some((0.0, 80.0)));
+        assert!(!pane.has_active_selection());
+    }
+
+    // Leaving the rendered window and returning does not clear selection.
+    pane.clear_tool_hit_rects();
+    assert!(pane.has_selection());
+    pane.register_selectable_line("selected region", [0.0, 70.0, 150.0, 18.0]);
+    assert_eq!(pane.selectable_line_highlight(0), Some((0.0, 80.0)));
+    assert_eq!(pane.end_selection(), None);
+    assert!(pane.clear_selection());
+    assert!(!pane.should_register_selection(true));
+    assert!(pane.suppress_markdown_interactions());
+}
+
+#[test]
 fn selection_copies_rows_from_previous_render_windows() {
     let mut pane = NeoismAgentPane::default();
     pane.set_timeline_metrics([0.0, 0.0, 400.0, 40.0], 120.0, 40.0);

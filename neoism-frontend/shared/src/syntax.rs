@@ -359,7 +359,6 @@ struct HighlightCacheKey {
 
 #[cfg(not(target_arch = "wasm32"))]
 struct TreeSitterCache {
-    configs: HashMap<ParserLang, HighlightConfiguration>,
     lines: HashMap<HighlightCacheKey, Vec<(SynTok, usize, usize)>>,
     order: VecDeque<HighlightCacheKey>,
 }
@@ -368,19 +367,9 @@ struct TreeSitterCache {
 impl TreeSitterCache {
     fn new() -> Self {
         Self {
-            configs: HashMap::new(),
             lines: HashMap::new(),
             order: VecDeque::new(),
         }
-    }
-
-    fn config(&mut self, lang: ParserLang) -> Option<&HighlightConfiguration> {
-        if !self.configs.contains_key(&lang) {
-            let mut config = tree_sitter_config(lang)?;
-            config.configure(TREE_SITTER_HIGHLIGHT_NAMES);
-            self.configs.insert(lang, config);
-        }
-        self.configs.get(&lang)
     }
 
     fn line(&self, key: &HighlightCacheKey) -> Option<Vec<(SynTok, usize, usize)>> {
@@ -708,7 +697,7 @@ pub fn highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'a str)> {
     fallback_highlight_line(line, lang)
 }
 
-fn fallback_highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'a str)> {
+pub fn fallback_highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'a str)> {
     let bytes = line.as_bytes();
     let mut out: Vec<(SynTok, &'a str)> = Vec::new();
     let mut i = 0;
@@ -832,6 +821,145 @@ fn fallback_highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'a st
     out
 }
 
+/// Process-wide compiled highlight configurations. Compiling a grammar's
+/// queries costs ~10-20 ms, so render-thread callers use the non-blocking
+/// path and let a worker compile while they paint plain fallback colours.
+#[cfg(not(target_arch = "wasm32"))]
+mod shared_configs {
+    use super::{tree_sitter_config, ParserLang, TREE_SITTER_HIGHLIGHT_NAMES};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    use tree_sitter_highlight::HighlightConfiguration;
+
+    enum Slot {
+        Compiling,
+        Ready(Option<Arc<HighlightConfiguration>>),
+    }
+
+    pub(super) enum Lookup {
+        Compiling,
+        Ready(Option<Arc<HighlightConfiguration>>),
+    }
+
+    static SLOTS: OnceLock<Mutex<HashMap<ParserLang, Slot>>> = OnceLock::new();
+    static COMPILING: AtomicUsize = AtomicUsize::new(0);
+    static LAST_READY: Mutex<Option<Instant>> = Mutex::new(None);
+    /// Keep painting briefly after a compile lands so a static frame repaints
+    /// its fallback-coloured lines with real highlights.
+    const READY_REPAINT_WINDOW: Duration = Duration::from_millis(500);
+
+    fn slots() -> &'static Mutex<HashMap<ParserLang, Slot>> {
+        SLOTS.get_or_init(Default::default)
+    }
+
+    fn compile(lang: ParserLang) -> Option<Arc<HighlightConfiguration>> {
+        let mut config = tree_sitter_config(lang)?;
+        config.configure(TREE_SITTER_HIGHLIGHT_NAMES);
+        Some(Arc::new(config))
+    }
+
+    fn ready(lang: ParserLang) -> Option<Option<Arc<HighlightConfiguration>>> {
+        match slots().lock().ok()?.get(&lang) {
+            Some(Slot::Ready(config)) => Some(config.clone()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn blocking(lang: ParserLang) -> Option<Arc<HighlightConfiguration>> {
+        if let Some(config) = ready(lang) {
+            return config;
+        }
+        let config = compile(lang);
+        if let Ok(mut slots) = slots().lock() {
+            slots.insert(lang, Slot::Ready(config.clone()));
+        }
+        config
+    }
+
+    pub(super) fn nonblocking(lang: ParserLang) -> Lookup {
+        let Ok(mut table) = slots().lock() else {
+            return Lookup::Ready(None);
+        };
+        match table.get(&lang) {
+            Some(Slot::Ready(config)) => return Lookup::Ready(config.clone()),
+            Some(Slot::Compiling) => return Lookup::Compiling,
+            None => {}
+        }
+        table.insert(lang, Slot::Compiling);
+        drop(table);
+        COMPILING.fetch_add(1, Ordering::AcqRel);
+        let spawned = std::thread::Builder::new()
+            .name("syntax-compile".into())
+            .spawn(move || {
+                let config = compile(lang);
+                if let Ok(mut slots) = slots().lock() {
+                    slots.insert(lang, Slot::Ready(config));
+                }
+                if let Ok(mut last) = LAST_READY.lock() {
+                    *last = Some(Instant::now());
+                }
+                COMPILING.fetch_sub(1, Ordering::Release);
+            });
+        if spawned.is_err() {
+            COMPILING.fetch_sub(1, Ordering::Release);
+            return Lookup::Ready(blocking(lang));
+        }
+        Lookup::Compiling
+    }
+
+    pub(super) fn busy() -> bool {
+        COMPILING.load(Ordering::Acquire) > 0
+            || LAST_READY
+                .lock()
+                .ok()
+                .and_then(|last| *last)
+                .is_some_and(|at| at.elapsed() < READY_REPAINT_WINDOW)
+    }
+}
+
+/// Like [`highlight_line`] but never compiles a grammar on the calling thread.
+/// Returns `None` while that language is still compiling in the background;
+/// callers paint [`fallback_highlight_line`] and must not cache that frame.
+pub fn try_highlight_line<'a>(line: &'a str, lang: Lang) -> Option<Vec<(SynTok, &'a str)>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(parser_lang) = ParserLang::from_lang(lang) {
+        let key = HighlightCacheKey {
+            lang: parser_lang,
+            line: line.to_owned(),
+        };
+        if let Some(spans) = TREE_SITTER_CACHE.with(|cache| cache.borrow().line(&key)) {
+            return Some(spans_to_slices(line, &spans));
+        }
+        let config = match shared_configs::nonblocking(parser_lang) {
+            shared_configs::Lookup::Compiling => return None,
+            shared_configs::Lookup::Ready(config) => config,
+        };
+        if let Some(spans) =
+            config.and_then(|config| tree_sitter_highlight_ranges(line, lang, &config))
+        {
+            let slices = spans_to_slices(line, &spans);
+            TREE_SITTER_CACHE.with(|cache| cache.borrow_mut().insert_line(key, spans));
+            return Some(slices);
+        }
+    }
+    Some(fallback_highlight_line(line, lang))
+}
+
+/// True while a grammar compiles in the background (or just finished): hosts
+/// keep painting so fallback-coloured lines pick up real highlights.
+pub fn highlighters_compiling() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        shared_configs::busy()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn tree_sitter_highlight_line<'a>(
     line: &'a str,
@@ -847,11 +975,8 @@ fn tree_sitter_highlight_line<'a>(
         return Some(spans_to_slices(line, &spans));
     }
 
-    let spans = TREE_SITTER_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let config = cache.config(parser_lang)?;
-        tree_sitter_highlight_ranges(line, lang, config)
-    })?;
+    let config = shared_configs::blocking(parser_lang)?;
+    let spans = tree_sitter_highlight_ranges(line, lang, &config)?;
 
     TREE_SITTER_CACHE.with(|cache| cache.borrow_mut().insert_line(key, spans.clone()));
     Some(spans_to_slices(line, &spans))
@@ -1330,11 +1455,8 @@ fn make_recipe_bash_overlay(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn highlight_source(source: &str, lang: Lang) -> Option<Vec<(SynTok, usize, usize)>> {
     let parser_lang = ParserLang::from_lang(lang)?;
-    let spans = TREE_SITTER_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let config = cache.config(parser_lang)?;
-        tree_sitter_highlight_ranges(source, lang, config)
-    })?;
+    let config = shared_configs::blocking(parser_lang)?;
+    let spans = tree_sitter_highlight_ranges(source, lang, &config)?;
     if lang == Lang::Make {
         if let Some((regions, bash_spans)) = make_recipe_bash_overlay(source) {
             return Some(merge_injected_spans(spans, &regions, bash_spans));

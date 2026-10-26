@@ -724,9 +724,18 @@ fn highlighted_code_line(line: &str, lang: Lang) -> Rc<Vec<(SynTok, String)>> {
     if let Some(hit) = CODE_LINE_HIGHLIGHT_CACHE.with(|cache| cache.borrow().get(&key)) {
         return hit;
     }
+    let Some(highlighted) = crate::syntax::try_highlight_line(line, lang) else {
+        // Grammar still compiling off-thread: paint this frame uncached.
+        return Rc::new(
+            crate::syntax::fallback_highlight_line(line, lang)
+                .into_iter()
+                .map(|(tok, slice)| (tok, slice.to_string()))
+                .collect(),
+        );
+    };
     super::derivations::bump_code_highlight();
     let spans = Rc::new(
-        crate::syntax::highlight_line(line, lang)
+        highlighted
             .into_iter()
             .map(|(tok, slice)| (tok, slice.to_string()))
             .collect::<Vec<_>>(),

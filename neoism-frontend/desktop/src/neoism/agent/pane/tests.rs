@@ -7862,6 +7862,58 @@ fn older_timeline_request_skipped_below_boundary() {
 }
 
 #[test]
+fn staged_older_page_prepends_only_after_renderer_warms_it() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("session-1".to_string());
+    let mut current = NeoismAgentMessage::user("current");
+    current.id = "m-current".to_string();
+    pane.messages = vec![current];
+    pane.timeline_history.loading_older = true;
+
+    let older = ["m-a", "m-b"]
+        .map(|id| {
+            let mut message = NeoismAgentMessage::user(id);
+            message.id = id.to_string();
+            message
+        })
+        .to_vec();
+    pane.stage_older_timeline_page("session-1".to_string(), older, 2, 2, None, false);
+
+    // Staged: nothing prepended yet and no duplicate history request allowed.
+    assert!(!pane.commit_staged_older_page_if_warm());
+    assert_eq!(pane.messages.len(), 1);
+    assert!(pane.timeline_history.loading_older);
+    assert_eq!(pane.animation_reason(), Some("history_warm"));
+
+    let warmed: Vec<_> = std::iter::from_fn(|| pane.next_timeline_warm_message())
+        .map(|message| message.id)
+        .collect();
+    assert_eq!(warmed, ["m-a", "m-b"]);
+
+    assert!(pane.commit_staged_older_page_if_warm());
+    let ids: Vec<_> = pane.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["m-a", "m-b", "m-current"]);
+    assert!(!pane.timeline_history.loading_older);
+    assert_eq!(pane.pending_timeline_prepend_count, Some(2));
+    assert!(pane.staged_older_page.is_none());
+}
+
+#[test]
+fn staged_older_page_for_another_session_is_released_not_warmed() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("session-2".to_string());
+    pane.timeline_history.loading_older = true;
+    let mut older = NeoismAgentMessage::user("old");
+    older.id = "m-old".to_string();
+    pane.stage_older_timeline_page("session-1".to_string(), vec![older], 1, 1, None, false);
+
+    assert!(pane.next_timeline_warm_message().is_none());
+    assert!(pane.commit_staged_older_page_if_warm());
+    assert!(pane.messages.is_empty());
+    assert!(!pane.timeline_history.loading_older);
+}
+
+#[test]
 fn apply_older_page_prepends_and_keeps_loading_when_full() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("session-1".to_string());
@@ -8048,6 +8100,47 @@ fn transcript_selection_distinguishes_plain_click_from_drag() {
     assert!(!pane.has_active_selection());
     assert!(pane.clear_selection());
     assert!(pane.selectable_line_highlight(0).is_none());
+}
+
+#[test]
+fn transcript_selection_keeps_highlight_during_fractional_scroll() {
+    use neoism_ui::panels::agent_pane::view::markdown::AgentMarkdownPane;
+
+    let mut pane = NeoismAgentPane::default();
+    pane.set_timeline_metrics([0.0, 20.0, 400.0, 100.0], 1000.0, 100.0);
+    pane.timeline_scroll_px = 900.0 - 10.4;
+    pane.register_selectable_line("selected region", [0.0, 70.0, 150.0, 18.0]);
+    assert!(pane.begin_selection_at(0.0, 75.0));
+    assert!(pane.drag_selection_to(80.0, 75.0));
+    assert_eq!(pane.end_selection().as_deref(), Some("selected"));
+    assert!(!pane.has_active_selection());
+
+    // Render the same content row at pixel-snapped positions while the
+    // underlying smooth-scroll offset crosses fractional pixel boundaries.
+    for scroll_top in [20.6_f32, 35.25, 0.6, 10.4] {
+        pane.timeline_scroll_px = 900.0 - scroll_top;
+        pane.timeline_wheel_target_px = Some(pane.timeline_scroll_px);
+        pane.timeline_last_scroll_at = Some(Instant::now());
+        pane.clear_tool_hit_rects();
+        assert!(pane.suppress_markdown_interactions());
+        assert!(pane.should_register_selection(true));
+        let screen_y = 80.0 - scroll_top.round();
+        let index = pane.register_selectable_line(
+            "selected region", [0.0, screen_y, 150.0, 18.0],
+        );
+        assert_eq!(pane.selectable_line_highlight(index), Some((0.0, 80.0)));
+        assert!(!pane.has_active_selection());
+    }
+
+    // Leaving the rendered window and returning does not clear selection.
+    pane.clear_tool_hit_rects();
+    assert!(pane.has_selection());
+    pane.register_selectable_line("selected region", [0.0, 70.0, 150.0, 18.0]);
+    assert_eq!(pane.selectable_line_highlight(0), Some((0.0, 80.0)));
+    assert_eq!(pane.end_selection(), None);
+    assert!(pane.clear_selection());
+    assert!(!pane.should_register_selection(true));
+    assert!(pane.suppress_markdown_interactions());
 }
 
 #[test]

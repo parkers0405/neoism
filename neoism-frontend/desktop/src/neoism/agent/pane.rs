@@ -270,6 +270,17 @@ pub(super) struct AgentTimelineHistoryState {
     pub last_requested_session_id: Option<String>,
 }
 
+pub(super) struct StagedOlderTimelinePage {
+    pub session_id: String,
+    pub messages: Vec<NeoismAgentMessage>,
+    pub raw_count: usize,
+    pub requested_limit: usize,
+    pub oldest_cursor: Option<String>,
+    pub reached_start: bool,
+    pub warmed: usize,
+    pub staged_at: Instant,
+}
+
 pub(super) struct CachedAgentSession {
     pub input: String,
     pub state: SessionState,
@@ -1283,6 +1294,9 @@ pub struct NeoismAgentPane {
     /// `(session_id, request_id)` of an idle `/compact` shown as Compacting
     /// the instant it was submitted, before the server's CompactionStarted.
     pub(super) optimistic_compact: Option<(String, String)>,
+    /// Fetched older-history page awaiting prepend while the renderer warms its
+    /// layout caches (see `next_timeline_warm_message`).
+    pub(super) staged_older_page: Option<StagedOlderTimelinePage>,
     sent_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -1630,6 +1644,7 @@ impl Default for NeoismAgentPane {
             queued_prompt_preview: None,
             pending_compact: None,
             optimistic_compact: None,
+            staged_older_page: None,
             sent_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),

@@ -1947,6 +1947,77 @@ impl NeoismAgentPane {
         }
     }
 
+    /// Hold a fetched older-history page until the renderer has pre-measured
+    /// it (a few ms per frame). Prepending it raw laid out every long answer
+    /// of the page in one frame: 30-60 ms hitches while scrolling up.
+    /// `loading_older` stays latched until the commit.
+    pub(super) fn stage_older_timeline_page(
+        &mut self,
+        session_id: String,
+        messages: Vec<NeoismAgentMessage>,
+        raw_count: usize,
+        requested_limit: usize,
+        oldest_cursor: Option<String>,
+        reached_start: bool,
+    ) {
+        if let Some(previous) = self.staged_older_page.take() {
+            self.commit_staged_older_page(previous);
+        }
+        self.staged_older_page = Some(super::pane::StagedOlderTimelinePage {
+            session_id,
+            messages,
+            raw_count,
+            requested_limit,
+            oldest_cursor,
+            reached_start,
+            warmed: 0,
+            staged_at: std::time::Instant::now(),
+        });
+        self.timeline_history.loading_older = true;
+    }
+
+    /// Next staged message for the renderer to pre-measure.
+    pub(crate) fn next_timeline_warm_message(&mut self) -> Option<NeoismAgentMessage> {
+        let staged = self.staged_older_page.as_mut()?;
+        if self.session_id.as_deref() != Some(staged.session_id.as_str()) {
+            return None;
+        }
+        let message = staged.messages.get(staged.warmed)?.clone();
+        staged.warmed += 1;
+        Some(message)
+    }
+
+    /// Prepend the staged page once warmed. A deadline bounds the wait if no
+    /// frames run (hidden pane) or the session changed.
+    pub(super) fn commit_staged_older_page_if_warm(&mut self) -> bool {
+        const STAGED_HISTORY_MAX_WAIT: std::time::Duration =
+            std::time::Duration::from_millis(400);
+        let ready = self.staged_older_page.as_ref().is_some_and(|staged| {
+            staged.warmed >= staged.messages.len()
+                || staged.staged_at.elapsed() >= STAGED_HISTORY_MAX_WAIT
+                || self.session_id.as_deref() != Some(staged.session_id.as_str())
+        });
+        if !ready {
+            return false;
+        }
+        let Some(staged) = self.staged_older_page.take() else {
+            return false;
+        };
+        self.commit_staged_older_page(staged);
+        true
+    }
+
+    fn commit_staged_older_page(&mut self, staged: super::pane::StagedOlderTimelinePage) {
+        self.apply_older_timeline_page(
+            staged.session_id,
+            staged.messages,
+            staged.raw_count,
+            staged.requested_limit,
+            staged.oldest_cursor,
+            staged.reached_start,
+        );
+    }
+
     /// Apply an older-history page fetched off-thread: dedupe against what is
     /// already loaded, prepend in reading order, and pin the reader's scroll
     /// position so the viewport doesn't jump. A page shorter than what we

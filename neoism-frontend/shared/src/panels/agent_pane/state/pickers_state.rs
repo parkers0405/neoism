@@ -745,6 +745,12 @@ impl NeoismAgentPane {
         if self.visible_running_tool_active {
             return Some("running_tool");
         }
+        if crate::panels::agent_pane::view::image_preview::image_decodes_pending() {
+            return Some("image_decode");
+        }
+        if crate::syntax::highlighters_compiling() {
+            return Some("syntax_compile");
+        }
         if self.visible_user_orb_active() {
             return Some("user_orb");
         }

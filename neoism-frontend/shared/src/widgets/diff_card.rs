@@ -17,7 +17,7 @@ use sugarloaf::Sugarloaf;
 
 use crate::primitives::truncate_to_fit;
 use crate::primitives::IdeTheme;
-use crate::syntax::{highlight_line, syn_color, Lang, SynTok};
+use crate::syntax::{syn_color, Lang, SynTok};
 
 mod measurement_cache;
 
@@ -1554,9 +1554,18 @@ fn highlighted_diff_line(text: &str, lang: Lang) -> Rc<Vec<(SynTok, String)>> {
     if let Some(hit) = DIFF_HIGHLIGHT_CACHE.with(|cache| cache.borrow().get(&key)) {
         return hit;
     }
+    let Some(highlighted) = crate::syntax::try_highlight_line(text, lang) else {
+        // Grammar still compiling off-thread: paint this frame uncached.
+        return Rc::new(
+            crate::syntax::fallback_highlight_line(text, lang)
+                .into_iter()
+                .map(|(tok, slice)| (tok, slice.to_string()))
+                .collect(),
+        );
+    };
     crate::panels::agent_pane::view::derivations::bump_diff_highlight();
     let spans = Rc::new(
-        highlight_line(text, lang)
+        highlighted
             .into_iter()
             .map(|(tok, slice)| (tok, slice.to_string()))
             .collect::<Vec<_>>(),
@@ -1911,6 +1920,13 @@ mod tests {
         ];
         let body_w = 90.0;
         let scale = 1.0;
+        // Grammars compile off-thread; uncached fallback frames are expected
+        // until the Rust highlighter is ready.
+        let ready_by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::syntax::try_highlight_line("let ready = 1;", Lang::Rust).is_none() {
+            assert!(std::time::Instant::now() < ready_by, "rust grammar never compiled");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         crate::panels::agent_pane::view::derivations::reset();
         let offsets = warm_render_cache(&lines, body_w, scale, Lang::Rust);

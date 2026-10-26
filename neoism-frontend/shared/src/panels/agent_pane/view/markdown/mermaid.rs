@@ -218,7 +218,7 @@ fn render_mermaid_raw_body<P: AgentMarkdownPane>(
         };
         let text_x = x + 18.0 * s;
         let line_y = body_top + ix as f32 * line_h;
-        if !suppress_interactions {
+        if pane.should_register_selection(suppress_interactions) {
             let geometry =
                 super::super::draw::measured_selection_geometry(sugarloaf, line, &opts);
             let line_w = geometry.width.max(12.0 * s);

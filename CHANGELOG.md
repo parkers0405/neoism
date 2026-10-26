@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.141] - 2026-10-26
+
+### Agent pane scrolling and cancellable discovery
+
+- Clips quad geometry before rasterization while retaining full-quad UV coordinates, avoiding repeated full-card shading for occlusion fragments. User-measured live apply_patch diff-card scrolling improved from 117 to 144 FPS, with GPU busy falling from 69% to 39%; these are workload-specific measurements, not universal guarantees.
+- Stages and premeasures older-history pages within a per-frame budget before prepending, removing user-measured 30-60 ms upward-scroll hitches.
+- Replaces quadratic inline wrapping with running-width tracking and exact measurement near the wrap edge.
+- Compiles Tree-sitter highlight grammars and decodes agent image attachments off the native render thread.
+- Extends opt-in `NEOISM_FRAME_SPIKE_LOG=1` diagnostics with main-thread handler time between frames.
+- Makes MCP discovery and provider-catalog preparation cancellable, scopes tool lookup to the requested service, and adds cancellation/queued-prompt regression coverage.
+
+Includes all modified and untracked files present at release staging, including concurrent-session changes and local memory files, as explicitly requested. The user reports 13 shared-UI tests, 12 desktop agent tests, and one hanging `subagent_runtime_snapshot` test fail identically on the preceding HEAD; those baseline issues are not claimed fixed or passing here.
+
 ## [0.7.140] - 2026-10-25
 
 ### Official Turso upgrade and history I/O

@@ -9449,6 +9449,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        let _busy = crate::screen::render::frame_spike::busy_span("new_events");
         self.daemon_pump_turn.reset();
         self.pump_daemon(event_loop);
         crate::app::freeze_watchdog::mark_global("new_events", format!("{cause:?}"));
@@ -9515,9 +9516,10 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: EventPayload) {
+        let event_name = Self::rio_event_name(&event.payload);
+        let _busy = crate::screen::render::frame_spike::busy_span(event_name);
         self.pump_daemon(event_loop);
         let window_id = event.window_id;
-        let event_name = Self::rio_event_name(&event.payload);
         let _watchdog_span = crate::app::freeze_watchdog::global_span(
             "user_event",
             format!("{event_name} window_id={window_id:?}"),
@@ -10224,7 +10226,16 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
         if matches!(&event, WindowEvent::Destroyed) {
             self.invite_activation_targets.remove(&window_id);
         }
+        let _busy = (!matches!(&event, WindowEvent::RedrawRequested))
+            .then(|| {
+                crate::screen::render::frame_spike::busy_span(Self::window_event_name(&event))
+            })
+            .flatten();
+        let _pump_before_redraw = matches!(&event, WindowEvent::RedrawRequested)
+            .then(|| crate::screen::render::frame_spike::busy_span("pump_daemon(before redraw)"))
+            .flatten();
         self.pump_daemon(event_loop);
+        drop(_pump_before_redraw);
         // Ignore all events we do not care about.
         if Self::skip_window_event(&event) {
             return;
@@ -10329,6 +10340,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _watchdog_span =
             crate::app::freeze_watchdog::global_span("about_to_wait", "");
+        let _busy = crate::screen::render::frame_spike::busy_span("about_to_wait");
         self.pump_daemon(event_loop);
         // Flush after the turn's input and inbound applies, not before them:
         // replies/local edits can enqueue outbound CRDT without inbound backlog.

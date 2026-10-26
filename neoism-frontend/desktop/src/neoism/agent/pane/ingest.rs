@@ -2153,12 +2153,13 @@ impl NeoismAgentPane {
     }
 
     fn drain_background_updates_with_budget(&mut self, budget: IngestionBudget) -> bool {
+        let committed_history = self.commit_staged_older_page_if_warm();
         if let Some(picker) = self.picker.as_mut() { picker.expire_model_catalog_request(); }
         if self.picker.as_ref().is_some_and(|p| p.model_catalog_poll_due()) {
             self.refresh_model_catalog();
         }
         if !self.execution_authorized() {
-            return false;
+            return committed_history;
         }
         if !self.image_hydration_pending.is_empty() {
             self.retry_session_images();
@@ -2170,7 +2171,7 @@ impl NeoismAgentPane {
         // pass will then schedule the next frame instead of leaving its result
         // stranded in the channel.
         self.background_tx.begin_drain();
-        let mut changed = false;
+        let mut changed = committed_history;
         let mut remaining = MAX_BACKGROUND_UPDATES_PER_FRAME;
         loop {
             if remaining == 0 || budget.exhausted() {
@@ -3237,7 +3238,7 @@ impl NeoismAgentPane {
                     reached_start,
                 }) => {
                     self.hydrate_session_images(&session_id, &messages);
-                    self.apply_older_timeline_page(
+                    self.stage_older_timeline_page(
                         session_id,
                         messages,
                         raw_count,

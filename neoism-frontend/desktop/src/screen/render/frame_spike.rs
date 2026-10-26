@@ -10,7 +10,7 @@
 //! The same switch also times Alt+A from keypress to the first presented
 //! frame.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -35,6 +35,8 @@ pub(crate) fn enabled() -> bool {
 }
 
 thread_local! {
+    /// Main-thread handler time recorded since the last finished frame.
+    static BETWEEN_FRAMES: RefCell<Vec<(&'static str, u128)>> = const { RefCell::new(Vec::new()) };
     static LAST_FRAME_END: Cell<Option<Instant>> = const { Cell::new(None) };
     static AGENT_OPEN_PRESSED: Cell<Option<Instant>> = const { Cell::new(None) };
 }
@@ -43,6 +45,27 @@ thread_local! {
 pub(crate) fn note_agent_open_pressed() {
     if enabled() {
         AGENT_OPEN_PRESSED.with(|cell| cell.set(Some(Instant::now())));
+    }
+}
+
+/// Times one event-loop handler call outside render; spike lines report the
+/// total per label so a long "gap" names what held the main thread.
+pub(crate) struct BusySpan {
+    label: &'static str,
+    started: Instant,
+}
+
+pub(crate) fn busy_span(label: &'static str) -> Option<BusySpan> {
+    enabled().then(|| BusySpan {
+        label,
+        started: Instant::now(),
+    })
+}
+
+impl Drop for BusySpan {
+    fn drop(&mut self) {
+        let us = self.started.elapsed().as_micros();
+        BETWEEN_FRAMES.with(|spans| spans.borrow_mut().push((self.label, us)));
     }
 }
 
@@ -91,6 +114,7 @@ impl FrameSpike {
                 total_us,
             );
         }
+        let between = BETWEEN_FRAMES.with(|spans| std::mem::take(&mut *spans.borrow_mut()));
         if total_us < self.threshold_us {
             return;
         }
@@ -101,6 +125,27 @@ impl FrameSpike {
         for (phase, us) in &self.phases[..self.len] {
             if *us >= 250 {
                 line.push_str(&format!(" | {phase} {us}µs"));
+            }
+        }
+        let mut totals: Vec<(&'static str, u128, usize)> = Vec::new();
+        for (label, us) in between {
+            match totals.iter_mut().find(|(name, _, _)| *name == label) {
+                Some(entry) => {
+                    entry.1 += us;
+                    entry.2 += 1;
+                }
+                None => totals.push((label, us, 1)),
+            }
+        }
+        totals.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut wrote_header = false;
+        for (label, us, count) in totals {
+            if us >= 250 {
+                if !wrote_header {
+                    line.push_str(" || between:");
+                    wrote_header = true;
+                }
+                line.push_str(&format!(" {label} {count}x {us}µs"));
             }
         }
         eprintln!("{line}");

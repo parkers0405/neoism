@@ -68,7 +68,10 @@ impl NeoismAgentPane {
         let viewport_y = self.timeline_viewport_rect.map(|r| r[1]).unwrap_or(0.0);
         let max_scroll = self.max_timeline_scroll();
         let scroll_top = (max_scroll - self.timeline_scroll_px).clamp(0.0, max_scroll);
-        screen_y - viewport_y + scroll_top
+        // Match the timeline renderer's pixel-snapped draw offset. Mixing
+        // snapped rows with a fractional offset makes a retained endpoint
+        // drift to a different content row as smooth scrolling advances.
+        screen_y - viewport_y + scroll_top.round()
     }
 
     /// Visible x-range of the highlight strip for the given line index, or
@@ -278,9 +281,11 @@ impl NeoismAgentPane {
 
     pub fn has_active_selection(&self) -> bool {
         // Drag history is released on mouse-up; endpoints stay for highlighting.
-        !self.selection_history.is_empty()
-            && self.selection_anchor.is_some()
-            && self.selection_focus.is_some()
+        !self.selection_history.is_empty() && self.has_selection()
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection_anchor.is_some() && self.selection_focus.is_some()
     }
 
     pub fn clear_selection(&mut self) -> bool {

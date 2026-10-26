@@ -2784,17 +2784,28 @@ async fn run_assistant_step(
     run_system: Option<&str>,
     goals_enabled: bool,
 ) -> Result<MessageWithParts, ApiError> {
-    let mut provider_tools = provider_tools_for_agent(
-        state,
-        &info.directory,
-        plugin_snapshot,
-        &tool_permissions,
-        &reply_model.model_id,
-        &crate::caller::session_execution_policy(state.services(), info),
-        &crate::mcp_auth::McpAuthStore::for_session(state.services(), info)
-            .map_err(|error| ApiError::forbidden(error.to_string()))?,
-    )
-    .await?;
+    let execution = crate::caller::session_execution_policy(state.services(), info);
+    let auth = crate::mcp_auth::McpAuthStore::for_session(state.services(), info)
+        .map_err(|error| ApiError::forbidden(error.to_string()))?;
+    // Catalog preparation can itself wait on an OAuth/stdio server, before a
+    // provider stream exists. Stop must release this run at that boundary too.
+    let mut provider_tools = tokio::select! {
+        biased;
+        _ = crate::session_loop::wait_for_cancellation(cancellation.clone()) => {
+            finish_session_run(state, session_id_text, run_id).await;
+            let _ = state.inner.store.finish_run(run_id, "interrupted", None).await;
+            return Err(ApiError::conflict("Session aborted"));
+        }
+        tools = provider_tools_for_agent(
+            state,
+            &info.directory,
+            plugin_snapshot,
+            &tool_permissions,
+            &reply_model.model_id,
+            &execution,
+            &auth,
+        ) => tools?,
+    };
     if !crate::caller::native_execution_allowed(&crate::caller::session_execution_policy(
         state.services(),
         info,

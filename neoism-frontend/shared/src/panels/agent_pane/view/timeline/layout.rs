@@ -111,6 +111,7 @@ where
     P: AgentTimelinePane,
     D: AgentTimelineDelegate<P>,
 {
+    warm_staged_history::<P, D>(sugarloaf, pane, width, theme, s);
     let width_bucket = f32_measure_bucket(width);
     let scale_bucket = f32_measure_bucket(s);
     let gap_bucket = f32_measure_bucket(gap);
@@ -242,6 +243,34 @@ where
     );
     let growth = measured_tail_growth(&layout, live_baseline);
     (layout, true, growth)
+}
+
+/// Per-frame budget for pre-measuring a staged history page. At least one
+/// message is warmed per frame so a page always finishes.
+const HISTORY_WARM_BUDGET_US: u128 = 2_000;
+
+/// Warm the measure + markdown caches for a fetched-but-not-yet-prepended
+/// history page, using the same width/scale/theme the prepend fold will use.
+fn warm_staged_history<P, D>(
+    sugarloaf: &mut Sugarloaf,
+    pane: &mut P,
+    width: f32,
+    theme: &IdeTheme,
+    s: f32,
+) where
+    P: AgentTimelinePane,
+    D: AgentTimelineDelegate<P>,
+{
+    let started = web_time::Instant::now();
+    while let Some(message) = pane.next_timeline_warm_message() {
+        if let Some(display) = display_timeline_message(&message, false) {
+            cached_message_height::<P, D>(sugarloaf, pane, &display, width, theme, s);
+            let _ = prepared_message_markdown_blocks(sugarloaf, pane, &display, width, theme, s);
+        }
+        if started.elapsed().as_micros() >= HISTORY_WARM_BUDGET_US {
+            break;
+        }
+    }
 }
 
 pub(super) fn reusable_timeline_cache<M>(

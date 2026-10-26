@@ -56,8 +56,21 @@ const vec2 UNIT_QUAD[4] = vec2[](
 
 void main() {
     vec2 unit = UNIT_QUAD[gl_VertexIndex];
-    vec2 pos = in_pos.xy + unit * in_size;
-    vec2 uv = mix(in_uv_rect.xy, in_uv_rect.zw, unit);
+    // Rasterize only the clipped part of the quad. The fragment shader's
+    // clip test is a per-pixel `discard`, so a large card emitted once per
+    // occlusion fragment (often zero-height slivers) used to shade its whole
+    // area every time: hundreds of megapixels per frame, GPU-bound scrolling
+    // past diff cards. UVs stay relative to the full quad, so SDF corners and
+    // underline patterns are unchanged.
+    vec2 lo = in_pos.xy;
+    vec2 hi = in_pos.xy + in_size;
+    if (in_clip_rect.z > 0.0) {
+        lo = max(lo, in_clip_rect.xy);
+        hi = max(lo, min(hi, in_clip_rect.xy + in_clip_rect.zw));
+    }
+    vec2 pos = mix(lo, hi, unit);
+    vec2 full_unit = (pos - in_pos.xy) / max(in_size, vec2(1e-6));
+    vec2 uv = mix(in_uv_rect.xy, in_uv_rect.zw, full_unit);
 
     gl_Position = globals.transform * vec4(pos, in_pos.z, 1.0);
 

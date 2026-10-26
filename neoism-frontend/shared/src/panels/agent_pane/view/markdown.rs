@@ -372,6 +372,14 @@ pub trait AgentMarkdownPane {
         self.register_selectable_line_with_caret_stops(&geometry.text, rect, &stops)
     }
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)>;
+    /// A retained highlight survives mouse-up and scrolling without owning
+    /// the pointer or enabling the rest of the Markdown hit targets.
+    fn has_selection(&self) -> bool {
+        false
+    }
+    fn should_register_selection(&self, suppress_interactions: bool) -> bool {
+        !suppress_interactions || self.has_selection()
+    }
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]);
     fn register_image_preview(
         &mut self,
@@ -491,6 +499,10 @@ impl AgentMarkdownPane for NeoismAgentPane {
 
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {
         NeoismAgentPane::selectable_line_highlight(self, index)
+    }
+
+    fn has_selection(&self) -> bool {
+        NeoismAgentPane::has_selection(self)
     }
 
     fn register_link_hit_rect(&mut self, target: String, rect: [f32; 4]) {
@@ -820,22 +832,50 @@ fn wrap_inline_aware(
     let tokens = inline_wrap_tokens(text);
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
+    // Running width of `current` from per-token (shape-cached) advances. The
+    // exact whole-line measure re-parses and re-shapes the entire line, so it
+    // only runs when the estimate lands near the wrap edge; doing it for every
+    // token made wrapping quadratic per line (4-12 ms per long answer).
+    let mut current_width = 0.0f32;
+    let space_width = measure_markdown_inline_width(sugarloaf, " ", opts);
+    let slack = opts.font_size.max(1.0);
     for token in tokens {
         for fragment in split_oversized_inline_token(sugarloaf, token, width, opts) {
             let source = fragment.source();
-            let add_space = fragment.whitespace_before && !current.is_empty();
-            let mut candidate = current.clone();
+            let source_width = measure_markdown_inline_width(sugarloaf, &source, opts);
+            if current.is_empty() {
+                current = source;
+                current_width = source_width;
+                continue;
+            }
+            let add_space = fragment.whitespace_before;
+            let estimate = current_width
+                + if add_space { space_width } else { 0.0 }
+                + source_width;
+            let mut candidate = String::with_capacity(current.len() + source.len() + 1);
+            candidate.push_str(&current);
             if add_space {
                 candidate.push(' ');
             }
             candidate.push_str(&source);
-            if current.is_empty()
-                || measure_markdown_inline_width(sugarloaf, &candidate, opts) <= width
-            {
-                current = candidate;
+            let fits = if estimate <= width - slack {
+                Some(estimate)
+            } else if estimate > width + slack {
+                None
             } else {
-                lines.push(std::mem::take(&mut current));
-                current = source;
+                let exact = measure_markdown_inline_width(sugarloaf, &candidate, opts);
+                (exact <= width).then_some(exact)
+            };
+            match fits {
+                Some(candidate_width) => {
+                    current = candidate;
+                    current_width = candidate_width;
+                }
+                None => {
+                    lines.push(std::mem::take(&mut current));
+                    current = source;
+                    current_width = source_width;
+                }
             }
         }
     }
@@ -2736,7 +2776,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                 );
             }
             AssistantMarkdownBlock::Blank => {
-                if !suppress_interactions {
+                if pane.should_register_selection(suppress_interactions) {
                     // Blank source lines are meaningful when selecting and
                     // copying even though they paint no glyphs. Keep a
                     // newline row in selection geometry so copied text
@@ -3023,7 +3063,7 @@ pub(super) fn render_markdown_code_block(
             s,
             viewport_clip,
         );
-        if !suppress_interactions {
+        if pane.should_register_selection(suppress_interactions) {
             let text_x = x + code_left_pad - horizontal_scroll;
             let geometry =
                 super::draw::measured_selection_geometry(sugarloaf, line, &opts);
@@ -3294,7 +3334,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
     occlusion_rects: &[[f32; 4]],
 ) {
     crate::panels::agent_pane::text_reveal::begin_line(line);
-    if !suppress_interactions {
+    if pane.should_register_selection(suppress_interactions) {
         // Register the RENDERED text and its drawn width — not the raw
         // Markdown `line` — so the selection geometry matches the glyphs we
         // actually paint (per-segment advances below) and the copied string

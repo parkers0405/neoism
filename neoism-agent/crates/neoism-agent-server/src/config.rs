@@ -626,4 +626,53 @@ pub(crate) fn inject_builtin_mcp(
             config
         });
     }
+    inject_browser_mcp(info);
+}
+
+fn inject_browser_mcp(info: &mut AgentConfigDocument) {
+    let mut candidates = Vec::new();
+    if let Some(directory) = std::env::var_os("NEOISM_BROWSER_CONTROL_DIR") {
+        candidates.push(PathBuf::from(directory));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            candidates.push(directory.join("browser-control"));
+            candidates.push(directory.join("../lib/neoism/browser-control"));
+        }
+    }
+    // Source checkouts use the same runtime as packaged installations.
+    if let Some(agent) = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+    {
+        candidates.push(agent.join("browser-control"));
+    }
+    let Some(runtime) = candidates.into_iter().find(|directory| {
+        directory.join("dist/mcp.js").is_file()
+            && directory.join("dist/firefox.js").is_file()
+    }) else {
+        return;
+    };
+    for (name, script) in [
+        ("browser_chrome", "mcp.js"),
+        ("browser_firefox", "firefox.js"),
+    ] {
+        info.mcp
+            .entry(name.to_string())
+            .or_insert_with(|| McpConfig::Local {
+                command: vec![
+                    "node".to_string(),
+                    runtime
+                        .join("dist")
+                        .join(script)
+                        .to_string_lossy()
+                        .into_owned(),
+                ],
+                args: None,
+                environment: None,
+                enabled: Some(false),
+                // Explicit handoffs may wait for a person for up to ten minutes.
+                timeout: Some(660_000),
+            });
+    }
 }

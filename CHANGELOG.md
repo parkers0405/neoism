@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.142] - 2026-10-26
+
+### Chat readiness, index recovery, and browser control
+
+- Memoizes provider readiness per catalog generation and prefetches bounded display-only history previews to reduce prompt admission and chat-opening work.
+- Promotes queued prompts immediately when stopping a run, with queue snapshot reconciliation and admission regression coverage.
+- Uses the indexed session-list sidecar for child-session queries, omits server-only context bookkeeping from roster responses, and repairs a corrupt derived FTS registry before retrying affected writes once.
+- Refines native browser observation/actions and includes Neoism Browser Control source, Chrome/Firefox extensions, build scripts, tests, and dependency notices. The separate Node runtime is disabled initially and must be built/staged separately; these files are not automatically bundled in desktop release packages.
+- Extends frame-spike diagnostics and render scheduling refinements.
+
+This release includes the complete working-tree source batch. Browser extension/runtime checks are distinct from live browser automation validation; no live browser session or cross-platform runtime behavior is claimed solely from source inclusion. Existing database upgrade and rollback cautions from 0.7.140 still apply.
+
 ## [0.7.141] - 2026-10-26
 
 ### Agent pane scrolling and cancellable discovery

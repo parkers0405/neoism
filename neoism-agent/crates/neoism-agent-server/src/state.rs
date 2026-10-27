@@ -578,25 +578,41 @@ impl Db {
                 anyhow::bail!("injected assistant insert failure");
             }
         }
-        let results = turso_busy_retry(|| {
-            let statements = statements.clone();
-            async move {
-                let mut connection = self.database.connect()?;
-                let transaction = connection
-                    .transaction_with_behavior(
-                        turso::transaction::TransactionBehavior::Immediate,
-                    )
-                    .await?;
-                let mut results = Vec::with_capacity(statements.len());
-                for (sql, params) in statements {
-                    results.push(transaction.execute(&sql, params).await?);
+        let run = || {
+            turso_busy_retry(|| {
+                let statements = statements.clone();
+                async move {
+                    let mut connection = self.database.connect()?;
+                    let transaction = connection
+                        .transaction_with_behavior(
+                            turso::transaction::TransactionBehavior::Immediate,
+                        )
+                        .await?;
+                    let mut results = Vec::with_capacity(statements.len());
+                    for (sql, params) in statements {
+                        results.push(transaction.execute(&sql, params).await?);
+                    }
+                    transaction.commit().await?;
+                    Ok(results)
                 }
-                transaction.commit().await?;
-                Ok(results)
+            })
+        };
+        match run().await {
+            Err(error)
+                if conversation_search::is_registry_corruption(&error)
+                    && statements
+                        .iter()
+                        .any(|(sql, _)| sql.contains("conversation_search_docs")) =>
+            {
+                // A stale pre-format-v2 row in the FTS registry fails every
+                // write that touches the index (chat delete returned 500).
+                // The index is a rebuildable projection: rebuild, retry once.
+                tracing::warn!(%error, "conversation search index corrupt; rebuilding it");
+                conversation_search::repair_fts_locked(self).await?;
+                Ok(run().await?)
             }
-        })
-        .await?;
-        Ok(results)
+            result => Ok(result?),
+        }
     }
 
     async fn execute_transaction(
@@ -2171,6 +2187,10 @@ impl SessionStore {
             Vec::new(),
         ).await?;
         self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_list_parent_updated ON session_list_index(parent_id, updated DESC)",
+            Vec::new(),
+        ).await?;
+        self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_catalog_execution_root ON sessions(json_extract(info_json, '$.executionRootSessionID'))",
             Vec::new(),
         ).await?;
@@ -3438,10 +3458,21 @@ impl SessionStore {
         &self,
         parent_id: &str,
     ) -> anyhow::Result<Vec<SessionInfo>> {
-        let rows = self.db.fetch_all(
-            "SELECT info_json FROM sessions WHERE json_extract(info_json, '$.parentId') = ? ORDER BY updated DESC",
-            vec![text(parent_id)],
-        ).await?;
+        // The JSON expression index is not used by the engine: that query
+        // parsed every stored session (~145 ms, and it held the database so
+        // concurrent requests stalled). The list sidecar's indexed parent_id
+        // finds the children; only their rows are decoded.
+        let rows = if self.session_list_index_ready().await? {
+            self.db.fetch_all(
+                "SELECT s.info_json FROM session_list_index i JOIN sessions s ON s.id = i.session_id WHERE i.parent_id = ? ORDER BY i.updated DESC",
+                vec![text(parent_id)],
+            ).await?
+        } else {
+            self.db.fetch_all(
+                "SELECT info_json FROM sessions WHERE json_extract(info_json, '$.parentId') = ? ORDER BY updated DESC",
+                vec![text(parent_id)],
+            ).await?
+        };
         let mut sessions = rows
             .into_iter()
             .map(|row| decode_json(row.get_str("info_json")?))

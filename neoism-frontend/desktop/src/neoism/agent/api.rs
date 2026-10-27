@@ -630,6 +630,11 @@ pub(super) fn fetch_catalog_scoped(scope: &CatalogScope, resource: &'static str)
     } else {
         catalog_cache().get(key, load)
     }?;
+    if resource == "/v2/providers" {
+        // Warm the readiness memo on this worker: parsing the full provider
+        // catalog costs tens of ms, and admission reads it on Enter.
+        let _ = provider_readiness_for_entry(&(scope.clone(), resource));
+    }
     if !scope.still_current() { return Err("Catalog scope changed".into()); }
     Ok(value)
 }
@@ -677,8 +682,7 @@ pub(super) fn cached_provider_readiness_with_age(
 ) -> Option<(ProviderReadiness, Duration)> {
     let scope = catalog_scope(server, directory);
     let key = (scope.clone(), "/v2/providers");
-    let (value, age) = catalog_cache().retained_snapshot_age(&key)?;
-    let readiness = ProviderReadiness::from_json(&value)?;
+    let (readiness, age) = provider_readiness_for_entry(&key)?;
     // Preserve the original validation age. Callers schedule refreshes from it,
     // without treating expiry as new provider/model availability evidence.
     scope.still_current().then_some((readiness, age))
@@ -708,6 +712,29 @@ pub(super) fn fetch_agent_options_scoped(scope: &CatalogScope) -> Result<Vec<Neo
 pub(super) fn fetch_provider_readiness_scoped(scope: &CatalogScope) -> Result<ProviderReadiness, String> {
     let value = fetch_catalog_scoped(scope, "/v2/providers")?;
     ProviderReadiness::from_json(&value).ok_or_else(|| "Neoism Agent returned malformed provider readiness".into())
+}
+
+/// Parsed readiness for the cached `/v2/providers` entry, memoized per entry
+/// generation (its load instant). Admission runs this on every send; cloning
+/// and re-parsing the whole catalog blocked the first Enter by ~90 ms a call.
+fn provider_readiness_for_entry(key: &CatalogKey) -> Option<(ProviderReadiness, Duration)> {
+    type Memo = HashMap<CatalogKey, (Instant, Option<ProviderReadiness>)>;
+    static MEMO: OnceLock<std::sync::Mutex<Memo>> = OnceLock::new();
+    let memo = MEMO.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let at = catalog_cache().retained_with(key, |at, _| at)?;
+    if let Some((memo_at, readiness)) = memo.lock().unwrap().get(key) {
+        if *memo_at == at {
+            return readiness.clone().map(|readiness| (readiness, at.elapsed()));
+        }
+    }
+    let (at, readiness) =
+        catalog_cache().retained_with(key, |at, value| (at, ProviderReadiness::from_json(value)))?;
+    let mut memo = memo.lock().unwrap();
+    if memo.len() >= 16 && !memo.contains_key(key) {
+        memo.clear();
+    }
+    memo.insert(key.clone(), (at, readiness.clone()));
+    readiness.map(|readiness| (readiness, at.elapsed()))
 }
 
 pub(super) fn fetch_model_context_limit(
@@ -2270,6 +2297,67 @@ pub(super) fn invalidate_session_messages_cache(server: &str, session_id: &str) 
 
 pub(super) mod conversation_cache;
 pub(super) mod generated_images;
+
+/// Warm the display-only history preview for a sidebar row so opening it is
+/// instant. Only fills missing or old entries; requests run in row order.
+pub(crate) fn prefetch_session_preview(server: &str, session_id: &str) {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    const WORKERS: usize = 2;
+    const MAX_QUEUED: usize = 24;
+    #[derive(Default)]
+    struct Prefetch {
+        queue: VecDeque<(String, String)>,
+        in_flight: HashSet<(String, String)>,
+        workers: usize,
+    }
+    fn state() -> &'static Mutex<Prefetch> {
+        static STATE: OnceLock<Mutex<Prefetch>> = OnceLock::new();
+        STATE.get_or_init(Default::default)
+    }
+    fn worker() {
+        loop {
+            let key = {
+                let mut prefetch = state().lock().unwrap();
+                let Some(key) = prefetch.queue.pop_front() else {
+                    prefetch.workers -= 1;
+                    return;
+                };
+                prefetch.in_flight.insert(key.clone());
+                key
+            };
+            // Fills `conversation_cache` as a side effect of the initial page.
+            let _ = fetch_session_messages_page(&key.0, &key.1, None, API_INITIAL_HISTORY_LIMIT);
+            state().lock().unwrap().in_flight.remove(&key);
+        }
+    }
+    // Remote-system rows carry encoded source keys, not session ids.
+    if !session_id.starts_with("ses_") {
+        return;
+    }
+    if conversation_cache::age(server, session_id).is_some_and(|age| age < Duration::from_secs(90)) {
+        return;
+    }
+    let key = (server.trim().trim_end_matches('/').to_owned(), session_id.to_owned());
+    let mut prefetch = state().lock().unwrap();
+    if prefetch.in_flight.contains(&key)
+        || prefetch.queue.contains(&key)
+        || prefetch.queue.len() >= MAX_QUEUED
+    {
+        return;
+    }
+    prefetch.queue.push_back(key);
+    while prefetch.workers < WORKERS {
+        if std::thread::Builder::new()
+            .name("neoism-agent-prefetch".into())
+            .spawn(worker)
+            .is_err()
+        {
+            break;
+        }
+        prefetch.workers += 1;
+    }
+}
 
 /// One page of session history. `blocks` is the expanded client-side
 /// render blocks (one stored message fans out into several). `raw_count`

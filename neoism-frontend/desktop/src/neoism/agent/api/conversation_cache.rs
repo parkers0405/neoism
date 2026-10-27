@@ -7,10 +7,13 @@ use std::time::{Duration, Instant};
 use super::message_blocks_from_response;
 use super::{agent_server_credentials, SessionMessagePage};
 
-const TTL: Duration = Duration::from_secs(30);
-const MAX_ENTRIES: usize = 16;
-const MAX_BYTES: usize = 8 * 1024 * 1024;
-pub(super) const MAX_ENTRY_BYTES: usize = 1024 * 1024;
+// Sidebar rows are prefetched into this cache (hover + visible rows) so a
+// click paints the transcript in the click frame. The authoritative fetch
+// still runs on open and reconciles; a stale preview only shows for one load.
+const TTL: Duration = Duration::from_secs(600);
+const MAX_ENTRIES: usize = 48;
+const MAX_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Identity {
@@ -174,6 +177,27 @@ pub(in crate::neoism::agent) fn peek(
     };
     // No parsing, message mapping, payload hashing, or block cloning on click.
     cache.snapshot(&identity, Instant::now())
+}
+
+/// Age of the cached preview for this session, if any. Lets prefetchers skip
+/// rows that are already fresh without cloning the page.
+pub(in crate::neoism::agent) fn age(server: &str, session: &str) -> Option<Duration> {
+    let server = server.trim().trim_end_matches('/').to_owned();
+    let credentials = agent_server_credentials().read().ok()?;
+    let mut cache = cache().lock().ok()?;
+    let identity = Identity {
+        credential: credentials.get(&server).cloned(),
+        server,
+        session: session.to_owned(),
+        generation: cache.generation,
+    };
+    let now = Instant::now();
+    cache.prune(now);
+    cache
+        .entries
+        .iter()
+        .find(|entry| entry.identity == identity)
+        .map(|entry| now.saturating_duration_since(entry.inserted))
 }
 
 #[cfg(test)]

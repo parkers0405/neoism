@@ -394,6 +394,7 @@ impl Screen<'_> {
                 if mods.shift_key() && agent.picker().is_none() {
                     agent.insert_newline();
                 } else {
+                    crate::screen::render::frame_spike::note_input_pressed("enter");
                     agent.submit();
                 }
                 self.mark_dirty();
@@ -451,6 +452,7 @@ impl Screen<'_> {
                 if agent.picker().is_some() {
                     agent.close_picker();
                 } else {
+                    crate::screen::render::frame_spike::note_input_pressed("esc");
                     agent.clear_or_abort();
                 }
                 self.mark_dirty();
@@ -724,6 +726,7 @@ impl Screen<'_> {
             let Some(agent) = item.val.neoism_agent.as_mut() else { return };
             if is_visible {
                 agent.maybe_refresh_side_panel_sessions();
+                agent_animating |= agent.poll_awaiting_preview();
             }
             agent_animating |= if is_visible {
                 agent.drain_server_updates()
@@ -757,6 +760,7 @@ impl Screen<'_> {
         );
         if sidebar_visible {
             agent_animating |= self.renderer.conversations_pane.catalog_is_animating();
+            self.renderer.conversations_pane.prefetch_catalog_previews();
         }
         for (key, item) in self
             .context_manager

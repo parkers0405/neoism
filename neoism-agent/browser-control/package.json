@@ -1,0 +1,20 @@
+{
+  "name": "@neoism/browser-control",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Neoism's own local browser runtime and Chrome/Firefox extensions",
+  "type": "module",
+  "engines": {"node": ">=22.19.0"},
+  "bin": {"neoism-browser": "dist/cli.js", "neoism-browser-mcp": "dist/mcp.js", "neoism-firefox-mcp": "dist/firefox.js"},
+  "scripts": {
+    "build": "tsx scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:live": "NEOISM_BROWSER_LIVE=1 node --import tsx --test test/*.live.ts",
+    "package:plugins": "tsx scripts/package.ts",
+    "stage:runtime": "tsx scripts/stage.ts"
+  },
+  "dependencies": {"@modelcontextprotocol/sdk": "1.32.2", "playwright-core": "1.64.1", "ws": "8.22.0", "zod": "^4.3.0"},
+  "devDependencies": {"@types/chrome": "^0.3.4", "@types/node": "^26.6.4", "@types/ws": "^8.18.2", "esbuild": "^0.28.2", "fflate": "^0.8.3", "tsx": "^4.23.15", "typescript": "^7.0.2"}
+}

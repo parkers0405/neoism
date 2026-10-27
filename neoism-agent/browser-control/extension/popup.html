@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Neoism Browser Control</title><link rel="stylesheet" href="popup.css"></head>
+<body><h1>Neoism Browser Control</h1><p id="status" role="status">Checking connection…</p>
+<label>Local pairing token<input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+<label>Firefox BiDi endpoint<input id="endpoint" value="ws://127.0.0.1:9223/session" spellcheck="false"></label>
+<button id="connect">Save and connect</button><button id="attach">Attach current tab</button><button id="detach">Detach current tab</button>
+<p id="firefox-note">Firefox requires <code>--remote-debugging-port 9223</code>.</p><p>Pair only with your local Neoism driver. The driver can read and act in attached pages. Get the token with <code>neoism-browser pair</code> (add <code>firefox</code> for Firefox).</p>
+<script type="module" src="popup.js"></script></body></html>

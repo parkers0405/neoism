@@ -520,7 +520,14 @@ impl Screen<'_> {
             window_id,
             "screen.render.terminal_dimensions",
         );
-        if grid_cols > 0 && grid_rows > 0 && !self.grids.contains_key(&current_route) {
+        // Agent/editor surfaces never paint a terminal grid; building one is
+        // ~3 ms of GPU setup on the frame a conversation opens. Terminal
+        // panels still get theirs from `terminal_compose` on demand.
+        if grid_cols > 0
+            && grid_rows > 0
+            && !current.has_non_terminal_surface()
+            && !self.grids.contains_key(&current_route)
+        {
             self.ensure_grid(current_route, grid_cols, grid_rows);
         }
 

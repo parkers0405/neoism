@@ -56,6 +56,20 @@ impl<K: Eq + Hash + Clone, V: Clone> Cache<K, V> {
         Some((value.clone(), at.elapsed()))
     }
 
+    /// Visit the retained entry in place with its load instant. The instant
+    /// identifies the entry's generation, so derived values can be memoized
+    /// without cloning large catalogs on the UI thread.
+    pub(super) fn retained_with<R>(
+        &self,
+        key: &K,
+        visit: impl FnOnce(Instant, &V) -> R,
+    ) -> Option<R> {
+        let slot = self.slots.lock().unwrap().get(key).cloned()?;
+        let state = slot.state.lock().unwrap();
+        let (at, value) = state.good.as_ref()?;
+        Some(visit(*at, value))
+    }
+
     #[cfg(test)]
     pub(super) fn age_for_test(&self, key: &K, age: Duration) {
         let slot = self.slots.lock().unwrap().get(key).cloned().unwrap();

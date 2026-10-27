@@ -382,3 +382,59 @@ fn hydration_projects_only_local_primary_and_running_evidence_closes_it() {
         assert_eq!(cold.queued_prompt_count(), 1);
     }
 }
+
+#[test]
+fn esc_shows_the_queued_prompt_bubble_before_the_server_dequeues_it() {
+    for windows in [false, true] {
+        let mut pane = pane(windows);
+        feed(&mut pane, vec![queue("dequeue", 0, true, None)]);
+        // What `submit()` records for a prompt sent behind a running turn.
+        pane.queued_prompt_count = 1;
+        pane.queued_prompt_preview = Some("next".into());
+        pane.status_timing
+            .note_local_queued(NeoismAgentMessage::user("next").with_id("next"));
+
+        pane.abort_session();
+        let bubbles = |pane: &NeoismAgentPane| {
+            pane.messages.iter().filter(|message| message.id == "next").count()
+        };
+        assert_eq!(bubbles(&pane), 1, "bubble must appear on Esc, not on echo");
+        assert_eq!(pane.messages.last().unwrap().id, "next");
+        assert_eq!(pane.queued_prompt_count(), 0);
+        assert!(pane.queued_prompt_preview().is_none());
+        assert!(pane.has_status_activity());
+
+        // The stopped run's busy snapshot still counts the prompt as queued.
+        feed(
+            &mut pane,
+            vec![json!({"type": "session.status", "properties": {"sessionID": "root",
+                "status": {"type": "busy", "startedAt": 100,
+                    "queue": {"count": 1, "preview": "next"}}
+            }})],
+        );
+        assert_eq!(pane.queued_prompt_count(), 0);
+        assert!(pane.queued_prompt_preview().is_none());
+
+        let mut dequeue = queue("dequeue", 0, true, None);
+        dequeue["properties"]["messageID"] = json!("next");
+        dequeue["properties"]["request"]["messageID"] = json!("next");
+        dequeue["properties"]["request"]["parts"][0]["text"] = json!("next");
+        feed(&mut pane, vec![dequeue]);
+        assert_eq!(bubbles(&pane), 1, "echo reconciles onto the optimistic bubble");
+        assert_eq!(pane.queued_prompt_count(), 0);
+        assert!(pane.has_status_activity());
+    }
+}
+
+#[test]
+fn esc_without_a_local_queue_entry_waits_for_the_server_echo() {
+    let mut pane = pane(false);
+    feed(&mut pane, vec![queue("dequeue", 0, true, None)]);
+    // Queued by another client: nothing local to promote.
+    pane.queued_prompt_count = 1;
+    pane.queued_prompt_preview = Some("theirs".into());
+    let before = pane.messages.len();
+    pane.abort_session();
+    assert_eq!(pane.messages.len(), before);
+    assert_eq!(pane.queued_prompt_count(), 1);
+}

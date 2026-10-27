@@ -1294,6 +1294,11 @@ pub struct NeoismAgentPane {
     /// `(session_id, request_id)` of an idle `/compact` shown as Compacting
     /// the instant it was submitted, before the server's CompactionStarted.
     pub(super) optimistic_compact: Option<(String, String)>,
+    /// Hash of the visible sidebar rows last queued for preview prefetch.
+    pub(super) catalog_prefetch_signature: u64,
+    /// A just-opened session with no transcript yet: paint its preview the
+    /// frame a prefetch lands instead of waiting for the full open.
+    pub(super) awaiting_preview_session: Option<(String, Instant)>,
     /// Fetched older-history page awaiting prepend while the renderer warms its
     /// layout caches (see `next_timeline_warm_message`).
     pub(super) staged_older_page: Option<StagedOlderTimelinePage>,
@@ -1644,6 +1649,8 @@ impl Default for NeoismAgentPane {
             queued_prompt_preview: None,
             pending_compact: None,
             optimistic_compact: None,
+            catalog_prefetch_signature: 0,
+            awaiting_preview_session: None,
             staged_older_page: None,
             sent_history: Vec::new(),
             history_index: None,

@@ -54,6 +54,11 @@ models.dev provider/model catalog metadata - MIT License, Copyright (c) 2025 mod
 
 OpenCode provider artwork (`neoism-agent/sdk/typescript/packages/gui/src/components/providers/icons.svg`) — MIT, Copyright (c) 2025 opencode. See `neoism-agent/sdk/typescript/packages/gui/src/components/providers/LICENSE.opencode`.
 
+Neoism Browser Control (`neoism-agent/browser-control`) uses Playwright Core
+(Apache-2.0, Microsoft), the MCP TypeScript SDK (MIT, Anthropic), ws (MIT,
+Einar Otto Stangvik and contributors), and Zod (MIT, Colin McDonnell).
+Their license files are included with the runtime's installed npm dependencies.
+
 MCP service artwork — Firecrawl mark from Lobe Icons, MIT, Copyright (c) 2023 LobeHub; Webflow mark from Simple Icons, CC0-1.0. SVG sources, rasterizations, source URLs, and the LobeHub MIT license are in `neoism-frontend/shared/assets/icons/MCP-ARTWORK.md`. Service marks remain trademarks of their respective owners.
 
 Claude provider artwork — Claude starburst from Lobe Icons, MIT, Copyright (c) 2023 LobeHub. Source, atlas-generation notes, and a link to the bundled MIT license are in `neoism-frontend/shared/assets/icons/PROVIDER-ARTWORK.md`. The mark remains a trademark of Anthropic.

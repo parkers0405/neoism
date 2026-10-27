@@ -1309,6 +1309,12 @@ pub(crate) async fn v2_session_children(
                     crate::caller::local_collaboration_session(false, session)
                 })
         })
+        .map(|mut session| {
+            // Server-side context bookkeeping (~26 KB per child). The roster
+            // never reads it; a 60-subagent family sent ~2 MB per refresh.
+            session.extra.remove("contextEpoch");
+            session
+        })
         .collect();
     Ok(Json(Page {
         items,

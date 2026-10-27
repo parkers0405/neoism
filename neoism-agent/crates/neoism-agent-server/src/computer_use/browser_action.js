@@ -3,17 +3,26 @@
   const state = globalThis.__neoismComputer;
   if (!state || state.token !== request.token) return fail('Stale observation; observe again');
   if (document.visibilityState !== 'visible' || !document.hasFocus() || !/^https?:$/.test(location.protocol) || location.href !== request.url) return fail('Tab is unfocused, navigated or unsupported');
-  const elementAction = ['click','fill','select'].includes(request.action);
+  const elementAction = ['click','fill','select','check','uncheck'].includes(request.action);
   const record = elementAction ? state.refs.get(request.ref) : null;
   const el = record?.el;
   if (elementAction) {
     if (!el || !el.isConnected || el.ownerDocument !== document) return fail('Element detached; observe again');
+    for (let ancestor = el; ancestor; ancestor = ancestor.parentElement || ancestor.getRootNode().host) {
+      if (ancestor.matches('[hidden],[aria-hidden="true"],[inert]')) return fail('Element is hidden or inert');
+    }
     if (state.signature(el) !== record.signature) return fail('Element changed since observation; observe again');
     const box = el.getBoundingClientRect();
     if (box.width <= 0 || box.height <= 0 || getComputedStyle(el).visibility !== 'visible') return fail('Element is not visible');
     const x = Math.max(0, Math.min(innerWidth - 1, box.x + box.width / 2));
     const y = Math.max(0, Math.min(innerHeight - 1, box.y + box.height / 2));
-    const top = document.elementFromPoint(x, y);
+    let top = document.elementFromPoint(x, y);
+    // document.elementFromPoint returns the host; descend to the actual control.
+    while (top?.shadowRoot) {
+      const inner = top.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === top) break;
+      top = inner;
+    }
     if (!top || (top !== el && !el.contains(top))) return fail('Element is obscured; observe again');
     if (el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true' || el.closest('[inert]')) return fail('Element disabled');
     if (el instanceof HTMLInputElement && ['password','file','hidden'].includes(el.type)) return fail('Sensitive/unsupported input; use deliberate desktop interaction');
@@ -22,7 +31,23 @@
   state.token = null;
   if (request.action === 'click') {
     el.click();
+  } else if (request.action === 'check' || request.action === 'uncheck') {
+    if (!(el instanceof HTMLInputElement) || !['checkbox','radio'].includes(el.type) || (el.type === 'radio' && request.action === 'uncheck')) return fail('Not a supported checkable control');
+    const checked = request.action === 'check';
+    if (el.checked !== checked) el.click();
+    if (el.checked !== checked) return fail('Control did not accept the requested checked state');
   } else if (request.action === 'fill') {
+    if (el.isContentEditable) {
+      el.focus();
+      const selection = el.getRootNode().getSelection?.() || document.getSelection();
+      if (!selection) return fail('Editable selection unavailable');
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      if (!document.execCommand('insertText', false, request.value)) return fail('Editor did not accept literal text');
+      return {ok:true};
+    }
     if (!(el instanceof HTMLTextAreaElement) && !(el instanceof HTMLInputElement && ['text','search','email','url','tel','number'].includes(el.type))) return fail('Not a supported text field');
     if (el.readOnly) return fail('Field is read-only');
     const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Neoism Browser Control for Firefox",
+  "version": "0.2.0",
+  "description": "Connect selected Firefox tabs to Neoism's local Playwright/BiDi browser driver.",
+  "permissions": ["activeTab", "tabs", "storage", "scripting", "alarms", "downloads"],
+  "host_permissions": ["<all_urls>"],
+  "background": {"scripts": ["background.js"]},
+  "action": {"default_title": "Neoism Browser Control", "default_popup": "popup.html"},
+  "content_scripts": [{"matches": ["http://*/*", "https://*/*"], "js": ["content-script.js"], "run_at": "document_start"}],
+  "browser_specific_settings": {"gecko": {"id": "browser-control@neoism.dev", "strict_min_version": "128.0"}},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:19991"}
+}

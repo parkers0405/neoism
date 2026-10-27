@@ -1,5 +1,33 @@
 # Browser-aware computer use
 
+## Chrome and Firefox browser plugins
+
+Neoism now includes a full Playwright browser runtime and separate Chrome and
+Firefox extensions in [browser-control](browser-control/README.md). The relay,
+extension protocol, Chrome debugger adapter, executor, sessions, snapshots and
+UI are Neoism implementations using standard Playwright and MCP libraries.
+Firefox uses Neoism's version-pinned BiDi adapter. Both expose sessions, compact
+snapshots, network summaries, screenshots, browser-managed downloads and user
+handoffs, plus bounded screenshot-sampled WebM recording and rolling capture
+through ffmpeg. Recording does not capture audio or browser compositor frames. Check the
+driver's `capabilities` tool for its actual engine and limits.
+
+After building or installing that runtime, Neoism's MCP picker offers
+`browser_chrome` and `browser_firefox`. Enable the relevant server and load its
+browser extension. The source checkout and packaged runtime layouts are
+discovered without editing configuration; explicit existing entries are
+preserved. The runtime's README documents Chrome installation, Firefox pairing
+and its required loopback BiDi endpoint, packaging, and isolated tests.
+
+For page automation, prefer an enabled browser plugin's `execute` and compact
+snapshots. Run several already-decided Playwright actions in one call and return
+only the result needed for the next decision. The native `computer` service
+below remains available for desktop apps, browser chrome, or browsers without
+an attached plugin. These are distinct MCP services and use their respective
+tool-permission paths.
+
+## Built-in native browser attachment
+
 User-facing attachment instructions are also bundled in [Computer Use](../neoism-workspace-index/src/welcome/Neoism%20Agent/Computer%20Use.md), available through the Docs tool at `Neoism Agent/Computer Use.md`. Models can call `computer.capabilities` for self-contained Firefox/Chromium setup instructions before permission approval, without connecting to a browser.
 
 The built-in `computer` MCP includes optional Chromium (CDP) and Firefox (WebDriver BiDi) page control alongside native input. The normal flow is `computer.windows` then `computer.browser_attach({target})`: it attaches an explicitly selected, already-debuggable active browser in memory without restarting Neoism, launching a profile, or changing environment. If it returns `domAvailable:false`, use screenshot/input on that target unless the user explicitly asks for DOM setup.
@@ -72,7 +100,7 @@ Example arguments for clicking and observing an expected outcome:
 
 `expect.kind` supports `text` and `url` substring matches, or `element` exact accessible-label matches within the bounded observation. Maximum wait is 3000 ms, under the existing overall computer operation deadline. No expectation means an immediate observation, not a readiness guarantee. An expectation matching after an action is not proof that the action caused it.
 
-`fill` replaces supported text/textarea values and dispatches input/change events without using the clipboard. `select` selects an exact enabled option value in a single-select. `click` invokes the DOM click method. These events are not trusted native input; sites requiring trusted events, user activation, or custom editor integration may need pixel tools.
+`fill` replaces supported text/textarea values and dispatches input/change events without using the clipboard. It also supports contenteditable editors through literal text insertion, without interpreting HTML. `check` and `uncheck` request an explicit native checkbox state and avoid clicking an already-correct state; native radio controls support `check`. `select` selects an exact enabled option value in a single-select. `click` invokes the DOM click method. Controls inside open shadow roots have normal refs. These actions do not provide a trusted native-input guarantee; sites requiring trusted events, user activation, or custom editor integration may need pixel tools.
 
 ## Safety and limitations
 
@@ -81,7 +109,7 @@ Example arguments for clicking and observing an expected outcome:
 - Actions reject expired observations (30 seconds), mismatched targets, changed URLs, detached/changed elements, disabled or obscured controls, and observations already consumed by an action or superseded by another observation.
 - Cancellation and permission revocation are checked at protocol boundaries and during waits. An in-flight page action cannot be recalled. `partial_unknown` means observe before deciding whether to retry; no action is automatically replayed.
 - Content extraction is bounded to 120 controls, 3000 scanned element/text nodes, 12000 text characters, 240-character labels and 50 options per select. It is a compact DOM-derived view, not the complete accessibility tree. Check `truncated`.
-- Only visible main-frame HTTP(S) page content is supported. Shadow roots, nested frames, passwords, file uploads, canvas content, native dialogs and browser chrome require the native desktop path. DOM-derived names approximate accessible naming; they do not implement the entire accessibility-name specification.
+- Only visible main-frame HTTP(S) page content and open shadow roots are supported. Closed shadow roots, nested frames, passwords, file uploads, canvas content, native dialogs and browser chrome require the native desktop path. DOM-derived names approximate accessible naming; they do not implement the entire accessibility-name specification.
 - The process retains at most 16 recent observations, each eligible for delta comparison for 60 seconds. They contain potentially private page text; nothing is written to disk by this adapter.
 
 ## Cropped native screenshots
@@ -98,6 +126,10 @@ For known desktop sequences, prefer `batch` with `screenshot` over separate inpu
 
 ## Timing and verification
 
+Chromium now retains one browser transport and its current page session across tool calls, rather than performing another WebSocket handshake and page attachment on every call. Switching pages detaches Neoism's previous page session. Browser-wide protocol commands stay outside the page session. A failed or unconfirmed Chromium transport is discarded without replaying the action; the next deliberate observation can reconnect. Disconnect closes the transport and invalidates its refs without closing the browser. Firefox retains its existing owned BiDi session and explicit cleanup behavior.
+
+Worker latency counters include `browserConnections`, `browserConnectionReuses`, and `browserProtocolRequests`. Use these with wall time and task success: eliminating repeated handshakes is a structural improvement, not a measured claim of superiority over another agent.
+
 Native worker results include the existing queue/worker/stage timings. Browser action results add observation duration and poll count. MCP result metadata includes executor `serverMs`, covering permission evaluation, catalog lookup, dispatch and result conversion. It **does not** measure human approval wait, model inference, or client transport; it is not an end-to-end latency claim. Compare successful task completion, number of model/tool rounds, retries, observation sizes and total wall time when benchmarking against pixel control.
 
 Run the focused Rust tests with `cargo test -p neoism-agent-server computer_use --lib`. The opt-in browser integration test launches a throwaway headless profile and local fixture, never the user's browser:
@@ -107,9 +139,26 @@ NEOISM_TEST_CHROMIUM="$(command -v chromium)" node --test \
   neoism-agent/crates/neoism-agent-server/src/computer_use/browser.live.test.mjs
 ```
 
+To include the production Rust Chromium transport, also set `NEOISM_TEST_BROWSER_RUST_BIN` to the test executable produced by the Rust command above. The fixture passes only its throwaway browser endpoint, tab and local URL to the ignored `chromium_live_protocol_roundtrip` test. This checks three observe/action/observe operations using one connection and two reuses. It does not exercise real accounts or establish end-to-end agent latency.
+
 Firefox's fixture similarly uses a temporary profile and local page. Set `NEOISM_TEST_BROWSER_RUST=1` to additionally run the production Rust BiDi connection/session/action roundtrip against that fixture before the JavaScript integration checks:
 
 ```sh
 NEOISM_TEST_FIREFOX="$(command -v firefox)" NEOISM_TEST_BROWSER_RUST=1 node --test \
   neoism-agent/crates/neoism-agent-server/src/computer_use/browser.firefox.live.test.mjs
 ```
+
+## Neoism extension runtime
+
+The extension path uses Neoism's own local service and toolbar plugins. Build
+`browser-control`, enable `browser_chrome` or `browser_firefox` in the MCP picker,
+then pair and attach a tab using the instructions in its README. No competing
+agent package or external browser-control service is required.
+
+The native computer backend and extension runtime are complementary. The
+extension provides real Playwright locators, frames, uploads and compact
+snapshots; native input remains available for browser chrome and desktop apps.
+The extension runtime follows normal external MCP permission rules. Trusted
+JavaScript execution is not a code sandbox, and Firefox's debugging endpoint
+itself has profile-wide privileges. Use an appropriate profile and keep its
+debugging port on loopback.

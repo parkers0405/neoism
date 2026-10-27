@@ -78,7 +78,8 @@ fn conversation_cache_bounds_ttl_and_replacement_are_strict() {
         insert_wire(
             &mut cache,
             key(&i.to_string()),
-            wire_page(&"x".repeat(700 * 1024)),
+            // Large enough that the byte budget, not the entry cap, evicts.
+            wire_page(&"x".repeat(MAX_BYTES / MAX_ENTRIES * 2)),
             100,
             now,
         );
@@ -177,7 +178,7 @@ fn conversation_cache_bounds_decoded_image_payloads_not_only_wire_bytes() {
     let json = serde_json::json!({"items": [{
         "info": {"id": "image-message", "role": "assistant"},
         "parts": [{"id": "image", "type": "file", "mime": "image/png",
-            "filename": "generated.png", "url": format!("data:image/png;base64,{}", "A".repeat(600 * 1024))}]
+            "filename": "generated.png", "url": format!("data:image/png;base64,{}", "A".repeat(MAX_ENTRY_BYTES * 6 / 10))}]
     }]}).to_string();
     assert!(json.len() < MAX_ENTRY_BYTES);
     let page = decode_snapshot(&json).unwrap();
@@ -224,9 +225,9 @@ fn conversation_cache_accounts_composition_children_and_reserved_capacity() {
         .push(neoism_ui::panels::agent_pane::state::NeoismAgentImage {
             filename: "child.png".into(),
             mime: "image/png".into(),
-            url: format!("data:image/png;base64,{}", "B".repeat(600 * 1024)).into(),
+            url: format!("data:image/png;base64,{}", "B".repeat(MAX_ENTRY_BYTES * 6 / 10)).into(),
         });
-    assert!(resident_bytes(&identity, &page) > baseline + 600 * 1024);
+    assert!(resident_bytes(&identity, &page) > baseline + MAX_ENTRY_BYTES * 6 / 10);
     assert!(resident_bytes(&identity, &page) > MAX_ENTRY_BYTES);
     page.blocks[0].composition_children.clear();
     let before_reserve = resident_bytes(&identity, &page);

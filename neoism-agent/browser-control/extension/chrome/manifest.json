@@ -1,0 +1,13 @@
+{
+  "manifest_version":3,
+  "name":"Neoism Browser Control",
+  "version":"0.2.0",
+  "minimum_chrome_version":"125",
+  "description":"Connect selected Chrome tabs to Neoism's own local Playwright driver.",
+  "permissions":["activeTab","tabs","storage","scripting","alarms","debugger","downloads"],
+  "host_permissions":["<all_urls>"],
+  "background":{"service_worker":"background.js","type":"module"},
+  "action":{"default_title":"Neoism Browser Control","default_popup":"popup.html"},
+  "content_scripts":[{"matches":["http://*/*","https://*/*"],"js":["content-script.js"],"run_at":"document_start"}],
+  "content_security_policy":{"extension_pages":"script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:19990"}
+}

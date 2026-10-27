@@ -2129,6 +2129,28 @@ impl NeoismAgentPane {
         );
     }
 
+    /// Stopping a run with this pane's prompt queued behind it starts that
+    /// prompt next. Show its bubble now; the server's dequeue echo carries the
+    /// same client message id and reconciles onto it.
+    pub(crate) fn promote_queued_prompt_on_stop(&mut self) {
+        if !self.status_timing.handoff.waiting() || self.queued_prompt_count == 0 {
+            return;
+        }
+        let Some(message) = self.status_timing.promote_local_queued() else {
+            return;
+        };
+        let text = message.text.clone();
+        self.messages.push(message);
+        self.remember_pending_user_prompt(&text);
+        self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
+        self.queued_prompt_count -= 1;
+        if self.queued_prompt_count == 0
+            || self.queued_prompt_preview.as_deref().map(str::trim) == Some(text.trim())
+        {
+            self.queued_prompt_preview = None;
+        }
+    }
+
     pub(super) fn promote_queue_handoff(&mut self) {
         if self.status_timing.handoff.dequeue() {
             self.abort_requested_at = None;

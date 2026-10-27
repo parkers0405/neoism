@@ -248,6 +248,40 @@ async fn finish_fts_transaction(
     Ok(Ok(()))
 }
 
+pub(super) fn is_registry_corruption(error: &turso::Error) -> bool {
+    error
+        .to_string()
+        .contains("FTS registry scan hit an unrecognized row")
+}
+
+/// Rebuild the FTS index in place (DROP + CREATE re-indexes every projected
+/// document). The caller must already hold the writer gate. Runs on a
+/// blocking thread: a large store takes seconds of native indexing.
+pub(super) async fn repair_fts_locked(db: &Db) -> anyhow::Result<()> {
+    let database = db.database.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let started = std::time::Instant::now();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(async {
+            let connection = database.connect()?;
+            connection.execute("BEGIN IMMEDIATE", ()).await?;
+            let result = async {
+                rebuild_fts(&connection).await?;
+                connection.execute("COMMIT", ()).await?;
+                Ok::<_, turso::Error>(())
+            }
+            .await;
+            finish_fts_transaction(&connection, result).await
+        })
+    })
+    .await???;
+    tracing::warn!(
+        duration_ms = started.elapsed().as_millis() as u64,
+        "conversation search index rebuilt"
+    );
+    Ok(())
+}
+
 async fn rebuild_fts(connection: &turso::Connection) -> turso::Result<()> {
     connection.execute("DROP INDEX IF EXISTS conversation_search_fts", ()).await?;
     connection.execute(CREATE_FTS, ()).await?;

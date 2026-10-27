@@ -7,15 +7,15 @@
 //! short render means the stall happened OUTSIDE render (event handling,
 //! daemon/agent pumps); a long phase names the render-side culprit.
 //!
-//! The same switch also times Alt+A from keypress to the first presented
-//! frame.
+//! The same switch also times Alt+A, and agent Enter/Esc, from keypress to
+//! the first presented frame.
 
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::time::Instant;
 
 const DEFAULT_SPIKE_US: u128 = 5_000;
-const MAX_PHASES: usize = 16;
+const MAX_PHASES: usize = 24;
 
 fn config() -> Option<u128> {
     static CONFIG: OnceLock<Option<u128>> = OnceLock::new();
@@ -39,6 +39,15 @@ thread_local! {
     static BETWEEN_FRAMES: RefCell<Vec<(&'static str, u128)>> = const { RefCell::new(Vec::new()) };
     static LAST_FRAME_END: Cell<Option<Instant>> = const { Cell::new(None) };
     static AGENT_OPEN_PRESSED: Cell<Option<Instant>> = const { Cell::new(None) };
+    static INPUT_PRESSED: Cell<Option<(&'static str, Instant)>> = const { Cell::new(None) };
+}
+
+/// Record a key (Enter/Esc in the agent pane) whose next finished frame
+/// reports keypress latency.
+pub(crate) fn note_input_pressed(label: &'static str) {
+    if enabled() {
+        INPUT_PRESSED.with(|cell| cell.set(Some((label, Instant::now()))));
+    }
 }
 
 /// Record the Alt+A keypress; the next finished frame reports latency.
@@ -110,6 +119,13 @@ impl FrameSpike {
         if let Some(pressed) = AGENT_OPEN_PRESSED.with(Cell::take) {
             eprintln!(
                 "[frame-spike] alt+a keypress -> frame presented: {}µs (this frame {}µs)",
+                now.duration_since(pressed).as_micros(),
+                total_us,
+            );
+        }
+        if let Some((label, pressed)) = INPUT_PRESSED.with(Cell::take) {
+            eprintln!(
+                "[frame-spike] {label} keypress -> frame finished: {}µs (this frame {}µs)",
                 now.duration_since(pressed).as_micros(),
                 total_us,
             );

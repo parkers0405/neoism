@@ -369,6 +369,15 @@ impl NeoismAgentPane {
         } else {
             self.queued_prompt_count += 1;
             self.queued_prompt_preview = Some(text.clone());
+            // Remember the bubble this queued prompt becomes, so stopping the
+            // current run can show it immediately (see `abort_session`).
+            let mut message =
+                NeoismAgentMessage::user(text.clone()).with_id(message_id.clone());
+            message.author = Some(crate::neoism::agent::commands::native_prompt_author(
+                self.local_presence_name(),
+            ));
+            message.images = self.input_images();
+            self.status_timing.note_local_queued(message);
         }
         // `expanded` may contain a large paste. Reuse the expansion already
         // computed for echo canonicalization instead of rebuilding it during

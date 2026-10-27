@@ -1,6 +1,12 @@
 //! Platform-independent prompt admission and Windows-only clock correction.
 use super::{instant_from_epoch_millis, Instant};
+use super::NeoismAgentMessage;
 use neoism_ui::panels::agent_pane::status_policy::PromptAdmission;
+use std::collections::VecDeque;
+
+/// Prompts this pane queued behind a running turn, oldest first, as the user
+/// bubbles they become once the server dequeues them.
+const MAX_LOCAL_QUEUED: usize = 16;
 
 #[derive(Clone, Debug)]
 pub(super) struct DesktopStatusTiming {
@@ -12,6 +18,11 @@ pub(super) struct DesktopStatusTiming {
     server_started_at: Option<u64>,
     retired_execution: Option<String>,
     execution_wall: Option<(String, Instant, u64)>,
+    local_queued: VecDeque<NeoismAgentMessage>,
+    /// Queued prompt already shown as a bubble on stop. Queue snapshots hide
+    /// it until its own dequeue arrives; unlike `admission`, a snapshot from
+    /// the stopped run (running=true) must not re-expose it.
+    promoted_queued: Option<String>,
 }
 
 impl Default for DesktopStatusTiming {
@@ -25,6 +36,8 @@ impl Default for DesktopStatusTiming {
             server_started_at: None,
             retired_execution: None,
             execution_wall: None,
+            local_queued: VecDeque::new(),
+            promoted_queued: None,
         }
     }
 }
@@ -81,14 +94,68 @@ impl DesktopStatusTiming {
         running: bool,
         preview: Option<&str>,
     ) -> usize {
-        self.admission.project(count, running, preview)
+        let projected = self.admission.project(count, running, preview);
+        if count == 0 {
+            // Nothing left to hide: the promoted prompt left the queue (or the
+            // queue was cleared) without a matching dequeue reaching us.
+            self.promoted_queued = None;
+            // A running turn may report 0 before our queue POST lands; only an
+            // idle empty queue proves the local entries are gone.
+            if !running {
+                self.local_queued.clear();
+            }
+        }
+        if self.promoted_queued.is_some() && preview != Some("Compaction queued") {
+            projected.saturating_sub(1)
+        } else {
+            projected
+        }
     }
 
     pub(super) fn queue_preview(&self, preview: Option<String>) -> Option<String> {
+        // The wire preview names the head, which is the promoted prompt.
+        if self.promoted_queued.is_some() && preview.as_deref() != Some("Compaction queued") {
+            return None;
+        }
         self.admission.project_preview(preview)
     }
 
+    pub(super) fn note_local_queued(&mut self, message: NeoismAgentMessage) {
+        if self.local_queued.len() >= MAX_LOCAL_QUEUED {
+            self.local_queued.pop_front();
+        }
+        self.local_queued.push_back(message);
+    }
+
+    /// A queued dispatch that never reached the server.
+    pub(super) fn drop_newest_local_queued(&mut self) {
+        self.local_queued.pop_back();
+    }
+
+    pub(super) fn forget_local_queued(&mut self, message_id: &str) {
+        self.local_queued.retain(|message| message.id != message_id);
+    }
+
+    /// On stop, the head of this pane's queue starts next: hand it back so it
+    /// can be shown immediately instead of after the server's dequeue echo.
+    pub(super) fn promote_local_queued(&mut self) -> Option<NeoismAgentMessage> {
+        if self.promoted_queued.is_some() {
+            return None;
+        }
+        let message = self.local_queued.pop_front()?;
+        self.promoted_queued = Some(message.id.clone());
+        Some(message)
+    }
+
     pub(super) fn dequeue(&mut self, message_id: Option<&str>) -> bool {
+        if let Some(id) = message_id {
+            self.forget_local_queued(id);
+            if self.promoted_queued.as_deref() == Some(id) {
+                // Already shown and already removed from the visible count.
+                self.promoted_queued = None;
+                return true;
+            }
+        }
         let primary = self.admission.dequeue(message_id);
         if primary {
             self.confirm_admission();

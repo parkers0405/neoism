@@ -1,0 +1,1 @@
+{"compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext","strict":true,"noUncheckedIndexedAccess":true,"exactOptionalPropertyTypes":true,"allowImportingTsExtensions":true,"noEmit":true,"skipLibCheck":true,"types":["node","chrome"]},"include":["src/**/*.ts","extension/**/*.ts","scripts/**/*.ts","test/**/*.ts"],"exclude":["**/dist/**","node_modules"]}

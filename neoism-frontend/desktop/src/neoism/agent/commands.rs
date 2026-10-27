@@ -499,6 +499,8 @@ impl NeoismAgentPane {
     }
 
     pub(super) fn execute_switch_session_command(&mut self, session_id: String) {
+        crate::screen::render::frame_spike::note_input_pressed("switch");
+        let _busy = crate::screen::render::frame_spike::busy_span("switch_session");
         self.conversation_header.clear();
         self.close_connect();
         if session_id.is_empty() {
@@ -548,7 +550,72 @@ impl NeoismAgentPane {
             cached.state.title = title;
         }
         self.apply_local_session_selection(&session_id);
-        self.activate_session_and_preload(session_id, false);
+        self.activate_session_and_preload(session_id.clone(), false);
+        self.awaiting_preview_session = (self.session_id.as_deref()
+            == Some(session_id.as_str())
+            && self.messages.is_empty())
+        .then(|| (session_id, Instant::now()));
+    }
+
+    /// Paint a prefetched preview that landed after the click. Only touches
+    /// an untouched, still-empty transcript; the full open reconciles it.
+    pub(crate) fn poll_awaiting_preview(&mut self) -> bool {
+        let Some((session_id, since)) = self.awaiting_preview_session.as_ref() else {
+            return false;
+        };
+        let session_id = session_id.as_str();
+        if self.session_id.as_deref() != Some(session_id)
+            || since.elapsed() > std::time::Duration::from_secs(3)
+            || !self.messages.is_empty()
+            || self.initial_history_preview.is_some()
+        {
+            self.awaiting_preview_session = None;
+            return false;
+        }
+        let Some((page, limit)) = super::api::conversation_cache::peek(&self.server, session_id)
+        else {
+            // Keep frames coming: the prefetch worker does not wake the loop.
+            return true;
+        };
+        self.awaiting_preview_session = None;
+        self.timeline_history.oldest_loaded_cursor = page.oldest_cursor.clone();
+        self.timeline_history.has_older =
+            page.raw_count >= limit && page.oldest_cursor.is_some();
+        self.messages = page.blocks.clone();
+        self.initial_history_preview = Some(page);
+        self.invalidate_timeline_layout();
+        true
+    }
+
+    /// Preload the sidebar's first rows into the preview cache so opening
+    /// one paints from memory. Local agent server only: on a joined
+    /// workspace these pages would cross the network on every sidebar open.
+    /// Cheap per frame: a hash of a few ids.
+    pub(crate) fn prefetch_catalog_previews(&mut self) {
+        use std::hash::{Hash, Hasher};
+        const VISIBLE_ROWS: usize = 12;
+        let local_server = super::neoism_agent_server();
+        if self.server.trim().trim_end_matches('/') != local_server.trim().trim_end_matches('/') {
+            return;
+        }
+        let rows = self
+            .side_panel
+            .sessions()
+            .iter()
+            .filter(|entry| !entry.is_header && !entry.is_excerpt && entry.source_key.is_none())
+            .take(VISIBLE_ROWS);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.server.hash(&mut hasher);
+        for entry in rows.clone() {
+            entry.id.hash(&mut hasher);
+        }
+        let signature = hasher.finish();
+        if signature != self.catalog_prefetch_signature {
+            self.catalog_prefetch_signature = signature;
+            for entry in rows {
+                super::api::prefetch_session_preview(&self.server, &entry.id);
+            }
+        }
     }
 
     fn activate_session_and_preload(&mut self, session_id: String, force: bool) {
@@ -1844,6 +1911,7 @@ impl NeoismAgentPane {
             return;
         }
         self.begin_queue_stop();
+        self.promote_queued_prompt_on_stop();
         self.settle_tracked_subagents(BranchStatus::Stopped);
         self.push_outbound(OutboundAgentCommand::AbortSession);
     }

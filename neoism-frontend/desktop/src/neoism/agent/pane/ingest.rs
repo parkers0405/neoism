@@ -2494,6 +2494,7 @@ impl NeoismAgentPane {
                             self.pending_user_prompts.pop();
                         }
                         if rollback_queue {
+                            self.status_timing.drop_newest_local_queued();
                             self.queued_prompt_count =
                                 self.queued_prompt_count.saturating_sub(1);
                             if self.queued_prompt_count == 0 {

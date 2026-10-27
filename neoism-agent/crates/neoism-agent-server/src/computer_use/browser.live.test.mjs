@@ -11,11 +11,26 @@ import { once } from 'node:events';
 const binary = process.env.NEOISM_TEST_CHROMIUM;
 const observe = await readFile(new URL('./browser_observe.js', import.meta.url), 'utf8');
 const act = await readFile(new URL('./browser_action.js', import.meta.url), 'utf8');
-test('isolated-world browser refs, action effects, deltas and stale protections', {skip: !binary, timeout:30000}, async () => {
+test('isolated-world browser refs, action effects, deltas and stale protections', {skip: !binary, timeout:process.env.NEOISM_TEST_BROWSER_RUST_BIN ? 60000 : 30000}, async () => {
   const profile = await mkdtemp(join(tmpdir(), 'neoism-browser-test-'));
   const server = createServer((_req, res) => {
     res.writeHead(200, {'content-type':'text/html'});
-    res.end(`<html><body style="min-height:3000px"><label for="q">Search</label><input id="q"><button id="go">Search now</button><select aria-label="Sort"><option value="a">Alpha</option><option value="b">Beta</option></select><input type="password" aria-label="Secret"><input type="file" aria-label="Upload"><p id="result">Ready</p><script>document.querySelector('#go').onclick=()=>{document.querySelector('#result').textContent='Results '+document.querySelector('#q').value};</script></body></html>`);
+    res.end(`<html><body style="min-height:3000px">
+      <label for="q">Search</label><input id="q"><button id="go">Search now</button>
+      <select aria-label="Sort"><option value="a">Alpha</option><option value="b">Beta</option></select>
+      <input type="password" aria-label="Secret"><input type="file" aria-label="Upload">
+      <div contenteditable="true" role="textbox" aria-label="Editor">Original <b>formatted</b> text</div>
+      <input type="checkbox" aria-label="Subscribe" id="subscribe">
+      <input type="radio" name="choice" aria-label="Choice A" id="radio">
+      <div id="component"></div><p id="result">Ready</p>
+      <script>
+        document.querySelector('#go').onclick=()=>{document.querySelector('#result').textContent='Results '+document.querySelector('#q').value};
+        document.querySelector('#subscribe').onclick=()=>{document.body.dataset.checkClicks=String(Number(document.body.dataset.checkClicks || 0)+1)};
+        const root = document.querySelector('#component').attachShadow({mode:'open'});
+        root.innerHTML='<label id="component-name">Component search</label><input aria-labelledby="component-name"><div id="nested"></div>';
+        root.querySelector('#nested').attachShadow({mode:'open'}).innerHTML='<button id="nested-button">Nested action</button>';
+        root.querySelector('#nested').shadowRoot.querySelector('button').onclick=()=>{document.querySelector('#result').textContent='Nested clicked'};
+      </script></body></html>`);
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -60,6 +75,18 @@ test('isolated-world browser refs, action effects, deltas and stale protections'
     let {sessionId} = await call('Target.attachToTarget',{targetId,flatten:true});
     await call('Page.bringToFront',{},sessionId);
     await new Promise(resolve => setTimeout(resolve,250));
+    if (process.env.NEOISM_TEST_BROWSER_RUST_BIN) {
+      const rust = spawn(process.env.NEOISM_TEST_BROWSER_RUST_BIN, ['chromium_live_protocol_roundtrip', '--ignored', '--test-threads=1', '--nocapture'], {
+        env:{...process.env, NEOISM_TEST_CDP_URL:endpoint, NEOISM_TEST_CDP_TAB:targetId, NEOISM_TEST_BROWSER_PAGE:url},
+        stdio:['ignore','pipe','pipe'],
+      });
+      let output = '';
+      rust.stdout.on('data', data => { output = (output + data).slice(-16000); });
+      rust.stderr.on('data', data => { output = (output + data).slice(-16000); });
+      const [code] = await once(rust, 'exit');
+      assert.equal(code, 0, output);
+      console.log(output.trim());
+    }
     const tree = await call('Page.getFrameTree',{},sessionId);
     const {executionContextId} = await call('Page.createIsolatedWorld',{frameId:tree.frameTree.frame.id,worldName:'neoism-computer-use'},sessionId);
     const evaluate = async expression => {
@@ -88,10 +115,53 @@ test('isolated-world browser refs, action effects, deltas and stale protections'
     assert.equal((await evaluate(`(${act})(${JSON.stringify(select)})`)).ok,true);
     assert.equal(await evaluate('document.querySelector("select").value'),'b');
     assert.equal(page.elements.find(e=>e.name==='Search').value,payload.value,'filled value is observable');
+    let step = 0;
+    const perform = async (name, action, value) => {
+      const token = `extra-${++step}`;
+      const observed = await evaluate(`(${observe})(${JSON.stringify(token)})`);
+      const element = observed.elements.find(e => e.name === name);
+      assert.ok(element, `Missing control: ${name}`);
+      assert.ok(element.actions.includes(action), `Action not advertised: ${name} ${action}`);
+      const result = await evaluate(`(${act})(${JSON.stringify({token, ref:element.ref, action, value, url})})`);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      return element;
+    };
+    const shadowField = await perform('Component search', 'fill', 'inside shadow');
+    assert.equal(await evaluate('document.querySelector("#component").shadowRoot.querySelector("input").value'), 'inside shadow');
+    assert.equal((await perform('Component search', 'fill', 'stable shadow ref')).ref, shadowField.ref);
+    await perform('Nested action', 'click');
+    assert.equal(await evaluate('document.querySelector("#result").textContent'), 'Nested clicked');
+    const editorText = 'literal <b>markup</b> & "quotes"';
+    await perform('Editor', 'fill', editorText);
+    assert.equal(await evaluate('document.querySelector("[contenteditable]").textContent'), editorText);
+    assert.equal(await evaluate('document.querySelector("[contenteditable]").querySelector("b")'), null, 'fill inserts literal text');
+    const editorPage = await evaluate(`(${observe})("editor-result")`);
+    assert.equal(editorPage.elements.find(e => e.name === 'Editor').value, editorText);
+    await perform('Subscribe', 'check');
+    await perform('Subscribe', 'check');
+    assert.equal(await evaluate('document.body.dataset.checkClicks'), '1', 'check is idempotent');
+    await perform('Subscribe', 'uncheck');
+    await perform('Subscribe', 'uncheck');
+    assert.equal(await evaluate('document.body.dataset.checkClicks'), '2', 'uncheck is idempotent');
+    assert.equal(await evaluate('document.querySelector("#subscribe").checked'), false);
+    await perform('Choice A', 'check');
+    assert.equal(await evaluate('document.querySelector("#radio").checked'), true);
+    // A covering host-level element must also block a shadow control.
+    const shadowPage = await evaluate(`(${observe})("shadow-covered")`);
+    await evaluate('document.body.insertAdjacentHTML("beforeend",\'<div id="shadow-overlay" style="position:fixed;inset:0;z-index:999;background:white"></div>\')');
+    assert.equal((await evaluate(`(${act})(${JSON.stringify({token:'shadow-covered', ref:shadowPage.elements.find(e=>e.name==='Component search').ref, action:'fill', value:'must not insert', url})})`)).ok, false);
+    await evaluate('document.querySelector("#shadow-overlay").remove()');
+    const beforeInert = await evaluate(`(${observe})("shadow-inert")`);
+    await evaluate('document.querySelector("#component").inert=true');
+    assert.equal((await evaluate(`(${act})(${JSON.stringify({token:'shadow-inert', ref:beforeInert.elements.find(e=>e.name==='Component search').ref, action:'fill', value:'must not insert', url})})`)).ok, false);
+    const inertPage = await evaluate(`(${observe})("inert-result")`);
+    assert.ok(!inertPage.elements.some(e=>e.name==='Component search'), 'inert shadow host hides its controls');
+    await evaluate('document.querySelector("#component").inert=false');
     page = await evaluate(`(${observe})("scroll")`);
     assert.equal(page.canScrollDown,true);
     assert.equal((await evaluate(`(${act})(${JSON.stringify({token:'scroll',action:'scroll',value:'down',url})})`)).ok,true);
     assert.ok(await evaluate('scrollY > 0'));
+    await evaluate('scrollTo(0,0)');
     page = await evaluate(`(${observe})("occluded")`);
     await evaluate('document.body.insertAdjacentHTML("beforeend",\'<div id="overlay" style="position:fixed;inset:0;z-index:999;background:white"></div>\')');
     assert.equal((await evaluate(`(${act})(${JSON.stringify({...payload,token:'occluded'})})`)).ok,false,'covered control rejected');

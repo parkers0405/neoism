@@ -3,6 +3,21 @@ import { NativeEditor } from "../src/native-core";
 import {NativeMarkdown} from "../src/markdown/NativeMarkdown";
 import {loadConfig} from "../src/config";
 
+test("code caret-follow starts from rest after idle and carries held-arrow motion",async()=>{
+ for(const idle of [8,100]){
+  const editor=new NativeEditor("idle-scroll.rs",Array.from({length:100},(_,i)=>`line ${i}`).join("\n"),true);
+  try{
+   editor.call("layout",{width:800,height:210,cellWidth:10,rowHeight:21});
+   await Bun.sleep(idle);
+   expect(editor.call("goto",{line:6,col:0}).scrollY).toBe(0);
+   await Bun.sleep(8);const moving=editor.call("frame").scrollY;
+   expect(moving).toBeGreaterThan(0);
+   await Bun.sleep(8);
+   expect(editor.call("key",{key:"down"}).scrollY).toBeGreaterThan(moving);
+  }finally{editor.dispose();}
+ }
+});
+
 test("code scroll benchmark input traverses rows rather than clamping at the document start", async () => {
   const editor = new NativeEditor("direction.rs", Array.from({ length: 200 }, (_, i) => `let value_${i} = ${i};`).join("\n"), true);
   try {

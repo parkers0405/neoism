@@ -1,0 +1,266 @@
+{
+  "branch": "experiment/gpuix-frontend",
+  "constraints": [
+    "No test windows.",
+    "User authorized one final updated app launch for testing; do not restart the daemon or launch automated test windows.",
+    "Preserve dirty buffers, drafts, saved workspaces and daemon-owned PTYs.",
+    "Use SolidJS and canonical Rust behavior/painting; no invented prompts.",
+    "Workspace tabs fit titles plus icon/close/padding; both tab rows scroll with inline +."
+  ],
+  "tasks": [
+    {
+      "id": "leader_close",
+      "status": "implemented_headless_verified",
+      "requirement": "Restore original Normal-mode Space x close for code and Markdown; preserve Insert input and dirty guards."
+    },
+    {
+      "id": "scoped_close_commands",
+      "status": "implemented_headless_verified",
+      "requirement": "Alt+P q/:q closes only focused tab or split leaf, all tab types; qall/:qall closes current workspace; explicit ! controls discard."
+    },
+    {
+      "id": "workspace_close",
+      "status": "implemented_headless_verified",
+      "requirement": "Workspace tabs have close X; inactive X never activates the target; preserve daemon catalog, PTYs and other drafts."
+    },
+    {
+      "id": "fresh_agent_tabs",
+      "status": "implemented_headless_verified",
+      "requirement": "Each Alt+A creates/selects a fresh local Agent tab, no extra input prompt or eager server session; independent drafts survive restart and async adoption."
+    },
+    {
+      "id": "window_keys",
+      "status": "implemented_headless_verified",
+      "requirement": "Native window key events route through GPUIX Root options to current App exactly once after local focused tab removal."
+    },
+    {
+      "id": "buffer_drag",
+      "status": "implemented_headless_verified",
+      "requirement": "Drag buffer tabs left/right under overflow without editor remount or dirty data loss; preserve split/dock gestures."
+    },
+    {
+      "id": "workspace_drag",
+      "status": "implemented_headless_verified",
+      "requirement": "Drag workspace tabs left/right; preserve host identity, active workspace and persisted order. Correct DOM self-anchor no-op in both pinned GPUIX layers."
+    },
+    {
+      "id": "zoom_flash",
+      "status": "implemented_headless_verified",
+      "requirement": "No blank first frames on splash/tree after Ctrl +/-; retain wallpaper, GPU logo/menu/row textures, native tree host, reveal clocks and wordmark shuffle/startup state."
+    },
+    {
+      "id": "workspace_shortcut",
+      "status": "implemented_headless_verified",
+      "requirement": "Ctrl+Shift+W opens one new workspace with Welcome from any page/modal, without a terminal."
+    },
+    {
+      "id": "lsp_hover",
+      "status": "implemented_headless_verified",
+      "requirement": "Reuse original Rust measured Markdown/syntax hover with no visible fences; pointer corridor/popup retention, captured drag selection, scrolling, links and clipboard; constrain to content body."
+    },
+    {
+      "id": "overlay_bounds",
+      "status": "implemented_headless_verified",
+      "requirement": "All modals, command palettes, menus, LSP hover, Agent home/chat slash/question/permission popovers and hamburger stay inside focused content body below all chrome/workspace/buffer tabs."
+    },
+    {
+      "id": "toast_bounds",
+      "status": "implemented_headless_verified",
+      "requirement": "Constrain notification, toast, connection and error banners to content body."
+    },
+    {
+      "id": "finder_appearance",
+      "status": "implemented_headless_verified",
+      "requirement": "Alt+S opens original Rust FILE finder with original painter, selection caret, glyphs, preview, mode badge and geometry."
+    },
+    {
+      "id": "fff_search",
+      "status": "implemented_headless_verified",
+      "requirement": "Alt+S opens FILES (original Rust binding); daemon fuzzy-file SearchFiles queries use real warm FFF ranked index and root-scoped pins, not ASCII/JS substitutes. Exact mode keeps original exact collector. Build matching daemon without live restart."
+    },
+    {
+      "id": "inactive_close_hover",
+      "status": "implemented_headless_verified",
+      "requirement": "Inactive close X must stay visible across parent/child hover transitions; red only over X, no flicker or disappearance while close target is hovered."
+    },
+    {
+      "id": "agent_block_cursor",
+      "status": "implemented_headless_verified_native_registry_fixed",
+      "requirement": "Use actual native textarea caret geometry (including wrap, mouse, selection and IME) to paint original block TrailCursor in Agent composer; hide duplicate native thin caret. Fix actual native custom-element supported_events whitelist; verify the compiled addon accepts caretGeometry for both input and textarea and actual App paints the block. Earlier injected-event proof missed this native filter."
+    },
+    {
+      "id": "release",
+      "status": "release_built_user_preview_launched",
+      "requirement": "Run relevant headless unit/integration/type/design/FFI/binding checks and build release frontend plus changed daemon. Launch updated frontend once for user testing as explicitly requested; preserve running daemon and PTYs."
+    },
+    {
+      "id": "smooth_buffer_tabs",
+      "status": "implemented_headless_verified",
+      "requirement": "Dragged buffer tab follows pointer smoothly; neighbors slide/ease into their new positions instead of snapping; preserve identities, dirty buffers, split/dock and reduced motion."
+    },
+    {
+      "id": "smooth_workspace_tabs",
+      "status": "implemented_headless_verified",
+      "requirement": "Same smooth sliding feedback for workspace tab dragging, including overflow/scroll and persisted order."
+    },
+    {
+      "id": "tree_open_first_frame",
+      "status": "implemented_headless_verified",
+      "requirement": "File tree opens with rows and glyphs present from the first painted frame; remove black/empty delay and slow reveal while preserving smooth panel movement, cached state and zoom no-replay behavior."
+    },
+    {
+      "id": "workspace_drag_text_selection",
+      "status": "implemented_headless_verified",
+      "requirement": "Dragging workspace tabs must not select or highlight label/icon/close/preview text; match buffer tabs while preserving measured title-sized layout and drag behavior."
+    },
+    {
+      "id": "workspace_switch_tab_replay",
+      "status": "implemented_headless_verified",
+      "requirement": "Switching workspaces must show restored tabs immediately without replaying a tab entrance/slide; animate actual reorders, not initial label measurement or width hydration."
+    },
+    {
+      "id": "cursor_opacity_and_blink",
+      "status": "implemented_headless_verified",
+      "requirement": "Agent, code, Markdown, chrome/tree/tabs, Finder and terminal use original full cursor color alpha and original local blink half-period (default530ms, configured350..1200), with expiring movement holds and resumed idle blink; preserve explicit disabled blinking, springs and rainbow colors."
+    },
+    {
+      "id": "tree_search_file_cursor_handoff",
+      "status": "implemented_headless_verified",
+      "requirement": "Click/Enter opening a file from tree or search transfers native focus and shared animated block cursor to the opened file, including existing files and rich Markdown."
+    },
+    {
+      "id": "agent_sidebar_cursor_navigation",
+      "status": "implemented_headless_verified",
+      "requirement": "Directional keyboard shared-cursor navigation reaches Agent left sidebar New Chat, directory dropdown and chat rows; traversal and activation reuse original controls."
+    },
+    {
+      "id": "status_directory_picker",
+      "status": "implemented_headless_verified",
+      "requirement": "Status cwd pill opens existing original folder modal; selecting changes capturedworkspace cwd, using host-confirmed ChangeTerminalDirectory for its firstterminal before rootcommit. No newPTY, rawcd, busy job interruption, wrongworkspace commit or false success."
+    },
+    {
+      "id": "full_git_surface",
+      "status": "implemented_headless_verified",
+      "requirement": "Port original statusbar Git\u2192rightGitDiffPanel, files/folders/stage/unstage/commit/branch/remoteactions, commit/PR views, and repository unified/split review tabs with blocks/live source/restore confirmation through existing daemonGit APIs. Original Rust painters/state; no invented Finder substitute and no tests mutate realrepository."
+    },
+    {
+      "id": "workspace_close_press_and_edge",
+      "status": "implemented_headless_verified",
+      "requirement": "Workspace X closes on same pointer-press phase as buffer X, one close pergesture, survivesdrag+nativeparentbubbling, preservesdirtyguards, and aligns closecenter tooriginalbuffer12pxrightinset atallscales; previewmatches."
+    },
+    {
+      "id": "splash_hover_background",
+      "status": "implemented_headless_verified",
+      "requirement": "Splash shortcutrows show original rounded hover background while hovered; rowowns hover so parentleave cannot erasechildenter paint. Preserve sourceactions, all8rows, scaled hitgeometry and leaves."
+    },
+    {
+      "id": "agent_family_tabs",
+      "status": "implemented_headless_verified",
+      "requirement": "Parent/child/sibling conversation selection reuses one root-family Agent tab, preserving per-session drafts and source activation policy."
+    },
+    {
+      "id": "agent_family_navigation",
+      "status": "implemented_headless_verified",
+      "requirement": "Use original Rust Back/Prev/Next header with the actual parent-keyed roster, selection and measured hit geometry."
+    },
+    {
+      "id": "git_split_leaf_view_state",
+      "status": "follow_up_identified",
+      "requirement": "Independent split leaves displaying the same Git surface need separate review controller viewport/scroll state keyed by leaf, while retaining shared canonical document bytes. Current cache is surface-scoped; normal single review is verified."
+    },
+    {
+      "id": "agent_workspace_return_flicker",
+      "status": "implemented_headless_verified",
+      "requirement": "Agent input and conversation sidebar must paint cached content on workspace return with no zero-sized or empty first frame, texture eviction or entrance replay."
+    },
+    {
+      "id": "agent_home_config_defaults",
+      "status": "implemented_headless_verified",
+      "requirement": "New Agent home loads canonical configured agent/model/thinking defaults through SDK config.defaults, preserves explicit workspace selections and conversation choices, scopes late results and shows cached defaults on warm workspace return."
+    },
+    {
+      "id": "agent_chip_scramble",
+      "status": "implemented_headless_verified",
+      "requirement": "Use original Rust per-letter colored loading/settling scramble and Build/Plan mode-change transitions for composer chips; preserve original accents, timing, reduced motion and settled tab remounts."
+    },
+    {
+      "id": "status_mode_scramble",
+      "status": "implemented_headless_verified",
+      "requirement": "Verify original bottom status bar Normal/Insert/Agent scramble, color transition, display scheduler and 320ms settling in actual Solid renderer."
+    },
+    {
+      "id": "workspace_sidebar_isolation",
+      "status": "implemented_headless_verified",
+      "requirement": "Each workspace independently retains Files/Notes/Agent/closed sidebar across switches, close/reopen, font changes and recovery; migrate legacy global value only to initial workspace."
+    },
+    {
+      "id": "agent_defaults_transport_independence",
+      "status": "implemented_headless_verified",
+      "requirement": "Configured home model/thinking load through scoped SDK immediately on workspace activation independently of WebSocket SubscribeWorkspace ack and recovered PTY bindings."
+    },
+    {
+      "id": "daemon_offline_git_flicker",
+      "status": "in_progress",
+      "requirement": "Diagnose and fix actual connection instability causing terminal Daemon is offline errors and Git status reset/reload; preserve same-root last good status across transport gaps."
+    },
+    {
+      "id": "git_panel_top_gap",
+      "status": "implemented_headless_verified",
+      "requirement": "Remove buffer-row-sized blank strip above right Git panel; align alongside central buffer row beneath workspace row, updating viewport and hit/cursor transforms."
+    },
+    {
+      "id": "welcome_directory_picker",
+      "status": "implemented_headless_verified",
+      "requirement": "Welcome Change Directory and its Alt+D shortcut open the same original folder browser as the bottom status cwd pill, with existing captured-workspace commit/cancel behavior."
+    },
+    {
+      "id": "home_tab_name_icon",
+      "status": "implemented_headless_verified",
+      "requirement": "Home title and home glyph in regular tabs and drag previews, compatible saved welcome IDs/kind and Home creation/recovery."
+    }
+  ],
+  "verification_note": "Checkpoint requested by user. Home labels/icons, workspace-specific sidebars, folder-picker entry points, early SDK defaults and shared read-only Git watches are implemented with targeted checks and clean TypeScript. Live catalog startup disconnect remains under investigation; event batching/private family watermarks reduce publication work but have not yet eliminated live WS1006.",
+  "verification": {
+    "frontend_tests": {
+      "passed": 378,
+      "failed": 0,
+      "files": 107,
+      "assertions": 5277,
+      "note": "Full suite377/0 (106files) plus final new workspace-paint test1/0."
+    },
+    "typecheck": "passed final source including workspace-paint fixture",
+    "design_sync": "passed final source",
+    "display_source_and_packaged_binding": "passed: source and packaged gpuix-display-linux-x64-52f91564654179d3.node; compiled inputCaretGeometrySupported() true",
+    "native_engine_ffi_smoke": "passed final release core; editor/recovery/undo/Vim/cursor/Ghostty/VT/keyboard",
+    "frontend_release": "Release packaged and launched with Agent composer/sidebar retention, scoped configured SDK defaults and original loading/mode chip scramble.",
+    "daemon_search_unit_tests": "8 passed",
+    "daemon_search_websocket_integration": "passed: 20 concurrent queries retain their own envelope IDs",
+    "window_launches": 2,
+    "app_or_daemon_restarts": 1,
+    "agent_cursor_native_registry": "fixed and compiled-factory verified; actual full-App cursor polygon visible; 5 source-Rust geometry/whitelist tests pass",
+    "daemon_build": {
+      "status": "built",
+      "profile": "activation (optimized, production service paths, no full LTO)",
+      "path": "../../target/activation/neoism-workspace-daemon",
+      "full_lto_attempt": "stopped due excessive compile time and memory; no full-LTO daemon binary was produced",
+      "activated": false
+    },
+    "cursor_opacity_and_blink": "17 focused tests pass: actual Agent/Code/Markdown/Chrome/Finder/Terminal full-opacity ink and idle on/off/on without new native frames; original530ms half-period, configured350..1200 clamp, actual cached holds expire; explicit blink=false honored",
+    "full_git_app": "passed actual App: status pill, original panel, working singleton, unified/split, explicit restore confirmation, canonical live edits/save, retained zoom draft/controller, commit/PR routes; isolated daemon fixture only",
+    "final_focus_gate": "4 passed after pointer focus correction",
+    "user_preview": {
+      "pid": 2625880,
+      "log": "/tmp/neoism-gpuix-agent-fixes-20261028-125754.log",
+      "executable": "/home/parkersettle/projects/neoism/neoism-frontend/gpuix/dist/neoism-gpuix",
+      "mapped": true,
+      "title": "ktblack-main-api \u2014 Neoism GPUIX",
+      "startup_errors": false
+    },
+    "agent_workspace_paint": "Actual App A\u2192B\u2192A: every first return batch contains input/draft/logo/sidebar before layout; stable same-workspace record hosts; cached native composer reused, sidebar glyphs never dropped/reuploaded, closed composer disposed.",
+    "agent_home_defaults": "Explicit agent/model/variant hydration, canonical provider fallback, first-submit settings, explicit choices retained, conversation isolation, late replies rejected, warm return no loading restart.",
+    "agent_chip_and_status_animation": "Original Rust colored glyph scramble, Build/Plan accents, loading/settling clocks, reduced motion, retained ready remount with no texture churn; original bottom Normal/Insert/Agent display-driven320ms mode transition verified.",
+    "preview_frontend_reload_for_agent_fixes": 1,
+    "daemon_restarts": 0,
+    "checkpoint_gates": "Current source TypeScript clean; targeted Agent/model batch14tests/181 assertions; Git/status22tests/131 assertions; Home12tests/134 assertions; workspace sidebar3tests; folder modal1test pass."
+  }
+}

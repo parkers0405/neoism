@@ -14,7 +14,6 @@ mod virtualized;
 pub use inline::spelling_suggestions;
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::helpers::notebook_markdown_cell_index;
 use crate::editor::markdown::{MarkdownPane, MarkdownWrapHitRow, MarkdownWrapKey};
@@ -68,7 +67,7 @@ fn publish_cursor_rect(pane: &mut MarkdownPane, rect: [f32; 4], clip: [f32; 4]) 
 }
 
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -1809,6 +1808,7 @@ fn markdown_code_lang(lang: &str) -> Lang {
         "go" => Lang::Go,
         "lua" => Lang::Lua,
         "toml" => Lang::Toml,
+        "sql" => Lang::Sql,
         "json" | "jsonc" => Lang::Json,
         "nix" => Lang::Nix,
         "bash" | "sh" | "shell" | "zsh" => Lang::Bash,
@@ -1854,7 +1854,7 @@ fn markdown_code_diff_color(kind: MarkdownCodeDiffKind, theme: &IdeTheme) -> u32
 
 #[allow(clippy::too_many_arguments)]
 fn draw_markdown_code_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     mut x: f32,
     y: f32,
     line: &str,
@@ -1903,7 +1903,7 @@ fn draw_markdown_code_line(
 }
 
 fn wrap_lines_cached(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     text: &str,
     max_w: f32,
@@ -1919,7 +1919,7 @@ fn wrap_lines_cached(
 }
 
 fn measured_text_stops(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     text: &str,
     opts: &DrawOpts,
 ) -> Vec<f32> {
@@ -1935,7 +1935,7 @@ fn measured_text_stops(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_fallback_paragraph_selection(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     segment: &virtualized::PlainParagraphSegment,
     rows: &[MarkdownWrapHitRow],

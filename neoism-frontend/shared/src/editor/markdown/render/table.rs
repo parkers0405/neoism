@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::{
     parse_table_cell_bounds, source_map::InlineSourceMap, MarkdownPane,
@@ -81,7 +80,7 @@ pub(super) fn is_table_separator(cells: &[String]) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_table(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     table: &ParsedTable,
     source_lines: &[String],
@@ -123,7 +122,7 @@ pub(super) fn render_table(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_table_with_source_base(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     table: &ParsedTable,
     source_lines: &[String],
@@ -715,7 +714,7 @@ pub(super) fn render_table_with_source_base(
 }
 
 pub(super) fn table_row_height(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     source_line: usize,
     row: &[String],
@@ -750,7 +749,7 @@ struct MeasuredCellRow {
 }
 
 fn measured_table_cell_rows(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     text: &str,
     width: f32,
     opts: &DrawOpts,
@@ -784,7 +783,7 @@ fn measured_table_cell_rows(
 }
 
 pub(super) fn measure_table(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     start_line: usize,
     table: &ParsedTable,
@@ -821,7 +820,7 @@ pub(super) fn measure_table(
 }
 
 fn measure_table_with_opts(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     start_line: usize,
     table: &ParsedTable,
@@ -913,7 +912,7 @@ fn measure_table_with_opts(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_table_selection_row(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     line_ix: usize,
     source_line: &str,
@@ -955,7 +954,7 @@ pub(super) fn draw_table_selection_row(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_table_yank_flash_row(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     line_ix: usize,
     source_line: &str,
@@ -1000,7 +999,7 @@ pub(super) fn draw_table_yank_flash_row(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_table_text_range_highlight(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     source_index: usize,
     source_line: &str,
@@ -1079,7 +1078,7 @@ fn draw_table_text_range_highlight(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_table_row_insert_control(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     after_line: usize,
     content_x: f32,
@@ -1116,7 +1115,7 @@ pub(super) fn draw_table_row_insert_control(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_table_column_insert_controls(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     start_line: usize,
     col_count: usize,
@@ -1142,7 +1141,7 @@ pub(super) fn draw_table_column_insert_controls(
 }
 
 pub(super) fn draw_table_action_button(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     icon: &str,
     hovered: bool,
@@ -1237,7 +1236,7 @@ pub(super) fn draw_table_action_button(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_table_row(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     source_line: usize,
     row: &[String],
@@ -1340,7 +1339,7 @@ pub(super) fn render_table_row(
 }
 
 fn draw_table_cell_links(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     source: &str,
     map: &InlineSourceMap,
@@ -1445,7 +1444,7 @@ fn draw_table_cell_links(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn set_table_cursor_rect(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     table: &ParsedTable,
     source_line: &str,
@@ -1493,7 +1492,7 @@ pub(super) fn table_source_cursor_position(
     table_row_ix: usize,
     cursor_col: usize,
     col_widths: &[f32],
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     opts: &DrawOpts,
 ) -> Option<TableCursorPosition> {
     table_row_for_ix(table, table_row_ix)?;

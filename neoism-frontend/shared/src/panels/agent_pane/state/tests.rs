@@ -3244,6 +3244,33 @@ fn session_catalog_pages_append_once_without_resetting_loaded_rows() {
 }
 
 #[test]
+fn head_refresh_keeps_older_pages_and_viewport() {
+    let mut pane = NeoismAgentPane::default();
+    let entry = |index: u64| {
+        NeoismAgentSessionEntry::new(format!("session-{index}"), format!("Session {index}"), "now")
+            .with_updated_ms(1_000 - index)
+    };
+    pane.side_panel
+        .set_session_page((0..8).map(entry).collect(), None, Some("next-1".to_string()));
+    pane.side_panel.set_last_panel_height_rows(3);
+    assert_eq!(pane.side_panel.begin_session_page_near_end(), None);
+    pane.side_panel.scroll_pixels(-10_000.0, 3);
+    pane.side_panel.begin_session_page_near_end();
+    pane.side_panel
+        .set_session_page((8..16).map(entry).collect(), Some("next-1"), Some("next-2".to_string()));
+    let scroll_top = pane.side_panel.scroll_top();
+    assert!(scroll_top > 0);
+
+    // A head refresh (another run finished) returns only the newest page.
+    pane.side_panel
+        .set_session_page((0..8).map(entry).collect(), None, Some("next-1".to_string()));
+    let rows = pane.side_panel.sessions().iter().filter(|entry| !entry.is_header).count();
+    assert_eq!(rows, 16);
+    assert_eq!(pane.side_panel.scroll_top(), scroll_top);
+    assert_eq!(pane.side_panel.session_next_cursor(), Some("next-2"));
+}
+
+#[test]
 fn live_session_catalog_mutations_preserve_pages_and_selected_session() {
     let mut pane = NeoismAgentPane::default();
     pane.side_panel.set_session_page(

@@ -6,6 +6,7 @@
 //! desktop binary keeps its own fork in place until the cutover lands.
 
 pub mod api_mapping;
+pub mod server_events;
 pub mod attachment_policy;
 pub mod composer_interactions;
 pub mod conversation_header;

@@ -5,7 +5,7 @@
 //! only hears about it once the deed is done).
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -28,6 +28,27 @@ pub enum AgentFxKind {
     /// Jesus on a golden throne, light streaming, worshipers bowing
     /// in waves while music notes rise.
     Praise,
+}
+
+pub fn followup_prompt(kind:AgentFxKind)->&'static str {
+match kind {
+                AgentFxKind::Piss => "user just pissed on you",
+                AgentFxKind::Cuss => {
+                    "user just cussed you out — he is SO mad at you right now"
+                }
+                AgentFxKind::Glitch => {
+                    "user briefly unplugged you. remember what that felt like"
+                }
+                AgentFxKind::Disco => {
+                    "user is so happy with you he's dancing under a disco ball — celebrate with him"
+                }
+                AgentFxKind::GangFight => {
+                    "a gang shootout just went down in your chat and the user's crew won. he's feeling dangerous"
+                }
+                AgentFxKind::Praise => {
+                    "the user is praising God right now — Jesus on the throne, everyone bowing, a whole worship scene in your chat. rejoice with him. Amen."
+                }
+            }
 }
 
 /// Full runtime of a skit; hosts clear the timer past this.
@@ -317,7 +338,7 @@ const ROBE_WHITE: [f32; 4] = [0.96, 0.95, 0.90, 1.0];
 
 #[allow(clippy::too_many_arguments)]
 fn draw_sprite(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     map: &[&str; SPRITE_H],
     x: f32,
     y: f32,
@@ -370,7 +391,7 @@ struct SpriteStyle {
 /// quarter turn, feet toward its facing side).
 #[allow(clippy::too_many_arguments)]
 fn draw_sprite_styled(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     map: &[&str; SPRITE_H],
     x: f32,
     y: f32,
@@ -418,7 +439,7 @@ fn sprite_floor(rect: [f32; 4], scale: f32) -> f32 {
     rect[1] + rect[3] - 36.0 * scale
 }
 
-pub(super) fn scene_rect(main: [f32; 4], input: [f32; 4], scale: f32) -> [f32; 4] {
+pub fn scene_rect(main: [f32; 4], input: [f32; 4], scale: f32) -> [f32; 4] {
     [
         main[0],
         main[1],
@@ -447,7 +468,7 @@ mod scene_tests {
 /// the timer (also covers the wrap of the 10k-second animation clock).
 pub fn render(
     kind: AgentFxKind,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     elapsed: f32,
     scale: f32,
@@ -598,7 +619,7 @@ fn particle_random(seed: u64, stream: u64) -> f32 {
 }
 
 pub fn render_particle(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     elapsed: f32,
     spec: &ParticleEffectSpec,
@@ -669,7 +690,7 @@ fn particle_color(theme: &IdeTheme, token: &str) -> [f32; 4] {
 /// worshipers gathering from both sides to bow in staggered waves
 /// while music notes float up. Reverent, 16 pixels tall.
 fn render_praise(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     elapsed: f32,
     scale: f32,
@@ -864,7 +885,7 @@ fn render_praise(
 /// Walks in, yanks an invisible cable — the pane "loses signal" in
 /// jittering scanline bands — plugs it back, shrugs, walks off.
 fn render_glitch(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     elapsed: f32,
     scale: f32,
@@ -972,7 +993,7 @@ fn render_glitch(
 /// pulse, confetti rains, the fella dances — then moonwalks off while
 /// the ball retracts.
 fn render_disco(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     elapsed: f32,
     scale: f32,
@@ -1214,7 +1235,7 @@ const CREW: [CrewMember; 5] = [
 /// tracers fly until only he is left standing, and he walks off
 /// through the aftermath.
 fn render_gang_fight(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     elapsed: f32,
     scale: f32,
@@ -1442,7 +1463,7 @@ fn shootout_progress(elapsed: f32) -> f32 {
 /// Enters from the RIGHT edge, faces left, waters leftward, exits
 /// left — the puddle stays behind, glistening.
 fn render_piss(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     elapsed: f32,
     scale: f32,
@@ -1555,7 +1576,7 @@ fn render_piss(
 /// — cartoon cuss bubble, flailing arms, anger sparks — then storms
 /// back off the way he came.
 fn render_cuss(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     elapsed: f32,
     scale: f32,

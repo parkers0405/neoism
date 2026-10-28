@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::state::{
     NeoismAgentImage, NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind,
@@ -90,7 +89,7 @@ where
 {
     #[allow(clippy::too_many_arguments)]
     fn render_assistant_text(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         x: f32,
         y: f32,
         w: f32,
@@ -129,7 +128,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     fn render_reasoning_message(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         x: f32,
         y: f32,
         w: f32,
@@ -164,7 +163,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     fn render_user_message(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &mut P,
         x: f32,
         y: f32,
@@ -201,7 +200,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     fn render_tool_message(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &mut P,
         x: f32,
         y: f32,
@@ -236,7 +235,7 @@ where
 
     #[allow(clippy::too_many_arguments)]
     fn render_code_block(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &mut P,
         x: f32,
         y: f32,
@@ -264,7 +263,7 @@ where
     }
 
     fn measure_markdown_text_namespaced(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &P,
         text: &str,
         width: f32,
@@ -287,7 +286,7 @@ where
     }
 
     fn measure_markdown_text(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &P,
         text: &str,
         width: f32,
@@ -444,7 +443,7 @@ impl AgentMessageCardDelegate<NeoismAgentPane, NeoismAgentMessage>
 
 #[allow(clippy::too_many_arguments)]
 fn draw_selectable_plain_line<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     x: f32,
     y: f32,
@@ -482,7 +481,7 @@ fn draw_selectable_plain_line<P: AgentMarkdownPane>(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_message_card(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     w: f32,
@@ -523,7 +522,7 @@ pub(super) fn render_message_card(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_message_card_with<P, M, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     w: f32,
@@ -904,7 +903,7 @@ where
 }
 
 pub(super) fn measure_message_height(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &NeoismAgentPane,
     message: &NeoismAgentMessage,
     width: f32,
@@ -930,7 +929,7 @@ pub(super) fn measure_message_height(
 }
 
 pub fn measure_message_height_with<P, M, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &P,
     message: &M,
     width: f32,
@@ -1216,7 +1215,7 @@ pub fn message_accent(kind: AgentMessageCardKind, theme: &IdeTheme, status: &str
 
 #[allow(clippy::too_many_arguments)]
 fn render_compaction_message_with<P, M, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     w: f32,
@@ -1306,7 +1305,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn render_todos_with<T>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     w: f32,

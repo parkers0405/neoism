@@ -112,6 +112,20 @@ struct CompletionMenuLayout {
     visible_rows: usize,
 }
 
+/// Data-only popup frame for hosts that paint with a different GPU renderer.
+pub struct CompletionHostFrame {
+    pub rect: [f32; 4],
+    pub row_height: f32,
+    pub font_size: f32,
+    pub padding_x: f32,
+    pub kind_width: f32,
+    pub menu_width: f32,
+    pub first: usize,
+    pub visible_rows: usize,
+    pub offset: f32,
+    pub animating: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CompletionDetailSide {
     Right,
@@ -127,6 +141,17 @@ struct CompletionDetailPlacement {
 }
 
 impl CompletionMenu {
+    pub fn host_frame(&mut self, menu: &PopupMenu, anchor: &EditorAnchor,
+        dimensions: (f32, f32, f32)) -> Option<CompletionHostFrame> {
+        let (_, layout) = self.layout(Some(menu), anchor, dimensions, false)?;
+        let first = first_visible(menu.selected_index(), menu.items.len(), layout.visible_rows);
+        let offset = self.tick_list_scroll(menu, first, layout.row_h);
+        Some(CompletionHostFrame { rect: [layout.x, layout.y, layout.width, layout.height],
+            row_height: layout.row_h, font_size: layout.font_size, padding_x: layout.pad_x,
+            kind_width: layout.kind_w, menu_width: layout.menu_w, first,
+            visible_rows: layout.visible_rows, offset, animating: self.is_animating() })
+    }
+
     pub fn new() -> Self {
         Self {
             scale: 1.0,

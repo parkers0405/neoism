@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import {createRoot} from "@gpuix/solid";
+import {createSignal} from "solid-js";
+import {StatusLine} from "../../src/ui/StatusLine";
+import {NativeEditor} from "../../src/native-core";
+import {loadConfig} from "../../src/config";
+import {DaemonConnection} from "../../src/daemon/client";
+import {statusInfo} from "../../src/chrome/status-info";
+import {usePresentationScheduler} from "../../src/animation/frame-scheduler";
+import type {CanvasOp} from "../../src/ui/canvas";
+import type {Surface} from "../../src/model";
+import {createRecordingAppRenderer} from "./full-app-recording-renderer";
+const config={...loadConfig(["--config","/nonexistent/status-animation"],{}),statusFps:false},client=new DaemonConnection(config),editor=new NativeEditor("mode.rs","let value = 1;\n",true),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
+const images=new Map<number,Buffer>();(host.renderer as unknown as {putPaintImage:(id:number,w:number,h:number,pixels:Buffer)=>void}).putPaintImage=(id,_w,_h,pixels)=>{images.set(id,Buffer.from(pixels));};
+(host.renderer as unknown as {dropPaintImage:(id:number)=>void}).dropPaintImage=id=>{images.delete(id);};
+let serial=0;const pending=new Map<number,()=>void>();const release=usePresentationScheduler(callback=>{const id=++serial;pending.set(id,callback);return()=>{pending.delete(id);};});
+const [frame,setFrame]=createSignal(editor.frame),[surface,setSurface]=createSignal<Surface>({id:"file:mode",workspaceId:"a",kind:"file",title:"mode.rs",path:"mode.rs"});
+const info=()=>statusInfo(surface(),"/project",{mode:frame().mode,line:frame().cursor.line,col:frame().cursor.col,dirty:frame().dirty},frame());
+const unsubscribe=editor.subscribe(setFrame);
+const commands=()=>JSON.parse(String([...host.nodes.values()].find(node=>node.type==="canvas")?.props.commands||"[]")) as CanvasOp[];
+const modeRect=()=>commands().findLast(op=>op.k==="r"&&op.b[0]===0&&op.b[2]<200&&op.b[3]>10&&!!op.r?.some(value=>value>0));
+const coloredModePixels=()=>{const rect=modeRect();assert.ok(rect?.k==="r");let count=0;for(const op of commands()){if(op.k!=="i"||op.b[0]>=rect.b[2])continue;const pixels=images.get(op.id);assert.ok(pixels,"Every current mode glyph must retain its uploaded original raster");for(let offset=0;offset<pixels.length;offset+=4)if(pixels[offset+3]>240&&Math.max(pixels[offset],pixels[offset+1],pixels[offset+2])-Math.min(pixels[offset],pixels[offset+1],pixels[offset+2])>80)count++;}return count;};
+const advance=async(delay:number)=>{await Bun.sleep(delay);const callbacks=[...pending.values()];pending.clear();callbacks.forEach(callback=>callback());await host.pump(root);};
+try{
+ root.render(()=><StatusLine config={config} info={info()} client={client} connected={false} splitEnabled={false} splitHidden={false} onAction={()=>{}} report={error=>{throw error;}}/>);await host.pump(root);
+ const id=host.find("original-statusline")!.id;assert.equal(coloredModePixels(),0);assert.equal(pending.size,0);
+ editor.call("key",{key:"i",char:"i"});await host.pump(root);assert.equal(info().mode,"Insert");assert.ok(coloredModePixels()>0,"Insert must immediately paint original rainbow scramble glyph pixels");assert.equal(pending.size,1,"One native display wake must own the unfinished transition");
+ const early=String([...host.nodes.values()].find(node=>node.type==="canvas")!.props.commands),earlyColor=(modeRect() as Extract<CanvasOp,{k:"r"}>).c;
+ await advance(75);assert.notEqual(String([...host.nodes.values()].find(node=>node.type==="canvas")!.props.commands),early,"Native display wakes must advance scramble without keyboard/timer input");
+ await advance(270);assert.equal(coloredModePixels(),0,"Original mode label must settle after320ms");assert.notEqual((modeRect() as Extract<CanvasOp,{k:"r"}>).c,earlyColor,"Original mode background must cross-fade along with its text");assert.equal(pending.size,0,"Settled mode must stop requesting native frames");
+ setSurface({id:"agent:a",workspaceId:"a",kind:"agent",title:"Neoism",sessionId:"a"});await host.pump(root);assert.equal(info().mode,"Agent");assert.ok(coloredModePixels()>0,"Entering actual Agent surface must restart native AGENT label scramble");
+ await advance(345);assert.equal(coloredModePixels(),0);assert.equal(pending.size,0);assert.equal(host.find("original-statusline")!.id,id,"Mode switches must retain original status host");
+ const settled=String([...host.nodes.values()].find(node=>node.type==="canvas")!.props.commands);await advance(50);assert.equal(String([...host.nodes.values()].find(node=>node.type==="canvas")!.props.commands),settled);
+ console.log(JSON.stringify({noWindow:true,actualNativeEditorMode:true,originalRainbowPixels:true,nativeDisplayDriven:true,original320msSettle:true,backgroundCrossfade:true,agentPageTransition:true,idleStops:true,stableStatusHost:true}));
+}finally{root.unmount();unsubscribe();editor.dispose();client.stop();release();}

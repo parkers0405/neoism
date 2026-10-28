@@ -1,7 +1,8 @@
 //! Immutable commit metadata used above the shared, read-only diff cards.
 use crate::{layout::Rect, primitives::{IdeTheme, draw_text_with_occlusion}};
 use neoism_protocol::git::GitCommitDetail;
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use sugarloaf::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 pub struct CommitMetadata {
     pub detail: GitCommitDetail,
@@ -30,7 +31,7 @@ impl CommitMetadata {
         self.message_scroll = (self.message_scroll + delta).clamp(0.0, self.message_max_scroll);
         true
     }
-    pub fn render(&mut self, painter: &mut Sugarloaf, rect: Rect, scale: f32, theme: &IdeTheme, occlusions: &[[f32; 4]]) -> Rect {
+    pub fn render(&mut self, painter: &mut dyn Paint, rect: Rect, scale: f32, theme: &IdeTheme, occlusions: &[[f32; 4]]) -> Rect {
         let line_h = 20.0 * scale;
         let x = rect.x + 16.0 * scale;
         let width = (rect.w - 32.0 * scale).max(1.0);

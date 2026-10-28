@@ -448,11 +448,7 @@ impl Island {
             // focused tab. Stored (not just drawn) so the host can feed it
             // into the shared animated trail cursor.
             if is_focused {
-                let cursor_w = 3.0_f32 * s;
-                let cursor_h = (h - 8.0 * s).max(8.0 * s).min(h);
-                let cursor_x = x_position + (TAB_PADDING_X * s - cursor_w).max(0.0);
-                let cursor_y = top + (h - cursor_h) / 2.0;
-                self.focused_cursor_rect = Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+                self.focused_cursor_rect = Some(keyboard_cursor_rect([x_position,top,tab_width,h],s));
             }
 
             // No accent underline — the rounded `bg` card is the active

@@ -19,7 +19,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 // Static placeholders deliberately do not claim animation/redraw ownership or create hit targets.
 pub(super) fn skeleton(
-    sl: &mut sugarloaf::Sugarloaf,
+    sl: &mut dyn crate::primitives::paint::Paint,
     rect: Rect,
     clip: [f32; 4],
     occlusions: &[[f32; 4]],

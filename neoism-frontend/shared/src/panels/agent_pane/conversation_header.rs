@@ -121,6 +121,14 @@ impl ConversationHeader {
         }
     }
 
+    /// Exact frame-local hit fragments after canonical clipping/occlusion.
+    pub fn visible_links(&self) -> impl Iterator<Item = (Direction, &str, &[[f32; 4]])> {
+        [Direction::Previous, Direction::Next].into_iter().filter_map(|direction| {
+            let link = &self.links[direction.index()];
+            Some((direction, link.target.as_deref()?, link.regions.as_slice()))
+        })
+    }
+
     pub fn hit_at(&self, x: f32, y: f32) -> Option<HeaderHit<'_>> {
         if !x.is_finite() || !y.is_finite() {
             return None;

@@ -8,7 +8,7 @@
 // cluster, so this in-document dot column is no longer drawn.
 #[allow(dead_code)]
 fn draw_markdown_roster(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     rect: [f32; 4],
     theme: &IdeTheme,

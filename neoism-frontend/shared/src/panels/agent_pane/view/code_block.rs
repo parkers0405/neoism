@@ -6,7 +6,6 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::state::NeoismAgentMessage;
 use crate::syntax::{Lang, SynTok};
@@ -149,7 +148,7 @@ impl AgentCodeMessage for NeoismAgentMessage {
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_code_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentCodePane,
     x: f32,
     y: f32,
@@ -498,7 +497,7 @@ pub fn diff_color(kind: DiffLineKind, theme: &IdeTheme) -> u32 {
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_code_line_background(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     w: f32,
@@ -530,7 +529,7 @@ pub fn render_code_line_background(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_code_line_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     line: &str,
@@ -555,7 +554,7 @@ pub fn render_code_line_text(
 }
 
 pub fn render_code_line_text_revealed(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     line: &str,
@@ -580,7 +579,7 @@ pub fn render_code_line_text_revealed(
 }
 
 fn render_code_line_text_impl(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     line: &str,
@@ -634,6 +633,7 @@ pub fn syntax_lang(lang: &str) -> crate::syntax::Lang {
         "go" => crate::syntax::Lang::Go,
         "lua" => crate::syntax::Lang::Lua,
         "toml" => crate::syntax::Lang::Toml,
+        "sql" => crate::syntax::Lang::Sql,
         "json" | "jsonc" => crate::syntax::Lang::Json,
         "nix" => crate::syntax::Lang::Nix,
         "bash" | "sh" | "shell" | "zsh" => crate::syntax::Lang::Bash,
@@ -647,7 +647,7 @@ pub fn syntax_lang(lang: &str) -> crate::syntax::Lang {
 }
 
 pub fn draw_syntax_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     line: &str,
@@ -670,7 +670,7 @@ pub fn draw_syntax_line(
 }
 
 fn draw_syntax_line_impl(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     mut x: f32,
     y: f32,
     line: &str,
@@ -825,6 +825,7 @@ fn lang_cache_tag(lang: Lang) -> u8 {
         Lang::Yaml => 17,
         Lang::Css => 18,
         Lang::Html => 19,
+        Lang::Sql => 21,
     }
 }
 

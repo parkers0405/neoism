@@ -4,7 +4,7 @@
 // highlighter), plus the small animation tick helpers.
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 use web_time::Instant;
 
 use super::modes::FinderMode;
@@ -28,7 +28,7 @@ use crate::syntax::{highlight_line, syn_color, Lang};
 
 #[allow(clippy::too_many_arguments)]
 fn draw_modal_frame_top(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut impl Paint,
     x: f32,
     y: f32,
     width: f32,
@@ -150,7 +150,7 @@ impl Finder {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut impl Paint,
         dimensions: (f32, f32, f32),
         theme: &IdeTheme,
         search: &dyn SearchService,
@@ -815,7 +815,7 @@ impl Finder {
 
     fn render_preview(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut impl Paint,
         x: f32,
         y: f32,
         w: f32,
@@ -868,6 +868,12 @@ impl Finder {
                     self.preview_content_lines =
                         content.lines().map(ToString::to_string).collect();
                     self.preview_content_unreadable = false;
+                }
+                Err(crate::services::IoError::Pending(_)) => {
+                    // Remote hosts complete preview reads asynchronously. Do
+                    // not turn an in-flight read into a cached failure.
+                    self.preview_content_path = None;
+                    return;
                 }
                 Err(_) => {
                     self.preview_content_lines.clear();

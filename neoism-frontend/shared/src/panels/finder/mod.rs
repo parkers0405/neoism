@@ -22,6 +22,7 @@ pub mod search;
 pub mod state;
 pub mod types;
 pub mod update;
+mod host_frame;
 
 pub use modes::FinderMode;
 pub use state::*;

@@ -14,6 +14,9 @@ const LARGE_MARKDOWN_FAST_PARSE_LINES: usize = 20_000;
 const LARGE_MARKDOWN_FAST_PARSE_BYTES: usize = 2 * 1024 * 1024;
 
 impl MarkdownPane {
+    pub fn source_revision(&self) -> u64 { self.source_revision }
+    pub fn content_height(&self) -> f32 { self.content_height }
+
     pub fn is_active_tab_path(&self, path: &std::path::Path) -> bool {
         if self.path == path {
             return true;

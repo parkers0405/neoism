@@ -3,7 +3,6 @@ pub use icons::InlinePickerIcon;
 pub(crate) use icons::crop as clip_icon_image;
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::primitives::IdeTheme;
@@ -222,7 +221,7 @@ fn answer_caret_rect(mut rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 
 /// Trim `text` with an ellipsis so its measured width is ≤ `max_w`.
 fn truncate_to_pixel_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     opts: &DrawOpts,
     max_w: f32,
@@ -316,7 +315,7 @@ fn layout_limited_with_empty_row(
 }
 
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     view: InlinePickerView<'_>,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -335,7 +334,7 @@ pub fn render(
 
 /// Shared two-bar loading rows, bounded by the picker body.
 pub(crate) fn render_loading_skeleton(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     body: [f32; 4],
     theme: &IdeTheme,
     scale: f32,
@@ -380,7 +379,7 @@ pub(crate) fn render_loading_skeleton(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_limited(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     view: InlinePickerView<'_>,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -405,7 +404,7 @@ pub fn render_limited(
 /// The separate slice avoids changing every existing picker row initializer.
 #[allow(clippy::too_many_arguments)]
 pub fn render_limited_with_disabled(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     view: InlinePickerView<'_>,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -420,7 +419,7 @@ pub fn render_limited_with_disabled(
 /// Activity detail is optional so ordinary picker initializers remain unchanged.
 #[allow(clippy::too_many_arguments)]
 pub fn render_limited_with_activity(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     view: InlinePickerView<'_>,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -435,7 +434,7 @@ pub fn render_limited_with_activity(
 /// Optional presentation slots; absent icons preserve existing picker geometry.
 #[allow(clippy::too_many_arguments)]
 pub fn render_limited_with_icons(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     view: InlinePickerView<'_>,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -451,7 +450,7 @@ pub fn render_limited_with_icons(
 
 #[allow(clippy::too_many_arguments)]
 fn render_limited_content(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     view: InlinePickerView<'_>,
     input_rect: [f32; 4],
     theme: &IdeTheme,

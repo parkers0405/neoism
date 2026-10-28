@@ -438,16 +438,9 @@ impl FileTree {
                     ORDER + 2,
                 );
                 if self.focused {
-                    let cursor_w = (font_size * 0.6).max(2.0);
-                    let cursor_x = content_x + (row_pad_x - cursor_w).max(0.0);
-                    let cursor_h = (row_h - 6.0 * self.scale)
-                        .max(font_size)
-                        .min(row_h)
-                        .min(content_h.max(2.0));
-                    let cursor_y = (row_y + (row_h - cursor_h) / 2.0)
-                        .clamp(content_y, (panel_bottom - cursor_h).max(content_y));
-                    self.selected_cursor_rect =
-                        Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+                    self.selected_cursor_rect=Some(super::keyboard_cursor_rect(
+                        [content_x,content_y,content_w,content_h],row_y,row_h,self.scale,
+                    ));
                 }
             }
         }

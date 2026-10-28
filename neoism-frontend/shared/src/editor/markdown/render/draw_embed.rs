@@ -8,7 +8,6 @@
 use std::path::Path;
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::MarkdownPane;
 use crate::editor::neodraw::{render_scene, Camera, Scene, Vec2};
@@ -23,7 +22,7 @@ const HEADER_H: f32 = 30.0;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_draw_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     source: &str,
     content_x: f32,
@@ -44,7 +43,7 @@ pub(super) fn render_draw_block(
         .map(Path::to_path_buf)
         .unwrap_or_default();
     let target = base.join(rel);
-    let json = std::fs::read_to_string(&target).ok()?;
+    let json = sugarloaf.asset_text(&target)?;
     let scene = Scene::from_json(&json).ok()?;
 
     let block_rect = [content_x - 18.0, cursor_y - 8.0, content_w + 36.0, BLOCK_H];

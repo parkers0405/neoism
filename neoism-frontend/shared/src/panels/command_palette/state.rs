@@ -136,6 +136,8 @@ pub struct CommandPalette {
     /// web host narrows it via [`Self::set_host_capabilities`] so
     /// commands that cannot run there are not listed.
     pub(super) host_capabilities: PaletteHostCapabilities,
+    pub(super) host_supported_actions: Option<Vec<String>>,
+    pub(super) host_management_enabled: bool,
     /// In-progress workspace→host drag (5D-drag), or `None` when no drag
     /// is armed. Only ever populated in `Workspaces` mode.
     pub(super) workspace_drag: Option<WorkspaceDrag>,
@@ -217,6 +219,8 @@ impl Default for CommandPalette {
             top_anchor: super::PALETTE_MARGIN_TOP,
             surface: PaletteSurface::Terminal,
             host_capabilities: PaletteHostCapabilities::all(),
+            host_supported_actions: None,
+            host_management_enabled: true,
             workspace_drag: None,
             workspace_peer_hosts: Vec::new(),
             workspace_move: None,

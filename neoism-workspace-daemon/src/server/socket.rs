@@ -336,7 +336,7 @@ pub(crate) async fn handle_socket(
     let (search_tx, mut search_rx) =
         tokio::sync::mpsc::unbounded_channel::<SearchServerMessage>();
     let search_registry = SearchRegistry::new();
-    let mut search_request_id: u64 = 0;
+    let mut search_request_ids: std::collections::HashMap<u64, u64> = Default::default();
     // Read-only files requests run outside the socket pump. In particular, a
     // large ListDir must not pause PTY forwarding or prevent the next folder
     // request from reaching the daemon.
@@ -493,8 +493,15 @@ pub(crate) async fn handle_socket(
                 continue;
             }
             Some(search_event) = search_rx.recv() => {
+                let inner_id = search_handler::response_id(&search_event);
+                let request_id = if matches!(&search_event, SearchServerMessage::SearchProgress { .. }) {
+                    search_request_ids.get(&inner_id).copied()
+                } else {
+                    search_request_ids.remove(&inner_id)
+                };
+                let Some(request_id) = request_id else { continue; };
                 let resp = ServiceServerMessage::SearchReply {
-                    request_id: search_request_id,
+                    request_id,
                     message: search_event,
                 };
                 if let Err(err) = send_json(&mut sink, &resp).await {
@@ -1776,6 +1783,7 @@ pub(crate) async fn handle_socket(
                         let _ = send_json(&mut sink, &denial).await;
                         continue;
                     }
+                    let search_inner_id = search_handler::request_id(&message);
                     let root =
                         match resolve_request_workspace_root(workspace_root.as_deref()) {
                             Ok(root) => root,
@@ -1783,7 +1791,7 @@ pub(crate) async fn handle_socket(
                                 let resp = ServiceServerMessage::SearchReply {
                                     request_id,
                                     message: SearchServerMessage::SearchError {
-                                        req_id: request_id,
+                                        req_id: search_inner_id,
                                         message,
                                     },
                                 };
@@ -1791,7 +1799,11 @@ pub(crate) async fn handle_socket(
                                 continue;
                             }
                         };
-                    search_request_id = request_id;
+                    if matches!(&message, SearchClientMessage::CancelSearch { .. }) {
+                        search_request_ids.remove(&search_inner_id);
+                    } else {
+                        search_request_ids.insert(search_inner_id, request_id);
+                    }
                     search_handler::dispatch(
                         &search_registry,
                         root,
@@ -2206,6 +2218,7 @@ mod pty_subscription_tests {
     fn socket_forwards_only_explicitly_addressed_pty_sessions() {
         let mut subscriptions = std::collections::HashSet::new();
         let created = ServerMessage::PtyCreated {
+            presentation: None,
             session_id: "owned".into(),
             workspace_root: None,
             shell: None,

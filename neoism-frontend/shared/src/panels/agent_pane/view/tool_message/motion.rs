@@ -38,7 +38,7 @@ pub(super) fn projection(rows: Rc<Vec<ToolWrappedRow>>) -> Rc<Projection> {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_body_reveal(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentToolPane,
     id: &str,
     rows: Rc<Vec<ToolWrappedRow>>,
@@ -124,7 +124,7 @@ pub(in crate::panels::agent_pane::view) fn active_visible(
 /// owning a deadline when only blank header space is uncovered.
 pub(in crate::panels::agent_pane::view) fn active_glyphs(
     sample: crate::panels::agent_pane::tool_motion::ToolMotionSample,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     first: usize,
     clip: [f32; 4],
     cuts: &[[f32; 4]],

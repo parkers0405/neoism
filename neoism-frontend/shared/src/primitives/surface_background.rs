@@ -4,7 +4,7 @@
 use neoism_lua::EffectOptions;
 use neoism_lua::{BackgroundEffect, PluginSnapshot, StylePatch, StyleSheet};
 use std::{cell::RefCell, sync::Arc};
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 const SURFACE_BUDGET: usize = 384;
 const FRAME_BUDGET: usize = 1536;
@@ -256,7 +256,7 @@ fn plan(
 /// Caller supplies real geometry, scale, paint order and foreground occlusions.
 /// Static effects (speed=0) paint once without acquiring animation demand.
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     selector: &str,
     inner: [f32; 4],
     radius: f32,

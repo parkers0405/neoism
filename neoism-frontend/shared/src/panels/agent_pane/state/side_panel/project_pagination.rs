@@ -218,6 +218,17 @@ impl NeoismAgentSidePanel {
 
     /// A page placeholder is pending before its first claim as well as while
     /// queued/in flight. Errors and idle loaded cursors remain actionable rows.
+    /// Discovered chat project directories, most recently updated first.
+    pub fn session_project_directories(&self) -> Vec<String> {
+        let mut projects = self
+            .project_pages
+            .iter()
+            .map(|(directory, page)| (page.updated_ms, directory.clone()))
+            .collect::<Vec<_>>();
+        projects.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        projects.into_iter().map(|(_, directory)| directory).collect()
+    }
+
     pub fn project_page_loading(&self, directory: &str) -> bool {
         self.project_pages.get(directory).is_some_and(|page| {
             page.request.is_some()

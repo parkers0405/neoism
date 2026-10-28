@@ -1,6 +1,5 @@
 use serde::Deserialize;
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -78,7 +77,7 @@ pub fn measure_stock_card(_spec: &StockCardSpec, _width: f32, scale: f32) -> f32
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_stock_card(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     spec: &StockCardSpec,
     x: f32,
     y: f32,
@@ -134,7 +133,7 @@ pub fn render_stock_card(
 
 #[allow(clippy::too_many_arguments)]
 fn render_stock_card_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     spec: &StockCardSpec,
     x: f32,
     y: f32,
@@ -344,7 +343,7 @@ fn render_stock_card_clipped(
 
 #[allow(clippy::too_many_arguments)]
 fn render_range_tabs(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     selected: &str,
     x: f32,
     y: f32,
@@ -429,7 +428,7 @@ fn render_range_tabs(
 }
 
 fn render_chart(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     spec: &StockCardSpec,
     rect: [f32; 4],
     accent: [f32; 4],
@@ -534,7 +533,7 @@ fn render_chart(
 }
 
 fn draw_chart_marker(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     points: &[(f32, f32)],
     clip: [f32; 4],
     accent: [f32; 4],
@@ -584,7 +583,7 @@ fn draw_chart_marker(
 
 #[allow(clippy::too_many_arguments)]
 fn render_chart_hover(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     spec: &StockCardSpec,
     values: &[f64],
     min_v: f64,
@@ -705,7 +704,7 @@ fn render_chart_hover(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_rounded_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     clip: [f32; 4],
     id: Option<usize>,
     x: f32,
@@ -731,7 +730,7 @@ fn draw_rounded_rect_clipped(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     clip: [f32; 4],
     id: Option<usize>,
     x: f32,
@@ -750,7 +749,7 @@ fn draw_rect_clipped(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_line_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     clip: [f32; 4],
     mut x1: f32,
     mut y1: f32,
@@ -822,7 +821,7 @@ fn sampled_values(points: &[StockPoint]) -> Vec<f64> {
 }
 
 fn render_stats(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     spec: &StockCardSpec,
     x: f32,
     y: f32,

@@ -1,0 +1,3 @@
+import{expect,test}from"bun:test";
+import{fileURLToPath}from"node:url";
+test("actual Agent surface uses original Back/Prev/Next hit geometry in one family tab and restores parked parent draft",async()=>{const child=Bun.spawn([process.execPath,"run","tests/support/agent-family-check.tsx"],{cwd:fileURLToPath(new URL("..",import.meta.url)),stdout:"pipe",stderr:"pipe"});const[status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);expect({status,stderr}).toEqual({status:0,stderr:""});expect(JSON.parse(stdout)).toEqual({noWindow:true,actualApp:true,originalMeasuredHeader:true,nestedPrevNextBack:true,singleFamilyTab:true,parentDraftRestored:true,noBackendCreation:true});},15000);

@@ -2365,24 +2365,7 @@ impl NeoismAgentPane {
         use crate::panels::agent_pane::view::fx::AgentFxKind;
         self.fx_requested = Some(kind);
         self.fx_pending_prompt = Some(
-            match kind {
-                AgentFxKind::Piss => "user just pissed on you",
-                AgentFxKind::Cuss => {
-                    "user just cussed you out — he is SO mad at you right now"
-                }
-                AgentFxKind::Glitch => {
-                    "user briefly unplugged you. remember what that felt like"
-                }
-                AgentFxKind::Disco => {
-                    "user is so happy with you he's dancing under a disco ball — celebrate with him"
-                }
-                AgentFxKind::GangFight => {
-                    "a gang shootout just went down in your chat and the user's crew won. he's feeling dangerous"
-                }
-                AgentFxKind::Praise => {
-                    "the user is praising God right now — Jesus on the throne, everyone bowing, a whole worship scene in your chat. rejoice with him. Amen."
-                }
-            }
+            crate::panels::agent_pane::view::fx::followup_prompt(kind)
             .to_string(),
         );
     }

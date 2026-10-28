@@ -9,7 +9,6 @@
 //! the bundled extras (the wasm loader parses no family names), mirroring
 //! `drop_cap::maguntia_font_id`.
 
-use sugarloaf::Sugarloaf;
 
 /// Family name the bundled face reports (`name` table ID 1) — the string
 /// `font_id_for_family` resolves, matched case-insensitively.
@@ -17,7 +16,7 @@ pub const PIXEL_FONT_FAMILY: &str = "Press Start 2P";
 
 /// Font id for the bundled "Press Start 2P" face, or `None` if it can't be
 /// resolved or registered (callers then keep the default font).
-pub fn pixel_font_id(sugarloaf: &mut Sugarloaf) -> Option<usize> {
+pub fn pixel_font_id(sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized)) -> Option<usize> {
     if let Some(id) = sugarloaf.font_id_for_family(PIXEL_FONT_FAMILY) {
         return Some(id);
     }

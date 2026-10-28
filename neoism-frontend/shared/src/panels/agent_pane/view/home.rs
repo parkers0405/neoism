@@ -1,4 +1,3 @@
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::state::NeoismAgentPane;
 
@@ -35,21 +34,7 @@ impl AgentHomePane for NeoismAgentPane {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn render_home_with<P: AgentHomePane>(
-    sugarloaf: &mut Sugarloaf,
-    pane: &mut P,
-    rect: [f32; 4],
-    theme: &IdeTheme,
-    active: bool,
-    now_seconds: f32,
-    mouse: Option<(f32, f32)>,
-    s: f32,
-    input_rect: [f32; 4],
-    occlusion_rects: &[[f32; 4]],
-    prepared_input_rows: Option<&std::rc::Rc<Vec<InputWrapRow>>>,
-    checkout_context: Option<&AgentCheckoutContext>,
-) {
+pub fn wordmark_rect(rect:[f32;4],input_rect:[f32;4],s:f32)->[f32;4] {
     let [x, y, w, h] = rect;
     let input_y = input_rect[1];
     let aspect = crate::panels::terminal_splash::WORDMARK_ASPECT;
@@ -67,6 +52,27 @@ pub fn render_home_with<P: AgentHomePane>(
     let logo_x = x + (w - logo_w) * 0.5;
     let gap_above_input = (44.0 * s).max(min_gap);
     let logo_y = (input_y - gap_above_input - logo_h).max(y + top_pad);
+
+    [logo_x, logo_y, logo_w, logo_h]
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_home_with<P: AgentHomePane>(
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
+    pane: &mut P,
+    rect: [f32; 4],
+    theme: &IdeTheme,
+    active: bool,
+    now_seconds: f32,
+    mouse: Option<(f32, f32)>,
+    s: f32,
+    input_rect: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+    prepared_input_rows: Option<&std::rc::Rc<Vec<InputWrapRow>>>,
+    checkout_context: Option<&AgentCheckoutContext>,
+) {
+    let [logo_x, logo_y, logo_w, logo_h] = wordmark_rect(rect, input_rect, s);
+    let w = rect[2];
 
     super::clear_overlays(sugarloaf);
     wordmark::render_wordmark(

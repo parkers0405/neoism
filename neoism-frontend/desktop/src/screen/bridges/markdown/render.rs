@@ -610,26 +610,9 @@ impl Screen<'_> {
         md_path: &std::path::Path,
         value: &str,
     ) -> Option<std::path::PathBuf> {
-        let raw = std::path::Path::new(value);
-        if raw.is_absolute() {
-            return raw.exists().then(|| raw.to_path_buf());
-        }
-        if value.contains('/') {
-            let joined = md_path.parent()?.join(raw);
-            return joined.exists().then_some(joined);
-        }
-        let covers = neoism_backend::config::config_dir_path().join("covers");
-        let exact = covers.join(value);
-        if exact.exists() {
-            return Some(exact);
-        }
-        for ext in ["png", "jpg", "jpeg", "webp"] {
-            let candidate = covers.join(format!("{value}.{ext}"));
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-        None
+        neoism_ui::editor::markdown::host_assets::cover_path_candidates(
+            md_path, value, &neoism_backend::config::config_dir_path().join("covers"),
+        ).into_iter().find(|path| path.exists())
     }
 
     fn load_markdown_cover(

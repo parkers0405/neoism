@@ -8,7 +8,6 @@
 //! rects. Keyboard routing lives with the host (arrows / enter / a / n
 //! / esc for permissions; arrows / typing / enter / esc for questions).
 
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::permission_policy::VISUAL_SELECTION_ORDER;
 use crate::primitives::ide_theme::IdeTheme;
@@ -23,7 +22,7 @@ use super::user_input::{
 /// `None` when nothing is pending — the caller shows the regular "/"
 /// picker instead.
 pub fn render_prompt_picker(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentUserInputPane,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -42,7 +41,7 @@ pub fn render_prompt_picker(
 }
 
 fn render_permission_prompt(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentUserInputPane,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -158,7 +157,7 @@ fn render_permission_prompt(
 }
 
 fn render_question_prompt(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentUserInputPane,
     input_rect: [f32; 4],
     theme: &IdeTheme,

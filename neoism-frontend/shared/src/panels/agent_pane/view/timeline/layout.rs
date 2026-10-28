@@ -98,7 +98,7 @@ pub(crate) fn timeline_virtual_row_measurements<M>(
 }
 
 pub(crate) fn timeline_layout<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     width: f32,
     theme: &IdeTheme,
@@ -252,7 +252,7 @@ const HISTORY_WARM_BUDGET_US: u128 = 2_000;
 /// Warm the measure + markdown caches for a fetched-but-not-yet-prepended
 /// history page, using the same width/scale/theme the prepend fold will use.
 fn warm_staged_history<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     width: f32,
     theme: &IdeTheme,
@@ -494,7 +494,7 @@ pub(super) fn mark_animating_tool_rows_dirty<P: AgentTimelinePane>(
 
 #[allow(clippy::too_many_arguments)]
 fn build_timeline_layout<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     width: f32,
     theme: &IdeTheme,
@@ -548,7 +548,7 @@ where
 /// Returns `(content_height, estimated_prefix_rows, estimated_suffix_start)`.
 #[allow(clippy::too_many_arguments)]
 fn build_lazy_rows<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     width: f32,
     theme: &IdeTheme,
@@ -881,7 +881,7 @@ pub(super) fn patch_start_row<M>(
 
 #[allow(clippy::too_many_arguments)]
 fn patch_timeline_layout<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     cache: &mut TimelineLayoutCache<P::Message>,
     dirty: TimelineDirtyMarks,
@@ -939,7 +939,7 @@ where
 }
 
 fn prepared_message_markdown_blocks<P>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &P,
     message: &P::Message,
     width: f32,
@@ -1019,7 +1019,7 @@ where
 /// shift is exact.
 #[allow(clippy::too_many_arguments)]
 fn prepend_timeline_layout<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     cache: &mut TimelineLayoutCache<P::Message>,
     delta: usize,
@@ -1229,7 +1229,7 @@ fn dirty_start_source<P: AgentTimelinePane>(
 
 #[allow(clippy::too_many_arguments)]
 fn append_timeline_rows<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     width: f32,
     theme: &IdeTheme,

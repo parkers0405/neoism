@@ -10,7 +10,6 @@
 use std::cell::RefCell;
 use std::f32::consts::{PI, TAU};
 use std::sync::atomic::{AtomicU32, Ordering};
-use sugarloaf::Sugarloaf;
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 const GRID: f32 = 31.25;
@@ -594,7 +593,7 @@ impl AnimationFrame {
     #[allow(clippy::too_many_arguments)]
     pub fn draw_glyph(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         character: char,
         glyph_index: usize,
         glyph_count: usize,
@@ -675,7 +674,7 @@ impl AnimationFrame {
     #[allow(clippy::too_many_arguments)]
     pub fn draw_letter(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         letter_index: usize,
         rect: [f32; 4],
         color: [f32; 4],
@@ -737,7 +736,7 @@ impl AnimationFrame {
 
 #[allow(clippy::too_many_arguments)]
 fn paint_polygons(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     mapped: [Point; 4],
     rgba: [f32; 4],
     clip: [f32; 4],

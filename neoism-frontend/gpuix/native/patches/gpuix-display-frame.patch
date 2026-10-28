@@ -1,0 +1,1486 @@
+diff --git c/.changeset/neoism-display-frame.md w/.changeset/neoism-display-frame.md
+new file mode 100644
+index 0000000..512cf66
+--- /dev/null
++++ w/.changeset/neoism-display-frame.md
+@@ -0,0 +1,5 @@
++---
++"@gpuix/native": patch
++---
++
++Expose coalesced one-shot native platform frame wakes for display-paced animation on Linux, Windows, and FreeBSD, retaining macOS display-link wakes.
+diff --git c/.changeset/neoism-input-caret-geometry.md w/.changeset/neoism-input-caret-geometry.md
+new file mode 100644
+index 0000000..85c3705
+--- /dev/null
++++ w/.changeset/neoism-input-caret-geometry.md
+@@ -0,0 +1,5 @@
++---
++"@gpuix/native": patch
++---
++
++Expose opt-in native input caret geometry from the existing shaped insertion point, with passive change-only events for custom renderer hosts.
+diff --git c/README.md w/README.md
+index 4459e7b..3481243 100644
+--- c/README.md
++++ w/README.md
+@@ -1,5 +1,22 @@
+ # GPUIX
+ 
++### Display frame wake (Neoism binding patch)
++
++`GpuixRenderer.setFrameWakeCallback(callback)` supports native display-frame
++wakes on Linux, Windows, FreeBSD, and macOS. Passing `null` clears the weak,
++coalesced callback and invalidates its pending registration.
++`requestFrameWake(): boolean` requests one callback through GPUI's
++`Window.on_next_frame`. Repeated requests coalesce until JavaScript receives
++the callback. It returns false without an active callback or after shutdown.
++The request does not dirty the scene, force a draw, or run a repeating timer.
++The callback is a platform frame opportunity, not a physical presentation
++timestamp. Animation owners should prepare mutations there and request another
++wake only while work remains. Multiplex runtime ticks with animation work
++because the renderer has one wake callback.
++Production hosts build with `--no-default-features` and verify
++`testSupportEnabled() === false`; GPUI's test-support mode bypasses its
++production frame scheduling even on platforms with only a test-renderer stub.
++
+ **React and Solid** for [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), Zed's GPU UI framework.
+ 
+ Write a React or Solid tree in TypeScript. GPUIX paints it with Metal, DirectX, or Vulkan. No Electron. No web view.
+@@ -1898,6 +1915,16 @@ inactive. Override its colour through the shared native theme:
+ <input theme={{ caret: '#22c55e' }} />
+ ```
+ 
++Custom renderer hosts can opt in to the native `caretGeometry` event on an
++`input` or `textarea` through the existing event-handler registry and native
++`setEventListener` mutation. It reports the same shaped insertion point and
++scroll offsets used by GPUI's caret: `x`/`y` are window coordinates, `width` is
++the native caret width, and `height` is the line height. Its JSON `value`
++contains `visible`, `fontSize`, `remainingWidth`, `offset`, `selectionStart`,
++and `selectionEnd` (UTF-8 byte offsets). Events are emitted only when geometry,
++selection, or focus changes, independently of blink opacity. Listening does
++not replace native input, IME, selection, or caret positioning.
++
+ When the clipboard has no text, `Cmd+V` or `Ctrl+V` continues to `onKeyDown`
+ instead of disappearing inside the editor. Applications can then handle an
+ image-only or file-only clipboard themselves. Copied files also propagate even
+@@ -4044,3 +4071,5 @@ See [AGENTS.md](https://github.com/remorses/gpuix/blob/main/AGENTS.md) for detai
+ ## License
+ 
+ [Apache-2.0](https://github.com/remorses/gpuix/blob/main/LICENSE)
++
++`inputCaretGeometrySupported(): boolean` queries the compiled native input and textarea event whitelists without opening a window. Custom-caret hosts must require `true` before hiding the built-in caret; a listener filtered out by the native custom-element registry cannot emit geometry.
+diff --git c/packages/native/Cargo.toml w/packages/native/Cargo.toml
+index 9d339ee..5912a2c 100644
+--- c/packages/native/Cargo.toml
++++ w/packages/native/Cargo.toml
+@@ -9,6 +9,9 @@ license-file = "LICENSE"
+ [lib]
+ crate-type = ["cdylib", "rlib"]
+ 
++# Keep this pinned dependency build separate from Neoism's enclosing workspace.
++[workspace]
++
+ [dependencies]
+ serde = { version = "1", features = ["derive"] }
+ serde_json = { version = "1", features = ["raw_value"] }
+diff --git c/packages/native/index.d.ts w/packages/native/index.d.ts
+index 4eded3a..5571422 100644
+--- c/packages/native/index.d.ts
++++ w/packages/native/index.d.ts
+@@ -578,6 +578,8 @@ export interface EventPayload {
+    * Populated for: scroll.
+    */
+   precise?: boolean
++  /** Window display scale; a wheel notch is sized in physical pixels. */
++  scaleFactor?: number
+   /**
+    * Touch phase for scroll: "started", "moved", "ended".
+    * Populated for: scroll (trackpad gestures).
+@@ -802,3 +804,6 @@ export interface WindowSize {
+   width: number
+   height: number
+ }
++
++/** True when both compiled native text-input adapters accept caretGeometry listeners. No window is created. */
++export declare function inputCaretGeometrySupported(): boolean
+diff --git c/packages/native/src/color.rs w/packages/native/src/color.rs
+index ab9f8b4..82f4200 100644
+--- c/packages/native/src/color.rs
++++ w/packages/native/src/color.rs
+@@ -1,6 +1,27 @@
+ /// Parse any color accepted by csscolorparser 0.8.3 into GPUI's sRGB paint type.
+ /// Out-of-gamut channels are hard-clipped because GPUI paints sRGB Rgba/Hsla.
++/// Memoized: styles re-apply every frame and CSS parsing dominated per-element
++/// style cost. A bounded per-thread table; colour strings are few in practice.
+ pub(crate) fn parse_color_rgba(value: &str) -> Option<gpui::Rgba> {
++    thread_local! {
++        static PARSED: std::cell::RefCell<std::collections::HashMap<Box<str>, Option<gpui::Rgba>>> =
++            std::cell::RefCell::new(std::collections::HashMap::new());
++    }
++    if let Some(hit) = PARSED.with(|cache| cache.borrow().get(value).copied()) {
++        return hit;
++    }
++    let parsed = parse_color_uncached(value);
++    PARSED.with(|cache| {
++        let mut cache = cache.borrow_mut();
++        if cache.len() >= 4096 {
++            cache.clear();
++        }
++        cache.insert(value.into(), parsed);
++    });
++    parsed
++}
++
++fn parse_color_uncached(value: &str) -> Option<gpui::Rgba> {
+     let parsed = csscolorparser::parse(value).ok()?.clamp();
+     Some(gpui::Rgba {
+         r: parsed.r,
+diff --git c/packages/native/src/custom_elements/canvas.rs w/packages/native/src/custom_elements/canvas.rs
+new file mode 100644
+index 0000000..fb892fa
+--- /dev/null
++++ w/packages/native/src/custom_elements/canvas.rs
+@@ -0,0 +1,438 @@
++//! `<canvas>`: one GPUI element that paints a retained display list.
++//!
++//! Every `<div>`, `<text>` and `<img>` host costs a stateful GPUI element, a
++//! taffy node, a prepaint and a paint pass on every frame. Dense surfaces such
++//! as a code viewport or painter output have hundreds of primitives that never
++//! need layout or events of their own, so they paint here instead: quads,
++//! shaped text, paths and images straight into the scene from one canvas.
++//!
++//! `commands` is a JSON string, compared by equality and parsed only when it
++//! changes. Coordinates are relative to the element's box. Images reference
++//! the process-wide [`PaintImageStore`] by key; uploads never wait for the UI
++//! thread, and a key's pixels must not change once published.
++
++use std::collections::HashMap;
++use std::rc::Rc;
++use std::sync::{Arc, LazyLock, Mutex};
++
++use serde::Deserialize;
++
++use super::{CustomElement, CustomElementFactory, CustomRenderContext};
++
++// ── Image store ──────────────────────────────────────────────────────
++
++#[derive(Default)]
++pub struct PaintImageStore {
++    images: HashMap<u64, Arc<gpui::RenderImage>>,
++    /// Replaced or released images whose atlas tiles must be freed on the UI
++    /// thread, which owns the window.
++    drops: Vec<Arc<gpui::RenderImage>>,
++}
++
++static PAINT_IMAGES: LazyLock<Mutex<PaintImageStore>> = LazyLock::new(Default::default);
++
++pub fn put_paint_image(key: u64, image: Arc<gpui::RenderImage>) {
++    let mut store = PAINT_IMAGES.lock().unwrap();
++    if let Some(previous) = store.images.insert(key, image) {
++        store.drops.push(previous);
++    }
++}
++
++pub fn drop_paint_image(key: u64) {
++    let mut store = PAINT_IMAGES.lock().unwrap();
++    if let Some(previous) = store.images.remove(&key) {
++        store.drops.push(previous);
++    }
++}
++
++pub fn clear_paint_images() {
++    let mut store = PAINT_IMAGES.lock().unwrap();
++    let images: Vec<_> = store.images.drain().map(|(_, image)| image).collect();
++    store.drops.extend(images);
++}
++
++/// Free atlas tiles of released images. Call from the UI thread each frame.
++pub fn release_dropped_paint_images(window: &mut gpui::Window) {
++    let drops = std::mem::take(&mut PAINT_IMAGES.lock().unwrap().drops);
++    for image in drops {
++        window.drop_image(image).ok();
++    }
++}
++
++// ── Display list ─────────────────────────────────────────────────────
++
++#[derive(Deserialize)]
++#[serde(tag = "k")]
++enum RawOp {
++    /// Rounded rect: `b` = [x, y, w, h], `r` = [tl, tr, br, bl], optional border.
++    #[serde(rename = "r")]
++    Rect {
++        b: [f32; 4],
++        c: u32,
++        #[serde(default)]
++        r: Option<[f32; 4]>,
++        #[serde(default)]
++        bc: Option<u32>,
++        #[serde(default)]
++        bw: Option<f32>,
++    },
++    /// Image from the store, stretched to `b`. `s` = normalized
++    /// `[u0, v0, u1, v1]` source slice (default: whole image).
++    #[serde(rename = "i")]
++    Image {
++        id: u64,
++        b: [f32; 4],
++        #[serde(default)]
++        r: Option<[f32; 4]>,
++        #[serde(default)]
++        s: Option<[f32; 4]>,
++    },
++    /// One shaped line. `y` is the top of a `lh` tall line box. With `aw`, the
++    /// line is aligned inside `[x, x + aw]` by `al` ("l", "c", "r").
++    #[serde(rename = "t")]
++    Text {
++        x: f32,
++        y: f32,
++        t: String,
++        s: f32,
++        c: u32,
++        f: String,
++        #[serde(default)]
++        w: Option<f32>,
++        #[serde(default)]
++        i: Option<bool>,
++        #[serde(default)]
++        lh: Option<f32>,
++        #[serde(default)]
++        aw: Option<f32>,
++        #[serde(default)]
++        al: Option<String>,
++    },
++    /// Filled contours (even-odd), each a flat [x0, y0, x1, y1, ...] list.
++    #[serde(rename = "p")]
++    Fill { c: u32, p: Vec<Vec<f32>> },
++    /// Open polyline stroke.
++    #[serde(rename = "l")]
++    Stroke { c: u32, w: f32, p: Vec<f32> },
++    /// Push a clip rect; pairs with `u`.
++    #[serde(rename = "cl")]
++    Clip { b: [f32; 4] },
++    #[serde(rename = "u")]
++    Unclip,
++}
++
++enum Op {
++    Rect {
++        bounds: [f32; 4],
++        color: gpui::Hsla,
++        radii: [f32; 4],
++        border: Option<(gpui::Hsla, f32)>,
++    },
++    Image {
++        key: u64,
++        bounds: [f32; 4],
++        radii: [f32; 4],
++        source: [f32; 4],
++    },
++    Text {
++        x: f32,
++        y: f32,
++        text: gpui::SharedString,
++        size: f32,
++        color: gpui::Hsla,
++        font: gpui::Font,
++        line_height: f32,
++        align: Option<(f32, gpui::TextAlign)>,
++    },
++    Fill {
++        color: gpui::Hsla,
++        contours: Vec<Vec<f32>>,
++    },
++    Stroke {
++        color: gpui::Hsla,
++        width: f32,
++        points: Vec<f32>,
++    },
++    Clip([f32; 4]),
++    Unclip,
++}
++
++fn color(rgba: u32) -> gpui::Hsla {
++    gpui::rgba(rgba).into()
++}
++
++impl From<RawOp> for Op {
++    fn from(raw: RawOp) -> Self {
++        match raw {
++            RawOp::Rect { b, c, r, bc, bw } => Op::Rect {
++                bounds: b,
++                color: color(c),
++                radii: r.unwrap_or_default(),
++                border: bc.zip(bw).filter(|(_, width)| *width > 0.0).map(|(c, w)| (color(c), w)),
++            },
++            RawOp::Image { id, b, r, s } => Op::Image {
++                key: id,
++                bounds: b,
++                radii: r.unwrap_or_default(),
++                source: s.unwrap_or([0.0, 0.0, 1.0, 1.0]),
++            },
++            RawOp::Text { x, y, t, s, c, f, w, i, lh, aw, al } => {
++                let mut font = gpui::font(f);
++                font.weight = gpui::FontWeight(w.unwrap_or(400.0));
++                if i.unwrap_or(false) {
++                    font.style = gpui::FontStyle::Italic;
++                }
++                let align = aw.map(|width| {
++                    let align = match al.as_deref() {
++                        Some("r") => gpui::TextAlign::Right,
++                        Some("c") => gpui::TextAlign::Center,
++                        _ => gpui::TextAlign::Left,
++                    };
++                    (width, align)
++                });
++                Op::Text {
++                    x,
++                    y,
++                    text: t.into(),
++                    size: s,
++                    color: color(c),
++                    font,
++                    line_height: lh.unwrap_or(s),
++                    align,
++                }
++            }
++            RawOp::Fill { c, p } => Op::Fill {
++                color: color(c),
++                contours: p,
++            },
++            RawOp::Stroke { c, w, p } => Op::Stroke {
++                color: color(c),
++                width: w,
++                points: p,
++            },
++            RawOp::Clip { b } => Op::Clip(b),
++            RawOp::Unclip => Op::Unclip,
++        }
++    }
++}
++
++fn parse(source: &str) -> Vec<Op> {
++    if source.is_empty() {
++        return Vec::new();
++    }
++    match serde_json::from_str::<Vec<RawOp>>(source) {
++        Ok(ops) => ops.into_iter().map(Op::from).collect(),
++        Err(error) => {
++            log::warn!("<canvas> commands are invalid: {error}");
++            Vec::new()
++        }
++    }
++}
++
++fn rect(origin: gpui::Point<gpui::Pixels>, b: &[f32; 4]) -> gpui::Bounds<gpui::Pixels> {
++    gpui::Bounds::new(
++        gpui::point(origin.x + gpui::px(b[0]), origin.y + gpui::px(b[1])),
++        gpui::size(gpui::px(b[2].max(0.0)), gpui::px(b[3].max(0.0))),
++    )
++}
++
++fn corners(r: &[f32; 4]) -> gpui::Corners<gpui::Pixels> {
++    gpui::Corners {
++        top_left: gpui::px(r[0]),
++        top_right: gpui::px(r[1]),
++        bottom_right: gpui::px(r[2]),
++        bottom_left: gpui::px(r[3]),
++    }
++}
++
++fn paint_ops(ops: &[Op], origin: gpui::Point<gpui::Pixels>, window: &mut gpui::Window, cx: &mut gpui::App) {
++    let images: HashMap<u64, Arc<gpui::RenderImage>> = {
++        let store = PAINT_IMAGES.lock().unwrap();
++        ops.iter()
++            .filter_map(|op| match op {
++                Op::Image { key, .. } => store.images.get(key).map(|image| (*key, image.clone())),
++                _ => None,
++            })
++            .collect()
++    };
++    let mut index = 0;
++    paint_range(ops, &mut index, origin, &images, window, cx);
++}
++
++/// Paint until the matching `Unclip` (or the end), recursing for nested clips.
++fn paint_range(
++    ops: &[Op],
++    index: &mut usize,
++    origin: gpui::Point<gpui::Pixels>,
++    images: &HashMap<u64, Arc<gpui::RenderImage>>,
++    window: &mut gpui::Window,
++    cx: &mut gpui::App,
++) {
++    while *index < ops.len() {
++        let op = &ops[*index];
++        *index += 1;
++        match op {
++            Op::Rect { bounds, color, radii, border } => {
++                let (border_color, border_width) = border.unwrap_or((gpui::transparent_black(), 0.0));
++                window.paint_quad(gpui::quad(
++                    rect(origin, bounds),
++                    corners(radii),
++                    *color,
++                    gpui::px(border_width),
++                    border_color,
++                    gpui::BorderStyle::default(),
++                ));
++            }
++            Op::Image { key, bounds, radii, source } => {
++                if let Some(image) = images.get(key) {
++                    let visible = rect(origin, bounds);
++                    let [u0, v0, u1, v1] = *source;
++                    let (du, dv) = ((u1 - u0).max(1e-6), (v1 - v0).max(1e-6));
++                    // GPUI crops by intersecting the visible box with the full
++                    // image placement, so a slice is a stretched placement.
++                    let full = gpui::size(visible.size.width / du, visible.size.height / dv);
++                    let placement = gpui::Bounds::new(
++                        gpui::point(visible.origin.x - full.width * u0, visible.origin.y - full.height * v0),
++                        full,
++                    );
++                    window
++                        .paint_image(visible, placement, corners(radii), image.clone(), 0, false)
++                        .ok();
++                }
++            }
++            Op::Text { x, y, text, size, color, font, line_height, align } => {
++                if text.is_empty() {
++                    continue;
++                }
++                let run = gpui::TextRun {
++                    len: text.len(),
++                    font: font.clone(),
++                    color: *color,
++                    background_color: None,
++                    underline: None,
++                    strikethrough: None,
++                };
++                let line = window
++                    .text_system()
++                    .shape_line(text.clone(), gpui::px(*size), &[run], None);
++                let (text_align, align_width) = match align {
++                    Some((width, align)) => (*align, Some(gpui::px(*width))),
++                    None => (gpui::TextAlign::Left, None),
++                };
++                let origin = gpui::point(origin.x + gpui::px(*x), origin.y + gpui::px(*y));
++                line.paint(origin, gpui::px(*line_height), text_align, align_width, window, cx)
++                    .ok();
++                crate::text::log_painted_text(text.clone());
++            }
++            Op::Fill { color, contours } => {
++                let mut builder = gpui::PathBuilder::fill();
++                let mut any = false;
++                for contour in contours {
++                    let mut points = contour.chunks_exact(2);
++                    let Some(first) = points.next() else { continue };
++                    builder.move_to(gpui::point(origin.x + gpui::px(first[0]), origin.y + gpui::px(first[1])));
++                    for point in points {
++                        builder.line_to(gpui::point(origin.x + gpui::px(point[0]), origin.y + gpui::px(point[1])));
++                    }
++                    builder.close();
++                    any = true;
++                }
++                if any {
++                    if let Ok(path) = builder.build() {
++                        window.paint_path(path, *color);
++                    }
++                }
++            }
++            Op::Stroke { color, width, points } => {
++                let mut builder = gpui::PathBuilder::stroke(gpui::px(*width));
++                let mut points = points.chunks_exact(2);
++                let Some(first) = points.next() else { continue };
++                builder.move_to(gpui::point(origin.x + gpui::px(first[0]), origin.y + gpui::px(first[1])));
++                for point in points {
++                    builder.line_to(gpui::point(origin.x + gpui::px(point[0]), origin.y + gpui::px(point[1])));
++                }
++                if let Ok(path) = builder.build() {
++                    window.paint_path(path, *color);
++                }
++            }
++            Op::Clip(bounds) => {
++                let mask = gpui::ContentMask { bounds: rect(origin, bounds) };
++                window.with_content_mask(Some(mask), |window| {
++                    paint_range(ops, index, origin, images, window, cx)
++                });
++            }
++            Op::Unclip => return,
++        }
++    }
++}
++
++// ── Element ──────────────────────────────────────────────────────────
++
++#[derive(Default)]
++pub struct CanvasElement {
++    source: String,
++    ops: Rc<Vec<Op>>,
++}
++
++impl CustomElement for CanvasElement {
++    fn render(
++        &mut self,
++        ctx: CustomRenderContext,
++        _window: &mut gpui::Window,
++        _cx: &mut gpui::Context<crate::renderer::GpuixView>,
++    ) -> gpui::AnyElement {
++        use gpui::prelude::*;
++
++        let ops = self.ops.clone();
++        let painter = gpui::canvas(
++            |_, _, _| (),
++            // Like `overflow: hidden`: a display list never paints outside its box.
++            move |bounds, _, window, cx| {
++                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
++                    paint_ops(&ops, bounds.origin, window, cx)
++                })
++            },
++        )
++        .absolute()
++        .size_full();
++        // Children (overlays) paint above the display list.
++        let mut surface = super::custom_surface(gpui::div().id(gpui::ElementId::Integer(ctx.id)), &ctx)
++            .child(painter);
++        for child in ctx.children {
++            surface = surface.child(child);
++        }
++        surface.into_any_element()
++    }
++
++    fn set_prop(&mut self, key: &str, value: serde_json::Value) {
++        if key == "commands" {
++            let source = value.as_str().unwrap_or_default();
++            if source != self.source {
++                self.source = source.to_string();
++                self.ops = Rc::new(parse(source));
++            }
++        }
++    }
++
++    fn supported_props(&self) -> &'static [&'static str] {
++        &["commands"]
++    }
++
++    fn supported_events(&self) -> &'static [&'static str] {
++        &["click", "mouseEnter", "mouseLeave"]
++    }
++
++    fn destroy(&mut self) {}
++}
++
++pub struct CanvasFactory;
++
++impl CustomElementFactory for CanvasFactory {
++    fn element_type(&self) -> &str {
++        "canvas"
++    }
++
++    fn create(&self, _id: u64) -> Box<dyn CustomElement> {
++        Box::new(CanvasElement::default())
++    }
++}
+diff --git c/packages/native/src/custom_elements/input.rs w/packages/native/src/custom_elements/input.rs
+index 7be2d25..2e34bac 100644
+--- c/packages/native/src/custom_elements/input.rs
++++ w/packages/native/src/custom_elements/input.rs
+@@ -359,6 +359,7 @@ impl CustomElement for TextEditorElement {
+         let emits_submit = ctx.events.contains("submit");
+         let emits_key_down = ctx.events.contains("keyDown");
+         let emits_key_up = ctx.events.contains("keyUp");
++        let emits_caret_geometry = ctx.events.contains("caretGeometry");
+         let callback = ctx.event_callback.clone();
+ 
+         let state = self
+@@ -382,6 +383,8 @@ impl CustomElement for TextEditorElement {
+                     emits_submit,
+                     emits_key_down,
+                     emits_key_up,
++                    emits_caret_geometry,
++                    last_caret_geometry: None,
+                     focus_handle: state_focus_handle,
+                     content: value,
+                     placeholder: placeholder.into(),
+@@ -428,6 +431,11 @@ impl CustomElement for TextEditorElement {
+             }
+             state.emits_key_down = emits_key_down;
+             state.emits_key_up = emits_key_up;
++            if state.emits_caret_geometry != emits_caret_geometry {
++                state.emits_caret_geometry = emits_caret_geometry;
++                state.last_caret_geometry = None;
++                cx.notify();
++            }
+             state.placeholder = self.placeholder.clone().into();
+             state.read_only = self.read_only;
+             state.min_rows = self.min_rows.max(1);
+@@ -553,9 +561,7 @@ impl CustomElement for TextEditorElement {
+     }
+ 
+     fn supported_events(&self) -> &'static [&'static str] {
+-        &[
+-            "change", "submit", "click", "keyDown", "keyUp", "focus", "blur", "fileDrop",
+-        ]
++        caret_geometry::INPUT_EVENTS
+     }
+ 
+     fn destroy(&mut self) {
+@@ -643,6 +649,10 @@ fn push_undo_snapshot(history: &mut VecDeque<EditSnapshot>, snapshot: EditSnapsh
+     history.push_back(snapshot);
+ }
+ 
++#[path = "input_caret_geometry.rs"]
++mod caret_geometry;
++use caret_geometry::CaretGeometry;
++
+ struct TextEditorState {
+     element_id: u64,
+     callback: Option<EventCallback>,
+@@ -650,6 +660,8 @@ struct TextEditorState {
+     emits_submit: bool,
+     emits_key_down: bool,
+     emits_key_up: bool,
++    emits_caret_geometry: bool,
++    last_caret_geometry: Option<CaretGeometry>,
+     focus_handle: FocusHandle,
+     content: String,
+     placeholder: SharedString,
+@@ -685,6 +697,29 @@ struct TextEditorState {
+ }
+ 
+ impl TextEditorState {
++    fn report_caret_geometry(&mut self, bounds: Bounds<Pixels>, window: &Window) {
++        if !self.emits_caret_geometry { return; }
++        // Read the same shaped insertion point and scroll offsets as the
++        // built-in caret below; Unicode, wrapped lines and marked IME text
++        // therefore retain the native text editor's geometry.
++        let point = self.point_for_index(self.cursor_offset()).unwrap_or(point(px(0.0),px(0.0)));
++        let geometry = CaretGeometry::from_shaped(
++            [f32::from(bounds.left()),f32::from(bounds.top()),f32::from(bounds.size.width),f32::from(bounds.size.height)],
++            [f32::from(point.x),f32::from(point.y)],[self.scroll_left,self.scroll_top],
++            f32::from(self.line_height),f32::from(self.font_size),
++            self.focus_handle.is_focused(window)&&window.is_window_active(),self.cursor_offset(),self.selected_range.clone(),
++        );
++        if self.last_caret_geometry.as_ref()==Some(&geometry) { return; }
++        self.last_caret_geometry=Some(geometry.clone());
++        emit_event_full(&self.callback,self.element_id,"caretGeometry",|payload| {
++            payload.x=Some(geometry.x as f64);payload.y=Some(geometry.y as f64);
++            payload.width=Some(f32::from(CARET_WIDTH) as f64);payload.height=Some(geometry.height as f64);
++            payload.value=Some(serde_json::json!({"visible":geometry.visible,"fontSize":geometry.font_size,
++                "remainingWidth":geometry.remaining_width,"offset":geometry.offset,
++                "selectionStart":geometry.selection_start,"selectionEnd":geometry.selection_end}).to_string());
++        });
++    }
++
+     fn reset_blink(&mut self, cx: &Context<Self>) {
+         self.blink_anchor = cx.background_executor().now();
+     }
+@@ -1797,12 +1832,13 @@ impl gpui::Element for EditorTextElement {
+         _: Option<&gpui::InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         _: &mut (),
+-        _: &mut Window,
++        window: &mut Window,
+         cx: &mut App,
+     ) -> EditorPrepaint {
+         self.input.update(cx, |input, _| {
+             input.last_bounds = Some(bounds);
+             input.clamp_scroll(f32::from(bounds.size.width), f32::from(bounds.size.height));
++            input.report_caret_geometry(bounds,window);
+         });
+         let input = self.input.read(cx);
+         let origin = point(
+diff --git c/packages/native/src/custom_elements/input_caret_geometry.rs w/packages/native/src/custom_elements/input_caret_geometry.rs
+new file mode 100644
+index 0000000..0dd107a
+--- /dev/null
++++ w/packages/native/src/custom_elements/input_caret_geometry.rs
+@@ -0,0 +1,78 @@
++//! Data-only projection of the native editor's shaped insertion point. This
++//! module has no window/backend dependencies so its real geometry contract can
++//! also be verified with `rustc --test` on a headless builder.
++use std::ops::Range;
++
++/// CustomElementRegistry filters requested listeners using this exact list.
++/// Keep the geometry reporter opt-in reachable through the native registry.
++pub(crate) const INPUT_EVENTS:&[&str]=&[
++    "change","submit","click","keyDown","keyUp","focus","blur","fileDrop","caretGeometry",
++];
++
++#[derive(Clone, Debug, PartialEq)]
++pub(crate) struct CaretGeometry {
++    pub x:f32,
++    pub y:f32,
++    pub height:f32,
++    pub font_size:f32,
++    pub remaining_width:f32,
++    pub visible:bool,
++    pub offset:usize,
++    pub selection_start:usize,
++    pub selection_end:usize,
++}
++impl CaretGeometry {
++    pub(crate) fn from_shaped(bounds:[f32;4],insertion:[f32;2],scroll:[f32;2],line_height:f32,font_size:f32,focused:bool,offset:usize,selection:Range<usize>)->Self {
++        let [left,top,width,height]=bounds;
++        let x=left+insertion[0]-scroll[0];
++        let y=top+insertion[1]-scroll[1];
++        Self{x,y,height:line_height,font_size,remaining_width:(left+width-x).max(0.0),
++            visible:focused&&selection.is_empty()&&x>=left&&x<left+width&&y<top+height&&y+line_height>top,
++            offset,selection_start:selection.start,selection_end:selection.end}
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn registry_keeps_the_opt_in_caret_geometry_listener(){
++        let requested=["change","caretGeometry","unsupported"];
++        let retained:Vec<_>=requested.into_iter().filter(|event|INPUT_EVENTS.contains(event)).collect();
++        assert_eq!(retained,vec!["change","caretGeometry"]);
++    }
++    fn project(point:[f32;2],scroll:[f32;2],focused:bool,selection:Range<usize>)->CaretGeometry {
++        CaretGeometry::from_shaped([120.0,240.0,300.0,44.0],point,scroll,22.0,16.0,focused,selection.end,selection)
++    }
++    #[test]
++    fn wrapped_and_scrolled_native_insertion_is_reported_in_window_coordinates(){
++        let geometry=project([71.25,44.0],[12.5,22.0],true,8..8);
++        assert_eq!((geometry.x,geometry.y),(178.75,262.0));
++        assert_eq!(geometry.remaining_width,241.25);
++        assert_eq!((geometry.height,geometry.font_size),(22.0,16.0));assert!(geometry.visible);
++        assert_eq!(geometry,project([71.25,44.0],[12.5,22.0],true,8..8));
++    }
++    #[test]
++    fn unicode_byte_offsets_are_not_recomputed_as_characters_or_utf16(){
++        let offset="界🙂e\u{301}".len();let geometry=project([51.75,0.0],[0.0,0.0],true,offset..offset);
++        assert_eq!(geometry.offset,offset);assert_eq!(geometry.selection_start,offset);assert_eq!(geometry.selection_end,offset);
++        assert_eq!(geometry.x,171.75);
++    }
++    #[test]
++    fn selection_focus_and_viewport_edges_control_visibility(){
++        assert!(!project([10.0,0.0],[0.0,0.0],false,1..1).visible);
++        assert!(!project([10.0,0.0],[0.0,0.0],true,1..5).visible);
++        assert!(!project([301.0,0.0],[0.0,0.0],true,1..1).visible);
++        assert!(!project([10.0,44.0],[0.0,0.0],true,1..1).visible);
++        assert!(!project([10.0,0.0],[11.0,0.0],true,1..1).visible);
++        assert!(!project([10.0,0.0],[0.0,22.0],true,1..1).visible);
++        assert!(project([10.0,0.0],[0.0,21.5],true,1..1).visible);
++        assert_eq!(project([301.0,0.0],[0.0,0.0],true,1..1).remaining_width,0.0);
++    }
++    #[test]
++    fn same_point_different_selection_or_offset_still_emits_a_state_change(){
++        let first=project([10.0,0.0],[0.0,0.0],true,1..1);
++        assert_ne!(first,project([10.0,0.0],[0.0,0.0],true,2..2));
++        assert_ne!(first,project([10.0,0.0],[0.0,0.0],true,1..2));
++    }
++}
+diff --git c/packages/native/src/custom_elements/mod.rs w/packages/native/src/custom_elements/mod.rs
+index 158269f..7fc6d69 100644
+--- c/packages/native/src/custom_elements/mod.rs
++++ w/packages/native/src/custom_elements/mod.rs
+@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
+ use crate::renderer::EventCallback;
+ 
+ pub mod anchored;
++pub mod canvas;
+ pub mod code;
+ pub mod diff;
+ pub mod img;
+@@ -324,6 +325,7 @@ impl CustomElementRegistry {
+         registry.register(Box::new(code::CodeFactory));
+         registry.register(Box::new(diff::DiffFactory));
+         registry.register(Box::new(markdown::MarkdownFactory));
++        registry.register(Box::new(canvas::CanvasFactory));
+         registry
+     }
+ 
+diff --git c/packages/native/src/element_tree.rs w/packages/native/src/element_tree.rs
+index 1b0bdd2..b097f36 100644
+--- c/packages/native/src/element_tree.rs
++++ w/packages/native/src/element_tree.rs
+@@ -76,7 +76,7 @@ pub struct EventPayload {
+     /// Populated for: scroll.
+     pub delta_x: Option<f64>,
+ 
+-    /// Scroll delta on the Y axis (pixels or lines, see `precise`).
++    /// Scroll delta on the Y axis (pixels, or wheel notches when not `precise`).
+     /// Populated for: scroll.
+     pub delta_y: Option<f64>,
+ 
+@@ -84,6 +84,10 @@ pub struct EventPayload {
+     /// Populated for: scroll.
+     pub precise: Option<bool>,
+ 
++    /// Window display scale; a wheel notch is sized in physical pixels.
++    /// Populated for: scroll.
++    pub scale_factor: Option<f64>,
++
+     /// Touch phase for scroll: "started", "moved", "ended".
+     /// Populated for: scroll (trackpad gestures).
+     pub touch_phase: Option<String>,
+@@ -159,6 +163,7 @@ impl Default for EventPayload {
+             delta_x: None,
+             delta_y: None,
+             precise: None,
++            scale_factor: None,
+             touch_phase: None,
+             hovered: None,
+             value: None,
+diff --git c/packages/native/src/lib.rs w/packages/native/src/lib.rs
+index c5f4fa1..d08b130 100644
+--- c/packages/native/src/lib.rs
++++ w/packages/native/src/lib.rs
+@@ -66,6 +66,23 @@ pub fn has_test_gpuix_renderer() -> bool {
+     ))
+ }
+ 
++/// Test-support changes GPUI scheduling even where the test renderer is a stub.
++/// Production hosts verify this is false before loading the display binding.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
++#[napi]
++pub fn test_support_enabled() -> bool {
++    cfg!(feature = "test-support")
++}
++
++/// Validate the compiled native event whitelist without creating a window.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
++#[napi]
++pub fn input_caret_geometry_supported() -> bool {
++    use crate::custom_elements::CustomElementFactory;
++    crate::custom_elements::input::InputFactory.create(0).supported_events().contains(&"caretGeometry")
++        && crate::custom_elements::input::TextareaFactory.create(0).supported_events().contains(&"caretGeometry")
++}
++
+ #[cfg(all(
+     not(all(target_arch = "wasm32", target_os = "unknown")),
+     not(all(
+diff --git c/packages/native/src/renderer.rs w/packages/native/src/renderer.rs
+index 8c104a4..22b2ddc 100644
+--- c/packages/native/src/renderer.rs
++++ w/packages/native/src/renderer.rs
+@@ -25,7 +25,7 @@ use napi_derive::napi;
+ use std::cell::RefCell;
+ use std::collections::{HashMap, HashSet};
+ use std::rc::Rc;
+-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ use std::sync::atomic::{AtomicBool, Ordering};
+ #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+ use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
+@@ -435,6 +435,7 @@ enum ClockControl {
+ #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+ enum UiCommand {
+     Invalidate,
++    RequestFrameWake(NativeFrameWake),
+     ActivateWindow,
+     MinimizeWindow,
+     ZoomWindow,
+@@ -560,6 +561,16 @@ async fn run_ui_commands(
+     while let Some(command) = commands.next().await {
+         let result = match command {
+             UiCommand::Invalidate => refresh_ui_window(window, cx),
++            UiCommand::RequestFrameWake(wake) => {
++                let queued = wake.requested.clone();
++                let result = window.update(cx, move |_view, window, _cx| {
++                    window.on_next_frame(move |_window, _cx| wake.deliver());
++                });
++                if result.is_err() {
++                    queued.store(false, Ordering::Release);
++                }
++                result
++            }
+             UiCommand::ActivateWindow => window.update(cx, |_view, window, cx| {
+                 cx.activate(true);
+                 window.activate_window();
+@@ -665,9 +676,11 @@ async fn run_ui_commands(
+                 format,
+                 response,
+             } => window.update(cx, move |view, window, cx| {
+-                response
+-                    .send(view.set_image_pixels(id, width, height, bytes, format, window, cx))
+-                    .ok();
++                let result = view.set_image_pixels(id, width, height, bytes, format, window, cx);
++                if let Err(error) = &result {
++                    log::warn!("setImagePixels({id}) failed: {error}");
++                }
++                response.send(result).ok();
+             }),
+             UiCommand::SetImage {
+                 id,
+@@ -957,9 +970,28 @@ pub fn is_terminal() -> bool {
+     TERMINAL_MODE.load(std::sync::atomic::Ordering::Acquire)
+ }
+ 
+-/// The main GPUI renderer exposed to Node.js.
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
++#[derive(Clone)]
++struct NativeFrameWake {
++    wake: Arc<dyn Fn() + Send + Sync>,
++    requested: Arc<AtomicBool>,
++    active: Arc<AtomicBool>,
++}
++
++#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
++impl NativeFrameWake {
++    fn deliver(self) {
++        if self.active.load(Ordering::Acquire) {
++            (self.wake)();
++        } else {
++            self.requested.store(false, Ordering::Release);
++        }
++    }
++}
++
+ #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ #[napi]
++/// The main GPUI renderer exposed to Node.js.
+ pub struct GpuixRenderer {
+     event_callback: Mutex<Option<Arc<ThreadsafeFunction<EventPayload>>>>,
+     tree: Arc<Mutex<RetainedTree>>,
+@@ -967,6 +999,7 @@ pub struct GpuixRenderer {
+     /// Shared with GpuixView so napi methods can read the live selection
+     /// without an App context. Paint and napi calls can use different threads.
+     selection: SharedSelection,
++    frame_wake: Mutex<Option<NativeFrameWake>>,
+     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+     ui_commands: Mutex<Option<mpsc::UnboundedSender<UiCommand>>>,
+     /// False after `Platform::run` returns. `tick()` reports that so JS can
+@@ -977,9 +1010,93 @@ pub struct GpuixRenderer {
+     ui_running: Arc<AtomicBool>,
+ }
+ 
++/// Draws completed by the root view. Read without a UI-thread round trip so a
++/// frame meter never stalls JavaScript behind an in-progress paint.
++static RENDERED_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++/// Microseconds since `FRAME_EPOCH` of the latest root draw, so a meter can
++/// divide draw intervals by the draw clock instead of its own polling time.
++static RENDERED_FRAME_AT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static FRAME_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
++/// Window display scale (f32 bits) as of the latest draw, for device-pixel snapping.
++static DISPLAY_SCALE_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
++/// Focused host id as of the latest draw (`u64::MAX` = none), published for the
++/// same reason.
++static FOCUSED_ELEMENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
++
+ #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ #[napi]
+ impl GpuixRenderer {
++    /// Root draws so far. Lock-free; never waits for the UI thread.
++    #[napi]
++    pub fn get_rendered_frame_count(&self) -> f64 {
++        RENDERED_FRAMES.load(std::sync::atomic::Ordering::Relaxed) as f64
++    }
++
++    /// Window display scale as of the latest draw. Lock-free.
++    #[napi]
++    pub fn get_display_scale(&self) -> f64 {
++        f64::from(f32::from_bits(DISPLAY_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed)))
++    }
++
++    /// `[count, drawn_at_ms]` of the latest root draw, read as one consistent
++    /// pair. Lock-free; never waits for the UI thread.
++    #[napi]
++    pub fn get_rendered_frame_sample(&self) -> Vec<f64> {
++        use std::sync::atomic::Ordering;
++        loop {
++            let count = RENDERED_FRAMES.load(Ordering::Acquire);
++            let at = RENDERED_FRAME_AT_US.load(Ordering::Acquire);
++            if RENDERED_FRAMES.load(Ordering::Acquire) == count {
++                return vec![count as f64, at as f64 / 1000.0];
++            }
++        }
++    }
++
++    /// Focused host id as of the latest draw. Lock-free; may trail a focus
++    /// change requested since that draw.
++    #[napi]
++    pub fn get_focused_element_id_snapshot(&self) -> Option<f64> {
++        match FOCUSED_ELEMENT.load(std::sync::atomic::Ordering::Relaxed) {
++            u64::MAX => None,
++            id => Some(id as f64),
++        }
++    }
++
++    /// Publish pixels under `key` for `<canvas>` image commands. Runs on the
++    /// calling thread and never waits for the UI thread. A key's pixels are
++    /// immutable once referenced: publish new content under a new key.
++    #[napi]
++    pub fn put_paint_image(
++        &self,
++        key: f64,
++        width: f64,
++        height: f64,
++        pixels: Buffer,
++        format: Option<String>,
++    ) -> Result<()> {
++        let key = to_element_id(key)?;
++        let width = dimension_u32(width, "width")?;
++        let height = dimension_u32(height, "height")?;
++        let format = crate::custom_elements::img::PixelFormat::parse(format.as_deref())
++            .map_err(Error::from_reason)?;
++        let image = crate::custom_elements::img::render_image_from_pixels(
++            width,
++            height,
++            pixels.to_vec(),
++            format,
++        )
++        .map_err(Error::from_reason)?;
++        crate::custom_elements::canvas::put_paint_image(key, image);
++        Ok(())
++    }
++
++    /// Release a `<canvas>` image. Its atlas tile is freed on the next draw.
++    #[napi]
++    pub fn drop_paint_image(&self, key: f64) -> Result<()> {
++        crate::custom_elements::canvas::drop_paint_image(to_element_id(key)?);
++        Ok(())
++    }
++
+     fn event_callback_for_view(&self) -> Option<EventCallback> {
+         self.event_callback.lock().unwrap().clone().map(|tsf| {
+             Arc::new(move |payload: EventPayload| {
+@@ -1178,6 +1295,7 @@ impl GpuixRenderer {
+             tree: Arc::new(Mutex::new(RetainedTree::new())),
+             initialized: Arc::new(Mutex::new(false)),
+             selection: SharedSelection::default(),
++            frame_wake: Mutex::new(None),
+             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+             ui_commands: Mutex::new(None),
+             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+@@ -1574,59 +1692,117 @@ impl GpuixRenderer {
+     }
+ 
+ 
+-    /// Wake JavaScript after the display link queues a frame. Returns true on macOS,
+-    /// false on other platforms. Call tick() in the callback; it never blocks.
+-    /// Wakes coalesce while JavaScript is busy and do not keep the process alive.
+-    /// Pass null to clear the callback. Already queued callbacks may still arrive.
++    /// Register a weak, coalesced JavaScript frame wake callback. macOS also
++    /// preserves its embedded display-link pump hook. Threaded platforms wake
++    /// only after requestFrameWake() asks for a GPUI next-frame callback.
++    /// Passing null invalidates pending native requests; callbacks already in
++    /// JavaScript's queue may still arrive. The callback never keeps JS alive.
+     #[napi]
+     pub fn set_frame_wake_callback(&self, callback: Option<Function<(), ()>>) -> Result<bool> {
+-        #[cfg(target_os = "macos")]
++        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+         {
+-            use std::sync::atomic::{AtomicBool, Ordering};
+-
+-            let set_wake_hook = |hook: Option<Arc<dyn Fn() + Send + Sync>>| {
+-                EMBEDDED_PLATFORM.with(|platform| {
+-                    if let Some(platform) = platform.borrow().as_ref() {
+-                        platform.set_wake_hook(hook);
+-                    }
+-                })
+-            };
+-            let Some(callback) = callback else {
+-                set_wake_hook(None);
+-                return Ok(true);
+-            };
+-            if !self.is_initialized() {
+-                return Err(Error::from_reason(
+-                    "Call init() before setting a frame wake callback",
+-                ));
++            if callback.is_some() && !self.is_initialized() {
++                return Err(Error::from_reason("Call init() before setting a frame wake callback"));
+             }
+-            let pending = Arc::new(AtomicBool::new(false));
+-            let handled = pending.clone();
+-            let wake = callback
+-                .build_threadsafe_function::<()>()
+-                .callee_handled::<false>()
+-                .weak::<true>()
+-                .build_callback(move |_| {
+-                    handled.store(false, Ordering::Release);
+-                    Ok(())
+-                })?;
+-            set_wake_hook(Some(Arc::new(move || {
+-                if !pending.swap(true, Ordering::AcqRel)
+-                    && wake.call((), ThreadsafeFunctionCallMode::NonBlocking) != napi::Status::Ok
+-                {
+-                    pending.store(false, Ordering::Release);
++            let next = if let Some(callback) = callback {
++                let pending = Arc::new(AtomicBool::new(false));
++                let handled = pending.clone();
++                let requested = Arc::new(AtomicBool::new(false));
++                let delivered = requested.clone();
++                let failed = requested.clone();
++                let active = Arc::new(AtomicBool::new(true));
++                let enabled = active.clone();
++                let wake = callback
++                    .build_threadsafe_function::<()>()
++                    .callee_handled::<false>()
++                    .weak::<true>()
++                    .build_callback(move |_| {
++                        // Conversion runs on JS before its callback executes.
++                        // A callback may therefore request the following frame.
++                        handled.store(false, Ordering::Release);
++                        delivered.store(false, Ordering::Release);
++                        Ok(())
++                    })?;
++                let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
++                    if enabled.load(Ordering::Acquire)
++                        && !pending.swap(true, Ordering::AcqRel)
++                        && wake.call((), ThreadsafeFunctionCallMode::NonBlocking) != napi::Status::Ok
++                    {
++                        pending.store(false, Ordering::Release);
++                        failed.store(false, Ordering::Release);
++                    }
++                });
++                Some(NativeFrameWake {
++                    wake: hook,
++                    requested,
++                    active,
++                })
++            } else {
++                None
++            };
++            if let Some(previous) = std::mem::replace(&mut *self.frame_wake.lock().unwrap(), next.clone()) {
++                previous.active.store(false, Ordering::Release);
++                previous.requested.store(false, Ordering::Release);
++            }
++            #[cfg(target_os = "macos")]
++            EMBEDDED_PLATFORM.with(|platform| {
++                if let Some(platform) = platform.borrow().as_ref() {
++                    platform.set_wake_hook(next.map(|registration| registration.wake));
+                 }
+-            })));
++            });
+             return Ok(true);
+         }
+-
+-        #[cfg(not(target_os = "macos"))]
++        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "freebsd")))]
+         {
+             let _ = callback;
+             Ok(false)
+         }
+     }
+ 
++    /// Request exactly one callback at GPUI's next platform frame. This does
++    /// not dirty the scene or force a draw. Requests coalesce until delivery.
++    /// Returns false without a registration or after the UI thread has closed.
++    #[napi]
++    pub fn request_frame_wake(&self) -> Result<bool> {
++        let Some(wake) = self.frame_wake.lock().unwrap().clone() else {
++            return Ok(false);
++        };
++        if !wake.active.load(Ordering::Acquire) {
++            return Ok(false);
++        }
++        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
++        {
++            if !self.ui_running.load(Ordering::Acquire) {
++                return Ok(false);
++            }
++            if wake.requested.swap(true, Ordering::AcqRel) {
++                return Ok(true);
++            }
++            let queued = wake.requested.clone();
++            if let Err(error) = self.send_ui_command(UiCommand::RequestFrameWake(wake)) {
++                queued.store(false, Ordering::Release);
++                return Err(error);
++            }
++            return Ok(true);
++        }
++        #[cfg(target_os = "macos")]
++        {
++            if wake.requested.swap(true, Ordering::AcqRel) {
++                return Ok(true);
++            }
++            let queued = wake.requested.clone();
++            let result = update_window(move |_view, window, _cx| {
++                window.on_next_frame(move |_window, _cx| wake.deliver());
++            });
++            if result.is_err() {
++                queued.store(false, Ordering::Release);
++            }
++            return result.map(|_| true);
++        }
++        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "freebsd")))]
++        Ok(false)
++    }
++
+     /// Whether JavaScript must call tick() until it returns false.
+     ///
+     /// macOS: tick() pumps AppKit. Windows/Linux: tick() only reports whether
+@@ -2380,17 +2556,18 @@ impl GpuixRenderer {
+ 
+         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+         {
+-            let (response, receiver) = sync_channel(1);
+-            self.send_ui_command(UiCommand::SetImagePixels {
++            // Fire and forget: waiting here parks JavaScript behind whatever the
++            // UI thread is drawing, which costs the next frame. Commands run in
++            // order, so a later batch still sees this image.
++            let (response, _receiver) = sync_channel(1);
++            return self.send_ui_command(UiCommand::SetImagePixels {
+                 id,
+                 width,
+                 height,
+                 bytes,
+                 format,
+                 response,
+-            })?;
+-            return recv_ui_response(receiver, "the image pixel upload")?
+-                .map_err(Error::from_reason);
++            });
+         }
+ 
+         #[cfg(not(any(
+@@ -3626,6 +3803,10 @@ impl WebGpuixRenderer {
+ #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+ impl Drop for GpuixRenderer {
+     fn drop(&mut self) {
++        if let Some(wake) = self.frame_wake.lock().unwrap().take() {
++            wake.active.store(false, Ordering::Release);
++            wake.requested.store(false, Ordering::Release);
++        }
+         #[cfg(target_os = "macos")]
+         if *self.initialized.lock().unwrap() {
+             EMBEDDED_PLATFORM
+@@ -5091,6 +5272,15 @@ impl gpui::Render for GpuixView {
+         use gpui::IntoElement;
+ 
+         window.set_window_title(&self.window_title);
++        DISPLAY_SCALE_BITS.store(window.scale_factor().to_bits(), std::sync::atomic::Ordering::Relaxed);
++        let epoch = *FRAME_EPOCH.get_or_init(std::time::Instant::now);
++        RENDERED_FRAME_AT_US.store(epoch.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Release);
++        RENDERED_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Release);
++        FOCUSED_ELEMENT.store(
++            self.focused_element_id(window).unwrap_or(u64::MAX),
++            std::sync::atomic::Ordering::Relaxed,
++        );
++        crate::custom_elements::canvas::release_dropped_paint_images(window);
+ 
+         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+         if let Some(id) = PENDING_FOCUS_ELEMENT.with(|pending| pending.borrow_mut().take()) {
+@@ -5843,20 +6033,30 @@ pub(crate) fn build_host_container(
+ 
+             // ── Scroll wheel ─────────────────────────────────────
+             "scroll" => {
+-                el = el.on_scroll_wheel(move |scroll_event, _window, _cx| {
++                el = el.on_scroll_wheel(move |scroll_event, window, _cx| {
++                    let scale_factor = f64::from(window.scale_factor());
+                     emit_event_full(&callback, id, "scroll", |p| {
++                        p.scale_factor = Some(scale_factor);
+                         let (x, y) = point_to_xy(scroll_event.position);
+                         p.x = Some(x);
+                         p.y = Some(y);
+                         p.modifiers = Some(scroll_event.modifiers.into());
+                         p.precise = Some(scroll_event.delta.precise());
+ 
+-                        // Convert ScrollDelta to pixel values.
+-                        // For Lines delta, we use a default line height of 20px.
+-                        let line_height = gpui::px(20.0);
+-                        let pixel_delta = scroll_event.delta.pixel_delta(line_height);
+-                        p.delta_x = Some(f64::from(f32::from(pixel_delta.x)));
+-                        p.delta_y = Some(f64::from(f32::from(pixel_delta.y)));
++                        // Precise (trackpad) deltas are pixels; mouse-wheel deltas
++                        // stay in notches/lines so each surface applies its own
++                        // row height, like the desktop's winit `LineDelta`.
++                        let (dx, dy) = match scroll_event.delta {
++                            gpui::ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
++                            // Linux GPUI pre-multiplies each notch by its
++                            // `SCROLL_LINES` (3); report notches like winit.
++                            gpui::ScrollDelta::Lines(lines) => {
++                                let per_notch = if cfg!(target_os = "linux") { 3.0 } else { 1.0 };
++                                (lines.x / per_notch, lines.y / per_notch)
++                            }
++                        };
++                        p.delta_x = Some(f64::from(dx));
++                        p.delta_y = Some(f64::from(dy));
+ 
+                         p.touch_phase = Some(match scroll_event.touch_phase {
+                             gpui::TouchPhase::Started => "started".to_string(),
+diff --git c/packages/native/src/retained_tree.rs w/packages/native/src/retained_tree.rs
+index ee95967..7323cca 100644
+--- c/packages/native/src/retained_tree.rs
++++ w/packages/native/src/retained_tree.rs
+@@ -419,6 +419,11 @@ impl RetainedTree {
+     }
+ 
+     pub fn insert_before(&mut self, parent_id: u64, child_id: u64, before_id: u64) {
++        // DOM insertBefore(node, node) is a no-op. Solid's keyed swap
++        // reconciliation deliberately emits this for retained siblings.
++        if child_id == before_id {
++            return;
++        }
+         // Remove from old parent if any
+         let old_parent_id = self.elements.get(&child_id).and_then(|e| e.parent);
+         if let Some(old_parent_id) = old_parent_id {
+@@ -811,6 +816,24 @@ fn element_to_json(
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn keyed_self_anchor_moves_preserve_order_and_revision() {
++        let mut tree = RetainedTree::new();
++        for id in 1..=5 { tree.create_element(id, "div".to_string()); }
++        for id in 2..=5 { tree.append_child(1, id); }
++        let before = tree.elements[&1].subtree_revision;
++        for id in 2..=5 {
++            tree.insert_before(1, id, id);
++            assert_eq!(tree.elements[&1].children, vec![2, 3, 4, 5]);
++            assert_eq!(tree.elements[&id].parent, Some(1));
++            assert_eq!(tree.elements[&1].subtree_revision, before);
++        }
++        // Exact Solid two-ended swap, with the trailing plus still last.
++        tree.insert_before(1, 3, 3);
++        tree.insert_before(1, 2, 4);
++        assert_eq!(tree.elements[&1].children, vec![3, 2, 4, 5]);
++    }
++
+     fn apply(tree: &mut RetainedTree, json: &str) {
+         crate::renderer::apply_batch_to_tree(tree, json.as_bytes()).expect("valid batch");
+     }
+diff --git c/packages/native/src/text/paint.rs w/packages/native/src/text/paint.rs
+index 23005b0..57e6928 100644
+--- c/packages/native/src/text/paint.rs
++++ w/packages/native/src/text/paint.rs
+@@ -19,7 +19,7 @@ use std::sync::Arc;
+ use parking_lot::Mutex;
+ 
+ use gpui::{
+-    canvas, div, point, prelude::*, px, quad, size, BorderStyle, Bounds, Hsla, SharedString,
++    canvas, point, prelude::*, px, quad, size, BorderStyle, Bounds, Hsla, SharedString,
+     StyledText, TextLayout, TextRun, Window,
+ };
+ 
+@@ -162,14 +162,85 @@ pub fn chrome_text(text: SharedString, runs: Option<Vec<TextRun>>) -> gpui::AnyE
+         Some(runs) => StyledText::new(text.clone()).with_runs(runs),
+         None => StyledText::new(text.clone()),
+     };
+-    let log = canvas(
+-        |_, _, _| (),
+-        move |_, _, _, _| PAINTED.with(|p| p.borrow_mut().push(text.clone())),
+-    )
+-    .absolute()
+-    .w(px(0.0))
+-    .h(px(0.0));
+-    div().relative().child(log).child(styled).into_any_element()
++    UnderlaidText::new(styled, move |_| PAINTED.with(|p| p.borrow_mut().push(text.clone())))
++        .into_any_element()
++}
++
++/// `StyledText` that runs `underlay` at the start of its own paint, before the
++/// glyphs. One GPUI element and one layout node per text run: the previous
++/// `div > (absolute canvas, StyledText)` shape cost three of each, on every
++/// frame, for every paragraph and code line.
++pub struct UnderlaidText {
++    styled: StyledText,
++    underlay: Option<Box<dyn FnOnce(&mut Window)>>,
++}
++
++impl UnderlaidText {
++    pub fn new(styled: StyledText, underlay: impl FnOnce(&mut Window) + 'static) -> Self {
++        Self {
++            styled,
++            underlay: Some(Box::new(underlay)),
++        }
++    }
++}
++
++impl IntoElement for UnderlaidText {
++    type Element = Self;
++
++    fn into_element(self) -> Self::Element {
++        self
++    }
++}
++
++impl gpui::Element for UnderlaidText {
++    type RequestLayoutState = <StyledText as gpui::Element>::RequestLayoutState;
++    type PrepaintState = <StyledText as gpui::Element>::PrepaintState;
++
++    fn id(&self) -> Option<gpui::ElementId> {
++        gpui::Element::id(&self.styled)
++    }
++
++    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
++        None
++    }
++
++    fn request_layout(
++        &mut self,
++        id: Option<&gpui::GlobalElementId>,
++        inspector_id: Option<&gpui::InspectorElementId>,
++        window: &mut Window,
++        cx: &mut gpui::App,
++    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
++        gpui::Element::request_layout(&mut self.styled, id, inspector_id, window, cx)
++    }
++
++    fn prepaint(
++        &mut self,
++        id: Option<&gpui::GlobalElementId>,
++        inspector_id: Option<&gpui::InspectorElementId>,
++        bounds: Bounds<gpui::Pixels>,
++        request_layout: &mut Self::RequestLayoutState,
++        window: &mut Window,
++        cx: &mut gpui::App,
++    ) -> Self::PrepaintState {
++        gpui::Element::prepaint(&mut self.styled, id, inspector_id, bounds, request_layout, window, cx)
++    }
++
++    fn paint(
++        &mut self,
++        id: Option<&gpui::GlobalElementId>,
++        inspector_id: Option<&gpui::InspectorElementId>,
++        bounds: Bounds<gpui::Pixels>,
++        request_layout: &mut Self::RequestLayoutState,
++        prepaint: &mut Self::PrepaintState,
++        window: &mut Window,
++        cx: &mut gpui::App,
++    ) {
++        if let Some(underlay) = self.underlay.take() {
++            underlay(window);
++        }
++        gpui::Element::paint(&mut self.styled, id, inspector_id, bounds, request_layout, prepaint, window, cx)
++    }
+ }
+ 
+ /// Selection key for an element. `sub` distinguishes multiple text runs painted
+@@ -272,9 +343,7 @@ pub fn selectable_text(opts: SelectableText) -> gpui::AnyElement {
+     };
+     let layout = styled.layout().clone();
+ 
+-    let underlay = canvas(
+-        |_, _, _| (),
+-        move |_, _, window, _| {
++    let underlay = move |window: &mut Window| {
+             if let Some(paint) = &extra_wash {
+                 paint(&layout, window);
+             }
+@@ -319,16 +388,9 @@ pub fn selectable_text(opts: SelectableText) -> gpui::AnyElement {
+             if let Some(on_link) = &on_link {
+                 register_link_listener(window, &layout, &links, on_link, &selection);
+             }
+-        },
+-    )
+-    .absolute()
+-    .size_full();
++    };
+ 
+-    div()
+-        .relative()
+-        .child(underlay)
+-        .child(styled)
+-        .into_any_element()
++    UnderlaidText::new(styled, underlay).into_any_element()
+ }
+ 
+ /// Paint one run's highlight washes and log their geometry.
+diff --git c/packages/solid/src/host.ts w/packages/solid/src/host.ts
+index 32d690a..0de5a9b 100644
+--- c/packages/solid/src/host.ts
++++ w/packages/solid/src/host.ts
+@@ -247,6 +247,8 @@ export function insertHostNode(
+   if (anchor && anchor.parent !== parent) {
+     throw new Error("GPUIX Solid anchor is not a child of its parent")
+   }
++  // Solid's keyed swap uses DOM insertBefore(node, node) as a no-op.
++  if (node === anchor) return
+   removeFromParent(node)
+   const index = anchor ? parent.children.indexOf(anchor) : parent.children.length
+   parent.children.splice(index, 0, node)

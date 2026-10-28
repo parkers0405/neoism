@@ -55,6 +55,7 @@ pub fn plugin_query(
         "toml" => Some(Lang::Toml),
         "nix" => Some(Lang::Nix),
         "make" | "makefile" => Some(Lang::Make),
+        "sql" => Some(Lang::Sql),
         _ => None,
     }
     .ok_or_else(|| format!("no compiled-in parser for `{language}`"))?;
@@ -127,6 +128,7 @@ fn language_for_plugin_query(lang: Lang) -> Option<tree_sitter::Language> {
         Lang::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
         Lang::Nix => tree_sitter_nix::LANGUAGE.into(),
         Lang::Make => tree_sitter_make::LANGUAGE.into(),
+        Lang::Sql => tree_sitter_sequel::LANGUAGE.into(),
         _ => return None,
     })
 }
@@ -324,6 +326,7 @@ pub fn built_in_grammars() -> &'static [(&'static str, &'static str)] {
         ("yaml", "YAML"),
         ("css", "CSS"),
         ("html", "HTML"),
+        ("sql", "SQL"),
     ]
 }
 
@@ -348,6 +351,7 @@ enum ParserLang {
     Yaml,
     Css,
     Html,
+    Sql,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -415,6 +419,7 @@ pub enum Lang {
     Yaml,
     Css,
     Html,
+    Sql,
     /// Markdown source. The file-viewer in chrome.rs branches on this
     /// to render block-aware markdown (headings, lists, code blocks,
     /// quotes) via the lifted `editor::markdown::MarkdownPane` parser
@@ -451,6 +456,7 @@ impl Lang {
             "yaml" | "yml" => Lang::Yaml,
             "css" => Lang::Css,
             "html" | "htm" => Lang::Html,
+            "sql" => Lang::Sql,
             "md" | "markdown" => Lang::Markdown,
             _ => Lang::Other,
         }
@@ -458,6 +464,95 @@ impl Lang {
 
     fn keywords(self) -> &'static [&'static str] {
         match self {
+            Lang::Sql => &[
+                "add",
+                "all",
+                "alter",
+                "and",
+                "as",
+                "asc",
+                "begin",
+                "between",
+                "by",
+                "cascade",
+                "case",
+                "check",
+                "column",
+                "commit",
+                "constraint",
+                "create",
+                "cross",
+                "database",
+                "default",
+                "delete",
+                "desc",
+                "distinct",
+                "drop",
+                "else",
+                "end",
+                "except",
+                "exists",
+                "explain",
+                "false",
+                "fetch",
+                "filter",
+                "foreign",
+                "from",
+                "full",
+                "grant",
+                "group",
+                "having",
+                "if",
+                "in",
+                "index",
+                "inner",
+                "insert",
+                "intersect",
+                "into",
+                "is",
+                "join",
+                "key",
+                "left",
+                "like",
+                "limit",
+                "not",
+                "null",
+                "offset",
+                "on",
+                "or",
+                "order",
+                "outer",
+                "over",
+                "partition",
+                "primary",
+                "recursive",
+                "references",
+                "rename",
+                "replace",
+                "returning",
+                "revoke",
+                "right",
+                "rollback",
+                "schema",
+                "select",
+                "set",
+                "table",
+                "then",
+                "transaction",
+                "trigger",
+                "true",
+                "truncate",
+                "union",
+                "unique",
+                "update",
+                "using",
+                "values",
+                "view",
+                "when",
+                "where",
+                "window",
+                "with",
+            ],
             Lang::Rust => &[
                 "as", "async", "await", "break", "const", "continue", "crate", "dyn",
                 "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in",
@@ -680,7 +775,7 @@ impl Lang {
             | Lang::Nix
             | Lang::Yaml
             | Lang::Make => Some("#"),
-            Lang::Lua => Some("--"),
+            Lang::Lua | Lang::Sql => Some("--"),
             // CSS/HTML only have block comments, which the per-line
             // fallback can't carry across lines anyway.
             Lang::Css | Lang::Html | Lang::Json | Lang::Markdown | Lang::Other => None,
@@ -722,6 +817,15 @@ pub fn fallback_highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'
             }
         }
 
+        if lang == Lang::Sql && bytes[i..].starts_with(b"/*") {
+            let end = line[i + 2..]
+                .find("*/")
+                .map_or(line.len(), |end| i + 2 + end + 2);
+            push(&mut out, SynTok::Comment, &line[i..end]);
+            i = end;
+            continue;
+        }
+
         if c == b'"' || c == b'\'' || c == b'`' {
             let start = i;
             let quote = c;
@@ -734,6 +838,10 @@ pub fn fallback_highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'
                 }
                 if bc == quote {
                     i += 1;
+                    if lang == Lang::Sql && bytes.get(i) == Some(&quote) {
+                        i += 1;
+                        continue;
+                    }
                     break;
                 }
                 i += 1;
@@ -765,7 +873,10 @@ pub fn fallback_highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'
                 i += 1;
             }
             let slice = &line[start..i];
-            let kind = if kws.contains(&slice) {
+            let kind = if kws.contains(&slice)
+                || (lang == Lang::Sql
+                    && kws.iter().any(|kw| kw.eq_ignore_ascii_case(slice)))
+            {
                 SynTok::Keyword
             } else if lang.type_starts_uppercase()
                 && slice
@@ -802,6 +913,9 @@ pub fn fallback_highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'
                     if bytes[i..].starts_with(m.as_bytes()) {
                         break;
                     }
+                }
+                if lang == Lang::Sql && bytes[i..].starts_with(b"/*") {
+                    break;
                 }
                 i += 1;
             }
@@ -922,7 +1036,10 @@ mod shared_configs {
 /// Like [`highlight_line`] but never compiles a grammar on the calling thread.
 /// Returns `None` while that language is still compiling in the background;
 /// callers paint [`fallback_highlight_line`] and must not cache that frame.
-pub fn try_highlight_line<'a>(line: &'a str, lang: Lang) -> Option<Vec<(SynTok, &'a str)>> {
+pub fn try_highlight_line<'a>(
+    line: &'a str,
+    lang: Lang,
+) -> Option<Vec<(SynTok, &'a str)>> {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(parser_lang) = ParserLang::from_lang(lang) {
         let key = HighlightCacheKey {
@@ -1004,6 +1121,7 @@ impl ParserLang {
             Lang::Yaml => Some(ParserLang::Yaml),
             Lang::Css => Some(ParserLang::Css),
             Lang::Html => Some(ParserLang::Html),
+            Lang::Sql => Some(ParserLang::Sql),
             _ => None,
         }
     }
@@ -1081,6 +1199,21 @@ fn tree_sitter_highlight_ranges(
 #[cfg(not(target_arch = "wasm32"))]
 fn tree_sitter_config(lang: ParserLang) -> Option<HighlightConfiguration> {
     match lang {
+        ParserLang::Sql => HighlightConfiguration::new(
+            tree_sitter_sequel::LANGUAGE.into(),
+            "sql",
+            // The bundled query uses a `%d` digit class and legacy
+            // capture names. Adapt them to Rust regexes and our palette.
+            &tree_sitter_sequel::HIGHLIGHTS_QUERY
+                .replace("%d", "[0-9]")
+                .replace("@float", "@number.float")
+                .replace("@storageclass", "@keyword")
+                .replace("@conditional", "@keyword.conditional")
+                .replace("@parameter", "@variable.parameter"),
+            "",
+            "",
+        )
+        .ok(),
         ParserLang::Rust => HighlightConfiguration::new(
             tree_sitter_rust::LANGUAGE.into(),
             "rust",
@@ -1588,6 +1721,59 @@ mod tests {
     }
 
     #[test]
+    fn sql_files_and_fallback_highlight_case_insensitive_keywords() {
+        assert_eq!(Lang::from_path("migrations/001_users.sql"), Lang::Sql);
+        assert_eq!(Lang::from_path("QUERY.SQL"), Lang::Sql);
+        let source = "SeLeCt 'it''s -- text', 42 FROM users;/* note */-- rest";
+        let spans = fallback_highlight_line(source, Lang::Sql);
+        assert_eq!(
+            spans.iter().map(|(_, text)| *text).collect::<String>(),
+            source
+        );
+        assert!(has_token(&spans, SynTok::Keyword, "SeLeCt"));
+        assert!(has_token(&spans, SynTok::Keyword, "FROM"));
+        assert!(has_token(&spans, SynTok::String, "'it''s -- text'"));
+        assert!(has_token(&spans, SynTok::Number, "42"));
+        assert!(has_token(&spans, SynTok::Comment, "/* note */"));
+        assert!(has_token(&spans, SynTok::Comment, "-- rest"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn sql_parser_highlights_multiline_source() {
+        let source = "/* migration\nSELECT ignored */\nCREATE TABLE users (id INTEGER, name TEXT);\nselect count(*), 3.14, CASE WHEN id > 42 THEN 'yes' ELSE 'no' END FROM users WHERE name = 'café';\n";
+        let spans = highlight_source(source, Lang::from_path("users.sql")).unwrap();
+        let kind_at = |needle: &str| {
+            let position = source.find(needle).unwrap();
+            spans
+                .iter()
+                .find(|(_, start, end)| *start <= position && position < *end)
+                .map(|(kind, _, _)| *kind)
+        };
+        assert_eq!(kind_at("SELECT ignored"), Some(SynTok::Comment));
+        assert_eq!(kind_at("CREATE"), Some(SynTok::Keyword));
+        assert_eq!(kind_at("select"), Some(SynTok::Keyword));
+        assert_eq!(kind_at("count"), Some(SynTok::Function));
+        assert_eq!(kind_at("INTEGER"), Some(SynTok::Type));
+        assert_eq!(kind_at("café"), Some(SynTok::String));
+        assert_eq!(kind_at("42"), Some(SynTok::Number));
+        assert_eq!(kind_at("3.14"), Some(SynTok::Number));
+        assert_eq!(kind_at("CASE"), Some(SynTok::Keyword));
+        let preview = highlight_line("SELECT 'value', 42; -- note", Lang::Sql);
+        assert!(has_token(&preview, SynTok::Keyword, "SELECT"));
+        assert!(has_token(&preview, SynTok::Number, "42"));
+        assert!(has_token(&preview, SynTok::Comment, "-- note"));
+        assert_eq!(spans.first().map(|(_, start, _)| *start), Some(0));
+        assert_eq!(spans.last().map(|(_, _, end)| *end), Some(source.len()));
+        for pair in spans.windows(2) {
+            assert_eq!(
+                pair[0].2, pair[1].1,
+                "spans must cover the source without gaps"
+            );
+        }
+    }
+
+    #[test]
     fn typescript_uses_parser_backed_highlight_categories() {
         let spans = highlight_line(
             "const value = client.fetch<User>(url, true)",
@@ -1704,6 +1890,7 @@ mod tests {
             ParserLang::Yaml,
             ParserLang::Css,
             ParserLang::Html,
+            ParserLang::Sql,
         ] {
             assert!(
                 tree_sitter_config(lang).is_some(),

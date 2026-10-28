@@ -112,6 +112,117 @@ pub struct MinimapHit {
     pub line: u64,
 }
 
+/// Original minimap paint commands, retained as data for other GPU hosts.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MinimapPrimitive {
+    pub rect: [f32; 4],
+    pub color: [f32; 4],
+    pub radius: f32,
+    pub depth: f32,
+    pub order: u8,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MinimapHostFrame {
+    pub rect: [f32; 4],
+    pub primitives: Vec<MinimapPrimitive>,
+}
+#[allow(clippy::too_many_arguments)]
+trait MinimapPainter {
+    fn rect(
+        &mut self,
+        target: Option<()>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        depth: f32,
+        order: u8,
+    );
+    fn rounded_rect(
+        &mut self,
+        target: Option<()>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        depth: f32,
+        radius: f32,
+        order: u8,
+    );
+}
+impl MinimapPainter for Sugarloaf<'_> {
+    fn rect(
+        &mut self,
+        _target: Option<()>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        depth: f32,
+        order: u8,
+    ) {
+        Sugarloaf::rect(self, None, x, y, w, h, color, depth, order);
+    }
+    fn rounded_rect(
+        &mut self,
+        _target: Option<()>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        depth: f32,
+        radius: f32,
+        order: u8,
+    ) {
+        Sugarloaf::rounded_rect(self, None, x, y, w, h, color, depth, radius, order);
+    }
+}
+impl MinimapPainter for Vec<MinimapPrimitive> {
+    fn rect(
+        &mut self,
+        _target: Option<()>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        depth: f32,
+        order: u8,
+    ) {
+        self.push(MinimapPrimitive {
+            rect: [x, y, w, h],
+            color,
+            depth,
+            radius: 0.0,
+            order,
+        });
+    }
+    fn rounded_rect(
+        &mut self,
+        _target: Option<()>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [f32; 4],
+        depth: f32,
+        radius: f32,
+        order: u8,
+    ) {
+        self.push(MinimapPrimitive {
+            rect: [x, y, w, h],
+            color,
+            depth,
+            radius,
+            order,
+        });
+    }
+}
+
 pub struct Minimap {
     enabled: bool,
     scale: f32,
@@ -283,6 +394,65 @@ impl Minimap {
         scroll_offset_lines: f32,
         theme: IdeTheme,
     ) {
+        self.paint_pane(
+            sugarloaf,
+            route_id,
+            pane_x,
+            pane_y,
+            pane_w,
+            pane_h,
+            viewport_rows,
+            scroll_offset_lines,
+            theme,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn host_frame(
+        &mut self,
+        route_id: usize,
+        pane: [f32; 4],
+        viewport_rows: u32,
+        scroll_offset_lines: f32,
+        theme: IdeTheme,
+    ) -> Option<MinimapHostFrame> {
+        self.rects.retain(|rect| rect.route_id != route_id);
+        let mut primitives = Vec::new();
+        self.paint_pane(
+            &mut primitives,
+            route_id,
+            pane[0],
+            pane[1],
+            pane[2],
+            pane[3],
+            viewport_rows,
+            scroll_offset_lines,
+            theme,
+        );
+        let rect = self
+            .rects
+            .iter()
+            .rev()
+            .find(|rect| rect.route_id == route_id)?;
+        Some(MinimapHostFrame {
+            rect: [rect.x, rect.y, rect.width, rect.height],
+            primitives,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_pane(
+        &mut self,
+        sugarloaf: &mut impl MinimapPainter,
+        route_id: usize,
+        pane_x: f32,
+        pane_y: f32,
+        pane_w: f32,
+        pane_h: f32,
+        viewport_rows: u32,
+        scroll_offset_lines: f32,
+        theme: IdeTheme,
+    ) {
         if !self.enabled || pane_w < MIN_PANE_WIDTH || pane_h <= INNER_PAD_Y * 2.0 {
             return;
         }
@@ -437,7 +607,7 @@ impl Minimap {
 
 #[allow(clippy::too_many_arguments)]
 fn render_lines(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut impl MinimapPainter,
     snapshot: &mut MinimapSnapshot,
     x: f32,
     y: f32,
@@ -523,7 +693,7 @@ fn build_line_rects(
 }
 
 fn render_git_changes(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut impl MinimapPainter,
     snapshot: &MinimapSnapshot,
     x: f32,
     y: f32,
@@ -557,7 +727,7 @@ fn render_git_changes(
 
 #[allow(clippy::too_many_arguments)]
 fn render_viewport(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut impl MinimapPainter,
     snapshot: &MinimapSnapshot,
     x: f32,
     width: f32,

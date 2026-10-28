@@ -4,7 +4,8 @@ use crate::primitives::ide_theme::IdeTheme;
 use crate::syntax::{highlight_line, syn_color, Lang, SynTok};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use sugarloaf::text::DrawOpts;
+use crate::primitives::paint::Paint;
 use unicode_segmentation::UnicodeSegmentation;
 
 const DEPTH: f32 = 0.02;
@@ -289,6 +290,12 @@ pub struct HoverPopupState {
     activated: Option<String>,
 }
 impl HoverPopupState {
+    pub fn bounds(&self) -> Option<[f32; 4]> { self.bounds }
+    pub fn viewport(&self) -> [f32; 4] { self.viewport }
+    pub fn scroll_y(&self) -> f32 { self.scroll_y }
+    pub fn max_scroll(&self) -> f32 { self.max_scroll }
+    /// A host font-library change must remeasure without losing selection.
+    pub fn invalidate_layout(&mut self) { self.key = None; }
     fn set_document(&mut self, lines: &[String], language: Lang) {
         if self.input == lines && self.language == Some(language) {
             return;
@@ -669,7 +676,7 @@ fn blended(theme: &IdeTheme, a: u32, b: u32, amount: f32) -> [f32; 4] {
 }
 
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     lines: &[String],
     layout: HoverPopupLayout,
     theme: &IdeTheme,
@@ -896,6 +903,7 @@ fn lang_from_fence(label: &str) -> Lang {
         "lua" => Lang::Lua,
         "nix" => Lang::Nix,
         "toml" => Lang::Toml,
+        "sql" => Lang::Sql,
         "json" | "jsonc" => Lang::Json,
         "md" | "markdown" => Lang::Markdown,
         _ => Lang::Other,

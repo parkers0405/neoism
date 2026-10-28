@@ -5,11 +5,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
-use sugarloaf::Sugarloaf;
 
 type FontIdentity = Weak<dyn std::any::Any>;
 
-fn font_identity(sugarloaf: &Sugarloaf) -> FontIdentity {
+fn font_identity(sugarloaf: &dyn crate::primitives::paint::Paint) -> FontIdentity {
     let library: Arc<dyn std::any::Any> = sugarloaf.font_library().inner.clone();
     Arc::downgrade(&library)
 }
@@ -29,7 +28,7 @@ struct FontKey {
 }
 
 impl FontKey {
-    fn new(sugarloaf: &mut Sugarloaf, scale: f32) -> Self {
+    fn new(sugarloaf: &mut dyn crate::primitives::paint::Paint, scale: f32) -> Self {
         let library = Arc::as_ptr(&sugarloaf.font_library().inner) as usize;
         Self {
             library,
@@ -116,7 +115,7 @@ fn cacheable_line_bytes(spans: &Vec<(SynTok, String)>) -> Option<usize> {
 }
 
 pub(super) fn syntax_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     spans: Rc<Vec<(SynTok, String)>>,
     scale: f32,
 ) -> Option<Rc<PreparedSyntaxLine>> {
@@ -160,7 +159,7 @@ pub(super) fn syntax_line(
     Some(line)
 }
 
-pub(super) fn gutter_width(sugarloaf: &mut Sugarloaf, max_line: u32, scale: f32) -> f32 {
+pub(super) fn gutter_width(sugarloaf: &mut dyn crate::primitives::paint::Paint, max_line: u32, scale: f32) -> f32 {
     let digits = max_line.max(1).ilog10() as usize + 1;
     let key = (FontKey::new(sugarloaf, scale), digits);
     if let Some(width) =

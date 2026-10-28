@@ -3,12 +3,12 @@ pub use super::gitdiff::build_review_diff;
 pub use super::types::{ProjectedCodeRow, ProjectedCodeSpec};
 use super::{feed::styled_runs_with_syntax, layout::*, types::*};
 use crate::{primitives::ide_theme::IdeTheme, syntax::syn_color};
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use sugarloaf::text::DrawOpts;
 
 /// Text/selection/caret only. The host owns backgrounds, gutters and scrolling.
 /// Refresh syntax once for the whole buffer, never render a full pane per row.
 pub fn render_projected_code(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut CodePane,
     spec: &ProjectedCodeSpec,
     theme: &IdeTheme,
@@ -450,7 +450,7 @@ mod tests {
 }
 
 fn paint_text(
-    s: &mut Sugarloaf,
+    s: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     text: &str,
@@ -469,7 +469,7 @@ fn paint_text(
         );
     }
 }
-fn paint_rect(s: &mut Sugarloaf, rect: [f32; 4], color: [f32; 4], clips: &[[f32; 4]]) {
+fn paint_rect(s: &mut dyn crate::primitives::paint::Paint, rect: [f32; 4], color: [f32; 4], clips: &[[f32; 4]]) {
     for clip in clips {
         if let Some([x, y, w, h]) = intersection(rect, *clip) {
             s.rect(None, x, y, w, h, color, 0.0, 8);

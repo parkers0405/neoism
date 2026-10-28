@@ -1,0 +1,334 @@
+{
+  "objective": "Ship the separate Neoism GPUIX frontend with SolidJS and Effect, preserving the existing UI and editor behavior, with libghostty inside the existing Terminal tab and direct shell input.",
+  "branch": "experiment/gpuix-frontend",
+  "latestUserConstraints": [
+    "Use SolidJS, never React",
+    "Implement the real frontend, never a demo",
+    "Keep the existing appearance, animations, scrolling, Vim, and cursor behavior",
+    "Use Neoism TypeScript SDK where its API applies",
+    "Ghostty replaces the existing Terminal tab content; keep the editor, splash, and Agent chat composer",
+    "Keep the daemon responsible for shell and backend lifetime",
+    "Multiple agents explicitly authorized",
+    "Blaze is the default Rust builder for this frontend",
+    "The splash owns an independent first/default Welcome tab and never overlays or creates a terminal",
+    "The new-tab + always opens another independent Welcome tab without creating a PTY"
+  ],
+  "gates": {
+    "daemonAndSdk": {
+      "status": "verified",
+      "checks": [
+        "tests/client.test.ts",
+        "tests/sdk.test.ts",
+        "tests/agent.test.ts",
+        "scripts/smoke-daemon.ts"
+      ]
+    },
+    "editorBehavior": {
+      "status": "partial",
+      "checks": [
+        "tests/editor.test.ts",
+        "tests/editor-lsp.test.ts",
+        "tests/editor-toggles.test.ts",
+        "scripts/native-lsp-check.ts",
+        "scripts/native-recovery-check.ts"
+      ],
+      "remaining": [
+        "custom IME integration",
+        "equal-sized visual and interaction comparison"
+      ]
+    },
+    "paneLayout": {
+      "status": "verified",
+      "checks": [
+        "tests/layout.test.ts",
+        "scripts/native-layout-check.ts",
+        "scripts/native-recovery-check.ts"
+      ]
+    },
+    "recovery": {
+      "status": "verified",
+      "checks": [
+        "tests/session-store.test.ts",
+        "scripts/native-recovery-check.ts",
+        "scripts/native-markdown-check.ts",
+        "tests/session-store.test.ts"
+      ],
+      "verified": [
+        "canonical and rich dirty-source/position recovery",
+        "live/deferred Vim propagation",
+        "HMR per-view recovery metadata",
+        "identity-isolated custom-path profiles retaining both endpoints"
+      ]
+    },
+    "agentControls": {
+      "status": "verified",
+      "checks": [
+        "scripts/native-agent-check.ts",
+        "tests/pickers.test.ts"
+      ]
+    },
+    "agentTimeline": {
+      "status": "partial",
+      "checks": [
+        "tests/agent-timeline.test.ts",
+        "tests/agent-view.test.ts",
+        "scripts/native-timeline-check.ts"
+      ],
+      "remaining": [
+        "full visual comparison",
+        "shared copy/selection behavior"
+      ]
+    },
+    "finder": {
+      "status": "verified",
+      "checks": [
+        "tests/finder.test.ts",
+        "scripts/native-finder-check.ts",
+        "scripts/native-check.ts"
+      ]
+    },
+    "ghosttyTerminal": {
+      "status": "partial",
+      "checks": [
+        "native/ghostty-pin.json",
+        "scripts/build-ghostty.ts",
+        "tests/ghostty.test.ts",
+        "tests/terminal-sessions.test.ts",
+        "scripts/native-terminal-check.ts"
+      ],
+      "remaining": [
+        "full visual and interaction comparison"
+      ]
+    },
+    "originalAppearance": {
+      "status": "partial",
+      "remaining": [
+        "compare equal-sized original and GPUIX windows",
+        "font, shell/splash, sidebar, tabs, composer, details, timeline geometry",
+        "mouse, scroll, selection, and animation checks"
+      ],
+      "checks": [
+        "scripts/native-provider-check.ts",
+        "tests/loading-skeleton.test.ts",
+        "tests/provider-logo.test.ts",
+        "tests/tree-viewport.test.ts"
+      ],
+      "verified": [
+        "original composer chevrons and responsive sizing",
+        "original loading skeleton geometry/timing/color; native pixel proof",
+        "original provider atlas/tint; native pixel proof",
+        "cursor colors preserved by native rendering"
+      ]
+    },
+    "remainingOriginalFeatures": {
+      "status": "partial",
+      "checks": [
+        "tests/commands.test.ts",
+        "scripts/native-command-check.ts",
+        "scripts/native-app-command-check.ts"
+      ],
+      "remaining": [
+        "unimplemented command actions (hidden)",
+        "notebook/epub surfaces",
+        "collaboration",
+        "Systems manager and server/workspace CRUD",
+        "extension lifecycle backend API",
+        "remaining context/management surfaces"
+      ]
+    },
+    "packaging": {
+      "status": "verified",
+      "checks": [
+        "scripts/build.ts",
+        "scripts/native-check.ts --packaged"
+      ],
+      "verified": [
+        "Cargo-built executable after chrome/Markdown/performance ports",
+        "packaged executable launched outside the repository; real daemon file loading, Finder, native geometry and input checks passed"
+      ]
+    },
+    "blazeBuild": {
+      "status": "partial",
+      "checks": [
+        "native/blaze-pin.json",
+        "scripts/bootstrap-blaze.ts",
+        "scripts/build-core.ts",
+        "scripts/verify-core.ts"
+      ],
+      "verified": [
+        "pinned compiler and native macro helper bootstrap",
+        "actual small shared-library edit/rebuild; no Cargo fallback",
+        "pre-publication engine smoke against Cargo artifact"
+      ],
+      "remaining": [
+        "complete and smoke-test the full bridge with Blaze"
+      ],
+      "note": "Blaze selected by default. Full native cold build remains unverified; working preview built explicitly with Cargo."
+    },
+    "richMarkdown": {
+      "status": "partial",
+      "checks": [
+        "tests/markdown.test.ts",
+        "scripts/native-markdown-check.ts"
+      ],
+      "verified": [
+        "original renderer, layout, glyph rasterization, Vim/history, tasks/tables/callouts/code cards/links",
+        "canonical saves and rich cursor/mode/scroll recovery",
+        "Mermaid/ink native primitives and cover service boundary",
+        "original block/table/spelling context menus",
+        "deferred cold-layout viewport restore with original virtual scroll anchor",
+        "2x cached original glyph textures and daemon cover image pixel proof"
+      ],
+      "remaining": [
+        "wiki-link completion/catalog service",
+        "title rename effect host callback",
+        "draw-over-note/standalone .neodraw editing controls",
+        "full-restart rich undo stack",
+        "live asset invalidation/retry",
+        "IME and separate notebook/EPUB surfaces"
+      ]
+    },
+    "chrome": {
+      "status": "partial",
+      "checks": [
+        "tests/chrome.test.ts",
+        "tests/menu-actions.test.ts",
+        "scripts/native-chrome-check.ts",
+        "scripts/native-menu-check.ts"
+      ],
+      "verified": [
+        "original Rust status line/topbar/menu painters and glyph pixels",
+        "workspace/buffer tab specifications and geometry",
+        "Settings writes/reload, transactional config editor, appearance pickers, About, singleton Extensions page",
+        "actual server/workspace selection and native FPS measurement"
+      ],
+      "remaining": [
+        "Systems manager and server/workspace creation/edit forms",
+        "extension lifecycle RPC",
+        "remote background asset catalog"
+      ]
+    },
+    "scrollPerformance": {
+      "status": "partial",
+      "checks": [
+        "tests/paint-performance.test.ts",
+        "scripts/benchmark-scroll.ts",
+        "scripts/native-scroll-check.ts",
+        "scripts/native-lsp-check.ts",
+        "tests/scroll-direction.test.ts",
+        "tests/code-raster.test.ts",
+        "scripts/native-code-fps.ts"
+      ],
+      "measured": {
+        "historicalPreRemovalCodeWindow": {
+          "viewport": [
+            752,
+            910
+          ],
+          "sourceLines": 5000,
+          "sampleMilliseconds": 2200,
+          "nativeDrawFps": {
+            "tokenNodes": 54.53,
+            "cachedRowImages": 139.62
+          }
+        }
+      },
+      "note": "Bridge CPU cases exclude Solid/GPUI work. The corrected benchmark verifies actual viewport movement; earlier clamped-at-top measurements were not scrolling. Historical code-window A/B numbers predate the latest feature removal and full-scene changes, and count native draws rather than physical presentation timestamps. Cached original-font row images remove per-token native text nodes. Full-app sustained refresh-rate parity remains unverified.",
+      "remaining": [
+        "compare original and GPUIX full-app scrolling at equal window sizes",
+        "verify sustained full-app scrolling at the display refresh rate"
+      ]
+    },
+    "agentComposer": {
+      "status": "partial",
+      "checks": [
+        "tests/agent-composer.test.ts",
+        "tests/slash-controller.test.ts",
+        "tests/pickers.test.ts",
+        "scripts/native-agent-composer-check.ts",
+        "scripts/native-agent-check.ts"
+      ],
+      "verified": [
+        "original Rust home/chat geometry, wordmark placement, one-to-five-row sizing and footer painter",
+        "production native Alt+A home centering, no home details rail and chat bottom anchoring",
+        "canonical slash catalog with SDK custom commands, composer caret retention and Enter acceptance",
+        "SDK-backed command dispatch, named provider accounts/OAuth, cancellation and secret-free notices",
+        "original six screen effects and exactly-once canonical follow-up prompts",
+        "actual SDK child-session metadata hides composer"
+      ],
+      "remaining": [
+        "equal-sized compositor pixel comparison",
+        "original provider-auth activity and usage-window painter parity"
+      ]
+    },
+    "chromeKeyboard": {
+      "status": "verified",
+      "checks": [
+        "tests/keyboard-navigation.test.ts",
+        "scripts/native-navigation-check.ts"
+      ],
+      "verified": [
+        "Alt arrows navigate body, buffer/workspace strips and tree without prematurely activating tabs",
+        "Alt workspace digits, Alt+P command palette and Finder Escape focus restoration",
+        "numeric/final-line code and rich Markdown commands preserve bare Vim dollar line-end"
+      ]
+    },
+    "welcomeSplash": {
+      "status": "partial",
+      "checks": [
+        "tests/splash.test.ts",
+        "tests/wordmark.test.ts",
+        "scripts/native-splash-check.ts",
+        "scripts/native-tab-workflow-check.ts",
+        "tests/app-generation.test.ts",
+        "tests/application-shortcuts.test.ts",
+        "tests/breadcrumbs.test.ts"
+      ],
+      "verified": [
+        "Welcome selected on cold startup, no startup PTY, recovered documents and drafts retained",
+        "inline new-tab + immediately after the buffer tabs opens a new independent Welcome surface and never creates a PTY",
+        "every Terminal tab is closable, including the first; Alt+T opens fresh terminals from surfaces and Settings",
+        "global font zoom persists across workspaces and retains the native root without empty mutation transactions",
+        "original code breadcrumbs reserve header space above the measured editor body",
+        "original shared adaptive splash menu geometry, eight action rows, narrow one-column/wide two-column policy",
+        "original animated wordmark native canvas, persistent per-surface effect bag, pane-sized overflow and click replay without backend mutation",
+        "Welcome remains independent from terminal input and the first explicit Terminal has no splash overlay",
+        "workspace/tab roundtrip creates no PTYs; first explicit Terminal retains local cwd ownership"
+      ],
+      "remaining": [
+        "equal-sized comparison against original desktop screenshot"
+      ]
+    },
+    "workspaceWindow": {
+      "status": "verified",
+      "checks": [
+        "tests/window-workspaces.test.ts",
+        "scripts/native-workspace-window-check.ts --packaged"
+      ],
+      "verified": [
+        "workspace row begins beside the sidebar directly above buffer tabs and follows sidebar visibility",
+        "legacy profiles open only their selected workspace; full daemon catalog stays available through Alt+P Workspaces",
+        "explicitly opened workspace IDs restore in saved order; catalog refreshes retain tab hosts and do not open extra tabs",
+        "hidden dirty buffers, layouts, drafts and daemon records are retained; native startup and picker create no PTYs"
+      ]
+    },
+    "workspaceTabs": {
+      "status": "verified",
+      "checks": [
+        "tests/new-workspace.test.ts",
+        "tests/keyboard-navigation.test.ts",
+        "scripts/native-workspace-tabs-check.ts --packaged",
+        "scripts/native-tab-workflow-check.ts --packaged"
+      ],
+      "verified": [
+        "workspace tabs fit their titles plus icons and padding, and scroll horizontally when the row fills",
+        "each tab strip keeps its add button immediately after its final tab",
+        "workspace + creates a daemon workspace on the current host/root and selects Welcome without a PTY",
+        "horizontal trackpad input moves workspace tabs while the strip remains fixed",
+        "keyboard arrows reveal hidden workspace tabs and the trailing +; Enter creates a workspace",
+        "rapid workspace creation stays ordered; failures preserve existing buffers and drafts"
+      ]
+    }
+  },
+  "completionRule": "Do not claim complete until required gates are implemented and verified. Preserve unrelated user changes and existing desktop usability."
+}

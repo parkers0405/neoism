@@ -1350,6 +1350,8 @@ pub struct NeoismAgentSidePanel {
     session_requested_cursor: Option<String>,
     session_request_generation: u64,
     session_refresh_attempts: u8,
+    /// A refresh failed while stale rows stayed visible (state stays Ready).
+    stale_refresh_failed: bool,
     /// Phase origin for the first-load session skeleton. The panel starts
     /// unloaded, so this clock can begin with the panel state and stops
     /// participating in redraws as soon as `set_sessions` lands.
@@ -1478,6 +1480,7 @@ impl Default for NeoismAgentSidePanel {
             session_requested_cursor: None,
             session_request_generation: 0,
             session_refresh_attempts: 0,
+            stale_refresh_failed: false,
             sessions: Vec::new(),
             catalog_directory: None,
             dashboard_directory: None,
@@ -3212,15 +3215,27 @@ impl NeoismAgentSidePanel {
                     .into_iter()
                     .filter(|session| known.insert(session.id.clone())),
             );
+        } else if next_cursor.is_some() && self.all_sessions.len() > sessions.len() {
+            // A head refresh must not discard older pages the user already
+            // scrolled into: the viewport anchor would vanish and the list
+            // would jump to the top. Keep the deeper rows and their cursor.
+            let mut known = sessions
+                .iter()
+                .map(|session| session.id.clone())
+                .collect::<HashSet<_>>();
+            let older = std::mem::take(&mut self.all_sessions)
+                .into_iter()
+                .filter(|session| known.insert(session.id.clone()));
+            self.all_sessions = sessions.into_iter().chain(older).collect();
+            self.finish_session_page();
+            self.restore_selected_session(selected_id.as_deref());
+            self.restore_session_viewport_anchor(viewport_anchor);
+            return;
         } else {
             self.all_sessions = sessions;
         }
         self.session_next_cursor = next_cursor;
-        self.session_page_loading = false;
-        self.session_requested_cursor = None;
-        self.session_refresh_attempts = 0;
-        self.session_catalog_state = SessionCatalogState::Ready;
-        self.rebuild_session_display();
+        self.finish_session_page();
         self.restore_selected_session(selected_id.as_deref());
         if was_home && requested_cursor.is_none() && catalog_was_empty {
             self.scroll_px = 0.0;
@@ -3229,6 +3244,15 @@ impl NeoismAgentSidePanel {
         } else {
             self.restore_session_viewport_anchor(viewport_anchor);
         }
+    }
+
+    fn finish_session_page(&mut self) {
+        self.stale_refresh_failed = false;
+        self.session_page_loading = false;
+        self.session_requested_cursor = None;
+        self.session_refresh_attempts = 0;
+        self.session_catalog_state = SessionCatalogState::Ready;
+        self.rebuild_session_display();
     }
 
     pub fn session_next_cursor(&self) -> Option<&str> {
@@ -3261,9 +3285,11 @@ impl NeoismAgentSidePanel {
             || self.session_page_loading
             || !matches!(self.mode, SidePanelMode::Sessions)
             || !self.session_query.trim().is_empty()
+            // Prefetch a full viewport ahead so a quick flick reaches the
+            // next page already loaded instead of bumping the list end.
             || self
                 .scroll_top
-                .saturating_add(self.last_panel_height_rows + 4)
+                .saturating_add(self.last_panel_height_rows + self.last_panel_height_rows.max(4))
                 < self.active_len()
         {
             return None;
@@ -3990,7 +4016,9 @@ impl NeoismAgentSidePanel {
     /// Keeps cached rows and errors visible until a worker actually claims work.
     /// Returns false unless the catalog is failed; never duplicates live work.
     pub fn retry_session_catalog(&mut self) -> bool {
-        if !matches!(self.session_catalog_state, SessionCatalogState::Error(_)) {
+        if !matches!(self.session_catalog_state, SessionCatalogState::Error(_))
+            && !std::mem::take(&mut self.stale_refresh_failed)
+        {
             return false;
         }
         self.session_refresh_attempts = 0;
@@ -4037,7 +4065,14 @@ impl NeoismAgentSidePanel {
         self.session_requested_cursor = None;
         self.last_sessions_refresh = Some(Instant::now());
         self.session_refresh_attempts = self.session_refresh_attempts.max(1);
-        self.session_catalog_state = SessionCatalogState::Error(message.into());
+        // A failed refresh keeps stale rows visible; only an empty catalog shows the error.
+        let stale = !self.all_sessions.is_empty() || !self.external_sessions.is_empty();
+        self.stale_refresh_failed = stale;
+        self.session_catalog_state = if stale {
+            SessionCatalogState::Ready
+        } else {
+            SessionCatalogState::Error(message.into())
+        };
     }
 
     pub fn should_refresh_subagents(&self) -> bool {

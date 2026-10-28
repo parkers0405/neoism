@@ -15,6 +15,9 @@ mod nvchad_themes;
 pub mod pixel_font;
 pub mod prose_font;
 pub mod text;
+pub mod paint;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod paint_record;
 pub mod wordmark_animation;
 
 pub use drop_cap::maguntia_font_id;

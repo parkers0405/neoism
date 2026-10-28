@@ -506,11 +506,7 @@ impl<A: Copy> BufferTabs<A> {
             }
 
             if is_focused && visible_w > 0.0 {
-                let cursor_w = (3.0 * scale).max(2.0);
-                let cursor_h = (strip_h - 8.0 * scale).max(8.0).min(strip_h);
-                let cursor_x = visible_left + (tab_pad_x - cursor_w).max(0.0);
-                let cursor_y = y_top + (strip_h - cursor_h) / 2.0;
-                self.focused_cursor_rect = Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+                self.focused_cursor_rect = Some(keyboard_cursor_rect(visible_left,y_top,strip_h,tab_pad_x,scale,false));
             }
 
             let tab = &self.tabs[ix];
@@ -856,12 +852,7 @@ impl<A: Copy> BufferTabs<A> {
                 }
 
                 if is_focused_plus && visible_w > 0.0 {
-                    let cursor_w = (3.0 * scale).max(2.0);
-                    let cursor_h = (strip_h - 8.0 * scale).max(8.0).min(strip_h);
-                    let cursor_x = visible_left;
-                    let cursor_y = y_top + (strip_h - cursor_h) / 2.0;
-                    self.focused_cursor_rect =
-                        Some([cursor_x, cursor_y, cursor_w, cursor_h]);
+                    self.focused_cursor_rect = Some(keyboard_cursor_rect(visible_left,y_top,strip_h,tab_pad_x,scale,true));
                 }
 
                 let glyph_size = consts::ICON_FONT_SIZE * scale * hover_scale;

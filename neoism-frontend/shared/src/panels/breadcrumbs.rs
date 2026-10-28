@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::panels::file_tree::icons::icon_for_file;
 use crate::primitives::{truncate_to_fit, IdeTheme};
@@ -339,7 +339,7 @@ impl Breadcrumbs {
 
     pub fn render(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut impl Paint,
         x_left: f32,
         y_top: f32,
         width: f32,
@@ -350,7 +350,7 @@ impl Breadcrumbs {
 
     pub fn render_with_options(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut impl Paint,
         x_left: f32,
         y_top: f32,
         width: f32,
@@ -512,7 +512,7 @@ impl Breadcrumbs {
 
     fn render_documentation_controls(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut impl Paint,
         x_left: f32,
         y_top: f32,
         width: f32,
@@ -618,7 +618,7 @@ impl Breadcrumbs {
 
     fn render_actions(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut impl Paint,
         x_left: f32,
         y_top: f32,
         width: f32,
@@ -841,7 +841,7 @@ fn notebook_action_tooltip(action: BreadcrumbAction) -> &'static str {
 }
 
 fn draw_notebook_action_tooltip(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut impl Paint,
     anchor: [f32; 4],
     label: &str,
     bounds: [f32; 4],

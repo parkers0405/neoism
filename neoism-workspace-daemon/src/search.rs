@@ -4,9 +4,9 @@
 //! `fff_search::FilePicker`, and `git status --porcelain` directly.
 //! The web frontend can't, so the daemon runs those tools on its host
 //! and streams the hits back over the WebSocket. This module
-//! implements the daemon side: it spawns `rg` / `git` subprocesses on
-//! the tokio blocking pool when those binaries are present and falls
-//! back to a `walkdir`-based file walk + in-memory scoring when not.
+//! runs fuzzy file queries through the same warm FFF index used by the
+//! desktop, on the blocking pool. Exact file matching, grep and git retain
+//! their existing host-side collectors.
 //!
 //! Each request carries a `req_id` from the protocol. The
 //! `CancelSearch` variant aborts the in-flight task associated with
@@ -15,11 +15,13 @@
 //! All paths flowing in/out of this module are workspace-relative —
 //! traversal protection is delegated to [`crate::files::resolve_path`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
+use neoism_agent_service_api::{WorkspaceSearchRootPin, WorkspaceSearchService};
+use neoism_agent_workspace_search_fff::FffWorkspaceSearchService;
 use neoism_protocol::search::{
     RequestId, SearchClientMessage, SearchDirectoryHit, SearchFileHit, SearchFileMode,
     SearchGitHit, SearchGitStatus, SearchGrepHit, SearchGrepMode, SearchServerMessage,
@@ -39,9 +41,74 @@ const MAX_HITS: usize = 500;
 
 /// Tracks in-flight tasks per request id so `CancelSearch` can abort
 /// them. Cheap to clone — the inner map is shared via `Arc<Mutex<_>>`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SearchRegistry {
     inflight: Arc<Mutex<HashMap<RequestId, AbortHandle>>>,
+    files: Arc<FffFileSearch>,
+}
+/// Pins warm FFF indices for this client; closing the socket releases watchers.
+/// The bounded set follows the same root-scoped index service as Agent tools.
+struct FffFileSearch {
+    service: FffWorkspaceSearchService,
+    roots: Mutex<VecDeque<(PathBuf, Arc<dyn WorkspaceSearchRootPin>)>>,
+}
+impl Default for SearchRegistry {
+    fn default() -> Self {
+        Self {
+            inflight: Default::default(),
+            files: Arc::new(FffFileSearch {
+                service: FffWorkspaceSearchService::new(),
+                roots: Mutex::new(VecDeque::new()),
+            }),
+        }
+    }
+}
+impl FffFileSearch {
+    fn search(&self, root: &Path, query: &str) -> Result<Vec<SearchFileHit>, String> {
+        {
+            let mut roots = self.roots.lock();
+            if let Some(index) = roots.iter().position(|(path, _)| path == root) {
+                let entry = roots.remove(index).unwrap();
+                roots.push_back(entry);
+            } else {
+                let pin = self
+                    .service
+                    .pin_root(root)
+                    .map_err(|error| error.to_string())?;
+                roots.push_back((root.to_path_buf(), pin));
+                while roots.len() > 8 {
+                    roots.pop_front();
+                }
+            }
+        }
+        self.service
+            .with_picker(root, |picker| {
+                let parser = fff_search::QueryParser::default();
+                let matches = picker.fuzzy_search(
+                    &parser.parse(query),
+                    None,
+                    fff_search::FuzzySearchOptions {
+                        max_threads: 0,
+                        current_file: None,
+                        pagination: fff_search::PaginationArgs {
+                            offset: 0,
+                            limit: MAX_HITS,
+                        },
+                        ..Default::default()
+                    },
+                );
+                matches
+                    .items
+                    .iter()
+                    .zip(matches.scores.iter())
+                    .map(|(item, score)| SearchFileHit {
+                        path: item.relative_path(picker),
+                        score: score.total,
+                    })
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl SearchRegistry {
@@ -66,6 +133,31 @@ impl SearchRegistry {
         } else {
             false
         }
+    }
+}
+
+/// Keep the protocol's inner ID distinct from its WebSocket envelope ID.
+pub fn request_id(message: &SearchClientMessage) -> RequestId {
+    match message {
+        SearchClientMessage::CollectFiles { req_id, .. }
+        | SearchClientMessage::SearchFiles { req_id, .. }
+        | SearchClientMessage::SearchDirectories { req_id, .. }
+        | SearchClientMessage::SearchGrep { req_id, .. }
+        | SearchClientMessage::SearchGitChanges { req_id, .. }
+        | SearchClientMessage::GitRepoRoot { req_id, .. }
+        | SearchClientMessage::CancelSearch { req_id } => *req_id,
+    }
+}
+pub fn response_id(message: &SearchServerMessage) -> RequestId {
+    match message {
+        SearchServerMessage::CollectFilesResult { req_id, .. }
+        | SearchServerMessage::SearchFilesResult { req_id, .. }
+        | SearchServerMessage::SearchDirectoriesResult { req_id, .. }
+        | SearchServerMessage::SearchGrepResult { req_id, .. }
+        | SearchServerMessage::SearchGitChangesResult { req_id, .. }
+        | SearchServerMessage::GitRepoRootResult { req_id, .. }
+        | SearchServerMessage::SearchProgress { req_id, .. }
+        | SearchServerMessage::SearchError { req_id, .. } => *req_id,
     }
 }
 
@@ -95,8 +187,9 @@ pub fn dispatch(
             cwd,
             mode,
         } => {
+            let files = registry.files.clone();
             spawn_task(registry, req_id, tx.clone(), async move {
-                search_files(req_id, workspace_root, query, cwd, mode).await
+                search_files(req_id, workspace_root, query, cwd, mode, files).await
             });
         }
         SearchClientMessage::SearchDirectories { req_id, query, cwd } => {
@@ -174,20 +267,6 @@ fn resolve_cwd(
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(root)
     };
-    let cwd_path = Path::new(cwd);
-    if cwd_path.is_absolute() {
-        return if cwd_path.starts_with(&root) {
-            Ok(cwd_path.to_path_buf())
-        } else {
-            Err(SearchServerMessage::SearchError {
-                req_id,
-                message: format!(
-                    "search cwd is outside workspace root: {}",
-                    cwd_path.display()
-                ),
-            })
-        };
-    }
     resolve_path(&root, cwd)
         .map_err(|message| SearchServerMessage::SearchError { req_id, message })
 }
@@ -365,11 +444,41 @@ async fn search_files(
     query: String,
     cwd: String,
     mode: SearchFileMode,
+    files: Arc<FffFileSearch>,
 ) -> SearchServerMessage {
-    let cwd_abs = match resolve_cwd(req_id, workspace_root, &cwd) {
+    let cwd_abs = match resolve_cwd(req_id, workspace_root.clone(), &cwd) {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if mode == SearchFileMode::Fuzzy {
+        let cwd_abs = match cwd_abs.canonicalize().and_then(|candidate| {
+            workspace_root.canonicalize().map(|root| (candidate, root))
+        }) {
+            Ok((candidate, root)) if candidate.starts_with(&root) => candidate,
+            Ok(_) => {
+                return SearchServerMessage::SearchError {
+                    req_id,
+                    message: "search cwd escapes the workspace through a symlink".into(),
+                }
+            }
+            Err(error) => {
+                return SearchServerMessage::SearchError {
+                    req_id,
+                    message: format!("resolve search root: {error}"),
+                }
+            }
+        };
+        return match tokio::task::spawn_blocking(move || files.search(&cwd_abs, &query))
+            .await
+        {
+            Ok(Ok(hits)) => SearchServerMessage::SearchFilesResult { req_id, hits },
+            Ok(Err(message)) => SearchServerMessage::SearchError { req_id, message },
+            Err(error) => SearchServerMessage::SearchError {
+                req_id,
+                message: format!("FFF file search failed: {error}"),
+            },
+        };
+    }
     let paths = match run_rg_files(&cwd_abs).await {
         Ok(p) => p,
         Err(_) => walkdir_files(&cwd_abs),
@@ -782,6 +891,59 @@ mod tests {
         assert!(matches!(classify_xy(" D"), SearchGitStatus::Deleted));
         assert!(matches!(classify_xy("UU"), SearchGitStatus::Conflict));
         assert!(matches!(classify_xy("R "), SearchGitStatus::Renamed));
+    }
+
+    #[tokio::test]
+    async fn file_picker_uses_warm_fff_for_empty_and_unicode_queries() {
+        let root = tempfile::tempdir().unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/lib.rs"), "pub fn sample() {}\n").unwrap();
+        std::fs::write(root.path().join("src/école.rs"), "// unicode\n").unwrap();
+        std::fs::write(root.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(root.path().join("ignored.rs"), "ignored\n").unwrap();
+        let registry = SearchRegistry::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for (id, query) in [(1, ""), (2, "slr"), (3, "école")] {
+            dispatch(
+                &registry,
+                root.path().to_path_buf(),
+                SearchClientMessage::SearchFiles {
+                    req_id: id,
+                    query: query.into(),
+                    cwd: String::new(),
+                    mode: SearchFileMode::Fuzzy,
+                },
+                tx.clone(),
+            );
+            let reply =
+                tokio::time::timeout(std::time::Duration::from_secs(15), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let SearchServerMessage::SearchFilesResult { req_id, hits } = reply else {
+                panic!("FFF picker failed: {reply:?}");
+            };
+            assert_eq!(req_id, id);
+            assert!(!hits.is_empty());
+            assert!(!hits
+                .iter()
+                .any(|hit| hit.path == "ignored.rs" || hit.path.starts_with(".git/")));
+            let expected = if id == 3 {
+                "src/école.rs"
+            } else {
+                "src/lib.rs"
+            };
+            assert!(
+                hits.iter().any(|hit| hit.path == expected),
+                "query={query:?}: {hits:?}"
+            );
+        }
+        assert_eq!(
+            registry.files.roots.lock().len(),
+            1,
+            "queries must retain the same warm index pin"
+        );
     }
 
     #[test]

@@ -42,6 +42,7 @@
 #[cfg(test)]
 mod actions_tests;
 mod baseline;
+mod host_frame;
 mod parse;
 mod render;
 mod review;

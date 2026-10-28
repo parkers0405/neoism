@@ -56,6 +56,7 @@ impl std::ops::Sub<Duration> for Instant {
 use serde::{Deserialize, Serialize};
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::event::UiEvent;
 use crate::layout::PanelLayout;
@@ -176,7 +177,8 @@ impl GitChangeSummary {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StatusInfo {
     pub mode: Mode,
     pub primary: String,
@@ -363,7 +365,7 @@ fn ease_out_cubic(t: f32) -> f32 {
 }
 
 fn draw_thick(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     x: f32,
     y: f32,
     text: &str,
@@ -385,7 +387,7 @@ fn centered_text_box_y(pill_y: f32, pill_h: f32, font_size: f32) -> f32 {
 /// Nerd Font advances/em boxes often contain asymmetric whitespace, so
 /// advance-based placement alone cannot visually center an icon.
 fn draw_icon_thick_centered(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     x: f32,
     rect: [f32; 4],
     icon: &str,
@@ -401,7 +403,7 @@ fn draw_icon_thick_centered(
 }
 
 fn icon_gap_text_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     icon: &str,
     text: &str,
     opts: &DrawOpts,
@@ -416,7 +418,7 @@ fn icon_gap_text_width(
 }
 
 fn draw_gap_text_thick(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     x: f32,
     body_y: f32,
     pill_y: f32,
@@ -444,7 +446,7 @@ fn draw_gap_text_thick(
 
 #[allow(clippy::too_many_arguments)]
 fn render_scramble_label(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     x: f32,
     y: f32,
     target: &str,
@@ -556,7 +558,7 @@ fn primary_glyph(kind: PrimaryKind) -> &'static str {
 }
 
 fn two_tone_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     font_size: f32,
     section_pad: f32,
     spec: &TwoTonePill,
@@ -584,7 +586,7 @@ fn two_tone_width(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_two_tone_pill(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     x: f32,
     pill_y: f32,
     pill_h: f32,
@@ -942,7 +944,7 @@ impl StatusLine {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         x_left: f32,
         y_top: f32,
         width: f32,
@@ -959,7 +961,7 @@ impl StatusLine {
     /// background or top border.
     pub fn render_in_content_bounds(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         background_x: f32,
         y_top: f32,
         background_width: f32,
@@ -1957,7 +1959,7 @@ impl StatusLine {
     /// forwards to the inherent `render` above.
     pub fn render_with_ide_theme(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         x_left: f32,
         y_top: f32,
         width: f32,
@@ -1982,7 +1984,7 @@ impl StatusLine {
     /// editor column rather than beneath the left side panels.
     pub fn render_with_ide_theme_in_content_bounds(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         background_x: f32,
         y_top: f32,
         background_width: f32,

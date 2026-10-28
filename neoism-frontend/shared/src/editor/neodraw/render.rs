@@ -11,7 +11,6 @@
 //! editor and the read-only markdown ```draw embed.
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -30,7 +29,7 @@ const ORDER_OVERLAY: u8 = 200;
 /// wallpaper supplies the canvas background. This is the desktop/web entry point — the per-shape
 /// [`render_scene`] is reused read-only by the markdown embed.
 pub fn render_pane(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut DrawPane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -123,7 +122,7 @@ pub fn render_pane(
 /// makes a `DrawPane` multi-use: a standalone file ([`render_pane`]) or an
 /// ink layer over something else (here).
 pub fn render_pane_overlay(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut DrawPane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -165,7 +164,7 @@ pub fn render_pane_overlay(
 
 /// The rubber-band selection rectangle while dragging on empty canvas.
 fn render_marquee(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &DrawPane,
     cam: &Camera,
     clip: [f32; 4],
@@ -211,7 +210,7 @@ fn render_marquee(
 }
 
 fn measure_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     content: &str,
     size: f32,
     width: Option<f32>,
@@ -227,7 +226,7 @@ fn measure_text(
     })
 }
 
-fn prepare_text_layouts(sugarloaf: &mut Sugarloaf, pane: &mut DrawPane) {
+fn prepare_text_layouts(sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized), pane: &mut DrawPane) {
     pane.text_layouts.clear();
     pane.text_dims.clear();
     for shape in &pane.scene.shapes {
@@ -248,7 +247,7 @@ fn prepare_text_layouts(sugarloaf: &mut Sugarloaf, pane: &mut DrawPane) {
 /// A caret at the end of the text shape currently being edited, so it's
 /// obvious which text has focus and where typing lands.
 fn render_text_caret(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &DrawPane,
     cam: &Camera,
     clip: [f32; 4],
@@ -329,7 +328,7 @@ fn center_graph(pane: &mut DrawPane, rect: [f32; 4]) {
 
 /// Draw the live note-graph: edges, node discs, and labels.
 fn render_graph(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     sim: &GraphSim,
     cam: &Camera,
     clip: [f32; 4],
@@ -394,7 +393,7 @@ fn render_graph(
 
 /// A filled circle, approximated by a clipped 22-gon.
 fn draw_disc(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     c: Vec2,
     r: f32,
@@ -415,7 +414,7 @@ fn draw_disc(
 
 /// Draw the floating tool/colour/size toolbar.
 fn render_toolbar(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &DrawPane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -498,7 +497,7 @@ fn render_toolbar(
 
 /// Selection bounding box + resize handles, in screen space.
 fn render_selection(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &DrawPane,
     cam: &Camera,
     clip: [f32; 4],
@@ -598,7 +597,7 @@ fn point_in_rect(p: Vec2, rect: [f32; 4], pad: f32) -> bool {
 /// occupies (used to cull offscreen shapes and clip text). `depth` /
 /// `order` place the scene within sugarloaf's paint stack.
 pub fn render_scene(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     scene: &Scene,
     camera: &Camera,
     clip: [f32; 4],
@@ -620,7 +619,7 @@ pub fn render_scene(
 /// Like [`render_scene`] but shapes in `dimmed` are drawn translucent —
 /// used for the eraser's drag preview before the shapes are removed.
 fn render_scene_dimmed(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     scene: &Scene,
     camera: &Camera,
     clip: [f32; 4],
@@ -660,7 +659,7 @@ fn render_scene_dimmed(
 }
 
 fn draw_shape(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     kind: &ShapeKind,
     style: &Style,
     camera: &Camera,
@@ -861,7 +860,7 @@ fn bbox_intersects(pts: &[Vec2], clip: [f32; 4]) -> bool {
 /// perpendicular jitter at each interior sample is hashed from the
 /// shape's seed, so the wobble is stable across frames.
 fn rough_stroke(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pts: &[Vec2],
     closed: bool,
     style: &Style,
@@ -947,7 +946,7 @@ fn jittered_endpoint(
 
 /// Filled interior for a closed shape (drawn under the stroke).
 fn fill_closed(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pts: &[Vec2],
     style: &Style,
     clip: [f32; 4],
@@ -967,7 +966,7 @@ fn fill_closed(
 }
 
 fn draw_arrowhead(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     from: Vec2,
     tip: Vec2,
     style: &Style,
@@ -1007,7 +1006,7 @@ fn draw_arrowhead(
 /// Draw a line clipped to `clip` (Liang–Barsky). Nothing drawn if fully out.
 #[allow(clippy::too_many_arguments)]
 fn draw_line_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x1: f32,
     y1: f32,

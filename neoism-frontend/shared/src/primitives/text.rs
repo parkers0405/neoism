@@ -1,7 +1,6 @@
 //! Text / wrap / occluded-draw helpers shared across chrome panels.
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use super::geom::rects_intersect;
 
@@ -22,7 +21,7 @@ pub fn hover_title_offset(elapsed: f32, distance: f32, scale: f32) -> Option<f32
 /// Browser builds have no system font cascade, and inherited explicit font
 /// slots bypass fallback resolution, so icon draws must choose this shared
 /// face rather than relying on the surrounding text font.
-fn icon_draw_opts(sugarloaf: &mut Sugarloaf, icon: &str, opts: &DrawOpts) -> DrawOpts {
+fn icon_draw_opts(sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized), icon: &str, opts: &DrawOpts) -> DrawOpts {
     let uses_nerd_pua = icon.chars().any(|ch| {
         matches!(ch as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
     });
@@ -45,7 +44,7 @@ fn icon_draw_opts(sugarloaf: &mut Sugarloaf, icon: &str, opts: &DrawOpts) -> Dra
 /// Draw a hard two-step text extrusion followed by the original foreground.
 /// The caller's clip rectangle and alpha are preserved for every layer.
 pub fn draw_text_extruded(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     text: &str,
@@ -69,7 +68,7 @@ pub fn draw_text_extruded(
 
 /// Occlusion-aware form of [`draw_text_extruded`].
 pub fn draw_text_extruded_with_occlusion(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     text: &str,
@@ -109,7 +108,7 @@ pub fn draw_text_extruded_with_occlusion(
 pub fn truncate_to_fit(
     text: &str,
     available_w: f32,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     opts: &DrawOpts,
 ) -> String {
     if available_w <= 0.0 || text.is_empty() {
@@ -145,7 +144,7 @@ pub fn truncate_to_fit(
 /// `occlusion_rects` overlap the text's bounding rect. Returns measured
 /// width.
 pub fn draw_text_with_occlusion(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     text: &str,
@@ -225,7 +224,7 @@ pub fn draw_text_with_occlusion(
 /// Recording the emitted instances and centering their real bitmap bounds
 /// keeps toolbar, tab, and tree icons symmetric for every loaded family.
 pub fn draw_icon_centered_with_occlusion(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     rect: [f32; 4],
     icon: &str,
@@ -253,7 +252,7 @@ pub fn draw_icon_centered_with_occlusion(
 /// Modals and popovers use Sugarloaf's overlay text buffer, so their glyph
 /// instances must be measured and shifted in that same buffer.
 pub fn draw_overlay_icon_centered(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     rect: [f32; 4],
     icon: &str,

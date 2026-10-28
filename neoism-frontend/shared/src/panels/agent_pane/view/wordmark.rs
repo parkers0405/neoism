@@ -1,6 +1,6 @@
 use web_time::Instant;
 
-use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId, Sugarloaf};
+use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
 
 use crate::panels::agent_pane::state::NeoismWordmarkState;
 use crate::primitives::wordmark_animation::WordmarkAnimation;
@@ -156,28 +156,36 @@ mod tests {
 /// the first upload into each window.
 static WORDMARK_TINT: std::sync::RwLock<Vec<u32>> = std::sync::RwLock::new(Vec::new());
 
-pub fn register_wordmark(sugarloaf: &mut Sugarloaf) -> bool {
+/// Original bundled artwork and per-letter Look tint for native hosts.
+pub fn wordmark_rgba(tint:&[u32])->Option<(u32,u32,Vec<u8>)> {
+    let image=image_rs::load_from_memory(WORDMARK_PNG).ok()?.to_rgba8();
+    let (width,height)=image.dimensions();let mut pixels=image.into_raw();
+    crate::primitives::look::tint_wordmark_pixels(&mut pixels,width as usize,LETTER_COUNT,tint);
+    Some((width,height,pixels))
+}
+
+/// Exact idle shimmer/hover geometry shared with the native Agent host.
+pub fn letter_rect(rect:[f32;4],index:usize,hover:f32,seconds:f32)->[f32;4] {
+    let [x,y,w,h]=rect;let letter_w=w/LETTER_COUNT as f32;
+    let shimmer=(seconds/LETTER_SHIMMER_PERIOD+index as f32*0.16)*std::f32::consts::TAU;
+    let extra_scale=1.0+hover*LETTER_HOVER_SCALE+shimmer.sin()*LETTER_SHIMMER_AMP;
+    let center_x=x+(index as f32+0.5)*letter_w;
+    let center_y=y+h*0.5-hover*LETTER_HOVER_LIFT*h;
+    let lw=letter_w*extra_scale;let lh=h*extra_scale;
+    [center_x-lw*0.5,center_y-lh*0.5,lw,lh]
+}
+
+pub fn register_wordmark(sugarloaf: &mut dyn crate::primitives::paint::Paint) -> bool {
     let tint =
         crate::primitives::look::wordmark_colors_or(crate::chrome::active_ide_theme().fg);
     let unchanged = WORDMARK_TINT
         .read()
         .map(|last| *last == tint)
         .unwrap_or(false);
-    if unchanged && sugarloaf.image_data.contains_key(&WORDMARK_IMAGE_ID) {
+    if unchanged && sugarloaf.image_data_contains(WORDMARK_IMAGE_ID) {
         return true;
     }
-    let img = match image_rs::load_from_memory(WORDMARK_PNG) {
-        Ok(i) => i.to_rgba8(),
-        Err(_) => return false,
-    };
-    let (width, height) = img.dimensions();
-    let mut pixels = img.into_raw();
-    crate::primitives::look::tint_wordmark_pixels(
-        &mut pixels,
-        width as usize,
-        LETTER_COUNT,
-        &tint,
-    );
+    let Some((width,height,pixels))=wordmark_rgba(&tint) else{return false;};
     let entry = GraphicDataEntry::from_graphic_data(GraphicData {
         id: GraphicId::new(WORDMARK_IMAGE_ID as u64),
         width: width as usize,
@@ -190,7 +198,7 @@ pub fn register_wordmark(sugarloaf: &mut Sugarloaf) -> bool {
         display_height: None,
         transmit_time: Instant::now(),
     });
-    sugarloaf.image_data.insert(WORDMARK_IMAGE_ID, entry);
+    sugarloaf.image_data_insert(WORDMARK_IMAGE_ID, entry);
     if let Ok(mut last) = WORDMARK_TINT.write() {
         *last = tint;
     }
@@ -199,7 +207,7 @@ pub fn register_wordmark(sugarloaf: &mut Sugarloaf) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_wordmark(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     state: &mut impl WordmarkState,
     rect: [f32; 4],
     clip: [f32; 4],
@@ -232,17 +240,9 @@ pub fn render_wordmark(
     let scale = sugarloaf.scale_factor();
     for i in 0..LETTER_COUNT {
         let hover = state.hover_mut()[i].clamp(0.0, 1.0);
-        let shimmer_phase = (now_seconds / LETTER_SHIMMER_PERIOD + i as f32 * 0.16)
-            * std::f32::consts::TAU;
-        let shimmer = shimmer_phase.sin() * LETTER_SHIMMER_AMP;
-        let extra_scale = 1.0 + hover * LETTER_HOVER_SCALE + shimmer;
-        let lift = -hover * LETTER_HOVER_LIFT * h;
-        let center_x = x + (i as f32 + 0.5) * letter_w;
-        let center_y = y + h * 0.5 + lift;
-        let lw = letter_w * extra_scale;
-        let lh = h * extra_scale;
-        let lx = center_x - lw * 0.5;
-        let ly = center_y - lh * 0.5;
+        let [lx,ly,lw,lh]=letter_rect(rect,i,hover,now_seconds);
+        let center_x=lx+lw*0.5;
+        let center_y=ly+lh*0.5;
         let u0 = i as f32 / LETTER_COUNT as f32;
         let u1 = (i as f32 + 1.0) / LETTER_COUNT as f32;
 

@@ -1,5 +1,5 @@
 pub(super) fn render_virtual(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -541,7 +541,7 @@ mod reader_footer_position_tests {
 /// cursor. Up/Down/Tab move, Enter accepts (host key path), Esc/leaving
 /// the line closes via `refresh_value_picker`.
 fn draw_value_picker(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -666,7 +666,7 @@ fn ensure_markdown_outline(pane: &mut MarkdownPane) {
 /// click reveals. The breadcrumb outline button owns visibility.
 #[allow(clippy::too_many_arguments)]
 fn draw_markdown_outline(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     rect: [f32; 4],
     content_x: f32,
@@ -895,7 +895,7 @@ fn draw_markdown_outline(
 /// spot it will land if released. After the drop, the moved block flashes
 /// briefly so the eye can track where it went.
 fn draw_drag_drop_preview(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     content_x: f32,
     content_w: f32,
@@ -1857,7 +1857,7 @@ fn invalidate_reveal_layout(pane: &mut MarkdownPane) {
 }
 
 fn commit_visible_measurements(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     items: &[VirtualMarkdownDrawItem],
     width: f32,

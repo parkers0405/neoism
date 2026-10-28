@@ -13,7 +13,6 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::primitives::truncate_to_fit;
 use crate::primitives::IdeTheme;
@@ -208,7 +207,7 @@ pub fn body_text_width_with_gutter(card_width: f32, scale: f32, gutter: f32) -> 
 
 /// Reserve the actual bold digit advance, including both gutter insets.
 pub fn measured_gutter_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     max_line: u32,
     scale: f32,
 ) -> f32 {
@@ -222,7 +221,7 @@ fn gutter_width_for_text(width: f32, scale: f32) -> f32 {
 /// Full code-column width in logical pixels, using the same expanded text,
 /// syntax token boundaries and font styles as no-wrap rendering.
 pub fn content_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     diff_lines: &[DiffLine],
     scale: f32,
     lang: Lang,
@@ -392,7 +391,7 @@ impl PaintTheme<'_> {
 }
 #[allow(clippy::too_many_arguments)]
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     width: f32,
@@ -424,7 +423,7 @@ pub fn render(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_with_paint(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     width: f32,
@@ -521,7 +520,7 @@ fn subtract(r: [f32; 4], cut: [f32; 4]) -> Vec<[f32; 4]> {
 }
 #[allow(clippy::too_many_arguments)]
 fn render_painted_region(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     width: f32,
@@ -1192,7 +1191,7 @@ fn hatch_segments(rect: [f32; 4], origin: [f32; 2], spacing: f32) -> Vec<[f32; 4
 /// preserved end-to-end).
 #[allow(clippy::too_many_arguments)]
 fn draw_syntax_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     start_x: f32,
     text_y: f32,
     text: &str,
@@ -1596,6 +1595,7 @@ fn lang_cache_tag(lang: Lang) -> u8 {
         Lang::Yaml => 17,
         Lang::Css => 18,
         Lang::Html => 19,
+        Lang::Sql => 21,
     }
 }
 

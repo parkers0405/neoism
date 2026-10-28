@@ -16,7 +16,7 @@ mod pr;
 #[path = "git_diff_view_toolbar.rs"]
 mod toolbar;
 
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use sugarloaf::text::DrawOpts;
 
 #[cfg(test)]
 use crate::editor::code::gitdiff::build_review_diff;
@@ -620,6 +620,31 @@ impl GitDiffView {
         self.live_diff_pending = !current;
     }
 
+    /// Host-neutral geometry from the original review renderer. Pointer targets
+    /// and accessibility labels use these same measured rectangles.
+    pub fn host_frame(&self) -> serde_json::Value {
+        let rect = |r: Rect| [r.x, r.y, r.w, r.h];
+        serde_json::json!({
+            "root":self.root,"path":self.path,"readOnly":self.is_read_only(),
+            "split":self.split,"effectiveSplit":self.effective_split,
+            "scrollY":self.scroll_top,"maxScrollY":self.max_scroll,
+            "horizontal":self.horizontal,"maxHorizontal":self.max_horizontal,
+            "column":self.column_focus,"editingPath":self.editing_path(),
+            "documentPath":self.document_path(),"error":self.error,
+            "dragging":self.is_dragging(),"loading":self.actions_loading,
+            "files":self.sections.iter().map(|s|serde_json::json!({
+                "path":s.change.path,"collapsed":s.collapsed,"loaded":s.lines.is_some(),
+                "additions":s.change.additions,"deletions":s.change.deletions,
+                "staged":s.change.staged,"rows":s.lines.as_ref().map_or(0,Vec::len)
+            })).collect::<Vec<_>>(),
+            "headers":self.header_rects.iter().map(|(i,r)|serde_json::json!({"path":self.sections[*i].change.path,"rect":rect(*r)})).collect::<Vec<_>>(),
+            "toolbar":self.toolbar_hits.iter().map(|hit|serde_json::json!({"id":format!("{:?}",hit.control),"rect":rect(hit.rect),"enabled":hit.enabled})).collect::<Vec<_>>(),
+            "fileActions":self.header_actions.iter().map(|(i,restore,r,enabled)|serde_json::json!({"path":self.sections[*i].change.path,"restore":restore,"rect":rect(*r),"enabled":enabled})).collect::<Vec<_>>(),
+            "sourceHits":self.source_hits.iter().map(|hit|serde_json::json!({"path":hit.path,"line":hit.line,"rect":rect(hit.rect)})).collect::<Vec<_>>(),
+            "editHits":self.edit_hits.iter().map(|hit|serde_json::json!({"path":hit.path,"line":hit.line,"rect":rect(hit.rect)})).collect::<Vec<_>>()
+        })
+    }
+
     pub fn set_error(&mut self, error: String) {
         self.error = Some(error);
         self.edit_focused = false;
@@ -1157,7 +1182,7 @@ impl GitDiffView {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         rect: Rect,
         font_id: usize,
         font_size: f32,
@@ -1168,7 +1193,7 @@ impl GitDiffView {
 
     pub fn render_with_editor(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         rect: Rect,
         font_id: usize,
         font_size: f32,

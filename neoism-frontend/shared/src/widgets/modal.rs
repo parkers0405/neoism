@@ -729,7 +729,7 @@ pub enum ModalHostAction {
 }
 
 fn draw_form_rect(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     clip: [f32; 4],
     color: [f32; 4],
@@ -2020,7 +2020,7 @@ impl UniversalModal {
         lines
     }
 
-    fn prepare_body_layout(&mut self, sugarloaf: &mut Sugarloaf, width: f32, scale: f32) {
+    fn prepare_body_layout(&mut self, sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized), width: f32, scale: f32) {
         let opts = DrawOpts { font_size: BODY_FONT_SIZE * scale, ..DrawOpts::default() };
         let bold_opts = DrawOpts { bold: true, ..opts.clone() };
         let probe = "Wim 0123456789";
@@ -2604,7 +2604,7 @@ impl UniversalModal {
 
     fn draw_form_body(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         theme: &IdeTheme,
         geometry: FormGeometry,
     ) {
@@ -2808,15 +2808,18 @@ impl UniversalModal {
         }
     }
 
-    pub fn render(
-        &mut self,
-        sugarloaf: &mut Sugarloaf,
-        dimensions: (f32, f32, f32),
-        theme: &IdeTheme,
-    ) {
-        // Retained graphics survive ordinary UI redraws. Clear even when closed
-        // or replaced with a normal modal; never clear the shared image cache.
+    pub fn render(&mut self, sugarloaf: &mut Sugarloaf, dimensions: (f32, f32, f32), theme: &IdeTheme) {
         sugarloaf.clear_image_overlays_for(IMAGE_OVERLAY_OWNER);
+        if self.active && self.is_image_open() {
+            self.render_image(sugarloaf, [dimensions.0 / dimensions.2, dimensions.1 / dimensions.2]);
+            return;
+        }
+        self.render_portable(sugarloaf, dimensions, theme);
+    }
+
+    /// Original ordinary-modal painter, shared with native GPU hosts.
+    /// Image overlays remain owned by the desktop wrapper above.
+    pub fn render_portable(&mut self, sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized), dimensions: (f32, f32, f32), theme: &IdeTheme) {
         if !self.active {
             return;
         }
@@ -2828,10 +2831,6 @@ impl UniversalModal {
         self.viewport_height = viewport_height;
         self.form_compact = false;
         let viewport_width = (window_width / scale_factor).max(1.0);
-        if self.is_image_open() {
-            self.render_image(sugarloaf, [viewport_width, viewport_height]);
-            return;
-        }
         let normal_margin = if self.form.is_some() {
             (12.0 * self.scale).min(viewport_height * 0.02).min(viewport_width * 0.05)
         } else {
@@ -3501,7 +3500,7 @@ impl UniversalModal {
 
     fn draw_modal_actions(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         theme: &IdeTheme,
         panel: [f32; 4],
         metrics: (f32, f32),
@@ -3654,7 +3653,7 @@ impl UniversalModal {
 
     fn draw_body_line(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         theme: &IdeTheme,
         line: &BodyLine,
         x: f32,
@@ -3765,7 +3764,7 @@ impl UniversalModal {
 fn truncate_to_fit(
     text: &str,
     available_w: f32,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     opts: &DrawOpts,
 ) -> String {
     if available_w <= 0.0 || text.is_empty() {
@@ -3831,6 +3830,7 @@ fn lang_from_fence(label: &str) -> Lang {
         "go" | "golang" => Lang::Go,
         "lua" => Lang::Lua,
         "toml" => Lang::Toml,
+        "sql" => Lang::Sql,
         "json" | "jsonc" => Lang::Json,
         "md" | "markdown" => Lang::Markdown,
         _ => Lang::Other,

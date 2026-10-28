@@ -13,7 +13,7 @@ enum CatalogIcon {
 /// Use the file tree's bundled icon font, sizing, and ink-centered alignment.
 #[allow(clippy::too_many_arguments)]
 fn draw_catalog_icon(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     icon: CatalogIcon,
     x: f32,
     y: f32,
@@ -208,7 +208,7 @@ const SCRAMBLE_MS: f32 = 320.0;
 const SCRAMBLE_GLYPHS: &[char] = &['#', '@', '%', '&', '*', '+', '?', '/', '~', '='];
 
 pub(crate) fn render_scramble_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     text: &str,
@@ -219,7 +219,7 @@ pub(crate) fn render_scramble_text(
 }
 
 pub(crate) fn render_loading_scramble_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     text: &str,
@@ -230,7 +230,7 @@ pub(crate) fn render_loading_scramble_text(
 }
 
 fn render_scramble_text_inner(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     text: &str,
@@ -296,7 +296,7 @@ fn running_square_visible(square: [f32; 4], clip: [f32; 4], cuts: &[[f32; 4]]) -
 /// Returns true only when a nonoccluded square is painted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_subagent_spinner(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     dot_x: f32,
     dot_y: f32,
     diameter: f32,
@@ -334,7 +334,7 @@ pub(crate) fn draw_subagent_spinner(
 }
 
 pub(crate) fn push_provider_icon_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     kind: agent_icon::AgentKind,
     rect: [f32; 4],
     clip: [f32; 4],
@@ -343,6 +343,7 @@ pub(crate) fn push_provider_icon_clipped(
     let Some((rect, source_rect)) = clip_image_rect(rect, clip) else {
         return;
     };
+    let overlay_scale = sugarloaf.scale_factor();
     push_image_overlay_clipped(
         sugarloaf,
         SIDE_PANEL_ICON_PANEL_ID,
@@ -350,7 +351,7 @@ pub(crate) fn push_provider_icon_clipped(
         rect,
         source_rect,
         1,
-        sugarloaf.scale_factor(),
+        overlay_scale,
         occlusion_rects,
     );
 }
@@ -381,7 +382,7 @@ pub(crate) fn intersect_rect(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
 
 #[allow(clippy::too_many_arguments)]
 fn draw_session_loading_skeleton(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     list_rect: [f32; 4],
     text_x: f32,
     row_h: f32,
@@ -444,7 +445,7 @@ fn draw_session_loading_skeleton(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_sessions_list(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentSidePanelPane,
     content_rect: [f32; 4],
     theme: &IdeTheme,
@@ -1477,7 +1478,7 @@ fn project_icon(remote: bool, open: bool) -> &'static str {
 /// project labels use the same regular body font as chat titles.
 #[allow(clippy::too_many_arguments)]
 fn render_project_row(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     entry: &NeoismAgentSessionEntry,
     open: bool,
     remote: bool,

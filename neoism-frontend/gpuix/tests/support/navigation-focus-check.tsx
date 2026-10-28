@@ -1,0 +1,54 @@
+import assert from "node:assert/strict";
+import {mkdtempSync,rmSync,writeFileSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import {createRoot} from "@gpuix/solid";
+import {App} from "../../src/ui/App";
+import {AppGeneration} from "../../src/ui/AppGeneration";
+import {AppVisualState} from "../../src/ui/AppVisualState";
+import {WorkspaceModel} from "../../src/model";
+import {DaemonConnection} from "../../src/daemon/client";
+import {loadConfig} from "../../src/config";
+import {createWindowKeyRouter} from "../../src/commands/window-key-router";
+import {usePresentationScheduler} from "../../src/animation/frame-scheduler";
+import {createRecordingAppRenderer} from "./full-app-recording-renderer";
+import {createAgentDaemon} from "./agent-daemon";
+const directory=mkdtempSync(join(tmpdir(),"neoism-navigation-focus-")),path=join(directory,"config.json");
+const configuration={appearance:{fonts:{family:"Cascadia Code NF",size:14}},editor:{"vim-mode":true}};writeFileSync(path,JSON.stringify(configuration));process.argv.push("--config",path);
+const daemon=createAgentDaemon({configuration,deferCreations:false,fileReadDelayMs:25});daemon.files.set("code.rs","pub fn code() {}\n");daemon.files.set("second.rs","fn second() { let needle = 1; }\n");
+const config={...loadConfig(["--config",path],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
+const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState();model.setUI({openWorkspaceIds:["a"],sidebar:"files"});
+const host=createRecordingAppRenderer(),keys=createWindowKeyRouter(),root=createRoot(host.renderer,{onKeyDown:keys.dispatch,keyboardFocusDim:false});
+const callbacks=new Set<()=>void>(),restoreSchedule=usePresentationScheduler(callback=>{callbacks.add(callback);return()=>callbacks.delete(callback);});
+let stage="startup",keystrokeId=0;
+const pulse=async()=>{const frame=[...callbacks];callbacks.clear();for(const callback of frame)callback();await host.pump(root);await Bun.sleep(5);};
+const until=async(predicate:()=>boolean)=>{const deadline=Date.now()+5000;while(!predicate()){await pulse();if(Date.now()>deadline)throw new Error(`Navigation focus failed: ${stage}`);}await host.pump(root);};
+const press=async(key:string,alt=false,id=host.focused)=>{host.dispatchKey(root,id,{key,keyChar:key.length===1?key:"",keystrokeId:++keystrokeId,modifiers:{alt,ctrl:false,shift:false,cmd:false}});await host.pump(root);};
+const event=async(testId:string,eventType:string,args:Record<string,unknown>={})=>{const node=host.find(testId);assert.ok(node,`missing ${testId}`);root.dispatch({elementId:node.id,eventType,...args});await host.pump(root);};
+const sidebar=()=>host.find("file-tree")!;
+const clickTree=async(file:string)=>{await event("file-tree","mouseDown",{button:0,x:30,y:150});await Promise.resolve();await event("app-content","mouseDown",{button:0,x:30,y:150});await event(`file:${file}`,"click",{button:0,x:30,y:150});};
+const panelFocus=()=>{const value=String(host.find("conversation-list")?.props["aria-description"]||"");return value==="New chat"?"new-chat":value==="Search"?"search":value==="Project directory"?"projects":value.startsWith("Conversation: ")?`row:${model.state.threads.find(thread=>thread.title===value.slice(14))?.session_id||""}`:"";};
+try{
+ model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);
+ root.render(()=><AppGeneration value={{model,config}}>{current=><App model={current.model} config={current.config} visuals={visuals} registerWindowKeys={keys.register}/>}</AppGeneration>);await host.pump(root);
+ stage="cold clicked file transfers actual native focus after deferred bubbling";await clickTree("code.rs");await until(()=>!!host.find("code-editor")&&host.focused===host.find("code-editor")!.id);
+ const code=host.find("code-editor")!,surface=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!,editor=model.getEditor(surface);editor.call("paste",{text:"// retained dirty bytes\n"});const dirty=editor.text();
+ await until(()=>!host.find("chrome-focus-cursor:content"));
+ stage="already open clicked file preserves host/editor/dirty document and returns the shared block cursor";await press("left",true);await until(()=>host.focused===sidebar().id&&!!host.find("chrome-focus-cursor:sidebar"));
+ const from=Number(host.find("chrome-focus-cursor:sidebar")!.style.left);await clickTree("code.rs");await until(()=>host.focused===code.id);
+ const samples:number[]=[];for(let i=0;i<60;i++){const caret=host.find("chrome-focus-cursor:content");if(caret)samples.push(Number(caret.style.left));await pulse();if(i>4&&!host.find("chrome-focus-cursor:content"))break;}
+ assert.ok(samples.length>=2,"shared cursor has continuous content travel frames");assert.ok(samples.some(x=>x>from+1&&x<340),"shared cursor traverses between sidebar and document");assert.equal(host.find("code-editor")!.id,code.id);assert.equal(model.getEditor(surface),editor);assert.equal(editor.text(),dirty);assert.equal(editor.frame.dirty,true);
+ stage="Tree Enter opens the selected file and focuses its actual editor";await press("left",true);await until(()=>host.focused===sidebar().id);await press("down");await press("enter");await until(()=>model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)?.path==="README.md"&&host.focused===host.find("rich-markdown-editor")?.id);await until(()=>!host.find("chrome-focus-cursor:content"));
+ stage="Finder keyboard accept transfers sidebar focus into the found file";await press("left",true);await until(()=>host.focused===sidebar().id);await press("s",true);await until(()=>!!host.find("command-palette"));await event("command-palette","change",{value:"second.rs"});await until(()=>!!host.find("finder-result:0"));await event("command-palette","submit");await until(()=>model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)?.path==="second.rs"&&host.focused===host.find("code-editor")?.id);await until(()=>!host.find("chrome-focus-cursor:content"));
+ stage="Finder mouse accept also focuses an already-open dirty file";await press("s",true);await until(()=>!!host.find("command-palette"));await event("command-palette","change",{value:"code.rs"});await until(()=>!!host.find("finder-result:0"));await event("finder-result:0","mouseDown",{button:0,x:500,y:250});await event("app-content","mouseDown",{button:0,x:500,y:250});await until(()=>model.state.activeSurfaceId===surface.id&&host.focused===host.find("code-editor")?.id);assert.equal(editor.text(),dirty);
+ await until(()=>!host.find("chrome-focus-cursor:content"));
+ stage="Alt-left enters the actual original Agent sidebar, with visible cursor and traversable controls";await press("c",true);await until(()=>!!host.find("conversation-list"));await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id&&!!host.find("chrome-focus-cursor:sidebar"));
+ for(let i=0;i<8&&panelFocus()!=="new-chat";i++)await press("up");assert.equal(panelFocus(),"new-chat");const firstCursor=host.find("chrome-focus-cursor:sidebar")!;assert.ok(Number(firstCursor.style.width)>0);const beforeAgents=model.state.surfaces.filter(surface=>surface.kind==="agent").length;
+ await press("enter");await until(()=>model.state.surfaces.filter(surface=>surface.kind==="agent").length===beforeAgents+1&&host.focused===host.find("composer")?.id);
+ stage="directory dropdown and Search are original keyboard activation paths";await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);for(let i=0;i<8&&panelFocus()!=="new-chat";i++)await press("up");await pulse();await press("down");assert.equal(panelFocus(),"search");await press("down");assert.equal(panelFocus(),"projects");await press("enter");await until(()=>!!host.find("conversation-navigator"));await press("escape");await until(()=>!host.find("conversation-navigator"));
+ await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);await press("up");assert.equal(panelFocus(),"search");await press("enter");await until(()=>!!host.find("finder"));await press("escape");await until(()=>!host.find("finder"));
+ stage="chat rows can be traversed and activated without creating a backend thread";await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);await press("down");await press("down");assert.match(panelFocus(),/^row:/);const selected=panelFocus().slice(4);await press("enter");await until(()=>model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)?.sessionId===selected&&host.focused===host.find("composer")?.id);
+ assert.equal(editor.text(),dirty);assert.equal(editor.frame.dirty,true);assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.some(request=>["CreateThread","SubmitPrompt"].includes(request.tag)),false);
+ console.log(JSON.stringify({noWindow:true,actualApp:true,treeClickNativeFocus:true,warmFileKeepsDirtyEditorAndHost:true,treeEnterNativeFocus:true,sharedCursorHasIntermediateFrames:true,finderKeyboardNativeFocus:true,finderMouseNativeFocus:true,agentAltArrowFocusAndExactCursor:true,originalAgentControlsTraverseAndActivate:true,newChatCreatesFreshLocalTab:true,unrelatedDirtyDocumentPreserved:true,noBackendThreadsOrPty:true}));
+}catch(error){console.error(JSON.stringify({stage,focused:host.focused,surface:model.state.activeSurfaceId,chrome:[...host.nodes.values()].filter(node=>String(node.props.testId||"").startsWith("chrome-focus-cursor")).map(node=>({props:node.props,style:node.style})),panel:panelFocus(),error:model.state.error}));throw error;}
+finally{root.unmount();restoreSchedule();visuals.dispose();model.dispose();client.stop();daemon.stop();rmSync(directory,{recursive:true,force:true});}

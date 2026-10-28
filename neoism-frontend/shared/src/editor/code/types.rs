@@ -6,7 +6,7 @@ use crate::syntax::Lang;
 
 /// Editing mode of the buffer. In `Standard` input mode the buffer
 /// rests in `Insert` permanently; the vim layer flips the full set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CodeMode {
     Normal,
     Insert,
@@ -16,7 +16,7 @@ pub enum CodeMode {
 /// Which input model drives the pane. `Standard` is the base (Zed-like
 /// always-insert editing); `Vim` layers the modal engine on top. The
 /// user toggles this per config / palette without touching the buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CodeInputMode {
     Standard,
     Vim,
@@ -24,7 +24,7 @@ pub enum CodeInputMode {
 
 /// A buffer position. `line` is a 0-based source line; `col` is a BYTE
 /// offset into that line (always on a char boundary).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct CodePosition {
     pub line: usize,
     pub col: usize,
@@ -71,7 +71,7 @@ pub enum CodeMotion {
 /// Detected indentation style of the loaded file, used by Tab and the
 /// newline auto-indent. Defaults to 4 spaces when the file carries no
 /// signal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CodeIndent {
     pub use_tabs: bool,
     pub width: usize,
@@ -98,20 +98,24 @@ impl CodeIndent {
 
 /// Line ending of the file on disk. The buffer always stores LF
 /// internally (and CRDT sync is LF); `text_for_disk` restores CRLF.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CodeLineEnding {
     Lf,
     Crlf,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct CodeHistorySnapshot {
     pub(super) lines: Vec<String>,
     pub(super) cursor_line: usize,
     pub(super) cursor_col: usize,
+    #[serde(default)]
+    pub(super) line_ending: Option<CodeLineEnding>,
+    #[serde(default)]
+    pub(super) trailing_newline: Option<bool>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct CodeHistoryLineSnapshot {
     pub(super) start: usize,
     pub(super) lines: Vec<String>,
@@ -119,7 +123,7 @@ pub(super) struct CodeHistoryLineSnapshot {
     pub(super) cursor_col: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) enum CodeHistoryEntry {
     Full {
         before: CodeHistorySnapshot,
@@ -155,7 +159,7 @@ pub(super) struct CodeInsertBurst {
 /// The renderer-agnostic text core: lines, cursor, selection, undo.
 /// See the module docs — no sugarloaf, no pixels, no paths. Everything
 /// a tty host needs to edit a file lives here.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CodeBuffer {
     /// Explicit caret placements (including repeated clicks on the same cell).
     /// Not document history: consumers combine this with position + revision.
@@ -186,24 +190,33 @@ pub struct CodeBuffer {
     pub(super) trailing_newline: bool,
     /// Brief highlight of the exact just-yanked range (nvim
     /// `TextYankPost` flash). Painter fades it out.
+    #[serde(skip)]
     pub yank_flash: Option<CodeYankFlash>,
     /// Brief accent settle over rows changed by an inbound CRDT update.
     /// Agent filesystem writes are folded into that same stream, so code
     /// visibly "lands" as it changes instead of silently swapping beneath
     /// the reader: (first_line, last_line, when).
+    #[serde(skip)]
     pub external_edit_flash: Option<(usize, usize, Instant)>,
     /// Vim resolver state (pending keys, find/search/repeat memory).
     /// Only consulted while the pane's input mode is `Vim`.
     pub vim: crate::editor::markdown::vim::VimState,
     pub(super) undo_stack: Vec<CodeHistoryEntry>,
     pub(super) redo_stack: Vec<CodeHistoryEntry>,
+    #[serde(skip)]
     pub(super) insert_burst: Option<CodeInsertBurst>,
+    #[serde(skip)]
     pub(super) doc_history_bound: bool,
+    #[serde(skip)]
     pub(super) pending_doc_history: Vec<CodeDocHistoryRequest>,
     /// Last-saved content baseline; `is_dirty()` recomputes against it
     /// (never a monotonic flag), matching the markdown pane and nvim's
     /// `modified` semantics.
     pub(super) saved_baseline: Vec<String>,
+    #[serde(default)]
+    pub(super) saved_line_ending: Option<CodeLineEnding>,
+    #[serde(default)]
+    pub(super) saved_trailing_newline: Option<bool>,
     /// Additional multi-cursor carets (`gb`/Ctrl+D occurrences,
     /// Ctrl+Alt+Up/Down stacks). Text entry applies at every caret;
     /// Esc collapses back to the primary. See `multicursor.rs`.
@@ -213,7 +226,7 @@ pub struct CodeBuffer {
 /// One additional multi-cursor caret. `anchor` holds its selection
 /// start when the caret was created from a word occurrence — the next
 /// typed char replaces that selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CodeExtraCaret {
     pub line: usize,
     /// Byte column (char-boundary), like the primary cursor.

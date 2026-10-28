@@ -151,7 +151,7 @@ impl PlainParagraphSegment {
 
 #[allow(clippy::too_many_arguments)]
 fn register_and_place_plain_paragraph(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     segment: &PlainParagraphSegment,
     lines: &[InlineWrappedLine],
@@ -205,7 +205,7 @@ fn register_and_place_plain_paragraph(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_plain_paragraph_selection(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     segment: &PlainParagraphSegment,
     lines: &[InlineWrappedLine],
@@ -284,7 +284,7 @@ impl InlineWrappedLine {
 
 #[allow(clippy::too_many_arguments)]
 fn draw_inline_unwrapped_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     raw: &str,
     x: f32,
@@ -318,7 +318,7 @@ fn draw_inline_unwrapped_text(
 }
 
 fn inline_wrapped_lines(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     raw: &str,
     max_w: f32,
     opts: &DrawOpts,
@@ -327,7 +327,7 @@ fn inline_wrapped_lines(
 }
 
 fn inline_wrapped_lines_dropcap(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     raw: &str,
     max_w: f32,
     opts: &DrawOpts,
@@ -356,7 +356,7 @@ fn inline_wrapped_lines_dropcap(
 /// rows (the width of the line's indent + list-marker prefix), so a revealed
 /// `- [ ]` item keeps its body column across wraps like the rendered view.
 fn inline_wrapped_lines_raw(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     raw: &str,
     max_w: f32,
     hang_px: f32,
@@ -374,7 +374,7 @@ fn inline_wrapped_lines_raw(
 /// Width of the raw indent + list-marker prefix as it is actually drawn on the
 /// revealed cursor line (each whitespace char renders as one space). This is
 /// the hanging indent wrapped continuation rows are shifted by.
-fn raw_line_hang_px(sugarloaf: &mut Sugarloaf, raw: &str, opts: &DrawOpts) -> f32 {
+fn raw_line_hang_px(sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized), raw: &str, opts: &DrawOpts) -> f32 {
     let Some(marker) = parse_markdown_list_marker(raw) else {
         return 0.0;
     };
@@ -456,7 +456,7 @@ fn inline_line_occupied_rows(line: &InlineWrappedLine) -> usize {
 }
 
 fn measured_inline_wrap_hit_rows(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     lines: &[InlineWrappedLine],
     hang_px: f32,
     opts: &DrawOpts,
@@ -483,7 +483,7 @@ fn measured_inline_wrap_hit_rows(
 }
 
 fn measured_inline_stops_for_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     line: &InlineWrappedLine,
     opts: &DrawOpts,
 ) -> Vec<f32> {
@@ -491,7 +491,7 @@ fn measured_inline_stops_for_line(
 }
 
 fn measured_stops_for_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     text: &str,
     opts: &DrawOpts,
 ) -> Vec<f32> {
@@ -500,7 +500,7 @@ fn measured_stops_for_text(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_inline_wrapped_lines(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     lines: &[InlineWrappedLine],
     x: f32,
@@ -717,7 +717,7 @@ fn inline_style_is_spellcheckable(style: &InlineRunStyle) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn draw_virtual_spellcheck_underlines(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     text: &str,
     x: f32,
     y: f32,
@@ -755,7 +755,7 @@ fn draw_virtual_spellcheck_underlines(
 }
 
 fn wrap_inline_words(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     words: Vec<InlineWord>,
     max_w: f32,
     hang_px: f32,
@@ -765,7 +765,7 @@ fn wrap_inline_words(
 }
 
 fn wrap_inline_words_with_dropcap(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     words: Vec<InlineWord>,
     max_w: f32,
     hang_px: f32,
@@ -926,7 +926,7 @@ fn inline_line_for_row(
 
 fn inline_dropcap_wrap(
     first_word: Option<&InlineWord>,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     opts: &DrawOpts,
 ) -> (usize, f32) {
     let Some(first_word) = first_word else {
@@ -950,7 +950,7 @@ fn inline_dropcap_wrap(
 }
 
 fn split_inline_word_to_fit(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     word: &InlineWord,
     max_w: f32,
     opts: &DrawOpts,
@@ -987,7 +987,7 @@ fn split_inline_word_to_fit(
 }
 
 fn inline_line_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     line: &InlineWrappedLine,
     opts: &DrawOpts,
     space_w: f32,
@@ -1005,7 +1005,7 @@ fn inline_line_width(
 }
 
 fn inline_word_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     word: &InlineWord,
     opts: &DrawOpts,
     space_w: f32,
@@ -1343,7 +1343,7 @@ fn list_marker_metrics(marker: &MarkdownListMarker, space_w: f32) -> (usize, f32
 }
 
 fn line_marker_layout<'a>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     raw: &'a str,
     width: f32,
     opts: &DrawOpts,

@@ -171,6 +171,8 @@ impl CodeBuffer {
             lines: self.lines.clone(),
             cursor_line: self.cursor_line,
             cursor_col: self.cursor_col,
+            line_ending: Some(self.line_ending),
+            trailing_newline: Some(self.trailing_newline),
         }
     }
 
@@ -186,6 +188,12 @@ impl CodeBuffer {
     }
 
     fn restore_history_snapshot(&mut self, snapshot: CodeHistorySnapshot) {
+        if let Some(line_ending) = snapshot.line_ending {
+            self.line_ending = line_ending;
+        }
+        if let Some(trailing_newline) = snapshot.trailing_newline {
+            self.trailing_newline = trailing_newline;
+        }
         self.lines = snapshot.lines;
         if self.lines.is_empty() {
             self.lines.push(String::new());

@@ -716,6 +716,20 @@ impl NeoismSettingsPane {
         }
     }
 
+    /// Restore host remounts without losing the current settings category/filter.
+    pub fn host_snapshot(&self) -> Value {
+        serde_json::json!({"category":Category::ALL.iter().position(|c|*c==self.category),"search":self.search,"scroll":self.scroll,"searchFocused":self.search_focused,"compactDetail":self.compact_detail,"compactLayout":self.compact_layout,"layoutInitialized":self.layout_initialized})
+    }
+    pub fn host_restore_snapshot(&mut self, value:&Value) {
+        if let Some(category)=value["category"].as_u64().and_then(|index|Category::ALL.get(index as usize)){self.category=*category;}
+        if let Some(search)=value["search"].as_str(){self.search=search.into();}
+        self.scroll=value["scroll"].as_f64().unwrap_or(0.0) as f32;
+        self.search_focused=value["searchFocused"].as_bool().unwrap_or(false);
+        self.compact_detail=value["compactDetail"].as_bool().unwrap_or(false);
+        self.compact_layout=value["compactLayout"].as_bool().unwrap_or(false);
+        self.layout_initialized=value["layoutInitialized"].as_bool().unwrap_or(false);
+    }
+
     pub fn is_active(&self) -> bool {
         self.active
     }

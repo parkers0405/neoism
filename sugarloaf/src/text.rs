@@ -451,6 +451,9 @@ struct PrefixMeasureKey {
 const PREFIX_MEASURE_CACHE_ENTRIES: usize = 512;
 const PREFIX_MEASURE_MAX_BYTES: usize = 1024;
 
+#[derive(Clone,Debug)]
+pub struct HostTextRaster{pub left:f32,pub top:f32,pub width:u32,pub height:u32,pub rgba:Vec<u8>}
+
 pub struct Text {
     /// Per-frame GPU instances, assembled inside `draw()` and drawn
     /// by the render-pass hook.
@@ -1703,7 +1706,12 @@ impl Text {
     /// No-op when CPU state is absent or no instances were queued.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_cpu(&self, buf: &mut [u32], buf_w: u32, buf_h: u32) {
-        if self.instances.is_empty() {
+        self.render_cpu_instances(&self.instances,buf,buf_w,buf_h,blend_premul_over);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render_cpu_instances(&self,instances:&[TextInstance],buf:&mut[u32],buf_w:u32,buf_h:u32,blend:fn([u8;4],u32)->u32){
+        if instances.is_empty() {
             return;
         }
         let Some(state) = self.cpu.as_ref() else {
@@ -1716,14 +1724,14 @@ impl Text {
         let color_atlas = state.atlas_color.pixels();
         let color_side = state.atlas_color.side() as usize;
 
-        for inst in &self.instances {
+        for inst in instances {
             if inst.raster_scale > 0.0 {
                 let (atlas, side) = if inst.atlas == 1 {
                     (color_atlas, color_side)
                 } else {
                     (mask, mask_side)
                 };
-                canvas::draw_scaled_cpu(inst, atlas, side, buf, buf_w_i, buf_h_i);
+                canvas::draw_scaled_cpu_with_blend(inst, atlas, side, buf, buf_w_i, buf_h_i, blend);
                 continue;
             }
             let gw = inst.glyph_size[0] as i32;
@@ -1737,7 +1745,7 @@ impl Text {
             let ay = inst.glyph_pos[1] as usize;
 
             if inst.atlas == 1 {
-                blit_text_color(
+                blit_text_color_with_blend(
                     buf,
                     buf_w_i,
                     buf_h_i,
@@ -1751,9 +1759,10 @@ impl Text {
                     ay,
                     inst.clip_rect,
                     inst.color[3],
+                    blend,
                 );
             } else {
-                blit_text_mask(
+                blit_text_mask_with_blend(
                     buf,
                     buf_w_i,
                     buf_h_i,
@@ -1767,9 +1776,33 @@ impl Text {
                     ay,
                     inst.color,
                     inst.clip_rect,
+                    blend,
                 );
             }
         }
+        }
+
+    /// Export one already-shaped glyph run as a transparent native texture.
+    /// Uses the same cached glyph atlas, clipping-free geometry and CPU sampler
+    /// as the existing renderer; callers apply the original draw clip on GPU.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn host_run_raster(&self,first:usize)->Option<HostTextRaster>{
+        let source=self.instances.get(first..)?;
+        if source.is_empty(){return None;}
+        let mut left=f32::MAX;let mut top=f32::MAX;let mut right=f32::MIN;let mut bottom=f32::MIN;
+        for glyph in source{
+            let scale=if glyph.raster_scale>0.0{glyph.raster_scale}else{1.0};
+            let x=glyph.pos[0]+glyph.bearings[0] as f32*scale;let y=glyph.pos[1]+glyph.bearings[1] as f32*scale;
+            left=left.min(x);top=top.min(y);right=right.max(x+glyph.glyph_size[0] as f32*scale);bottom=bottom.max(y+glyph.glyph_size[1] as f32*scale);
+        }
+        let left=left.floor();let top=top.floor();let width=(right.ceil()-left).max(0.0) as u32;let height=(bottom.ceil()-top).max(0.0) as u32;
+        if width==0||height==0||width as u64*height as u64>16*1024*1024{return None;}
+        let instances:Vec<_>=source.iter().map(|glyph|{let mut g=*glyph;g.pos[0]-=left;g.pos[1]-=top;g.clip_rect=[0.0;4];g}).collect();
+        let mut pixels=vec![0u32;width as usize*height as usize];
+        self.render_cpu_instances(&instances,&mut pixels,width,height,blend_premul_rgba_over);
+        let mut rgba=Vec::with_capacity(pixels.len()*4);
+        for pixel in pixels{let alpha=(pixel>>24) as u8;let unpremul=|channel:u32|if alpha==0{0}else{((channel*255+alpha as u32/2)/alpha as u32).min(255) as u8};rgba.extend_from_slice(&[unpremul((pixel>>16)&255),unpremul((pixel>>8)&255),unpremul(pixel&255),alpha]);}
+        Some(HostTextRaster{left,top,width,height,rgba})
     }
 
     //  macOS GPU backend
@@ -2887,6 +2920,13 @@ fn pack_opaque(r: u8, g: u8, b: u8) -> u32 {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[inline]
+fn blend_premul_rgba_over(src:[u8;4],dst:u32)->u32{
+    let sa=src[3] as u32;let inv=255-sa;
+    let channel=|value:u8,shift:u32|(value as u32+(((dst>>shift)&255)*inv+127)/255).min(255);
+    let alpha=sa+(((dst>>24)&255)*inv+127)/255;
+    (alpha<<24)|(channel(src[0],16)<<16)|(channel(src[1],8)<<8)|channel(src[2],0)
+}
+
 fn blend_premul_over(src: [u8; 4], dst: u32) -> u32 {
     let sa = src[3] as u32;
     if sa == 0 {
@@ -2921,6 +2961,27 @@ fn blit_text_mask(
     ay: usize,
     color: [u8; 4],
     clip_rect: [f32; 4],
+) {
+    blit_text_mask_with_blend(buf,buf_w,buf_h,glyph_x,glyph_y,gw,gh,atlas,atlas_side,ax,ay,color,clip_rect,blend_premul_over);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn blit_text_mask_with_blend(
+    buf: &mut [u32],
+    buf_w: i32,
+    buf_h: i32,
+    glyph_x: i32,
+    glyph_y: i32,
+    gw: i32,
+    gh: i32,
+    atlas: &[u8],
+    atlas_side: usize,
+    ax: usize,
+    ay: usize,
+    color: [u8; 4],
+    clip_rect: [f32; 4],
+    blend:fn([u8;4],u32)->u32,
 ) {
     if color[3] == 0 {
         return;
@@ -2964,7 +3025,7 @@ fn blit_text_mask(
             let pb = (b * a + 127) / 255;
             let src = [pr as u8, pg as u8, pb as u8, a as u8];
             let idx = buf_row + (dst_x as usize);
-            buf[idx] = blend_premul_over(src, buf[idx]);
+            buf[idx] = blend(src, buf[idx]);
         }
     }
 }
@@ -2985,6 +3046,27 @@ fn blit_text_color(
     ay: usize,
     clip_rect: [f32; 4],
     opacity: u8,
+) {
+    blit_text_color_with_blend(buf,buf_w,buf_h,glyph_x,glyph_y,gw,gh,atlas,atlas_side,ax,ay,clip_rect,opacity,blend_premul_over);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn blit_text_color_with_blend(
+    buf: &mut [u32],
+    buf_w: i32,
+    buf_h: i32,
+    glyph_x: i32,
+    glyph_y: i32,
+    gw: i32,
+    gh: i32,
+    atlas: &[u8],
+    atlas_side: usize,
+    ax: usize,
+    ay: usize,
+    clip_rect: [f32; 4],
+    opacity: u8,
+    blend:fn([u8;4],u32)->u32,
 ) {
     let stride = buf_w as usize;
     let (clip_x0, clip_y0, clip_x1, clip_y1) = cpu_clip_bounds(clip_rect, buf_w, buf_h);
@@ -3022,7 +3104,7 @@ fn blit_text_color(
                     .map(|v| ((u32::from(v) * u32::from(opacity) + 127) / 255) as u8)
             };
             let idx = buf_row + (dst_x as usize);
-            buf[idx] = blend_premul_over(src, buf[idx]);
+            buf[idx] = blend(src, buf[idx]);
         }
     }
 }

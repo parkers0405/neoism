@@ -67,7 +67,7 @@ pub(crate) fn section_header_font_size(s: f32) -> f32 {
 }
 
 pub(crate) fn render_section_header(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     label: &str,
     x: f32,
     y: f32,
@@ -138,7 +138,7 @@ pub(crate) fn render_section_header(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_text_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     line: &str,
     x: f32,
     y: f32,
@@ -167,7 +167,7 @@ pub(crate) fn render_text_line(
 /// Returns the `y` below it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_directory_section(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentSidePanelPane,
     x: f32,
     y: f32,
@@ -204,7 +204,7 @@ pub(crate) fn render_directory_section(
 }
 
 fn render_kv_row(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     label: &str,
     value: &str,
     x: f32,
@@ -244,7 +244,7 @@ fn render_kv_row(
 }
 
 pub(crate) fn render_session_info(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentSidePanelPane,
     content_rect: [f32; 4],
     theme: &IdeTheme,
@@ -546,7 +546,7 @@ mod authoritative_todo_tests {
 /// below the section.
 #[allow(clippy::too_many_arguments)]
 fn render_goal_section(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     goal: &SessionGoal,
     x: f32,
     y: f32,
@@ -629,7 +629,7 @@ fn tasks_section_height(todos_len: usize, s: f32) -> f32 {
 
 #[allow(clippy::too_many_arguments)]
 fn render_tasks_section(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     todos: &[impl AgentSidePanelTodo],
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -673,7 +673,7 @@ fn render_tasks_section(
 
 #[allow(clippy::too_many_arguments)]
 fn render_task_row(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     todo: &impl AgentSidePanelTodo,
     x: f32,
     y: f32,

@@ -1,0 +1,72 @@
+import { usePresentationScheduler, type Schedule } from "./frame-scheduler";
+
+export interface DisplayRenderer {
+  setFrameWakeCallback?: (callback?: (() => void) | null) => boolean;
+  requestFrameWake?: () => boolean;
+}
+export interface DisplayClock { readonly active: boolean; dispose(): void }
+const installed = new WeakMap<object, DisplayClock>();
+
+/** Multiplex the native runtime's wake callback with requested animation work.
+ * GPUI owns the platform/display frame; JavaScript never invents its cadence.
+ * No request remains after animations settle or their owners unmount. */
+export function installDisplayClock(renderer: DisplayRenderer, onError: (error: unknown) => void = error => { throw error; }): DisplayClock {
+  const existing = installed.get(renderer); if (existing) return existing;
+  const setWake = renderer.setFrameWakeCallback?.bind(renderer);
+  if (!setWake || !renderer.requestFrameWake) return { active: false, dispose() {} };
+  const callbacks = new Map<number, () => void>(), delayed = new Set<ReturnType<typeof setTimeout>>();
+  let next = 0, active = false, queued = false, requested = false, disposed = false;
+  let detachSchedule: (() => void) | undefined;
+  const request = () => {
+    if (!active || queued || requested || !callbacks.size) return;
+    queued = true;
+    // Solid flushes mutations and glyph uploads in microtasks. Submit the
+    // frame request after those commands, including updates from every owner
+    // sharing this display callback, have reached the native UI queue.
+    queueMicrotask(() => queueMicrotask(() => {
+      queued = false;
+      if (!active || requested || !callbacks.size) return;
+      requested = true;
+      let accepted: boolean;
+      try { accepted = renderer.requestFrameWake!(); }
+      catch (error) { requested = false; onError(error); return; }
+      if (!accepted) {
+        requested = false; callbacks.clear();
+        onError(new Error("The native display frame request was rejected"));
+      }
+    }));
+  };
+  const schedule: Schedule = (callback, delay, kind) => {
+    const id = ++next;
+    let timer: ReturnType<typeof setTimeout> | undefined, cancelled = false;
+    const enqueue = () => { if (timer !== undefined) delayed.delete(timer); if (!cancelled && active) { callbacks.set(id, callback); request(); } };
+    // Real deadlines (e.g. a hover probe) may sleep; the animation interval
+    // itself is replaced by the next native display frame, at any refresh rate.
+    if (kind === "deadline" && delay > 0) { timer = setTimeout(enqueue, delay); delayed.add(timer); }
+    else enqueue();
+    return () => { cancelled = true; callbacks.delete(id); if (timer !== undefined) { clearTimeout(timer); delayed.delete(timer); } };
+  };
+  const clear = () => {
+    active = false; queued = false; requested = false;
+    callbacks.clear(); for (const timer of delayed) clearTimeout(timer); delayed.clear();
+    detachSchedule?.(); detachSchedule = undefined;
+  };
+  renderer.setFrameWakeCallback = callback => {
+    if (disposed) return false;
+    clear();
+    if (!callback) return setWake(null);
+    const accepted = setWake(() => {
+      if (!active || disposed) return;
+      requested = false;
+      const batch = [...callbacks.values()]; callbacks.clear();
+      for (const frame of batch) { try { frame(); } catch (error) { onError(error); } }
+      callback();
+    });
+    if (accepted) { active = true; detachSchedule = usePresentationScheduler(schedule); }
+    return accepted;
+  };
+  const clock: DisplayClock = { get active() { return active; }, dispose() {
+    if (disposed) return; disposed = true; clear(); setWake(null);
+  } };
+  installed.set(renderer, clock); return clock;
+}

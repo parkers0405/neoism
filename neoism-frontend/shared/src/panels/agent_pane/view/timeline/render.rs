@@ -94,7 +94,7 @@ pub(super) fn body_paint_clip(
 }
 
 pub fn render_timeline_with<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -128,7 +128,7 @@ pub fn render_timeline_with<P, D>(
 /// text treats those as full-line cuts. The renderer clips final glyphs in 2D.
 #[allow(clippy::too_many_arguments)]
 pub fn render_timeline_in_paint_viewport_with<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     rect: [f32; 4],
     paint_rect: [f32; 4],
@@ -695,7 +695,7 @@ fn wasm_agent_timeline_debug_enabled() -> bool {
 }
 
 pub(crate) fn cached_message_height<P, D>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     message: &P::Message,
     width: f32,
@@ -1088,7 +1088,7 @@ pub(super) fn question_user_preview(text: &str, has_images: bool) -> String {
 }
 
 fn build_question_preview<M: AgentTimelineMessage>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     target: &TimelineQuestionTarget,
     messages: &[M],
     pane_rect: [f32; 4],
@@ -1132,7 +1132,7 @@ fn build_question_preview<M: AgentTimelineMessage>(
 
 /// Paint the exact snapshot whose preview was masked before transcript glyphs.
 pub fn render_timeline_scrollbar_with<P: AgentTimelinePane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     theme: &IdeTheme,
     s: f32,

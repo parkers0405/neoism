@@ -23,7 +23,6 @@
 //! widget can be adopted incrementally without pixel drift.
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 // ---------------------------------------------------------------------------
 // Block model
@@ -983,7 +982,7 @@ pub fn looks_like_inline_code_ref(value: &str) -> bool {
 /// Measure-driven greedy word wrap. Splits oversize words across character
 /// boundaries so a single un-spaced URL doesn't blow past `max_w`.
 pub fn wrap_words_measured(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     text: &str,
     max_w: f32,
     opts: &DrawOpts,
@@ -1049,7 +1048,7 @@ pub fn wrap_words_measured(
 }
 
 fn split_word_to_fit(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     word: &str,
     max_w: f32,
     opts: &DrawOpts,

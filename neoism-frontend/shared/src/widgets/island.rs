@@ -84,6 +84,12 @@ fn color_u8(c: [f32; 4]) -> [u8; 4] {
 /// Height of the tab bar in pixels
 pub const ISLAND_HEIGHT: f32 = 28.0;
 
+/// Original workspace-strip keyboard-cursor geometry for native adapters.
+pub fn keyboard_cursor_rect(rect:[f32;4],scale:f32)->[f32;4]{
+    let width=3.0*scale;let height=(rect[3]-8.0*scale).max(8.0*scale).min(rect[3]);
+    [rect[0]+(TAB_PADDING_X*scale-width).max(0.0),rect[1]+(rect[3]-height)/2.0,width,height]
+}
+
 /// Height of the progress bar in pixels
 const PROGRESS_BAR_HEIGHT: f32 = 3.0;
 

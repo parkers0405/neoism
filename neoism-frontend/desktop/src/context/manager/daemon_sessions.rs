@@ -314,6 +314,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             return false;
         };
         let request_id = link.send_pty(PtyClientMessage::CreatePty {
+            presentation: None,
             cwd: self.config.working_dir.clone(),
             cols: size.cols,
             rows: size.rows,
@@ -478,6 +479,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
         };
         let request_id = link.send_pty(PtyClientMessage::CreatePty {
             cwd,
+            presentation:None,
             cols: context
                 .dimension
                 .columns
@@ -554,6 +556,7 @@ impl<T: EventListener + Clone + std::marker::Send + Sync + 'static> ContextManag
             self.daemon.cache.remote_routes.insert(route_id, binding);
             let request_id = link.send_pty(PtyClientMessage::CreatePty {
                 cwd,
+                presentation:None,
                 cols,
                 rows,
                 shell: None,

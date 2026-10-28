@@ -476,6 +476,7 @@ async fn fresh_socket_never_receives_unattached_pty_backlog() {
     send_pty(
         &mut owner,
         &PtyClientMessage::CreatePty {
+            presentation: None,
             cwd: None,
             cols: 80,
             rows: 24,
@@ -818,6 +819,7 @@ async fn pty_registry_is_shared_across_websocket_clients_with_backlog() {
     send_pty(
         &mut client_a,
         &PtyClientMessage::CreatePty {
+            presentation: None,
             cwd: None,
             cols: 80,
             rows: 24,
@@ -1280,4 +1282,69 @@ async fn full_snapshot_reconnect_resumes_client_and_returns_backlog_cursor() {
     }
 
     close(resumed).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn concurrent_fff_queries_keep_their_own_websocket_envelopes() {
+    let _guard = EnvGuard::new(&[
+        ("NEOISM_REQUIRE_AUTH", None),
+        ("NEOISM_DAEMON_TOKEN", None),
+        ("NEOISM_CONFIG_DIR", None),
+        ("NEOISM_DAEMON_DATA_DIR", None),
+        ("NEOISM_WORKSPACE_REGISTRY", None),
+    ]);
+    let daemon = Daemon::spawn().await;
+    let root = TempDir::new().unwrap();
+    git2::Repository::init(root.path()).unwrap();
+    for n in 0..20 {
+        std::fs::write(root.path().join(format!("alpha{n}.rs")), "pub fn sample() {}\n")
+            .unwrap();
+    }
+    let mut ws = connect_client(daemon.addr).await;
+    send_workspace(
+        &mut ws,
+        1,
+        &WorkspaceClientMessage::Hello {
+            token: None,
+            client_name: Some("fff-correlation".into()),
+            client_id: uuid::Uuid::nil(),
+        },
+    )
+    .await;
+    recv_workspace_timeout(&mut ws, Duration::from_secs(3)).await.expect("HelloAck");
+    for n in 0..20u64 {
+        let payload = serde_json::json!({
+            "Search": {
+                "request_id": 1000 + n,
+                "workspace_root": root.path().to_string_lossy(),
+                "message": {
+                    "SearchFiles": {
+                        "req_id": 100 + n,
+                        "query": format!("alpha{n}.rs"),
+                        "cwd": "",
+                        "mode": "Fuzzy"
+                    }
+                }
+            }
+        });
+        ws.send(Message::Text(payload.to_string())).await.unwrap();
+    }
+    let mut seen = std::collections::HashSet::new();
+    while seen.len() < 20 {
+        let frame = tokio::time::timeout(Duration::from_secs(15), ws.next())
+            .await.unwrap().unwrap().unwrap();
+        let text = match frame {
+            Message::Text(text) => text,
+            _ => continue,
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let Some(reply) = value.get("SearchReply") else { continue; };
+        let result = &reply["message"]["SearchFilesResult"];
+        assert!(!result.is_null(), "{reply}");
+        let id = result["req_id"].as_u64().unwrap();
+        assert_eq!(reply["request_id"].as_u64(), Some(id + 900));
+        assert!(seen.insert(id));
+        assert!(result["hits"].as_array().unwrap().iter()
+            .any(|hit| hit["path"] == format!("alpha{}.rs", id - 100)));
+    }
 }

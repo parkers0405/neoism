@@ -1,4 +1,3 @@
-use sugarloaf::Sugarloaf;
 
 use crate::event::{
     KeyDescriptor, KeyState, LogicalKey, Modifiers, NamedKey, PointerButton,
@@ -202,6 +201,7 @@ pub(crate) struct RowHit {
 
 #[derive(Debug, Clone)]
 pub struct NeoismExtensionsPane {
+    pub(crate) host_read_only: bool,
     pub(crate) entries: Vec<ExtensionEntry>,
     pub(crate) search_query: String,
     pub(crate) filter: ExtensionFilter,
@@ -267,6 +267,7 @@ pub struct NeoismExtensionsPane {
 impl NeoismExtensionsPane {
     pub fn new() -> Self {
         Self {
+            host_read_only: false,
             entries: Vec::new(),
             search_query: String::new(),
             filter: ExtensionFilter::default(),
@@ -305,6 +306,10 @@ impl NeoismExtensionsPane {
         // was open, retract it so focus is unambiguous.
         self.close_language_picker();
     }
+
+    /// Remote inventory hosts can browse the real catalog without offering
+    /// package lifecycle operations that their transport cannot execute.
+    pub fn set_host_read_only(&mut self, read_only: bool) { self.host_read_only = read_only; }
 
     /// Record the view's scaled per-row advance so keyboard scroll-
     /// follow lands the selected card in the same coordinate space the
@@ -1015,6 +1020,7 @@ impl NeoismExtensionsPane {
                 KeyResponse::handled()
             }
             NamedKey::Enter => {
+                if self.host_read_only { return KeyResponse::handled(); }
                 if visible.is_empty() {
                     return KeyResponse::handled();
                 }
@@ -1117,7 +1123,7 @@ impl NeoismExtensionsPane {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         rect: [f32; 4],
         theme: &IdeTheme,
         scale: f32,

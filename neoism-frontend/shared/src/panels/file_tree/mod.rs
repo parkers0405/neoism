@@ -31,6 +31,7 @@
 
 mod drag;
 mod git;
+mod host_frame;
 mod host_git;
 pub mod icons;
 mod policy;
@@ -56,6 +57,17 @@ pub const ROW_HEIGHT: f32 = 26.0;
 pub const FONT_SIZE: f32 = 13.0;
 pub const ICON_FONT_SIZE: f32 = 13.0;
 pub const ROW_PADDING_X: f32 = 12.0;
+
+/// Original focused-row caret geometry, shared with alternate native hosts.
+pub fn keyboard_cursor_rect(content: [f32;4], row_y:f32, row_h:f32, scale:f32)->[f32;4]{
+    let font_size=FONT_SIZE*scale;
+    let cursor_w=(font_size*0.6).max(2.0);
+    let cursor_x=content[0]+(ROW_PADDING_X*scale-cursor_w).max(0.0);
+    let cursor_h=(row_h-6.0*scale).max(font_size).min(row_h).min(content[3].max(2.0));
+    let cursor_y=(row_y+(row_h-cursor_h)/2.0).clamp(content[1],(content[1]+content[3]-cursor_h).max(content[1]));
+    [cursor_x,cursor_y,cursor_w,cursor_h]
+}
+
 pub const INDENT_PX: f32 = 14.0;
 pub const ICON_GAP: f32 = 8.0;
 pub const FRAME_RADIUS: f32 = 14.0;
@@ -81,6 +93,7 @@ pub(crate) const LABEL_TRUNCATION_CACHE_MAX: usize = 2048;
 
 pub use drag::{FileDragState, FileDropOutcome};
 pub use git::{git_statuses_for, git_watch_paths_for, parse_git_status};
+pub use host_frame::FileTreeHostFrame;
 pub use icons::{icon_for_file, workspace_root_icon};
 pub use policy::{
     activation_for_selection, close_policy, directory_link_policy,

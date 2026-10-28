@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use super::draw::{draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip};
 use super::markdown::{
@@ -24,7 +23,7 @@ pub(super) const ASSISTANT_RESPONSE_FOOTER_H: f32 =
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_assistant_text_with<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     w: f32,
@@ -109,7 +108,7 @@ pub fn render_assistant_text_with<P: AgentMarkdownPane>(
 
 #[allow(clippy::too_many_arguments)]
 fn render_assistant_response_footer<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     footer: &str,
@@ -234,7 +233,7 @@ fn render_assistant_response_footer<P: AgentMarkdownPane>(
 }
 
 pub fn render_reasoning_message_with<P, M>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     w: f32,

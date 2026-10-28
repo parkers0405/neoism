@@ -4,7 +4,8 @@ use crate::panels::{command_palette::render::draw_modal_frame_top, file_tree};
 use crate::primitives::{
     geom::intersect_rect, snap_to_device_px, text::truncate_to_fit, IdeTheme,
 };
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use crate::primitives::paint::Paint;
+use sugarloaf::text::DrawOpts;
 
 const INPUT_HEIGHT: f32 = 40.0;
 const INPUT_FONT: f32 = 14.0;
@@ -195,7 +196,7 @@ pub(super) fn fit_excerpt(
 }
 
 fn quad(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     rect: [f32; 4],
     clip: [f32; 4],
     color: [f32; 4],
@@ -231,7 +232,7 @@ impl ConversationNavigator {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         theme: &IdeTheme,
         geometry: NavigatorRenderGeometry,
         s: f32,

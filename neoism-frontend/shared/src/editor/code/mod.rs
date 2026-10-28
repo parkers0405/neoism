@@ -30,13 +30,16 @@ pub mod lsp_session;
 pub mod multicursor;
 pub mod outline;
 pub mod projected;
+pub mod pointer;
 pub use gitdiff::build_review_diff;
 pub use projected::render_projected_code;
 pub mod render;
+pub mod recovery;
 pub mod substitute;
 #[cfg(test)]
 mod tests;
 pub mod types;
+pub mod viewport;
 pub mod vim;
 
 pub use feed::{

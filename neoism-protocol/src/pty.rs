@@ -1,5 +1,11 @@
 //! PTY session wire messages.
 
+/// A block-composer host owns the prompt; a grid host displays the shell's
+/// actual prompt. Missing presentation retains the original block protocol.
+#[derive(Debug,Clone,Copy,Default,PartialEq,Eq,serde::Serialize,serde::Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum Presentation { #[default] Blocks, Grid }
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ClientMessage {
     CreatePty {
@@ -12,6 +18,8 @@ pub enum ClientMessage {
         /// daemon's `SessionRegistry::create` already handles `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<String>,
+        #[serde(default,skip_serializing_if="Option::is_none")]
+        presentation: Option<Presentation>,
     },
     /// Explicit user intent; never implied by workspace-root metadata.
     /// The string request_id is independent of the service-envelope numeric id.
@@ -70,6 +78,10 @@ pub enum ServerMessage {
     },
     PtyCreated {
         session_id: String,
+        /// Echoes the actual spawn mode. Grid clients must not assume an old
+        /// server honored a request field it did not understand.
+        #[serde(default,skip_serializing_if="Option::is_none")]
+        presentation: Option<Presentation>,
         /// Actual spawned program, replayed on attach. Never infer from the client OS.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<String>,
@@ -130,12 +142,14 @@ mod tests {
     #[test]
     fn client_create_pty_roundtrip() {
         roundtrip_client(&ClientMessage::CreatePty {
+            presentation: None,
             cwd: Some("/tmp".into()),
             cols: 80,
             rows: 24,
             shell: None,
         });
         roundtrip_client(&ClientMessage::CreatePty {
+            presentation: None,
             cwd: None,
             cols: 132,
             rows: 50,
@@ -144,6 +158,7 @@ mod tests {
         // Round-trip with an explicit shell so we cover both
         // `#[serde(default)]` (missing field) and the populated path.
         roundtrip_client(&ClientMessage::CreatePty {
+            presentation: None,
             cwd: Some("/work".into()),
             cols: 100,
             rows: 30,
@@ -178,11 +193,13 @@ mod tests {
     #[test]
     fn server_pty_created_roundtrip() {
         roundtrip_server(&ServerMessage::PtyCreated {
+            presentation: None,
             shell: Some("pwsh.exe".into()),
             session_id: "s-1".into(),
             workspace_root: None,
         });
         roundtrip_server(&ServerMessage::PtyCreated {
+            presentation: None,
             shell: Some("pwsh.exe".into()),
             session_id: "s-2".into(),
             workspace_root: Some("/work".into()),

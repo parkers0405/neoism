@@ -4,7 +4,7 @@ use super::*;
 // Resolver types.
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VimOperator {
     Delete,
     Change,
@@ -13,7 +13,7 @@ pub enum VimOperator {
     Outdent,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VimFindKind {
     /// `f` — forward onto the target char.
     To,
@@ -25,7 +25,7 @@ pub enum VimFindKind {
     TillBack,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VimMotion {
     Left,
     Right,
@@ -64,7 +64,7 @@ pub enum VimMotion {
     MatchPair,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VimTextObject {
     Word { big: bool },
     Quote(char),
@@ -72,7 +72,7 @@ pub enum VimTextObject {
     Paragraph,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VimTarget {
     Motion(VimMotion),
     Object {
@@ -85,7 +85,7 @@ pub enum VimTarget {
     Selection,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VimInsertKind {
     Here,
     LineStart,
@@ -95,7 +95,7 @@ pub enum VimInsertKind {
     LineAbove,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum VimAction {
     Move {
         motion: VimMotion,
@@ -188,7 +188,7 @@ pub enum VimAction {
 }
 
 /// Outcome of feeding one key into the resolver.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum VimKeyFeed {
     /// Consumed; waiting for more keys.
     Pending,
@@ -200,7 +200,7 @@ pub enum VimKeyFeed {
     Unhandled,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VimStage {
     #[default]
     Ready,
@@ -225,7 +225,7 @@ pub enum VimStage {
     MacroPlay,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VimPending {
     pub count1: usize,
     pub operator: Option<VimOperator>,
@@ -304,7 +304,7 @@ impl VimPending {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VimSearch {
     pub pattern: String,
     pub forward: bool,
@@ -316,7 +316,7 @@ pub struct VimSearch {
 /// nearest match, every occurrence lights up, and Esc restores the
 /// pre-search view. Distinct from [`VimSearch`], which is the committed
 /// pattern that `n`/`N` walk after the input closes.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct MarkdownIncSearch {
     /// Pattern typed so far (empty right after the opening `/`).
     pub query: String,
@@ -336,7 +336,7 @@ pub struct MarkdownIncSearch {
 }
 
 /// One yank/delete payload stored in a vim register.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VimRegisterValue {
     pub text: String,
     pub linewise: bool,
@@ -345,7 +345,7 @@ pub struct VimRegisterValue {
 
 /// Named + special registers. Unnamed (`"`) is always mirrored here; the
 /// host clipboard is synced from/to unnamed (and `+`/`*`) by the applier.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct VimRegisters {
     pub unnamed: VimRegisterValue,
     /// `"0` last yank.
@@ -440,7 +440,7 @@ impl VimRegisters {
 }
 
 /// Buffer-local mark position (line, byte col).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VimMark {
     pub line: usize,
     pub col: usize,
@@ -449,7 +449,7 @@ pub struct VimMark {
 /// Per-pane vim state: the pending key sequence plus the sticky pieces
 /// (`;`/`,` find memory, `n`/`N` search memory, `.` repeat memory,
 /// visual selection shape, registers, marks, jumplist, macros).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct VimState {
     pub pending: VimPending,
     pub last_find: Option<(VimFindKind, char)>,
@@ -478,7 +478,7 @@ pub struct VimState {
 }
 
 /// What the applier reports back to the host dispatch.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct VimApplied {
     pub handled: bool,
     pub snap_cursor: bool,

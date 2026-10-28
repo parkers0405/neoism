@@ -63,6 +63,13 @@ use crate::session_layout::{buffer_tabs_scroll_dx, SessionScrollDelta};
 // preserves pixel layout. Lift these to theme tokens later.
 
 pub const BUFFER_TABS_HEIGHT: f32 = 28.0;
+
+/// Original keyboard-cursor geometry, also consumed by native host adapters.
+pub fn keyboard_cursor_rect(visible_left:f32,y:f32,height:f32,padding:f32,scale:f32,plus:bool)->[f32;4]{
+    let width=(3.0*scale).max(2.0);
+    let cursor_h=(height-8.0*scale).max(8.0).min(height);
+    [visible_left+if plus{0.0}else{(padding-width).max(0.0)},y+(height-cursor_h)/2.0,width,cursor_h]
+}
 const ICON_FONT_SIZE: f32 = 12.0;
 const ICON_GAP: f32 = 6.0;
 const FONT_SIZE: f32 = 11.5;

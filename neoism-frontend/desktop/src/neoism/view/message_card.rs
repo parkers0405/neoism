@@ -35,7 +35,7 @@ impl AgentMessageCardDelegate<NeoismAgentPane, NeoismAgentMessage>
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_message_card(
-    sugarloaf: &mut neoism_backend::sugarloaf::Sugarloaf,
+    sugarloaf: &mut dyn neoism_ui::primitives::paint::Paint,
     x: f32,
     y: f32,
     w: f32,
@@ -76,7 +76,7 @@ pub(super) fn render_message_card(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn measure_message_height(
-    sugarloaf: &mut neoism_backend::sugarloaf::Sugarloaf,
+    sugarloaf: &mut dyn neoism_ui::primitives::paint::Paint,
     pane: &NeoismAgentPane,
     message: &NeoismAgentMessage,
     width: f32,

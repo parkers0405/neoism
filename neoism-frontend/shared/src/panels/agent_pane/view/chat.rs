@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::conversation_header::{ConversationNavigation, Direction};
 use crate::panels::agent_pane::state::NeoismAgentPane;
@@ -187,64 +186,22 @@ mod header_tests {
     }
 }
 
+/// The original family header, shared with hosts whose composer is painted
+/// independently. Returns the exact timeline top reserved by render_chat_with.
 #[allow(clippy::too_many_arguments)]
-pub fn render_chat(
-    sugarloaf: &mut Sugarloaf,
-    pane: &mut NeoismAgentPane,
-    rect: [f32; 4],
-    theme: &IdeTheme,
-    active: bool,
-    now_seconds: f32,
-    mouse: Option<(f32, f32)>,
-    s: f32,
-    input_rect: [f32; 4],
-    occlusion_rects: &[[f32; 4]],
-    plugins: Option<&neoism_lua::PluginSnapshot>,
-) {
-    render_chat_with::<NeoismAgentPane, SharedTimelineDelegate>(
-        sugarloaf,
-        pane,
-        rect,
-        theme,
-        active,
-        now_seconds,
-        mouse,
-        s,
-        input_rect,
-        occlusion_rects,
-        plugins,
-        None,
-        None,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn render_chat_with<P, D>(
-    sugarloaf: &mut Sugarloaf,
+pub fn render_conversation_header<P: AgentChatPane>(
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     rect: [f32; 4],
     theme: &IdeTheme,
-    active: bool,
-    now_seconds: f32,
     mouse: Option<(f32, f32)>,
     s: f32,
-    input_rect: [f32; 4],
     occlusion_rects: &[[f32; 4]],
-    plugins: Option<&neoism_lua::PluginSnapshot>,
-    prepared_input_rows: Option<&std::rc::Rc<Vec<InputWrapRow>>>,
-    checkout_context: Option<&AgentCheckoutContext>,
-) where
-    P: AgentChatPane,
-    D: AgentTimelineDelegate<P>,
-{
+) -> f32 {
     pane.conversation_header().clear();
     if pane.has_conversation() || pane.is_subagent_session() {
         pane.maybe_refresh_side_panel_subagents();
     }
-    // Timeline lives in the SAME column as the composer island (same
-    // insets + wide-pane cap, centered) — content wider than the
-    // floating input bar would extend past its borders and kill the
-    // island illusion.
     let (content_x, content_w) = super::layout::chat_column(rect, s);
     let mut timeline_top = rect[1];
     let navigation = pane.conversation_navigation();
@@ -318,6 +275,61 @@ pub fn render_chat_with<P, D>(
             }
         }
     }
+    timeline_top
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_chat(
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
+    pane: &mut NeoismAgentPane,
+    rect: [f32; 4],
+    theme: &IdeTheme,
+    active: bool,
+    now_seconds: f32,
+    mouse: Option<(f32, f32)>,
+    s: f32,
+    input_rect: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+    plugins: Option<&neoism_lua::PluginSnapshot>,
+) {
+    render_chat_with::<NeoismAgentPane, SharedTimelineDelegate>(
+        sugarloaf,
+        pane,
+        rect,
+        theme,
+        active,
+        now_seconds,
+        mouse,
+        s,
+        input_rect,
+        occlusion_rects,
+        plugins,
+        None,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_chat_with<P, D>(
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
+    pane: &mut P,
+    rect: [f32; 4],
+    theme: &IdeTheme,
+    active: bool,
+    now_seconds: f32,
+    mouse: Option<(f32, f32)>,
+    s: f32,
+    input_rect: [f32; 4],
+    occlusion_rects: &[[f32; 4]],
+    plugins: Option<&neoism_lua::PluginSnapshot>,
+    prepared_input_rows: Option<&std::rc::Rc<Vec<InputWrapRow>>>,
+    checkout_context: Option<&AgentCheckoutContext>,
+) where
+    P: AgentChatPane,
+    D: AgentTimelineDelegate<P>,
+{
+    let timeline_top = render_conversation_header(sugarloaf, pane, rect, theme, mouse, s, occlusion_rects);
+    let (content_x, content_w) = super::layout::chat_column(rect, s);
     let composer_visible = !pane.is_subagent_session();
     // The metrics viewport retains its original bottom for scroll/follow math.
     // The paint viewport continues behind the floating silhouette, not a blank strip.

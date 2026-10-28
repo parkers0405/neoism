@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::{
     parse_markdown_link_parts, source_map::InlineSourceMap, MarkdownPane,
@@ -28,7 +27,7 @@ pub use crate::editor::markdown::{
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_spellcheck_underlines(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     text_x: f32,
     text_y: f32,
     line_h: f32,
@@ -77,7 +76,7 @@ pub(super) fn draw_spellcheck_underlines(
 }
 
 pub(super) fn draw_spellcheck_squiggle_visible(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x: f32,
     y: f32,
@@ -131,7 +130,7 @@ fn spellcheck_visible_spans(
 }
 
 pub(super) fn draw_spellcheck_squiggle(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x: f32,
     y: f32,
@@ -180,7 +179,7 @@ mod spellcheck_occlusion_tests {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_inline_links_for_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     line: &str,
     text_x: f32,

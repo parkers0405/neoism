@@ -2,14 +2,13 @@
 //! inside scroll viewports (agent pane, markdown blocks, extensions
 //! page, stock cards).
 
-use sugarloaf::Sugarloaf;
 
 use crate::primitives::geom::intersect_rect;
 
 /// Clip the original rounded shape, rather than rounding or squaring its visible slice.
 #[allow(clippy::too_many_arguments)]
 pub fn rounded_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     id: Option<usize>,
     rect: [f32; 4],

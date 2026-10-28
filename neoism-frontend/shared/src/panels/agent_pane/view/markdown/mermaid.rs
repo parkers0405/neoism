@@ -2,7 +2,7 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_mermaid_block<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     lines: &[String],
     diagram: Option<&MermaidDiagram>,
@@ -167,7 +167,7 @@ pub(crate) fn render_mermaid_block<P: AgentMarkdownPane>(
 
 #[allow(clippy::too_many_arguments)]
 fn render_mermaid_raw_body<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     x: f32,
     y: f32,

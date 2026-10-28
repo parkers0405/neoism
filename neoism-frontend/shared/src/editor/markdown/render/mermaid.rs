@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::MarkdownPane;
 use crate::editor::neodraw::{render_scene, Camera, Vec2};
@@ -184,7 +183,7 @@ pub(super) fn add_mermaid_node(nodes: &mut Vec<MermaidNode>, node: MermaidNode) 
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_mermaid_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     start_line: usize,
     code_end: usize,
@@ -358,7 +357,7 @@ pub(super) fn layout_mermaid_nodes(
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 pub(super) fn draw_mermaid_node(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     node: &MermaidNode,
     rect: [f32; 4],
     clip: [f32; 4],
@@ -425,7 +424,7 @@ pub(super) fn draw_mermaid_node(
 
 #[allow(dead_code)]
 pub(super) fn draw_mermaid_border(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     clip: [f32; 4],
     color: [f32; 4],
@@ -478,7 +477,7 @@ pub(super) fn draw_mermaid_border(
 
 #[allow(dead_code)]
 pub(super) fn draw_mermaid_edge(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     edge: &MermaidEdge,
     layout: &[(String, [f32; 4])],
     direction: MermaidDirection,
@@ -561,7 +560,7 @@ pub(super) fn draw_mermaid_edge(
 
 #[allow(dead_code)]
 pub(super) fn draw_mermaid_segment(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x1: f32,
     y1: f32,
@@ -599,7 +598,7 @@ pub(super) fn draw_mermaid_segment(
 
 #[allow(dead_code)]
 pub(super) fn draw_mermaid_arrowhead(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x: f32,
     y: f32,
@@ -662,7 +661,7 @@ pub(super) fn draw_mermaid_arrowhead(
 
 #[allow(dead_code)]
 pub(super) fn draw_mermaid_edge_label(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     edge: &MermaidEdge,
     center: [f32; 2],
     clip: [f32; 4],

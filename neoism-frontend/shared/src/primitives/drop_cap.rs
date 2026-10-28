@@ -8,7 +8,6 @@
 //! `UnifrakturMaguntia-Book.ttf` for its `Maguntia` style). The font is
 //! registered once and cached by sugarloaf.
 
-use sugarloaf::Sugarloaf;
 
 /// UnifrakturMaguntia Book (bundled Google OFL blackletter font) — the
 /// illuminated drop-cap face. Mirrors `markdown::render::illuminated`'s
@@ -19,6 +18,6 @@ const UNIFRAKTUR_MAGUNTIA_BOOK: &[u8] = include_bytes!(
 
 /// Font id for the bundled UnifrakturMaguntia face, or `None` if registration
 /// failed (callers then fall back to the default font).
-pub fn maguntia_font_id(sugarloaf: &mut Sugarloaf) -> Option<usize> {
+pub fn maguntia_font_id(sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized)) -> Option<usize> {
     sugarloaf.ensure_static_font(UNIFRAKTUR_MAGUNTIA_BOOK)
 }

@@ -16,7 +16,6 @@
 //! it. Pair with [`crate::primitives::edge_row_radii`] for
 //! selected-row corners that meet the frame cleanly.
 
-use sugarloaf::Sugarloaf;
 
 /// Which of the four outer corners get rounded. The unrounded corners
 /// sit flush against whatever edge they're adjacent to (window edge,
@@ -137,7 +136,7 @@ pub fn inner_radius(outer_radius: f32, border_thickness: f32) -> f32 {
 /// Paired contours form disjoint triangles, including
 /// the rounded corners; alpha is not multiplied at overlapping strip joins.
 pub(crate) fn draw_background_border(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     outer: [f32; 4],
     inner: [f32; 4],
     outer_radii: [f32; 4],
@@ -151,12 +150,7 @@ pub(crate) fn draw_background_border(
     }
     let outer = background_border_contour(outer, outer_radii);
     let inner = background_border_contour(inner, inner_radii);
-    for i in 0..outer.len() {
-        let next = (i + 1) % outer.len();
-        let (a, b, c, d) = (outer[i], outer[next], inner[next], inner[i]);
-        sugarloaf.triangle_ordered(a.0, a.1, b.0, b.1, c.0, c.1, depth, color, order);
-        sugarloaf.triangle_ordered(a.0, a.1, c.0, c.1, d.0, d.1, depth, color, order);
-    }
+    sugarloaf.border_ring(&outer,&inner,depth,color,order);
 }
 
 fn background_border_contour(rect: [f32; 4], radii: [f32; 4]) -> [(f32, f32); 68] {
@@ -257,7 +251,7 @@ mod background_border_tests {
 /// strictly less than `order_inner` so the inner fill paints on top of
 /// the ring.
 pub fn draw_frame(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     config: &FrameConfig,
     depth: f32,

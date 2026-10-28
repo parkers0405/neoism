@@ -6,7 +6,7 @@ use base64::Engine;
 use serde_json::Value;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId, Sugarloaf};
+use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
 use web_time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,7 +120,7 @@ impl McpServiceIcon {
 
     pub fn presentation(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         color: [u8; 4],
     ) -> InlinePickerIcon {
         if let Some(raster) = &self.raster {
@@ -152,12 +152,12 @@ impl McpServiceIcon {
             _ => None,
         };
         if let Some((id, bytes)) = asset {
-            if !sugarloaf.image_data.contains_key(&id) {
+            if !sugarloaf.image_data_contains(id) {
                 if let Ok(image) = image_rs::load_from_memory(bytes) {
                     upload(sugarloaf, id, &image.to_rgba8().into_raw());
                 }
             }
-            if sugarloaf.image_data.contains_key(&id) {
+            if sugarloaf.image_data_contains(id) {
                 return InlinePickerIcon::Image {
                     panel_id: super::view::OVERLAY_PANEL_ID,
                     image_id: id,
@@ -172,25 +172,24 @@ impl McpServiceIcon {
     }
 }
 
-fn upload(sugarloaf: &mut Sugarloaf, id: u32, pixels: &[u8]) {
-    if sugarloaf.image_data.contains_key(&id) {
+fn upload(sugarloaf: &mut dyn crate::primitives::paint::Paint, id: u32, pixels: &[u8]) {
+    if sugarloaf.image_data_contains(id) {
         return;
     }
     // Keep changing server metadata from growing the per-window upload store.
     if id & 0xff00_0000 == 0xAD00_0000 {
         let dynamic = sugarloaf
-            .image_data
-            .keys()
-            .filter(|key| **key & 0xff00_0000 == 0xAD00_0000)
-            .copied()
+            .image_data_ids()
+            .into_iter()
+            .filter(|key| *key & 0xff00_0000 == 0xAD00_0000)
             .collect::<Vec<_>>();
         if dynamic.len() >= 128 {
             for victim in dynamic.iter().take(dynamic.len() - 127) {
-                sugarloaf.image_data.remove(victim);
+                sugarloaf.image_data_remove(*victim);
             }
         }
     }
-    sugarloaf.image_data.insert(
+    sugarloaf.image_data_insert(
         id,
         GraphicDataEntry::from_graphic_data(GraphicData {
             id: GraphicId::new(id as u64),

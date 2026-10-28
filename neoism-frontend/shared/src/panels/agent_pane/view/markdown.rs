@@ -5,7 +5,6 @@ use std::rc::Rc;
 
 use pulldown_cmark::{Event, Options, Parser};
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
@@ -569,7 +568,7 @@ fn table_column_count(rows: &[Vec<String>]) -> usize {
 }
 
 fn table_column_widths(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     rows: &[Vec<String>],
     viewport_w: f32,
     s: f32,
@@ -625,7 +624,7 @@ fn table_scroll_content_width(content_w: f32, viewport_w: f32, s: f32) -> f32 {
 }
 
 fn wrap_table_cells(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     cells: Vec<String>,
     column_widths: &[f32],
     s: f32,
@@ -649,7 +648,7 @@ fn wrap_table_cells(
 }
 
 fn flush_layout_table(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     blocks: &mut Vec<AssistantMarkdownBlock>,
     rows: &mut Vec<Vec<String>>,
     width: f32,
@@ -668,7 +667,7 @@ fn flush_layout_table(
 }
 
 fn push_layout_prose_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     blocks: &mut Vec<AssistantMarkdownBlock>,
     raw: &str,
     width: f32,
@@ -788,7 +787,7 @@ fn semantic_markdown_lines(text: &str) -> Vec<String> {
 
 #[allow(clippy::too_many_arguments)]
 fn flush_pending_table_header(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     blocks: &mut Vec<AssistantMarkdownBlock>,
     pending: &mut Option<(String, Vec<String>)>,
     width: f32,
@@ -824,7 +823,7 @@ fn flush_pending_table_header(
 /// `overflow-wrap: anywhere` equivalent, so no model output can escape the
 /// message column.
 fn wrap_inline_aware(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     width: f32,
     opts: &DrawOpts,
@@ -1046,7 +1045,7 @@ fn push_inline_segment_words(
 }
 
 fn split_oversized_inline_token(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     token: InlineWrapToken,
     width: f32,
     opts: &DrawOpts,
@@ -1090,7 +1089,7 @@ fn split_oversized_inline_token(
 }
 
 fn measure_markdown_inline_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     line: &str,
     opts: &DrawOpts,
 ) -> f32 {
@@ -1144,7 +1143,7 @@ fn measure_markdown_inline_width(
 }
 
 fn measure_markdown_inline_run(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     opts: &DrawOpts,
 ) -> f32 {
@@ -1171,7 +1170,7 @@ fn stable_markdown_inline_advance(measured: f32, cell: f32, columns: usize) -> f
 }
 
 fn draw_markdown_inline_run(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     text: &str,
@@ -1214,7 +1213,7 @@ fn rendered_inline_text(line: &str) -> String {
 }
 
 fn markdown_inline_caret_stops(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     line: &str,
     opts: &DrawOpts,
     theme: &IdeTheme,
@@ -1302,7 +1301,7 @@ fn markdown_inline_caret_stops(
 }
 
 pub fn layout_assistant_markdown_cached<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &P,
     text: &str,
     width: f32,
@@ -1333,7 +1332,7 @@ const STABLE_PREFIX_KEY_TAG: &str = "\u{1}neoism-md-stable-prefix\u{1}";
 /// the layout of everything before the last such line is independent of what
 /// follows. Cache that prefix and lay out only the growing tail.
 fn layout_assistant_markdown_with_stable_prefix<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &P,
     text: &str,
     width: f32,
@@ -1412,7 +1411,7 @@ fn stable_markdown_prefix_end(text: &str) -> Option<usize> {
 }
 
 pub fn layout_assistant_markdown(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     width: f32,
     theme: &IdeTheme,
@@ -1447,7 +1446,7 @@ pub fn layout_assistant_markdown(
 /// Block layout of already sanitized/normalized Markdown, without trimming
 /// outer blank blocks (the stable-prefix path concatenates these).
 fn layout_normalized_markdown_blocks(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     width: f32,
     theme: &IdeTheme,
@@ -2107,7 +2106,7 @@ fn ensure_line_break(output: &mut String) {
 }
 
 fn markdown_code_or_stock_block_laid_out(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     lang: String,
     lines: Vec<String>,
     s: f32,
@@ -2330,7 +2329,7 @@ fn markdown_block_gap(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_markdown_blocks<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     blocks: &[AssistantMarkdownBlock],
     scroll_namespace: &str,
     x: f32,
@@ -2822,7 +2821,7 @@ fn visible_line_range(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_markdown_code_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentMarkdownPane,
     x: f32,
     y: f32,
@@ -3200,7 +3199,7 @@ fn markdown_horizontal_scrollbar_geometry(
 /// controllable above the fixed composer without permanently covering text.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_markdown_horizontal_scrollbar<P: AgentMarkdownPane + ?Sized>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     scroll_key: &str,
     track: Option<[f32; 4]>,
@@ -3322,7 +3321,7 @@ fn lang_display_name(lang: &str) -> &'static str {
 
 #[allow(clippy::too_many_arguments)]
 fn draw_markdown_inline_line<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     mut x: f32,
     y: f32,
@@ -3592,7 +3591,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
 
 #[allow(clippy::too_many_arguments)]
 fn render_markdown_table<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     x: f32,
     y: f32,
@@ -4032,7 +4031,7 @@ fn displayed_projection(
     p
 }
 fn prepare_text_reveal<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     blocks: &[AssistantMarkdownBlock],
     id: &str,

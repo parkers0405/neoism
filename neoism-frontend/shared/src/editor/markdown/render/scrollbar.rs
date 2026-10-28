@@ -1,4 +1,3 @@
-use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::MarkdownPane;
 
@@ -11,7 +10,7 @@ use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::look::scrollbar_style;
 
 pub(super) fn draw_markdown_scrollbar(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     rect: [f32; 4],
     content_height: f32,

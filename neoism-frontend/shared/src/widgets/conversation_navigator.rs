@@ -3,7 +3,6 @@ mod render;
 use crate::primitives::IdeTheme;
 use crate::widgets::scroll::Scroll;
 use render::{frame_inset, header_height, NavigatorRenderGeometry};
-use sugarloaf::Sugarloaf;
 use web_time::Instant;
 
 const PROJECT_ROW_HEIGHT: f32 = 32.0;
@@ -136,6 +135,10 @@ impl ConversationNavigator {
     }
     pub fn close(&mut self) {
         *self = Self::default();
+    }
+    /// Scroll or selection-cursor motion still settling (hosts keep painting).
+    pub fn is_animating(&self) -> bool {
+        self.is_active() && (self.scroll.motion.is_animating() || self.cursor.motion.is_animating() || self.show_skeletons())
     }
     pub fn is_active(&self) -> bool {
         self.mode.is_some()
@@ -431,7 +434,7 @@ impl ConversationNavigator {
     }
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         theme: &IdeTheme,
         viewport: [f32; 4],
         scale: f32,

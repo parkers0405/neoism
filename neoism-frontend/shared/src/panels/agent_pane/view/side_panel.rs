@@ -6,7 +6,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::icon::{self as agent_icon, SIDE_PANEL_ICON_PANEL_ID};
 #[cfg(test)]
@@ -59,7 +58,7 @@ thread_local! {
 fn truncate_sidebar_text(
     text: &str,
     available_width: f32,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     opts: &DrawOpts,
 ) -> String {
     let key = TruncationKey {
@@ -139,7 +138,7 @@ pub trait AgentSidePanelPane {
 }
 
 pub trait AgentSidePanelIconHost {
-    fn register_agent_icons(sugarloaf: &mut Sugarloaf) -> bool;
+    fn register_agent_icons(sugarloaf: &mut dyn crate::primitives::paint::Paint) -> bool;
 }
 
 #[macro_export]
@@ -274,7 +273,7 @@ macro_rules! neoism_ui_impl_agent_side_panel {
 pub struct SharedAgentSidePanelIcons;
 
 impl AgentSidePanelIconHost for SharedAgentSidePanelIcons {
-    fn register_agent_icons(sugarloaf: &mut Sugarloaf) -> bool {
+    fn register_agent_icons(sugarloaf: &mut dyn crate::primitives::paint::Paint) -> bool {
         agent_icon::register_agent_icons(sugarloaf)
     }
 }
@@ -404,7 +403,7 @@ pub fn detail_rail_width(available_width: f32, s: f32) -> f32 {
 /// signal that timeline/composer paint must be skipped.
 #[allow(clippy::too_many_arguments)]
 pub fn render_side_panel<P: AgentSidePanelPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     panel_rect: [f32; 4],
     theme: &IdeTheme,
@@ -427,7 +426,7 @@ pub fn render_side_panel<P: AgentSidePanelPane>(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_side_panel_with_icons<P, I>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     panel_rect: [f32; 4],
     theme: &IdeTheme,
@@ -514,7 +513,7 @@ pub fn render_side_panel_with_icons<P, I>(
 /// Right-hand detail rail. Only called for an active conversation with enough
 /// room after the left catalog and the composer have been laid out.
 pub fn render_detail_panel<P: AgentSidePanelPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     rect: [f32; 4],
     theme: &IdeTheme,

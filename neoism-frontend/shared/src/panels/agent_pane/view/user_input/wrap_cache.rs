@@ -5,7 +5,6 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::input_controller::InputWrapRow;
 
@@ -27,7 +26,7 @@ struct FontKey {
 }
 
 impl FontKey {
-    fn new(sugarloaf: &Sugarloaf) -> Self {
+    fn new(sugarloaf: &dyn crate::primitives::paint::Paint) -> Self {
         let library = sugarloaf.font_library();
         let address = std::sync::Arc::as_ptr(&library.inner) as usize;
         let fonts = library.inner.read();
@@ -103,7 +102,7 @@ struct LayoutKey {
 }
 
 impl LayoutKey {
-    fn new(sugarloaf: &Sugarloaf, width: f32, opts: &DrawOpts) -> Self {
+    fn new(sugarloaf: &dyn crate::primitives::paint::Paint, width: f32, opts: &DrawOpts) -> Self {
         let fonts = FontKey::new(sugarloaf);
         Self {
             width: width.to_bits(),
@@ -206,11 +205,11 @@ fn cached<T: Clone>(
 }
 
 pub(super) fn prompt(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     width: f32,
     opts: &DrawOpts,
-    build: impl FnOnce(&mut Sugarloaf) -> Vec<InputWrapRow>,
+    build: impl FnOnce(&mut dyn crate::primitives::paint::Paint) -> Vec<InputWrapRow>,
 ) -> Rc<Vec<InputWrapRow>> {
     let key = LayoutKey::new(sugarloaf, width, opts);
     cached(
@@ -229,11 +228,11 @@ pub(super) fn prompt(
 }
 
 pub(super) fn bubble(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     width: f32,
     opts: &DrawOpts,
-    build: impl FnOnce(&mut Sugarloaf) -> Vec<String>,
+    build: impl FnOnce(&mut dyn crate::primitives::paint::Paint) -> Vec<String>,
 ) -> Vec<String> {
     let key = LayoutKey::new(sugarloaf, width, opts);
     cached(

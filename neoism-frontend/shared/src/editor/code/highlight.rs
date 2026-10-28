@@ -219,6 +219,25 @@ mod tests {
     }
 
     #[test]
+    fn sql_editor_cache_preserves_multiline_comments_and_refreshes_edits() {
+        let mut buffer =
+            CodeBuffer::from_text("/* migration\nSELECT ignored\n*/\nSELECT 42;\n");
+        let mut cache = CodeHighlightCache::default();
+        let lang = Lang::from_path("migration.sql");
+        cache.refresh(&buffer, lang);
+        assert!(has_kind(cache.line_runs(1), SynTok::Comment));
+        assert!(!has_kind(cache.line_runs(1), SynTok::Keyword));
+        assert!(has_kind(cache.line_runs(3), SynTok::Keyword));
+        assert!(has_kind(cache.line_runs(3), SynTok::Number));
+
+        buffer.lines[3] = "SELECT 'updated';".to_string();
+        buffer.revision += 1;
+        cache.refresh(&buffer, lang);
+        assert!(has_kind(cache.line_runs(3), SynTok::String));
+        assert!(!has_kind(cache.line_runs(3), SynTok::Number));
+    }
+
+    #[test]
     fn small_files_reparse_instantly() {
         let mut buffer = CodeBuffer::from_text("fn main() {}\n");
         let mut cache = CodeHighlightCache::default();

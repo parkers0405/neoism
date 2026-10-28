@@ -10,8 +10,47 @@ use neoism_window::keyboard::NamedKey;
 use neoism_window::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use std::borrow::Cow;
 
+/// Platform-neutral adapter for hosts which already decoded a key event.
+/// The desktop wrapper and GPUIX use the same protocol encoder below.
+pub struct ProtocolKeyEvent {
+    pub logical_key: Key,
+    pub location: KeyLocation,
+    pub state: ElementState,
+    pub repeat: bool,
+    pub text: Option<String>,
+    pub unmodified_key: Key,
+}
+impl ProtocolKeyEvent {
+    fn text_with_all_modifiers(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+    fn key_without_modifiers(&self) -> Key {
+        self.unmodified_key.clone()
+    }
+}
+
 #[inline(never)]
 pub fn build_key_sequence(key: &KeyEvent, mods: ModifiersState, mode: Mode) -> Vec<u8> {
+    build_protocol_key_sequence(
+        &ProtocolKeyEvent {
+            logical_key: key.logical_key.clone(),
+            location: key.location,
+            state: key.state,
+            repeat: key.repeat,
+            text: key.text_with_all_modifiers().map(str::to_owned),
+            unmodified_key: key.key_without_modifiers(),
+        },
+        mods,
+        mode,
+    )
+}
+
+#[inline(never)]
+pub fn build_protocol_key_sequence(
+    key: &ProtocolKeyEvent,
+    mods: ModifiersState,
+    mode: Mode,
+) -> Vec<u8> {
     let mut modifiers = mods.into();
 
     let kitty_seq = mode.intersects(
@@ -117,7 +156,7 @@ impl SequenceBuilder {
     /// Try building sequence from the event's emitting text.
     fn try_build_textual(
         &self,
-        key: &KeyEvent,
+        key: &ProtocolKeyEvent,
         associated_text: Option<&str>,
     ) -> Option<SequenceBase> {
         let character = match key.logical_key.as_ref() {
@@ -169,7 +208,7 @@ impl SequenceBuilder {
     /// Try building from numpad key.
     ///
     /// `None` is returned when the key is neither known nor numpad.
-    fn try_build_numpad(&self, key: &KeyEvent) -> Option<SequenceBase> {
+    fn try_build_numpad(&self, key: &ProtocolKeyEvent) -> Option<SequenceBase> {
         if !self.kitty_seq || key.location != KeyLocation::Numpad {
             return None;
         }
@@ -213,7 +252,7 @@ impl SequenceBuilder {
 
     /// Try building from [`NamedKey`] using the kitty keyboard protocol encoding
     /// for functional keys.
-    fn try_build_named_kitty(&self, key: &KeyEvent) -> Option<SequenceBase> {
+    fn try_build_named_kitty(&self, key: &ProtocolKeyEvent) -> Option<SequenceBase> {
         let named = match key.logical_key {
             Key::Named(named) if self.kitty_seq => named,
             _ => return None,
@@ -270,7 +309,7 @@ impl SequenceBuilder {
     /// Try building from [`NamedKey`].
     fn try_build_named_normal(
         &self,
-        key: &KeyEvent,
+        key: &ProtocolKeyEvent,
         has_associated_text: bool,
     ) -> Option<SequenceBase> {
         let named = match key.logical_key {
@@ -327,7 +366,7 @@ impl SequenceBuilder {
     /// Try building escape from control characters (e.g. Enter) and modifiers.
     fn try_build_control_char_or_mod(
         &self,
-        key: &KeyEvent,
+        key: &ProtocolKeyEvent,
         mods: &mut SequenceModifiers,
     ) -> Option<SequenceBase> {
         if !self.kitty_encode_all && !self.kitty_seq {

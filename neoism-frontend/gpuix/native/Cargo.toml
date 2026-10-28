@@ -1,0 +1,42 @@
+[package]
+name = "neoism-gpuix-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Separate frontend build; never changes the desktop's feature selection.
+[workspace]
+
+[workspace.metadata.blaze]
+# SQLx's macro links native SQLite/ring archives, so it cannot execute as WASM.
+native-proc-macros = ["sqlx-macros"]
+
+[dependencies]
+neoism-ui = { path = "../../shared" }
+neoism-protocol = { path = "../../../neoism-protocol" }
+neoism-terminal-core = { path = "../../../neoism-terminal-core" }
+neoism-agent-service-api = { path = "../../../neoism-agent/crates/neoism-agent-service-api", default-features = false }
+sugarloaf = { path = "../../../sugarloaf", default-features = false }
+dirs = "6.0.0"
+serde_json = "1"
+neoism-window = { path = "../../../neoism-window" }
+bitflags = "2"
+libloading = "0.8"
+regex = "1"
+unicode-segmentation = "1"
+
+
+[profile.dev]
+split-debuginfo = "unpacked"
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"

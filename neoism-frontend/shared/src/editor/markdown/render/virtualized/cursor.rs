@@ -1,5 +1,5 @@
 fn set_cursor_for_item(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     x: f32,
@@ -78,7 +78,7 @@ fn set_cursor_for_item(
 /// whitespace collapsing — so the caret tracks exactly what is typed
 /// (indentation, `*`, backticks, brackets, etc. all stay aligned).
 fn set_cursor_for_code_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     line_ix: usize,
@@ -146,7 +146,7 @@ fn set_cursor_for_code_line(
 }
 
 fn set_cursor_for_source_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     line_ix: usize,

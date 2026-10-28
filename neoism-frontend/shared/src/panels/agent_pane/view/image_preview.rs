@@ -3,7 +3,7 @@ use std::sync::{Mutex, OnceLock};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId, Sugarloaf};
+use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
 use web_time::Instant;
 
 use crate::panels::agent_pane::composer_interactions::ImagePreviewHit;
@@ -184,14 +184,14 @@ pub fn image_decodes_pending() -> bool {
 /// The first sighting schedules a background decode and returns `None` (the
 /// caller's placeholder frame stays visible) until the pixels are ready.
 pub fn register_image(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     image: &NeoismAgentImage,
 ) -> Option<(u32, f32)> {
     if image.url.decode_failed() {
         return None;
     }
     let id = image_id(image)?;
-    if let Some(entry) = sugarloaf.image_data.get(&id) {
+    if let Some(entry) = sugarloaf.image_data_get(id) {
         return Some((id, entry.width / entry.height.max(1.0)));
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -199,7 +199,7 @@ pub fn register_image(
     #[cfg(target_arch = "wasm32")]
     let decoded = decode_image(image)?;
     let (width, height) = decoded.dimensions();
-    sugarloaf.image_data.insert(
+    sugarloaf.image_data_insert(
         id,
         GraphicDataEntry::from_graphic_data(GraphicData {
             id: GraphicId::new(id as u64),
@@ -238,7 +238,7 @@ fn thumbnail_is_visible(rect: [f32; 4], clip: [f32; 4], occlusions: &[[f32; 4]])
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_image_strip(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     images: &[NeoismAgentImage],
     x: f32,
     y: f32,
@@ -296,6 +296,7 @@ pub fn render_image_strip(
             };
             if let Some((visible, source)) = clip_image(fitted, clip) {
                 hits.extend(image_preview_hits(image, fitted, clip, occlusion_rects));
+                let overlay_scale = sugarloaf.scale_factor();
                 push_image_overlay_clipped(
                     sugarloaf,
                     OVERLAY_PANEL_ID,
@@ -303,7 +304,7 @@ pub fn render_image_strip(
                     visible,
                     source,
                     8,
-                    sugarloaf.scale_factor(),
+                    overlay_scale,
                     occlusion_rects,
                 );
             }

@@ -29,6 +29,7 @@
 
 use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::editor::crdt::PresenceAvatarPeer;
 use crate::event::{PointerButton, UiEvent};
@@ -42,6 +43,7 @@ use crate::surface_layout::{
     CHROME_SERVERS_ITEM,
 };
 use neoism_lua::DockEdge;
+pub mod host_frame;
 
 pub const CHROME_TOPBAR_HEIGHT: f32 = 30.0;
 
@@ -850,7 +852,7 @@ impl ChromeTopBar {
     /// chrome can call it without going through a `PanelContext`.
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         x_left: f32,
         y_top: f32,
         width: f32,
@@ -872,7 +874,7 @@ impl ChromeTopBar {
 
     pub fn render_resolved(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         layout: &ResolvedSurfaceLayout,
         theme: &IdeTheme,
         style: &neoism_lua::StylePatch,
@@ -890,7 +892,7 @@ impl ChromeTopBar {
 
     fn paint(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         strip: Rect,
         dock: DockEdge,
         theme: &IdeTheme,
@@ -1035,7 +1037,7 @@ impl ChromeTopBar {
     /// redraw owner), and stops for zero cost once the room empties.
     fn draw_peer_cluster(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         strip: Rect,
         dock: DockEdge,
         theme: &IdeTheme,
@@ -1105,7 +1107,7 @@ impl ChromeTopBar {
     /// dropdown order so it never hides behind other chrome.
     fn draw_peer_tooltip(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         strip: Rect,
         dock: DockEdge,
         theme: &IdeTheme,
@@ -1178,7 +1180,7 @@ impl ChromeTopBar {
 
     fn draw_icon_button(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         rect: Rect,
         glyph: &str,
         hovered: bool,
@@ -1244,7 +1246,7 @@ impl ChromeTopBar {
 
     fn draw_server_button(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         theme: &IdeTheme,
         style: &neoism_lua::StylePatch,
     ) {
@@ -1349,7 +1351,7 @@ impl ChromeTopBar {
         );
     }
 
-    fn draw_menu(&self, sugarloaf: &mut Sugarloaf, theme: &IdeTheme) {
+    fn draw_menu(&self, sugarloaf: &mut (impl Paint + ?Sized), theme: &IdeTheme) {
         let menu = self.menu_rect;
         let radius = MENU_RADIUS * self.scale;
 

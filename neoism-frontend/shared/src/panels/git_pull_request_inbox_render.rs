@@ -1,7 +1,8 @@
 use super::*;
 use crate::primitives::{draw_text_with_occlusion, IdeTheme};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use sugarloaf::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 // Use one metric and option set for wrapping and drawing, including long unbroken titles.
 fn wrap(text: &str, width: f32, mut measure: impl FnMut(&str) -> f32) -> Vec<String> {
@@ -70,7 +71,7 @@ pub(super) fn content_viewport(r: Rect, x: f32, width: f32, natural_y: f32) -> R
 impl PullRequestInbox {
     pub(super) fn label(
         &self,
-        sl: &mut Sugarloaf,
+        sl: &mut dyn Paint,
         text: &str,
         x: f32,
         y: f32,
@@ -93,7 +94,7 @@ impl PullRequestInbox {
     }
     pub(super) fn button(
         &mut self,
-        sl: &mut Sugarloaf,
+        sl: &mut dyn Paint,
         text: &str,
         x: f32,
         y: f32,
@@ -123,7 +124,7 @@ impl PullRequestInbox {
     }
     pub fn render(
         &mut self,
-        sl: &mut Sugarloaf,
+        sl: &mut dyn Paint,
         rect: Rect,
         mono_font_id: usize,
         font_size: f32,
@@ -166,7 +167,7 @@ impl PullRequestInbox {
     }
     fn render_detail(
         &mut self,
-        sl: &mut Sugarloaf,
+        sl: &mut dyn Paint,
         r: Rect,
         base: DrawOpts,
         s: f32,
@@ -549,7 +550,7 @@ impl PullRequestInbox {
     // Parse CommonMark into proportional inline runs, preserving semantic blocks and link targets.
     fn markdown(
         &mut self,
-        sl: &mut Sugarloaf,
+        sl: &mut dyn Paint,
         body: &str,
         x: f32,
         mut y: f32,

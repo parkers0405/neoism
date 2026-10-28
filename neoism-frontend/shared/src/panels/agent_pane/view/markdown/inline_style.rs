@@ -699,7 +699,7 @@ fn looks_like_codeish_word(token: &str) -> bool {
 }
 
 pub(crate) fn draw_hover_underline<P: AgentMarkdownPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &P,
     target: &str,
     rect: [f32; 4],

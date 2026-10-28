@@ -8,7 +8,7 @@
 /// state (their line renders styled for me unless it's also my cursor
 /// line, and the raw→visible mapping accounts for either).
 fn draw_remote_markdown_carets(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     theme: &IdeTheme,
     clip: [f32; 4],

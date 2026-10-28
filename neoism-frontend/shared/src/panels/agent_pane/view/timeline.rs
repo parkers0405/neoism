@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::rc::Rc;
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::state::{
     NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind, NeoismAgentPane,
@@ -569,7 +568,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
 
 pub trait AgentTimelineDelegate<P: AgentTimelinePane> {
     fn measure_message_height(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &mut P,
         message: &P::Message,
         width: f32,
@@ -581,7 +580,7 @@ pub trait AgentTimelineDelegate<P: AgentTimelinePane> {
 
     #[allow(clippy::too_many_arguments)]
     fn render_message_card(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         x: f32,
         y: f32,
         w: f32,
@@ -599,7 +598,7 @@ pub trait AgentTimelineDelegate<P: AgentTimelinePane> {
     ) -> f32;
 
     fn render_streaming_status_row(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &mut P,
         rect: [f32; 4],
         theme: &IdeTheme,
@@ -1045,7 +1044,7 @@ macro_rules! neoism_ui_impl_agent_timeline_delegate {
             for $delegate
         {
             fn measure_message_height(
-                sugarloaf: &mut $crate::sugarloaf::Sugarloaf,
+                sugarloaf: &mut dyn $crate::primitives::paint::Paint,
                 pane: &mut $pane,
                 message: &$message,
                 width: f32,
@@ -1067,7 +1066,7 @@ macro_rules! neoism_ui_impl_agent_timeline_delegate {
             }
 
             fn render_message_card(
-                sugarloaf: &mut $crate::sugarloaf::Sugarloaf,
+                sugarloaf: &mut dyn $crate::primitives::paint::Paint,
                 x: f32,
                 y: f32,
                 w: f32,
@@ -1111,7 +1110,7 @@ macro_rules! neoism_ui_impl_agent_timeline_delegate {
             }
 
             fn render_streaming_status_row(
-                sugarloaf: &mut $crate::sugarloaf::Sugarloaf,
+                sugarloaf: &mut dyn $crate::primitives::paint::Paint,
                 pane: &mut $pane,
                 rect: [f32; 4],
                 theme: &$crate::primitives::ide_theme::IdeTheme,

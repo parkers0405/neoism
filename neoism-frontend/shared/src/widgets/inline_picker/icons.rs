@@ -1,6 +1,6 @@
 //! Presentation-only icons. Callers own loading and image registration.
 use sugarloaf::text::DrawOpts;
-use sugarloaf::{GraphicOverlay, Sugarloaf};
+use sugarloaf::{GraphicOverlay};
 
 #[derive(Clone, Copy, Debug)]
 pub enum InlinePickerIcon {
@@ -45,7 +45,7 @@ pub(crate) fn crop(
 impl InlinePickerIcon {
     pub(super) fn draw(
         self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         rect: [f32; 4],
         clip: [f32; 4],
         color: [u8; 4],

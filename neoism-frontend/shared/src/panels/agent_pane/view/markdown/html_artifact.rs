@@ -196,7 +196,7 @@ fn image_piece(viewport: [f32; 4], clip: [f32; 4]) -> Option<ImagePiece> {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentMarkdownPane,
     source: &str,
     copy_target: &str,
@@ -232,6 +232,7 @@ pub(super) fn render(
         });
     if let Some(frame) = frame {
         if let Some(piece) = image_piece(viewport, clip) {
+            let overlay_scale = sugarloaf.scale_factor();
             push_image_overlay_clipped(
                 sugarloaf,
                 OVERLAY_PANEL_ID,
@@ -239,7 +240,7 @@ pub(super) fn render(
                 piece.rect,
                 piece.source_rect,
                 8,
-                sugarloaf.scale_factor(),
+                overlay_scale,
                 occlusions,
             );
         }
@@ -295,7 +296,7 @@ pub(super) fn render(
 
 /// Static loading marks only: no animation, source text or actionable chrome.
 pub(super) fn render_pending(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     theme: &IdeTheme,
     scale: f32,

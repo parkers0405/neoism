@@ -1,5 +1,5 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::primitives::ide_theme::IdeTheme;
 pub(super) use crate::primitives::{snap_to_device_px, truncate_to_fit};
@@ -203,7 +203,7 @@ mod commit_layout_tests {
 impl GitDiffPanel {
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         window_w: f32,
         chrome_top: f32,
         bottom_y: f32,
@@ -1460,7 +1460,7 @@ impl GitDiffPanel {
 
     fn draw_footer_controls(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         x: f32,
         y: f32,
         width: f32,
@@ -1576,7 +1576,7 @@ impl GitDiffPanel {
 
     fn draw_actions_menu(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         s: f32,
         content_x: f32,
         top: f32,
@@ -1700,7 +1700,7 @@ impl GitDiffPanel {
     /// cards at the highest render order in the panel.
     fn draw_branch_menu(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         s: f32,
         content_x: f32,
         _content_bottom: f32,
@@ -1999,7 +1999,7 @@ fn git_background_opacity(color: [f32; 4]) -> [f32; 4] {
 // Keep the historical call exactly when opaque, otherwise paint only its ring.
 #[allow(clippy::too_many_arguments)]
 fn git_border_backing(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     x: f32,
     y: f32,
     w: f32,

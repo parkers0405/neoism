@@ -4,7 +4,8 @@ use crate::{
     primitives::{draw_text_with_occlusion, IdeTheme},
 };
 use neoism_protocol::pull_request::*;
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use sugarloaf::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -137,7 +138,7 @@ fn visible_regions(rect: Rect, clip: Rect, occlusions: &[[f32; 4]]) -> Vec<Rect>
     visible
 }
 fn control_quad(
-    sl: &mut Sugarloaf,
+    sl: &mut dyn Paint,
     rect: Rect,
     clip: Rect,
     color: [f32; 4],
@@ -411,7 +412,7 @@ impl PullRequestView {
     /// Returns the remaining Changes viewport; other tabs and sheets own all input.
     pub fn render(
         &mut self,
-        sl: &mut Sugarloaf,
+        sl: &mut dyn Paint,
         rect: Rect,
         scale: f32,
         theme: &IdeTheme,

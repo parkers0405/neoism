@@ -87,7 +87,7 @@ fn fixed_diff_viewport_height(preview_rows: usize, s: f32) -> f32 {
 }
 
 pub fn measure_tool_message_height(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &impl AgentToolPane,
     message: &impl AgentToolMessage,
     width: f32,
@@ -118,7 +118,7 @@ pub fn measure_tool_message_height(
 }
 
 fn prepare_composition_child(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &impl AgentToolPane,
     child: &NeoismAgentMessage,
     width: f32,
@@ -151,7 +151,7 @@ fn prepare_composition_child(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_tool_message(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentToolPane,
     x: f32,
     y: f32,
@@ -235,7 +235,7 @@ pub fn render_tool_message(
 }
 
 fn measure_single_tool_message_height(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &impl AgentToolPane,
     message: &impl AgentToolMessage,
     width: f32,
@@ -335,7 +335,7 @@ fn measure_single_tool_message_height(
 }
 
 fn measure_tool_group_activity_height(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     message: &impl AgentToolMessage,
     width: f32,
     s: f32,
@@ -367,7 +367,7 @@ fn measure_tool_group_activity_height(
 
 #[allow(clippy::too_many_arguments)]
 fn render_single_tool_message(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentToolPane,
     x: f32,
     y: f32,
@@ -598,7 +598,7 @@ fn render_single_tool_message(
     status_opts.bold = false;
     status_opts.color = theme.u8(accent);
     let outgoing = motion.outgoing_status.map(tool_status_label).unwrap_or("");
-    let label_width = |sugarloaf: &mut Sugarloaf, label: &str| {
+    let label_width = |sugarloaf: &mut dyn crate::primitives::paint::Paint, label: &str| {
         if label.is_empty() {
             0.0
         } else {
@@ -1020,7 +1020,7 @@ fn render_single_tool_message(
 
 #[allow(clippy::too_many_arguments)]
 fn render_tool_group_activity(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentToolPane,
     x: f32,
     y: f32,
@@ -1215,7 +1215,7 @@ fn tool_group_child_previews(message: &impl AgentToolMessage) -> HashMap<String,
 
 #[allow(clippy::too_many_arguments)]
 fn render_tool_diff_cards(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentToolPane,
     message: &impl AgentToolMessage,
     x: f32,
@@ -1703,7 +1703,7 @@ mod tests {
 /// warnings/info muted. Returns the height consumed for the next element.
 #[allow(clippy::too_many_arguments)]
 fn render_diff_card_diagnostics(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     section: &ToolDiffSection,
     x: f32,
     y: f32,
@@ -1764,7 +1764,7 @@ fn render_diff_card_diagnostics(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_diff_body_scrollbar(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     body_x: f32,
     body_y: f32,
     body_w: f32,
@@ -1816,7 +1816,7 @@ fn draw_diff_body_scrollbar(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_tool_todos<Todo: AgentToolTodo, P: AgentToolPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     x: f32,
     y: f32,
@@ -1849,7 +1849,7 @@ pub fn render_tool_todos<Todo: AgentToolTodo, P: AgentToolPane>(
 
 #[allow(clippy::too_many_arguments)]
 fn render_tool_todos_painted<Todo: AgentToolTodo, P: AgentToolPane>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     x: f32,
     y: f32,

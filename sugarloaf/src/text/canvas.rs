@@ -9,6 +9,19 @@ pub(super) fn draw_scaled_cpu(
     width: i32,
     height: i32,
 ) {
+    draw_scaled_cpu_with_blend(glyph,atlas,side,buffer,width,height,super::blend_premul_over);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn draw_scaled_cpu_with_blend(
+    glyph: &super::TextInstance,
+    atlas: &[u8],
+    side: usize,
+    buffer: &mut [u32],
+    width: i32,
+    height: i32,
+    blend:fn([u8;4],u32)->u32,
+) {
     let scale = glyph.raster_scale;
     if !scale.is_finite() || scale <= 0.0 || side == 0 {
         return;
@@ -92,7 +105,7 @@ pub(super) fn draw_scaled_cpu(
             };
             let index = y as usize * width as usize + x as usize;
             if let Some(pixel) = buffer.get_mut(index) {
-                *pixel = super::blend_premul_over(rgba, *pixel);
+                *pixel = blend(rgba, *pixel);
             }
         }
     }

@@ -37,6 +37,8 @@ pub mod modes;
 pub mod render;
 pub mod state;
 pub mod update;
+mod host_frame;
+pub use host_frame::host_command_catalog;
 
 #[cfg(test)]
 mod tests;

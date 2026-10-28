@@ -24,7 +24,6 @@
 //! `lib.rs`/`panels/mod.rs` after the widget lift commits.
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::MarkdownBlockTemplate;
 
@@ -818,7 +817,7 @@ impl ContextMenu {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         dimensions: (f32, f32, f32),
         theme: &IdeTheme,
     ) {
@@ -1439,7 +1438,7 @@ mod completion_tests {
 fn truncate_to_fit(
     text: &str,
     available_w: f32,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     opts: &DrawOpts,
 ) -> String {
     if available_w <= 0.0 || text.is_empty() {

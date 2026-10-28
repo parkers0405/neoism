@@ -1,0 +1,32 @@
+{
+  "repository": "https://github.com/remorses/gpuix.git",
+  "revision": "a53b294401280014e94eb9bd98a7c7ed1929f92d",
+  "zedRevision": "f77e5cfe9dad04288566f00c66ecf3c58d6f84b3",
+  "toolchain": "1.97.1",
+  "rustcVersion": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "patch": "native/patches/gpuix-display-frame.patch",
+  "patchSha256": "819481066a29c781ec501ca85cb6baff796d9a75706a6b66fccb4b9a583667e3",
+  "cargoLockSha256": "8e571739885b57803db59052742c2ccfa9dee35a264f0712d6656bf336f3f36a",
+  "patchedFiles": {
+    ".changeset/neoism-display-frame.md": "deb527ada235800bf38935efd9dd457d3799cae0fbd564d61546efa3c918c479",
+    ".changeset/neoism-input-caret-geometry.md": "cd5516df3b849f4b1856f2183b8c5ecbb4e28fd6a38bf75a43fa6fe46631e2cd",
+    "README.md": "6423a85d7206e4f8aa20e965baef25f5d4871998cf3346933101d3ed88359a4d",
+    "packages/native/Cargo.toml": "1b479bcbfae372fccc35279504ddf004f55c0fad4a1d16ff24620993e7c098ee",
+    "packages/native/index.d.ts": "456c4773bfc08dca9c06eebedc70d7715e42b5821b1d9f01634cf168ea7c3bb1",
+    "packages/native/src/color.rs": "efa0dd1eedc1ddaad48eb78cb7f68e0db9186adaa295b0c8bf27c8bab704e38e",
+    "packages/native/src/custom_elements/canvas.rs": "21dde6917f116addbfe86adea8bf6f8a2e5fa522e52e0df0c5f627c1fdd66793",
+    "packages/native/src/custom_elements/input.rs": "79ed9acecec6ed92a83c289ec2ea22b73143941574647813f5da597cc73d38b6",
+    "packages/native/src/custom_elements/mod.rs": "a7a3003ad1cccc0242bbbd4e2661d48381204634ce43eafbdb5da856f206e069",
+    "packages/native/src/element_tree.rs": "c8997b37c4bfec5b72c0f83cdd0f86a82206abdf38ea9098bca47b83d2cd8c0d",
+    "packages/native/src/lib.rs": "a7fe1f94b66d2cd9df8a38f8c5602268169889d09fac71e9d7b3a928d6cc45ec",
+    "packages/native/src/renderer.rs": "f4aeae500052fa44447e5e1b1789392e9085282626608d1ce25f8721c480db1a",
+    "packages/native/src/retained_tree.rs": "af6fd6e1800e5a4537f78315536ba4a12485899c2c79cd843f0f1baceb648d82",
+    "packages/native/src/text/paint.rs": "b258b7403641bd32e35bfb24b8d641ff72bf0ff5951dfd08d3d710b8e3e4de3f",
+    "packages/solid/src/host.ts": "e5296409295e735623c7c6a5796acec1d62ce8b0de1dffd370332adede9a0710",
+    "packages/native/src/custom_elements/input_caret_geometry.rs": "7d11e924ae1500293b7f30808f713bc5165e5634a804883bb7cc445f0c142f14"
+  },
+  "profile": "release",
+  "lto": true,
+  "defaultFeatures": false,
+  "jobs": 2
+}

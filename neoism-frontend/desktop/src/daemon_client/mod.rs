@@ -1977,6 +1977,7 @@ mod tests {
         let message = OutboundServiceMessage::Pty {
             request_id: 9,
             message: PtyClientMessage::CreatePty {
+                presentation: None,
                 cwd: Some("/tmp".into()),
                 cols: 80,
                 rows: 24,
@@ -2568,6 +2569,7 @@ mod tests {
         handle.send_pty(test_input()).await.unwrap();
         handle
             .send_pty(PtyClientMessage::CreatePty {
+                presentation: None,
                 cwd: None,
                 cols: 80,
                 rows: 24,

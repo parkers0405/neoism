@@ -697,6 +697,96 @@ impl SplashOverlay {
         }
         let _ = click_alpha_extra;
 
+        self.render_menu_host(sugarloaf,injection,pane_origin,pane_size,cell_h,theme,chrome_scale,scaled_w,dismiss_t,dismiss_eased,dismiss_alpha,occlusion_rects);
+
+        // Click fidget — small burst at the click point clipped
+        // to the wordmark rect so it never spills past the
+        // letters. Image squash gives the tactile bounce.
+        if let Some(click) = self.click {
+            let life =
+                now.saturating_duration_since(click.started).as_secs_f32() * 1000.0;
+            let max_life = BURST_LIFE_MS.max(SQUASH_LIFE_MS);
+            if life >= max_life {
+                self.click = None;
+            } else {
+                self.draw_click_fidget(
+                    sugarloaf,
+                    click,
+                    life,
+                    scaled_h,
+                    [img_x, img_y, scaled_w, scaled_h],
+                );
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn squash_active(&self, now: Instant) -> bool {
+        match self.click {
+            None => false,
+            Some(c) => {
+                let life =
+                    now.saturating_duration_since(c.started).as_secs_f32() * 1000.0;
+                life < SQUASH_LIFE_MS
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn burst_active(&self, now: Instant) -> bool {
+        match self.click {
+            None => false,
+            Some(c) => {
+                let life =
+                    now.saturating_duration_since(c.started).as_secs_f32() * 1000.0;
+                life < BURST_LIFE_MS
+            }
+        }
+    }
+
+    fn compute_squash_and_flash(&self, now: Instant) -> (f32, f32) {
+        let Some(click) = self.click else {
+            return (0.0, 0.0);
+        };
+        let life = now.saturating_duration_since(click.started).as_secs_f32() * 1000.0;
+        if life >= SQUASH_LIFE_MS {
+            return (0.0, 0.0);
+        }
+        let t = life / SQUASH_LIFE_MS;
+        // Spring profile: snap inward by t≈0.18, overshoot
+        // outward to ~−0.4 at t≈0.45, then ring back to zero
+        // by t=1.0. This reads as a tactile "press → pop"
+        // bounce on the wordmark instead of a flat shrink.
+        let damping = (-3.5 * t).exp();
+        let phase = (t - 0.18) * std::f32::consts::PI / 0.42;
+        let scale_offset = if t < 0.18 {
+            // Compress phase: ease into the press.
+            let u = t / 0.18;
+            u * u * (3.0 - 2.0 * u)
+        } else {
+            // Release phase: damped sin overshoot. Negative
+            // values mean the image briefly grows past 1.0 —
+            // gives the wordmark its "snap back" pop.
+            damping * phase.cos()
+        };
+        // Click flash — bumps halo brightness for the first
+        // ~120 ms of the press.
+        let flash = (1.0 - t * 4.0).max(0.0).powi(2);
+        (scale_offset, flash)
+    }
+
+    /// Shared original menu paint/layout for hosts that supply wordmark images.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_menu_host<P: crate::primitives::paint::Paint + ?Sized>(
+      &mut self, sugarloaf:&mut P, injection:&SplashInjection,
+      pane_origin:(f32,f32),pane_size:(f32,f32),cell_h:f32,
+      theme:&IdeTheme,chrome_scale:f32,scaled_w:f32,
+      dismiss_t:f32,dismiss_eased:f32,dismiss_alpha:f32,occlusion_rects:&[[f32;4]],
+    ) {
+      let band_top=pane_origin.1+injection.wordmark_row as f32*cell_h;
+      let wordmark_h=injection.wordmark_cells_h as f32*cell_h;
+      let menu_top=band_top+wordmark_h+injection.gap_cells_h as f32*cell_h;
+      let layout_scale=((injection.wordmark_cells_h+injection.gap_cells_h+injection.menu_cells_h)as f32/crate::panels::terminal_splash::SPLASH_BODY_ROWS as f32).clamp(0.20,crate::panels::terminal_splash::MAX_SPLASH_SCALE);
         // Menu buttons — every dimension follows both chrome zoom and the
         // responsive splash scale. Width is still computed from each row's
         // measured text plus padding so the bg always covers the labels.
@@ -720,7 +810,7 @@ impl SplashOverlay {
         // unit if either width or the reserved menu band is too small.
         // This keeps the splash controls contained in the terminal pane
         // when the tree is open or the viewport is narrow.
-        let widest_text_at_scale = |s: f32, sugarloaf: &mut Sugarloaf| -> f32 {
+        let widest_text_at_scale = |s: f32, sugarloaf: &mut P| -> f32 {
             let label_font = MENU_LABEL_FONT * s;
             let key_font = MENU_KEY_FONT * s;
             let btn_pad = MENU_BTN_PAD * s;
@@ -862,85 +952,13 @@ impl SplashOverlay {
             );
         }
 
-        // Click fidget — small burst at the click point clipped
-        // to the wordmark rect so it never spills past the
-        // letters. Image squash gives the tactile bounce.
-        if let Some(click) = self.click {
-            let life =
-                now.saturating_duration_since(click.started).as_secs_f32() * 1000.0;
-            let max_life = BURST_LIFE_MS.max(SQUASH_LIFE_MS);
-            if life >= max_life {
-                self.click = None;
-            } else {
-                self.draw_click_fidget(
-                    sugarloaf,
-                    click,
-                    life,
-                    scaled_h,
-                    [img_x, img_y, scaled_w, scaled_h],
-                );
-            }
-        }
     }
 
-    #[allow(dead_code)]
-    fn squash_active(&self, now: Instant) -> bool {
-        match self.click {
-            None => false,
-            Some(c) => {
-                let life =
-                    now.saturating_duration_since(c.started).as_secs_f32() * 1000.0;
-                life < SQUASH_LIFE_MS
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn burst_active(&self, now: Instant) -> bool {
-        match self.click {
-            None => false,
-            Some(c) => {
-                let life =
-                    now.saturating_duration_since(c.started).as_secs_f32() * 1000.0;
-                life < BURST_LIFE_MS
-            }
-        }
-    }
-
-    fn compute_squash_and_flash(&self, now: Instant) -> (f32, f32) {
-        let Some(click) = self.click else {
-            return (0.0, 0.0);
-        };
-        let life = now.saturating_duration_since(click.started).as_secs_f32() * 1000.0;
-        if life >= SQUASH_LIFE_MS {
-            return (0.0, 0.0);
-        }
-        let t = life / SQUASH_LIFE_MS;
-        // Spring profile: snap inward by t≈0.18, overshoot
-        // outward to ~−0.4 at t≈0.45, then ring back to zero
-        // by t=1.0. This reads as a tactile "press → pop"
-        // bounce on the wordmark instead of a flat shrink.
-        let damping = (-3.5 * t).exp();
-        let phase = (t - 0.18) * std::f32::consts::PI / 0.42;
-        let scale_offset = if t < 0.18 {
-            // Compress phase: ease into the press.
-            let u = t / 0.18;
-            u * u * (3.0 - 2.0 * u)
-        } else {
-            // Release phase: damped sin overshoot. Negative
-            // values mean the image briefly grows past 1.0 —
-            // gives the wordmark its "snap back" pop.
-            damping * phase.cos()
-        };
-        // Click flash — bumps halo brightness for the first
-        // ~120 ms of the press.
-        let flash = (1.0 - t * 4.0).max(0.0).powi(2);
-        (scale_offset, flash)
-    }
+    pub fn host_menu_rows(&self)->Vec<(&'static str,&'static str,&'static str,[f32;4])>{self.menu_rects.iter().filter_map(|(action,rect)|MENU.iter().find(|spec|spec.action==*action).map(|spec|(action.as_str(),spec.label,spec.keybind,*rect))).collect()}
 
     fn draw_menu_button(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         rect: [f32; 4],
         spec: &MenuSpec,
         hovered: bool,
@@ -1285,7 +1303,7 @@ fn clipped_disc(
 /// touch its visibility. Without a `clip_rect` on the input
 /// opts we can't carve, so just draw straight through.
 fn draw_text_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     text: &str,

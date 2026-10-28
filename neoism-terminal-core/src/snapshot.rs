@@ -311,4 +311,28 @@ mod tests {
         assert_send_sync_clone::<CellSnapshot>();
         assert_send_sync_clone::<CursorSnapshot>();
     }
+
+    #[test]
+    fn snapshot_follows_scrollback_and_alternate_screen() {
+        use crate::ansi::CursorShape;
+        use crate::crosswords::grid::Scroll;
+        use crate::{handler::Processor, Crosswords, TerminalId};
+        let mut terminal = Crosswords::new(
+            (3usize, 20usize),
+            CursorShape::Block,
+            TerminalId::new(1),
+            100,
+        );
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut terminal, b"one\r\ntwo\r\nthree\r\nfour");
+        terminal.scroll_display(Scroll::Delta(1));
+        let snapshot = terminal.snapshot();
+        let line: String = snapshot.viewport[0].iter().map(|cell| cell.c).collect();
+        assert!(line.starts_with("one"));
+        assert!(!snapshot.cursor.visible);
+        parser.advance(&mut terminal, b"\x1b[?1049h");
+        assert!(terminal.snapshot().modes.alt_screen);
+        parser.advance(&mut terminal, b"\x1b[?1049l");
+        assert!(!terminal.snapshot().modes.alt_screen);
+    }
 }

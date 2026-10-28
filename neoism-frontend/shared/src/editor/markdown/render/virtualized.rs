@@ -4,7 +4,7 @@ use sugarloaf::{
     VirtualNodeKind, VirtualRevealAlign, VirtualScroll, VirtualSourceQuery,
     VirtualSourceRevision, VirtualSurfaceCommand, VirtualSurfaceConfig, VirtualViewport,
 };
-use sugarloaf::{Sugarloaf, VirtualBounds};
+use sugarloaf::VirtualBounds;
 use web_time::Instant;
 
 use crate::editor::markdown::helpers::{

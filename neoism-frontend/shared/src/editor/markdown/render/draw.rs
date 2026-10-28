@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::editor::markdown::{
     source_map::InlineSourceMap, MarkdownPane, MarkdownReaderHighlightColor,
@@ -19,7 +18,7 @@ pub(super) fn intersect_rect(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
 }
 
 pub(super) fn draw_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x: f32,
     y: f32,
@@ -41,7 +40,7 @@ pub(super) fn draw_rect_clipped(
 }
 
 pub(crate) fn draw_rounded_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x: f32,
     y: f32,
@@ -82,7 +81,7 @@ pub(crate) fn draw_rounded_rect_clipped(
 /// repainting while any peer is present (see the presence-orb redraw
 /// owner), so the plasma flows.
 pub(crate) fn draw_presence_orb_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     seed: &str,
     ox: f32,
@@ -122,7 +121,7 @@ pub(crate) fn draw_presence_orb_clipped(
 /// Windows peers carry a locally animated stink cloud; the orb itself stays readable.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_presence_avatar_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     seed: &str,
     client_os: Option<&str>,
@@ -179,7 +178,7 @@ pub(crate) fn draw_presence_avatar_clipped(
 }
 
 pub(super) fn draw_if_visible(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     text: &str,
@@ -258,7 +257,7 @@ fn push_positive_rect(out: &mut Vec<[f32; 4]>, rect: [f32; 4]) {
 }
 
 pub(super) fn draw_wrapped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     mut y: f32,
     text: &str,
@@ -294,7 +293,7 @@ pub(super) fn point_in_rect(x: f32, y: f32, rect: [f32; 4]) -> bool {
 }
 
 pub(super) fn wrap_lines(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     text: &str,
     max_w: f32,
     opts: &DrawOpts,
@@ -321,7 +320,7 @@ pub(super) fn markdown_font(size: f32, scale: f32) -> f32 {
 /// virtual layout heights / caret x drift — thread it through both.
 /// Code blocks, inline code chips, and the illuminated/drop-cap path
 /// keep their own fonts and never take this id.
-pub(super) fn md_font_id(sugarloaf: &Sugarloaf) -> Option<usize> {
+pub(super) fn md_font_id(sugarloaf: &(impl crate::primitives::paint::Paint + ?Sized)) -> Option<usize> {
     let family = crate::primitives::look::markdown_font_family()?;
     sugarloaf.font_id_for_family(&family)
 }
@@ -339,7 +338,7 @@ pub(super) fn cursor_cell_width(opts: &DrawOpts) -> f32 {
 }
 
 pub(super) fn draw_task_checkbox(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x: f32,
     y: f32,
@@ -426,7 +425,7 @@ pub(super) fn draw_task_checkbox(
 /// as the modern style so `list_marker_metrics` / `checkbox_y` /
 /// `register_task_rect` geometry is untouched.
 fn draw_task_checkbox_retro95(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     x: f32,
     y: f32,
@@ -490,7 +489,7 @@ pub(super) fn floor_char_boundary(text: &str, index: usize) -> usize {
 }
 
 pub(super) fn draw_list_guides(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     content_x: f32,
     y: f32,
     h: f32,
@@ -519,7 +518,7 @@ pub(super) fn draw_list_guides(
 }
 
 pub(super) fn cursor_position_for_text_prefix(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     line_h: f32,
@@ -614,7 +613,7 @@ fn missing_trailing_spaces(measured: &str, trailing_spaces: usize) -> usize {
 }
 
 fn advance_cursor_by_spaces(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     line_x: f32,
     mut cursor: (f32, f32),
     line_h: f32,
@@ -639,7 +638,7 @@ fn advance_cursor_by_spaces(
 }
 
 pub(super) fn draw_copy_button(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     theme: &IdeTheme,
     clip: [f32; 4],
@@ -668,7 +667,7 @@ pub(super) fn draw_copy_button(
 }
 
 pub(super) fn draw_block_chrome(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     w: f32,
@@ -705,7 +704,7 @@ pub(super) fn draw_block_chrome(
 }
 
 pub(super) fn draw_block_actions(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     block_rect: [f32; 4],
     theme: &IdeTheme,
     clip: [f32; 4],
@@ -717,7 +716,7 @@ pub(super) fn draw_block_actions(
 }
 
 pub(super) fn draw_block_handle(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     theme: &IdeTheme,
@@ -756,7 +755,7 @@ pub(super) fn draw_block_handle(
 }
 
 pub(super) fn draw_drag_ghost(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     w: f32,
@@ -809,7 +808,7 @@ pub(super) fn draw_drag_ghost(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_selection_for_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     line_ix: usize,
     line: &str,
@@ -876,7 +875,7 @@ pub(super) fn draw_selection_for_line(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_yank_flash_for_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     line_ix: usize,
     line: &str,
@@ -922,7 +921,7 @@ pub(super) fn draw_yank_flash_for_line(
 /// highlighter as selection so wrapped lines stay pixel-aligned.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_search_matches_for_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     line_ix: usize,
     line: &str,
@@ -970,7 +969,7 @@ pub(super) fn draw_search_matches_for_line(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn draw_text_range_highlight_with_rows(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     line: &str,
     raw_start: usize,
     raw_end: usize,
@@ -1078,7 +1077,7 @@ fn draw_text_range_highlight_with_rows(
 }
 
 pub(super) fn draw_text_range_highlight(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     line: &str,
     raw_start: usize,
     raw_end: usize,
@@ -1151,7 +1150,7 @@ pub(super) fn draw_text_range_highlight(
 }
 
 pub(super) fn selection_point_for_col(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     line: &str,
     col: usize,
     marker_len: usize,

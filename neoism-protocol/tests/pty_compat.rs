@@ -14,10 +14,12 @@ fn legacy_create_pty_without_shell_still_decodes() {
             cols,
             rows,
             shell,
+            presentation,
         } => {
             assert_eq!(cwd.as_deref(), Some("/workspace"));
             assert_eq!((cols, rows), (80, 24));
             assert_eq!(shell, None);
+            assert_eq!(presentation,None);
         }
         other => panic!("unexpected message: {other:?}"),
     }
@@ -26,6 +28,7 @@ fn legacy_create_pty_without_shell_still_decodes() {
 #[test]
 fn absent_optional_pty_fields_stay_off_the_wire() {
     let create = serde_json::to_string(&ClientMessage::CreatePty {
+        presentation: None,
         cwd: None,
         cols: 120,
         rows: 40,
@@ -38,6 +41,7 @@ fn absent_optional_pty_fields_stay_off_the_wire() {
     );
 
     let created = serde_json::to_string(&ServerMessage::PtyCreated {
+        presentation: None,
         shell: None,
         session_id: "session-1".into(),
         workspace_root: None,
@@ -60,9 +64,11 @@ fn legacy_pty_created_without_workspace_root_still_decodes() {
             shell: None,
             session_id,
             workspace_root,
+            presentation,
         } => {
             assert_eq!(session_id, "session-1");
             assert_eq!(workspace_root, None);
+            assert_eq!(presentation,None);
         }
         other => panic!("unexpected message: {other:?}"),
     }
@@ -106,4 +112,15 @@ fn actual_windows_shell_survives_wire_roundtrip() {
         Some(r"C:\Program Files\PowerShell\7\pwsh.exe")
     );
     assert!(workspace_root.is_none());
+}
+
+#[test]
+fn grid_presentation_is_explicit_and_survives_create_and_attach_metadata() {
+    use neoism_protocol::pty::Presentation;
+    let request: ClientMessage=serde_json::from_str(r#"{"CreatePty":{"cwd":null,"cols":80,"rows":24,"shell":null,"presentation":"grid"}}"#).unwrap();
+    assert!(matches!(request,ClientMessage::CreatePty{presentation:Some(Presentation::Grid),..}));
+    let reply=ServerMessage::PtyCreated{session_id:"grid-shell".into(),presentation:Some(Presentation::Grid),workspace_root:None,shell:Some("/bin/bash".into())};
+    let wire=serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["PtyCreated"]["presentation"],"grid");
+    assert!(matches!(serde_json::from_value::<ServerMessage>(wire).unwrap(),ServerMessage::PtyCreated{presentation:Some(Presentation::Grid),..}));
 }

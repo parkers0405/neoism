@@ -4,7 +4,6 @@
 // LICENSE file in the root directory of this source tree.
 
 use crate::primitives::look;
-use sugarloaf::Sugarloaf;
 use web_time::Instant;
 
 // Layout. Kept `pub` so other UI elements (command palette, future
@@ -136,7 +135,7 @@ pub fn compute_thumb_px(
 /// only turns them into the right sugarloaf call.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_bar(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     overlay: bool,
     x: f32,
     y: f32,
@@ -178,7 +177,7 @@ fn styled_thumb_color(opacity: f32, dragging: bool) -> [f32; 4] {
 /// band it reserves for hit-testing.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_thumb_scaled(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     overlay: bool,
     x: f32,
     y: f32,
@@ -207,7 +206,7 @@ pub fn draw_thumb_scaled(
 /// the thumb lands on top.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_track_scaled(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     overlay: bool,
     x: f32,
     y: f32,
@@ -244,7 +243,7 @@ pub fn draw_track_scaled(
 /// the palette's backdrop/bg rects.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_thumb(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     height: f32,
@@ -262,7 +261,7 @@ pub fn draw_thumb(
 /// for modal UI that also draws its shell/text as late overlays.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_thumb_overlay(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     height: f32,
@@ -284,7 +283,7 @@ pub fn draw_thumb_overlay(
 /// `opacity` keeps the track on the thumb's fade envelope.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_track(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     height: f32,
@@ -299,7 +298,7 @@ pub fn draw_track(
 /// via `draw_thumb_overlay`.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_track_overlay(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     height: f32,
@@ -564,7 +563,7 @@ impl Scrollbar {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         panel_rect: [f32; 4],
         scale_factor: f32,
         display_offset: usize,

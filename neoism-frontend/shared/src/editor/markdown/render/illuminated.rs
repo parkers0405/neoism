@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -90,7 +89,7 @@ pub(super) fn parse_illuminate_token(source: &str) -> Option<IlluminatedToken> {
 }
 
 pub(super) fn illuminated_inline_metrics(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     token: &IlluminatedToken,
     opts: &DrawOpts,
 ) -> IlluminatedDrawMetrics {
@@ -110,7 +109,7 @@ pub(super) fn illuminated_inline_metrics(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_illuminated_inline(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     token: &IlluminatedToken,
     x: f32,
     text_y: f32,
@@ -256,7 +255,7 @@ fn normalize_attr(value: &str) -> String {
 }
 
 fn illuminated_draw_opts(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     style: IlluminatedStyleKind,
     color: IlluminatedColorMode,
     base: &DrawOpts,
@@ -302,7 +301,7 @@ fn illuminated_color(color: IlluminatedColorMode, base: &DrawOpts) -> [u8; 4] {
 }
 
 fn draw_manuscript_tile(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     letter: char,
     x: f32,
     y: f32,

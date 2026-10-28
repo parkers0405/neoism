@@ -1696,7 +1696,7 @@ impl Crosswords {
 
         let mut viewport: Vec<Vec<CellSnapshot>> = Vec::with_capacity(rows as usize);
         for line_idx in 0..rows as i32 {
-            let line = crate::crosswords::pos::Line(line_idx);
+            let line = crate::crosswords::pos::Line(line_idx - display_offset as i32);
             let mut row_cells: Vec<CellSnapshot> = Vec::with_capacity(cols as usize);
             for col_idx in 0..cols as usize {
                 let col = crate::crosswords::pos::Column(col_idx);
@@ -1819,12 +1819,13 @@ impl Crosswords {
             scrollback_size: 0,
             cursor: CursorSnapshot {
                 col: cursor_pos.col.0 as u16,
-                row: cursor_pos.row.0.max(0) as u16,
+                row: (cursor_pos.row.0 + display_offset as i32).max(0) as u16,
                 shape: cursor_shape,
-                visible: self.mode.contains(Mode::SHOW_CURSOR),
+                visible: self.mode.contains(Mode::SHOW_CURSOR)
+                    && cursor_pos.row.0 + (display_offset as i32) < rows as i32,
             },
             modes: ModesSnapshot {
-                alt_screen: false,
+                alt_screen: self.mode.contains(Mode::ALT_SCREEN),
                 origin: self.mode.contains(Mode::ORIGIN),
                 auto_wrap: self.mode.contains(Mode::LINE_WRAP),
                 bracketed_paste: self.mode.contains(Mode::BRACKETED_PASTE),

@@ -531,6 +531,13 @@ impl NeoismAgentPicker {
         self.painted_rows = None;
     }
 
+    /// Leave an activity stage (back to the normal list).
+    pub fn clear_connect_activity(&mut self) {
+        self.connect_activity = None;
+        self.authorization_link_rect = None;
+        self.painted_rows = None;
+    }
+
     pub fn set_connect_authorization_url(&mut self, url: &str) {
         if let Some(detail) = self.connect_activity.as_mut() {
             detail.authorization_url = (url.starts_with("https://") || url.starts_with("http://")).then(|| url.to_string());

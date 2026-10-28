@@ -124,8 +124,8 @@ fn theme_display_name(name: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_theme_preview(
-    sugarloaf: &mut Sugarloaf,
+fn draw_theme_preview<P: crate::primitives::paint::Paint + ?Sized>(
+    sugarloaf: &mut P,
     x: f32,
     y: f32,
     width: f32,
@@ -213,7 +213,7 @@ fn draw_theme_preview(
     let line_y = divider_y + 16.0 * scale;
     let line_h = 25.0 * scale;
     let code_x = x + pad;
-    let draw_line = |sugarloaf: &mut Sugarloaf, row: usize, parts: &[(&str, u32)]| {
+    let draw_line = |sugarloaf: &mut P, row: usize, parts: &[(&str, u32)]| {
         let mut cursor_x = code_x;
         for (text, color) in parts {
             let opts = DrawOpts {
@@ -306,7 +306,7 @@ fn draw_theme_preview(
 /// into a struct would just shuffle the same fields.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stroke_rounded_rect(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     width: f32,
@@ -348,7 +348,7 @@ pub(crate) fn stroke_rounded_rect(
 /// quad.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_modal_frame_top(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     width: f32,
@@ -389,7 +389,7 @@ pub(crate) fn draw_modal_frame_top(
 /// correctly hides the overlapping portion of the back's stroke.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_copy_icon(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     stroke_color: [f32; 4],
@@ -489,13 +489,16 @@ impl CommandPalette {
                         < OPEN_POP_MS))
     }
 
-    pub fn render(
-        &mut self,
-        sugarloaf: &mut Sugarloaf,
-        dimensions: (f32, f32, f32),
-        theme: &IdeTheme,
-    ) {
+    pub fn render(&mut self, sugarloaf: &mut Sugarloaf, dimensions: (f32, f32, f32), theme: &IdeTheme) {
         super::background_preview::BackgroundPreviewCache::clear(sugarloaf);
+        self.render_with_background(sugarloaf, dimensions, theme, |cache, painter, entry, rect, scale| cache.draw(painter, entry, rect, scale));
+    }
+
+    /// Original palette painter with a host-supplied image-overlay transport.
+    pub fn render_with_background<P: crate::primitives::paint::Paint + ?Sized>(
+        &mut self, sugarloaf: &mut P, dimensions: (f32, f32, f32), theme: &IdeTheme,
+        mut background: impl FnMut(&mut super::background_preview::BackgroundPreviewCache, &mut P, &super::PaletteBackgroundEntry, [f32; 4], f32) -> bool,
+    ) {
         if !self.enabled {
             // Immediate mode: not drawing == not visible.
             self.selected_cursor_rect = None;
@@ -1023,8 +1026,8 @@ impl CommandPalette {
                         preview_width - pad * 2.0,
                         (h - 57.0 * s - pad * 2.0).max(0.0),
                     ];
-                    if !self.background_preview.borrow_mut().draw(
-                        sugarloaf,
+                    if !background(
+                        &mut self.background_preview.borrow_mut(), sugarloaf,
                         &entry,
                         rect,
                         scale_factor,
@@ -1437,7 +1440,7 @@ impl CommandPalette {
                 PaletteRow::Command { action: action @ PaletteAction::SetSystemEnabled { .. }, .. }
                     if matches!(self.mode, PaletteMode::SystemSettings(_)) =>
                     Some(vec![("Active", 40.0, action.clone())]),
-                PaletteRow::Server { entry } if !entry.local => Some(entry.controls()),
+                PaletteRow::Server { entry } if !entry.local && self.host_management_enabled => Some(entry.controls()),
                 _ => None,
             };
             let server_action_reserve = server_actions

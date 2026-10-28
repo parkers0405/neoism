@@ -4,6 +4,11 @@ use super::helpers::*;
 use super::types::*;
 
 impl MarkdownPane {
+    /// A virtual reveal can set a new target after this frame's scroll tick.
+    pub fn has_pending_scroll_animation(&self) -> bool {
+        (self.target_scroll_y-self.scroll_y).abs()>SCROLL_EPSILON || self.scroll_animation_velocity_px_s.abs()>1.0
+    }
+
     /// Hand scrolling owns the viewport until cursor navigation resumes. Once
     /// it does, discard any wheel/trackpad momentum so an in-flight inertial
     /// tick cannot immediately pull the caret back out of view.

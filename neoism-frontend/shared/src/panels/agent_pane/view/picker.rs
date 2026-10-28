@@ -1,5 +1,4 @@
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::session_group::SESSION_PICKER_FOOTER;
 use crate::panels::agent_pane::state::picker::{
@@ -34,7 +33,7 @@ impl AgentPickerPane for NeoismAgentPane {
 }
 
 pub fn render_picker(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut impl AgentPickerPane,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -138,7 +137,7 @@ pub fn render_picker(
 /// Dedicated read-only usage content inside the existing themed picker shell.
 /// The cached layout is also the host's geometry; no inferred row-height ratios.
 pub fn render_usage_picker(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     picker: &mut NeoismAgentPicker,
     input_rect: [f32; 4],
     theme: &IdeTheme,
@@ -454,7 +453,7 @@ fn usage_intersect(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
 }
 
 fn usage_rect(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     clip: [f32; 4],
     color: [f32; 4],
@@ -466,7 +465,7 @@ fn usage_rect(
 
 #[allow(clippy::too_many_arguments)]
 fn usage_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     rect: [f32; 4],
     clip: [f32; 4],

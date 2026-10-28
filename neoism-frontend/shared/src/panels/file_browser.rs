@@ -7,7 +7,6 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 use unicode_segmentation::UnicodeSegmentation;
 use web_time::Instant;
 
@@ -1273,7 +1272,7 @@ impl FileBrowserModal {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         viewport: [f32; 4],
         theme: &IdeTheme,
     ) {
@@ -1968,7 +1967,7 @@ fn centered_text_origin(rect: [f32; 4], text_width: f32, font_size: f32) -> [f32
     ]
 }
 fn draw_text_in_rect(
-    s: &mut Sugarloaf,
+    s: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     value: &str,
     size: f32,
@@ -1979,7 +1978,7 @@ fn draw_text_in_rect(
     draw_text_in_rect_with_weight(s, rect, value, size, color, center_x, center_y, false);
 }
 fn draw_text_in_rect_bold(
-    s: &mut Sugarloaf,
+    s: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     value: &str,
     size: f32,
@@ -1990,7 +1989,7 @@ fn draw_text_in_rect_bold(
     draw_text_in_rect_with_weight(s, rect, value, size, color, center_x, center_y, true);
 }
 fn draw_text_in_rect_with_weight(
-    s: &mut Sugarloaf,
+    s: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     value: &str,
     size: f32,
@@ -2004,7 +2003,7 @@ fn draw_text_in_rect_with_weight(
     );
 }
 fn draw_text_in_rect_clipped(
-    s: &mut Sugarloaf,
+    s: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     clip: [f32; 4],
     value: &str,
@@ -2018,7 +2017,7 @@ fn draw_text_in_rect_clipped(
     );
 }
 fn draw_text_in_rect_with_weight_clipped(
-    s: &mut Sugarloaf,
+    s: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     clip: [f32; 4],
     value: &str,
@@ -2041,14 +2040,14 @@ fn draw_text_in_rect_with_weight_clipped(
     };
     let width = s.text_mut().measure(value, &opts);
     let [x, y] = centered_text_origin(rect, if center_x { width } else { rect[2] }, size);
-    let first = s.text_mut().instance_count();
+    let first = s.text_mut().instances().len();
     s.text_mut().draw(x, y, value, &opts);
     let _ = s
         .text_mut()
         .center_instances_in_rect(first, rect, center_x, center_y);
 }
 fn input_box(
-    s: &mut Sugarloaf,
+    s: &mut dyn crate::primitives::paint::Paint,
     r: [f32; 4],
     value: &str,
     placeholder: &str,
@@ -2138,7 +2137,7 @@ fn input_box(
         }
     }
     let label = if value.is_empty() { placeholder } else { value };
-    let first = s.text_mut().instance_count();
+    let first = s.text_mut().instances().len();
     s.text_mut().draw(
         text_x,
         inner[1] + (inner[3] - font_size) * 0.5,
@@ -2170,7 +2169,7 @@ fn fitted_label_size(requested: f32, measured_width: f32, inner: [f32; 4]) -> f3
 }
 
 fn button(
-    s: &mut Sugarloaf,
+    s: &mut dyn crate::primitives::paint::Paint,
     r: [f32; 4],
     label: &str,
     primary: bool,

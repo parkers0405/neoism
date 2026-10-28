@@ -2,7 +2,7 @@ use super::*;
 use crate::primitives::draw_icon_centered_with_occlusion;
 
 pub fn draw_checkbox(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     state: TodoVisualState,
@@ -25,7 +25,7 @@ pub fn draw_checkbox(
 }
 
 pub(super) fn draw_checkbox_painted(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     state: TodoVisualState,
@@ -107,7 +107,7 @@ pub(super) fn draw_checkbox_painted(
     }
 }
 
-fn tool_symbol(tool: &str) -> &'static str {
+pub fn tool_symbol(tool: &str) -> &'static str {
     match tool.to_ascii_lowercase().as_str() {
         "bash" | "shell" | "terminal" | "exec" => "\u{f120}",
         "read" | "read_file" | "readfile" | "view" | "cat" => "\u{2192}",
@@ -123,7 +123,7 @@ fn tool_symbol(tool: &str) -> &'static str {
 }
 
 pub(super) fn draw_tool_symbol(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     tool: &str,
     opts: &DrawOpts,
@@ -142,7 +142,7 @@ pub(super) fn draw_tool_symbol(
 
 /// One curved connector anchors the entire expanded details area.
 pub fn draw_tool_connector(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     opts: &DrawOpts,

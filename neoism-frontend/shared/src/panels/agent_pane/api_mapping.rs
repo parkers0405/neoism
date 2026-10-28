@@ -3801,6 +3801,7 @@ fn lang_from_path(path: &str) -> Option<String> {
         "lua" => "lua",
         "json" | "jsonc" => "json",
         "toml" => "toml",
+        "sql" => "sql",
         "yaml" | "yml" => "yaml",
         "sh" | "bash" => "bash",
         "md" | "markdown" => "markdown",

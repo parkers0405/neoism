@@ -4,7 +4,6 @@
 // layout.
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::primitives::geom::intersect_rect;
 use crate::primitives::ide_theme::IdeTheme;
@@ -54,7 +53,7 @@ const FILTER_LABELS: [&str; 3] = ["All", "Installed", "Not Installed"];
 
 pub(crate) fn render(
     pane: &mut NeoismExtensionsPane,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     theme: &IdeTheme,
     scale: f32,
@@ -154,7 +153,7 @@ pub(crate) fn render(
 
 fn draw_language_dropdown(
     pane: &mut NeoismExtensionsPane,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     theme: &IdeTheme,
     s: f32,
     mouse: Option<(f32, f32)>,
@@ -472,7 +471,7 @@ fn draw_language_dropdown(
 }
 
 fn draw_rect_clipped_local(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     color: [f32; 4],
     order: u8,
@@ -486,7 +485,7 @@ fn draw_rect_clipped_local(
 
 fn draw_header(
     _pane: &mut NeoismExtensionsPane,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     _w: f32,
@@ -518,7 +517,7 @@ fn draw_header(
 
 fn draw_search_and_filters(
     pane: &mut NeoismExtensionsPane,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     w: f32,
@@ -717,7 +716,7 @@ fn draw_search_and_filters(
 
 fn draw_tab_strip(
     pane: &mut NeoismExtensionsPane,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     w: f32,
@@ -905,7 +904,7 @@ fn list_clip_for(outer: Option<[f32; 4]>, rect: [f32; 4]) -> [f32; 4] {
 
 fn draw_card_list(
     pane: &mut NeoismExtensionsPane,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     list_top: f32,
     w: f32,
@@ -993,6 +992,7 @@ fn draw_card_list(
 
         draw_card_body(
             &mut pane.row_hits,
+            pane.host_read_only,
             sugarloaf,
             entry,
             visible_position,
@@ -1039,7 +1039,8 @@ fn empty_tab_hint(pane: &NeoismExtensionsPane) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 fn draw_card_body(
     row_hits: &mut Vec<RowHit>,
-    sugarloaf: &mut Sugarloaf,
+    host_read_only: bool,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     entry: &super::state::ExtensionEntry,
     idx: usize,
     x: f32,
@@ -1221,6 +1222,15 @@ fn draw_card_body(
 
     // Install / Uninstall / Installing button.
     let button_rect = [button_x, button_y, button_w, button_h];
+    if host_read_only {
+        let label = match &entry.status {
+            ExtensionStatus::Installed { .. } => "Installed",
+            ExtensionStatus::NotInstalled => "Not Installed",
+            status => install_button_label(status),
+        };
+        paint_install_button(sugarloaf, button_rect, &ExtensionStatus::BuiltIn, theme, s, false, clip, occlusion_rects, Some(label));
+        return;
+    }
     // Hit-rect for 1.3's click dispatch. Pushed after the row Focus
     // entry so click-resolution can prefer the button before falling
     // back to row-level focus. Informational states have no action.
@@ -1317,7 +1327,7 @@ fn draw_card_body(
 
 #[allow(clippy::too_many_arguments)]
 fn paint_install_button(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     status: &ExtensionStatus,
     theme: &IdeTheme,
@@ -1665,7 +1675,7 @@ fn installing_label(percent: Option<u8>, status: &str) -> String {
 /// "oddly has corners" artifact). Matches the common ~4px corner radius.
 const OUTLINE_CORNER_INSET: f32 = 4.0;
 
-fn paint_outline(sugarloaf: &mut Sugarloaf, rect: [f32; 4], color: [f32; 4], s: f32) {
+fn paint_outline(sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized), rect: [f32; 4], color: [f32; 4], s: f32) {
     let [x, y, w, h] = rect;
     let t = 1.0_f32.max(s);
     let r = OUTLINE_CORNER_INSET * s;
@@ -1682,7 +1692,7 @@ fn paint_outline(sugarloaf: &mut Sugarloaf, rect: [f32; 4], color: [f32; 4], s: 
 /// region's top/bottom edge during scroll — without this the outline
 /// would draw a hairline through the tab strip and search bar above.
 fn paint_outline_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     color: [f32; 4],
     s: f32,
@@ -1728,7 +1738,7 @@ fn intersect_clip(rect: [f32; 4], outer: Option<[f32; 4]>) -> [f32; 4] {
 }
 
 fn draw_rounded_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     color: [f32; 4],
     radius: f32,
@@ -1746,7 +1756,7 @@ fn draw_rounded_rect_clipped(
 /// artifact. Here the border is a full-size rounded rect and the fill is an
 /// inset rounded rect drawn on top, so the visible border is a rounded ring.
 fn draw_rounded_rect_bordered_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     fill: [f32; 4],
     border: [f32; 4],

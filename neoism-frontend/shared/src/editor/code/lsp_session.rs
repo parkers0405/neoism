@@ -1063,11 +1063,17 @@ impl CodeLspUi {
     /// mouse-idle hover candidate. Pass `None` when the pointer is
     /// outside the pane. Desktop: `note_code_mouse_hover`.
     pub fn note_mouse_move(&mut self, pane: &CodePane, pos: Option<(f32, f32)>) -> bool {
+        self.note_mouse_move_with_popup_offset(pane, pos, (0.0, 0.0))
+    }
+
+    /// Code geometry may be pane-local while a floating popup uses window
+    /// coordinates. Translate only the popup retention test, never hit input.
+    pub fn note_mouse_move_with_popup_offset(&mut self, pane: &CodePane, pos: Option<(f32, f32)>, popup_offset: (f32, f32)) -> bool {
         // The rendered popup and its source-to-popup corridor win over
         // cell-based dismissal, including a captured drag outside the pane.
         if pos.is_some_and(|(x, y)| {
             self.hover.as_ref().is_some_and(|card| {
-                card.path == pane.path && card.interaction.retains_pointer(x, y)
+                card.path == pane.path && card.interaction.retains_pointer(x + popup_offset.0, y + popup_offset.1)
             })
         }) {
             return false;

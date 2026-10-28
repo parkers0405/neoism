@@ -51,6 +51,7 @@ async fn real_pty_busy_quoted_directory_request_sends_no_input_and_preserves_cwd
     let (registry, mut owner) = SessionRegistry::new();
     let created = registry.handle_subscribed(
         ClientMessage::CreatePty {
+            presentation: None,
             cwd: Some(root.path().to_string_lossy().into_owned()),
             cols: 120,
             rows: 24,
@@ -145,6 +146,7 @@ async fn integrated_shells_home_to_quoted_repo_confirms_real_pwd_and_cargo() {
         let (registry, mut owner) = SessionRegistry::new();
         let created = registry.handle_subscribed(
             ClientMessage::CreatePty {
+                presentation: None,
                 cwd: Some(home.path().to_string_lossy().into_owned()),
                 cols: 120,
                 rows: 24,
@@ -199,6 +201,7 @@ async fn integrated_bash_busy_builtin_read_defers_without_any_control_bytes() {
     let (registry, mut owner) = SessionRegistry::new();
     let created = registry.handle_subscribed(
         ClientMessage::CreatePty {
+            presentation: None,
             cwd: Some(home.path().to_string_lossy().into_owned()),
             cols: 120,
             rows: 24,

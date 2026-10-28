@@ -1235,38 +1235,7 @@ impl Screen<'_> {
         // Multi-click selection (chrome standard): double-click selects
         // the word under the pointer, triple-click the whole line. Uses
         // the same ClickState the terminal press pipeline maintains.
-        /// Byte range of the "word" at `col`: an identifier run when
-        /// the char is word-class, else the single char clicked.
-        fn word_range_at(line: &str, col: usize) -> (usize, usize) {
-            let is_word = |c: char| c.is_alphanumeric() || c == '_';
-            if line.is_empty() {
-                return (0, 0);
-            }
-            let mut start = col.min(line.len().saturating_sub(1));
-            while start > 0 && !line.is_char_boundary(start) {
-                start -= 1;
-            }
-            let ch = line[start..].chars().next().unwrap_or(' ');
-            if !is_word(ch) {
-                return (start, start + ch.len_utf8());
-            }
-            let mut begin = start;
-            while begin > 0 {
-                let prev = line[..begin].chars().next_back().unwrap_or(' ');
-                if !is_word(prev) {
-                    break;
-                }
-                begin -= prev.len_utf8();
-            }
-            let mut end = start;
-            for c in line[start..].chars() {
-                if !is_word(c) {
-                    break;
-                }
-                end += c.len_utf8();
-            }
-            (begin, end)
-        }
+        use neoism_ui::editor::code::pointer::word_range_at;
         match self.mouse.click_state {
             crate::event::ClickState::DoubleClick if !ctrl => {
                 let (start, end) = word_range_at(&code.buffer.lines[line], col);

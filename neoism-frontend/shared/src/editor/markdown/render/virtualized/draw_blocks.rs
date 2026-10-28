@@ -1,5 +1,5 @@
 fn measure_item(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     width: f32,
@@ -389,7 +389,7 @@ fn with_notebook_cell_gap(
 }
 
 fn measure_notebook_output_lines(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     local_lines: &[String],
     meta: &NotebookOutputMeta,
     width: f32,
@@ -435,7 +435,7 @@ fn measure_notebook_output_lines(
 }
 
 fn measure_notebook_output_text_group(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     outputs: &[NotebookOutputLine<'_>],
     width: f32,
     clip: [f32; 4],
@@ -538,7 +538,7 @@ fn notebook_image_output_dimensions(text: &str) -> Option<(f32, f32)> {
 }
 
 fn draw_item(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     content_x: f32,
@@ -681,7 +681,7 @@ fn draw_item(
 }
 
 fn draw_heading(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     x: f32,
@@ -820,7 +820,7 @@ fn heading_marker_len(raw: &str, level: usize) -> usize {
 
 #[allow(clippy::too_many_arguments)]
 fn draw_notebook_output_group(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     start_local_ix: usize,
@@ -1052,7 +1052,7 @@ fn draw_notebook_output_group(
 }
 
 fn draw_markdown_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     x: f32,
@@ -1747,7 +1747,7 @@ fn draw_markdown_line(
 /// paragraph rows otherwise) so the styled rows never drift from the layout.
 #[allow(clippy::too_many_arguments)]
 fn draw_frontmatter_row(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     line_ix: usize,
     raw: &str,
@@ -1957,7 +1957,7 @@ fn draw_frontmatter_row(
 
 #[allow(clippy::too_many_arguments)]
 fn measure_frontmatter_row(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     raw: &str,
     width: f32,
     line_h: f32,
@@ -2027,7 +2027,7 @@ fn measure_frontmatter_row(
 }
 
 fn frontmatter_tag_rows(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     value: &str,
     value_width: f32,
     font_scale: f32,
@@ -2060,7 +2060,7 @@ fn frontmatter_tag_rows(
 }
 
 fn draw_line_marker<'a>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     line_ix: usize,
     raw: &'a str,
@@ -2169,7 +2169,7 @@ fn draw_line_marker<'a>(
 }
 
 fn draw_checked_task_strike(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     lines: &[InlineWrappedLine],
     x: f32,
     y: f32,

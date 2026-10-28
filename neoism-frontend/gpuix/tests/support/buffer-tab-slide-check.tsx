@@ -1,0 +1,40 @@
+import assert from "node:assert/strict";
+import {createRoot} from "@gpuix/solid";
+import {onCleanup} from "solid-js";
+import {PaneLayoutView} from "../../src/layout/PaneLayoutView";
+import {WorkspaceLayout} from "../../src/layout/WorkspaceLayout";
+import {EditorView} from "../../src/editor/EditorView";
+import {NativeEditor} from "../../src/native-core";
+import {loadConfig} from "../../src/config";
+import {usePresentationScheduler} from "../../src/animation/frame-scheduler";
+import {createRecordingAppRenderer} from "./full-app-recording-renderer";
+const config={...loadConfig(["--config","/nonexistent/buffer-slide"],{}),reducedMotion:false,cursorBlink:false},layout=new WorkspaceLayout();
+const surfaces=["a","b","c","d"].map(id=>({id,title:`${id}.rs`,kind:"file" as const}));
+for(const surface of surfaces)layout.open(surface);layout.focusSurface("a");
+const source=layout.frame.focusedLeaf!,ids=layout.frame.panes[0].tabs.map(tab=>tab.leaf),editor=new NativeEditor("a.rs","pub fn retained() {}\n",true);
+editor.call("paste",{text:"dirty "});const text=editor.text();
+const host=createRecordingAppRenderer(),root=createRoot(host.renderer),callbacks=new Set<()=>void>(),restore=usePresentationScheduler(callback=>{callbacks.add(callback);return()=>callbacks.delete(callback);});
+let mounted=0,disposed=0;
+function Surface(){mounted++;onCleanup(()=>disposed++);return <EditorView editor={editor} config={config} active focusToken={0} prompt={()=>{}} save={async()=>{}} report={error=>{throw error;}} onState={()=>{}}/>;}
+const tick=async()=>{await Bun.sleep(8);const pending=[...callbacks];callbacks.clear();pending.forEach(callback=>callback());root.flush();};
+const tab=(leaf:number)=>host.find(`pane-tab:${leaf}`)!;
+try{
+ root.render(()=><PaneLayoutView controller={layout} config={config} renderSurface={()=><Surface/>} onClose={()=>{}}/>);await host.pump(root);
+ root.dispatch({elementId:host.find("pane-layout")!.id,eventType:"layout",x:10,y:50,width:600,height:400});
+ for(let i=0;i<ids.length;i++)root.dispatch({elementId:tab(ids[i]!).id,eventType:"layout",x:10+i*100,y:50,width:100,height:28});
+ for(let i=0;i<100&&ids.some(id=>Number(tab(id).style.left)!==0);i++)await tick();
+ const originalIds=ids.map(id=>tab(id).id),originalEditor=host.find("code-editor")!.id,pane=host.find(`pane:${source}`)!.id;
+ root.dispatch({elementId:tab(source).id,eventType:"mouseDown",button:0,x:45,y:64});
+ root.dispatch({elementId:tab(source).id,eventType:"mouseMove",pressedButton:0,x:220,y:64});root.flush();
+ assert.deepEqual(layout.frame.panes[0].tabs.map(tab=>tab.surfaceId),["b","c","a","d"]);
+ assert.equal(host.find("buffer-tab-drag-ghost")!.style.left,185);assert.equal(tab(source).style.opacity,0);
+ const neighbor=ids[1]!,before=Number(tab(neighbor).style.left);assert.ok(before>0);
+ await tick();const intermediate=Number(tab(neighbor).style.left);assert.ok(intermediate>0&&intermediate<before,"Neighbor must paint an intermediate slide offset");
+ root.dispatch({elementId:host.find("pane-drag-layer")!.id,eventType:"mouseMove",pressedButton:0,x:240,y:64});root.flush();assert.equal(host.find("buffer-tab-drag-ghost")!.style.left,205);
+ root.dispatch({elementId:host.find("pane-drag-layer")!.id,eventType:"mouseUp",button:0,x:240,y:64});root.flush();assert.equal(host.find("buffer-tab-drag-ghost"),undefined);
+ for(let i=0;i<100&&ids.some(id=>Number(tab(id).style.left)!==0);i++)await tick();
+ assert.ok(ids.every(id=>Number(tab(id).style.left)===0));assert.deepEqual(ids.map(id=>tab(id).id),originalIds);
+ assert.equal(host.find("code-editor")!.id,originalEditor);assert.equal(host.find(`pane:${source}`)!.id,pane);assert.equal(mounted,1);assert.equal(disposed,0);
+ assert.equal(editor.text(),text);assert.equal(editor.frame.dirty,true);
+ console.log(JSON.stringify({noWindow:true,canonicalBufferReorder:true,draggedTabFollowsPointer:true,neighborsPaintIntermediateSpringOffsets:true,offsetsSettle:true,tabAndPaneHostsRetained:true,actualEditorMountedOnce:true,dirtyBytesRetained:true}));
+}finally{root.unmount();restore();layout.dispose();editor.dispose();}

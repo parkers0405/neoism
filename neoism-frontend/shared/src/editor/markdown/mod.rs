@@ -3,6 +3,8 @@ pub mod dispatch;
 pub mod doc_sync;
 pub mod helpers;
 pub mod history;
+pub mod host_assets;
+pub mod host_view;
 pub mod input;
 pub mod interactions;
 pub mod links;

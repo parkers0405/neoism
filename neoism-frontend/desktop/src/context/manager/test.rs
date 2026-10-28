@@ -1102,6 +1102,7 @@ fn remote_attach_error_invalidates_binding_and_late_success_cannot_revive_it() {
     assert!(!manager.apply_pty_server_message(
         123,
         ServerMessage::PtyCreated {
+            presentation: None,
             session_id: "stale".into(),
             shell: None,
             workspace_root: None
@@ -1184,6 +1185,7 @@ fn transport_loss_gates_input_without_killing_session_identity() {
                 .next()
                 .unwrap_or(0),
             neoism_protocol::pty::ServerMessage::PtyCreated {
+                presentation: None,
                 session_id: "live-shell".into(),
                 shell: None,
                 workspace_root: None
@@ -1310,6 +1312,7 @@ fn parked_connection_reactivation_replaces_stale_pty_generation() {
     assert!(manager.apply_pty_server_message(
         request_id,
         neoism_protocol::pty::ServerMessage::PtyCreated {
+            presentation: None,
             session_id: "joined-shell".into(),
             shell: None,
             workspace_root: None,
@@ -1428,6 +1431,7 @@ fn joined_terminal_created_during_home_attach_is_spawned_after_peer_reattach() {
     assert!(manager.apply_pty_server_message(
         request_id,
         neoism_protocol::pty::ServerMessage::PtyCreated {
+            presentation: None,
             session_id: "new-joined-shell".into(),
             shell: None,
             workspace_root: None,
@@ -1466,6 +1470,7 @@ fn stale_attach_reply_cannot_bind_a_reassigned_route() {
     assert!(!manager.apply_pty_server_message(
         123,
         neoism_protocol::pty::ServerMessage::PtyCreated {
+            presentation: None,
             session_id: "old".into(),
             shell: None,
             workspace_root: None

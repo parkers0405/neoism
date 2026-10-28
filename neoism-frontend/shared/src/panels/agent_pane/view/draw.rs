@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use sugarloaf::text::DrawOpts;
-use sugarloaf::{GraphicOverlay, Sugarloaf};
+use sugarloaf::{GraphicOverlay};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::DEPTH;
@@ -233,7 +233,7 @@ fn text_measure_style(opts: &DrawOpts, scale_factor: f32) -> TextMeasureStyle {
 }
 
 pub fn measure_text_cached(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     opts: &DrawOpts,
 ) -> f32 {
@@ -570,7 +570,7 @@ mod measure_tests {
 
 /// Compatibility adapter for renderers still accepting screen-space slices.
 pub fn measured_caret_stops(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     opts: &DrawOpts,
     start_x: f32,
@@ -588,11 +588,11 @@ pub fn measured_caret_stops(
 /// Retain inline geometry by raw source, not its marker-stripped display text.
 /// The builder runs only on a cold style/font/source identity.
 pub(super) fn cached_inline_selection_geometry(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     source: &str,
     opts: &DrawOpts,
     origin_x: f32,
-    build: impl FnOnce(&mut Sugarloaf) -> SelectionGeometry,
+    build: impl FnOnce(&mut dyn crate::primitives::paint::Paint) -> SelectionGeometry,
 ) -> SelectionGeometry {
     let mut style = text_measure_style(opts, sugarloaf.scale_factor());
     style.font_generation = sugarloaf.text_mut().font_cache_generation();
@@ -609,7 +609,7 @@ pub(super) fn cached_inline_selection_geometry(
 }
 
 pub fn measured_selection_geometry(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     opts: &DrawOpts,
 ) -> SelectionGeometry {
@@ -673,7 +673,7 @@ pub fn opts_with_clip(mut opts: DrawOpts, clip: [f32; 4]) -> Option<DrawOpts> {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_status_dot_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     diameter: f32,
@@ -725,7 +725,7 @@ pub(crate) fn draw_status_dot_text(
 }
 
 pub fn draw_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     rect: [f32; 4],
     color: [f32; 4],
     order: u8,
@@ -738,7 +738,7 @@ pub fn draw_rect_clipped(
 }
 
 pub fn draw_rounded_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     color: [f32; 4],
     radius: f32,
@@ -751,7 +751,7 @@ pub fn draw_rounded_rect_clipped(
 }
 
 pub fn draw_top_rounded_rect_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     rect: [f32; 4],
     color: [f32; 4],
     radius: f32,
@@ -780,18 +780,104 @@ pub fn same_rect(a: [f32; 4], b: [f32; 4]) -> bool {
 }
 
 pub fn draw_text_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     x: f32,
     y: f32,
     text: &str,
     opts: &DrawOpts,
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    draw_text_revealed_clipped(sugarloaf, x, y, text, opts, occlusion_rects, &[])
+    let reveals: &[sugarloaf::text::TextReveal] = &[];
+    let y = snap_text_y(y);
+    if occlusion_rects.is_empty() && reveals.is_empty() {
+        return sugarloaf.text_mut().draw(x, y, text, opts);
+    }
+    // Keep this tied to the draw shaper rather than the process-global
+    // measurement cache. Font state can change without changing DrawOpts.
+    let width = sugarloaf.text_mut().measure(text, opts);
+    if width <= 0.0 {
+        return 0.0;
+    }
+    // Rasterized ink can overhang the advance-sum `width` (nerd-font
+    // icons in the patched primary font raster ~1px wider than their
+    // advance, and clip-edge snapping to device pixels eats up to
+    // another) — a synthetic clip cut exactly at `width` shaved the
+    // right diagonal off the chip chevrons (˅) whenever any occlusion
+    // was active. Pad the fallback clip only; explicit `clip_rect`s
+    // stay exact, and occlusion carving below still cuts overlaps.
+    // Match the GPU's four-physical-pixel support plus bilinear footprint.
+    let scale = sugarloaf.scale_factor().max(f32::EPSILON);
+    let reveal_halo = |radius: f32| {
+        if radius > 0.0 {
+            ((radius * scale).min(4.0) + 1.0) / scale
+        } else {
+            0.0
+        }
+    };
+    let halo = reveals
+        .iter()
+        .map(|r| reveal_halo(r.blur_radius))
+        .fold(0.0_f32, f32::max);
+    let ink_slack = 2.0 + halo;
+    let base_clip = opts.clip_rect.unwrap_or([
+        x - ink_slack,
+        y - 4.0 - halo,
+        width + 2.0 * ink_slack,
+        opts.font_size * 1.8 + 2.0 * halo,
+    ]);
+    let text_h = (opts.font_size * 1.8).max(opts.font_size + 8.0) + 2.0 * halo;
+    let text_rect = [
+        x - ink_slack,
+        y - 4.0 - halo,
+        width + 2.0 * ink_slack,
+        text_h,
+    ];
+    let mut intervals = vec![(base_clip[0], base_clip[0] + base_clip[2])];
+
+    for rect in occlusion_rects {
+        if !rects_intersect(text_rect, *rect) {
+            continue;
+        }
+        let cut_start = rect[0].max(base_clip[0]);
+        let cut_end = (rect[0] + rect[2]).min(base_clip[0] + base_clip[2]);
+        if cut_end <= cut_start {
+            continue;
+        }
+        let mut next = Vec::with_capacity(intervals.len() + 1);
+        for (start, end) in intervals {
+            if cut_end <= start || cut_start >= end {
+                next.push((start, end));
+            } else {
+                if cut_start > start {
+                    next.push((start, cut_start));
+                }
+                if cut_end < end {
+                    next.push((cut_end, end));
+                }
+            }
+        }
+        intervals = next;
+        if intervals.is_empty() {
+            return width;
+        }
+    }
+
+    for (start, end) in intervals {
+        let clip_w = end - start;
+        if clip_w <= 0.0 {
+            continue;
+        }
+        let mut clipped = *opts;
+        clipped.clip_rect = Some([start, base_clip[1], clip_w, base_clip[3]]);
+        sugarloaf
+            .text_mut()
+            .draw(x, y, text, &clipped);
+    }
+    width
 }
 
 pub fn draw_text_revealed_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     text: &str,
@@ -799,6 +885,7 @@ pub fn draw_text_revealed_clipped(
     occlusion_rects: &[[f32; 4]],
     reveals: &[sugarloaf::text::TextReveal],
 ) -> f32 {
+    if reveals.is_empty() { return draw_text_clipped(sugarloaf,x,y,text,opts,occlusion_rects); }
     let y = snap_text_y(y);
     if occlusion_rects.is_empty() && reveals.is_empty() {
         return sugarloaf.text_mut().draw(x, y, text, opts);
@@ -958,7 +1045,7 @@ pub struct ImagePiece {
 
 #[allow(clippy::too_many_arguments)]
 pub fn push_image_overlay_clipped(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     panel_id: usize,
     image_id: u32,
     rect: [f32; 4],
@@ -1073,7 +1160,7 @@ pub fn rects_intersect(a: [f32; 4], b: [f32; 4]) -> bool {
 }
 
 pub fn wrap_input_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     width: f32,
     opts: &DrawOpts,
@@ -1107,7 +1194,7 @@ pub fn wrap_input_text(
 }
 
 pub fn wrap_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,
     width: f32,
     opts: &DrawOpts,

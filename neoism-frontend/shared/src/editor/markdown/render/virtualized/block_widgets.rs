@@ -1,5 +1,5 @@
 fn draw_code_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     x: f32,
@@ -568,7 +568,7 @@ fn draw_code_block(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_notebook_markdown_cell_boundary(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     item: &VirtualMarkdownDrawItem,
     x: f32,
     width: f32,
@@ -631,7 +631,7 @@ fn draw_notebook_markdown_cell_boundary(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_mermaid_code_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     item: &VirtualMarkdownDrawItem,
     x: f32,
     width: f32,
@@ -847,7 +847,7 @@ fn notebook_cell_action_tooltip(
 }
 
 fn draw_notebook_running_loader(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     clip: [f32; 4],
     left: f32,
     row_top: f32,
@@ -909,7 +909,7 @@ fn draw_notebook_running_loader(
 }
 
 fn draw_notebook_cell_action_tooltip(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     anchor: [f32; 4],
     label: &str,
     clip: [f32; 4],
@@ -988,7 +988,7 @@ fn parse_notebook_output_line(line: &str) -> Option<NotebookOutputLine<'_>> {
 
 #[allow(clippy::too_many_arguments)]
 fn draw_notebook_output_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     local_lines: &[String],
@@ -1241,7 +1241,7 @@ mod virtualized_mermaid_tests {
 /// verbatim code/fence row so clicks and the caret map 1:1 onto its glyphs.
 #[allow(clippy::too_many_arguments)]
 fn register_code_row_geometry(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     source_line: usize,
     line: &str,
@@ -1337,6 +1337,7 @@ fn virtual_markdown_code_lang(lang: &str) -> Lang {
         "go" => Lang::Go,
         "lua" => Lang::Lua,
         "toml" => Lang::Toml,
+        "sql" => Lang::Sql,
         "json" | "jsonc" => Lang::Json,
         "nix" => Lang::Nix,
         "bash" | "sh" | "shell" | "zsh" => Lang::Bash,
@@ -1351,7 +1352,7 @@ fn virtual_markdown_code_lang(lang: &str) -> Lang {
 
 #[allow(clippy::too_many_arguments)]
 fn draw_virtualized_code_line(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     mut x: f32,
     y: f32,
     line: &str,
@@ -1379,7 +1380,7 @@ fn draw_virtualized_code_line(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_table_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     x: f32,
@@ -1433,7 +1434,7 @@ fn draw_table_block(
 }
 
 fn draw_literal_block(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     pane: &mut MarkdownPane,
     item: &VirtualMarkdownDrawItem,
     x: f32,

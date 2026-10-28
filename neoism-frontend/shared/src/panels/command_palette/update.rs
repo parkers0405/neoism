@@ -720,6 +720,7 @@ impl CommandPalette {
                 let mut rows: Vec<(i32, PaletteRow<'_>)> = COMMANDS
                     .iter()
                     .filter(|cmd| {
+                        if self.host_supported_actions.as_ref().is_some_and(|actions| !actions.iter().any(|name| name == &format!("{:?}", cmd.action))) { return false; }
                         // Host axis first: a command the host cannot
                         // execute is never listed, whatever surface
                         // owns focus. Desktop defaults to all-true so
@@ -934,7 +935,7 @@ impl CommandPalette {
                         Some((score, PaletteRow::Server { entry }))
                     })
                     .collect::<Vec<_>>();
-                if self.query.is_empty() {
+                if self.query.is_empty() && self.host_management_enabled {
                     rows.push((i32::MIN, PaletteRow::ServerAdd));
                 }
                 rows
@@ -1103,7 +1104,7 @@ impl CommandPalette {
             ));
         }
 
-        rows.push((0, PaletteRow::WorkspaceCreate));
+        if self.host_management_enabled { rows.push((0, PaletteRow::WorkspaceCreate)); }
 
         rows
     }

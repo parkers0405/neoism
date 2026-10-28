@@ -357,7 +357,7 @@ impl AgentTimelinePane for NeoismAgentPane {
 
 impl AgentTimelineDelegate<NeoismAgentPane> for SharedTimelineDelegate {
     fn measure_message_height(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &mut NeoismAgentPane,
         message: &NeoismAgentMessage,
         width: f32,
@@ -379,7 +379,7 @@ impl AgentTimelineDelegate<NeoismAgentPane> for SharedTimelineDelegate {
     }
 
     fn render_message_card(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         x: f32,
         y: f32,
         w: f32,
@@ -415,7 +415,7 @@ impl AgentTimelineDelegate<NeoismAgentPane> for SharedTimelineDelegate {
     }
 
     fn render_streaming_status_row(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         pane: &mut NeoismAgentPane,
         rect: [f32; 4],
         theme: &IdeTheme,

@@ -12,10 +12,15 @@ mod view;
 pub use state::{NeoismSettingsPane, PointerOutcome, SettingsAction};
 
 impl NeoismSettingsPane {
+    #[cfg(feature = "neoui")]
+    pub fn render(&mut self, sugarloaf: &mut sugarloaf::Sugarloaf, win_w: f32, win_h: f32, theme: &crate::primitives::ide_theme::IdeTheme, scale: f32, mouse: Option<(f32,f32)>) {
+        view::render(self,sugarloaf,win_w,win_h,theme,scale,mouse);
+    }
     /// Paint the panel across the whole window. No-op when inactive.
+    #[cfg(not(feature = "neoui"))]
     pub fn render(
         &mut self,
-        sugarloaf: &mut sugarloaf::Sugarloaf,
+        sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
         win_w: f32,
         win_h: f32,
         theme: &crate::primitives::ide_theme::IdeTheme,

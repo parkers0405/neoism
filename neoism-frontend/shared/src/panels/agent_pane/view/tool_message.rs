@@ -7,7 +7,6 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::panels::agent_pane::state::{
@@ -77,7 +76,7 @@ pub(crate) fn show_tool_diff_cards(
 }
 
 pub(super) fn wrap_todo_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     content: &str,
     width: f32,
     opts: &DrawOpts,
@@ -702,6 +701,34 @@ pub struct ToolDiffSection {
     diagnostics: Vec<DiagLine>,
 }
 
+impl ToolDiffSection {
+    /// Renderer-neutral view of the canonical parsed tool diff. Native hosts
+    /// can paint the same rows without parsing patch/ACP/edit metadata again.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn link_target(&self) -> &str {
+        &self.link_target
+    }
+    pub fn additions(&self) -> u32 {
+        self.additions
+    }
+    pub fn deletions(&self) -> u32 {
+        self.deletions
+    }
+    pub fn lines(&self) -> &[DiffLine] {
+        &self.lines
+    }
+    pub fn omitted(&self) -> usize {
+        self.omitted
+    }
+    pub fn diagnostics(&self) -> impl Iterator<Item = (bool, &str)> {
+        self.diagnostics
+            .iter()
+            .map(|line| (line.is_error, line.text.as_str()))
+    }
+}
+
 /// A single LSP diagnostic line surfaced under a diff card, e.g.
 /// `ERROR [12:5] cannot find value `foo``.
 #[derive(Clone, Debug)]
@@ -728,7 +755,7 @@ fn tool_body_wrap_width(width: f32, s: f32) -> f32 {
 }
 
 fn tool_wrapped_rows(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     body: &str,
     width: f32,
     opts: &DrawOpts,
@@ -738,7 +765,7 @@ fn tool_wrapped_rows(
 }
 
 fn tool_preview_wrapped_rows(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     body: &str,
     width: f32,
     opts: &DrawOpts,
@@ -748,7 +775,7 @@ fn tool_preview_wrapped_rows(
 }
 
 fn cached_tool_wrapped_rows(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     body: &str,
     width: f32,
     opts: &DrawOpts,

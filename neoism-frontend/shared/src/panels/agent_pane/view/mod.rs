@@ -1,4 +1,3 @@
-use sugarloaf::Sugarloaf;
 
 use crate::panels::agent_pane::state::NeoismAgentPane;
 use crate::primitives::ide_theme::IdeTheme;
@@ -6,7 +5,7 @@ use crate::primitives::ide_theme::IdeTheme;
 pub mod assistant;
 pub mod chat;
 pub mod code_block;
-pub(super) mod composer_geometry;
+pub mod composer_geometry;
 pub mod derivations;
 pub mod draw;
 pub mod fx;
@@ -124,7 +123,7 @@ impl AgentCheckoutContext {
     }
 }
 
-pub fn clear_overlays(sugarloaf: &mut Sugarloaf) {
+pub fn clear_overlays(sugarloaf: &mut dyn crate::primitives::paint::Paint) {
     sugarloaf.clear_image_overlays_for(OVERLAY_PANEL_ID);
     crate::panels::agent_pane::icon::clear_side_panel_icon_overlays(sugarloaf);
 }
@@ -214,7 +213,7 @@ impl AgentPaneView for NeoismAgentPane {
 
 #[allow(clippy::too_many_arguments)]
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut NeoismAgentPane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -244,7 +243,7 @@ pub fn render(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_responsive(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut NeoismAgentPane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -279,7 +278,7 @@ pub fn render_responsive(
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_agent_pane_with<P, D, I>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -372,7 +371,7 @@ mod detail_rail_tests {
 }
 
 fn render_agent_pane_with_responsive<P, D, I>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     pane: &mut P,
     rect: [f32; 4],
     theme: &IdeTheme,

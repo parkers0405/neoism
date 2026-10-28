@@ -1,0 +1,44 @@
+import { mkdtempSync,readFileSync,rmSync,writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { launchNative } from "../tests/support/native-launch";
+import { createAgentDaemon } from "../tests/support/agent-daemon";
+const directory=mkdtempSync(join(tmpdir(),"neoism-rich-markdown-")),config=join(directory,"config.json"),recovery=join(directory,"session.json");
+writeFileSync(config,JSON.stringify({appearance:{fonts:{family:"Cascadia Code NF",size:14}},editor:{"vim-mode":true},terminal:{cursor:{blinking:false}}}));
+const daemon=createAgentDaemon({binaryFiles:{"cover.png":readFileSync("../shared/assets/splash/neoism-wordmark.png")}});daemon.files.set("README.md","---\ncover: ./cover.png\n---\n\n# Rich document\n\n- [ ] A real task\n\n| Name | Value |\n| --- | --- |\n| café | **bold** |\n\n> [!NOTE] Original formatting\n\n```ts\nconst answer = 42;\n```\n\n"+Array.from({length:80},(_,i)=>`Paragraph ${i+1} with **rich text** and a [local link](README.md).`).join("\n\n"));
+const launch=()=>launchNative({command:process.execPath,args:["src/main.tsx","--daemon",daemon.endpoint,"--workspace","a","--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:recovery}});
+const until=async(test:()=>boolean|Promise<boolean>)=>{const deadline=Date.now()+15000;while(!await test()){if(Date.now()>deadline)throw new Error("Rich Markdown did not converge");await Bun.sleep(20);}};
+const commandJson=async(args:string[])=>JSON.parse(await new Response(Bun.spawn(args,{stdout:"pipe"}).stdout).text());
+const before=new Set((await commandJson(["hyprctl","clients","-j"])).map((c:any)=>c.address));
+let app=await launch(),stage="open original rich renderer";
+try{
+ await app.getByTestId("file:README.md").waitFor({timeoutMs:20000});await Bun.sleep(350);await app.getByTestId("file:README.md").click();
+ let editor=app.getByTestId("rich-markdown-editor");await editor.waitFor({timeoutMs:15000});
+ await until(async()=>{const layers=await editor.getByType("canvas").all();return layers.some(layer=>(layer.bounds?.width||0)>100&&(layer.bounds?.height||0)>100);});await Bun.sleep(150);
+ await app.getByTestId("markdown-cover").waitFor();await until(()=>daemon.fileRequests.some(request=>request.tag==="ReadFile"&&request.body.path==="cover.png"));
+ stage="original glyph pixel proof";
+ const clients=await commandJson(["hyprctl","clients","-j"]),client=clients.find((c:any)=>!before.has(c.address)&&c.class==="ai.neoism.gpuix");
+ if(!client)throw new Error("Controlled native Markdown window not found");
+ const monitor=(await commandJson(["hyprctl","monitors","-j"])).find((m:any)=>m.id===client.monitor),bounds=await editor.bounds(),capture="/tmp/neoism-gpuix-markdown.png";
+ if(await Bun.spawn(["grim","-o",monitor.name,capture]).exited)throw new Error("Compositor capture failed");
+ const verify=Bun.spawn(["/usr/bin/python3","-c",`from PIL import Image\nimport sys,json\nc,m,r=map(json.loads,sys.argv[2:]);s=m['scale'];x=(c['at'][0]-m['x']+r['x'])*s;y=(c['at'][1]-m['y']+r['y'])*s\na=Image.open(sys.argv[1]).crop((round(x),round(y),round(x+r['width']*s),round(y+r['height']*s))).convert('RGB')\np=sum(min(pixel)>180 and max(pixel)-min(pixel)<4 for pixel in a.getdata())\nassert p>500,('Original rich glyph pixels missing',p)\nprint('Original rich Markdown native glyph pixels:',p)`,capture,JSON.stringify(client),JSON.stringify(monitor),JSON.stringify(bounds)],{stdout:"inherit",stderr:"inherit"});if(await verify.exited)throw new Error("Original glyph texture paint failed");
+ stage="original Ex navigation";await editor.press(":");await app.getByTestId("command-palette").waitFor();await app.getByTestId("command-palette").fill("5");await app.getByTestId("command-palette").press("enter");await until(async()=>await app.getByTestId("command-palette").count()===0);
+ stage="Vim editing";await editor.press("i");await editor.press("X");await editor.press("escape");
+ await until(()=>{try{return Object.values(JSON.parse(readFileSync(recovery,"utf8")).editors).some((entry:any)=>entry.text?.includes("# XRich document"));}catch{return false;}});
+ stage="original compact context menu";await editor.press(":");await app.getByTestId("command-palette").waitFor();await app.getByTestId("command-palette").fill("6");await app.getByTestId("command-palette").press("enter");await until(async()=>await app.getByTestId("command-palette").count()===0);await editor.press("i");await editor.press("/");await app.getByTestId("markdown-context-menu").waitFor();
+ const popup=await app.getByTestId("markdown-context-menu").bounds();if(popup.width<100||popup.height<100)throw new Error("Original context menu never painted its compact rows");
+ await Bun.spawn(["grim","-o",monitor.name,"/tmp/neoism-gpuix-markdown-context.png"]).exited;
+ for(let i=0;i<4;i++)await editor.press("down");await editor.press("enter");await until(async()=>await app.getByTestId("markdown-context-menu").count()===0);await editor.press("escape");await Bun.sleep(400);
+ stage="original paging and rich recovery";await editor.press("G");await until(()=>{try{return Object.values(JSON.parse(readFileSync(recovery,"utf8")).ui.markdownViews||{}).some((entry:any)=>entry.line>100&&entry.scrollY>0);}catch{return false;}});
+ if(daemon.fileRequests.some(request=>request.tag==="WriteFile"))throw new Error("Rich edit/paging saved without permission");
+ await until(async()=>await app.getByTestId("rich-markdown-caret").count()===1);await Bun.sleep(250);
+ await app.close();const checkpoint=JSON.parse(readFileSync(recovery,"utf8"));if(!Object.keys(checkpoint.ui.markdownViews||{}).length)throw new Error("Rich view checkpoint missing");
+ stage="restore dirty rich document";app=await launch();editor=app.getByTestId("rich-markdown-editor");await editor.waitFor({timeoutMs:20000});
+ await until(async()=>await app.getByTestId("rich-markdown-caret").count()===1);
+ stage="caret focus ownership";await editor.press("ctrl-p");await until(async()=>await app.getByTestId("rich-markdown-caret").count()===0);await app.getByTestId("finder").getByType("input").press("escape");
+ await until(async()=>await app.getByTestId("rich-markdown-caret").count()===1);
+ stage="explicit save";await editor.press("ctrl-s");await until(()=>daemon.fileRequests.some(request=>request.tag==="WriteFile"));
+ if(!daemon.files.get("README.md")?.includes("# XRich document"))throw new Error("Saving rich recovery lost edited source");
+ console.log("Original rich renderer, native glyph textures, Vim editing, paging, dirty recovery, caret focus and daemon save passed.");
+}catch(error){console.error(`Native Markdown failed at ${stage}`);try{console.error("rich checkpoint",JSON.parse(readFileSync(recovery,"utf8")).ui.markdownViews);console.error("fixture file requests",daemon.fileRequests);console.error("native IDs",(await app.getByType("div").all()).filter(node=>node.testId).map(node=>({id:node.testId,bounds:node.bounds})));await Bun.spawn(["grim","/tmp/neoism-gpuix-markdown-failed.png"]).exited;}catch{}throw error;}
+finally{await app.close();daemon.stop();rmSync(directory,{recursive:true,force:true});}

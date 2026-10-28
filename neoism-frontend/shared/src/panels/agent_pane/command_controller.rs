@@ -6,7 +6,8 @@
 
 use super::state::picker::NeoismAgentPickerOption;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "value")]
 pub enum SlashCommandAction {
     Noop,
     ShowHelp,

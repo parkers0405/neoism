@@ -6,7 +6,7 @@ pub(super) const COMPOSER_CORNER_RADIUS: f32 = 20.0;
 pub(super) const COMPOSER_TRAY_RADIUS: f32 = 16.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ComposerGeometry {
+pub struct ComposerGeometry {
     pub card: [f32; 4],
     pub tray: Option<[f32; 4]>,
     pub card_radius: f32,

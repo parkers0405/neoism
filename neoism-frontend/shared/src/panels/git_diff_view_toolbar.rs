@@ -201,7 +201,7 @@ impl GitDiffView {
 
     pub(super) fn render_toolbar(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         rect: Rect,
         height: f32,
         scale: f32,
@@ -353,7 +353,7 @@ impl GitDiffView {
 
     fn toolbar_button(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         rect: Rect,
         control: Control,
         label: Option<&str>,

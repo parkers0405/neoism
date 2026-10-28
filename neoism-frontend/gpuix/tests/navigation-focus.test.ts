@@ -1,0 +1,5 @@
+import{expect,test}from"bun:test";
+import{fileURLToPath}from"node:url";
+test("actual App tree/Finder activation transfers focus and shared cursor; Agent sidebar supports original control navigation",async()=>{
+ const child=Bun.spawn([process.execPath,"run","tests/support/navigation-focus-check.tsx"],{cwd:fileURLToPath(new URL("..",import.meta.url)),stdout:"pipe",stderr:"pipe"});const[status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);expect({status,stderr}).toEqual({status:0,stderr:""});expect(JSON.parse(stdout)).toMatchObject({noWindow:true,actualApp:true,treeClickNativeFocus:true,warmFileKeepsDirtyEditorAndHost:true,treeEnterNativeFocus:true,sharedCursorHasIntermediateFrames:true,finderKeyboardNativeFocus:true,finderMouseNativeFocus:true,agentAltArrowFocusAndExactCursor:true,originalAgentControlsTraverseAndActivate:true,newChatCreatesFreshLocalTab:true,unrelatedDirtyDocumentPreserved:true,noBackendThreadsOrPty:true});
+},15000);

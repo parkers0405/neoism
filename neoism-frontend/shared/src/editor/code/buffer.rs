@@ -279,6 +279,8 @@ impl CodeBuffer {
         let indent = detect_indent(&lines);
         Self {
             saved_baseline: lines.clone(),
+            saved_line_ending: Some(line_ending),
+            saved_trailing_newline: Some(trailing_newline),
             lines,
             // Panes open in vim Normal (matches the default input mode;
             // `toggle` to Standard switches this to Insert).
@@ -355,10 +357,37 @@ impl CodeBuffer {
 
     pub fn is_dirty(&self) -> bool {
         self.lines != self.saved_baseline
+            || self.saved_line_ending.is_some_and(|saved| saved != self.line_ending)
+            || self.saved_trailing_newline.is_some_and(|saved| saved != self.trailing_newline)
     }
 
     pub fn mark_saved(&mut self) {
         self.saved_baseline = self.lines.clone();
+        self.saved_line_ending = Some(self.line_ending);
+        self.saved_trailing_newline = Some(self.trailing_newline);
+    }
+
+    /// Replace disk-form text as one undoable edit. Terminal newlines and CRLF
+    /// are file metadata, rather than extra editable rows in the replacement.
+    pub fn replace_from_disk_text(&mut self, text: &str) {
+        let replacement = Self::from_text(text);
+        if self.lines == replacement.lines
+            && self.line_ending == replacement.line_ending
+            && self.trailing_newline == replacement.trailing_newline
+        {
+            return;
+        }
+        self.break_undo_group();
+        self.save_undo();
+        self.lines = replacement.lines;
+        self.line_ending = replacement.line_ending;
+        self.trailing_newline = replacement.trailing_newline;
+        self.extra_carets.clear();
+        self.visual_anchor = None;
+        self.clear_vertical_goal();
+        self.clamp_cursor();
+        self.mark_edited();
+        self.commit_undo();
     }
 
     /// Replace the whole content (reload / remote seed). Resets history

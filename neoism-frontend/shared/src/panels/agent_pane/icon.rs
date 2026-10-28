@@ -8,7 +8,7 @@
 
 use base64::Engine;
 use sugarloaf::{
-    ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay, Sugarloaf,
+    ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay,
 };
 use web_time::Instant;
 
@@ -174,14 +174,14 @@ impl ProviderLogo {
 }
 
 pub fn register_provider_logo_atlas(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     color: [u8; 4],
 ) -> Option<u32> {
     let image_id = PROVIDER_LOGO_IMAGE_PREFIX
         | ((color[0] as u32) << 16)
         | ((color[1] as u32) << 8)
         | color[2] as u32;
-    if sugarloaf.image_data.contains_key(&image_id) {
+    if sugarloaf.image_data_contains(image_id) {
         return Some(image_id);
     }
 
@@ -203,7 +203,7 @@ pub fn register_provider_logo_atlas(
         pixel[3] = ((pixel[3] as u16 * color[3] as u16) / 255) as u8;
     }
     let (width, height) = image.dimensions();
-    sugarloaf.image_data.insert(
+    sugarloaf.image_data_insert(
         image_id,
         GraphicDataEntry::from_graphic_data(GraphicData {
             id: GraphicId::new(image_id as u64),
@@ -250,7 +250,7 @@ const PROVIDER_LOGO_ATLAS_BASE64: &str =
 /// host whose `BufferTabs<A>` carries no agent identity (web runs
 /// `Chrome<()>`) can't distinguish Claude/Codex/OpenCode tabs anyway —
 /// but it CAN tell a Neoism agent tab from `neoism_agent_route_id`.
-pub fn register_neoism_icon(sugarloaf: &mut Sugarloaf) -> bool {
+pub fn register_neoism_icon(sugarloaf: &mut dyn crate::primitives::paint::Paint) -> bool {
     register_icon(sugarloaf, NEOISM_IMAGE_ID, NEOISM_PNG)
 }
 
@@ -258,7 +258,7 @@ pub fn register_neoism_icon(sugarloaf: &mut Sugarloaf) -> bool {
 /// Mirrors the desktop `push_cropped_icon_overlay` call the shared
 /// buffer-tabs render makes through an `AgentIconProvider`.
 pub fn draw_neoism_tab_icon(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     x: f32,
     y: f32,
     width: f32,
@@ -283,12 +283,12 @@ pub fn draw_neoism_tab_icon(
 /// Side-panel overlays are immediate-mode on every host. Sugarloaf retains
 /// the vectors between frames, so failing to clear here grows one image per
 /// visible conversation on every repaint.
-pub fn clear_side_panel_icon_overlays(sugarloaf: &mut Sugarloaf) {
+pub fn clear_side_panel_icon_overlays(sugarloaf: &mut dyn crate::primitives::paint::Paint) {
     sugarloaf.clear_image_overlays_for(SIDE_PANEL_ICON_PANEL_ID);
 }
 
 pub fn push_icon_overlay_to_panel(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
     kind: AgentKind,
     panel_id: usize,
     x: f32,
@@ -310,7 +310,7 @@ pub fn push_icon_overlay_to_panel(
     );
 }
 
-pub fn register_agent_icons(sugarloaf: &mut Sugarloaf) -> bool {
+pub fn register_agent_icons(sugarloaf: &mut dyn crate::primitives::paint::Paint) -> bool {
     [
         (CLAUDE_IMAGE_ID, CLAUDE_PNG),
         (CODEX_IMAGE_ID, CODEX_PNG),
@@ -321,8 +321,8 @@ pub fn register_agent_icons(sugarloaf: &mut Sugarloaf) -> bool {
     .all(|(id, bytes)| register_icon(sugarloaf, id, bytes))
 }
 
-fn register_icon(sugarloaf: &mut Sugarloaf, id: u32, bytes: &[u8]) -> bool {
-    if sugarloaf.image_data.contains_key(&id) {
+fn register_icon(sugarloaf: &mut dyn crate::primitives::paint::Paint, id: u32, bytes: &[u8]) -> bool {
+    if sugarloaf.image_data_contains(id) {
         return true;
     }
     let Ok(image) = image_rs::load_from_memory(bytes) else {
@@ -342,7 +342,7 @@ fn register_icon(sugarloaf: &mut Sugarloaf, id: u32, bytes: &[u8]) -> bool {
         display_height: None,
         transmit_time: Instant::now(),
     });
-    sugarloaf.image_data.insert(id, entry);
+    sugarloaf.image_data_insert(id, entry);
     true
 }
 

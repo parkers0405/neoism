@@ -23,7 +23,7 @@ pub use neoism_ui::panels::agent_pane::icon::{
 /// Decode the embedded PNGs and upload them to sugarloaf's image
 /// store. Returns `true` once all icons are registered. Idempotent —
 /// safe to call every frame; subsequent calls return immediately.
-pub fn register_agent_icons(sugarloaf: &mut Sugarloaf) -> bool {
+pub fn register_agent_icons(sugarloaf: &mut dyn neoism_ui::primitives::paint::Paint) -> bool {
     neoism_ui::panels::agent_pane::icon::register_agent_icons(sugarloaf)
 }
 

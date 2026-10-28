@@ -222,6 +222,12 @@ pub struct TrailCursor {
 }
 
 impl TrailCursor {
+    /// The animated quad in host pixels, in TL/TR/BR/BL order. Alternate
+    /// painters consume the same spring positions as Sugarloaf's triangles.
+    pub fn quad_points(&self) -> [[f32; 2]; 4] {
+        self.corners.each_ref().map(|corner| [corner.x, corner.y])
+    }
+
     pub fn new() -> Self {
         Self {
             corners: [

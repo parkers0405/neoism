@@ -501,7 +501,7 @@ impl GitDiffView {
 
     pub(super) fn paint_block_controls(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn crate::primitives::paint::Paint,
         scale: f32,
         theme: &IdeTheme,
     ) {

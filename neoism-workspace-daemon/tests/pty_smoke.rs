@@ -22,6 +22,7 @@ async fn create_input_output_close_roundtrip() {
     std::env::set_var("SHELL", "/bin/sh");
 
     let created = registry.handle(ClientMessage::CreatePty {
+        presentation: None,
         cwd: None,
         cols: 80,
         rows: 24,

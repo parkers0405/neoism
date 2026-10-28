@@ -221,7 +221,7 @@
     {
       "id": "ctrl_shift_buffer_arrows",
       "status": "implemented_headless_verified",
-      "requirement": "Restore original Ctrl+Shift+Left/Right buffer cycling, wrap and split scope across Home/code/Markdown/Agent/tree focus; preserve Alt arrows and other modifiers."
+      "requirement": "Global Ctrl+Shift+Left/Right cycles active-pane tabs from every actual tab host, picker, modal, Agent history and pending interaction, retaining strip focus and existing overrides without shell input or lost drafts."
     },
     {
       "id": "fresh_agent_first_paint",
@@ -262,6 +262,11 @@
       "id": "modal_content_center",
       "status": "implemented_headless_verified",
       "requirement": "Center Alt+P, Alt+S, appearance/workspace/server palettes and buffer search in both axes of the available content body; react to sidebar/window/result changes while keeping native paint, inputs, pointer hits and cursor handoff aligned below all tabs."
+    },
+    {
+      "id": "sidebar_scroll_retention",
+      "status": "in_progress",
+      "requirement": "Retain independent Files/Notes/Agent sidebar scroll positions on panel switches and workspace away/back; preserve native tree state and original keyboard focus."
     }
   ],
   "verification_note": "Commits9e16544ab,d8610acb0,f56e99592 saved. Modal centering follow-up verified and packaged. Independent same-Git-surface split view state remains tracked.",
@@ -310,6 +315,7 @@
     "catalog_live": "Actual App recording renderer against running daemon: all825family+825activity events,8.22s connected, zero WS closures,39modelpublications and max1ms actual publication. Production diagnostics show connected, configured gpt-6.1-sol/high, loadingfalse and no catalog error.",
     "final_interaction_gate": "16 tests across5files,106 assertions pass; production build and FFI smoke pass.",
     "agent_streaming": "Family-wide subscriptions use exactly one owner including late switch/close replies; original native Markdown renders partial output before idle and canonical completion metadata restores original footer.",
-    "modal_centering": "25 tests across7files pass,112 assertions; actual Command/Finder/appearance native painting and pointer translation checked across sidebar-sized viewport changes, empty/filtered results and narrow resize. TypeScript and optimized release/FFI smoke pass."
+    "modal_centering": "25 tests across7files pass,112 assertions; actual Command/Finder/appearance native painting and pointer translation checked across sidebar-sized viewport changes, empty/filtered results and narrow resize. TypeScript and optimized release/FFI smoke pass.",
+    "global_buffer_chord": "Reproduced Agent picker trap before fix.24 tests across9files pass (156assertions), plus final focused rerun; actual Home/code/Markdown/Agent-home/conversation/Terminal/Extensions/Git hosts, history/picker/Finder/command inputs, pending permission, rapid strip focus and split scope. TypeScript and optimized release pass."
   }
 }

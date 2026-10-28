@@ -5,6 +5,7 @@ import { coreCall } from "../native-core";
 import { PaintLayer, type PaintCommand } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
 import { focusNativeElement } from "../native-focus";
+import {handleApplicationShortcut} from "../commands/application-shortcuts";
 
 export interface NavigatorRow { value: string; title: string; description?: string; footer?: string; current?: boolean; disabled?: boolean }
 interface NavigatorFrame { commands: PaintCommand[]; animating: boolean; active: boolean; action?: string | null }
@@ -31,6 +32,7 @@ export function ConversationNavigatorView(props: { config: AppConfig; rows: Navi
   onMount(() => { if (host) focusNativeElement(renderer, host.id); });
   onCleanup(() => { animation.dispose(); coreCall("convnav.dispose", { id }); });
   const keyDown = (event: KeyEvent) => {
+    if(handleApplicationShortcut(renderer,event))return;
     event.preventDefault(); event.stopPropagation();
     call("key", { key: event.key || "", char: event.keyChar || "", shift: !!event.modifiers?.shift, ctrl: !!event.modifiers?.ctrl });
   };

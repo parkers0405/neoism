@@ -6,6 +6,7 @@ import { PaintLayer, type PaintCommand } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
 import { focusNativeElement } from "../native-focus";
 import {useOverlayViewport,overlayPoint} from "../ui/overlay-viewport";
+import {handleApplicationShortcut} from "../commands/application-shortcuts";
 
 interface BrowserFrame { commands: PaintCommand[]; animating: boolean; active: boolean; selection?: string | null }
 
@@ -32,6 +33,7 @@ export function DirectoryBrowserView(props: { config: AppConfig; start: string; 
   onMount(() => { if (host) focusNativeElement(renderer, host.id); });
   onCleanup(() => { animation.dispose(); coreCall("dirbrowser.dispose", { id }); });
   const keyDown = (event: KeyEvent) => {
+    if(handleApplicationShortcut(renderer,event))return;
     event.preventDefault(); event.stopPropagation();
     call("key", { key: event.key || "", char: event.keyChar || "" });
   };

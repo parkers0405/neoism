@@ -10,6 +10,7 @@ import { focusNativeElement } from "../native-focus";
 import type {AgentFamilyRow} from "./family";
 import { wheelCellPixels } from "../ui/wheel";
 import {localPresenceIdentity} from "./local-presence";
+import {handleApplicationShortcut} from "../commands/application-shortcuts";
 
 interface TimelineFrame { commands: PaintCommand[]; animating: boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
 interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
@@ -79,6 +80,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   createEffect(() => { const bottom = props.contentBottom; if (bounds.width > 0) untrack(() => call("layout", { width: bounds.width, height: bounds.height, contentBottom: bottom ?? bounds.height })); });
   const local = (event: { x?: number; y?: number }) => ({ x: (event.x || 0) - bounds.x, y: (event.y || 0) - bounds.y });
   const keyDown = (event: KeyEvent) => {
+    if(handleApplicationShortcut(renderer,event))return;
     const key = event.key || "", ctrl = !!event.modifiers?.ctrl, modified = ctrl || !!event.modifiers?.alt || !!event.modifiers?.cmd;
     const handled = () => { event.preventDefault(); event.stopPropagation(); };
     if ((ctrl || event.modifiers?.cmd) && key.toLowerCase() === "c") {

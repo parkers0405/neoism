@@ -6,6 +6,7 @@ import{PaintLayer,type PaintCommand}from"../ui/PaintLayer";
 import{useOverlayViewport,overlayPoint}from"../ui/overlay-viewport";
 import{AnimationFrameScheduler,ANIMATION_FRAME_MS}from"../animation/frame-scheduler";
 import{focusNativeElement}from"../native-focus";
+import{handleApplicationShortcut}from"../commands/application-shortcuts";
 export interface GitRestoreTarget{root:string;path:string;block?:unknown}
 interface Frame{commands:PaintCommand[];active:boolean;animating:boolean;rect:number[]|null;confirmed:boolean|null;target:GitRestoreTarget}
 /** The original UniversalModal and review_actions spec. This host only returns
@@ -20,7 +21,7 @@ export function GitRestoreDialog(props:{target:GitRestoreTarget;config:AppConfig
  onMount(()=>{if(host)focusNativeElement(renderer,host.id);});onCleanup(()=>{animation.dispose();coreCall("gitconfirm.dispose",{id});});
  return <anchored fill="window" deferred priority={4} occlude={false} style={{backgroundColor:"transparent",pointerEvents:"none"}}>
   <div ref={host} testId="git-restore-confirmation" role="dialog" aria-label={props.target.block?"Restore this edit?":"Restore unstaged changes?"} tabIndex={0}
-   onKeyDown={event=>{event.preventDefault();event.stopPropagation();call("key",{key:event.key?.toLowerCase()||"",shift:!!event.modifiers?.shift});}}
+   onKeyDown={event=>{if(handleApplicationShortcut(renderer,event))return;event.preventDefault();event.stopPropagation();call("key",{key:event.key?.toLowerCase()||"",shift:!!event.modifiers?.shift});}}
    onMouseDown={event=>{if(event.button===0)call("pointer",{kind:"down",...overlayPoint(viewport(),event)});}}
    onMouseMove={event=>call("pointer",{kind:"move",...overlayPoint(viewport(),event)})}
    onMouseLeave={()=>call("pointer",{kind:"leave"})}

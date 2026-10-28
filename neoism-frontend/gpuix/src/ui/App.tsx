@@ -394,6 +394,9 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   };
   const noteContentFocus=()=>{if(chromeFocus().zone!=="content"){setChromeFocus({zone:"content"});setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}};
   const currentChromeFocus=():ChromeFocus=>{
+    // Explicit keyboard parking wins while native focus catches up. Its
+    // snapshot can still report the old content host during this keystroke.
+    const requested=chromeFocus();if(requested.zone==="buffers"||requested.zone==="workspaces")return requested;
     const owner=focusedNativeElement(renderer),workspaces=windowWorkspaces(),pane=focusedPane();
     if(workspaceNewHost?.id===owner)return {zone:"workspaces",index:workspaces.length};
     const workspaceIndex=workspaces.findIndex(workspace=>workspaceHosts.get(workspace.id)?.id===owner);if(workspaceIndex>=0)return {zone:"workspaces",index:workspaceIndex};
@@ -504,8 +507,6 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const workspaceIndex=workspaceShortcut(event);
     if(workspaceIndex!==undefined){event.preventDefault();event.stopPropagation();const workspace=windowWorkspaces()[workspaceIndex];if(workspace)void model.activateWorkspace(workspace).then(()=>focusChrome({zone:"content"})).catch(model.report);return true;}
     if(handleChromeKey(event))return true;
-    const bufferDirection=bufferTabShortcut(event);
-    if(bufferDirection){event.preventDefault();event.stopPropagation();const stripFocused=currentChromeFocus().zone==="buffers";selectTab(bufferDirection==="previous");if(stripFocused){const pane=focusedPane();focusChrome({zone:"buffers",index:Math.max(0,pane?.tabs.findIndex(tab=>tab.leaf===pane.leaf)??0)});}return true;}
     let action: string | undefined;
     if (alt && !ctrl && !shift && key === "d") {event.preventDefault();event.stopPropagation();chooseStatusDirectory();return true;}
     if (alt && shift && !ctrl && key === "space") action = "ToggleViMode";
@@ -524,10 +525,22 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     event.preventDefault(); event.stopPropagation(); if (action) dispatchCommand({ action }); return true;
   };
   const handleSurfaceKey = (event: KeyEvent) => { try { return handleApplicationShortcut(renderer,event) || handleCustomKey(event) || handleApplicationKey(event); } catch (error) { model.report(error); return true; } };
-  onCleanup(registerApplicationShortcuts(renderer,action=>{
+  onCleanup(registerApplicationShortcuts(renderer,(action,event)=>{
     if(action==="zoom-in"||action==="zoom-out"){
       if(chromeFrame()?.kind==="settings")model.setUI({chromeAction:"OpenSettings",chromeSnapshot:chromeFrame()?.snapshot});
       if(props.onZoomFont)void Promise.resolve(props.onZoomFont(action==="zoom-in"?1:-1)).catch(model.report);
+      return;
+    }
+    if(action==="previous-buffer"||action==="next-buffer"){
+      if(handleCustomKey(event))return;
+      const stripFocused=chromeFocus().zone==="buffers";
+      // Leave questions/permissions pending in their conversation. Navigation
+      // dismisses only transient controls; it never answers or rejects them.
+      setChoice(undefined);setMenu(false);setProjectPicker(undefined);const directory=directoryBrowser();setDirectoryBrowser(undefined);directory?.resolve(undefined);if(gitRestore())finishGitRestore(false);
+      if(palette())closePalette();const previous=commands();setCommands(undefined);previous?.dispose();commandFocus=undefined;chromeActions.close();
+      if(!stripFocused){setChromeFocus({zone:"content"});setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}
+      selectTab(action==="previous-buffer");
+      if(stripFocused){const pane=focusedPane();focusChrome({zone:"buffers",index:Math.max(0,pane?.tabs.findIndex(tab=>tab.leaf===pane.leaf)??0)});}
       return;
     }
     // Dismiss transient UI without replying to pending Agent interactions or

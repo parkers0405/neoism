@@ -77,6 +77,13 @@ try{
  snapshot=host.snapshots.at(-1)!;
  const shell=tagged(snapshot,"app-shell")!.id,wallpaper=tagged(snapshot,"app-wallpaper")!.id;
  const nativeWordmark=visuals.wordmarks.acquire(context,"splash");visuals.wordmarks.release(context);coreCall("wordmark.cancel",{id:nativeWordmark});
+ // A random startup intro may deliberately hide every tile at progress zero.
+ // Cancelling the native engine does not replace the canvas already recorded
+ // by Solid. Paint the settled state through the real event/frame path before
+ // checking that subsequent font generations never publish an empty logo.
+ root.dispatch({elementId:tagged(snapshot,"splash-wordmark")!.id,eventType:"mouseLeave"});
+ const settledFrame=[...callbacks];callbacks.clear();for(const callback of settledFrame)callback();
+ await Promise.resolve();root.flush();snapshot=host.snapshots.at(-1)!;
  const check=(frame:Snapshot)=>{
   assert.equal(frame.root,shell);assert.equal(tagged(frame,"app-shell")?.id,shell);assert.equal(tagged(frame,"app-wallpaper")?.id,wallpaper);
   assert.equal(tagged(frame,"app-wallpaper")?.props.src,"/fixture/persistent-wallpaper.png");

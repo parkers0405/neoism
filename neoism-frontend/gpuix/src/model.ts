@@ -10,7 +10,9 @@ import { closeTerminalSession, disposeTerminalSessions,onTerminalUnavailable,ter
 import { absoluteTerminalDirectory,mainTerminalSurface,followsTerminalDirectory } from "./terminal/workspace";
 import { localDaemon } from "./menu-actions/web-frontend";
 import {getWindowWorkspaces,includeWindowWorkspace,openWorkspaceIds,reorderWindowWorkspace} from "./workspaces/window-tabs";
-import { AgentSdk, sdkModel, sdkPrompt } from "./daemon/sdk";
+import { AgentSdk, sdkModel, sdkPrompt,sdkThread } from "./daemon/sdk";
+import {catalogThread} from "./agent/catalog-session";
+import {catalogAgentMessage} from "./agent/catalog-event";
 import {agentFamily,agentFamilyRoot,noteAgentFamily} from "./agent/family";
 import type { GitReviewDescriptor } from "./git/GitReviewController";
 import { DirectorySchema, FileSchema, HistoryMessageSchema, ThreadSchema, TreeSchema, WorkspaceSchema,
@@ -215,7 +217,7 @@ export class WorkspaceModel {
       else this.epoch++;
     }));
   }
-  dispose(preserveEditors = false) { clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
+  dispose(preserveEditors = false) { this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
   getLayout(workspaceId = this.state.activeWorkspace?.id): WorkspaceLayout {
     if (!workspaceId) throw new Error("Select a workspace first");
     let layout = this.layouts.get(workspaceId);
@@ -497,6 +499,8 @@ export class WorkspaceModel {
     // websocket subscription and any old terminal binding acknowledgements.
     // A slow subscription must not leave a usable empty Agent on placeholders.
     void this.refreshCatalogs();
+    void this.refreshThreadCatalog(workspace,epoch);
+    if(this.requestedAgentCatalogScopes.has(workspace.id))this.ensureAgentCatalogStream(workspace.id,this.requestedAgentCatalogScopes.get(workspace.id));
     // File/directory operations carry explicit roots and need not wait for the
     // workspace subscription acknowledgement. Cached navigation stays visible.
     const subscribed = this.run(this.client.request("Workspace", { SubscribeWorkspace: { workspace_id: workspace.id } }));
@@ -516,7 +520,6 @@ export class WorkspaceModel {
       await this.bindPendingTerminals(workspace.id);
       if(epoch!==this.epoch)return;
       this.ensureWelcome({select:!this.state.activeSurfaceId});
-      this.client.send("Agent", { ListThreads: { directory: workspace.root_dir ?? null, limit: 50, cursor: null } });
       await listing;
       this.followMainTerminal();
     } catch (error) { if (epoch === this.epoch) this.report(error); }
@@ -881,7 +884,43 @@ export class WorkspaceModel {
     this.sendAgent({ GetHistory: { session_id: sessionId, cursor: null, limit: 200 } });
     this.sendAgent({ ResumeStream: { session_id: sessionId } });
   }
+  private requestedAgentCatalogScopes=new Map<string,string|undefined>();
+  private agentCatalogStream?:{workspaceId:string;directory?:string;abort:AbortController};
+  private ensureAgentCatalogStream(workspaceId:string,directory?:string){
+    // All-project discovery already covers narrower page reads in this window.
+    if(this.requestedAgentCatalogScopes.has(workspaceId)&&this.requestedAgentCatalogScopes.get(workspaceId)===undefined)directory=undefined;
+    this.requestedAgentCatalogScopes.set(workspaceId,directory);
+    const previous=this.agentCatalogStream;
+    if(previous?.workspaceId===workspaceId&&previous.directory===directory&&!previous.abort.signal.aborted)return;
+    previous?.abort.abort();const stream={workspaceId,directory,abort:new AbortController()};this.agentCatalogStream=stream;
+    void(async()=>{try{
+      for await(const event of this.agentSdk.catalogEvents(workspaceId,{directory,signal:stream.abort.signal,onReset:()=>{if(this.agentCatalogStream===stream&&!this.disposed)this.enqueueReceive({family:"Agent",requestId:0,message:{CatalogReset:{directory:directory??null}}});}})){
+        if(this.disposed||this.agentCatalogStream!==stream)break;
+        const message=catalogAgentMessage(event);if(message)this.enqueueReceive({family:"Agent",requestId:0,message});
+      }
+    }catch(error){if(!this.disposed&&!stream.abort.signal.aborted&&this.agentCatalogStream===stream)this.report(error);}finally{if(this.agentCatalogStream===stream)this.agentCatalogStream=undefined;}})();
+  }
+  private catalogRead=(message:AgentClientMessage):boolean=>{
+    const pair=variant(message),workspace=this.state.activeWorkspace;if(!pair||!workspace||!isRecord(pair[1]))return false;
+    const[kind,body]=pair;if(!["ListThreads","ListSessionProjects","ListProjectSessions"].includes(kind))return false;
+    const directory=typeof body.directory==="string"&&body.directory?body.directory:undefined;
+    if(kind!=="ListProjectSessions")this.ensureAgentCatalogStream(workspace.id,directory);
+    const emit=(message:unknown)=>{if(!this.disposed)this.enqueueReceive({family:"Agent",requestId:0,message});};
+    void(async()=>{try{
+      if(kind==="ListSessionProjects"){
+        const result=await this.agentSdk.catalogProjects(workspace.id);
+        emit({SessionProjects:{catalog_identity:body.catalog_identity,generation:body.generation,items:result.items,pinnedSessions:result.pinnedSessions}});
+      }else{
+        const page=await this.agentSdk.catalogSessions(workspace.id,{directory,roots:true,limit:kind==="ListProjectSessions"?5:typeof body.limit==="number"?body.limit:50,cursor:typeof body.cursor==="string"?body.cursor:undefined});
+        const fields={threads:page.items.map(catalogThread),requested_cursor:body.cursor??null,next_cursor:page.cursor?.next??null};
+        emit(kind==="ListThreads"?{ThreadList:fields}:{ProjectSessionPage:{...fields,catalog_identity:body.catalog_identity,directory,generation:body.generation}});
+      }
+    }catch(error){if(this.disposed)return;const fields={message:error instanceof Error?error.message:"Catalog unavailable"};
+      emit(kind==="ListSessionProjects"?{SessionProjectsFailed:{...fields,catalog_identity:body.catalog_identity,generation:body.generation}}:kind==="ListProjectSessions"?{ProjectSessionPageFailed:{...fields,catalog_identity:body.catalog_identity,directory,requested_cursor:body.cursor??null,generation:body.generation}}:{ThreadListFailed:fields});
+    }})();return true;
+  };
   sendAgent = (message: AgentClientMessage) => {
+    if(this.catalogRead(message))return;
     try { this.client.send("Agent", message); } catch (error) { this.report(error); }
   };
   selection = (sessionId?: string): ProviderState => {
@@ -928,6 +967,16 @@ export class WorkspaceModel {
     this.sessionWorkspaces.set(sessionId, workspaceId);
     return this.agentSdk.forWorkspace(workspaceId);
   }
+  /** Plain SDK list does not create a second catalog SSE subscription. The
+   * visible original sidebar owns its directory/all-projects live catalog. */
+  private refreshThreadCatalog=async(workspace:Workspace,epoch:number)=>{
+    try{
+      const page=await this.run(Effect.tryPromise({try:()=>this.agentSdk.catalogSessions(workspace.id,{directory:workspace.root_dir||undefined,roots:true,limit:50}),catch:error=>error}));
+      if(epoch!==this.epoch||this.state.activeWorkspace?.id!==workspace.id)return;
+      const threads=Schema.decodeUnknownSync(Schema.Array(ThreadSchema))(page.items.map(sdkThread)).filter(thread=>thread.directory===workspace.root_dir);
+      this.update({threads});
+    }catch(error){if(epoch===this.epoch)this.report(error);}
+  };
   refreshCatalogs = async () => {
     const epoch = this.epoch, workspace = this.state.activeWorkspace;
     if (!workspace) return;
@@ -1109,6 +1158,7 @@ export class WorkspaceModel {
     if (workspaceId) this.addSurface({ id: `terminal:${sessionId}`, kind: "terminal", title: "Terminal", sessionId, workspaceId });
   };
   private agentFamilyWatermarks=new Map<string,unknown>();
+  private catalogResetSeen=false;
   private incomingAgentEvents:WireEvent[]=[];
   private incomingAgentHead=0;
   private incomingAgentTimer?:ReturnType<typeof setTimeout>;
@@ -1154,7 +1204,8 @@ export class WorkspaceModel {
     if(event.family==="Agent"){
       const current=this.state.ui,snapshot=isRecord(body.snapshot)?body.snapshot:{};
       const key=tag==="CatalogFamily"||tag==="RuntimeSnapshot"?`${String(snapshot.rootSessionId||body.session_id||"")}:${tag}`:undefined;
-      const saved=isRecord(current.agentFamilyVersions)?current.agentFamilyVersions:{};
+      if(tag==="CatalogReset"){this.agentFamilyWatermarks.clear();this.catalogResetSeen=true;}
+      const saved=!this.catalogResetSeen&&isRecord(current.agentFamilyVersions)?current.agentFamilyVersions:{};
       const ui=noteAgentFamily({...current,agentFamilyVersions:key?{[key]:this.agentFamilyWatermarks.get(key)??saved[key]}:{}},event.message);
       if(ui){
         if(key&&isRecord(ui.agentFamilyVersions)&&ui.agentFamilyVersions[key]!==undefined)this.agentFamilyWatermarks.set(key,ui.agentFamilyVersions[key]);

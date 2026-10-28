@@ -694,7 +694,8 @@ pub fn dispatch_panel(v: &Value) -> Option<Result<Value, String>> {
             "agentsidepanel.focus"=>{
                 let focused=v["focused"].as_bool().unwrap_or(true);
                 panel.pane.side_panel_mut().set_focused(focused);
-                if focused&&panel.pane.side_panel().sessions().is_empty(){panel.pane.side_panel_mut().select_new_chat();}
+                let side=panel.pane.side_panel();
+                if focused&&side.sessions().is_empty()&&!side.new_chat_selected()&&side.selected_header_action().is_none(){panel.pane.side_panel_mut().select_new_chat();}
                 Ok(panel_frame(panel))
             }
             "agentsidepanel.key"=>{

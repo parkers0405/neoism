@@ -15,3 +15,19 @@ test("original Agent sidebar keyboard traverses New Chat, Search, Projects and r
   expect(call("focus",{focused:false}).cursor).toBeNull();expect(call("focus",{focused:true}).selected).toBe("row:two");expect(call("key",{key:"escape"}).result?.action).toBe("focus-content");
  }finally{call("dispose");}
 });
+test("loading Agent catalog preserves Search and Projects keyboard selection across native focus callbacks and reset",()=>{
+ const{id}=coreCall<{id:number}>("agentsidepanel.new",{directory:"/project/a",theme:"pastel_dark",scale:1,fontFamily:"Cascadia Code NF"});
+ const call=(op:string,args:Record<string,unknown>={})=>coreCall<Frame>(`agentsidepanel.${op}`,{id,...args});
+ try{
+  call("frame",{width:300,height:650});expect(call("focus",{focused:true}).selected).toBe("new-chat");
+  for(const selected of ["search","projects"]){
+   expect(call("key",{key:"down"}).selected).toBe(selected);
+   expect(call("focus",{focused:true}).selected).toBe(selected);
+   call("focus",{focused:false});
+   expect(call("focus",{focused:true}).selected).toBe(selected);
+   call("event",{message:{CatalogReset:{directory:"/project/a"}}});
+   expect(call("focus",{focused:true}).selected).toBe(selected);
+   const frame=call("key",{key:"enter"});expect(frame.result?.action).toBe(selected);expect(frame.cursor?.every(Number.isFinite)).toBe(true);
+  }
+ }finally{call("dispose");}
+});

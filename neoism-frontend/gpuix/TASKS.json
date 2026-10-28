@@ -200,8 +200,8 @@
     },
     {
       "id": "daemon_offline_git_flicker",
-      "status": "in_progress",
-      "requirement": "Diagnose and fix actual connection instability causing terminal Daemon is offline errors and Git status reset/reload; preserve same-root last good status across transport gaps."
+      "status": "implemented_headless_and_live_verified",
+      "requirement": "Use SDK HTTP/SSE catalog reads with authorized master read capability for legacy host catalogs and paired-workspace confinement; preserve original native panels and complete catalog without overflowing daemon WS queue. Shared read-only per-root Git watches and cache prevent subscription replacement/transport flicker."
     },
     {
       "id": "git_panel_top_gap",
@@ -217,9 +217,29 @@
       "id": "home_tab_name_icon",
       "status": "implemented_headless_verified",
       "requirement": "Home title and home glyph in regular tabs and drag previews, compatible saved welcome IDs/kind and Home creation/recovery."
+    },
+    {
+      "id": "ctrl_shift_buffer_arrows",
+      "status": "in_progress",
+      "requirement": "Restore original Ctrl+Shift+Left/Right buffer cycling, wrap and split scope across Home/code/Markdown/Agent/tree focus; preserve Alt arrows and other modifiers."
+    },
+    {
+      "id": "fresh_agent_first_paint",
+      "status": "in_progress",
+      "requirement": "Alt+A fresh Agent input/logo paint at correct canonical pane bounds in first transaction, without waiting on layout; preserve independent drafts and original startup animation."
+    },
+    {
+      "id": "tab_row_scroll",
+      "status": "in_progress",
+      "requirement": "Wheel/trackpad while hovering either buffer/workspace strip scrolls that row horizontally with natural direction, bounds and no content bubbling."
+    },
+    {
+      "id": "tab_title_hover_scroll",
+      "status": "in_progress",
+      "requirement": "Clipped long tab titles animate through their text on hover with original Agent-sidebar marquee behavior; retain tab/close geometry and reduced motion."
     }
   ],
-  "verification_note": "Checkpoint requested by user. Home labels/icons, workspace-specific sidebars, folder-picker entry points, early SDK defaults and shared read-only Git watches are implemented with targeted checks and clean TypeScript. Live catalog startup disconnect remains under investigation; event batching/private family watermarks reduce publication work but have not yet eliminated live WS1006.",
+  "verification_note": "Checkpoint9e16544ab saved. SDK HTTP/SSE catalog fix live-verified with full825family+825activity baseline, zero WS closes for8.22s, correct configured model in running production. Follow-up checks underway for new AltA firstpaint/tab scrolling/title hover requests.",
   "verification": {
     "frontend_tests": {
       "passed": 378,
@@ -249,11 +269,11 @@
     "full_git_app": "passed actual App: status pill, original panel, working singleton, unified/split, explicit restore confirmation, canonical live edits/save, retained zoom draft/controller, commit/PR routes; isolated daemon fixture only",
     "final_focus_gate": "4 passed after pointer focus correction",
     "user_preview": {
-      "pid": 2625880,
-      "log": "/tmp/neoism-gpuix-agent-fixes-20261028-125754.log",
+      "pid": 2717246,
+      "log": "/tmp/neoism-gpuix-catalog-fixes-20261028-135452.log",
       "executable": "/home/parkersettle/projects/neoism/neoism-frontend/gpuix/dist/neoism-gpuix",
       "mapped": true,
-      "title": "ktblack-main-api \u2014 Neoism GPUIX",
+      "title": "neoism \u2014 Neoism GPUIX",
       "startup_errors": false
     },
     "agent_workspace_paint": "Actual App A\u2192B\u2192A: every first return batch contains input/draft/logo/sidebar before layout; stable same-workspace record hosts; cached native composer reused, sidebar glyphs never dropped/reuploaded, closed composer disposed.",
@@ -261,6 +281,7 @@
     "agent_chip_and_status_animation": "Original Rust colored glyph scramble, Build/Plan accents, loading/settling clocks, reduced motion, retained ready remount with no texture churn; original bottom Normal/Insert/Agent display-driven320ms mode transition verified.",
     "preview_frontend_reload_for_agent_fixes": 1,
     "daemon_restarts": 0,
-    "checkpoint_gates": "Current source TypeScript clean; targeted Agent/model batch14tests/181 assertions; Git/status22tests/131 assertions; Home12tests/134 assertions; workspace sidebar3tests; folder modal1test pass."
+    "checkpoint_gates": "Current source TypeScript clean; targeted Agent/model batch14tests/181 assertions; Git/status22tests/131 assertions; Home12tests/134 assertions; workspace sidebar3tests; folder modal1test pass.",
+    "catalog_live": "Actual App recording renderer against running daemon: all825family+825activity events,8.22s connected, zero WS closures,39modelpublications and max1ms actual publication. Production diagnostics show connected, configured gpt-6.1-sol/high, loadingfalse and no catalog error."
   }
 }

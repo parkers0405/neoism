@@ -78,7 +78,7 @@ test("joined host cwd never rebases Explorer and invalid cwd observations are ig
 test("legacy daemon cannot silently create a hidden-prompt grid shell or close an existing session",async()=>{
  const {daemon,model,close}=await fixture({gridPresentation:false},false);
  try{
-  const welcome=model.state.surfaces.find(surface=>surface.title==="Welcome")!;expect(welcome).toBeDefined();
+  const welcome=model.state.surfaces.find(surface=>surface.kind==="welcome")!;expect(welcome).toBeDefined();expect(welcome.title).toBe("Home");
   model.openTerminal("existing-session");await model.newTerminal();
   expect(model.state.error).toContain("updated daemon");expect(model.state.surfaces.filter(surface=>surface.kind==="terminal").map(surface=>surface.sessionId)).toEqual(["existing-session"]);
   expect(model.state.surfaces.find(surface=>surface.id===welcome.id)).toBe(welcome);

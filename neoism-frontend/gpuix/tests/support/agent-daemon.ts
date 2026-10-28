@@ -2,7 +2,7 @@ import type { ServerWebSocket } from "bun";
 import { applyEdits, modify, parse } from "jsonc-parser";
 // An isolated protocol fixture used only by tests. The production frontend has
 // no fixture mode and connects through the same daemon transport in every test.
-export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;deferWorkspaceSubscriptions?:boolean } = {}) {
+export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
   const workspaces = [{ id: "a", host_id: "host", title: "A", root_dir: "/project/a" }, { id: "b", host_id: "host", title: "B", root_dir: "/project/b" }];
   const threads = [{ session_id: "one", title: "One", directory: "/project/a", agent: "build", model: "openai/base" }, { session_id: "two", title: "Two", directory: "/project/a", agent: "plan", model: "other/second" }];
   const requests: Array<{ tag: string; body: Record<string, unknown> }> = [];
@@ -32,6 +32,9 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
   };
   const pushPty=(message:unknown)=>broadcast("Pty",message);
   const pushWorkspace=(message:unknown)=>broadcast("Workspace",message);
+  const catalogStreams=new Map<ReadableStreamDefaultController<Uint8Array>,string|undefined>();
+  const catalogInScope=(event:unknown,directory?:string)=>{if(!directory||!event||typeof event!=="object")return true;const data=(event as {data?:any;properties?:any}).data||(event as {properties?:any}).properties;const scope=data?.snapshot?.directory||data?.info?.directory;return !scope||scope===directory;};
+  const pushCatalog=(event:unknown)=>{const bytes=new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);for(const[stream,directory]of catalogStreams)if(catalogInScope(event,directory)){try{stream.enqueue(bytes);}catch{catalogStreams.delete(stream);}}};
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0,
     fetch: async (request, server) => {
       const url = new URL(request.url);
@@ -40,6 +43,13 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
       const match = url.pathname.match(/^\/agent\/workspaces\/([^/]+)\/v2\/(.*)$/);
       if (!match) return new Response("Not found", { status: 404 });
       if(!workspaces.some(workspace=>workspace.id===match[1]))return new Response("Unknown workspace",{status:404});
+      if(match[2]==="session-catalog/events"){
+        const directory=url.searchParams.get("directory")||undefined;
+        let controller:ReadableStreamDefaultController<Uint8Array>|undefined;
+        const stream=new ReadableStream<Uint8Array>({start(value){controller=value;catalogStreams.set(value,directory);for(const event of config.agentCatalogEvents||[])if(catalogInScope(event,directory))value.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));},cancel(){if(controller)catalogStreams.delete(controller);}});
+        return new Response(stream,{headers:{"content-type":"text/event-stream","cache-control":"no-cache"}});
+      }
+      if(match[2]==="session-projects")return Response.json({items:[...new Set(threads.map(thread=>thread.directory))].map((directory,index)=>({directory,updatedMs:100-index})),pinnedSessions:[]});
       if(match[2]==="config/defaults"){const delay=config.agentDefaultsDelayMs?.[match[1]];if(delay)await Bun.sleep(delay);return Response.json(config.agentConfigDefaults?.[match[1]]||{defaultAgent:null,model:null,variant:null});}
       if (match[2] === "providers/configured") return Response.json(config.agentProviderCatalog||{ default: {}, providers: [{ id: "openai", name: "OpenAI", models: {
         base: { id: "base", name: "Base", limit: { context: 128000 } }, advanced: { id: "advanced", name: "Advanced", limit: { context: 256000 } },
@@ -55,6 +65,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
           model: { providerId: selection.model.slice(0, slash), id: selection.model.slice(slash + 1), variant: selection.thinking } };
       };
       const payload = request.method === "POST" || request.method === "PATCH" ? await request.json().catch(() => ({})) : {};
+      if(match[2]==="sessions"&&request.method==="GET")return Response.json({items:threads.filter(thread=>!url.searchParams.get("directory")||thread.directory===url.searchParams.get("directory")).map(thread=>{const selected=selections.get(thread.session_id)||thread,model=selected.model?.split("/");return{id:thread.session_id,title:thread.title,directory:thread.directory,agent:selected.agent,...(model&&model.length>1?{model:{providerId:model[0],id:model.slice(1).join("/")}}:{})};}),cursor:{}});
       if (match[2] === "sessions" && request.method === "POST") {
         const complete = () => Response.json(session("created-a"));
         requests.push({ tag: "CreateThread", body: { directory: workspace.root_dir, ...payload } });
@@ -217,6 +228,6 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
       },
     },
   });
-  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,workspaceSubscriptions,directoryChanges, push,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
-    mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => server.stop(true) };
+  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
+    mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);} };
 }

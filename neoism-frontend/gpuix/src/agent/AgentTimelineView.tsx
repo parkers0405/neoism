@@ -9,6 +9,7 @@ import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-
 import { focusNativeElement } from "../native-focus";
 import type {AgentFamilyRow} from "./family";
 import { wheelCellPixels } from "../ui/wheel";
+import {localPresenceIdentity} from "./local-presence";
 
 interface TimelineFrame { commands: PaintCommand[]; animating: boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
 interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
@@ -23,7 +24,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   if (!byModel) { byModel = new Map(); engines.set(model, byModel); }
   const existing = byModel.get(rootSessionId); if (existing) return existing;
   const { id } = coreCall<{ id: number }>("agenttimeline.new", { sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
-    fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight });
+    fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight,localName:localPresenceIdentity(config).displayName });
   const family=model.agentFamily(sessionId);
   coreCall("agenttimeline.family",{id,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});
   const dirty = new Set<() => void>();
@@ -46,6 +47,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   /** Composer top in pane coordinates: layout ends here, paint continues under the floating island (desktop `render_chat`). */
   contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
+  const localName=localPresenceIdentity(config).displayName;
   const engine = untrack(() => engineFor(props.model, props.sessionId, config,props.rootSessionId||props.sessionId));
   const [commands, setCommands] = createSignal<readonly PaintCommand[]>([]);
   const [header,setHeader]=createSignal<NonNullable<TimelineFrame["header"]>>([]);
@@ -65,7 +67,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   };
   const call = (op: string, args: Record<string, unknown> = {}) => {
     startedAt = performance.now(); animation.cancel();
-    try { apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id, ...args })); } catch (error) { props.report(error); }
+    try { apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id,...(op==="layout"?{localName}:{}), ...args })); } catch (error) { props.report(error); }
   };
   // One paint per display frame however many events or animations arrive.
   const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame"); }, startedAt); };

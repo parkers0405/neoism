@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack, useContext, type Accessor, type JSX } from "solid-js";
 import { GenerationRetiring } from "../ui/AppGeneration";
-import { motion, type EventPayload, type StyleDesc, type HostElement } from "@gpuix/solid";
+import { motion, useGpuixRequired, type EventPayload, type StyleDesc, type HostElement } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { dimensions as d, namedIcons, extensionIcons } from "../design/generated";
 import { WorkspaceLayout, type DropPreview, type LayoutDivider, type LayoutPane, type LayoutTab } from "./WorkspaceLayout";
@@ -9,6 +9,8 @@ import neoismIcon from "../../../shared/assets/icons/neoism.png" with { type: "f
 import { readFileSync } from "node:fs";
 import { easeOutCubicBezier } from "../design/animation";
 import { paneHostKey } from "./pane-host";
+import { HoverTabTitle } from "./HoverTabTitle";
+import { verticalTabScroll,consumeTabScroll } from "./tab-scroll";
 import { TabSlide } from "./tab-slide";
 
 const sameTab = (a: LayoutTab, b: LayoutTab) => a.leaf === b.leaf && a.surfaceId === b.surfaceId && a.title === b.title && a.kind === b.kind;
@@ -52,7 +54,7 @@ export function PaneLayoutView(props: {
     if (lastPaneArea?.scale === scale && !untrack(retiring)) controller.layout(lastPaneArea.width, lastPaneArea.height, scale);
     setFrame(controller.frame); onCleanup(controller.subscribe(next => { if (!untrack(retiring)) setFrame(next); }));
   });
-  const config = props.config, s = config.scale, c = config.theme;
+  const config = props.config, s = config.scale, c = config.theme,renderer=useGpuixRequired();
   const chrome = tabChrome(s).buffer;
   const paneCount = createMemo(() => frame().panes.length);
   const paneHosts = createMemo(() => { const next=frame();return new Map(next.panes.map(pane=>[paneHostKey(next,pane),pane])); });
@@ -129,7 +131,7 @@ export function PaneLayoutView(props: {
     const paneFocused=createMemo(()=>pane().focused);
     const [bodyBounds,setBodyBounds]=createSignal<{x:number;y:number;width:number;height:number}>();
     createEffect(()=>{const bounds=bodyBounds();if(paneFocused()&&bounds)props.onContentBounds?.(bounds);});
-    const widths=new Map<number,number>();let scrollX=0;
+    const widths=new Map<number,number>();let scrollX=0,scrollHost:HostElement|undefined;
     const [widthRevision,setWidthRevision]=createSignal(0),[slideRevision,setSlideRevision]=createSignal(0);
     const slide=new TabSlide<number>({reducedMotion:config.reducedMotion,onChange:()=>setSlideRevision(value=>value+1)});
     strips.set(p.hostKey,{pane,widths,scroll:()=>scrollX,slide});onCleanup(()=>{strips.delete(p.hostKey);slide.dispose();});
@@ -187,8 +189,7 @@ export function PaneLayoutView(props: {
           style={{ ...text, position: "absolute", left: chrome.padding, top: 0, lineHeight: chrome.height, fontFamily: config.iconFontFamily, fontSize: chrome.iconSize, color: selected() ? icon().color : inactiveTabIcon(icon().color) }}>{icon().glyph}</text>}>
           <img ref={image} testId={`pane-tab-icon:${t.leaf}`} objectFit="contain" alt="Neoism" style={{ position: "absolute", left: chrome.padding, top: (chrome.height - chrome.iconSize) / 2, width: chrome.iconSize, height: chrome.iconSize, pointerEvents: "none" }} />
         </Show>
-        <text style={{ ...text, position: "absolute", left: chrome.padding + geometry().iconWidth + chrome.iconGap, top: 0, lineHeight: chrome.height, width: geometry().titleWidth,
-          color: selected() ? c.fg : c.muted, textOverflow: "ellipsis" }}>{tab().title}</text>
+        <div style={{position:"absolute",left:chrome.padding+geometry().iconWidth+chrome.iconGap,top:0,pointerEvents:"none"}}><HoverTabTitle label={tab().title} width={geometry().titleWidth} naturalWidth={titleWidth()} height={chrome.height} scale={s} hovered={hovered()} reducedMotion={config.reducedMotion} style={{...text,lineHeight:chrome.height,color:selected()?c.fg:c.muted}}/></div>
         <div role="button" aria-label={`Close ${tab().title}`} testId={`pane-close:${t.leaf}`}
           onMouseEnter={() => setCloseHovered(true)} onMouseLeave={() => setCloseHovered(false)}
           onMouseDown={() => { suppressTabPress=true;queueMicrotask(()=>{suppressTabPress=false;});armed = undefined; const id = tab().surfaceId; if (id) props.onClose(id, t.leaf); }}
@@ -207,7 +208,7 @@ export function PaneLayoutView(props: {
       <div role="tablist" aria-label="Pane tabs" testId={`pane-tabs:${pane().leaf}`}
         style={{ position:"relative", height: chrome.height, flexShrink: 0, backgroundColor: c.surface, overflow: "hidden", minWidth: 0,
           borderTopLeftRadius: 6 * s, borderTopRightRadius: 6 * s, borderBottomWidth: 1, borderColor: c.border }}>
-        <div testId={`pane-tab-scroll:${pane().leaf}`} onScrollChange={event=>{scrollX=event.scrollX||0;const active=drag();if(active?.kind==="tab"&&pane().tabs.some(tab=>tab.leaf===active.leaf))slide.move(dragPoint().x-origin().x-pane().rect[0]-(paneCount()>1?s:0)-scrollX);props.onTabScroll?.();}} style={{...row,position:"absolute",left:0,top:0,right:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
+        <div ref={host=>scrollHost=host} testId={`pane-tab-scroll:${pane().leaf}`} onScroll={event=>{consumeTabScroll(event);const content=pane().tabs.reduce((sum,tab)=>sum+(widths.get(tab.leaf)||tabGeometry.get(tab.leaf)?.width||chrome.width),0)+(props.onNewWelcome?chrome.newWidth:0);const next=verticalTabScroll(event,scrollX,Math.max(0,pane().rect[2]-(paneCount()>1?2*s:0)),content);if(next!==undefined&&next!==scrollX&&scrollHost){consumeTabScroll(event,true);scrollX=next;renderer.scrollTo?.(scrollHost.id,next,0);props.onTabScroll?.();}}} onScrollChange={event=>{scrollX=event.scrollX||0;const active=drag();if(active?.kind==="tab"&&pane().tabs.some(tab=>tab.leaf===active.leaf))slide.move(dragPoint().x-origin().x-pane().rect[0]-(paneCount()>1?s:0)-scrollX);props.onTabScroll?.();}} style={{...row,position:"absolute",left:0,top:0,right:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
           <For each={tabIds()}>{(leaf) => <Tab leaf={leaf} />}</For>
           <Show when={props.onNewWelcome}><div ref={host=>{newTabHost=host;}} tabIndex={0} role="button" testId={`pane-new-welcome:${pane().leaf}`} aria-label="New Home" data-keyboard-focused={props.keyboardNewPane===pane().leaf} onClick={() => { focus(pane().leaf); props.onNewWelcome?.(pane().leaf); }}
             onLayout={event=>props.onNewLayout?.(pane().leaf,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0})}

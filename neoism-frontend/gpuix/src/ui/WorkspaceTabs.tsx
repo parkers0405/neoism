@@ -1,5 +1,5 @@
 import {createEffect,createMemo,createSignal,For,onCleanup,Show,untrack} from "solid-js";
-import {motion,useGpuixRequired,type EventPayload,type HostElement} from "@gpuix/solid";
+import {motion,useGpuixRequired,createWindowSize,type EventPayload,type HostElement} from "@gpuix/solid";
 import type {AppConfig} from "../config";
 import type {Workspace} from "../daemon/protocol";
 import {tabChrome,rgba,workspaceLabel} from "../layout/tab-chrome";
@@ -7,6 +7,8 @@ import {easeOutCubicBezier} from "../design/animation";
 import {paintedChromeBounds,type ChromeBounds} from "./chrome-target-bounds";
 import {AnimationFrameScheduler} from "../animation/frame-scheduler";
 import {workspaceDropTarget,type WorkspaceDropTarget} from "../workspaces/drag-target";
+import {HoverTabTitle} from "../layout/HoverTabTitle";
+import {verticalTabScroll,consumeTabScroll} from "../layout/tab-scroll";
 import {TabSlide} from "../layout/tab-slide";
 
 /** Window-owned workspace tabs size to their titles and share one horizontal strip with their add button. */
@@ -21,6 +23,7 @@ export function WorkspaceTabs(props:{
  const c=props.config.theme,s=props.config.scale,spec=tabChrome(s),chrome=spec.workspace;
  const row={display:"flex" as const,flexDirection:"row" as const,alignItems:"center" as const};
  const text={fontFamily:props.config.fontFamily,fontWeight:props.config.fontWeight,fontSize:chrome.titleFontSize,color:c.fg,whiteSpace:"nowrap" as const,pointerEvents:"none" as const,userSelect:"none" as const};
+ const windowSize=createWindowSize(),[viewportWidth,setViewportWidth]=createSignal(0);
  const renderer=useGpuixRequired(),hosts=new Map<string,HostElement>(),pointerFrames=new AnimationFrameScheduler(1000/60);
  const [drag,setDrag]=createSignal<string>(),[drop,setDrop]=createSignal<WorkspaceDropTarget>();
  const [slideRevision,setSlideRevision]=createSignal(0),[widthRevision,setWidthRevision]=createSignal(0);
@@ -59,6 +62,8 @@ export function WorkspaceTabs(props:{
   const title=createMemo(()=>workspaceLabel(workspace().title,workspace().root_dir));
   const selected=()=>props.activeId===p.id;
   const [hovered,setHovered]=createSignal(false),[closeHovered,setCloseHovered]=createSignal(false);
+  const [titleWidth,setTitleWidth]=createSignal([...title()].length*chrome.titleFontSize*.6);
+  const titleBudget=()=>Math.min(titleWidth(),Math.max(24*s,(viewportWidth()||windowSize().width)-chrome.tabPaddingX-(9*s+spec.buffer.closeHitSize/2+spec.buffer.padding)-9*s-12*s-spec.buffer.newWidth));
   let closingClick=false,closePressed=false;
   const close=(event?:EventPayload)=>{if(event?.button!==undefined&&event.button!==0)return;closingClick=true;armed=undefined;suppressActivation=false;closePressed=true;props.onClose(p.id);};
   let host:HostElement|undefined,closeHost:HostElement|undefined,closeLayout:ChromeBounds|undefined,queued=false,disposed=false;
@@ -81,7 +86,8 @@ export function WorkspaceTabs(props:{
    style={{...row,position:"relative",left:(slideRevision(),slide.offset(p.id)),opacity:drag()===p.id?0:1,paddingLeft:chrome.tabPaddingX,paddingRight:9*s+spec.buffer.closeHitSize/2+spec.buffer.padding,gap:9*s,height:chrome.height,flexShrink:0,overflow:"hidden",cursor:drag()===p.id?"grabbing":"pointer",backgroundColor:selected()||drag()===p.id?c.bg:undefined,borderTopLeftRadius:chrome.tabRadius,borderTopRightRadius:chrome.tabRadius}}>
    <motion.div initial={false} animate={{opacity:(hovered()||props.keyboardIndex===p.index)&&!selected()?1:0}} transition={{duration:.15,ease:easeOutCubicBezier}} style={{position:"absolute",left:0,right:0,top:0,height:chrome.height,backgroundColor:c.accent+"17",pointerEvents:"none"}}/>
    <text testId={`workspace-icon:${p.id}`} style={{...text,flexShrink:0,lineHeight:chrome.height,fontFamily:props.config.iconFontFamily,fontSize:12*s,color:rgba(chrome.iconColor)}}>{chrome.iconGlyph}</text>
-   <text testId={`workspace-title:${p.id}`} style={{...text,flexShrink:0,lineHeight:chrome.height,color:selected()?c.fg:c.muted}}>{title()}</text>
+   <text onLayout={event=>{if(event.width)setTitleWidth(event.width);}} style={{...text,position:"absolute",opacity:0,left:0,top:0}}>{title()}</text>
+   <HoverTabTitle testId={`workspace-title:${p.id}`} label={title()} width={titleBudget()} naturalWidth={titleWidth()} height={chrome.height} scale={s} hovered={hovered()} reducedMotion={props.config.reducedMotion} style={{...text,lineHeight:chrome.height,color:selected()?c.fg:c.muted}}/>
    <div ref={value=>closeHost=value} role="button" aria-label={`Close ${workspace().title}`} testId={`workspace-close:${p.id}`} onClick={event=>{if(closePressed){closePressed=false;closingClick=true;}else if(!suppressActivation)close(event);}}
     onMouseDown={close}
     onLayout={event=>{closeLayout={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0};}}
@@ -93,7 +99,7 @@ export function WorkspaceTabs(props:{
   </div>;
  }
  return <div role="tablist" aria-label="Workspaces" testId="workspace-tabs" onLayout={props.onScroll} onMouseMove={move} onMouseUp={finish} style={{height:chrome.height,flexShrink:0,position:"relative",minWidth:0,backgroundColor:c.surface,overflow:"hidden",borderBottomWidth:1,borderColor:c.border}}>
-  <div ref={host=>scrollHost=host} testId="workspace-tab-scroll" onScrollChange={event=>{scrollX=event.scrollX??scrollX;props.onScroll();if(drag()){slide.move(contentPoint(pointer.x));pointerFrames.request(measureDrop);}}} style={{...row,position:"absolute",left:0,right:0,top:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
+  <div ref={host=>scrollHost=host} testId="workspace-tab-scroll" onLayout={event=>{setViewportWidth(event.width||0);stripWidth=event.width||0;stripOriginX=event.x||0;stripOriginY=event.y||0;}} onScroll={event=>{consumeTabScroll(event);const next=verticalTabScroll(event,scrollX,stripWidth,[...widths.values()].reduce((sum,width)=>sum+width,0)+spec.buffer.newWidth);if(next!==undefined&&next!==scrollX&&scrollHost){consumeTabScroll(event,true);scrollX=next;renderer.scrollTo?.(scrollHost.id,next,0);props.onScroll();}}} onScrollChange={event=>{scrollX=event.scrollX??scrollX;props.onScroll();if(drag()){slide.move(contentPoint(pointer.x));pointerFrames.request(measureDrop);}}} style={{...row,position:"absolute",left:0,right:0,top:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
    <For each={props.workspaces.map(w=>w.id)}>{(id,index)=><Tab id={id} index={index()}/>}</For>
    <div ref={host=>{newHost=host;props.registerNewHost(host);}} tabIndex={0} role="button" testId="workspace-new" aria-label="New workspace" data-keyboard-focused={props.keyboardIndex===props.workspaces.length}
     onMouseDown={()=>{armed=undefined;suppressActivation=false;}} onClick={()=>{if(!suppressActivation)props.onNew();}} onLayout={event=>{if(newHost)props.onBounds(newHost,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});}}

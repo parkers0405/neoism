@@ -23,6 +23,7 @@ export interface AppConfig {
   cursorBlinkInterval?: number;
   cursorStyle: string;
   cursorColor?: string;
+  presenceDisplayName?: string;
   terminalScrollMultiplier?: number;
   terminalScrollDivider?: number;
   scale: number;
@@ -86,6 +87,7 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
     cursorBlinkInterval: cursorBlinkInterval(number(object(object(raw.terminal).cursor)["blinking-interval"], DEFAULT_CURSOR_BLINK_INTERVAL_MS)),
     cursorStyle: string(object(raw.presence)["cursor-style"], "solid"),
     cursorColor: typeof object(raw.presence)["cursor-color"] === "string" ? object(raw.presence)["cursor-color"] as string : undefined,
+    presenceDisplayName: typeof object(raw.presence)["display-name"] === "string" ? object(raw.presence)["display-name"] as string : undefined,
     terminalScrollMultiplier: Math.max(0, number(object(object(raw.terminal).scroll).multiplier, 3)),
     terminalScrollDivider: Math.max(0.01, number(object(object(raw.terminal).scroll).divider, 1)),
     fontWeight: number(fonts.weight, 400), scale: Math.max(0.5, Math.min(3, fontSize / 14)),

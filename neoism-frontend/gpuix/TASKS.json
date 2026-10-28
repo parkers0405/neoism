@@ -220,39 +220,59 @@
     },
     {
       "id": "ctrl_shift_buffer_arrows",
-      "status": "in_progress",
+      "status": "implemented_headless_verified",
       "requirement": "Restore original Ctrl+Shift+Left/Right buffer cycling, wrap and split scope across Home/code/Markdown/Agent/tree focus; preserve Alt arrows and other modifiers."
     },
     {
       "id": "fresh_agent_first_paint",
-      "status": "in_progress",
+      "status": "implemented_headless_verified",
       "requirement": "Alt+A fresh Agent input/logo paint at correct canonical pane bounds in first transaction, without waiting on layout; preserve independent drafts and original startup animation."
     },
     {
       "id": "tab_row_scroll",
-      "status": "in_progress",
+      "status": "implemented_headless_verified",
       "requirement": "Wheel/trackpad while hovering either buffer/workspace strip scrolls that row horizontally with natural direction, bounds and no content bubbling."
     },
     {
       "id": "tab_title_hover_scroll",
-      "status": "in_progress",
+      "status": "implemented_headless_verified",
       "requirement": "Clipped long tab titles animate through their text on hover with original Agent-sidebar marquee behavior; retain tab/close geometry and reduced motion."
+    },
+    {
+      "id": "completed_agent_footer",
+      "status": "implemented_headless_verified",
+      "requirement": "Refresh canonical transcript on model completion so original Build/model/duration/token-rate response footer appears, with no substitute formatting."
+    },
+    {
+      "id": "agent_live_tab_title",
+      "status": "implemented_headless_verified",
+      "requirement": "Session title updates rename Surface plus canonical native layout tab routes immediately, including raw session.updated and updates before first home adoption."
+    },
+    {
+      "id": "agent_profile_identity",
+      "status": "implemented_headless_verified",
+      "requirement": "Use original local presence name/env/config/hostname resolution, avatar seed and You/remote/unknown hover policy; stamp prompt.author from same local identity."
+    },
+    {
+      "id": "agent_live_markdown",
+      "status": "implemented_headless_verified",
+      "requirement": "Preserve exactly-once family stream bytes and original incremental Markdown rendering during generation; stop redundant parent/child streams without dropping legitimate repeated tokens."
     }
   ],
-  "verification_note": "Checkpoint9e16544ab saved. SDK HTTP/SSE catalog fix live-verified with full825family+825activity baseline, zero WS closes for8.22s, correct configured model in running production. Follow-up checks underway for new AltA firstpaint/tab scrolling/title hover requests.",
+  "verification_note": "Saved checkpoint9e16544ab and catalog transport fixd8610acb0. Current interaction and Agent streaming fixes implemented and verified; production preview relaunched. Independent same-Git-surface split view state remains a tracked follow-up.",
   "verification": {
     "frontend_tests": {
-      "passed": 378,
+      "passed": 411,
       "failed": 0,
-      "files": 107,
-      "assertions": 5277,
-      "note": "Full suite377/0 (106files) plus final new workspace-paint test1/0."
+      "files": 118,
+      "assertions": 5565,
+      "note": "Full suite410/0 (118files,5556assertions), plus added close-race regression1/0 (9assertions). Final focused gate16/0,106assertions after all source changes."
     },
-    "typecheck": "passed final source including workspace-paint fixture",
+    "typecheck": "passed final source",
     "design_sync": "passed final source",
     "display_source_and_packaged_binding": "passed: source and packaged gpuix-display-linux-x64-52f91564654179d3.node; compiled inputCaretGeometrySupported() true",
     "native_engine_ffi_smoke": "passed final release core; editor/recovery/undo/Vim/cursor/Ghostty/VT/keyboard",
-    "frontend_release": "Release packaged and launched with Agent composer/sidebar retention, scoped configured SDK defaults and original loading/mode chip scramble.",
+    "frontend_release": "Final optimized release packaged with streaming, footer, identity, tab title, tab scroll/marquee, CtrlShift navigation and AltA first-paint fixes.",
     "daemon_search_unit_tests": "8 passed",
     "daemon_search_websocket_integration": "passed: 20 concurrent queries retain their own envelope IDs",
     "window_launches": 2,
@@ -269,8 +289,8 @@
     "full_git_app": "passed actual App: status pill, original panel, working singleton, unified/split, explicit restore confirmation, canonical live edits/save, retained zoom draft/controller, commit/PR routes; isolated daemon fixture only",
     "final_focus_gate": "4 passed after pointer focus correction",
     "user_preview": {
-      "pid": 2717246,
-      "log": "/tmp/neoism-gpuix-catalog-fixes-20261028-135452.log",
+      "pid": 2768358,
+      "log": "/tmp/neoism-gpuix-stream-fixes-20261028-141846.log",
       "executable": "/home/parkersettle/projects/neoism/neoism-frontend/gpuix/dist/neoism-gpuix",
       "mapped": true,
       "title": "neoism \u2014 Neoism GPUIX",
@@ -282,6 +302,8 @@
     "preview_frontend_reload_for_agent_fixes": 1,
     "daemon_restarts": 0,
     "checkpoint_gates": "Current source TypeScript clean; targeted Agent/model batch14tests/181 assertions; Git/status22tests/131 assertions; Home12tests/134 assertions; workspace sidebar3tests; folder modal1test pass.",
-    "catalog_live": "Actual App recording renderer against running daemon: all825family+825activity events,8.22s connected, zero WS closures,39modelpublications and max1ms actual publication. Production diagnostics show connected, configured gpt-6.1-sol/high, loadingfalse and no catalog error."
+    "catalog_live": "Actual App recording renderer against running daemon: all825family+825activity events,8.22s connected, zero WS closures,39modelpublications and max1ms actual publication. Production diagnostics show connected, configured gpt-6.1-sol/high, loadingfalse and no catalog error.",
+    "final_interaction_gate": "16 tests across5files,106 assertions pass; production build and FFI smoke pass.",
+    "agent_streaming": "Family-wide subscriptions use exactly one owner including late switch/close replies; original native Markdown renders partial output before idle and canonical completion metadata restores original footer."
   }
 }

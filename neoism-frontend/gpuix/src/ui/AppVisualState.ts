@@ -20,11 +20,11 @@ export class AppVisualState {
  private gitPanels=new Map<string,GitController>();
  private gitReviews=new Map<string,{controller:GitReviewController;reveal?:number}>();
  private agentComposers=new Map<string,{surfaceId:string;state:CachedAgentComposer}>();
- agentComposer(surfaceId:string,config:AppConfig):CachedAgentComposer{
+ agentComposer(surfaceId:string,config:AppConfig,initialViewport?:{width:number;height:number}):CachedAgentComposer{
   const style=JSON.stringify([config.fontFamily,config.fontWeight,config.scale,config.themeName]),key=`${surfaceId}\0${style}`;
   const existing=this.agentComposers.get(key);if(existing)return existing.state;
   const previous=[...this.agentComposers.values()].find(entry=>entry.surfaceId===surfaceId)?.state;
-  const state:CachedAgentComposer={viewport:previous?.viewport||{width:0,height:0}};
+  const state:CachedAgentComposer={viewport:initialViewport&&initialViewport.width>0&&initialViewport.height>0?{...initialViewport}:previous?.viewport||{width:0,height:0}};
   this.agentComposers.set(key,{surfaceId,state});return state;
  }
  pruneAgentComposers(surfaces:readonly Surface[]){const ids=new Set(surfaces.filter(surface=>surface.kind==="agent").map(surface=>surface.id));for(const[key,entry]of this.agentComposers)if(!ids.has(entry.surfaceId)){entry.state.native?.dispose();this.agentComposers.delete(key);}}

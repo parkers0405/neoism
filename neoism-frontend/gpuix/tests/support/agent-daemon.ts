@@ -5,6 +5,7 @@ import { applyEdits, modify, parse } from "jsonc-parser";
 export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
   const workspaces = [{ id: "a", host_id: "host", title: "A", root_dir: "/project/a" }, { id: "b", host_id: "host", title: "B", root_dir: "/project/b" }];
   const threads = [{ session_id: "one", title: "One", directory: "/project/a", agent: "build", model: "openai/base" }, { session_id: "two", title: "Two", directory: "/project/a", agent: "plan", model: "other/second" }];
+  const history=new Map<string,unknown[]>(),agentStreams=new Set<string>();
   const requests: Array<{ tag: string; body: Record<string, unknown> }> = [];
   const files = new Map([["README.md", "# Neoism\n" + Array.from({ length: 80 }, (_, i) => `Line ${i + 1}`).join("\n")]]);
   const fileRequests: Array<{ tag: string; body: Record<string, unknown> }> = [];
@@ -83,6 +84,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
         }
         if (route[2] === "prompt") {
           requests.push({ tag: "SubmitPrompt", body: { session_id: id, message_id: payload.messageId,
+            author:payload.author,
             text: payload.parts?.find((p: any) => p.type === "text")?.text, mode: payload.agent,
             model: payload.model ? `${payload.model.providerId}/${payload.model.modelId}` : undefined,
             thinking: payload.model?.variant, delivery: payload.delivery,
@@ -197,6 +199,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
         if (tag === "ListAgents") reply({ AgentCatalog: { agents: [{ name: "build", description: "Build" }, { name: "plan", description: "Plan" }] } });
         if (tag === "ListSkills") reply({ SkillCatalog: { skills: [{ name: "review", description: "Review" }] } });
         if (tag === "SwitchThread") {
+          agentStreams.add(String(payload.session_id));reply({ThreadSwitched:{session_id:payload.session_id}});
           const thread = threads.find((t) => t.session_id === payload.session_id);
           if (thread) reply({ ProviderState: { session_id: thread.session_id, ...selections.get(thread.session_id), context_limit: 128000 } });
           if (config.questionsOnSwitch && !asked) {
@@ -206,7 +209,9 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
             ] } } });
           }
         }
-        if (tag === "GetHistory") reply({ HistoryChunk: { session_id: payload.session_id, messages: [] } });
+        if(tag==="ResumeStream")agentStreams.add(String(payload.session_id));
+        if(tag==="StopStream")agentStreams.delete(String(payload.session_id));
+        if (tag === "GetHistory") reply({ HistoryChunk: { session_id: payload.session_id, messages: history.get(String(payload.session_id))||[] } });
         if (tag === "CreateThread") {
           const complete = () => reply({ ThreadCreated: { session_id: "created-a", title: "Created", directory: payload.directory } });
           if (config.deferCreations === false) complete(); else creations.push(complete);
@@ -228,6 +233,6 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
       },
     },
   });
-  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
+  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
     mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);} };
 }

@@ -18,9 +18,9 @@ export function sdkModel(selection: ProviderState): ModelRef | undefined {
     ...(selection.thinking ? { variant: selection.thinking } : {}) };
 }
 export function sdkPrompt(text: string, attachments: readonly Attachment[], selection: ProviderState,
-  delivery: "steer" | "queue"): PromptRequest {
+  delivery: "steer" | "queue",author?:string): PromptRequest {
   const model = sdkModel(selection);
-  return { messageId: crypto.randomUUID(), agent: selection.agent || undefined, delivery,
+  return { messageId: crypto.randomUUID(), agent: selection.agent || undefined, delivery,...(author?{author}:{}),
     ...(model ? { model: { providerId: model.providerId, modelId: model.id, variant: model.variant, connectionId: model.connectionId } } : {}),
     parts: [{ type: "text", text }, ...attachments.filter((a) => a.bytes.length > 0).map((a) => ({
       type: "file" as const, filename: a.path || "image", mime: a.kind,

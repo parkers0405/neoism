@@ -101,7 +101,7 @@ fn frame(view: &mut View) -> Value {
     render_timeline_scrollbar_with(painter, &mut view.pane, &theme, s, rail.as_ref());
     let send={
         use neoism_ui::panels::agent_pane::{protocol_mapping::{map_outbound_command,AgentProtocolMapping,AgentProtocolMappingContext},outbound::OutboundAgentCommand};
-        let context=AgentProtocolMappingContext{active_session_id:Some(view.session_id.clone()),default_directory:None,default_agent:None,default_model:None,default_connection_id:None,default_thinking:None,local_author:None};
+        let context=AgentProtocolMappingContext{active_session_id:Some(view.session_id.clone()),default_directory:None,default_agent:None,default_model:None,default_connection_id:None,default_thinking:None,local_author:view.pane.local_presence_name().map(str::to_owned)};
         view.pane.drain_pending_outbound().into_iter().filter(|command|!matches!(command,OutboundAgentCommand::SwitchSession{..})).flat_map(|command|match map_outbound_command(command,&context){AgentProtocolMapping::Messages(messages)=>messages.into_iter().filter_map(|message|serde_json::to_value(message).ok()).collect::<Vec<_>>(),_=>vec![]}).collect::<Vec<_>>()
     };
     json!({
@@ -185,6 +185,13 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
     if !op.starts_with("agenttimeline.") {
         return None;
     }
+    if op == "agenttimeline.identity" {
+        let host = v["host"].as_str().filter(|host|!host.trim().is_empty()).unwrap_or("neoism");
+        let user = v["user"].as_str().unwrap_or("user");
+        let display_name = neoism_ui::editor::crdt::resolve_presence_display_name(v["envName"].as_str(),v["configName"].as_str(),host);
+        let peer_id = format!("{user}@{host}");
+        return Some(Ok(json!({"peerId":peer_id,"displayName":display_name,"color":neoism_ui::editor::crdt::stable_presence_color(&peer_id)})));
+    }
     Some(STORE.with(|store| {
         let mut store = store.borrow_mut();
         if op == "agenttimeline.new" {
@@ -199,6 +206,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             );
             let session_id = text(v, "sessionId").to_owned();
             let mut pane = NeoismAgentPane::new();
+            pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));
             pane.set_session_id(Some(v["rootSessionId"].as_str().unwrap_or(&session_id).to_owned()));
             store.views.insert(id, View {
                 pane,
@@ -255,6 +263,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 Ok(frame(view))
             }
             "agenttimeline.layout" => {
+                if v.get("localName").is_some(){view.pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));}
                 view.width = number(v, "width", view.width).max(1.0);
                 view.height = number(v, "height", view.height).max(1.0);
                 view.content_bottom = number(v, "contentBottom", view.height);

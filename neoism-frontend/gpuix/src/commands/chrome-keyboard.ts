@@ -4,6 +4,14 @@ export interface ChromeKey {key?:string;keyChar?:string;modifiers?:{alt?:boolean
 export type ChromeFocus = {zone:"content"|"sidebar"|"details"}|{zone:"buffers"|"workspaces";index:number};
 export interface ChromeNavigationContext {bufferCount:number;activeBuffer:number;workspaceCount:number;workspacePlus?:boolean;activeWorkspace:number;sidebar:boolean}
 export interface ChromeNavigation {focus:ChromeFocus;activate?:"buffer"|"workspace";direction?:"left"|"right"|"down"}
+/** Linux/Windows desktop SelectPrev/NextBufferTab defaults. Modified vertical
+ * arrows remain available to each editor/terminal's own input engine. */
+export function bufferTabShortcut(event:ChromeKey):"previous"|"next"|undefined{
+ const modifiers=event.modifiers||{};
+ if(!modifiers.ctrl||!modifiers.shift||modifiers.alt||modifiers.cmd)return;
+ const key=event.key?.toLowerCase().replace(/^arrow/,"");
+ return key==="left"?"previous":key==="right"?"next":undefined;
+}
 export function workspaceShortcut(event:ChromeKey):number|undefined{
  const key=/^\d$/.test(event.key||"")?event.key!:event.keyChar||event.key||"";if(!/^\d$/.test(key)||!event.modifiers?.alt)return;
  return coreCall<number|null>("keyboard.workspace-index",{key,alt:!!event.modifiers?.alt,ctrl:!!event.modifiers?.ctrl,shift:!!event.modifiers?.shift,cmd:!!event.modifiers?.cmd})??undefined;

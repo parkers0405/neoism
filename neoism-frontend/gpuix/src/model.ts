@@ -11,8 +11,10 @@ import { absoluteTerminalDirectory,mainTerminalSurface,followsTerminalDirectory 
 import { localDaemon } from "./menu-actions/web-frontend";
 import {getWindowWorkspaces,includeWindowWorkspace,openWorkspaceIds,reorderWindowWorkspace} from "./workspaces/window-tabs";
 import { AgentSdk, sdkModel, sdkPrompt,sdkThread } from "./daemon/sdk";
+import {localPresenceIdentity} from "./agent/local-presence";
 import {catalogThread} from "./agent/catalog-session";
 import {catalogAgentMessage} from "./agent/catalog-event";
+import {FamilyStreamOwnership,CompletedTranscriptRefresh} from "./agent/transcript-sync";
 import {agentFamily,agentFamilyRoot,noteAgentFamily} from "./agent/family";
 import type { GitReviewDescriptor } from "./git/GitReviewController";
 import { DirectorySchema, FileSchema, HistoryMessageSchema, ThreadSchema, TreeSchema, WorkspaceSchema,
@@ -97,6 +99,7 @@ export class WorkspaceModel {
   private observedEditors = new WeakSet<NativeEditor>();
   private syncingDocuments = new Set<string>();
   private sessionWorkspaces = new Map<string, string>();
+  private agentTitles=new Map<string,string>();
   private selectionTasks = new Map<string, Promise<void>>();
   private workspaceCreations: Promise<unknown> = Promise.resolve();
   private pendingWorkspaceCreations = new Set<string>();
@@ -217,7 +220,7 @@ export class WorkspaceModel {
       else this.epoch++;
     }));
   }
-  dispose(preserveEditors = false) { this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
+  dispose(preserveEditors = false) { clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
   getLayout(workspaceId = this.state.activeWorkspace?.id): WorkspaceLayout {
     if (!workspaceId) throw new Error("Select a workspace first");
     let layout = this.layouts.get(workspaceId);
@@ -716,7 +719,7 @@ export class WorkspaceModel {
       delete cwds[target.sessionId!];delete pending[target.id];
       this.setUI({mainTerminals:main,terminalCwds:cwds,pendingTerminalBindings:pending});
     }
-    if (target?.kind === "agent" && target.sessionId) this.sendAgent({ StopStream: { session_id: target.sessionId! } });
+    if (target?.kind === "agent" && target.sessionId&&!this.state.surfaces.some(surface=>surface.id!==id&&surface.kind==="agent"&&surface.sessionId===target.sessionId)) {this.familyStreams.deactivate(target.sessionId);this.sendAgent({ StopStream: { session_id: target.sessionId } });}
     // Closing a UI tab never kills a daemon-owned shell or deletes a chat.
     const surfaces = this.state.surfaces.filter((s) => s.id !== id);
     this.update({ surfaces, activeSurfaceId: this.state.activeSurfaceId === id ? surfaces.findLast((s) => s.workspaceId === this.state.activeWorkspace?.id && !s.hidden)?.id : this.state.activeSurfaceId });
@@ -880,9 +883,18 @@ export class WorkspaceModel {
   };
   agentFamily = (sessionId:string) => agentFamily(this.state.ui,sessionId);
   private resumeThread(sessionId: string) {
+    for(const stopped of this.familyStreams.activate(sessionId))this.sendAgent({StopStream:{session_id:stopped}});
     this.sendAgent({ SwitchThread: { session_id: sessionId } });
     this.sendAgent({ GetHistory: { session_id: sessionId, cursor: null, limit: 200 } });
     this.sendAgent({ ResumeStream: { session_id: sessionId } });
+  }
+  private familyStreams=new FamilyStreamOwnership(id=>agentFamilyRoot(this.state.ui,id));
+  private completedTranscript=new CompletedTranscriptRefresh();
+  private completedHistory=new Set<string>();
+  private completedHistoryTimer:ReturnType<typeof setTimeout>|undefined;
+  private refreshCompletedHistory(sessionId:string){
+    this.completedHistory.add(sessionId);if(this.completedHistoryTimer!==undefined)return;
+    this.completedHistoryTimer=setTimeout(()=>{this.completedHistoryTimer=undefined;const sessions=[...this.completedHistory];this.completedHistory.clear();if(!this.disposed&&this.client.state.phase==="connected")for(const session_id of sessions)this.sendAgent({GetHistory:{session_id,cursor:null,limit:200}});},0);
   }
   private requestedAgentCatalogScopes=new Map<string,string|undefined>();
   private agentCatalogStream?:{workspaceId:string;directory?:string;abort:AbortController};
@@ -1025,7 +1037,7 @@ export class WorkspaceModel {
     const session = await this.agentSdk.forWorkspace(workspace.id).sessions.create({
       directory: workspace.root_dir || undefined, agent: selection.agent || undefined, model: sdkModel(selection),
     });
-    const thread = Schema.decodeUnknownSync(ThreadSchema)({ session_id: session.id, directory: workspace.root_dir, title: session.title || "New conversation" });
+    const thread = Schema.decodeUnknownSync(ThreadSchema)({ session_id: session.id, directory: workspace.root_dir, title: this.agentTitles.get(session.id) || session.title || "New conversation" });
     this.sessionWorkspaces.set(thread.session_id, workspace.id);
     // Creating with defaults lets the Agent choose a concrete model. Retain
     // that canonical selection so later variant changes carry its model too.
@@ -1061,7 +1073,7 @@ export class WorkspaceModel {
       const selection = options.selection || this.selection(sessionId);
       const sdk = this.sdkForSession(sessionId);
       await this.selectionTasks.get(sessionId);
-      await sdk.sessions.prompt(sessionId, sdkPrompt(text, attachments, selection, options.delivery || "steer"));
+      await sdk.sessions.prompt(sessionId, sdkPrompt(text, attachments, selection, options.delivery || "steer",localPresenceIdentity(this.config).displayName));
       return true;
     } catch (error) { this.report(error); return false; }
   };
@@ -1191,6 +1203,20 @@ export class WorkspaceModel {
     else{if(this.incomingAgentHead>=1024){this.incomingAgentEvents=this.incomingAgentEvents.slice(this.incomingAgentHead);this.incomingAgentHead=0;}this.scheduleAgentEvents();}
   }
   private agentEventListeners = new Set<(message: unknown) => void>();
+  private updateAgentTitle(sessionId:string,title:string){
+    if(!title.trim())return;
+    this.agentTitles.set(sessionId,title);
+    const changed=this.state.surfaces.filter(surface=>surface.kind==="agent"&&(surface.agentRootSessionId||surface.sessionId)===sessionId&&surface.title!==title).map(surface=>({...surface,title}));
+    const updates=new Map(changed.map(surface=>[surface.id,surface]));
+    const changedThread=this.state.threads.some(thread=>thread.session_id===sessionId&&thread.title!==title);
+    if(!changed.length&&!changedThread)return;
+    this.transaction(()=>{
+      this.update({...(changedThread?{threads:this.state.threads.map(thread=>thread.session_id===sessionId?{...thread,title}:thread)}:{}),...(changed.length?{surfaces:this.state.surfaces.map(surface=>updates.get(surface.id)||surface)}:{})});
+      // Buffer-strip titles live in the canonical layout routes as well as
+      // Surface metadata. Update both without replacing the tab or its pane.
+      for(const surface of changed)this.getLayout(surface.workspaceId).rename(surface);
+    });
+  }
   /** Raw daemon Agent-family messages, untouched, for engines that run the
    * shared Rust dispatcher (the original agent timeline). */
   subscribeAgentEvents = (listener: (message: unknown) => void) => {
@@ -1211,8 +1237,10 @@ export class WorkspaceModel {
         if(key&&isRecord(ui.agentFamilyVersions)&&ui.agentFamilyVersions[key]!==undefined)this.agentFamilyWatermarks.set(key,ui.agentFamilyVersions[key]);
         const metadata=["agentParentSessions","agentFamilyRoots","agentFamilyRosters"] as const;
         const changed=metadata.some(field=>ui[field]!==current[field]&&(current[field]!==undefined||isRecord(ui[field])&&Object.keys(ui[field]).length>0));
-        if(changed)this.update({ui:{...current,agentParentSessions:ui.agentParentSessions,agentFamilyRoots:ui.agentFamilyRoots,agentFamilyRosters:ui.agentFamilyRosters}});
+        if(changed){this.update({ui:{...current,agentParentSessions:ui.agentParentSessions,agentFamilyRoots:ui.agentFamilyRoots,agentFamilyRosters:ui.agentFamilyRosters}});for(const stopped of this.familyStreams.reconcile())this.sendAgent({StopStream:{session_id:stopped}});}
       }
+      const completed=this.completedTranscript.observe(event.message);if(completed)this.refreshCompletedHistory(completed);
+      if(tag==="ThreadSwitched"&&typeof body.session_id==="string")for(const stopped of this.familyStreams.switched(body.session_id))this.sendAgent({StopStream:{session_id:stopped}});
     }
     if (event.family === "Agent") for (const listener of this.agentEventListeners) { try { listener(event.message); } catch (error) { this.report(error); } }
     try {
@@ -1272,7 +1300,10 @@ export class WorkspaceModel {
       } else if (tag === "ProviderState" && sessionId) {
         this.update({ providerStates: { ...this.state.providerStates, [sessionId]: Schema.decodeUnknownSync(ProviderStateSchema)(body) } });
       } else if (tag === "ThreadUpdated" && sessionId) {
-        if (typeof body.title === "string") this.update({ threads: this.state.threads.map((t) => t.session_id === sessionId ? { ...t, title: body.title as string } : t), surfaces: this.state.surfaces.map((surface) => (surface.agentRootSessionId||surface.sessionId) === sessionId ? { ...surface, title: body.title as string } : surface) });
+        if (typeof body.title === "string") this.updateAgentTitle(sessionId,body.title);
+      } else if (tag === "SessionEvent" && body.kind === "session.updated" && isRecord(body.properties) && isRecord(body.properties.info)) {
+        const info=body.properties.info,id=typeof info.id==="string"?info.id:sessionId;
+        if(id&&typeof info.title==="string")this.updateAgentTitle(id,info.title);
       } else if (tag === "QuestionAsked" && sessionId) this.receiveQuestion(sessionId, body.request);
       else if (tag === "QuestionsUpdated" && sessionId && Array.isArray(body.requests)) {
         const ids = new Set(body.requests.filter(isRecord).map((request) => request.id));

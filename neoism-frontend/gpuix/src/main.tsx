@@ -20,6 +20,7 @@ import { SessionStore, type SavedSession } from "./session-store";
 import { installFrameMeter, notifyFrameActivity } from "./chrome/frame-meter";
 import { installDisplayClock, type DisplayClock } from "./animation/display-clock";
 import { installProfiling, profileInput, profileStart, profileEnd } from "./profiling";
+import {localDaemon} from "./menu-actions/web-frontend";
 
 if (process.argv.includes("--help")) {
   console.log(`Neoism GPUIX — native SolidJS frontend\n\nUsage: npm run start -- [options]\n\n  --daemon URL       ws://host:7878/session or ws+unix:///path/neoism.sock:/session\n  --workspace ID     Open a particular existing daemon workspace\n  --config PATH      Read appearance from a Neoism JSONC config\n  --theme NAME       Override the configured theme\n  --font-size SIZE   Override the configured font size\n  --maximized        Start with a maximized window\n  --reduced-motion  Disable transitions\n\nCredentials: NEOISM_DAEMON_TOKEN (upgrade), NEOISM_PAIRING_TOKEN (Hello).\nDefault: local Neoism Unix socket if present; otherwise 127.0.0.1:7878.\nShortcuts: Alt+E files, Alt+C conversations, Alt+H details, Ctrl+P find, Ctrl+T terminal.`);
@@ -92,7 +93,8 @@ async function reloadConfig(fontSizeOverride?:number,expectedSession?:typeof ses
     const beforeVim = previous.vim;
     // Appearance follows the selected host's config; transport identity remains
     // scoped to the server the user explicitly selected.
-    Object.assign(previous, next, { endpoint: previous.endpoint, authToken: previous.authToken, pairingToken: previous.pairingToken, workspaceId: previous.workspaceId });
+    Object.assign(previous, next, { endpoint: previous.endpoint, authToken: previous.authToken, pairingToken: previous.pairingToken, workspaceId: previous.workspaceId,
+      presenceDisplayName:localDaemon(previous.endpoint)?next.presenceDisplayName:previous.presenceDisplayName });
     if (beforeVim !== previous.vim) session.model.setVimMode(previous.vim);
     // Rebuild components that capture font metrics without clearing the native
     // root first. Both generations commit through its existing mutation queue.

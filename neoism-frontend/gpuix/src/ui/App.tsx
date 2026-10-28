@@ -54,7 +54,7 @@ import { StatusLine } from "./StatusLine";
 import { workspaceLabel } from "../layout/tab-chrome";
 import {TreeRowGlyphs} from "./TreeRowGlyphs";
 import { statusInfo } from "../chrome/status-info";
-import { workspaceShortcut,navigateChrome,type ChromeFocus } from "../commands/chrome-keyboard";
+import { workspaceShortcut,bufferTabShortcut,navigateChrome,type ChromeFocus } from "../commands/chrome-keyboard";
 import { ChromeFocusCursor,type ChromeCursorTarget } from "./ChromeFocusCursor";
 import {setOverlayViewport,useOverlayViewport} from "./overlay-viewport";
 import {paintedChromeBounds} from "./chrome-target-bounds";
@@ -275,7 +275,8 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       : { title: slash > 0 ? selected.model.slice(slash + 1) : selected.model, description: slash > 0 ? selected.model.slice(0, slash) : "", footer: "selected", value: selected.model, section: "Current", current: true };
     return [current, ...(recent.length ? [{ title: "Recent", value: "header:recent", header: true, section: "Recent" }, ...recent] : []), ...catalog];
   });
-  const modelCatalogOptions = createMemo(() => coreCall<PickerOption[]>("picker.model-options", { catalog: state().providerCatalog ?? { providers: [] } }));
+  const configuredProviderCatalog = createMemo(() => state().providerCatalog);
+  const modelCatalogOptions = createMemo(() => coreCall<PickerOption[]>("picker.model-options", { catalog: configuredProviderCatalog() ?? { providers: [] } }));
   const recentModels = createMemo(() => (Array.isArray(state().ui.recentModels) ? state().ui.recentModels as PickerOption[] : []));
   const rememberModel = (value: string) => {
     const option = modelCatalogOptions().find((candidate) => !candidate.header && candidate.value === value);
@@ -503,6 +504,8 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const workspaceIndex=workspaceShortcut(event);
     if(workspaceIndex!==undefined){event.preventDefault();event.stopPropagation();const workspace=windowWorkspaces()[workspaceIndex];if(workspace)void model.activateWorkspace(workspace).then(()=>focusChrome({zone:"content"})).catch(model.report);return true;}
     if(handleChromeKey(event))return true;
+    const bufferDirection=bufferTabShortcut(event);
+    if(bufferDirection){event.preventDefault();event.stopPropagation();const stripFocused=currentChromeFocus().zone==="buffers";selectTab(bufferDirection==="previous");if(stripFocused){const pane=focusedPane();focusChrome({zone:"buffers",index:Math.max(0,pane?.tabs.findIndex(tab=>tab.leaf===pane.leaf)??0)});}return true;}
     let action: string | undefined;
     if (alt && !ctrl && !shift && key === "d") {event.preventDefault();event.stopPropagation();chooseStatusDirectory();return true;}
     if (alt && shift && !ctrl && key === "space") action = "ToggleViMode";
@@ -616,6 +619,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const visibleRows = createMemo(() => { const frame = view(), entries = rows(); return entries.slice(...visibleTreeRange(entries.length, height(), d.treeRowHeight * s, frame.top, frame.offset)); });
     createEffect(() => { update("layout", { entries: rows().map((entry) => ({ ...entry, open: expanded().has(entry.path) })) }); });
     const keyDown = (event: KeyEvent) => {
+      if(bufferTabShortcut(event)&&handleSurfaceKey(event))return;
       if (event.modifiers?.alt || event.modifiers?.cmd) return;
       const key = event.keyChar || event.key || "";
       if (!["j", "k", "g", "G", "up", "down", "home", "end", "d", "u", "enter", "right", "left", "h", "l", "escape"].includes(key) && !/^\d$/.test(key)) return;
@@ -828,10 +832,8 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         onSelect={value=>{setSlashPicker(undefined);void Promise.resolve(request.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{setSlashPicker(undefined);focus();}}/>}</Show>
     </>;
   }
-  function AgentSurface(props:{surfaceId:string;sessionId?:string}) {
-    const cached=visuals.agentComposer(props.surfaceId,config);
-    const [viewport,setViewport]=createSignal(cached.viewport);
-    const [frame,setFrame]=createSignal<ComposerFrame|undefined>(cached.frame);
+  function AgentSurface(props:{surfaceId:string;sessionId?:string;initialViewport:{width:number;height:number}}) {
+    const cached=visuals.agentComposer(props.surfaceId,config,props.initialViewport);
     const messages=()=>props.sessionId?state().history[props.sessionId]||[]:[];
     const family=()=>{state().ui;return model.agentFamily(props.sessionId||"");};
     const subagent=()=>!!props.sessionId&&family().root!==props.sessionId;
@@ -840,6 +842,18 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     // new-chat wordmark page.
     const historyKnown=()=>!props.sessionId||state().history[props.sessionId]!==undefined;
     const home=()=>!subagent()&&historyKnown()&&!messages().some(message=>message.kind!=="System");
+    // Wordmark mounts before Composer in the original paint order. Its first
+    // frame must already have the native logo rectangle, rather than mounting
+    // at 0px and waiting for Composer or another layout pass to supply it.
+    if(!subagent()&&cached.viewport.width>0&&cached.viewport.height>0){
+      const draft=model.state.composerDrafts[model.composerDraftKey(props.sessionId,props.surfaceId)];
+      const native=cached.native||(cached.native=new NativeComposer(config));
+      cached.frame=native.frame({...cached.viewport,home:home(),text:draft?.text||"",images:draft?.attachments?.length||0,help:model.state.ui.agentHints!==false,
+        cwd:state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined,
+        noProviders:state().providers.length===0,busy:!!props.sessionId&&![undefined,"Idle"].includes(state().streaming[props.sessionId]),state:props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle"});
+    }
+    const [viewport,setViewport]=createSignal(cached.viewport);
+    const [frame,setFrame]=createSignal<ComposerFrame|undefined>(cached.frame);
     return <div testId="agent-pane" data-home={home()} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",minWidth:0,minHeight:0,overflow:"hidden"}}
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
@@ -849,7 +863,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={setFrame}/></Show>
     </div>;
   }
-  function Conversation(props: { surfaceId: string }) { const surface=()=>state().surfaces.find(surface=>surface.id===props.surfaceId);return <AgentSurface surfaceId={props.surfaceId} sessionId={surface()?.sessionId}/>; }
+  function Conversation(props: { surfaceId: string;initialViewport:{width:number;height:number} }) { const surface=()=>state().surfaces.find(surface=>surface.id===props.surfaceId);return <AgentSurface surfaceId={props.surfaceId} sessionId={surface()?.sessionId} initialViewport={props.initialViewport}/>; }
 
   function DetailRail() {
     const session = () => active()?.sessionId || "";
@@ -953,7 +967,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
                   onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} /></Match>
                 <Match when={surface.kind === "git"&&surface.git}><GitReviewView controller={visuals.gitReview(surface,model,config,()=>closeFocusedTab())} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={()=>{noteContentFocus();setGitFocused(false);layout.focus(leaf);model.selectSurface(id,true);}} onState={next=>{if(focused())setEditorState(next);}}/></Match>
-                <Match when={surface.kind === "agent"}><Conversation surfaceId={id} /></Match>
+                <Match when={surface.kind === "agent"}><Conversation surfaceId={id} initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border)};})()} /></Match>
                 <Match when={surface.kind === "file"}><div style={{ ...column, flexGrow: 1 }}>
                   <Show when={state().files[surface.id] !== undefined} fallback={<div style={{ position: "relative", flexGrow: 1 }}><LoadingSkeleton config={config} kind="document" /></div>}>
                     <Show when={/\.(md|markdown|mdown|mkd)$/i.test(surface.path || "")} fallback={<EditorView editor={model.getEditor(surface, leaf)} config={config} onCustomKey={handleSurfaceKey} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()}

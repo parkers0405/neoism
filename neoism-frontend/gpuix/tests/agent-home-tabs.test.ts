@@ -41,3 +41,29 @@ test("a failed first prompt retains the originating home draft atomically under 
   expect(model.state.composerDrafts[laterKey]?.text).toBe("other tab draft");expect(model.state.activeSurfaceId).toBe(later.id);expect(model.state.error).toContain("Prompt rejected");
  }finally{close();}
 });
+
+test("generated titles update canonical tab routes without replacing leaves or stealing focus, including raw session events",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  const source=model.newAgentHome()!,submission=model.submitNewPrompt("title this conversation");await until(()=>daemon.creations.length===1);daemon.creations.shift()!();expect(await submission).toBe(true);
+  const leaf=model.getLayout().frame.leaves.find(leaf=>leaf.surfaceId===source.id)!.leaf;
+  const other=model.newAgentHome()!,draftKey=model.composerDraftKey(undefined,other.id);model.setComposerDraft(draftKey,{text:"keep draft",attachments:[]});
+  daemon.push({ThreadUpdated:{session_id:"created-a",title:"Generated conversation title",pinned:null}});
+  await until(()=>model.getLayout().frame.leaves.find(tab=>tab.leaf===leaf)?.title==="Generated conversation title");
+  expect(model.state.surfaces.find(surface=>surface.id===source.id)?.title).toBe("Generated conversation title");expect(model.state.activeSurfaceId).toBe(other.id);
+  daemon.push({SessionEvent:{session_id:"created-a",kind:"session.updated",properties:{info:{id:"created-a",title:"Refined title"}}}});
+  await until(()=>model.getLayout().frame.leaves.find(tab=>tab.leaf===leaf)?.title==="Refined title");
+  expect(model.captureSession().surfaces.find(surface=>surface.id===source.id)?.title).toBe("Refined title");expect(model.state.composerDrafts[draftKey]?.text).toBe("keep draft");
+ }finally{close();}
+});
+
+test("a generated title arriving before the create response survives home adoption",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  const home=model.newAgentHome()!,pending=model.submitNewPrompt("first prompt");await until(()=>daemon.creations.length===1);
+  daemon.push({ThreadUpdated:{session_id:"created-a",title:"Generated before adoption",pinned:null}});
+  // The raw Agent FIFO processes the event before the deferred HTTP response.
+  let observed=false;const off=model.subscribeAgentEvents(message=>{if(typeof message==="object"&&message!==null&&"ThreadUpdated"in message)observed=true;});
+  await until(()=>observed);off();daemon.creations.shift()!();expect(await pending).toBe(true);
+  expect(model.state.surfaces.find(surface=>surface.id===home.id)?.title).toBe("Generated before adoption");
+  expect(model.getLayout().frame.leaves.find(tab=>tab.surfaceId===home.id)?.title).toBe("Generated before adoption");
+ }finally{close();}
+});

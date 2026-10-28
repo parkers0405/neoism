@@ -6,6 +6,17 @@ const panel = (directory: string) => coreCall<{ id: number }>("agentsidepanel.ne
 const frame = (id: number) => coreCall<{ send: Record<string, any>[] }>("agentsidepanel.frame", { id, width: 300, height: 600, viewedSession: null });
 const debug = (id: number) => coreCall<{ sessions: number; scrollTop: number; nextCursor: string | null }>("agentsidepanel.debug", { id });
 
+test("a settled catalog does not animate the pane's invisible home wordmark", () => {
+  const id = panel("/proj/app");
+  try {
+    const loading = coreCall<{ animating: boolean }>("agentsidepanel.frame", { id, width: 300, height: 600 });
+    expect(loading.animating).toBe(true);
+    coreCall("agentsidepanel.event", { id, message: { ThreadList: { threads: [thread("a", "/proj/app", 2)], requested_cursor: null, next_cursor: null } } });
+    const settled = coreCall<{ animating: boolean }>("agentsidepanel.frame", { id, width: 300, height: 600 });
+    expect(settled.animating).toBe(false);
+  } finally { coreCall("agentsidepanel.dispose", { id }); }
+});
+
 test("a declared-workspace sidebar ignores another consumer's ThreadList and keeps its own reply", () => {
   const id = panel("/proj/app");
   try {

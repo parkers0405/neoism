@@ -272,6 +272,61 @@
       "id": "workspace_plus_tree_first_paint",
       "status": "implemented_headless_verified",
       "requirement": "Workspace + paints the known same-host/root directory listing immediately while refreshing, with independent expansion/scroll state and no blank/loading tree frame."
+    },
+    {
+      "id": "toast_original_rust_appearance",
+      "status": "queued_waiting_for_user",
+      "requirement": "Match notification/error toast appearance to the original Rust GUI, preserving chrome/tab clearance."
+    },
+    {
+      "id": "modal_window_center_and_original_height",
+      "status": "queued_waiting_for_user",
+      "requirement": "Restore Alt+P, Search and other modals to their earlier higher vertical placement. Center horizontally in the whole window, including sidebar width, rather than in the content pane. Supersedes modal_content_center placement."
+    },
+    {
+      "id": "agent_tab_build_plan_session_not_found",
+      "status": "queued_waiting_for_user",
+      "requirement": "Investigate and fix the Session not found error when Tab switches the Agent between Build and Plan."
+    },
+    {
+      "id": "restored_agent_tabs_missing_chat",
+      "status": "queued_waiting_for_user",
+      "requirement": "Investigate and fix restored Agent tabs reopening without their conversation loaded."
+    },
+    {
+      "id": "usage_original_rust_appearance",
+      "status": "queued_waiting_for_user",
+      "requirement": "Match /usage to the original Rust GUI and supplied screenshot: provider/account header, account/plan column, usage bars and remaining percentages, reset details, account dividers, inline errors, scroll area and refresh/close hints. Reference: /tmp/codex-clipboard-gzYeRn.png."
+    },
+    {
+      "id": "slash_dialog_original_skeleton_loading",
+      "status": "queued_waiting_for_user",
+      "requirement": "Restore original Rust GUI animated skeleton loading for /models, /connect, /usage and other slash-command dialogs/pickers while their data loads."
+    },
+    {
+      "id": "theme_change_black_rendering",
+      "status": "queued_waiting_for_user",
+      "requirement": "Investigate and fix the tree and other UI regions turning black immediately after a theme change; ensure themed content remains painted throughout the transition."
+    },
+    {
+      "id": "global_font_zoom_flash_regression",
+      "status": "queued_waiting_for_user",
+      "requirement": "Fix the recurring flash during Ctrl+/Ctrl\u2212 global font-size changes, including the top chrome, most sidebars and Agent input bar. Preserve continuous painting and existing animation state throughout zoom."
+    },
+    {
+      "id": "agent_chat_original_half_page_navigation",
+      "status": "queued_waiting_for_user",
+      "requirement": "Inspect the original Rust GUI Agent chat Ctrl+D/Ctrl+U behavior and restore matching half-page navigation, scroll direction, animation and focus handling in the new Agent chat."
+    },
+    {
+      "id": "agent_table_trackpad_and_accessible_scrollbar",
+      "status": "queued_waiting_for_user",
+      "requirement": "Preserve working table scrollbar dragging; add correct left/right trackpad scrolling. Keep the horizontal scrollbar reachable above the Agent input bar while scrolling a tall table, including when viewing its top, rather than requiring scrolling to the table bottom."
+    },
+    {
+      "id": "settings_natural_scroll_direction",
+      "status": "queued_waiting_for_user",
+      "requirement": "Fix Settings modal scrolling to respect natural scrolling on Hyprland consistently with working app surfaces; inspect related scroll handling for the same direction mismatch."
     }
   ],
   "verification_note": "Commits9e16544ab,d8610acb0,f56e99592,28f2000c0,749294143 saved. Sidebar scroll and workspace + first-paint fixes verified and packaged. Independent same-Git-surface split view state remains tracked.",

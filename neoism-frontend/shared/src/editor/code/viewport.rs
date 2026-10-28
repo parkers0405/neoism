@@ -172,8 +172,7 @@ pub fn update_viewport(
     let dt = pane
         .scroll_last_tick_at
         .map(|at| (now - at).as_secs_f32().clamp(0.0, 0.05))
-        .unwrap_or(1.0 / 60.0);
-    pane.scroll_last_tick_at = Some(now);
+        .unwrap_or(0.0);
     // Neovide's long-jump rule (rendered_window.rs keeps only 2×height
     // of scrollback): the animated travel is capped to ~a viewport —
     // the far portion of a `:1`-from-line-300 jump TELEPORTS (that
@@ -189,6 +188,10 @@ pub fn update_viewport(
     let delta = pane.target_scroll_y - pane.scroll_y;
     let scroll_animating = delta.abs() > 0.5 || pane.scroll_velocity_px_s.abs() > 1.0;
     if scroll_animating {
+        // A settled spring has no running clock. Its first new target starts
+        // at rest; time spent idle must not become a 50 ms initial jump. Keep
+        // this clock (and velocity) across targets while motion is active.
+        pane.scroll_last_tick_at = Some(now);
         // ω of the critically-damped spring; higher = snappier.
         const OMEGA: f32 = 16.0;
         // Explicit Euler is only stable for small dt. When the frame rate
@@ -213,10 +216,12 @@ pub fn update_viewport(
         {
             pane.scroll_y = pane.target_scroll_y;
             pane.scroll_velocity_px_s = 0.0;
+            pane.scroll_last_tick_at = None;
         }
     } else {
         pane.scroll_y = pane.target_scroll_y;
         pane.scroll_velocity_px_s = 0.0;
+        pane.scroll_last_tick_at = None;
     }
     pane.scroll_y = pane.scroll_y.clamp(0.0, max_scroll);
 
@@ -268,6 +273,46 @@ mod tests {
     }
 
     #[test]
+    fn held_arrow_start_does_not_integrate_idle_time() {
+        let first_positions: Vec<_> = [Duration::from_millis(7), Duration::from_secs(5)]
+            .into_iter()
+            .map(|idle| {
+                let mut pane = pane();
+                update_viewport(&mut pane, 0.0, 800.0, 50.0, 10.0, 21.0, 210.0);
+                // Advance the age of any retained idle clock without sleeping.
+                // The old implementation kept Some(now) here, so the first
+                // cursor-follow frame incorrectly integrated this idle time.
+                pane.scroll_last_tick_at = pane.scroll_last_tick_at
+                    .map(|_| Instant::now() - idle);
+                pane.buffer.set_cursor_position(6, 0, false);
+                pane.buffer.follow_cursor = true;
+                let view = update_viewport(&mut pane, 0.0, 800.0, 50.0, 10.0, 21.0, 210.0);
+                assert!(view.scroll_animating);
+                assert!(pane.target_scroll_y > 0.0);
+                let first = pane.scroll_y;
+                assert_eq!(pane.scroll_velocity_px_s, 0.0);
+                assert!(pane.scroll_last_tick_at.is_some());
+
+                pane.scroll_last_tick_at = Some(Instant::now() - Duration::from_millis(7));
+                update_viewport(&mut pane, 0.0, 800.0, 50.0, 10.0, 21.0, 210.0);
+                assert!(pane.scroll_y > first);
+                assert!(pane.scroll_velocity_px_s > 0.0);
+
+                // Another held-arrow target must carry active velocity, not
+                // restart at rest on every key repeat.
+                let moving = pane.scroll_y;
+                pane.buffer.set_cursor_position(7, 0, false);
+                pane.buffer.follow_cursor = true;
+                pane.scroll_last_tick_at = Some(Instant::now() - Duration::from_millis(7));
+                update_viewport(&mut pane, 0.0, 800.0, 50.0, 10.0, 21.0, 210.0);
+                assert!(pane.scroll_y > moving);
+                assert!(pane.scroll_velocity_px_s > 0.0);
+                first
+            }).collect();
+        assert_eq!(first_positions, vec![0.0, 0.0]);
+    }
+
+    #[test]
     fn spring_settles_without_overshoot_at_slow_frame_rates() {
         let mut pane = pane();
         update_viewport(&mut pane, 0.0, 800.0, 50.0, 10.0, 21.0, 210.0);
@@ -283,5 +328,6 @@ mod tests {
         }
         assert_eq!(pane.scroll_y, pane.target_scroll_y);
         assert_eq!(pane.scroll_velocity_px_s, 0.0);
+        assert!(pane.scroll_last_tick_at.is_none());
     }
 }

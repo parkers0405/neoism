@@ -164,6 +164,17 @@ export class WorkspaceModel {
     }
     return saved.snapshot;
   }
+  /** Identities of recovery-owned state. Chat paint/scroll frames do not alter
+   * these, so a periodic checkpoint need not serialize every inactive editor. */
+  sessionDependencies(): unknown[] {
+    return [this.config.vim, this.state.activeWorkspace?.id, this.state.activeSurfaceId,
+      this.state.surfaces, this.state.ui, this.state.providerStates, this.state.drafts, this.state.composerDrafts,
+      ...Object.entries(this.recoveredViews).flat(), ...Object.entries(this.recoveredMarkdownViews).flat(),
+      ...[...this.agentFamilyWatermarks].flat(),
+      ...[...this.editors].flatMap(([key, editor]) => [key, editor.frame]),
+      ...[...this.editorViews].flatMap(([key, view]) => [key, view.editor.frame]),
+      ...[...this.markdownViews].flatMap(([key, view]) => [key, view.markdown.frame])];
+  }
   captureSession(): SavedSession {
     return { version: 1, activeWorkspaceId: this.state.activeWorkspace?.id, activeSurfaceId: this.state.activeSurfaceId,
       surfaces: [...this.state.surfaces], ui: { ...this.state.ui,agentFamilyVersions:{...(isRecord(this.state.ui.agentFamilyVersions)?this.state.ui.agentFamilyVersions:{}),...Object.fromEntries(this.agentFamilyWatermarks)}, markdownViews: { ...this.recoveredMarkdownViews, ...Object.fromEntries([...this.markdownViews].map(([key, view]) => [key, view.markdown.snapshot()])) } }, providerStates: this.state.providerStates, drafts: this.state.drafts,
@@ -220,7 +231,7 @@ export class WorkspaceModel {
       else this.epoch++;
     }));
   }
-  dispose(preserveEditors = false) { clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
+  dispose(preserveEditors = false) { this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
   getLayout(workspaceId = this.state.activeWorkspace?.id): WorkspaceLayout {
     if (!workspaceId) throw new Error("Select a workspace first");
     let layout = this.layouts.get(workspaceId);
@@ -680,7 +691,15 @@ export class WorkspaceModel {
       this.update({ activeSurfaceId: id });
       if (!preserveLeaf) this.getLayout(surface.workspaceId).focusSurface(id);
     });
-    if (surface.kind === "agent" && changed && surface.sessionId) this.resumeThread(surface.sessionId);
+    if (surface.kind === "agent" && surface.sessionId) {
+      const pending = this.historyRequests.get(surface.sessionId);
+      // Layout focus publishes activeSurfaceId before PaneLayoutView calls
+      // selectSurface. A restored chat still needs its first history request
+      // even when that earlier publication makes `changed` false here.
+      const needsHistory = !this.historyCursors.has(surface.sessionId)
+        && (!pending || Date.now() - pending.sentAt >= 30000);
+      if (changed || needsHistory) this.resumeThread(surface.sessionId);
+    }
     if (surface.kind === "file" && this.state.files[id] === undefined) void this.loadFile(surface);
     if(surface.kind==="terminal")this.followMainTerminal();
   };
@@ -942,9 +961,27 @@ export class WorkspaceModel {
       emit(kind==="ListSessionProjects"?{SessionProjectsFailed:{...fields,catalog_identity:body.catalog_identity,generation:body.generation}}:kind==="ListProjectSessions"?{ProjectSessionPageFailed:{...fields,catalog_identity:body.catalog_identity,directory,requested_cursor:body.cursor??null,generation:body.generation}}:{ThreadListFailed:fields});
     }})();return true;
   };
+  readonly historyCursors = new Map<string, string | null>();
+  private historyRequests = new Map<string, { older: boolean; sentAt: number }>();
+  private queuedHistory = new Map<string, AgentClientMessage[]>();
   sendAgent = (message: AgentClientMessage) => {
     if(this.catalogRead(message))return;
-    try { this.client.send("Agent", message); } catch (error) { this.report(error); }
+    // Legacy Agent envelopes carry the most recent request id, not the
+    // request that produced a reply. Serialize history reads per session.
+    const history = typeof message === "object" && "GetHistory" in message ? message.GetHistory : undefined;
+    if (history) {
+      const pending = this.historyRequests.get(history.session_id);
+      if (pending && Date.now() - pending.sentAt < 30000) {
+        const queue = this.queuedHistory.get(history.session_id) || [];
+        if (!queue.some(item => typeof item === "object" && "GetHistory" in item && item.GetHistory.cursor === history.cursor)) queue.push(message);
+        this.queuedHistory.set(history.session_id, queue);
+        return;
+      }
+    }
+    try {
+      this.client.send("Agent", message);
+      if (history) this.historyRequests.set(history.session_id, { older: !!history.cursor, sentAt: Date.now() });
+    } catch (error) { this.report(error); }
   };
   selection = (sessionId?: string): ProviderState => {
     const thread = sessionId ? this.state.threads.find((thread) => thread.session_id === sessionId) : undefined;
@@ -1213,7 +1250,7 @@ export class WorkspaceModel {
     if(this.incomingAgentHead===this.incomingAgentEvents.length){this.incomingAgentEvents=[];this.incomingAgentHead=0;}
     else{if(this.incomingAgentHead>=1024){this.incomingAgentEvents=this.incomingAgentEvents.slice(this.incomingAgentHead);this.incomingAgentHead=0;}this.scheduleAgentEvents();}
   }
-  private agentEventListeners = new Set<(message: unknown) => void>();
+  private agentEventListeners = new Set<(message: unknown, historyKind?: "head" | "older") => void>();
   private updateAgentTitle(sessionId:string,title:string){
     if(!title.trim())return;
     this.agentTitles.set(sessionId,title);
@@ -1228,9 +1265,9 @@ export class WorkspaceModel {
       for(const surface of changed)this.getLayout(surface.workspaceId).rename(surface);
     });
   }
-  /** Raw daemon Agent-family messages, untouched, for engines that run the
-   * shared Rust dispatcher (the original agent timeline). */
-  subscribeAgentEvents = (listener: (message: unknown) => void) => {
+  /** Agent events for shared engines. Head history includes retained older
+   * pages; continuations stay page-sized and carry their actual request kind. */
+  subscribeAgentEvents = (listener: (message: unknown, historyKind?: "head" | "older") => void) => {
     this.agentEventListeners.add(listener);
     return () => { this.agentEventListeners.delete(listener); };
   };
@@ -1253,7 +1290,7 @@ export class WorkspaceModel {
       const completed=this.completedTranscript.observe(event.message);if(completed)this.refreshCompletedHistory(completed);
       if(tag==="ThreadSwitched"&&typeof body.session_id==="string")for(const stopped of this.familyStreams.switched(body.session_id))this.sendAgent({StopStream:{session_id:stopped}});
     }
-    if (event.family === "Agent") for (const listener of this.agentEventListeners) { try { listener(event.message); } catch (error) { this.report(error); } }
+    if (event.family === "Agent" && tag !== "HistoryChunk") for (const listener of this.agentEventListeners) { try { listener(event.message); } catch (error) { this.report(error); } }
     try {
       if (event.family === "Workspace") {
         if (tag === "HostWorkspaceTree") {
@@ -1297,9 +1334,30 @@ export class WorkspaceModel {
         if (thread.directory === this.state.activeWorkspace?.root_dir) this.update({ threads: [thread, ...this.state.threads.filter((t) => t.session_id !== sessionId)] });
       } else if (tag === "HistoryChunk" && sessionId) {
         const history = Schema.decodeUnknownSync(Schema.Array(HistoryMessageSchema))(body.messages);
-        const merged = new Map(this.state.history[sessionId]?.map((message) => [message.id, message]));
-        for (const message of history) merged.set(message.id, message);
-        this.update({ history: { ...this.state.history, [sessionId]: [...merged.values()] } });
+        const request = this.historyRequests.get(sessionId);
+        this.historyRequests.delete(sessionId);
+        queueMicrotask(() => {
+          if (this.disposed) return;
+          const queue = this.queuedHistory.get(sessionId), next = queue?.shift();
+          if (!queue?.length) this.queuedHistory.delete(sessionId);
+          if (next) this.sendAgent(next);
+        });
+        const previous = this.state.history[sessionId] || [];
+        const older = request?.older ?? false;
+        const nextCursor = typeof body.next_cursor === "string" ? body.next_cursor : null;
+        const initial = !this.historyCursors.has(sessionId);
+        // Head refreshes must not forget the oldest retained page's cursor.
+        if (older || initial) this.historyCursors.set(sessionId, nextCursor);
+        const updates = new Map(history.map(message => [message.id, message]));
+        const existing = new Set(previous.map(message => message.id));
+        const added = history.filter(message => !existing.has(message.id));
+        const retained = previous.map(message => updates.get(message.id) || message);
+        const merged = initial ? [...history, ...previous.filter(message => !updates.has(message.id))] : older ? [...added, ...retained] : [...retained, ...added];
+        this.update({ history: { ...this.state.history, [sessionId]: merged } });
+        // Classify by the request that actually completed, not the pane's
+        // loading flag: an older request can be queued behind a head refresh.
+        const delivered = {HistoryChunk:{...body,messages:older ? history : merged,next_cursor:this.historyCursors.get(sessionId) ?? null}};
+        for (const listener of this.agentEventListeners) { try { listener(delivered, older ? "older" : "head"); } catch (error) { this.report(error); } }
       } else if (tag === "MessageUpdated" && sessionId) {
         this.upsertMessage(sessionId, Schema.decodeUnknownSync(HistoryMessageSchema)(body.message));
       } else if (tag === "ContentDelta" && sessionId && typeof body.message_id === "string" && typeof body.text === "string") {

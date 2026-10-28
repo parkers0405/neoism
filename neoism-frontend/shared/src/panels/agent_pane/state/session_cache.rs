@@ -790,8 +790,18 @@ impl NeoismAgentPane {
     pub fn apply_history_to_cache(
         &mut self,
         session_id: &str,
+        messages: Vec<NeoismAgentMessage>,
+        oldest_cursor: Option<String>,
+    ) {
+        self.apply_history_to_cache_with_kind(session_id, messages, oldest_cursor, None);
+    }
+
+    pub fn apply_history_to_cache_with_kind(
+        &mut self,
+        session_id: &str,
         mut messages: Vec<NeoismAgentMessage>,
         oldest_cursor: Option<String>,
+        history_older: Option<bool>,
     ) {
         let cached = self.cached_session_entry(session_id);
         let mut live = std::mem::take(&mut cached.messages);
@@ -801,8 +811,15 @@ impl NeoismAgentPane {
             &mut cached.pending_user_prompts,
             &cached.prompt_echo_aliases,
         );
-        cached.messages = merge_session_snapshot(messages, live, cached.hydrated);
+        // A disjoint older page precedes existing history, even when this
+        // session was parked after the continuation was requested.
+        cached.messages = merge_session_snapshot(messages, live, cached.hydrated && history_older != Some(true));
+        cached.timeline_history.has_older = oldest_cursor.is_some();
         cached.timeline_history.oldest_loaded_cursor = oldest_cursor;
+        if history_older == Some(true) {
+            cached.timeline_history.loading_older = false;
+            cached.timeline_history.last_requested_session_id = None;
+        }
         cached.hydrated = true;
         cached.invalidate_timeline_layout();
         self.trim_session_cache();

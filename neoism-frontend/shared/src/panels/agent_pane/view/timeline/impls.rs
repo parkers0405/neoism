@@ -204,6 +204,34 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::maybe_request_older_timeline_page(self, scroll_top, viewport_h);
     }
 
+    // Match the desktop adapter: these defaults intentionally do nothing for
+    // hosts without retained history, but this pane owns reader anchors.
+    // Omitting the anchor delegates made lazy remeasurement jump
+    // the view instead of preserving the reader's visible message.
+    fn timeline_view_anchor(&self) -> Option<(TimelineViewAnchorKey, f32)> {
+        NeoismAgentPane::timeline_view_anchor(self)
+    }
+
+    fn timeline_view_anchor_matches(&self, source_index: usize, source_len: usize) -> bool {
+        NeoismAgentPane::timeline_view_anchor_matches(self, source_index, source_len)
+    }
+
+    fn restore_timeline_view_anchor(&mut self, content_y: f32, screen_offset: f32) {
+        NeoismAgentPane::restore_timeline_view_anchor(self, content_y, screen_offset);
+    }
+
+    fn set_timeline_view_anchor(&mut self, key: Option<TimelineViewAnchorKey>, screen_offset: f32) {
+        NeoismAgentPane::set_timeline_view_anchor(self, key, screen_offset);
+    }
+
+    fn visible_user_orb_active(&self) -> bool {
+        NeoismAgentPane::visible_user_orb_active(self)
+    }
+
+    fn set_visible_user_orb_active(&mut self, active: bool) {
+        NeoismAgentPane::set_visible_user_orb_active(self, active);
+    }
+
     fn virtual_timeline_visible_source_range(&self) -> Option<(usize, usize)> {
         NeoismAgentPane::virtual_timeline_visible_source_range(self)
     }

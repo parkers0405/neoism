@@ -2307,14 +2307,27 @@ impl NeoismAgentPane {
     /// latch even when the server reports the final page.
     pub fn apply_history_page(
         &mut self,
-        mut messages: Vec<NeoismAgentMessage>,
+        messages: Vec<NeoismAgentMessage>,
         next_cursor: Option<String>,
     ) {
-        if !self.timeline_history.loading_older {
+        self.apply_history_page_with_kind(messages, next_cursor, None);
+    }
+
+    pub fn apply_history_page_with_kind(
+        &mut self,
+        mut messages: Vec<NeoismAgentMessage>,
+        next_cursor: Option<String>,
+        history_older: Option<bool>,
+    ) {
+        if !history_older.unwrap_or(self.timeline_history.loading_older) {
             self.apply_history(messages);
             self.timeline_history.oldest_loaded_cursor = next_cursor.clone();
             self.timeline_history.has_older = next_cursor.is_some();
-            self.timeline_history.last_requested_session_id = None;
+            // A head refresh may complete while an older request is still
+            // queued/in flight. Only that continuation can release its latch.
+            if !self.timeline_history.loading_older {
+                self.timeline_history.last_requested_session_id = None;
+            }
             return;
         }
 

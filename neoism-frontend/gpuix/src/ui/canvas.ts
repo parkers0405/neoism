@@ -52,6 +52,36 @@ function counts(renderer: object) {
   return map;
 }
 
+/** Keep a bounded set of recently visible textures resident when scrolling
+ * back. These are extra leases; eviction cannot release another canvas's ink. */
+export class RecentCanvasImages {
+  private retained = new Map<number, number>();
+  private bytes = 0;
+  constructor(private readonly renderer: object, private readonly budget: number) {}
+  use(source: number, raster: CanvasRaster) {
+    const key = rasterKey(source, raster.id), previous = this.retained.get(key);
+    if (previous !== undefined) {
+      this.retained.delete(key); this.retained.set(key, previous); return;
+    }
+    if (raster.len > this.budget || this.budget <= 0) return;
+    const map = counts(this.renderer), count = map.get(key) || 0;
+    if (!count) {
+      const pixels = Buffer.from(toArrayBuffer(raster.ptr as unknown as Pointer, 0, raster.len));
+      (this.renderer as ImageRenderer).putPaintImage?.(key, raster.width, raster.height, pixels, "rgba");
+    }
+    map.set(key, count + 1);
+    this.retained.set(key, raster.len); this.bytes += raster.len;
+    while (this.bytes > this.budget) this.release(this.retained.keys().next().value!);
+  }
+  private release(key: number) {
+    this.bytes -= this.retained.get(key)!; this.retained.delete(key);
+    const map = counts(this.renderer), count = (map.get(key) || 0) - 1;
+    if (count > 0) map.set(key, count);
+    else { map.delete(key); (this.renderer as ImageRenderer).dropPaintImage?.(key); }
+  }
+  dispose() { for (const key of this.retained.keys()) this.release(key); }
+}
+
 /** Frame-scoped image references for one canvas. Pixels upload when a key is
  * first used (copied synchronously out of the native raster cache, which only
  * guarantees the pointer for the frame that produced it). A key unused by a
@@ -63,11 +93,11 @@ export class CanvasImages {
   private deferred: number[] = [];
   constructor(private readonly renderer: object,private readonly retain?:(source:number,raster:CanvasRaster)=>void) {}
   use(source: number, raster: CanvasRaster): number {
+    const key = rasterKey(source, raster.id);
+    if (this.current.has(key)) return key;
     // The session lease must exist before this frame's own reference. A
     // generation may release its canvas before the atomic replacement batch.
     this.retain?.(source,raster);
-    const key = rasterKey(source, raster.id);
-    if (this.current.has(key)) return key;
     this.current.add(key);
     if (!this.previous.has(key)) {
       const map = counts(this.renderer), count = map.get(key) || 0;

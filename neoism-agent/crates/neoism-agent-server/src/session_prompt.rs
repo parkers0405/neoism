@@ -2733,6 +2733,38 @@ fn compaction_usage_tokens(
     }
 }
 
+/// Room the cached summary request needs beyond the run's own request: the
+/// summary prompt plus slack for tool results added since the last count.
+const CACHED_COMPACTION_HEADROOM_TOKENS: u64 = 8_000;
+
+/// The run's request exactly as the provider will receive it, for a summary
+/// that reuses its prompt cache. None when it would not fit beside the
+/// summary's output, or the model's window is unknown.
+async fn compaction_cache_base(
+    state: &AppState,
+    session_id: &str,
+    request: &ProviderGenerationRequest,
+    tokens: u64,
+    limit: Option<&ModelLimit>,
+) -> Option<ProviderGenerationRequest> {
+    let usable = limit
+        .filter(|limit| limit.context > 0)
+        .map(usable_context_tokens)?;
+    if tokens.saturating_add(CACHED_COMPACTION_HEADROOM_TOKENS) > usable {
+        return None;
+    }
+    let mut base = request.clone();
+    // Sent requests carry hydrated attachments; the cached prefix does too.
+    crate::artifact_routes::hydrate_provider_attachments(
+        state,
+        session_id,
+        &mut base.messages,
+    )
+    .await
+    .ok()?;
+    Some(base)
+}
+
 async fn rebuilt_compaction_messages(
     state: &AppState,
     session_id: &str,
@@ -2861,20 +2893,40 @@ async fn run_assistant_step(
         Some(&chat_hook_ctx),
     )
     .await;
-    let should_compact = if enabled && !cancellation.load(Ordering::SeqCst) {
+    let compact_at_tokens = if enabled && !cancellation.load(Ordering::SeqCst) {
         let history = state
             .inner
             .store
             .list_context_messages(session_id_text)
             .await?;
-        !summary_covers_all_messages(info, &history)
-            && compaction_usage_tokens(&request, &history) >= threshold
+        let tokens = compaction_usage_tokens(&request, &history);
+        (!summary_covers_all_messages(info, &history) && tokens >= threshold)
+            .then_some(tokens)
     } else {
-        false
+        None
     };
     let mut compacted = false;
-    if should_compact {
-        match compact_session_context_for_run(state, session_id_text).await {
+    if let Some(tokens) = compact_at_tokens {
+        let cache_base = compaction_cache_base(
+            state,
+            session_id_text,
+            &request,
+            tokens,
+            limit.as_ref(),
+        )
+        .await;
+        let compaction = match cache_base {
+            Some(base) => {
+                crate::session_context::compact_session_context_for_run_cached(
+                    state,
+                    session_id_text,
+                    base,
+                )
+                .await
+            }
+            None => compact_session_context_for_run(state, session_id_text).await,
+        };
+        match compaction {
             Ok(info) => {
                 request.messages = rebuilt_compaction_messages(
                     state,

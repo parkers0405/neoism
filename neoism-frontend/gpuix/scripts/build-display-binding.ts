@@ -30,7 +30,20 @@ if(!existsSync(join(source,"zed/.git"))){
  await run(["git","submodule","update","--init","--depth","1","--","zed"],source);
 }
 if(await run(["git","rev-parse","HEAD"],join(source,"zed"),true)!==pin.zedRevision)throw new Error("The existing Zed submodule has another revision; it was left intact");
-if(await run(["git","status","--porcelain"],join(source,"zed"),true))throw new Error("The pinned Zed submodule has local changes; it was left intact");
+if(pin.zedPatch){
+ const zed=join(source,"zed"),zedPatch=join(root,pin.zedPatch);
+ for(const [path,hash] of Object.entries(pin.zedPatchedFiles||{})){
+  const apply=["git","apply",`--include=${path}`];
+  if(!await succeeds([...apply,"--reverse","--check",zedPatch],zed)){
+   if(!await succeeds([...apply,"--check",zedPatch],zed))throw new Error(`GPUI patch conflicts with local changes in ${path}`);
+   await run([...apply,zedPatch],zed);
+  }
+  if(sha256(readFileSync(join(zed,path)))!==hash)throw new Error(`GPUI source differs from pin: ${path}`);
+ }
+ for(const line of (await run(["git","status","--porcelain","--untracked-files=all"],zed,true)).split("\n").filter(Boolean)){
+  if(!Object.hasOwn(pin.zedPatchedFiles||{},line.slice(3)))throw new Error(`Unpinned GPUI edit: ${line.slice(3)}`);
+ }
+}else if(await run(["git","status","--porcelain"],join(source,"zed"),true))throw new Error("The pinned Zed submodule has local changes; it was left intact");
 // Per-file checks support a partially prepared checkout without resetting or
 // overwriting edits. Every patched file must then match its pinned hash.
 for(const [path,hash]of Object.entries(pin.patchedFiles)){
@@ -42,7 +55,7 @@ for(const [path,hash]of Object.entries(pin.patchedFiles)){
  if(sha256(readFileSync(join(source,path)))!==hash)throw new Error(`The patched GPUIX source differs from the pin: ${path}`);
 }
 for(const line of (await run(["git","status","--porcelain","--untracked-files=all"],source,true)).split("\n").filter(Boolean)){
- const path=line.slice(3);if(!Object.hasOwn(pin.patchedFiles,path))throw new Error(`GPUIX source contains an unpinned edit: ${path}`);
+ const path=line.slice(3);if(!(path==="zed"&&pin.zedPatch)&&!Object.hasOwn(pin.patchedFiles,path))throw new Error(`GPUIX source contains an unpinned edit: ${path}`);
 }
 if(sha256(readFileSync(join(source,"packages/native/Cargo.lock")))!==pin.cargoLockSha256)throw new Error("The pinned GPUIX Cargo.lock checksum differs");
 let rustc:string;

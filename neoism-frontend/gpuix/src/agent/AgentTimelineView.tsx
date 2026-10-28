@@ -1,10 +1,10 @@
-import { createEffect, createSignal, For, onCleanup, onMount, untrack } from "solid-js";
+import { batch, createEffect, createSignal, For, onCleanup, onMount, untrack } from "solid-js";
 import { useGpuixRequired, type HostElement, type KeyEvent } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import type { WorkspaceModel } from "../model";
 import { coreCall } from "../native-core";
 import { writeClipboard } from "../clipboard";
-import { PaintLayer, type PaintCommand } from "../ui/PaintLayer";
+import { PaintLayer, type PaintCommand, type PreparedCanvas } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
 import { focusNativeElement } from "../native-focus";
 import type {AgentFamilyRow} from "./family";
@@ -12,7 +12,7 @@ import { wheelCellPixels } from "../ui/wheel";
 import {localPresenceIdentity} from "./local-presence";
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
 
-interface TimelineFrame { commands: PaintCommand[]; animating: boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
+interface TimelineFrame { canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
 interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
 
 /** One original agent timeline engine per conversation (the shared Rust
@@ -24,18 +24,18 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   let byModel = engines.get(model);
   if (!byModel) { byModel = new Map(); engines.set(model, byModel); }
   const existing = byModel.get(rootSessionId); if (existing) return existing;
-  const { id } = coreCall<{ id: number }>("agenttimeline.new", { sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
+  const { id } = coreCall<{ id: number }>("agenttimeline.new", { compactPaint: true, canvasPaint: true, sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
     fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight,localName:localPresenceIdentity(config).displayName });
   const family=model.agentFamily(sessionId);
   coreCall("agenttimeline.family",{id,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});
   const dirty = new Set<() => void>();
-  const event = (message: unknown) => {
-    try { coreCall("agenttimeline.event", { id, message }); } catch (error) { model.report(error); return; }
+  const event = (message: unknown, historyKind?: "head" | "older") => {
+    try { coreCall("agenttimeline.event", { id, message, historyKind }); } catch (error) { model.report(error); return; }
     for (const listener of dirty) listener();
   };
   // Seed what the model already holds; later daemon events stream in live.
   for(const selected of new Set([rootSessionId,sessionId,...family.roster.map(row=>row.id)])){
-    const history=model.state.history[selected];if(history?.length)event({HistoryChunk:{session_id:selected,messages:history,next_cursor:null}});
+    const history=model.state.history[selected];if(history?.length)event({HistoryChunk:{session_id:selected,messages:history,next_cursor:model.historyCursors.get(selected)??null}},"head");
     const streaming=model.state.streaming[selected];if(streaming&&streaming!=="Idle")event({StreamingState:{session_id:selected,state:streaming,label:null}});
   }
   const unsubscribe = model.subscribeAgentEvents(event);
@@ -51,11 +51,12 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   const localName=localPresenceIdentity(config).displayName;
   const engine = untrack(() => engineFor(props.model, props.sessionId, config,props.rootSessionId||props.sessionId));
   const [commands, setCommands] = createSignal<readonly PaintCommand[]>([]);
+  const [canvas, setCanvas] = createSignal<PreparedCanvas>();
   const [header,setHeader]=createSignal<NonNullable<TimelineFrame["header"]>>([]);
   let bounds = { x: 0, y: 0, width: 0, height: 0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const apply = (next: TimelineFrame) => {
-    setCommands(next.commands);setHeader(next.header||[]);
+    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setHeader(next.header||[]);});
     for(const message of next.send||[])props.model.sendAgent(message as never);
     if(next.navigate)props.onNavigate?.(next.navigate);
     if (next.copy) void writeClipboard(next.copy).catch(props.report);
@@ -70,6 +71,14 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     startedAt = performance.now(); animation.cancel();
     try { apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id,...(op==="layout"?{localName}:{}), ...args })); } catch (error) { props.report(error); }
   };
+  let layoutSignature = "";
+  const layout = (contentBottom = props.contentBottom ?? bounds.height) => {
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    const signature = `${bounds.width}:${bounds.height}:${contentBottom}`;
+    if (signature === layoutSignature) return;
+    layoutSignature = signature;
+    call("layout", { width: bounds.width, height: bounds.height, contentBottom, scale: s, theme: config.themeName });
+  };
   // One paint per display frame however many events or animations arrive.
   const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame"); }, startedAt); };
   engine.dirty.add(schedule);
@@ -77,7 +86,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   onMount(() => schedule());
   let familySignature="";
   createEffect(()=>{const family={rootSessionId:props.rootSessionId||props.sessionId,sessionId:props.sessionId,roster:props.familyRoster||[],rootTitle:props.model.state.threads.find(thread=>thread.session_id===(props.rootSessionId||props.sessionId))?.title||props.rootSessionId||props.sessionId};const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>call("family",family));}});
-  createEffect(() => { const bottom = props.contentBottom; if (bounds.width > 0) untrack(() => call("layout", { width: bounds.width, height: bounds.height, contentBottom: bottom ?? bounds.height })); });
+  createEffect(() => { const bottom = props.contentBottom; untrack(() => layout(bottom ?? bounds.height)); });
   const local = (event: { x?: number; y?: number }) => ({ x: (event.x || 0) - bounds.x, y: (event.y || 0) - bounds.y });
   const keyDown = (event: KeyEvent) => {
     if(handleApplicationShortcut(renderer,event))return;
@@ -95,15 +104,18 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     onLayout={(event) => {
       const next = { x: event.x || 0, y: event.y || 0, width: event.width || 0, height: event.height || 0 };
       const resized = next.width !== bounds.width || next.height !== bounds.height; bounds = next;
-      if (resized && next.width > 0 && next.height > 0) call("layout", { width: next.width, height: next.height, contentBottom: props.contentBottom ?? next.height, scale: s, theme: config.themeName });
+      if (resized) layout();
     }}
-    onScroll={(event) => call("scroll", { deltaX: event.deltaX || 0, deltaY: event.deltaY || 0, precise: !!event.precise, lineHeight: wheelCellPixels(event, config.fontSize) })}
+    onScroll={(event) => {
+      try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: event.deltaY || 0, precise: !!event.precise, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
+      schedule();
+    }}
     onMouseDown={(event) => { if (host) focusNativeElement(renderer, host.id); if (event.button === 0) call("pointer", { kind: "down", ...local(event) }); }}
     onMouseMove={(event) => { try { coreCall("agenttimeline.pointer", { id: engine.id, kind: "move", deferFrame: true, ...local(event) }); } catch (error) { props.report(error); } schedule(); }}
     onMouseUp={(event) => call("pointer", { kind: "up", ...local(event) })}
     onMouseLeave={() => call("pointer", { kind: "leave" })}
     style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", userSelect: "none", cursor: "text" }}>
-    <PaintLayer commands={commands()} config={config} />
+    <PaintLayer commands={commands()} prepared={canvas()} config={config} cacheImageBytes={16 * 1024 * 1024} />
     <For each={header()}>{link=><For each={link.rects}>{rect=><div testId={`agent-family-navigation:${link.direction}`} aria-label={link.direction==="next"?"Next conversation":"Previous conversation"} style={{position:"absolute",left:rect[0],top:rect[1],width:rect[2],height:rect[3],pointerEvents:"none"}}/>}</For>}</For>
   </div>;
 }

@@ -16,6 +16,8 @@ function rasterEqual(a: PaintRaster | null | undefined, b: typeof a): boolean {
 function commandEqual(a: PaintCommand, b: PaintCommand): boolean {
   if (a === b) return true;
   if (a.kind !== b.kind || a.layer !== b.layer) return false;
+  if (a.kind === "raster-text" && b.kind === "raster-text") return numbersEqual(a.rect, b.rect) && numbersEqual(a.clip, b.clip) && rasterEqual(a.raster, b.raster);
+  if (a.kind === "raster-text" || b.kind === "raster-text") return false;
   if (a.kind === "image" && b.kind === "image") return a.depth === b.depth && numbersEqual(a.rect, b.rect) && numbersEqual(a.source, b.source) && rasterEqual(a.raster, b.raster);
   if (a.kind === "image" || b.kind === "image" || !numbersEqual(a.color, b.color)) return false;
   if (a.kind === "rect" && b.kind === "rect") {

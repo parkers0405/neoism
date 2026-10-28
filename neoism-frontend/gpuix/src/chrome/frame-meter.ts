@@ -24,16 +24,25 @@ export function installFrameMeter(renderer: GpuixRenderer, clock = () => perform
   if (meters.has(renderer)) return;
   const meter = new FrameMeter(); meters.set(renderer, meter);
   const tick = renderer.tick.bind(renderer);
-  let nextSample = -Infinity;
+  let nextSample = -Infinity, sampleSource: "presented" | "drawn" | undefined;
   renderer.tick = () => {
     const running = tick();
     // The draw counter is a lock-free native atomic. The debug-stats getter it
     // replaces waited for the UI thread, parking JavaScript behind a paint and
     // costing frames. The pill still publishes half-second buckets.
     if (running !== false && clock() >= nextSample) {
-      const native = renderer as GpuixRenderer & { getRenderedFrameSample?: () => number[] };
+      const native = renderer as GpuixRenderer & { getRenderedFrameSample?: () => number[]; getPresentedFrameSample?: () => number[] | null };
       const now = clock(); nextSample = now + 100;
-      if (native.getRenderedFrameSample) { const [frames, drawnAt] = native.getRenderedFrameSample(); meter.observe(frames, drawnAt); }
+      const presented = native.getPresentedFrameSample?.();
+      const source = presented ? "presented" : "drawn";
+      if (source !== sampleSource) {
+        meter.previous = meter.last = meter.start = meter.count = 0;
+        sampleSource = source;
+      }
+      // Prefer frames actually displayed by the compositor. Root draws can be
+      // queued/replaced and are not a physical FPS measurement under Mailbox.
+      if (presented) meter.observe(presented[0], presented[1]);
+      else if (native.getRenderedFrameSample) { const [frames, drawnAt] = native.getRenderedFrameSample(); meter.observe(frames, drawnAt); }
       else meter.observe(renderer.getDebugFrameOverlayStats().frames, now);
     }
     return running;

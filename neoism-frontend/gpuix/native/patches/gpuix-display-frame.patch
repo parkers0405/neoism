@@ -21,12 +21,29 @@ index 0000000..85c3705
 +
 +Expose opt-in native input caret geometry from the existing shaped insertion point, with passive change-only events for custom renderer hosts.
 diff --git c/README.md w/README.md
-index 4459e7b..3481243 100644
+index 4459e7b..8dcb5b2 100644
 --- c/README.md
 +++ w/README.md
-@@ -1,5 +1,22 @@
+@@ -1,5 +1,55 @@
  # GPUIX
  
++Neoism's raster canvas keeps a native GPUI paint cache for unchanged display
++lists. Command, image-store, scale, bounds, and clip changes invalidate it;
++interactive overlays remain live. Canvas text remains uncached so per-frame
++automation text stays complete. Ordinary retained-tree mutations notify the
++root instead of forcing a window-wide cache reset.
++Changed canvas lists paint immediately without queuing a second root redraw;
++GPUI discards their previous cached scene during that uncached frame.
++Window titles are sent to the platform only when changed. Optional
++`NEOISM_GPUIX_TREE_PROFILE=1` logs aggregate tree-lock waits and root construction
++timings once per second; it excludes subsequent GPUI layout and painting.
++Consecutive, pairwise-disjoint canvas images share bounded GPUI paint layers.
++Overlaps and clip or primitive boundaries split groups, preserving paint order.
++
++The pinned Wayland backend preserves continuous-axis logical displacement
++without the upstream threefold multiplier. Discrete wheel notches retain their
++three-row policy; synthetic pixel events and X11 are unaffected.
++
 +### Display frame wake (Neoism binding patch)
 +
 +`GpuixRenderer.setFrameWakeCallback(callback)` supports native display-frame
@@ -40,14 +57,30 @@ index 4459e7b..3481243 100644
 +timestamp. Animation owners should prepare mutations there and request another
 +wake only while work remains. Multiplex runtime ticks with animation work
 +because the renderer has one wake callback.
++Visible animating windows retain display cadence when keyboard focus moves away;
++there is no additional inactive-window 30 Hz throttle. Idle windows still park.
 +Production hosts build with `--no-default-features` and verify
 +`testSupportEnabled() === false`; GPUI's test-support mode bypasses its
 +production frame scheduling even on platforms with only a test-renderer stub.
 +
++On Wayland the pinned GPUI patch retains compositor-paced Mailbox presentation.
++`GPUI_WAYLAND_PRESENT_MODE=fifo` selects FIFO for pacing diagnostics. Retry
++timers use the current output mode rather than assuming a 60 Hz display.
++`GPUI_WAYLAND_PRESENTATION_TRACE=1` logs compositor presentation timestamps,
++refresh intervals and discarded buffers for opt-in pacing diagnostics. `getRenderedFrameSample()` publishes a coherent draw count
++and timestamp; this measures root draws, not physical presentation.
++`getPresentedFrameSample()` returns the compositor-confirmed count and timestamp
++on Wayland, or null before feedback/on unsupported platforms.
++On Linux, Windows and FreeBSD, `simulateScrollWheel(x, y, dx, dy, modifiers, false)`
++queues benchmark input without synchronously blocking JavaScript behind a draw.
++Omitting the wait argument retains synchronous automation behavior. A final
++`precise` argument (default true) selects pixel input; false selects mouse-wheel
++notches so slow-wheel benchmarks exercise the real line-based input path.
++
  **React and Solid** for [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), Zed's GPU UI framework.
  
  Write a React or Solid tree in TypeScript. GPUIX paints it with Metal, DirectX, or Vulkan. No Electron. No web view.
-@@ -1898,6 +1915,16 @@ inactive. Override its colour through the shared native theme:
+@@ -1898,6 +1948,16 @@ inactive. Override its colour through the shared native theme:
  <input theme={{ caret: '#22c55e' }} />
  ```
  
@@ -64,12 +97,16 @@ index 4459e7b..3481243 100644
  When the clipboard has no text, `Cmd+V` or `Ctrl+V` continues to `onKeyDown`
  instead of disappearing inside the editor. Applications can then handle an
  image-only or file-only clipboard themselves. Copied files also propagate even
-@@ -4044,3 +4071,5 @@ See [AGENTS.md](https://github.com/remorses/gpuix/blob/main/AGENTS.md) for detai
+@@ -4044,3 +4104,9 @@ See [AGENTS.md](https://github.com/remorses/gpuix/blob/main/AGENTS.md) for detai
  ## License
  
  [Apache-2.0](https://github.com/remorses/gpuix/blob/main/LICENSE)
 +
 +`inputCaretGeometrySupported(): boolean` queries the compiled native input and textarea event whitelists without opening a window. Custom-caret hosts must require `true` before hiding the built-in caret; a listener filtered out by the native custom-element registry cannot emit geometry.
++
++Neoism diagnostics: `GPUI_GPU_TIMING_TRACE=1` logs CPU time spent acquiring a surface texture, recording/submitting GPU commands, and presenting. These timings exclude asynchronous GPU execution; use Wayland presentation feedback for confirmed display cadence.
++
++`GPUI_CANVAS_PARSE_TRACE=1` reports canvas JSON bytes and UI-thread decoding time without logging content. Unchanged custom props are compared before cloning; canvas command strings transfer ownership into the retained parser cache.
 diff --git c/packages/native/Cargo.toml w/packages/native/Cargo.toml
 index 9d339ee..5912a2c 100644
 --- c/packages/native/Cargo.toml
@@ -104,6 +141,36 @@ index 4eded3a..5571422 100644
 +
 +/** True when both compiled native text-input adapters accept caretGeometry listeners. No window is created. */
 +export declare function inputCaretGeometrySupported(): boolean
+diff --git c/packages/native/src/automation.rs w/packages/native/src/automation.rs
+index bdbf95b..075d317 100644
+--- c/packages/native/src/automation.rs
++++ w/packages/native/src/automation.rs
+@@ -413,11 +413,24 @@ pub fn dispatch_scroll_wheel(
+     delta_x: f64,
+     delta_y: f64,
+     modifiers: Modifiers,
++) {
++    dispatch_scroll_wheel_with_units(window,cx,x,y,delta_x,delta_y,modifiers,true);
++}
++
++pub fn dispatch_scroll_wheel_with_units(
++    window: &mut Window,
++    cx: &mut App,
++    x: f64,
++    y: f64,
++    delta_x: f64,
++    delta_y: f64,
++    modifiers: Modifiers,
++    precise: bool,
+ ) {
+     window.dispatch_event(
+         gpui::ScrollWheelEvent {
+             position: point(px(x as f32), px(y as f32)),
+-            delta: gpui::ScrollDelta::Pixels(point(px(delta_x as f32), px(delta_y as f32))),
++            delta: if precise { gpui::ScrollDelta::Pixels(point(px(delta_x as f32), px(delta_y as f32))) } else { gpui::ScrollDelta::Lines(point(delta_x as f32, delta_y as f32)) },
+             modifiers,
+             touch_phase: gpui::TouchPhase::Moved,
+         }
 diff --git c/packages/native/src/color.rs w/packages/native/src/color.rs
 index ab9f8b4..82f4200 100644
 --- c/packages/native/src/color.rs
@@ -138,10 +205,10 @@ index ab9f8b4..82f4200 100644
          r: parsed.r,
 diff --git c/packages/native/src/custom_elements/canvas.rs w/packages/native/src/custom_elements/canvas.rs
 new file mode 100644
-index 0000000..fb892fa
+index 0000000..ebaf28e
 --- /dev/null
 +++ w/packages/native/src/custom_elements/canvas.rs
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,596 @@
 +//! `<canvas>`: one GPUI element that paints a retained display list.
 +//!
 +//! Every `<div>`, `<text>` and `<img>` host costs a stateful GPUI element, a
@@ -158,6 +225,7 @@ index 0000000..fb892fa
 +use std::collections::HashMap;
 +use std::rc::Rc;
 +use std::sync::{Arc, LazyLock, Mutex};
++use std::sync::atomic::{AtomicU64, Ordering};
 +
 +use serde::Deserialize;
 +
@@ -174,18 +242,21 @@ index 0000000..fb892fa
 +}
 +
 +static PAINT_IMAGES: LazyLock<Mutex<PaintImageStore>> = LazyLock::new(Default::default);
++static IMAGE_GENERATION: AtomicU64 = AtomicU64::new(0);
 +
 +pub fn put_paint_image(key: u64, image: Arc<gpui::RenderImage>) {
 +    let mut store = PAINT_IMAGES.lock().unwrap();
 +    if let Some(previous) = store.images.insert(key, image) {
 +        store.drops.push(previous);
 +    }
++    IMAGE_GENERATION.fetch_add(1, Ordering::Release);
 +}
 +
 +pub fn drop_paint_image(key: u64) {
 +    let mut store = PAINT_IMAGES.lock().unwrap();
 +    if let Some(previous) = store.images.remove(&key) {
 +        store.drops.push(previous);
++        IMAGE_GENERATION.fetch_add(1, Ordering::Release);
 +    }
 +}
 +
@@ -193,6 +264,7 @@ index 0000000..fb892fa
 +    let mut store = PAINT_IMAGES.lock().unwrap();
 +    let images: Vec<_> = store.images.drain().map(|(_, image)| image).collect();
 +    store.drops.extend(images);
++    IMAGE_GENERATION.fetch_add(1, Ordering::Release);
 +}
 +
 +/// Free atlas tiles of released images. Call from the UI thread each frame.
@@ -364,7 +436,10 @@ index 0000000..fb892fa
 +    if source.is_empty() {
 +        return Vec::new();
 +    }
-+    match serde_json::from_str::<Vec<RawOp>>(source) {
++    let started = std::env::var_os("GPUI_CANVAS_PARSE_TRACE").is_some().then(std::time::Instant::now);
++    let parsed = serde_json::from_str::<Vec<RawOp>>(source);
++    if let Some(started) = started { eprintln!("[gpui-canvas-parse] bytes={} time_us={}", source.len(), started.elapsed().as_micros()); }
++    match parsed {
 +        Ok(ops) => ops.into_iter().map(Op::from).collect(),
 +        Err(error) => {
 +            log::warn!("<canvas> commands are invalid: {error}");
@@ -403,6 +478,62 @@ index 0000000..fb892fa
 +    paint_range(ops, &mut index, origin, &images, window, cx);
 +}
 +
++/// GPUI may sort sprites with the same layer order by atlas tile. Only
++/// pairwise-disjoint, consecutive images may therefore share a layer.
++/// Keep this scan bounded even for very large text display lists.
++fn image_group(ops: &[Op], start: usize) -> Option<(usize, [f32; 4])> {
++    const MAX_IMAGES: usize = 32;
++    let mut boxes = [[0.0f32; 4]; MAX_IMAGES];
++    let mut count = 0;
++    let mut union = [0.0f32; 4]; // left, top, right, bottom
++    for op in ops.iter().skip(start).take(MAX_IMAGES) {
++        let Op::Image { bounds, .. } = op else { break };
++        let [x, y, width, height] = *bounds;
++        let edges = [x, y, x + width, y + height];
++        if width <= 0.0 || height <= 0.0 || !edges.iter().all(|edge| edge.is_finite()) {
++            break;
++        }
++        if boxes[..count].iter().any(|previous| {
++            edges[0] < previous[2] && previous[0] < edges[2]
++                && edges[1] < previous[3] && previous[1] < edges[3]
++        }) {
++            break;
++        }
++        union = if count == 0 { edges } else {
++            [union[0].min(edges[0]), union[1].min(edges[1]),
++             union[2].max(edges[2]), union[3].max(edges[3])]
++        };
++        boxes[count] = edges;
++        count += 1;
++    }
++    let bounds = [union[0], union[1], union[2] - union[0], union[3] - union[1]];
++    (count > 1 && bounds.iter().all(|value| value.is_finite())).then_some((start + count, bounds))
++}
++
++fn paint_image_op(
++    op: &Op,
++    origin: gpui::Point<gpui::Pixels>,
++    images: &HashMap<u64, Arc<gpui::RenderImage>>,
++    window: &mut gpui::Window,
++) {
++    let Op::Image { key, bounds, radii, source } = op else { return };
++    if let Some(image) = images.get(key) {
++        let visible = rect(origin, bounds);
++        let [u0, v0, u1, v1] = *source;
++        let (du, dv) = ((u1 - u0).max(1e-6), (v1 - v0).max(1e-6));
++        // GPUI crops by intersecting the visible box with the full
++        // image placement, so a slice is a stretched placement.
++        let full = gpui::size(visible.size.width / du, visible.size.height / dv);
++        let placement = gpui::Bounds::new(
++            gpui::point(visible.origin.x - full.width * u0, visible.origin.y - full.height * v0),
++            full,
++        );
++        window
++            .paint_image(visible, placement, corners(radii), image.clone(), 0, false)
++            .ok();
++    }
++}
++
 +/// Paint until the matching `Unclip` (or the end), recursing for nested clips.
 +fn paint_range(
 +    ops: &[Op],
@@ -427,21 +558,24 @@ index 0000000..fb892fa
 +                    gpui::BorderStyle::default(),
 +                ));
 +            }
-+            Op::Image { key, bounds, radii, source } => {
-+                if let Some(image) = images.get(key) {
-+                    let visible = rect(origin, bounds);
-+                    let [u0, v0, u1, v1] = *source;
-+                    let (du, dv) = ((u1 - u0).max(1e-6), (v1 - v0).max(1e-6));
-+                    // GPUI crops by intersecting the visible box with the full
-+                    // image placement, so a slice is a stretched placement.
-+                    let full = gpui::size(visible.size.width / du, visible.size.height / dv);
-+                    let placement = gpui::Bounds::new(
-+                        gpui::point(visible.origin.x - full.width * u0, visible.origin.y - full.height * v0),
-+                        full,
-+                    );
-+                    window
-+                        .paint_image(visible, placement, corners(radii), image.clone(), 0, false)
-+                        .ok();
++            Op::Image { .. } => {
++                let start = *index - 1;
++                if let Some((end, bounds)) = image_group(ops, start) {
++                    // One conservative bounds insertion also survives cached
++                    // scene replay. Coordinates, sampling and clipping stay
++                    // unchanged; disjointness makes tile sorting harmless.
++                    // Expand only the ordering envelope by a device pixel to
++                    // cover floating-point union/translation roundoff. This
++                    // does not change any image bounds or its content mask.
++                    let envelope = rect(origin, &bounds).dilate(gpui::px(1.0 / window.scale_factor()));
++                    window.paint_layer(envelope, |window| {
++                        for image in &ops[start..end] {
++                            paint_image_op(image, origin, images, window);
++                        }
++                    });
++                    *index = end;
++                } else {
++                    paint_image_op(op, origin, images, window);
 +                }
 +            }
 +            Op::Text { x, y, text, size, color, font, line_height, align } => {
@@ -516,29 +650,78 @@ index 0000000..fb892fa
 +pub struct CanvasElement {
 +    source: String,
 +    ops: Rc<Vec<Op>>,
++    painter: Option<gpui::Entity<CanvasPainter>>,
++}
++
++struct CanvasPainter {
++    ops: Rc<Vec<Op>>,
++    image_generation: u64,
++    images: Vec<(u64, usize)>,
++    scale: f32,
++}
++
++fn image_signature(ops: &[Op]) -> Vec<(u64, usize)> {
++    let store = PAINT_IMAGES.lock().unwrap();
++    ops.iter().filter_map(|op| match op {
++        Op::Image { key, .. } => Some((*key, store.images.get(key).map_or(0, |image| Arc::as_ptr(image) as usize))),
++        _ => None,
++    }).collect()
++}
++
++impl gpui::Render for CanvasPainter {
++    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
++        use gpui::prelude::*;
++        let ops = self.ops.clone();
++        gpui::canvas(|_, _, _| (), move |bounds, _, window, cx| {
++            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
++                paint_ops(&ops, bounds.origin, window, cx)
++            })
++        }).absolute().size_full()
++    }
 +}
 +
 +impl CustomElement for CanvasElement {
 +    fn render(
 +        &mut self,
 +        ctx: CustomRenderContext,
-+        _window: &mut gpui::Window,
-+        _cx: &mut gpui::Context<crate::renderer::GpuixView>,
++        window: &mut gpui::Window,
++        cx: &mut gpui::Context<crate::renderer::GpuixView>,
 +    ) -> gpui::AnyElement {
 +        use gpui::prelude::*;
 +
-+        let ops = self.ops.clone();
-+        let painter = gpui::canvas(
-+            |_, _, _| (),
-+            // Like `overflow: hidden`: a display list never paints outside its box.
-+            move |bounds, _, window, cx| {
-+                window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-+                    paint_ops(&ops, bounds.origin, window, cx)
-+                })
-+            },
-+        )
-+        .absolute()
-+        .size_full();
++        let generation = IMAGE_GENERATION.load(Ordering::Acquire);
++        let scale = window.scale_factor();
++        let painter = self.painter.get_or_insert_with(|| cx.new(|_| CanvasPainter {
++            ops: self.ops.clone(), image_generation: generation, images: image_signature(&self.ops), scale,
++        }));
++        let changed = painter.update(cx, |painter, _cx| {
++            let commands_changed = !Rc::ptr_eq(&painter.ops, &self.ops);
++            let images = (commands_changed || painter.image_generation != generation).then(|| image_signature(&self.ops));
++            let images_changed = images.as_ref().is_some_and(|images| *images != painter.images);
++            painter.image_generation = generation;
++            if let Some(images) = images { painter.images = images; }
++            // Uploading a newly visible transcript word must not invalidate
++            // unchanged sidebar/composer lists that reference different images.
++            if commands_changed || images_changed || painter.scale != scale {
++                painter.ops = self.ops.clone();
++                painter.scale = scale;
++                return true;
++            }
++            false
++        });
++        // Only the noninteractive paint list is cached. The outer surface still
++        // owns current bounds, overlays, accessibility and event handlers.
++        // Paint changed commands uncached immediately. GPUI retains cached
++        // element state only when it is accessed in this frame, so this also
++        // drops the previous cached scene. Notifying here would schedule a
++        // redundant root draw after the changed ink was already painted.
++        // Text painting also feeds per-frame automation text collection.
++        // Keep that path live; rasterized original-painter lists can reuse ink.
++        let painter = if changed || self.ops.iter().any(|op| matches!(op, Op::Text { .. })) {
++            painter.clone().into_any_element()
++        } else {
++            painter.clone().cached(gpui::StyleRefinement::default().absolute().size_full()).into_any_element()
++        };
 +        // Children (overlays) paint above the display list.
 +        let mut surface = super::custom_surface(gpui::div().id(gpui::ElementId::Integer(ctx.id)), &ctx)
 +            .child(painter);
@@ -550,10 +733,10 @@ index 0000000..fb892fa
 +
 +    fn set_prop(&mut self, key: &str, value: serde_json::Value) {
 +        if key == "commands" {
-+            let source = value.as_str().unwrap_or_default();
++            let source = match value { serde_json::Value::String(source) => source, _ => String::new() };
 +            if source != self.source {
-+                self.source = source.to_string();
-+                self.ops = Rc::new(parse(source));
++                self.ops = Rc::new(parse(&source));
++                self.source = source;
 +            }
 +        }
 +    }
@@ -578,6 +761,48 @@ index 0000000..fb892fa
 +
 +    fn create(&self, _id: u64) -> Box<dyn CustomElement> {
 +        Box::new(CanvasElement::default())
++    }
++}
++
++#[cfg(test)]
++mod image_group_tests {
++    use super::*;
++
++    fn image(bounds: [f32; 4]) -> Op {
++        Op::Image { key: 1, bounds, radii: [0.0; 4], source: [0.0, 0.0, 1.0, 1.0] }
++    }
++
++    #[test]
++    fn disjoint_images_share_their_union_and_touching_edges_are_safe() {
++        let ops = [image([0.0, 0.0, 10.0, 10.0]), image([10.0, 0.0, 5.0, 10.0]), image([0.0, 10.0, 15.0, 5.0])];
++        assert_eq!(image_group(&ops, 0), Some((3, [0.0, 0.0, 15.0, 15.0])));
++    }
++
++    #[test]
++    fn overlap_with_any_prior_image_splits_the_layer() {
++        let ops = [image([0.0, 0.0, 10.0, 10.0]), image([20.0, 0.0, 10.0, 10.0]), image([5.0, 0.0, 5.0, 10.0])];
++        assert_eq!(image_group(&ops, 0), Some((2, [0.0, 0.0, 30.0, 10.0])));
++        assert_eq!(image_group(&[image([0.0, 0.0, 10.0, 10.0]), image([5.0, 5.0, 10.0, 10.0])], 0), None);
++    }
++
++    #[test]
++    fn clips_and_non_image_ink_are_never_crossed() {
++        for boundary in [Op::Clip([0.0, 0.0, 100.0, 100.0]), Op::Unclip,
++            Op::Rect { bounds: [0.0, 0.0, 100.0, 100.0], color: gpui::transparent_black(), radii: [0.0; 4], border: None }]
++        {
++            let ops = [image([0.0, 0.0, 10.0, 10.0]), image([20.0, 0.0, 10.0, 10.0]), boundary, image([40.0, 0.0, 10.0, 10.0])];
++            assert_eq!(image_group(&ops, 0).unwrap().0, 2);
++            assert_eq!(image_group(&ops, 2), None);
++        }
++    }
++
++    #[test]
++    fn groups_are_bounded_and_invalid_geometry_falls_back() {
++        let ops: Vec<_> = (0..40).map(|i| image([i as f32 * 20.0, 0.0, 10.0, 10.0])).collect();
++        assert_eq!(image_group(&ops, 0).unwrap().0, 32);
++        assert_eq!(image_group(&ops, 32).unwrap().0, 40);
++        assert_eq!(image_group(&[image([0.0, 0.0, 0.0, 10.0]), image([20.0, 0.0, 10.0, 10.0])], 0), None);
++        assert_eq!(image_group(&[image([f32::INFINITY, 0.0, 10.0, 10.0]), image([20.0, 0.0, 10.0, 10.0])], 0), None);
 +    }
 +}
 diff --git c/packages/native/src/custom_elements/input.rs w/packages/native/src/custom_elements/input.rs
@@ -774,7 +999,7 @@ index 0000000..0dd107a
 +    }
 +}
 diff --git c/packages/native/src/custom_elements/mod.rs w/packages/native/src/custom_elements/mod.rs
-index 158269f..7fc6d69 100644
+index 158269f..eaece18 100644
 --- c/packages/native/src/custom_elements/mod.rs
 +++ w/packages/native/src/custom_elements/mod.rs
 @@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
@@ -785,6 +1010,20 @@ index 158269f..7fc6d69 100644
  pub mod code;
  pub mod diff;
  pub mod img;
+@@ -270,10 +271,10 @@ impl CustomElementEntry {
+     fn sync(&mut self, props: &HashMap<String, serde_json::Value>) {
+         let supported_props = self.element.supported_props();
+         for &key in supported_props {
+-            let value = props.get(key).cloned().unwrap_or(serde_json::Value::Null);
+-            if self.applied_props.get(key) != Some(&value) {
++            let value = props.get(key).unwrap_or(&serde_json::Value::Null);
++            if self.applied_props.get(key) != Some(value) {
+                 self.element.set_prop(key, value.clone());
+-                self.applied_props.insert(key.to_string(), value);
++                self.applied_props.insert(key.to_string(), value.clone());
+             }
+         }
+ 
 @@ -324,6 +325,7 @@ impl CustomElementRegistry {
          registry.register(Box::new(code::CodeFactory));
          registry.register(Box::new(diff::DiffFactory));
@@ -854,7 +1093,7 @@ index c5f4fa1..d08b130 100644
      not(all(target_arch = "wasm32", target_os = "unknown")),
      not(all(
 diff --git c/packages/native/src/renderer.rs w/packages/native/src/renderer.rs
-index 8c104a4..22b2ddc 100644
+index 8c104a4..50cac17 100644
 --- c/packages/native/src/renderer.rs
 +++ w/packages/native/src/renderer.rs
 @@ -25,7 +25,7 @@ use napi_derive::napi;
@@ -866,7 +1105,83 @@ index 8c104a4..22b2ddc 100644
  use std::sync::atomic::{AtomicBool, Ordering};
  #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
  use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
-@@ -435,6 +435,7 @@ enum ClockControl {
+@@ -42,6 +42,67 @@ use crate::style::StyleDesc;
+ use crate::text::{selectable_text, selection_frame_reset, SharedSelection};
+ use crate::theme::Theme;
+ 
++// Opt-in phase measurements for the retained-tree bridge. Never inspect
++// commands or document contents, and never read a clock when disabled.
++static TREE_PROFILE_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
++    std::env::var("NEOISM_GPUIX_TREE_PROFILE").as_deref() == Ok("1")
++});
++
++#[derive(Clone, Copy, Default)]
++struct TreeProfileMetric {
++    count: u64,
++    sum_us: f64,
++    max_us: f64,
++}
++
++struct TreeProfile {
++    since: std::time::Instant,
++    metrics: [TreeProfileMetric; 5],
++}
++
++static TREE_PROFILE: std::sync::LazyLock<Mutex<TreeProfile>> = std::sync::LazyLock::new(|| {
++    Mutex::new(TreeProfile {
++        since: std::time::Instant::now(),
++        metrics: [TreeProfileMetric::default(); 5],
++    })
++});
++
++fn tree_profile_now() -> Option<std::time::Instant> {
++    (*TREE_PROFILE_ENABLED).then(std::time::Instant::now)
++}
++
++fn record_tree_profile(samples: &[(usize, Duration)]) {
++    let now = std::time::Instant::now();
++    let report = {
++        let mut profile = TREE_PROFILE.lock().unwrap();
++        for &(index, elapsed) in samples {
++            let metric = &mut profile.metrics[index];
++            let us = elapsed.as_secs_f64() * 1_000_000.0;
++            metric.count += 1;
++            metric.sum_us += us;
++            metric.max_us = metric.max_us.max(us);
++        }
++        let elapsed = now.saturating_duration_since(profile.since);
++        if elapsed >= Duration::from_secs(1) {
++            let metrics = std::mem::replace(&mut profile.metrics, [TreeProfileMetric::default(); 5]);
++            profile.since = now;
++            Some((elapsed, metrics))
++        } else {
++            None
++        }
++    };
++    if let Some((elapsed, metrics)) = report {
++        let names = ["root_lock_wait", "sync_prune", "host_build", "root_render", "batch_lock_wait"];
++        let values: serde_json::Map<String, serde_json::Value> = names.into_iter().zip(metrics)
++            .map(|(name, metric)| (name.to_owned(), serde_json::json!({
++                "count": metric.count, "sum_us": metric.sum_us, "max_us": metric.max_us,
++            }))).collect();
++        eprintln!("[neoism-gpuix-tree-profile] {}", serde_json::json!({
++            "elapsed_ms": elapsed.as_secs_f64() * 1000.0, "phases": values,
++        }));
++    }
++}
++
+ /// The Window menu items act on the focused window, and the root element is the
+ /// only place in GPUIX that has one. `crate::app_menu` owns everything else.
+ #[cfg(target_os = "macos")]
+@@ -414,6 +475,7 @@ enum MouseInput {
+         delta_x: f64,
+         delta_y: f64,
+         modifiers: gpui::Modifiers,
++        precise: bool,
+     },
+ }
+ 
+@@ -435,6 +497,7 @@ enum ClockControl {
  #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
  enum UiCommand {
      Invalidate,
@@ -874,7 +1189,18 @@ index 8c104a4..22b2ddc 100644
      ActivateWindow,
      MinimizeWindow,
      ZoomWindow,
-@@ -560,6 +561,16 @@ async fn run_ui_commands(
+@@ -545,9 +608,8 @@ fn refresh_ui_window(
+     window: gpui::WindowHandle<GpuixView>,
+     cx: &mut gpui::AsyncApp,
+ ) -> anyhow::Result<()> {
+-    window.update(cx, |_view, window, cx| {
++    window.update(cx, |_view, _window, cx| {
+         cx.notify();
+-        window.refresh();
+     })
+ }
+ 
+@@ -560,6 +622,16 @@ async fn run_ui_commands(
      while let Some(command) = commands.next().await {
          let result = match command {
              UiCommand::Invalidate => refresh_ui_window(window, cx),
@@ -891,7 +1217,7 @@ index 8c104a4..22b2ddc 100644
              UiCommand::ActivateWindow => window.update(cx, |_view, window, cx| {
                  cx.activate(true);
                  window.activate_window();
-@@ -665,9 +676,11 @@ async fn run_ui_commands(
+@@ -665,9 +737,11 @@ async fn run_ui_commands(
                  format,
                  response,
              } => window.update(cx, move |view, window, cx| {
@@ -906,7 +1232,20 @@ index 8c104a4..22b2ddc 100644
              }),
              UiCommand::SetImage {
                  id,
-@@ -957,9 +970,28 @@ pub fn is_terminal() -> bool {
+@@ -859,9 +933,10 @@ async fn run_ui_commands(
+                                 delta_x,
+                                 delta_y,
+                                 modifiers,
++                                precise,
+                             } => {
+-                                crate::automation::dispatch_scroll_wheel(
+-                                    window, cx, x, y, delta_x, delta_y, modifiers,
++                                crate::automation::dispatch_scroll_wheel_with_units(
++                                    window, cx, x, y, delta_x, delta_y, modifiers, precise,
+                                 );
+                             }
+                         }
+@@ -957,9 +1032,28 @@ pub fn is_terminal() -> bool {
      TERMINAL_MODE.load(std::sync::atomic::Ordering::Acquire)
  }
  
@@ -936,7 +1275,7 @@ index 8c104a4..22b2ddc 100644
  pub struct GpuixRenderer {
      event_callback: Mutex<Option<Arc<ThreadsafeFunction<EventPayload>>>>,
      tree: Arc<Mutex<RetainedTree>>,
-@@ -967,6 +999,7 @@ pub struct GpuixRenderer {
+@@ -967,6 +1061,7 @@ pub struct GpuixRenderer {
      /// Shared with GpuixView so napi methods can read the live selection
      /// without an App context. Paint and napi calls can use different threads.
      selection: SharedSelection,
@@ -944,12 +1283,13 @@ index 8c104a4..22b2ddc 100644
      #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
      ui_commands: Mutex<Option<mpsc::UnboundedSender<UiCommand>>>,
      /// False after `Platform::run` returns. `tick()` reports that so JS can
-@@ -977,9 +1010,93 @@ pub struct GpuixRenderer {
+@@ -977,9 +1072,103 @@ pub struct GpuixRenderer {
      ui_running: Arc<AtomicBool>,
  }
  
 +/// Draws completed by the root view. Read without a UI-thread round trip so a
 +/// frame meter never stalls JavaScript behind an in-progress paint.
++static FRAME_SAMPLE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 +static RENDERED_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 +/// Microseconds since `FRAME_EPOCH` of the latest root draw, so a meter can
 +/// divide draw intervals by the draw clock instead of its own polling time.
@@ -970,6 +1310,13 @@ index 8c104a4..22b2ddc 100644
 +        RENDERED_FRAMES.load(std::sync::atomic::Ordering::Relaxed) as f64
 +    }
 +
++    /// Compositor-confirmed count and presentation time in milliseconds. None
++    /// before the first feedback or when the platform has no presentation clock.
++    #[napi]
++    pub fn get_presented_frame_sample(&self) -> Option<Vec<f64>> {
++        gpui_platform::presented_frame_sample().map(|(count, time)| vec![count as f64, time as f64 / 1_000_000.0])
++    }
++
 +    /// Window display scale as of the latest draw. Lock-free.
 +    #[napi]
 +    pub fn get_display_scale(&self) -> f64 {
@@ -982,9 +1329,11 @@ index 8c104a4..22b2ddc 100644
 +    pub fn get_rendered_frame_sample(&self) -> Vec<f64> {
 +        use std::sync::atomic::Ordering;
 +        loop {
-+            let count = RENDERED_FRAMES.load(Ordering::Acquire);
-+            let at = RENDERED_FRAME_AT_US.load(Ordering::Acquire);
-+            if RENDERED_FRAMES.load(Ordering::Acquire) == count {
++            let sequence = FRAME_SAMPLE_SEQUENCE.load(Ordering::SeqCst);
++            if sequence & 1 != 0 { std::hint::spin_loop(); continue; }
++            let count = RENDERED_FRAMES.load(Ordering::SeqCst);
++            let at = RENDERED_FRAME_AT_US.load(Ordering::SeqCst);
++            if FRAME_SAMPLE_SEQUENCE.load(Ordering::SeqCst) == sequence {
 +                return vec![count as f64, at as f64 / 1000.0];
 +            }
 +        }
@@ -1038,7 +1387,7 @@ index 8c104a4..22b2ddc 100644
      fn event_callback_for_view(&self) -> Option<EventCallback> {
          self.event_callback.lock().unwrap().clone().map(|tsf| {
              Arc::new(move |payload: EventPayload| {
-@@ -1178,6 +1295,7 @@ impl GpuixRenderer {
+@@ -1178,6 +1367,7 @@ impl GpuixRenderer {
              tree: Arc::new(Mutex::new(RetainedTree::new())),
              initialized: Arc::new(Mutex::new(false)),
              selection: SharedSelection::default(),
@@ -1046,7 +1395,24 @@ index 8c104a4..22b2ddc 100644
              #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
              ui_commands: Mutex::new(None),
              #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
-@@ -1574,59 +1692,117 @@ impl GpuixRenderer {
+@@ -1511,11 +1701,16 @@ impl GpuixRenderer {
+     /// Acquires the tree mutex ONCE for the entire batch.
+     #[napi]
+     pub fn apply_batch(&self, json: String) -> Result<Vec<f64>> {
++        let profile_lock_start = tree_profile_now();
+         let mut tree = self.tree.lock().unwrap();
++        let profile_lock_wait = profile_lock_start.map(|start| start.elapsed());
+         let destroyed =
+             apply_batch_to_tree(&mut tree, json.as_bytes()).map_err(Error::from_reason)?;
+         let dirty = tree.take_dirty();
+         drop(tree);
++        if let Some(wait) = profile_lock_wait {
++            record_tree_profile(&[(4, wait)]);
++        }
+         // A re-render that changed nothing sends a batch of identical resends.
+         // Waking the window for it makes it rebuild and diff the whole element
+         // tree to draw the frame it already has.
+@@ -1574,59 +1769,117 @@ impl GpuixRenderer {
      }
  
  
@@ -1204,7 +1570,7 @@ index 8c104a4..22b2ddc 100644
      /// Whether JavaScript must call tick() until it returns false.
      ///
      /// macOS: tick() pumps AppKit. Windows/Linux: tick() only reports whether
-@@ -2380,17 +2556,18 @@ impl GpuixRenderer {
+@@ -2380,17 +2633,18 @@ impl GpuixRenderer {
  
          #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
          {
@@ -1228,7 +1594,43 @@ index 8c104a4..22b2ddc 100644
          }
  
          #[cfg(not(any(
-@@ -3626,6 +3803,10 @@ impl WebGpuixRenderer {
+@@ -2758,22 +3012,27 @@ impl GpuixRenderer {
+         delta_x: f64,
+         delta_y: f64,
+         modifiers: Option<String>,
++        wait_for_dispatch: Option<bool>,
++        precise: Option<bool>,
+     ) -> Result<()> {
+         let modifiers = crate::automation::parse_modifiers(modifiers.as_deref());
+ 
+         #[cfg(target_os = "macos")]
+         return update_window_without_view(move |window, cx| {
+-            crate::automation::dispatch_scroll_wheel(window, cx, x, y, delta_x, delta_y, modifiers);
++            crate::automation::dispatch_scroll_wheel_with_units(window, cx, x, y, delta_x, delta_y, modifiers, precise.unwrap_or(true));
+         });
+ 
+         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+-        return self.dispatch_mouse_input(MouseInput::Wheel {
+-            x,
+-            y,
+-            delta_x,
+-            delta_y,
+-            modifiers,
+-        });
++        {
++            let input = MouseInput::Wheel { x, y, delta_x, delta_y, modifiers, precise: precise.unwrap_or(true) };
++            if wait_for_dispatch == Some(false) {
++                // Benchmark input must not park the JS animation producer behind
++                // a native draw. Normal automation retains synchronous dispatch.
++                let (response, _receiver) = sync_channel(1);
++                return self.send_ui_command(UiCommand::DispatchMouse { input, response });
++            }
++            return self.dispatch_mouse_input(input);
++        }
+ 
+         #[cfg(not(any(
+             target_os = "macos",
+@@ -3626,6 +3885,10 @@ impl WebGpuixRenderer {
  #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
  impl Drop for GpuixRenderer {
      fn drop(&mut self) {
@@ -1239,14 +1641,44 @@ index 8c104a4..22b2ddc 100644
          #[cfg(target_os = "macos")]
          if *self.initialized.lock().unwrap() {
              EMBEDDED_PLATFORM
-@@ -5091,6 +5272,15 @@ impl gpui::Render for GpuixView {
+@@ -3647,6 +3910,7 @@ pub(crate) struct GpuixView {
+     pub(crate) tree: Arc<Mutex<RetainedTree>>,
+     pub(crate) event_callback: Option<EventCallback>,
+     pub(crate) window_title: String,
++    applied_window_title: Option<String>,
+     pub(crate) window_key_down: bool,
+     pub(crate) window_key_up: bool,
+     pub(crate) window_key_event_id: u64,
+@@ -3967,6 +4231,7 @@ impl GpuixView {
+             tree,
+             event_callback,
+             window_title,
++            applied_window_title: None,
+             window_key_down: false,
+             window_key_up: false,
+             window_key_event_id: 0,
+@@ -5090,7 +5355,28 @@ impl gpui::Render for GpuixView {
+     ) -> impl gpui::IntoElement {
          use gpui::IntoElement;
  
-         window.set_window_title(&self.window_title);
+-        window.set_window_title(&self.window_title);
++        let profile_start = tree_profile_now();
++
++        // GPUI forwards every call to the platform (including a Wayland
++        // set_title request). Scrolling must not resend an unchanged title
++        // to the compositor on every frame.
++        if self.applied_window_title.as_deref() != Some(self.window_title.as_str()) {
++            window.set_window_title(&self.window_title);
++            self.applied_window_title = Some(self.window_title.clone());
++        }
 +        DISPLAY_SCALE_BITS.store(window.scale_factor().to_bits(), std::sync::atomic::Ordering::Relaxed);
 +        let epoch = *FRAME_EPOCH.get_or_init(std::time::Instant::now);
-+        RENDERED_FRAME_AT_US.store(epoch.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Release);
-+        RENDERED_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Release);
++        // A count-only retry can pair the previous count with the next timestamp.
++        // Publish an odd/even sequence around both fields to make the snapshot coherent.
++        FRAME_SAMPLE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        RENDERED_FRAME_AT_US.store(epoch.elapsed().as_micros() as u64, std::sync::atomic::Ordering::SeqCst);
++        RENDERED_FRAMES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        FRAME_SAMPLE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 +        FOCUSED_ELEMENT.store(
 +            self.focused_element_id(window).unwrap_or(u64::MAX),
 +            std::sync::atomic::Ordering::Relaxed,
@@ -1255,7 +1687,54 @@ index 8c104a4..22b2ddc 100644
  
          #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
          if let Some(id) = PENDING_FOCUS_ELEMENT.with(|pending| pending.borrow_mut().take()) {
-@@ -5843,20 +6033,30 @@ pub(crate) fn build_host_container(
+@@ -5099,7 +5385,9 @@ impl gpui::Render for GpuixView {
+ 
+         // Clone Arc so we don't borrow self.tree — frees self for focus_handles access.
+         let tree_arc = self.tree.clone();
++        let profile_lock_start = profile_start.map(|_| std::time::Instant::now());
+         let tree = tree_arc.lock().unwrap();
++        let profile_locked = profile_start.map(|_| std::time::Instant::now());
+         let callback = self.event_callback.clone();
+ 
+         // Sync focus handles before building elements.
+@@ -5151,6 +5439,7 @@ impl gpui::Render for GpuixView {
+         });
+         let mut highlight_events = Vec::new();
+         let keyboard_focus = self.keyboard_focus_path(&tree, window, cx);
++        let profile_build_start = profile_start.map(|_| std::time::Instant::now());
+         let result = match tree.root_id {
+             Some(root_id) => {
+                 let mut ctx = BuildCtx {
+@@ -5173,6 +5462,7 @@ impl gpui::Render for GpuixView {
+             }
+             None => gpui::Empty.into_any_element(),
+         };
++        let profile_built = profile_start.map(|_| std::time::Instant::now());
+         // Flushed after the root build so a `setState` in the handler cannot
+         // re-enter this build.
+         emit_highlight_events(&callback, &highlight_events);
+@@ -5246,6 +5536,20 @@ impl gpui::Render for GpuixView {
+             window.request_animation_frame();
+         }
+ 
++        // Release the application tree before aggregate reporting so the
++        // diagnostic output itself cannot inflate another thread's lock wait.
++        drop(tree);
++        if let (Some(start), Some(lock_start), Some(locked), Some(build_start), Some(built)) =
++            (profile_start, profile_lock_start, profile_locked, profile_build_start, profile_built)
++        {
++            record_tree_profile(&[
++                (0, locked.duration_since(lock_start)),
++                (1, build_start.duration_since(locked)),
++                (2, built.duration_since(build_start)),
++                (3, start.elapsed()),
++            ]);
++        }
++
+         result
+     }
+ }
+@@ -5843,20 +6147,30 @@ pub(crate) fn build_host_container(
  
              // ── Scroll wheel ─────────────────────────────────────
              "scroll" => {
@@ -1293,6 +1772,24 @@ index 8c104a4..22b2ddc 100644
  
                          p.touch_phase = Some(match scroll_event.touch_phase {
                              gpui::TouchPhase::Started => "started".to_string(),
+@@ -7657,6 +7971,9 @@ fn to_gpui_window_options(
+         focus: options.focus.unwrap_or(true),
+         show: options.show.unwrap_or(true),
+         app_id: options.app_id.clone(),
++        // Visible streaming panes must keep display cadence when keyboard focus
++        // moves away. Idle/occluded windows still park through the platform loop.
++        inactive_frame_interval: None,
+         ..Default::default()
+     };
+ 
+@@ -8171,6 +8488,7 @@ mod window_options_tests {
+         let gpui_options = mapped(WindowOptions::default());
+         assert!(gpui_options.focus);
+         assert!(gpui_options.show);
++        assert_eq!(gpui_options.inactive_frame_interval, None);
+     }
+ 
+     #[test]
 diff --git c/packages/native/src/retained_tree.rs w/packages/native/src/retained_tree.rs
 index ee95967..7323cca 100644
 --- c/packages/native/src/retained_tree.rs
@@ -1484,3 +1981,24 @@ index 32d690a..0de5a9b 100644
    removeFromParent(node)
    const index = anchor ? parent.children.indexOf(anchor) : parent.children.length
    parent.children.splice(index, 0, node)
+diff --git 1/.changeset/neoism-frame-pacing.md 2/.changeset/neoism-frame-pacing.md
+new file mode 100644
+index 0000000..26f7359
+--- /dev/null
++++ 2/.changeset/neoism-frame-pacing.md
+@@ -0,0 +1,15 @@
++---
++"@gpuix/native": patch
++---
++
++Use output-aware Wayland retry timing and publish coherent native frame samples.
++
++Avoid cloning unchanged custom properties and move canvas payload strings into their cache; add opt-in CPU-side GPU submission and canvas parsing diagnostics.
++
++Reuse unchanged raster canvas paint through GPUI cached views and stop invalidating
++all views for ordinary root mutations. Normalize Wayland continuous-axis travel
++to the original frontend without changing discrete wheel behavior.
++
++Avoid redundant root notifications after changed canvas lists already paint.
++Send platform window titles only when changed and add opt-in tree phase timings.
++Batch disjoint consecutive canvas images to reduce bounds-tree insertion work.

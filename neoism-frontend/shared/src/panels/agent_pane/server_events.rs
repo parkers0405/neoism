@@ -13,6 +13,16 @@ pub fn apply_agent_event_to_pane_inner(
     pane: &mut crate::panels::agent_pane::state::NeoismAgentPane,
     parsed: neoism_protocol::agent::AgentServerMessage,
 ) {
+    apply_agent_event_to_pane_with_history_kind(pane, parsed, None);
+}
+
+/// Adapters that correlate history requests can override the legacy paging
+/// latch inference without changing the daemon wire protocol.
+pub fn apply_agent_event_to_pane_with_history_kind(
+    pane: &mut crate::panels::agent_pane::state::NeoismAgentPane,
+    parsed: neoism_protocol::agent::AgentServerMessage,
+    history_older: Option<bool>,
+) {
     use neoism_protocol::agent::{
         AgentServerMessage, CompactionPhase as ProtoCompactionPhase, ContentKind,
         NoticeLevel, Role, SubagentStatus, ToolStatus,
@@ -277,7 +287,7 @@ pub fn apply_agent_event_to_pane_inner(
             // are the web's recovery source. Live events keep overriding
             // these seeds (`preserve_specific_subagent_metadata`).
             let seeds = subagent_seeds_from_history(&mapped);
-            pane.apply_history_page(mapped, next_cursor);
+            pane.apply_history_page_with_kind(mapped, next_cursor, history_older);
             for (task_id, status, title) in seeds {
                 pane.note_subagent_event(task_id, status, title, None, None, None);
             }
@@ -898,6 +908,14 @@ pub fn apply_agent_event_to_cache_inner(
     pane: &mut crate::panels::agent_pane::state::NeoismAgentPane,
     parsed: neoism_protocol::agent::AgentServerMessage,
 ) -> bool {
+    apply_agent_event_to_cache_with_history_kind(pane, parsed, None)
+}
+
+pub fn apply_agent_event_to_cache_with_history_kind(
+    pane: &mut crate::panels::agent_pane::state::NeoismAgentPane,
+    parsed: neoism_protocol::agent::AgentServerMessage,
+    history_older: Option<bool>,
+) -> bool {
     use neoism_protocol::agent::{
         AgentServerMessage, CompactionPhase, ContentKind, Role,
     };
@@ -915,7 +933,7 @@ pub fn apply_agent_event_to_cache_inner(
         } => {
             let mapped: Vec<NeoismAgentMessage> =
                 messages.into_iter().map(map_history).collect();
-            pane.apply_history_to_cache(&session_id, mapped, next_cursor);
+            pane.apply_history_to_cache_with_kind(&session_id, mapped, next_cursor, history_older);
             true
         }
         AgentServerMessage::MessageStart {

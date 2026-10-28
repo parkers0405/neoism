@@ -32,6 +32,7 @@ mod pickers;
 mod host_layout;
 mod markdown;
 mod agent_timeline;
+mod paint_canvas;
 mod ghostty;
 mod editor_lsp;
 mod editor_raster;
@@ -1662,14 +1663,16 @@ pub unsafe extern "C" fn neoism_core_call(bytes: *const u8, len: usize) -> *mut 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let input = std::slice::from_raw_parts(bytes, len);
         let value: Value = serde_json::from_slice(input).map_err(|e| e.to_string())?;
+        if let Some(response) = agent_timeline::serialized_frame(&value) { return response; }
         ENGINES.with(|engines| dispatch(value, &mut engines.borrow_mut()))
+            .map(|value| json!({"ok": value}).to_string())
     }));
     let output = match result {
-        Ok(Ok(value)) => json!({"ok":value}),
-        Ok(Err(error)) => json!({"error":error}),
-        Err(_) => json!({"error":"Native engine failed"}),
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => json!({"error":error}).to_string(),
+        Err(_) => json!({"error":"Native engine failed"}).to_string(),
     };
-    CString::new(output.to_string()).unwrap().into_raw()
+    CString::new(output).unwrap().into_raw()
 }
 #[no_mangle]
 pub unsafe extern "C" fn neoism_core_free(value: *mut c_char) {

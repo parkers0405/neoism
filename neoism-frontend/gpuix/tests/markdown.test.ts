@@ -47,7 +47,7 @@ test("original Mermaid scene and daemon-supplied ink assets produce real diagram
   markdown.call("layout",{width:900,height:1000});
   const initial=texts(markdown.frame.commands).map(run=>run.text);
   expect(initial).toContain("Start");expect(initial).toContain("Done");
-  const end=Date.now()+2000;while(!markdown.frame.commands.some(command=>command.kind!=="text"&&command.kind!=="image"&&command.color[0]===1&&command.color[1]===0)){if(Date.now()>end)throw new Error("Original ink layer did not load through its host service");await Bun.sleep(5);}
+  const end=Date.now()+2000;while(!markdown.frame.commands.some(command=>command.kind!=="text"&&"color" in command&&command.color[0]===1&&command.color[1]===0)){if(Date.now()>end)throw new Error("Original ink layer did not load through its host service");await Bun.sleep(5);}
   expect(requested.some(path=>path.endsWith("/.README.ink.neodraw"))).toBe(true);
   expect(markdown.frame.commands.filter(command=>command.kind==="polygon").length).toBeGreaterThan(10);
   expect(editor.frame.dirty).toBe(false);

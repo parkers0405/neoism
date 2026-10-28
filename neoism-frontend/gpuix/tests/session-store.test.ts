@@ -29,6 +29,21 @@ function model() {
   result.update({ workspaces: [workspace], activeWorkspace: workspace, surfaces: [surface], activeSurfaceId: surface.id, files: { [surface.id]: "one\ntwo\nthree" } });
   return result;
 }
+test("checkpoint dependencies ignore chat paint but retain cursor, draft and tab changes", () => {
+  const app = model(), editor = app.getEditor(surface, 1);
+  const same = (a:unknown[],b:unknown[]) => a.length === b.length && a.every((value,index)=>Object.is(value,b[index]));
+  const initial = app.sessionDependencies();
+  expect(same(initial,app.sessionDependencies())).toBe(true);
+  editor.queueKey({key:"down",char:""});
+  expect(same(initial,app.sessionDependencies())).toBe(false);
+  const moved = app.sessionDependencies();
+  app.setComposerDraft("checkpoint-test",{text:"unsent",attachments:[]});
+  expect(same(moved,app.sessionDependencies())).toBe(false);
+  expect(app.captureSession().composerDrafts["checkpoint-test"].text).toBe("unsent");
+  const drafted = app.sessionDependencies();
+  app.update({activeSurfaceId:"different-tab"});
+  expect(same(drafted,app.sessionDependencies())).toBe(false);
+});
 test("split editor views share edits and undo history while keeping independent cursors", () => {
   const app = model(), first = app.getEditor(surface, 1), second = app.getEditor(surface, 2);
   second.call("key", { key: "j", char: "j" });

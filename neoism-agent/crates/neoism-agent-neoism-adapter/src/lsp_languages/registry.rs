@@ -309,6 +309,28 @@ pub(in crate::lsp) const LANGUAGE_SPECS: &[LanguageSpec] = &[
         code_actions: true,
         rename: false,
     },
+    LanguageSpec {
+        id: "sql",
+        name: "SQL",
+        catalog_packages: catalog!("sqlls" => "sql-language-server"),
+        transport: stdio!("sql-language-server", "up", "--method", "stdio"),
+        routes: &[route!("sql", "sql", ["sql"], [])],
+        markers: &[".sqllsrc.json"],
+        root_strategy: WorkspaceRootStrategySpec::NearestMarker,
+        workspace_symbols: false,
+        completion: true,
+        hover: false,
+        definition: false,
+        references: false,
+        implementation: false,
+        call_hierarchy: false,
+        diagnostics: true,
+        document_symbols: false,
+        formatting: false,
+        code_actions: true,
+        // Upstream advertises renameProvider but has no rename handler.
+        rename: false,
+    },
     // Docker precedes generic YAML/JSON and its filename matches carry a
     // higher score than extensions, so Compose/Bake never attach twice.
     LanguageSpec {

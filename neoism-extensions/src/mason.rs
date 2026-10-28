@@ -603,11 +603,27 @@ pub fn package_to_manifest(
                 assets,
             }
         }
-        PurlKind::Npm => InstallKind::Npm {
-            package: name_path,
-            version: version.clone(),
-            extra_packages: pkg.source.extra_packages.clone(),
-        },
+        PurlKind::Npm => {
+            let mut extra_packages = pkg.source.extra_packages.clone();
+            // sqlls 1.7.1 imports the protocol package's internal
+            // `lib/common/protocol` path. Protocol 3.18's exports hide it,
+            // crashing the CLI before it can initialize. Keep this catalog
+            // version on the compatible release in its private npm prefix.
+            if name_path == "sql-language-server"
+                && version == "1.7.1"
+                && !extra_packages.iter().any(|package| {
+                    package == "vscode-languageserver-protocol"
+                        || package.starts_with("vscode-languageserver-protocol@")
+                })
+            {
+                extra_packages.push("vscode-languageserver-protocol@3.17.5".into());
+            }
+            InstallKind::Npm {
+                package: name_path,
+                version: version.clone(),
+                extra_packages,
+            }
+        }
         PurlKind::Pypi => InstallKind::Pip {
             package: name_path,
             version: version.clone(),
@@ -875,6 +891,24 @@ mod tests {
             render_asset_file("server-{{version}}-darwin-arm64", "v1.2.3"),
             "server-v1.2.3-darwin-arm64"
         );
+    }
+
+    #[test]
+    fn sql_server_catalog_install_pins_compatible_protocol() {
+        let pkg = single_pkg(
+            r#"{
+                "name": "sqlls",
+                "description": "SQL Language Server",
+                "source": { "id": "pkg:npm/sql-language-server@1.7.1" },
+                "bin": { "sql-language-server": "npm:sql-language-server" }
+            }"#,
+        );
+        let manifest = package_to_manifest(&pkg).unwrap();
+        assert_eq!(manifest.run.unwrap().command, ["sql-language-server"]);
+        let InstallKind::Npm { extra_packages, .. } = manifest.install else {
+            panic!("expected npm install");
+        };
+        assert_eq!(extra_packages, ["vscode-languageserver-protocol@3.17.5"]);
     }
 
     #[test]
@@ -1266,6 +1300,7 @@ mod tests {
             "zls",
             "elixir-ls",
             "docker-language-server",
+            "sqlls",
         ] {
             let package = registry
                 .iter()

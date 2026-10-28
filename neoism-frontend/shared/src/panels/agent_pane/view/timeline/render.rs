@@ -209,6 +209,10 @@ where
                     timeline_row_for_anchor_source(&layout.rows, source_index)
                 })
             {
+                #[cfg(not(target_arch = "wasm32"))]
+                if std::env::var_os("NEOISM_GPUIX_SCROLL_TRACE").is_some() {
+                    eprintln!("[neoism-scroll-anchor] source={} row_top={} screen_offset={} offset_before={} content={} viewport={}",row.source_index,row.top,screen_offset,pane.timeline_scroll_offset(),content_h,viewport_h);
+                }
                 pane.restore_timeline_view_anchor(row.top, screen_offset);
             }
         }

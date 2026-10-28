@@ -1,0 +1,274 @@
+diff --git c/crates/gpui_linux/src/gpui_linux.rs w/crates/gpui_linux/src/gpui_linux.rs
+index 62d972d..6f14eee 100644
+--- c/crates/gpui_linux/src/gpui_linux.rs
++++ w/crates/gpui_linux/src/gpui_linux.rs
+@@ -2,3 +2,14 @@
+ mod linux;
+ 
+ pub use linux::current_platform;
++
++static PRESENTED_SAMPLE: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
++
++pub(crate) fn record_presentation(time_ns: u64) {
++    if let Ok(mut sample) = PRESENTED_SAMPLE.lock() { sample.0 += 1; sample.1 = time_ns; }
++}
++
++/// Compositor-confirmed frame count and timestamp in nanoseconds, if available.
++pub fn presented_frame_sample() -> Option<(u64, u64)> {
++    PRESENTED_SAMPLE.lock().ok().and_then(|sample| (sample.0 > 0).then_some(*sample))
++}
+diff --git c/crates/gpui_linux/src/linux/wayland/client.rs w/crates/gpui_linux/src/linux/wayland/client.rs
+index a5c6dc8..9b43c8e 100644
+--- c/crates/gpui_linux/src/linux/wayland/client.rs
++++ w/crates/gpui_linux/src/linux/wayland/client.rs
+@@ -37,6 +37,7 @@ use wayland_client::{
+         wl_shm_pool, wl_surface,
+     },
+ };
++use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
+ use wayland_protocols::wp::pointer_gestures::zv1::client::{
+     zwp_pointer_gesture_pinch_v1, zwp_pointer_gestures_v1,
+ };
+@@ -188,8 +189,7 @@ fn set_ime_cursor_rectangle_after_done(
+     }
+ }
+ 
+-/// Pacing for retry ticks: a fixed 60Hz interval. Retries only occur for throttled or
+-/// failed-present frames, so matching the output's actual refresh rate wouldn't be observable.
++/// Used only before the compositor has supplied the window's output mode.
+ const FRAME_RETRY_INTERVAL: Duration = Duration::from_micros(16_667);
+ 
+ fn take_startup_activation_token_from_environment() -> Option<String> {
+@@ -206,6 +206,7 @@ fn take_startup_activation_token_from_environment() -> Option<String> {
+ 
+ #[derive(Clone)]
+ pub struct Globals {
++    pub presentation_trace: Option<wp_presentation::WpPresentation>,
+     pub qh: QueueHandle<WaylandClientStatePtr>,
+     pub activation: Option<xdg_activation_v1::XdgActivationV1>,
+     pub compositor: wl_compositor::WlCompositor,
+@@ -240,6 +241,7 @@ impl Globals {
+     ) -> Self {
+         let dialog_v = XdgWmDialogV1::interface().version;
+         Globals {
++            presentation_trace: globals.bind(&qh, 1..=1, ()).ok(),
+             activation: globals.bind(&qh, 1..=1, ()).ok(),
+             compositor: globals
+                 .bind(
+@@ -284,6 +286,7 @@ pub struct InProgressOutput {
+     position: Option<Point<DevicePixels>>,
+     size: Option<Size<DevicePixels>>,
+     subpixel: Option<wl_output::Subpixel>,
++    refresh_millihz: Option<i32>,
+ }
+ 
+ impl InProgressOutput {
+@@ -295,6 +298,7 @@ impl InProgressOutput {
+                 scale,
+                 bounds: Bounds::new(position, size),
+                 subpixel: self.subpixel,
++                refresh_millihz: self.refresh_millihz,
+             })
+         } else {
+             None
+@@ -308,6 +312,7 @@ pub struct Output {
+     pub scale: i32,
+     pub bounds: Bounds<DevicePixels>,
+     pub subpixel: Option<wl_output::Subpixel>,
++    pub refresh_millihz: Option<i32>,
+ }
+ 
+ pub(crate) struct WaylandClientState {
+@@ -468,9 +473,16 @@ impl WaylandClientStatePtr {
+     pub fn schedule_frame_retry(&self, surface_id: &ObjectId) {
+         let client = self.get_client();
+         let state = client.borrow();
++        let interval = state.windows.get(surface_id)
++            .and_then(|window| window.current_output_id())
++            .and_then(|id| state.outputs.get(&id))
++            .and_then(|output| output.refresh_millihz)
++            .filter(|refresh| *refresh > 0)
++            .map(|refresh| Duration::from_secs_f64(1000.0 / f64::from(refresh)))
++            .unwrap_or(FRAME_RETRY_INTERVAL);
+         let surface_id = surface_id.clone();
+         if let Err(err) = state.loop_handle.insert_source(
+-            Timer::from_duration(FRAME_RETRY_INTERVAL),
++            Timer::from_duration(interval),
+             move |_, _, this| {
+                 let client = this.get_client();
+                 let window = get_window(&mut client.borrow_mut(), &surface_id);
+@@ -1500,9 +1512,18 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
+         let client = this.get_client();
+         let mut state = client.borrow_mut();
+ 
+-        let Some(in_progress_output) = state.in_progress_outputs.get_mut(&output.id()) else {
+-            return;
+-        };
++        // wl_output sends partial batches after the initial Done (including
++        // refresh-rate changes). Seed from the last complete mode so those
++        // updates are neither discarded nor missing unchanged geometry.
++        let current = state.outputs.get(&output.id()).map(|previous| InProgressOutput {
++            name: previous.name.clone(),
++            scale: Some(previous.scale),
++            position: Some(previous.bounds.origin),
++            size: Some(previous.bounds.size),
++            subpixel: previous.subpixel,
++            refresh_millihz: previous.refresh_millihz,
++        }).unwrap_or_default();
++        let in_progress_output = state.in_progress_outputs.entry(output.id()).or_insert(current);
+ 
+         match event {
+             wl_output::Event::Name { name } => {
+@@ -1517,8 +1538,11 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
+                     in_progress_output.subpixel = Some(subpixel);
+                 }
+             }
+-            wl_output::Event::Mode { width, height, .. } => {
+-                in_progress_output.size = Some(size(DevicePixels(width), DevicePixels(height)))
++            wl_output::Event::Mode { width, height, refresh, flags } => {
++                if matches!(flags, WEnum::Value(mode) if mode.contains(wl_output::Mode::Current)) {
++                    in_progress_output.size = Some(size(DevicePixels(width), DevicePixels(height)));
++                    in_progress_output.refresh_millihz = Some(refresh);
++                }
+             }
+             wl_output::Event::Done => {
+                 if let Some(complete) = in_progress_output.complete() {
+@@ -2319,7 +2343,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
+                 let scroll_delta = state
+                     .continuous_scroll_delta
+                     .get_or_insert(point(px(0.0), px(0.0)));
+-                let modifier = 3.0;
++                // Continuous Wayland axes already carry logical displacement.
++                // Keep the old winit frontend's physical travel after scaling;
++                // the three-lines-per-notch multiplier belongs only to wheels.
++                let modifier = 1.0;
+                 match axis {
+                     wl_pointer::Axis::VerticalScroll => {
+                         scroll_delta.y += px(value as f32 * modifier * axis_modifier);
+@@ -3018,3 +3045,27 @@ mod tests {
+         );
+     }
+ }
++
++impl Dispatch<wp_presentation::WpPresentation, ()> for WaylandClientStatePtr {
++    fn event(_: &mut Self, _: &wp_presentation::WpPresentation, _: wp_presentation::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
++}
++
++impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ObjectId> for WaylandClientStatePtr {
++    fn event(_: &mut Self, _: &wp_presentation_feedback::WpPresentationFeedback, event: wp_presentation_feedback::Event, surface: &ObjectId, _: &Connection, _: &QueueHandle<Self>) {
++        match event {
++            wp_presentation_feedback::Event::Presented { tv_sec_hi, tv_sec_lo, tv_nsec, refresh, seq_hi, seq_lo, .. } => {
++                let seconds = (u64::from(tv_sec_hi) << 32) | u64::from(tv_sec_lo);
++                let sequence = (u64::from(seq_hi) << 32) | u64::from(seq_lo);
++                let time_ns = seconds * 1_000_000_000 + u64::from(tv_nsec);
++                crate::record_presentation(time_ns);
++                if std::env::var_os("GPUI_WAYLAND_PRESENTATION_TRACE").is_some() {
++                    eprintln!("[gpui-presented] surface={} time_ns={} refresh_ns={} sequence={}", surface.protocol_id(), time_ns, refresh, sequence);
++                }
++            }
++            wp_presentation_feedback::Event::Discarded => {
++                if std::env::var_os("GPUI_WAYLAND_PRESENTATION_TRACE").is_some() { eprintln!("[gpui-discarded] surface={}", surface.protocol_id()); }
++            },
++            _ => {}
++        }
++    }
++}
+diff --git c/crates/gpui_linux/src/linux/wayland/window.rs w/crates/gpui_linux/src/linux/wayland/window.rs
+index 2d25416..d5a5ae2 100644
+--- c/crates/gpui_linux/src/linux/wayland/window.rs
++++ w/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -571,8 +571,13 @@ impl WaylandWindowState {
+                     height: DevicePixels(f32::from(options.bounds.size.height) as i32),
+                 },
+                 transparent: true,
+-                // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
+-                preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
++                // Keep compositor-paced Mailbox nonblocking by default. FIFO is available
++                // for controlled comparisons of compositor/driver pacing.
++                preferred_present_mode: Some(if std::env::var("GPUI_WAYLAND_PRESENT_MODE").as_deref() == Ok("fifo") {
++                    wgpu::PresentMode::Fifo
++                } else {
++                    wgpu::PresentMode::Mailbox
++                }),
+             };
+             WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
+         };
+@@ -994,6 +999,10 @@ impl WaylandWindowStatePtr {
+         }
+     }
+ 
++    pub fn current_output_id(&self) -> Option<ObjectId> {
++        self.state.borrow().display.as_ref().map(|(id, _)| id.clone())
++    }
++
+     pub fn scheduled_frame_fired(&self) {
+         if self.frame_loop.get() == FrameLoop::Scheduled {
+             self.frame();
+@@ -1929,6 +1938,9 @@ impl PlatformWindow for WaylandWindow {
+             let callback = state.surface.frame(&state.globals.qh, state.surface.id());
+             state.pending_frame_callback = Some(callback);
+         }
++        if let Some(presentation) = &state.globals.presentation_trace {
++            presentation.feedback(&state.surface, &state.globals.qh, state.surface.id());
++        }
+         if state.renderer.draw(scene) {
+             state.presentation = PresentationState::Presented;
+             self.0.frame_loop.set(FrameLoop::AwaitingCallback);
+diff --git c/crates/gpui_platform/src/gpui_platform.rs w/crates/gpui_platform/src/gpui_platform.rs
+index 91d336a..d6ea5cd 100644
+--- c/crates/gpui_platform/src/gpui_platform.rs
++++ w/crates/gpui_platform/src/gpui_platform.rs
+@@ -205,3 +205,11 @@ mod tests {
+         assert!(*task_ran.borrow());
+     }
+ }
++
++/// Compositor-confirmed presentations; unsupported platforms return None.
++pub fn presented_frame_sample() -> Option<(u64, u64)> {
++    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
++    { gpui_linux::presented_frame_sample() }
++    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
++    { None }
++}
+diff --git c/crates/gpui_wgpu/src/wgpu_renderer.rs w/crates/gpui_wgpu/src/wgpu_renderer.rs
+index 47ce2a3..7687aca 100644
+--- c/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ w/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -1322,6 +1322,8 @@ impl WgpuRenderer {
+     }
+ 
+     pub fn draw(&mut self, scene: &Scene) -> bool {
++        let trace = std::env::var_os("GPUI_GPU_TIMING_TRACE").is_some();
++        let started = trace.then(std::time::Instant::now);
+         #[cfg(target_family = "wasm")]
+         if self.device_lost() {
+             if self.surface_configured {
+@@ -1371,6 +1373,7 @@ impl WgpuRenderer {
+             log::error!("draw() called on an offscreen renderer; use render_to_pixels()");
+             return false;
+         };
++        let acquire_start = trace.then(std::time::Instant::now);
+         let frame = match surface.get_current_texture() {
+             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+@@ -1393,6 +1396,7 @@ impl WgpuRenderer {
+             }
+         };
+ 
++        let acquired = trace.then(std::time::Instant::now);
+         // Now that we know the surface is healthy, ensure intermediate textures exist
+         self.ensure_intermediate_textures();
+ 
+@@ -1408,7 +1412,12 @@ impl WgpuRenderer {
+             return false;
+         }
+ 
++        let recorded = trace.then(std::time::Instant::now);
+         frame.present();
++        if let (Some(started), Some(acquire_start), Some(acquired), Some(recorded)) = (started, acquire_start, acquired, recorded) {
++            let end = std::time::Instant::now();
++            eprintln!("[gpui-gpu-timing] total_us={} acquire_us={} record_us={} present_us={}", end.duration_since(started).as_micros(), acquired.duration_since(acquire_start).as_micros(), recorded.duration_since(acquired).as_micros(), end.duration_since(recorded).as_micros());
++        }
+         true
+     }
+ 

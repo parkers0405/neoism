@@ -194,13 +194,25 @@ pub(crate) async fn compact_session_context_for_run(
     state: &AppState,
     session_id: &str,
 ) -> Result<SessionInfo, ApiError> {
-    compact_session_context_inner(state, session_id, "auto").await
+    compact_session_context_inner(state, session_id, "auto", None).await
+}
+
+/// Auto compaction with the run's trigger-time request. The summary replays
+/// that request unchanged ahead of the summary prompt, so the provider reads
+/// the conversation from its prompt cache instead of re-reading all of it.
+pub(crate) async fn compact_session_context_for_run_cached(
+    state: &AppState,
+    session_id: &str,
+    cache_base: ProviderGenerationRequest,
+) -> Result<SessionInfo, ApiError> {
+    compact_session_context_inner(state, session_id, "auto", Some(cache_base)).await
 }
 
 async fn compact_session_context_inner(
     state: &AppState,
     session_id: &str,
     reason: &str,
+    cache_base: Option<ProviderGenerationRequest>,
 ) -> Result<SessionInfo, ApiError> {
     let started = now_millis();
     // Register a cancellable run so the session abort endpoint can
@@ -239,7 +251,8 @@ async fn compact_session_context_inner(
     // Always release the transient run afterwards — even if the body returns
     // early through a `?` — so a mid-compaction error can't wedge the session
     // in a permanent "already running" state.
-    let result = run_compaction(state, session_id, reason, started, &cancel, false).await;
+    let result =
+        run_compaction(state, session_id, reason, started, &cancel, cache_base).await;
     release_owned_compaction_run(state, session_id, owned_run_id).await;
     if let Some(guard) = run_guard.as_mut() {
         guard.disarm();
@@ -275,6 +288,7 @@ async fn run_manual_compaction(
         cancel,
         run_continues,
         Some(&mut ended),
+        None,
     )
     .await;
     if let Err(error) = &result {
@@ -345,7 +359,7 @@ async fn run_compaction(
     reason: &str,
     started: u64,
     cancel: &Arc<AtomicBool>,
-    manual_run_continues: bool,
+    cache_base: Option<ProviderGenerationRequest>,
 ) -> Result<SessionInfo, ApiError> {
     run_compaction_body(
         state,
@@ -353,8 +367,9 @@ async fn run_compaction(
         reason,
         started,
         cancel,
-        manual_run_continues,
+        false,
         None,
+        cache_base,
     )
     .await
 }
@@ -367,6 +382,7 @@ async fn run_compaction_body(
     cancel: &Arc<AtomicBool>,
     manual_run_continues: bool,
     mut manual_ended: Option<&mut bool>,
+    cache_base: Option<ProviderGenerationRequest>,
 ) -> Result<SessionInfo, ApiError> {
     let mut info = ensure_session(state, session_id).await?;
     info.time.compacting = Some(started);
@@ -469,6 +485,7 @@ async fn run_compaction_body(
         tail_start_message_id.as_deref(),
         &mut assistant_message,
         cancel,
+        cache_base,
     )
     .await
     {
@@ -673,18 +690,62 @@ async fn generate_model_compaction_summary(
     tail_start_message_id: Option<&str>,
     assistant_message: &mut MessageWithParts,
     cancel: &Arc<AtomicBool>,
+    cache_base: Option<ProviderGenerationRequest>,
 ) -> Option<String> {
     if model_compaction_disabled() || messages.is_empty() {
         return None;
     }
     let model = compaction_model(state, info, model).await;
+    let previous_summary = previous_compaction_summary(messages);
+    let Ok(runtime) = state
+        .workspace_runtime_for_tenant(
+            crate::caller::session_tenant(info),
+            &info.directory,
+        )
+        .await
+    else {
+        return None;
+    };
+    let snapshot = runtime.snapshot();
+    let provider = snapshot
+        .provider_services_by_priority()
+        .into_iter()
+        .next()?;
+    // The trigger-time request is the prefix the provider just processed, so
+    // replaying it unchanged reads the conversation from the prompt cache. It
+    // only matches the cache for the model that wrote it; a dedicated
+    // compaction model takes the trimmed path below.
+    if let Some(mut request) =
+        cache_base.filter(|request| request_matches_model(request, &model))
+    {
+        request.messages.push(ProviderMessage::text(
+            ProviderRole::User,
+            cached_compaction_request_prompt(previous_summary.is_some()),
+        ));
+        match stream_compaction_summary(
+            state,
+            session_id,
+            &provider,
+            request,
+            assistant_message,
+            cancel,
+            "cached",
+        )
+        .await
+        {
+            StreamedSummary::Text(summary) => return Some(summary),
+            StreamedSummary::Cancelled => return None,
+            // Nothing usable came back (too long, a tool call instead of a
+            // summary, a provider error): summarize the trimmed head instead.
+            StreamedSummary::Failed => {}
+        }
+    }
     // Summarize only the head: messages since the last completed compaction,
     // minus the protected tail (the tail stays raw in post-compaction prompts,
     // so replaying it here is wasted context). Older context is carried by the
     // previous summary, re-anchored via the prompt, which
     // never replays the whole session into the summarize request.
     let mut head = compaction_head_messages(messages, tail_start_message_id);
-    let previous_summary = previous_compaction_summary(messages);
     // The request that *triggers* compaction is near the model's usable
     // context, so an unbounded replay would overflow the very model that is
     // supposed to shrink the session. Drop the oldest head messages until the
@@ -723,20 +784,6 @@ async fn generate_model_compaction_summary(
         &model.model_id,
     );
     provider_messages.push(ProviderMessage::text(ProviderRole::User, prompt));
-    let Ok(runtime) = state
-        .workspace_runtime_for_tenant(
-            crate::caller::session_tenant(info),
-            &info.directory,
-        )
-        .await
-    else {
-        return None;
-    };
-    let snapshot = runtime.snapshot();
-    let provider = snapshot
-        .provider_services_by_priority()
-        .into_iter()
-        .next()?;
     let metadata = provider.model_metadata(&model).await.unwrap_or_default();
     let request = ProviderGenerationRequest {
         provider_id: model.provider_id.clone(),
@@ -757,22 +804,68 @@ async fn generate_model_compaction_summary(
         options: metadata.options,
         headers: metadata.headers,
     };
-    if cancel.load(Ordering::SeqCst) {
-        return None;
+    match stream_compaction_summary(
+        state,
+        session_id,
+        &provider,
+        request,
+        assistant_message,
+        cancel,
+        "trimmed",
+    )
+    .await
+    {
+        StreamedSummary::Text(summary) => Some(summary),
+        StreamedSummary::Cancelled | StreamedSummary::Failed => None,
     }
+}
+
+enum StreamedSummary {
+    Text(String),
+    Cancelled,
+    Failed,
+}
+
+fn request_matches_model(
+    request: &ProviderGenerationRequest,
+    model: &neoism_agent_core::UserModel,
+) -> bool {
+    request.provider_id == model.provider_id
+        && request.model_id == model.model_id
+        && request.variant == model.variant
+        && request.connection_id == model.connection_id
+}
+
+async fn stream_compaction_summary(
+    state: &AppState,
+    session_id: &str,
+    provider: &Arc<dyn neoism_agent_plugin_api::ProviderService>,
+    request: ProviderGenerationRequest,
+    assistant_message: &mut MessageWithParts,
+    cancel: &Arc<AtomicBool>,
+    path: &'static str,
+) -> StreamedSummary {
+    if cancel.load(Ordering::SeqCst) {
+        return StreamedSummary::Cancelled;
+    }
+    let started = std::time::Instant::now();
     let activity_segment =
         crate::execution_activity::begin_provider_segment(state, session_id).await;
     let stream = match provider.stream(request).await {
         Ok(stream) => stream,
         Err(_) => {
             crate::execution_activity::end_provider_segment(activity_segment).await;
-            return None;
+            return StreamedSummary::Failed;
         }
     };
     let mut events = stream.events;
     let mut raw = String::new();
     let mut reasoning_parts = std::collections::BTreeMap::new();
     let mut failed = false;
+    let mut input_tokens = 0;
+    let mut cache_read_tokens = 0;
+    let mut output_tokens = 0;
+    let mut first_text_ms = None;
     loop {
         // Never commit a half-finished summary after a user abort.
         if cancel.load(Ordering::SeqCst) {
@@ -797,9 +890,31 @@ async fn generate_model_compaction_summary(
                 },
             },
         };
-        if matches!(event, ProviderStreamEvent::Error { .. }) {
-            failed = raw.trim().is_empty();
-            break;
+        match &event {
+            ProviderStreamEvent::Error { .. } => {
+                failed = raw.trim().is_empty();
+                break;
+            }
+            ProviderStreamEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                first_text_ms.get_or_insert(started.elapsed().as_millis());
+            }
+            ProviderStreamEvent::FinishStep {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: cache_read,
+                ..
+            }
+            | ProviderStreamEvent::Finish {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: cache_read,
+                ..
+            } => {
+                input_tokens = *input;
+                output_tokens = *output;
+                cache_read_tokens = *cache_read;
+            }
+            _ => {}
         }
         apply_compaction_stream_event(
             state,
@@ -811,11 +926,27 @@ async fn generate_model_compaction_summary(
         );
     }
     crate::execution_activity::end_provider_segment(activity_segment).await;
-    if failed {
-        None
-    } else {
-        clean_model_compaction_summary(&raw)
+    tracing::info!(
+        target: "neoism::compaction",
+        session_id,
+        path,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        first_text_ms = first_text_ms.map(|ms| ms as u64),
+        input_tokens,
+        cache_read_tokens,
+        output_tokens,
+        ok = !failed && !raw.trim().is_empty(),
+        "compaction summary request finished"
+    );
+    if cancel.load(Ordering::SeqCst) {
+        return StreamedSummary::Cancelled;
     }
+    if failed {
+        return StreamedSummary::Failed;
+    }
+    clean_model_compaction_summary(&raw)
+        .map(StreamedSummary::Text)
+        .unwrap_or(StreamedSummary::Failed)
 }
 
 #[cfg(test)]
@@ -897,6 +1028,21 @@ fn compaction_request_prompt(previous_summary: Option<&str>) -> String {
         }
     };
     format!("{anchor}\n\n{COMPACTION_PROMPT_TEMPLATE}")
+}
+
+/// Appended to the run's unchanged request, so the conversation and any prior
+/// summary are already above it; repeating them here would miss the cache.
+fn cached_compaction_request_prompt(has_previous_summary: bool) -> String {
+    let anchor = if has_previous_summary {
+        "Update the conversation summary from prior compacted context using the conversation above.\n\
+         Preserve still-true details, remove stale details, and merge in the new facts."
+    } else {
+        "Create a new anchored summary from the conversation above."
+    };
+    format!(
+        "{anchor}\nDo not call tools and do not continue the task: reply with the summary only.\n\n\
+         {COMPACTION_PROMPT_TEMPLATE}"
+    )
 }
 
 fn clean_model_compaction_summary(raw: &str) -> Option<String> {
@@ -2463,6 +2609,41 @@ mod tests {
         assert!(!text.contains("<path>"));
         assert!(text.contains("Tool read completed: Read file"));
         assert!(text.contains("useful code line"));
+    }
+
+    #[test]
+    fn cached_compaction_prompt_does_not_repeat_the_conversation() {
+        let fresh = cached_compaction_request_prompt(false);
+        let update = cached_compaction_request_prompt(true);
+        assert!(fresh.contains("Create a new anchored summary"));
+        assert!(update.contains("prior compacted context"));
+        for prompt in [fresh, update] {
+            assert!(prompt.contains("Do not call tools"));
+            assert!(prompt.contains("## Goal"));
+            assert!(!prompt.contains("<previous-summary>"));
+        }
+    }
+
+    #[test]
+    fn cached_compaction_only_replays_the_model_that_wrote_the_cache() {
+        let request: ProviderGenerationRequest = serde_json::from_value(json!({
+            "providerId": "openai", "modelId": "gpt", "variant": "high", "messages": [],
+        }))
+        .unwrap();
+        let model = neoism_agent_core::UserModel {
+            provider_id: "openai".into(),
+            model_id: "gpt".into(),
+            connection_id: None,
+            variant: Some("high".into()),
+        };
+        assert!(request_matches_model(&request, &model));
+        for other in [
+            neoism_agent_core::UserModel { variant: None, ..model.clone() },
+            neoism_agent_core::UserModel { model_id: "mini".into(), ..model.clone() },
+            neoism_agent_core::UserModel { connection_id: Some("work".into()), ..model.clone() },
+        ] {
+            assert!(!request_matches_model(&request, &other));
+        }
     }
 
     #[test]

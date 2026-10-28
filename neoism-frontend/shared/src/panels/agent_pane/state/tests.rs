@@ -1,6 +1,68 @@
 use super::*;
 
 #[test]
+fn explicit_head_history_preserves_pending_older_request_and_reader_anchor() {
+    use crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey;
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("chat".into()));
+    let rows = || ["a", "b", "c", "d"].into_iter()
+        .map(|id| NeoismAgentMessage::assistant(id).with_id(id)).collect();
+    pane.apply_history_page_with_kind(rows(), Some("before-a".into()), Some(false));
+    let rect = [0.0, 0.0, 400.0, 300.0];
+    pane.set_timeline_metrics(rect, 1200.0, 300.0);
+    pane.scroll_timeline_pixels(300.0);
+    pane.set_timeline_view_anchor(Some(TimelineViewAnchorKey::at_source(2, 4, "c")), 20.0);
+    let offset = pane.timeline_scroll_offset();
+    pane.timeline_history.loading_older = true;
+    pane.timeline_history.last_requested_session_id = Some("chat".into());
+    pane.apply_history_page_with_kind(rows(), Some("before-a".into()), Some(false));
+    assert!(pane.timeline_history.loading_older);
+    assert_eq!(pane.timeline_history.last_requested_session_id.as_deref(), Some("chat"));
+    assert_eq!(pane.timeline_history.oldest_loaded_cursor.as_deref(), Some("before-a"));
+    assert_eq!(pane.timeline_scroll_offset(), offset);
+    assert_eq!(pane.timeline_view_anchor().unwrap().1, 20.0);
+    assert!(pane.pending_timeline_prepend_height_px.is_none());
+    pane.apply_history_page_with_kind(vec![NeoismAgentMessage::assistant("zero").with_id("zero")], None, Some(true));
+    assert_eq!(pane.messages.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(), vec!["zero", "a", "b", "c", "d"]);
+    assert!(!pane.timeline_history.loading_older);
+    assert!(!pane.timeline_history.has_older);
+    assert!(pane.timeline_history.last_requested_session_id.is_none());
+    pane.set_timeline_metrics(rect, 1400.0, 300.0);
+    assert_eq!(pane.timeline_scroll_offset(), offset);
+    assert_eq!(pane.timeline_view_anchor().unwrap().1, 20.0);
+}
+
+#[test]
+fn explicit_older_history_arriving_after_session_switch_prepends_cached_rows() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("chat".into()));
+    pane.apply_history_page_with_kind(vec![NeoismAgentMessage::assistant("c").with_id("c"), NeoismAgentMessage::assistant("d").with_id("d")], Some("before-c".into()), Some(false));
+    pane.timeline_history.loading_older = true;
+    pane.timeline_history.last_requested_session_id = Some("chat".into());
+    pane.switch_session("other".into());
+    pane.apply_history_to_cache_with_kind("chat", vec![NeoismAgentMessage::assistant("a").with_id("a"), NeoismAgentMessage::assistant("b").with_id("b")], Some("before-a".into()), Some(true));
+    pane.switch_session("chat".into());
+    assert_eq!(pane.messages.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "d"]);
+    assert!(!pane.timeline_history.loading_older);
+    assert!(pane.timeline_history.has_older);
+    assert_eq!(pane.timeline_history.oldest_loaded_cursor.as_deref(), Some("before-a"));
+}
+
+#[test]
+fn explicit_empty_older_page_releases_only_its_paging_latch() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_history_page_with_kind(vec![NeoismAgentMessage::assistant("tail").with_id("tail")], Some("before-tail".into()), Some(false));
+    pane.timeline_history.loading_older = true;
+    pane.timeline_history.last_requested_session_id = Some("chat".into());
+    pane.apply_history_page_with_kind(Vec::new(), None, Some(true));
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].id, "tail");
+    assert!(!pane.timeline_history.loading_older);
+    assert!(!pane.timeline_history.has_older);
+    assert!(pane.timeline_history.last_requested_session_id.is_none());
+}
+
+#[test]
 fn pending_tool_raw_delta_reconstructs_late_baseline_and_respects_boundary() {
     let snapshot = |raw: &str, status: &str| crate::panels::agent_pane::api_mapping::part_block(&serde_json::json!({
         "id":"tool", "messageID":"m", "sessionID":"s", "type":"tool", "tool":"apply_patch",

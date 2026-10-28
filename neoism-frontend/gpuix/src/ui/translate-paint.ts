@@ -7,7 +7,7 @@ export function translatePaintCommands(commands:readonly PaintCommand[],dx:numbe
  return commands.map(command=>{
   const clip="clip"in command&&command.clip?{clip:rect(command.clip)}:{};
   switch(command.kind){
-   case "rect":case "image":return{...command,...clip,rect:rect(command.rect)};
+   case "raster-text":case "rect":case "image":return{...command,...clip,rect:rect(command.rect)};
    case "text":return{...command,...clip,x:command.x+dx,y:command.y+dy};
    case "polygon":return{...command,points:points(command.points)};
    case "ring":return{...command,outer:points(command.outer),inner:points(command.inner)};

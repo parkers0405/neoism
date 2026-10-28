@@ -602,6 +602,8 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const view = () => { viewportRevision(); return viewport().frame; };
     let host: HostElement | undefined;
     const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
+    let pendingScroll = 0;
+    createEffect(() => { scope(); pendingScroll = 0; animation.cancel(); });
     const id = createMemo(() => {
       const key = scope();
       if (!trees.has(key)) trees.set(key, coreCall<{ id: number }>("tree.new", { scale: s }).id);
@@ -615,7 +617,11 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       const dpr = (renderer as { getDisplayScale?: () => number }).getDisplayScale?.() || 1, snap = (value: number) => Math.round(value * dpr) / dpr;
       viewport().frame = { ...frame, offset: snap(frame.offset), cursorOffset: snap(frame.cursorOffset) };
       setViewportRevision(value => value + 1);
-      if (frame.animating) animation.request(() => update("frame"), started);
+      if (frame.animating || pendingScroll) animation.request(flushFrame, started);
+    };
+    const flushFrame = () => {
+      const delta = pendingScroll; pendingScroll = 0;
+      update(delta ? "scroll" : "frame", delta ? {delta} : {});
     };
     onCleanup(() => animation.dispose());
     onMount(() => { if (host&&chromeFocus().zone==="content") focusNativeElement(renderer,host.id); });
@@ -642,7 +648,9 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       walk("", 0); return result;
     });
     const rowPositions = createMemo(() => new Map(rows().map((entry, index) => [entry.path, index])));
-    const visibleRows = createMemo(() => { const frame = view(), entries = rows(); return entries.slice(...visibleTreeRange(entries.length, height(), d.treeRowHeight * s, frame.top, frame.offset)); });
+    const visibleRange = createMemo(() => { const frame = view(); return visibleTreeRange(rows().length, height(), d.treeRowHeight * s, frame.top, frame.offset); }, undefined,
+      {equals:(before,next)=>before[0]===next[0]&&before[1]===next[1]});
+    const visibleRows = createMemo(() => rows().slice(...visibleRange()));
     createEffect(() => {
       scope(); height();
       const known = !!directories()[""], entries = rows().map(entry => ({...entry, open:expanded().has(entry.path)}));
@@ -672,11 +680,12 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     onCleanup(()=>{sidebarHosts.delete(sidebarKey);sidebarTargets.delete(sidebarKey);});
     return <motion.div initial={config.reducedMotion||!opening?false:{left:-6*s}} animate={{left:0}} transition={{duration:config.reducedMotion?0:.12,ease:easeOutCubicBezier}} ref={element=>{host=element;sidebarHosts.set(props.notes?"notes":"files",element);}} tabIndex={0} onKeyDown={keyDown} onMouseDown={()=>focusChrome({zone:"sidebar"})} onFocus={() => {invalidateNativeFocus(renderer);setFocused(true);if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});publishTarget();}}} onBlur={() => {invalidateNativeFocus(renderer);setFocused(false);}}
       onLayout={(event) => {if(viewport().height!==(event.height||0)){viewport().height=event.height||0;setHeightRevision(value=>value+1);}updateChromeBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});}}
-      onScroll={(event) => { update("scroll", { delta: (event.deltaY || 0) * (event.precise ? 1 : d.treeRowHeight * s * 3) }); }}
+      onScroll={(event) => { pendingScroll += (event.deltaY || 0) * (event.precise ? 1 : d.treeRowHeight * s * 3); animation.request(flushFrame); }}
       data-tree-id={id()} style={{ ...column, flexGrow: 1, position: "relative", overflow: "hidden" }} role="tree" aria-label={props.notes ? "Notes" : "Files"} testId={props.notes ? "notes-tree" : "file-tree"}>
       <Show when={focused() && rows().length}><div style={{ position: "absolute", left: 0, right: 0,
         top: (view().selected - view().top) * d.treeRowHeight * s + view().offset + view().cursorOffset,
         height: d.treeRowHeight * s, backgroundColor: c.surface, pointerEvents: "none" }} /></Show>
+      <div style={{position:"absolute",left:0,right:0,top:-view().top*d.treeRowHeight*s+view().offset,height:rows().length*d.treeRowHeight*s}}>
       <For each={visibleRows()}>{(entry) => {
         const index = () => rowPositions().get(entry.path) || 0;
         const icon = () => entry.dir ? { glyph: expanded().has(entry.path) ? "\uf07c" : "\uf07b", color: c.folder } : fileIcon(entry.name);
@@ -684,13 +693,14 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         const glyphKey=JSON.stringify([state().activeWorkspace?.id,!!props.notes,root(),entry.path]);
         return <div data-reveal-opacity={1} data-reveal-start={entry.revealStart} role="treeitem" aria-label={entry.name} aria-expanded={entry.dir ? expanded().has(entry.path) : undefined} aria-selected={selected()}
           testId={`${props.notes ? "note" : "file"}:${entry.path}`} onClick={() => { update("select", { index: index() });focusChrome({zone:"sidebar"});open(entry); }}
-          style={{ ...row, position: "absolute", left: 0, right: 0, top: (index() - view().top) * d.treeRowHeight * s + view().offset, height: d.treeRowHeight * s, flexShrink: 0, paddingLeft: (d.treePadding + entry.depth * d.treeIndent) * s,
+          style={{ ...row, position: "absolute", left: 0, right: 0, top: index() * d.treeRowHeight * s, height: d.treeRowHeight * s, flexShrink: 0, paddingLeft: (d.treePadding + entry.depth * d.treeIndent) * s,
             paddingRight: 8 * s, gap: 8 * s, cursor: "pointer", backgroundColor: selected() ? c.surface : undefined,
             hover: { backgroundColor: c.hover }, focusVisible: { outlineColor: c.accent, outlineWidth: 1 } }}>
           <TreeRowGlyphs host={glyphs} config={config} initialWidth={visuals.treeWidths.get(glyphKey)||Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-(d.frameStroke+d.treePadding+entry.depth*d.treeIndent+8)*s)} onWidth={width=>visuals.treeWidths.set(glyphKey,width)} pinImage={raster=>visuals.pinTreeRaster(renderer,glyphKey,raster)} name={entry.name} chevron={entry.dir?(expanded().has(entry.path)?"\uf078":"\uf054"):""}
             icon={icon().glyph} iconColor={icon().color} labelColor={selected()?c.fg:c.dim} chevronColor={c.muted}/>
         </div>;
       }}</For>
+      </div>
       <Show when={!rows().length}><Show when={state().loading||!!root()&&!directories()[""]&&!state().error} fallback={<div style={{ padding: 16 * s }}><Label color={c.muted}>{props.notes ? root() ? "No notes" : "No notes vault linked" : "No files"}</Label></div>}><LoadingSkeleton config={config} kind="tree" immediate initialSize={{width:Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-d.frameStroke*s),height:height()}} /></Show></Show>
     </motion.div>;
   }

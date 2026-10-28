@@ -2310,12 +2310,17 @@ async fn transient_compaction_registers_and_releases_busy_status() {
 }
 
 #[tokio::test]
+async fn cached_compaction_replays_the_run_request_and_releases_busy_status() {
+    assert_compaction_status_lifecycle("transient-cached").await;
+}
+
+#[tokio::test]
 async fn transient_compaction_error_releases_busy_status() {
     assert_compaction_status_lifecycle("transient-error").await;
 }
 
 async fn assert_compaction_status_lifecycle(scenario: &str) {
-    let succeeds = matches!(scenario, "success" | "transient");
+    let succeeds = matches!(scenario, "success" | "transient" | "transient-cached");
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-compaction-events-{}.sqlite3",
         Id::ascending(IdKind::Event)
@@ -2398,7 +2403,19 @@ async fn assert_compaction_status_lifecycle(scenario: &str) {
     let mut saw_streaming_busy = false;
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let mut compaction = Box::pin(async {
-            if scenario.starts_with("transient") {
+            if scenario == "transient-cached" {
+                let base: neoism_agent_core::ProviderGenerationRequest = serde_json::from_value(json!({
+                    "providerId": "neoism", "modelId": "stub",
+                    "messages": [{"role": "user", "content": "remember this compactable context"}],
+                }))
+                .unwrap();
+                crate::session_context::compact_session_context_for_run_cached(
+                    &state,
+                    session_id.as_str(),
+                    base,
+                )
+                .await
+            } else if scenario.starts_with("transient") {
                 crate::session_context::compact_session_context_for_run(
                     &state,
                     session_id.as_str(),

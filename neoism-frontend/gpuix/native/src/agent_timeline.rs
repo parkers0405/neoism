@@ -6,7 +6,7 @@ use neoism_ui::{
     editor::scroll_model::agent_timeline_wheel,
     panels::{
         agent_pane::{
-            server_events::{agent_event_session_id, apply_agent_event_to_pane,apply_agent_event_to_cache},
+        server_events::{agent_event_session_id, apply_agent_event_to_pane,apply_agent_event_to_pane_with_history_kind,apply_agent_event_to_cache_with_history_kind},
             state::NeoismAgentPane,
             view::{
                 layout::chat_column,
@@ -25,6 +25,11 @@ use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashMap};
 
 struct View {
+    scroll_trace: Option<ScrollTrace>,
+    compact_paint: bool,
+    canvas_paint: bool,
+    font_family: String,
+    font_weight: u16,
     pane: NeoismAgentPane,
     painter: RecordingPainter,
     session_id: String,
@@ -40,6 +45,37 @@ struct View {
     selection: Option<String>,
     scrollbar_drag: bool,
     horizontal_drag: bool,
+}
+
+struct ScrollTrace {
+    origin: std::time::Instant,
+    last: std::time::Instant,
+    text_y: HashMap<u64, f32>,
+    input_pixels: f32,
+    input_events: u32,
+    precise_events: u32,
+}
+
+fn trace_scroll(view: &mut View) {
+    use std::hash::{Hash, Hasher};
+    use neoism_ui::primitives::paint_record::PaintCommand;
+    let Some(trace) = view.scroll_trace.as_mut() else { return };
+    let now = std::time::Instant::now();
+    let mut positions = HashMap::new();
+    for command in view.painter.borrowed_commands().iter() {
+        if let PaintCommand::Text { text, x, y, .. } = command {
+            if *y < 0.0 || *y > view.content_bottom || text.is_empty() { continue; }
+            let mut key = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut key); x.round().to_bits().hash(&mut key);
+            positions.insert(key.finish(), *y);
+        }
+    }
+    let mut movements: Vec<_> = positions.iter().filter_map(|(key, y)| trace.text_y.get(key).map(|before| y-before)).collect();
+    movements.sort_by(f32::total_cmp);
+    let movement = movements.get(movements.len()/2).copied();
+    let metrics = view.pane.timeline_scrollbar_state().map(|(offset,content,viewport,_)| [offset,content,viewport]);
+    eprintln!("[neoism-scroll-frame] {}", json!({"timeUs":now.duration_since(trace.origin).as_micros(),"dtUs":now.duration_since(trace.last).as_micros(),"medianTextDy":movement,"matchedRuns":movements.len(),"metrics":metrics,"inputPixels":trace.input_pixels,"inputEvents":trace.input_events,"preciseEvents":trace.precise_events,"reason":view.pane.animation_reason()}));
+    trace.last=now; trace.text_y=positions; trace.input_pixels=0.0;trace.input_events=0;trace.precise_events=0;
 }
 
 #[derive(Default)]
@@ -64,7 +100,7 @@ fn now_seconds() -> f32 {
         .unwrap_or(0.0)
 }
 
-fn frame(view: &mut View) -> Value {
+fn render_frame(view: &mut View) -> Value {
     let s = view.scale;
     let theme = IdeTheme::by_name(&view.theme);
     let rect = [0.0, 0.0, view.width, view.height];
@@ -99,19 +135,61 @@ fn frame(view: &mut View) -> Value {
         Some(gutter),
     );
     render_timeline_scrollbar_with(painter, &mut view.pane, &theme, s, rail.as_ref());
+    trace_scroll(view);
     let send={
         use neoism_ui::panels::agent_pane::{protocol_mapping::{map_outbound_command,AgentProtocolMapping,AgentProtocolMappingContext},outbound::OutboundAgentCommand};
         let context=AgentProtocolMappingContext{active_session_id:Some(view.session_id.clone()),default_directory:None,default_agent:None,default_model:None,default_connection_id:None,default_thinking:None,local_author:view.pane.local_presence_name().map(str::to_owned)};
         view.pane.drain_pending_outbound().into_iter().filter(|command|!matches!(command,OutboundAgentCommand::SwitchSession{..})).flat_map(|command|match map_outbound_command(command,&context){AgentProtocolMapping::Messages(messages)=>messages.into_iter().filter_map(|message|serde_json::to_value(message).ok()).collect::<Vec<_>>(),_=>vec![]}).collect::<Vec<_>>()
     };
     json!({
-        "commands": view.painter.commands(),
         "animating": scrolling || view.pane.animation_reason().is_some(),
         "reason": view.pane.animation_reason(),
         "selecting": view.selecting,
         "hasConversation": view.pane.has_conversation(),
         "send":send,"header":header,"subagent":view.pane.is_subagent_session(),"sessionId":view.session_id,
     })
+}
+
+fn frame(view: &mut View) -> Value {
+    let mut metadata = render_frame(view);
+    if view.canvas_paint {
+        metadata["commands"] = json!([]);
+        metadata["canvas"] = serde_json::to_value(crate::paint_canvas::encode(&view.painter.borrowed_commands(), &view.font_family, view.font_weight)).unwrap();
+    } else { metadata["commands"] = serde_json::to_value(view.painter.serializable_commands(view.compact_paint)).unwrap(); }
+    metadata
+}
+
+/// The animation hot path writes borrowed paint commands straight into the
+/// response buffer. Building a serde_json::Value tree first allocates a map
+/// and strings for every primitive on every display frame.
+pub fn serialized_frame(v: &Value) -> Option<Result<String, String>> {
+    if text(v, "op") != "agenttimeline.frame" { return None; }
+    Some(STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        let id = v["id"].as_u64().unwrap_or(0) as u32;
+        let view = store.views.get_mut(&id).ok_or_else(|| "Unknown agent timeline".to_owned())?;
+        if let Some(compact) = v["compactPaint"].as_bool() { view.compact_paint = compact; }
+        if let Some(canvas) = v["canvasPaint"].as_bool() { view.canvas_paint = canvas; }
+        let metadata = render_frame(view);
+        #[derive(serde::Serialize)]
+        struct Frame<C: serde::Serialize> {
+            #[serde(flatten)]
+            metadata: Value,
+            commands: C,
+            #[serde(skip_serializing_if="Option::is_none")]
+            canvas: Option<crate::paint_canvas::CanvasPacket>,
+        }
+        #[derive(serde::Serialize)]
+        struct Response<T: serde::Serialize> { ok: T }
+        let canvas = view.canvas_paint.then(|| crate::paint_canvas::encode(&view.painter.borrowed_commands(), &view.font_family, view.font_weight));
+        if canvas.is_some() && !v["includeCommands"].as_bool().unwrap_or(false) {
+            return serde_json::to_string(&Response {ok: Frame {metadata,commands:Vec::<u8>::new(),canvas}}).map_err(|error|error.to_string());
+        }
+        let response = serde_json::to_string(&Response { ok: Frame {
+            metadata, commands: view.painter.serializable_commands(view.compact_paint), canvas,
+        }}).map_err(|error| error.to_string());
+        response
+    }))
 }
 
 fn pointer(view: &mut View, v: &Value) -> Value {
@@ -182,6 +260,34 @@ fn pointer(view: &mut View, v: &Value) -> Value {
 
 pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
     let op = v["op"].as_str()?;
+    if op == "agenttimeline.diagnostics" {
+        return Some(Ok(STORE.with(|store| {
+            json!(store.borrow().views.values().map(|view| {
+                use neoism_ui::primitives::paint_record::PaintCommand;
+                let mut counts = [0usize; 8];
+                for command in view.painter.borrowed_commands().iter() {
+                    match command {
+                        PaintCommand::Rect { .. } => counts[0] += 1,
+                        PaintCommand::Ring { .. } => counts[1] += 1,
+                        PaintCommand::Polygon { .. } => counts[2] += 1,
+                        PaintCommand::Image { .. } => counts[3] += 1,
+                        PaintCommand::Text { raster, text, .. } => {
+                            counts[4] += 1;
+                            if raster.is_some() { counts[5] += 1; } else { counts[6] += 1; }
+                            if raster.is_none() && text.bytes().all(|byte| matches!(byte,b' '|b'\t'|b'\r'|b'\n')) { counts[7] += 1; }
+                        }
+                    }
+                }
+                json!({
+                "sessionId": view.session_id,
+                "offset": view.pane.timeline_scroll_offset(),
+                "scrollbar": view.pane.timeline_scrollbar_state().map(|(offset, content, viewport, _)| json!({"offset":offset,"content":content,"viewport":viewport})),
+                "visibleRange": view.pane.virtual_timeline_visible_source_range(),
+                "animation": view.pane.animation_reason(),
+                "commandsByKind": {"rect":counts[0],"ring":counts[1],"polygon":counts[2],"image":counts[3],"text":counts[4],"rasterText":counts[5],"unrasterizedText":counts[6],"blankText":counts[7]},
+            })}).collect::<Vec<_>>())
+        })));
+    }
     if !op.starts_with("agenttimeline.") {
         return None;
     }
@@ -209,6 +315,11 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));
             pane.set_session_id(Some(v["rootSessionId"].as_str().unwrap_or(&session_id).to_owned()));
             store.views.insert(id, View {
+                scroll_trace: std::env::var_os("NEOISM_GPUIX_SCROLL_TRACE").map(|_| {let now=std::time::Instant::now();ScrollTrace{origin:now,last:now,text_y:HashMap::new(),input_pixels:0.0,input_events:0,precise_events:0}}),
+                compact_paint: v["compactPaint"].as_bool().unwrap_or(false),
+                canvas_paint: v["canvasPaint"].as_bool().unwrap_or(false),
+                font_family: if family.is_empty() {"Cascadia Code NF".to_owned()} else {family.to_owned()},
+                font_weight: v["fontWeight"].as_u64().unwrap_or(400) as u16,
                 pane,
                 painter,
                 session_id,
@@ -235,11 +346,12 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             "agenttimeline.event" => {
                 let parsed: AgentServerMessage =
                     serde_json::from_value(v["message"].clone()).map_err(|error| error.to_string())?;
+                let history_older = match v["historyKind"].as_str() { Some("head") => Some(false), Some("older") => Some(true), _ => None };
                 // Only this conversation's events reach its pane (the hosts'
                 // live gate); session-less events (notices) always apply.
                 if agent_event_session_id(&parsed).is_none_or(|session| session == view.session_id) {
-                    apply_agent_event_to_pane(&mut view.pane, parsed);
-                }else{apply_agent_event_to_cache(&mut view.pane,parsed);}
+                    apply_agent_event_to_pane_with_history_kind(&mut view.pane, parsed, history_older);
+                }else{apply_agent_event_to_cache_with_history_kind(&mut view.pane,parsed,history_older);}
                 // Events never publish paint; the host schedules a frame.
                 Ok(json!({"animating": view.pane.animation_reason().is_some()}))
             }
@@ -273,7 +385,10 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 }
                 Ok(frame(view))
             }
-            "agenttimeline.frame" => Ok(frame(view)),
+            "agenttimeline.frame" => {
+                if let Some(compact) = v["compactPaint"].as_bool() { view.compact_paint = compact; }
+                Ok(frame(view))
+            },
             "agenttimeline.scroll" => {
                 let delta = if v["precise"].as_bool().unwrap_or(false) {
                     ScrollDelta::Pixels { x: number(v, "deltaX", 0.0), y: number(v, "deltaY", 0.0) }
@@ -281,11 +396,13 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                     ScrollDelta::Lines { x: number(v, "deltaX", 0.0), y: number(v, "deltaY", 0.0) }
                 };
                 let wheel = agent_timeline_wheel(&delta, number(v, "lineHeight", 24.0));
+                if let Some(trace) = view.scroll_trace.as_mut() {trace.input_pixels+=wheel.pixels;trace.input_events+=1;trace.precise_events+=u32::from(!wheel.smooth);}
                 if wheel.smooth {
                     view.pane.scroll_timeline_wheel_pixels(wheel.pixels);
                 } else {
                     view.pane.scroll_timeline_pixels(wheel.pixels);
                 }
+                if v["deferFrame"].as_bool().unwrap_or(false) { return Ok(Value::Null); }
                 Ok(frame(view))
             }
             "agenttimeline.half" => {
@@ -524,8 +641,10 @@ fn panel_frame(panel: &mut Panel) -> Value {
     let side=panel.pane.side_panel();
     let selected=if side.new_chat_selected(){"new-chat".to_owned()}else if let Some(action)=side.selected_header_action(){format!("{:?}",action).to_lowercase()}else{side.selected_row().map(|row|format!("row:{}",row.id)).unwrap_or_default()};
     json!({
-        "commands": panel.painter.commands(),
-        "animating": panel.pane.animation_reason().is_some() || panel.pane.side_panel().is_animating(),
+        "commands": &*panel.painter.borrowed_commands(),
+        // This pane owns only the catalog. Its empty conversation would keep
+        // the unrelated home wordmark animation alive forever.
+        "animating": panel.pane.side_panel().is_animating(),
         "send": outbound(panel),
         "cursor": panel.pane.side_panel().selected_cursor_rect(),
         "focused": panel.pane.side_panel().is_focused(),
@@ -757,7 +876,7 @@ fn browser_frame(view: &mut Browser, v: &Value) -> Value {
     let painter: &mut dyn Paint = &mut view.painter;
     view.browser.render(painter, [0.0, 0.0, number(v, "width", 800.0), number(v, "height", 600.0)], &theme);
     json!({
-        "commands": view.painter.commands(),
+        "commands": &*view.painter.borrowed_commands(),
         "animating": view.browser.is_animating(),
         "active": view.browser.is_active(),
         "selection": view.browser.take_selection().map(|selection| selection.path),
@@ -849,7 +968,7 @@ fn navigator_frame(view: &mut Navigator, v: &Value, action: Option<String>) -> V
     let painter: &mut dyn Paint = &mut view.painter;
     view.navigator.render(painter, &theme, [0.0, 0.0, number(v, "width", 800.0), number(v, "height", 600.0)], view.scale, now_seconds());
     json!({
-        "commands": view.painter.commands(),
+        "commands": &*view.painter.borrowed_commands(),
         "animating": view.navigator.is_animating(),
         "active": view.navigator.is_active(),
         "action": action,

@@ -102,10 +102,10 @@ fn frame(view: &mut View) -> Value {
       view.trail.animate(rect[2],rect[3],if was_animating{elapsed}else{0.0});
     }
     let menu=if view.menu.is_visible(){if view.menu_painter.is_none(){view.menu_painter=Some(RecordingPainter::from_fonts(view.painter.font_library().clone()));}
-      let painter=view.menu_painter.as_mut().unwrap();painter.begin_frame();view.menu.render(painter,(view.width,view.height,1.0),&IdeTheme::by_name(&view.theme));Some(json!({"rect":view.menu.rect(),"commands":painter.commands()}))
+      let painter=view.menu_painter.as_mut().unwrap();painter.begin_frame();view.menu.render(painter,(view.width,view.height,1.0),&IdeTheme::by_name(&view.theme));Some(json!({"rect":view.menu.rect(),"commands":&*painter.borrowed_commands()}))
     }else{None};
     let effects = std::mem::replace(&mut view.effects, Value::Null);
-    json!({"commands":view.painter.commands(),"menu":menu,"assets":assets,"cover":cover,"revision":view.pane.source_revision(),"mode":format!("{:?}",view.pane.mode),"vim":view.pane.vim_enabled,"cursor":{"line":view.pane.cursor_line,"col":view.pane.cursor_col,"rect":view.pane.cursor_rect},"dirty":view.pane.is_dirty(),"scrollY":view.pane.scroll_y,"contentHeight":view.pane.content_height(),"animating":moving||reveal||view.pane.has_pending_scroll_animation()||view.trail.is_animating()||view.menu.is_animating(),"cursorQuad":view.trail.quad_points(),"cursorHold":view.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),"hostAction":effects.get("hostAction"),"dragging":view.pane.is_dragging(),"effects":effects})
+    json!({"commands":&*view.painter.borrowed_commands(),"menu":menu,"assets":assets,"cover":cover,"revision":view.pane.source_revision(),"mode":format!("{:?}",view.pane.mode),"vim":view.pane.vim_enabled,"cursor":{"line":view.pane.cursor_line,"col":view.pane.cursor_col,"rect":view.pane.cursor_rect},"dirty":view.pane.is_dirty(),"scrollY":view.pane.scroll_y,"contentHeight":view.pane.content_height(),"animating":moving||reveal||view.pane.has_pending_scroll_animation()||view.trail.is_animating()||view.menu.is_animating(),"cursorQuad":view.trail.quad_points(),"cursorHold":view.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),"hostAction":effects.get("hostAction"),"dragging":view.pane.is_dragging(),"effects":effects})
 }
 fn snapshot(view: &mut View) -> Value {
     let anchor=view.pane.capture_host_scroll_anchor();

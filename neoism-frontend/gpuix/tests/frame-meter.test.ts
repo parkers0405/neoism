@@ -43,3 +43,11 @@ test("a terminated window never receives another synchronous stats request", () 
   expect(f.stop()).toBe(false);
   expect(f.samples).toBe(1);
 });
+
+test("Wayland FPS counts displayed frames rather than faster submitted draws",()=>{
+ let now=1,frames=0;
+ const renderer={tick:()=>true,getPresentedFrameSample:()=>[frames,now],getRenderedFrameSample:()=>{throw new Error("must use compositor feedback");}} as unknown as GpuixRenderer;
+ installFrameMeter(renderer,()=>now);
+ for(let i=0;i<=12;i++){frames=i*12;now=1+frames*1000/144;renderer.tick();}
+ expect(measuredFrameRate(renderer)).toBe(144);
+});

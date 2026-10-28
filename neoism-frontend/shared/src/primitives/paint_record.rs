@@ -78,6 +78,39 @@ pub enum PaintCommand {
         raster: PaintRaster,
     },
 }
+pub struct SerializableCommands<'a> {
+    commands: std::cell::Ref<'a, Vec<PaintCommand>>,
+    compact: bool,
+}
+impl Serialize for SerializableCommands<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        struct Command<'a>(&'a PaintCommand, bool);
+        impl Serialize for Command<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                if self.1 {
+                    if let PaintCommand::Text { x, y, layer, clip, raster: Some(raster), .. } = self.0 {
+                        // Pixels already contain font, color and text. The canvas needs
+                        // only their placement; don't transport the shaping inputs again.
+                        let scale = if raster.scale > 0.0 { raster.scale } else { 1.0 };
+                        let rect = [x + raster.dx, y + raster.dy, raster.width as f32 / scale, raster.height as f32 / scale];
+                        let mut map = serializer.serialize_map(Some(5))?;
+                        map.serialize_entry("kind", "raster-text")?;
+                        map.serialize_entry("rect", &rect)?;
+                        map.serialize_entry("raster", raster)?;
+                        map.serialize_entry("layer", layer)?;
+                        map.serialize_entry("clip", clip)?;
+                        return map.end();
+                    }
+                }
+                self.0.serialize(serializer)
+            }
+        }
+        let mut sequence = serializer.serialize_seq(Some(self.commands.len()))?;
+        for command in self.commands.iter() { sequence.serialize_element(&Command(command, self.compact))?; }
+        sequence.end()
+    }
+}
 type Commands = Rc<RefCell<Vec<PaintCommand>>>;
 /// The recorder is a 2x device: text rasters are produced at 2x, so layout
 /// measures and shapes at 2x too. Measuring at 1x while painting 2x glyphs let
@@ -85,7 +118,6 @@ type Commands = Rc<RefCell<Vec<PaintCommand>>>;
 const DEVICE_SCALE: f32 = 2.0;
 struct RecordedText {
     original: Text,
-    rasterizer:Text,
     fonts: FontLibrary,
     commands: Commands,
     emitted: Vec<(usize, usize)>,
@@ -101,11 +133,9 @@ impl RecordedText {
         #[cfg(not(target_arch = "wasm32"))]
         original.init_cpu();
         original.set_scale_factor(DEVICE_SCALE);
-        let mut rasterizer=Text::new(fonts);rasterizer.init_cpu();rasterizer.set_scale_factor(DEVICE_SCALE);
         let generation = original.font_cache_generation();
         Self {
             original,
-            rasterizer,
             fonts: fonts.clone(),
             commands,
             emitted: Vec::new(),
@@ -159,9 +189,10 @@ impl RecordedText {
         let mut raster = self.raster_cache.get(&key).cloned();
         #[cfg(not(target_arch = "wasm32"))]
         if raster.is_none() {
-            self.rasterizer.clear();
-            if scale==1.0{self.rasterizer.draw(x,y,text,opts);}else{self.rasterizer.draw_scaled(x,y,text,opts,scale);}
-            if let Some(image) = self.rasterizer.host_run_raster(0) {
+            // The original draw above already shaped and rasterized this run.
+            // Export its exact instances instead of repeating the work through
+            // a second font engine on each newly visible text run.
+            if let Some(image) = self.original.host_run_raster(first) {
                 let data = Arc::new(image.rgba);
                 static NEXT_RASTER: AtomicU64 = AtomicU64::new(1);
                 let item = PaintRaster {
@@ -392,6 +423,14 @@ impl RecordingPainter {
         });
         self.decoded.insert(id, (identity, raster.clone()));
         raster
+    }
+    /// Borrow the current display list for serialization without cloning text,
+    /// geometry and raster backing references on every animation frame.
+    pub fn serializable_commands(&self, compact: bool) -> SerializableCommands<'_> {
+        SerializableCommands { commands: self.commands.borrow(), compact }
+    }
+    pub fn borrowed_commands(&self) -> std::cell::Ref<'_, Vec<PaintCommand>> {
+        self.commands.borrow()
     }
     pub fn commands(&self) -> Vec<PaintCommand> {
         self.commands.borrow().clone()

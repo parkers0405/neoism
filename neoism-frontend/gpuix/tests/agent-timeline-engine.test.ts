@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { coreCall } from "../src/native-core";
+import {paintOps,type PaintCommand,type PreparedCanvas} from "../src/ui/PaintLayer";
+import {CanvasImages,rasterKey} from "../src/ui/canvas";
+import {loadConfig} from "../src/config";
 
 // The original agent timeline engine (shared Rust pane + recorded renderer),
 // driven exactly like AgentTimelineView drives it.
@@ -20,6 +23,67 @@ const texts = (frame: Frame) => frame.commands.filter((c) => c.kind === "text");
 const run = (id: number, ms: number) => { let frame = coreCall<Frame>("agenttimeline.frame", { id }); const end = Date.now() + ms; while (Date.now() < end) { Bun.sleepSync(8); frame = coreCall<Frame>("agenttimeline.frame", { id }); } return frame; };
 const settle = (id: number) => { let frame = coreCall<Frame>("agenttimeline.layout", { id, width: 900, height: 700 }); for (let i = 0; i < 300 && frame.animating; i++) { Bun.sleepSync(8); frame = coreCall<Frame>("agenttimeline.frame", { id }); } return frame; };
 
+test("explicit older adapter pages prepend even without a pane loading latch", () => {
+  const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId:"paging",scale:1});
+  const row=(id:string)=>({id,role:"Assistant",kind:"Assistant",text:`pageToken${id}`});
+  const event=(historyKind:"head"|"older",ids:string[],cursor:string|null)=>coreCall("agenttimeline.event",{id,historyKind,message:{HistoryChunk:{session_id:"paging",messages:ids.map(row),next_cursor:cursor}}});
+  try {
+    event("head",["Ccc","Ddd"],"before-c");
+    event("older",["Aaa","Bbb"],"before-a");
+    const frame=coreCall<Frame>("agenttimeline.layout",{id,width:900,height:2000});
+    const body=texts(frame).map(command=>command.text).join(" ");
+    for(const token of ["Aaa","Bbb","Ccc","Ddd"])expect(body).toContain(`pageToken${token}`);
+    event("head",["Aaa","Bbb","Ccc","Ddd"],"before-a");
+    const refresh=coreCall<Frame>("agenttimeline.frame",{id});
+    expect(texts(refresh).map(command=>command.text)).toEqual(texts(frame).map(command=>command.text));
+  } finally {coreCall("agenttimeline.dispose",{id});}
+});
+
+test("refining lazy row heights never reverses visible text during slow scrolling", () => {
+  const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId:"slow-anchor",scale:1.357,fontFamily:"Cascadia Code NF",fontWeight:700});
+  const messages=Array.from({length:35},(_,row)=>({id:`row-${row}`,role:"Assistant",kind:"Assistant",text:Array.from({length:35+row%7},(_,word)=>`tokenR${row.toString().padStart(2,"0")}W${word.toString().padStart(2,"0")}`).join(" ")}));
+  const positions=(f:Frame)=>new Map(texts(f).filter(c=>c.text?.startsWith("token")&&c.y!>0&&c.y!<590).map(c=>[c.text!,c.y!]));
+  try {
+    coreCall("agenttimeline.event",{id,message:{HistoryChunk:{session_id:"slow-anchor",messages,next_cursor:null}}});
+    let frame=coreCall<Frame>("agenttimeline.layout",{id,width:1100,height:900,contentBottom:590});
+    let previous=positions(frame), matched=0;
+    for(let step=0;step<1200;step++){
+      const delta=step<600?3:-3;
+      coreCall("agenttimeline.scroll",{id,deltaY:delta,precise:true,deferFrame:true});
+      frame=coreCall<Frame>("agenttimeline.frame",{id});const next=positions(frame);
+      for(const [text,y] of next){const before=previous.get(text);if(before!==undefined){matched++;expect(y-before).toBeGreaterThanOrEqual(delta>0?-1:-4);expect(y-before).toBeLessThanOrEqual(delta>0?4:1);}}
+      previous=next;
+    }
+    expect(matched).toBeGreaterThan(1000);
+  } finally {coreCall("agenttimeline.dispose",{id});}
+});
+
+test("native canvas encoding matches the original JavaScript paint translation", () => {
+  const id = engine(), config={...loadConfig(["--config","/nonexistent/paint-parity"],{}),fontFamily:"Cascadia Code NF",fontWeight:400};
+  try {
+    settle(id);
+    const frame=coreCall<{commands:PaintCommand[];canvas:PreparedCanvas}>("agenttimeline.frame",{id,canvasPaint:true,includeCommands:true});
+    expect(frame.commands.some(command=>command.kind==="text"&&!command.raster&&/^[ \t\r\n]+$/.test(command.text))).toBe(true);
+    expect(JSON.parse(frame.canvas.commands).some((op:{k:string;t?:string})=>op.k==="t"&&/^[ \t\r\n]*$/.test(op.t||""))).toBe(false);
+    const keys=new Set<number>();
+    const images={use:(source:number,raster:{id:number})=>{const key=rasterKey(source,raster.id);keys.add(key);return key;},commit(){}} as unknown as CanvasImages;
+    const expected=paintOps(frame.commands,config,images), actual=JSON.parse(frame.canvas.commands);
+    const compare=(a:unknown,b:unknown):void=>{
+      if(typeof a==="number"&&typeof b==="number"){expect(a).toBeCloseTo(b,3);return;}
+      if(Array.isArray(a)&&Array.isArray(b)){expect(a.length).toBe(b.length);a.forEach((value,index)=>compare(value,b[index]));return;}
+      if(a&&b&&typeof a==="object"&&typeof b==="object"){
+        expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+        for(const key of Object.keys(a))compare((a as Record<string,unknown>)[key],(b as Record<string,unknown>)[key]);return;
+      }
+      expect(a).toEqual(b);
+    };
+    compare(actual,expected);
+    expect(frame.canvas.images.map(image=>rasterKey(image.source,image.raster.id)).sort((a,b)=>a-b)).toEqual([...keys].sort((a,b)=>a-b));
+    const compact=coreCall<{commands:PaintCommand[];canvas:PreparedCanvas}>("agenttimeline.frame",{id});
+    expect(compact.commands).toEqual([]);expect(compact.canvas.commands.length).toBeGreaterThan(0);
+  } finally {coreCall("agenttimeline.dispose",{id});}
+});
+
 test("renders the original timeline from daemon history", () => {
   const id = engine(), frame = settle(id);
   const painted = texts(frame).map((c) => c.text).join(" ");
@@ -27,6 +91,22 @@ test("renders the original timeline from daemon history", () => {
   expect(painted).toContain("answer");
   // Completed tool rows in reopened history stay collapsed, as on desktop.
   coreCall("agenttimeline.dispose", { id });
+});
+
+test("direct frame serialization preserves layout text and reports missing engines", () => {
+  const id = engine();
+  try {
+    settle(id);
+    const layout = coreCall<Frame>("agenttimeline.layout", { id, width: 900, height: 700 });
+    const direct = coreCall<Frame>("agenttimeline.frame", { id });
+    const before = texts(layout), after = texts(direct);
+    expect(after.map(command => command.text)).toEqual(before.map(command => command.text));
+    before.forEach((command, index) => {
+      expect(after[index].x!).toBeCloseTo(command.x!, 3);
+      expect(after[index].y!).toBeCloseTo(command.y!, 3);
+    });
+  } finally { coreCall("agenttimeline.dispose", { id }); }
+  expect(() => coreCall("agenttimeline.frame", { id })).toThrow("Unknown agent timeline");
 });
 
 test("code-card Copy click copies the code, links report their target", () => {
@@ -69,3 +149,38 @@ test("streaming updates and scroll go through the shared pane", () => {
   expect(JSON.stringify(run(id, 400).commands.map((c) => c.y))).not.toBe(before);
   coreCall("agenttimeline.dispose", { id });
 }, 20000);
+
+test("deferred wheel input paints once and older history preserves visible text position", () => {
+ const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId:"paged",scale:1,fontFamily:"Cascadia Code NF",fontWeight:400});
+ const rows=(start:number,end:number)=>Array.from({length:end-start},(_,i)=>({id:`page-${start+i}`,role:"User",kind:"User",text:`Stable pagination marker ${start+i}`}));
+ try {
+  coreCall("agenttimeline.event",{id,message:{HistoryChunk:{session_id:"paged",messages:rows(40,80),next_cursor:"older"}}});
+  coreCall("agenttimeline.layout",{id,width:900,height:700});
+  expect(coreCall("agenttimeline.scroll",{id,deltaY:1e7,precise:true,deferFrame:true})).toBeNull();
+  const before=coreCall<Frame & {send:unknown[]}>("agenttimeline.frame",{id});
+  expect(JSON.stringify(before.send)).toContain("GetHistory");
+  const anchor=texts(before).find(c=>c.text?.includes("Stable pagination marker")&&c.y!>30);
+  expect(anchor).toBeDefined();
+  coreCall("agenttimeline.event",{id,message:{HistoryChunk:{session_id:"paged",messages:rows(0,40),next_cursor:null}}});
+  const after=coreCall<Frame>("agenttimeline.frame",{id});
+  const retained=texts(after).find(c=>c.text===anchor!.text);
+  expect(retained).toBeDefined();
+  expect(retained!.y!).toBeCloseTo(anchor!.y!,1);
+ } finally {coreCall("agenttimeline.dispose",{id});}
+});
+
+test("compact paint retains raster identity, geometry and clipping with less transport",()=>{
+ const id=engine();try{
+  settle(id);
+  const full=coreCall<{commands:any[]}>("agenttimeline.frame",{id,compactPaint:false});
+  const compact=coreCall<{commands:any[]}>("agenttimeline.frame",{id,compactPaint:true});
+  expect(compact.commands.length).toBe(full.commands.length);
+  let rasters=0;
+  full.commands.forEach((before,i)=>{const after=compact.commands[i];if(before.kind!=="text"||!before.raster)return;
+   rasters++;const r=before.raster,scale=r.scale||1;
+   expect(after.kind).toBe("raster-text");expect(after.raster.id).toBe(r.id);expect(after.clip).toEqual(before.clip);expect(after.layer).toBe(before.layer);
+   [before.x+r.dx,before.y+r.dy,r.width/scale,r.height/scale].forEach((value,j)=>expect(after.rect[j]).toBeCloseTo(value,3));
+  });
+  expect(rasters).toBeGreaterThan(0);expect(JSON.stringify(compact).length).toBeLessThan(JSON.stringify(full).length);
+ }finally{coreCall("agenttimeline.dispose",{id});}
+});

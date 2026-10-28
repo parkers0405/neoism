@@ -12,7 +12,7 @@ import {FontZoomController} from "./commands/font-zoom";
 import { expectVariant, isRecord } from "./daemon/protocol";
 import { Daemon, DaemonConnection, daemonLayer } from "./daemon/client";
 import { WorkspaceModel, type AppState } from "./model";
-import type { NativeEditor } from "./native-core";
+import { coreCall, type NativeEditor } from "./native-core";
 import { App } from "./ui/App";
 import {AppVisualState} from "./ui/AppVisualState";
 import { AppGeneration } from "./ui/AppGeneration";
@@ -38,7 +38,12 @@ async function createSession(config: AppConfig, seed?: HotState) {
   const client = new DaemonConnection(config), model = new WorkspaceModel(client, config, seed),visuals=new AppVisualState();
   const store = new SessionStore(config);
   if (!seed) { const recovery = store.read(); if (recovery) model.restoreSession(recovery); }
-  const checkpoint = () => { const start=profileStart();try { store.write(model.captureSession()); } catch (error) { console.error("[neoism-gpuix] Recovery checkpoint failed:", error instanceof Error ? error.message : "write failed"); }finally{profileEnd("recovery.checkpoint",start);} };
+  let savedDependencies: unknown[] | undefined;
+  const checkpoint = () => { const start=profileStart();try {
+    const dependencies = model.sessionDependencies();
+    if (savedDependencies?.length === dependencies.length && dependencies.every((value,index) => Object.is(value,savedDependencies![index]))) return;
+    store.write(model.captureSession()); savedDependencies = dependencies;
+  } catch (error) { console.error("[neoism-gpuix] Recovery checkpoint failed:", error instanceof Error ? error.message : "write failed"); }finally{profileEnd("recovery.checkpoint",start);} };
   const timer = setInterval(checkpoint, 2000); timer.unref();
   const runtime = ManagedRuntime.make(daemonLayer(client));
   model.start(); await runtime.runPromise(Daemon);
@@ -149,6 +154,9 @@ process.once("SIGINT", stop); process.once("SIGTERM", stop);
 process.on("SIGUSR2", () => {
   const state = session.model.state;
   const dump = {
+    timelines: coreCall("agenttimeline.diagnostics", {}),
+    performance: {draw: host!.renderer.getDebugFrameOverlayStats(),
+      presented: (host!.renderer as unknown as {getPresentedFrameSample?:()=>number[]|null}).getPresentedFrameSample?.()},
     connection: state.connection,
     agentDefaults: state.agentDefaults,
     agentDefaultsLoading: state.agentDefaultsLoading,

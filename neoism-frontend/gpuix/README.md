@@ -213,6 +213,47 @@ GPUI layout/paint, texture uploads, and presentation; its timings are not FPS.
 comparison of token text hosts and cached original-font row images. It verifies
 actual scrolling and counts native draws; these are not compositor presentation
 timestamps or a claim of sustained full-application refresh-rate parity.
+For full-application scrolling, build the release core and display binding, then run:
+
+```sh
+GPUI_WAYLAND_PRESENTATION_TRACE=1 NEOISM_BENCH_MAXIMIZED=1 \
+  NEOISM_BENCH_SCROLL=mouse-slow NEOISM_BENCH_MS=6000 \
+  bun scripts/native-scenario-fps.ts code markdown agent > /tmp/neoism-fps.log 2>&1
+bun scripts/summarize-presentation.ts /tmp/neoism-fps.log
+```
+
+Repeat with `mouse-regular`, `touchpad-slow`, and `touchpad-regular`. The default
+`fast` profile cannot establish slow-scroll smoothness. Compare equal reported
+window dimensions and verify focus; maximizing on current Hyprland uses its Lua
+dispatcher. Presentation feedback measures displayed frames, while native draw
+counts measure submitted work. With VRR, a zero protocol refresh interval leaves
+the missed-refresh count unknown; presentation gaps remain available. Optional
+`GPUI_GPU_TIMING_TRACE=1` separates surface acquisition, GPU command recording,
+and presentation call durations, excluding asynchronous GPU execution.
+`NEOISM_GPUIX_PROFILE=1` measures bridge operations and image uploads. Run timing
+tests without a concurrent build and record power/display settings alongside them.
+Fixture timings do not establish live-chat performance. Validate the packaged
+application with the user's actual workspace, configuration, and conversation.
+`SIGUSR2` writes read-only timeline offsets, content/viewport dimensions, visible
+source ranges, and animation reasons alongside the existing state dump. Check
+these before and after scroll samples: clamped boundaries and demand-driven idle
+frames must not be interpreted as scrolling performance. The conversation
+catalog schedules only its own animations, excluding the invisible home pane.
+`NEOISM_GPUIX_SCROLL_TRACE=1` logs frame intervals, delivered scroll input,
+timeline metrics, and median displacement of matching text runs (without
+message text) to distinguish missed deadlines from layout-position jumps.
+Raster text exports the original renderer's already-emitted glyph instances;
+it no longer repeats cold glyph work through a second font engine.
+The mounted chat canvas retains up to 16 MiB of recently visible raster textures
+to avoid re-uploading text on scroll reversal. LRU eviction releases only the
+cache's reference; visible canvases retain their own leases. Unmounting releases
+the cache, and oversized images keep only their normal frame references.
+ASCII blank text advances stay in the original layout and selection data but
+do not become fallback canvas text commands that prevent paint-cache reuse.
+Restored chat tabs request missing history even when pane focus already marked
+the tab active. History delivery identifies head and continuation replies
+explicitly: head refreshes retain loaded older pages and their cursor, while
+continuations prepend their bounded page, including replies to parked sessions.
 End-to-end frame-rate parity still needs measured native-window comparisons. The terminal check creates
 and closes its own PTY. Other interactive checks use isolated daemon fixtures or
 read-only operations. Linux GPU screenshot capture requires compositor tools;

@@ -1,9 +1,11 @@
 import { createMemo, onCleanup } from "solid-js";
 import { useGpuixRequired } from "@gpuix/solid";
 import type { AppConfig } from "../config";
-import { CanvasImages, cssColor, paintColor as packPaintColor, RasterSource, type CanvasOp,type CanvasRaster } from "./canvas";
+import { CanvasImages, RecentCanvasImages, cssColor, paintColor as packPaintColor, RasterSource, type CanvasOp,type CanvasRaster } from "./canvas";
 export interface PaintRaster { id:number;ptr:number;len:number;width:number;height:number;scale?:number;dx:number;dy:number }
+export interface PreparedCanvas {commands:string;images:Array<{source:number;raster:CanvasRaster}>}
 export type PaintCommand =
+ | {kind:"raster-text";rect:number[];raster:PaintRaster;layer:number;clip?:number[]|null}
  | {kind:"rect";rect:number[];color:number[];radii:number[];clip?:number[]|null;depth:number;order:number;layer:number}
  | {kind:"ring";outer:number[][];inner:number[][];color:number[];depth:number;order:number;layer:number}
  | {kind:"polygon";points:number[][];color:number[];depth:number;layer:number}
@@ -23,6 +25,7 @@ export function paintOps(commands:readonly PaintCommand[],config:AppConfig,image
   const next="clip" in command?command.clip:undefined;
   if(!sameClip(clip,next)){if(clip)ops.push({k:"u"});if(next)ops.push({k:"cl",b:next});clip=next;}
   switch(command.kind){
+   case "raster-text":ops.push({k:"i",id:images.use(RasterSource.painter,command.raster),b:command.rect});break;
    case "rect":ops.push({k:"r",b:command.rect,c:packPaintColor(command.color),r:command.radii});break;
    case "ring":ops.push({k:"p",c:packPaintColor(command.color),p:[flat(command.outer),flat(command.inner)]});break;
    case "polygon":ops.push({k:"p",c:packPaintColor(command.color),p:[flat(command.points)]});break;
@@ -30,7 +33,9 @@ export function paintOps(commands:readonly PaintCommand[],config:AppConfig,image
    case "text":{
     const raster=command.raster;
     if(raster){const scale=raster.scale||1;ops.push({k:"i",id:images.use(RasterSource.painter,raster),b:[command.x+(raster.dx||0),command.y+(raster.dy||0),raster.width/scale,raster.height/scale]});}
-    else ops.push({k:"t",x:command.x,y:command.y,t:command.text,s:command.size,c:packPaintColor(command.color,true),f:command.family||config.fontFamily,w:command.bold?800:config.fontWeight,i:command.italic,lh:command.size});
+    // Blank advances remain in the original layout/selection commands, but
+    // have no ink. Sending them as text also disables native canvas caching.
+    else if(!/^[ \t\r\n]*$/.test(command.text))ops.push({k:"t",x:command.x,y:command.y,t:command.text,s:command.size,c:packPaintColor(command.color,true),f:command.family||config.fontFamily,w:command.bold?800:config.fontWeight,i:command.italic,lh:command.size});
    }
   }
  }
@@ -42,9 +47,17 @@ export { cssColor };
 
 /** Exact original paint geometry and cached glyph pixels as one GPUI element.
  * No second Markdown layout or text shaping engine. `extra` paints on top. */
-export function PaintLayer(props:{commands:readonly PaintCommand[];config:AppConfig;extra?:readonly CanvasOp[];pinImage?:(source:number,raster:CanvasRaster)=>void}){
- const images=new CanvasImages(useGpuixRequired(),(source,raster)=>props.pinImage?.(source,raster));
- onCleanup(()=>images.dispose());
- const source=createMemo(()=>{const ops=paintOps(props.commands,props.config,images);if(props.extra?.length)ops.push(...props.extra);return JSON.stringify(ops);});
+export function PaintLayer(props:{commands:readonly PaintCommand[];prepared?:PreparedCanvas;config:AppConfig;extra?:readonly CanvasOp[];cacheImageBytes?:number;pinImage?:(source:number,raster:CanvasRaster)=>void}){
+ const renderer=useGpuixRequired(),recent=props.cacheImageBytes?new RecentCanvasImages(renderer,props.cacheImageBytes):undefined;
+ const images=new CanvasImages(renderer,(source,raster)=>{props.pinImage?.(source,raster);recent?.use(source,raster);});
+ onCleanup(()=>{images.dispose();recent?.dispose();});
+ const source=createMemo(()=>{
+  if(props.prepared){
+   for(const image of props.prepared.images)images.use(image.source,image.raster);
+   images.commit();
+   return props.extra?.length?JSON.stringify([...JSON.parse(props.prepared.commands),...props.extra]):props.prepared.commands;
+  }
+  const ops=paintOps(props.commands,props.config,images);if(props.extra?.length)ops.push(...props.extra);return JSON.stringify(ops);
+ });
  return <canvas testId="original-paint-layer" commands={source()} style={{position:"absolute",left:0,right:0,top:0,bottom:0,pointerEvents:"none"}}/>;
 }

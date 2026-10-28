@@ -500,3 +500,41 @@ fn compaction_overflow_recovery_uses_provider_error_classifier() {
     assert!(!ApiError::internal("rate limit exceeded").is_context_overflow());
     assert!(!ApiError::internal("invalid API key").is_context_overflow());
 }
+
+#[tokio::test]
+async fn cached_compaction_base_needs_a_known_window_with_room_to_spare() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-compaction-cache-base-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let request: ProviderGenerationRequest = serde_json::from_value(json!({
+        "providerId": "neoism", "modelId": "stub",
+        "messages": [{"role": "user", "content": "keep going"}],
+    }))
+    .unwrap();
+    let limit = ModelLimit {
+        context: 400_000,
+        input: Some(272_000),
+        output: 128_000,
+    };
+    let usable = usable_context_tokens(&limit);
+    let base = compaction_cache_base(&state, "ses_test", &request, usable / 2, Some(&limit))
+        .await
+        .expect("a request well under the window is replayed");
+    assert_eq!(
+        serde_json::to_value(&base.messages).unwrap(),
+        serde_json::to_value(&request.messages).unwrap(),
+        "the replay is the run's request unchanged"
+    );
+    assert!(compaction_cache_base(&state, "ses_test", &request, usable, Some(&limit))
+        .await
+        .is_none());
+    assert!(compaction_cache_base(&state, "ses_test", &request, 1_000, None)
+        .await
+        .is_none());
+    drop(state);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}

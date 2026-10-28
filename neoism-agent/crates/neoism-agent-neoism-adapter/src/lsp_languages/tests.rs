@@ -6,7 +6,7 @@ fn every_stdio_adapter_has_an_explicit_catalog_contract_or_opt_out() {
         .iter()
         .filter(|spec| stdio_command(spec).is_some())
         .collect::<Vec<_>>();
-    assert_eq!(stdio.len(), 25, "update this audit when adapters change");
+    assert_eq!(stdio.len(), 26, "update this audit when adapters change");
 
     let without_catalog = stdio
         .iter()
@@ -23,7 +23,7 @@ fn every_stdio_adapter_has_an_explicit_catalog_contract_or_opt_out() {
             .iter()
             .map(|spec| spec.catalog_packages.len())
             .sum::<usize>(),
-        24
+        25
     );
 }
 
@@ -79,6 +79,12 @@ fn representative_catalog_contracts_match_executable_argv_and_routes() {
             &["start", "--stdio"][..],
         ),
         ("nix", "nil", "nil", &[][..]),
+        (
+            "sql",
+            "sqlls",
+            "sql-language-server",
+            &["up", "--method", "stdio"][..],
+        ),
     ];
 
     for (adapter_id, package_id, executable, args) in expected {

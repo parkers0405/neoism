@@ -953,10 +953,13 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                             virtual_kind: None,
                         })
                         .collect();
-                    tree.set_entries_preserve_scroll(entries);
+                    tree.host_set_entries(entries);
                 }
                 "tree.scroll" => tree.scroll_pixels(n(&v, "delta", 0.0), rows),
-                "tree.select" => tree.set_selected(n(&v, "index", 0.0) as usize),
+                "tree.select" => {
+                    tree.set_selected(n(&v, "index", 0.0) as usize);
+                    tree.host_reveal_selection(height);
+                }
                 "tree.key" => {
                     let key = text(&v, "key");
                     let ctrl = v["ctrl"].as_bool().unwrap_or(false);
@@ -980,6 +983,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                             "g" => {
                                 if tree.note_g() {
                                     tree.select_first();
+                                    tree.host_reveal_selection(height);
                                 }
                             }
                             "G" | "end" => {
@@ -992,6 +996,10 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                             "home" => tree.select_first(),
                             "escape" => tree.clear_pending(),
                             _ => {}
+                        }
+                        if matches!(key, "j" | "down" | "k" | "up" | "G" | "end" | "home")
+                            || ctrl && matches!(key, "d" | "u") {
+                            tree.host_reveal_selection(height);
                         }
                     }
                 }

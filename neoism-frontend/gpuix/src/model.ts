@@ -375,6 +375,8 @@ export class WorkspaceModel {
   };
   private async createWorkspace(parent:Workspace,id=crypto.randomUUID()):Promise<Workspace|undefined>{
     const root=parent.root_dir??null;
+    const navigation=this.state.activeWorkspace&&this.workspaceKey(this.state.activeWorkspace)===this.workspaceKey(parent)
+      ? this.state : this.workspaceNavigation.get(this.workspaceKey(parent));
     const title=(root?(win32.isAbsolute(root)?win32.basename(root):posix.basename(root)):"")||"Workspace";
     this.pendingWorkspaceCreations.add(id);
     this.update({creatingWorkspace:true});
@@ -385,6 +387,15 @@ export class WorkspaceModel {
         const workspace=Schema.decodeUnknownSync(WorkspaceSchema)(body.workspace);
         if(workspace.id!==id||workspace.host_id!==parent.host_id)throw new Error("The daemon returned a different workspace");
         if(this.disposed)return;
+        // The + action starts in the same host/folder. Its known directory
+        // listing can paint immediately while the new workspace refreshes it.
+        // Expansion, selection, scroll and conversation state remain its own.
+        if(workspace.root_dir===parent.root_dir&&navigation?.directories[""]){
+          this.workspaceNavigation.set(this.workspaceKey(workspace),{
+            directories:{...navigation.directories},expanded:new Set([""]),
+            notesDirectories:{},notesExpanded:new Set([""]),threads:[],
+          });
+        }
         let activation!:Promise<void>;
         this.transaction(()=>{
           this.update({workspaces:this.state.workspaces.some(entry=>entry.id===id)?this.state.workspaces.map(entry=>entry.id===id?workspace:entry):[...this.state.workspaces,workspace]});

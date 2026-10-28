@@ -1,0 +1,52 @@
+import assert from "node:assert/strict";
+import {createSignal} from "solid-js";
+import {createRoot} from "@gpuix/solid";
+import {App} from "../../src/ui/App";
+import {AppGeneration} from "../../src/ui/AppGeneration";
+import {AppVisualState} from "../../src/ui/AppVisualState";
+import {WorkspaceModel} from "../../src/model";
+import {DaemonConnection} from "../../src/daemon/client";
+import {loadConfig} from "../../src/config";
+import {coreCall} from "../../src/native-core";
+import {createRecordingAppRenderer} from "./full-app-recording-renderer";
+import {usePresentationScheduler} from "../../src/animation/frame-scheduler";
+const config={...loadConfig(["--config","/nonexistent/tree-retention"],{}),reducedMotion:true,cursorBlink:false};
+const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
+const restore=usePresentationScheduler(()=>()=>{});
+const workspaces=[{id:"a",host_id:"host",title:"A",root_dir:"/project/a",notes_vault_dir:"/notes/a"},{id:"b",host_id:"host",title:"B",root_dir:"/project/b",notes_vault_dir:"/notes/b"}];
+const entries=Array.from({length:200},(_,i)=>({name:`file-${String(i).padStart(3,"0")}.ts`,is_dir:false}));
+const listing={"":{path:"",entries}};
+model.update({activeWorkspace:workspaces[0],workspaces,directories:listing,notesDirectories:listing,expanded:new Set([""]),notesExpanded:new Set([""]),loading:false,ui:{sidebar:"files",openWorkspaceIds:["a","b"]}});
+const [generation,setGeneration]=createSignal(config);
+const node=()=>host.find("file-tree")||host.find("notes-tree");
+const treeId=()=>visuals.trees.get(JSON.stringify([model.state.activeWorkspace?.id,!!host.find("notes-tree"),host.find("notes-tree")?model.state.activeWorkspace?.notes_vault_dir:model.state.activeWorkspace?.root_dir]));
+const frame=()=>coreCall<{top:number;selected:number}>("tree.frame",{id:treeId(),height:680,scale:generation().scale});
+const wheel=async(delta:number)=>{root.dispatch({elementId:node()!.id,eventType:"scroll",deltaY:delta,precise:true});await host.pump(root);return frame().top;};
+const pick=async(kind:string)=>{root.dispatch({elementId:host.find(`toggle-${kind}`)!.id,eventType:"mouseDown",button:0});await host.pump(root);};
+const workspace=async(index:number)=>{model.update({activeWorkspace:workspaces[index],directories:listing,notesDirectories:listing});await host.pump(root);};
+try{
+ root.render(()=><AppGeneration value={generation()}>{value=><App model={model} config={value} visuals={visuals}/>}</AppGeneration>);await host.pump(root);
+ const filesA=await wheel(-1600);assert.ok(filesA>30);assert.equal(frame().selected,0,"Wheel leaves the keyboard selection offscreen");
+ await pick("notes");const notesA=await wheel(-900);assert.ok(notesA>10);assert.notEqual(notesA,filesA);
+ await pick("files");assert.equal(frame().top,filesA,"Files keeps its wheel viewport after Notes");
+ await workspace(1);assert.equal(frame().top,0,"New workspace starts with its own viewport");const filesB=await wheel(-2500);
+ await workspace(0);assert.equal(frame().top,filesA,"Workspace A restores its Files viewport");
+ await pick("notes");assert.equal(frame().top,notesA,"Workspace A restores its independent Notes viewport");
+ await workspace(1);await pick("notes");const notesB=await wheel(-450);assert.notEqual(notesB,notesA);
+ await pick("files");assert.equal(frame().top,filesB,"Workspace B Files remains independent of Notes");
+ await workspace(0);assert.equal(frame().top,notesA);await pick("files");assert.equal(frame().top,filesA);
+ // Activation temporarily drops the directory map before the authoritative response.
+ model.update({directories:{}});await host.pump(root);assert.equal(frame().top,filesA,"Unknown loading listing must not erase scroll");
+ model.update({directories:{"":{path:"",entries:[...entries,{name:"new.ts",is_dir:false}]}}});await host.pump(root);assert.equal(frame().top,filesA,"Changed background listing must not reveal row zero");
+ setGeneration({...config,fontSize:16,scale:16/14});root.flush();
+ const firstRows=[...host.nodes.values()].filter(n=>String(n.props.testId||"").startsWith("file:"));
+ assert.ok(!firstRows.some(n=>n.props.testId==="file:file-000.ts"),"Remounted tree paints the retained viewport immediately, before layout");
+ await host.pump(root);assert.equal(frame().top,filesA,"Font generation retains scroll row");
+ // A genuinely empty directory does clear and clamp; keyboard motion still reveals.
+ model.update({directories:{"":{path:"",entries:[]}}});await host.pump(root);assert.equal(frame().top,0);
+ model.update({directories:listing});await host.pump(root);await wheel(-1600);
+ root.dispatch({elementId:node()!.id,eventType:"keyDown",key:"home",modifiers:{shift:false,ctrl:false,alt:false,cmd:false}});await host.pump(root);assert.equal(frame().top,0,"Explicit keyboard navigation still reveals selection");
+ const originalId=treeId();
+ model.update({activeWorkspace:{...workspaces[0],root_dir:"/different-root"},directories:listing});await host.pump(root);assert.notEqual(treeId(),originalId,"Different roots own different viewports");assert.equal(frame().top,0);
+ console.log(JSON.stringify({actualApp:true,noWindow:true,independentPanels:true,independentWorkspaces:true,loadingAndRelistsRetained:true,firstPaintRetained:true,fontGenerationRetained:true,emptyAndKeyboardClamp:true,rootScoped:true}));
+}finally{root.unmount();visuals.dispose();model.dispose();client.stop();restore();}

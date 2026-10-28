@@ -19,12 +19,15 @@ test("new workspace uses its current host/root and publishes a selected Welcome 
  try{
   await model.openFile("README.md");const old=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!;
   const editor=model.getEditor(old);editor.call("paste",{text:"unsaved "});model.setComposerDraft("home:a",{text:"keep draft",attachments:[]});
+  const parentDirectories=model.state.directories,parentExpanded=model.state.expanded;
   const frames:AppState[]=[];const unsubscribe=model.subscribe(()=>frames.push(model.state));
   const created=await model.newWorkspace();unsubscribe();expect(created).toBeDefined();const id=created!.id;
   expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   expect(daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace")).toEqual([{tag:"CreateHostWorkspace",body:{workspace_id:id,host_id:"host",root_dir:"/project/a",title:"a"}}]);
   const first=frames.find(frame=>frame.workspaces.some(workspace=>workspace.id===id))!;
   expect(first.activeWorkspace?.id).toBe(id);expect(first.activeSurfaceId).toBe(`welcome:${id}`);
+  expect(first.directories[""]).toEqual(parentDirectories[""]);expect(first.loading).toBe(false);
+  expect(first.directories).not.toBe(parentDirectories);expect(first.expanded).not.toBe(parentExpanded);
   expect(first.surfaces.find(surface=>surface.id===first.activeSurfaceId)).toMatchObject({kind:"welcome",workspaceId:id,title:"Home"});
   expect(model.windowWorkspaces().map(workspace=>workspace.id)).toEqual(["a",id]);expect(model.state.workspaces.map(workspace=>workspace.id)).toEqual(["a","b",id]);
   expect(model.getLayout(id).frame.focusedSurfaceId).toBe(`welcome:${id}`);expect(model.state.creatingWorkspace).toBe(false);

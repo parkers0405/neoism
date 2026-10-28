@@ -585,13 +585,25 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const expanded = createMemo(() => props.notes ? state().notesExpanded : state().expanded);
     const root = () => props.notes ? state().activeWorkspace?.notes_vault_dir || undefined : state().activeWorkspace?.root_dir || undefined;
     const open = (entry: { path: string; dir: boolean }) => {if(entry.dir)model.toggleDirectory(entry.path,props.notes);else void focusOpenedFile(()=>model.openFile(entry.path,root()));};
-    const [height, setHeight] = createSignal(600);
+    const [viewportRevision, setViewportRevision] = createSignal(0);
+    const [heightRevision, setHeightRevision] = createSignal(0);
     const [focused, setFocused] = createSignal(false);
-    const [view, setView] = createSignal({ top: 0, offset: 0, selected: 0, cursorOffset: 0, animating: false });
+    const scope = createMemo(() => JSON.stringify([state().activeWorkspace?.id, !!props.notes, root()]));
+    const viewport = createMemo(() => {
+      const key = scope();
+      let cached = visuals.treeViewports.get(key);
+      if (!cached) {
+        cached = {height:600,frame:{top:0,offset:0,selected:0,cursorOffset:0,animating:false}};
+        visuals.treeViewports.set(key,cached);
+      }
+      return cached;
+    });
+    const height = () => { heightRevision(); return viewport().height; };
+    const view = () => { viewportRevision(); return viewport().frame; };
     let host: HostElement | undefined;
     const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
     const id = createMemo(() => {
-      const key = `${state().activeWorkspace?.id}:${props.notes ? "notes" : "files"}`;
+      const key = scope();
       if (!trees.has(key)) trees.set(key, coreCall<{ id: number }>("tree.new", { scale: s }).id);
       return trees.get(key)!;
     });
@@ -601,7 +613,8 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       // Desktop `render` snaps the spring offsets to device pixels so text and
       // row fills move together; fractional offsets shimmer at 1.67x.
       const dpr = (renderer as { getDisplayScale?: () => number }).getDisplayScale?.() || 1, snap = (value: number) => Math.round(value * dpr) / dpr;
-      setView({ ...frame, offset: snap(frame.offset), cursorOffset: snap(frame.cursorOffset) });
+      viewport().frame = { ...frame, offset: snap(frame.offset), cursorOffset: snap(frame.cursorOffset) };
+      setViewportRevision(value => value + 1);
       if (frame.animating) animation.request(() => update("frame"), started);
     };
     onCleanup(() => animation.dispose());
@@ -630,7 +643,13 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     });
     const rowPositions = createMemo(() => new Map(rows().map((entry, index) => [entry.path, index])));
     const visibleRows = createMemo(() => { const frame = view(), entries = rows(); return entries.slice(...visibleTreeRange(entries.length, height(), d.treeRowHeight * s, frame.top, frame.offset)); });
-    createEffect(() => { update("layout", { entries: rows().map((entry) => ({ ...entry, open: expanded().has(entry.path) })) }); });
+    createEffect(() => {
+      scope(); height();
+      const known = !!directories()[""], entries = rows().map(entry => ({...entry, open:expanded().has(entry.path)}));
+      // Missing listing during activation is loading, not an empty directory.
+      // Retain the native viewport until an authoritative listing arrives.
+      untrack(() => known ? update("layout", {entries}) : update("frame"));
+    });
     const keyDown = (event: KeyEvent) => {
       if(bufferTabShortcut(event)&&handleSurfaceKey(event))return;
       if (event.modifiers?.alt || event.modifiers?.cmd) return;
@@ -652,7 +671,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     createEffect(()=>{view();rows();if(focused()&&chromeFocus().zone==="sidebar")publishTarget();});
     onCleanup(()=>{sidebarHosts.delete(sidebarKey);sidebarTargets.delete(sidebarKey);});
     return <motion.div initial={config.reducedMotion||!opening?false:{left:-6*s}} animate={{left:0}} transition={{duration:config.reducedMotion?0:.12,ease:easeOutCubicBezier}} ref={element=>{host=element;sidebarHosts.set(props.notes?"notes":"files",element);}} tabIndex={0} onKeyDown={keyDown} onMouseDown={()=>focusChrome({zone:"sidebar"})} onFocus={() => {invalidateNativeFocus(renderer);setFocused(true);if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});publishTarget();}}} onBlur={() => {invalidateNativeFocus(renderer);setFocused(false);}}
-      onLayout={(event) => {setHeight(event.height || 0);updateChromeBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});}}
+      onLayout={(event) => {if(viewport().height!==(event.height||0)){viewport().height=event.height||0;setHeightRevision(value=>value+1);}updateChromeBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});}}
       onScroll={(event) => { update("scroll", { delta: (event.deltaY || 0) * (event.precise ? 1 : d.treeRowHeight * s * 3) }); }}
       data-tree-id={id()} style={{ ...column, flexGrow: 1, position: "relative", overflow: "hidden" }} role="tree" aria-label={props.notes ? "Notes" : "Files"} testId={props.notes ? "notes-tree" : "file-tree"}>
       <Show when={focused() && rows().length}><div style={{ position: "absolute", left: 0, right: 0,

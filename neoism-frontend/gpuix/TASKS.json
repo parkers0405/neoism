@@ -265,18 +265,23 @@
     },
     {
       "id": "sidebar_scroll_retention",
-      "status": "in_progress",
+      "status": "implemented_headless_verified",
       "requirement": "Retain independent Files/Notes/Agent sidebar scroll positions on panel switches and workspace away/back; preserve native tree state and original keyboard focus."
+    },
+    {
+      "id": "workspace_plus_tree_first_paint",
+      "status": "implemented_headless_verified",
+      "requirement": "Workspace + paints the known same-host/root directory listing immediately while refreshing, with independent expansion/scroll state and no blank/loading tree frame."
     }
   ],
-  "verification_note": "Commits9e16544ab,d8610acb0,f56e99592 saved. Modal centering follow-up verified and packaged. Independent same-Git-surface split view state remains tracked.",
+  "verification_note": "Commits9e16544ab,d8610acb0,f56e99592,28f2000c0,749294143 saved. Sidebar scroll and workspace + first-paint fixes verified and packaged. Independent same-Git-surface split view state remains tracked.",
   "verification": {
     "frontend_tests": {
-      "passed": 411,
+      "passed": 413,
       "failed": 0,
-      "files": 118,
-      "assertions": 5565,
-      "note": "Full suite410/0 (118files,5556assertions), plus added close-race regression1/0 (9assertions). Final focused gate16/0,106assertions after all source changes."
+      "files": 119,
+      "assertions": 5578,
+      "note": "Full suite413/0 (119files,5578assertions), including actual App tree viewport retention, workspace + first-paint, global buffer shortcuts, focus, and zoom regressions."
     },
     "typecheck": "passed final source",
     "design_sync": "passed final source",

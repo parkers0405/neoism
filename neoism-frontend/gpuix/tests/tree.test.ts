@@ -28,3 +28,16 @@ test("sidebar wheel preserves row lag and clamps at the bottom", () => {
     expect(call("scroll", { delta: -100000 }).top).toBe(91);
   } finally { dispose(); }
 });
+test("host relists retain an offscreen wheel viewport while keyboard selection still reveals", () => {
+  const { call, dispose } = tree();
+  try {
+    const before = call("scroll", {delta:-1000});
+    expect(before.top).toBeGreaterThan(20); expect(before.selected).toBe(0);
+    expect(call("layout", {entries}).top).toBe(before.top);
+    expect(call("layout", {entries:[...entries,{name:"new.txt",path:"new.txt",dir:false,depth:0}]}).top).toBe(before.top);
+    expect(call("key", {key:"home"}).top).toBe(0);
+    call("scroll", {delta:-1000});
+    expect(call("layout", {entries:entries.slice(0,12)}).top).toBe(3);
+    expect(call("layout", {entries:[]}).top).toBe(0);
+  } finally { dispose(); }
+});

@@ -47,11 +47,23 @@ try{
   bounds=next;root.flushSync(()=>{setOverlayViewport(renderer,next);setAnchor([next.x+40,next.y+composerOffset,next.width-80,100]);});await Promise.resolve();root.flush();
   assert.equal(overlayViewport(renderer)()?.y,next.y);
   for(const id of dialogs){const node=byTest(id);assert.ok(node,`${id} must mount its real original component`);const rect=origin(node);assert.ok(rect.y>=next.y-0.1,`${id} overlaps reserved headers: ${rect.y} < ${next.y}`);assert.ok(rect.x>=next.x-0.1,`${id} starts before focused body`);checks++;}
+  const centered=()=>{const dialog=byTest("command-dialog"),rect=origin(dialog);assert.ok(Math.abs(rect.x+Number(dialog.style.width)/2-(next.x+next.width/2))<.1,"Command palette must center horizontally beside the sidebar");assert.ok(Math.abs(rect.y+Number(dialog.style.height)/2-(next.y+next.height/2))<.1,"Command palette must center vertically below the tabs");};
+  centered();commands.query("q");root.flush();centered();commands.query("");root.flush();centered();
   for(const id of ["agent-picker:agent","agent-picker:permission","agent-question"]){const node=byTest(id),rect=origin(node);assert.ok(rect.y+Number(node.style.height)<=anchor()[1]+.1,`${id} must stay above the composer`);}
   // Select the actual first picker row using its native global hit geometry.
   const picker=byTest("agent-picker:agent"),point=origin(picker);root.dispatch({elementId:picker.id,eventType:"mouseDown",button:0,x:point.x+30,y:point.y+76});
  }
  assert.deepEqual(selected,["0","0"]);
+ await chrome.open("OpenThemes");root.flush();
+ for(const next of [{x:0,y:132,width:1300,height:730},{x:360,y:246,width:820,height:610}]){
+  root.flushSync(()=>setOverlayViewport(renderer,next));await Promise.resolve();root.flush();
+  const rect=chrome.frame?.rect;assert.ok(rect,"Appearance palette publishes its original native frame");
+  const paint=origin(byTest("chrome-action-paint-origin"));
+  assert.ok(Math.abs(paint.x+rect[0]+rect[2]/2-(next.x+next.width/2))<.1,"Appearance palette follows sidebar changes horizontally");
+  assert.ok(Math.abs(paint.y+rect[1]+rect[3]/2-(next.y+next.height/2))<.1,"Appearance palette centers vertically too");
+  root.dispatch({elementId:byTest("chrome-action-overlay").id,eventType:"mouseDown",button:0,x:paint.x+rect[0]+30,y:paint.y+rect[1]+30});root.flush();
+  assert.ok(chrome.frame?.active,"Centered palette input click must retain its original native hit target rather than close as an outside click");
+ }
  const item=[...nodes.values()].find(node=>String(node.props.testId).startsWith("menu:"))!;assert.ok(item);const target=origin(item);root.dispatch({elementId:item.id,eventType:"mouseDown",button:0,x:target.x+5,y:target.y+5});assert.equal(actions.length,1,"Translated hamburger row must dispatch its original action");
  console.log(JSON.stringify({dialogs:dialogs.length,boundsChanges:2,checks,nativePickerSelections:selected.length,hamburgerActions:actions.length,nativeWindowsCreated:0}));
 }finally{root.unmount();commands.dispose();chrome.dispose();model.dispose();setOverlayViewport(renderer,undefined);resetSchedule();rmSync(rootDir,{recursive:true,force:true});}

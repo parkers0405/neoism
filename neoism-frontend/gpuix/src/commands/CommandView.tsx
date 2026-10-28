@@ -3,7 +3,7 @@ import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid
 import { createWindowSize, useGpuixRequired, type HostElement, type KeyEvent, type StyleDesc } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { CommandController, type CommandTarget } from "./CommandController";
-import {useOverlayViewport} from "../ui/overlay-viewport";
+import {centeredOverlayOffset,useOverlayViewport} from "../ui/overlay-viewport";
 
 export function CommandView(props: { controller: CommandController; config: AppConfig; onAccept: (target: CommandTarget) => void; onClose: () => void }) {
   const config = props.config, c = config.theme, s = config.scale, renderer = useGpuixRequired(), size = createWindowSize();
@@ -24,9 +24,10 @@ export function CommandView(props: { controller: CommandController; config: AppC
     fontWeight: config.fontWeight, whiteSpace: "nowrap", pointerEvents: "none", userSelect: "none", textOverflow: "ellipsis" });
   const position = (rect: number[]): StyleDesc => ({ position: "absolute", left: rect[0], top: rect[1], width: rect[2], height: rect[3] });
   const rows = () => frame().rows.slice(Math.max(0, frame().top - 3), frame().top + frame().visibleRows + 4);
+  const dialogPosition=()=>{const rect=frame().rect,offset=centeredOverlayOffset(viewport(),rect);return position([rect[0]+offset.x,rect[1]+offset.y,rect[2],rect[3]]);};
   return <anchored fill="window" deferred={true} priority={2} occlude={false} style={{ backgroundColor: "transparent", pointerEvents: "none" }}>
-    <div style={{position:"absolute",left:viewport().x,top:viewport().y,width:viewport().width,height:viewport().height,pointerEvents:"none"}}><div testId="command-dialog" role="dialog" aria-label="Command palette" onKeyDown={keyDown} onMouseDownOutside={props.onClose}
-      style={{ ...position(frame().rect), backgroundColor: c.bg, borderTopLeftRadius: frame().radius, borderTopRightRadius: frame().radius, overflow: "hidden", pointerEvents: "auto" }}>
+    <div style={{position:"absolute",left:viewport().x,top:viewport().y,width:viewport().width,height:viewport().height,overflow:"hidden",pointerEvents:"none"}}><div testId="command-dialog" role="dialog" aria-label="Command palette" onKeyDown={keyDown} onMouseDownOutside={props.onClose}
+      style={{ ...dialogPosition(), backgroundColor: c.bg, borderTopLeftRadius: frame().radius, borderTopRightRadius: frame().radius, overflow: "hidden", pointerEvents: "auto" }}>
       <div style={{ position: "absolute", left: 0, top: 0, width: "100%", height: "100%", borderWidth: frame().stroke, borderColor: c.surface,
         borderTopLeftRadius: frame().radius, borderTopRightRadius: frame().radius, pointerEvents: "none" }} />
       <input ref={input} testId="command-palette" aria-label="Type a command" autoFocus={true} value={frame().query} placeholder="Type a command..."

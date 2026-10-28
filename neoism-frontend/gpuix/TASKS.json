@@ -257,9 +257,14 @@
       "id": "agent_live_markdown",
       "status": "implemented_headless_verified",
       "requirement": "Preserve exactly-once family stream bytes and original incremental Markdown rendering during generation; stop redundant parent/child streams without dropping legitimate repeated tokens."
+    },
+    {
+      "id": "modal_content_center",
+      "status": "implemented_headless_verified",
+      "requirement": "Center Alt+P, Alt+S, appearance/workspace/server palettes and buffer search in both axes of the available content body; react to sidebar/window/result changes while keeping native paint, inputs, pointer hits and cursor handoff aligned below all tabs."
     }
   ],
-  "verification_note": "Saved checkpoint9e16544ab and catalog transport fixd8610acb0. Current interaction and Agent streaming fixes implemented and verified; production preview relaunched. Independent same-Git-surface split view state remains a tracked follow-up.",
+  "verification_note": "Commits9e16544ab,d8610acb0,f56e99592 saved. Modal centering follow-up verified and packaged. Independent same-Git-surface split view state remains tracked.",
   "verification": {
     "frontend_tests": {
       "passed": 411,
@@ -304,6 +309,7 @@
     "checkpoint_gates": "Current source TypeScript clean; targeted Agent/model batch14tests/181 assertions; Git/status22tests/131 assertions; Home12tests/134 assertions; workspace sidebar3tests; folder modal1test pass.",
     "catalog_live": "Actual App recording renderer against running daemon: all825family+825activity events,8.22s connected, zero WS closures,39modelpublications and max1ms actual publication. Production diagnostics show connected, configured gpt-6.1-sol/high, loadingfalse and no catalog error.",
     "final_interaction_gate": "16 tests across5files,106 assertions pass; production build and FFI smoke pass.",
-    "agent_streaming": "Family-wide subscriptions use exactly one owner including late switch/close replies; original native Markdown renders partial output before idle and canonical completion metadata restores original footer."
+    "agent_streaming": "Family-wide subscriptions use exactly one owner including late switch/close replies; original native Markdown renders partial output before idle and canonical completion metadata restores original footer.",
+    "modal_centering": "25 tests across7files pass,112 assertions; actual Command/Finder/appearance native painting and pointer translation checked across sidebar-sized viewport changes, empty/filtered results and narrow resize. TypeScript and optimized release/FFI smoke pass."
   }
 }

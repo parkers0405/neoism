@@ -228,7 +228,11 @@ impl Host {
             }
         };
         let target=match &self.panel {Panel::Appearance(p)=>p.get_selected_theme().map(|name|json!({"kind":"theme","name":name})).or_else(||p.selected_background().map(|entry|json!({"kind":"background","id":entry.id,"path":entry.path,"opacity":entry.opacity,"blur":entry.blur,"fit":entry.fit,"position_x":entry.position_x,"position_y":entry.position_y}))).or_else(||p.get_selected_workspace_target().map(|target|json!({"kind":"workspace","id":target.workspace_id}))).or_else(||match p.get_selected_action(){Some(PaletteAction::SelectServer{id})=>Some(json!({"kind":"server","id":id})),Some(PaletteAction::AddServer)=>Some(json!({"kind":"server-add"})),Some(action)=>Some(json!({"kind":"run","action":format!("{action:?}")})),_=>None}).or_else(||p.get_selected_cd_directory().map(|entry|json!({"kind":"directory","path":entry.absolute_path}))).or_else(||p.get_typed_cd_target().and_then(|path|neoism_ui::panels::command_palette::actions::parse_cd_operand(&path).ok()).map(|path|json!({"kind":"directory","path":path}))).unwrap_or(Value::Null),_=>Value::Null};
-        json!({"kind":self.kind,"active":active,"animating":animating,"commands":self.painter.commands(),"image":image,"action":action,"target":target,"snapshot":match &self.panel {Panel::Settings(p)=>p.host_snapshot(),_=>Value::Null},"query":match &self.panel {Panel::Appearance(p)=>Some(p.query.as_str()),_=>None}})
+        let rect = match &self.panel {
+            Panel::Appearance(p) => p.active_visual_rect(self.width, 1.0),
+            _ => None,
+        };
+        json!({"kind":self.kind,"active":active,"animating":animating,"commands":self.painter.commands(),"rect":rect,"image":image,"action":action,"target":target,"snapshot":match &self.panel {Panel::Settings(p)=>p.host_snapshot(),_=>Value::Null},"query":match &self.panel {Panel::Appearance(p)=>Some(p.query.as_str()),_=>None}})
     }
 }
 pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {

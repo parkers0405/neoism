@@ -15,6 +15,7 @@ import { localDaemon, openExternalUrl, startWebFrontend } from "./web-frontend";
 export interface ServerSelection { id: string; endpoint: string; token?: string; pairingToken?: string }
 export interface MenuFrame {
   kind: string; active: boolean; animating: boolean; commands: PaintCommand[]; query?: string | null;
+  rect?: number[] | null;
   image?: { path: string; rect: number[] } | null; target?: Record<string, any> | null; action?: Record<string, any> | null;
   snapshot?: unknown;
 }

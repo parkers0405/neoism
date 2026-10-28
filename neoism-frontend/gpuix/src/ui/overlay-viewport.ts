@@ -16,6 +16,12 @@ export function useOverlayViewport(renderer:object,window:Accessor<{width:number
 }
 export function overlayPoint(bounds:OverlayViewport,event:{x?:number;y?:number}){return{x:(event.x||0)-bounds.x,y:(event.y||0)-bounds.y};}
 
+/** Move a native dialog's entire coordinate space together, including its
+ * painter, input hit targets and caret. Bounds exclude the sidebar and tabs. */
+export function centeredOverlayOffset(bounds:Pick<OverlayViewport,"width"|"height">,rect:readonly number[]){
+ return{x:Math.max(0,(bounds.width-rect[2])/2)-rect[0],y:Math.max(0,(bounds.height-rect[3])/2)-rect[1]};
+}
+
 export function placeOverlayRect(rect:readonly number[],bounds:OverlayViewport):[number,number,number,number]{
  const width=rect[2],height=rect[3];
  return[Math.max(bounds.x,Math.min(rect[0],bounds.x+bounds.width-width)),Math.max(bounds.y,Math.min(rect[1],bounds.y+bounds.height-height)),width,height];

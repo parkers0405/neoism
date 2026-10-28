@@ -6,7 +6,7 @@ import { PaintLayer } from "../ui/PaintLayer";
 import { LoadingSkeleton } from "../ui/LoadingSkeleton";
 import { readClipboard } from "../clipboard";
 import { ChromeActionsController } from "./ChromeActionsController";
-import {useOverlayViewport,overlayPoint} from "../ui/overlay-viewport";
+import {centeredOverlayOffset,useOverlayViewport,overlayPoint} from "../ui/overlay-viewport";
 
 export function ChromeActionsView(props: { controller: ChromeActionsController; config: AppConfig; pageMode?: boolean; active?: boolean; focusToken?: number; onFocus?: () => void; onCustomKey?: (event: KeyEvent) => boolean }) {
   const renderer = useGpuixRequired(), window = createWindowSize(), page = !!props.pageMode;
@@ -22,7 +22,8 @@ export function ChromeActionsView(props: { controller: ChromeActionsController; 
   onCleanup(() => { if (!page && previousFocus != null) renderer.focusElement?.(previousFocus); });
   createEffect(() => { props.focusToken; if (props.active !== false && host) focus(); });
   createEffect(() => { if (!page) { const size = viewport(); props.controller.layout(size.width, size.height); } });
-  const point = (event: { x?: number; y?: number }) => overlayPoint(page?bounds():viewport(),event);
+  const offset=createMemo(()=>{const rect=frame()?.rect;return !page&&rect?centeredOverlayOffset(viewport(),rect):{x:0,y:0};});
+  const point = (event: { x?: number; y?: number }) => {const local=overlayPoint(page?bounds():viewport(),event),shift=offset();return{x:local.x-shift.x,y:local.y-shift.y};};
   const key = (event: KeyEvent) => {
     if(handleApplicationShortcut(renderer,event))return;
     if (page && props.onCustomKey?.(event)) return;
@@ -40,8 +41,10 @@ export function ChromeActionsView(props: { controller: ChromeActionsController; 
     onScroll={(event) => props.controller.call("scroll", { ...point(event), delta: (event.deltaY || 0) * (event.precise ? 1 : 40 * props.config.scale) }, page)}
     style={page ? { position: "relative", flexGrow: 1, minHeight: 0, minWidth: 0, overflow: "hidden", backgroundColor: props.config.theme.bg } : { position: "absolute", left: viewport().x, top: viewport().y, width: viewport().width, height: viewport().height, overflow: "hidden" }}>
     <Show when={frame()} fallback={<LoadingSkeleton kind="document" config={props.config} />}>
+      <div testId="chrome-action-paint-origin" style={{position:"absolute",left:offset().x,top:offset().y,width:"100%",height:"100%",pointerEvents:"none"}}>
       <PaintLayer commands={frame()?.commands || []} config={props.config} />
       <Show when={imagePath()} keyed>{(path) => <img src={path} objectFit="contain" alt="Background preview" style={{ position: "absolute", left: frame()?.image?.rect[0], top: frame()?.image?.rect[1], width: frame()?.image?.rect[2], height: frame()?.image?.rect[3], pointerEvents: "none" }} />}</Show>
+      </div>
     </Show>
   </div>;
   return page ? content : <anchored fill="window" deferred priority={3} occlude={true} style={{ backgroundColor: "transparent" }}>{content}</anchored>;

@@ -5,7 +5,7 @@ import type { AppConfig } from "../config";
 import { FinderController, type FinderFrame, type FinderTarget } from "./FinderController";
 import { PaintLayer } from "../ui/PaintLayer";
 import { cssColor, type CanvasOp } from "../ui/canvas";
-import { useOverlayViewport } from "../ui/overlay-viewport";
+import { centeredOverlayOffset, useOverlayViewport } from "../ui/overlay-viewport";
 import { coreCall } from "../native-core";
 import {CursorBlinkClock} from "../ui/cursor-blink";
 
@@ -37,6 +37,7 @@ export function FinderView(props: { controller: FinderController; config: AppCon
     else if(key==="up"||key==="down"){event.preventDefault();props.controller.move(key==="up"?-1:1);}
   };
   const rows=()=>frame().rows.slice(Math.max(0,frame().top-3),frame().top+frame().visibleRows+4);
+  const offset=createMemo(()=>centeredOverlayOffset(viewport(),frame().rect));
   const cursor=createMemo(():CanvasOp[]=>{
     const points=frame().cursorQuad||[];if(!points.length)return [];
     if(!blink())return [];
@@ -45,6 +46,7 @@ export function FinderView(props: { controller: FinderController; config: AppCon
   });
   return <anchored fill="window" deferred priority={2} occlude={false} style={{backgroundColor:"transparent",pointerEvents:"none"}}>
     <div testId="finder-viewport" style={{position:"absolute",left:viewport().x,top:viewport().y,width:viewport().width,height:viewport().height,overflow:"hidden",pointerEvents:"none"}}>
+      <div testId="finder-paint-origin" style={{position:"absolute",left:offset().x,top:offset().y,width:viewport().width,height:viewport().height,pointerEvents:"none"}}>
       <PaintLayer config={config} commands={frame().commands||[]} extra={cursor()}/>
       <div role="dialog" aria-label="Finder" testId="finder" onKeyDown={keyDown} onMouseDownOutside={props.onClose}
         style={{position:"absolute",left:frame().rect[0],top:frame().rect[1],width:frame().rect[2],height:frame().rect[3],pointerEvents:"auto",overflow:"hidden",borderTopLeftRadius:frame().radius,borderTopRightRadius:frame().radius}}>
@@ -66,6 +68,7 @@ export function FinderView(props: { controller: FinderController; config: AppCon
           </div></Show>
         </div>
         <Show when={frame().preview}><div testId="finder-preview" aria-label={frame().previewPath||"Preview"} style={{position:"absolute",left:frame().previewRect[0],top:frame().previewRect[1],width:frame().previewRect[2],height:frame().previewRect[3],pointerEvents:"none"}}/></Show>
+      </div>
       </div>
     </div>
   </anchored>;

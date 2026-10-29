@@ -108,6 +108,10 @@ fn paint_picker(
     }
     let show_search_caret = v["caret"].as_bool().unwrap_or(true);
     let empty_message = picker.empty_message();
+    // Keep the editable value in state while the native card paints only
+    // one mask glyph per entered scalar; credentials never enter text paint.
+    let masked_query=(picker.kind==NeoismAgentPickerKind::ConnectSecret).then(||"•".repeat(picker.query.chars().count()));
+    let display_query=masked_query.unwrap_or_else(||picker.query.clone());
     let list_scroll_offset = picker.tick_list_scroll();
     let cursor_offset = picker.tick_cursor();
     painter.begin_frame();
@@ -139,7 +143,7 @@ fn paint_picker(
         paint,
         InlinePickerView {
             title: &picker.title,
-            query: &picker.query,
+            query: &display_query,
             selected: picker.selected,
             scroll_offset: picker.scroll_offset,
             list_scroll_offset,
@@ -263,6 +267,12 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
         match op {
             // The desktop catalog projection: connected providers only, same
             // provider/model ranking and "Free"/"Nk ctx" footers.
+            "picker.connect-options" => Ok(Value::Array(
+                neoism_ui::panels::agent_pane::state::connect_options_from_catalog(&v["catalog"])
+                    .into_iter()
+                    .map(|o| json!({"title":o.title,"description":o.description,"footer":o.footer,"value":o.value,"section":o.section,"header":o.is_header,"current":o.is_current,"pinned":o.pinned}))
+                    .collect(),
+            )),
             "picker.model-options" => Ok(Value::Array(
                 neoism_ui::panels::agent_pane::api_mapping::model_options_from_providers_json(&v["catalog"])
                     .into_iter()
@@ -281,6 +291,9 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                     "mcp" => NeoismAgentPickerKind::Mcp,
                     "mcp-action" => NeoismAgentPickerKind::McpActions,
                     "connect" => NeoismAgentPickerKind::Connect,
+                    "connect-account" => NeoismAgentPickerKind::ConnectAccount,
+                    "connect-account-actions" => NeoismAgentPickerKind::ConnectAccountActions,
+                    "connect-confirm" => NeoismAgentPickerKind::ConnectConfirm,
                     "connect-method" | "connect-input" | "connect-authorize" => NeoismAgentPickerKind::ConnectAuth,
                     "secret" => NeoismAgentPickerKind::ConnectSecret,
                     "input" => NeoismAgentPickerKind::ConnectLabel,
@@ -297,6 +310,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                     v["selected"].as_u64().unwrap_or(0) as usize,
                 );
                 picker.set_loading(v["loading"].as_bool().unwrap_or(false));
+                picker.search_placeholder=v["placeholder"].as_str().map(str::to_owned);
                 sync_mcp_icons(&mut picker, v);
                 store.pickers.insert(id, picker);
                 Ok(json!({"id":id}))
@@ -327,6 +341,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                     "picker.options" => {
                         p.replace_options(options(v));
                         p.set_loading(v["loading"].as_bool().unwrap_or(false));
+                        if let Some(placeholder)=v["placeholder"].as_str(){p.search_placeholder=Some(placeholder.to_owned());}
                         sync_mcp_icons(p, v);
                     }
                     // Connect / OAuth / MCP stage status, drawn by the original card.

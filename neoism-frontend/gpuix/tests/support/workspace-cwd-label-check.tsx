@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import {createRoot} from "@gpuix/solid";
+import {App} from "../../src/ui/App";
+import {AppVisualState} from "../../src/ui/AppVisualState";
+import {loadConfig} from "../../src/config";
+import {DaemonConnection} from "../../src/daemon/client";
+import {WorkspaceModel} from "../../src/model";
+import {createAgentDaemon} from "./agent-daemon";
+import {createRecordingAppRenderer} from "./full-app-recording-renderer";
+const server=createAgentDaemon();server.threads.splice(0);const home=process.env.HOME||"/home/fixture";server.workspaces[0]!.root_dir=home;
+const config={...loadConfig(["--config","/nonexistent/workspace-cwd-label"],{}),endpoint:server.endpoint,reducedMotion:true,cursorBlink:false};
+const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
+let stage="startup";
+const until=async(check:()=>boolean)=>{const deadline=Date.now()+5000;while(!check()){await host.pump(root);if(Date.now()>deadline)throw new Error(`Workspace cwd label did not settle: ${stage}; root=${model.state.activeWorkspace?.root_dir}; label=${host.find("workspace:a")?.props["aria-label"]}`);await Bun.sleep(4);}await host.pump(root);};
+const label=(id:string)=>host.find(`workspace:${id}`)?.props["aria-label"];
+try{
+ model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);await model.newTerminal();
+ stage="initial home";root.render(()=><App model={model} config={config} visuals={visuals}/>);await until(()=>label("a")==="~");
+ const tabId=host.find("workspace:a")!.id,main=model.mainTerminalSurface()!;
+ stage="observed terminal cwd";server.pushPty({SessionCwd:{session_id:main.sessionId,cwd:`${home}/projects/neoism`}});
+ await until(()=>model.state.activeWorkspace?.root_dir===`${home}/projects/neoism`&&label("a")==="neoism");
+ assert.equal(model.state.workspaces.find(workspace=>workspace.id==="a")!.root_dir,home,"Observed cwd must not rewrite shared host metadata");
+ assert.equal(host.find("workspace:a")!.id,tabId,"The existing strip tab updates in place");
+ stage="switch away";await model.activateWorkspace(server.workspaces[1]!);await until(()=>model.state.activeWorkspace?.id==="b");assert.equal(label("a"),"neoism","Inactive tabs retain their own confirmed directory");
+ stage="switch back";await model.activateWorkspace(server.workspaces[0]!);await until(()=>model.state.activeWorkspace?.id==="a"&&label("a")==="neoism");assert.equal(host.find("workspace:a")!.id,tabId);
+ assert.equal(server.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot"),false);
+ stage="manual folder change";await model.changeWorkspaceDirectory(`${home}/manual-choice`);await until(()=>label("a")==="manual-choice");
+ assert.equal(model.state.activeWorkspace?.root_dir,`${home}/manual-choice`,"Explicit roots invalidate a previous terminal override");
+ assert.equal(server.workspaceRequests.filter(request=>request.tag==="SetWorkspaceRoot").length,1,"Only the explicit folder choice may publish a shared root");assert.equal(server.ptyRequests.filter(request=>request.tag==="CreatePty").length,1);
+ console.log(JSON.stringify({actualApp:true,noWindow:true,confirmedTerminalCwdLabelsExistingTab:true,inactiveWorkspaceRetained:true,manualRootWins:true,noSharedRootMutation:true}));
+}finally{root.unmount();visuals.dispose();model.dispose();client.stop();server.stop();}

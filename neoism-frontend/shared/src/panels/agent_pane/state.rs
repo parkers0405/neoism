@@ -2,6 +2,7 @@
 
 mod caches;
 mod connect;
+pub use connect::connect_options_from_catalog;
 pub mod external_options;
 mod hit_rects;
 mod ingest;

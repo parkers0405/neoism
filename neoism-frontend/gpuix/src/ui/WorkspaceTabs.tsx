@@ -2,7 +2,7 @@ import {createEffect,createMemo,createSignal,For,onCleanup,Show,untrack} from "s
 import {motion,useGpuixRequired,createWindowSize,type EventPayload,type HostElement} from "@gpuix/solid";
 import type {AppConfig} from "../config";
 import type {Workspace} from "../daemon/protocol";
-import {tabChrome,rgba,workspaceLabel} from "../layout/tab-chrome";
+import {tabChrome,rgba,workspaceLabel,workspaceTabRoot} from "../layout/tab-chrome";
 import {easeOutCubicBezier} from "../design/animation";
 import {paintedChromeBounds,type ChromeBounds} from "./chrome-target-bounds";
 import {AnimationFrameScheduler} from "../animation/frame-scheduler";
@@ -14,7 +14,7 @@ import {workspaceIcon,cloudWorkspace} from "../workspaces/workspace-icon";
 
 /** Window-owned workspace tabs size to their titles and share one horizontal strip with their add button. */
 export function WorkspaceTabs(props:{
- config:AppConfig;workspaces:readonly Workspace[];activeId?:string;keyboardIndex?:number;connectedHostId?:string;
+ config:AppConfig;workspaces:readonly Workspace[];activeId?:string;keyboardIndex?:number;connectedHostId?:string;directoryRoots?:unknown;
  onActivate:(workspace:Workspace)=>void;onNew:()=>void;onClose:(workspaceId:string)=>void;
  onReorder?:(dragId:string,targetId:string,position:"before"|"after")=>void;
  registerHost:(id:string,host:HostElement|undefined)=>void;
@@ -60,7 +60,7 @@ export function WorkspaceTabs(props:{
  function Tab(p:{id:string;index:number}){
   const initial=untrack(()=>props.workspaces.find(w=>w.id===p.id))!;
   const workspace=createMemo(()=>props.workspaces.find(w=>w.id===p.id)||initial);
-  const title=createMemo(()=>workspaceLabel(workspace().title,workspace().root_dir));
+  const title=createMemo(()=>workspaceLabel(workspace().title,workspaceTabRoot(workspace(),props.config,props.directoryRoots)));
   const selected=()=>props.activeId===p.id;
   const [hovered,setHovered]=createSignal(false),[closeHovered,setCloseHovered]=createSignal(false);
   const [titleWidth,setTitleWidth]=createSignal([...title()].length*chrome.titleFontSize*.6);
@@ -79,7 +79,7 @@ export function WorkspaceTabs(props:{
   const reveal=()=>{if(queued)return;queued=true;queueMicrotask(()=>{queued=false;if(disposed||!host?.mounted||!selected()||drag())return;host.root?.mutations.flushMutations();host.scrollIntoView();if(props.workspaces.at(-1)?.id===p.id)newHost?.scrollIntoView();props.onScroll();});};
   createEffect(()=>{if(selected())reveal();});
   onCleanup(()=>{disposed=true;hosts.delete(p.id);widths.delete(p.id);props.registerHost(p.id,undefined);});
-  return <div ref={value=>{host=value;hosts.set(p.id,value);props.registerHost(p.id,value);}} tabIndex={0} role="tab" testId={`workspace:${p.id}`} aria-label={workspace().title} aria-selected={selected()} data-keyboard-focused={props.keyboardIndex===p.index}
+  return <div ref={value=>{host=value;hosts.set(p.id,value);props.registerHost(p.id,value);}} tabIndex={0} role="tab" testId={`workspace:${p.id}`} aria-label={title()} aria-selected={selected()} data-keyboard-focused={props.keyboardIndex===p.index}
    onLayout={event=>{rememberWidth(p.id,event.width||0);if(host)props.onBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});if(selected())reveal();}}
    onMouseDown={press}
    onMouseMove={move} onMouseUp={finish}
@@ -113,7 +113,7 @@ export function WorkspaceTabs(props:{
    <div style={{position:"absolute",left:stripOriginX,top:stripOriginY,width:stripWidth,height:chrome.height,overflow:"hidden",pointerEvents:"none"}}>
     <div testId="workspace-drag-preview" aria-hidden={true} style={{...row,position:"absolute",left:(slideRevision(),scrollX+slide.position(drag()!)),top:0,width:widths.get(drag()!)||0,height:chrome.height,paddingLeft:chrome.tabPaddingX,paddingRight:9*s+spec.buffer.closeHitSize/2+spec.buffer.padding,gap:9*s,backgroundColor:c.bg,borderTopLeftRadius:chrome.tabRadius,borderTopRightRadius:chrome.tabRadius,pointerEvents:"none"}}>
      <text testId="workspace-drag-preview-icon" style={{...text,flexShrink:0,lineHeight:chrome.height,fontFamily:props.config.iconFontFamily,fontSize:12*s,color:rgba(chrome.iconColor)}}>{workspaceIcon(props.workspaces.find(workspace=>workspace.id===drag()),props.config,chrome.iconGlyph,props.connectedHostId)}</text>
-     <text style={{...text,flexShrink:0,lineHeight:chrome.height,color:props.activeId===drag()?c.fg:c.muted}}>{workspaceLabel(props.workspaces.find(workspace=>workspace.id===drag())?.title||"Workspace",props.workspaces.find(workspace=>workspace.id===drag())?.root_dir)}</text>
+     <text style={{...text,flexShrink:0,lineHeight:chrome.height,color:props.activeId===drag()?c.fg:c.muted}}>{(()=>{const workspace=props.workspaces.find(workspace=>workspace.id===drag());return workspace?workspaceLabel(workspace.title,workspaceTabRoot(workspace,props.config,props.directoryRoots)):"Workspace";})()}</text>
      <div style={{...row,position:"absolute",right:spec.buffer.padding-spec.buffer.closeHitSize/2,top:(chrome.height-spec.buffer.closeHitSize)/2,justifyContent:"center",width:spec.buffer.closeHitSize,height:spec.buffer.closeHitSize,flexShrink:0,pointerEvents:"none"}}><text style={{...text,fontSize:spec.buffer.fontSize,color:c.muted}}>×</text></div>
     </div>
    </div>

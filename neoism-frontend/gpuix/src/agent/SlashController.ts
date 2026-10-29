@@ -6,12 +6,12 @@ import {sdkModel} from "../daemon/sdk";
 import {coreCall} from "../native-core";
 import {thinkingOptions} from "../design/generated";
 
-export interface SlashOption{title:string;description:string;footer:string;value:string;mcp?:unknown}
+export interface SlashOption{title:string;description:string;footer:string;value:string;header?:boolean;section?:string;mcp?:unknown}
 export type SlashEffect="piss"|"cuss"|"glitch"|"disco"|"gangfight"|"praise";
-export interface SlashPickerRequest{token?:string;loading?:boolean;error?:string;usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;onCancel?:()=>void;kind:string;title:string;options:SlashOption[];selected?:string;onSelect?:(value:string)=>void|Promise<void>;
+export interface SlashPickerRequest{token?:string;loading?:boolean;error?:string;usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;onCancel?:()=>void;onBack?:()=>void|Promise<void>;kind:string;title:string;options:SlashOption[];selected?:string;onSelect?:(value:string)=>void|Promise<void>;
  /** Original-card stage status (connect / OAuth / MCP authorization). */
  activity?:{body:string;status:string;busy?:boolean;url?:string};mcpServer?:string;mcpEntry?:unknown}
-export interface SlashInputRequest{title:string;description?:string;secret?:boolean;initialValue?:string}
+export interface SlashInputRequest{title:string;description?:string;secret?:boolean;initialValue?:string;placeholder?:string;activity?:SlashPickerRequest["activity"]}
 export interface SlashHooks{
  /** Composer chips and slash aliases share the same selection UI and account flow. */
  openSelectionPicker?:(kind:"model"|"agent"|"thinking")=>void|Promise<void>;
@@ -71,7 +71,7 @@ export class SlashController{
   return scope.sessionId?session===scope.sessionId:state.activeSurfaceId===scope.surfaceId;
  }
  private assertCurrent(scope:Scope){if(!this.current(scope))throw new Error("The conversation changed. Run the command again in the current conversation.");}
- private notice(scope:Scope,title:string,value:unknown){if(this.current(scope))this.options.hooks.notice(title,value,scope.sessionId);}
+ private notice(scope:Scope,title:string,value:unknown){if(!scope.pickerCancelled&&!this.disposed&&this.current(scope))this.options.hooks.notice(title,value,scope.sessionId);}
  async refresh(){
   const scope=this.scope(),generation=++this.generation,key=`${scope.workspaceId}\0${scope.directory}`;
   if(key!==this.catalogScope){this.capabilities=undefined;this.catalogScope=key;}
@@ -128,7 +128,7 @@ export class SlashController{
   const message=error instanceof Error?error.message:"Could not load this menu";
   await this.options.hooks.picker({...shell,loading:false,error:message,activity:shell.kind==="usage"?undefined:{body:message,status:"Could not load",busy:false}});
  }
- private async picker(scope:Scope,kind:string,title:string,rows:SlashOption[],select?:(value:string)=>Promise<void>|void,selected?:string,extra:Pick<SlashPickerRequest,"activity"|"mcpServer"|"mcpEntry"|"usage"|"onRefresh">={}){
+ private async picker(scope:Scope,kind:string,title:string,rows:SlashOption[],select?:(value:string)=>Promise<void>|void,selected?:string,extra:Pick<SlashPickerRequest,"activity"|"mcpServer"|"mcpEntry"|"usage"|"onRefresh"|"onBack">={}){
   this.assertCurrent(scope);if(scope.pickerCancelled||this.disposed)return;scope.pickerShell=undefined;
   await this.options.hooks.picker(this.pickerRequest(scope,{kind,title,options:rows,selected,loading:false,...extra,onSelect:select?async value=>{this.assertCurrent(scope);await select(value);}:undefined}));
  }
@@ -207,16 +207,62 @@ export class SlashController{
  }
  private async connectPicker(scope:Scope){
   const [catalog,methods]=await Promise.all([scope.sdk.catalog.providers.list(scope.directory),scope.sdk.catalog.providers.authMethods(scope.directory)]);this.assertCurrent(scope);
-  await this.picker(scope,"connect","Connect a provider",catalog.all.map(provider=>option(provider.name,provider.id,provider.id,catalog.connected.includes(provider.id)?"connected":"provider")),async providerId=>{
-   const choices:ProviderAuthMethod[]=[...(methods[providerId]||[])];if(!choices.some(method=>method.type==="api"))choices.push({type:"api",label:"API key"});
-   await this.picker(scope,"connect-method",`Connect ${catalog.all.find(provider=>provider.id===providerId)?.name||providerId}`,choices.map((method,index)=>option(method.label,method.type,String(index),"authentication")),async index=>{
-    const methodIndex=Number(index),method=choices[methodIndex];if(!method)throw new Error("Unknown authentication method");
-    const label=await this.input(scope,{title:"Account label",description:"Name this account without changing other conversations",initialValue:catalog.all.find(provider=>provider.id===providerId)?.name||providerId});if(label===undefined)return;if(!label.trim())throw new Error("Account label is required");
+  const rows=coreCall<SlashOption[]>("picker.connect-options",{catalog});
+  await this.picker(scope,"connect","Connect a provider",rows,async providerId=>{
+   const provider=catalog.all.find(provider=>provider.id===providerId);if(provider)await this.connectAccounts(scope,provider,methods);
+  });
+ }
+ private async connectAccounts(scope:Scope,provider:{id:string;name:string},methods:Record<string,ProviderAuthMethod[]>){
+  await this.loadingPicker(scope,"connect-account","Choose an account");
+  const accounts=await scope.sdk.catalog.providers.connections(provider.id,scope.workspaceId);this.assertCurrent(scope);
+  const back=()=>this.connectAccounts(scope,provider,methods);
+  const rows:SlashOption[]=[option("Add account","","__add_account__","add")];
+  if(accounts.length)rows.push({...option("Connected accounts","","header:accounts",""),header:true});
+  rows.push(...accounts.map(account=>option(account.label,account.authType,account.connectionId,account.isDefault?"default":"account")));
+  await this.picker(scope,"connect-account",provider.name,rows,async value=>{
+   if(value==="__add_account__"){
+    const label=await this.input(scope,{title:"Label new account",placeholder:"Account label"});
+    if(label===undefined){await back();return;}if(!label.trim())throw new Error("Account label is required");
+    await this.connectMethods(scope,provider,methods,label.trim());return;
+   }
+   const account=accounts.find(account=>account.connectionId===value);if(!account)throw new Error("The selected provider connection no longer exists");
+   const actions=[option("Select account",account.label,"select","use"),option("Rename",account.label,"rename","edit label"),...(!account.isDefault?[option("Make default",account.label,"default","default")]:[]),option("Disconnect",account.label,"disconnect","remove")];
+   await this.picker(scope,"connect-account-actions","Account actions",actions,async action=>{
+    if(action==="select"){
+     const model=this.options.model,current=model.selection(scope.sessionId),key=`${scope.workspaceId}\0${provider.id}`;
+     model.setUI({providerAccountChoices:{...(model.state.ui.providerAccountChoices as Record<string,string>||{}),[key]:account.connectionId}});
+     if(current.model?.startsWith(provider.id+"/"))model.setSelection("model",current.model,scope.sessionId,account.connectionId);
+     this.notice(scope,"Account",`Using ${account.label}.`);return;
+    }
+    if(action==="rename"){
+     const label=await this.input(scope,{title:"Rename account",placeholder:account.label,initialValue:account.label});if(label===undefined){await back();return;}if(!label.trim())throw new Error("Account label is required");
+     await this.loadingPicker(scope,"connect-account","Updating account");await scope.sdk.catalog.providers.renameConnection(provider.id,account.connectionId,label.trim(),scope.workspaceId);await back();return;
+    }
+    if(action==="default"){
+     await this.loadingPicker(scope,"connect-account","Updating account");await scope.sdk.catalog.providers.setDefaultConnection(provider.id,account.connectionId,scope.workspaceId);await back();return;
+    }
+    if(action==="disconnect")await this.picker(scope,"connect-confirm","Disconnect account?",[option("Disconnect",account.label,"confirm_disconnect","cannot be undone"),option("Cancel","","cancel","keep account")],async confirmation=>{
+     if(confirmation==="confirm_disconnect"){
+      await this.loadingPicker(scope,"connect-account","Updating account");
+      if(!await scope.sdk.catalog.providers.deleteConnection(provider.id,account.connectionId,scope.workspaceId))throw new Error("The account could not be disconnected");
+      if(this.current(scope))void this.options.model.refreshCatalogs();
+     }
+     await back();
+    },"cancel",{onBack:back});
+   },undefined,{onBack:back});
+  },undefined,{onBack:()=>this.connectPicker(scope)});
+ }
+ private async connectMethods(scope:Scope,provider:{id:string;name:string},methods:Record<string,ProviderAuthMethod[]>,label:string){
+  const providerId=provider.id,choices=methods[providerId]||[];
+  if(!choices.length)throw new Error(`${provider.name} exposes no auth methods`);
+  await this.picker(scope,"connect-method",`${provider.name} — select auth method`,choices.map((method,index)=>option(method.label,"",String(index),method.type==="api"?"api key":"oauth")),async index=>{
+   const methodIndex=Number(index),method=choices[methodIndex];if(!method)throw new Error("Unknown authentication method");
     if(method.type==="api"){
-     const key=await this.input(scope,{title:"API key",description:providerId,secret:true});if(key===undefined)return;if(!key.trim())throw new Error("API key is required");
+     const key=providerId==="claude-code"&&method.label.includes("Meridian")?"meridian":await this.input(scope,{title:"API key",description:providerId,placeholder:"API key",secret:true});if(key===undefined){await this.connectMethods(scope,provider,methods,label);return;}if(!key.trim())throw new Error("API key is required");
      try{await scope.sdk.catalog.providers.createConnection(providerId,{label:label.trim(),credential:{type:"api",key:key.trim()},setDefault:false},scope.workspaceId);}catch{throw new Error("The account could not be connected. Check the key and server authorization.");}
      if(this.current(scope))void this.options.model.refreshCatalogs();
-     this.notice(scope,"Connected",`${label.trim()} is available for ${providerId}. Existing conversation selections are unchanged.`);return;
+     this.notice(scope,"Connected",`${label.trim()} is available for ${providerId}. Existing conversation selections are unchanged.`);
+     await this.connectFinished(scope,provider.name);return;
     }
     await this.authInputs(scope,method.prompts||[],0,{},async inputs=>{
      let authorization;try{authorization=await scope.sdk.catalog.providers.oauthAuthorize(providerId,{method:methodIndex,label:label.trim(),inputs},scope.workspaceId);}catch{throw new Error("Provider authorization could not start");}
@@ -224,16 +270,19 @@ export class SlashController{
      if(this.options.hooks.openExternal)await this.options.hooks.openExternal(authorization.url);
      this.notice(scope,"Provider authorization",`${authorization.instructions}\n${authorization.url}`);
      const finish=async(code?:string)=>{
+      if(scope.pickerCancelled||this.disposed)return;
       this.assertCurrent(scope);if(authorization.expiresAt&&authorization.expiresAt<=Date.now())throw new Error("Authorization expired. Run /connect again.");
       let accepted=false;try{accepted=await scope.sdk.catalog.providers.oauthCallback(providerId,{method:methodIndex,attemptId:authorization.attemptId,...(code===undefined?{}:{code})},scope.workspaceId);}catch{throw new Error("Provider authorization failed. Run /connect to retry.");}
-      if(!accepted)throw new Error("Authorization is incomplete. Complete the browser flow and retry.");if(this.current(scope))void this.options.model.refreshCatalogs();this.notice(scope,"Connected",`${label.trim()} is connected. Existing conversation selections are unchanged.`);
+      if(scope.pickerCancelled||this.disposed)return;
+      if(!accepted)throw new Error("Authorization is incomplete. Complete the browser flow and retry.");if(this.current(scope))void this.options.model.refreshCatalogs();this.notice(scope,"Connected",`${label.trim()} is connected. Existing conversation selections are unchanged.`);await this.connectFinished(scope,provider.name);
      };
-     if(authorization.method==="code"){const code=await this.input(scope,{title:"Authorization code",description:authorization.instructions,secret:true});if(code===undefined)return;if(!code.trim())throw new Error("Authorization code is required");await finish(code.trim());}
-     else await this.picker(scope,"connect-authorize","Complete provider authorization",[option("Finish connecting",authorization.instructions,"finish","browser")],()=>finish(),undefined,
-       {activity:{body:authorization.instructions,status:"Waiting for browser authorization…",busy:true,url:authorization.url}});
+     if(authorization.method==="code"){const code=await this.input(scope,{title:"Authorization code",placeholder:"OAuth token",activity:{body:authorization.instructions,status:"Waiting for authorization code",url:authorization.url},secret:true});if(code===undefined){await this.connectMethods(scope,provider,methods,label);return;}if(!code.trim())throw new Error("Authorization code is required");await finish(code.trim());}
+     else{await this.picker(scope,"connect-authorize","Provider connection — Esc to cancel",[],undefined,undefined,{activity:{body:authorization.instructions,status:"Waiting for browser authorization…",busy:true,url:authorization.url}});await finish();}
     });
-   });
-  });
+  },undefined,{onBack:()=>this.connectAccounts(scope,provider,methods)});
+ }
+ private async connectFinished(scope:Scope,provider:string){
+  await this.picker(scope,"connect","Provider connection",[option("Done","","__connect_done__","")],()=>{},undefined,{activity:{body:`${provider} connected. Open /model to pick a model.`,status:"Connected",busy:false}});
  }
  private async authInputs(scope:Scope,prompts:ProviderAuthPrompt[],index:number,inputs:Record<string,string>,done:(inputs:Record<string,string>)=>Promise<void>):Promise<void>{
   if(index>=prompts.length){await done(inputs);return;}

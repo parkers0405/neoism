@@ -1308,3 +1308,11 @@ fn connect_empty_options() -> Vec<NeoismAgentPickerOption> {
         "",
     )]
 }
+
+/// Data-only original `/connect` catalog projection for native GPU hosts.
+/// Parsing and section order stay shared with the desktop-compatible flow.
+pub fn connect_options_from_catalog(catalog: &Value) -> Vec<NeoismAgentPickerOption> {
+    let flow = parse_connect_flow(catalog.clone(), Value::Null);
+    if flow.providers.is_empty() { connect_empty_options() }
+    else { connect_provider_options(&flow.providers) }
+}

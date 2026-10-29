@@ -1,4 +1,5 @@
 import{ToastNotifications}from"./ToastNotifications";
+import {cachedGitStatus,watchGitStatus,type GitStatusSnapshot} from "../daemon/git-status";
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 import { Effect, Schema } from "effect";
 import { createEffect, createMemo, createSignal, untrack, For, onCleanup, onMount, Show, Switch, Match, type Accessor, type JSX } from "solid-js";
@@ -7,7 +8,7 @@ import type { AppConfig } from "../config";
 import { dimensions as d, extensionIcons, namedIcons, thinkingOptions } from "../design/generated";
 import { easeOutCubicBezier } from "../design/animation";
 import { WorkspaceModel, type AppState, type Surface } from "../model";
-import { FileSchema, expectVariant, isRecord, type HistoryMessage, type Attachment } from "../daemon/protocol";
+import { DirectorySchema, FileSchema, expectVariant, isRecord, type HistoryMessage, type Attachment } from "../daemon/protocol";
 import { TerminalView } from "../terminal/TerminalView";
 import { AnimatedWordmark as Wordmark } from "./AnimatedWordmark";
 import {AppVisualState} from "./AppVisualState";
@@ -311,7 +312,8 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     try { connections = await model.providerConnections(providerId); } catch (error) { model.report(error); }
     if (connections.length <= 1) { model.setSelection("model", value, request.sessionId, connections[0]?.id); closeChoice(); return; }
     const previous = model.selection(request.sessionId);
-    const current = previous.model?.startsWith(providerId + "/") ? previous.connection_id || undefined : undefined;
+    const remembered=(state().ui.providerAccountChoices as Record<string,string>|undefined)?.[`${state().activeWorkspace?.id}\0${providerId}`];
+    const current = previous.model?.startsWith(providerId + "/") ? previous.connection_id || remembered : remembered;
     const provider = providerCatalog().find((candidate) => candidate.id === providerId)?.name || providerId;
     setChoice({ ...request, kind: "account", model: value, current: current || connections.find((c) => c.isDefault)?.id,
       accounts: [{ title: provider, value: "header:accounts", header: true, section: provider },
@@ -602,10 +604,52 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   function Tree(props: { notes?: boolean } = {}) {
     const opening=beginTreePanel(visuals,props.notes?"notes":"files");
     const glyphs=visuals.treeGlyphHost(config);
-    const directories = createMemo(() => props.notes ? state().notesDirectories : state().directories);
+    const sourceDirectories = createMemo(() => props.notes ? state().notesDirectories : state().directories);
     const expanded = createMemo(() => props.notes ? state().notesExpanded : state().expanded);
-    const root = () => props.notes ? state().activeWorkspace?.notes_vault_dir || undefined : state().activeWorkspace?.root_dir || undefined;
-    const open = (entry: { path: string; dir: boolean }) => {if(entry.dir)model.toggleDirectory(entry.path,props.notes);else void focusOpenedFile(()=>model.openFile(entry.path,root()));};
+    const root = createMemo(() => props.notes ? state().activeWorkspace?.notes_vault_dir || undefined : state().activeWorkspace?.root_dir || undefined);
+    const [gitSnapshot,setGitSnapshot]=createSignal<GitStatusSnapshot>();
+    createEffect(()=>{
+      const directory=root(),workspaceId=activeWorkspaceId(),cached=directory?cachedGitStatus(model.client,directory):undefined;
+      setGitSnapshot(cached);if(!directory)return;
+      const signature=(snapshot:GitStatusSnapshot)=>JSON.stringify([snapshot.repo_root,snapshot.files.map(file=>isRecord(file)?[file.path,file.status]:file)]);
+      let previous:string|undefined,refreshRevision=0,live=true;
+      onCleanup(()=>{live=false;});
+      onCleanup(watchGitStatus(model.client,directory,snapshot=>untrack(()=>{
+        if(snapshot.error)return;setGitSnapshot(snapshot);
+        const next=signature(snapshot);if(previous===next)return;previous=next;const revision=++refreshRevision;
+        // Git changes can add/remove directory children. Refresh only known,
+        // open listings, retaining the visible tree until each read completes.
+        for(const path of expanded())if(sourceDirectories()[path])void Effect.runPromise(model.client.request("Files",{ListDir:{path}},directory)).then(reply=>{
+          const listing=Schema.decodeUnknownSync(DirectorySchema)(expectVariant(reply,"DirListing"));
+          if(!live||revision!==refreshRevision||root()!==directory||state().activeWorkspace?.id!==workspaceId)return;
+          const entries=[...listing.entries].sort((a,b)=>Number(b.is_dir)-Number(a.is_dir)||a.name.localeCompare(b.name)),source=sourceDirectories(),before=source[path];
+          if(before&&JSON.stringify(before.entries)===JSON.stringify(entries))return;
+          model.update(props.notes?{notesDirectories:{...source,[path]:{path,entries}}}:{directories:{...source,[path]:{path,entries}}});
+        }).catch(()=>{});
+      })));
+    });
+    const gitDecorations=createMemo(()=>new Map((gitSnapshot()?glyphs.git(gitSnapshot(),config):[]).map(decoration=>[decoration.path,decoration])));
+    const directories=createMemo(()=>{
+      const source=sourceDirectories();if(!source[""])return source;
+      const result={...source};
+      for(const decoration of gitDecorations().values()){
+        if(decoration.status!=="Deleted")continue;
+        const slash=decoration.path.lastIndexOf("/"),parent=slash<0?"":decoration.path.slice(0,slash),name=decoration.path.slice(slash+1);
+        if(!name)continue;
+        const listing=result[parent]||{path:parent,entries:[]};
+        if(!listing.entries.some(entry=>entry.name===name))result[parent]={...listing,entries:[...listing.entries,{name,is_dir:decoration.directory}].sort((a,b)=>Number(b.is_dir)-Number(a.is_dir)||a.name.localeCompare(b.name))};
+        if(decoration.directory&&!result[decoration.path])result[decoration.path]={path:decoration.path,entries:[]};
+      }
+      return result;
+    });
+    const toggle=(path:string)=>{
+      const slash=path.lastIndexOf("/"),parent=slash<0?"":path.slice(0,slash),name=path.slice(slash+1);
+      const physical=sourceDirectories()[parent]?.entries.some(entry=>entry.name===name&&entry.is_dir);
+      if(!physical&&gitDecorations().get(path)?.status==="Deleted"){
+        const next=new Set(expanded());if(next.has(path))next.delete(path);else next.add(path);model.update(props.notes?{notesExpanded:next}:{expanded:next});
+      }else model.toggleDirectory(path,props.notes);
+    };
+    const open = (entry: { path: string; dir: boolean }) => {if(entry.dir)toggle(entry.path);else void focusOpenedFile(()=>model.openFile(entry.path,root()));};
     const [viewportRevision, setViewportRevision] = createSignal(0);
     const [heightRevision, setHeightRevision] = createSignal(0);
     const [hiddenRevision,setHiddenRevision]=createSignal(0);
@@ -698,9 +742,9 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       if(key==="h"){update("key",{key:"escape"});viewport().showHidden=!showHidden();setHiddenRevision(value=>value+1);return;}
       const entry = rows()[view().selected];
       if (key === "enter") { if (entry) open(entry); }
-      else if (["right", "l"].includes(key)) { if (entry?.dir && !expanded().has(entry.path)) model.toggleDirectory(entry.path, props.notes); }
+      else if (["right", "l"].includes(key)) { if (entry?.dir && !expanded().has(entry.path)) toggle(entry.path); }
       else if (key==="left") {
-        if (entry?.dir && expanded().has(entry.path)) model.toggleDirectory(entry.path, props.notes);
+        if (entry?.dir && expanded().has(entry.path)) toggle(entry.path);
         else if (entry) { const parent = entry.path.split("/").slice(0, -1).join("/"); const index = rows().findIndex((e) => e.path === parent); if (index >= 0) update("select", { index }); }
       } else update("key", { key, ctrl: event.modifiers?.ctrl });
     };
@@ -725,15 +769,16 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
 
         const icon = () => entry.dir ? { glyph: expanded().has(entry.path) ? "\uf07c" : "\uf07b", color: c.folder } : fileIcon(entry.name);
         const selected = () => active()?.path === entry.path && active()?.rootDir === root();
+        const git=()=>gitDecorations().get(entry.path);
         const glyphKey=JSON.stringify([state().activeWorkspace?.id,!!props.notes,root(),entry.path]);
-        return <div data-reveal-opacity={1} data-reveal-start={entry.revealStart} role="treeitem" aria-label={entry.name} aria-expanded={entry.dir ? expanded().has(entry.path) : undefined} aria-selected={selected()}
+        return <div data-reveal-opacity={1} data-reveal-start={entry.revealStart} role="treeitem" aria-label={entry.name} aria-description={git()?`Git ${git()!.status}: ${git()!.marker}`:undefined} aria-expanded={entry.dir ? expanded().has(entry.path) : undefined} aria-selected={selected()}
           testId={`${props.notes ? "note" : "file"}:${entry.path}`} onClick={() => { update("select", { index: index() });focusChrome({zone:"sidebar"});open(entry); }}
           style={{ ...row, position: "absolute", left: 0, right: 0, top: index() * d.treeRowHeight * s, height: d.treeRowHeight * s, flexShrink: 0, paddingLeft: (d.treePadding + entry.depth * d.treeIndent) * s,
             paddingRight: 8 * s, gap: 8 * s, cursor: "pointer", backgroundColor: selected() ? c.surface : undefined,
             hover: { backgroundColor: c.hover }, focusVisible: { outlineColor: c.accent, outlineWidth: 1 } }}>
           <TreeRowGlyphs host={glyphs} config={config} initialWidth={visuals.treeWidths.get(glyphKey)||Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-(d.frameStroke+d.treePadding+entry.depth*d.treeIndent+8)*s)} onWidth={width=>visuals.treeWidths.set(glyphKey,width)} pinImage={raster=>visuals.pinTreeRaster(renderer,glyphKey,raster)} trailingWidth={peerPaint()?.width} name={entry.name} chevron={entry.dir?(expanded().has(entry.path)?"\uf078":"\uf054"):""}
-            icon={icon().glyph} iconColor={icon().color} labelColor={selected()?c.fg:c.dim} chevronColor={c.muted}/>
-          <Show when={peerPaint()}>{paint=><div testId={`tree-presence:${entry.path}`} aria-label={model.presence.filePeers(peerBuffer()).map(peer=>peer.display_name).join(", ")} style={{position:"absolute",right:8*s,top:0,width:256,height:paint().height,pointerEvents:"none"}}><PaintLayer config={config} commands={paint().commands}/></div>}</Show>
+            icon={icon().glyph} iconColor={icon().color} labelColor={selected()?c.fg:c.dim} chevronColor={c.muted} gitStatus={git()?.status} directory={entry.dir}/>
+          <Show when={peerPaint()}>{paint=><div testId={`tree-presence:${entry.path}`} aria-label={model.presence.filePeers(peerBuffer()).map(peer=>peer.display_name).join(", ")} style={{position:"absolute",right:8*s+(git()?.trailingWidth||0),top:0,width:256,height:paint().height,pointerEvents:"none"}}><PaintLayer config={config} commands={paint().commands}/></div>}</Show>
         </div>;
       }}</For>
       </div>
@@ -778,7 +823,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const [slashRevision,setSlashRevision] = createSignal(0);
     const [slashDismissed,setSlashDismissed] = createSignal(false);
     const [slashPicker,setSlashPicker] = createSignal<SlashPickerRequest>();
-    const [slashInput,setSlashInput]=createSignal<{request:{title:string;description?:string;secret?:boolean;initialValue?:string};resolve:(value:string|undefined)=>void}>();
+    const [slashInput,setSlashInput]=createSignal<{request:{title:string;description?:string;secret?:boolean;initialValue?:string;placeholder?:string;activity?:SlashPickerRequest["activity"]};resolve:(value:string|undefined)=>void}>();
     let slashKey: ((event:KeyEvent)=>boolean)|undefined,slashAccept:(()=>void)|undefined;
     let effectActive=false, disposed=false, effectScope="";
     const activityAnimation = new AnimationFrameScheduler(1000/44);
@@ -788,7 +833,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const slash=new SlashController({model,config,sessionId:()=>props.sessionId,attachments,hooks:{
       openSelectionPicker:kind=>{setSlashDismissed(true);setSlashPicker(undefined);openPicker(kind);},
       picker:request=>{setSlashDismissed(true);setSlashPicker(request);},
-      input:request=>new Promise(resolve=>{setSlashDismissed(true);slashInput()?.resolve(undefined);setSlashInput({request,resolve});}),
+      input:request=>new Promise(resolve=>{setSlashDismissed(true);setSlashPicker(undefined);slashInput()?.resolve(undefined);setSlashInput({request,resolve});}),
       insert:value=>{setDraft(value);setSlashDismissed(false);focus();},
       toggleHints:()=>{setHelp(value=>!value);model.setUI({agentHints:help()});},
       toggleSidebar:()=>{setDetails(value=>!value);},
@@ -907,12 +952,11 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         <For each={frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>
       </div></Show>
       <Show when={slashOpen()}><InlinePicker config={config} kind="slash" title="Commands" options={slashOptions()} loading={slash.state.loading} error={slash.state.error} anchor={anchor} query={draft().replace(/^\/+/,"")} onKeyHandler={handler=>slashKey=handler} onAcceptHandler={handler=>slashAccept=handler} onSelect={acceptSlash} onClose={()=>{setSlashDismissed(true);focus();}}/></Show>
-      <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue}
-        question={{id:"composer-auth-entry",sessionID:props.sessionId||"home",questions:[{question:[entry.request.title,entry.request.description].filter(Boolean).join("\n"),options:[]}]}}
-        onAnswers={answers=>{setSlashInput(undefined);entry.resolve(answers[0]?.[0]);focus();}} onClose={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}/>}</Show>
+      <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue} placeholder={entry.request.placeholder} activity={entry.request.activity}
+        onSelect={value=>{setSlashInput(undefined);entry.resolve(value);focus();}} onClose={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}/>}</Show>
       <Show when={slashPicker()?.token||slashPicker()} keyed>{_token=>{const initial=slashPicker()!;const request=()=>slashPicker()?.token===initial.token?slashPicker()!:initial;return <InlinePicker config={config} kind={request().kind} title={request().title} options={request().options} current={request().selected} anchor={anchor}
         loading={request().loading} error={request().error} usage={request().usage} onRefresh={request().onRefresh} activity={request().activity} mcpServer={request().mcpServer} mcpEntry={request().mcpEntry}
-        onSelect={value=>{const current=request();setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{request().onCancel?.();setSlashPicker(undefined);focus();}}/>;}}</Show>
+        onSelect={value=>{const current=request();setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{const current=request();setSlashPicker(undefined);if(current.onBack)void Promise.resolve(current.onBack()).catch(model.report);else current.onCancel?.();focus();}}/>;}}</Show>
     </>;
   }
   function AgentSurface(props:{surfaceId:string;sessionId?:string;initialViewport:{width:number;height:number}}) {
@@ -1022,7 +1066,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         </Switch>
       </div></Show>
       <div testId="workspace-content" onLayout={event=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0};setWorkspaceBounds(before=>before.x===next.x&&before.y===next.y&&before.width===next.width&&before.height===next.height?before:next);}} style={{ ...column, flexGrow: 1, minWidth: 0, position: "relative", overflow: "hidden" }}>
-        <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWorkspaceId()} connectedHostId={state().connection.connectedHostId}
+        <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWorkspaceId()} connectedHostId={state().connection.connectedHostId} directoryRoots={state().ui.terminalWorkspaceRoots}
           keyboardIndex={chromeFocus().zone==="workspaces"?(chromeFocus() as {index:number}).index:undefined}
           onActivate={workspace=>void model.activateWorkspace(workspace).catch(model.report)} onNew={()=>void model.newWorkspace().catch(model.report)} onClose={workspaceId=>void model.closeWorkspace(false,workspaceId).catch(model.report)} onReorder={model.reorderWorkspace}
           registerHost={(id,host)=>{if(host)workspaceHosts.set(id,host);else workspaceHosts.delete(id);}}

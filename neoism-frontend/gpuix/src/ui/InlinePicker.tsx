@@ -21,7 +21,7 @@ export interface PickerFrame {
 export function InlinePicker(props: {
   config: AppConfig; kind: string; title?: string; options?: readonly PickerOption[]; current?: string | null;
   question?: Record<string, unknown>; anchor: Anchor; loading?: boolean; error?: string; responding?: boolean;
-  entry?:boolean; secret?:boolean; initialValue?:string; query?: string; onAcceptHandler?: (handler:(()=>void)|undefined)=>void; onKeyHandler?: (handler: ((event: KeyEvent) => boolean) | undefined) => void;
+  entry?:boolean; secret?:boolean; initialValue?:string; placeholder?:string; query?: string; onAcceptHandler?: (handler:(()=>void)|undefined)=>void; onKeyHandler?: (handler: ((event: KeyEvent) => boolean) | undefined) => void;
   onSelect?: (value: string) => void; onAnswers?: (answers: string[][]) => void; onClose: () => void;
   activity?: PickerActivity; mcpServer?: string; mcpEntry?: unknown;
   usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;
@@ -37,7 +37,7 @@ export function InlinePicker(props: {
   const nativeKind = props.entry ? (props.secret ? "secret" : "input") : props.kind;
   const id = coreCall<{ id: number }>(`${engine}.new`, { request: props.question, kind: nativeKind, title: props.title,
     options: props.options, selected: Math.max(0, props.options?.findIndex((o) => o.value === props.current) ?? 0), loading: props.loading,
-    mcpServer: props.mcpServer, mcpEntry: props.mcpEntry }).id;
+    mcpServer: props.mcpServer, mcpEntry: props.mcpEntry, placeholder:props.placeholder }).id;
   const [card, setCard] = createSignal<{ commands: PaintCommand[]; rect?: Anchor | null }>({ commands: [] });
   const [headerExtra, setHeaderExtra] = createSignal(0);
   const [frame, setFrame] = createSignal<PickerFrame>(coreCall(`${engine}.frame`, { id, ...placement(), scale: s }));
@@ -67,6 +67,7 @@ export function InlinePicker(props: {
   onCleanup(() => { props.onKeyHandler?.(undefined); props.onAcceptHandler?.(undefined); disposed = true; animation.dispose(); coreCall(`${engine}.dispose`, { id }); });
   const accept = (index?: number) => {
     if (props.responding || frame().responding) return;
+    if(props.entry&&engine==="picker"){props.onSelect?.(frame().query);return;}
     if (index !== undefined) update("select", { index });
     if (engine === "question") {
       const next = update("commit"); if (next.answers) props.onAnswers?.(next.answers);

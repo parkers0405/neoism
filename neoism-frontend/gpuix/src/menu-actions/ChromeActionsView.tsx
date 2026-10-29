@@ -6,11 +6,11 @@ import { PaintLayer } from "../ui/PaintLayer";
 import { LoadingSkeleton } from "../ui/LoadingSkeleton";
 import { readClipboard } from "../clipboard";
 import { ChromeActionsController } from "./ChromeActionsController";
-import {centeredOverlayOffset,useOverlayViewport,overlayPoint} from "../ui/overlay-viewport";
+import {dialogOverlayOffset,useDialogViewport,overlayPoint} from "../ui/overlay-viewport";
 
 export function ChromeActionsView(props: { controller: ChromeActionsController; config: AppConfig; pageMode?: boolean; active?: boolean; focusToken?: number; onFocus?: () => void; onCustomKey?: (event: KeyEvent) => boolean }) {
   const renderer = useGpuixRequired(), window = createWindowSize(), page = !!props.pageMode;
-  const viewport=useOverlayViewport(renderer,window);
+  const viewport=useDialogViewport(renderer,window);
   const [frame, setFrame] = createSignal(page ? props.controller.extensionFrame : props.controller.frame);
   const [bounds, setBounds] = createSignal({ x: 0, y: 0, width: 0, height: 0 });
   const imagePath = createMemo(() => frame()?.image?.path);
@@ -22,7 +22,7 @@ export function ChromeActionsView(props: { controller: ChromeActionsController; 
   onCleanup(() => { if (!page && previousFocus != null) renderer.focusElement?.(previousFocus); });
   createEffect(() => { props.focusToken; if (props.active !== false && host) focus(); });
   createEffect(() => { if (!page) { const size = viewport(); props.controller.layout(size.width, size.height); } });
-  const offset=createMemo(()=>{const rect=frame()?.rect;return !page&&rect?centeredOverlayOffset(viewport(),rect):{x:0,y:0};});
+  const offset=createMemo(()=>{const rect=frame()?.rect;return !page&&rect?dialogOverlayOffset(viewport(),rect):{x:0,y:0};});
   const point = (event: { x?: number; y?: number }) => {const local=overlayPoint(page?bounds():viewport(),event),shift=offset();return{x:local.x-shift.x,y:local.y-shift.y};};
   const key = (event: KeyEvent) => {
     if(handleApplicationShortcut(renderer,event))return;

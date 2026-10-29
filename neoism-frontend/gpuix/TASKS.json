@@ -260,7 +260,7 @@
     },
     {
       "id": "modal_content_center",
-      "status": "implemented_headless_verified",
+      "status": "superseded_by_modal_window_center_and_original_height",
       "requirement": "Center Alt+P, Alt+S, appearance/workspace/server palettes and buffer search in both axes of the available content body; react to sidebar/window/result changes while keeping native paint, inputs, pointer hits and cursor handoff aligned below all tabs."
     },
     {
@@ -280,7 +280,7 @@
     },
     {
       "id": "modal_window_center_and_original_height",
-      "status": "queued_waiting_for_user",
+      "status": "implemented_headless_verified",
       "requirement": "Restore Alt+P, Search and other modals to their earlier higher vertical placement. Center horizontally in the whole window, including sidebar width, rather than in the content pane. Supersedes modal_content_center placement."
     },
     {
@@ -347,16 +347,26 @@
       "id": "remote_ghostty_terminal",
       "status": "implemented_native_and_isolated_e2e_verified",
       "requirement": "Keep libghostty rendering while selected-server/SSH terminals execute on the selected remote system, with no silent local fallback."
+    },
+    {
+      "id": "agent_composer_small_screen_controls",
+      "status": "implemented_native_and_headless_verified",
+      "requirement": "Bound original Agent mode/model/reasoning labels and dropdowns on narrow panes; reserve attachment/send controls, use native measured truncation and retain source animation/identity/draft."
+    },
+    {
+      "id": "tree_h_hidden_files",
+      "status": "implemented_native_and_headless_verified",
+      "requirement": "Restore plain h hidden/dotfile visibility in Files/Notes using canonical Rust exclusion rules; preserve selected path, expansion, per-workspace/root/panel state and ArrowLeft collapse behavior."
     }
   ],
-  "verification_note": "Server manager, multiplayer editing/presence/shared Agent chat and remote Ghostty/SSH implementation verified and packaged. Earlier11queued UI fixes remain paused. Independent Git split leaf view state remains tracked.",
+  "verification_note": "Servers/multiplayer implemented and verified. Follow-up modal window centering/original upper anchoring, responsive Agent composer and h hidden-files toggle implemented; final checks tracked below. Other queued UI tasks and Git split leaf view state remain pending.",
   "verification": {
     "frontend_tests": {
-      "passed": 462,
+      "passed": 467,
       "failed": 0,
-      "files": 135,
-      "assertions": 282531,
-      "note": "Final full frontend suite passed, including original Server/Systems painters and forms, actual hosted daemon with two authenticated clients, real-daemon code/Markdown collaboration and causal recovery, presence/shared chat, and original native SSH/Ghostty remote-only routing plus selected-tunnel reconnect."
+      "files": 137,
+      "assertions": 284306,
+      "note": "Final complete frontend suite passed after global dialog upper/window alignment, narrow composer geometry and original h dotfile restoration."
     },
     "typecheck": "passed final source",
     "design_sync": "passed final source",
@@ -395,7 +405,7 @@
     "catalog_live": "Actual App recording renderer against running daemon: all825family+825activity events,8.22s connected, zero WS closures,39modelpublications and max1ms actual publication. Production diagnostics show connected, configured gpt-6.1-sol/high, loadingfalse and no catalog error.",
     "final_interaction_gate": "16 tests across5files,106 assertions pass; production build and FFI smoke pass.",
     "agent_streaming": "Family-wide subscriptions use exactly one owner including late switch/close replies; original native Markdown renders partial output before idle and canonical completion metadata restores original footer.",
-    "modal_centering": "25 tests across7files pass,112 assertions; actual Command/Finder/appearance native painting and pointer translation checked across sidebar-sized viewport changes, empty/filtered results and narrow resize. TypeScript and optimized release/FFI smoke pass.",
+    "modal_centering": "Global dialogs span full window width including sidebar, retain original upper native anchors and clip below chrome/tab rows. Command/Finder/appearance pointer+caret alignment, query height changes, sidebar/split/window resize and original Git restore confirmation checked without windows.",
     "global_buffer_chord": "Reproduced Agent picker trap before fix.24 tests across9files pass (156assertions), plus final focused rerun; actual Home/code/Markdown/Agent-home/conversation/Terminal/Extensions/Git hosts, history/picker/Finder/command inputs, pending permission, rapid strip focus and split scope. TypeScript and optimized release pass.",
     "server_multiplayer": {
       "ordinary_host": "Isolated actual daemon startup/readiness, two authenticated clients, requested root, durable recipe and exact owned shutdown passed.",
@@ -405,6 +415,8 @@
       "ssh_ghostty": "Original native SSH engine and isolated SSH proxy fixture; terminal operations stayed exclusively on the selected daemon; selected process loss reconnects same terminal/workspace without CreatePty; credentials/cancel/shutdown/reaping and stable recovery verified.",
       "package": "Optimized core/FFI smoke and production executable built with standalone daemon; packaged CLI help is headless.",
       "known_limit": "Yrs undo stacks from before an app/model restart are not serialized; recovered document state, unacknowledged edits and subsequent undo are verified."
-    }
+    },
+    "responsive_composer": "18 targeted tests/1887assertions passed:168 measured native cases across widths200\u2013800logical/scales0.75\u20133 home/chat, actualApp resizing, retained input/draft/picker and source colors/loading/scramble.",
+    "tree_hidden_toggle": "ActualApp h toggles cached Files/Notes dotfiles via canonical Rust visibility rules, preserves selected path and expansion, independently retains workspace/root/panel choice through zoom; ArrowLeft collapse preserved."
   }
 }

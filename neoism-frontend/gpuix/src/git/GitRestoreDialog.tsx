@@ -3,7 +3,7 @@ import{createWindowSize,useGpuixRequired,type HostElement}from"@gpuix/solid";
 import type{AppConfig}from"../config";
 import{coreCall}from"../native-core";
 import{PaintLayer,type PaintCommand}from"../ui/PaintLayer";
-import{useOverlayViewport,overlayPoint}from"../ui/overlay-viewport";
+import{useDialogViewport,overlayPoint}from"../ui/overlay-viewport";
 import{AnimationFrameScheduler,ANIMATION_FRAME_MS}from"../animation/frame-scheduler";
 import{focusNativeElement}from"../native-focus";
 import{handleApplicationShortcut}from"../commands/application-shortcuts";
@@ -12,7 +12,7 @@ interface Frame{commands:PaintCommand[];active:boolean;animating:boolean;rect:nu
 /** The original UniversalModal and review_actions spec. This host only returns
  * a decision; all mutation, dirty-document and daemon checks stay upstream. */
 export function GitRestoreDialog(props:{target:GitRestoreTarget;config:AppConfig;onDone:(confirmed:boolean)=>void}){
- const renderer=useGpuixRequired(),config=props.config,viewport=useOverlayViewport(renderer,createWindowSize());
+ const renderer=useGpuixRequired(),config=props.config,viewport=useDialogViewport(renderer,createWindowSize());
  const{id}=coreCall<{id:number}>("gitconfirm.new",{target:props.target,scale:config.scale,theme:config.themeName,fontFamily:config.fontFamily,fontWeight:config.fontWeight,width:viewport().width,height:viewport().height});
  const[frame,setFrame]=createSignal(coreCall<Frame>("gitconfirm.frame",{id}));let host:HostElement|undefined,done=false;
  const animation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);

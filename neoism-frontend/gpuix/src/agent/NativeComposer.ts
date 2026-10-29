@@ -3,6 +3,8 @@ import { coreCall } from "../native-core";
 import type { PaintCommand } from "../ui/PaintLayer";
 import { sharePaintCommands } from "../editor/paint-command";
 export type ComposerRect = [number, number, number, number];
+export interface ComposerChip {rect:ComposerRect;label_rect:ComposerRect;caret_rect:ComposerRect;logo_rect:ComposerRect|null;label:string}
+export interface ComposerChips {chips:[ComposerChip,ComposerChip,ComposerChip];attach_rect:ComposerRect;font_size:number;narrow:boolean}
 export interface ComposerFrame {
   inputRect: ComposerRect; logoRect: ComposerRect; cardRect: ComposerRect; trayRect: ComposerRect | null;
   joinRect:ComposerRect|null; cardRadius: number; trayRadius: number; footerVisible: boolean; visualRows: number; animating: boolean;
@@ -21,6 +23,7 @@ export class NativeComposer {
     const next = coreCall<ComposerFrame>("agentcomposer.frame", { id: this.id, ...input, scale: this.config.scale, theme: this.config.themeName, seconds: performance.now() / 1000 });
     next.commands = sharePaintCommands(this.before, next.commands); this.before = next.commands; return next;
   }
+  chips(input:{width:number;height:number;agent:string;model:string;thinking:string}){return coreCall<ComposerChips>("agentcomposer.chips-layout",{id:this.id,...input,scale:this.config.scale});}
   startEffect(kind: string) { coreCall("agentcomposer.fx.start", { id: this.id, kind }); }
   effect(input: { width: number; height: number; inputY: number }) {
     return coreCall<{ commands: PaintCommand[]; prompt?: string | null; animating: boolean }>("agentcomposer.fx.frame", { id: this.id, ...input, scale: this.config.scale, theme: this.config.themeName });

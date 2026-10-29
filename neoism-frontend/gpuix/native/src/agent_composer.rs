@@ -32,6 +32,9 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
    if op=="agentcomposer.dispose"{hosts.remove(&id);return Ok(Value::Null);}
    let host=hosts.get_mut(&id).ok_or("Unknown Agent composer")?;
    let scale=n(v,"scale",1.0).clamp(0.5,3.0);let width=n(v,"width",800.0).max(0.0);let height=n(v,"height",600.0).max(0.0);let theme=IdeTheme::by_name(v["theme"].as_str().unwrap_or("pastel_dark"));
+   if op=="agentcomposer.chips-layout"{
+    return serde_json::to_value(user_input::host_chips::layout(&mut host.paint,width,height,scale,text(v,"agent"),text(v,"model"),text(v,"thinking"))).map_err(|error|error.to_string());
+   }
    if op=="agentcomposer.chip-frame"{
     let label=text(v,"label");let kind=text(v,"kind");let loading=v["loading"].as_bool().unwrap_or(false);
     if loading&&!host.chip_loading{host.chip_hydration.begin();}
@@ -43,7 +46,7 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
     let transition=if reduced{None}else{host.chip_hydration.transition()};
     let elapsed=if reduced{None}else{host.chip_changed.map(|start|start.elapsed().as_secs_f32()*1000.0).filter(|ms|*ms<320.0)};
     host.paint.begin_frame();let font_size=n(v,"fontSize",14.0*scale);
-    let width=user_input::render_status_chip_label_for_host(&mut host.paint,label,kind,font_size,&theme,transition,elapsed);
+    let width=user_input::render_status_chip_label_for_host_with_source(&mut host.paint,v["displayLabel"].as_str().unwrap_or(label),label,kind,font_size,&theme,transition,elapsed);
     return Ok(json!({"commands":host.paint.commands(),"width":width,"height":font_size*1.3,"animating":transition.is_some()||elapsed.is_some(),"phase":match transition{Some(neoism_ui::panels::agent_pane::state::ConfigChipTransition::Loading{..})=>"loading",Some(_)=>"settling",None if elapsed.is_some()=>"changing",_=>"idle"}}));
    }
    if op=="agentcomposer.fx.start"{host.fx=Some((effect(text(v,"kind"))?,Instant::now(),false));return Ok(Value::Null);}

@@ -21,18 +21,18 @@ export class AgentChipHosts {
 
 /** The original composer label renderer owns glyph selection, color, width
  * and the shared loading/settling clock. Presentation only schedules paint. */
-export function AgentChipLabel(props:{config:AppConfig;hosts:AgentChipHosts;paintPins:WordmarkHosts;scope:string;kind:"agent"|"model"|"thinking";label:string;size:number;loading:boolean}){
+export function AgentChipLabel(props:{config:AppConfig;hosts:AgentChipHosts;paintPins:WordmarkHosts;scope:string;kind:"agent"|"model"|"thinking";label:string;displayLabel?:string;maxWidth?:number;size:number;loading:boolean}){
  const renderer=useGpuixRequired(),animation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
  const [frame,setFrame]=createSignal<ChipFrame>();let disposed=false;
  const draw=()=>{
   if(disposed)return;animation.cancel();
   const id=props.hosts.acquire(props.scope,props.kind,props.config);
-  const next=coreCall<ChipFrame>("agentcomposer.chip-frame",{id,kind:props.kind,label:props.label,fontSize:props.size*props.config.scale,theme:props.config.themeName,loading:props.loading,reducedMotion:props.config.reducedMotion});
+  const next=coreCall<ChipFrame>("agentcomposer.chip-frame",{id,kind:props.kind,label:props.label,displayLabel:props.displayLabel,fontSize:props.size*props.config.scale,theme:props.config.themeName,loading:props.loading,reducedMotion:props.config.reducedMotion});
   setFrame(next);if(next.animating)animation.request(draw);
  };
  createEffect(draw);
  onCleanup(()=>{disposed=true;animation.dispose();});
- return <div testId={`agent-chip-label:${props.kind}`} aria-label={props.label} style={{position:"relative",width:frame()?.width||0,height:frame()?.height||0,flexShrink:0,pointerEvents:"none"}}>
+ return <div testId={`agent-chip-label:${props.kind}`} aria-label={props.label} style={{position:"relative",width:Math.min(frame()?.width||0,props.maxWidth??Infinity),overflow:"hidden",height:frame()?.height||0,flexShrink:0,pointerEvents:"none"}}>
   <PaintLayer config={props.config} commands={frame()?.commands||[]} pinImage={(source,raster)=>props.paintPins.pinPaintImage(renderer,source,raster)}/>
  </div>;
 }

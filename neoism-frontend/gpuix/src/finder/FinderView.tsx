@@ -5,14 +5,14 @@ import type { AppConfig } from "../config";
 import { FinderController, type FinderFrame, type FinderTarget } from "./FinderController";
 import { PaintLayer } from "../ui/PaintLayer";
 import { cssColor, type CanvasOp } from "../ui/canvas";
-import { centeredOverlayOffset, useOverlayViewport } from "../ui/overlay-viewport";
+import { dialogOverlayOffset, useDialogViewport } from "../ui/overlay-viewport";
 import { coreCall } from "../native-core";
 import {CursorBlinkClock} from "../ui/cursor-blink";
 
 /** Original Rust Finder pixels with transparent native input and hit targets. */
 export function FinderView(props: { controller: FinderController; config: AppConfig;
   onAccept: (target: FinderTarget) => void; onClose: () => void; onPreview?: (target: FinderTarget) => void; inputTestId?: string }) {
-  const renderer = useGpuixRequired(), viewport = useOverlayViewport(renderer, createWindowSize()), config = props.config;
+  const renderer = useGpuixRequired(), viewport = useDialogViewport(renderer, createWindowSize()), config = props.config;
   const [frame, setFrame] = createSignal<FinderFrame>(props.controller.frame);
   const [blink,setBlink]=createSignal(false),[rainbow,setRainbow]=createSignal<number[]>([]);
   const blinkClock=new CursorBlinkClock(setBlink,{scope:renderer});
@@ -37,7 +37,7 @@ export function FinderView(props: { controller: FinderController; config: AppCon
     else if(key==="up"||key==="down"){event.preventDefault();props.controller.move(key==="up"?-1:1);}
   };
   const rows=()=>frame().rows.slice(Math.max(0,frame().top-3),frame().top+frame().visibleRows+4);
-  const offset=createMemo(()=>centeredOverlayOffset(viewport(),frame().rect));
+  const offset=createMemo(()=>dialogOverlayOffset(viewport(),frame().rect));
   const cursor=createMemo(():CanvasOp[]=>{
     const points=frame().cursorQuad||[];if(!points.length)return [];
     if(!blink())return [];

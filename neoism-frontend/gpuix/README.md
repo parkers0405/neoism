@@ -130,8 +130,10 @@ without replaying entrance animations. Workspace
 close buttons and `Ctrl+Shift+W` close and create local window workspaces without
 terminating daemon-owned terminals.
 
-Command menus, Agent pickers, Finder, LSP hover and notification banners are
-constrained to the focused content body below the top chrome and both tab strips.
+Command palettes, Finder and other global dialogs center horizontally across
+the whole window (including the sidebar), retain their original upper native
+anchor and stay below the top chrome and both tab strips. Composer pickers, LSP
+hover and notification banners remain constrained to their focused content body.
 LSP hover uses the original measured Rust painter, pointer retention, text selection,
 scrolling, links and copy. Agent input uses native shaped caret geometry to paint
 the shared block cursor and trail.
@@ -149,6 +151,12 @@ restores this frontend window’s explicitly opened workspaces in their saved or
 the daemon’s full catalog remains available through Alt+P → Workspaces. Older
 profiles start the row with their selected workspace without deleting any saved
 projects, buffers, or terminal sessions.
+
+Plain `h` in Files/Notes toggles dotfiles with the original Rust exclusions;
+ArrowLeft still collapses directories. Each workspace, root and panel keeps its
+own visibility choice through font generations. Agent composer controls use
+bounded original font measurements on narrow panes, truncating model labels
+before they can overlap reasoning, attachment or submit controls.
 
 ## Servers and multiplayer
 

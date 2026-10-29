@@ -17,7 +17,8 @@ impl FileTree {
     /// Host relayouts and background listings must not reveal an offscreen
     /// selection. Only explicit keyboard/select actions move to that row.
     pub fn host_set_entries(&mut self, entries: Vec<TreeEntry>) {
-        self.selected = self.selected.min(entries.len().saturating_sub(1));
+        let selected_path=self.entries.get(self.selected).and_then(|entry|entry.path.as_ref());
+        self.selected=selected_path.and_then(|path|entries.iter().position(|entry|entry.path.as_ref()==Some(path))).unwrap_or_else(||self.selected.min(entries.len().saturating_sub(1)));
         if self.reveal_flash.as_ref().is_some_and(|flash| flash.index >= entries.len()) {
             self.reveal_flash = None;
         }

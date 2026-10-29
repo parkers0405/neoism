@@ -1,0 +1,34 @@
+import assert from "node:assert/strict";
+import {createSignal} from "solid-js";
+import {createRoot} from "@gpuix/solid";
+import {App} from "../../src/ui/App";
+import {AppGeneration} from "../../src/ui/AppGeneration";
+import {AppVisualState} from "../../src/ui/AppVisualState";
+import {WorkspaceModel} from "../../src/model";
+import {DaemonConnection} from "../../src/daemon/client";
+import {loadConfig} from "../../src/config";
+import {coreCall} from "../../src/native-core";
+import {createRecordingAppRenderer} from "./full-app-recording-renderer";
+const config={...loadConfig(["--config","/nonexistent/tree-hidden"],{}),reducedMotion:true,cursorBlink:false};
+const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
+const workspaces=[{id:"a",host_id:"host",title:"A",root_dir:"/project/a",notes_vault_dir:"/notes/a"},{id:"b",host_id:"host",title:"B",root_dir:"/project/b",notes_vault_dir:"/notes/b"}];
+const entry=(name:string,is_dir=false)=>({name,is_dir});const directories={"":{path:"",entries:[entry(".env"),entry(".git",true),entry("visible.ts"),entry("folder",true),entry(".secret",true)]},folder:{path:"folder",entries:[entry(".dot.md"),entry("keep.md")]},".secret":{path:".secret",entries:[entry("inside.md")]}};
+model.update({activeWorkspace:workspaces[0],workspaces,directories,notesDirectories:directories,expanded:new Set(["","folder",".secret"]),notesExpanded:new Set(["","folder",".secret"]),loading:false,ui:{sidebar:"files",openWorkspaceIds:["a","b"]}});
+const[generation,setGeneration]=createSignal(config);
+const tree=()=>host.find("file-tree")||host.find("notes-tree");
+const press=async(key:string,ctrl=false)=>{root.dispatch({elementId:tree()!.id,eventType:"keyDown",key,keyChar:key.length===1?key:undefined,modifiers:{shift:false,ctrl,alt:false,cmd:false}});await host.pump(root);};
+const pick=async(kind:string)=>{root.dispatch({elementId:host.find(`toggle-${kind}`)!.id,eventType:"mouseDown",button:0});await host.pump(root);};
+const has=(name:string,notes=false)=>!!host.find(`${notes?"note":"file"}:${name}`);
+try{
+ root.render(()=><AppGeneration value={generation()}>{value=><App model={model} config={value} visuals={visuals}/>}</AppGeneration>);await host.pump(root);
+ assert.ok(has(".env")&&has("folder/.dot.md")&&has(".secret/inside.md"));assert.ok(!has(".git"),"Canonical metadata exclusions remain hidden");
+ await press("down");await press("h");assert.ok(!has(".env")&&!has("folder/.dot.md")&&!has(".secret/inside.md"));assert.ok(has("folder/keep.md"),"h must not collapse an expanded directory");
+ const id=visuals.trees.get(JSON.stringify(["a",false,"/project/a"]));assert.equal(coreCall<{selected:number}>("tree.frame",{id,height:680}).selected,0,"Selection stays on visible.ts when preceding hidden entries disappear");
+ await press("h",true);assert.ok(!has(".env"),"Ctrl+h is not the plain hidden-file toggle");
+ await pick("notes");assert.ok(has(".env",true));await press("h");assert.ok(!has(".env",true));await pick("files");assert.ok(!has(".env"));await press("h");assert.ok(has(".env"));
+ setGeneration({...config,fontSize:16,scale:16/14});await host.pump(root);assert.ok(has(".env"));await pick("notes");assert.ok(!has(".env",true),"Notes hidden state survives font generations independently");await pick("files");
+ model.update({activeWorkspace:workspaces[1],directories,notesDirectories:directories});await host.pump(root);assert.ok(has(".env"));await press("h");assert.ok(!has(".env"));
+ model.update({activeWorkspace:workspaces[0],directories,notesDirectories:directories});await host.pump(root);assert.ok(has(".env"),"A retains its own visibility after B");
+ await press("home");await press("down");await press("down");await press("left");assert.ok(!has("folder/keep.md"),"ArrowLeft keeps its original collapse behavior");
+ console.log(JSON.stringify({actualApp:true,noWindow:true,plainHToggles:true,nestedDotfiles:true,canonicalExclusions:true,selectedPathPreserved:true,independentWorkspaceAndNotes:true,zoomRetained:true,arrowLeftStillCollapses:true}));
+}finally{root.unmount();visuals.dispose();model.dispose();client.stop();}

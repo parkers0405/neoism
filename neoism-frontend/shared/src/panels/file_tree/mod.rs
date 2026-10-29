@@ -107,7 +107,7 @@ pub use policy::{
 };
 pub(crate) use render::truncate_label;
 pub use scan::{
-    apply_git_statuses, entries_from_dir_listing, normalize_path, same_entry_layout,
+    apply_git_statuses, entries_from_dir_listing, entry_is_visible, normalize_path, same_entry_layout,
     scan_dir, scan_dir_result, scan_dir_with_open,
 };
 pub use state::FileTree;

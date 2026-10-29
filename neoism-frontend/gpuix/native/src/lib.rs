@@ -935,6 +935,19 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
     let op = text(&v, "op");
     let id = v["id"].as_u64().unwrap_or(0) as u32;
     match op {
+        "tree.visible" => {
+            let root=PathBuf::from(text(&v,"root").replace('\\',"/"));
+            let hidden=v["showHidden"].as_bool().unwrap_or(true);
+            let mut visible=Vec::new();
+            for (relative,listing) in v["directories"].as_object().into_iter().flatten(){
+                let parent=root.join(relative);
+                for entry in listing["entries"].as_array().into_iter().flatten(){
+                    let name=text(entry,"name");
+                    if neoism_ui::panels::file_tree::entry_is_visible(&parent,name,hidden){visible.push(if relative.is_empty(){name.to_owned()}else{format!("{relative}/{name}")});}
+                }
+            }
+            Ok(json!(visible))
+        }
         "tree.new" => {
             engines.next += 1;
             let id = engines.next;

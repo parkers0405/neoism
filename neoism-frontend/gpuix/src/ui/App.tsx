@@ -56,7 +56,7 @@ import {TreeRowGlyphs} from "./TreeRowGlyphs";
 import { statusInfo } from "../chrome/status-info";
 import { workspaceShortcut,bufferTabShortcut,navigateChrome,type ChromeFocus } from "../commands/chrome-keyboard";
 import { ChromeFocusCursor,type ChromeCursorTarget } from "./ChromeFocusCursor";
-import {centeredOverlayOffset,setOverlayViewport,useOverlayViewport} from "./overlay-viewport";
+import {dialogOverlayOffset,setDialogViewport,useDialogViewport,setOverlayViewport,useOverlayViewport} from "./overlay-viewport";
 import {paintedChromeBounds} from "./chrome-target-bounds";
 import {surfaceCaret,suppressSurfaceCursor,surfaceCursorSuppressed} from "./cursor-handoff";
 import { focusedNativeElement,focusNativeElement,invalidateNativeFocus } from "../native-focus";
@@ -145,6 +145,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   const windowSize = createWindowSize();
   const renderer = useGpuixRequired();
   const contentViewport=useOverlayViewport(renderer,windowSize);
+  const dialogViewport=useDialogViewport(renderer,windowSize);
   const chromeMeasurements=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const refreshChromeTargetBounds=()=>{chromeMeasurements.request(()=>{const target=untrack(chromeTarget);if(!target?.host.mounted||target.kind==="content"||target.kind==="sidebar")return;const bounds=paintedChromeBounds(renderer,target.host.id);if(bounds)updateChromeBounds(target.host,bounds);});};
   onCleanup(()=>chromeMeasurements.dispose());
@@ -163,6 +164,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   const [gitFrame,setGitFrame]=createSignal<GitFrame>();
   const [gitFocused,setGitFocused]=createSignal(false),[gitFocusToken,setGitFocusToken]=createSignal(0);
   const [workspaceBounds,setWorkspaceBounds]=createSignal({x:0,y:0,width:windowSize().width,height:windowSize().height});
+  createEffect(()=>{const size=windowSize(),top=Math.min(size.height,Math.max(d.topbarHeight*s,workspaceBounds().y)+tabChromeSpec.workspace.height+tabChromeSpec.buffer.height);setDialogViewport(renderer,{x:0,y:top,width:size.width,height:Math.max(0,size.height-top-d.statusHeight*s)});});
   const gitViewport=createMemo(()=>{const bounds=workspaceBounds(),top=tabChromeSpec.workspace.height;return{x:bounds.x,y:bounds.y+top,width:bounds.width,height:Math.max(0,bounds.height-top)};});
   const [gitRestore,setGitRestore]=createSignal<{target:GitRestoreTarget;workspaceId:string;resolve:(confirmed:boolean)=>void;focus?:number}>();
   let gitHost:HostElement|undefined;
@@ -600,18 +602,20 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const open = (entry: { path: string; dir: boolean }) => {if(entry.dir)model.toggleDirectory(entry.path,props.notes);else void focusOpenedFile(()=>model.openFile(entry.path,root()));};
     const [viewportRevision, setViewportRevision] = createSignal(0);
     const [heightRevision, setHeightRevision] = createSignal(0);
+    const [hiddenRevision,setHiddenRevision]=createSignal(0);
     const [focused, setFocused] = createSignal(false);
     const scope = createMemo(() => JSON.stringify([state().activeWorkspace?.id, !!props.notes, root()]));
     const viewport = createMemo(() => {
       const key = scope();
       let cached = visuals.treeViewports.get(key);
       if (!cached) {
-        cached = {height:600,frame:{top:0,offset:0,selected:0,cursorOffset:0,animating:false}};
+        cached = {showHidden:true,height:600,frame:{top:0,offset:0,selected:0,cursorOffset:0,animating:false}};
         visuals.treeViewports.set(key,cached);
       }
       return cached;
     });
     const height = () => { heightRevision(); return viewport().height; };
+    const showHidden=()=>{hiddenRevision();return viewport().showHidden;};
     const view = () => { viewportRevision(); return viewport().frame; };
     let host: HostElement | undefined;
     const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
@@ -646,9 +650,11 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       if (revealRoot !== root()) { rowCache.clear(); revealRoot = root(); }
       const now = performance.now();
       const result: TreeEntry[] = [];
+      const visible=new Set(coreCall<string[]>("tree.visible",{root:root(),showHidden:showHidden(),directories:directories()}));
       const walk = (path: string, depth: number) => {
         for (const entry of directories()[path]?.entries || []) {
           const child = path ? `${path}/${entry.name}` : entry.name;
+          if(!visible.has(child))continue;
           if (!revealStarts().has(child)) revealStarts().set(child, now);
           let cached = rowCache.get(child);
           if (!cached || cached.name !== entry.name || cached.dir !== entry.is_dir || cached.depth !== depth) {
@@ -676,11 +682,13 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       if (event.modifiers?.alt || event.modifiers?.cmd) return;
       const key = event.keyChar || event.key || "";
       if (!["j", "k", "g", "G", "up", "down", "home", "end", "d", "u", "enter", "right", "left", "h", "l", "escape"].includes(key) && !/^\d$/.test(key)) return;
+      if(key==="h"&&event.modifiers?.ctrl)return;
       event.preventDefault(); event.stopPropagation();
+      if(key==="h"){update("key",{key:"escape"});viewport().showHidden=!showHidden();setHiddenRevision(value=>value+1);return;}
       const entry = rows()[view().selected];
       if (key === "enter") { if (entry) open(entry); }
       else if (["right", "l"].includes(key)) { if (entry?.dir && !expanded().has(entry.path)) model.toggleDirectory(entry.path, props.notes); }
-      else if (["left", "h"].includes(key)) {
+      else if (key==="left") {
         if (entry?.dir && expanded().has(entry.path)) model.toggleDirectory(entry.path, props.notes);
         else if (entry) { const parent = entry.path.split("/").slice(0, -1).join("/"); const index = rows().findIndex((e) => e.path === parent); if (index >= 0) update("select", { index }); }
       } else update("key", { key, ctrl: event.modifiers?.ctrl });
@@ -798,10 +806,11 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     onCleanup(()=>{disposed=true;slashInput()?.resolve(undefined);slash.dispose();activityAnimation.dispose();effectsAnimation.dispose();});
     const width=()=>frame()?.cardRect[2]||800;
     const absolute=(rect:readonly number[]|undefined):StyleDesc=>({position:"absolute",left:rect?.[0]||0,top:rect?.[1]||0,width:rect?.[2]||0,height:rect?.[3]||0});
-    const chipFont = () => 12 + 2 * Math.max(0, Math.min(1, (width() / s - 420) / 340));
+
     const labels = createMemo(() => coreCall<{ agent: string; model: string; thinking: string; narrow: boolean }>("composer.labels", {
       agent: selection().agent || "build", model: selection().model || "Default model", thinking: selection().thinking || "none", width: width(), scale: s,
     }));
+    const chipGeometry=createMemo(()=>native.chips({width:frame()?.controls.chips_rect[2]||0,height:frame()?.controls.chips_rect[3]||0,agent:selection().agent||"build",model:selection().model||"Default model",thinking:selection().thinking||"none"}));
     let input: HostElement | undefined, shell: HostElement | undefined, anchor: Anchor = [0, 0, 0, 0];
     const focus = () => { if (input && composerInputs.get(key()) === input&&chromeFocus().zone==="content"&&!pendingPermission()&&!pendingQuestion()&&!choice()&&!commands()&&!palette()&&(props.sessionId?active()?.sessionId===props.sessionId:active()?.id===props.surfaceId)){input.root?.mutations.flushMutations();focusNativeElement(renderer,input.id);} };
     createEffect(()=>{
@@ -864,13 +873,16 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
               if(event.key==="enter"&&event.modifiers?.alt){event.preventDefault();event.stopPropagation();void submit("queue");}
             }} style={{...text(16),...absolute(frame()?.controls.text_rect),lineHeight:22*s,padding:0,backgroundColor:"transparent",borderWidth:0}}/>
           <ComposerCaret config={config} input={()=>input}/>
-          <div style={{...row,...absolute(frame()?.controls.chips_rect),gap:14*s}}>
-            <div role="button" testId="select-agent" aria-label="Select agent" onClick={()=>openPicker("agent")} style={{...row,gap:6*s,cursor:"pointer"}}><AgentChipLabel config={config} hosts={visuals.agentChips} paintPins={wordmarkHosts} scope={model.composerDraftKey(props.sessionId,props.surfaceId)} kind="agent" label={labels().agent} size={chipFont()} loading={!props.sessionId&&!!state().agentDefaultsLoading}/><Icon glyph={"\uf078"} color={c.muted} size={chipFont()*.66}/></div>
-            <div role="button" testId="select-model" aria-label="Select model" onClick={()=>openPicker("model")} style={{...row,flexShrink:1,gap:6*s,cursor:"pointer",minWidth:0}}><div style={{...row,gap:5*s}}><ProviderLogo model={selection().model} config={config}/><AgentChipLabel config={config} hosts={visuals.agentChips} paintPins={wordmarkHosts} scope={model.composerDraftKey(props.sessionId,props.surfaceId)} kind="model" label={labels().model} size={chipFont()} loading={!props.sessionId&&!!state().agentDefaultsLoading}/></div><Icon glyph={"\uf078"} color={c.muted} size={chipFont()*.66}/></div>
-            <div role="button" testId="select-thinking" aria-label="Select reasoning" onClick={()=>openPicker("thinking")} style={{...row,gap:6*s,cursor:"pointer"}}><AgentChipLabel config={config} hosts={visuals.agentChips} paintPins={wordmarkHosts} scope={model.composerDraftKey(props.sessionId,props.surfaceId)} kind="thinking" label={labels().thinking} size={chipFont()} loading={!props.sessionId&&!!state().agentDefaultsLoading}/><Icon glyph={"\uf078"} color={c.muted} size={chipFont()*.66}/></div>
-            {/* Chips stay together on the left (desktop chip row); attach sits by send. */}
-            <div style={{flexGrow:1,minWidth:0}}/>
-            <IconButton glyph={"\uf0c6"} label="Attach files" testId="attach-files" onClick={()=>void attach()}/>
+          <div testId="composer-chip-row" style={{...absolute(frame()?.controls.chips_rect)}}>
+            <For each={["agent","model","thinking"] as const}>{(kind,index)=>{
+              const geometry=()=>chipGeometry().chips[index()];
+              return <div role="button" testId={`select-${kind}`} aria-label={kind==="thinking"?"Select reasoning":`Select ${kind}`} onClick={()=>openPicker(kind)} style={{...absolute(geometry().rect),cursor:"pointer",overflow:"hidden"}}>
+                <Show when={geometry().logo_rect}>{rect=><div style={absolute(rect())}><ProviderLogo model={selection().model} config={config}/></div>}</Show>
+                <div style={absolute(geometry().label_rect)}><AgentChipLabel config={config} hosts={visuals.agentChips} paintPins={wordmarkHosts} scope={model.composerDraftKey(props.sessionId,props.surfaceId)} kind={kind} label={labels()[kind]} displayLabel={geometry().label} maxWidth={geometry().label_rect[2]} size={chipGeometry().font_size/s} loading={!props.sessionId&&!!state().agentDefaultsLoading}/></div>
+                <div style={absolute(geometry().caret_rect)}><Icon glyph={"\uf078"} color={c.muted} size={chipGeometry().font_size/s*.66}/></div>
+              </div>;
+            }}</For>
+            <div style={absolute(chipGeometry().attach_rect)}><IconButton glyph={"\uf0c6"} label="Attach files" testId="attach-files" onClick={()=>void attach()}/></div>
           </div>
           <div testId="send-prompt" role="button" aria-label={localBusy()?"Stop generation":"Send message"} onClick={()=>localBusy()&&props.sessionId?model.cancelPrompt(props.sessionId):void submit()}
             style={{...absolute(frame()?.controls.hit_rect),cursor:"pointer"}}><div style={{...row,justifyContent:"center",position:"absolute",left:(frame()?.controls.visual_rect[0]||0)-(frame()?.controls.hit_rect[0]||0),top:(frame()?.controls.visual_rect[1]||0)-(frame()?.controls.hit_rect[1]||0),width:frame()?.controls.visual_rect[2],height:frame()?.controls.visual_rect[3],borderRadius:8*s,backgroundColor:frame()?.controls.action==="Disabled"?c.fg+"8c":c.fg}}>
@@ -1095,8 +1107,8 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     <Show when={chromeFrame()}><ChromeActionsView controller={chromeActions} config={config} /></Show>
     <Show when={gitRestore()} keyed>{pending=><GitRestoreDialog target={pending.target} config={config} onDone={finishGitRestore}/>}</Show>
     <Show when={finder()} keyed>{(controller) => <FinderView controller={controller} config={config}
-      onAccept={(target) => { const points=controller.frame.cursorQuad,bounds=contentViewport(),offset=centeredOverlayOffset(bounds,controller.frame.rect);const xs=points.map(point=>point[0]!),ys=points.map(point=>point[1]!);const origin=points.length===4?[bounds.x+offset.x+Math.min(...xs),bounds.y+offset.y+Math.min(...ys),Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys)]:undefined;closePalette(false);if(target.path)void focusOpenedFile(()=>model.openLocation(target.path!,Math.max(0,(target.line||1)-1),target.column||0),origin); }} onClose={() => closePalette()} />}</Show>
-    <Show when={palette() && paletteMode() !== "find"}><anchored fill="window" deferred priority={2} occlude={false} style={{ backgroundColor: "transparent", pointerEvents: "none" }}><div testId="buffer-search-dialog" style={{ ...column, position: "absolute", left: contentViewport().x+Math.max(0,(contentViewport().width-Math.min(contentViewport().width,600*s))/2), top: contentViewport().y+Math.max(0,(contentViewport().height-Math.min(60*s,contentViewport().height))/2), width: Math.min(contentViewport().width,600*s), height: Math.min(60*s,contentViewport().height),overflow:"hidden",
+      onAccept={(target) => { const points=controller.frame.cursorQuad,bounds=dialogViewport(),offset=dialogOverlayOffset(bounds,controller.frame.rect);const xs=points.map(point=>point[0]!),ys=points.map(point=>point[1]!);const origin=points.length===4?[bounds.x+offset.x+Math.min(...xs),bounds.y+offset.y+Math.min(...ys),Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys)]:undefined;closePalette(false);if(target.path)void focusOpenedFile(()=>model.openLocation(target.path!,Math.max(0,(target.line||1)-1),target.column||0),origin); }} onClose={() => closePalette()} />}</Show>
+    <Show when={palette() && paletteMode() !== "find"}><anchored fill="window" deferred priority={2} occlude={false} style={{ backgroundColor: "transparent", pointerEvents: "none" }}><div testId="buffer-search-dialog" style={{ ...column, position: "absolute", left: dialogViewport().x+Math.max(0,(dialogViewport().width-Math.min(dialogViewport().width,600*s))/2), top: dialogViewport().y+Math.max(0,Math.min(80*s,dialogViewport().height-Math.min(60*s,dialogViewport().height))), width: Math.min(dialogViewport().width,600*s), height: Math.min(60*s,dialogViewport().height),overflow:"hidden",
       padding: 10 * s, pointerEvents: "auto", backgroundColor: c.bg, borderWidth: 2, borderColor: c.border, borderRadius: 12 * s }} onMouseDownOutside={() => closePalette()}>
       <input autoFocus={true} testId="command-palette" aria-label={paletteMode() === "find" ? "Find files, conversations, commands" : paletteMode() === ":" ? "Vim command" : "Search in buffer"} placeholder={paletteMode() === "find" ? "Find files, conversations, commands…" : paletteMode() === ":" ? ":command" : `${paletteMode()} Search in buffer…`} value={query()}
         onChange={(event) => changePalette(event.value || "")} onSubmit={() => void submitPalette()} theme={nativeTheme} style={{ ...text(14), padding: 10 * s, height: 40 * s }} />

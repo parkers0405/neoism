@@ -10,7 +10,7 @@ import type {WorkspaceModel,Surface} from "../model";
 import {AgentChipHosts} from "../agent/AgentChipLabel";
 
 export interface CachedAgentComposer {native?:NativeComposer;viewport:{width:number;height:number};frame?:ComposerFrame}
-export interface CachedTreeViewport {height:number;frame:{top:number;offset:number;selected:number;cursorOffset:number;animating:boolean}}
+export interface CachedTreeViewport {showHidden:boolean;height:number;frame:{top:number;offset:number;selected:number;cursorOffset:number;animating:boolean}}
 
 /** Window resources outlive font/theme component generations, but not the session. */
 export class AppVisualState {

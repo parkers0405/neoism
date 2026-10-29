@@ -1,5 +1,6 @@
 mod wrap_cache;
 pub mod host_footer;
+pub mod host_chips;
 
 use std::rc::Rc;
 
@@ -258,8 +259,14 @@ fn agent_chip_accent(theme: &IdeTheme, label: &str) -> u32 {
 /// Native hosts use the same chip ink and per-letter transition as the
 /// desktop composer, without reproducing the scramble in their UI layer.
 pub fn render_status_chip_label_for_host(
+    painter:&mut dyn crate::primitives::paint::Paint,label:&str,kind:&str,font_size:f32,theme:&IdeTheme,
+    transition:Option<crate::panels::agent_pane::state::ConfigChipTransition>,agent_elapsed_ms:Option<f32>,
+)->f32 {render_status_chip_label_for_host_with_source(painter,label,label,kind,font_size,theme,transition,agent_elapsed_ms)}
+
+pub fn render_status_chip_label_for_host_with_source(
     painter: &mut dyn crate::primitives::paint::Paint,
     label: &str,
+    source_label: &str,
     kind: &str,
     font_size: f32,
     theme: &IdeTheme,
@@ -268,7 +275,7 @@ pub fn render_status_chip_label_for_host(
 ) -> f32 {
     use crate::panels::agent_pane::state::ConfigChipTransition;
     let color = match kind {
-        "agent" => agent_chip_accent(theme, label),
+        "agent" => agent_chip_accent(theme, source_label),
         "model" => theme.blue,
         _ => theme.magenta,
     };

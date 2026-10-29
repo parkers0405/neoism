@@ -5,7 +5,7 @@ import { coreCall } from "../native-core";
 import { PaintLayer, type PaintCommand } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
 import { focusNativeElement } from "../native-focus";
-import {useOverlayViewport,overlayPoint} from "../ui/overlay-viewport";
+import {useDialogViewport,overlayPoint} from "../ui/overlay-viewport";
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
 
 interface BrowserFrame { commands: PaintCommand[]; animating: boolean; active: boolean; selection?: string | null }
@@ -15,7 +15,7 @@ interface BrowserFrame { commands: PaintCommand[]; animating: boolean; active: b
  * original renderer over the whole window. */
 export function DirectoryBrowserView(props: { config: AppConfig; start: string; root: string; onDone: (path: string | undefined) => void }) {
   const config = props.config, renderer = useGpuixRequired();
-  const viewport=useOverlayViewport(renderer,createWindowSize());
+  const viewport=useDialogViewport(renderer,createWindowSize());
   const { id } = coreCall<{ id: number }>("dirbrowser.new", { start: props.start, root: props.root, theme: config.themeName, scale: config.scale, fontFamily: config.fontFamily, fontWeight: config.fontWeight });
   const [commands, setCommands] = createSignal<readonly PaintCommand[]>([]);
   let size = { width: 0, height: 0 }, host: HostElement | undefined, done = false;

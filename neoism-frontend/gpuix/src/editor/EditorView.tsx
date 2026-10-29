@@ -155,10 +155,11 @@ export function EditorView(props: {
       } else for (const run of line.runs) if (run.text) ops.push({ k: "t", x: run.x, y: top, t: run.text, s: size, c: cssColor(token(run.token)), f: font, w: weight, lh: rh });
       for (const run of line.runs) {
         if (!run.severity) continue;
-        const width = Math.max(1, run.width || run.text.length * cell()), points: number[] = [];
-        for (let i = 0; i <= Math.ceil(width / 2); i++) points.push(run.x + i * 2, top + rh - 3 + (i % 2 ? 2 : 0));
+        const width = Math.max(1, run.width || run.text.length * cell());
         const tone = run.severity === "Error" ? c.red : run.severity === "Warn" ? c.yellow : run.severity === "Info" ? c.blue : c.muted;
-        ops.push({ k: "l", c: cssColor(tone), w: 1, p: points });
+        // Match the original Code renderer's diagnostic band. Spellcheck and
+        // plugin underlines have separate paint paths and keep their styles.
+        ops.push({ k: "r", c: cssColor(tone), b: [run.x, top + rh - 3, width, 2] });
       }
     }
     images.commit();

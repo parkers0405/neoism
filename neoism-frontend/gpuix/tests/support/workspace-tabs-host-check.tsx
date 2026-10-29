@@ -5,6 +5,8 @@ import {join} from "node:path";
 import {createSignal} from "solid-js";
 import {createRoot,type HostElement,type NativeRenderer,type EventPayload} from "@gpuix/solid";
 import {WorkspaceTabs} from "../../src/ui/WorkspaceTabs";
+import {WORKSPACE_CLOUD_ICON} from "../../src/workspaces/workspace-icon";
+import {tabChrome} from "../../src/layout/tab-chrome";
 import {loadConfig} from "../../src/config";
 import {DaemonConnection} from "../../src/daemon/client";
 import {WorkspaceModel} from "../../src/model";
@@ -14,7 +16,7 @@ import {createAgentDaemon} from "./agent-daemon";
 // Actual Solid host, event map and mutation batching. Only native painting is
 // replaced: this records native tree mutations and supplies explicit viewport
 // geometry, so the test never constructs or opens a native desktop window.
-interface Node {id:number;type:string;children:number[];props:Record<string,unknown>;style:Record<string,unknown>}
+interface Node {id:number;type:string;children:number[];props:Record<string,unknown>;style:Record<string,unknown>;text?:string}
 function recordingRenderer(){
  const nodes=new Map<number,Node>();let offset=0;
  const byTestId=(testId:string)=>[...nodes.values()].find(node=>node.props.testId===testId);
@@ -39,6 +41,7 @@ function recordingRenderer(){
     else if(op==="destroyElement")remove(id,destroyed);
     else if(op==="setCustomProp")nodes.get(id)!.props[a]=b;
     else if(op==="setStyle")nodes.get(id)!.style=a;
+    else if(op==="setText")nodes.get(id)!.text=a;
     else if(op==="appendChild"||op==="insertBefore"){
      if(op==="insertBefore"&&a===b)continue;
      for(const node of nodes.values())node.children=node.children.filter(child=>child!==a);
@@ -55,12 +58,14 @@ const server=createAgentDaemon();server.threads.splice(0);server.workspaces.push
 const config={...loadConfig(["--config","/nonexistent/workspace-tabs-host"],{}),endpoint:server.endpoint,authToken:undefined};
 let client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
 const host=recordingRenderer(),root=createRoot(host.renderer),registered=new Map<string,HostElement>();
+const[tabConfig,setTabConfig]=createSignal(config);
 const[state,setState]=createSignal(model.state);let release=()=>{},failure:unknown;
 let activations=0,closes=0,creates=0,reorders=0;let closeTask:Promise<boolean>|undefined,createTask:ReturnType<WorkspaceModel["newWorkspace"]>|undefined;
 let pointerFollowingSamples=0,intermediateSlideSamples=0;
 const dispatch=(id:number,type:string,x:number,y:number)=>root.dispatch({elementId:id,eventType:type,x,y,button:0,pressedButton:0} satisfies EventPayload);
 const node=(testId:string)=>{const node=host.byTestId(testId);assert.ok(node,`missing ${testId}`);return node;};
 const box=(testId:string)=>{const value=host.bounds(node(testId).id);assert.ok(value,`missing bounds ${testId}`);return value;};
+const ink=(testId:string)=>host.descendants(node(testId).id).map(node=>node.text||"").join("");
 const order=()=>host.tabNodes().map(node=>String(node.props.testId).slice(10));
 const membership=()=>model.windowWorkspaces().map(workspace=>workspace.id);
 const settle=async()=>{await Promise.resolve();root.flush();};
@@ -79,6 +84,7 @@ async function drag(id:string,targetId:string,side:"before"|"after"){
  dispatch(tab.id,"mouseDown",x,y);dispatch(tab.id,"mouseMove",x+(endX>=x?8:-8),y);await settle();
  const layer=node("workspace-drag-layer");dispatch(layer.id,"mouseMove",endX,y);await settle();assert.ok(Math.abs(box(`workspace:${id}`).x+grab-endX)<.01,"dragged stable host follows actual pointer");
  assertNonselectableText(node("workspace-drag-preview").id);
+ assert.equal(ink("workspace-drag-preview-icon"),ink(`workspace-icon:${id}`),"drag preview preserves exact cloud/folder metadata of its source tab");
  assert.ok(Math.abs(box("workspace-drag-preview").x+grab-endX)<.01,"foreground painted preview follows the same pointer");assert.equal(node(`workspace:${id}`).style.opacity,0);pointerFollowingSamples++;
  dispatch(layer.id,"mouseUp",endX,y);await settle();
  dispatch(tab.id,"click",endX,y);await settle();
@@ -98,13 +104,19 @@ try{
  const dirtySurface=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!;model.getEditor(dirtySurface).call("paste",{text:"keep unsaved B "});
  await model.activateWorkspace(server.workspaces[2]!);await model.activateWorkspace(server.workspaces[0]!);
  setState(model.state);release=model.subscribe(()=>setState(model.state));
- root.render(()=><WorkspaceTabs config={config} workspaces={model.windowWorkspaces(state())} activeId={state().activeWorkspace?.id}
+ root.render(()=><WorkspaceTabs config={tabConfig()} workspaces={model.windowWorkspaces(state())} activeId={state().activeWorkspace?.id}
   onActivate={workspace=>{activations++;void model.activateWorkspace(workspace).catch(error=>failure=error);}}
   onClose={id=>{closes++;closeTask=model.closeWorkspace(false,id);}}
   onNew={()=>{creates++;createTask=model.newWorkspace();}}
   onReorder={(id,target,side)=>{reorders++;model.reorderWorkspace(id,target,side);}}
   registerHost={(id,value)=>{if(value)registered.set(id,value);else registered.delete(id);}} registerNewHost={()=>{}} onBounds={()=>{}} onScroll={()=>{}}/>);
  await settle();assert.deepEqual(order(),["a","b","c"]);
+ for(const id of ["a","b","c"])assert.equal(ink(`workspace-icon:${id}`),tabChrome(config.scale).workspace.iconGlyph,"private local workspaces keep the original folder glyph");
+ for(const metadata of [{serverId:"joined",collaborative:true},{serverId:"system:fixture",transportIdentity:"ssh:fixture"},{serverId:"hosted",collaborative:true}]){
+  setTabConfig({...config,...metadata});await settle();for(const id of ["a","b","c"])assert.equal(ink(`workspace-icon:${id}`),WORKSPACE_CLOUD_ICON,"joined, SSH and hosted connections all use cloud glyphs");
+ }
+ setTabConfig(config);model.update({workspaces:model.state.workspaces.map(workspace=>workspace.id==="a"?{...workspace,visibility:"shared"}:workspace.id==="b"?{...workspace,host_kind:"tailscale"}:workspace)});await settle();
+ assert.equal(ink("workspace-icon:a"),WORKSPACE_CLOUD_ICON,"host users get a cloud from advertised sharing metadata even on Local Server");assert.equal(ink("workspace-icon:b"),WORKSPACE_CLOUD_ICON);assert.equal(ink("workspace-icon:c"),tabChrome(config.scale).workspace.iconGlyph);
  assertNonselectableText(node("workspace-tab-scroll").id);
  const requestsBefore=server.workspaceRequests.length,activeBefore=model.state.activeWorkspace!.id;
  await closeWithNativeBubbling("b");assert.equal(closes,1);assert.equal(activations,0);assert.equal(model.state.activeWorkspace!.id,activeBefore);assert.deepEqual(order(),["a","b","c"]);assert.ok(model.state.error?.includes(":qall!"));assert.equal(model.getEditor(dirtySurface).frame.dirty,true);
@@ -125,5 +137,5 @@ try{
   assert.deepEqual(membership(),expected);assert.deepEqual(order(),expected);assert.equal(model.state.activeWorkspace?.id,created.id);assert.equal(server.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length,1);
  }finally{rmSync(directory,{recursive:true,force:true});}
  assert.equal(failure,undefined);assert.equal(server.ptyRequests.length,0);assert.equal(server.workspaceRequests.some(request=>request.tag==="CloseHostWorkspace"),false);
- console.log(JSON.stringify({actualSolidHost:true,windowsCreated:0,nonselectableTabChromeAndGhost:true,childParentClickMicrotaskGuard:true,dirtyInactiveCloseRejected:true,cleanInactiveCloseDoesNotActivate:true,retainedHostReorders:2,pointerFollowingSamples,intermediateSlideSamples,scrolledDropUsesCurrentGeometry:true,outsideDropCancels:true,backendCreates:1,oneBackendActionPerClick:true,persistedOrderRestored:true,ptyCreates:0}));
+ console.log(JSON.stringify({actualSolidHost:true,windowsCreated:0,metadataCloudIcons:true,cloudAndFolderDragPreviews:true,nonselectableTabChromeAndGhost:true,childParentClickMicrotaskGuard:true,dirtyInactiveCloseRejected:true,cleanInactiveCloseDoesNotActivate:true,retainedHostReorders:2,pointerFollowingSamples,intermediateSlideSamples,scrolledDropUsesCurrentGeometry:true,outsideDropCancels:true,backendCreates:1,oneBackendActionPerClick:true,persistedOrderRestored:true,ptyCreates:0}));
 }finally{release();root.unmount();model.dispose();client.stop();server.stop();}

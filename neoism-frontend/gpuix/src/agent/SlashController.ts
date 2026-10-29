@@ -8,7 +8,7 @@ import {thinkingOptions} from "../design/generated";
 
 export interface SlashOption{title:string;description:string;footer:string;value:string;mcp?:unknown}
 export type SlashEffect="piss"|"cuss"|"glitch"|"disco"|"gangfight"|"praise";
-export interface SlashPickerRequest{kind:string;title:string;options:SlashOption[];selected?:string;onSelect?:(value:string)=>void|Promise<void>;
+export interface SlashPickerRequest{token?:string;loading?:boolean;error?:string;usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;onCancel?:()=>void;kind:string;title:string;options:SlashOption[];selected?:string;onSelect?:(value:string)=>void|Promise<void>;
  /** Original-card stage status (connect / OAuth / MCP authorization). */
  activity?:{body:string;status:string;busy?:boolean;url?:string};mcpServer?:string;mcpEntry?:unknown}
 export interface SlashInputRequest{title:string;description?:string;secret?:boolean;initialValue?:string}
@@ -28,7 +28,7 @@ export interface SlashHooks{
 }
 export interface SlashControllerOptions{model:WorkspaceModel;config:AppConfig;sessionId:()=>string|undefined;attachments?:()=>readonly unknown[];hooks:SlashHooks}
 interface Plan{kind:string;value?:unknown}
-interface Scope{workspaceId:string;directory:string;sessionId?:string;surfaceId?:string;selection:ProviderState;sdk:NeoismClient}
+interface Scope{pickerId?:string;pickerCancelled?:boolean;pickerShell?:SlashPickerRequest;workspaceId:string;directory:string;sessionId?:string;surfaceId?:string;selection:ProviderState;sdk:NeoismClient}
 const providerModelId=(providerId:string,modelId:string)=>modelId.startsWith(`${providerId}/`)?modelId:`${providerId}/${modelId}`;
 const effects:Record<string,SlashEffect>={PissOnScreen:"piss",CussOnScreen:"cuss",GlitchOnScreen:"glitch",DiscoOnScreen:"disco",GangFightOnScreen:"gangfight",PraiseOnScreen:"praise"};
 const option=(title:string,description:string,value:string,footer="server"):SlashOption=>({title,description,value,footer});
@@ -41,6 +41,7 @@ export class SlashController{
  private listeners=new Set<()=>void>();
  private generation=0;
  private disposed=false;
+ private abort=new AbortController();
  private flights=new Map<string,Promise<boolean>>();
  private capabilities?:CapabilityInfo[];
  private catalogScope="";
@@ -49,7 +50,7 @@ export class SlashController{
   this.state.options=this.builtins.filter(row=>this.supported(this.plan(row.value).kind));
  }
  subscribe(listener:()=>void){this.listeners.add(listener);return()=>this.listeners.delete(listener);}
- dispose(){this.disposed=true;this.generation++;this.listeners.clear();}
+ dispose(){this.abort.abort();this.disposed=true;this.generation++;this.listeners.clear();}
  private update(patch:Partial<SlashController["state"]>){if(this.disposed)return;this.state={...this.state,...patch};for(const listener of this.listeners)listener();}
  private plan(text:string){return coreCall<Plan>("agentcomposer.plan",{text});}
  private supported(kind:string){
@@ -93,7 +94,7 @@ export class SlashController{
   if(this.options.attachments?.().length)return Promise.reject(new Error("Attachments belong to a chat message, not a slash command. Remove them before running this command."));
   const scope=this.scope(),key=`${scope.workspaceId}\0${scope.sessionId||""}\0${text}`;
   const existing=this.flights.get(key);if(existing)return existing;
-  const task=this.perform(scope,this.plan(text)).finally(()=>{if(this.flights.get(key)===task)this.flights.delete(key);});
+  const task=this.perform(scope,this.plan(text)).catch(async error=>{if(scope.pickerCancelled||this.disposed)return true;await this.pickerFailure(scope,error);throw error;}).finally(()=>{if(this.flights.get(key)===task)this.flights.delete(key);});
   this.flights.set(key,task);return task;
  }
  private async ensureSession(scope:Scope){
@@ -113,8 +114,26 @@ export class SlashController{
   model.setUI({agentParentSessions:parents});
   const surfaceId=model.openThread(thread);scope.sessionId=session.id;scope.surfaceId=surfaceId||`agent:${session.id}`;scope.directory=thread.directory||scope.directory;
  }
- private async picker(scope:Scope,kind:string,title:string,rows:SlashOption[],select?:(value:string)=>Promise<void>|void,selected?:string,extra:Pick<SlashPickerRequest,"activity"|"mcpServer"|"mcpEntry">={}){
-  this.assertCurrent(scope);await this.options.hooks.picker({kind,title,options:rows,selected,...extra,onSelect:select?async value=>{this.assertCurrent(scope);await select(value);}:undefined});
+ private pickerRequest(scope:Scope,request:SlashPickerRequest):SlashPickerRequest{
+  return{...request,token:`${scope.pickerId??=crypto.randomUUID()}:${request.kind}`,onCancel:()=>{scope.pickerCancelled=true;}};
+ }
+ private async loadingPicker(scope:Scope,kind:string,title:string){
+  if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
+  const request=this.pickerRequest(scope,{kind,title,options:[],loading:true});scope.pickerShell=request;await this.options.hooks.picker(request);
+ }
+ private async pickerFailure(scope:Scope,error:unknown){
+  const shell=scope.pickerShell;if(!shell||scope.pickerCancelled||this.disposed||!this.current(scope))return;
+  const message=error instanceof Error?error.message:"Could not load this menu";
+  await this.options.hooks.picker({...shell,loading:false,error:message,activity:shell.kind==="usage"?undefined:{body:message,status:"Could not load",busy:false}});
+ }
+ private async picker(scope:Scope,kind:string,title:string,rows:SlashOption[],select?:(value:string)=>Promise<void>|void,selected?:string,extra:Pick<SlashPickerRequest,"activity"|"mcpServer"|"mcpEntry"|"usage"|"onRefresh">={}){
+  this.assertCurrent(scope);if(scope.pickerCancelled||this.disposed)return;scope.pickerShell=undefined;
+  await this.options.hooks.picker(this.pickerRequest(scope,{kind,title,options:rows,selected,loading:false,...extra,onSelect:select?async value=>{this.assertCurrent(scope);await select(value);}:undefined}));
+ }
+ private async awaitCatalog(scope:Scope){
+  if(!this.options.model.state.catalogsLoading)return;
+  await new Promise<void>(resolve=>{let stop=()=>{};const done=()=>{stop();this.abort.signal.removeEventListener("abort",done);resolve();};stop=this.options.model.subscribe(()=>{if(!this.options.model.state.catalogsLoading||!this.current(scope)||this.disposed)done();});this.abort.signal.addEventListener("abort",done,{once:true});});
+  this.assertCurrent(scope);
  }
  private async changeDirectory(scope:Scope,directory:string){
   const id=await this.ensureSession(scope);this.assertCurrent(scope);
@@ -178,11 +197,11 @@ export class SlashController{
   const value=await this.options.hooks.input(request);this.assertCurrent(scope);return value;
  }
  private async usagePicker(scope:Scope){
+  await this.loadingPicker(scope,"usage","Codex");
   const usage=await scope.sdk.operations.request("v2.providers.openai.usage",{query:{workspaceId:scope.workspaceId}});this.assertCurrent(scope);
-  if(!usage.accounts.length){this.notice(scope,"Account usage","No connected OpenAI accounts. Use /connect to add one.");return;}
-  await this.picker(scope,"usage","Account usage",usage.accounts.map(account=>option(account.label,account.error||account.windows.map(window=>`${window.label}: ${window.used_percent}% used`).join(" · ")||"No usage windows reported",account.connection_id,account.plan_type||account.auth_type)),id=>{
+  await this.picker(scope,"usage","Codex",usage.accounts.map(account=>option(account.label,account.error||account.windows.map(window=>`${window.label}: ${window.used_percent}% used`).join(" · ")||"No usage windows reported",account.connection_id,account.plan_type||account.auth_type)),id=>{
    const account=usage.accounts.find(account=>account.connection_id===id);if(account)this.notice(scope,account.label,account.error||account.windows.map(window=>`${window.label}: ${window.used_percent}% used${window.reset_at?` · resets ${new Date(window.reset_at*1000).toLocaleString()}`:""}`).join("\n")||"No usage windows reported");
-  },scope.selection.connection_id||undefined);
+  },scope.selection.connection_id||undefined,{usage,onRefresh:async()=>{try{await this.usagePicker(scope);}catch(error){await this.pickerFailure(scope,error);}}});
  }
  private async connectPicker(scope:Scope){
   const [catalog,methods]=await Promise.all([scope.sdk.catalog.providers.list(scope.directory),scope.sdk.catalog.providers.authMethods(scope.directory)]);this.assertCurrent(scope);
@@ -229,6 +248,9 @@ export class SlashController{
   if(!this.supported(action.kind))throw new Error("This command is unavailable in this frontend");
   this.assertCurrent(scope);
   if(effects[action.kind]){await hooks.effect!(effects[action.kind]);return true;}
+  const pending:Record<string,[string,string]>={OpenConnectPicker:["connect","Connect a provider"],OpenModelPicker:["model","Model"],OpenAgentPicker:["agent","Agent"],OpenSessionsPicker:["sessions","Sessions"],OpenSkillPicker:["skills","Skills"],OpenSubagentPicker:["subagents","Subagent sessions"],ShowMcp:["mcp","MCP servers"]};
+  if(pending[action.kind])await this.loadingPicker(scope,...pending[action.kind]);
+  if(action.kind==="OpenModelPicker"||action.kind==="OpenAgentPicker")await this.awaitCatalog(scope);
   switch(action.kind){
    case "Noop":return false;
    case "ShowHelp":this.notice(scope,"Commands",this.state.options.map(row=>`${row.value} — ${row.description}`).join("\n"));break;

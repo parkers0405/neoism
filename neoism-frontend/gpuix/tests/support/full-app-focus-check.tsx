@@ -125,9 +125,10 @@ try {
   stage="notifications stay within content bounds below all chrome and tab strips";
   for(const viewport of [{x:300,y:128,width:640,height:480},{x:100,y:260,width:360,height:150}]){
     setOverlayViewport(host.renderer,viewport);model.report(new Error("headless notification bounds check"));await host.pump(root);
-    const notice=host.find("app-notification")!;assert.ok(notice);assert.ok(Number(notice.style.top)>=viewport.y);
-    assert.ok(Number(notice.style.maxHeight)<=viewport.height);assert.ok(Number(notice.style.maxWidth)<=viewport.width);
-    assert.ok(Number(notice.style.right)>=1440-viewport.x-viewport.width);model.clearError();await host.pump(root);
+    const notice=host.find("app-notification")!;assert.ok(notice);const container=[...host.nodes.values()].find(node=>node.children.includes(notice.id))!;
+    const left=Number(container.style.left)+Number(notice.style.left),top=Number(container.style.top)+Number(notice.style.top),width=Number(notice.style.width),height=Number(notice.style.height);
+    assert.ok(top>=viewport.y&&left>=viewport.x);assert.ok(left+width<=viewport.x+viewport.width+.001);assert.ok(top+height<=viewport.y+viewport.height+.001);
+    assert.equal(container.style.overflow,"hidden");model.clearError();await host.pump(root);
   }
   console.log(JSON.stringify({ noWindow: true, fullProductionAppComponents: true, actualCodeAndMarkdownLeaderClose: true,
     postCloseWindowAltACreatesOneAgent: true, focusedComposerShortcutRunsOnce: true, threeIndependentAgentTabs: true,

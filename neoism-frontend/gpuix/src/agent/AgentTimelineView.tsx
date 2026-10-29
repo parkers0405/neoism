@@ -44,8 +44,15 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   return engine;
 }
 
+/** Route the original Agent half-page command while its composer owns focus. */
+export function scrollAgentHalfPage(model:WorkspaceModel,sessionId:string,config:AppConfig,older:boolean){
+ const engine=engineFor(model,sessionId,config,model.agentFamily(sessionId).root);
+ coreCall("agenttimeline.half",{id:engine.id,older,deferFrame:true});
+ for(const listener of engine.dirty)listener();
+}
+
 export function AgentTimelineView(props: { sessionId: string; model: WorkspaceModel; config: AppConfig; report: (error: unknown) => void; openFile: (path: string) => void;
-  /** Composer top in pane coordinates: layout ends here, paint continues under the floating island (desktop `render_chat`). */
+  /** Composer top in pane coordinates: timeline paint and sticky table/code scrollbars end above this boundary. */
   contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
   const localName=localPresenceIdentity(config).displayName;
@@ -95,7 +102,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     if ((ctrl || event.modifiers?.cmd) && key.toLowerCase() === "c") {
       const text = coreCall<{ text: string | null }>("agenttimeline.copy", { id: engine.id }).text;
       if (text) { handled(); void writeClipboard(text).catch(props.report); }
-    } else if (ctrl && ["d", "u"].includes(key)) { handled(); call("half", { older: key === "u" }); }
+    } else if (ctrl && !event.modifiers?.alt && !event.modifiers?.cmd && !event.modifiers?.shift && ["d", "u"].includes(key)) { handled(); call("half", { older: key === "u" }); }
     else if (["pageup", "pagedown"].includes(key)) { handled(); call("scroll", { deltaY: (key === "pageup" ? 1 : -1) * bounds.height * 0.9, precise: true }); }
     else if (key === "home" || key === "end") { handled(); call("scroll", { deltaY: key === "home" ? 1e7 : -1e7, precise: true }); }
     else if (config.vim && !modified && ["j", "k"].includes(key)) { handled(); call("scroll", { deltaY: (key === "k" ? 1 : -1) * 19 * s, precise: true }); }
@@ -107,7 +114,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
       if (resized) layout();
     }}
     onScroll={(event) => {
-      try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: event.deltaY || 0, precise: !!event.precise, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
+      try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: event.deltaY || 0, precise: !!event.precise, ...(typeof event.x==="number"&&typeof event.y==="number"?local(event):{}), shift:!!event.modifiers?.shift, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
       schedule();
     }}
     onMouseDown={(event) => { if (host) focusNativeElement(renderer, host.id); if (event.button === 0) call("pointer", { kind: "down", ...local(event) }); }}

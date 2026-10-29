@@ -77,3 +77,18 @@ test("provider OAuth honors conditional prompts, attempt identity and explicit c
 test("model commands retain already-qualified catalog IDs without duplicating providers",async()=>{
  const f=await fixture();f.model.update({providers:[{id:"openai",name:"OpenAI",models:[{id:"openai/qualified",name:"Qualified"}]}]});await f.controller.execute("/model");expect(f.pickers.at(-1)?.options[0].value).toBe("openai/qualified");await f.controller.execute("/model openai/qualified");expect(f.model.selection("one").model).toBe("openai/qualified");
 });
+
+test("slash dialogs publish original loading shells immediately, retain their token and suppress cancelled late reads",async()=>{
+ const f=await fixture();f.server.defer("/providers");
+ const running=f.controller.execute("/connect"),loading=f.pickers.at(-1)!;expect(loading).toMatchObject({kind:"connect",loading:true,options:[]});expect(loading.token).toBeTruthy();
+ await until(()=>f.server.requests.some(request=>request.path==="/providers"));f.server.release("/providers");await running;
+ const ready=f.pickers.at(-1)!;expect(ready.loading).toBe(false);expect(ready.token).toBe(loading.token);expect(ready.options.length).toBeGreaterThan(0);
+ f.server.defer("/providers");const cancelled=f.controller.execute("/connect");const shell=f.pickers.at(-1)!;shell.onCancel?.();const before=f.pickers.length;f.server.release("/providers");await cancelled;expect(f.pickers).toHaveLength(before);
+});
+test("usage retains original structured windows and supports an explicit refresh without account mutations",async()=>{
+ const f=await fixture();f.server.defer("/providers/openai/usage");
+ const pending=f.controller.execute("/usage"),loading=f.pickers.at(-1)!;expect(loading).toMatchObject({kind:"usage",title:"Codex",loading:true});
+ await until(()=>f.server.requests.some(request=>request.path==="/providers/openai/usage"));f.server.release("/providers/openai/usage");await pending;
+ const usage=f.pickers.at(-1)!;expect(usage.token).toBe(loading.token);expect(usage.usage?.accounts[0]).toMatchObject({label:"Personal",plan_type:"pro",windows:[{used_percent:24,reset_at:1900000000}]});
+ await usage.onRefresh?.();expect(f.server.requests.filter(request=>request.path==="/providers/openai/usage")).toHaveLength(2);expect(f.server.requests.some(request=>request.method!=="GET")).toBe(false);
+});

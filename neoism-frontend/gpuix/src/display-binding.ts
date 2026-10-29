@@ -31,7 +31,8 @@ export function displayBindingLoader(binding:string,stamp:DisplayStamp,embedded=
 const nativeBinding=createRequire(import.meta.url)(${embedded?"embeddedBinding":JSON.stringify(binding)});
 if(typeof nativeBinding.GpuixRenderer?.prototype?.requestFrameWake!=="function"||typeof nativeBinding.testSupportEnabled!=="function"||nativeBinding.testSupportEnabled()!==false)throw new Error("The selected GPUIX binding has no production display frame API. Run npm run build:display.");
 if(typeof nativeBinding.inputCaretGeometrySupported!=="function"||nativeBinding.inputCaretGeometrySupported()!==true)throw new Error("The selected GPUIX input binding cannot emit caretGeometry. Run npm run build:display.");
-export const {AvailableUpdate,GpuixRenderer,TestGpuixRenderer,checkUpdate,hasTestGpuixRenderer,isTerminal,testSupportEnabled,inputCaretGeometrySupported}=nativeBinding;
+if(typeof nativeBinding.applicationTabShortcutsSupported!=="function"||nativeBinding.applicationTabShortcutsSupported()!==true)throw new Error("The selected GPUIX binding cannot capture tab navigation before native text selection. Run npm run build:display.");
+export const {AvailableUpdate,GpuixRenderer,TestGpuixRenderer,checkUpdate,hasTestGpuixRenderer,isTerminal,testSupportEnabled,inputCaretGeometrySupported,applicationTabShortcutsSupported}=nativeBinding;
 export const __napiBindingTarget="native";
 export const __neoismDisplayBinding=Object.freeze(${JSON.stringify(stamp)});
 export const __neoismDisplayBindingEmbedded=${embedded};

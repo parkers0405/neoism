@@ -8,11 +8,12 @@ import {AppVisualState} from "../../src/ui/AppVisualState";
 import {loadConfig} from "../../src/config";
 import {WorkspaceModel} from "../../src/model";
 import {DaemonConnection} from "../../src/daemon/client";
+import {coreCall} from "../../src/native-core";
 import {createWindowKeyRouter} from "../../src/commands/window-key-router";
 import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
 const directory=mkdtempSync(join(tmpdir(),"neoism-buffer-shortcuts-")),path=join(directory,"config.json");writeFileSync(path,"{}");process.argv.push("--config",path);
-const daemon=createAgentDaemon({deferCreations:false});daemon.files.set("code.rs","fn retained() {}\nsecond\nthird\n");
+const daemon=createAgentDaemon({deferCreations:false});daemon.history.set("one",[{id:"existing",role:"Assistant",kind:"Assistant",text:"Existing conversation history"}]);daemon.files.set("code.rs","fn retained() {}\nsecond\nthird\n");
 const config={...loadConfig(["--config",path],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),keys=createWindowKeyRouter(),root=createRoot(host.renderer,{onKeyDown:keys.dispatch,keyboardFocusDim:false});
 let sequence=0,stage="startup";
@@ -46,7 +47,39 @@ try{
   const expected=all[(all.indexOf(id)+1)%all.length];await press("right");assert.equal(model.state.activeSurfaceId,expected,`CtrlShiftRight switches once from ${testId}`);
   await press("left");assert.equal(model.state.activeSurfaceId,id,`CtrlShiftLeft returns to ${testId}`);
  }
+ stage="native root capture owns Agent navigation before textarea word-selection actions";
+ for(const id of [agent.id,conversation]){
+  model.selectSurface(id);model.setComposerDraft(model.composerDraftKey(model.state.surfaces.find(surface=>surface.id===id)!.sessionId,id),{text:"keep these draft words",attachments:[]});await host.pump(root);
+  const draftKey=model.composerDraftKey(model.state.surfaces.find(surface=>surface.id===id)!.sessionId,id);
+  const index=all.indexOf(id),expected=all[(index+1)%all.length];
+  // The native capture path emits only windowKeyDown: no textarea keyDown
+  // follows, because its SelectWord action is stopped before dispatch.
+  root.dispatch({elementId:host.windowId,eventType:"windowKeyDown",key:"right",modifiers:{ctrl:true,shift:true,alt:false,cmd:false},keystrokeId:++sequence});await host.pump(root);
+  assert.equal(model.state.activeSurfaceId,expected,"root capture leaves focused Agent textarea");
+  root.dispatch({elementId:host.windowId,eventType:"windowKeyDown",key:"left",modifiers:{ctrl:true,shift:true,alt:false,cmd:false},keystrokeId:++sequence});await host.pump(root);
+  assert.equal(model.state.activeSurfaceId,id);assert.equal(model.state.composerDrafts[draftKey]?.text,"keep these draft words");
+ }
  model.selectSurface(conversation);await host.pump(root);const history=host.find("conversation")!;root.dispatch({elementId:history.id,eventType:"mouseDown",button:0,x:400,y:150});await host.pump(root);assert.equal(host.focused,history.id);await press("right");assert.equal(model.state.activeSurfaceId,terminal,"History focus routes the same chord without interpreting it as chat input");
+ stage="CtrlU/D half-page navigation works while Agent composer owns focus";
+ model.selectSurface(conversation);await host.pump(root);
+ const sessionId=model.state.surfaces.find(surface=>surface.id===conversation)!.sessionId!;
+ const tallHistory=Array.from({length:45},(_,i)=>({id:`half-page-${i}`,role:"User",kind:"User",text:`History paragraph ${i} with enough content to retain a real scrolling viewport.`}));
+ daemon.history.set(sessionId,tallHistory);daemon.push({HistoryChunk:{session_id:sessionId,messages:tallHistory,next_cursor:null}});
+ const timeline=()=>coreCall<Array<{sessionId:string;offset:number;scrollbar?:{content:number;viewport:number}}>>("agenttimeline.diagnostics",{}).find(engine=>engine.sessionId===sessionId);
+ await until(()=>!!timeline()?.scrollbar&&timeline()!.scrollbar!.content>timeline()!.scrollbar!.viewport);
+ const composer=host.find("composer")!;root.dispatch({elementId:composer.id,eventType:"focus"});
+ const latest=timeline()!.offset;
+ root.dispatch({elementId:composer.id,eventType:"keyDown",key:"u",keyChar:"u",modifiers:{ctrl:true,shift:false,alt:false,cmd:false},keystrokeId:++sequence});await host.pump(root);
+ await until(()=>timeline()!.offset>latest+1);const older=timeline()!.offset;
+ root.dispatch({elementId:composer.id,eventType:"keyDown",key:"d",keyChar:"d",modifiers:{ctrl:true,shift:false,alt:false,cmd:false},keystrokeId:++sequence});await host.pump(root);
+ await until(()=>timeline()!.offset<older-1);
+ stage="Agent sidebar owns its CtrlU/D navigation without scrolling the conversation";
+ await press("c",{ctrl:false,shift:false,alt:true,cmd:false});await press("left",{ctrl:false,shift:false,alt:true,cmd:false});
+ const conversations=host.find("conversation-list")!;assert.ok(conversations);await until(()=>host.focused===conversations.id);
+ const beforeSidebar=timeline()!.offset;
+ root.dispatch({elementId:conversations.id,eventType:"keyDown",key:"u",keyChar:"u",modifiers:{ctrl:true,shift:false,alt:false,cmd:false},keystrokeId:++sequence});
+ assert.equal(timeline()!.offset,beforeSidebar,"Sidebar CtrlU does not invoke chat half-page command");
+ await host.pump(root);await press("right",{ctrl:false,shift:false,alt:true,cmd:false});
  stage="pending Agent permission remains pending when navigating away";
  model.selectSurface(conversation);model.update({permissions:[{sessionId:model.state.surfaces.find(surface=>surface.id===conversation)!.sessionId!,requestId:"keep-pending",tool:"shell",title:"Allow shell?"}]});await until(()=>!!host.find("agent-picker:permission"));
  await press("right");assert.equal(model.state.activeSurfaceId,terminal);assert.equal(model.state.permissions[0]?.requestId,"keep-pending");assert.equal(daemon.httpRequests.some(request=>request.path.includes("interactions/permissions/keep-pending/")),false);model.update({permissions:[]});await host.pump(root);

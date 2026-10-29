@@ -100,6 +100,12 @@ fn paint_picker(
     if picker.activity().is_none() {
         picker.set_visible_row_limit(max_rows);
     }
+    if picker.kind==NeoismAgentPickerKind::Usage {
+        painter.begin_frame();
+        neoism_ui::panels::agent_pane::view::picker::render_usage_picker(painter,picker,anchor,&theme,s,max_rows,min_y);
+        let geometry=picker.usage_layout(anchor,s,max_rows,min_y);
+        return json!({"commands":painter.commands(),"rect":geometry.rect,"animating":picker.loading||picker.is_animating(),"selectedValue":Value::Null});
+    }
     let show_search_caret = v["caret"].as_bool().unwrap_or(true);
     let empty_message = picker.empty_message();
     let list_scroll_offset = picker.tick_list_scroll();
@@ -172,6 +178,12 @@ fn paint_picker(
 }
 
 fn picker_frame(p: &mut NeoismAgentPicker, v: &Value) -> Value {
+    if p.kind==NeoismAgentPickerKind::Usage {
+        let scale=number(v,"scale",1.0);let anchor=v["anchor"].as_array().filter(|a|a.len()==4).map(|a|std::array::from_fn(|i|a[i].as_f64().unwrap_or(0.0)as f32)).unwrap_or([20.0,600.0,600.0,100.0]);
+        let limit=inline_picker::row_limit_for_space(anchor[1],number(v,"minY",8.0*scale),scale,false,8);
+        let geometry=p.usage_layout(anchor,scale,limit,number(v,"minY",8.0*scale));
+        return json!({"title":p.title,"query":"","rows":[],"count":p.usage_accounts.len(),"selected":0,"top":0,"offset":p.tick_list_scroll(),"cursorOffset":0,"rect":geometry.rect,"limit":limit,"animating":p.loading||p.is_animating(),"selectedValue":Value::Null,"loading":p.loading});
+    }
     let (rect, limit) =
         rect(v, if p.loading && p.options().is_empty() { 3 } else { p.options().len() }, v["footer"].as_bool().unwrap_or(false));
     p.set_visible_row_limit(limit);
@@ -261,6 +273,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 store.next += 1;
                 let id = 0x40000000 + store.next;
                 let kind = match text(v, "kind") {
+                    "usage" => NeoismAgentPickerKind::Usage,
                     "agent" => NeoismAgentPickerKind::Agent,
                     "model" => NeoismAgentPickerKind::Model,
                     "thinking" => NeoismAgentPickerKind::Thinking,
@@ -306,6 +319,11 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 let p = pickers.get_mut(&id).ok_or("Unknown picker")?;
                 match op {
                     "picker.query" => p.set_query(text(v, "query").to_owned()),
+                    "picker.usage"=>{
+                        if v["usage"].is_object(){let payload:neoism_ui::panels::agent_pane::state::picker::NeoismAgentUsagePayload=serde_json::from_value(v["usage"].clone()).map_err(|error|error.to_string())?;p.set_usage_accounts(payload.accounts);}
+                        if let Some(error)=v["error"].as_str(){p.set_usage_error(error.to_owned());}
+                        p.set_loading(v["loading"].as_bool().unwrap_or(false));
+                    }
                     "picker.options" => {
                         p.replace_options(options(v));
                         p.set_loading(v["loading"].as_bool().unwrap_or(false));

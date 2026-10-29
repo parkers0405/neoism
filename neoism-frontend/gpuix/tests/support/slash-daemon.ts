@@ -8,11 +8,14 @@ export function createSlashDaemon(){
  const questions=[{id:"q-one",sessionId:"one",messageId:"m",questions:[{question:"First?"},{question:"Second?"}]},{id:"q-two",sessionId:"two",messageId:"m",questions:[{question:"Other?"}]}];
  let goal:any=null,connected=false,failCommand=false,deferCreation=false,count=0;
  const creations:Array<()=>void>=[];
+ const deferred=new Set<string>(),releases=new Map<string,Array<()=>void>>();
+ const release=(path:string)=>{deferred.delete(path);for(const done of releases.get(path)||[])done();releases.delete(path);};
  const server=Bun.serve({hostname:"127.0.0.1",port:0,async fetch(request,server){
   const url=new URL(request.url);if(url.pathname==="/session")return server.upgrade(request)?undefined:new Response("",{status:400});
   const route=url.pathname.match(/^\/agent\/workspaces\/([^/]+)\/v2(.*)$/);if(!route)return new Response("Not found",{status:404});
   const workspace=decodeURIComponent(route[1]),path=route[2],body=await request.json().catch(()=>undefined);
   requests.push({workspace,path,method:request.method,body,directory:url.searchParams.get("directory"),authorization:request.headers.get("authorization")});
+  if(deferred.has(path))await new Promise<void>(resolve=>{const list=releases.get(path)||[];list.push(resolve);releases.set(path,list);});
   if(path==="/providers")return Response.json({all:[{id:"openai",name:"OpenAI",env:[],models:{},options:{},source:"builtin"}],connected:["openai"],default:{}});
   if(path==="/providers/auth-methods")return Response.json({openai:[{type:"api",label:"API key"},{type:"oauth",label:"Browser sign in",prompts:[{key:"region",message:"Region",type:"select",options:[{value:"us",label:"US"}]},{key:"tenant",message:"Tenant",type:"text",condition:{key:"region",op:"eq",value:"us"}}]}]});
   if(path==="/providers/openai/connections")return Response.json({providerId:"openai",connectionId:"added",label:body.label,scope:"workspace",authType:"api",isDefault:false});
@@ -53,5 +56,5 @@ export function createSlashDaemon(){
   if(path.startsWith("/plugins/dev.neoism.subagents/sessions/"))return Response.json([{id:"task",sessionId:"one",childSessionId:"two",agent:"plan",description:"Inspect source",status:"done",nested:false}]);
   return Response.json({message:`Unhandled fixture operation ${request.method} ${path}`},{status:404});
  },websocket:{message(socket,data){const [family,envelope]=Object.entries(JSON.parse(String(data)))[0]as[string,{request_id:number;message:any}];const reply=(message:unknown)=>socket.send(JSON.stringify({[family+"Reply"]:{request_id:envelope.request_id,message}}));if(envelope.message.Hello)reply({HelloAck:{accepted:true}});else if(envelope.message.GetHistory)reply({HistoryChunk:{session_id:envelope.message.GetHistory.session_id,messages:[]}});}}});
- return {endpoint:`ws://127.0.0.1:${server.port}/session`,requests,sessions,capabilities,creations,setFailCommand:()=>{failCommand=true;},deferCreation:()=>{deferCreation=true;},stop:()=>server.stop(true)};
+ return {defer:(path:string)=>{deferred.add(path);},release,endpoint:`ws://127.0.0.1:${server.port}/session`,requests,sessions,capabilities,creations,setFailCommand:()=>{failCommand=true;},deferCreation:()=>{deferCreation=true;},stop:()=>{for(const path of deferred)release(path);server.stop(true);}};
 }

@@ -82,3 +82,9 @@ test("server close codes remain diagnostic and stale close events cannot fail th
  const sockets:FakeSocket[]=[],failures:unknown[]=[],client=new DaemonConnection({endpoint:"ws://localhost/session"},()=>{const socket=new FakeSocket();sockets.push(socket);return socket as unknown as WebSocket;},failure=>failures.push(failure));clients.push(client);client.start();sockets[0].emit("open");sockets[0].reply("Workspace",0,{HelloAck:{accepted:true}});sockets[0].emit("close",1011);
  expect(client.state.reason).toBe("Daemon disconnected (WebSocket 1011)");expect(failures).toHaveLength(1);client.reconnect();sockets[0].emit("close",1006);sockets[1].emit("open");sockets[1].reply("Workspace",0,{HelloAck:{accepted:true}});expect(client.state.phase).toBe("connected");expect(failures).toHaveLength(1);
 });
+
+test("authenticated host identity drives workspace ownership and cannot be replaced by a stale socket",()=>{
+ const {client,sockets}=setup();sockets[0].emit("open");sockets[0].reply("Workspace",0,{HelloAck:{accepted:true,connected_host_id:"machine-a"}});expect(client.state.connectedHostId).toBe("machine-a");
+ client.reconnect();sockets[0].reply("Workspace",0,{HelloAck:{accepted:true,connected_host_id:"stale-machine"}});expect(client.state.connectedHostId).toBe("machine-a");
+ sockets[1].emit("open");sockets[1].reply("Workspace",0,{HelloAck:{accepted:true,connected_host_id:"machine-b"}});expect(client.state.connectedHostId).toBe("machine-b");
+});

@@ -1,4 +1,5 @@
 import { toArrayBuffer, type Pointer } from "bun:ffi";
+import {retireCanvasImage,reuseCanvasImage,trackCanvasTransactions} from "./canvas-transactions";
 
 /** Display-list commands for the native `<canvas>` element (see the GPUIX
  * patch, custom_elements/canvas.rs). One canvas paints hundreds of primitives
@@ -40,6 +41,7 @@ export function paintColor(color: readonly number[], bytes = false): number {
 
 export interface CanvasRaster { id: number; ptr: number; len: number; width: number; height: number }
 interface ImageRenderer {
+  applyBatch?: (json: string) => number[];
   putPaintImage?: (key: number, width: number, height: number, pixels: Buffer, format?: string) => void;
   dropPaintImage?: (key: number) => void;
 }
@@ -57,9 +59,10 @@ function counts(renderer: object) {
 export class RecentCanvasImages {
   private retained = new Map<number, number>();
   private bytes = 0;
-  constructor(private readonly renderer: object, private readonly budget: number) {}
+  constructor(private readonly renderer: object, private readonly budget: number) {trackCanvasTransactions(renderer as ImageRenderer);}
   use(source: number, raster: CanvasRaster) {
     const key = rasterKey(source, raster.id), previous = this.retained.get(key);
+    reuseCanvasImage(this.renderer,key);
     if (previous !== undefined) {
       this.retained.delete(key); this.retained.set(key, previous); return;
     }
@@ -77,7 +80,7 @@ export class RecentCanvasImages {
     this.bytes -= this.retained.get(key)!; this.retained.delete(key);
     const map = counts(this.renderer), count = (map.get(key) || 0) - 1;
     if (count > 0) map.set(key, count);
-    else { map.delete(key); (this.renderer as ImageRenderer).dropPaintImage?.(key); }
+    else { map.delete(key); retireCanvasImage(this.renderer as ImageRenderer,key); }
   }
   dispose() { for (const key of this.retained.keys()) this.release(key); }
 }
@@ -91,9 +94,10 @@ export class CanvasImages {
   private current = new Set<number>();
   private previous = new Set<number>();
   private deferred: number[] = [];
-  constructor(private readonly renderer: object,private readonly retain?:(source:number,raster:CanvasRaster)=>void) {}
+  constructor(private readonly renderer: object,private readonly retain?:(source:number,raster:CanvasRaster)=>void) {trackCanvasTransactions(renderer as ImageRenderer);}
   use(source: number, raster: CanvasRaster): number {
     const key = rasterKey(source, raster.id);
+    reuseCanvasImage(this.renderer,key);
     if (this.current.has(key)) return key;
     // The session lease must exist before this frame's own reference. A
     // generation may release its canvas before the atomic replacement batch.
@@ -123,6 +127,6 @@ export class CanvasImages {
   private release(key: number) {
     const map = counts(this.renderer), count = (map.get(key) || 0) - 1;
     if (count > 0) { map.set(key, count); return; }
-    map.delete(key); (this.renderer as ImageRenderer).dropPaintImage?.(key);
+    map.delete(key); retireCanvasImage(this.renderer as ImageRenderer,key);
   }
 }

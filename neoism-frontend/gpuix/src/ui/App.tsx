@@ -1,3 +1,4 @@
+import{ToastNotifications}from"./ToastNotifications";
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 import { Effect, Schema } from "effect";
 import { createEffect, createMemo, createSignal, untrack, For, onCleanup, onMount, Show, Switch, Match, type Accessor, type JSX } from "solid-js";
@@ -26,7 +27,7 @@ import { readFileSync } from "node:fs";
 import { EditorView } from "../editor/EditorView";
 import { MarkdownView } from "../markdown/MarkdownView";
 import { PaneLayoutView } from "../layout/PaneLayoutView";
-import { AgentTimelineView } from "../agent/AgentTimelineView";
+import { AgentTimelineView,scrollAgentHalfPage } from "../agent/AgentTimelineView";
 import { AgentSidePanelView } from "../agent/AgentSidePanelView";
 import { DirectoryBrowserView } from "../agent/DirectoryBrowserView";
 import { ConversationNavigatorView, type NavigatorRow } from "../agent/ConversationNavigatorView";
@@ -539,7 +540,12 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     else return false;
     event.preventDefault(); event.stopPropagation(); if (action) dispatchCommand({ action }); return true;
   };
-  const handleSurfaceKey = (event: KeyEvent) => { try { return handleApplicationShortcut(renderer,event) || handleCustomKey(event) || handleApplicationKey(event); } catch (error) { model.report(error); return true; } };
+  const handleAgentHistoryKey=(event:KeyEvent)=>{
+    const surface=active(),mods=event.modifiers,key=event.key?.toLowerCase();
+    if(chromeFocus().zone!=="content"||projectPicker()||directoryBrowser()||gitRestore()||menu()||surface?.kind!=="agent"||!surface.sessionId||!mods?.ctrl||mods.alt||mods.shift||mods.cmd||!["d","u"].includes(key||"")||chromeFrame()||commands()||palette()||choice()||pendingPermission()||pendingQuestion())return false;
+    event.preventDefault();event.stopPropagation();scrollAgentHalfPage(model,surface.sessionId,config,key==="u");return true;
+  };
+  const handleSurfaceKey = (event: KeyEvent) => { try { return handleApplicationShortcut(renderer,event) || handleAgentHistoryKey(event) || handleCustomKey(event) || handleApplicationKey(event); } catch (error) { model.report(error); return true; } };
   onCleanup(registerApplicationShortcuts(renderer,(action,event)=>{
     if(action==="zoom-in"||action==="zoom-out"){
       if(chromeFrame()?.kind==="settings")model.setUI({chromeAction:"OpenSettings",chromeSnapshot:chromeFrame()?.snapshot});
@@ -604,14 +610,19 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const [heightRevision, setHeightRevision] = createSignal(0);
     const [hiddenRevision,setHiddenRevision]=createSignal(0);
     const [focused, setFocused] = createSignal(false);
+    // Scroll state belongs to a root, but physical host geometry does not.
+    // A cwd/root switch leaves the host bounds unchanged, so native layout
+    // need not send another event for the newly selected viewport cache.
+    let measuredHeight = 0;
     const scope = createMemo(() => JSON.stringify([state().activeWorkspace?.id, !!props.notes, root()]));
     const viewport = createMemo(() => {
       const key = scope();
       let cached = visuals.treeViewports.get(key);
       if (!cached) {
-        cached = {showHidden:true,height:600,frame:{top:0,offset:0,selected:0,cursorOffset:0,animating:false}};
+        cached = {showHidden:true,height:measuredHeight||600,frame:{top:0,offset:0,selected:0,cursorOffset:0,animating:false}};
         visuals.treeViewports.set(key,cached);
       }
+      if(measuredHeight>0)cached.height=measuredHeight;
       return cached;
     });
     const height = () => { heightRevision(); return viewport().height; };
@@ -700,7 +711,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     createEffect(()=>{view();rows();if(focused()&&chromeFocus().zone==="sidebar")publishTarget();});
     onCleanup(()=>{sidebarHosts.delete(sidebarKey);sidebarTargets.delete(sidebarKey);});
     return <motion.div initial={config.reducedMotion||!opening?false:{left:-6*s}} animate={{left:0}} transition={{duration:config.reducedMotion?0:.12,ease:easeOutCubicBezier}} ref={element=>{host=element;sidebarHosts.set(props.notes?"notes":"files",element);}} tabIndex={0} onKeyDown={keyDown} onMouseDown={()=>focusChrome({zone:"sidebar"})} onFocus={() => {invalidateNativeFocus(renderer);setFocused(true);if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});publishTarget();}}} onBlur={() => {invalidateNativeFocus(renderer);setFocused(false);}}
-      onLayout={(event) => {if(viewport().height!==(event.height||0)){viewport().height=event.height||0;setHeightRevision(value=>value+1);}updateChromeBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});}}
+      onLayout={(event) => {measuredHeight=event.height||0;if(viewport().height!==measuredHeight){viewport().height=measuredHeight;setHeightRevision(value=>value+1);}updateChromeBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:measuredHeight});}}
       onScroll={(event) => { pendingScroll += (event.deltaY || 0) * (event.precise ? 1 : d.treeRowHeight * s * 3); animation.request(flushFrame); }}
       data-tree-id={id()} style={{ ...column, flexGrow: 1, position: "relative", overflow: "hidden" }} role="tree" aria-label={props.notes ? "Notes" : "Files"} testId={props.notes ? "notes-tree" : "file-tree"}>
       <Show when={focused() && rows().length}><div style={{ position: "absolute", left: 0, right: 0,
@@ -898,9 +909,9 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue}
         question={{id:"composer-auth-entry",sessionID:props.sessionId||"home",questions:[{question:[entry.request.title,entry.request.description].filter(Boolean).join("\n"),options:[]}]}}
         onAnswers={answers=>{setSlashInput(undefined);entry.resolve(answers[0]?.[0]);focus();}} onClose={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}/>}</Show>
-      <Show when={slashPicker()} keyed>{request=><InlinePicker config={config} kind={request.kind} title={request.title} options={request.options} current={request.selected} anchor={anchor}
-        activity={request.activity} mcpServer={request.mcpServer} mcpEntry={request.mcpEntry}
-        onSelect={value=>{setSlashPicker(undefined);void Promise.resolve(request.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{setSlashPicker(undefined);focus();}}/>}</Show>
+      <Show when={slashPicker()?.token||slashPicker()} keyed>{_token=>{const initial=slashPicker()!;const request=()=>slashPicker()?.token===initial.token?slashPicker()!:initial;return <InlinePicker config={config} kind={request().kind} title={request().title} options={request().options} current={request().selected} anchor={anchor}
+        loading={request().loading} error={request().error} usage={request().usage} onRefresh={request().onRefresh} activity={request().activity} mcpServer={request().mcpServer} mcpEntry={request().mcpEntry}
+        onSelect={value=>{const current=request();setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{request().onCancel?.();setSlashPicker(undefined);focus();}}/>;}}</Show>
     </>;
   }
   function AgentSurface(props:{surfaceId:string;sessionId?:string;initialViewport:{width:number;height:number}}) {
@@ -929,7 +940,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
       <Show when={!home()&&props.sessionId}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><Show when={props.sessionId} keyed>{(sessionId)=><AgentTimelineView sessionId={sessionId} rootSessionId={family().root} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
-        contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]||viewport().height)}
+        contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]??viewport().height)}
         openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/>}</Show></div></Show>
       <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={setFrame}/></Show>
     </div>;
@@ -1010,7 +1021,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         </Switch>
       </div></Show>
       <div testId="workspace-content" onLayout={event=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0};setWorkspaceBounds(before=>before.x===next.x&&before.y===next.y&&before.width===next.width&&before.height===next.height?before:next);}} style={{ ...column, flexGrow: 1, minWidth: 0, position: "relative", overflow: "hidden" }}>
-        <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWorkspaceId()}
+        <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWorkspaceId()} connectedHostId={state().connection.connectedHostId}
           keyboardIndex={chromeFocus().zone==="workspaces"?(chromeFocus() as {index:number}).index:undefined}
           onActivate={workspace=>void model.activateWorkspace(workspace).catch(model.report)} onNew={()=>void model.newWorkspace().catch(model.report)} onClose={workspaceId=>void model.closeWorkspace(false,workspaceId).catch(model.report)} onReorder={model.reorderWorkspace}
           registerHost={(id,host)=>{if(host)workspaceHosts.set(id,host);else workspaceHosts.delete(id);}}
@@ -1036,7 +1047,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
                 }}/></Match>
                 <Match when={surface.kind === "page" && surface.page === "extensions"}><ChromeActionsView controller={chromeActions} config={config} pageMode active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} /></Match>
-                <Match when={surface.kind === "git"&&surface.git}><GitReviewView controller={visuals.gitReview(surface,model,config,()=>closeFocusedTab())} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
+                <Match when={surface.kind === "git"&&surface.git}><GitReviewView controller={visuals.gitReview(surface,model,config,()=>{layout.focus(leaf);model.selectSurface(id,true);closeFocusedTab();},leaf)} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={()=>{noteContentFocus();setGitFocused(false);layout.focus(leaf);model.selectSurface(id,true);}} onState={next=>{if(focused())setEditorState(next);}}/></Match>
                 <Match when={surface.kind === "agent"}><Conversation surfaceId={id} initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border)};})()} /></Match>
                 <Match when={surface.kind === "file"}><div style={{ ...column, flexGrow: 1 }}>
@@ -1072,18 +1083,13 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         </div>
       </div>
     </div>
-    <StatusLine config={config} info={nativeStatus()} client={model.client} root={state().activeWorkspace?.root_dir}
+    <StatusLine editor={activeEditor()} onDiagnosticActivate={(editor,line,column)=>{if(activeEditor()!==editor)return;editor.call("goto",{line,col:column});focusChrome({zone:"content"});setEditorFocus(value=>value+1);}} config={config} info={nativeStatus()} client={model.client} root={state().activeWorkspace?.root_dir}
       connected={state().connection.phase === "connected"} splitEnabled={false} splitHidden={false} activity={state()} editorActivity={editorState()} report={model.report}
       onAction={(action) => {
         if (action.kind === "open_directory_palette") chooseStatusDirectory();
         else if (action.kind === "toggle_git_diff") toggleGit();
       }} />
-    <Show when={state().error || state().connection.phase === "auth-rejected"}>
-      <div testId="app-notification" onClick={model.clearError} role="alert" style={{ ...row, position: "absolute", top: contentViewport().y+Math.min(14*s,contentViewport().height*.05), right: windowSize().width-contentViewport().x-contentViewport().width+Math.min(14*s,contentViewport().width*.05), maxWidth: Math.max(0,Math.min(560*s,contentViewport().width-Math.min(28*s,contentViewport().width*.1))), maxHeight: Math.max(0,contentViewport().height-Math.min(28*s,contentViewport().height*.1)),overflowY:"scroll",padding: Math.min(14*s,contentViewport().width*.04),
-        borderRadius: 8 * s, backgroundColor: c.surface, borderWidth: 1, borderColor: c.red, cursor: "pointer" }}>
-        <text style={{ ...text(12, c.red), whiteSpace: "normal" }}>{state().error || state().connection.reason}</text>
-      </div>
-    </Show>
+    <ToastNotifications id={visuals.notifications()} delivery={visuals.notificationDelivery} config={config} message={state().error||(state().connection.phase==="auth-rejected"?state().connection.reason:undefined)} consume={model.clearError} report={model.report}/>
     <Show when={choice()} keyed>{(request) => <InlinePicker config={config} kind={request.kind}
       title={request.kind === "agent" ? "Agents" : request.kind === "model" ? "Select model" : request.kind === "account" ? "Select account" : "Reasoning"}
       options={pickerOptions()} current={request.kind === "account" ? request.current : request.kind === "model" ? choiceSelection().model ?? "" : choiceSelection()[request.kind]} anchor={measuredComposerAnchor(request.sessionId || activeComposerKey()) || request.anchor}

@@ -16,7 +16,7 @@ use web_time::Duration;
 use web_time::Instant;
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::primitives::IdeTheme;
 
@@ -259,7 +259,7 @@ impl Notifications {
         top_offset: f32,
     ) -> Option<usize> {
         let logical_w = window_width / scale_factor;
-        let toast_w = TOAST_WIDTH * self.scale;
+        let toast_w = (TOAST_WIDTH * self.scale).min((logical_w-2.0*RIGHT_MARGIN*self.scale).max(1.0));
         let pad_x = TOAST_PADDING_X * self.scale;
         let pad_y = TOAST_PADDING_Y * self.scale;
         let gap = TOAST_GAP * self.scale;
@@ -307,12 +307,21 @@ impl Notifications {
         None
     }
 
+    pub fn host_messages(&self)->Vec<String>{self.toasts.iter().map(|toast|toast.message.clone()).collect()}
+    pub fn dismiss(&mut self,index:usize){if index<self.toasts.len(){self.toasts.remove(index);}}
+    /// Last measured toast geometry for another native host's pointer regions.
+    pub fn host_rects(&self,width:f32,top:f32)->Vec<[f32;4]>{
+        let toast_w=(TOAST_WIDTH*self.scale).min((width-2.0*RIGHT_MARGIN*self.scale).max(1.0));
+        let x=(width-toast_w-RIGHT_MARGIN*self.scale).max(0.0);let mut y=top+TOP_OFFSET*self.scale;
+        self.toasts.iter().map(|toast|{let h=toast_height(toast.wrapped_lines.len().max(1),FONT_SIZE*self.scale,TOAST_PADDING_Y*self.scale);let rect=[x,y,toast_w,h];y+=h+TOAST_GAP*self.scale;rect}).collect()
+    }
+
     /// Draw all live toasts. `(window_width, _, scale_factor)` matches
     /// the dimensions tuple used by the rest of the overlays so the
     /// caller doesn't need to remember a fourth signature.
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         dimensions: (f32, f32, f32),
         top_offset: f32,
         theme: &IdeTheme,
@@ -325,7 +334,7 @@ impl Notifications {
         let (window_width, _window_height, scale_factor) = dimensions;
         let logical_w = window_width / scale_factor;
 
-        let toast_w = TOAST_WIDTH * self.scale;
+        let toast_w = (TOAST_WIDTH * self.scale).min((logical_w-2.0*RIGHT_MARGIN*self.scale).max(1.0));
         let pad_x = TOAST_PADDING_X * self.scale;
         let pad_y = TOAST_PADDING_Y * self.scale;
         let gap = TOAST_GAP * self.scale;

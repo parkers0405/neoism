@@ -10,7 +10,7 @@
 // curve all live in `widgets/overlay.rs`.
 
 use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use super::status_line::DiagnosticPill;
 use crate::editor_snapshot::{DiagnosticItem, DiagnosticSeverity};
@@ -140,6 +140,8 @@ pub struct DiagnosticsPopup {
     scale: f32,
     /// Last-render rect cached for outside-click hit-testing.
     last_rect: (f32, f32, f32, f32),
+    host_viewport_height: Option<f32>,
+    visible_row_limit: usize,
 }
 
 impl DiagnosticsPopup {
@@ -150,11 +152,25 @@ impl DiagnosticsPopup {
             anchor_y: 0.0,
             scale: 1.0,
             last_rect: (0.0, 0.0, 0.0, 0.0),
+            host_viewport_height: None,
+            visible_row_limit: MAX_VISIBLE_ROWS,
         }
     }
 
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.5, 3.0);
+    }
+
+    /// Embedded hosts reserve chrome above their local content body. Desktop
+    /// callers keep the original unconstrained ten-row popover by default.
+    pub fn set_host_viewport_height(&mut self, height: Option<f32>) {
+        self.host_viewport_height = height.filter(|height| height.is_finite() && *height > 0.0);
+    }
+
+    pub fn set_host_anchor(&mut self, x: f32, y: f32) {
+        self.anchor_x = x;
+        self.anchor_y = y;
+        self.popover.set_anchor(PopoverAnchor::Point([x, y]));
     }
 
     /// Rect for the host's text-occlusion registry (pane text must not
@@ -256,7 +272,7 @@ impl DiagnosticsPopup {
         if content.selected >= content.items.len() {
             content.selected = content.items.len().saturating_sub(1);
         }
-        let visible = content.items.len().min(MAX_VISIBLE_ROWS);
+        let visible = content.items.len().min(self.visible_row_limit);
         content.scroll_offset = content
             .scroll_offset
             .min(content.items.len().saturating_sub(visible));
@@ -289,18 +305,18 @@ impl DiagnosticsPopup {
         let content = self.popover.content_mut();
         if content.selected + 1 < content.items.len() {
             content.selected += 1;
-            if content.selected >= content.scroll_offset + MAX_VISIBLE_ROWS {
-                content.scroll_offset = content.selected + 1 - MAX_VISIBLE_ROWS;
+            if content.selected >= content.scroll_offset + self.visible_row_limit {
+                content.scroll_offset = content.selected + 1 - self.visible_row_limit;
             }
         }
     }
 
     pub fn scroll_by(&mut self, delta_rows: i32) {
         let content = self.popover.content_mut();
-        if content.items.len() <= MAX_VISIBLE_ROWS {
+        if content.items.len() <= self.visible_row_limit {
             return;
         }
-        let max_offset = content.items.len() - MAX_VISIBLE_ROWS;
+        let max_offset = content.items.len() - self.visible_row_limit;
         let new = (content.scroll_offset as i32 + delta_rows).clamp(0, max_offset as i32)
             as usize;
         content.scroll_offset = new;
@@ -352,6 +368,11 @@ impl DiagnosticsPopup {
         if w <= 0.0 || h <= 0.0 || mx < x || mx > x + w || my < y || my > y + h {
             return Err(());
         }
+        if self.host_viewport_height.is_some() {
+            return Ok(self.popover.content().row_layout.iter()
+                .find(|(_, top, bottom, _)| my >= *top && my < *bottom)
+                .map(|(index, _, _, _)| *index));
+        }
         let s = self.scale;
         let pad = POPUP_PADDING * s;
         let rows_y0 = y + pad + HEADER_HEIGHT * s + 6.0 * s;
@@ -373,21 +394,29 @@ impl DiagnosticsPopup {
         }
     }
 
+    /// Painted row geometry for another native GPU host, retaining original
+    /// paging, selection and the animation's current vertical offset.
+    pub fn host_rows(&self) -> Vec<(usize,[f32;4],u64,String)> {
+        let content=self.popover.content();let (x,_,w,_)=self.last_rect;
+        content.row_layout.iter().filter_map(|(index,top,bottom,_)|content.items.get(*index).map(|item|(*index,[x+8.0*self.scale,*top,(w-16.0*self.scale).max(0.0),bottom-top],item.lnum,item.message.clone()))).collect()
+    }
+    pub fn host_selected(&self)->usize {self.popover.content().selected}
+
     pub fn set_selected_index(&mut self, idx: usize) {
         let content = self.popover.content_mut();
         if idx < content.items.len() {
             content.selected = idx;
             if idx < content.scroll_offset {
                 content.scroll_offset = idx;
-            } else if idx >= content.scroll_offset + MAX_VISIBLE_ROWS {
-                content.scroll_offset = idx + 1 - MAX_VISIBLE_ROWS;
+            } else if idx >= content.scroll_offset + self.visible_row_limit {
+                content.scroll_offset = idx + 1 - self.visible_row_limit;
             }
         }
     }
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut (impl Paint + ?Sized),
         window_width: f32,
         scale_factor: f32,
         theme: &IdeTheme,
@@ -398,10 +427,12 @@ impl DiagnosticsPopup {
         }
         let s = self.scale;
         let _ = scale_factor;
-        let pad = POPUP_PADDING * s;
+        let mut pad = POPUP_PADDING * s;
         let radius = CORNER_RADIUS * s;
-        let header_h = HEADER_HEIGHT * s;
-        let row_h = ROW_HEIGHT * s + ROW_GAP * s;
+        let mut header_h = HEADER_HEIGHT * s;
+        let mut body_gap = 6.0 * s;
+        let mut row_body_h = ROW_HEIGHT * s;
+        let mut row_h = row_body_h + ROW_GAP * s;
         let eased = self.popover.anim_t();
         let lift = (1.0 - eased) * 6.0 * s;
         let alpha = eased;
@@ -411,7 +442,7 @@ impl DiagnosticsPopup {
         // through `sugarloaf.text_mut()`, which can't run while we're
         // also borrowing `self.popover.content_mut()` later. We rebuild
         // row_layout into a local Vec and push it back once we're done.
-        let (pill, items_len, total_count, scroll_offset, selected, msg_scroll_snapshot) = {
+        let (pill, items_len, total_count, mut scroll_offset, selected, msg_scroll_snapshot) = {
             let c = self.popover.content();
             (
                 c.pill,
@@ -422,14 +453,46 @@ impl DiagnosticsPopup {
                 c.msg_scroll.clone(),
             )
         };
-        let visible = items_len.min(MAX_VISIBLE_ROWS);
-        let rows_h = visible as f32 * row_h;
+        let mut visible = items_len.min(MAX_VISIBLE_ROWS);
         let payload_bounded = total_count > items_len.min(u64::MAX as usize) as u64;
-        let footer_hint = items_len > visible || payload_bounded;
-        let footer_h = if footer_hint { 16.0 * s } else { 0.0 };
-        let inner_h = header_h + 6.0 * s + rows_h + footer_h;
+        let mut footer_hint = items_len > visible || payload_bounded;
+        let mut footer_h = if footer_hint { 16.0 * s } else { 0.0 };
+        if let Some(height) = self.host_viewport_height {
+            let available = (height - 16.0 * s).max(1.0);
+            let mut rows = ((available - pad * 2.0 - header_h - body_gap - footer_h) / row_h).floor().max(0.0) as usize;
+            if rows < visible && !footer_hint {
+                footer_hint = true;
+                footer_h = 16.0 * s;
+                rows = ((available-pad*2.0-header_h-body_gap-footer_h)/row_h).floor().max(0.0) as usize;
+            }
+            if rows > 0 {
+                visible = visible.min(rows);
+            } else {
+                // On short, zoomed windows retain an accessible full row;
+                // sacrifice decorative whitespace/footer before readable ink.
+                visible = items_len.min(1);
+                footer_hint = false;
+                footer_h = 0.0;
+                body_gap = 0.0;
+                row_h = row_h.min(available);
+                row_body_h = row_body_h.min(row_h);
+                let remaining = (available-visible as f32*row_h).max(0.0);
+                header_h = header_h.min(remaining);
+                pad = pad.min(((remaining-header_h)*0.5).max(0.0));
+            }
+        }
+        let limit = visible.max(1);
+        if limit != self.visible_row_limit {
+            if selected < scroll_offset { scroll_offset = selected; }
+            else if selected >= scroll_offset + limit { scroll_offset = selected + 1 - limit; }
+        }
+        self.visible_row_limit = limit;
+        scroll_offset = scroll_offset.min(items_len.saturating_sub(visible));
+        self.popover.content_mut().scroll_offset = scroll_offset;
+        let rows_h = visible as f32 * row_h;
+        let inner_h = header_h + body_gap + rows_h + footer_h;
         let total_h = inner_h + pad * 2.0;
-        let total_w = POPUP_WIDTH * s;
+        let total_w = (POPUP_WIDTH * s).min((window_width - 16.0 * s).max(1.0));
 
         // Position: centered horizontally on the pill, just above it.
         // Diagnostics popups always anchor above the pill, so we keep
@@ -505,7 +568,7 @@ impl DiagnosticsPopup {
         );
 
         let body_x = x + pad + 4.0 * s;
-        let mut row_y = y + lift + pad + header_h + 6.0 * s;
+        let mut row_y = y + lift + pad + header_h + body_gap;
         let mut new_layout: Vec<(usize, f32, f32, f32)> = Vec::with_capacity(visible);
 
         // Collect rendered items by index — borrowing the slice once is
@@ -525,7 +588,7 @@ impl DiagnosticsPopup {
         for (offset, item) in items_slice.iter().enumerate() {
             let abs_idx = scroll_offset + offset;
             let is_selected = abs_idx == selected;
-            let row_clip = [x + 8.0 * s, row_y, total_w - 16.0 * s, ROW_HEIGHT * s];
+            let row_clip = [x + 8.0 * s, row_y, total_w - 16.0 * s, row_body_h];
             if is_selected {
                 let bg = theme.f32_alpha(theme.hover, alpha);
                 sugarloaf.rounded_rect(
@@ -533,7 +596,7 @@ impl DiagnosticsPopup {
                     x + 8.0 * s,
                     row_y,
                     total_w - 16.0 * s,
-                    ROW_HEIGHT * s,
+                    row_body_h,
                     bg,
                     DEPTH_TEXT,
                     4.0 * s,
@@ -570,7 +633,7 @@ impl DiagnosticsPopup {
                 ..DrawOpts::default()
             };
 
-            let row_text_y = row_y + (ROW_HEIGHT * s - FONT_BODY * s) / 2.0;
+            let row_text_y = row_y + ((row_body_h - FONT_BODY * s) / 2.0).max(0.0);
             let glyph_x = body_x;
             let lnum_x = glyph_x + glyph_w + 8.0 * s;
             let msg_x = lnum_x + lnum_w + 10.0 * s;
@@ -595,7 +658,7 @@ impl DiagnosticsPopup {
                 .text_mut()
                 .draw(msg_x, row_text_y, visible_msg.as_str(), &msg_opts);
 
-            new_layout.push((abs_idx, row_y, row_y + ROW_HEIGHT * s, msg_max));
+            new_layout.push((abs_idx, row_y, row_y + row_body_h, msg_max));
             row_y += row_h;
         }
 
@@ -643,7 +706,7 @@ fn with_alpha(mut c: [u8; 4], alpha: f32) -> [u8; 4] {
 }
 
 fn slice_visible(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     text: &str,
     opts: &DrawOpts,
     scroll_x: f32,
@@ -713,7 +776,7 @@ fn slice_visible(
 }
 
 fn trim_to_fit(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut (impl Paint + ?Sized),
     text: &str,
     opts: &DrawOpts,
     max_w: f32,

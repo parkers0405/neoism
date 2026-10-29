@@ -27,12 +27,14 @@ export interface ConnectionState {
   phase: "connecting" | "authenticating" | "connected" | "waiting" | "auth-rejected" | "closed";
   attempt: number;
   reason?: string;
+  connectedHostId?:string;
 }
 
 export const WorkspaceSchema = Schema.Struct({
   id: Schema.String, host_id: Schema.String, title: Schema.String,
   host_kind:Schema.optionalKey(Schema.String),
   visibility:Schema.optionalKey(Schema.String),
+  running_on_host_id:Schema.optionalKey(Schema.NullOr(Schema.String)),
   root_dir: Schema.optionalKey(Schema.NullOr(Schema.String)),
   notes_vault_dir: Schema.optionalKey(Schema.NullOr(Schema.String)),
   linked_vault_dir: Schema.optionalKey(Schema.NullOr(Schema.String)),

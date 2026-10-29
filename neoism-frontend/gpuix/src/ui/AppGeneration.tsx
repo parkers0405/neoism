@@ -19,11 +19,18 @@ export function AppGeneration<T extends object>(props: {
 }) {
   const renderer = useGpuix()?.renderer as { getRenderedFrameCount?: () => number } | undefined;
   const [generations, setGenerations] = createSignal<T[]>([untrack(() => props.value)]);
+  // The outgoing glyphs and their background are one visual generation.
+  // Applying the incoming background first can make light-theme dark ink
+  // disappear against a new dark background while its replacement settles.
+  const backgrounds = new WeakMap<T, {image?:{path:string;opacity:number};color?:string}>();
+  backgrounds.set(untrack(() => props.value), untrack(() => ({image:props.background,color:props.backgroundColor})));
+  const background = () => backgrounds.get(generations()[0]);
   let watch: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(watch));
   const promote = (next: T) => { clearTimeout(watch); watch = undefined; setGenerations(list => list.includes(next) ? [next] : list); };
   createEffect(() => {
     const next = props.value;
+    backgrounds.set(next,{image:props.background,color:props.backgroundColor});
     if (untrack(generations).includes(next)) return;
     clearTimeout(watch);
     // A newer request supersedes a still-settling one; the visible generation stays.
@@ -48,8 +55,8 @@ export function AppGeneration<T extends object>(props: {
   });
   return <div testId="app-shell" style={{
     display: "flex", flexDirection: "column", width: "100%", height: "100%",
-    minWidth: 0, minHeight: 0, position: "relative", overflow: "hidden",backgroundColor:props.backgroundColor,
-  }}><Show when={props.background?.path} keyed>{path=><img testId="app-wallpaper" src={path} objectFit="cover" alt="" style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",opacity:props.background?.opacity,pointerEvents:"none"}}/>}</Show>
+    minWidth: 0, minHeight: 0, position: "relative", overflow: "hidden",backgroundColor:background()?.color,
+  }}><Show when={background()?.image?.path} keyed>{path=><img testId="app-wallpaper" src={path} objectFit="cover" alt="" style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",opacity:background()?.image?.opacity,pointerEvents:"none"}}/>}</Show>
     <For each={generations()}>{(value) => {
       const pending = () => generations()[0] !== value;
       const retiring = () => !pending() && generations().length > 1;

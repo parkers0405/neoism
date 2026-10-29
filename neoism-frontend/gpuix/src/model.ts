@@ -1031,6 +1031,10 @@ export class WorkspaceModel {
     }
     this.update({ providerStates: { ...this.state.providerStates, [sessionId]: selection } });
     const task = (this.selectionTasks.get(sessionId) || Promise.resolve()).then(async () => {
+      // The original Agent command resolves the conversation's own scope.
+      // A legacy chat shown by the master catalog need not belong to the
+      // current UI workspace's HTTP tenant.
+      if(field==="agent"){this.sendAgent({SetAgent:{session_id:sessionId,agent:value}});return;}
       await this.sdkForSession(sessionId).sessions.update(sessionId, { agent: selection.agent || undefined, model: sdkModel(selection) });
     }).catch(this.report);
     this.selectionTasks.set(sessionId, task);

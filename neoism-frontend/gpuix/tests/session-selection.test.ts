@@ -32,16 +32,19 @@ test("thread model changes clear only accounts belonging to the previous provide
   model.update({providerStates:{...model.state.providerStates,one:{model:"openai/base",provider_id:"openai",connection_id:"openai-account",thinking:"medium",agent:"build"},two:{model:"other/second",connection_id:"other-account"}}});
   model.setSelection("model","openai/advanced","one");model.setSelection("thinking","high","one");model.setSelection("agent","plan","one");
   const updates=()=>daemon.requests.filter(request=>request.tag==="UpdateSession"&&request.body.session_id==="one");
-  await until(()=>updates().length===3);
+  const agentUpdates=()=>daemon.requests.filter(request=>request.tag==="SetAgent"&&request.body.session_id==="one");
+  await until(()=>updates().length===2&&agentUpdates().length===1&&model.selection("one").context_limit===128000);
   for(const update of updates())expect(update.body.model).toMatchObject({providerId:"openai",connectionId:"openai-account"});
-  expect(updates()[2].body).toMatchObject({agent:"plan",model:{id:"advanced",variant:"high"}});
+  expect(updates()[1].body.model).toMatchObject({id:"advanced",variant:"high"});
+  expect(agentUpdates()[0].body).toEqual({session_id:"one",agent:"plan"});
+  expect(model.selection("one")).toMatchObject({agent:"plan",model:"openai/advanced",connection_id:"openai-account",thinking:"high"});
   model.setSelection("model","other/next","one");
   expect(model.selection("one").connection_id).toBeUndefined();expect(model.selection("one").provider_id).toBe("other");
   expect(model.selection("two").connection_id).toBe("other-account");
-  await until(()=>updates().length===4);
-  expect(updates()[3].body.model).toEqual({providerId:"other",id:"next",variant:"high"});
-  model.setSelection("thinking","low","one");await until(()=>updates().length===5);
-  expect(updates()[4].body.model).toEqual({providerId:"other",id:"next",variant:"low"});
+  await until(()=>updates().length===3);
+  expect(updates()[2].body.model).toEqual({providerId:"other",id:"next",variant:"high"});
+  model.setSelection("thinking","low","one");await until(()=>updates().length===4);
+  expect(updates()[3].body.model).toEqual({providerId:"other",id:"next",variant:"low"});
  }finally{close();}
 });
 test("home drafts retain same-provider accounts and omit them atomically on cross-provider creation",async()=>{

@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { ptr } from "bun:ffi";
 import { CanvasImages, RecentCanvasImages, rasterKey } from "../src/ui/canvas";
+import {canvasImageKeys} from "../src/ui/canvas-transactions";
+
+test("image lease scan ignores text/path primitives and quoted pseudo commands",()=>{
+ const commands=JSON.stringify([{k:"t",t:'{"k":"i","id":999}',x:0,y:0},{id:41,b:[0,0,1,1],k:"i"},{k:"r",b:[0,0,1,1],c:255},{k:"i",id:42,b:[0,0,1,1]},{k:"i",id:41,b:[2,2,1,1]}]);
+ expect([...canvasImageKeys(commands)]).toEqual([41,42]);expect([...canvasImageKeys("[]")]).toEqual([]);
+});
 
 function fixture(budget = 8) {
   const pixels = Buffer.alloc(4, 255), uploads: number[] = [], drops: number[] = [];

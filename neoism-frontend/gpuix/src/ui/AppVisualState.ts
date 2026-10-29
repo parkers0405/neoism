@@ -16,11 +16,14 @@ export interface CachedTreeViewport {showHidden:boolean;height:number;frame:{top
 export class AppVisualState {
  readonly agentChips=new AgentChipHosts();
  readonly wordmarks=new WordmarkHosts();
+ private notificationsId?:number;
+ readonly notificationDelivery:{message?:string;consumed:boolean;refresh?:()=>void}={consumed:true};
+ notifications(){return this.notificationsId??=coreCall<{id:number}>("notifications.new").id;}
  readonly trees=new Map<string,number>();
  readonly treeViewports=new Map<string,CachedTreeViewport>();
  readonly treeWidths=new Map<string,number>();
  private gitPanels=new Map<string,GitController>();
- private gitReviews=new Map<string,{controller:GitReviewController;reveal?:number}>();
+ private gitReviews=new Map<string,{surfaceId:string;leaf?:number;controller:GitReviewController;reveal?:number}>();
  private agentComposers=new Map<string,{surfaceId:string;state:CachedAgentComposer}>();
  agentComposer(surfaceId:string,config:AppConfig,initialViewport?:{width:number;height:number}):CachedAgentComposer{
   const style=JSON.stringify([config.fontFamily,config.fontWeight,config.scale,config.themeName]),key=`${surfaceId}\0${style}`;
@@ -35,15 +38,16 @@ export class AppVisualState {
   if(!controller){controller=new GitController({model,config});this.gitPanels.set(workspaceId,controller);}
   controller.configure(config);return controller;
  }
- gitReview(surface:Surface,model:WorkspaceModel,config:AppConfig,onClose:()=>void){
+ gitReview(surface:Surface,model:WorkspaceModel,config:AppConfig,onClose:()=>void,leaf?:number){
   if(!surface.git)throw new Error("Missing Git review descriptor");
-  let entry=this.gitReviews.get(surface.id);
-  if(!entry){entry={controller:new GitReviewController({model,config,descriptor:surface.git,git:this.gitPanel(surface.workspaceId,model,config),workspaceRoot:surface.git.root,onClose}),reveal:surface.gitReveal};this.gitReviews.set(surface.id,entry);}
+  const key=leaf===undefined?surface.id:JSON.stringify([surface.id,leaf]);
+  let entry=leaf===undefined?[...this.gitReviews.values()].find(entry=>entry.surfaceId===surface.id):this.gitReviews.get(key);
+  if(!entry){entry={surfaceId:surface.id,leaf,controller:new GitReviewController({model,config,descriptor:surface.git,git:this.gitPanel(surface.workspaceId,model,config),workspaceRoot:surface.git.root,onClose}),reveal:surface.gitReveal};this.gitReviews.set(key,entry);}
   entry.controller.options.onClose=onClose;entry.controller.configure(config);
   if(entry.reveal!==surface.gitReveal){entry.reveal=surface.gitReveal;if(surface.git.path)entry.controller.reveal(surface.git.path);}
   return entry.controller;
  }
- pruneGitReviews(surfaces:readonly Surface[]){const ids=new Set(surfaces.map(surface=>surface.id));for(const[id,entry]of this.gitReviews){if(!ids.has(id)){entry.controller.dispose();this.gitReviews.delete(id);continue;}const surface=surfaces.find(surface=>surface.id===id);if(surface?.git&&entry.reveal!==surface.gitReveal){entry.reveal=surface.gitReveal;if(surface.git.path)entry.controller.reveal(surface.git.path);}}}
+ pruneGitReviews(surfaces:readonly Surface[]){const byId=new Map(surfaces.map(surface=>[surface.id,surface]));for(const[key,entry]of this.gitReviews){const surface=byId.get(entry.surfaceId),layout=surface&&entry.controller.options.model.layouts.get(surface.workspaceId);if(!surface||entry.leaf!==undefined&&layout&&!layout.frame.leaves.some(leaf=>leaf.leaf===entry.leaf&&leaf.surfaceId===surface.id)){entry.controller.dispose();this.gitReviews.delete(key);continue;}if(surface.git&&entry.reveal!==surface.gitReveal){entry.reveal=surface.gitReveal;if(surface.git.path)entry.controller.reveal(surface.git.path);}}}
  applyGitReply(root:string,reply:unknown){for(const entry of this.gitReviews.values())if(entry.controller.descriptor.root===root)entry.controller.call("reply",{message:{PullRequest:{reply}}});}
  private glyphHosts=new Map<string,ReturnType<typeof createTreeGlyphHost>>();
  private rasterPins=new Map<string,CanvasImages>();
@@ -54,5 +58,5 @@ export class AppVisualState {
   const key=JSON.stringify([workspaceId,notes,root]);let value=this.reveals.get(key);
   if(!value){value=new Map();this.reveals.set(key,value);}return value;
  }
- dispose(){this.agentChips.dispose();for(const entry of this.agentComposers.values())entry.state.native?.dispose();this.agentComposers.clear();for(const entry of this.gitReviews.values())entry.controller.dispose();this.gitReviews.clear();for(const controller of this.gitPanels.values())controller.dispose();this.gitPanels.clear();this.wordmarks.dispose();for(const id of this.trees.values())coreCall("dispose",{id});this.trees.clear();this.treeViewports.clear();this.reveals.clear();this.treeWidths.clear();for(const images of this.rasterPins.values())images.dispose();this.rasterPins.clear();for(const host of this.glyphHosts.values())host.dispose();this.glyphHosts.clear();}
+ dispose(){if(this.notificationsId!==undefined)coreCall("notifications.dispose",{id:this.notificationsId});this.agentChips.dispose();for(const entry of this.agentComposers.values())entry.state.native?.dispose();this.agentComposers.clear();for(const entry of this.gitReviews.values())entry.controller.dispose();this.gitReviews.clear();for(const controller of this.gitPanels.values())controller.dispose();this.gitPanels.clear();this.wordmarks.dispose();for(const id of this.trees.values())coreCall("dispose",{id});this.trees.clear();this.treeViewports.clear();this.reveals.clear();this.treeWidths.clear();for(const images of this.rasterPins.values())images.dispose();this.rasterPins.clear();for(const host of this.glyphHosts.values())host.dispose();this.glyphHosts.clear();}
 }

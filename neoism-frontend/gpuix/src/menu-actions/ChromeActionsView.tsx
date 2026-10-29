@@ -38,7 +38,7 @@ export function ChromeActionsView(props: { controller: ChromeActionsController; 
     onLayout={(event) => { const next = { x: event.x || 0, y: event.y || 0, width: event.width || 0, height: event.height || 0 }; setBounds((old) => Object.keys(next).every((key) => next[key as keyof typeof next] === old[key as keyof typeof old]) ? old : next); if (page && next.width && next.height) props.controller.layout(next.width, next.height, true); }}
     onMouseDown={(event) => { if (event.button !== undefined && event.button !== 0) return; focus(); props.controller.call("click", point(event), page); }}
     onMouseMove={(event) => props.controller.call("pointer", point(event), page)}
-    onScroll={(event) => props.controller.call("scroll", { ...point(event), delta: (event.deltaY || 0) * (event.precise ? 1 : 40 * props.config.scale) }, page)}
+    onScroll={(event) => props.controller.call("scroll", { ...point(event), delta: (event.deltaY || 0) * (event.precise ? 1 : frame()?.kind === "settings" ? 48 : 40 * props.config.scale) }, page)}
     style={page ? { position: "relative", flexGrow: 1, minHeight: 0, minWidth: 0, overflow: "hidden", backgroundColor: props.config.theme.bg } : { position: "absolute", left: viewport().x, top: viewport().y, width: viewport().width, height: viewport().height, overflow: "hidden" }}>
     <Show when={frame()} fallback={<LoadingSkeleton kind="document" config={props.config} />}>
       <div testId="chrome-action-paint-origin" style={{position:"absolute",left:offset().x,top:offset().y,width:"100%",height:"100%",pointerEvents:"none"}}>

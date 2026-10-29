@@ -10,10 +10,11 @@ import {workspaceDropTarget,type WorkspaceDropTarget} from "../workspaces/drag-t
 import {HoverTabTitle} from "../layout/HoverTabTitle";
 import {verticalTabScroll,consumeTabScroll} from "../layout/tab-scroll";
 import {TabSlide} from "../layout/tab-slide";
+import {workspaceIcon,cloudWorkspace} from "../workspaces/workspace-icon";
 
 /** Window-owned workspace tabs size to their titles and share one horizontal strip with their add button. */
 export function WorkspaceTabs(props:{
- config:AppConfig;workspaces:readonly Workspace[];activeId?:string;keyboardIndex?:number;
+ config:AppConfig;workspaces:readonly Workspace[];activeId?:string;keyboardIndex?:number;connectedHostId?:string;
  onActivate:(workspace:Workspace)=>void;onNew:()=>void;onClose:(workspaceId:string)=>void;
  onReorder?:(dragId:string,targetId:string,position:"before"|"after")=>void;
  registerHost:(id:string,host:HostElement|undefined)=>void;
@@ -85,7 +86,7 @@ export function WorkspaceTabs(props:{
    onMouseEnter={()=>setHovered(true)} onMouseLeave={()=>setHovered(false)} onClick={()=>{if(!closingClick&&!suppressActivation)props.onActivate(workspace());}}
    style={{...row,position:"relative",left:(slideRevision(),slide.offset(p.id)),opacity:drag()===p.id?0:1,paddingLeft:chrome.tabPaddingX,paddingRight:9*s+spec.buffer.closeHitSize/2+spec.buffer.padding,gap:9*s,height:chrome.height,flexShrink:0,overflow:"hidden",cursor:drag()===p.id?"grabbing":"pointer",backgroundColor:selected()||drag()===p.id?c.bg:undefined,borderTopLeftRadius:chrome.tabRadius,borderTopRightRadius:chrome.tabRadius}}>
    <motion.div initial={false} animate={{opacity:(hovered()||props.keyboardIndex===p.index)&&!selected()?1:0}} transition={{duration:.15,ease:easeOutCubicBezier}} style={{position:"absolute",left:0,right:0,top:0,height:chrome.height,backgroundColor:c.accent+"17",pointerEvents:"none"}}/>
-   <text testId={`workspace-icon:${p.id}`} style={{...text,flexShrink:0,lineHeight:chrome.height,fontFamily:props.config.iconFontFamily,fontSize:12*s,color:rgba(chrome.iconColor)}}>{chrome.iconGlyph}</text>
+   <text testId={`workspace-icon:${p.id}`} aria-label={cloudWorkspace(workspace(),props.config,props.connectedHostId)?"Cloud workspace":"Local workspace"} style={{...text,flexShrink:0,lineHeight:chrome.height,fontFamily:props.config.iconFontFamily,fontSize:12*s,color:rgba(chrome.iconColor)}}>{workspaceIcon(workspace(),props.config,chrome.iconGlyph,props.connectedHostId)}</text>
    <text onLayout={event=>{if(event.width)setTitleWidth(event.width);}} style={{...text,position:"absolute",opacity:0,left:0,top:0}}>{title()}</text>
    <HoverTabTitle testId={`workspace-title:${p.id}`} label={title()} width={titleBudget()} naturalWidth={titleWidth()} height={chrome.height} scale={s} hovered={hovered()} reducedMotion={props.config.reducedMotion} style={{...text,lineHeight:chrome.height,color:selected()?c.fg:c.muted}}/>
    <div ref={value=>closeHost=value} role="button" aria-label={`Close ${workspace().title}`} testId={`workspace-close:${p.id}`} onClick={event=>{if(closePressed){closePressed=false;closingClick=true;}else if(!suppressActivation)close(event);}}
@@ -111,7 +112,7 @@ export function WorkspaceTabs(props:{
    <div testId="workspace-drag-layer" onMouseMove={move} onMouseUp={finish} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"auto",cursor:"grabbing"}}/>
    <div style={{position:"absolute",left:stripOriginX,top:stripOriginY,width:stripWidth,height:chrome.height,overflow:"hidden",pointerEvents:"none"}}>
     <div testId="workspace-drag-preview" aria-hidden={true} style={{...row,position:"absolute",left:(slideRevision(),scrollX+slide.position(drag()!)),top:0,width:widths.get(drag()!)||0,height:chrome.height,paddingLeft:chrome.tabPaddingX,paddingRight:9*s+spec.buffer.closeHitSize/2+spec.buffer.padding,gap:9*s,backgroundColor:c.bg,borderTopLeftRadius:chrome.tabRadius,borderTopRightRadius:chrome.tabRadius,pointerEvents:"none"}}>
-     <text style={{...text,flexShrink:0,lineHeight:chrome.height,fontFamily:props.config.iconFontFamily,fontSize:12*s,color:rgba(chrome.iconColor)}}>{chrome.iconGlyph}</text>
+     <text testId="workspace-drag-preview-icon" style={{...text,flexShrink:0,lineHeight:chrome.height,fontFamily:props.config.iconFontFamily,fontSize:12*s,color:rgba(chrome.iconColor)}}>{workspaceIcon(props.workspaces.find(workspace=>workspace.id===drag()),props.config,chrome.iconGlyph,props.connectedHostId)}</text>
      <text style={{...text,flexShrink:0,lineHeight:chrome.height,color:props.activeId===drag()?c.fg:c.muted}}>{workspaceLabel(props.workspaces.find(workspace=>workspace.id===drag())?.title||"Workspace",props.workspaces.find(workspace=>workspace.id===drag())?.root_dir)}</text>
      <div style={{...row,position:"absolute",right:spec.buffer.padding-spec.buffer.closeHitSize/2,top:(chrome.height-spec.buffer.closeHitSize)/2,justifyContent:"center",width:spec.buffer.closeHitSize,height:spec.buffer.closeHitSize,flexShrink:0,pointerEvents:"none"}}><text style={{...text,fontSize:spec.buffer.fontSize,color:c.muted}}>×</text></div>
     </div>

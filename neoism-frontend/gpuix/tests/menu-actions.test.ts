@@ -56,6 +56,14 @@ test("extensions preserve actual inventory status while withholding unsupported 
   expect(labels).toContain("Installed"); expect(labels).not.toContain("Uninstall");
   expect(extensions.call("key", { key: "enter" }).action).toBeNull();
 });
+test("Extensions follows the same compositor scroll direction as Settings and Code",async()=>{
+  const extensions=menu("extensions",{entries:Array.from({length:30},(_,index)=>({id:`fixture-${index}`,name:`Fixture extension ${index}`,version:"1",description:"Scroll direction fixture",author:"Neoism",categories:["Language Servers"],languages:["Rust"],status:"installed",installed_version:"1"}))});
+  const y=(frame:MenuFrame)=>frame.commands.find(command=>command.kind==="text"&&command.text==="Fixture extension 0");
+  const before=y(extensions.frame);expect(before?.kind).toBe("text");if(before?.kind!=="text")throw new Error("Fixture extension did not paint");
+  let frame=extensions.call("scroll",{delta:-40});const limit=performance.now()+1000;
+  while(performance.now()<limit){const label=y(frame);if(label?.kind==="text"&&label.y<before.y)break;await Bun.sleep(8);frame=extensions.call("frame");}
+  const after=y(frame);expect(after?.kind).toBe("text");if(after?.kind!=="text")throw new Error("Scrolled fixture extension did not paint");expect(after.y).toBeLessThan(before.y);
+});
 test("background discovery reuses backend format, explicit-selection precedence and alias dedup", () => {
   const base = mkdtempSync(join(tmpdir(), "neoism-bg-catalog-")); cleanups.push(() => rmSync(base, { recursive: true, force: true }));
   mkdirSync(join(base, "bg")); writeFileSync(join(base, "bg", "one.PNG"), "fixture"); writeFileSync(join(base, "bg", "ignore.txt"), "fixture");

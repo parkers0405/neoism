@@ -43,6 +43,8 @@ mod editor_presence;
 mod finder;
 mod command_catalog;
 mod chrome;
+mod notifications;
+mod diagnostic_popup;
 mod presence;
 mod keyboard_policy;
 mod tree_glyphs;
@@ -906,6 +908,8 @@ impl Editor {
 fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
     if let Some(result) = ssh_transport::dispatch(&v) { return result; }
     if let Some(result) = presence::dispatch(&v) { return result; }
+    if let Some(result) = diagnostic_popup::dispatch(&v,engines) { return result; }
+    if let Some(result) = notifications::dispatch(&v) { return result; }
     if let Some(result) = chrome::dispatch(&v) { return result; }
     if let Some(result) = keyboard_policy::dispatch(&v) { return result; }
     if let Some(result) = tree_glyphs::dispatch(&v) { return result; }

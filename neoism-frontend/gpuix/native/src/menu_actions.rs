@@ -301,7 +301,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
         if op=="menu.data"{match &mut host.panel {Panel::Settings(p)=>{p.set_values(v["values"].clone());},Panel::Extensions(p)=>p.set_entries(extensions(&v["entries"])),_=>{}}}
         let x=n(v,"x",0.0);let y=n(v,"y",0.0);
         if op=="menu.pointer"{host.mouse=Some((x,y));match &mut host.panel {Panel::Appearance(p)=>{p.hover(x,y,host.width,1.0);},Panel::Settings(p)=>p.pointer_move(x,y),Panel::About(p)=>{p.pointer_move(x,y,host.width,1.0);},_=>{}}}
-        if op=="menu.scroll"{let delta=n(v,"delta",0.0);match &mut host.panel{Panel::Settings(p)=>{p.scroll_by(-delta);},Panel::Extensions(p)=>p.scroll_pixels(delta),Panel::Appearance(p)=>p.scroll_pixels(delta),Panel::About(p)=>{p.scroll_at(x,y,host.width,1.0,-delta);}}}
+        if op=="menu.scroll"{let delta=n(v,"delta",0.0);match &mut host.panel{Panel::Settings(p)=>{p.scroll_by(delta);},Panel::Extensions(p)=>p.scroll_pixels(-delta),Panel::Appearance(p)=>p.scroll_pixels(delta),Panel::About(p)=>{p.scroll_at(x,y,host.width,1.0,-delta);}}}
         if op=="menu.directories" {if let Panel::Appearance(p)=&mut host.panel {p.set_cd_directory_results(v["entries"].as_array().into_iter().flatten().filter_map(Value::as_str).map(PaletteDirectoryEntry::new).collect());}}
         if op=="menu.query"{if let Panel::Appearance(p)=&mut host.panel{p.set_query(text(v,"query").into());}}
         if op=="menu.click"{match &mut host.panel{

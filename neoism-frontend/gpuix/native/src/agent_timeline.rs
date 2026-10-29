@@ -117,7 +117,10 @@ fn render_frame(view: &mut View) -> Value {
     let painter: &mut dyn Paint = &mut view.painter;
     let top=neoism_ui::panels::agent_pane::view::chat::render_conversation_header(painter,&mut view.pane,rect,&theme,view.mouse,s,&[]);
     let metrics=[content_x,top,content_w,(bottom-top).max(0.0)];
-    let paint=[content_x,top,content_w,(view.height-top).max(0.0)];
+    // The fixed composer is the visible timeline boundary. Passing the full
+    // pane as paint viewport hid sticky Markdown table/code scrollbars under
+    // the composer despite correct scroll metrics.
+    let paint=metrics;
     let header={use neoism_ui::panels::agent_pane::view::chat::AgentChatPane;
       view.pane.conversation_header().visible_links().map(|(direction,target,rects)|json!({"direction":format!("{:?}",direction).to_lowercase(),"target":target,"rects":rects})).collect::<Vec<_>>()};
     let rail = render_timeline_in_paint_viewport_with::<NeoismAgentPane, SharedTimelineDelegate>(
@@ -390,7 +393,23 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 Ok(frame(view))
             },
             "agenttimeline.scroll" => {
-                let delta = if v["precise"].as_bool().unwrap_or(false) {
+                let precise=v["precise"].as_bool().unwrap_or(false);
+                let dx=number(v,"deltaX",0.0);let dy=number(v,"deltaY",0.0);
+                let horizontal=if precise {
+                    if dx.abs()>dy.abs() && dx.abs()>0.5 {-dx} else if v["shift"].as_bool().unwrap_or(false) && dy.abs()>0.5 {-dy} else {0.0}
+                } else if dx.abs()>0.01 {-dx*48.0} else if v["shift"].as_bool().unwrap_or(false) {-dy*48.0} else {0.0};
+                let point=v["x"].as_f64().zip(v["y"].as_f64()).map(|(x,y)|(x as f32,y as f32)).or(view.mouse);
+                if horizontal.abs()>0.01 {
+                    if let Some((x,y))=point {
+                        if view.pane.scroll_markdown_horizontal_at(x,y,horizontal).is_some() {
+                            // Consume at both edges too: sideways input must
+                            // never leak into vertical timeline movement.
+                            if v["deferFrame"].as_bool().unwrap_or(false) {return Ok(Value::Null);}
+                            return Ok(frame(view));
+                        }
+                    }
+                }
+                let delta = if precise {
                     ScrollDelta::Pixels { x: number(v, "deltaX", 0.0), y: number(v, "deltaY", 0.0) }
                 } else {
                     ScrollDelta::Lines { x: number(v, "deltaX", 0.0), y: number(v, "deltaY", 0.0) }
@@ -407,6 +426,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             }
             "agenttimeline.half" => {
                 view.pane.scroll_timeline_half_page(v["older"].as_bool().unwrap_or(false));
+                if v["deferFrame"].as_bool().unwrap_or(false) {return Ok(Value::Null);}
                 Ok(frame(view))
             }
             "agenttimeline.pointer" => {

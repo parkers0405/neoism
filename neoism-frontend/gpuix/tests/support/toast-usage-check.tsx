@@ -1,0 +1,33 @@
+import assert from"node:assert/strict";
+import{createRoot}from"@gpuix/solid";
+import{createSignal}from"solid-js";
+import{App}from"../../src/ui/App";
+import{AppGeneration}from"../../src/ui/AppGeneration";
+import{AppVisualState}from"../../src/ui/AppVisualState";
+import{loadConfig}from"../../src/config";
+import{DaemonConnection}from"../../src/daemon/client";
+import{WorkspaceModel}from"../../src/model";
+import{createAgentDaemon}from"./agent-daemon";
+import{createRecordingAppRenderer}from"./full-app-recording-renderer";
+const usage={accounts:[{connection_id:"one",label:"Patriot",is_default:true,auth_type:"oauth",plan_type:"team",error:null,windows:[{label:"5-hour",used_percent:0,reset_at:1900000000,limit_window_seconds:18000}]},{connection_id:"two",label:"Communities",is_default:false,auth_type:"oauth",plan_type:"pro",error:"OpenAI usage service rejected the request",windows:[]}]};
+const daemon=createAgentDaemon({usageResponse:usage,usageDelayMs:150}),config={...loadConfig(["--config","/nonexistent/toast-usage-app"],{}),endpoint:daemon.endpoint,reducedMotion:true,cursorBlink:false};
+const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer),[generation,setGeneration]=createSignal(config);
+const until=async(check:()=>boolean)=>{const end=Date.now()+5000;while(!check()){await host.pump(root);if(Date.now()>end)throw new Error("Toast/usage App did not settle");await Bun.sleep(4);}await host.pump(root);};
+const notices=()=>[...host.nodes.values()].filter(node=>node.props.testId==="app-notification");
+try{
+ model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);model.newAgentHome();root.render(()=><AppGeneration value={generation()}>{config=><App model={model} config={config} visuals={visuals}/>}</AppGeneration>);await host.pump(root);
+ model.report(new Error("Original notification card"));await until(()=>notices().length===1);assert.equal(notices()[0].props["aria-label"],"Original notification card");
+ const notice=notices()[0],container=[...host.nodes.values()].find(node=>node.children.includes(notice.id))!;assert.ok(Number(container.style.top)+Number(notice.style.top)>=Number(container.style.top));assert.equal(container.style.overflow,"hidden");
+ await Bun.sleep(1600);root.dispatch({elementId:notices()[0].id,eventType:"mouseMove",x:Number(container.style.left)+Number(notice.style.left)+1,y:Number(container.style.top)+Number(notice.style.top)+1});await host.pump(root);setGeneration({...config,fontSize:16,scale:16/14});await host.pump(root);assert.equal(notices().length,1,"Zoom after native dedupe window must not republish the same toast");
+ await until(()=>!notices().length);assert.equal(model.state.error,undefined);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"/usage"});await host.pump(root);root.dispatch({elementId:host.find("composer")!.id,eventType:"submit"});
+ await until(()=>!!host.find("agent-picker:usage"));const loading=host.find("agent-picker:usage")!.id;assert.ok(!host.find("usage-account:one"),"Original loading card must precede HTTP data");
+ await until(()=>!!host.find("usage-account:one")&&!!host.find("usage-account:two"));assert.equal(host.find("agent-picker:usage")!.id,loading,"Loading and ready usage must retain one native picker host");
+ assert.equal(host.find("usage-account:one")!.props["aria-label"],"Patriot");
+ const before=daemon.httpRequests.filter(request=>request.path.endsWith("/providers/openai/usage")).length;
+ root.dispatch({elementId:host.find("agent-picker:usage")!.id,eventType:"keyDown",key:"enter",modifiers:{shift:false,ctrl:false,alt:false,cmd:false}});
+ await until(()=>daemon.httpRequests.filter(request=>request.path.endsWith("/providers/openai/usage")).length===before+1&&!!host.find("usage-account:one"));
+ root.dispatch({elementId:host.find("agent-picker:usage")!.id,eventType:"keyDown",key:"escape",modifiers:{shift:false,ctrl:false,alt:false,cmd:false}});await until(()=>!host.find("agent-picker:usage"));
+ assert.equal(daemon.requests.filter(request=>request.tag==="SubmitPrompt"||request.tag==="CreateThread").length,0);assert.equal(daemon.ptyRequests.length,0);
+ console.log(JSON.stringify({actualApp:true,noWindow:true,originalToastBelowChrome:true,toastSurvivesGeneration:true,immediateUsageSkeleton:true,usageHydratesInPlace:true,structuredAccountsAndBars:true,refreshAndEscape:true,noBackendMutation:true}));
+}finally{root.unmount();visuals.dispose();model.dispose();client.stop();daemon.stop();}

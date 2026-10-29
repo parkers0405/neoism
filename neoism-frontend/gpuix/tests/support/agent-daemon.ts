@@ -2,7 +2,7 @@ import type { ServerWebSocket } from "bun";
 import { applyEdits, modify, parse } from "jsonc-parser";
 // An isolated protocol fixture used only by tests. The production frontend has
 // no fixture mode and connects through the same daemon transport in every test.
-export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
+export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSessionUpdates?:boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;usageResponse?:unknown;usageDelayMs?:number;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
   const workspaces = [{ id: "a", host_id: "host", title: "A", root_dir: "/project/a" }, { id: "b", host_id: "host", title: "B", root_dir: "/project/b" }];
   const threads = [{ session_id: "one", title: "One", directory: "/project/a", agent: "build", model: "openai/base" }, { session_id: "two", title: "Two", directory: "/project/a", agent: "plan", model: "other/second" }];
   const history=new Map<string,unknown[]>(),agentStreams=new Set<string>();
@@ -22,7 +22,8 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
   const configDocument = () => ({ content: configContent, display_path: "/fixture/config.json", revision: `r${configRevision}`, writable: true });
   const descriptors = [{ path: "editor.vim-mode", label: "Modal editing", description: "Original Vim engine", value_kind: "boolean", default: true, static_suggestions: [], runtime_suggestions: [], options: [], constraints: { nullable: false }, accepted_kinds: ["boolean"], extensible: false, category: "general", control: { kind: "toggle" } }];
   let answers = 0, asked = false;
-  const selections = new Map(threads.map((thread) => [thread.session_id, { agent: thread.agent, model: thread.model, thinking: "medium" }]));
+  type Selection={agent:string;model:string;thinking:string;connection_id?:string};
+  const selections = new Map<string,Selection>(threads.map((thread) => [thread.session_id, { agent: thread.agent, model: thread.model, thinking: "medium" }]));
   const socketAgentStreams=new Map<ServerWebSocket<unknown>,Set<string>>();
   const streamSubscribers=(sessionId:string)=>[...socketAgentStreams.values()].filter(streams=>streams.has(sessionId)).length;
   const sockets=new Set<ServerWebSocket<unknown>>(),gitWatchers=new Map<string,ServerWebSocket<unknown>>();
@@ -58,6 +59,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
       }
       if(match[2]==="session-projects")return Response.json({items:[...new Set(threads.map(thread=>thread.directory))].map((directory,index)=>({directory,updatedMs:100-index})),pinnedSessions:[]});
       if(match[2]==="config/defaults"){const delay=config.agentDefaultsDelayMs?.[match[1]];if(delay)await Bun.sleep(delay);return Response.json(config.agentConfigDefaults?.[match[1]]||{defaultAgent:null,model:null,variant:null});}
+      if(match[2]==="providers/openai/usage"){if(config.usageDelayMs)await Bun.sleep(config.usageDelayMs);return Response.json(config.usageResponse||{accounts:[]});}
       if (match[2] === "providers/configured") return Response.json(config.agentProviderCatalog||{ default: {}, providers: [{ id: "openai", name: "OpenAI", models: {
         base: { id: "base", name: "Base", limit: { context: 128000 } }, advanced: { id: "advanced", name: "Advanced", limit: { context: 256000 } },
       } }] });
@@ -66,10 +68,10 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
       if (match[2] === "skills") return Response.json([{ name: "review", description: "Review" }]);
       const workspace = workspaces.find((w) => w.id === match[1])!;
       const session = (id: string) => {
-        const selection = selections.get(id) || { agent: "build", model: "openai/base", thinking: "medium" };
+        const selection:Selection = selections.get(id) || { agent: "build", model: "openai/base", thinking: "medium" };
         const slash = selection.model.indexOf("/");
         return { id, title: "Created", directory: workspace.root_dir, agent: selection.agent,
-          model: { providerId: selection.model.slice(0, slash), id: selection.model.slice(slash + 1), variant: selection.thinking } };
+          model: { providerId: selection.model.slice(0, slash), id: selection.model.slice(slash + 1), variant: selection.thinking,connectionId:selection.connection_id } };
       };
       const payload = request.method === "POST" || request.method === "PATCH" ? await request.json().catch(() => ({})) : {};
       if(match[2]==="sessions"&&request.method==="GET")return Response.json({items:threads.filter(thread=>!url.searchParams.get("directory")||thread.directory===url.searchParams.get("directory")).map(thread=>{const selected=selections.get(thread.session_id)||thread,model=selected.model?.split("/");return{id:thread.session_id,title:thread.title,directory:thread.directory,agent:selected.agent,...(model&&model.length>1?{model:{providerId:model[0],id:model.slice(1).join("/")}}:{})};}),cursor:{}});
@@ -83,8 +85,9 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
       if (route) {
         const id = decodeURIComponent(route[1]);
         if (request.method === "PATCH") {
-          const old = selections.get(id) || { agent: "build", model: "openai/base", thinking: "medium" };
-          const next = { agent: payload.agent || old.agent, model: payload.model ? `${payload.model.providerId}/${payload.model.id}` : old.model, thinking: payload.model?.variant || old.thinking };
+          if(config.rejectSessionUpdates)return Response.json({code:"not_found",message:"Session not found",retryable:false,details:{}},{status:404});
+          const old:Selection = selections.get(id) || { agent: "build", model: "openai/base", thinking: "medium" };
+          const next:Selection = { agent: payload.agent || old.agent, model: payload.model ? `${payload.model.providerId}/${payload.model.id}` : old.model, thinking: payload.model?.variant || old.thinking,connection_id:payload.model?payload.model.connectionId:old.connection_id };
           selections.set(id, next); requests.push({ tag: "UpdateSession", body: { session_id: id, ...payload } });
           return Response.json(session(id));
         }
@@ -234,7 +237,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
           if (tag === "SetAgent") selection.agent = String(payload.agent);
           if (tag === "SetModel") selection.model = String(payload.model);
           if (tag === "SetThinkingMode") selection.thinking = String(payload.thinking);
-          selections.set(id, selection); reply({ ProviderState: { session_id: id, ...selection, context_limit: 128000 } });
+          selections.set(id, selection); reply({ ProviderState: { session_id: id, ...selection,provider_id:selection.model.split("/")[0], context_limit: 128000 } });
         }
         if (tag === "AnswerQuestion" && config.questionsOnSwitch) {
           answers++;

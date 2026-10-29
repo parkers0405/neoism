@@ -12,6 +12,7 @@ export interface ConnectionFailure { reason:string; attempt:number; quietMs:numb
 
 export class DaemonConnection {
   private socket?: WebSocket;
+  private connectedHostId?:string;
   private generation = 0;
   private requestId = 1;
   private desired = false;
@@ -45,7 +46,7 @@ export class DaemonConnection {
   subscribeStatus = (listener: (state: ConnectionState) => void) => { this.statusListeners.add(listener); listener(this.state); return () => { this.statusListeners.delete(listener); }; };
 
   private setState(phase: ConnectionState["phase"], reason?: string) {
-    this.state = { phase, attempt: this.attempt, reason };
+    this.state = { phase, attempt: this.attempt, reason,...(this.connectedHostId?{connectedHostId:this.connectedHostId}:{}) };
     for (const listener of this.statusListeners) listener(this.state);
   }
   start() { if (!this.desired) { this.desired = true; this.connect(); } }
@@ -91,14 +92,14 @@ export class DaemonConnection {
       const message = variant(event.message);
       this.lastMessage={family:event.family,kind:(message?.[0]||"unknown").slice(0,80),bytes:Buffer.isBuffer(data)?data.length:Buffer.byteLength(raw)};
       if (event.family === "Workspace" && message?.[0] === "HelloAck") {
-        let ack: { readonly accepted: boolean; readonly reason?: string | null };
-        try { ack = Schema.decodeUnknownSync(Schema.Struct({ accepted: Schema.Boolean, reason: Schema.optionalKey(Schema.NullOr(Schema.String)) }))(message[1]); }
+        let ack: { readonly accepted: boolean; readonly reason?: string | null;readonly connected_host_id?:string|null };
+        try { ack = Schema.decodeUnknownSync(Schema.Struct({ accepted: Schema.Boolean, reason: Schema.optionalKey(Schema.NullOr(Schema.String)),connected_host_id:Schema.optionalKey(Schema.NullOr(Schema.String)) }))(message[1]); }
         catch { this.failed(generation, "Invalid daemon handshake"); return; }
         if (!ack.accepted) {
           this.desired = false; this.clearTimers(); this.rejectPending("Authentication rejected");
           this.setState("auth-rejected", ack.reason || "Pairing token required"); socket.close(); return;
         }
-        clearTimeout(this.deadline); this.attempt = 0; this.setState("connected");
+        clearTimeout(this.deadline); this.attempt = 0;this.connectedHostId=ack.connected_host_id||undefined; this.setState("connected");
         this.heartbeat = setInterval(() => {
           if(!current()||this.state.phase!=="connected")return;
           if (Date.now() - this.lastMessageAt > 45_000) { this.failed(generation, "Daemon stopped responding"); return; }

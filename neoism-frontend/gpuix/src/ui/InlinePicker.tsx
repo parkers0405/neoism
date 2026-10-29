@@ -24,6 +24,7 @@ export function InlinePicker(props: {
   entry?:boolean; secret?:boolean; initialValue?:string; query?: string; onAcceptHandler?: (handler:(()=>void)|undefined)=>void; onKeyHandler?: (handler: ((event: KeyEvent) => boolean) | undefined) => void;
   onSelect?: (value: string) => void; onAnswers?: (answers: string[][]) => void; onClose: () => void;
   activity?: PickerActivity; mcpServer?: string; mcpEntry?: unknown;
+  usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;
 }) {
   const config = props.config, c = config.theme, s = config.scale, renderer = useGpuixRequired();
   const viewport=useOverlayViewport(renderer,createWindowSize());
@@ -59,6 +60,7 @@ export function InlinePicker(props: {
   createEffect(() => { if (native) { const a = props.activity; coreCall("picker.activity", { id, ...(a ? { body: a.body, status: a.status, busy: !!a.busy, url: a.url } : {}) }); update("frame"); } });
   createEffect(() => { props.anchor; headerExtra(); update("frame"); });
   createEffect(() => { if (engine === "picker") update("options", { options: props.options || [], loading: props.loading }); });
+  createEffect(()=>{if(props.kind==="usage")update("usage",{usage:props.usage,loading:props.loading,error:props.error});});
   createEffect(() => { if (engine === "question" && props.error) update("retry"); });
   createEffect(() => { if (props.query !== undefined && engine === "picker") update("query", { query: props.query }); });
   onMount(() => { if(props.initialValue!==undefined)update("query",{query:props.initialValue}); if (input && props.query === undefined) renderer.focusElement?.(input.id); });
@@ -77,7 +79,8 @@ export function InlinePicker(props: {
     if(handleApplicationShortcut(renderer,event))return true;
     let handled = true;
     const key = event.key || "", ctrl = event.modifiers?.ctrl;
-    if (key === "escape") { event.preventDefault(); event.stopPropagation(); if (!props.responding) props.onClose(); }
+    if(props.kind==="usage"&&key==="enter"){event.preventDefault();event.stopPropagation();if(!props.loading)void props.onRefresh?.();}
+    else if (key === "escape") { event.preventDefault(); event.stopPropagation(); if (!props.responding) props.onClose(); }
     else if (["up", "down"].includes(key) || ctrl && ["n", "p"].includes(key)) {
       event.preventDefault(); event.stopPropagation(); update("move", { delta: key === "up" || key === "p" ? -1 : 1 });
     } else if (key === "enter" && props.query !== undefined) { event.preventDefault(); event.stopPropagation(); accept(); }
@@ -85,7 +88,7 @@ export function InlinePicker(props: {
     else handled = false;
     return handled;
   };
-  onMount(() => {props.onKeyHandler?.(keyDown);props.onAcceptHandler?.(()=>accept());});
+  onMount(() => {props.onKeyHandler?.(keyDown);props.onAcceptHandler?.(()=>{if(props.kind==="usage"){if(!props.loading)void props.onRefresh?.();}else accept();});});
   const text = (size: number, color = c.fg) => ({ color, fontFamily: config.fontFamily, fontSize: size * s, fontWeight: config.fontWeight, pointerEvents: "none" as const });
   const headerHeight = () => d.pickerTitleHeight * s + headerExtra();
   const footerHeight = () => !props.entry && engine === "question" || props.kind === "permission" && (props.responding || props.error) ? d.pickerFooterHeight * s : 0;
@@ -101,10 +104,11 @@ export function InlinePicker(props: {
         onScroll={(event) => update("scroll", { delta: (event.deltaY || 0) * (event.precise ? 1 / s : d.pickerRowHeight * 3) })}
         style={{ position: "absolute", left: rect()[0], top: rect()[1], width: rect()[2], height: rect()[3], pointerEvents: "auto", userSelect: "none" }}>
         <Index each={frame().rows}>{(option) => <div role="option" aria-label={option().title} testId={props.secret ? "picker-option:credential" : `picker-option:${option().value}`} style={{ position: "absolute", width: 0, height: 0, pointerEvents: "none" }} />}</Index>
+        <Show when={props.kind==="usage"}><Index each={props.usage?.accounts||[]}>{account=><div role="listitem" testId={`usage-account:${account().connection_id}`} aria-label={account().label} style={{width:0,height:0,pointerEvents:"none"}}/>}</Index></Show>
         <Show when={props.query === undefined}>
           {/* Typing target only; the original card paints query, caret and mask. */}
           <input ref={input} testId="inline-picker-input" autoFocus={true} aria-label={`Search ${props.title || "options"}`} value={frame().query}
-            onChange={(event) => update("query", { query: event.value || "" })} onSubmit={() => accept()}
+            onChange={(event) => {if(props.kind!=="usage")update("query", { query: event.value || "" });}} onSubmit={() => {if(props.kind==="usage"){if(!props.loading)void props.onRefresh?.();}else accept();}}
             style={{ position: "absolute", left: 0, top: 0, width: 1, height: 1, opacity: 0, color: "transparent", backgroundColor: "transparent", borderWidth: 0, pointerEvents: "none" }} />
         </Show>
       </div>
@@ -128,7 +132,7 @@ export function InlinePicker(props: {
     <Show when={props.query === undefined} fallback={<text style={{ ...text(13), position: "absolute", left: 14 * s, right: 30 * s, top: headerHeight() - 24 * s, height: 22 * s }}>{props.query || "Search"}</text>}>
     <input ref={input} testId="inline-picker-input" autoFocus={true} aria-label={engine === "question" ? "Answer question" : `Search ${props.title || "options"}`}
       value={frame().query} placeholder={engine === "question" ? "Type your answer" : "Search"}
-      onChange={(event) => update("query", { query: event.value || "" })} onSubmit={() => accept()}
+      onChange={(event) => {if(props.kind!=="usage")update("query", { query: event.value || "" });}} onSubmit={() => {if(props.kind==="usage"){if(!props.loading)void props.onRefresh?.();}else accept();}}
       style={{ ...text(13, props.secret ? "transparent" : c.fg), position: "absolute", left: 14 * s, width: Math.max(1, frame().rect[2] - 30 * s), top: headerHeight() - 24 * s, height: 22 * s,
         backgroundColor: c.bg, borderWidth: 0, userSelect: "text", pointerEvents: "auto" }} />
     </Show>

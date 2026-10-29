@@ -409,19 +409,20 @@
       "requirement": "Original Git status markers/colors for files and folder rollups, staged/mixed/conflict states, deleted ghost files/directories, measured marker/presence spacing, live shared snapshots, quiet directory refresh, stale/error safety and retained per-workspace/theme/zoom/scroll state."
     }
   ],
-  "verification_note": "Requested /connect organization/account flow, actual workspace directory labels, and original file-tree Git display implemented and focused checks passed. Optimized isolated release is running from normal dist; complete isolated headless suite finishing. Shared daemon preserved; no automated GUI windows.",
+  "verification_note": "All requested /connect, workspace directory label and original file-tree Git changes implemented, optimized release launched from normal dist, all509 isolated headless tests and TypeScript pass. Concurrent backend/terminal refactor left untouched. Shared daemon preserved; no automated GUI windows.",
   "verification": {
     "frontend_tests": {
-      "passed": 488,
+      "passed": 509,
       "failed": 0,
-      "files": 147,
-      "note": "Full suite:487 pass/1 diagnostic resize failure. Corrected retained popup anchor; final release rerun:9 pass/0 fail/686 assertions across diagnostics, native tab capture and original toast/usage. All488 unique tests now covered by passing checks."
+      "files": 153,
+      "assertions": 285277,
+      "note": "Complete isolated requested UI source suite passed after original connect/account flow, effective workspace label and full native file-tree Git integration."
     },
     "typecheck": "passed isolated final requested source; unrelated concurrent source excluded from verification snapshot",
     "design_sync": "passed final source",
     "display_source_and_packaged_binding": "Verified production gpuix-display-linux-x64-21143abd734946a8.node; inherited opacity participates in GPUI cached-scene matching and Div prepaint propagates ancestor opacity.",
     "native_engine_ffi_smoke": "passed final release core; editor/recovery/undo/Vim/cursor/Ghostty/VT/keyboard",
-    "frontend_release": "Optimized release built with final diagnostic resize anchoring, original toast/usage/skeletons, cloud workspace metadata, retained theme/zoom/tree paint, native Agent tab capture, half-page chat/table scroll and Settings scroll. Native FFI smoke passes.",
+    "frontend_release": "Optimized native core and FFI smoke passed; final standalone SolidJS frontend packaged from isolated requested source with verified native GPUI binding, libghostty and workspace daemon; atomically installed to normal dist and mapped without shared daemon restart.",
     "daemon_search_unit_tests": "8 passed",
     "daemon_search_websocket_integration": "passed: 20 concurrent queries retain their own envelope IDs",
     "window_launches": 2,
@@ -474,7 +475,7 @@
     "verification_scope": "Headless renderer/native/isolated backend checks; direct compositor frame capture and real remote external service provisioning were not performed.",
     "toast_usage_loading": "21 focused tests/142 assertions plus3 generation tests passed; final release9-test gate includes original Usage and toast App lifecycle.",
     "diagnostic_popup_short_viewports": "All4 diagnostic tests pass; 20 selectable rows at viewport heights160/200/240 and scales1/2/3 stay reachable, pointer activation remains aligned and resizing restores capacity.",
-    "latest_followup_gate": "36tests/8files/2013assertions pass against optimized connect core; original usage, shared chip/slash pickers and global buffer shortcuts retained. Config/composer/native focused gate16pass/175assertions. Full typecheck currently blocked only by unrelated concurrent tests/ghostty.test.ts:48 cursor-shape typing.",
+    "latest_followup_gate": "509tests/153files/285277assertions:0fail; TypeScript clean in isolated requested source; native FFI smoke and production package pass.",
     "zoom_theme_native_cache": "Root cause confirmed in GPUI ViewElementCacheKey: opacity0 hidden-generation sprites reused at opacity1. Fix propagates opacity in Div prepaint and invalidates cached scenes when inherited opacity changes; actual extracted Rust matcher and staged App paint/generation tests pass.",
     "connect_original_flow": "Canonical shared provider projection used by native host; actual App covers grouped connected providers\u2192accounts\u2192native label\u2192Escape Back\u2192auth method\u2192masked key\u2192Done, exact scoped creation, draft retention; controller20tests/163assertions cover account CRUD/default/Cancel-first confirmation, cancellation and stale-scope protection. Native labels/secret paint and header filtering verified.",
     "workspace_effective_directory": "13tests/4files/92assertions pass: actual SessionCwd updates existing workspace label in place, inactive A\u2192B\u2192A retains distinct root, explicit folder choice wins, remote roots ignore local overrides, ordinary cwd notifications never mutate saved root.",

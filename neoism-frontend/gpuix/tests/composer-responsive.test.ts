@@ -45,3 +45,20 @@ test("actual App uses bounded native chips while resizing and preserves draft an
  const[status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
  expect({status,stderr}).toEqual({status:0,stderr:""});expect(JSON.parse(stdout)).toEqual({actualApp:true,noWindow:true,narrowMeasuredControls:true,nonOverlappingChips:true,boundedInk:true,draftAndInputRetained:true,reasoningPickerWorks:true,slashAndChipPickersIdentical:true,noBackendSideEffects:true});
 },15000);
+
+test("composer dropdown carets follow displayed label ink at the original six pixel gap rather than trailing hit padding",()=>{
+ for(const scale of [0.75,1,1.25,1.67,2,3]){
+  const actor=new NativeComposer({...loadConfig(["--config","/nonexistent/composer-caret-gap"],{}),scale});
+  try{for(const width of [180,240,320,800])for(const agent of ["build","plan"]){
+   const layout=actor.chips({width:width*scale,height:23.5*scale,agent,model:"openai/a-very-long-model-name-with-many-versions",thinking:"high"});
+   for(const chip of layout.chips){
+    const painted=coreCall<{width:number}>("agentcomposer.chip-frame",{id:actor.id,kind:"model",label:chip.label,fontSize:layout.font_size,reducedMotion:true});
+    expect(chip.label_rect[2]).toBeCloseTo(painted.width,3);
+    const labelEnd=chip.label_rect[0]+painted.width;
+    const expectedGap=Math.min(6*scale,Math.max(0,chip.rect[2]-labelEnd-chip.caret_rect[2]));
+    expect(chip.caret_rect[0]-labelEnd).toBeCloseTo(expectedGap,3);
+    expect(chip.caret_rect[0]+chip.caret_rect[2]).toBeLessThanOrEqual(chip.rect[2]+.001);
+   }
+  }}finally{actor.dispose();}
+ }
+});

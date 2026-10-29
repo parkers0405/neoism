@@ -407,9 +407,14 @@
       "id": "file_tree_original_git_decorations",
       "status": "implemented_native_and_headless_verified",
       "requirement": "Original Git status markers/colors for files and folder rollups, staged/mixed/conflict states, deleted ghost files/directories, measured marker/presence spacing, live shared snapshots, quiet directory refresh, stale/error safety and retained per-workspace/theme/zoom/scroll state."
+    },
+    {
+      "id": "composer_dropdown_pointer_and_caret_spacing",
+      "status": "implemented_native_and_headless_verified",
+      "requirement": "Composer Agent/Model/Reasoning labels, logos, dropdown arrows and padding must activate their own shared picker; decorative absolute hosts must not block native hitboxes; each caret follows actual displayed label at original6 logical px gap, including truncated labels."
     }
   ],
-  "verification_note": "All requested /connect, workspace directory label and original file-tree Git changes implemented, optimized release launched from normal dist, all509 isolated headless tests and TypeScript pass. Concurrent backend/terminal refactor left untouched. Shared daemon preserved; no automated GUI windows.",
+  "verification_note": "Latest composer click/arrow-spacing regression fixed, focused native/headless checks pass, optimized production relaunched. Shared daemon/PTYs and concurrent backend refactor preserved.",
   "verification": {
     "frontend_tests": {
       "passed": 509,
@@ -439,8 +444,8 @@
     "full_git_app": "passed actual App: status pill, original panel, working singleton, unified/split, explicit restore confirmation, canonical live edits/save, retained zoom draft/controller, commit/PR routes; isolated daemon fixture only",
     "final_focus_gate": "4 passed after pointer focus correction",
     "user_preview": {
-      "pid": 3647982,
-      "log": "/tmp/neoism-gpuix-latest-20261028-230541.log",
+      "pid": 4024390,
+      "log": "/tmp/neoism-gpuix-latest-20261029-093317.log",
       "executable": "/home/parkersettle/projects/neoism/neoism-frontend/gpuix/dist/neoism-gpuix",
       "mapped": true,
       "startup_errors": false
@@ -475,11 +480,12 @@
     "verification_scope": "Headless renderer/native/isolated backend checks; direct compositor frame capture and real remote external service provisioning were not performed.",
     "toast_usage_loading": "21 focused tests/142 assertions plus3 generation tests passed; final release9-test gate includes original Usage and toast App lifecycle.",
     "diagnostic_popup_short_viewports": "All4 diagnostic tests pass; 20 selectable rows at viewport heights160/200/240 and scales1/2/3 stay reachable, pointer activation remains aligned and resizing restores capacity.",
-    "latest_followup_gate": "509tests/153files/285277assertions:0fail; TypeScript clean in isolated requested source; native FFI smoke and production package pass.",
+    "latest_followup_gate": "Composer controls: both12-test targeted gates pass on new optimized isolatedcore; TypeScript clean; native FFI smoke and production package pass. Previous complete509-test suite belongs to b6acac7e5 checkpoint.",
     "zoom_theme_native_cache": "Root cause confirmed in GPUI ViewElementCacheKey: opacity0 hidden-generation sprites reused at opacity1. Fix propagates opacity in Div prepaint and invalidates cached scenes when inherited opacity changes; actual extracted Rust matcher and staged App paint/generation tests pass.",
     "connect_original_flow": "Canonical shared provider projection used by native host; actual App covers grouped connected providers\u2192accounts\u2192native label\u2192Escape Back\u2192auth method\u2192masked key\u2192Done, exact scoped creation, draft retention; controller20tests/163assertions cover account CRUD/default/Cancel-first confirmation, cancellation and stale-scope protection. Native labels/secret paint and header filtering verified.",
     "workspace_effective_directory": "13tests/4files/92assertions pass: actual SessionCwd updates existing workspace label in place, inactive A\u2192B\u2192A retains distinct root, explicit folder choice wins, remote roots ignore local overrides, ordinary cwd notifications never mutate saved root.",
     "file_tree_git": "Native host reuses original FileTree.apply_host_git_snapshot with lexical Unix/Windows/subdirectory projection and canonical priority/colors. Actual App validates all8 marker-colored raster pixels, filetype icon retention/folder tint, deleted and physical directories, one shared broker watch, live updates without scroll/selection reset, error/token retention, cached workspace/font/theme paint, presence before marker, clean removal and zero Git mutations. Focused8tests/5files/63assertions plus native3tests pass.",
-    "build_isolation": "Concurrent uncommitted neoism_paint refactor made main native build fail; requested UI changes built in /home/parkersettle/projects/neoism-gpuix-ui-verify isolated checkout from ae499277b plus scoped fixes. Optimized native core built and FFI-verified; bundled using verified production GPUI addon and libghostty, then atomically installed to normal dist. Concurrent backend/terminal changes untouched."
+    "build_isolation": "Concurrent uncommitted neoism_paint refactor made main native build fail; requested UI changes built in /home/parkersettle/projects/neoism-gpuix-ui-verify isolated checkout from ae499277b plus scoped fixes. Optimized native core built and FFI-verified; bundled using verified production GPUI addon and libghostty, then atomically installed to normal dist. Concurrent backend/terminal changes untouched.",
+    "composer_dropdown_click_spacing": "Reproduced old native caret reservation mismatch before fix. Native geometry now positions caret6logicalpx after measured displayed ink (including ellipses); interactivebuttons auto and all decorativewrappers none. Release12tests4files2331assertions and pointer/animation/caret/buffer12tests4files2243assertions pass; covers6scales\u00d74widths\u00d7Build/Plan\u00d73chips plus10 real retained control regions opening their correct picker with draft/input retention. Pointer proof is retained-policy/handler verification, not native compositor injection."
   }
 }

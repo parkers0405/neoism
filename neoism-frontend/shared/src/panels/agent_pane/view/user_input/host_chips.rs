@@ -43,8 +43,14 @@ pub fn layout(paint:&mut dyn Paint,width:f32,height:f32,scale:f32,agent:&str,mod
   let tolerance=0.0001*s;
   let mut label=if natural[index]<=label_width+tolerance{labels[index].clone()}else{crate::primitives::text::truncate_to_fit(&labels[index],label_width,paint,&opts)};
   if paint.text_mut().measure(&label,&opts)>label_width+tolerance{label.clear();}
+  let displayed_width=paint.text_mut().measure(&label,&opts);
+  // Desktop places the caret six logical pixels after the displayed label,
+  // including an ellipsis. The hit target's trailing padding is not ink.
+  let label_end=own_logo+displayed_width;
+  let caret_gap=(6.0*s).min((w-label_end-own_caret).max(0.0));
+  let caret_x=(label_end+caret_gap).min((w-own_caret).max(0.0));
   let text_y=(height-font*1.3)*0.5;
-  let result=Chip{rect:[x,0.0,w,height],label_rect:[own_logo,text_y,label_width,font*1.3],caret_rect:[(w-own_caret-(3.0*s).min(pad)).max(0.0),(height-font*0.66)*0.5,own_caret,font*0.9],logo_rect:if own_logo>0.0{Some([0.0,(height-MODEL_LOGO_SIDE*s)*0.5,MODEL_LOGO_SIDE*s,MODEL_LOGO_SIDE*s])}else{None},label};
+  let result=Chip{rect:[x,0.0,w,height],label_rect:[own_logo,text_y,displayed_width,font*1.3],caret_rect:[caret_x,(height-font*0.66)*0.5,own_caret,font*0.9],logo_rect:if own_logo>0.0{Some([0.0,(height-MODEL_LOGO_SIDE*s)*0.5,MODEL_LOGO_SIDE*s,MODEL_LOGO_SIDE*s])}else{None},label};
   x+=w+gap;result
  });
  Layout{chips,attach_rect:[width-attach_side,(height-attach_side)*0.5,attach_side,attach_side],font_size:font,narrow}

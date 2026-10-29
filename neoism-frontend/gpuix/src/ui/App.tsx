@@ -930,16 +930,16 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
               if(event.key==="enter"&&event.modifiers?.alt){event.preventDefault();event.stopPropagation();void submit("queue");}
             }} style={{...text(16),...absolute(frame()?.controls.text_rect),lineHeight:22*s,padding:0,backgroundColor:"transparent",borderWidth:0}}/>
           <ComposerCaret config={config} input={()=>input}/>
-          <div testId="composer-chip-row" style={{...absolute(frame()?.controls.chips_rect)}}>
+          <div testId="composer-chip-row" style={{...absolute(frame()?.controls.chips_rect),pointerEvents:"none"}}>
             <For each={["agent","model","thinking"] as const}>{(kind,index)=>{
               const geometry=()=>chipGeometry().chips[index()];
-              return <div role="button" testId={`select-${kind}`} aria-label={kind==="thinking"?"Select reasoning":`Select ${kind}`} onClick={()=>openPicker(kind)} style={{...absolute(geometry().rect),cursor:"pointer",overflow:"hidden"}}>
-                <Show when={geometry().logo_rect}>{rect=><div style={absolute(rect())}><ProviderLogo model={selection().model} config={config}/></div>}</Show>
-                <div style={absolute(geometry().label_rect)}><AgentChipLabel config={config} hosts={visuals.agentChips} paintPins={wordmarkHosts} scope={model.composerDraftKey(props.sessionId,props.surfaceId)} kind={kind} label={labels()[kind]} displayLabel={geometry().label} maxWidth={geometry().label_rect[2]} size={chipGeometry().font_size/s} loading={!props.sessionId&&!!state().agentDefaultsLoading}/></div>
-                <div style={absolute(geometry().caret_rect)}><Icon glyph={"\uf078"} color={c.muted} size={chipGeometry().font_size/s*.66}/></div>
+              return <div role="button" testId={`select-${kind}`} aria-label={kind==="thinking"?"Select reasoning":`Select ${kind}`} onClick={()=>openPicker(kind)} style={{...absolute(geometry().rect),cursor:"pointer",overflow:"hidden",pointerEvents:"auto"}}>
+                <Show when={geometry().logo_rect}>{rect=><div style={{...absolute(rect()),pointerEvents:"none"}}><ProviderLogo model={selection().model} config={config}/></div>}</Show>
+                <div style={{...absolute(geometry().label_rect),pointerEvents:"none"}}><AgentChipLabel config={config} hosts={visuals.agentChips} paintPins={wordmarkHosts} scope={model.composerDraftKey(props.sessionId,props.surfaceId)} kind={kind} label={labels()[kind]} displayLabel={geometry().label} maxWidth={geometry().label_rect[2]} size={chipGeometry().font_size/s} loading={!props.sessionId&&!!state().agentDefaultsLoading}/></div>
+                <div style={{...absolute(geometry().caret_rect),pointerEvents:"none"}}><Icon glyph={"\uf078"} color={c.muted} size={chipGeometry().font_size/s*.66}/></div>
               </div>;
             }}</For>
-            <div style={absolute(chipGeometry().attach_rect)}><IconButton glyph={"\uf0c6"} label="Attach files" testId="attach-files" onClick={()=>void attach()}/></div>
+            <div style={{...absolute(chipGeometry().attach_rect),pointerEvents:"auto"}}><IconButton glyph={"\uf0c6"} label="Attach files" testId="attach-files" onClick={()=>void attach()}/></div>
           </div>
           <div testId="send-prompt" role="button" aria-label={localBusy()?"Stop generation":"Send message"} onClick={()=>localBusy()&&props.sessionId?model.cancelPrompt(props.sessionId):void submit()}
             style={{...absolute(frame()?.controls.hit_rect),cursor:"pointer"}}><div style={{...row,justifyContent:"center",position:"absolute",left:(frame()?.controls.visual_rect[0]||0)-(frame()?.controls.hit_rect[0]||0),top:(frame()?.controls.visual_rect[1]||0)-(frame()?.controls.hit_rect[1]||0),width:frame()?.controls.visual_rect[2],height:frame()?.controls.visual_rect[3],borderRadius:8*s,backgroundColor:frame()?.controls.action==="Disabled"?c.fg+"8c":c.fg}}>

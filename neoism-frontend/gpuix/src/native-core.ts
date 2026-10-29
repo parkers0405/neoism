@@ -41,6 +41,10 @@ export interface EditorRun { text: string; x: number; width?: number; token: str
 export interface EditorSnapshot { version: 1; text: string; buffer: unknown; [key: string]: unknown }
 export interface EditorRowRaster { id:number; ptr:number; len:number; width:number; height:number; scale:number; x:number; y:number }
 export interface EditorFrame {
+  collaborationBound?:boolean;
+  presence?:{cursor:import("./daemon/protocol").CrdtCursorPosition;selection:import("./daemon/protocol").CrdtSelectionRange|null;insert:boolean};
+  remotePeers?:import("./daemon/protocol").CrdtPeerPresence[];
+  peerCommands?:import("./ui/PaintLayer").PaintCommand[];
   packedRuns?: boolean;
   wrap?: boolean; vim?: boolean;
   lsp?: import("./editor/lsp").LspFrame;
@@ -58,6 +62,7 @@ export interface EditorFrame {
 }
 export class NativeEditor {
   readonly id: number;
+  private historyOwner?:NativeEditor;
   private listeners = new Set<(frame: EditorFrame) => void>();
   private animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   private lastFrameStarted = performance.now();
@@ -66,17 +71,24 @@ export class NativeEditor {
   subscribe(listener: (frame: EditorFrame) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   frame: EditorFrame;
   constructor(path: string, text: string, vim: boolean, viewOf?: NativeEditor) {
+    this.historyOwner=viewOf;
     this.id = viewOf ? coreCall<{ id: number }>("editor.clone-view", { id: viewOf.id }).id
       : coreCall<{ id: number }>("editor.new", { path, text, vim, compact: true }).id;
     this.frame = unpackEditorPaint(coreCall<EditorFrame>("editor.frame", { id: this.id }));
   }
-  call(op: string, args: Record<string, unknown> = {}) {
+  getPresence(){return this.frame.presence;}
+  call(op: string, args: Record<string, unknown> = {}):EditorFrame {
+    if(op==="crdt.history"&&this.historyOwner)return this.historyOwner.call(op,args);
     const configurable=op==="layout"||op==="raster.configure";
     const signature=configurable?JSON.stringify(args):undefined;
     if(signature!==undefined&&this.configuration.get(op)===signature)return this.frame;
     this.animation.cancel(); this.lastFrameStarted = performance.now();
     this.frame = shareEditorPaint(this.frame, unpackEditorPaint(coreCall<EditorFrame>(`editor.${op}`, { id: this.id, ...args })));
     if(signature!==undefined)this.configuration.set(op,signature);
+    if(this.historyOwner&&this.frame.collaborationBound){
+      const requests=coreCall<boolean[]>("editor.crdt.take-history",{id:this.id});
+      for(const redo of requests)this.historyOwner.call("crdt.history",{redo});
+    }
     const publishStart=profileStart();
     for (const listener of this.listeners) listener(this.frame);
     profileEnd("editor.publish",publishStart);

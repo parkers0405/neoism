@@ -327,16 +327,36 @@
       "id": "settings_natural_scroll_direction",
       "status": "queued_waiting_for_user",
       "requirement": "Fix Settings modal scrolling to respect natural scrolling on Hyprland consistently with working app surfaces; inspect related scroll handling for the same direction mismatch."
+    },
+    {
+      "id": "server_manager_full_parity",
+      "status": "implemented_native_and_isolated_e2e_verified",
+      "requirement": "Restore the top-right original Servers/Systems modal, saved server management, ordinary/Fast host and join, invite copy/leave, SSH systems and connection lifecycle."
+    },
+    {
+      "id": "multiplayer_live_documents",
+      "status": "implemented_native_and_isolated_e2e_verified",
+      "requirement": "Restore end-to-end shared live code/Markdown CRDT edits, remote cursors/selections, reconnect and cleanup with two-client verification."
+    },
+    {
+      "id": "multiplayer_chrome_and_agent_chat",
+      "status": "implemented_native_and_isolated_e2e_verified",
+      "requirement": "Restore participant presence in top chrome and shared Agent chats, including same-conversation live events and author identity."
+    },
+    {
+      "id": "remote_ghostty_terminal",
+      "status": "implemented_native_and_isolated_e2e_verified",
+      "requirement": "Keep libghostty rendering while selected-server/SSH terminals execute on the selected remote system, with no silent local fallback."
     }
   ],
-  "verification_note": "Commits9e16544ab,d8610acb0,f56e99592,28f2000c0,749294143 saved. Sidebar scroll and workspace + first-paint fixes verified and packaged. Independent same-Git-surface split view state remains tracked.",
+  "verification_note": "Server manager, multiplayer editing/presence/shared Agent chat and remote Ghostty/SSH implementation verified and packaged. Earlier11queued UI fixes remain paused. Independent Git split leaf view state remains tracked.",
   "verification": {
     "frontend_tests": {
-      "passed": 413,
+      "passed": 462,
       "failed": 0,
-      "files": 119,
-      "assertions": 5578,
-      "note": "Full suite413/0 (119files,5578assertions), including actual App tree viewport retention, workspace + first-paint, global buffer shortcuts, focus, and zoom regressions."
+      "files": 135,
+      "assertions": 282531,
+      "note": "Final full frontend suite passed, including original Server/Systems painters and forms, actual hosted daemon with two authenticated clients, real-daemon code/Markdown collaboration and causal recovery, presence/shared chat, and original native SSH/Ghostty remote-only routing plus selected-tunnel reconnect."
     },
     "typecheck": "passed final source",
     "design_sync": "passed final source",
@@ -376,6 +396,15 @@
     "final_interaction_gate": "16 tests across5files,106 assertions pass; production build and FFI smoke pass.",
     "agent_streaming": "Family-wide subscriptions use exactly one owner including late switch/close replies; original native Markdown renders partial output before idle and canonical completion metadata restores original footer.",
     "modal_centering": "25 tests across7files pass,112 assertions; actual Command/Finder/appearance native painting and pointer translation checked across sidebar-sized viewport changes, empty/filtered results and narrow resize. TypeScript and optimized release/FFI smoke pass.",
-    "global_buffer_chord": "Reproduced Agent picker trap before fix.24 tests across9files pass (156assertions), plus final focused rerun; actual Home/code/Markdown/Agent-home/conversation/Terminal/Extensions/Git hosts, history/picker/Finder/command inputs, pending permission, rapid strip focus and split scope. TypeScript and optimized release pass."
+    "global_buffer_chord": "Reproduced Agent picker trap before fix.24 tests across9files pass (156assertions), plus final focused rerun; actual Home/code/Markdown/Agent-home/conversation/Terminal/Extensions/Git hosts, history/picker/Finder/command inputs, pending permission, rapid strip focus and split scope. TypeScript and optimized release pass.",
+    "server_multiplayer": {
+      "ordinary_host": "Isolated actual daemon startup/readiness, two authenticated clients, requested root, durable recipe and exact owned shutdown passed.",
+      "fast_server": "Original desktop OpenTunnel host/join implementation reused with canonical shared filter;6 Rust scope-policy tests and isolated invite/credential/no-registry/native-form tests passed. Public OpenTunnel provisioning was not exercised against the live external service.",
+      "documents": "Real daemon and actual WorkspaceModels: concurrent code/rich Markdown/split edits, origin-only undo, UTF16 remote flags, authoritative saves, offline reconnect, Yrs actor/pending recovery, legacy recovery merge and clean dirty flags passed.",
+      "agent_presence": "Original topbar/tree avatars and hover, scoped two-client presence/reconnect, shared live Agent transcript/authors/subscription isolation passed.",
+      "ssh_ghostty": "Original native SSH engine and isolated SSH proxy fixture; terminal operations stayed exclusively on the selected daemon; selected process loss reconnects same terminal/workspace without CreatePty; credentials/cancel/shutdown/reaping and stable recovery verified.",
+      "package": "Optimized core/FFI smoke and production executable built with standalone daemon; packaged CLI help is headless.",
+      "known_limit": "Yrs undo stacks from before an app/model restart are not serialized; recovered document state, unacknowledged edits and subsequent undo are verified."
+    }
   }
 }

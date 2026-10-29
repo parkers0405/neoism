@@ -150,14 +150,44 @@ the daemon’s full catalog remains available through Alt+P → Workspaces. Olde
 profiles start the row with their selected workspace without deleting any saved
 projects, buffers, or terminal sessions.
 
+## Servers and multiplayer
+
+The top-right Servers button uses the original Rust Servers/Systems palette and
+Host/Join forms. Saved connections support add, edit and remove with masked
+credentials. Ordinary Host launches a separate persistent daemon for the chosen
+local folder; removing that hosted connection stops that exact daemon recipe.
+Fast Host reuses the desktop OpenTunnel implementation and its filtered ingress;
+Fast Join accepts complete invite links/passwords without saving temporary access
+credentials to the durable server registry. Fast hosts are owned by the app and
+stop on exit. Public tunnel provisioning still depends on OpenTunnel availability.
+
+Systems uses the desktop SSH recipe registry, alias parsing, daemon bootstrap and
+port-forward owner. The normal Ghostty terminal consumes the selected daemon's PTY
+stream: an SSH shell runs on that system, rather than in a local shell pretending
+to be remote. Failed/cancelled connections leave the current session intact.
+Selected SSH tunnels reconnect with the same recovery identity and tab/workspace
+focus. Returning to Local restores its own transport and saved workspace state.
+The production package includes the daemon used for ordinary/Fast hosting.
+
+Shared code and rich Markdown use the original Rust Yrs document bindings over
+the daemon CRDT plane. Split views share one document owner, native undo is scoped
+to the local collaborator, and saves are daemon-owned. Original cursor/selection
+flags, top chrome participants and per-file peer avatars use the same presence
+identity and workspace scope. Agent tabs subscribe to the same live conversation
+with separate local drafts and correct prompt authorship. Integration checks use
+two authenticated clients, isolated real daemons, and separate SSH transport
+fixtures; they never launch a GPU window or connect to a real SSH host. Shared
+document state and pending edits survive recovery; pre-restart Yrs undo stacks
+are not serialized. SSH systems need a compatible installed Neoism daemon, as
+with the original desktop bootstrap.
+
 ## Remaining parity work
 
 This is a working port under development. Complete visual and interaction parity
 has not been established. Remaining work includes notebook/EPUB surfaces,
-collaboration, custom-editor IME, remaining desktop management actions,
+custom-editor IME, remaining desktop management actions,
 and equal-sized comparisons of appearance, selection, scrolling,
-and animations. Systems management and server/workspace creation forms remain
-unported. Extensions inventory works; installation needs a daemon lifecycle API.
+and animations. Extensions inventory works; installation needs a daemon lifecycle API.
 Background catalog/preview currently requires a local host. Command actions that
 lack an implementation are hidden from the palette.
 

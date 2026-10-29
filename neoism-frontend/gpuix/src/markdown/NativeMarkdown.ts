@@ -4,6 +4,7 @@ import type { PaintCommand } from "../ui/PaintLayer";
 import { sharePaintCommands } from "../editor/paint-command";
 export interface MarkdownSnapshot {anchor?:unknown;width?:number;height?:number;version:1;line:number;col:number;scrollY:number;mode:string;vim:boolean}
 export interface MarkdownFrame {
+ presence?:import("../native-core").EditorFrame["presence"];docHistory?:boolean[];
  menu?:{rect:number[];commands:PaintCommand[]}|null;assets?:string[];cover?:{value:string;rect:number[]}|null;cursorQuad:number[][];cursorHold:boolean;hostAction?:"save"|"save-close"|"close"|null;commands:PaintCommand[];revision:number;mode:"Normal"|"Insert"|"Visual";vim:boolean;dirty:boolean;scrollY:number;contentHeight:number;animating:boolean;dragging:boolean;
  cursor:{line:number;col:number;rect:number[]|null};effects?:{clipboard?:string|null;search?:boolean|null;palette?:boolean;blockMenu?:boolean;yank?:string;titleRename?:string;link?:{url?:string;path?:string;line?:number;target?:string}|null;matches?:Array<[number,number,string]>}|null;
 }
@@ -23,6 +24,8 @@ export class NativeMarkdown {
  private editorRevision:number;
  private lastDirty:boolean;
  private editorCursor:string;
+ private peers:unknown;
+ private docBound=false;
  private assetLoads=new Map<string,Promise<Uint8Array>>();
  private assetDelivered=new Set<string>();
  constructor(readonly editor:NativeEditor,config:AppConfig,path:string,private readonly readAsset:(path:string)=>Promise<Uint8Array>=async path=>new Uint8Array(await Bun.file(path).arrayBuffer())){
@@ -31,12 +34,17 @@ export class NativeMarkdown {
   this.frame=coreCall("markdown.goto",{id:this.id,line:editor.frame.cursor.line,col:editor.frame.cursor.col});this.richRevision=this.frame.revision;this.editorRevision=editor.frame.revision;this.lastDirty=editor.frame.dirty;this.editorCursor=`${editor.frame.cursor.line}:${editor.frame.cursor.col}`;
   this.cleanup=editor.subscribe(frame=>{
    if(this.syncing||this.disposed)return;
+   if(this.docBound!==!!frame.collaborationBound){this.docBound=!!frame.collaborationBound;this.call("doc-bound",{bound:this.docBound},false);}
+   if(this.peers!==frame.remotePeers){this.peers=frame.remotePeers;this.call("presence",{peers:frame.remotePeers||[]},false);}
    if(frame.revision!==this.editorRevision){this.editorRevision=frame.revision;this.call("source",{text:editor.text()},false);}
    const cursor=`${frame.cursor.line}:${frame.cursor.col}`;if(cursor!==this.editorCursor){this.editorCursor=cursor;this.call("goto",{line:frame.cursor.line,col:frame.cursor.col},false);}
    if(frame.vim!==undefined&&frame.vim!==this.frame.vim)this.call("toggle-vim",{},false);
    if(this.lastDirty&&!frame.dirty)this.call("saved",{},false);this.lastDirty=frame.dirty;
   });
+  if(editor.frame.collaborationBound){this.docBound=true;this.call("doc-bound",{bound:true},false);}
+  if(editor.frame.remotePeers?.length){this.peers=editor.frame.remotePeers;this.call("presence",{peers:this.peers},false);}
  }
+ getPresence(){return this.frame.presence;}
  private signature(config:AppConfig){return JSON.stringify([config.fontFamily,config.markdownFontFamily,config.fontWeight,config.scale,config.themeName]);}
  configure(config:AppConfig){const next=this.signature(config);if(next===this.configuration)return;this.configuration=next;this.assetDelivered.clear();return this.call("configure",{fontFamily:config.fontFamily,markdownFontFamily:config.markdownFontFamily,fontWeight:config.fontWeight,scale:config.scale,theme:config.themeName},false);}
  private assetBytes(path:string){let pending=this.assetLoads.get(path);if(!pending){pending=this.readAsset(path);this.assetLoads.set(path,pending);}return pending;}
@@ -54,6 +62,10 @@ export class NativeMarkdown {
   frame.commands=sharePaintCommands(this.frame.commands,frame.commands);
   if(this.frame.menu&&frame.menu)frame.menu.commands=sharePaintCommands(this.frame.menu.commands,frame.menu.commands);
   this.frame=frame;
+  if(frame.docHistory?.length){
+   for(const redo of frame.docHistory)this.editor.call("crdt.history",{redo});
+   return this.frame;
+  }
   if(frame.revision!==this.richRevision){this.richRevision=frame.revision;if(sync){this.syncing=true;try{this.editor.call("replace-source",{text:this.text()});this.editorRevision=this.editor.frame.revision;this.lastDirty=this.editor.frame.dirty;}finally{this.syncing=false;}}}
   if(sync&&["key","pointer","goto","restore","block-template","command","menu.pointer"].includes(op)){
    this.syncing=true;try{this.editor.call("goto",{line:frame.cursor.line,col:frame.cursor.col});this.editorCursor=`${this.editor.frame.cursor.line}:${this.editor.frame.cursor.col}`;}finally{this.syncing=false;}

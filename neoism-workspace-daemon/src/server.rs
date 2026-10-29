@@ -30,11 +30,11 @@ use axum::{
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
-use neoism_protocol::agent::{AgentClientMessage, AgentServerMessage};
-use neoism_protocol::config::{ConfigClientMessage, ConfigServerMessage};
+use neoism_protocol::agent::AgentServerMessage;
+use neoism_protocol::config::ConfigServerMessage;
 use neoism_protocol::crdt::{CrdtClientMessage, CrdtPresenceUpdate, CrdtServerMessage};
 use neoism_protocol::cursor::{CursorOverlayClientMessage, CursorOverlayServerMessage};
-use neoism_protocol::diagnostics::{DiagnosticsClientMessage, DiagnosticsServerMessage};
+use neoism_protocol::diagnostics::DiagnosticsServerMessage;
 use neoism_protocol::editor::{EditorClientMessage, EditorServerMessage};
 use neoism_protocol::files::{FilesClientMessage, FilesServerMessage};
 use neoism_protocol::git::{GitClientMessage, GitServerMessage};

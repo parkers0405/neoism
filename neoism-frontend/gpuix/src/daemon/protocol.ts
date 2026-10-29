@@ -4,6 +4,10 @@ import { Schema } from "effect";
 // its browser host or changing any Rust wire contract.
 export type { WorkspaceClientMessage, FilesClientMessage, AgentClientMessage, Attachment, SearchClientMessage, ConfigClientMessage, DiagnosticsClientMessage } from "../../../web/src/workspace/types";
 import type { GitClientMessage as WebGitClientMessage } from "../../../web/src/workspace/types";
+export type { CrdtServerMessage, CrdtCursorPosition, CrdtSelectionRange } from "../../../web/src/workspace/types";
+import type { CrdtClientMessage as WebCrdtClientMessage, CrdtPeerPresence as WebCrdtPeerPresence } from "../../../web/src/workspace/types";
+export type CrdtPeerPresence = WebCrdtPeerPresence & {client_os?:string|null};
+export type CrdtClientMessage = WebCrdtClientMessage | { AcknowledgeStateVector:{buffer_id:string;peer_id:string;state_vector_v1:number[]} };
 export type GitClientMessage = WebGitClientMessage | { WatchStatus: { token: string } } | { UnwatchStatus: { token: string } };
 import type { EditorClientMessage as WebEditorClientMessage } from "../../../web/src/workspace/types";
 // Additive canonical variants that landed after the web mirror was generated.
@@ -17,7 +21,7 @@ export type PtyMessage =
   | { PtyInput: { session_id: string; bytes: number[] } }
   | { Resize: { session_id: string; cols: number; rows: number } }
   | { ClosePty: { session_id: string } };
-export type Family = "Workspace" | "Files" | "Agent" | "Pty" | "Search" | "Config" | "Editor" | "Diagnostics" | "Git";
+export type Family = "Workspace" | "Files" | "Agent" | "Pty" | "Search" | "Config" | "Editor" | "Diagnostics" | "Git" | "Crdt";
 export interface WireEvent { family: Family; requestId: number; message: unknown }
 export interface ConnectionState {
   phase: "connecting" | "authenticating" | "connected" | "waiting" | "auth-rejected" | "closed";
@@ -28,6 +32,7 @@ export interface ConnectionState {
 export const WorkspaceSchema = Schema.Struct({
   id: Schema.String, host_id: Schema.String, title: Schema.String,
   host_kind:Schema.optionalKey(Schema.String),
+  visibility:Schema.optionalKey(Schema.String),
   root_dir: Schema.optionalKey(Schema.NullOr(Schema.String)),
   notes_vault_dir: Schema.optionalKey(Schema.NullOr(Schema.String)),
   linked_vault_dir: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -115,7 +120,7 @@ export function parseEnvelope(raw: string): WireEvent | undefined {
   if (["PtyCreated", "PtyOutput", "PtyClosed", "SessionCwd", "TerminalDirectoryChanged", "TerminalDirectoryChangeFailed"].includes(tag) && isRecord(body))
     return { family: "Pty", requestId: 0, message: { [tag]: body } };
   const family = tag.replace(/Reply$/, "");
-  if (!["Workspace", "Files", "Agent", "Pty", "Search", "Config", "Editor", "Diagnostics", "Git"].includes(family) || !isRecord(body)) return;
+  if (!["Workspace", "Files", "Agent", "Pty", "Search", "Config", "Editor", "Diagnostics", "Git", "Crdt"].includes(family) || !isRecord(body)) return;
   if (typeof body.request_id !== "number" || !Number.isSafeInteger(body.request_id) || body.request_id < 0 || !("message" in body)) return;
   const inner = variant(body.message);
   const requestId = family === "Search" && inner && isRecord(inner[1]) && typeof inner[1].req_id === "number" ? inner[1].req_id : body.request_id;

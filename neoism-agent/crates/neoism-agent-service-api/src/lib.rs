@@ -1,3 +1,5 @@
+pub mod service_envelope;
+pub mod fast_policy;
 pub mod browser_pages;
 pub mod server_registry;
 pub mod fast_hosting;

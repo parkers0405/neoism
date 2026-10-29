@@ -40,9 +40,9 @@ export class SessionStore {
   private readonly identity: string;
   private readonly profiles: boolean;
   private last = "";
-  constructor(config: Pick<AppConfig, "endpoint" | "authToken" | "pairingToken">, env = process.env) {
+  constructor(config: Pick<AppConfig, "endpoint" | "authToken" | "pairingToken" | "transportIdentity">, env = process.env) {
     // Scope recovery to the endpoint and authenticated identity without writing credentials.
-    this.identity = createHash("sha256").update(JSON.stringify([config.endpoint, config.pairingToken || config.authToken || ""])).digest("hex").slice(0, 24);
+    this.identity = createHash("sha256").update(JSON.stringify(config.transportIdentity ? [config.transportIdentity] : [config.endpoint, config.pairingToken || config.authToken || ""])).digest("hex").slice(0, 24);
     this.profiles = !!env.NEOISM_GPUIX_STATE_PATH;
     this.path = env.NEOISM_GPUIX_STATE_PATH || join(env.XDG_STATE_HOME || join(homedir(), ".local/state"), "neoism/gpuix", `${this.identity}.json`);
   }

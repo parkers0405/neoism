@@ -329,6 +329,20 @@ impl CodeBuffer {
         text
     }
 
+    /// Exact last-saved source, including EOF/EOL metadata. Hosts use this
+    /// baseline to rebase legacy dirty recovery against a live shared file.
+    pub fn saved_text_for_disk(&self) -> String {
+        let sep = match self.saved_line_ending.unwrap_or(self.line_ending) {
+            CodeLineEnding::Lf => "\n",
+            CodeLineEnding::Crlf => "\r\n",
+        };
+        let mut text = self.saved_baseline.join(sep);
+        if self.saved_trailing_newline.unwrap_or(self.trailing_newline) {
+            text.push_str(sep);
+        }
+        text
+    }
+
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }

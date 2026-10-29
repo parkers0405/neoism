@@ -6,6 +6,7 @@ import { coreCall, NativeEditor, type EditorFrame } from "../native-core";
 import { createEditorLsp, type EditorLspConnection } from "./lsp";
 import { LspOverlay } from "./LspOverlay";
 import { BreadcrumbsView } from "./BreadcrumbsView";
+import {PaintLayer} from "../ui/PaintLayer";
 import { CanvasImages, cssColor, RasterSource, type CanvasOp } from "../ui/canvas";
 import { focusedNativeElement, focusNativeElement, invalidateNativeFocus } from "../native-focus";
 import {registerSurfaceCaret,surfaceCursorSuppressed} from "../ui/cursor-handoff";
@@ -189,6 +190,7 @@ export function EditorView(props: {
     <text onLayout={(event) => { if (event.width) setCell(event.width / 10); }} style={{ position: "absolute", opacity: 0,
       fontFamily: config.fontFamily, fontSize: config.fontSize, fontWeight: config.fontWeight, pointerEvents: "none" }}>0000000000</text>
     <canvas testId="code-viewport" commands={paint()} style={{ position: "absolute", left: 0, top: 0, right: 0, bottom: 0, pointerEvents: "none" }} />
+    <PaintLayer commands={frame().peerCommands||[]} config={config}/>
     {/* Painted by the canvas; this empty box only locates the caret for automation. */}
     <Show when={caretShown()}><div testId="code-editor-caret" style={{ position: "absolute", left: caret().left, top: caret().top, width: caret().width, height: caret().height, pointerEvents: "none" }} /></Show>
     <Show when={lsp}><LspOverlay controller={lsp!} config={config} anchor={size()} /></Show>

@@ -28,6 +28,8 @@ use std::{
 #[path = "../../../desktop/src/input/kitty_keyboard.rs"]
 mod kitty_keyboard;
 mod pickers;
+mod ssh_transport;
+use ssh_transport::original as ssh_hosts;
 #[path = "layout.rs"]
 mod host_layout;
 mod markdown;
@@ -36,12 +38,19 @@ mod paint_canvas;
 mod ghostty;
 mod editor_lsp;
 mod editor_raster;
+mod editor_collaboration;
+mod editor_presence;
 mod finder;
 mod command_catalog;
 mod chrome;
+mod presence;
 mod keyboard_policy;
 mod tree_glyphs;
 mod menu_actions;
+mod server_management;
+mod service_process;
+#[path = "../../../desktop/src/fast_servers.rs"]
+mod fast_servers;
 mod agent_composer;
 mod splash;
 mod wordmark;
@@ -364,6 +373,9 @@ impl Terminal {
     }
 }
 struct Editor {
+    collaboration: Option<editor_collaboration::EditorCollaboration>,
+    peers: Vec<neoism_protocol::crdt::CrdtPeerPresence>,
+    peer_paint: editor_presence::PeerPainter,
     pane: CodePane,
     register: String,
     clipboard: Option<String>,
@@ -404,13 +416,14 @@ impl Editor {
         pane.wrap = self.pane.wrap;
         pane.search_highlight = self.pane.search_highlight.clone();
         pane.restore_host_scroll(self.pane.scroll_x, self.pane.scroll_y);
-        Self { pane, register: self.register.clone(), clipboard: None, host_action: None,
+        Self { collaboration:None, peers:self.peers.clone(), peer_paint:Default::default(), pane, register: self.register.clone(), clipboard: None, host_action: None,
             width: self.width, height: self.height, cell: self.cell, row: self.row,
             trail: neoism_ui::panels::trail_cursor::TrailCursor::new(),
             last_frame: Instant::now(), last_cursor: self.last_cursor, lsp: Default::default(), compact: self.compact, raster: self.raster.clone_settings() }
     }
-    fn snapshot(&self) -> Value {
-        json!({"version":1,"text":self.pane.buffer.text_for_disk(),"buffer":self.pane.buffer.recovery_snapshot(),
+    fn snapshot(&mut self) -> Value {
+        let collaboration=self.collaboration.as_mut().map(|binding|binding.snapshot(&mut self.pane.buffer));
+        json!({"collaboration":collaboration,"version":1,"text":self.pane.buffer.text_for_disk(),"buffer":self.pane.buffer.recovery_snapshot(),
             "inputMode":self.pane.input_mode,"wrap":self.pane.wrap,"scrollX":self.pane.scroll_x,"scrollY":self.pane.scroll_y,
             "register":self.register,"searchHighlight":self.pane.search_highlight})
     }
@@ -424,6 +437,7 @@ impl Editor {
         pane.wrap = snapshot["wrap"].as_bool().unwrap_or(true);
         pane.search_highlight = snapshot["searchHighlight"].as_str().map(str::to_owned);
         pane.restore_host_scroll(n(snapshot,"scrollX",0.0), n(snapshot,"scrollY",0.0));
+        self.collaboration=if snapshot["collaboration"].is_null(){None}else{Some(editor_collaboration::EditorCollaboration::restore(&snapshot["collaboration"],&mut pane.buffer)?)};
         self.pane = pane;
         self.register = text(snapshot,"register").to_owned();
         self.clipboard = None;
@@ -432,6 +446,7 @@ impl Editor {
         Ok(())
     }
     fn frame(&mut self) -> Value {
+        if let Some(collaboration)=self.collaboration.as_mut(){collaboration.drain(&mut self.pane.buffer);}
         self.lsp.session.pump(&mut self.pane);
         let pane = &mut self.pane;
         let row = self.row.max(1.0);
@@ -577,7 +592,7 @@ impl Editor {
         // time predates this transition and must not consume its spring.
         self.trail.animate(cell, caret_h, if was_animating { dt } else { 0.0 });
         let lsp = self.lsp.frame(pane);
-        json!({"packedRuns":self.compact,"lsp":lsp,"lines":lines,"searchHits":search_hits,"extraCarets":extra_carets,"rowHeight":row,"cellWidth":cell,"textX":text_x,"gutterWidth":gutter,
+        json!({"peerCommands":self.peer_paint.frame(pane,&self.peers),"remotePeers":self.peers,"collaborationBound":pane.buffer.doc_history_bound(),"presence":editor_collaboration::cursor(&pane.buffer),"packedRuns":self.compact,"lsp":lsp,"lines":lines,"searchHits":search_hits,"extraCarets":extra_carets,"rowHeight":row,"cellWidth":cell,"textX":text_x,"gutterWidth":gutter,
             "cursor":{"x":cursor_x,"y":cursor_y,"line":pane.buffer.cursor_line,"col":pane.buffer.cursor_col,
               "shape":format!("{:?}",pane.cursor_shape()),"visible":cursor_y+row>0.0 && cursor_y<self.height},
             "mode":format!("{:?}",pane.buffer.mode),"wrap":pane.wrap,"vim":pane.input_mode==CodeInputMode::Vim,"dirty":pane.buffer.is_dirty(),"revision":pane.buffer.revision,
@@ -889,6 +904,8 @@ impl Editor {
 }
 
 fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
+    if let Some(result) = ssh_transport::dispatch(&v) { return result; }
+    if let Some(result) = presence::dispatch(&v) { return result; }
     if let Some(result) = chrome::dispatch(&v) { return result; }
     if let Some(result) = keyboard_policy::dispatch(&v) { return result; }
     if let Some(result) = tree_glyphs::dispatch(&v) { return result; }
@@ -899,6 +916,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
     if let Some(result) = git_panel::dispatch(&v) { return result; }
     if let Some(result) = git_review::dispatch(&v, engines) { return result; }
     if let Some(result) = git_confirm::dispatch(&v) { return result; }
+    if let Some(result) = server_management::dispatch(&v) { return result; }
     if let Some(result) = menu_actions::dispatch(&v) { return result; }
     if let Some(result) = command_catalog::dispatch(&v) { return result; }
     if let Some(result) = finder::dispatch(&v) { return result; }
@@ -1049,6 +1067,10 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
             let source_id = v["sourceID"].as_u64().ok_or("Missing source editor")? as u32;
             let buffer = engines.editors.get(&source_id).ok_or("Unknown source editor")?.pane.buffer.clone();
             let target = engines.editors.get_mut(&id).ok_or("Unknown editor")?;
+            if buffer.doc_history_bound(){
+                let old=target.pane.buffer.lines.join("\n");let new=buffer.lines.join("\n");
+                if let Some(delta)=neoism_ui::editor::markdown::doc_sync::diff_doc_texts(&old,&new){neoism_ui::editor::code::doc_sync::apply_remote_delta_to_buffer(&mut target.pane.buffer,&delta);}
+            }
             target.pane.buffer.sync_document_from(&buffer);
             target.pane.highlight = Default::default();
             Ok(target.frame())
@@ -1072,6 +1094,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
             engines.editors.insert(
                 id,
                 Editor {
+                    collaboration:None, peers:Vec::new(),peer_paint:Default::default(),
                     pane,
                     register: String::new(),
                     clipboard: None,
@@ -1400,6 +1423,20 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
         op if op.starts_with("editor.") => {
             let e = engines.editors.get_mut(&id).ok_or("Unknown editor")?;
             match op {
+                "editor.crdt.bind" => {
+                    if let Some(binding)=e.collaboration.as_mut(){
+                        let expected=neoism_ui::editor::crdt::presence_buffer_id_for_path(std::path::Path::new(text(&v,"path")));
+                        if binding.binding.buffer_id()!=expected{return Err("Shared recovery belongs to a different document".into());}
+                        binding.reconnect(&mut e.pane.buffer);
+                    }else{e.collaboration=Some(editor_collaboration::EditorCollaboration::new(v["clientId"].as_u64().ok_or("Missing CRDT client id")?,text(&v,"path"),&e.pane.buffer));}
+                    return Ok(e.collaboration.as_mut().unwrap().take(&mut e.pane.buffer));
+                },
+                "editor.crdt.flush" => return Ok(e.collaboration.as_mut().ok_or("Editor is not document-bound")?.take(&mut e.pane.buffer)),
+                "editor.crdt.reconnect" => {e.collaboration.as_mut().ok_or("Editor is not document-bound")?.reconnect(&mut e.pane.buffer);return Ok(e.collaboration.as_mut().unwrap().take(&mut e.pane.buffer));},
+                "editor.crdt.event" => {e.collaboration.as_mut().ok_or("Editor is not document-bound")?.event(serde_json::from_value(v["message"].clone()).map_err(|e|e.to_string())?,&mut e.pane.buffer)?;},
+                "editor.crdt.history" => {e.collaboration.as_mut().ok_or("Editor is not document-bound")?.history(&mut e.pane.buffer,v["redo"].as_bool().unwrap_or(false));},
+                "editor.crdt.take-history" => return Ok(json!(e.pane.buffer.take_doc_history_requests().into_iter().map(|r|matches!(r,neoism_ui::editor::code::CodeDocHistoryRequest::Redo)).collect::<Vec<_>>())),
+                "editor.presence" => {e.peer_paint.configure(&v);e.peers=serde_json::from_value(v["peers"].clone()).map_err(|e|e.to_string())?;},
                 "editor.snapshot" => return Ok(e.snapshot()),
                 "editor.restore" => e.restore(&v["snapshot"] )?,
                 "editor.raster.configure" => e.raster.configure(&v),
@@ -1646,7 +1683,9 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                     }
                 }
                 "editor.replace-source" => {
-                    e.pane.buffer.replace_from_disk_text(text(&v, "text"));
+                    if e.pane.buffer.doc_history_bound(){
+                        if let Some(delta)=neoism_ui::editor::markdown::doc_sync::diff_doc_texts(&e.pane.buffer.lines.join("\n"),text(&v,"text")){neoism_ui::editor::code::doc_sync::apply_remote_delta_to_buffer(&mut e.pane.buffer,&delta);}
+                    }else{e.pane.buffer.replace_from_disk_text(text(&v, "text"));}
                 }
                 "editor.paste" => e.pane.buffer.insert_text(text(&v, "text")),
                 "editor.frame" => {}

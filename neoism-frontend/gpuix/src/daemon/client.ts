@@ -2,10 +2,10 @@ import { Context, Data, Effect, Layer, Schema } from "effect";
 import WebSocket from "ws";
 import type { AppConfig } from "../config";
 import { parseEnvelope, variant, isRecord, type WireEvent, type ConnectionState, type Family,
-  type WorkspaceClientMessage, type FilesClientMessage, type AgentClientMessage, type PtyMessage, type SearchClientMessage, type ConfigClientMessage, type EditorClientMessage, type DiagnosticsClientMessage, type GitClientMessage } from "./protocol";
+  type WorkspaceClientMessage, type FilesClientMessage, type AgentClientMessage, type PtyMessage, type SearchClientMessage, type ConfigClientMessage, type EditorClientMessage, type DiagnosticsClientMessage, type GitClientMessage, type CrdtClientMessage } from "./protocol";
 
 export class DaemonError extends Data.TaggedError("DaemonError")<{ message: string }> {}
-type Messages = { Workspace: WorkspaceClientMessage; Files: FilesClientMessage; Agent: AgentClientMessage; Pty: PtyMessage; Search: SearchClientMessage; Config: ConfigClientMessage; Editor: EditorClientMessage; Diagnostics: DiagnosticsClientMessage; Git: GitClientMessage };
+type Messages = { Workspace: WorkspaceClientMessage; Files: FilesClientMessage; Agent: AgentClientMessage; Pty: PtyMessage; Search: SearchClientMessage; Config: ConfigClientMessage; Editor: EditorClientMessage; Diagnostics: DiagnosticsClientMessage; Git: GitClientMessage; Crdt:CrdtClientMessage };
 interface Pending { family: Family; resume: (result: Effect.Effect<unknown, DaemonError>) => void; timer: ReturnType<typeof setTimeout> }
 export type SocketFactory = (endpoint: string, token?: string) => WebSocket;
 export interface ConnectionFailure { reason:string; attempt:number; quietMs:number; lastMessage?:{family:Family;kind:string;bytes:number} }

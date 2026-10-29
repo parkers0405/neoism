@@ -23,14 +23,19 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
   const descriptors = [{ path: "editor.vim-mode", label: "Modal editing", description: "Original Vim engine", value_kind: "boolean", default: true, static_suggestions: [], runtime_suggestions: [], options: [], constraints: { nullable: false }, accepted_kinds: ["boolean"], extensible: false, category: "general", control: { kind: "toggle" } }];
   let answers = 0, asked = false;
   const selections = new Map(threads.map((thread) => [thread.session_id, { agent: thread.agent, model: thread.model, thinking: "medium" }]));
+  const socketAgentStreams=new Map<ServerWebSocket<unknown>,Set<string>>();
+  const streamSubscribers=(sessionId:string)=>[...socketAgentStreams.values()].filter(streams=>streams.has(sessionId)).length;
   const sockets=new Set<ServerWebSocket<unknown>>(),gitWatchers=new Map<string,ServerWebSocket<unknown>>();
   const broadcast=(family:string,message:unknown)=>{const wire=JSON.stringify({[family+"Reply"]:{request_id:0,message}});for(const socket of sockets)socket.send(wire);};
   const push = (message:unknown)=>broadcast("Agent",message);
+  const pushSubscribed=(message:any)=>{const body=typeof message==="object"&&message?Object.values(message)[0]as any:undefined;for(const[socket,streams]of socketAgentStreams)if(!body?.session_id||streams.has(body.session_id))socket.send(JSON.stringify({AgentReply:{request_id:0,message}}));};
   const pushGit=(message:unknown)=>{
     const token=(message as {RepoStatus?:{token?:string}})?.RepoStatus?.token;
     if(token){gitWatchers.get(token)?.send(JSON.stringify({GitReply:{request_id:0,message}}));return;}
     broadcast("Git",message);
   };
+  const pushCrdt=(message:unknown)=>broadcast("Crdt",message);
+  const crdtRequests:Array<{tag:string;body:Record<string,unknown>}>=[];
   const pushPty=(message:unknown)=>broadcast("Pty",message);
   const pushWorkspace=(message:unknown)=>broadcast("Workspace",message);
   const catalogStreams=new Map<ReadableStreamDefaultController<Uint8Array>,string|undefined>();
@@ -40,6 +45,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
     fetch: async (request, server) => {
       const url = new URL(request.url);
       if (url.pathname === "/session") return server.upgrade(request) ? undefined : new Response("", { status: 400 });
+      if (url.pathname === "/health") return Response.json({ok:true});
       httpRequests.push({ path: url.pathname, authorization: request.headers.get("authorization"), directory: url.searchParams.get("directory") });
       const match = url.pathname.match(/^\/agent\/workspaces\/([^/]+)\/v2\/(.*)$/);
       if (!match) return new Response("Not found", { status: 404 });
@@ -114,20 +120,27 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
       return new Response("Not found", { status: 404 });
     },
     websocket: {
-      open(client) { sockets.add(client); },
-      close(client){sockets.delete(client);for(const[token,owner]of gitWatchers)if(owner===client)gitWatchers.delete(token);},
+      open(client) { sockets.add(client);socketAgentStreams.set(client,new Set()); },
+      close(client){sockets.delete(client);const streams=socketAgentStreams.get(client);socketAgentStreams.delete(client);for(const id of streams||[])if(!streamSubscribers(id))agentStreams.delete(id);for(const[token,owner]of gitWatchers)if(owner===client)gitWatchers.delete(token);},
       message(client, data) {
         const [family, envelope] = Object.entries(JSON.parse(String(data)))[0] as [string, { request_id: number; message: unknown;workspace_root?:string }];
         const reply = (message: unknown) => client.send(JSON.stringify({ [family + "Reply"]: { request_id: envelope.request_id, message } }));
         const body = typeof envelope.message === "string" ? {} : envelope.message as Record<string, unknown>;
         const tag = typeof envelope.message === "string" ? envelope.message : Object.keys(body)[0];
         const payload = (body[tag] || {}) as Record<string, unknown>;
+        if(family==="Crdt"){crdtRequests.push({tag,body:payload});return;}
         if(family==="Git"){if(tag==="WatchStatus"){for(const[token,owner]of gitWatchers)if(owner===client)gitWatchers.delete(token);gitWatchers.set(String(payload.token),client);}else if(tag==="UnwatchStatus")gitWatchers.delete(String(payload.token));gitRequests.push({message:envelope.message,root:envelope.workspace_root});if(config.gitHandler)config.gitHandler(envelope.message,envelope.workspace_root,reply);else reply("Ack");return;}
         if (family === "Workspace") {
           workspaceRequests.push({ tag, body: payload });
           if (tag === "Hello") reply({ HelloAck: { accepted: true } });
           if (tag === "RequestHostWorkspaceTree") reply({ HostWorkspaceTree: { hosts: [{ id: "host", label: "Host" }], workspaces, tabs: [] } });
           if (tag === "ResolveInitialWorkspace") reply({ InitialWorkspaceResolved: { workspace: workspaces[0], reason: "host_active" } });
+          if(tag==="CreateWorkspace"){
+            const id=String(payload.workspace_id||crypto.randomUUID());
+            let workspace=workspaces.find(entry=>entry.id===id);
+            if(!workspace){workspace={id,host_id:"host",title:String(payload.title||"Workspace"),root_dir:payload.root_dir==="~"?"/home/fixture-remote":String(payload.root_dir||"/project")};workspaces.push(workspace);}
+            reply({HostWorkspaceUpserted:{workspace}});
+          }
           if(tag==="CreateHostWorkspace"){
             const complete=()=>{
               if(config.workspaceCreateError){reply({Error:{message:config.workspaceCreateError}});return;}
@@ -199,7 +212,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
         if (tag === "ListAgents") reply({ AgentCatalog: { agents: [{ name: "build", description: "Build" }, { name: "plan", description: "Plan" }] } });
         if (tag === "ListSkills") reply({ SkillCatalog: { skills: [{ name: "review", description: "Review" }] } });
         if (tag === "SwitchThread") {
-          agentStreams.add(String(payload.session_id));reply({ThreadSwitched:{session_id:payload.session_id}});
+          socketAgentStreams.get(client)!.add(String(payload.session_id));agentStreams.add(String(payload.session_id));reply({ThreadSwitched:{session_id:payload.session_id}});
           const thread = threads.find((t) => t.session_id === payload.session_id);
           if (thread) reply({ ProviderState: { session_id: thread.session_id, ...selections.get(thread.session_id), context_limit: 128000 } });
           if (config.questionsOnSwitch && !asked) {
@@ -209,8 +222,8 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
             ] } } });
           }
         }
-        if(tag==="ResumeStream")agentStreams.add(String(payload.session_id));
-        if(tag==="StopStream")agentStreams.delete(String(payload.session_id));
+        if(tag==="ResumeStream"){socketAgentStreams.get(client)!.add(String(payload.session_id));agentStreams.add(String(payload.session_id));}
+        if(tag==="StopStream"){const id=String(payload.session_id);socketAgentStreams.get(client)!.delete(id);if(!streamSubscribers(id))agentStreams.delete(id);}
         if (tag === "GetHistory") reply({ HistoryChunk: { session_id: payload.session_id, messages: history.get(String(payload.session_id))||[] } });
         if (tag === "CreateThread") {
           const complete = () => reply({ ThreadCreated: { session_id: "created-a", title: "Created", directory: payload.directory } });
@@ -233,6 +246,6 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean; deferCr
       },
     },
   });
-  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
+  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
     mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);} };
 }

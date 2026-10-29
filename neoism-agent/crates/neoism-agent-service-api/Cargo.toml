@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+neoism-protocol = { path = "../../../neoism-protocol" }
 base64.workspace = true
 ring = "0.17"
 serde.workspace = true

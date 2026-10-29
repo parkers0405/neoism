@@ -20,6 +20,10 @@ import { SessionStore, type SavedSession } from "./session-store";
 import { installFrameMeter, notifyFrameActivity } from "./chrome/frame-meter";
 import { installDisplayClock, type DisplayClock } from "./animation/display-clock";
 import { installProfiling, profileInput, profileStart, profileEnd } from "./profiling";
+import {prepareServerConnection,ServerHandshakeError,LocalServerConfig} from "./daemon/server-connection";
+import {SelectedSshReconnect,preserveReconnectFocus} from "./daemon/ssh-reconnect";
+import type {SshAttachment} from "./daemon/ssh-transport";
+import type {ServerSelection} from "./menu-actions/ChromeActionsController";
 import {localDaemon} from "./menu-actions/web-frontend";
 
 if (process.argv.includes("--help")) {
@@ -27,11 +31,15 @@ if (process.argv.includes("--help")) {
   process.exit(0);
 }
 
-export interface ServerSelection { id: string; endpoint: string; pairingToken?: string; token?: string }
-type HotState = { state: AppState; editors: Map<string, NativeEditor>; config?: AppConfig; recovery?: SavedSession };
+export type {ServerSelection} from "./menu-actions/ChromeActionsController";
+let sshAttachment:SshAttachment|undefined;
+let releaseReconnectFocus:(()=>void)|undefined;
+const sshReconnect=new SelectedSshReconnect(server=>connectServer(server,true),error=>session.model.report(error));
+type HotState = { ssh?:SshAttachment; state: AppState; editors: Map<string, NativeEditor>; config?: AppConfig; recovery?: SavedSession };
 const stateKey = Symbol.for("neoism/gpuix/state");
 const stateGlobals = globalThis as typeof globalThis & { [stateKey]?: HotState };
 const hotState = stateGlobals[stateKey]; delete stateGlobals[stateKey];
+sshAttachment=hotState?.ssh;
 
 async function createSession(config: AppConfig, seed?: HotState) {
   for (const warning of config.warnings) console.error(`[neoism-gpuix] ${warning}`);
@@ -53,6 +61,7 @@ async function createSession(config: AppConfig, seed?: HotState) {
   } };
 }
 let session = await createSession(hotState?.config || loadConfig(), hotState);
+const localServerConfig=new LocalServerConfig(session.config);
 const hostKey = Symbol.for("neoism/gpuix/native-host");
 const globals = globalThis as typeof globalThis & { [hostKey]?: { renderer: GpuixRenderer; loop: FrameLoop; displayClock?: DisplayClock; shutdown?: () => Promise<void> } };
 let host = globals[hostKey];
@@ -81,11 +90,11 @@ let root: ReturnType<typeof render> | undefined;
 // its replacement has settled (AppGeneration), so it must keep its own values.
 const generationOf = () => ({ model: session.model, config: { ...session.config } });
 const [appGeneration, setAppGeneration] = createSignal(generationOf());
-host.shutdown = () => session.dispose();
+host.shutdown = async () => {sshReconnect.dispose();releaseReconnectFocus?.();try{await session.dispose();}finally{try{sshAttachment?.dispose();}finally{try{coreCall("ssh.shutdown");}finally{coreCall("server.shutdown");}}}};
 installFrameMeter(host.renderer);
 let transition = Promise.resolve();
-function update(work: () => Promise<void>) {
-  const next = transition.then(work); transition = next.catch(error => session.model.report(error)); return next;
+function update(work: () => Promise<void>,reportErrors=true) {
+  const next = transition.then(work); transition = next.catch(error => {if(reportErrors&&!(error instanceof ServerHandshakeError&&error.phase==="cancelled"))session.model.report(error);}); return next;
 }
 async function reloadConfig(fontSizeOverride?:number,expectedSession?:typeof session) {
   return update(async () => {
@@ -99,7 +108,8 @@ async function reloadConfig(fontSizeOverride?:number,expectedSession?:typeof ses
     // Appearance follows the selected host's config; transport identity remains
     // scoped to the server the user explicitly selected.
     Object.assign(previous, next, { endpoint: previous.endpoint, authToken: previous.authToken, pairingToken: previous.pairingToken, workspaceId: previous.workspaceId,
-      presenceDisplayName:localDaemon(previous.endpoint)?next.presenceDisplayName:previous.presenceDisplayName });
+      serverId:previous.serverId,collaborative:previous.collaborative,transportIdentity:previous.transportIdentity,
+      presenceDisplayName:!previous.collaborative&&localDaemon(previous.endpoint)?next.presenceDisplayName:previous.presenceDisplayName });
     if (beforeVim !== previous.vim) session.model.setVimMode(previous.vim);
     // Rebuild components that capture font metrics without clearing the native
     // root first. Both generations commit through its existing mutation queue.
@@ -117,24 +127,30 @@ const fontZoom=new FontZoomController(()=>session.config.fontSize,async size=>{
   Object.assign(session.config,{fontSize:size,scale:size/14});
   return update(async()=>{root?.flushSync(()=>setAppGeneration(generationOf()));});
 });
-async function connectServer(server: ServerSelection) {
-  return update(async () => {
-    let next: AppConfig;
-    if (server.id === "local") {
-      const args: string[] = [];
-      for (let i = 2; i < process.argv.length; i++) {
-        if (["--daemon", "--workspace"].includes(process.argv[i])) { i++; continue; }
-        args.push(process.argv[i]);
-      }
-      next = loadConfig(args, { ...process.env, NEOISM_GPUIX_DAEMON_URL: undefined, NEOISM_DAEMON_TOKEN: undefined, NEOISM_PAIRING_TOKEN: undefined });
-    } else {
-      // Saved registry credentials belong to Workspace.Hello. They never
-      // become an upgrade URL token or implicit local daemon credential.
-      next = { ...session.config, endpoint: server.endpoint, authToken: undefined, pairingToken: server.pairingToken ?? server.token, workspaceId: undefined };
-    }
-    root?.unmount(); await session.dispose(); session = await createSession(next); mount();
-  });
+async function connectServer(server: ServerSelection,reconnecting=false) {
+  const resume=reconnecting?()=>{}:sshReconnect.pause();
+  try{return await update(async () => {
+    localServerConfig.observe(session.config);
+    const prepared=await prepareServerConnection(server,session.config,()=>localServerConfig.resolve(()=>{
+      const args:string[]=[];
+      for(let i=2;i<process.argv.length;i++){if(["--daemon","--workspace"].includes(process.argv[i])){i++;continue;}args.push(process.argv[i]);}
+      return loadConfig(args,{...process.env,NEOISM_GPUIX_DAEMON_URL:undefined,NEOISM_DAEMON_TOKEN:undefined,NEOISM_PAIRING_TOKEN:undefined});
+    }),{signal:server.signal});
+    if(server.signal?.aborted){prepared.ssh?.dispose();return;}
+    session.checkpoint();
+    const focus={workspaceId:session.model.state.activeWorkspace?.id,surfaceId:session.model.state.activeSurfaceId};
+    if(reconnecting&&prepared.config.transportIdentity===session.config.transportIdentity)prepared.config.workspaceId=focus.workspaceId;
+    const previousSsh=sshAttachment;
+    // Construct recovery/native state before tearing down the working UI.
+    // An invalid recovery file or failed initialization leaves it usable.
+    let replacement:Awaited<ReturnType<typeof createSession>>;
+    try{replacement=await createSession(prepared.config);}catch(error){prepared.ssh?.dispose();throw error;}
+    if(server.signal?.aborted){await replacement.dispose();prepared.ssh?.dispose();return;}
+    releaseReconnectFocus?.();releaseReconnectFocus=reconnecting?preserveReconnectFocus(replacement.model,focus):undefined;
+    root?.unmount();await session.dispose();session=replacement;sshAttachment=prepared.ssh;sshReconnect.select(server,prepared.ssh);mount();previousSsh?.dispose();
+  },!reconnecting);}finally{resume();}
 }
+
 const windowKeys=createWindowKeyRouter();
 function mount() {
   setAppGeneration(generationOf());
@@ -147,7 +163,7 @@ function mount() {
 }
 mount();
 let stopping = false;
-const stop = () => { if (stopping) return; stopping = true; root?.unmount(); host!.loop.stop(); host!.displayClock?.dispose(); void session.dispose().finally(() => process.exit(0)); };
+const stop = () => { if (stopping) return; stopping = true; root?.unmount(); host!.loop.stop(); host!.displayClock?.dispose(); void host!.shutdown!().finally(() => process.exit(0)); };
 process.once("SIGINT", stop); process.once("SIGTERM", stop);
 // `kill -USR2 <pid>` writes the live UI model (tabs, workspaces, history
 // readiness) for diagnosing a state that cannot be reproduced from outside.
@@ -171,6 +187,6 @@ process.on("SIGUSR2", () => {
 });
 if (import.meta.hot) import.meta.hot.dispose(() => {
   process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
-  stateGlobals[stateKey] = { state: session.model.state, editors: session.model.editors, config: session.config, recovery: session.model.captureSession() };
+  stateGlobals[stateKey] = { ssh:sshAttachment,state: session.model.state, editors: session.model.editors, config: session.config, recovery: session.model.captureSession() };
   session.checkpoint(); root?.unmount(); void session.dispose(true);
 });

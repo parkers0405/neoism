@@ -26,6 +26,8 @@ use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashMap};
 #[path = "../../../../neoism-backend/src/config/background/catalog.rs"]
 mod background_catalog;
+#[path = "server_forms.rs"]
+mod server_forms;
 
 enum Panel {
     Settings(NeoismSettingsPane),
@@ -42,6 +44,7 @@ struct Host {
     theme: String,
     mouse: Option<(f32, f32)>,
     kind: String,
+    context: Value,
 }
 #[derive(Default)]
 struct Store {
@@ -227,9 +230,10 @@ impl Host {
                 (p.is_enabled(), p.is_animating())
             }
         };
-        let target=match &self.panel {Panel::Appearance(p)=>p.get_selected_theme().map(|name|json!({"kind":"theme","name":name})).or_else(||p.selected_background().map(|entry|json!({"kind":"background","id":entry.id,"path":entry.path,"opacity":entry.opacity,"blur":entry.blur,"fit":entry.fit,"position_x":entry.position_x,"position_y":entry.position_y}))).or_else(||p.get_selected_workspace_target().map(|target|json!({"kind":"workspace","id":target.workspace_id}))).or_else(||match p.get_selected_action(){Some(PaletteAction::SelectServer{id})=>Some(json!({"kind":"server","id":id})),Some(PaletteAction::AddServer)=>Some(json!({"kind":"server-add"})),Some(action)=>Some(json!({"kind":"run","action":format!("{action:?}")})),_=>None}).or_else(||p.get_selected_cd_directory().map(|entry|json!({"kind":"directory","path":entry.absolute_path}))).or_else(||p.get_typed_cd_target().and_then(|path|neoism_ui::panels::command_palette::actions::parse_cd_operand(&path).ok()).map(|path|json!({"kind":"directory","path":path}))).unwrap_or(Value::Null),_=>Value::Null};
+        let target=match &self.panel {Panel::Appearance(p)=>p.get_selected_theme().map(|name|json!({"kind":"theme","name":name})).or_else(||p.selected_background().map(|entry|json!({"kind":"background","id":entry.id,"path":entry.path,"opacity":entry.opacity,"blur":entry.blur,"fit":entry.fit,"position_x":entry.position_x,"position_y":entry.position_y}))).or_else(||p.get_selected_workspace_target().map(|target|json!({"kind":"workspace","id":target.workspace_id}))).or_else(||match p.get_selected_action(){Some(action)=>Some(server_forms::palette_action(action)),_=>None}).or_else(||p.get_selected_cd_directory().map(|entry|json!({"kind":"directory","path":entry.absolute_path}))).or_else(||p.get_typed_cd_target().and_then(|path|neoism_ui::panels::command_palette::actions::parse_cd_operand(&path).ok()).map(|path|json!({"kind":"directory","path":path}))).unwrap_or(Value::Null),_=>Value::Null};
         let rect = match &self.panel {
             Panel::Appearance(p) => p.active_visual_rect(self.width, 1.0),
+            Panel::About(p) if self.kind.starts_with("server-")||self.kind=="system-form" => p.active_rect(self.width,1.0),
             _ => None,
         };
         json!({"kind":self.kind,"active":active,"animating":animating,"commands":self.painter.commands(),"rect":rect,"image":image,"action":action,"target":target,"snapshot":match &self.panel {Panel::Settings(p)=>p.host_snapshot(),_=>Value::Null},"query":match &self.panel {Panel::Appearance(p)=>Some(p.query.as_str()),_=>None}})
@@ -280,12 +284,14 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 "extensions"=>{let mut p=NeoismExtensionsPane::new();p.set_entries(extensions(&v["entries"]));p.set_host_read_only(true);p.focus_search();Panel::Extensions(p)},
                 "directories"=>{let mut p=CommandPalette::new();p.set_scale(scale);p.host_set_supported_actions(Some(v["supportedActions"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()));p.open_commands_for_workspace("cd ",WorkspaceDirectoryTarget{workspace_id:v["workspaceId"].as_str().map(str::to_owned),root:text(v,"root").into()});Panel::Appearance(p)},
                 "workspaces"=>{let mut p=CommandPalette::new();p.set_scale(scale);p.host_set_management_enabled(false);let entries=v["entries"].as_array().into_iter().flatten().map(|entry|{let mut row=PaletteWorkspaceEntry::local(text(entry,"title").into(),text(entry,"detail").into(),text(entry,"id").into());row.host_id=text(entry,"hostId").into();row.host_label=text(entry,"hostLabel").into();row.current=entry["current"].as_bool().unwrap_or(false);row}).collect();p.enter_workspaces_mode(entries);Panel::Appearance(p)},
-                "servers"=>{let mut p=CommandPalette::new();p.set_scale(scale);p.host_set_management_enabled(false);let entries=v["entries"].as_array().into_iter().flatten().map(|entry|PaletteServerEntry{id:text(entry,"id").into(),name:text(entry,"name").into(),address:text(entry,"address").into(),local:entry["local"].as_bool().unwrap_or(false),temporary:entry["temporary"].as_bool().unwrap_or(false),hosted:entry["hosted"].as_bool().unwrap_or(false),status:if entry["active"].as_bool().unwrap_or(false){match text(entry,"status"){"connected"=>ServerIndicatorStatus::Online,"connecting"|"authenticating"|"waiting"=>ServerIndicatorStatus::Connecting,"closed"|"auth-rejected"=>ServerIndicatorStatus::Offline,_=>ServerIndicatorStatus::Unknown}}else{ServerIndicatorStatus::Unknown},active:entry["active"].as_bool().unwrap_or(false)}).collect();p.enter_servers_mode(entries);Panel::Appearance(p)},
+                "servers"=>{let mut p=CommandPalette::new();p.set_scale(scale);p.host_set_management_enabled(true);let entries=v["entries"].as_array().into_iter().flatten().map(|entry|PaletteServerEntry{id:text(entry,"id").into(),name:text(entry,"name").into(),address:text(entry,"address").into(),local:entry["local"].as_bool().unwrap_or(false),temporary:entry["temporary"].as_bool().unwrap_or(false),hosted:entry["hosted"].as_bool().unwrap_or(false),status:if entry["active"].as_bool().unwrap_or(false){match text(entry,"status"){"connected"=>ServerIndicatorStatus::Online,"connecting"|"authenticating"|"waiting"=>ServerIndicatorStatus::Connecting,"closed"|"auth-rejected"=>ServerIndicatorStatus::Offline,_=>ServerIndicatorStatus::Unknown}}else{ServerIndicatorStatus::Unknown},active:entry["active"].as_bool().unwrap_or(false)}).collect();p.enter_servers_mode(entries);Panel::Appearance(p)},
+                "systems"|"system-settings"=>{let mut p=CommandPalette::new();p.set_scale(scale);p.host_set_management_enabled(true);let entries=v["entries"].as_array().into_iter().flatten().map(server_forms::system).collect::<Vec<_>>();if kind=="system-settings"{p.enter_system_settings_mode(entries.into_iter().next().ok_or("System no longer exists")?);}else{p.enter_systems_mode(entries);}Panel::Appearance(p)},
+                "server-form"|"system-form"|"server-confirm"|"server-message"=>Panel::About(server_forms::open(v)),
                 "themes"|"backgrounds"=>{let mut p=CommandPalette::new();p.set_scale(scale);if kind=="themes"{p.enter_themes_mode(all_ide_theme_names());}else{p.enter_backgrounds_mode(backgrounds(&v["entries"]));p.select_clicked(v["selected"].as_u64().unwrap_or(0) as usize);}Panel::Appearance(p)},
                 "about"=>{let mut p=UniversalModal::new();p.set_scale(scale);let cargo=include_str!("../../../../Cargo.toml");let version=cargo.split("[workspace.package]").nth(1).and_then(|s|s.lines().find(|s|s.trim().starts_with("version ="))).and_then(|s|s.split('"').nth(1)).unwrap_or("dev");p.open(ModalSpec{title:"About Neoism".into(),body:format!("Neoism  v{version}\n\nA terminal-first workspace for code, notes,\nagents, and multiplayer editing.\n\nCommit\n{}",option_env!("GIT_HASH").unwrap_or("dev")),meta:String::new(),input:None,buttons:vec![ModalButton::new("OK","Enter",ModalAction::Close)],busy:false,blocking:true});Panel::About(p)},
                 _=>return Err("Unknown menu panel".into()),
             };
-            store.next+=1;let id=0xA0000000+store.next;let mut host=Host{panel,painter:RecordingPainter::new(v["fontFamily"].as_str().unwrap_or("Cascadia Code NF"),v["fontWeight"].as_u64().unwrap_or(400) as u16,v["extraFamilies"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()),width:n(v,"width",1440.0),height:n(v,"height",900.0),scale,theme:v["theme"].as_str().unwrap_or("pastel_dark").into(),mouse:None,kind:kind.into()};
+            store.next+=1;let id=0xA0000000+store.next;let mut host=Host{panel,painter:RecordingPainter::new(v["fontFamily"].as_str().unwrap_or("Cascadia Code NF"),v["fontWeight"].as_u64().unwrap_or(400) as u16,v["extraFamilies"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()),width:n(v,"width",1440.0),height:n(v,"height",900.0),scale,theme:v["theme"].as_str().unwrap_or("pastel_dark").into(),mouse:None,kind:kind.into(),context:v.clone()};
             if let Panel::Settings(p)=&mut host.panel {p.set_font_families(host.painter.font_library().family_names());p.host_restore_snapshot(&v["snapshot"]);}
             let frame=host.frame(Value::Null);store.hosts.insert(id,host);return Ok(json!({"id":id,"frame":frame}));
         }
@@ -294,21 +300,23 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
         if op=="menu.layout"{host.width=n(v,"width",host.width);host.height=n(v,"height",host.height);}
         if op=="menu.data"{match &mut host.panel {Panel::Settings(p)=>{p.set_values(v["values"].clone());},Panel::Extensions(p)=>p.set_entries(extensions(&v["entries"])),_=>{}}}
         let x=n(v,"x",0.0);let y=n(v,"y",0.0);
-        if op=="menu.pointer"{host.mouse=Some((x,y));match &mut host.panel {Panel::Settings(p)=>p.pointer_move(x,y),Panel::About(p)=>{p.pointer_move(x,y,host.width,1.0);},_=>{}}}
+        if op=="menu.pointer"{host.mouse=Some((x,y));match &mut host.panel {Panel::Appearance(p)=>{p.hover(x,y,host.width,1.0);},Panel::Settings(p)=>p.pointer_move(x,y),Panel::About(p)=>{p.pointer_move(x,y,host.width,1.0);},_=>{}}}
         if op=="menu.scroll"{let delta=n(v,"delta",0.0);match &mut host.panel{Panel::Settings(p)=>{p.scroll_by(-delta);},Panel::Extensions(p)=>p.scroll_pixels(delta),Panel::Appearance(p)=>p.scroll_pixels(delta),Panel::About(p)=>{p.scroll_at(x,y,host.width,1.0,-delta);}}}
         if op=="menu.directories" {if let Panel::Appearance(p)=&mut host.panel {p.set_cd_directory_results(v["entries"].as_array().into_iter().flatten().filter_map(Value::as_str).map(PaletteDirectoryEntry::new).collect());}}
         if op=="menu.query"{if let Panel::Appearance(p)=&mut host.panel{p.set_query(text(v,"query").into());}}
         if op=="menu.click"{match &mut host.panel{
             Panel::Settings(p)=>action=setting(p.pointer_down(x,y).action),
             Panel::Extensions(p)=>{if let Some(neoism_ui::panels::extensions_page::PaneAction::OpenRepository(url))=p.on_pointer_down(x,y,PointerButton::Left){action=json!({"kind":"url","url":url});}},
+            Panel::About(p) if host.kind!="about"=>action=server_forms::click(p,v,host.width,&host.kind,&host.context),
             Panel::About(p)=>{if p.close_button_hit(x,y)||p.hit_test(x,y,host.width,1.0).is_err(){p.close();}else if let Ok(Some(index))=p.hit_test(x,y,host.width,1.0){p.set_selected_index(index);p.close();}},
-            Panel::Appearance(p)=>if let Some(category)=p.server_action_at(x,y){action=json!({"kind":"run","action":match category {PaletteAction::ShowServers=>"OpenServers",PaletteAction::ShowSystems=>"OpenSystems",_=>"UnsupportedServerAction"}});}else{match p.hit_test(x,y,host.width,1.0){Err(())=>p.set_enabled(false),Ok(Some(index))=>{p.select_clicked(index);action=json!({"kind":"accept"});},_=>{}}},
+            Panel::Appearance(p)=>if let Some(category)=p.server_action_at(x,y){action=server_forms::palette_action(category);}else{match p.hit_test(x,y,host.width,1.0){Err(())=>p.set_enabled(false),Ok(Some(index))=>{p.select_clicked(index);action=json!({"kind":"accept"});},_=>{}}},
         }}
         if op=="menu.key"||op=="menu.text"{let event=key(v);let name=text(v,"key");let chars=v["text"].as_str().unwrap_or(text(v,"char"));match &mut host.panel{
             Panel::Settings(p)=>{if p.capturing().is_some(){if name=="escape"{p.cancel_capture();}else if !name.is_empty(){let with=[("ctrl","Control"),("shift","Shift"),("alt","Alt"),("cmd","Super")].iter().filter(|(key,_)|v[*key].as_bool().unwrap_or(false)).map(|(_,name)|*name).collect::<Vec<_>>().join(" | ");action=setting(p.finish_capture(name.into(),with));}}else{match name{"escape"=>{p.on_escape();},"backspace"=>p.backspace(),"enter"=>action=setting(p.commit_edit()),_=>for c in chars.chars().filter(|c|!c.is_control()){p.input_char(c);}}}},
             Panel::Extensions(p)=>{let response=p.on_key(&event);if !response.consumed&&!chars.is_empty(){p.on_text(chars);}},
+            Panel::About(p) if host.kind!="about"=>action=server_forms::key(p,v,&host.kind,&host.context),
             Panel::About(p)=>match name{"escape"|"enter"=>p.close(),"up"=>p.move_selection_up(),"down"=>p.move_selection_down(),_=>{}},
-            Panel::Appearance(p)=>match name{"escape"=>p.set_enabled(false),"up"=>p.move_selection_up(),"down"=>p.move_selection_down(),"backspace"=>{p.backspace_query();},"left"=>p.move_query_cursor_left(),"right"=>p.move_query_cursor_right(),"home"=>p.set_query_cursor(0),"end"=>{let end=p.query.len();p.set_query_cursor(end);},"tab"=>{if p.is_cd_query(){let reverse=v["shift"].as_bool().unwrap_or(false);if reverse||!p.tab_complete(){p.cycle_cd_selection(reverse);}}else if !p.tab_complete(){p.move_selection_down();}},"enter"=>{if host.kind!="directories"||p.get_selected_cd_directory().is_some()||p.typed_change_workspace_directory_intent().is_some(){action=json!({"kind":"accept"});}},_=>p.insert_query_text(chars)},
+            Panel::Appearance(p)=>match name{"escape"=>{if let Some(back)=p.system_settings_back_action(){action=server_forms::palette_action(back);}else{p.set_enabled(false);}},"up"=>p.move_selection_up(),"down"=>p.move_selection_down(),"backspace"=>{p.backspace_query();},"left"=>p.move_query_cursor_left(),"right"=>p.move_query_cursor_right(),"home"=>p.set_query_cursor(0),"end"=>{let end=p.query.len();p.set_query_cursor(end);},"tab"=>{if let Some(category)=p.category_switch_action(){action=server_forms::palette_action(category);}else if p.is_cd_query(){let reverse=v["shift"].as_bool().unwrap_or(false);if reverse||!p.tab_complete(){p.cycle_cd_selection(reverse);}}else if !p.tab_complete(){p.move_selection_down();}},"enter"=>{if host.kind!="directories"||p.get_selected_cd_directory().is_some()||p.typed_change_workspace_directory_intent().is_some(){action=json!({"kind":"accept"});}},_=>p.insert_query_text(chars)},
         }}
         Ok(host.frame(action))
     }))

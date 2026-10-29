@@ -14,6 +14,14 @@ fn render(host:&mut Host,v:&Value)->Result<Value,String>{
     match &mut host.kind {
         Kind::Top(top)=>{
             top.set_scale(scale);top.set_visible(true);
+            if let Some(peers)=v["peers"].as_array(){
+                top.set_peers(peers.iter().filter_map(|p|Some(neoism_ui::editor::crdt::PresenceAvatarPeer{
+                    peer_id:p["peer_id"].as_str()?.to_owned(),display_name:p["display_name"].as_str()?.to_owned(),
+                    client_os:p["client_os"].as_str().map(str::to_owned),
+                    color:[p["color"][0].as_u64()?.min(255)as u8,p["color"][1].as_u64()?.min(255)as u8,p["color"][2].as_u64()?.min(255)as u8],
+                    rainbow:p["rainbow"].as_bool().unwrap_or(false),
+                })).collect());
+            }
             if let Some(s)=v["sidebar"].as_str(){top.set_panel_open(s=="files");top.set_notes_open(s=="notes");top.set_conversations_open(s=="conversations");}
             if v["sidebar"].is_null(){top.set_panel_open(false);top.set_notes_open(false);top.set_conversations_open(false);}
             top.set_search_open(v["search"].as_bool().unwrap_or(false));

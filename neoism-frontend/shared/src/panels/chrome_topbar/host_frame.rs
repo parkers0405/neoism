@@ -37,6 +37,11 @@ impl ChromeTopBar {
                 regions.push(ChromeRegion { id: id.into(), label: label.into(), rect: rect(bounds), menu: false });
             }
         }
+        for (index,bounds) in self.peer_rects.iter().enumerate() {
+            if let Some(peer)=self.peers.get(index) {
+                regions.push(ChromeRegion{id:format!("presence:{}",peer.peer_id),label:peer.display_name.clone(),rect:rect(*bounds),menu:false});
+            }
+        }
         if self.menu_open {
             for (index, item) in MenuItem::visible(self.share_with_phone_enabled).iter().enumerate() {
                 regions.push(ChromeRegion { id: format!("menu:{:?}", item.action()), label: item.label().into(), rect: rect(self.menu_item_rect(index)), menu: true });

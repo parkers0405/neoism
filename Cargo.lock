@@ -5775,6 +5775,7 @@ dependencies = [
  "dirs 6.0.0",
  "dunce",
  "libc",
+ "neoism-protocol",
  "ring",
  "serde",
  "serde_json",

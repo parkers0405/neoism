@@ -1057,7 +1057,7 @@ async fn proxy(socket: WebSocket, state: Arc<Ingress>) {
             _ = wait_for_end(&mut ended) => break,
             frame = client_stream.next() => match frame {
                 Some(Ok(Message::Text(text))) => {
-                    match neoism_workspace_daemon::server::fast::filter_frame(&text, &state.root, &state.daemon_token) {
+                    match neoism_agent_service_api::fast_policy::filter_frame(&text, &state.root, &state.daemon_token) {
                         Ok(text) => if send_until_end(daemon_sink.send(UpstreamMessage::Text(text)), &mut ended).await.is_err() { break; },
                         Err(_) => {
                             // Keep normal clients connected when an optional global

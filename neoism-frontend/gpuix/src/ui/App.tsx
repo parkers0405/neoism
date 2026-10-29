@@ -68,6 +68,8 @@ export function fileIcon(name: string) {
 }
 export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: () => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
   const config = props.config, model = props.model, c = config.theme, s = config.scale;
+  const [presencePeers,setPresencePeers]=createSignal(model.presence.peers());
+  const stopPresence=model.presence.subscribe(()=>setPresencePeers(model.presence.peers()));onCleanup(stopPresence);
   const visuals=props.visuals||new AppVisualState();if(!props.visuals)onCleanup(()=>visuals.dispose());
   const wordmarkHosts=visuals.wordmarks;
   const tabChromeSpec = tabChrome(s);
@@ -197,6 +199,17 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   createEffect(()=>{const controller=gitController(),workspace=state().activeWorkspace,flags=state().ui.gitPanels;if(!controller||!workspace?.root_dir)return;const requested=isRecord(flags)&&flags[workspace.id]===true;if(requested&&(!controller.frame.visible||controller.root!==workspace.root_dir))controller.open(workspace.root_dir);else if(!requested&&controller.frame.visible)controller.close();});
   const toggleGit=()=>{const controller=gitController(),workspace=state().activeWorkspace;if(!controller||!workspace?.root_dir)return;const opening=!controller.frame.visible,flags=isRecord(model.state.ui.gitPanels)?model.state.ui.gitPanels:{};setGitFocused(opening);if(opening)setGitFocusToken(value=>value+1);model.setUI({gitPanels:{...flags,[workspace.id]:opening}});};
   const activeEditor = () => { const surface = active(); return surface?.kind === "file" && state().files[surface.id] !== undefined ? model.getEditor(surface, workspaceLayout()?.frame.focusedLeaf || undefined) : undefined; };
+  createEffect(()=>{
+    const surface=active(),editor=activeEditor(),leaf=workspaceLayout()?.frame.focusedLeaf||undefined;
+    if(!surface||!editor||chromeFocus().zone!=="content"){untrack(()=>model.presence.clearLocal());return;}
+    const view=/\.(md|markdown|mdown|mkd)$/i.test(surface.path||"")?model.getMarkdown(surface,leaf):editor;
+    const publish=()=>{
+      if(model.state.activeSurfaceId!==surface.id)return;
+      const bufferId=model.collaboration.bufferId(editor),presence=view.getPresence();
+      if(bufferId&&presence)model.presence.updateLocal(bufferId,presence.cursor,presence.selection??null,presence.insert);else model.presence.clearLocal();
+    };
+    untrack(publish);onCleanup(view.subscribe(publish));
+  });
   const saveSurface = async (surface: Surface) => { await model.saveFile(surface); if (surface.document?.kind === "config") await props.reloadConfig?.(); };
   const nativeStatus = createMemo(() => statusInfo(active(), state().activeWorkspace?.root_dir, editorState(), activeEditor()?.frame), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const closePalette = (cancel = true) => {
@@ -335,7 +348,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     if (commands()) closeCommands(); setFinderMode(mode); setPaletteMode("find"); setQuery(""); setMenu(false); setPalette(true);
   };
   const supportedCommands = () => ["TabCreate", "TabClose", "TabCloseUnfocused", "SelectNextTab", "SelectPrevTab", "SplitRight", "SplitDown", "SelectNextSplit", "SelectPrevSplit", "CloseCurrentSplitOrTab",
-    "Copy", "Paste", "SearchFiles", "SearchWords", "SearchGitChanges", "ToggleGitDiffPanel", "OpenNeoismAgent", "OpenNeoismNotes", "ToggleFullscreen", "Quit", "CloseTab", "CloseWorkspace", "OpenSettings", "ConfigEditor", "OpenThemePicker", "ListBackgrounds", "ShowServers", "ShowWorkplaces",
+    "Copy", "Paste", "SearchFiles", "SearchWords", "SearchGitChanges", "ToggleGitDiffPanel", "OpenNeoismAgent", "OpenNeoismNotes", "ToggleFullscreen", "Quit", "CloseTab", "CloseWorkspace", "OpenSettings", "ConfigEditor", "OpenThemePicker", "ListBackgrounds", "ShowServers", "ShowSystems", "AddServer", "CreateServer", "LeaveWorkspace", "ShowWorkplaces",
     ...(active()?.kind === "file" ? ["SaveDocument", "GoToLine", "ToggleWordWrap", "ToggleViMode", "ReplaceInFile", "SearchForward", "SearchBackward", "LspHover", "LspCodeAction", "LspFormat", "LspDefinition", "LspReferences", "LspRename"] : []),
     ...(active()?.kind === "terminal" ? ["ToggleViMode", "ClearHistory", "SearchForward", "SearchBackward"] : [])];
   const openCommands = (prefill = "") => {
@@ -442,7 +455,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       case "ToggleGitDiffPanel": toggleGit(); return;
       case "OpenCommandPalette": openCommands(); return;
       case "ShowWorkplaces": await chromeActions.open("OpenWorkspaces"); return;
-      case "OpenSettings": case "ConfigEditor": case "OpenThemePicker": case "ListBackgrounds": case "ShowServers": await chromeActions.open(action); return;
+      case "OpenSettings": case "ConfigEditor": case "OpenThemePicker": case "ListBackgrounds": case "ShowServers": case "ShowSystems": case "AddServer": case "CreateServer": case "LeaveWorkspace": await chromeActions.open(action); return;
       case "SaveDocument": if (surface?.kind === "file") await saveSurface(surface); return;
       case "GoToLine": openEditorPrompt(":"); return;
       case "ReplaceInFile": openEditorPrompt(":"); setQuery("%s/"); return;
@@ -688,6 +701,9 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       <div style={{position:"absolute",left:0,right:0,top:-view().top*d.treeRowHeight*s+view().offset,height:rows().length*d.treeRowHeight*s}}>
       <For each={visibleRows()}>{(entry) => {
         const index = () => rowPositions().get(entry.path) || 0;
+        const peerBuffer=createMemo(()=>{const base=root();if(!base)return "";const paths=/^[a-z]:[\\/]/i.test(base)||base.startsWith("\\\\")?win32:posix;return model.presence.bufferId(paths.join(base,entry.path));});
+        const peerPaint=createMemo(()=>{presencePeers();return peerBuffer()&&model.presence.filePeers(peerBuffer()).length?model.presence.row(peerBuffer(),config):undefined;});
+
         const icon = () => entry.dir ? { glyph: expanded().has(entry.path) ? "\uf07c" : "\uf07b", color: c.folder } : fileIcon(entry.name);
         const selected = () => active()?.path === entry.path && active()?.rootDir === root();
         const glyphKey=JSON.stringify([state().activeWorkspace?.id,!!props.notes,root(),entry.path]);
@@ -696,8 +712,9 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
           style={{ ...row, position: "absolute", left: 0, right: 0, top: index() * d.treeRowHeight * s, height: d.treeRowHeight * s, flexShrink: 0, paddingLeft: (d.treePadding + entry.depth * d.treeIndent) * s,
             paddingRight: 8 * s, gap: 8 * s, cursor: "pointer", backgroundColor: selected() ? c.surface : undefined,
             hover: { backgroundColor: c.hover }, focusVisible: { outlineColor: c.accent, outlineWidth: 1 } }}>
-          <TreeRowGlyphs host={glyphs} config={config} initialWidth={visuals.treeWidths.get(glyphKey)||Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-(d.frameStroke+d.treePadding+entry.depth*d.treeIndent+8)*s)} onWidth={width=>visuals.treeWidths.set(glyphKey,width)} pinImage={raster=>visuals.pinTreeRaster(renderer,glyphKey,raster)} name={entry.name} chevron={entry.dir?(expanded().has(entry.path)?"\uf078":"\uf054"):""}
+          <TreeRowGlyphs host={glyphs} config={config} initialWidth={visuals.treeWidths.get(glyphKey)||Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-(d.frameStroke+d.treePadding+entry.depth*d.treeIndent+8)*s)} onWidth={width=>visuals.treeWidths.set(glyphKey,width)} pinImage={raster=>visuals.pinTreeRaster(renderer,glyphKey,raster)} trailingWidth={peerPaint()?.width} name={entry.name} chevron={entry.dir?(expanded().has(entry.path)?"\uf078":"\uf054"):""}
             icon={icon().glyph} iconColor={icon().color} labelColor={selected()?c.fg:c.dim} chevronColor={c.muted}/>
+          <Show when={peerPaint()}>{paint=><div testId={`tree-presence:${entry.path}`} aria-label={model.presence.filePeers(peerBuffer()).map(peer=>peer.display_name).join(", ")} style={{position:"absolute",right:8*s,top:0,width:256,height:paint().height,pointerEvents:"none"}}><PaintLayer config={config} commands={paint().commands}/></div>}</Show>
         </div>;
       }}</For>
       </div>
@@ -968,7 +985,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     { label: "New conversation", type: "Command", action: model.openAgentHome },
   ].filter((entry) => entry.label.toLowerCase().includes(query().toLowerCase())).slice(0, 30);
   return <div data-font-size={config.fontSize} testId="app-content" onKeyDown={keyDown} onMouseDown={event=>{const host=sidebarHosts.get(sidebar()||""),bounds=host&&chromeBounds.get(host.id);if(bounds&&event.x!==undefined&&event.y!==undefined&&event.x>=bounds.x&&event.x<bounds.x+bounds.width&&event.y>=bounds.y&&event.y<bounds.y+bounds.height)return;const git=gitViewport();if(gitVisible()&&event.x!==undefined&&event.y!==undefined&&event.x>=git.x+git.width-(gitFrame()?.width||0)&&event.x<git.x+git.width&&event.y>=git.y&&event.y<git.y+git.height)return;setChromeFocus({zone:"content"});setChromeTarget(undefined);}} style={{ ...column, width: "100%", height: "100%", backgroundColor: config.background?"transparent":c.bg, position: "relative", overflow: "hidden" }}>
-    <TopBar config={config} sidebar={sidebar()} details={details()} agent={active()?.kind === "agent"} search={palette() && paletteMode() === "find"}
+    <TopBar config={config} peers={presencePeers()} sidebar={sidebar()} details={details()} agent={active()?.kind === "agent"} search={palette() && paletteMode() === "find"}
       connection={state().connection.phase} menuOpen={menu()} onMenuChange={setMenu} report={model.report}
       onAction={(action) => ["TogglePanel", "ToggleConversations", "ToggleAgentSidePanel", "OpenNotes", "OpenAgent", "OpenSearch"].includes(action) ? onChromeAction(action) : chromeActions.open(action)} />
     <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0, position: "relative" }}>

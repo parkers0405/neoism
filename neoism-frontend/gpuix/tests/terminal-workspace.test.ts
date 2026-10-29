@@ -3,7 +3,7 @@ import { loadConfig } from "../src/config";
 import { DaemonConnection } from "../src/daemon/client";
 import { WorkspaceModel } from "../src/model";
 import { createAgentDaemon } from "./support/agent-daemon";
-import { absoluteTerminalDirectory,followsTerminalDirectory } from "../src/terminal/workspace";
+import { absoluteTerminalDirectory,followsTerminalDirectory,terminalDirectoryFollowsWorkspace } from "../src/terminal/workspace";
 
 async function until(predicate:()=>boolean){const deadline=Date.now()+2500;while(!predicate()){if(Date.now()>deadline)throw new Error("Terminal workspace did not converge");await Bun.sleep(5);}}
 async function fixture(options:Parameters<typeof createAgentDaemon>[0]={},createTerminal=true){
@@ -100,4 +100,15 @@ test("ended PTYs retire only their terminal views and stale main role, retaining
   await model.newTerminal();expect(model.mainTerminalSurface()?.sessionId).toBe("fixture-pty-2");
   expect(model.captureSession().surfaces.some(surface=>surface.id===file.id)).toBe(true);
  }finally{close();}
+});
+
+test("SSH tunnel identity permits private home cwd follow without treating other loopback joins as local",()=>{
+ const remote={id:"shared",host_id:"remote",title:"Shared",root_dir:"/srv/project"};
+ const quick={...remote,id:"neoism-quick-ssh-home-0123456789abcdef"};
+ const tunnel={endpoint:"ws://127.0.0.1:54321/session",serverId:"ssh:home",remote:true,transportIdentity:"ssh:home"};
+ expect(terminalDirectoryFollowsWorkspace(quick,tunnel)).toBe(true);
+ expect(terminalDirectoryFollowsWorkspace(remote,tunnel)).toBe(false);
+ expect(terminalDirectoryFollowsWorkspace(remote,{endpoint:tunnel.endpoint,serverId:"joined",remote:true})).toBe(false);
+ expect(terminalDirectoryFollowsWorkspace(remote,{endpoint:tunnel.endpoint,serverId:"local"})).toBe(true);
+ expect(terminalDirectoryFollowsWorkspace({...quick,host_kind:"tailscale"},tunnel)).toBe(false);
 });

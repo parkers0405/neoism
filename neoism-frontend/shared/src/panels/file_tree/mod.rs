@@ -32,6 +32,7 @@
 mod drag;
 mod git;
 mod host_frame;
+pub use host_frame::paint_host_presence_row;
 mod host_git;
 pub mod icons;
 mod policy;

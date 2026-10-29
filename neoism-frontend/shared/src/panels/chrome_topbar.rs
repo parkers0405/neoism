@@ -1159,8 +1159,7 @@ impl ChromeTopBar {
                 (x, y)
             }
         };
-        sugarloaf.rounded_rect(
-            None,
+        sugarloaf.overlay_rounded_rect(
             tip_x,
             tip_y,
             tip_w,
@@ -1170,7 +1169,7 @@ impl ChromeTopBar {
             5.0 * scale,
             ORDER_MENU_BORDER + 1,
         );
-        sugarloaf.text_mut().draw(
+        sugarloaf.overlay_text_mut().draw(
             tip_x + pad_x,
             tip_y + (tip_h - font_size) * 0.5,
             &label,

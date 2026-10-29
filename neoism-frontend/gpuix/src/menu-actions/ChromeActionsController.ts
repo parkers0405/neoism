@@ -1,4 +1,8 @@
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
+import {ServerHandshakeError} from "../daemon/server-connection";
+import {writeClipboard} from "../clipboard";
+import {serverJob,serverDraftValues,serverFormOperation,type ServerDraft,type ServerEntry} from "./server-actions";
+import type {SavedSystem,SshHost} from "../daemon/ssh-transport";
 import { Effect, Schema } from "effect";
 import {posix,win32} from "node:path";
 import type { ConfigDocument, ConfigDescriptor } from "../../../web/src/workspace/types";
@@ -12,7 +16,7 @@ import { backgroundCatalog } from "./backgrounds";
 import { editConfigDocument, themeUpdates } from "./config-document";
 import { localDaemon, openExternalUrl, startWebFrontend } from "./web-frontend";
 
-export interface ServerSelection { id: string; endpoint: string; token?: string; pairingToken?: string }
+export interface ServerSelection { signal?:AbortSignal; id: string; endpoint: string; token?: string; pairingToken?: string; authToken?:string; workspaceId?:string; ssh?:{systemId?:string;target?:string;args?:readonly string[]}; temporary?:boolean;hosted?:boolean;invite?:string;name?:string }
 export interface MenuFrame {
   kind: string; active: boolean; animating: boolean; commands: PaintCommand[]; query?: string | null;
   rect?: number[] | null;
@@ -41,6 +45,11 @@ export class ChromeActionsController {
   private directoryTimer?: ReturnType<typeof setTimeout>;
   private directoryTarget?: { id: string; root: string };
   private disposed = false;
+  private serverDraft?:ServerDraft;
+  private serverPending=false;
+  private serverGeneration=0;
+  private serverConnectionAbort?:AbortController;
+  private systems:SavedSystem[]=[];
   constructor(readonly options: ChromeActionsOptions) {}
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private emit() { for (const listener of this.listeners) listener(); }
@@ -73,7 +82,7 @@ export class ChromeActionsController {
     const id = this.ids.get(page); if (id !== undefined) coreCall("menu.dispose", { id }); this.ids.delete(page);
     if (page) this.extensionFrame = undefined; else this.frame = undefined;
   }
-  close = () => { this.overlayRequest?.abort(); this.directorySearch?.abort(); clearTimeout(this.directoryTimer); this.disposePanel(false); this.emit(); };
+  close = () => { this.serverGeneration++;this.serverPending=false; this.serverConnectionAbort?.abort();this.serverConnectionAbort=undefined; this.overlayRequest?.abort(); this.directorySearch?.abort(); clearTimeout(this.directoryTimer); this.disposePanel(false); this.emit(); };
   dispose() { this.disposed = true; this.close(); this.pageRequest?.abort(); this.disposePanel(true); this.listeners.clear(); }
   layout(width: number, height: number, page = false) {
     const previous = this.viewports.get(page); if (previous?.width === width && previous.height === height) return;
@@ -93,7 +102,7 @@ export class ChromeActionsController {
         case "OpenThemes": case "OpenThemePicker": this.create("themes"); return;
         case "ConfigEditor": { this.options.model.openConfigDocument(await this.configDocument(true)); this.close(); return; }
         case "OpenBackgrounds": case "ListBackgrounds": {
-          if (!localDaemon(this.options.config.endpoint)) throw new Error("Background discovery and image preview are unavailable for this remote host; the daemon does not expose its background catalog");
+          if (this.options.config.collaborative || !localDaemon(this.options.config.endpoint)) throw new Error("Background discovery and image preview are unavailable for this remote host; the daemon does not expose its background catalog");
           const [reply, document] = await Promise.all([this.request("GetConfig", abort.signal), this.configDocument()]);
           const config = expectVariant(reply, "Config"); if (!isRecord(config)) throw new Error("Invalid daemon config");
           if (!abort.signal.aborted) this.create("backgrounds", backgroundCatalog(config.value, document.display_path)); return;
@@ -109,13 +118,71 @@ export class ChromeActionsController {
           const tree = Schema.decodeUnknownSync(TreeSchema)(expectVariant(await Effect.runPromise(this.options.model.client.request("Workspace", "RequestHostWorkspaceTree"), { signal: abort.signal }), "HostWorkspaceTree"));
           if (!abort.signal.aborted) this.create("workspaces", { entries: tree.workspaces.map((workspace) => ({ id: workspace.id, title: workspace.title, detail: workspace.root_dir || "", hostId: workspace.host_id, hostLabel: tree.hosts.find((host) => host.id === workspace.host_id)?.label || workspace.host_id, current: workspace.id === this.options.model.state.activeWorkspace?.id })) }); return;
         }
-        case "OpenServers": case "ShowServers": {
-          const config = this.options.config, stored = coreCall<{ entries: unknown[] }>("menu.servers", { endpoint: publicEndpoint(config.endpoint) });
-          this.create("servers", { entries: [{ id: "local", name: "Local Server", address: publicEndpoint(config.endpoint), local: true, status: this.options.model.client.state.phase, active: !stored.entries.some((entry) => isRecord(entry) && entry.active === true) }, ...stored.entries.map((entry) => isRecord(entry) ? { ...entry, status: this.options.model.client.state.phase } : entry)] }); return;
-        }
+        case "OpenServers": case "ShowServers": this.openServers(); return;
+        case "OpenSystems": case "ShowSystems": this.openSystems(); return;
+        case "AddServer": case "CreateServer": this.beginServer(); return;
+        case "AddSystem": this.create("system-form"); return;
+        case "LeaveWorkspace": await this.options.onConnectServer?.({id:"local",endpoint:""});return;
         default: if (this.options.onRunAction) await this.options.onRunAction(action); else throw new Error(`This host cannot execute ${action}`);
       }
     } catch (error) { if (!this.disposed && !this.overlayRequest?.signal.aborted) this.options.model.report(error); }
+  }
+  private openServers(){
+    const config=this.options.config,{entries}=coreCall<{entries:ServerEntry[]}>("server.list");
+    const local=!(config.collaborative??!localDaemon(config.endpoint));
+    this.create("servers",{entries:[{id:"local",name:"Local Server",address:local?publicEndpoint(config.endpoint):"This computer",local:true,status:local?this.options.model.client.state.phase:"closed",active:local},...entries.map(entry=>({...entry,active:config.serverId===entry.id||(!config.serverId&&entry.address===config.endpoint),status:config.serverId===entry.id?this.options.model.client.state.phase:entry.online===false?"closed":"unknown"}))]});
+  }
+  private openSystems(selected?:string){
+    const result=coreCall<{systems:SavedSystem[];hosts:SshHost[]}>("ssh.systems.list");this.systems=result.systems;
+    const entries=[{id:"local",name:"This computer",target:"Local system",local:true,enabled:true,connection:this.options.config.serverId?.startsWith("system:")?"disconnected":"connected"},...result.systems];
+    if(selected){const entry=entries.find(entry=>entry.id===selected);if(!entry)throw new Error("System no longer exists");this.create("system-settings",{entries:[entry]});}else this.create("systems",{entries});
+  }
+  private beginServer(draft?:Partial<ServerDraft>){
+    this.serverDraft={mode:"host",fast:false,directory:(this.options.config.collaborative??!localDaemon(this.options.config.endpoint))?process.env.HOME||"":this.options.model.state.activeWorkspace?.root_dir||process.env.HOME||"",address:"",name:"",password:"",...draft};this.create("server-form",{...this.serverDraft});
+  }
+  private async connect(server:ServerSelection){
+    if(!this.options.onConnectServer)throw new Error("Server switching is unavailable in this host");
+    this.serverConnectionAbort?.abort();const abort=new AbortController();this.serverConnectionAbort=abort;
+    this.create("server-message",{title:"Connecting",body:server.name||"Connecting to the selected system…",busy:true});
+    try{
+      try{await this.options.onConnectServer({...server,signal:abort.signal});}
+      catch(error){
+        if(!abort.signal.aborted&&server.hosted&&!server.temporary&&error instanceof ServerHandshakeError&&["waiting","timeout"].includes(error.phase)){
+          const ready=await serverJob("rehost",{serverId:server.id});if(!abort.signal.aborted)await this.options.onConnectServer({...ready,signal:abort.signal});
+        }else throw error;
+      }
+      if(!this.disposed)this.close();
+    }catch(error){if(abort.signal.aborted)return;if(!this.disposed)this.openServers();throw error;}
+    finally{if(this.serverConnectionAbort===abort)this.serverConnectionAbort=undefined;}
+  }
+  private async serverAction(action:Record<string,any>):Promise<boolean>{
+    switch(action.kind){
+      case "servers":this.openServers();return true;
+      case "systems":this.openSystems();return true;
+      case "server-add":this.beginServer();return true;
+      case "server-edit":{const entry=coreCall<ServerSelection>("server.edit",{serverId:action.id});this.beginServer({mode:"join",serverId:action.id,address:entry.endpoint,name:entry.name,password:entry.pairingToken||""});return true;}
+      case "server-remove":case "system-remove":this.create("server-confirm",{serverId:action.id,system:action.kind==="system-remove",title:action.kind==="system-remove"?"Remove system?":"Remove server?",body:action.kind==="system-remove"?"Remove this saved SSH connection?":"Remove this saved connection? A server hosted here will stop and disconnect its clients."});return true;
+      case "confirm-remove":{if(this.options.config.serverId===(action.system?`system:${action.id}`:action.id))await this.connect({id:"local",endpoint:""});if(action.system){coreCall("ssh.systems.remove",{systemId:action.id});if(!this.disposed)this.openSystems();}else{await serverJob("remove",{serverId:action.id});if(!this.disposed)this.openServers();}return true;}
+      case "server-invite":{const entry=coreCall<ServerSelection>("server.resolve",{serverId:action.id});if(!entry.invite)throw new Error("This server has no Fast Server invite");await writeClipboard(entry.invite);return true;}
+      case "server":await this.connect(action.id==="local"?{id:"local",endpoint:""}:coreCall<ServerSelection>("server.resolve",{serverId:action.id}));return true;
+      case "system-add":this.create("system-form");return true;
+      case "system-settings":this.openSystems(action.id);return true;
+      case "system-connect":if(action.id==="local")await this.connect({id:"local",endpoint:""});else await this.connect({id:`system:${action.id}`,endpoint:"",ssh:{systemId:action.id}});return true;
+      case "system-disconnect":if(this.options.config.serverId===`system:${action.id}`)await this.connect({id:"local",endpoint:""});else this.openSystems(action.id);return true;
+      case "system-enabled":coreCall("ssh.systems.set-enabled",{systemId:action.id,enabled:!!action.enabled});if(action.enabled)await this.connect({id:`system:${action.id}`,endpoint:"",ssh:{systemId:action.id}});else if(this.options.config.serverId===`system:${action.id}`)await this.connect({id:"local",endpoint:""});else this.openSystems(action.id);return true;
+      case "form-mode":{if(!this.serverDraft)return true;this.serverDraft=serverDraftValues(this.serverDraft,action.values||[]);this.serverDraft.mode=action.mode;this.serverDraft.fast=!!action.fast;this.create("server-form",{...this.serverDraft});return true;}
+      case "form-submit":{
+        if(this.serverPending)return true;
+        if(action.system){const fields=Object.fromEntries(action.values||[]);coreCall("ssh.systems.add",{target:String(fields.system_target||""),name:String(fields.system_name||"")});this.openSystems();return true;}
+        if(!this.serverDraft)return true;
+        this.serverDraft=serverDraftValues(this.serverDraft,action.values||[]);const draft={...this.serverDraft},operation=serverFormOperation(draft);
+        const generation=this.serverGeneration;
+        this.serverPending=true;this.create("server-message",{title:draft.mode==="host"?"Starting server":"Joining server",body:draft.fast?"Preparing the Fast Server connection…":"Preparing the workspace connection…",busy:true});
+        try{const selected=await serverJob(operation.action,operation.args);if(!this.disposed&&generation===this.serverGeneration)await this.connect(selected);}
+        catch(error){if(this.disposed||generation!==this.serverGeneration)return true;this.beginServer(draft);throw error;}finally{if(generation===this.serverGeneration)this.serverPending=false;}return true;
+      }
+      default:return false;
+    }
   }
   async ensureExtensions() {
     if (this.extensionFrame || this.pageRequest || this.disposed) return;
@@ -157,6 +224,7 @@ export class ChromeActionsController {
       case "url": await (this.options.openUrl || openExternalUrl)(action.url); return;
       case "run": if (action.action === "backgrounds:pick") await this.open("OpenBackgrounds"); else if (["OpenServers", "OpenWorkspaces", "OpenSystems"].includes(action.action)) await this.open(action.action); else if (this.options.onRunAction) await this.options.onRunAction(action.action); else throw new Error(`This host cannot execute ${action.action}`); return;
       case "accept": await this.accept(target); return;
+      default: if(await this.serverAction(action))return;
     }
   }
   /** All explicit folder choices use the host-confirmed terminal transition;
@@ -167,6 +235,7 @@ export class ChromeActionsController {
   }
   private async accept(target?: Record<string, any> | null) {
     if (!target) return;
+    if(await this.serverAction(target))return;
     if (target.kind === "run") { this.close(); if (this.options.onRunAction) await this.options.onRunAction(target.action); return; }
     if (target.kind === "workspace") { const workspace = this.options.model.state.workspaces.find((workspace) => workspace.id === target.id); if (!workspace) throw new Error("Workspace no longer exists"); await this.options.model.activateWorkspace(workspace); this.close(); return; }
     if (target.kind === "directory") {
@@ -179,12 +248,6 @@ export class ChromeActionsController {
       await this.options.model.changeWorkspaceDirectory(paths.resolve(captured.root,target.path), captured.id);
       this.close(); return;
     }
-    if (target.kind === "server") {
-      if (!this.options.onConnectServer) throw new Error("Server switching is unavailable in this host");
-      const server = target.id === "local" ? { id: "local", endpoint: this.options.config.endpoint } : coreCall<ServerSelection>("menu.server-connect", { serverId: target.id });
-      this.close(); await this.options.onConnectServer(server); return;
-    }
-    if (target.kind === "server-add") throw new Error("The GPUIX saved-server editor is not ported yet");
     const document = await this.configDocument(true); if (!document.writable) throw new Error("This daemon config document is read-only");
     const updates = target.kind === "theme" ? themeUpdates(document, target.name) : target.kind === "background" ? [
       ["ui.window.background-image-disabled", target.id === "none"],

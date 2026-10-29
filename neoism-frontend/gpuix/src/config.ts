@@ -7,6 +7,9 @@ import { cursorBlinkInterval, DEFAULT_CURSOR_BLINK_INTERVAL_MS } from "./ui/curs
 
 export interface AppConfig {
   endpoint: string;
+  serverId?: string;
+  transportIdentity?: string;
+  collaborative?: boolean;
   authToken?: string;
   pairingToken?: string;
   workspaceId?: string;

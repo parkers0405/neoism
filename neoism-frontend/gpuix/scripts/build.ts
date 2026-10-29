@@ -1,4 +1,5 @@
 import solid from "@gpuix/solid/bun-plugin";
+import {packageWorkspaceDaemon} from "../src/daemon/packaged-daemon";
 import { copyFileSync, renameSync } from "node:fs";
 import {displayBindingLoader,verifiedDisplayBinding} from "../src/display-binding";
 import {createRequire} from "node:module";
@@ -33,6 +34,7 @@ const ghosttyLibrary = process.platform === "win32" ? "ghostty-vt.dll" : process
 copyFileSync(`artifacts/${ghosttyLibrary}`, `dist/${ghosttyLibrary}.next`);
 renameSync(`dist/${ghosttyLibrary}.next`, `dist/${ghosttyLibrary}`);
 copyFileSync("artifacts/ghostty/LICENSE", "dist/LICENSE.ghostty");
+packageWorkspaceDaemon(process.cwd());
 // Preserve the executable inode used by an already running preview.
 renameSync("dist/neoism-gpuix.next", "dist/neoism-gpuix");
-console.log(`Built dist/neoism-gpuix with ${library} and ${ghosttyLibrary}. Keep the libraries beside the executable.`);
+console.log(`Built dist/neoism-gpuix with ${library}, ${ghosttyLibrary}, and the standalone workspace daemon. Keep these files beside the executable.`);

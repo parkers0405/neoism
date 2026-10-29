@@ -105,7 +105,10 @@ fn frame(view: &mut View) -> Value {
       let painter=view.menu_painter.as_mut().unwrap();painter.begin_frame();view.menu.render(painter,(view.width,view.height,1.0),&IdeTheme::by_name(&view.theme));Some(json!({"rect":view.menu.rect(),"commands":&*painter.borrowed_commands()}))
     }else{None};
     let effects = std::mem::replace(&mut view.effects, Value::Null);
-    json!({"commands":&*view.painter.borrowed_commands(),"menu":menu,"assets":assets,"cover":cover,"revision":view.pane.source_revision(),"mode":format!("{:?}",view.pane.mode),"vim":view.pane.vim_enabled,"cursor":{"line":view.pane.cursor_line,"col":view.pane.cursor_col,"rect":view.pane.cursor_rect},"dirty":view.pane.is_dirty(),"scrollY":view.pane.scroll_y,"contentHeight":view.pane.content_height(),"animating":moving||reveal||view.pane.has_pending_scroll_animation()||view.trail.is_animating()||view.menu.is_animating(),"cursorQuad":view.trail.quad_points(),"cursorHold":view.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),"hostAction":effects.get("hostAction"),"dragging":view.pane.is_dragging(),"effects":effects})
+    fn point(pane:&MarkdownPane,line:usize,col:usize)->Value{let line=line.min(pane.lines.len().saturating_sub(1));let source=&pane.lines[line];let mut col=col.min(source.len());while !source.is_char_boundary(col){col-=1;}let column=source[..col].encode_utf16().count();let offset=pane.lines[..line].iter().map(|s|s.encode_utf16().count()+1).sum::<usize>()+column;json!({"line":line,"column":column,"offset":offset})}
+    let presence=json!({"cursor":point(&view.pane,view.pane.cursor_line,view.pane.cursor_col),"selection":view.pane.visual_selection().map(|(anchor,head,_)|json!({"anchor":point(&view.pane,anchor.line,anchor.col),"head":point(&view.pane,head.line,head.col)})),"insert":view.pane.mode==MarkdownMode::Insert});
+    let history=view.pane.take_doc_history_requests().into_iter().map(|request|matches!(request,md::MarkdownDocHistoryRequest::Redo)).collect::<Vec<_>>();
+    json!({"presence":presence,"docHistory":history,"commands":&*view.painter.borrowed_commands(),"menu":menu,"assets":assets,"cover":cover,"revision":view.pane.source_revision(),"mode":format!("{:?}",view.pane.mode),"vim":view.pane.vim_enabled,"cursor":{"line":view.pane.cursor_line,"col":view.pane.cursor_col,"rect":view.pane.cursor_rect},"dirty":view.pane.is_dirty(),"scrollY":view.pane.scroll_y,"contentHeight":view.pane.content_height(),"animating":moving||reveal||view.pane.has_pending_scroll_animation()||view.trail.is_animating()||view.menu.is_animating(),"cursorQuad":view.trail.quad_points(),"cursorHold":view.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),"hostAction":effects.get("hostAction"),"dragging":view.pane.is_dragging(),"effects":effects})
 }
 fn snapshot(view: &mut View) -> Value {
     let anchor=view.pane.capture_host_scroll_anchor();
@@ -157,7 +160,12 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
   "markdown.snapshot"=>return Ok(snapshot(view)),
   "markdown.restore"=>restore(&mut view.pane,&v["snapshot"]),
   "markdown.restore-anchor"=>{let anchor=serde_json::from_value::<neoism_ui::sugarloaf::VirtualScrollAnchor>(v["anchor"].clone()).map_err(|error|error.to_string())?;view.pane.restore_host_scroll_anchor(anchor);},
-  "markdown.source"=>{view.pane.set_source_preserving_view(text(v,"text"));},
+  "markdown.source"=>{
+    if view.pane.doc_history_bound(){if let Some(delta)=md::doc_sync::diff_doc_texts(&view.pane.lines.join("\n"),text(v,"text")){md::doc_sync::apply_remote_delta_to_pane(&mut view.pane,&delta);}}
+    else{view.pane.set_source_preserving_view(text(v,"text"));}
+  },
+  "markdown.doc-bound"=>view.pane.set_doc_history_bound(v["bound"].as_bool().unwrap_or(false)),
+  "markdown.presence"=>{let peers=serde_json::from_value::<Vec<neoism_protocol::crdt::CrdtPeerPresence>>(v["peers"].clone()).map_err(|e|e.to_string())?;view.pane.remote_cursors=peers.into_iter().map(|peer|md::MarkdownRemoteCursor{name:peer.display_name,client_os:peer.client_os,color:[peer.color.r,peer.color.g,peer.color.b],rainbow:peer.rainbow,insert:peer.insert,line:peer.cursor.line as usize,col_utf16:peer.cursor.column as usize}).collect();},
   "markdown.asset"=>view.painter.set_asset(PathBuf::from(text(v,"path")),v["text"].as_str().map(str::to_owned)),
   "markdown.cover-paths"=>{let covers=std::env::var("NEOISM_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_|{if cfg!(target_os="windows"){dirs::home_dir().unwrap_or_default().join("AppData/Local/neoism")}else if cfg!(target_os="macos"){dirs::home_dir().unwrap_or_default().join(".config/neoism")}else{std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_|dirs::home_dir().unwrap_or_default().join(".config")).join("neoism")}}).join("covers");return Ok(json!(md::host_assets::cover_path_candidates(&view.pane.path,text(v,"value"),&covers)));},
   "markdown.saved"=>view.pane.mark_saved(),

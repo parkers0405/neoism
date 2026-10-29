@@ -47,6 +47,8 @@ export function shareEditorPaint(before: EditorFrame, next: EditorFrame): Editor
   next.searchHits = share(before.searchHits, next.searchHits, sameRecord);
   next.cursorQuad = share(before.cursorQuad, next.cursorQuad, (a, b) => a.length === b.length && a.every((n, i) => n === b[i]));
   next.lsp = shareJson(before.lsp, next.lsp) as EditorFrame["lsp"];
+  next.remotePeers = shareJson(before.remotePeers,next.remotePeers) as EditorFrame["remotePeers"];
+  next.peerCommands = shareJson(before.peerCommands,next.peerCommands) as EditorFrame["peerCommands"];
   return next;
 }
 

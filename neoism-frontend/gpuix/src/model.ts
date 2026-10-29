@@ -1,3 +1,5 @@
+import {DocumentController} from "./collaboration/DocumentController";
+import {PresenceController} from "./collaboration/PresenceController";
 import { Effect, Schema } from "effect";
 import type { AppConfig } from "./config";
 import { DaemonConnection } from "./daemon/client";
@@ -7,8 +9,7 @@ import type { SavedSession } from "./session-store";
 import { WorkspaceLayout, type LayoutSnapshot, type SplitAxis, type FocusDirection } from "./layout/WorkspaceLayout";
 import { relative, isAbsolute, posix, win32 } from "node:path";
 import { closeTerminalSession, disposeTerminalSessions,onTerminalUnavailable,terminalSession } from "./terminal/sessions";
-import { absoluteTerminalDirectory,mainTerminalSurface,followsTerminalDirectory } from "./terminal/workspace";
-import { localDaemon } from "./menu-actions/web-frontend";
+import { absoluteTerminalDirectory,mainTerminalSurface,followsTerminalDirectory,terminalDirectoryFollowsWorkspace } from "./terminal/workspace";
 import {getWindowWorkspaces,includeWindowWorkspace,openWorkspaceIds,reorderWindowWorkspace} from "./workspaces/window-tabs";
 import { AgentSdk, sdkModel, sdkPrompt,sdkThread } from "./daemon/sdk";
 import {localPresenceIdentity} from "./agent/local-presence";
@@ -76,6 +77,8 @@ export interface AppState {
 }
 type WorkspaceNavigation = Pick<AppState, "directories" | "expanded" | "notesDirectories" | "notesExpanded" | "threads">;
 export class WorkspaceModel {
+  readonly collaboration:DocumentController;
+  readonly presence:PresenceController;
   private listeners = new Set<() => void>();
   private cleanups: Array<() => void> = [];
   private abort = new AbortController();
@@ -111,6 +114,8 @@ export class WorkspaceModel {
   };
   constructor(readonly client: DaemonConnection, readonly config: AppConfig, seed?: { state: AppState; editors: Map<string, NativeEditor>; recovery?: SavedSession }) {
     this.agentSdk = new AgentSdk(config);
+    this.presence = new PresenceController(client,config);
+    this.collaboration=new DocumentController(client,config,this.presence,this.report);
     this.editors = seed?.editors || new Map();
     if (seed) {
       // Hot remounts retain the current view; a cold recovery opens Welcome.
@@ -228,10 +233,10 @@ export class WorkspaceModel {
     this.cleanups.push(this.client.subscribeStatus((connection) => {
       this.update({ connection });
       if (connection.phase === "connected") void this.hydrate();
-      else this.epoch++;
+      else {this.presence.leaveWorkspace();this.epoch++;}
     }));
   }
-  dispose(preserveEditors = false) { this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
+  dispose(preserveEditors = false) { this.collaboration.dispose(); this.presence.dispose(); this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
   getLayout(workspaceId = this.state.activeWorkspace?.id): WorkspaceLayout {
     if (!workspaceId) throw new Error("Select a workspace first");
     let layout = this.layouts.get(workspaceId);
@@ -325,7 +330,7 @@ export class WorkspaceModel {
     const layout=this.getLayout(surface.workspaceId);if(!layout.frame.leaves.some(entry=>entry.leaf===leaf&&entry.surfaceId===id))return false;
     if(!discard&&this.surfaceDirty(id)&&layout.frame.leaves.filter(entry=>entry.surfaceId===id).length<2){this.report(new Error("Unsaved changes. Save this file or use :q! to discard it."));return false;}
     this.transaction(()=>{
-      const key=`${id}@${leaf}`,view=this.editorViews.get(key);this.markdownViews.get(key)?.markdown.dispose();this.markdownViews.delete(key);delete this.recoveredMarkdownViews[key];view?.editor.dispose();this.editorViews.delete(key);delete this.recoveredViews[`view:${key}`];
+      const key=`${id}@${leaf}`,view=this.editorViews.get(key);this.markdownViews.get(key)?.markdown.dispose();this.markdownViews.delete(key);delete this.recoveredMarkdownViews[key];if(view)this.collaboration.detach(view.editor);view?.editor.dispose();this.editorViews.delete(key);delete this.recoveredViews[`view:${key}`];
       layout.close(leaf);
       if(!layout.frame.leaves.some(entry=>entry.surfaceId===id))this.closeSurface(id,discard);
       if(this.state.activeWorkspace?.id===surface.workspaceId&&layout.frame.focusedSurfaceId)this.selectSurface(layout.frame.focusedSurfaceId,true);
@@ -476,11 +481,11 @@ export class WorkspaceModel {
   };
   private workspaceView(workspace:Workspace):Workspace{
     const roots=isRecord(this.state.ui.terminalWorkspaceRoots)?this.state.ui.terminalWorkspaceRoots:{},entry=roots[workspace.id];
-    return localDaemon(this.config.endpoint)&&(!workspace.host_kind||workspace.host_kind==="local")&&isRecord(entry)&&entry.declaredRoot===(workspace.root_dir||null)&&absoluteTerminalDirectory(entry.root)?{...workspace,root_dir:entry.root}:workspace;
+    return terminalDirectoryFollowsWorkspace(workspace,this.config)&&isRecord(entry)&&entry.declaredRoot===(workspace.root_dir||null)&&absoluteTerminalDirectory(entry.root)?{...workspace,root_dir:entry.root}:workspace;
   }
   private followMainTerminal(){
     const workspace=this.state.activeWorkspace,surface=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId);
-    if(!workspace||!followsTerminalDirectory(workspace,surface,this.mainTerminalSurface(),localDaemon(this.config.endpoint)))return;
+    if(!workspace||!followsTerminalDirectory(workspace,surface,this.mainTerminalSurface(),this.config))return;
     const cwds=isRecord(this.state.ui.terminalCwds)?this.state.ui.terminalCwds:{},cwd=cwds[surface!.sessionId!];
     if(!absoluteTerminalDirectory(cwd)||cwd===workspace.root_dir)return;
     const declared=this.state.workspaces.find(entry=>entry.id===workspace.id)||workspace;
@@ -494,9 +499,11 @@ export class WorkspaceModel {
     workspace=this.workspaceView(this.state.workspaces.find(entry=>entry.id===workspace.id)||workspace);
     const previous = this.state.activeWorkspace, key = this.workspaceKey(workspace);
     if (!force && previous && this.workspaceKey(previous) === key) {
+      if(this.presence.workspaceId()===workspace.id)this.presence.setWorkspace(workspace);
       this.setUI({openWorkspaceIds:includeWindowWorkspace(this.state.ui,workspace.id)});
       return;
     }
+    this.presence.leaveWorkspace();
     if (previous) this.workspaceNavigation.set(this.workspaceKey(previous), {
       directories: this.state.directories, expanded: this.state.expanded, notesDirectories: this.state.notesDirectories,
       notesExpanded: this.state.notesExpanded, threads: this.state.threads,
@@ -538,6 +545,7 @@ export class WorkspaceModel {
     try {
       await subscribed;
       if (epoch !== this.epoch) return;
+      this.presence.setWorkspace(workspace);
       for (const pane of this.getLayout(workspace.id).frame.panes) {
         const surface = this.state.surfaces.find((s) => s.id === pane.surfaceId);
         if (surface?.kind === "agent" && surface.sessionId) this.resumeThread(surface.sessionId);
@@ -733,7 +741,8 @@ export class WorkspaceModel {
     const targetLayout = closing?.workspaceId;
     if (targetLayout) this.getLayout(targetLayout).closeSurface(id);
     for (const [key, view] of this.markdownViews) if (view.surfaceId === id) { view.markdown.dispose(); this.markdownViews.delete(key); delete this.recoveredMarkdownViews[key]; }
-    for (const [key, view] of this.editorViews) if (view.surfaceId === id) { view.editor.dispose(); this.editorViews.delete(key); }
+    for (const [key, view] of this.editorViews) if (view.surfaceId === id) { this.collaboration.detach(view.editor);view.editor.dispose(); this.editorViews.delete(key); }
+    if(editor)this.collaboration.detach(editor);
     delete this.recoveredViews[id];
     for(const key of Object.keys(this.recoveredViews))if(key.startsWith(`view:${id}@`))delete this.recoveredViews[key];
     for(const key of Object.keys(this.recoveredMarkdownViews))if(key.startsWith(`${id}@`))delete this.recoveredMarkdownViews[key];
@@ -759,10 +768,10 @@ export class WorkspaceModel {
   private observeEditor(surfaceId: string, editor: NativeEditor) {
     if (this.observedEditors.has(editor)) return;
     this.observedEditors.add(editor);
-    let revision = editor.frame.revision, dirty = editor.frame.dirty;
+    let revision = editor.frame.revision, dirty = editor.frame.dirty, bound = editor.frame.collaborationBound;
     this.cleanups.push(editor.subscribe((frame) => {
-      if (revision === frame.revision && dirty === frame.dirty) return;
-      revision = frame.revision; dirty = frame.dirty;
+      if (revision === frame.revision && dirty === frame.dirty && bound === frame.collaborationBound) return;
+      revision = frame.revision; dirty = frame.dirty; bound = frame.collaborationBound;
       if (this.syncingDocuments.has(surfaceId)) return;
       this.syncingDocuments.add(surfaceId);
       try {
@@ -775,6 +784,7 @@ export class WorkspaceModel {
     let editor = this.editors.get(surface.id);
     if (!editor) { editor = new NativeEditor(this.hostPath(surface), this.state.files[surface.id] || "", this.config.vim); this.editors.set(surface.id, editor); }
     this.observeEditor(surface.id, editor);
+    if(!surface.document&&this.state.files[surface.id]!==undefined)this.collaboration.attach(editor,this.hostPath(surface),this.state.workspaces.find(workspace=>workspace.id===surface.workspaceId));
     if (leaf === undefined) return editor;
     const key = `${surface.id}@${leaf}`;
     let view = this.editorViews.get(key);
@@ -784,6 +794,7 @@ export class WorkspaceModel {
       if (saved) try { clone.call("restore", { snapshot: saved }); clone.syncFrom(editor); } catch {}
       view = { surfaceId: surface.id, editor: clone }; this.editorViews.set(key, view); this.observeEditor(surface.id, clone);
     }
+    this.collaboration.attachView(view.editor,editor);
     return view.editor;
   }
   getMarkdown(surface: Surface, leaf?: number) {
@@ -855,6 +866,10 @@ export class WorkspaceModel {
       return;
     }
     if (!root) return;
+    if(await this.collaboration.save(editor)){
+      if(this.client.state.phase==="connected")this.client.send("Editor",{DidSave:{path:this.hostPath(surface)}},root);
+      this.update({files:{...this.state.files,[surface.id]:editor.text()}});return;
+    }
     expectVariant(await this.run(this.client.request("Files", { WriteFile: { path: surface.path, bytes: [...new TextEncoder().encode(text)] } }, root)), "FileWritten");
     editor.call("saved", { revision });
     if (this.client.state.phase === "connected") this.client.send("Editor", { DidSave: { path: this.hostPath(surface) } }, root);
@@ -1296,6 +1311,7 @@ export class WorkspaceModel {
         if (tag === "HostWorkspaceTree") {
           const tree = Schema.decodeUnknownSync(TreeSchema)(body);
           this.update({ workspaces: tree.workspaces, workspaceTabs: tree.tabs });
+          const active=tree.workspaces.find(workspace=>workspace.id===this.state.activeWorkspace?.id);if(active&&this.presence.workspaceId()===active.id)this.presence.setWorkspace(active);
         } else if (tag === "HostWorkspaceUpserted" || tag === "WorkspaceControlChanged") {
           const workspace = Schema.decodeUnknownSync(WorkspaceSchema)(body.workspace);
           // The correlated create reply also reaches event subscribers. Publish
@@ -1304,6 +1320,7 @@ export class WorkspaceModel {
           this.update({ workspaces: this.state.workspaces.some((w) => w.id === workspace.id)
             ? this.state.workspaces.map((w) => w.id === workspace.id ? workspace : w)
             : [...this.state.workspaces, workspace] });
+          if(workspace.id===this.presence.workspaceId())this.presence.setWorkspace(workspace);
         }
         return;
       }

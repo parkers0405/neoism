@@ -1,3 +1,5 @@
+mod host_presence;
+pub use host_presence::render_presence_name_flag;
 mod bullet_align;
 pub(crate) mod draw;
 mod draw_embed;

@@ -28,8 +28,24 @@ neoism-window = { path = "../../../neoism-window" }
 bitflags = "2"
 libloading = "0.8"
 regex = "1"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
 unicode-segmentation = "1"
 
+
+axum = { version = "0.7", features = ["ws"] }
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+sha2 = "0.10"
+base64 = "0.22"
+subtle = "2.5"
+opentunnel = "=0.5.1"
+libc = "0.2"
+url = "2"
 
 [profile.dev]
 split-debuginfo = "unpacked"

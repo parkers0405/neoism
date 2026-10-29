@@ -40,8 +40,8 @@ fn fade_f32(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
 /// the label budget can reserve it before truncating. Mirrors the layout
 /// in [`draw_row_presence_cluster`]: up to `PRESENCE_ROW_CAP` orbs at 62%
 /// overlap, plus a "+N" tail when there are more. `0.0` for no peers.
-fn presence_cluster_width(
-    sugarloaf: &mut Sugarloaf,
+pub(super) fn presence_cluster_width(
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     peers: &[PresenceAvatarPeer],
     av: f32,
     plus_opts: &DrawOpts,
@@ -67,8 +67,8 @@ fn presence_cluster_width(
 /// overlapping orbs stay legible. Still frame (`t = 0.6`) — the tree
 /// doesn't repaint just for presence.
 #[allow(clippy::too_many_arguments)]
-fn draw_row_presence_cluster(
-    sugarloaf: &mut Sugarloaf,
+pub(super) fn draw_row_presence_cluster(
+    sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized),
     peers: &[PresenceAvatarPeer],
     right_edge: f32,
     row_y: f32,

@@ -11,7 +11,7 @@ export function createTreeGlyphHost(config:AppConfig){
 }
 /** Native row interaction/reveal stays on its parent. This one image contains
  * the original FileTree icon ink centers, shaped label and truncation. */
-export function TreeRowGlyphs(props:{host:ReturnType<typeof createTreeGlyphHost>;config:AppConfig;name:string;chevron:string;icon:string;labelColor:string;iconColor:string;chevronColor:string;initialWidth?:number;onWidth?:(width:number)=>void;pinImage?:(raster:CanvasRaster)=>void}){
+export function TreeRowGlyphs(props:{host:ReturnType<typeof createTreeGlyphHost>;config:AppConfig;name:string;chevron:string;icon:string;labelColor:string;iconColor:string;chevronColor:string;initialWidth?:number;trailingWidth?:number;onWidth?:(width:number)=>void;pinImage?:(raster:CanvasRaster)=>void}){
  const initialWidth=props.initialWidth||0;
  const [width,setWidth]=createSignal(Number.isFinite(initialWidth)&&initialWidth>0?initialWidth:0);
  const images=new CanvasImages(useGpuixRequired());
@@ -19,7 +19,7 @@ export function TreeRowGlyphs(props:{host:ReturnType<typeof createTreeGlyphHost>
  // One display-list image; pixels are copied inside this synchronous request,
  // before a sibling row can evict the native cache entry.
  const commands=createMemo(()=>{
-  const next=width()>0?props.host.row({width:width(),scale:props.config.scale,name:props.name,chevron:props.chevron,icon:props.icon,labelColor:props.labelColor,iconColor:props.iconColor,chevronColor:props.chevronColor}):null;
+  const next=width()>0?props.host.row({width:Math.max(1,width()-(props.trailingWidth||0)),scale:props.config.scale,name:props.name,chevron:props.chevron,icon:props.icon,labelColor:props.labelColor,iconColor:props.iconColor,chevronColor:props.chevronColor}):null;
   if(next)props.pinImage?.(next.raster);
   const ops:CanvasOp[]=next?[{k:"i",id:images.use(RasterSource.tree,next.raster),b:[0,0,next.raster.width/next.raster.scale,next.raster.height/next.raster.scale]}]:[];
   images.commit();

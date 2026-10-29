@@ -47,3 +47,15 @@ test("tree reveal matches the production ease-out cubic and per-row delay", () =
   expect(revealProgress(172, 1, 320, 12)).toBe(0.875);
   expect(revealProgress(332, 1, 320, 12)).toBe(1);
 });
+
+test("composer material retains configured selector opacity without fading text or changing wallpaper", () => {
+  const config = (styles: Record<string, unknown>) => loadConfig([], {}, {ui: {styles}});
+  expect(config({}).composerOpacity).toBe(0.85);
+  expect(config({composer: {opacity: 0.4}}).composerOpacity).toBe(0.4);
+  expect(config({composer: {opacity: 0.4}, "composer.agent": {opacity: 0.7}}).composerOpacity).toBe(0.7);
+  expect(config({"composer.agent": {opacity: 0}}).composerOpacity).toBe(0);
+  expect(config({"composer.agent": {opacity: 1}}).composerOpacity).toBe(1);
+  expect(config({"composer.agent": {opacity: 5}}).composerOpacity).toBe(1);
+  expect(config({"composer.agent": {opacity: -2}}).composerOpacity).toBe(0);
+  expect(config({"composer.agent": {opacity: NaN}}).composerOpacity).toBe(0.85);
+});

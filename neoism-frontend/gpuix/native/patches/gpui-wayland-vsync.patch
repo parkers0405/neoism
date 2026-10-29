@@ -1,10 +1,83 @@
+diff --git c/crates/gpui/src/elements/div.rs w/crates/gpui/src/elements/div.rs
+index 51379b8..c75e98b 100644
+--- c/crates/gpui/src/elements/div.rs
++++ w/crates/gpui/src/elements/div.rs
+@@ -2308,6 +2308,10 @@ impl Interactivity {
+                     }
+                 }
+
++                // Prepaint computes cached-view keys. Carry the same inherited
++                // alpha as paint so revealing a staged subtree invalidates ink
++                // whose cached primitives were recorded fully transparent.
++                window.with_element_opacity(style.opacity, |window| {
+                 window.with_text_style(style.text_style().cloned(), |window| {
+                     window.with_content_mask(
+                         style.overflow_mask(bounds, window.rem_size()),
+@@ -2325,6 +2329,7 @@ impl Interactivity {
+                         },
+                     )
+                 })
++                })
+             },
+         )
+     }
+diff --git c/crates/gpui/src/view.rs w/crates/gpui/src/view.rs
+index f8343be..eba9c3c 100644
+--- c/crates/gpui/src/view.rs
++++ w/crates/gpui/src/view.rs
+@@ -293,6 +293,24 @@ struct ViewElementCacheKey {
+     bounds: Bounds<Pixels>,
+     content_mask: ContentMask<Pixels>,
+     text_style: TextStyle,
++    // Cached primitives already contain the inherited alpha. A staged view
++    // painted under opacity zero must repaint when that ancestor is revealed.
++    opacity: f32,
++}
++
++impl ViewElementCacheKey {
++    fn matches(
++        &self,
++        bounds: &Bounds<Pixels>,
++        content_mask: &ContentMask<Pixels>,
++        text_style: &TextStyle,
++        opacity: f32,
++    ) -> bool {
++        self.bounds == *bounds
++            && self.content_mask == *content_mask
++            && self.text_style == *text_style
++            && self.opacity == opacity
++    }
+ }
+
+ impl<V: View> Element for ViewElement<V> {
+@@ -384,9 +402,9 @@ impl<V: View> Element for ViewElement<V> {
+                         let text_style = window.text_style();
+
+                         if let Some(mut element_state) = element_state
+-                            && element_state.cache_key.bounds == bounds
+-                            && element_state.cache_key.content_mask == content_mask
+-                            && element_state.cache_key.text_style == text_style
++                            && element_state.cache_key.matches(
++                                &bounds, &content_mask, &text_style, window.element_opacity,
++                            )
+                             && !window.dirty_views.contains(&entity_id)
+                             && !window.refreshing
+                         {
+@@ -427,6 +445,7 @@ impl<V: View> Element for ViewElement<V> {
+                                     bounds,
+                                     content_mask,
+                                     text_style,
++                                    opacity: window.element_opacity,
+                                 },
+                             },
+                         )
 diff --git c/crates/gpui_linux/src/gpui_linux.rs w/crates/gpui_linux/src/gpui_linux.rs
 index 62d972d..6f14eee 100644
 --- c/crates/gpui_linux/src/gpui_linux.rs
 +++ w/crates/gpui_linux/src/gpui_linux.rs
 @@ -2,3 +2,14 @@
  mod linux;
- 
+
  pub use linux::current_platform;
 +
 +static PRESENTED_SAMPLE: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
@@ -32,15 +105,15 @@ index a5c6dc8..9b43c8e 100644
 @@ -188,8 +189,7 @@ fn set_ime_cursor_rectangle_after_done(
      }
  }
- 
+
 -/// Pacing for retry ticks: a fixed 60Hz interval. Retries only occur for throttled or
 -/// failed-present frames, so matching the output's actual refresh rate wouldn't be observable.
 +/// Used only before the compositor has supplied the window's output mode.
  const FRAME_RETRY_INTERVAL: Duration = Duration::from_micros(16_667);
- 
+
  fn take_startup_activation_token_from_environment() -> Option<String> {
 @@ -206,6 +206,7 @@ fn take_startup_activation_token_from_environment() -> Option<String> {
- 
+
  #[derive(Clone)]
  pub struct Globals {
 +    pub presentation_trace: Option<wp_presentation::WpPresentation>,
@@ -61,7 +134,7 @@ index a5c6dc8..9b43c8e 100644
      subpixel: Option<wl_output::Subpixel>,
 +    refresh_millihz: Option<i32>,
  }
- 
+
  impl InProgressOutput {
 @@ -295,6 +298,7 @@ impl InProgressOutput {
                  scale,
@@ -77,7 +150,7 @@ index a5c6dc8..9b43c8e 100644
      pub subpixel: Option<wl_output::Subpixel>,
 +    pub refresh_millihz: Option<i32>,
  }
- 
+
  pub(crate) struct WaylandClientState {
 @@ -468,9 +473,16 @@ impl WaylandClientStatePtr {
      pub fn schedule_frame_retry(&self, surface_id: &ObjectId) {
@@ -100,7 +173,7 @@ index a5c6dc8..9b43c8e 100644
 @@ -1500,9 +1512,18 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
          let client = this.get_client();
          let mut state = client.borrow_mut();
- 
+
 -        let Some(in_progress_output) = state.in_progress_outputs.get_mut(&output.id()) else {
 -            return;
 -        };
@@ -116,7 +189,7 @@ index a5c6dc8..9b43c8e 100644
 +            refresh_millihz: previous.refresh_millihz,
 +        }).unwrap_or_default();
 +        let in_progress_output = state.in_progress_outputs.entry(output.id()).or_insert(current);
- 
+
          match event {
              wl_output::Event::Name { name } => {
 @@ -1517,8 +1538,11 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
@@ -196,7 +269,7 @@ index 2d25416..d5a5ae2 100644
 @@ -994,6 +999,10 @@ impl WaylandWindowStatePtr {
          }
      }
- 
+
 +    pub fn current_output_id(&self) -> Option<ObjectId> {
 +        self.state.borrow().display.as_ref().map(|(id, _)| id.clone())
 +    }
@@ -236,7 +309,7 @@ index 47ce2a3..7687aca 100644
 +++ w/crates/gpui_wgpu/src/wgpu_renderer.rs
 @@ -1322,6 +1322,8 @@ impl WgpuRenderer {
      }
- 
+
      pub fn draw(&mut self, scene: &Scene) -> bool {
 +        let trace = std::env::var_os("GPUI_GPU_TIMING_TRACE").is_some();
 +        let started = trace.then(std::time::Instant::now);
@@ -254,15 +327,15 @@ index 47ce2a3..7687aca 100644
 @@ -1393,6 +1396,7 @@ impl WgpuRenderer {
              }
          };
- 
+
 +        let acquired = trace.then(std::time::Instant::now);
          // Now that we know the surface is healthy, ensure intermediate textures exist
          self.ensure_intermediate_textures();
- 
+
 @@ -1408,7 +1412,12 @@ impl WgpuRenderer {
              return false;
          }
- 
+
 +        let recorded = trace.then(std::time::Instant::now);
          frame.present();
 +        if let (Some(started), Some(acquire_start), Some(acquired), Some(recorded)) = (started, acquire_start, acquired, recorded) {
@@ -271,4 +344,4 @@ index 47ce2a3..7687aca 100644
 +        }
          true
      }
- 
+

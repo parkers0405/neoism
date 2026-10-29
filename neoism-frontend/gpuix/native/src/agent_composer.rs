@@ -67,9 +67,19 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
    let mut snapshot=FooterSnapshot{help_visible:help,no_providers:v["noProviders"].as_bool().unwrap_or(false),streaming:status(text(v,"state")),system,interactions:Default::default()};
    host.paint.begin_frame();let checkout=view::AgentCheckoutContext::new(cwd.map(|cwd|neoism_ui::panels::agent_pane::attachment_policy::compact_directory_label(&cwd)),branch);
    if let Some(tray)=geometry.tray{host_footer::render(&mut host.paint,&mut snapshot,tray,width,&theme,scale,home,!input_text.trim().is_empty(),v["busy"].as_bool().unwrap_or(false),n(v,"seconds",0.0),Some(&checkout));}
+   // Preserve foreground opacity while allowing the wallpaper through the two
+   // material fills. Use the same selector/theme policy as the desktop painter.
+   let mut material=neoism_ui::primitives::surface_background::style("composer.agent");
+   material.opacity=Some(n(v,"materialOpacity",material.opacity.unwrap_or(0.85)).clamp(0.0,1.0));
+   let card_color=neoism_ui::customization::background_color(&material,&theme,theme.f32(theme.bg));
+   let tray_color=neoism_ui::customization::background_color(&material,&theme,theme.f32(theme.surface));
+   let original_tray=neoism_ui::primitives::surface_background::base_color("composer.agent",&theme,theme.f32(theme.surface));
+   let mut commands=host.paint.commands();
+   for command in &mut commands{if let neoism_ui::primitives::paint_record::PaintCommand::Rect{color,..}=command{if *color==original_tray{*color=tray_color;}}}
+   let bytes=|color:[f32;4]|color.map(|v|(v.clamp(0.0,1.0)*255.0).round()as u8);
    let controls=host_footer::controls(geometry.card,scale,home,!input_text.trim().is_empty(),v["busy"].as_bool().unwrap_or(false),images);
    let logo=view::home::wordmark_rect([0.0,0.0,width,height],rect,scale);
-   Ok(json!({"inputRect":rect,"logoRect":logo,"cardRect":geometry.card,"trayRect":geometry.tray,"cardRadius":geometry.card_radius,"joinRect":geometry.tray_join_rect((neoism_ui::panels::file_tree::FRAME_STROKE*0.5*scale).max(1.0)),"trayRadius":geometry.tray_radius,"footerVisible":footer_visible,"controls":controls,"visualRows":rows,"commands":host.paint.commands(),"animating":footer_visible&&snapshot.streaming!=AgentStreamingStatus::Idle,"cwdRects":snapshot.interactions.cwd_rects,"systemRects":snapshot.interactions.system_rects}))
+   Ok(json!({"inputRect":rect,"logoRect":logo,"cardRect":geometry.card,"cardColor":bytes(card_color),"trayColor":bytes(tray_color),"trayRect":geometry.tray,"cardRadius":geometry.card_radius,"joinRect":geometry.tray_join_rect((neoism_ui::panels::file_tree::FRAME_STROKE*0.5*scale).max(1.0)),"trayRadius":geometry.tray_radius,"footerVisible":footer_visible,"controls":controls,"visualRows":rows,"commands":commands,"animating":footer_visible&&snapshot.streaming!=AgentStreamingStatus::Idle,"cwdRects":snapshot.interactions.cwd_rects,"systemRects":snapshot.interactions.system_rects}))
   })
  })())
 }

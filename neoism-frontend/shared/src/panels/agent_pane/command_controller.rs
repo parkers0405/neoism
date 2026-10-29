@@ -105,7 +105,7 @@ pub fn plan_slash_command(text: &str) -> SlashCommandAction {
             SlashCommandAction::ApplyThinking,
             SlashCommandAction::OpenThinkingPicker,
         ),
-        "/agent" => first_arg_or_picker(
+        "/agent" | "/agents" => first_arg_or_picker(
             &args,
             SlashCommandAction::ApplyAgent,
             SlashCommandAction::OpenAgentPicker,
@@ -426,6 +426,16 @@ mod tests {
             assert_eq!(
                 plan_slash_command(&format!("/models{suffix}")),
                 plan_slash_command(&format!("/model{suffix}")),
+            );
+        }
+    }
+
+    #[test]
+    fn agents_alias_matches_agent_with_and_without_arguments() {
+        for suffix in ["", " plan", " build extra"] {
+            assert_eq!(
+                plan_slash_command(&format!("/agents{suffix}")),
+                plan_slash_command(&format!("/agent{suffix}")),
             );
         }
     }

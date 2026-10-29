@@ -50,3 +50,16 @@ test("all original screen effects render and emit exactly one canonical followup
   expect(coreCall<{prompt:unknown}>("agentcomposer.fx.frame",{id:actor.id,width:800,height:600,inputY:276,elapsed:11}).prompt).toBeNull();
  }
 });
+
+test("original composer material is translucent once while foreground text remains fully opaque",()=>{
+ const config=loadConfig([],{},{}),actor=new NativeComposer(config);actors.push(actor);
+ for(const themeName of ["pastel_dark","tokyo_night"]){
+  for(const opacity of [0,0.4,0.85,1]){
+   const frame=coreCall<ReturnType<NativeComposer["frame"]>>("agentcomposer.frame",{id:actor.id,...base,theme:themeName,scale:1,materialOpacity:opacity});
+   expect(frame.cardColor[3]).toBe(Math.round(opacity*255));expect(frame.trayColor[3]).toBe(frame.cardColor[3]);
+   const fill=frame.commands.find(command=>command.kind==="rect"&&command.color.slice(0,3).every((v,i)=>Math.abs(v*255-frame.trayColor[i])<0.51));
+   expect(fill?.kind).toBe("rect");if(fill?.kind==="rect")expect(fill.color[3]).toBeCloseTo(opacity);
+   const text=frame.commands.filter(command=>command.kind==="text");expect(text.length).toBeGreaterThan(0);expect(text.every(command=>command.kind==="text"&&command.color[3]===255)).toBe(true);
+  }
+ }
+});

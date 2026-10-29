@@ -45,8 +45,8 @@ import {handleApplicationShortcut,registerApplicationShortcuts} from "../command
 import { readClipboard, writeClipboard } from "../clipboard";
 import { terminalSession } from "../terminal/sessions";
 import type { FinderMode } from "../finder/FinderController";
-import { visibleTreeRange, beginTreePanel, clearHiddenTreePanels } from "./tree-viewport";
-import { tabChrome } from "../layout/tab-chrome";
+import { visibleTreeRange, treeCursorRowY, beginTreePanel, clearHiddenTreePanels } from "./tree-viewport";
+import { tabChrome,rgba } from "../layout/tab-chrome";
 import { ChromeActionsController, type ServerSelection } from "../menu-actions/ChromeActionsController";
 import { ChromeActionsView } from "../menu-actions/ChromeActionsView";
 import { TopBar } from "./TopBar";
@@ -705,7 +705,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       } else update("key", { key, ctrl: event.modifiers?.ctrl });
     };
     const sidebarKey=props.notes?"notes":"files";
-    const target=():ChromeCursorTarget|undefined=>host&&rows().length?{host,kind:"tree",bounds:chromeBounds.get(host.id),rowY:(view().selected-view().top)*d.treeRowHeight*s+view().offset,rowHeight:d.treeRowHeight*s}:undefined;
+    const target=():ChromeCursorTarget|undefined=>{const rowY=treeCursorRowY(rows().length,height(),d.treeRowHeight*s,view());return host&&rowY!==undefined?{host,kind:"tree",bounds:chromeBounds.get(host.id),rowY,rowHeight:d.treeRowHeight*s}:undefined;};
     sidebarTargets.set(sidebarKey,target);
     const publishTarget=()=>{const next=target();setChromeTarget(previous=>next&&previous?.host===next.host?{...next,origin:previous.origin}:next);};
     createEffect(()=>{view();rows();if(focused()&&chromeFocus().zone==="sidebar")publishTarget();});
@@ -786,6 +786,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const localBusy=()=>!!props.sessionId && ![undefined,"Idle"].includes(state().streaming[props.sessionId]);
     const cwd=()=>state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined;
     const slash=new SlashController({model,config,sessionId:()=>props.sessionId,attachments,hooks:{
+      openSelectionPicker:kind=>{setSlashDismissed(true);setSlashPicker(undefined);openPicker(kind);},
       picker:request=>{setSlashDismissed(true);setSlashPicker(request);},
       input:request=>new Promise(resolve=>{setSlashDismissed(true);slashInput()?.resolve(undefined);setSlashInput({request,resolve});}),
       insert:value=>{setDraft(value);setSlashDismissed(false);focus();},
@@ -872,10 +873,10 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       <Show when={!!frame()}><div testId="agent-composer-shell" data-home={props.home} style={{...absolute(frame()?.inputRect),height:(frame()?.inputRect[3]||0)+(frame()?.footerVisible?32*s:0)}}>
         <div ref={element=>{shell=element;composerShells.set(key(),element);}} onFileDrop={event=>{if(event.paths?.length)void attachPaths(event.paths);}}
           onLayout={event=>{anchor=[event.x||0,event.y||0,event.width||0,event.height||0];setComposerAnchors(current=>current[key()]?.every((n,i)=>n===anchor[i])?current:{...current,[key()]:anchor});}}
-          testId="agent-input-card" style={{...absolute(frame()?.cardRect),backgroundColor:c.bg,borderColor:c.border+"bf",borderWidth:Math.max(1,d.frameStroke*.5*s),borderRadius:frame()?.cardRadius}}>
+          testId="agent-input-card" style={{...absolute(frame()?.cardRect),backgroundColor:frame()?.cardColor?rgba(frame()!.cardColor):c.bg,borderColor:c.border+"bf",borderWidth:Math.max(1,d.frameStroke*.5*s),borderRadius:frame()?.cardRadius}}>
           <Show when={attachments().length}><div style={{...row,position:"absolute",left:18*s,right:18*s,top:(props.home?15:11)*s,height:82*s,gap:6*s,overflow:"hidden"}}><For each={attachments()}>{attachment=><div style={{...row,gap:6*s,padding:5*s,backgroundColor:c.surface,borderRadius:5*s}}><Label size={11}>{attachment.name}</Label><div role="button" aria-label={`Remove ${attachment.name}`} onClick={()=>removeAttachment(attachment.token)}><Label size={11} color={c.muted}>×</Label></div></div>}</For></div></Show>
           <textarea ref={element=>{input=element;composerInputs.set(key(),element);}} testId="composer" aria-label="Message" value={draft()} placeholder="Ask anything" minRows={1} maxRows={5} theme={{...nativeTheme,caret:"#00000000"}}
-            onChange={event=>{setDraft(event.value||"");setSlashDismissed(false);}} onSubmit={()=>{if(slashOpen()){slashAccept?.();return;}void submit();}}
+            onChange={event=>{setDraft(event.value||"");setSlashDismissed(false);}} onSubmit={()=>{if(slashOpen()&&!slashOptions().some(row=>row.value===draft())&&slashOptions().some(row=>row.value.startsWith(draft()))){slashAccept?.();return;}void submit();}}
             onKeyDown={event=>{
               if(handleSurfaceKey(event))return;
               if(slashOpen()&&slashKey?.(event))return;
@@ -900,7 +901,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
               <Show when={localBusy()} fallback={<text style={{...text((frame()?.controls.visual_rect[2]||26*s)/s*.62,c.bg),fontWeight:800,pointerEvents:"none"}}>↑</text>}><div style={{width:(frame()?.controls.visual_rect[2]||26*s)*.28,height:(frame()?.controls.visual_rect[3]||26*s)*.28,borderRadius:1.5*s,backgroundColor:c.bg}}/></Show>
             </div></div>
         </div>
-        <Show when={frame()?.joinRect}>{rect=><div style={{...absolute(rect()),backgroundColor:c.surface,pointerEvents:"none"}}/>}</Show>
+        <Show when={frame()?.joinRect}>{rect=><div style={{...absolute(rect()),backgroundColor:frame()?.trayColor?rgba(frame()!.trayColor):c.surface,pointerEvents:"none"}}/>}</Show>
         <Show when={frame()?.trayRect}>{rect=><div testId="agent-composer-footer" style={{...absolute(rect()),pointerEvents:"none"}}/>}</Show>
         <div style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"none"}}><PaintLayer commands={frame()?.commands||[]} config={config} pinImage={(source,raster)=>wordmarkHosts.pinPaintImage(renderer,source,raster)}/></div>
         <For each={frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>

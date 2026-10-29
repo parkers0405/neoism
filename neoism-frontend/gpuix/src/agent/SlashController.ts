@@ -13,6 +13,8 @@ export interface SlashPickerRequest{token?:string;loading?:boolean;error?:string
  activity?:{body:string;status:string;busy?:boolean;url?:string};mcpServer?:string;mcpEntry?:unknown}
 export interface SlashInputRequest{title:string;description?:string;secret?:boolean;initialValue?:string}
 export interface SlashHooks{
+ /** Composer chips and slash aliases share the same selection UI and account flow. */
+ openSelectionPicker?:(kind:"model"|"agent"|"thinking")=>void|Promise<void>;
  input?:(request:SlashInputRequest)=>Promise<string|undefined>;
  picker(request:SlashPickerRequest):void|Promise<void>;
  insert(text:string):void;
@@ -248,6 +250,8 @@ export class SlashController{
   if(!this.supported(action.kind))throw new Error("This command is unavailable in this frontend");
   this.assertCurrent(scope);
   if(effects[action.kind]){await hooks.effect!(effects[action.kind]);return true;}
+  const selectionKind=({OpenModelPicker:"model",OpenAgentPicker:"agent",OpenThinkingPicker:"thinking"}as const)[action.kind as "OpenModelPicker"|"OpenAgentPicker"|"OpenThinkingPicker"];
+  if(selectionKind&&hooks.openSelectionPicker){await hooks.openSelectionPicker(selectionKind);return true;}
   const pending:Record<string,[string,string]>={OpenConnectPicker:["connect","Connect a provider"],OpenModelPicker:["model","Model"],OpenAgentPicker:["agent","Agent"],OpenSessionsPicker:["sessions","Sessions"],OpenSkillPicker:["skills","Skills"],OpenSubagentPicker:["subagents","Subagent sessions"],ShowMcp:["mcp","MCP servers"]};
   if(pending[action.kind])await this.loadingPicker(scope,...pending[action.kind]);
   if(action.kind==="OpenModelPicker"||action.kind==="OpenAgentPicker")await this.awaitCatalog(scope);

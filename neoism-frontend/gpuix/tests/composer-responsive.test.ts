@@ -43,5 +43,5 @@ test("long model names truncate before reasoning without changing the original l
 test("actual App uses bounded native chips while resizing and preserves draft and picker",async()=>{
  const child=Bun.spawn([process.execPath,"run","tests/support/composer-responsive-check.tsx"],{cwd:fileURLToPath(new URL("..",import.meta.url)),stdout:"pipe",stderr:"pipe"});
  const[status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
- expect({status,stderr}).toEqual({status:0,stderr:""});expect(JSON.parse(stdout)).toEqual({actualApp:true,noWindow:true,narrowMeasuredControls:true,nonOverlappingChips:true,boundedInk:true,draftAndInputRetained:true,reasoningPickerWorks:true,noBackendSideEffects:true});
+ expect({status,stderr}).toEqual({status:0,stderr:""});expect(JSON.parse(stdout)).toEqual({actualApp:true,noWindow:true,narrowMeasuredControls:true,nonOverlappingChips:true,boundedInk:true,draftAndInputRetained:true,reasoningPickerWorks:true,slashAndChipPickersIdentical:true,noBackendSideEffects:true});
 },15000);

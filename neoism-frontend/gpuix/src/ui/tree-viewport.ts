@@ -17,3 +17,12 @@ export function treeReveal(elapsed: number, index: number, duration: number, sta
   return { opacity: revealProgress(elapsed, Math.min(index, 40), duration, stagger),
     delay: Math.max(0, delay - elapsed) / 1000, duration: Math.max(0, duration - Math.max(0, elapsed - delay)) / 1000 };
 }
+
+/** The original FileTree publishes a keyboard caret only while its selected
+ * row intersects the painted viewport (including native spring displacement).
+ * Overscan rows are retained for painting, not for a clamped edge caret. */
+export function treeCursorRowY(total:number,height:number,rowHeight:number,frame:{selected:number;top:number;offset:number;cursorOffset?:number}):number|undefined{
+  if(frame.selected<0||frame.selected>=total||height<=0||rowHeight<=0)return undefined;
+  const rowY=(frame.selected-frame.top)*rowHeight+frame.offset+(frame.cursorOffset||0);
+  return Math.min(rowY+rowHeight,height)-Math.max(rowY,0)>0?rowY:undefined;
+}

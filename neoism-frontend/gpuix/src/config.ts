@@ -30,6 +30,7 @@ export interface AppConfig {
   terminalScrollMultiplier?: number;
   terminalScrollDivider?: number;
   scale: number;
+  composerOpacity?: number;
   background?: { path: string; opacity: number; blur: number };
   reducedMotion: boolean;
   splashAutoAnimate?: boolean;
@@ -58,6 +59,8 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
   const fonts = object(appearance.fonts);
   const windowConfig = object(object(raw.ui).window ?? raw.window);
   const image = object(windowConfig["background-image"]);
+  const materialStyles = object(object(raw.ui).styles);
+  const composerOpacity = number(object(materialStyles["composer.agent"]).opacity, number(object(materialStyles.composer).opacity, 0.85));
   const themeName = value("--theme") || string(appearance.theme, "pastel_dark");
   const theme = { ...(palettes[themeName as keyof typeof palettes] || palettes.pastel_dark) } as Palette;
   const fontSize = Math.max(7, Math.min(42, number(Number(value("--font-size") || fonts.size || 14), 14)));
@@ -94,6 +97,7 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
     terminalScrollMultiplier: Math.max(0, number(object(object(raw.terminal).scroll).multiplier, 3)),
     terminalScrollDivider: Math.max(0.01, number(object(object(raw.terminal).scroll).divider, 1)),
     fontWeight: number(fonts.weight, 400), scale: Math.max(0.5, Math.min(3, fontSize / 14)),
+    composerOpacity: Math.max(0, Math.min(1, composerOpacity)),
     background: backgroundPath && !windowConfig["background-image-disabled"]
       ? { path: backgroundPath, opacity: Math.max(0, Math.min(1, number(image.opacity, 0.35))), blur } : undefined,
     reducedMotion: args.includes("--reduced-motion") || env.NEOISM_REDUCED_MOTION === "1",

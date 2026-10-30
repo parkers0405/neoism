@@ -201,3 +201,36 @@ test("compact paint retains raster identity, geometry and clipping with less tra
   expect(rasters).toBeGreaterThan(0);expect(JSON.stringify(compact).length).toBeLessThan(JSON.stringify(full).length);
  }finally{coreCall("agenttimeline.dispose",{id});}
 });
+
+test("subagent round trips preserve visible tool cards and their clickable details", () => {
+ const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId:"parent",scale:1,fontFamily:"Cascadia Code NF",fontWeight:400});
+ const call=(op:string,args:Record<string,unknown>={})=>coreCall<Frame>(`agenttimeline.${op}`,{id,...args});
+ const roster=[{id:"child",title:"Child",agent:"explore",depth:1,status:"completed"}];
+ const tool={id:"read-card",role:"Assistant",kind:"Tool",tool:"bash",status:"completed",title:"RoundtripTool",detail:"PreservedToolDetail",text:"PreservedToolDetail"};
+ const parent=[{id:"prompt",role:"User",kind:"User",text:"Inspect this"},tool,{id:"answer",role:"Assistant",kind:"Assistant",text:"Finished inspection"}];
+ const body=(frame:Frame)=>texts(frame).map(command=>command.text).join(" ");
+ const click=(frame:Frame,label:string)=>{
+  const text=texts(frame).find(command=>command.text?.includes(label));expect(text).toBeDefined();
+  const point={x:text!.x!+3,y:text!.y!+(text!.size||14)/2};
+  call("pointer",{kind:"down",...point});call("pointer",{kind:"up",...point});return run(id,300);
+ };
+ try{
+  call("family",{rootSessionId:"parent",sessionId:"parent",roster});
+  call("event",{message:{HistoryChunk:{session_id:"parent",messages:[parent[0]],next_cursor:null}}});
+  for(const message of parent.slice(1))call("event",{message:{MessageUpdated:{session_id:"parent",message}}});
+  call("event",{message:{SessionIdle:{session_id:"parent"}}});
+  let frame=settle(id);expect(body(frame)).toContain("RoundtripTool");
+  frame=click(frame,"RoundtripTool");expect(body(frame)).toContain("PreservedToolDetail");
+  for(let visit=0;visit<2;visit++){
+   frame=call("family",{rootSessionId:"parent",sessionId:"child",roster});
+   expect(body(frame)).not.toContain("PreservedToolDetail");
+   call("event",{message:{HistoryChunk:{session_id:"child",messages:[{id:"child-answer",role:"Assistant",kind:"Assistant",text:"Child result"}],next_cursor:null}}});
+   // A parent history refresh while parked must retain disclosure state too.
+   call("event",{historyKind:"head",message:{HistoryChunk:{session_id:"parent",messages:[{id:"older",role:"User",kind:"User",text:"Earlier prompt"},...parent],next_cursor:null}}});
+   call("family",{rootSessionId:"parent",sessionId:"parent",roster});
+   frame=settle(id);expect(body(frame)).toContain("RoundtripTool");expect(body(frame)).toContain("PreservedToolDetail");
+  }
+  frame=click(frame,"RoundtripTool");expect(body(frame)).not.toContain("PreservedToolDetail");
+  frame=click(frame,"RoundtripTool");expect(body(frame)).toContain("PreservedToolDetail");
+ }finally{call("dispose");}
+}, 20000);

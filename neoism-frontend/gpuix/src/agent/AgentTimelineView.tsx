@@ -13,8 +13,9 @@ import {localPresenceIdentity} from "./local-presence";
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
 import {paintedChromeBounds} from "../ui/chrome-target-bounds";
 import {openExternalUrl} from "../menu-actions/web-frontend";
+import {timelineReceivesEvent} from "./timeline-event-routing";
 
-interface TimelineFrame { canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
+interface TimelineFrame { canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
 interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
 
 /** One original agent timeline engine per conversation (the shared Rust
@@ -32,6 +33,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   coreCall("agenttimeline.family",{id,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});
   const dirty = new Set<() => void>();
   const event = (message: unknown, historyKind?: "head" | "older") => {
+    if(!timelineReceivesEvent(rootSessionId,model.state.ui,byModel!,message))return;
     try { if(coreCall<{needsPaint?:boolean}>("agenttimeline.event", { id, message, historyKind }).needsPaint===false)return; } catch (error) { model.report(error); return; }
     for (const listener of dirty) listener();
   };
@@ -63,10 +65,11 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   const [commands, setCommands] = createSignal<readonly PaintCommand[]>([]);
   const [canvas, setCanvas] = createSignal<PreparedCanvas>();
   const [header,setHeader]=createSignal<NonNullable<TimelineFrame["header"]>>([]);
+  const [pointer,setPointer]=createSignal(false);
   let bounds = { x: 0, y: 0, width: 0, height: 0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const apply = (next: TimelineFrame) => {
-    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
+    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setPointer(!!next.pointer);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
     if(!provisional)for(const message of next.send||[])props.model.sendAgent(message as never);
     if(next.navigate)props.onNavigate?.(next.navigate);
     if (next.copy) void writeClipboard(next.copy).catch(props.report);
@@ -132,7 +135,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     onMouseMove={(event) => {pointerPending=local(event);schedule();}}
     onMouseUp={(event) => call("pointer", { kind: "up", ...local(event) })}
     onMouseLeave={() => call("pointer", { kind: "leave" })}
-    style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", userSelect: "none", cursor: "text" }}>
+    style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", userSelect: "none", cursor: pointer()?"pointer":"text" }}>
     <PaintLayer commands={commands()} prepared={canvas()} config={config} cacheImageBytes={16 * 1024 * 1024} />
     <For each={header()}>{link=><For each={link.rects}>{rect=><div testId={`agent-family-navigation:${link.direction}`} aria-label={link.direction==="next"?"Next conversation":"Previous conversation"} style={{position:"absolute",left:rect[0],top:rect[1],width:rect[2],height:rect[3],pointerEvents:"none"}}/>}</For>}</For>
   </div>;

@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import {createRoot} from "@gpuix/solid";
+import {App} from "../../src/ui/App";
+import {AppVisualState} from "../../src/ui/AppVisualState";
+import {WorkspaceModel} from "../../src/model";
+import {DaemonConnection} from "../../src/daemon/client";
+import {loadConfig} from "../../src/config";
+import {createRecordingAppRenderer} from "./full-app-recording-renderer";
+import {usePresentationScheduler} from "../../src/animation/frame-scheduler";
+import {createWindowKeyRouter} from "../../src/commands/window-key-router";
+const config={...loadConfig(["--config","/nonexistent/tree-drag"],{}),reducedMotion:true,cursorBlink:false};
+const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer),keys=createWindowKeyRouter();
+const frames=new Set<()=>void>(),restore=usePresentationScheduler(callback=>{frames.add(callback);return()=>{frames.delete(callback);};});
+const workspace={id:"a",host_id:"host",title:"A",root_dir:"/project/a"};
+model.update({activeWorkspace:workspace,workspaces:[workspace],directories:{"":{path:"",entries:[{name:"dest",is_dir:true},{name:"src",is_dir:true},{name:"a.ts",is_dir:false}]},dest:{path:"dest",entries:[]},src:{path:"src",entries:[]}},expanded:new Set([""]),loading:false,ui:{sidebar:"files",openWorkspaceIds:["a"]}});
+const opens:string[]=[],moves:unknown[]=[];model.openFile=async path=>{opens.push(path);};model.moveTreePath=async (...args)=>{moves.push(args);};
+const pulse=async()=>{for(const callback of [...frames]){frames.delete(callback);callback();}await host.pump(root);};
+const dispatch=(testId:string,eventType:string,x:number,y:number)=>{const node=host.find(testId);assert.ok(node,testId);root.dispatch({elementId:node.id,eventType,button:0,x,y});};
+try{
+ root.render(()=><App model={model} config={config} visuals={visuals} registerWindowKeys={keys.register}/>);await host.pump(root);
+ assert.ok(!host.find("file-tree")!.events.has("mouseMove"),"The tree ancestor must not capture pointer events intended for rows");
+ assert.ok(host.find("file:src")!.events.has("mouseMove"),"The pressed row owns pointer capture through a native drag");
+ dispatch("file:src","mouseDown",80,129);await pulse();assert.ok(model.state.expanded.has("src"),"Folders open on press, before release");
+ dispatch("tree-drag-layer","mouseUp",80,129);await pulse();assert.ok(model.state.expanded.has("src"),"Release does not toggle again");
+ dispatch("file:a.ts","mouseDown",80,155);await pulse();assert.deepEqual(opens,["a.ts"],"Files open on press");
+ dispatch("tree-drag-layer","mouseMove",80,103);await pulse();assert.ok(host.find("tree-drag-preview"));
+ await Bun.sleep(470);await pulse();assert.ok(model.state.expanded.has("dest"),"Stationary hover springs the destination open");
+ dispatch("tree-drag-layer","mouseUp",80,103);await pulse();assert.deepEqual(moves,[["/project/a/a.ts","/project/a/dest",false]]);assert.ok(!host.find("tree-drag-layer"));
+ dispatch("file:src","mouseDown",80,129);await pulse();dispatch("tree-drag-layer","mouseMove",1200,103);await pulse();dispatch("tree-drag-layer","mouseUp",1200,103);await pulse();assert.equal(moves.length,1,"Outside-panel release cancels");
+ dispatch("file:a.ts","mouseDown",80,155);await pulse();dispatch("tree-drag-layer","mouseMove",80,103);await pulse();
+ assert.equal(host.focused,host.find("tree-drag-layer")!.id,"The active drag keeps Escape away from the source editor");
+ root.dispatch({elementId:host.find("tree-drag-layer")!.id,eventType:"keyDown",key:"escape"});await pulse();assert.ok(!host.find("tree-drag-layer"),"Escape cancels even after file activation changed focus");
+ model.setUI({sidebar:null});await pulse();model.setUI({sidebar:"files"});await pulse();assert.ok(host.find("file-tree"));
+ console.log(JSON.stringify({pressActivation:true,springOpen:true,move:true,outsideCancel:true,escapeCancel:true,nativeWindowsCreated:0}));
+}finally{root.unmount();visuals.dispose();model.dispose();client.stop();restore();}

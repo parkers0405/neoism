@@ -957,6 +957,8 @@ fn reader_loop(
     #[cfg(unix)]
     let mut last_cwd: Option<String> = None;
     #[cfg(unix)]
+    let mut last_program: Option<String> = None;
+    #[cfg(unix)]
     let mut last_cwd_poll = std::time::Instant::now()
         .checked_sub(CWD_POLL_INTERVAL)
         .unwrap_or_else(std::time::Instant::now);
@@ -967,6 +969,11 @@ fn reader_loop(
         #[cfg(unix)]
         if last_cwd_poll.elapsed() >= CWD_POLL_INTERVAL {
             last_cwd_poll = std::time::Instant::now();
+            let program = neoism_terminal_pty::foreground_process_name(cwd_main_fd, cwd_shell_pid);
+            if last_program.as_deref() != Some(program.as_str()) {
+                last_program = Some(program.clone());
+                registry.publish(ServerMessage::SessionProgram { session_id: session_id.clone(), program });
+            }
             if let Ok(path) =
                 neoism_terminal_pty::foreground_process_path(cwd_main_fd, cwd_shell_pid)
             {
@@ -1037,6 +1044,7 @@ fn server_message_session_id(message: &ServerMessage) -> Option<&str> {
         | ServerMessage::TerminalDirectoryChanged { session_id, .. }
         | ServerMessage::TerminalDirectoryChangeFailed { session_id, .. }
         | ServerMessage::SessionCwd { session_id, .. } => Some(session_id),
+        ServerMessage::SessionProgram { session_id, .. } => Some(session_id),
         ServerMessage::Ack | ServerMessage::Error { .. } => None,
     }
 }

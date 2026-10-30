@@ -10,6 +10,14 @@ pub struct FileTreeHostFrame {
 }
 
 impl FileTree {
+    /// Read-only drag geometry for hosts using their own retained row painter.
+    pub fn host_drag_frame(&self) -> Option<(bool, Option<usize>, Option<usize>, bool, f32)> {
+        let drag = self.file_drag.as_ref()?;
+        let t = drag.hovered_since.map(|since| since.elapsed().as_secs_f32()).unwrap_or(0.0);
+        Some((drag.live, self.drag_source_index(), self.drag_hovered_index(), self.is_root_drop_target(),
+            (t * 26.0).sin() * 2.4 * self.scale * (t / 0.12).clamp(0.0, 1.0)))
+    }
+
     pub fn host_reveal_selection(&mut self, height: f32) {
         self.clamp_scroll(self.visible_rows_for_panel_height(height));
     }

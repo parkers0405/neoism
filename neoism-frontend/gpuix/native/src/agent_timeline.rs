@@ -138,6 +138,13 @@ fn render_frame(view: &mut View) -> Value {
         Some(gutter),
     );
     render_timeline_scrollbar_with(painter, &mut view.pane, &theme, s, rail.as_ref());
+    let pointer = view.mouse.is_some_and(|(x, y)| {
+        view.pane.conversation_navigation_at(x, y).is_some()
+            || view.pane.link_at(x, y).is_some()
+            || view.pane.tool_hit(x, y)
+            || view.pane.activity_status_contains(x, y)
+            || view.pane.wordmark_hit(x, y)
+    });
     trace_scroll(view);
     let send={
         use neoism_ui::panels::agent_pane::{protocol_mapping::{map_outbound_command,AgentProtocolMapping,AgentProtocolMappingContext},outbound::OutboundAgentCommand};
@@ -148,6 +155,7 @@ fn render_frame(view: &mut View) -> Value {
         "animating": scrolling || view.pane.animation_reason().is_some(),
         "reason": view.pane.animation_reason(),
         "selecting": view.selecting,
+        "pointer": pointer,
         "hasConversation": view.pane.has_conversation(),
         "send":send,"header":header,"subagent":view.pane.is_subagent_session(),"sessionId":view.session_id,
     })

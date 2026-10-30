@@ -950,3 +950,63 @@ fn indent_detection() {
     let four = CodeBuffer::from_text("fn x() {\n    body\n}\n");
     assert_eq!(four.indent.width, 4);
 }
+
+#[test]
+fn unicode_wrap_preserves_clusters_and_cell_geometry() {
+    use unicode_segmentation::UnicodeSegmentation;
+    for text in [
+        "日本語の長い行",
+        "ae\u{301}bc",
+        "a👩‍💻b🇺🇸c",
+        "日\t本語",
+        "❤️❤️❤️",
+    ] {
+        let boundaries: Vec<_> = text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .collect();
+        for cols in 1..16 {
+            let segments = wrap_segments(text, cols, TAB_DISPLAY_WIDTH);
+            assert_eq!(
+                segments
+                    .iter()
+                    .map(|s| &text[s.byte_start..s.byte_end])
+                    .collect::<String>(),
+                text
+            );
+            for seg in segments {
+                assert!(boundaries.contains(&seg.byte_start));
+                assert!(boundaries.contains(&seg.byte_end));
+                assert_eq!(
+                    seg.source_col,
+                    display_col_for_byte(text, seg.byte_start, TAB_DISPLAY_WIDTH)
+                );
+                assert_eq!(
+                    seg.source_end_col,
+                    display_col_for_byte(text, seg.byte_end, TAB_DISPLAY_WIDTH)
+                );
+                // An indivisible cluster wider than the pane is allowed to overflow.
+                assert!(
+                    seg.visual_indent + seg.source_end_col - seg.source_col <= cols
+                        || text[seg.byte_start..seg.byte_end].graphemes(true).count()
+                            == 1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unicode_columns_tabs_and_pointer_mapping_agree() {
+    let text = "日e\u{301}👩‍💻\tx";
+    assert_eq!(display_width(text, 4), 9);
+    assert_eq!(expand_tabs_from(text, 0, 4), "日e\u{301}👩‍💻   x");
+    for (byte, col) in [(0, 0), (3, 2), (6, 3), (17, 5), (18, 8), (19, 9)] {
+        assert_eq!(display_col_for_byte(text, byte, 4), col);
+        assert_eq!(byte_for_display_col(text, col, 4), byte);
+    }
+    assert_eq!(byte_for_display_col(text, 1, 4), 0);
+    assert_eq!(byte_for_display_col(text, 4, 4), 6);
+    assert_eq!(display_col_for_byte(text, 10, 4), 3);
+}

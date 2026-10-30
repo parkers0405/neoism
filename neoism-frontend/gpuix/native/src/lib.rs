@@ -603,7 +603,17 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
         let weight=v["fontWeight"].as_u64().unwrap_or(400) as u16;
         let extras=if document.is_empty(){vec![]}else{vec![document.to_owned()]};
         let base_ready=neoism_ui::primitives::paint_record::prewarm_fonts(family.to_owned(),weight,vec![]).map_err(|error|error.to_string())?;
-        let ready=neoism_ui::primitives::paint_record::prewarm_fonts(family.to_owned(),weight,extras).map_err(|error|error.to_string())? && base_ready;
+        let mut ready=neoism_ui::primitives::paint_record::prewarm_fonts(family.to_owned(),weight,extras).map_err(|error|error.to_string())? && base_ready;
+        // These are the exact libraries used by the always-mounted topbar,
+        // status line, Git controller and notifications. Resolve them while
+        // the display device initializes instead of serial font discovery
+        // during the first App mount. Hidden panes still construct lazily.
+        if let Some(icons)=v["iconFontFamily"].as_str() {
+            for extras in [vec![icons.to_owned()],vec![icons.to_owned(),"Symbols Nerd Font Mono".into()],vec!["Symbols Nerd Font Mono".into()]] {
+                ready=neoism_ui::primitives::paint_record::prewarm_fonts(family.to_owned(),weight,extras).map_err(|error|error.to_string())? && ready;
+            }
+            ready=neoism_ui::primitives::paint_record::prewarm_fonts("Cascadia Code NF".into(),400,vec![]).map_err(|error|error.to_string())? && ready;
+        }
         return Ok(json!({"ready":ready}));
     }
     if let Some(result) = ssh_transport::dispatch(&v) { return result; }
@@ -655,7 +665,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
         "tree.new" => {
             engines.next += 1;
             let id = engines.next;
-            let mut tree = FileTree::new(PathBuf::new());
+            let mut tree = FileTree::new(PathBuf::from(text(&v, "root")));
             tree.set_scale(n(&v, "scale", 1.0));
             tree.set_visible(true);
             engines.trees.insert(id, tree);
@@ -692,6 +702,23 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                     tree.host_set_entries(entries);
                 }
                 "tree.scroll" => tree.scroll_pixels(n(&v, "delta", 0.0), rows),
+                "tree.drag-begin" => {
+                    tree.begin_file_drag(n(&v,"index",0.0) as usize,n(&v,"x",0.0),n(&v,"y",0.0));
+                }
+                "tree.drag-update" => {
+                    let open=tree.update_file_drag(n(&v,"x",0.0),n(&v,"y",0.0),v["hovered"].as_u64().map(|index|index as usize),v["inside"].as_bool().unwrap_or(false));
+                    let drag=tree.host_drag_frame().map(|(live,source,target,root,wiggle)|json!({"live":live,"source":source,"target":target,"root":root,"wiggle":wiggle}));
+                    return Ok(json!({"drag":drag,"open":open}));
+                }
+                "tree.drag-end" => {
+                    use neoism_ui::panels::file_tree::FileDropOutcome;
+                    return Ok(match tree.end_file_drag(){
+                        FileDropOutcome::Click=>json!({"kind":"click"}),
+                        FileDropOutcome::Cancel=>json!({"kind":"cancel"}),
+                        FileDropOutcome::Move{source,dest_dir}=>json!({"kind":"move","source":source,"directory":dest_dir}),
+                    });
+                }
+                "tree.drag-cancel" => tree.cancel_file_drag(),
                 "tree.select" => {
                     tree.set_selected(n(&v, "index", 0.0) as usize);
                     tree.host_reveal_selection(height);
@@ -864,6 +891,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                 "editor.path" => {
                     let path = text(&v, "path");
                     if path.is_empty() { return Err("Missing editor host path".into()); }
+                    if e.pane.path != PathBuf::from(path) { e.collaboration = None; e.pane.buffer.set_doc_history_bound(false); }
                     e.pane.path = PathBuf::from(path);
                 },
                 "editor.lsp.enable" => {

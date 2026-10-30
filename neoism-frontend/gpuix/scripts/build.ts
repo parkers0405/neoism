@@ -14,10 +14,15 @@ const reuseCore=process.argv.includes("--reuse-core");
 const core = Bun.spawn([process.execPath, reuseCore ? "scripts/verify-core.ts" : "scripts/build-core.ts"], { env: { ...process.env, NEOISM_GPUIX_BUILD_PROFILE: "release", ...(reuseCore?{NEOISM_GPUIX_CORE:resolve("artifacts",library)}:{}) }, stdout: "inherit", stderr: "inherit" });
 if (await core.exited !== 0) process.exit(1);
 const {binding,stamp}=verifiedDisplayBinding();
+const executable=process.platform==="win32"?"neoism.exe":"neoism",pendingExecutable=process.platform==="win32"?"neoism.next.exe":"neoism.next";
 const result = await Bun.build({
-  entrypoints: ["./src/main.tsx"],
+  entrypoints: ["./src/launch.ts"],
   target: "bun",
-  compile: { outfile: "dist/neoism.next", autoloadBunfig: false, autoloadTsconfig: false },
+  // ESM bytecode preserves top-level await while avoiding bundle parsing on
+  // every launch. Keep the source beside it for Bun's diagnostic stack traces.
+  format: "esm",
+  bytecode: true,
+  compile: { outfile: `dist/${pendingExecutable}`, autoloadBunfig: false, autoloadTsconfig: false },
   plugins: [solid, {
     name: "embed-gpuix-binding",
     setup(build) {
@@ -40,5 +45,5 @@ renameSync(`dist/${ghosttyLibrary}.next`, `dist/${ghosttyLibrary}`);
 copyFileSync("artifacts/ghostty/LICENSE", "dist/LICENSE.ghostty");
 packageWorkspaceDaemon(process.cwd());
 // Preserve the executable inode used by an already running preview.
-renameSync("dist/neoism.next", "dist/neoism");
+renameSync(`dist/${pendingExecutable}`, `dist/${executable}`);
 console.log(`Built dist/neoism with ${library}, ${ghosttyLibrary}, and the standalone workspace daemon. Keep these files beside the executable.`);

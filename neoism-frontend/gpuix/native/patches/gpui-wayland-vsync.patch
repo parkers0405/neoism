@@ -1,3 +1,13 @@
+diff --git c/README.md w/README.md
+index 24840ee..e1dc180 100644
+--- c/README.md
++++ w/README.md
+@@ -49,3 +49,5 @@ Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+ If you’d like to financially support the project, you can do so via GitHub Sponsors.
+ Sponsorships go directly to Zed Industries and are used as general company revenue.
+ There are no perks or entitlements associated with sponsorship.
++
++Neoism first tries hardware Vulkan with the existing compositor/GPU ranking and real surface configuration checks. If unavailable, it initializes the original OpenGL/software fallback. Successful Vulkan launches no longer pay for unused EGL contexts; existing windows reuse their device.
 diff --git c/crates/gpui/src/elements/div.rs w/crates/gpui/src/elements/div.rs
 index 51379b8..c75e98b 100644
 --- c/crates/gpui/src/elements/div.rs
@@ -5,7 +15,7 @@ index 51379b8..c75e98b 100644
 @@ -2308,6 +2308,10 @@ impl Interactivity {
                      }
                  }
-
+ 
 +                // Prepaint computes cached-view keys. Carry the same inherited
 +                // alpha as paint so revealing a staged subtree invalidates ink
 +                // whose cached primitives were recorded fully transparent.
@@ -48,11 +58,11 @@ index f8343be..eba9c3c 100644
 +            && self.opacity == opacity
 +    }
  }
-
+ 
  impl<V: View> Element for ViewElement<V> {
 @@ -384,9 +402,9 @@ impl<V: View> Element for ViewElement<V> {
                          let text_style = window.text_style();
-
+ 
                          if let Some(mut element_state) = element_state
 -                            && element_state.cache_key.bounds == bounds
 -                            && element_state.cache_key.content_mask == content_mask
@@ -77,7 +87,7 @@ index 62d972d..6f14eee 100644
 +++ w/crates/gpui_linux/src/gpui_linux.rs
 @@ -2,3 +2,14 @@
  mod linux;
-
+ 
  pub use linux::current_platform;
 +
 +static PRESENTED_SAMPLE: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
@@ -105,15 +115,15 @@ index a5c6dc8..9b43c8e 100644
 @@ -188,8 +189,7 @@ fn set_ime_cursor_rectangle_after_done(
      }
  }
-
+ 
 -/// Pacing for retry ticks: a fixed 60Hz interval. Retries only occur for throttled or
 -/// failed-present frames, so matching the output's actual refresh rate wouldn't be observable.
 +/// Used only before the compositor has supplied the window's output mode.
  const FRAME_RETRY_INTERVAL: Duration = Duration::from_micros(16_667);
-
+ 
  fn take_startup_activation_token_from_environment() -> Option<String> {
 @@ -206,6 +206,7 @@ fn take_startup_activation_token_from_environment() -> Option<String> {
-
+ 
  #[derive(Clone)]
  pub struct Globals {
 +    pub presentation_trace: Option<wp_presentation::WpPresentation>,
@@ -134,7 +144,7 @@ index a5c6dc8..9b43c8e 100644
      subpixel: Option<wl_output::Subpixel>,
 +    refresh_millihz: Option<i32>,
  }
-
+ 
  impl InProgressOutput {
 @@ -295,6 +298,7 @@ impl InProgressOutput {
                  scale,
@@ -150,7 +160,7 @@ index a5c6dc8..9b43c8e 100644
      pub subpixel: Option<wl_output::Subpixel>,
 +    pub refresh_millihz: Option<i32>,
  }
-
+ 
  pub(crate) struct WaylandClientState {
 @@ -468,9 +473,16 @@ impl WaylandClientStatePtr {
      pub fn schedule_frame_retry(&self, surface_id: &ObjectId) {
@@ -173,7 +183,7 @@ index a5c6dc8..9b43c8e 100644
 @@ -1500,9 +1512,18 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
          let client = this.get_client();
          let mut state = client.borrow_mut();
-
+ 
 -        let Some(in_progress_output) = state.in_progress_outputs.get_mut(&output.id()) else {
 -            return;
 -        };
@@ -189,7 +199,7 @@ index a5c6dc8..9b43c8e 100644
 +            refresh_millihz: previous.refresh_millihz,
 +        }).unwrap_or_default();
 +        let in_progress_output = state.in_progress_outputs.entry(output.id()).or_insert(current);
-
+ 
          match event {
              wl_output::Event::Name { name } => {
 @@ -1517,8 +1538,11 @@ impl Dispatch<wl_output::WlOutput, ()> for WaylandClientStatePtr {
@@ -269,7 +279,7 @@ index 2d25416..d5a5ae2 100644
 @@ -994,6 +999,10 @@ impl WaylandWindowStatePtr {
          }
      }
-
+ 
 +    pub fn current_output_id(&self) -> Option<ObjectId> {
 +        self.state.borrow().display.as_ref().map(|(id, _)| id.clone())
 +    }
@@ -303,20 +313,122 @@ index 91d336a..d6ea5cd 100644
 +    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 +    { None }
 +}
+diff --git c/crates/gpui_wgpu/src/wgpu_context.rs w/crates/gpui_wgpu/src/wgpu_context.rs
+index 4a83d21..8a66dfa 100644
+--- c/crates/gpui_wgpu/src/wgpu_context.rs
++++ w/crates/gpui_wgpu/src/wgpu_context.rs
+@@ -339,8 +339,16 @@ impl WgpuContext {
+ 
+     #[cfg(not(target_family = "wasm"))]
+     pub fn instance(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> wgpu::Instance {
++        Self::instance_with_backends(display, wgpu::Backends::VULKAN | wgpu::Backends::GL)
++    }
++
++    #[cfg(not(target_family = "wasm"))]
++    pub fn instance_with_backends(
++        display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>,
++        backends: wgpu::Backends,
++    ) -> wgpu::Instance {
+         wgpu::Instance::new(wgpu::InstanceDescriptor {
+-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
++            backends,
+             flags: wgpu::InstanceFlags::default(),
+             backend_options: wgpu::BackendOptions::default(),
+             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
 diff --git c/crates/gpui_wgpu/src/wgpu_renderer.rs w/crates/gpui_wgpu/src/wgpu_renderer.rs
-index 47ce2a3..7687aca 100644
+index 47ce2a3..b87fffd 100644
 --- c/crates/gpui_wgpu/src/wgpu_renderer.rs
 +++ w/crates/gpui_wgpu/src/wgpu_renderer.rs
-@@ -1322,6 +1322,8 @@ impl WgpuRenderer {
+@@ -286,38 +286,50 @@ impl WgpuRenderer {
+             .window_handle()
+             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
+ 
+-        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+-            // Fall back to the display handle already provided via InstanceDescriptor::display.
+-            raw_display_handle: None,
+-            raw_window_handle: window_handle.as_raw(),
++        let make_surface = |instance: &wgpu::Instance| {
++            let target = wgpu::SurfaceTargetUnsafe::RawHandle {
++                // InstanceDescriptor already owns the display handle.
++                raw_display_handle: None,
++                raw_window_handle: window_handle.as_raw(),
++            };
++            // Safety: RawWindow outlives the renderer. Each surface belongs to
++            // the same instance used to select/configure its device below.
++            unsafe { instance.create_surface_unsafe(target) }
++                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))
+         };
+-
+-        // Use the existing context's instance if available, otherwise create a new one.
+-        // The surface must be created with the same instance that will be used for
+-        // adapter selection, otherwise wgpu will panic.
+-        let instance = gpu_context
+-            .borrow()
+-            .as_ref()
+-            .map(|ctx| ctx.instance.clone())
+-            .unwrap_or_else(|| WgpuContext::instance(Box::new(window.clone())));
+-
+-        // Safety: The caller guarantees that the window handle is valid for the
+-        // lifetime of this renderer. In practice, the RawWindow struct is created
+-        // from the native window handles and the surface is dropped before the window.
+-        let surface = unsafe {
+-            instance
+-                .create_surface_unsafe(target)
+-                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
+-        };
+-
+         let mut ctx_ref = gpu_context.borrow_mut();
+-        let context = match ctx_ref.as_mut() {
+-            Some(context) => {
+-                context.check_compatible_with_surface(&surface)?;
+-                context
+-            }
+-            None => ctx_ref.insert(WgpuContext::new(instance, &surface, compositor_gpu)?),
++        let surface = if let Some(context) = ctx_ref.as_ref() {
++            let surface = make_surface(&context.instance)?;
++            context.check_compatible_with_surface(&surface)?;
++            surface
++        } else {
++            // Initializing GL eagerly creates extra EGL contexts/display
++            // connections even when Vulkan wins. Try hardware Vulkan first,
++            // keeping the real surface-configuration test and hybrid-GPU
++            // ordering. If it cannot present, retain the full GL/software
++            // fallback instead of requiring Vulkan or a particular GPU.
++            let preferred = (|| {
++                let instance = WgpuContext::instance_with_backends(
++                    Box::new(window.clone()), wgpu::Backends::VULKAN,
++                );
++                let surface = make_surface(&instance)?;
++                let context = WgpuContext::new_rejecting_software(instance, &surface, compositor_gpu)?;
++                Ok::<_, anyhow::Error>((context, surface))
++            })();
++            let (context, surface) = match preferred {
++                Ok(pair) => pair,
++                Err(error) => {
++                    log::info!("Hardware Vulkan unavailable ({error:#}); trying all graphics backends");
++                    let instance = WgpuContext::instance(Box::new(window.clone()));
++                    let surface = make_surface(&instance)?;
++                    let context = WgpuContext::new(instance, &surface, compositor_gpu)?;
++                    (context, surface)
++                }
++            };
++            *ctx_ref = Some(context);
++            surface
+         };
++        let context = ctx_ref.as_mut().expect("GPU context initialized above");
+ 
+         let atlas = Arc::new(WgpuAtlas::from_context(context));
+ 
+@@ -1322,6 +1334,8 @@ impl WgpuRenderer {
      }
-
+ 
      pub fn draw(&mut self, scene: &Scene) -> bool {
 +        let trace = std::env::var_os("GPUI_GPU_TIMING_TRACE").is_some();
 +        let started = trace.then(std::time::Instant::now);
          #[cfg(target_family = "wasm")]
          if self.device_lost() {
              if self.surface_configured {
-@@ -1371,6 +1373,7 @@ impl WgpuRenderer {
+@@ -1371,6 +1385,7 @@ impl WgpuRenderer {
              log::error!("draw() called on an offscreen renderer; use render_to_pixels()");
              return false;
          };
@@ -324,18 +436,18 @@ index 47ce2a3..7687aca 100644
          let frame = match surface.get_current_texture() {
              wgpu::CurrentSurfaceTexture::Success(frame) => frame,
              wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-@@ -1393,6 +1396,7 @@ impl WgpuRenderer {
+@@ -1393,6 +1408,7 @@ impl WgpuRenderer {
              }
          };
-
+ 
 +        let acquired = trace.then(std::time::Instant::now);
          // Now that we know the surface is healthy, ensure intermediate textures exist
          self.ensure_intermediate_textures();
-
-@@ -1408,7 +1412,12 @@ impl WgpuRenderer {
+ 
+@@ -1408,7 +1424,12 @@ impl WgpuRenderer {
              return false;
          }
-
+ 
 +        let recorded = trace.then(std::time::Instant::now);
          frame.present();
 +        if let (Some(started), Some(acquire_start), Some(acquired), Some(recorded)) = (started, acquire_start, acquired, recorded) {
@@ -344,4 +456,4 @@ index 47ce2a3..7687aca 100644
 +        }
          true
      }
-
+ 

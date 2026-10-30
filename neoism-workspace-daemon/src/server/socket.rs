@@ -2116,6 +2116,7 @@ fn pty_message_session_id(message: &ServerMessage) -> Option<&str> {
         | ServerMessage::TerminalDirectoryChanged { session_id, .. }
         | ServerMessage::TerminalDirectoryChangeFailed { session_id, .. }
         | ServerMessage::SessionCwd { session_id, .. } => Some(session_id),
+        ServerMessage::SessionProgram { session_id, .. } => Some(session_id),
         ServerMessage::Ack | ServerMessage::Error { .. } => None,
     }
 }

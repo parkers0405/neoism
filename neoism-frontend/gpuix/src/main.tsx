@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { Effect, ManagedRuntime } from "effect";
 import { createRenderer, render } from "@gpuix/solid";
 import { createSignal } from "solid-js";
-import { startFrameLoop, type FrameLoop } from "@gpuix/native/runtime";
+import { startFrameLoop, enableAutomation, type FrameLoop } from "@gpuix/native/runtime";
 import type { GpuixRenderer } from "@gpuix/native";
 import cascadia from "../../../neoism-paint/src/font/resources/CascadiaCode/CascadiaCodeNF-Regular.otf" with { type: "file" };
 import pixel from "../../../neoism-paint/src/font/resources/PressStart2P/PressStart2P-Regular.ttf" with { type: "file" };
@@ -21,12 +21,18 @@ import { AppGeneration } from "./ui/AppGeneration";
 import { SessionStore, type SavedSession } from "./session-store";
 import { installFrameMeter, notifyFrameActivity } from "./chrome/frame-meter";
 import { installDisplayClock, type DisplayClock } from "./animation/display-clock";
-import { installProfiling, profileInput, profileStart, profileEnd } from "./profiling";
+import { installProfiling, profileInput, profileStart, profileEnd, profileStartup } from "./profiling";
 import {prepareServerConnection,ServerHandshakeError,LocalServerConfig} from "./daemon/server-connection";
 import {SelectedSshReconnect,preserveReconnectFocus} from "./daemon/ssh-reconnect";
 import type {SshAttachment} from "./daemon/ssh-transport";
 import type {ServerSelection} from "./menu-actions/ChromeActionsController";
 import {localDaemon} from "./menu-actions/web-frontend";
+import type { WindowBootstrap } from "./window-bootstrap";
+
+profileStartup("modules-ready");
+const bootstrapGlobal=globalThis as typeof globalThis & {__neoismWindowBootstrap?:WindowBootstrap};
+const bootstrap=bootstrapGlobal.__neoismWindowBootstrap;
+delete bootstrapGlobal.__neoismWindowBootstrap;
 
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(`Neoism ${appVersion}`);
@@ -49,11 +55,14 @@ const hotState = stateGlobals[stateKey]; delete stateGlobals[stateKey];
 sshAttachment=hotState?.ssh;
 
 async function createSession(config: AppConfig, seed?: HotState) {
-  coreCall("paint.prewarm",{fontFamily:config.fontFamily,fontWeight:config.fontWeight,markdownFontFamily:config.markdownFontFamily});
+  coreCall("paint.prewarm",{fontFamily:config.fontFamily,fontWeight:config.fontWeight,markdownFontFamily:config.markdownFontFamily,iconFontFamily:config.iconFontFamily});
+  profileStartup("fonts-started");
   for (const warning of config.warnings) console.error(`[neoism-gpuix] ${warning}`);
   const client = new DaemonConnection(config), model = new WorkspaceModel(client, config, seed),visuals=new AppVisualState();
+  profileStartup("model-created");
   const store = new SessionStore(config);
   if (!seed) { const recovery = store.read(); if (recovery) model.restoreSession(recovery); }
+  profileStartup("recovery-loaded");
   let savedDependencies: unknown[] | undefined;
   const checkpoint = () => { const start=profileStart();try {
     const dependencies = model.sessionDependencies();
@@ -68,15 +77,21 @@ async function createSession(config: AppConfig, seed?: HotState) {
     if (disposed) return; disposed = true; clearInterval(timer); checkpoint(); visuals.dispose();model.dispose(preserveEditors); await runtime.dispose();
   } };
 }
-let session = await createSession(hotState?.config || await ensureLocalDaemon(loadConfig()), hotState);
+const initialConfig = hotState?.config || bootstrap?.config || await ensureLocalDaemon(loadConfig());
+profileStartup("config-ready");
+let session = await createSession(initialConfig, hotState);
+profileStartup("session-created");
 const localServerConfig=new LocalServerConfig(session.config);
 const hostKey = Symbol.for("neoism/gpuix/native-host");
 const globals = globalThis as typeof globalThis & { [hostKey]?: { renderer: GpuixRenderer; loop: FrameLoop; displayClock?: DisplayClock; shutdown?: () => Promise<void> } };
 let host = globals[hostKey];
 if (!host) {
-  const renderer: GpuixRenderer = createRenderer((event) => { profileInput(event);notifyFrameActivity(renderer, event); });
-  renderer.init({ title: "Neoism", appName: "Neoism", appId: "ai.neoism.gpuix", width: 1440, height: 900,
-    minWidth: 720, minHeight: 480, titlebarTransparent: true, windowBackground: "opaque" });
+  const renderer: GpuixRenderer = bootstrap?.renderer || createRenderer((event) => { profileInput(event);notifyFrameActivity(renderer, event); });
+  await (bootstrap?.ready || (renderer as GpuixRenderer & {initAsync(options:Parameters<GpuixRenderer["init"]>[0]):Promise<void>}).initAsync({ title: "Neoism", appName: "Neoism", appId: "ai.neoism.gpuix", width: 1440, height: 900,
+    minWidth: 720, minHeight: 480, titlebarTransparent: true, windowBackground: "opaque" }));
+  // The upstream runtime installs stdio automation only through sync init().
+  if(process.stdin&&!process.stdin.isTTY)enableAutomation(renderer);
+  profileStartup("window-created");
   for (const path of [cascadia, pixel]) renderer.registerFont(readFileSync(path));
   if (process.argv.includes("--maximized")) renderer.zoomWindow();
   installProfiling(renderer);
@@ -170,6 +185,7 @@ function mount() {
   });
 }
 mount();
+profileStartup("app-mounted");
 let stopping = false;
 const stop = () => { if (stopping) return; stopping = true; root?.unmount(); host!.loop.stop(); host!.displayClock?.dispose(); void host!.shutdown!().finally(() => process.exit(0)); };
 process.once("SIGINT", stop); process.once("SIGTERM", stop);

@@ -3,27 +3,126 @@ on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing nightly tag to update (blank uses the selected tag)
+        type: string
+      platform:
+        description: Build all platforms, or retry one platform after a fix
+        type: choice
+        default: all
+        options: [all, linux, macos, windows]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  build:
-    uses: ./.github/workflows/build-stack.yml
-  publish:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+  prepare:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      matrix: ${{ steps.release.outputs.matrix }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: neoism-linux-x86_64
-          path: release
-      - name: Publish the verified bundle
+      - uses: actions/checkout@v4
+      - name: Prepare shared release and independent platform jobs
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+          REQUESTED_PLATFORM: ${{ inputs.platform || 'all' }}
         run: |
-          gh release view "$RELEASE_TAG" || gh release create "$RELEASE_TAG" --generate-notes
-          gh release upload "$RELEASE_TAG" release/* --clobber
+          tag="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          [[ "$tag" == "v$version" ]] || { echo 'Release tag must match the checkout version'; exit 1; }
+          # Stable artifacts must all come from their tag. A nightly platform
+          # retry may build a fix from this branch; each asset records its SHA.
+          if [[ "$tag" != *-nightly.* ]]; then
+            [[ "$GITHUB_REF" == "refs/tags/$tag" ]] || exit 1
+          fi
+          flags=()
+          if [[ "$tag" == *-* ]]; then flags+=(--prerelease --latest=false); fi
+          gh release view "$tag" || gh release create "$tag" --verify-tag --draft --generate-notes "${flags[@]}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          entries = [
+              {'platform': 'linux', 'runner': 'ubuntu-24.04', 'asset': 'linux-x86_64'},
+              {'platform': 'macos', 'runner': 'macos-15', 'asset': 'darwin-aarch64'},
+              {'platform': 'windows', 'runner': 'windows-2025', 'asset': 'windows-x86_64'},
+          ]
+          chosen = os.environ['REQUESTED_PLATFORM']
+          print('matrix=' + json.dumps({'include': [e for e in entries if chosen == 'all' or chosen == e['platform']]}))
+          PY
+  build:
+    name: ${{ matrix.platform }} bundle
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    concurrency:
+      group: nightly-${{ needs.prepare.outputs.tag }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preserve pinned source bytes and support long Windows paths
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.97.1'
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libfontconfig1-dev libfreetype-dev libgbm-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libwayland-dev libasound2-dev libvulkan-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            neoism-frontend/gpuix/native -> target/gpuix-core-cargo
+          shared-key: gpuix-release-${{ matrix.asset }}
+          cache-on-failure: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            neoism-frontend/gpuix/artifacts/gpuix-rustup
+            target/gpuix-native-vsync
+          key: gpuix-display-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/gpuix-pin.json') }}
+          restore-keys: gpuix-display-${{ matrix.asset }}-
+      - name: Build, test, and package native app and services
+        run: node scripts/build-gpuix-release.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neoism-${{ matrix.asset }}
+          path: release/neoism-${{ matrix.asset }}.*
+          if-no-files-found: error
+      # Each job publishes immediately. There is deliberately no all-platform
+      # success barrier, and GitHub's rerun-failed-jobs retains successful legs.
+      - name: Publish this platform as soon as it is ready
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          gh release upload "$RELEASE_TAG" release/neoism-"$ASSET".* --clobber
+          flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease --latest=false); fi
+          gh release edit "$RELEASE_TAG" --draft=false "${flags[@]}"

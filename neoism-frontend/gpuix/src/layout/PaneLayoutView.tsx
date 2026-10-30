@@ -6,6 +6,9 @@ import { dimensions as d, namedIcons, extensionIcons } from "../design/generated
 import { WorkspaceLayout, type DropPreview, type LayoutDivider, type LayoutPane, type LayoutTab } from "./WorkspaceLayout";
 import { inactiveTabIcon, tabChrome } from "./tab-chrome";
 import neoismIcon from "../../../shared/assets/icons/neoism.png" with { type: "file" };
+import claudeIcon from "../../../shared/assets/icons/claude.png" with { type: "file" };
+import codexIcon from "../../../shared/assets/icons/codex.png" with { type: "file" };
+import opencodeIcon from "../../../shared/assets/icons/opencode.png" with { type: "file" };
 import { readFileSync } from "node:fs";
 import { easeOutCubicBezier } from "../design/animation";
 import { paneHostKey } from "./pane-host";
@@ -18,6 +21,8 @@ const samePane = (a: LayoutPane, b: LayoutPane) => a.leaf === b.leaf && a.focuse
 const sameIds = (a: readonly number[], b: readonly number[]) => a.length === b.length && a.every((n, i) => n === b[i]);
 const sameKeys = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((key, i) => key === b[i]);
 let cachedNeoismIcon: Buffer | undefined;
+const terminalAgentIcons:Record<string,string>={Claude:claudeIcon,Codex:codexIcon,OpenCode:opencodeIcon};
+const cachedTerminalAgentIcons=new Map<string,Buffer>();
 
 /** Paint the canonical solver's panes; no second layout engine in the host. */
 /** Measured tab title/icon widths, kept across remounts (bounded by distinct titles). */
@@ -171,7 +176,8 @@ export function PaneLayoutView(props: {
       };
       createEffect(()=>{if(selected())reveal();});
       onCleanup(()=>{disposed=true;widths.delete(t.leaf);tabGeometry.delete(t.leaf);props.registerTabHost?.(t.leaf,undefined);});
-      onMount(() => queueMicrotask(() => { if (!image?.mounted) return; image.root?.mutations.flushMutations(); image.setImage(cachedNeoismIcon ||= readFileSync(neoismIcon)); }));
+      onMount(() => queueMicrotask(() => { if (!image?.mounted) return; image.root?.mutations.flushMutations(); const path=terminalAgentIcons[tab().title];image.setImage(path?(cachedTerminalAgentIcons.get(path)??readFileSync(path)):(cachedNeoismIcon ||= readFileSync(neoismIcon))); }));
+      createEffect(()=>{const title=tab().kind==="terminal"?tab().title:"";const path=terminalAgentIcons[title];if(!path||!image?.mounted)return;image.root?.mutations.flushMutations();let data=cachedTerminalAgentIcons.get(path);if(!data){data=readFileSync(path);cachedTerminalAgentIcons.set(path,data);}image.setImage(data);});
       return <div ref={host=>{tabHost=host;props.registerTabHost?.(t.leaf,host);}} tabIndex={0} role="tab" testId={`pane-tab:${t.leaf}`} aria-label={tab().title} aria-selected={selected()} data-keyboard-focused={props.keyboardTab===t.leaf}
         onLayout={event=>{const width=event.width||geometry().width;if(widths.get(t.leaf)!==width){widths.set(t.leaf,width);setWidthRevision(value=>value+1);}props.onTabLayout?.(t.leaf,{x:event.x||0,y:event.y||0,width:width,height:event.height||0});if(selected())reveal();}}
         onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
@@ -187,9 +193,9 @@ export function PaneLayoutView(props: {
         <motion.div initial={false} animate={{ opacity: (hovered()||props.keyboardTab===t.leaf) && !selected() ? 1 : 0 }} transition={{ duration: 0.15, ease: easeOutCubicBezier }}
           style={{ position: "absolute", left: 0, right: 0, top: 0, height: chrome.height, borderTopLeftRadius: 3 * s, borderTopRightRadius: 3 * s, backgroundColor: c.hover + "b8", pointerEvents: "none" }} />
         <text onLayout={(event) => { if (event.width) setTitleWidth(event.width); }} style={{ ...text, position: "absolute", opacity: 0, left: 0, top: 0 }}>{tab().title}</text>
-        <Show when={tab().kind === "agent"} fallback={<text testId={`pane-tab-icon:${t.leaf}`} onLayout={(event) => { if (event.width) setIconWidth(Math.max(chrome.iconSize, event.width)); }}
+        <Show when={tab().kind === "agent"||tab().kind==="terminal"&&!!terminalAgentIcons[tab().title]} fallback={<text testId={`pane-tab-icon:${t.leaf}`} onLayout={(event) => { if (event.width) setIconWidth(Math.max(chrome.iconSize, event.width)); }}
           style={{ ...text, position: "absolute", left: chrome.padding, top: 0, lineHeight: chrome.height, fontFamily: config.iconFontFamily, fontSize: chrome.iconSize, color: selected() ? icon().color : inactiveTabIcon(icon().color) }}>{icon().glyph}</text>}>
-          <img ref={image} testId={`pane-tab-icon:${t.leaf}`} objectFit="contain" alt="Neoism" style={{ position: "absolute", left: chrome.padding, top: (chrome.height - chrome.iconSize) / 2, width: chrome.iconSize, height: chrome.iconSize, pointerEvents: "none" }} />
+          <img ref={host=>{image=host;queueMicrotask(()=>{if(!host.mounted)return;host.root?.mutations.flushMutations();const path=terminalAgentIcons[tab().title];host.setImage(path?(cachedTerminalAgentIcons.get(path)??readFileSync(path)):(cachedNeoismIcon ||= readFileSync(neoismIcon)));});}} testId={`pane-tab-icon:${t.leaf}`} objectFit="contain" alt={tab().kind==="agent"?"Neoism":tab().title} style={{ position: "absolute", left: chrome.padding, top: (chrome.height - chrome.iconSize) / 2, width: chrome.iconSize, height: chrome.iconSize, pointerEvents: "none" }} />
         </Show>
         <div style={{position:"absolute",left:chrome.padding+geometry().iconWidth+chrome.iconGap,top:0,pointerEvents:"none"}}><HoverTabTitle label={tab().title} width={geometry().titleWidth} naturalWidth={titleWidth()} height={chrome.height} scale={s} hovered={hovered()} reducedMotion={config.reducedMotion} style={{...text,lineHeight:chrome.height,color:selected()?c.fg:c.muted}}/></div>
         <div role="button" aria-label={`Close ${tab().title}`} testId={`pane-close:${t.leaf}`}

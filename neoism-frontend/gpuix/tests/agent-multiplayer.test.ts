@@ -17,8 +17,10 @@ test("two independent Agent clients share one live chat; closing one preserves t
   a.openThread(daemon.threads[0]);b.openThread(daemon.threads[0]);await until(()=>daemon.streamSubscribers("one")===2);
   expect(await a.submitPrompt("one","Alice question")).toBe(true);expect(await b.submitPrompt("one","Bob question")).toBe(true);
   const prompts=daemon.requests.filter(request=>request.tag==="SubmitPrompt");expect(prompts).toHaveLength(2);expect(prompts.map(request=>request.body.author)).toEqual(["Alice","Bob"]);
-  daemon.pushSubscribed({MessageUpdated:{session_id:"one",parent_message_id:"alice",message:{id:"alice",role:"User",kind:"User",text:"Alice question",author:"Alice"}}});
-  daemon.pushSubscribed({MessageUpdated:{session_id:"one",parent_message_id:"bob",message:{id:"bob",role:"User",kind:"User",text:"Bob question",author:"Bob"}}});
+  // The server echoes the submitted message ID; optimistic prompts reconcile by ID.
+  const [aliceId,bobId]=prompts.map(request=>String(request.body.message_id));
+  daemon.pushSubscribed({MessageUpdated:{session_id:"one",parent_message_id:aliceId,message:{id:aliceId,role:"User",kind:"User",text:"Alice question",author:"Alice"}}});
+  daemon.pushSubscribed({MessageUpdated:{session_id:"one",parent_message_id:bobId,message:{id:bobId,role:"User",kind:"User",text:"Bob question",author:"Bob"}}});
   for(const piece of ["Shared ","live ","answer"]){daemon.pushSubscribed({ContentDelta:{session_id:"one",message_id:"answer",parent_message_id:"reply",kind:"Text",text:piece}});}
   await until(()=>a.state.history.one?.find(row=>row.id==="answer")?.text==="Shared live answer"&&b.state.history.one?.find(row=>row.id==="answer")?.text==="Shared live answer");
   expect(a.state.history.one).toEqual(b.state.history.one);

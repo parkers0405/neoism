@@ -5,6 +5,7 @@ import type {ProviderState} from "../daemon/protocol";
 import {sdkModel} from "../daemon/sdk";
 import {coreCall} from "../native-core";
 import {thinkingOptions} from "../design/generated";
+import {connectCatalog} from "./connect-catalog";
 
 export interface SlashOption{title:string;description:string;footer:string;value:string;header?:boolean;section?:string;mcp?:unknown}
 export type SlashEffect="piss"|"cuss"|"glitch"|"disco"|"gangfight"|"praise";
@@ -209,7 +210,7 @@ export class SlashController{
   // Provider choices do not depend on authentication-method discovery.
   // Fetch methods only when an account flow needs them, so a slow plugin
   // cannot hold the initial /connect list behind an unrelated request.
-  const catalog=await scope.sdk.catalog.providers.list(scope.directory);this.assertCurrent(scope);
+  const catalog=connectCatalog(await scope.sdk.catalog.providers.list(scope.directory));this.assertCurrent(scope);
   const rows=coreCall<SlashOption[]>("picker.connect-options",{catalog});
   await this.picker(scope,"connect","Connect a provider",rows,async providerId=>{
    const provider=catalog.all.find(provider=>provider.id===providerId);if(provider){

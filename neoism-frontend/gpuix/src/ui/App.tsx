@@ -3,12 +3,12 @@ import {cachedGitStatus,watchGitStatus,type GitStatusSnapshot} from "../daemon/g
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 import { Effect, Schema } from "effect";
 import { createEffect, createMemo, createSignal, untrack, For, onCleanup, onMount, Show, Switch, Match, type Accessor, type JSX } from "solid-js";
-import { createWindowSize, motion, useGpuixRequired, type GpuixTheme, type HostElement, type KeyEvent, type StyleDesc } from "@gpuix/solid";
+import { createWindowSize, motion, useGpuixRequired, type GpuixTheme, type HostElement, type KeyEvent, type EventPayload, type StyleDesc } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { dimensions as d, extensionIcons, namedIcons, thinkingOptions } from "../design/generated";
 import { easeOutCubicBezier } from "../design/animation";
 import { WorkspaceModel, type AppState, type Surface } from "../model";
-import { DirectorySchema, FileSchema, expectVariant, isRecord, type HistoryMessage, type Attachment } from "../daemon/protocol";
+import { FileSchema, expectVariant, isRecord, type HistoryMessage, type Attachment } from "../daemon/protocol";
 import { TerminalView } from "../terminal/TerminalView";
 import { AnimatedWordmark as Wordmark } from "./AnimatedWordmark";
 import {AppVisualState} from "./AppVisualState";
@@ -70,6 +70,7 @@ export function fileIcon(name: string) {
 }
 export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: () => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
   const config = props.config, model = props.model, c = config.theme, s = config.scale;
+  let activeTreeEscape:((event:KeyEvent)=>boolean)|undefined;
   const [presencePeers,setPresencePeers]=createSignal(model.presence.peers());
   const stopPresence=model.presence.subscribe(()=>setPresencePeers(model.presence.peers()));onCleanup(stopPresence);
   const visuals=props.visuals||new AppVisualState();if(!props.visuals)onCleanup(()=>visuals.dispose());
@@ -581,6 +582,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     void opened.then(()=>setEditorFocus(value=>value+1)).catch(model.report);
   }));
   const keyDown = (event: KeyEvent) => {
+    if(activeTreeEscape?.(event))return;
     if (handleSurfaceKey(event)) return;
     if (event.key === "escape") { if (commands()) closeCommands(); else if (choice()) closeChoice(); else closePalette(); setMenu(false); }
   };
@@ -618,43 +620,21 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       const directory=root(),workspaceId=activeWorkspaceId(),cached=directory?cachedGitStatus(model.client,directory):undefined;
       setGitSnapshot(cached);if(!directory)return;
       const signature=(snapshot:GitStatusSnapshot)=>JSON.stringify([snapshot.repo_root,snapshot.files.map(file=>isRecord(file)?[file.path,file.status]:file)]);
-      let previous:string|undefined,refreshRevision=0,live=true;
-      onCleanup(()=>{live=false;});
+      let previous=cached?signature(cached):undefined;
       onCleanup(watchGitStatus(model.client,directory,snapshot=>untrack(()=>{
         if(snapshot.error)return;setGitSnapshot(snapshot);
-        const next=signature(snapshot);if(previous===next)return;previous=next;const revision=++refreshRevision;
+        const next=signature(snapshot);if(previous===next)return;previous=next;
         // Git changes can add/remove directory children. Refresh only known,
         // open listings, retaining the visible tree until each read completes.
-        for(const path of expanded())if(sourceDirectories()[path])void Effect.runPromise(model.client.request("Files",{ListDir:{path}},directory)).then(reply=>{
-          const listing=Schema.decodeUnknownSync(DirectorySchema)(expectVariant(reply,"DirListing"));
-          if(!live||revision!==refreshRevision||root()!==directory||state().activeWorkspace?.id!==workspaceId)return;
-          const entries=[...listing.entries].sort((a,b)=>Number(b.is_dir)-Number(a.is_dir)||a.name.localeCompare(b.name)),source=sourceDirectories(),before=source[path];
-          if(before&&JSON.stringify(before.entries)===JSON.stringify(entries))return;
-          model.update(props.notes?{notesDirectories:{...source,[path]:{path,entries}}}:{directories:{...source,[path]:{path,entries}}});
-        }).catch(()=>{});
+        if(root()!==directory||state().activeWorkspace?.id!==workspaceId)return;
+        for(const path of expanded())if(sourceDirectories()[path])void model.listDirectory(path,undefined,props.notes);
       })));
     });
-    const gitDecorations=createMemo(()=>new Map((gitSnapshot()?glyphs.git(gitSnapshot(),config):[]).map(decoration=>[decoration.path,decoration])));
-    const directories=createMemo(()=>{
-      const source=sourceDirectories();if(!source[""])return source;
-      const result={...source};
-      for(const decoration of gitDecorations().values()){
-        if(decoration.status!=="Deleted")continue;
-        const slash=decoration.path.lastIndexOf("/"),parent=slash<0?"":decoration.path.slice(0,slash),name=decoration.path.slice(slash+1);
-        if(!name)continue;
-        const listing=result[parent]||{path:parent,entries:[]};
-        if(!listing.entries.some(entry=>entry.name===name))result[parent]={...listing,entries:[...listing.entries,{name,is_dir:decoration.directory}].sort((a,b)=>Number(b.is_dir)-Number(a.is_dir)||a.name.localeCompare(b.name))};
-        if(decoration.directory&&!result[decoration.path])result[decoration.path]={path:decoration.path,entries:[]};
-      }
-      return result;
-    });
-    const toggle=(path:string)=>{
-      const slash=path.lastIndexOf("/"),parent=slash<0?"":path.slice(0,slash),name=path.slice(slash+1);
-      const physical=sourceDirectories()[parent]?.entries.some(entry=>entry.name===name&&entry.is_dir);
-      if(!physical&&gitDecorations().get(path)?.status==="Deleted"){
-        const next=new Set(expanded());if(next.has(path))next.delete(path);else next.add(path);model.update(props.notes?{notesExpanded:next}:{expanded:next});
-      }else model.toggleDirectory(path,props.notes);
-    };
+    const gitDecorations=createMemo(()=>new Map((gitSnapshot()?glyphs.git(gitSnapshot()!,config):[]).map(decoration=>[decoration.path,decoration])));
+    // Git decorates existing entries; deleted paths belong in Git changes,
+    // not in the file navigator. The daemon listing is authoritative.
+    const directories=sourceDirectories;
+    const toggle=(path:string)=>model.toggleDirectory(path,props.notes);
     const open = (entry: { path: string; dir: boolean }) => {if(entry.dir)toggle(entry.path);else void focusOpenedFile(()=>model.openFile(entry.path,root()));};
     const [viewportRevision, setViewportRevision] = createSignal(0);
     const [heightRevision, setHeightRevision] = createSignal(0);
@@ -684,7 +664,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     createEffect(() => { scope(); pendingScroll = 0; animation.cancel(); });
     const id = createMemo(() => {
       const key = scope();
-      if (!trees.has(key)) trees.set(key, coreCall<{ id: number }>("tree.new", { scale: s }).id);
+      if (!trees.has(key)) trees.set(key, coreCall<{ id: number }>("tree.new", { scale: s,root:root() }).id);
       return trees.get(key)!;
     });
     const update = (op: string, args: Record<string, unknown> = {}) => {
@@ -701,6 +681,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       const delta = pendingScroll; pendingScroll = 0;
       update(delta ? "scroll" : "frame", delta ? {delta} : {});
     };
+    const scrollTree=(event:EventPayload)=>{pendingScroll+=(event.deltaY||0)*(event.precise?1:d.treeRowHeight*s*3);animation.request(flushFrame);};
     onCleanup(() => animation.dispose());
     onMount(() => { if (host&&chromeFocus().zone==="content") focusNativeElement(renderer,host.id); });
     const revealStarts=()=>visuals.treeReveals(activeWorkspaceId()||"",!!props.notes,root());
@@ -733,12 +714,51 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const visibleRows = createMemo(() => rows().slice(...visibleRange()));
     createEffect(() => {
       scope(); height();
-      const known = !!directories()[""], entries = rows().map(entry => ({...entry, open:expanded().has(entry.path)}));
+      const base=root()||"",paths=/^[a-z]:[\\/]/i.test(base)||base.startsWith("\\\\")?win32:posix;
+      const known = !!directories()[""], entries = rows().map(entry => ({...entry,path:paths.join(base,entry.path),open:expanded().has(entry.path)}));
       // Missing listing during activation is loading, not an empty directory.
       // Retain the native viewport until an authoritative listing arrives.
       untrack(() => known ? update("layout", {entries}) : update("frame"));
     });
+    const [drag,setDrag]=createSignal<{live:boolean;source:number|null;target:number|null;root:boolean;wiggle:number}>();
+    const [dragPoint,setDragPoint]=createSignal({x:0,y:0});
+    const dragFrames=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
+    let armed:{id:number;entry:TreeEntry;root:string}|undefined,pressed=false,dragHost:HostElement|undefined;
+    const cancelDrag=()=>{dragFrames.cancel();if(armed)coreCall("tree.drag-cancel",{id:armed.id});armed=undefined;setDrag(undefined);};
+    const driveDrag=()=>{
+      if(!armed)return;
+      const bounds=host&&(paintedChromeBounds(renderer,host.id)||chromeBounds.get(host.id)),point=dragPoint();
+      const inside=!!bounds&&point.x>=bounds.x&&point.x<bounds.x+bounds.width&&point.y>=bounds.y&&point.y<bounds.y+bounds.height;
+      const row=inside?Math.floor((point.y-bounds!.y-view().offset)/(d.treeRowHeight*s))+view().top:-1;
+      const result=coreCall<{drag:ReturnType<typeof drag>;open?:string}>("tree.drag-update",{id:armed.id,...point,inside,hovered:row>=0&&row<rows().length?row:null});
+      setDrag(result.drag);
+      // Opening the source file can focus its editor. The active drag owns
+      // Escape until release, even when that editor finishes loading later.
+      if(result.drag?.live&&dragHost&&focusedNativeElement(renderer)!==dragHost.id)focusNativeElement(renderer,dragHost.id);
+      if(result.open){const paths=/^[a-z]:[\\/]/i.test(armed.root)||armed.root.startsWith("\\\\")?win32:posix;const path=paths.relative(armed.root,result.open).replaceAll("\\","/");if(!expanded().has(path))toggle(path);}
+      if(result.drag?.live)dragFrames.request(driveDrag);
+    };
+    const moveDrag=(event:EventPayload)=>{if(!armed)return;setDragPoint({x:event.x??0,y:event.y??0});dragFrames.request(driveDrag);};
+    const finishDrag=(event:EventPayload)=>{
+      if(!armed)return;setDragPoint({x:event.x??0,y:event.y??0});driveDrag();dragFrames.cancel();
+      const source=armed.entry,outcome=coreCall<{kind:string;source?:string;directory?:string}>("tree.drag-end",{id:armed.id});armed=undefined;setDrag(undefined);
+      focusChrome({zone:source.dir?"sidebar":"content"});
+      if(outcome.kind==="move"&&outcome.source&&outcome.directory!==undefined)void model.moveTreePath(outcome.source,outcome.directory,!!props.notes).catch(model.report);
+    };
+    const pressRow=(entry:TreeEntry,index:number,event:EventPayload)=>{
+      if(event.button!==undefined&&event.button!==0)return;
+      cancelDrag();pressed=true;update("select",{index});focusChrome({zone:"sidebar"});
+      // Deleted Git ghosts are visible, but have no physical item to move.
+      if(root()&&gitDecorations().get(entry.path)?.status!=="Deleted"){
+        armed={id:id(),entry,root:root()!};setDragPoint({x:event.x??0,y:event.y??0});coreCall("tree.drag-begin",{id:id(),index,...dragPoint()});setDrag({live:false,source:index,target:null,root:false,wiggle:0});
+      }
+      open(entry);
+    };
+    createEffect(()=>{scope();untrack(cancelDrag);});
+    onCleanup(()=>{cancelDrag();dragFrames.dispose();});
+    activeTreeEscape=keyEscapeDrag;onCleanup(()=>{if(activeTreeEscape===keyEscapeDrag)activeTreeEscape=undefined;});
     const keyDown = (event: KeyEvent) => {
+      if(keyEscapeDrag(event))return;
       if(bufferTabShortcut(event)&&handleSurfaceKey(event))return;
       if (event.modifiers?.alt || event.modifiers?.cmd) return;
       const key = event.keyChar || event.key || "";
@@ -760,9 +780,10 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const publishTarget=()=>{const next=target();setChromeTarget(previous=>next&&previous?.host===next.host?{...next,origin:previous.origin}:next);};
     createEffect(()=>{view();rows();if(focused()&&chromeFocus().zone==="sidebar")publishTarget();});
     onCleanup(()=>{sidebarHosts.delete(sidebarKey);sidebarTargets.delete(sidebarKey);});
-    return <motion.div initial={config.reducedMotion||!opening?false:{left:-6*s}} animate={{left:0}} transition={{duration:config.reducedMotion?0:.12,ease:easeOutCubicBezier}} ref={element=>{host=element;sidebarHosts.set(props.notes?"notes":"files",element);}} tabIndex={0} onKeyDown={keyDown} onMouseDown={()=>focusChrome({zone:"sidebar"})} onFocus={() => {invalidateNativeFocus(renderer);setFocused(true);if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});publishTarget();}}} onBlur={() => {invalidateNativeFocus(renderer);setFocused(false);}}
+    function keyEscapeDrag(event:KeyEvent){if(event.key!=="escape"||!armed)return false;event.preventDefault();event.stopPropagation();const source=armed.entry;cancelDrag();focusChrome({zone:source.dir?"sidebar":"content"});return true;}
+    return <motion.div initial={config.reducedMotion||!opening?false:{left:-6*s}} animate={{left:0}} transition={{duration:config.reducedMotion?0:.12,ease:easeOutCubicBezier}} ref={element=>{host=element;sidebarHosts.set(props.notes?"notes":"files",element);}} tabIndex={0} onKeyDown={keyDown} onMouseUp={finishDrag} onMouseLeave={event=>{if(armed&&!drag()?.live){moveDrag(event);driveDrag();}}} onMouseDown={()=>focusChrome({zone:"sidebar"})} onFocus={() => {invalidateNativeFocus(renderer);setFocused(true);if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});publishTarget();}}} onBlur={() => {invalidateNativeFocus(renderer);setFocused(false);}}
       onLayout={(event) => {measuredHeight=event.height||0;if(viewport().height!==measuredHeight){viewport().height=measuredHeight;setHeightRevision(value=>value+1);}updateChromeBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:measuredHeight});}}
-      onScroll={(event) => { pendingScroll += (event.deltaY || 0) * (event.precise ? 1 : d.treeRowHeight * s * 3); animation.request(flushFrame); }}
+      onScroll={scrollTree}
       data-tree-id={id()} style={{ ...column, flexGrow: 1, position: "relative", overflow: "hidden" }} role="tree" aria-label={props.notes ? "Notes" : "Files"} testId={props.notes ? "notes-tree" : "file-tree"}>
       <Show when={focused() && rows().length}><div style={{ position: "absolute", left: 0, right: 0,
         top: (view().selected - view().top) * d.treeRowHeight * s + view().offset + view().cursorOffset,
@@ -778,16 +799,23 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         const git=()=>gitDecorations().get(entry.path);
         const glyphKey=JSON.stringify([state().activeWorkspace?.id,!!props.notes,root(),entry.path]);
         return <div data-reveal-opacity={1} data-reveal-start={entry.revealStart} role="treeitem" aria-label={entry.name} aria-description={git()?`Git ${git()!.status}: ${git()!.marker}`:undefined} aria-expanded={entry.dir ? expanded().has(entry.path) : undefined} aria-selected={selected()}
-          testId={`${props.notes ? "note" : "file"}:${entry.path}`} onClick={() => { update("select", { index: index() });focusChrome({zone:"sidebar"});open(entry); }}
+          testId={`${props.notes ? "note" : "file"}:${entry.path}`} onMouseDown={event=>pressRow(entry,index(),event)} onMouseMove={moveDrag} onMouseUp={finishDrag} onClick={() => { if(pressed){pressed=false;return;}update("select", { index: index() });focusChrome({zone:"sidebar"});open(entry); }}
           style={{ ...row, position: "absolute", left: 0, right: 0, top: index() * d.treeRowHeight * s, height: d.treeRowHeight * s, flexShrink: 0, paddingLeft: (d.treePadding + entry.depth * d.treeIndent) * s,
-            paddingRight: 8 * s, gap: 8 * s, cursor: "pointer", backgroundColor: selected() ? c.surface : undefined,
+            paddingRight: 8 * s, gap: 8 * s, cursor: "pointer",opacity:drag()?.live&&drag()?.source===index()? .35:1,backgroundColor:drag()?.live&&drag()?.target===index()?c.accent+"38":selected()?c.surface:undefined,
             hover: { backgroundColor: c.hover }, focusVisible: { outlineColor: c.accent, outlineWidth: 1 } }}>
-          <TreeRowGlyphs host={glyphs} config={config} initialWidth={visuals.treeWidths.get(glyphKey)||Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-(d.frameStroke+d.treePadding+entry.depth*d.treeIndent+8)*s)} onWidth={width=>visuals.treeWidths.set(glyphKey,width)} pinImage={raster=>visuals.pinTreeRaster(renderer,glyphKey,raster)} trailingWidth={peerPaint()?.width} name={entry.name} chevron={entry.dir?(expanded().has(entry.path)?"\uf078":"\uf054"):""}
+          <TreeRowGlyphs offsetX={drag()?.live&&drag()?.target===index()&&!config.reducedMotion?drag()!.wiggle:0} host={glyphs} config={config} initialWidth={visuals.treeWidths.get(glyphKey)||Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-(d.frameStroke+d.treePadding+entry.depth*d.treeIndent+8)*s)} onWidth={width=>visuals.treeWidths.set(glyphKey,width)} pinImage={raster=>visuals.pinTreeRaster(renderer,glyphKey,raster)} trailingWidth={peerPaint()?.width} name={entry.name} chevron={entry.dir?(expanded().has(entry.path)?"\uf078":"\uf054"):""}
             icon={icon().glyph} iconColor={icon().color} labelColor={selected()?c.fg:c.dim} chevronColor={c.muted} gitStatus={git()?.status} directory={entry.dir}/>
           <Show when={peerPaint()}>{paint=><div testId={`tree-presence:${entry.path}`} aria-label={model.presence.filePeers(peerBuffer()).map(peer=>peer.display_name).join(", ")} style={{position:"absolute",right:8*s+(git()?.trailingWidth||0),top:0,width:256,height:paint().height,pointerEvents:"none"}}><PaintLayer config={config} commands={paint().commands}/></div>}</Show>
         </div>;
       }}</For>
       </div>
+      <Show when={drag()?.live&&drag()?.root}><div testId="tree-root-drop" style={{position:"absolute",left:0,right:0,top:0,bottom:0,backgroundColor:c.accent+"24",borderWidth:s,borderColor:c.accent,pointerEvents:"none"}}/></Show>
+      <Show when={drag()}><anchored fill="window" deferred={true} priority={5} occlude={true} style={{backgroundColor:"transparent"}}>
+        <div ref={element=>dragHost=element} tabIndex={0} testId="tree-drag-layer" onMouseMove={moveDrag} onMouseUp={finishDrag} onKeyDown={keyEscapeDrag} onScroll={event=>{const b=host&&(paintedChromeBounds(renderer,host.id)||chromeBounds.get(host.id));if(b&&(event.x??0)>=b.x&&(event.x??0)<b.x+b.width&&(event.y??0)>=b.y&&(event.y??0)<b.y+b.height)scrollTree(event);}} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"auto",cursor:drag()?.live?"grabbing":"pointer"}}/>
+        <Show when={drag()?.live&&armed?.entry}>{entry=><div testId="tree-drag-preview" style={{...row,position:"absolute",left:dragPoint().x+12*s,top:dragPoint().y-d.treeRowHeight*s/2,width:Math.min(280,60+entry().name.length*8)*s,height:d.treeRowHeight*s,paddingLeft:10*s,paddingRight:10*s,borderRadius:6*s,backgroundColor:c.surface,borderWidth:s,borderColor:c.border,pointerEvents:"none"}}>
+          <TreeRowGlyphs host={glyphs} config={config} initialWidth={Math.min(260,40+entry().name.length*8)*s} name={entry().name} chevron={entry().dir?(expanded().has(entry().path)?"\uf078":"\uf054"):""} icon={entry().dir?(expanded().has(entry().path)?"\uf07c":"\uf07b"):fileIcon(entry().name).glyph} iconColor={entry().dir?c.folder:fileIcon(entry().name).color} labelColor={c.fg} chevronColor={c.muted}/>
+        </div>}</Show>
+      </anchored></Show>
       <Show when={!rows().length}><Show when={state().loading||!!root()&&!directories()[""]&&!state().error} fallback={<div style={{ padding: 16 * s }}><Label color={c.muted}>{props.notes ? root() ? "No notes" : "No notes vault linked" : "No files"}</Label></div>}><LoadingSkeleton config={config} kind="tree" immediate initialSize={{width:Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-d.frameStroke*s),height:height()}} /></Show></Show>
     </motion.div>;
   }

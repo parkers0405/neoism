@@ -52,13 +52,40 @@ index 0000000..fd841b9
 +---
 +
 +Read element bounds from a renderer-local completed-paint snapshot. Linux and Windows input and rendering callbacks no longer block waiting for a UI-thread response to geometry queries. Bounds retain GPUI paint positions, including translated and deferred content, and disappear when an element stops painting.
+diff --git c/.changeset/neoism-plain-text-layout.md w/.changeset/neoism-plain-text-layout.md
+new file mode 100644
+index 0000000..45f2659
+--- /dev/null
++++ w/.changeset/neoism-plain-text-layout.md
+@@ -0,0 +1,8 @@
++---
++"@gpuix/native": patch
++---
++
++Avoid redundant stateful containers for plain text runs and layout boxes for
++empty reconciliation anchors. Preserve selection/search and record bare text
++bounds from GPUI's measured paint box; styled and interactive text hosts retain
++their normal container behavior.
 diff --git c/README.md w/README.md
-index 4459e7b..89e04ce 100644
+index 4459e7b..079dbbf 100644
 --- c/README.md
 +++ w/README.md
-@@ -1,5 +1,55 @@
+@@ -1,5 +1,68 @@
  # GPUIX
  
++`GpuixRenderer.initAsync(options)` returns a promise for native window readiness.
++On Linux, FreeBSD and Windows, JavaScript can continue networking/session loading
++while the UI thread initializes graphics. Await it before other renderer calls;
++concurrent/repeated initialization is rejected. macOS keeps initialization on
++the main thread. The synchronous `init` method remains available. Hosts using
++stdio automation must call the runtime's `enableAutomation(renderer)` afterward.
++
++Plain adapter text runs use GPUI's text element directly, retaining selection,
++search, and painted text bounds without a redundant stateful container. Empty
++unstyled text anchors remain in the retained tree for reconciliation but do not
++add child layout boxes. Text hosts with styles, children, IDs, custom props, or
++event handlers retain the full container path, including empty styled spacers.
++
 +Neoism's raster canvas keeps a native GPUI paint cache for unchanged display
 +lists. Command, image-store, scale, bounds, and clip changes invalidate it;
 +interactive overlays remain live. Canvas text remains uncached so per-frame
@@ -112,7 +139,7 @@ index 4459e7b..89e04ce 100644
  **React and Solid** for [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), Zed's GPU UI framework.
  
  Write a React or Solid tree in TypeScript. GPUIX paints it with Metal, DirectX, or Vulkan. No Electron. No web view.
-@@ -1898,6 +1948,16 @@ inactive. Override its colour through the shared native theme:
+@@ -1898,6 +1961,16 @@ inactive. Override its colour through the shared native theme:
  <input theme={{ caret: '#22c55e' }} />
  ```
  
@@ -129,7 +156,7 @@ index 4459e7b..89e04ce 100644
  When the clipboard has no text, `Cmd+V` or `Ctrl+V` continues to `onKeyDown`
  instead of disappearing inside the editor. Applications can then handle an
  image-only or file-only clipboard themselves. Copied files also propagate even
-@@ -2494,7 +2554,7 @@ elements live in the tree, not the order gpui paints them in.
+@@ -2494,7 +2567,7 @@ elements live in the tree, not the order gpui paints them in.
  
  ### Measure an element
  
@@ -138,7 +165,7 @@ index 4459e7b..89e04ce 100644
  not paint. It works on the live `GpuixRenderer` and on the test renderer.
  Bounds are recorded during **paint**, so read them after a frame, not in the
  same commit as mount. The box is the element's border box, like a DOM
-@@ -4044,3 +4104,9 @@ See [AGENTS.md](https://github.com/remorses/gpuix/blob/main/AGENTS.md) for detai
+@@ -4044,3 +4117,9 @@ See [AGENTS.md](https://github.com/remorses/gpuix/blob/main/AGENTS.md) for detai
  ## License
  
  [Apache-2.0](https://github.com/remorses/gpuix/blob/main/LICENSE)
@@ -163,10 +190,19 @@ index 9d339ee..5912a2c 100644
  serde = { version = "1", features = ["derive"] }
  serde_json = { version = "1", features = ["raw_value"] }
 diff --git c/packages/native/index.d.ts w/packages/native/index.d.ts
-index 4eded3a..15ea2c6 100644
+index 4eded3a..df88b6d 100644
 --- c/packages/native/index.d.ts
 +++ w/packages/native/index.d.ts
-@@ -578,6 +578,8 @@ export interface EventPayload {
+@@ -37,6 +37,8 @@ export declare class GpuixRenderer {
+   constructor(eventCallback?: (((err: Error | null, arg: EventPayload) => any)) | undefined | null)
+   /** Initialize GPUI using the native event-loop architecture for this OS. */
+   init(options?: WindowOptions | undefined | null): void
++  /** Await before native commands. Keeps JS responsive during threaded platform startup. */
++  initAsync(options?: WindowOptions | undefined | null): Promise<void>
+   /**
+    * Apply a batch of mutations in a single FFI call.
+    *
+@@ -578,6 +580,8 @@ export interface EventPayload {
     * Populated for: scroll.
     */
    precise?: boolean
@@ -175,7 +211,7 @@ index 4eded3a..15ea2c6 100644
    /**
     * Touch phase for scroll: "started", "moved", "ended".
     * Populated for: scroll (trackpad gestures).
-@@ -802,3 +804,9 @@ export interface WindowSize {
+@@ -802,3 +806,9 @@ export interface WindowSize {
    width: number
    height: number
  }
@@ -1237,7 +1273,7 @@ index c5f4fa1..b600860 100644
      not(all(target_arch = "wasm32", target_os = "unknown")),
      not(all(
 diff --git c/packages/native/src/renderer.rs w/packages/native/src/renderer.rs
-index 8c104a4..2a8b240 100644
+index 8c104a4..2c223b3 100644
 --- c/packages/native/src/renderer.rs
 +++ w/packages/native/src/renderer.rs
 @@ -25,7 +25,7 @@ use napi_derive::napi;
@@ -1249,8 +1285,12 @@ index 8c104a4..2a8b240 100644
  use std::sync::atomic::{AtomicBool, Ordering};
  #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
  use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
-@@ -42,6 +42,67 @@ use crate::style::StyleDesc;
- use crate::text::{selectable_text, selection_frame_reset, SharedSelection};
+@@ -39,9 +39,70 @@ use crate::custom_elements::{CustomElementRegistry, CustomRenderContext};
+ use crate::element_tree::EventPayload;
+ use crate::retained_tree::{RetainedTree, StyleTable};
+ use crate::style::StyleDesc;
+-use crate::text::{selectable_text, selection_frame_reset, SharedSelection};
++use crate::text::{selection_frame_reset, SharedSelection};
  use crate::theme::Theme;
  
 +// Opt-in phase measurements for the retained-tree bridge. Never inspect
@@ -1578,7 +1618,85 @@ index 8c104a4..2a8b240 100644
              #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
              ui_commands: Mutex::new(None),
              #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
-@@ -1511,11 +1687,16 @@ impl GpuixRenderer {
+@@ -1208,6 +1384,39 @@ impl GpuixRenderer {
+         return self.init_threaded(options);
+     }
+ 
++    /// Keep JS networking and session hydration live while the platform UI
++    /// thread creates its GPU device/window. Native commands require awaiting
++    /// this promise. macOS retains its main-thread initialization requirement.
++    #[napi(ts_return_type = "Promise<void>")]
++    pub fn init_async<'env>(&self, env: &'env Env, options: Option<WindowOptions>) -> Result<Object<'env>> {
++        let (deferred, promise): (JsDeferred<(), fn(Env) -> Result<()>>, Object<'env>) = env.create_deferred()?;
++        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
++        {
++            match self.begin_threaded_init(options) {
++                Ok(receiver) => {
++                    let initialized = self.initialized.clone();
++                    std::thread::spawn(move || {
++                        match receiver.recv() {
++                            Ok(Ok(())) => {
++                                *initialized.lock().unwrap() = true;
++                                deferred.resolve(|_| Ok(()));
++                            }
++                            Ok(Err(error)) => deferred.reject(Error::from_reason(error)),
++                            Err(_) => deferred.reject(Error::from_reason("The GPUI UI thread stopped during initialization")),
++                        }
++                    });
++                }
++                Err(error) => deferred.reject(error),
++            }
++        }
++        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
++        match self.init(options) {
++            Ok(()) => deferred.resolve(|_| Ok(())),
++            Err(error) => deferred.reject(error),
++        }
++        Ok(promise)
++    }
++
+     #[cfg(target_os = "macos")]
+     fn init_macos(&self, options: Option<WindowOptions>) -> Result<()> {
+         let options = options.unwrap_or_default();
+@@ -1362,8 +1571,18 @@ impl GpuixRenderer {
+ 
+     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+     fn init_threaded(&self, options: Option<WindowOptions>) -> Result<()> {
++        self.begin_threaded_init(options)?
++            .recv()
++            .map_err(|_| Error::from_reason("The GPUI UI thread stopped during initialization"))?
++            .map_err(Error::from_reason)?;
++        *self.initialized.lock().unwrap() = true;
++        Ok(())
++    }
++
++    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
++    fn begin_threaded_init(&self, options: Option<WindowOptions>) -> Result<std::sync::mpsc::Receiver<std::result::Result<(), String>>> {
+         let options = options.unwrap_or_default();
+-        if *self.initialized.lock().unwrap() {
++        if *self.initialized.lock().unwrap() || self.ui_commands.lock().unwrap().is_some() {
+             return Err(Error::from_reason("Renderer is already initialized"));
+         }
+ 
+@@ -1478,16 +1697,10 @@ impl GpuixRenderer {
+                 Error::from_reason(format!("Failed to spawn the GPUI UI thread: {error}"))
+             })?;
+ 
+-        startup_receiver
+-            .recv()
+-            .map_err(|_| Error::from_reason("The GPUI UI thread stopped during initialization"))?
+-            .map_err(Error::from_reason)?;
+-
+         *self.ui_commands.lock().unwrap() = Some(command_sender);
+         TERMINAL_MODE.store(terminal, std::sync::atomic::Ordering::Release);
+-        *self.initialized.lock().unwrap() = true;
+         self.event_callback.lock().unwrap().take();
+-        Ok(())
++        Ok(startup_receiver)
+     }
+ 
+     /// Apply a batch of mutations in a single FFI call.
+@@ -1511,11 +1724,16 @@ impl GpuixRenderer {
      /// Acquires the tree mutex ONCE for the entire batch.
      #[napi]
      pub fn apply_batch(&self, json: String) -> Result<Vec<f64>> {
@@ -1595,7 +1713,7 @@ index 8c104a4..2a8b240 100644
          // A re-render that changed nothing sends a batch of identical resends.
          // Waking the window for it makes it rebuild and diff the whole element
          // tree to draw the frame it already has.
-@@ -1574,59 +1755,117 @@ impl GpuixRenderer {
+@@ -1574,59 +1792,117 @@ impl GpuixRenderer {
      }
  
  
@@ -1753,7 +1871,7 @@ index 8c104a4..2a8b240 100644
      /// Whether JavaScript must call tick() until it returns false.
      ///
      /// macOS: tick() pumps AppKit. Windows/Linux: tick() only reports whether
-@@ -2380,17 +2619,18 @@ impl GpuixRenderer {
+@@ -2380,17 +2656,18 @@ impl GpuixRenderer {
  
          #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
          {
@@ -1777,7 +1895,7 @@ index 8c104a4..2a8b240 100644
          }
  
          #[cfg(not(any(
-@@ -2758,22 +2998,27 @@ impl GpuixRenderer {
+@@ -2758,22 +3035,27 @@ impl GpuixRenderer {
          delta_x: f64,
          delta_y: f64,
          modifiers: Option<String>,
@@ -1813,7 +1931,7 @@ index 8c104a4..2a8b240 100644
  
          #[cfg(not(any(
              target_os = "macos",
-@@ -3626,6 +3871,10 @@ impl WebGpuixRenderer {
+@@ -3626,6 +3908,10 @@ impl WebGpuixRenderer {
  #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
  impl Drop for GpuixRenderer {
      fn drop(&mut self) {
@@ -1824,7 +1942,7 @@ index 8c104a4..2a8b240 100644
          #[cfg(target_os = "macos")]
          if *self.initialized.lock().unwrap() {
              EMBEDDED_PLATFORM
-@@ -3647,6 +3896,7 @@ pub(crate) struct GpuixView {
+@@ -3647,6 +3933,7 @@ pub(crate) struct GpuixView {
      pub(crate) tree: Arc<Mutex<RetainedTree>>,
      pub(crate) event_callback: Option<EventCallback>,
      pub(crate) window_title: String,
@@ -1832,7 +1950,7 @@ index 8c104a4..2a8b240 100644
      pub(crate) window_key_down: bool,
      pub(crate) window_key_up: bool,
      pub(crate) window_key_event_id: u64,
-@@ -3842,6 +4092,17 @@ fn window_key_events(
+@@ -3842,6 +4129,17 @@ fn window_key_events(
              window.on_root_key_event(move |event: &gpui::KeyDownEvent, phase, _window, _cx| {
                  if phase == gpui::DispatchPhase::Capture {
                      next_keystroke_id();
@@ -1850,7 +1968,7 @@ index 8c104a4..2a8b240 100644
                      return;
                  }
                  if key_down {
-@@ -3967,6 +4228,7 @@ impl GpuixView {
+@@ -3967,6 +4265,7 @@ impl GpuixView {
              tree,
              event_callback,
              window_title,
@@ -1858,7 +1976,7 @@ index 8c104a4..2a8b240 100644
              window_key_down: false,
              window_key_up: false,
              window_key_event_id: 0,
-@@ -5090,7 +5352,28 @@ impl gpui::Render for GpuixView {
+@@ -5090,7 +5389,28 @@ impl gpui::Render for GpuixView {
      ) -> impl gpui::IntoElement {
          use gpui::IntoElement;
  
@@ -1888,7 +2006,7 @@ index 8c104a4..2a8b240 100644
  
          #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
          if let Some(id) = PENDING_FOCUS_ELEMENT.with(|pending| pending.borrow_mut().take()) {
-@@ -5099,7 +5382,9 @@ impl gpui::Render for GpuixView {
+@@ -5099,7 +5419,9 @@ impl gpui::Render for GpuixView {
  
          // Clone Arc so we don't borrow self.tree — frees self for focus_handles access.
          let tree_arc = self.tree.clone();
@@ -1898,7 +2016,7 @@ index 8c104a4..2a8b240 100644
          let callback = self.event_callback.clone();
  
          // Sync focus handles before building elements.
-@@ -5151,6 +5436,7 @@ impl gpui::Render for GpuixView {
+@@ -5151,6 +5473,7 @@ impl gpui::Render for GpuixView {
          });
          let mut highlight_events = Vec::new();
          let keyboard_focus = self.keyboard_focus_path(&tree, window, cx);
@@ -1906,7 +2024,7 @@ index 8c104a4..2a8b240 100644
          let result = match tree.root_id {
              Some(root_id) => {
                  let mut ctx = BuildCtx {
-@@ -5173,6 +5459,7 @@ impl gpui::Render for GpuixView {
+@@ -5173,6 +5496,7 @@ impl gpui::Render for GpuixView {
              }
              None => gpui::Empty.into_any_element(),
          };
@@ -1914,7 +2032,7 @@ index 8c104a4..2a8b240 100644
          // Flushed after the root build so a `setState` in the handler cannot
          // re-enter this build.
          emit_highlight_events(&callback, &highlight_events);
-@@ -5218,6 +5505,7 @@ impl gpui::Render for GpuixView {
+@@ -5218,6 +5542,7 @@ impl gpui::Render for GpuixView {
                  ))
                  .child(crate::automation::bounds_frame_reset())
                  .child(result)
@@ -1922,7 +2040,7 @@ index 8c104a4..2a8b240 100644
                  .into_any_element()
          };
  
-@@ -5246,6 +5534,20 @@ impl gpui::Render for GpuixView {
+@@ -5246,6 +5571,20 @@ impl gpui::Render for GpuixView {
              window.request_animation_frame();
          }
  
@@ -1943,7 +2061,33 @@ index 8c104a4..2a8b240 100644
          result
      }
  }
-@@ -5843,20 +6145,30 @@ pub(crate) fn build_host_container(
+@@ -5267,6 +5606,16 @@ pub(crate) fn build_element(
+         return gpui::Empty.into_any_element();
+     };
+ 
++    // A framework text run needs GPUI's measured text element, not another
++    // stateful Div around it. Empty reconciliation anchors have no layout box.
++    // Styled/interactive/identified hosts still take the full container path.
++    if element.is_bare_text() {
++        return match element.content.as_deref() {
++            Some(content) if !content.is_empty() => text_content(element, content, ctx),
++            _ => gpui::Empty.into_any_element(),
++        };
++    }
++
+     let animated_style = if element.custom_props().contains_key("motion") {
+         ctx.motion_states
+             .get(&id)
+@@ -5328,7 +5677,7 @@ pub(crate) fn build_element(
+                 .children
+                 .iter()
+                 .copied()
+-                .filter(|child_id| ctx.tree.elements.contains_key(child_id))
++                .filter(|child_id| ctx.tree.elements.get(child_id).is_some_and(|child| !child.is_empty_text_anchor()))
+                 .map(|child_id| build_element(child_id, ctx, window, cx))
+                 .collect();
+             let inherited = ctx.inherited.clone();
+@@ -5843,20 +6192,30 @@ pub(crate) fn build_host_container(
  
              // ── Scroll wheel ─────────────────────────────────────
              "scroll" => {
@@ -1981,7 +2125,35 @@ index 8c104a4..2a8b240 100644
  
                          p.touch_phase = Some(match scroll_event.touch_phase {
                              gpui::TouchPhase::Started => "started".to_string(),
-@@ -7657,6 +7969,9 @@ fn to_gpui_window_options(
+@@ -5916,6 +6275,9 @@ pub(crate) fn build_host_container(
+ 
+     // Children
+     for &child_id in &element.children {
++        if ctx.tree.elements.get(&child_id).is_some_and(|child| child.is_empty_text_anchor()) {
++            continue;
++        }
+         let child = build_element(child_id, ctx, window, cx);
+         el = if overflow_x_only {
+             el.child(gpui::div().flex_none().child(child))
+@@ -6220,7 +6582,7 @@ fn text_content(
+     content: &str,
+     ctx: &BuildCtx,
+ ) -> gpui::AnyElement {
+-    selectable_text(crate::text::SelectableText {
++    crate::text::paint::selectable_text_with_bounds(crate::text::SelectableText {
+         group: crate::text::search::group_id(ctx.tree, element.id),
+         selectable: ctx.inherited.selectable,
+         highlight: ctx
+@@ -6236,7 +6598,7 @@ fn text_content(
+             ctx.selection.clone(),
+             ctx.inherited.selection_wash,
+         )
+-    })
++    }, element.is_bare_text().then_some(element.id))
+ }
+ 
+ /// Explicit `userSelect` on this node. `None` means inherit; the ancestor
+@@ -7657,6 +8019,9 @@ fn to_gpui_window_options(
          focus: options.focus.unwrap_or(true),
          show: options.show.unwrap_or(true),
          app_id: options.app_id.clone(),
@@ -1991,7 +2163,7 @@ index 8c104a4..2a8b240 100644
          ..Default::default()
      };
  
-@@ -8171,6 +8486,7 @@ mod window_options_tests {
+@@ -8171,6 +8536,7 @@ mod window_options_tests {
          let gpui_options = mapped(WindowOptions::default());
          assert!(gpui_options.focus);
          assert!(gpui_options.show);
@@ -2000,10 +2172,34 @@ index 8c104a4..2a8b240 100644
  
      #[test]
 diff --git c/packages/native/src/retained_tree.rs w/packages/native/src/retained_tree.rs
-index ee95967..56b2425 100644
+index ee95967..62eae9d 100644
 --- c/packages/native/src/retained_tree.rs
 +++ w/packages/native/src/retained_tree.rs
-@@ -238,6 +238,7 @@ impl StyleTable {
+@@ -67,6 +67,23 @@ struct ElementExtras {
+ static EMPTY_EXTRAS: LazyLock<ElementExtras> = LazyLock::new(ElementExtras::default);
+ 
+ impl RetainedElement {
++    /// Adapter text runs carry no host-box behavior. Keep their retained IDs
++    /// for reconciliation/search, but let GPUI lay out the text directly.
++    pub fn is_bare_text(&self) -> bool {
++        self.element_type == "text"
++            && self.content.is_some()
++            && self.style.is_none()
++            && self.children.is_empty()
++            && self.events().is_empty()
++            && self.custom_props().is_empty()
++            && self.test_id.is_none()
++            && !self.auto_focus
++    }
++
++    pub fn is_empty_text_anchor(&self) -> bool {
++        self.content.as_deref() == Some("") && self.is_bare_text()
++    }
++
+     /// The element's `tabIndex`, when it has a usable one.
+     pub fn tab_index(&self) -> Option<isize> {
+         self.custom_props()
+@@ -238,6 +255,7 @@ impl StyleTable {
  }
  
  pub struct RetainedTree {
@@ -2011,7 +2207,7 @@ index ee95967..56b2425 100644
      pub elements: ElementMap,
      pub motion_ids: HashSet<u64>,
      /// Elements that `needs_focus`, in id order. Kept as mutations arrive so the
-@@ -263,6 +264,7 @@ pub struct RetainedTree {
+@@ -263,6 +281,7 @@ pub struct RetainedTree {
  impl RetainedTree {
      pub fn new() -> Self {
          Self {
@@ -2019,7 +2215,7 @@ index ee95967..56b2425 100644
              elements: ElementMap::default(),
              motion_ids: HashSet::new(),
              focusable_ids: Default::default(),
-@@ -419,6 +421,11 @@ impl RetainedTree {
+@@ -419,6 +438,11 @@ impl RetainedTree {
      }
  
      pub fn insert_before(&mut self, parent_id: u64, child_id: u64, before_id: u64) {
@@ -2031,10 +2227,51 @@ index ee95967..56b2425 100644
          // Remove from old parent if any
          let old_parent_id = self.elements.get(&child_id).and_then(|e| e.parent);
          if let Some(old_parent_id) = old_parent_id {
-@@ -811,6 +818,24 @@ fn element_to_json(
+@@ -811,6 +835,65 @@ fn element_to_json(
  mod tests {
      use super::*;
  
++    #[test]
++    fn text_anchors_remain_reconciliation_targets_across_content_updates() {
++        let mut tree = RetainedTree::new();
++        tree.create_element(1, "div".into());
++        for id in 2..=4 {
++            tree.create_element(id, "text".into());
++            tree.set_text(id, String::new());
++            tree.append_child(1, id);
++        }
++        tree.set_text(3, "visible".into());
++        tree.insert_before(1, 4, 3);
++        assert_eq!(tree.elements[&1].children, vec![2, 4, 3]);
++        let painted: Vec<_> = tree.elements[&1].children.iter()
++            .filter(|id| !tree.elements[id].is_empty_text_anchor()).copied().collect();
++        assert_eq!(painted, vec![3]);
++        tree.set_text(4, "new content".into());
++        tree.set_text(3, String::new());
++        assert!(tree.elements[&4].is_bare_text());
++        assert!(tree.elements[&3].is_empty_text_anchor());
++        assert_eq!(tree.elements[&1].children, vec![2, 4, 3]);
++        assert_eq!(tree.elements.len(), 4, "anchors are not destroyed");
++    }
++
++    #[test]
++    fn empty_text_hosts_keep_declared_layout_and_interactions() {
++        let mut tree = RetainedTree::new();
++        for id in 1..=5 {
++            tree.create_element(id, "text".into());
++            tree.set_text(id, String::new());
++        }
++        tree.set_style(1, Arc::new(serde_json::from_value(serde_json::json!({"width":24,"height":12})).unwrap()));
++        tree.set_event_listener(2, "click".into(), true);
++        tree.set_custom_prop(3, "tabIndex".into(), serde_json::json!(0));
++        tree.set_custom_prop(4, "testId".into(), serde_json::json!("empty-host"));
++        tree.append_child(5, 1);
++        for id in 1..=5 {
++            assert!(!tree.elements[&id].is_bare_text(), "host {id} must retain its container");
++            assert!(!tree.elements[&id].is_empty_text_anchor());
++        }
++    }
++
 +    #[test]
 +    fn keyed_self_anchor_moves_preserve_order_and_revision() {
 +        let mut tree = RetainedTree::new();
@@ -2057,7 +2294,7 @@ index ee95967..56b2425 100644
          crate::renderer::apply_batch_to_tree(tree, json.as_bytes()).expect("valid batch");
      }
 diff --git c/packages/native/src/text/paint.rs w/packages/native/src/text/paint.rs
-index 23005b0..57e6928 100644
+index 23005b0..aa68efb 100644
 --- c/packages/native/src/text/paint.rs
 +++ w/packages/native/src/text/paint.rs
 @@ -19,7 +19,7 @@ use std::sync::Arc;
@@ -2069,7 +2306,7 @@ index 23005b0..57e6928 100644
      StyledText, TextLayout, TextRun, Window,
  };
  
-@@ -162,14 +162,85 @@ pub fn chrome_text(text: SharedString, runs: Option<Vec<TextRun>>) -> gpui::AnyE
+@@ -162,14 +162,90 @@ pub fn chrome_text(text: SharedString, runs: Option<Vec<TextRun>>) -> gpui::AnyE
          Some(runs) => StyledText::new(text.clone()).with_runs(runs),
          None => StyledText::new(text.clone()),
      };
@@ -2092,6 +2329,7 @@ index 23005b0..57e6928 100644
 +pub struct UnderlaidText {
 +    styled: StyledText,
 +    underlay: Option<Box<dyn FnOnce(&mut Window)>>,
++    bounds_id: Option<u64>,
 +}
 +
 +impl UnderlaidText {
@@ -2099,6 +2337,7 @@ index 23005b0..57e6928 100644
 +        Self {
 +            styled,
 +            underlay: Some(Box::new(underlay)),
++            bounds_id: None,
 +        }
 +    }
 +}
@@ -2155,6 +2394,9 @@ index 23005b0..57e6928 100644
 +        window: &mut Window,
 +        cx: &mut gpui::App,
 +    ) {
++        if let Some(id) = self.bounds_id {
++            crate::automation::record_bounds(id, bounds);
++        }
 +        if let Some(underlay) = self.underlay.take() {
 +            underlay(window);
 +        }
@@ -2163,7 +2405,20 @@ index 23005b0..57e6928 100644
  }
  
  /// Selection key for an element. `sub` distinguishes multiple text runs painted
-@@ -272,9 +343,7 @@ pub fn selectable_text(opts: SelectableText) -> gpui::AnyElement {
+@@ -250,6 +326,12 @@ impl SelectableText {
+ /// A selectable text element: `StyledText` with a canvas underlay that paints
+ /// the selection wash and registers into the frame registry.
+ pub fn selectable_text(opts: SelectableText) -> gpui::AnyElement {
++    selectable_text_with_bounds(opts, None)
++}
++
++/// Bare adapter text has no container to report its painted box. Record the
++/// measured GPUI text box in paint, just like the normal host on_painted hook.
++pub(crate) fn selectable_text_with_bounds(opts: SelectableText, bounds_id: Option<u64>) -> gpui::AnyElement {
+     let SelectableText {
+         element_id,
+         sub,
+@@ -272,9 +354,7 @@ pub fn selectable_text(opts: SelectableText) -> gpui::AnyElement {
      };
      let layout = styled.layout().clone();
  
@@ -2174,7 +2429,7 @@ index 23005b0..57e6928 100644
              if let Some(paint) = &extra_wash {
                  paint(&layout, window);
              }
-@@ -319,16 +388,9 @@ pub fn selectable_text(opts: SelectableText) -> gpui::AnyElement {
+@@ -319,16 +399,11 @@ pub fn selectable_text(opts: SelectableText) -> gpui::AnyElement {
              if let Some(on_link) = &on_link {
                  register_link_listener(window, &layout, &links, on_link, &selection);
              }
@@ -2189,7 +2444,9 @@ index 23005b0..57e6928 100644
 -        .child(underlay)
 -        .child(styled)
 -        .into_any_element()
-+    UnderlaidText::new(styled, underlay).into_any_element()
++    let mut element = UnderlaidText::new(styled, underlay);
++    element.bounds_id = bounds_id;
++    element.into_any_element()
  }
  
  /// Paint one run's highlight washes and log their geometry.

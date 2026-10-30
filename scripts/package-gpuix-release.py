@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Package and smoke-test the native GPUIX bundle on the current platform."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import tomllib
+import zipfile
+
+ROOT = Path(__file__).resolve().parent.parent
+DIST = ROOT / 'neoism-frontend/gpuix/dist'
+VERSION = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
+SYSTEM = {'Linux': 'linux', 'Darwin': 'darwin', 'Windows': 'windows'}[platform.system()]
+ARCH = 'aarch64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x86_64'
+SUFFIX = '.exe' if SYSTEM == 'windows' else ''
+LIBRARIES = {'linux': ['libneoism_gpuix_core.so', 'libghostty-vt.so'],
+             'darwin': ['libneoism_gpuix_core.dylib', 'libghostty-vt.dylib'],
+             'windows': ['neoism_gpuix_core.dll', 'ghostty-vt.dll']}[SYSTEM]
+OUT = ROOT / 'release'
+OUT.mkdir(exist_ok=True)
+NAME = f'neoism-{SYSTEM}-{ARCH}'
+
+def run(*args):
+    return subprocess.check_output([str(arg) for arg in args], text=True, stderr=subprocess.STDOUT).strip()
+
+with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
+    stage = Path(temporary)
+    bundle = stage / NAME
+    bundle.mkdir()
+    for name in ['neoism' + SUFFIX, 'neoism-workspace-daemon' + SUFFIX,
+                 'neoism-agent' + SUFFIX, *LIBRARIES, 'LICENSE.ghostty', 'LICENSE', 'NOTICE']:
+        shutil.copy2(DIST / name, bundle / name)
+    for name in ['licenses', 'web']:
+        shutil.copytree(DIST / name, bundle / name)
+    assert (bundle / 'web/agent-gui/index.html').is_file()
+    assert VERSION in run(bundle / ('neoism' + SUFFIX), '--version')
+    commit = run('git', 'rev-parse', 'HEAD')
+    metadata = json.dumps({'version': VERSION, 'commit': commit,
+        'platform': SYSTEM, 'architecture': ARCH}, indent=2) + '\n'
+    (bundle / 'build-info.json').write_text(metadata)
+    (OUT / f'{NAME}.build-info.json').write_text(metadata)
+    if SYSTEM == 'linux':
+        shutil.copy2(ROOT / 'scripts/install-gpuix-bundle.sh', bundle / 'install-bundle.sh')
+        shutil.copy2(ROOT / 'misc/neoism.desktop', bundle / 'neoism.desktop')
+        shutil.copy2(ROOT / 'neoism-frontend/shared/assets/icons/neoism.png', bundle / 'neoism.png')
+    elif SYSTEM == 'darwin':
+        app = stage / 'Neoism.app'
+        contents = app / 'Contents'
+        contents.mkdir(parents=True)
+        shutil.move(bundle, contents / 'MacOS')
+        bundle = contents / 'MacOS'
+        resources = contents / 'Resources'
+        resources.mkdir()
+        shutil.copy2(ROOT / 'misc/macos/neoism.icns', resources / 'neoism.icns')
+        plist = (ROOT / 'misc/macos/Info.plist').read_text()
+        (contents / 'Info.plist').write_text(plist.replace('{{RELEASE_VERSION}}', VERSION).replace('{{VERSION}}', VERSION.split('-')[0]))
+        for name in [*LIBRARIES, 'neoism', 'neoism-workspace-daemon', 'neoism-agent']:
+            run('codesign', '--force', '--sign', '-', bundle / name)
+        run('codesign', '--force', '--deep', '--sign', '-', app)
+        run('codesign', '--verify', '--deep', '--strict', app)
+        assert VERSION in run(bundle / 'neoism', '--version')
+        os.symlink('/Applications', stage / 'Applications')
+        run('hdiutil', 'create', '-volname', 'Neoism', '-srcfolder', stage,
+            '-ov', '-format', 'UDZO', OUT / f'{NAME}.dmg')
+    archive = OUT / (NAME + ('.zip' if SYSTEM == 'windows' else '.tar.gz'))
+    if SYSTEM == 'windows':
+        (bundle / 'README.txt').write_text('Extract the entire folder, then run neoism.exe. Keep the DLLs, services, web and licenses beside it.\n')
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:
+            for path in bundle.rglob('*'):
+                if path.is_file():
+                    output.write(path, path.relative_to(stage))
+    else:
+        with tarfile.open(archive, 'w:gz') as output:
+            payload = stage / 'Neoism.app' if SYSTEM == 'darwin' else bundle
+            output.add(payload, arcname=payload.name)
+    # Validate the archive, not just the staging directory.
+    extracted = stage / 'extracted'
+    extracted.mkdir()
+    if SYSTEM == 'windows':
+        with zipfile.ZipFile(archive) as source:
+            source.extractall(extracted)
+    else:
+        with tarfile.open(archive) as source:
+            source.extractall(extracted, filter='data')
+    installed = extracted / ('Neoism.app/Contents/MacOS' if SYSTEM == 'darwin' else NAME)
+    assert VERSION in run(installed / ('neoism' + SUFFIX), '--version')
+    run(installed / ('neoism' + SUFFIX), '--help')
+    for artifact in OUT.glob(NAME + '.*'):
+        if artifact.suffix == '.sha256':
+            continue
+        digest = hashlib.file_digest(artifact.open('rb'), 'sha256').hexdigest()
+        Path(str(artifact) + '.sha256').write_text(f'{digest}  {artifact.name}\n')
+        print(artifact)

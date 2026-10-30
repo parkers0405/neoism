@@ -43,11 +43,13 @@ fn draw(host:&mut Host,v:&Value)->Value{
  let marker_x=(width-4.0*scale-marker_width).max(0.0);if let Some(marker)=marker{host.paint.text_mut().draw(marker_x,(row-font)/2.0,marker,&git_opts);}
  let w=(width*2.0).ceil() as usize;let h=(row*2.0).ceil() as usize;if w==0||h==0{return Value::Null;}
  let mut canvas=vec![[0.0f32;4];w*h];
+ // Empty row padding stays zeroed; only convert spans actually touched by ink.
+ let mut spans=vec![(w,0usize);h];
  for command in host.paint.commands(){if let PaintCommand::Text{x,y,raster:Some(r),..}=command{
   let left=((x+r.dx)*2.0).round() as i32;let top=((y+r.dy)*2.0).round() as i32;let source=r.pixels();
-  for sy in 0..r.height as usize{let dy=top+sy as i32;if dy<0||dy>=h as i32{continue;}for sx in 0..r.width as usize{let dx=left+sx as i32;if dx<0||dx>=w as i32{continue;}let at=(sy*r.width as usize+sx)*4;let alpha=source[at+3] as f32/255.0;if alpha==0.0{continue;}let dest=&mut canvas[dy as usize*w+dx as usize];for c in 0..3{dest[c]=source[at+c] as f32/255.0*alpha+dest[c]*(1.0-alpha);}dest[3]=alpha+dest[3]*(1.0-alpha);}}
+  for sy in 0..r.height as usize{let dy=top+sy as i32;if dy<0||dy>=h as i32{continue;}for sx in 0..r.width as usize{let dx=left+sx as i32;if dx<0||dx>=w as i32{continue;}let at=(sy*r.width as usize+sx)*4;let alpha=source[at+3] as f32/255.0;if alpha==0.0{continue;}let span=&mut spans[dy as usize];span.0=span.0.min(dx as usize);span.1=span.1.max(dx as usize+1);let dest=&mut canvas[dy as usize*w+dx as usize];for c in 0..3{dest[c]=source[at+c] as f32/255.0*alpha+dest[c]*(1.0-alpha);}dest[3]=alpha+dest[3]*(1.0-alpha);}}
  }}
- let mut pixels=Vec::with_capacity(w*h*4);for p in canvas{for c in p.iter().take(3){pixels.push(if p[3]>0.0{(c/p[3]*255.0).round().clamp(0.0,255.0) as u8}else{0});}pixels.push((p[3]*255.0).round().clamp(0.0,255.0) as u8);}
+ let mut pixels=vec![0u8;w*h*4];for (y,(left,right)) in spans.into_iter().enumerate(){for x in left..right{let p=canvas[y*w+x];if p[3]==0.0{continue;}let at=(y*w+x)*4;for c in 0..3{pixels[at+c]=(p[c]/p[3]*255.0).round().clamp(0.0,255.0) as u8;}pixels[at+3]=(p[3]*255.0).round().clamp(0.0,255.0) as u8;}}
  let pixels=Arc::new(pixels);let value=json!({"raster":{"id":NEXT_RASTER.fetch_add(1,Ordering::Relaxed),"ptr":pixels.as_ptr() as usize,"len":pixels.len(),"width":w,"height":h,"scale":2},"label":label,"labelX":label_x,"labelY":(row-font)/2.0,"iconX":indent,"rowHeight":row,"gitMarker":marker,"gitColor":status.color(&theme),"gitMarkerX":marker_x,"gitMarkerWidth":marker_width,"gitTrailingWidth":marker_width+git_gap,"labelColor":label_color,"iconColor":icon_color});
  host.bytes+=pixels.len();host.cache.insert(key.clone(),Raster{value:value.clone(),pixels});host.order.push_back(key);
  while host.bytes>64*1024*1024||host.cache.len()>1024{let Some(key)=host.order.pop_front()else{break;};if let Some(old)=host.cache.remove(&key){host.bytes-=old.pixels.len();}}

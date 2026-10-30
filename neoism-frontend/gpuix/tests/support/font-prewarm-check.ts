@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {coreCall} from "../../src/native-core";
-const config={fontFamily:"Cascadia Code NF",fontWeight:400,markdownFontFamily:"DejaVu Serif"};
+const config={fontFamily:"Cascadia Code NF",fontWeight:400,markdownFontFamily:"DejaVu Serif",iconFontFamily:"Symbols Nerd Font Mono"};
 const start=performance.now();
 let ready=coreCall<{ready:boolean}>("paint.prewarm",config).ready;
 const kickoffMs=performance.now()-start;

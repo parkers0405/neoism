@@ -48,6 +48,9 @@ export class DocumentController {
   }catch(error){this.report(error);}
  }
  attachView(view:NativeEditor,editor:NativeEditor){if(this.owners.get(view)===editor)return;const binding=this.bindings.get(editor);if(!binding)return;this.owners.set(view,editor);binding.views.add(view);this.paintPeers(binding);}
+ rebind(editor:NativeEditor,path:string,workspace?:Workspace){
+  this.detach(editor);editor.call("path",{path});this.attach(editor,path,workspace);
+ }
  private ship(binding:Binding,drain:Drain){binding.seeded=drain.seeded;if(!this.connected)return;for(const message of drain.send)try{this.client.send("Crdt",message);}catch(error){this.report(error);break;}}
  private flush(binding:Binding){if(this.disposed)return;try{this.ship(binding,coreCall<Drain>("editor.crdt.flush",{id:binding.editor.id}));}catch(error){this.report(error);}}
  private paintPeers(binding:Binding){

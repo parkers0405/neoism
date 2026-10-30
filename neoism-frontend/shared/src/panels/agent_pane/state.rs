@@ -747,9 +747,9 @@ pub struct NeoismAgentPane {
     timeline_dirty_message_ids: BTreeSet<String>,
     timeline_dirty_message_indices: BTreeSet<usize>,
     /// First source row whose trace was observed live during this visit to the
-    /// session. This is intentionally not persisted: revisiting a session
-    /// presents its settled answer-only history, while the current visit keeps
-    /// reasoning and tools visible even after the foreground turn goes idle.
+    /// session. Family navigation parks this with the transcript so returning
+    /// from a subagent retains visible reasoning and tools. A cold visit still
+    /// presents settled answer-only history.
     timeline_live_trace_start: Option<usize>,
     /// Id of the user message the live-trace window is anchored after; kept
     /// alongside the index so list replacements/prepends re-derive the same

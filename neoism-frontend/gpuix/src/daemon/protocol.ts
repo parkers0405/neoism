@@ -104,7 +104,7 @@ export function parseEnvelope(raw: string): WireEvent | undefined {
   const envelope = variant(JSON.parse(raw));
   if (!envelope) return;
   const [tag, body] = envelope;
-  if (["PtyCreated", "PtyOutput", "PtyClosed", "SessionCwd", "TerminalDirectoryChanged", "TerminalDirectoryChangeFailed"].includes(tag) && isRecord(body))
+  if (["PtyCreated", "PtyOutput", "PtyClosed", "SessionCwd", "SessionProgram", "TerminalDirectoryChanged", "TerminalDirectoryChangeFailed"].includes(tag) && isRecord(body))
     return { family: "Pty", requestId: 0, message: { [tag]: body } };
   const family = tag.replace(/Reply$/, "");
   if (!["Workspace", "Files", "Agent", "Pty", "Search", "Config", "Editor", "Diagnostics", "Git", "Crdt"].includes(family) || !isRecord(body)) return;

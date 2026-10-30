@@ -29,6 +29,8 @@ bitflags = { workspace = true, features = ["serde"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 unicode-width = { workspace = true }
+# Sequence-aware widths for grapheme-safe code wrapping (ZWJ emoji, flags).
+unicode-width-sequences = { package = "unicode-width", version = "0.2.2" }
 unicode-segmentation = "1.13.2"
 typos-dict = "0.13"
 unicase = "2.9"

@@ -5203,13 +5203,10 @@ fn task_card_navigation_clears_on_subagent_round_trip() {
     assert!(!pane.any_tool_expand_animating());
 }
 
-/// Leave-and-return collapses the live-trace window. A parked parent
-/// layout from the previous visit still contains the tool rows that
-/// were visible while you were inside the child; restoring that cache
-/// would paint leftover titles that vanish on click. The restore must
-/// drop the parked layout and hide settled tools.
+/// Returning from a child keeps observed tools visible while rebuilding their
+/// layout and hit targets instead of restoring stale geometry.
 #[test]
-fn settled_tool_titles_hide_after_subagent_round_trip() {
+fn settled_tool_titles_survive_subagent_round_trip() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("parent".to_string());
     pane.side_panel.ensure_subagent_main_entry("parent");
@@ -5260,11 +5257,11 @@ fn settled_tool_titles_hide_after_subagent_round_trip() {
     pane.switch_session("child-1".to_string());
     pane.switch_session("parent".to_string());
 
-    assert_eq!(pane.timeline_live_trace_start, None);
+    assert_eq!(pane.timeline_live_trace_start, Some(1));
     assert!(pane.timeline_layout_cache.borrow().is_none());
     assert!(
-        pane.tool_archived("read-1"),
-        "settled tools must stay archived after leave-and-return"
+        !pane.tool_archived("read-1"),
+        "returning from a child must preserve visible settled tools"
     );
 }
 

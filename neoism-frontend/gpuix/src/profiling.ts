@@ -3,6 +3,10 @@ import type { EventPayload, GpuixRenderer } from "@gpuix/native";
 /** Opt-in timings contain operation names/counts only, never file contents,
  * daemon credentials, paths, or input text. No extra native queries/redraws. */
 export const profilingEnabled=process.env.NEOISM_GPUIX_PROFILE==="1";
+/** Process-relative startup milestones; no user paths or session data. */
+export function profileStartup(phase:string){
+  if(profilingEnabled)console.error("[neoism-gpuix-startup]",JSON.stringify({phase,ms:Math.round(performance.now()*100)/100}));
+}
 interface Metric { count:number;ms:number;maxMs:number;bytes:number;samples:number[] }
 const metrics=new Map<string,Metric>();
 let lastReport=performance.now(),nativeFrames=0,reportedFrames=0,draw:unknown,lastInput=0;

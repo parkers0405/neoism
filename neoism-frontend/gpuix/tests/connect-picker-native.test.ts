@@ -1,7 +1,16 @@
 import {expect,test} from "bun:test";
 import {coreCall} from "../src/native-core";
+import {connectCatalog} from "../src/agent/connect-catalog";
 import type {PickerFrame,PickerOption} from "../src/ui/InlinePicker";
 const geometry={anchor:[100,700,600,120],scale:1};
+test("Connect strips model catalogs before FFI without changing provider choices",()=>{
+ const catalog={all:[{id:"openai",name:"OpenAI",models:{large:{description:"unused".repeat(10000)}},options:{unused:true}},{id:"custom",name:"",models:{},options:{}}],connected:["openai"]};
+ const compact=connectCatalog(catalog);
+ expect(JSON.stringify(compact).length).toBeLessThan(200);
+ expect(coreCall("picker.connect-options",{catalog:compact})).toEqual(coreCall("picker.connect-options",{catalog}));
+ const provider={id:"openai",name:"OpenAI",get models():never{throw new Error("Picker must not traverse models");},get options():never{throw new Error("Picker must not traverse options");}};
+ expect(connectCatalog({all:[provider],connected:["openai"]})).toEqual({all:[{id:"openai",name:"OpenAI"}],connected:["openai"]});
+});
 test("Connect provider rows use canonical popular ordering, connected marks and alphabetical remaining providers",()=>{
  const rows=coreCall<PickerOption[]>("picker.connect-options",{catalog:{all:[{id:"z",name:"Zulu"},{id:"openai",name:"OpenAI"},{id:"github-copilot",name:"Copilot"},{id:"anthropic",name:"Anthropic"},{id:"a",name:"alpha"},{id:"openrouter",name:"OpenRouter"},{id:"claude-code",name:"Claude Code"},{id:"",name:"invalid"}],connected:["openai","a"]}});
  expect(rows.map(row=>row.title)).toEqual(["Popular","Claude Code","Anthropic","✓ OpenAI","OpenRouter","Copilot","Providers","✓ alpha","Zulu"]);

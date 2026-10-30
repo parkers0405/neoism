@@ -429,14 +429,9 @@ impl NeoismAgentPane {
         interaction_policy::register_hit_rect(&mut self.tool_hit_rects, id, rect);
     }
 
-    /// Drop transient timeline interaction state — expanded tool cards,
-    /// in-flight expand animations, the pinned group-child selection,
-    /// link hover, and stale hit rects — so a session switch renders
-    /// the target's timeline exactly as it would fresh. The expansion
-    /// set is keyed by message id and is deliberately NOT parked per
-    /// session: without this reset a child→parent round trip restored
-    /// the same ids and the navigation click's raised Task card came
-    /// back still showing its title until clicked again.
+    /// Clear the departing transcript's disclosure, animations and hit targets.
+    /// A cached family navigation restores the target's own disclosure afterward,
+    /// while pointer state and geometry are always rebuilt for the new view.
     pub(in crate::panels::agent_pane) fn reset_transient_timeline_interactions(
         &mut self,
     ) {

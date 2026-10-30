@@ -93,6 +93,7 @@ export class WorkspaceModel {
   private startupWelcomePending = true;
   private workspaceNavigation = new Map<string, WorkspaceNavigation>();
   private fileLoads = new Map<string, Promise<void>>();
+  private directoryVersions = new Map<string,number>();
   private directoryLoads = new Map<string, Promise<void>>();
   private editorSnapshots = new WeakMap<NativeEditor, { frame: NativeEditor["frame"]; snapshot: ReturnType<NativeEditor["snapshot"]> }>();
   private updateDepth = 0;
@@ -567,13 +568,14 @@ export class WorkspaceModel {
   listDirectory = (path: string, epoch = this.epoch, notes = false): Promise<void> => {
     const root = notes ? this.state.activeWorkspace?.notes_vault_dir : this.state.activeWorkspace?.root_dir;
     if (!root) return Promise.resolve();
-    const key = JSON.stringify([epoch, root, path, notes]), pending = this.directoryLoads.get(key);
+    const version=this.directoryVersions.get(root)||0;
+    const key = JSON.stringify([epoch, root, path, notes,version]), pending = this.directoryLoads.get(key);
     if (pending) return pending;
     const task = (async () => {
       try {
         const reply = await this.run(this.client.request("Files", { ListDir: { path } }, root));
         const directory = Schema.decodeUnknownSync(DirectorySchema)(expectVariant(reply, "DirListing"));
-        if (epoch !== this.epoch) return;
+        if (epoch !== this.epoch || version !== (this.directoryVersions.get(root)||0)) return;
         const entries = [...directory.entries].sort((a, b) => Number(b.is_dir) - Number(a.is_dir) || a.name.localeCompare(b.name));
         const before = (notes ? this.state.notesDirectories : this.state.directories)[path];
         if (before && before.entries.length === entries.length && before.entries.every((entry, index) => entry.name === entries[index].name && entry.is_dir === entries[index].is_dir && entry.size === entries[index].size)) return;
@@ -589,6 +591,56 @@ export class WorkspaceModel {
     if (expanded.has(path)) expanded.delete(path);
     else { expanded.add(path); if (!(notes ? this.state.notesDirectories : this.state.directories)[path]) void this.listDirectory(path, this.epoch, notes); }
     this.update(notes ? { notesExpanded: expanded } : { expanded });
+  };
+  /** A tree drop is a host-scoped rename, including for joined workspaces. */
+  moveTreePath = async (from: string, directory: string, notes = false) => {
+    const workspace=this.state.activeWorkspace,epoch=this.epoch;
+    const root=notes?workspace?.notes_vault_dir:workspace?.root_dir;
+    if(!workspace||!root)return;
+    const paths=/^[a-z]:[\\/]/i.test(root)||root.startsWith("\\\\")?win32:posix;
+    const relativePath=(value:string)=>paths.relative(root,paths.resolve(root,value)).replaceAll("\\","/");
+    from=relativePath(from);directory=relativePath(directory);
+    const outside=(path:string)=>path===".."||path.startsWith("../")||paths.isAbsolute(path);
+    if(!from||outside(from)||outside(directory))throw new Error("The move must stay inside this tree's root.");
+    const name=posix.basename(from),to=directory?`${directory}/${name}`:name;
+    if(to===from)return;
+    if(directory===from||directory.startsWith(from+"/"))throw new Error("A folder cannot be moved inside itself.");
+    // Older daemons allow replacing a destination. Check the authoritative
+    // listing, not our potentially stale navigation cache, before requesting it.
+    const listing=Schema.decodeUnknownSync(DirectorySchema)(expectVariant(await this.run(this.client.request("Files",{ListDir:{path:directory}},root)),"DirListing"));
+    if(listing.entries.some(entry=>paths===win32?entry.name.toLowerCase()===name.toLowerCase():entry.name===name))throw new Error("A file or folder with that name already exists there.");
+    if(epoch!==this.epoch||this.disposed)return;
+    expectVariant(await this.run(this.client.request("Files",{Rename:{from,to}},root)),"Renamed");
+    if(this.disposed)return;
+    this.directoryVersions.set(root,(this.directoryVersions.get(root)||0)+1);
+    const remap=(path:string)=>path===from?to:path.startsWith(from+"/")?to+path.slice(from.length):path;
+    const changed:Surface[]=[];
+    const surfaces=this.state.surfaces.map(surface=>{
+      if(surface.kind!=="file"||surface.document||surface.workspaceId!==workspace.id||(surface.rootDir||workspace.root_dir)!==root||!surface.path)return surface;
+      const path=remap(surface.path);if(path===surface.path)return surface;
+      const next={...surface,path,title:posix.basename(path)};changed.push(next);return next;
+    });
+    this.update({surfaces});
+    for(const surface of changed){
+      const path=this.hostPath(surface),owner=this.editors.get(surface.id);
+      if(owner)this.collaboration.rebind(owner,path,workspace);
+      for(const view of this.editorViews.values())if(view.surfaceId===surface.id){view.editor.call("path",{path});if(owner)this.collaboration.attachView(view.editor,owner);}
+      for(const view of this.markdownViews.values())if(view.surfaceId===surface.id)view.markdown.call("path",{path});
+      const pending=this.fileLoads.get(surface.id);if(pending)void pending.then(()=>this.loadFile(surface));
+    }
+    const navigationKey=this.workspaceKey(workspace);
+    const current=epoch===this.epoch,source=current?this.state:this.workspaceNavigation.get(navigationKey);
+    if(!source)return;
+    const directories={...(notes?source.notesDirectories:source.directories)},expanded=new Set([...(notes?source.notesExpanded:source.expanded)].map(remap));
+    for(const path of Object.keys(directories))if(path===from||path.startsWith(from+"/")){const next=remap(path);directories[next]={...directories[path],path:next};delete directories[path];}
+    const oldParent=posix.dirname(from)==="."?"":posix.dirname(from),old=directories[oldParent];
+    const movedEntry=old?.entries.find(entry=>entry.name===name)||{name,is_dir:Object.keys(directories).some(path=>path===to||path.startsWith(to+"/"))};
+    if(old)directories[oldParent]={...old,entries:old.entries.filter(entry=>entry.name!==name)};
+    directories[directory]={path:directory,entries:[...listing.entries,movedEntry].sort((a,b)=>Number(b.is_dir)-Number(a.is_dir)||a.name.localeCompare(b.name))};
+    let parent=directory;while(parent){expanded.add(parent);parent=posix.dirname(parent);if(parent===".")break;}expanded.add("");
+    const patch=notes?{notesDirectories:directories,notesExpanded:expanded}:{directories,expanded};
+    if(current){this.update(patch);await Promise.all([...new Set([oldParent,directory,...[...expanded].filter(path=>path===to||path.startsWith(to+"/"))])].map(path=>this.listDirectory(path,epoch,notes)));}
+    else this.workspaceNavigation.set(navigationKey,{...source,...patch} as WorkspaceNavigation);
   };
   openFile = async (path: string, rootOverride?: string) => {
     const workspace = this.state.activeWorkspace;
@@ -1394,6 +1446,16 @@ export class WorkspaceModel {
       }
       if(event.family==="Pty"){
         if(tag==="PtyClosed"&&typeof body.session_id==="string")this.retireTerminal(body.session_id);
+        if(tag==="SessionProgram"&&typeof body.session_id==="string"&&typeof body.program==="string"){
+          const program=body.program.split(/[\\/]/).pop()?.toLowerCase();
+          const title=program==="claude"?"Claude":program==="codex"?"Codex":program==="opencode"?"OpenCode":"Terminal";
+          const changed=this.state.surfaces.filter(surface=>surface.kind==="terminal"&&surface.sessionId===body.session_id&&surface.title!==title).map(surface=>({...surface,title}));
+          if(changed.length){
+            const updates=new Map(changed.map(surface=>[surface.id,surface]));
+            this.update({surfaces:this.state.surfaces.map(surface=>updates.get(surface.id)||surface)});
+            for(const surface of changed)this.getLayout(surface.workspaceId).rename(surface);
+          }
+        }
         if(tag==="SessionCwd"&&typeof body.session_id==="string"&&absoluteTerminalDirectory(body.cwd)){
           const previous=isRecord(this.state.ui.terminalCwds)?this.state.ui.terminalCwds:{};
           if(previous[body.session_id]!==body.cwd)this.setUI({terminalCwds:{...previous,[body.session_id]:body.cwd}});
@@ -1447,7 +1509,9 @@ export class WorkspaceModel {
         const delivered = {HistoryChunk:{...body,messages:older ? history : merged,next_cursor:this.historyCursors.get(sessionId) ?? null}};
         for (const listener of this.agentEventListeners) { try { listener(delivered, older ? "older" : "head"); } catch (error) { this.report(error); } }
       } else if (tag === "MessageUpdated" && sessionId) {
-        const message=Schema.decodeUnknownSync(HistoryMessageSchema)(body.message);if(message.kind==="User")this.optimisticPrompts.delete(message.id);this.upsertMessage(sessionId,message);
+        const message=Schema.decodeUnknownSync(HistoryMessageSchema)(body.message);
+        const confirmed=message.kind==="User"&&this.optimisticPrompts.delete(message.id);
+        this.upsertMessage(sessionId,message,confirmed);
       } else if (tag === "ContentDelta" && sessionId && typeof body.message_id === "string" && typeof body.text === "string") {
         const id = body.message_id;
         const previous = this.state.history[sessionId]?.find((m) => m.id === id);
@@ -1490,8 +1554,10 @@ export class WorkspaceModel {
       }
     } catch { this.update({ error: `Unsupported ${tag} payload from daemon` }); }
   };
-  private upsertMessage(sessionId: string, message: HistoryMessage) {
-    const list = [...(this.state.history[sessionId] || [])];
+  private upsertMessage(sessionId: string, message: HistoryMessage, confirmed=false) {
+    // Confirmed echoes follow server event order, not each client's local send
+    // order. Otherwise simultaneous users retain different transcript orders.
+    const list = (this.state.history[sessionId] || []).filter(row=>!confirmed||row.id!==message.id);
     const index = list.findIndex((m) => m.id === message.id);
     if (index >= 0) list[index] = message; else list.push(message);
     this.update({ history: { ...this.state.history, [sessionId]: list } });

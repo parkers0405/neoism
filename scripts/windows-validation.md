@@ -1,27 +1,31 @@
-# Windows validation on the GPUIX branch
+# GPUIX nightly platform builds
 
-The current desktop bundle and installer target Linux x86_64. The old desktop
-and MSI release pipelines have been removed. This branch does not publish or
-claim validation of a Windows GPUIX desktop release.
+`Release Neoism GPUIX` runs Linux x86_64, macOS ARM64, and Windows x86_64
+as independent jobs in one workflow run. Each job builds the GPUIX frontend,
+native engines, workspace daemon, Agent service, and standalone Agent GUI from
+its checkout, runs checks, and uploads its archive and SHA-256 checksum directly
+to the same release. The first successful platform publishes the draft release;
+other successful platforms attach their downloads as they finish. A platform
+failure does not cancel or hold back the others.
 
-[Tool Composition](../.github/workflows/tool-composition.yml) retains Linux,
-macOS, and Windows checks for the Rust tool runtime. Its shared
-[Blaze setup](../.github/actions/setup-blaze/action.yml) pins the compiler and
-nightly. Windows bootstraps the compiler from that exact source revision because
-upstream has no Windows release archive. Application code is checked and tested
-with Blaze, using its documented host proc-macro mode.
+Nightly tags are prereleases and never replace the stable `Latest` release.
+Each archive and its accompanying `build-info.json` identify the exact source
+commit, version, platform, and architecture.
 
-The runtime checks are:
+Use GitHub's **Re-run failed jobs** for a transient failure at the same commit.
+For a source fix, push it to the branch and dispatch `release-neoism.yml` from
+that branch with `release_tag` set to the existing nightly and `platform` set
+to `linux`, `macos`, or `windows`. This rebuilds only the selected platform and
+updates its assets; its build metadata records the new commit. The checkout
+version must still match the nightly tag. Stable releases must build from their
+tag.
 
-```sh
-bash scripts/blaze.sh check --locked -p neoism-agent-composition --all-targets
-bash scripts/blaze.sh test --locked -p neoism-agent-composition
-```
+Downloads are a Linux tarball with its bundle installer, a macOS `.app` in a
+DMG and tarball, and a Windows portable ZIP. Extract the complete Windows folder
+and run `neoism.exe`; its DLLs, daemon, Agent, licenses, and web resources must
+stay beside it. macOS builds are ad-hoc signed, not Developer ID notarized.
 
-Native Windows PTY and process helpers remain in their service crates. Their
-platform-specific tests do not establish GPUIX window, input, installer, or
-rendering acceptance. See the [frontend verification gates](../neoism-frontend/gpuix/parity.json)
-for the current desktop scope.
-
-The previous MSI acceptance and runner-loss investigation notes are retained as
-[historical evidence](../docs/archive/windows-release-validation.md).
+The release checks verify native engine loading, frontend tests, and executable
+startup from the extracted archive. These checks do not establish interactive
+GPU rendering or input parity on every supported machine. The preserved older
+MSI investigation is [historical evidence](../docs/archive/windows-release-validation.md).

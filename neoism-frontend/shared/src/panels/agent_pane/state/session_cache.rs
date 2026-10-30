@@ -176,6 +176,10 @@ pub(in crate::panels::agent_pane::state) struct CachedAgentSession {
     pub pending_user_prompts: Vec<String>,
     pub prompt_echo_aliases: Vec<(String, String)>,
     pub timeline_history: AgentTimelineHistoryState,
+    pub timeline_live_trace_start: Option<usize>,
+    pub timeline_live_trace_anchor: Option<String>,
+    pub expanded_tool_ids: BTreeSet<String>,
+    pub selected_tool_group_child: Option<(String, String)>,
     pub timeline_content_height_px: f32,
     pub timeline_layout_epoch: u64,
     pub timeline_layout_cache: Option<TimelineLayoutCache>,
@@ -200,6 +204,10 @@ impl CachedAgentSession {
             pending_user_prompts: Vec::new(),
             prompt_echo_aliases: Vec::new(),
             timeline_history: AgentTimelineHistoryState::default(),
+            timeline_live_trace_start: None,
+            timeline_live_trace_anchor: None,
+            expanded_tool_ids: BTreeSet::new(),
+            selected_tool_group_child: None,
             timeline_content_height_px: 0.0,
             timeline_layout_epoch: 0,
             timeline_layout_cache: None,
@@ -503,6 +511,10 @@ impl NeoismAgentPane {
                 pending_user_prompts: std::mem::take(&mut self.pending_user_prompts),
                 prompt_echo_aliases: std::mem::take(&mut self.prompt_echo_aliases),
                 timeline_history,
+                timeline_live_trace_start: self.timeline_live_trace_start.take(),
+                timeline_live_trace_anchor: self.timeline_live_trace_anchor.take(),
+                expanded_tool_ids: std::mem::take(&mut self.expanded_tool_ids),
+                selected_tool_group_child: self.selected_tool_group_child.take(),
                 timeline_content_height_px: self.timeline_content_height_px,
                 timeline_layout_epoch: self.timeline_layout_epoch,
                 timeline_layout_cache,
@@ -593,10 +605,8 @@ impl NeoismAgentPane {
         self.input = cached.input;
         self.close_picker();
         self.reset_timeline_navigation_for_session_switch();
-        // The restored timeline must render fresh — no raised/expanded
-        // card artifacts from the click that navigated away. Leave-and-return
-        // also collapses the live-trace window, so a parked layout that still
-        // contains tool rows would paint leftover titles until the next click.
+        // Clear gesture state and hit targets from the previous transcript.
+        // Disclosure belongs to the parked session, not to the navigation click.
         self.reset_transient_timeline_interactions();
         self.timeline_history = cached.timeline_history;
         self.timeline_history_position_hydrated = true;
@@ -631,6 +641,14 @@ impl NeoismAgentPane {
             self.close_picker();
         }
         self.messages = cached.messages;
+        if stays_in_family {
+            self.timeline_live_trace_start = cached.timeline_live_trace_start;
+            self.timeline_live_trace_anchor = cached.timeline_live_trace_anchor;
+            self.expanded_tool_ids = cached.expanded_tool_ids;
+            self.selected_tool_group_child = cached.selected_tool_group_child;
+            // Background history may have prepended or replaced message rows.
+            self.rebase_current_turn_trace();
+        }
         self.pending_user_prompts = cached.pending_user_prompts;
         self.prompt_echo_aliases = cached.prompt_echo_aliases;
         self.restore_session_runtime_ui(cached.runtime);
@@ -639,9 +657,8 @@ impl NeoismAgentPane {
             self.running_background_task_count = count;
             self.background_tasks_started_at = started_at;
         }
-        // Live-trace was cleared by the switch. Drop the parked layout so
-        // settled tool/reasoning rows are re-masked instead of flashing as
-        // leftover titles from the previous visit.
+        // Rebuild geometry and clickable targets against the restored trace
+        // and expansion state; cached layouts may predate background updates.
         self.invalidate_timeline_layout();
         // The virtual timeline rebuilds off the content revision, which
         // is pane-global and monotonic (never parked/restored) — bump

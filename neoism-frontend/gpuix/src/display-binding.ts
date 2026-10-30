@@ -30,6 +30,7 @@ export function displayBindingLoader(binding:string,stamp:DisplayStamp,embedded=
  return `${embedded?`import embeddedBinding from ${JSON.stringify(binding)} with { type: "file" };\n`:""}import {createRequire} from "node:module";
 const nativeBinding=createRequire(import.meta.url)(${embedded?"embeddedBinding":JSON.stringify(binding)});
 if(typeof nativeBinding.GpuixRenderer?.prototype?.requestFrameWake!=="function"||typeof nativeBinding.testSupportEnabled!=="function"||nativeBinding.testSupportEnabled()!==false)throw new Error("The selected GPUIX binding has no production display frame API. Run npm run build:display.");
+if(typeof nativeBinding.GpuixRenderer.prototype.initAsync!=="function")throw new Error("The selected GPUIX binding has no asynchronous window initialization. Run npm run build:display.");
 if(typeof nativeBinding.inputCaretGeometrySupported!=="function"||nativeBinding.inputCaretGeometrySupported()!==true)throw new Error("The selected GPUIX input binding cannot emit caretGeometry. Run npm run build:display.");
 if(typeof nativeBinding.applicationTabShortcutsSupported!=="function"||nativeBinding.applicationTabShortcutsSupported()!==true)throw new Error("The selected GPUIX binding cannot capture tab navigation before native text selection. Run npm run build:display.");
 export const {AvailableUpdate,GpuixRenderer,TestGpuixRenderer,checkUpdate,hasTestGpuixRenderer,isTerminal,testSupportEnabled,inputCaretGeometrySupported,applicationTabShortcutsSupported}=nativeBinding;

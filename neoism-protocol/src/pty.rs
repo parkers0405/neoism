@@ -113,6 +113,11 @@ pub enum ServerMessage {
         session_id: String,
         cwd: String,
     },
+    /// Foreground program for a live PTY, updated when its process group changes.
+    SessionProgram {
+        session_id: String,
+        program: String,
+    },
     Error {
         message: String,
     },

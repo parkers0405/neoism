@@ -169,6 +169,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
     if view.pane.doc_history_bound(){if let Some(delta)=md::doc_sync::diff_doc_texts(&view.pane.lines.join("\n"),text(v,"text")){md::doc_sync::apply_remote_delta_to_pane(&mut view.pane,&delta);}}
     else{view.pane.set_source_preserving_view(text(v,"text"));}
   },
+  "markdown.path"=>{view.pane.path=PathBuf::from(text(v,"path"));},
   "markdown.doc-bound"=>view.pane.set_doc_history_bound(v["bound"].as_bool().unwrap_or(false)),
   "markdown.presence"=>{let peers=serde_json::from_value::<Vec<neoism_protocol::crdt::CrdtPeerPresence>>(v["peers"].clone()).map_err(|e|e.to_string())?;view.pane.remote_cursors=peers.into_iter().map(|peer|md::MarkdownRemoteCursor{name:peer.display_name,client_os:peer.client_os,color:[peer.color.r,peer.color.g,peer.color.b],rainbow:peer.rainbow,insert:peer.insert,line:peer.cursor.line as usize,col_utf16:peer.cursor.column as usize}).collect();},
   "markdown.asset"=>view.painter.set_asset(PathBuf::from(text(v,"path")),v["text"].as_str().map(str::to_owned)),

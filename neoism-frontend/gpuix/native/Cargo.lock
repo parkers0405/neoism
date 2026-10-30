@@ -381,9 +381,9 @@ dependencies = [
 
 [[package]]
 name = "bitvec"
-version = "1.1.1"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddcec3d12c579d40898fe0a9a358a803c23e9c52ca3c425707f81c9436211837"
+checksum = "1bc2832c24239b0141d5674bb9174f9d68a8b5b3f2753311927c172ca46f7e9c"
 dependencies = [
  "funty",
  "radium",
@@ -2184,12 +2184,13 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.106"
+version = "0.3.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7883d941dae510fb2d978fc3fe018c71c9e2892fd38854de3e8b92c2e5ad9cc5"
+checksum = "2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca"
 dependencies = [
  "cfg-if",
  "futures-util",
+ "once_cell",
  "wasm-bindgen",
 ]
 
@@ -2441,7 +2442,7 @@ checksum = "5f98efec8807c63c752b5bd61f862c165c115b0a35685bdcfd9238c7aeb592b7"
 dependencies = [
  "cfg-if",
  "miette-derive",
- "unicode-width",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -2526,7 +2527,7 @@ checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
 
 [[package]]
 name = "neoism-agent-core"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "getrandom 0.2.17",
  "rand 0.8.8",
@@ -2537,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-service-api"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -2557,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-customization"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2601,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-grapheme-width"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "phf",
  "ucd-trie",
@@ -2609,11 +2610,11 @@ dependencies = [
 
 [[package]]
 name = "neoism-neoworld-core"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 
 [[package]]
 name = "neoism-paint"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "bytemuck",
  "core-foundation 0.10.1",
@@ -2651,11 +2652,11 @@ dependencies = [
 
 [[package]]
 name = "neoism-product-docs"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2666,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-terminal-types"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "bitflags 2.13.2",
  "serde",
@@ -2674,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-ui"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -2721,6 +2722,7 @@ dependencies = [
  "typos-dict",
  "unicase",
  "unicode-segmentation",
+ "unicode-width 0.2.2",
  "unicode-width-16",
  "url",
  "wasm-bindgen",
@@ -2732,7 +2734,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-workspace-index"
-version = "0.7.142"
+version = "0.7.143-nightly.20261030.1"
 dependencies = [
  "dirs",
  "dunce",
@@ -5716,6 +5718,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
 name = "unicode-width-16"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5852,9 +5860,9 @@ checksum = "b8dad83b4f25e74f184f64c43b150b91efe7647395b42289f38e50566d82855b"
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.129"
+version = "0.2.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bb54f33acc68fd454578d9820b0bde1a1a3d17aa17bb7b6595806d02886d409"
+checksum = "0bf938a0bacb0469e83c1e148908bd7d5a6010354cf4fb73279b7447422e3a89"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -5865,20 +5873,19 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.79"
+version = "0.4.68"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbab34de2d982e9b48e18d216d04c4a6f641066ff19ffb699980f591ee3610e"
+checksum = "f371d383f2fb139252e0bfac3b81b265689bf45b6874af544ffa4c975ac1ebf8"
 dependencies = [
  "js-sys",
- "tokio",
  "wasm-bindgen",
 ]
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.129"
+version = "0.2.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e29d0c35b16e224a7eeb5cd2d25e3e1968fbd65604117b44d3b789d00ee8535"
+checksum = "eeff24f84126c0ec2db7a449f0c2ec963c6a49efe0698c4242929da037ca28ed"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -5886,22 +5893,22 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.129"
+version = "0.2.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f501a8bc3719dba86ef8ae4728879c08001bea749eb1333ac5b91e040e2a6b7"
+checksum = "9d08065faf983b2b80a79fd87d8254c409281cf7de75fc4b773019824196c904"
 dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 3.0.9",
+ "syn 2.0.119",
  "wasm-bindgen-shared",
 ]
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.129"
+version = "0.2.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
+checksum = "5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129"
 dependencies = [
  "unicode-ident",
 ]
@@ -5921,9 +5928,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.106"
+version = "0.3.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
+checksum = "4f2dfbb17949fa2088e5d39408c48368947b86f7834484e87b73de55bc14d97d"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

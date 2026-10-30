@@ -3,21 +3,32 @@
 //! multiplies display columns by a measured cell width, a tty host
 //! uses them as terminal columns directly.
 //!
-//! v1 counts every non-tab char as one cell (wide CJK/emoji glyphs
-//! drift; measured hit-stops come later with the polish pass — the
-//! draw path uses the same math, so caret and text stay consistent).
+//! Unicode grapheme clusters are indivisible; their display widths and tab
+//! stops are shared by wrapping, drawing offsets, and pointer mapping.
+
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width_sequences::UnicodeWidthStr;
+
+fn cluster_width(cluster: &str, col: usize, tab: usize) -> usize {
+    if cluster == "\t" {
+        tab.max(1) - col % tab.max(1)
+    } else {
+        UnicodeWidthStr::width(cluster)
+    }
+}
 
 pub const TAB_DISPLAY_WIDTH: usize = 4;
 
 /// Display column of a byte offset, expanding tabs to the next stop.
+/// Offsets inside a grapheme snap to its beginning.
 pub fn display_col_for_byte(line: &str, byte: usize, tab: usize) -> usize {
     let tab = tab.max(1);
     let mut col = 0usize;
-    for (i, c) in line.char_indices() {
-        if i >= byte {
+    for (i, cluster) in line.grapheme_indices(true) {
+        if i >= byte || i + cluster.len() > byte {
             break;
         }
-        col += if c == '\t' { tab - (col % tab) } else { 1 };
+        col += cluster_width(cluster, col, tab);
     }
     col
 }
@@ -27,8 +38,8 @@ pub fn display_col_for_byte(line: &str, byte: usize, tab: usize) -> usize {
 pub fn byte_for_display_col(line: &str, target: usize, tab: usize) -> usize {
     let tab = tab.max(1);
     let mut col = 0usize;
-    for (i, c) in line.char_indices() {
-        let width = if c == '\t' { tab - (col % tab) } else { 1 };
+    for (i, cluster) in line.grapheme_indices(true) {
+        let width = cluster_width(cluster, col, tab);
         if col + width > target {
             return i;
         }
@@ -46,16 +57,16 @@ pub fn expand_tabs_from(slice: &str, start_col: usize, tab: usize) -> String {
     }
     let mut out = String::with_capacity(slice.len() + tab * 2);
     let mut col = start_col;
-    for c in slice.chars() {
-        if c == '\t' {
+    for cluster in slice.graphemes(true) {
+        if cluster == "\t" {
             let pad = tab - (col % tab);
             for _ in 0..pad {
                 out.push(' ');
             }
             col += pad;
         } else {
-            out.push(c);
-            col += 1;
+            out.push_str(cluster);
+            col += cluster_width(cluster, col, tab);
         }
     }
     out
@@ -213,7 +224,11 @@ fn break_candidates(line: &str, tab: usize) -> Vec<BreakCandidate> {
     }
 
     let tab = tab.max(1);
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let clusters: Vec<(usize, &str)> = line.grapheme_indices(true).collect();
+    let chars: Vec<(usize, char)> = clusters
+        .iter()
+        .map(|(byte, cluster)| (*byte, cluster.chars().next().unwrap()))
+        .collect();
     let mut candidates = Vec::new();
     let mut state = LexState::Normal;
     let mut escaped = false;
@@ -227,8 +242,8 @@ fn break_candidates(line: &str, tab: usize) -> Vec<BreakCandidate> {
             .checked_sub(1)
             .and_then(|i| chars.get(i))
             .map(|(_, ch)| *ch);
-        let width = if ch == '\t' { tab - col % tab } else { 1 };
-        let next_byte = byte + ch.len_utf8();
+        let width = cluster_width(clusters[i].1, col, tab);
+        let next_byte = byte + clusters[i].1.len();
 
         match state {
             LexState::Normal => {
@@ -253,13 +268,10 @@ fn break_candidates(line: &str, tab: usize) -> Vec<BreakCandidate> {
                         if !candidate_ch.is_whitespace() {
                             break;
                         }
-                        let candidate_width = if candidate_ch == '\t' {
-                            tab - end_col % tab
-                        } else {
-                            1
-                        };
+                        let candidate_width =
+                            cluster_width(clusters[end_i + 1].1, end_col, tab);
                         end_i += 1;
-                        end_byte = candidate_byte + candidate_ch.len_utf8();
+                        end_byte = candidate_byte + clusters[end_i].1.len();
                         end_col += candidate_width;
                     }
                     let priority = match previous {
@@ -365,7 +377,11 @@ fn delimiter_snapshots(line: &str, tab: usize) -> Vec<(usize, Option<usize>)> {
     let mut state = LexState::Normal;
     let mut escaped = false;
     let mut col = 0usize;
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let clusters: Vec<(usize, &str)> = line.grapheme_indices(true).collect();
+    let chars: Vec<(usize, char)> = clusters
+        .iter()
+        .map(|(byte, cluster)| (*byte, cluster.chars().next().unwrap()))
+        .collect();
     let mut i = 0usize;
     while let Some(&(byte, ch)) = chars.get(i) {
         let next = chars.get(i + 1).map(|(_, ch)| *ch);
@@ -411,12 +427,11 @@ fn delimiter_snapshots(line: &str, tab: usize) -> Vec<(usize, Option<usize>)> {
             }
             LexState::BlockComment | LexState::LineComment => {}
         }
-        col += if ch == '\t' {
-            tab.max(1) - col % tab.max(1)
-        } else {
-            1
-        };
-        snapshots.push((byte + ch.len_utf8(), stack.last().map(|(_, col)| *col)));
+        col += cluster_width(clusters[i].1, col, tab);
+        snapshots.push((
+            byte + clusters[i].1.len(),
+            stack.last().map(|(_, col)| *col),
+        ));
         i += 1;
     }
     snapshots
@@ -479,26 +494,22 @@ pub fn wrap_segments(line: &str, cols: usize, tab: usize) -> Vec<WrapSegment> {
         let limit = source_col + available;
         let mut hard_byte = byte_start;
         let mut hard_col = source_col;
-        for (relative, ch) in line[byte_start..].char_indices() {
+        for (relative, cluster) in line[byte_start..].grapheme_indices(true) {
             let byte = byte_start + relative;
-            let width = if ch == '\t' {
-                tab.max(1) - hard_col % tab.max(1)
-            } else {
-                1
-            };
+            let width = cluster_width(cluster, hard_col, tab);
             if hard_col + width > limit && byte > byte_start {
                 break;
             }
-            hard_byte = byte + ch.len_utf8();
+            hard_byte = byte + cluster.len();
             hard_col += width;
             if hard_col >= limit {
                 break;
             }
         }
         if hard_byte == byte_start {
-            // Defensive progress for malformed widths; always cut on UTF-8.
-            let ch = line[byte_start..].chars().next().unwrap();
-            hard_byte += ch.len_utf8();
+            // Defensive progress; never split a grapheme cluster.
+            let cluster = line[byte_start..].graphemes(true).next().unwrap();
+            hard_byte += cluster.len();
             hard_col = display_col_for_byte(line, hard_byte, tab);
         }
 

@@ -39,7 +39,7 @@ if (!existsSync(zig)) {
   const digest = createHash("sha256").update(readFileSync(archive)).digest("hex");
   if (digest !== release.sha256) throw new Error("Pinned Zig archive checksum mismatch");
   mkdirSync(tools, { recursive: true });
-  if (platform === "windows") throw new Error("Extract the verified Zig zip to " + tools + " before building on Windows");
+  // Windows ships bsdtar, which also extracts the verified ZIP archive.
   await run(["tar", "-xf", archive, "--strip-components=1", "-C", tools]);
 }
 console.log(`Building Ghostty VT ${pin.revision.slice(0, 12)}…`);

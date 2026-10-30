@@ -5,7 +5,7 @@ import {frontendRoot as root,readDisplayPin,sha256,displayIdentity,displayStampP
 const pin=readDisplayPin(),source=join(root,"artifacts/gpuix-pacing-source"),patch=join(root,pin.patch);
 const toolchains=join(root,"artifacts/gpuix-rustup"),target=resolve(root,"../../target/gpuix-native-vsync");
 const publishOnly=process.argv.includes("--publish-only"),checkOnly=process.argv.includes("--check");
-const env={...process.env,RUSTUP_HOME:toolchains,RUSTUP_TOOLCHAIN:pin.toolchain,RUSTUP_NO_UPDATE_CHECK:"1",CARGO_TARGET_DIR:target,CARGO_BUILD_JOBS:String(pin.jobs)};
+const env:NodeJS.ProcessEnv={...process.env,RUSTUP_HOME:toolchains,RUSTUP_TOOLCHAIN:pin.toolchain,RUSTUP_NO_UPDATE_CHECK:"1",CARGO_TARGET_DIR:target,CARGO_BUILD_JOBS:String(pin.jobs)};
 async function run(command:string[],cwd=root,capture=false){
  const child=Bun.spawn(command,{cwd,env,stdout:capture?"pipe":"inherit",stderr:"inherit"});
  const output=capture?await new Response(child.stdout).text():"";
@@ -65,6 +65,9 @@ try{rustc=await run(["rustup","which","--toolchain",pin.toolchain,"rustc"],root,
  rustc=await run(["rustup","which","--toolchain",pin.toolchain,"rustc"],root,true);
 }
 if(await run([rustc,"-V"],root,true)!==pin.rustcVersion)throw new Error("The private Rust compiler differs from the GPUIX source pin");
+// Calling the pinned cargo does not select its sibling rustc: Cargo otherwise
+// resolves `rustc` through PATH (which can be a system or Nix installation).
+env.RUSTC=rustc;
 if(!publishOnly){
  if(pin.profile!=="release"||pin.defaultFeatures||!pin.lto)throw new Error("The GPUIX pin requires another production build configuration");
  console.log(`Building pinned GPUIX ${pin.revision.slice(0,12)} with native display frames (${pin.jobs} jobs)…`);

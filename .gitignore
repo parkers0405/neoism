@@ -62,3 +62,6 @@ sugarloaf/src/**/*.spv
 
 # Personal EPUBs copied into the repository root for manual reader testing.
 /*.epub
+
+# Local JavaScript dependencies, including retired frontend checkouts.
+**/node_modules/

@@ -1455,6 +1455,9 @@ mod mcp_tests {
     fn mcp_picker_opens_actions_then_runs_selected_action() {
         let mut pane = NeoismAgentPane::default();
         pane.directory = Some("/tmp/project".to_string());
+        // The synthetic picker represents a freshly received catalog, so no
+        // passive refresh should accompany the action under test.
+        pane.mcp_catalog_refresh.completed_at = Some(Instant::now());
         pane.picker = Some(NeoismAgentPicker::new(
             NeoismAgentPickerKind::Mcp,
             "MCP servers",
@@ -1493,7 +1496,7 @@ mod mcp_tests {
             commands.as_slice(),
             [OutboundAgentCommand::McpSetEnabled { name, enabled: true, directory }]
                 if name == "webflow" && directory.as_deref() == Some("/tmp/project")
-        ));
+        ), "{commands:?}");
     }
 
     fn toggle_catalog(enabled: bool) -> Value {

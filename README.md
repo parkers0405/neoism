@@ -1,120 +1,85 @@
 # Neoism
 
-**A terminal-first IDE for code, agents, and multiplayer.**
+A native workspace for code, Markdown, terminals, and agents.
 
-[![Neoism](https://raw.githubusercontent.com/parkers0405/neoism/241e6daaea1249d2eff6ca94b91dbacc2c426b0f/docs/images/terminal.png)](https://github.com/parkers0405/neoism)
+GPUIX is the frontend built by this branch. Its preview installation stays separate from an existing daily Neoism launcher. SolidJS drives the native GPUI window, while a Rust bridge provides editor behavior, text shaping, document layout, and retained paint commands. Ghostty supplies terminal emulation. The workspace daemon owns PTYs, files, language servers, Git, search, collaboration, persistent workspaces, and Agent sessions.
 
-Neoism is a GPU-rendered, local-first IDE that starts with the terminal instead of hiding it. Real shells, a native code editor, Markdown notes, drawings, Git, language servers, and a full agent runtime share one workspace. A workspace daemon keeps that workspace alive so desktop, web, phone, and other laptops can join it.
+The old winit/Sugarloaf desktop, Rio terminal emulator, WASM workspace frontend, and Lua configuration/plugin runtimes are retired. Useful UI and editor code remains in `neoism-frontend/shared`; reusable CPU font and layout routines live in `neoism-paint`. Neither crate creates a GPU device or OS window.
 
-It is not an Electron IDE and not a chat window bolted onto a terminal. The desktop app owns a `winit` window and renders through `sugarloaf`. The browser client uses the same renderer family through Rust/WASM and WebGPU/WebGL.
+## Build and run
 
-## Terminal
-
-The terminal is the center of the workspace, not a drawer under an editor:
-
-- Real PTYs with GPU-rendered text, smooth scrollback, tabs, splits, and command navigation
-- Interactive programs, job control, mouse reporting, OSC links, and alternate-screen apps
-- New tabs start in the workspace directory; a shell `cd` stays local to that pane
-
-## Editor
-
-Rust-owned buffers for source and Markdown, not an embedded nvim or a web editor:
-
-- File tree, buffer tabs, splits, finder, and project search
-- Tree-sitter highlighting and a managed LSP catalog (hover, go-to, references, symbols, diagnostics, format, code actions)
-- Optional Vim layer
-- Git diff panel for status, staging, commits, and branches
-- Native Markdown with wiki links, live preview, notebooks, EPUB reading, and `.neodraw` sketches
-- Settings GUI and a command palette (`Alt+P`) with completion for every action
-
-## Agent
-
-Neoism ships its own agent server, not a hosted chat iframe. Sessions belong to the workspace and survive closing a pane or reconnecting from another device.
-
-- Persistent conversations over a versioned HTTP/SSE API
-- Providers, models, skills, MCP, plugins, and a TypeScript SDK
-- Shell, file, patch, search, LSP, notes, and web tools with an ask/allow/deny permission model
-- Parallel sub-agents (`explore`, `general`, and custom agents), checkpoints, undo/redo, compaction, and durable memory
-- Open an agent pane with `Alt+A`
-
-## Multiplayer and remote
-
-The workspace daemon is the authority for files, PTYs, layout, pairing, and shared editor documents:
-
-- Live co-editing through daemon-owned CRDT documents, plus presence carets and avatars
-- The same terminals and agent sessions from desktop, browser, or phone
-- Join another machine over a private network or Tailscale; promote a workspace to a different host when you mean to move it
-- Local-first: files, terminals, notes, credentials, and agent history stay on machines you control
-
-## Notes
-
-Notes are ordinary Markdown vaults with graphs, backlinks, tags, and tasks (`Alt+N`). Drawings and notebooks live next to the code they describe.
-
-## Install
-
-Every release includes Linux, macOS, and Windows builds. Download the latest from [GitHub Releases](https://github.com/parkers0405/neoism/releases/latest).
-
-### NixOS
-
-To run an extracted Linux release with `programs.nix-ld.enable = true`, launch it from its extracted directory:
+The validated desktop target is Linux x86_64. Install Node.js/npm, a C/C++ toolchain, pkg-config, Fontconfig/FreeType, GBM, xkbcommon, Wayland/X11 development libraries, and the Vulkan loader. Build scripts fetch the checksum-pinned Blaze compiler and its toolchain, plus the pinned GPUIX and Ghostty engines when needed. Rust builds and tests use `scripts/blaze.sh`; there is no application fallback to Cargo.
 
 ```sh
-nix run github:parkers0405/neoism/main#neoism-runtime -- ./neoism
+make build
+./neoism-frontend/gpuix/dist/neoism
 ```
 
-This supplies the matching runtime libraries without recompiling Neoism. Keep the helper binaries beside `neoism`; graphics drivers still come from your NixOS configuration.
-
-To build and run the Nix source package instead:
+The bundle contains `neoism`, `neoism-workspace-daemon`, `neoism-agent`, two native libraries, and the standalone Agent web GUI. Keep them together. A normal launch reuses the local daemon or starts one when missing. Closing the window leaves daemon-owned shells and sessions running.
 
 ```sh
-nix run github:parkers0405/neoism/main
+make run                         # build the engines, then run from source
+make dev                         # source frontend with hot replacement
+bash scripts/blaze.sh run -p neoism -- --help  # frontend development entrypoint
+./install.sh                     # install the separate GPUIX preview
+~/.local/lib/neoism-gpuix/bin/neoism  # launch that preview
 ```
 
-The source package builds the desktop and helper executables unless a binary cache supplies them. It does not currently include the release's bundled web UI or CEF worker assets.
+The installer defaults to `~/.local/lib/neoism-gpuix`; it preserves the existing `~/.local/bin/neoism` launcher and desktop shortcuts. An explicit `--prefix ~/.local` replaces that launcher. For an isolated development instance, use `bash scripts/dev-neoism.sh dev`.
 
-Cross-play is supported: people on different platforms can join the same workspace.
+Upgrades retain the previous installed bundle while its windows or daemons are
+running, so their helpers and resources remain available. A later upgrade prunes
+that bundle after those processes exit.
 
-## Build from source
+Use `neoism --daemon ws://HOST:7878/session` to attach explicitly to another host. Explicit endpoints do not start a local daemon. `--workspace ID`, `--config PATH`, `--theme NAME`, `--font-size SIZE`, and `--maximized` select launch preferences. Configuration is JSONC in `~/.config/neoism/config.json` or `NEOISM_CONFIG_HOME`; `init.lua` is no longer evaluated.
+
+Terminals load the real pinned `libghostty-vt` library for terminal emulation, keyboard/mouse encoding, selection, and search. GPUIX paints its cell data; the daemon owns the shell and PTY. Fonts, colors, and supported terminal preferences come from Neoism's configuration. The standalone Ghostty application's configuration is not loaded.
+
+## Working surfaces
+
+- Code editing with Tree-sitter, Vim editing, multicarets, save/recovery, and daemon-backed LSP.
+- Rich Markdown with source editing, links, tasks, tables, diagrams, and shared documents.
+- Ghostty terminals with direct daemon PTY input, scrollback, selection, search, and Vim navigation.
+- Agent conversations with streaming, models, reasoning, attachments, questions, permissions, tools, and history.
+- Workspace and buffer tabs, splits, file tree, Finder, command palette, settings, themes, SSH systems, and hosted connections.
+
+Shortcuts include Alt+E for files, Alt+A for a new Agent, Alt+T for a terminal, Ctrl+P for Finder, Alt+P for commands, and Ctrl+S for save.
+
+[The frontend guide](neoism-frontend/gpuix/README.md) records working behavior, known parity gaps, native checks, and performance measurement. Native editor IME and notebook/EPUB surfaces remain separate frontend work; retiring the old renderer does not establish feature or FPS parity.
+
+## Agent and extensions
+
+Native Agent plugins, supervised process plugins, MCP, LSP servers, and managed extension installation remain daemon features. The bundled Lua runner and editor Lua plugin host are removed. See [plugin authoring](docs/plugins.md), [the Agent API reference](docs/agent-plugins.md), and [the Agent runtime](neoism-agent/README.md).
+
+The standalone Agent GUI is served at `/agent-gui/`; it is independent of the retired browser workspace renderer.
+
+## Validation
 
 ```sh
-git clone https://github.com/parkers0405/neoism.git
-cd neoism
-cargo build --bin neoism
-./target/debug/neoism
+make check
+make test
+bash scripts/check-frontend-deps.sh
+bash scripts/package-gpuix.sh
+python3 scripts/test-gpuix-release.py  # isolated installed release and native-window checks
 ```
 
-## Documentation
-
-- [Guides](https://neoism.ai/api/docs/#guides): editor, agent, daemon, multiplayer, extensions, configuration, keybindings, and troubleshooting.
-- [API reference](https://neoism.ai/api/docs/#reference): Neoism's API documentation.
-
-Native UI, commands, keymaps, events, panels, agent surfaces, trees, tabs, status, and chrome are customizable from [`~/.config/neoism/init.lua`](docs/lua.md) on Linux/macOS or `%USERPROFILE%\AppData\Local\neoism\init.lua` on Windows without moving rendering out of Rust.
-
-Plugin authors and coding agents should start with the canonical [`plugin architecture and package guide`](docs/plugins.md), then use the complete [`editor plugin API`](docs/editor-plugin-api.md), [`Agent plugin API`](docs/agent-plugins.md), and generated [`Lua annotations`](docs/lua-api.lua). These references cover every exposed tier, manifest field, capability, contribution, lifecycle rule, protocol frame, broker and security boundary.
-
-For standalone Agent, product embedding, and cloud workers, start with the [Agent runtime README](neoism-agent/README.md) and the authoritative [hosted architecture and implementation status](neoism-agent/docs/hosted-control-plane.md).
-
-A first tour: open a project, `Alt+E` for the file tree, `Ctrl+Shift+T` for a terminal, `Alt+A` for an agent, `Alt+P` when you do not know the command.
+The dependency guard checks both resolved frontend and daemon graphs for retired renderers, window hosts, terminal emulators, and Lua libraries. Native window checks are described in the frontend guide; they require a graphics session.
 
 ## Architecture
-| Path | Role |
+
+| Path | Responsibility |
 |---|---|
-| `neoism-frontend/desktop` | Native `neoism` app, window host, and desktop integration |
-| `neoism-frontend/shared` | Shared UI, panels, layout, editors, and interaction policy |
-| `neoism-frontend/wasm` | Rust terminal and chrome renderer for the browser |
-| `neoism-frontend/web` | TypeScript web host and daemon client |
-| `neoism-workspace-daemon` | PTYs, workspaces, pairing, remote sessions, and shared state |
-| `neoism-agent` | Agent server, CLI, providers, tools, permissions, and memory |
-| [`neoism-cloud-runtime`](neoism-cloud-runtime/README.md) | Provider-neutral whole-workspace lifecycle, durable registry, and v2 infrastructure bridge |
-| [`neoism-cloud-host`](neoism-cloud-host/README.md) | Workspace launch manager, controller signing, readiness verification, connection broker, and policy-injected host API |
-| `neoism-terminal-core` | Terminal parser, grid, selections, and effects model |
-| `sugarloaf` | Native and web GPU rendering |
-| `neoism-protocol` | Wire types shared by clients and the daemon |
+| `neoism-frontend/gpuix` | Native application, GPUIX window, input, composition, and Ghostty adapter |
+| `neoism-frontend/launcher` | Rust development launcher for GPUIX |
+| `neoism-frontend/shared` | Portable editor, Markdown, panel state, layout, interaction, and paint interfaces |
+| `neoism-paint` | CPU fonts, shaping, glyph rasters, image data, and retained document layout |
+| `neoism-customization` | Styling and retained contribution data; no scripting runtime |
+| `neoism-terminal-types` | Colors, coordinates, input modes, and presentation data; no terminal emulator |
+| `neoism-workspace-daemon` | Workspace services, PTYs, transport, persistence, and collaboration |
+| `neoism-agent` | Agent server, CLI, native/process plugins, SDK, tools, and standalone web GUI |
+| `neoism-backend` | Shared persistent configuration and server registry |
+| `neoism-terminal-pty` | Native PTY ownership used by the daemon |
 
-## Contributors
+Nix users can run a built Linux bundle with `nix run .#neoism-runtime -- /path/to/neoism`. The Nix source package provides daemon/Agent services; build the desktop bundle through `make build`.
 
-- [Logan Settle (@LoganSettle)](https://github.com/LoganSettle) - Windows MSI upgrade and repair fixes.
-
-Neoism is open source under the [MIT License](LICENSE). See [NOTICE](NOTICE) for third-party attribution.
-
-Join the [Neoism Discord](https://discord.gg/FF2KUFMRd).
+Source-building the Nix services with Blaze uses `nix build .#neoism-services --option sandbox relaxed` (a trusted Nix user is required). Blaze rejects the unmapped owner of Nix's filesystem-sandbox root, so this derivation opts out of that sandbox while keeping pinned inputs and offline dependencies. `nix develop` runs the same pinned compiler outside that filesystem sandbox. The runtime-only package needs no sandbox override.

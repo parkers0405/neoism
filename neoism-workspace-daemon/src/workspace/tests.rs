@@ -4,6 +4,19 @@ use neoism_protocol::workspace::{
 };
 use tempfile::TempDir;
 
+static NOTES_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+struct NotesHomeGuard { previous: Option<std::ffi::OsString>, _lock: std::sync::MutexGuard<'static, ()> }
+impl NotesHomeGuard {
+    fn new(path: &std::path::Path) -> Self {
+        let lock = NOTES_HOME_LOCK.lock().unwrap_or_else(|error|error.into_inner());
+        let previous=std::env::var_os("NEOISM_NOTES_HOME");std::env::set_var("NEOISM_NOTES_HOME",path);
+        Self { previous, _lock: lock }
+    }
+}
+impl Drop for NotesHomeGuard {
+    fn drop(&mut self) { match &self.previous { Some(value)=>std::env::set_var("NEOISM_NOTES_HOME",value),None=>std::env::remove_var("NEOISM_NOTES_HOME") } }
+}
+
 /// Back-compat shim for tests written before the `Hello` arm
 /// gained the `pairing_tokens` + `peer_ip` parameters. The
 /// pre-existing arms never touched either, so we pass `None` and
@@ -692,7 +705,7 @@ fn workspace_action_create_note_falls_back_to_default_vault() {
     // workspace root has no linked/local notes workspace; point the
     // vaults home at the tempdir so the test never touches the real
     // `~/Neoism/Vaults`.
-    std::env::set_var("NEOISM_NOTES_HOME", td.path().join("vaults"));
+    let _notes_home = NotesHomeGuard::new(&td.path().join("vaults"));
     let mgr = make_manager(&td);
     let mut conn = ConnectionWorkspace::default();
     handle(
@@ -731,7 +744,7 @@ fn workspace_action_create_note_falls_back_to_default_vault() {
 #[test]
 fn refresh_host_workspace_notes_advertises_a_late_vault_link() {
     let td = TempDir::new().unwrap();
-    std::env::set_var("NEOISM_NOTES_HOME", td.path().join("vaults"));
+    let _notes_home = NotesHomeGuard::new(&td.path().join("vaults"));
     let vault_dir = td.path().join("vaults").join("neoism");
     std::fs::create_dir_all(&vault_dir).unwrap();
     neoism_workspace_index::register_notes_vault("neoism", &vault_dir).unwrap();

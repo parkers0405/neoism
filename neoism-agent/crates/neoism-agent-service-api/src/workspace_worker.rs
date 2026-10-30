@@ -31,6 +31,14 @@ pub const MAX_WORKSPACE_WORKER_DOCUMENT_BYTES: usize = 16_384;
 
 /// Controller bootstrap document, loaded only at runtime startup, never via /config.
 /// Only the public verification key is supplied to the worker alongside it.
+///
+/// Wire documents support serde serialization, unlike live credential authority.
+///
+/// ```
+/// use neoism_agent_service_api::WorkspaceWorkerBootstrap;
+/// use serde::Serialize;
+/// let _ = WorkspaceWorkerBootstrap::serialize::<serde_json::value::Serializer>;
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceWorkerBootstrap {
@@ -152,10 +160,10 @@ pub struct AuthorizedWorkerAccess {
 /// Sensitive issuance result. Host adapters must explicitly extract the token
 /// when constructing their JSON grant; this type is not serializable.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use neoism_agent_service_api::IssuedWorkerCredential;
-/// fn require_serializable<T: serde::Serialize>() {}
-/// require_serializable::<IssuedWorkerCredential>();
+/// use serde::Serialize;
+/// let _ = IssuedWorkerCredential::serialize::<serde_json::value::Serializer>;
 /// ```
 pub struct IssuedWorkerCredential {
     token: String,
@@ -183,10 +191,10 @@ impl fmt::Debug for IssuedWorkerCredential {
 /// The host manager must associate the descriptor's public key with
 /// `verification_key()` before provisioning it. Never inject this into workers.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use neoism_agent_service_api::WorkspaceWorkerCredentialIssuer;
-/// fn require_serializable<T: serde::Serialize>() {}
-/// require_serializable::<WorkspaceWorkerCredentialIssuer>();
+/// use serde::Serialize;
+/// let _ = WorkspaceWorkerCredentialIssuer::serialize::<serde_json::value::Serializer>;
 /// ```
 #[derive(Clone)]
 pub struct WorkspaceWorkerCredentialIssuer {
@@ -405,10 +413,10 @@ fn is_windows_device_name(part: &str) -> bool {
 /// Immutable, non-serializable live worker profile with public verification material
 /// only. Fields are accessible only through getters; no credential issuer exists.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use neoism_agent_service_api::WorkspaceWorkerBinding;
-/// fn require_serializable<T: serde::Serialize>() {}
-/// require_serializable::<WorkspaceWorkerBinding>();
+/// use serde::Serialize;
+/// let _ = WorkspaceWorkerBinding::serialize::<serde_json::value::Serializer>;
 /// ```
 ///
 /// ```compile_fail

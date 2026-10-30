@@ -16,11 +16,12 @@
 mod blame;
 
 /// Clear frame-local avatar placements before any editor visibility branches.
-pub fn clear_blame_overlays(sugarloaf: &mut Sugarloaf) {
+pub fn clear_blame_overlays(sugarloaf: &mut dyn Paint) {
     sugarloaf.clear_image_overlays_for(blame::OVERLAY_ID);
 }
 
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use crate::primitives::paint::Paint;
+use neoism_paint::{text::DrawOpts, };
 
 use crate::primitives::draw_icon_centered_with_occlusion;
 use crate::primitives::ide_theme::IdeTheme;
@@ -69,7 +70,7 @@ fn intersect_cursor_rect(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 /// Paint the pane. Returns `true` while the scroll glide is still
 /// animating (the host must schedule another frame).
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     pane: &mut CodePane,
     rect: [f32; 4],
     theme: &IdeTheme,
@@ -764,7 +765,7 @@ pub fn render(
                 .and_then(|snapshot| snapshot.by_line.get(&rv.line))
                 .and_then(|items| {
                     items.iter().rev().find(|item| {
-                        item.layer == neoism_lua::DecorationLayer::GutterSign
+                        item.layer == neoism_customization::DecorationLayer::GutterSign
                     })
                 })
             {
@@ -1017,10 +1018,10 @@ pub fn render(
                     items.iter().rev().find(|item| {
                         matches!(
                             item.layer,
-                            neoism_lua::DecorationLayer::VirtualText
-                                | neoism_lua::DecorationLayer::InlineWidget
-                                | neoism_lua::DecorationLayer::CodeLens
-                                | neoism_lua::DecorationLayer::Fold
+                            neoism_customization::DecorationLayer::VirtualText
+                                | neoism_customization::DecorationLayer::InlineWidget
+                                | neoism_customization::DecorationLayer::CodeLens
+                                | neoism_customization::DecorationLayer::Fold
                         )
                     })
                 })
@@ -1508,7 +1509,7 @@ fn byte_col_for_utf16_col(line: &str, col_utf16: usize) -> usize {
 /// Clip-aware, occlusion-aware single-line text draw (the code pane's
 /// counterpart of the markdown renderer's `draw_if_visible`).
 fn draw_text(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     x: f32,
     y: f32,
     text: &str,
@@ -1519,7 +1520,7 @@ fn draw_text(
 }
 
 fn draw_text_into(
-    target: &mut sugarloaf::text::Text,
+    target: &mut dyn crate::primitives::paint::TextPaint,
     x: f32,
     y: f32,
     text: &str,
@@ -1637,10 +1638,10 @@ mod text_occlusion_tests {
 
     #[test]
     fn partial_glyph_clips_match_original_raster_outside_occlusion() {
-        use sugarloaf::font::{fonts::SugarloafFonts, FontLibrary};
-        use sugarloaf::text::{DrawOpts, Text};
+        use neoism_paint::font::{fonts::FontConfig, FontLibrary};
+        use neoism_paint::text::{DrawOpts, Text};
 
-        let (library, _errors) = FontLibrary::new(SugarloafFonts::default());
+        let (library, _errors) = FontLibrary::new(FontConfig::default());
         let (width, height) = (640, 160);
         let base = [0.0, 0.0, 300.0, 64.0];
         let cut = [85.3, 18.4, 53.4, 7.2];

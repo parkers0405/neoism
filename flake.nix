@@ -14,7 +14,7 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [ flake-parts.flakeModules.easyOverlay ];
 
-      systems = import inputs.systems;
+      systems = builtins.filter (system: builtins.elem system [ "x86_64-linux" "aarch64-linux" ]) (import inputs.systems);
 
       perSystem =
         {
@@ -31,14 +31,28 @@
           mkDevShell =
             rust-toolchain:
             let
-              runtimeDeps = self'.packages.neoism.runtimeDependencies;
+              runtimeDeps = self'.packages.neoism-services.runtimeDependencies;
               tools =
-                self'.packages.neoism.nativeBuildInputs ++ self'.packages.neoism.buildInputs ++ [ rust-toolchain ];
+                self'.packages.neoism-services.nativeBuildInputs ++ self'.packages.neoism-services.buildInputs ++ [ rust-toolchain ];
             in
             pkgs.mkShell {
-              packages = [ self'.formatter ] ++ tools;
+              packages = [ self'.formatter pkgs.nodejs_22 pkgs.rustup pkgs.git pkgs.clang
+                blazeCompiler ] ++ tools;
+              NEOISM_BLAZE_BIN = "${blazeCompiler}/bin/blaze";
+              shellHook = ''
+                export RUSTUP_HOME="$PWD/target/blaze-rustup"
+                mkdir -p "$RUSTUP_HOME/toolchains"
+                ln -sfn ${blazeToolchain} "$RUSTUP_HOME/toolchains/${blazePin.toolchain}-${pkgs.stdenv.hostPlatform.rust.rustcTarget}"
+              '';
               LD_LIBRARY_PATH = "${lib.makeLibraryPath runtimeDeps}";
             };
+          blazePin = builtins.fromJSON (builtins.readFile ./neoism-frontend/gpuix/native/blaze-pin.json);
+          blazeCompiler = pkgs.callPackage ./pkgBlaze.nix { };
+          blazeToolchain = pkgs.rust-bin.nightly.${lib.removePrefix "nightly-" blazePin.toolchain}.default.override {
+            # Blaze links most proc macros as WASI modules, including during
+            # offline Nix builds where rustup cannot download missing targets.
+            targets = [ "wasm32-wasip1" ];
+          };
           toolchains = rec {
             msrv = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
             stable = pkgs.rust-bin.stable.latest.minimal;
@@ -55,20 +69,16 @@
           };
 
           # Create overlay to override `neoism` with this flake's default
-          overlayAttrs = { inherit (self'.packages) neoism; };
+          overlayAttrs = { inherit (self'.packages) neoism-services; };
           packages = lib.mapAttrs' (k: v: {
-            name =
-              if
-                builtins.elem k [
-                  "neoism"
-                  "default"
-                ]
-              then
-                k
-              else
-                "neoism-${k}";
-            value = pkgs.callPackage ./pkgNeoism.nix { rust-toolchain = v; };
+            name = if k == "neoism" || k == "default" then "neoism-services${if k == "default" then "-default" else ""}" else "neoism-services-${k}";
+            value = pkgs.callPackage ./pkgNeoism.nix {
+              rust-toolchain = v;
+              blaze-toolchain = blazeToolchain;
+              blaze-compiler = blazeCompiler;
+            };
           }) toolchains // lib.optionalAttrs pkgs.stdenv.isLinux {
+            default = self'.packages.neoism-runtime;
             # Run an existing Linux release without compiling the Rust workspace.
             neoism-runtime = pkgs.writeShellScriptBin "neoism-runtime" ''
               if [ "$#" -eq 0 ]; then
@@ -76,8 +86,8 @@
                 exit 64
               fi
               export NIX_LD="${pkgs.stdenv.cc.bintools.dynamicLinker}"
-              export NIX_LD_LIBRARY_PATH="${lib.makeLibraryPath self'.packages.neoism.runtimeDependencies}''${NIX_LD_LIBRARY_PATH:+:$NIX_LD_LIBRARY_PATH}"
-              export LD_LIBRARY_PATH="${lib.makeLibraryPath self'.packages.neoism.runtimeDependencies}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              export NIX_LD_LIBRARY_PATH="${lib.makeLibraryPath self'.packages.neoism-services.runtimeDependencies}''${NIX_LD_LIBRARY_PATH:+:$NIX_LD_LIBRARY_PATH}"
+              export LD_LIBRARY_PATH="${lib.makeLibraryPath self'.packages.neoism-services.runtimeDependencies}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
               exec "$@"
             '';
           };

@@ -1,0 +1,13 @@
+[package]
+name = "neoism-terminal-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal presentation and input data without a terminal emulator."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+bitflags = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+serde_json.workspace = true

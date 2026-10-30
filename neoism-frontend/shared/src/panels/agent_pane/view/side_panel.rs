@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::panels::agent_pane::icon::{self as agent_icon, SIDE_PANEL_ICON_PANEL_ID};
 #[cfg(test)]

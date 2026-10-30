@@ -26,6 +26,21 @@ pub(crate) struct McpNotification {
     pub(crate) params: Value,
 }
 
+/// A failed write before a complete JSON-RPC line reached the child. Such a
+/// request can be retried after reconnecting; response failures remain uncertain.
+#[derive(Debug)]
+pub(super) struct RequestNotSent(std::io::Error);
+impl std::fmt::Display for RequestNotSent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "MCP request was not sent: {}", self.0)
+    }
+}
+impl std::error::Error for RequestNotSent {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 pub(crate) struct StdioJsonRpcClient {
     connection: Mutex<StdioConnection>,
     request_timeout: Duration,
@@ -97,7 +112,12 @@ impl StdioJsonRpcClient {
             "method": method,
             "params": params
         });
-        write_json_line(&mut connection.stdin, &request).await?;
+        let mut line = serde_json::to_vec(&request)?;
+        line.push(b'\n');
+        connection.stdin.write_all(&line).await.map_err(RequestNotSent)?;
+        // Once the complete frame was delivered, failures are uncertain and
+        // must not be classified as safe to replay.
+        connection.stdin.flush().await?;
         loop {
             let line = match timeout(self.request_timeout, connection.stdout.next_line())
                 .await

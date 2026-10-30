@@ -1,5 +1,10 @@
 # Live interactive HTML artifacts
 
+This document describes the retired desktop's experimental integration. GPUIX
+does not currently host live HTML artifacts or automatically build a browser
+worker. The independent CEF/Servo workers and browser-neutral contracts remain
+available for experimentation; they are not part of the default application.
+
 Native agent chat renders completed `neoism-html` fences as live Chromium pages inline. Ordinary `html` fences remain source code. The CEF worker replaces the desktop's previous Servo worker; the Servo workspace is retained but is no longer built or selected by this feature. Markdown-file embeds and the web frontend are not wired yet.
 
 ## Build and enable

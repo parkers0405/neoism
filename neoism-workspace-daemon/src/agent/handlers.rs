@@ -589,15 +589,7 @@ pub(crate) async fn handle_get_history(
                 .or_else(|| value.get("items").and_then(Value::as_array))
                 .cloned()
                 .unwrap_or_default();
-            let next_cursor = (items.len() == take as usize)
-                .then(|| {
-                    items
-                        .last()
-                        .and_then(|message| message.get("id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .flatten();
+            let next_cursor = history_next_cursor(&items, take as usize);
             let messages = if items.is_empty() {
                 Vec::new()
             } else {
@@ -615,6 +607,44 @@ pub(crate) async fn handle_get_history(
             });
         }
         Err(err) => emit_error(&inner.tx, err),
+    }
+}
+
+fn history_next_cursor(items: &[Value], take: usize) -> Option<String> {
+    if items.len() != take {
+        return None;
+    }
+    // The API returns message envelopes, not bare MessageInfo objects. Use
+    // the oldest parent message, before expanding its parts into timeline rows.
+    items
+        .last()?
+        .get("info")?
+        .get("id")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod history_pagination_tests {
+    use super::history_next_cursor;
+    use serde_json::json;
+
+    #[test]
+    fn full_page_continues_from_oldest_parent_not_part() {
+        let items = vec![
+            json!({"info":{"id":"msg_new"},"parts":[{"id":"part_new"}]}),
+            json!({"info":{"id":"msg_old"},"parts":[{"id":"part_a"},{"id":"part_b"}]}),
+        ];
+        assert_eq!(history_next_cursor(&items, 2).as_deref(), Some("msg_old"));
+        assert_eq!(history_next_cursor(&items, 3), None);
+        assert_eq!(history_next_cursor(&[], 2), None);
+    }
+
+    #[test]
+    fn missing_or_empty_parent_id_does_not_repeat_page() {
+        assert_eq!(history_next_cursor(&[json!({"parts":[]})], 1), None);
+        assert_eq!(history_next_cursor(&[json!({"info":{"id":""}})], 1), None);
     }
 }
 

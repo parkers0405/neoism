@@ -1,0 +1,6 @@
+[package]
+name = "neoism"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Development launcher for the GPUIX Neoism frontend."

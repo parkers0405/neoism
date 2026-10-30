@@ -605,6 +605,18 @@ impl<Action: Clone> Runtime<Action> {
         clip: Rect,
         measurer: &mut dyn TextMeasurer,
     ) -> Result<&Frame<Action>, LayoutError> {
+        let invalid_input = if !origin.into_iter().all(f32::is_finite) {
+            Some(invalid(None, "origin"))
+        } else if !valid_length(available_width) {
+            Some(invalid(None, "available_width"))
+        } else if !clip.is_valid() {
+            Some(invalid(None, "clip"))
+        } else { None };
+        if let Some(error) = invalid_input {
+            dispose_description(root);
+            self.clear();
+            return Err(error);
+        }
         self.set_tree(root)?;
         self.present(origin, available_width, clip, measurer)
     }
@@ -941,7 +953,7 @@ fn engine_style(style: &Style, kind: &Kind, in_stack: bool) -> tf::Style {
     if matches!(kind, Kind::Stack) {
         // A single fractional column fills the stack's assigned width even
         // when every child is a quad with zero intrinsic width.
-        output.grid_template_columns = vec![tf::fr(1.0)];
+        output.grid_template_columns = vec![tf::fr(1.0_f32)];
         output.justify_items = Some(tf::AlignItems::Stretch);
     }
     if in_stack {

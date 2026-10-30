@@ -1,6 +1,6 @@
 //! Native hosts persist the same virtual viewport anchor used for live edits.
 use super::MarkdownPane;
-use sugarloaf::{NodeId,VirtualScrollAnchor};
+use neoism_paint::{NodeId,VirtualScrollAnchor};
 impl MarkdownPane {
  pub fn capture_host_scroll_anchor(&mut self)->Option<VirtualScrollAnchor>{
   self.virtual_render.surface.capture_scroll_anchor((self.scroll_viewport_height*0.35).max(0.0))

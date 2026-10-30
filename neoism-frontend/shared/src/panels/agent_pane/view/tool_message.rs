@@ -6,7 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::panels::agent_pane::selection_model::SelectableCaretStop;
 use crate::panels::agent_pane::state::{

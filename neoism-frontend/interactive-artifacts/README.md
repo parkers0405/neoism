@@ -1,5 +1,9 @@
 # Neoism interactive artifacts
 
+GPUIX does not currently host this experimental facade. The integration and
+automatic desktop-worker behavior described below belong to the retired
+desktop; only the contracts and independent workers remain available.
+
 Browser-neutral contracts plus an optional asynchronous process facade for live Chromium HTML surfaces. This crate has no CEF, Servo, native graphics or windowing dependency. The engine lives in the separate `../cef-runtime` workspace; the desktop compiles only the small IPC client.
 
 ## Features

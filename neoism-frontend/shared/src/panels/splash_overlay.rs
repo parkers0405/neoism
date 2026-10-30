@@ -1,3 +1,4 @@
+use crate::primitives::paint::Paint;
 // GPU overlay for the splash banner. The cell-based splash
 // (`terminal_splash::splash_bytes`) reserves three vertical
 // bands of blank rows; this module paints, in order:
@@ -25,9 +26,9 @@
 // `SplashInjection` types defined here.
 use web_time::Instant;
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::{
-    ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay, Sugarloaf,
+use neoism_paint::text::DrawOpts;
+use neoism_paint::{
+    ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay,
 };
 
 use crate::panels::command_palette::commands::CommandService;
@@ -440,7 +441,7 @@ impl SplashOverlay {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         injection: &SplashInjection,
         pane_origin: (f32, f32),
         pane_size: (f32, f32),
@@ -1070,7 +1071,7 @@ impl SplashOverlay {
 
     fn draw_click_fidget(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         click: Click,
         life_ms: f32,
         wordmark_size: f32,
@@ -1100,7 +1101,7 @@ impl SplashOverlay {
         }
     }
 
-    pub fn clear_image_overlays(sugarloaf: &mut Sugarloaf) {
+    pub fn clear_image_overlays(sugarloaf: &mut dyn Paint) {
         sugarloaf.clear_image_overlays_for(SPLASH_PANEL_ID);
     }
 }
@@ -1398,7 +1399,7 @@ fn splash_wordmark_z_index(occlusion_rects: &[[f32; 4]]) -> i32 {
 /// per-letter color needs no draw-side change). The source PNG is a
 /// white glyph on transparency. Callers re-invoke on tint change; the
 /// fresh `transmit_time` below invalidates the cached texture.
-fn register_wordmark(sugarloaf: &mut Sugarloaf, tint: &[u32]) -> bool {
+fn register_wordmark(sugarloaf: &mut dyn Paint, tint: &[u32]) -> bool {
     let img = match image_rs::load_from_memory(WORDMARK_PNG) {
         Ok(i) => i.to_rgba8(),
         Err(_) => return false,
@@ -1423,6 +1424,6 @@ fn register_wordmark(sugarloaf: &mut Sugarloaf, tint: &[u32]) -> bool {
         display_height: None,
         transmit_time: web_time::Instant::now(),
     });
-    sugarloaf.image_data.insert(SPLASH_WORDMARK_IMAGE_ID, entry);
+    sugarloaf.image_data_insert(SPLASH_WORDMARK_IMAGE_ID, entry);
     true
 }

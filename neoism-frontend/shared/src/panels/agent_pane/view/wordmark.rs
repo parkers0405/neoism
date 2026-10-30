@@ -1,6 +1,6 @@
 use web_time::Instant;
 
-use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
+use neoism_paint::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
 
 use crate::panels::agent_pane::state::NeoismWordmarkState;
 use crate::primitives::wordmark_animation::WordmarkAnimation;

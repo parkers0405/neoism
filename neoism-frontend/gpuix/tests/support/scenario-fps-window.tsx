@@ -27,7 +27,7 @@ const client=new DaemonConnection(config),model=new WorkspaceModel(client,config
 model.start();client.start();
 const renderer=createRenderer(event=>notifyFrameActivity(renderer,event));
 renderer.init({title:"Neoism scenario FPS",appId:"ai.neoism.gpuix.scenario-fps",width:1440,height:900,titlebarTransparent:true});
-for(const name of ["CascadiaCode/CascadiaCodeNF-Regular.otf","PressStart2P/PressStart2P-Regular.ttf"])renderer.registerFont(readFileSync(new URL(`../../../../sugarloaf/src/font/resources/${name}`,import.meta.url)));
+for(const name of ["CascadiaCode/CascadiaCodeNF-Regular.otf","PressStart2P/PressStart2P-Regular.ttf"])renderer.registerFont(readFileSync(new URL(`../../../../neoism-paint/src/font/resources/${name}`,import.meta.url)));
 installProfiling(renderer);
 installFrameMeter(renderer);
 const displayClock=installDisplayClock(renderer,console.error);

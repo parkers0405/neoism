@@ -1,7 +1,7 @@
 //! Background selection, catalog discovery and durable JSONC persistence.
 use super::Config;
 use std::path::{Path, PathBuf};
-use sugarloaf::ImageProperties;
+use neoism_paint::ImageProperties;
 
 /// Pack assets have already been resolved by the backend pack loader.
 pub type ResolvedMashUpPack = super::mashup::MashupPack;
@@ -142,7 +142,6 @@ mod tests {
             wallpaper: Some(image),
             look: Default::default(),
             ui: Default::default(),
-            editor_plugins: None,
             dir: PathBuf::new(),
         }
     }
@@ -155,7 +154,7 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.blur, 0.0);
         assert_eq!(ImageProperties::default().blur, 0.0);
-        assert_eq!(legacy.fit, sugarloaf::BackgroundImageFit::Cover);
+        assert_eq!(legacy.fit, neoism_paint::BackgroundImageFit::Cover);
         assert_eq!(legacy.position_x, 0.5);
         assert_eq!(legacy.position_y, 0.5);
     }
@@ -165,7 +164,7 @@ mod tests {
         let dir = TempDir::new();
         let selected = ImageProperties {
             blur: 3.0,
-            fit: sugarloaf::BackgroundImageFit::Contain,
+            fit: neoism_paint::BackgroundImageFit::Contain,
             position_x: 0.2,
             position_y: 0.85,
             ..image("chosen.png", 0.6)
@@ -218,7 +217,7 @@ mod tests {
         let pack = pack(image("pack.png", 0.4));
         config.ui.window.background_image = Some(ImageProperties {
             blur: 3.0,
-            fit: sugarloaf::BackgroundImageFit::Contain,
+            fit: neoism_paint::BackgroundImageFit::Contain,
             position_x: 0.2,
             position_y: 1.0,
             ..Default::default()
@@ -227,7 +226,7 @@ mod tests {
         assert!(resolved.path.ends_with("pack.png"));
         assert_eq!(resolved.opacity, 0.4);
         assert_eq!(resolved.blur, 3.0);
-        assert_eq!(resolved.fit, sugarloaf::BackgroundImageFit::Contain);
+        assert_eq!(resolved.fit, neoism_paint::BackgroundImageFit::Contain);
         assert_eq!(resolved.position_x, 0.2);
         assert_eq!(resolved.position_y, 1.0);
         assert!(resolve_background(&config, None).is_none());
@@ -326,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn serialization_and_unrelated_lua_patch_preserve_images() {
+    fn serialization_and_unrelated_config_patch_preserve_images() {
         let mut config = Config::default();
         config.ui.window.background_image = Some(image("explicit.png", 0.42));
         let platform: super::super::platform::PlatformConfig =

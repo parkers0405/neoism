@@ -11,7 +11,7 @@ const configuration={appearance:{fonts:{family:"Cascadia Code NF",size:14}},edit
 writeFileSync(config,JSON.stringify(configuration));
 const server=createAgentDaemon({configuration,directoryEntries:{"":[{name:"README.md",is_dir:false},{name:"code.rs",is_dir:false},{name:"assets",is_dir:true}]}});
 const packaged=process.argv.includes("--packaged");
-const app=await launchNative({command:packaged?join(process.cwd(),"dist/neoism-gpuix"):process.execPath,args:[...(packaged?[]:["src/main.tsx"]),"--daemon",server.endpoint,"--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:recovery}});
+const app=await launchNative({command:packaged?join(process.cwd(),"dist/neoism"):process.execPath,args:[...(packaged?[]:["src/main.tsx"]),"--daemon",server.endpoint,"--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:recovery}});
 const flatten=(nodes:TreeNode[]):TreeNode[]=>nodes.flatMap(node=>[node,...flatten(node.children||[])]);
 const snapshot=async()=>{const{tree}=await app.call("getTree",{});return flatten(tree?[tree]:[]);};
 const until=async(predicate:()=>boolean|Promise<boolean>)=>{const deadline=Date.now()+15000;while(!await predicate()){if(Date.now()>deadline)throw new Error("Zoom appearance did not converge");await Bun.sleep(5);}};

@@ -4,9 +4,11 @@ import { createRenderer, render } from "@gpuix/solid";
 import { createSignal } from "solid-js";
 import { startFrameLoop, type FrameLoop } from "@gpuix/native/runtime";
 import type { GpuixRenderer } from "@gpuix/native";
-import cascadia from "../../../sugarloaf/src/font/resources/CascadiaCode/CascadiaCodeNF-Regular.otf" with { type: "file" };
-import pixel from "../../../sugarloaf/src/font/resources/PressStart2P/PressStart2P-Regular.ttf" with { type: "file" };
+import cascadia from "../../../neoism-paint/src/font/resources/CascadiaCode/CascadiaCodeNF-Regular.otf" with { type: "file" };
+import pixel from "../../../neoism-paint/src/font/resources/PressStart2P/PressStart2P-Regular.ttf" with { type: "file" };
 import { loadConfig, type AppConfig } from "./config";
+import {appVersion} from "./design/generated";
+import {ensureLocalDaemon} from "./daemon/local-startup";
 import {createWindowKeyRouter} from "./commands/window-key-router";
 import {FontZoomController} from "./commands/font-zoom";
 import { expectVariant, isRecord } from "./daemon/protocol";
@@ -26,8 +28,13 @@ import type {SshAttachment} from "./daemon/ssh-transport";
 import type {ServerSelection} from "./menu-actions/ChromeActionsController";
 import {localDaemon} from "./menu-actions/web-frontend";
 
-if (process.argv.includes("--help")) {
-  console.log(`Neoism GPUIX — native SolidJS frontend\n\nUsage: npm run start -- [options]\n\n  --daemon URL       ws://host:7878/session or ws+unix:///path/neoism.sock:/session\n  --workspace ID     Open a particular existing daemon workspace\n  --config PATH      Read appearance from a Neoism JSONC config\n  --theme NAME       Override the configured theme\n  --font-size SIZE   Override the configured font size\n  --maximized        Start with a maximized window\n  --reduced-motion  Disable transitions\n\nCredentials: NEOISM_DAEMON_TOKEN (upgrade), NEOISM_PAIRING_TOKEN (Hello).\nDefault: local Neoism Unix socket if present; otherwise 127.0.0.1:7878.\nShortcuts: Alt+E files, Alt+C conversations, Alt+H details, Ctrl+P find, Ctrl+T terminal.`);
+if (process.argv.includes("--version") || process.argv.includes("-V")) {
+  console.log(`Neoism ${appVersion}`);
+  process.exit(0);
+}
+
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Neoism — native workspace client\n\nUsage: neoism [options]\n\n  --daemon URL       ws://host:7878/session or ws+unix:///path/neoism.sock:/session\n  --workspace ID     Open a particular existing daemon workspace\n  --config PATH      Read appearance from a Neoism JSONC config\n  --theme NAME       Override the configured theme\n  --font-size SIZE   Override the configured font size\n  --maximized        Start with a maximized window\n  --reduced-motion  Disable transitions\n\nCredentials: NEOISM_DAEMON_TOKEN (upgrade), NEOISM_PAIRING_TOKEN (Hello).\nDefault: reuse the local daemon or start one when missing.\nShortcuts: Alt+E files, Alt+C conversations, Alt+H details, Ctrl+P find, Alt+T terminal.`);
   process.exit(0);
 }
 
@@ -60,14 +67,14 @@ async function createSession(config: AppConfig, seed?: HotState) {
     if (disposed) return; disposed = true; clearInterval(timer); checkpoint(); visuals.dispose();model.dispose(preserveEditors); await runtime.dispose();
   } };
 }
-let session = await createSession(hotState?.config || loadConfig(), hotState);
+let session = await createSession(hotState?.config || await ensureLocalDaemon(loadConfig()), hotState);
 const localServerConfig=new LocalServerConfig(session.config);
 const hostKey = Symbol.for("neoism/gpuix/native-host");
 const globals = globalThis as typeof globalThis & { [hostKey]?: { renderer: GpuixRenderer; loop: FrameLoop; displayClock?: DisplayClock; shutdown?: () => Promise<void> } };
 let host = globals[hostKey];
 if (!host) {
   const renderer: GpuixRenderer = createRenderer((event) => { profileInput(event);notifyFrameActivity(renderer, event); });
-  renderer.init({ title: "Neoism GPUIX", appName: "Neoism", appId: "ai.neoism.gpuix", width: 1440, height: 900,
+  renderer.init({ title: "Neoism", appName: "Neoism", appId: "ai.neoism.gpuix", width: 1440, height: 900,
     minWidth: 720, minHeight: 480, titlebarTransparent: true, windowBackground: "opaque" });
   for (const path of [cascadia, pixel]) renderer.registerFont(readFileSync(path));
   if (process.argv.includes("--maximized")) renderer.zoomWindow();

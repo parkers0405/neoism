@@ -8,7 +8,7 @@
 //!
 //! This module lifts the *policy* (action variants, mode bitflags,
 //! binding tables) to plain-old-data types that depend only on
-//! `neoism_terminal_core` and the existing shared `key_policy` /
+//! `neoism_terminal_types` and the existing shared `key_policy` /
 //! `mouse_policy` POD enums. The desktop fork converts the POD lists
 //! into its winit-typed structs via `From` adapters; the web frontend
 //! consumes the same POD lists directly.
@@ -21,13 +21,13 @@
 //!   bindings use [`BindingKey`], mouse bindings use
 //!   [`crate::mouse_policy::MouseButtonClass`]).
 //! * [`BindingMode`] is the platform-neutral mode bitset, derivable
-//!   from `neoism_terminal_core::crosswords::Mode`.
+//!   from `neoism_terminal_types::mode::Mode`.
 //! * [`defaults`] holds the static default bindings + user-config
 //!   conversion + hint-binding builder.
 
 use bitflags::bitflags;
-use neoism_terminal_core::crosswords::vi_mode::ViMotion;
-use neoism_terminal_core::crosswords::Mode;
+use neoism_terminal_types::mode::ViMotion;
+use neoism_terminal_types::mode::Mode;
 
 use crate::key_policy::{
     normalize_config_key_name, ConfigKeyName, KeyPolicyKey, KeyPolicyLocation,

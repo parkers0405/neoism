@@ -3,7 +3,7 @@
 // (file load + line-by-line render with the lightweight syntax
 // highlighter), plus the small animation tick helpers.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 use web_time::Instant;
 
@@ -28,7 +28,7 @@ use crate::syntax::{highlight_line, syn_color, Lang};
 
 #[allow(clippy::too_many_arguments)]
 fn draw_modal_frame_top(
-    sugarloaf: &mut impl Paint,
+    sugarloaf: &mut (impl Paint + ?Sized),
     x: f32,
     y: f32,
     width: f32,
@@ -150,7 +150,7 @@ impl Finder {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut impl Paint,
+        sugarloaf: &mut (impl Paint + ?Sized),
         dimensions: (f32, f32, f32),
         theme: &IdeTheme,
         search: &dyn SearchService,
@@ -815,7 +815,7 @@ impl Finder {
 
     fn render_preview(
         &mut self,
-        sugarloaf: &mut impl Paint,
+        sugarloaf: &mut (impl Paint + ?Sized),
         x: f32,
         y: f32,
         w: f32,

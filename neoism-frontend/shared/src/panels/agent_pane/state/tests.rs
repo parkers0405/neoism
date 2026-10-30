@@ -1799,7 +1799,7 @@ fn hints_command_toggles_row_and_reclaims_chat_space() {
     assert!(!pane.input_help_visible());
     assert_eq!(
         hidden_rect[1] - visible_rect[1],
-        22.0,
+        32.0,
         "hiding the compact footer must move the composer into its reserved space"
     );
     assert_eq!(
@@ -2187,7 +2187,7 @@ fn tab_mode_switch_rearms_agent_chip_transition() {
 
     assert_eq!(pane.agent_label(), "Plan");
     assert!(pane.agent_label_changed_elapsed_ms().is_some());
-    assert_eq!(pane.animation_reason(), Some("agent_label_transition"));
+    assert_eq!(pane.animation_reason(), Some("status_chip_activation"));
 }
 
 #[test]
@@ -2559,7 +2559,7 @@ fn wide_side_panel_session_navigation_keeps_panel_open() {
 }
 
 #[test]
-fn mobile_semantic_search_result_navigation_dismisses_takeover() {
+fn semantic_search_navigation_leaves_takeover_visibility_to_host() {
     let mut pane = NeoismAgentPane::default();
     pane.set_session_id(Some("current".to_string()));
     pane.side_panel_mut()
@@ -2588,7 +2588,8 @@ fn mobile_semantic_search_result_navigation_dismisses_takeover() {
 
     assert!(pane.activate_side_panel_row(true, true));
     assert_eq!(pane.session_id_str(), Some("result"));
-    assert!(pane.side_panel().user_hidden());
+    assert!(!pane.side_panel().user_hidden(), "the chrome owner controls takeover visibility");
+    assert!(!pane.side_panel().is_focused());
 }
 
 #[test]
@@ -2627,7 +2628,7 @@ fn session_search_typing_route_owns_only_the_painted_field() {
 }
 
 #[test]
-fn mobile_child_and_root_navigation_both_dismiss_takeover() {
+fn child_and_root_navigation_leave_takeover_visibility_to_host() {
     for (current, selected_row, expected) in [("root", 1, "child"), ("child", 0, "root")]
     {
         let mut pane = NeoismAgentPane::default();
@@ -2643,7 +2644,8 @@ fn mobile_child_and_root_navigation_both_dismiss_takeover() {
 
         assert!(pane.activate_side_panel_row(false, true));
         assert_eq!(pane.session_id_str(), Some(expected));
-        assert!(pane.side_panel().user_hidden());
+        assert!(!pane.side_panel().user_hidden(), "the chrome owner controls takeover visibility");
+    assert!(!pane.side_panel().is_focused());
     }
 }
 
@@ -2760,7 +2762,9 @@ fn config_chip_cancellation_and_loading_timeout_do_not_replay() {
 fn first_model_and_thinking_choices_request_insert_only_config_persistence() {
     let mut pane = NeoismAgentPane::default();
     pane.apply_model("opencode/free".to_string());
-    pane.apply_provider_connections("opencode".to_string(), Vec::new());
+    pane.apply_provider_connections("opencode".to_string(), vec![neoism_protocol::agent::ProviderConnectionInfo {
+        provider_id: "opencode".into(), connection_id: "free-account".into(), label: "Free".into(), auth_type: "api".into(), is_default: true,
+    }]);
     pane.apply_thinking("high".to_string());
 
     let drained = pane.drain_pending_outbound();
@@ -5160,6 +5164,7 @@ fn clicking_the_active_detail_child_returns_to_main() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("child".to_string());
     pane.parent_session_id = Some("parent".to_string());
+    pane.detail_panel.set_mode(SidePanelMode::Subagents);
     pane.detail_panel.set_subagents(vec![
         NeoismAgentSessionEntry::new("parent", "main session", "return"),
         NeoismAgentSessionEntry::new("child", "Worker", "general"),

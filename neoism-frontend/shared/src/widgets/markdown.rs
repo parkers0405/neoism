@@ -22,7 +22,7 @@
 //! drives all of its sizing/color tokens through its own config, so this
 //! widget can be adopted incrementally without pixel drift.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 // ---------------------------------------------------------------------------
 // Block model

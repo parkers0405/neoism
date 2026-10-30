@@ -1,9 +1,9 @@
 //! Host-neutral immediate paint interface. Desktop delegates retain every
 //! original draw/measure path; other GPU hosts consume the same layout.
-use sugarloaf::{
+use neoism_paint::{
     font::FontLibrary,
     text::{DrawOpts, Text, TextInstance, TextReveal},
-    GraphicDataEntry, GraphicOverlay, Sugarloaf,
+    GraphicDataEntry, GraphicOverlay,
 };
 
 pub trait TextPaint {
@@ -95,6 +95,17 @@ pub trait Paint {
         self.font_library().ensure_static_font(data)
     }
     fn scale_factor(&self) -> f32;
+    /// Put subsequent content in the final overlay layer.
+    fn set_late_overlay_mode(&mut self, enabled: bool);
+    fn char_advance(&mut self, ch: char, attrs: neoism_paint::Attributes, font_size: f32) -> f32 {
+        self.text_mut().measure(&ch.to_string(), &DrawOpts {
+            font_size,
+            bold: attrs.weight().0 >= 700,
+            italic: attrs.style() != neoism_paint::Style::Normal,
+            ..DrawOpts::default()
+        })
+    }
+
     fn rect(
         &mut self,
         id: Option<usize>,
@@ -263,161 +274,5 @@ pub trait Paint {
         order: u8,
     ) {
         self.overlay_rounded_rect(x, y, w, h, color, depth, 0.0, order);
-    }
-}
-impl Paint for Sugarloaf<'_> {
-    fn text_mut(&mut self) -> &mut dyn TextPaint {
-        Sugarloaf::text_mut(self)
-    }
-    fn overlay_text_mut(&mut self) -> &mut dyn TextPaint {
-        Sugarloaf::overlay_text_mut(self)
-    }
-    fn font_library(&self) -> &FontLibrary {
-        Sugarloaf::font_library(self)
-    }
-    fn scale_factor(&self) -> f32 {
-        Sugarloaf::scale_factor(self)
-    }
-    fn rect(
-        &mut self,
-        id: Option<usize>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        c: [f32; 4],
-        d: f32,
-        o: u8,
-    ) {
-        Sugarloaf::rect(self, id, x, y, w, h, c, d, o)
-    }
-    fn rounded_rect(
-        &mut self,
-        id: Option<usize>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        c: [f32; 4],
-        d: f32,
-        r: f32,
-        o: u8,
-    ) {
-        Sugarloaf::rounded_rect(self, id, x, y, w, h, c, d, r, o)
-    }
-    fn quad(
-        &mut self,
-        id: Option<usize>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        c: [f32; 4],
-        r: [f32; 4],
-        d: f32,
-        o: u8,
-    ) {
-        Sugarloaf::quad(self, id, x, y, w, h, c, r, d, o)
-    }
-    fn quad_clipped(
-        &mut self,
-        r: [f32; 4],
-        c: [f32; 4],
-        rs: [f32; 4],
-        d: f32,
-        o: u8,
-        clip: [f32; 4],
-    ) {
-        Sugarloaf::quad_clipped(self, r, c, rs, d, o, clip)
-    }
-    fn set_bounds(&mut self, id: usize, b: Option<[f32; 4]>) {
-        Sugarloaf::set_bounds(self, id, b)
-    }
-    fn triangle(
-        &mut self,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
-        x3: f32,
-        y3: f32,
-        d: f32,
-        c: [f32; 4],
-    ) {
-        Sugarloaf::triangle(self, x1, y1, x2, y2, x3, y3, d, c)
-    }
-    fn triangle_ordered(&mut self,x1:f32,y1:f32,x2:f32,y2:f32,x3:f32,y3:f32,d:f32,c:[f32;4],o:u8){
-        Sugarloaf::triangle_ordered(self,x1,y1,x2,y2,x3,y3,d,c,o)
-    }
-    fn polygon(&mut self, p: &[(f32, f32)], d: f32, c: [f32; 4]) {
-        Sugarloaf::polygon(self, p, d, c)
-    }
-    fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, w: f32, d: f32, c: [f32; 4]) {
-        Sugarloaf::line(self, x1, y1, x2, y2, w, d, c)
-    }
-    fn set_content_occlusion_rects(&mut self, rects: Vec<[f32; 4]>) -> Vec<[f32; 4]> {
-        Sugarloaf::set_content_occlusion_rects(self, rects)
-    }
-    fn ring_clipped(&mut self, c: [f32; 2], r: f32, sw: f32, col: [f32; 4], d: f32, o: u8, clip: [f32; 4]) {
-        Sugarloaf::ring_clipped(self, c, r, sw, col, d, o, clip)
-    }
-    fn image_data_contains(&self, id: u32) -> bool {
-        self.image_data.contains_key(&id)
-    }
-    fn image_data_get(&self, id: u32) -> Option<&GraphicDataEntry> {
-        self.image_data.get(&id)
-    }
-    fn image_data_insert(&mut self, id: u32, entry: GraphicDataEntry) {
-        self.image_data.insert(id, entry);
-    }
-    fn image_data_remove(&mut self, id: u32) {
-        self.image_data.remove(&id);
-    }
-    fn image_data_ids(&self) -> Vec<u32> {
-        self.image_data.keys().copied().collect()
-    }
-    fn push_image_overlay(&mut self, panel_id: usize, overlay: GraphicOverlay) {
-        Sugarloaf::push_image_overlay(self, panel_id, overlay)
-    }
-    fn clear_image_overlays_for(&mut self, panel_id: usize) {
-        Sugarloaf::clear_image_overlays_for(self, panel_id)
-    }
-    fn overlay_rounded_rect(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        c: [f32; 4],
-        d: f32,
-        r: f32,
-        o: u8,
-    ) {
-        Sugarloaf::overlay_rounded_rect(self, x, y, w, h, c, d, r, o)
-    }
-    fn overlay_quad(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        c: [f32; 4],
-        r: [f32; 4],
-        d: f32,
-        o: u8,
-    ) {
-        Sugarloaf::overlay_quad(self, x, y, w, h, c, r, d, o)
-    }
-    fn overlay_rect(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        c: [f32; 4],
-        d: f32,
-        o: u8,
-    ) {
-        Sugarloaf::overlay_rect(self, x, y, w, h, c, d, o)
     }
 }

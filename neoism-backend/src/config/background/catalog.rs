@@ -1,7 +1,7 @@
 //! Pure catalog used by the backend and native hosts, with caller-owned config/pack loading.
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use sugarloaf::ImageProperties;
+use neoism_paint::ImageProperties;
 #[derive(Clone, Debug)]
 pub struct PackWallpaper {
     pub id: String,
@@ -55,7 +55,7 @@ pub fn normalize_image(image: &ImageProperties, base: &Path) -> ImageProperties 
     }
 }
 
-/// Supported formats match Sugarloaf's image decoder features.
+/// Supported formats match the retained CPU image decoder features.
 fn supported(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())

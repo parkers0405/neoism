@@ -24,3 +24,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+[[example]]
+name = "cloud_host_openapi"
+path = "examples/openapi.rs"

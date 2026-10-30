@@ -1,7 +1,7 @@
 //! Optional static web UI served from the daemon HTTP listener.
 //!
-//! Production "Start Web Server" should open this same origin as
-//! `/session` so the browser never has to run `npm` or guess port 7878.
+//! GPUIX is the workspace client. Optional custom static assets and the
+//! standalone Agent GUI share the daemon origin.
 //! Phone share serves the standalone Agent GUI from `/agent-gui/` so Vite
 //! absolute `/assets` paths can be rewritten to that prefix.
 
@@ -72,6 +72,5 @@ pub fn candidate_web_roots() -> Vec<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         out.push(home.join(".local/share/neoism/web"));
     }
-    out.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../neoism-frontend/web/dist"));
     out
 }

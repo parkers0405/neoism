@@ -6,8 +6,8 @@ fn text_instance(
     pos_y: f32,
     bearing_y: i16,
     height: u32,
-) -> sugarloaf::text::TextInstance {
-    sugarloaf::text::TextInstance {
+) -> neoism_paint::text::TextInstance {
+    neoism_paint::text::TextInstance {
         pos: [0.0, pos_y],
         glyph_size: [8, height],
         bearings: [0, bearing_y],

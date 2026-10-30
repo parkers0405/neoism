@@ -582,26 +582,26 @@ fn plugin_virtual_lines_reserve_real_visual_rows() {
 
 #[test]
 fn large_plugin_snapshot_is_validated_and_indexed_once() {
-    let owner = neoism_lua::PluginOwner {
+    let owner = neoism_customization::PluginOwner {
         plugin_id: "dev.stress".into(),
-        revision: neoism_lua::PluginRevision("r1".into()),
+        revision: neoism_customization::PluginRevision("r1".into()),
     };
     let decorations = (0..10_000)
-        .map(|id| neoism_lua::ResolvedPluginDecoration {
-            id: neoism_lua::PluginResourceId(id),
+        .map(|id| neoism_customization::ResolvedPluginDecoration {
+            id: neoism_customization::PluginResourceId(id),
             owner: owner.clone(),
-            document: neoism_lua::DocumentHandle("document:stress".into()),
+            document: neoism_customization::DocumentHandle("document:stress".into()),
             start: 0,
             end: 1,
-            start_position: neoism_lua::TextPosition {
+            start_position: neoism_customization::TextPosition {
                 line: 0,
                 character: 0,
             },
-            end_position: neoism_lua::TextPosition {
+            end_position: neoism_customization::TextPosition {
                 line: 0,
                 character: 1,
             },
-            layer: neoism_lua::DecorationLayer::Highlight,
+            layer: neoism_customization::DecorationLayer::Highlight,
             class: None,
             text: None,
             severity: None,
@@ -612,7 +612,7 @@ fn large_plugin_snapshot_is_validated_and_indexed_once() {
             actions: Vec::new(),
         })
         .collect();
-    let snapshot = neoism_lua::PluginDecorationSnapshot {
+    let snapshot = neoism_customization::PluginDecorationSnapshot {
         revision: 1,
         decorations,
     };

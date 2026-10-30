@@ -12,7 +12,7 @@ import type { DaemonConnection } from "../../src/daemon/client";
 // Production views with in-memory document/PTY input. No daemon or user files.
 const renderer=createRenderer();
 renderer.init({title:"Neoism wheel verification",appId:"ai.neoism.gpuix.test",width:1200,height:800});
-renderer.registerFont(readFileSync("../../sugarloaf/src/font/resources/CascadiaCode/CascadiaCodeNF-Regular.otf"));
+renderer.registerFont(readFileSync("../../neoism-paint/src/font/resources/CascadiaCode/CascadiaCodeNF-Regular.otf"));
 const config={...loadConfig(["--config","/nonexistent/scroll-verification"],{}),vim:true,cursorBlink:false};
 const editor=new NativeEditor("scroll.rs",Array.from({length:5000},(_,i)=>`pub fn value_${i}() -> usize { ${i} }`).join("\n"),true);
 let layouts=0,frames=0,work=0,focuses=0,scrollEvents=0;

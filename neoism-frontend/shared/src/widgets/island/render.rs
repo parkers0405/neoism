@@ -1,6 +1,6 @@
 use super::*;
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 use web_time::Instant;
 
 use crate::primitives::IdeTheme;
@@ -76,7 +76,7 @@ impl Island {
     /// Render the progress bar below the island
     pub(crate) fn render_progress_bar(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         window_width: f32,
         scale_factor: f32,
     ) {
@@ -215,7 +215,7 @@ impl Island {
     #[inline]
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         dimensions: (f32, f32, f32),
         contexts: &dyn IslandContexts,
         theme: &IdeTheme,
@@ -239,7 +239,7 @@ impl Island {
         // Resolve workspace chrome independently. The host theme remains the
         // exact legacy fallback (native hosts historically pass chrome.top).
         let style = crate::primitives::surface_background::style(
-            neoism_lua::selector::WORKSPACE_TABS,
+            neoism_customization::selector::WORKSPACE_TABS,
         );
         let workspace_theme = crate::customization::styled_ide_theme(*theme, &style);
         let theme = &workspace_theme;
@@ -592,7 +592,7 @@ impl Island {
 
     pub(crate) fn render_dragged_tab(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         contexts: &dyn IslandContexts,
         theme: &IdeTheme,
         drag: IslandDragState,
@@ -754,7 +754,7 @@ impl Island {
 /// Workspace color overrides retain precedence over the active-card default.
 /// Only material alpha changes; the host's legacy fallback theme stays intact.
 fn workspace_tab_material(
-    style: &neoism_lua::StylePatch,
+    style: &neoism_customization::StylePatch,
     theme: &IdeTheme,
     custom: Option<[f32; 4]>,
     active: bool,
@@ -775,7 +775,7 @@ mod material_tests {
     #[test]
     fn workspace_defaults_and_color_precedence_are_unchanged() {
         let theme = IdeTheme::default();
-        let style = neoism_lua::StylePatch::default();
+        let style = neoism_customization::StylePatch::default();
         let color = [0.2, 0.4, 0.6, 0.8];
         assert_eq!(workspace_tab_material(&style, &theme, None, false), None);
         assert_eq!(
@@ -791,7 +791,7 @@ mod material_tests {
     #[test]
     fn workspace_alpha_is_applied_once_to_active_and_custom_materials() {
         let theme = IdeTheme::default();
-        let style = neoism_lua::StylePatch {
+        let style = neoism_customization::StylePatch {
             opacity: Some(0.25),
             ..Default::default()
         };
@@ -803,7 +803,7 @@ mod material_tests {
             workspace_tab_material(&style, &theme, Some([0.2, 0.4, 0.6, 0.8]), true),
             Some([0.2, 0.4, 0.6, 0.2])
         );
-        let transparent = neoism_lua::StylePatch {
+        let transparent = neoism_customization::StylePatch {
             background: Some("transparent".into()),
             ..style
         };

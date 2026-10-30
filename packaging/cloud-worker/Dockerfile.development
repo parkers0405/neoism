@@ -5,14 +5,13 @@ RUN pacman -Sy --noconfirm --needed ca-certificates curl git jq openssh \
     && pacman -Scc --noconfirm
 COPY worker-artifacts/native-libs/ /usr/lib/
 COPY worker-artifacts/neoism-agent /usr/local/bin/neoism-agent
-COPY worker-artifacts/neoism-agent-lua-runner /usr/local/bin/neoism-agent-lua-runner
 COPY packaging/cloud-worker/entrypoint.sh /usr/local/bin/worker-entrypoint
 COPY packaging/cloud-worker/healthcheck.sh /usr/local/bin/worker-healthcheck
 RUN groupadd --gid 10001 neoism \
     && useradd --uid 10001 --gid 10001 --home-dir /var/lib/neoism/home --no-create-home --shell /bin/bash neoism \
     && mkdir -p /workspace /var/lib/neoism/home /var/lib/neoism/config /var/lib/neoism/state /var/lib/neoism/cache /var/lib/neoism/data \
     && chown -R 10001:10001 /workspace /var/lib/neoism \
-    && chmod 0755 /usr/local/bin/neoism-agent /usr/local/bin/neoism-agent-lua-runner /usr/local/bin/worker-entrypoint /usr/local/bin/worker-healthcheck
+    && chmod 0755 /usr/local/bin/neoism-agent /usr/local/bin/worker-entrypoint /usr/local/bin/worker-healthcheck
 ENV HOME=/var/lib/neoism/home \
     XDG_CONFIG_HOME=/var/lib/neoism/config \
     XDG_STATE_HOME=/var/lib/neoism/state \

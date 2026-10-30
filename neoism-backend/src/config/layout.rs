@@ -108,7 +108,7 @@ impl<'de> Deserialize<'de> for Margin {
         D: Deserializer<'de>,
     {
         // Keep accepting CSS-style user input as well as the named sides
-        // emitted by our derived Serialize implementation (used by Lua patches).
+        // emitted by our derived Serialize implementation (used by configuration patches).
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Representation {

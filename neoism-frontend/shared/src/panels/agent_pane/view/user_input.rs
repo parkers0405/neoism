@@ -4,7 +4,7 @@ pub mod host_chips;
 
 use std::rc::Rc;
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::panels::agent_pane::input_controller::{visual_row_index, InputWrapRow};

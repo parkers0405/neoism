@@ -23,7 +23,7 @@
 //! modules that don't exist yet in the shared crate. The host wires
 //! `lib.rs`/`panels/mod.rs` after the widget lift commits.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::editor::markdown::MarkdownBlockTemplate;
 

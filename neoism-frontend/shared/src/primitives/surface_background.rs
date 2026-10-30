@@ -1,8 +1,8 @@
 //! Native, bounded decorations behind surface foreground. The host brackets
 //! each window's serial paint with begin_frame/finish_frame; no idle timer.
 #[cfg(test)]
-use neoism_lua::EffectOptions;
-use neoism_lua::{BackgroundEffect, PluginSnapshot, StylePatch, StyleSheet};
+use neoism_customization::EffectOptions;
+use neoism_customization::{BackgroundEffect, PluginSnapshot, StylePatch, StyleSheet};
 use std::{cell::RefCell, sync::Arc};
 use crate::primitives::paint::Paint;
 

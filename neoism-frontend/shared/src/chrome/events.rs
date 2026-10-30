@@ -2,7 +2,7 @@ use super::*;
 
 use web_time::Duration;
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::chrome_policy::TrailCursorOverlayTarget;
 use crate::event::{KeyState, LogicalKey, Modifiers, NamedKey, UiEvent, WheelMode};
@@ -38,22 +38,22 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         let top_style = self
             .plugins
             .styles
-            .resolve(neoism_lua::selector::CHROME_TOP);
-        let status_style = self.plugins.styles.resolve(neoism_lua::selector::STATUS);
+            .resolve(neoism_customization::selector::CHROME_TOP);
+        let status_style = self.plugins.styles.resolve(neoism_customization::selector::STATUS);
         let tabs_style = self
             .plugins
             .styles
-            .resolve(neoism_lua::selector::BUFFER_TABS);
-        let tree_style = self.plugins.styles.resolve(neoism_lua::selector::FILE_TREE);
+            .resolve(neoism_customization::selector::BUFFER_TABS);
+        let tree_style = self.plugins.styles.resolve(neoism_customization::selector::FILE_TREE);
         let notes_style = self
             .plugins
             .styles
-            .resolve(neoism_lua::selector::NOTES_TREE);
+            .resolve(neoism_customization::selector::NOTES_TREE);
         let agent_style = self
             .plugins
             .styles
-            .resolve(neoism_lua::selector::AGENT_SIDEBAR);
-        let composer_style = self.plugins.styles.resolve(neoism_lua::selector::COMPOSER);
+            .resolve(neoism_customization::selector::AGENT_SIDEBAR);
+        let composer_style = self.plugins.styles.resolve(neoism_customization::selector::COMPOSER);
         self.mobile_agent_narrow = self.mobile_web_agent_panel_enabled
             && viewport.w
                 < (crate::panels::agent_pane::state::side_panel::SIDE_PANEL_WIDTH
@@ -100,7 +100,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 viewport,
                 scale,
                 &surface_registry,
-                &neoism_lua::SurfaceLayoutPatch::default(),
+                &neoism_customization::SurfaceLayoutPatch::default(),
             )
             .expect("built-in surface registry must resolve")
         });
@@ -275,7 +275,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 viewport,
                 scale,
                 &surface_registry,
-                &neoism_lua::SurfaceLayoutPatch::default(),
+                &neoism_customization::SurfaceLayoutPatch::default(),
             )
             .expect("built-in surface registry must resolve")
         });
@@ -358,8 +358,8 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             Rect::new(x, y, w, h)
         };
 
-        let palette_style = self.plugins.styles.resolve(neoism_lua::selector::PALETTE);
-        let finder_style = self.plugins.styles.resolve(neoism_lua::selector::FINDER);
+        let palette_style = self.plugins.styles.resolve(neoism_customization::selector::PALETTE);
+        let finder_style = self.plugins.styles.resolve(neoism_customization::selector::FINDER);
         let command_palette = self.command_palette.is_visible().then(|| {
             center_modal(
                 palette_style.width.unwrap_or(MODAL_WIDTH),
@@ -590,7 +590,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     pub(crate) fn draw_block_trail_cursor_rect(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         [x, y, w, h]: [f32; 4],
         _cell_w: f32,
         _cell_h: f32,
@@ -598,7 +598,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         cursor_color: [f32; 4],
     ) {
         self.trail_cursor
-            .set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);
+            .set_cursor_shape(neoism_terminal_types::ansi::CursorShape::Block);
         self.trail_cursor.set_destination(x, y, w, h);
         // Chrome focus rects carry their own geometry. In particular, a
         // focused buffer tab publishes a narrow left-edge insertion bar.
@@ -611,9 +611,9 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     pub(crate) fn draw_content_trail_cursor_rect(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         [x, y, w, h]: [f32; 4],
-        shape: neoism_terminal_core::ansi::CursorShape,
+        shape: neoism_terminal_types::ansi::CursorShape,
         dt: f32,
         cursor_color: [f32; 4],
     ) {

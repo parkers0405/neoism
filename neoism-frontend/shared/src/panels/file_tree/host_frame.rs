@@ -51,7 +51,7 @@ pub fn paint_host_presence_row(
     let height=super::ROW_HEIGHT*scale;
     let font=super::FONT_SIZE*scale;
     let avatar=(font+2.0).clamp(14.0,18.0);
-    let opts=sugarloaf::text::DrawOpts{font_size:font*0.82,color:theme.u8(theme.dim),clip_rect:Some([0.0,0.0,width,height]),..Default::default()};
+    let opts=neoism_paint::text::DrawOpts{font_size:font*0.82,color:theme.u8(theme.dim),clip_rect:Some([0.0,0.0,width,height]),..Default::default()};
     let occupied=super::render::presence_cluster_width(painter,peers,avatar,&opts);
     super::render::draw_row_presence_cluster(painter,peers,width,0.0,height,avatar,scale,&opts,[0.0,0.0,width,height],theme,1.0,&[]);
     occupied

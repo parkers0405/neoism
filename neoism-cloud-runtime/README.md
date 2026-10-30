@@ -176,7 +176,7 @@ Native integrations can later implement `RuntimeProvider` directly, or serve thi
 `canonical_openapi() -> serde_json::Value` is the authoritative OpenAPI 3.1 source for the generic bridge; SDK DTOs and snapshots should be generated from it, not copied by hand. Export without launching a server:
 
 ```sh
-cargo run --locked --example openapi -p neoism-cloud-runtime
+bash scripts/blaze.sh run --locked --example cloud_runtime_openapi -p neoism-cloud-runtime
 ```
 
 Operation IDs are `cloud.runtime.ensure`, `cloud.runtime.start`, `cloud.runtime.inspect`, `cloud.runtime.stop`, and `cloud.runtime.destroy`; all are POST under `/v2/runtime/`. The request body derives its wire shape from the owned public `ProtocolRequest { version, allocation, handle }`; responses use `ProtocolResponse { version, status }`. `HttpProvider` serializes/deserializes these exact DTOs. `ProtocolRequest::new/validate(RuntimeAction)` requires null/absent handle for ensure an optional matching handle for inspect, and a matching complete handle for other mutations. Deserialization is structural: bridges must call validation before any native operation. Bridge version is exactly 2 (worker connection and launch contracts remain 1), generations are positive, and authentication is modeled only as a header bearer security scheme, never a body field or secret-bearing error schema.

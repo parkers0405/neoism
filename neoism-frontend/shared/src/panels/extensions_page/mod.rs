@@ -9,6 +9,6 @@ mod view;
 
 pub use state::{
     ExtensionEntry, ExtensionFilter, ExtensionKind, ExtensionStatus, ExtensionTab,
-    KeyResponse, LuaPluginAction, LuaPluginLifecycle, LuaPluginPresentation,
+    KeyResponse,
     NeoismExtensionsPane, PaneAction,
 };

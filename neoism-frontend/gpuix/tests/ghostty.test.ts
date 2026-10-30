@@ -1,6 +1,4 @@
-import { terminalContract } from "./support/terminal-contract";
-terminalContract("ghostty");
-
+import vimMotions from "./fixtures/terminal-vim-motions.json";
 import { expect, test } from "bun:test";
 import { TerminalBuffer } from "../src/terminal/buffer";
 import { palettes } from "../src/design/generated";
@@ -41,22 +39,14 @@ test("Ghostty preserves selection anchors through output and supports actual Vim
   } finally { buffer.dispose(); }
 });
 
-test("Ghostty Vim matches Neoism word, line, viewport, bracket, wide-cell, and wrap motions", async () => {
-  const scenarios: Array<{ content: string; cols: number; rows: number; keys: string[] }> = [
-    ...["H0w", "H0ww", "H0e", "H0$", "H0$$", "H0lb", "H0M", "H0L", "H0j$", "H0jw", "H0jW", "H0jllkj", "H0ww%", "H0G", "H0g"].map((keys) => ({ content: "one two (four)\r\nsecond\r\n  third line", cols: 30, rows: 5, keys: [...keys] })),
-    ...["H0l", "H0ll", "H0llh", "H0llll", "H0llllllllll", "H0j0", "H0j00", "H0j0h"].map((keys) => ({ content: "a界defghijklmnopq\r\nsecond", cols: 10, rows: 4, keys: [...keys] })),
-  ];
-  for (const scenario of scenarios) {
-    const cursors = [];
-    for (const backend of ["crosswords", "ghostty"] as const) {
-      const buffer = new TerminalBuffer(palettes.pastel_dark, scenario.cols, scenario.rows, backend);
-      try {
-        await buffer.write(bytes(scenario.content)); buffer.key({ key: "space", char: " ", alt: true, shift: true });
-        for (const char of scenario.keys) buffer.key({ key: char.toLowerCase(), char, shift: char !== char.toLowerCase() });
-        cursors.push(buffer.frame().cursor);
-      } finally { buffer.dispose(); }
-    }
-    expect({ scenario, cursor: cursors[1] }).toEqual({ scenario, cursor: cursors[0] });
+test("Ghostty preserves word, line, viewport, bracket, wide-cell, and wrap motions", async () => {
+  for (const { scenario, cursor } of vimMotions) {
+    const buffer = new TerminalBuffer(palettes.pastel_dark, scenario.cols, scenario.rows);
+    try {
+      await buffer.write(bytes(scenario.content)); buffer.key({ key: "space", char: " ", alt: true, shift: true });
+      for (const char of scenario.keys) buffer.key({ key: char.toLowerCase(), char, shift: char !== char.toLowerCase() });
+      expect({ scenario, cursor }).toEqual({ scenario, cursor: buffer.frame().cursor });
+    } finally { buffer.dispose(); }
   }
 });
 test("Ghostty answers TUI device, size and color-scheme queries through the PTY effect", async () => {

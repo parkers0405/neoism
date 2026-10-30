@@ -36,3 +36,6 @@ pub use vaults::{
     notes_vaults, rename_notes_vault, NotesVault,
 };
 pub use watcher::{NoteGraphWatcher, WatcherEvent};
+
+#[cfg(test)]
+mod test_support;

@@ -356,7 +356,7 @@ async fn drain_until(
 /// have already dropped the socket.
 async fn close(mut ws: WsClient) {
     let _: WsResult<()> = ws.close(None).await;
-    let _ = ws.next().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), ws.next()).await;
 }
 
 // ---------------------------------------------------------------------
@@ -819,7 +819,7 @@ async fn pty_registry_is_shared_across_websocket_clients_with_backlog() {
     send_pty(
         &mut client_a,
         &PtyClientMessage::CreatePty {
-            presentation: None,
+            presentation: Some(neoism_protocol::pty::Presentation::Grid),
             cwd: None,
             cols: 80,
             rows: 24,
@@ -853,6 +853,11 @@ async fn pty_registry_is_shared_across_websocket_clients_with_backlog() {
     // registry would be empty here; the daemon-owned registry replays
     // the retained output for the existing PTY.
     let mut client_b = connect_client(daemon.addr).await;
+    // GPUIX adopts sessions explicitly; a fresh socket must not receive
+    // another client's terminal history before attaching.
+    send_pty(&mut client_b, &PtyClientMessage::AttachPty {
+        session_id: session_id.clone(), cursor: None,
+    }).await;
     recv_pty_output_containing(
         &mut client_b,
         &session_id,

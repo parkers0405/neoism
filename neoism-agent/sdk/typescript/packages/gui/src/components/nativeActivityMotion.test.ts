@@ -8,7 +8,7 @@ const runtime = (overrides: Partial<SessionRuntimeSnapshot> = {}): SessionRuntim
 describe("native activity motion port", () => {
     it("pins exact native constants and face, not sidebar orbit or generic pulse", () => {
         expect(ACTIVITY.scramble).toBe("|/-\\+!?>?<%#=@*~&^$");
-        for (const source of ["const SCRAMBLE_TOTAL: f32 = 0.7", "now_seconds * 44.0", "live_phase * 5.6 + ix as f32 * 0.82", "live_phase * 4.0 + ix as f32 * 0.95", "Press Start 2P", "word_motion.sin() * 1.8", "wave_phase.sin() * 2.4", "cursor_x += 7.0", "0.40 + (swell * 0.5 + 0.5) * 0.45"]) expect(native).toContain(source);
+        for (const source of ["(0.7 / count.max(1) as f32)", "time * 44.0", "time * 5.6 + index as f32 * 0.82", "live_phase * 4.0 + ix as f32 * 0.95", "Press Start 2P", "word_motion.sin() * 1.8", "phase.sin() * 2.4", "cursor_x += 7.0", "0.40 + (swell * 0.5 + 0.5) * 0.45"]) expect(native).toContain(source);
         expect(ACTIVITY).toMatchObject({ scrambleSeconds: 0.7, scrambleHz: 44, lineHeight: 26, inset: 3.3 });
         expect(STATUS.thinking[0]).toBe("Pondering"); expect(STATUS.working[0]).toBe("Tinkering");
     });

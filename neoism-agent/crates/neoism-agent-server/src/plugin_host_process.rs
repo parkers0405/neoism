@@ -122,22 +122,6 @@ pub(crate) fn package_plugin_spec(
         .as_ref()
         .ok_or_else(|| "package has no Agent entrypoint".to_string())?;
     let source = match agent.runtime {
-        neoism_agent_plugin_api::AgentEntrypointRuntime::Lua => {
-            let bundled = std::env::current_exe().ok().and_then(|executable| {
-                let candidate = executable.with_file_name(format!(
-                    "neoism-agent-lua-runner{}",
-                    std::env::consts::EXE_SUFFIX
-                ));
-                candidate.is_file().then_some(candidate)
-            });
-            ServeSource::Command(vec![
-                bundled
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "neoism-agent-lua-runner".into()),
-                "--manifest".into(),
-                package.manifest_path.to_string_lossy().into_owned(),
-            ])
-        }
         neoism_agent_plugin_api::AgentEntrypointRuntime::Process
             if !agent.command.is_empty() =>
         {

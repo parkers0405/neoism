@@ -17,3 +17,7 @@ uuid.workspace = true
 
 axum.workspace = true
 base64.workspace = true
+
+[[example]]
+name = "cloud_runtime_openapi"
+path = "examples/openapi.rs"

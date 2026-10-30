@@ -14,8 +14,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use web_time::Duration;
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 use web_time::Instant;
 
 use crate::primitives::ide_theme::IdeTheme;
@@ -145,7 +145,7 @@ impl NeoismTagsPane {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         rect: [f32; 4],
         theme: &IdeTheme,
         mouse: Option<[f32; 2]>,

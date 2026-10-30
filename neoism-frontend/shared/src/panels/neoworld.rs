@@ -2,8 +2,8 @@ use neoism_neoworld_core::{
     CritterStyle, Moment, PetId, PetState, RoomStyle, SimulationEvents, StationKind,
     Vec2, WORLD_FLOOR, WORLD_HEIGHT, WORLD_WIDTH,
 };
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 use web_time::Instant;
 
 use crate::primitives::IdeTheme;
@@ -128,7 +128,7 @@ impl NeoWorldPane {
     #[rustfmt::skip]
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         rect: [f32; 4],
         theme: &IdeTheme,
         chrome_scale: f32,
@@ -299,7 +299,7 @@ fn contains([x, y, w, h]: [f32; 4], px: f32, py: f32) -> bool {
 }
 
 fn lcd_rect(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     display: [f32; 4],
     scale: f32,
     [x, y, w, h]: [f32; 4],
@@ -320,7 +320,7 @@ fn lcd_rect(
 
 #[rustfmt::skip]
 fn draw_room_pattern(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     display: [f32; 4],
     scale: f32,
     pattern: u8,
@@ -355,7 +355,7 @@ fn draw_room_pattern(
 
 #[rustfmt::skip]
 fn draw_station(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     display: [f32; 4],
     scale: f32,
     kind: StationKind,
@@ -2125,7 +2125,7 @@ fn idle_fidget_frame(tick: i32) -> &'static [&'static str] {
 
 #[rustfmt::skip]
 fn draw_stick_pet(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     display: [f32; 4],
     scale: f32,
     pet: &PetState,
@@ -2320,7 +2320,7 @@ fn draw_stick_pet(
 }
 
 fn draw_frame(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     display: [f32; 4],
     scale: f32,
     x: f32,

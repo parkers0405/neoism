@@ -1,4 +1,4 @@
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::editor::markdown::{
     source_map::InlineSourceMap, MarkdownPane, MarkdownReaderHighlightColor,

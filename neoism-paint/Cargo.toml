@@ -1,0 +1,47 @@
+[package]
+name = "neoism-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CPU text shaping, raster assets, and renderer-neutral document layout for Neoism."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+image_rs.workspace = true
+unicode-width.workspace = true
+neoism-grapheme-width.workspace = true
+web-time = "1.1"
+rustc-hash.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+lru = "0.16.1"
+smallvec.workspace = true
+skrifa = "0.37.0"
+halfbrown = "0.3.0"
+swash = "0.2.7"
+zeno = "0.3.3"
+tiny-skia = "0.12.0"
+wide = "1.2.0"
+bytemuck.workspace = true
+twox-hash = { version = "2.1.1", default-features = false, features = ["std", "xxhash64"] }
+wyhash = "0.5.0"
+thiserror = "2.0.1"
+memmap2.workspace = true
+font-kit = "0.14.3"
+walkdir = "2.5.0"
+ttf-parser = { version = "0.25.1", default-features = false, features = ["std", "opentype-layout", "apple-layout", "variable-fonts", "glyph-names"] }
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+fontconfig-parser = { version = "0.5.8", default-features = false }
+yeslogic-fontconfig-sys = "6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics-types = "0.2.0"
+core-graphics = "0.24.0"
+core-text = "21.0.0"
+core-foundation = "0.10.1"
+
+[dev-dependencies]
+approx = "0.5.1"

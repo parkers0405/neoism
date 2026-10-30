@@ -2,8 +2,8 @@
 //! overlay with a category rail, scrollable setting rows, toggle
 //! switches, and dropdown selects.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use crate::primitives::draw_text_with_occlusion;
 use crate::primitives::geom::intersect_rect;
@@ -165,7 +165,7 @@ fn dropdown_geometry(
 /// scrolled-off control is cut at the viewport edge instead of drawing
 /// over the header / margins.
 fn clip_rrect(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     rect: [f32; 4],
     clip: [f32; 4],
     color: [f32; 4],
@@ -183,7 +183,7 @@ fn clip_rrect(
 /// stale detail controls cannot remain clickable after a push/pop or resize.
 fn render_compact_root(
     pane: &mut NeoismSettingsPane,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     theme: &IdeTheme,
     s: f32,
     mouse: Option<(f32, f32)>,
@@ -343,7 +343,7 @@ fn render_compact_root(
 
 pub(crate) fn render(
     pane: &mut NeoismSettingsPane,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     win_w: f32,
     win_h: f32,
     theme: &IdeTheme,

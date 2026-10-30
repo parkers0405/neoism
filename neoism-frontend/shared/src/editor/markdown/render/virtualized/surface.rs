@@ -1369,8 +1369,8 @@ fn prepare_surface(
             .flatten();
         if state.source_id != source_id {
             state.adapter =
-                sugarloaf::VirtualMarkdownAdapter::new("neoism-markdown-pane");
-            state.surface = sugarloaf::VirtualSurface::new(VirtualSurfaceConfig {
+                neoism_paint::VirtualMarkdownAdapter::new("neoism-markdown-pane");
+            state.surface = neoism_paint::VirtualSurface::new(VirtualSurfaceConfig {
                 overscan_px: 700.0,
                 warm_distance_px: 12_000.0,
                 cold_distance_px: 60_000.0,
@@ -1395,8 +1395,8 @@ fn prepare_surface(
                 )
             } else if same_source && state.source == source {
                 (
-                    sugarloaf::VirtualSurfaceBatch::for_route(
-                        sugarloaf::VirtualSurfaceRoute::markdown_file(&source_id),
+                    neoism_paint::VirtualSurfaceBatch::for_route(
+                        neoism_paint::VirtualSurfaceRoute::markdown_file(&source_id),
                         VirtualSourceRevision(revision),
                     ),
                     false,
@@ -1535,8 +1535,8 @@ fn prepare_large_line_surface(
         let new_source = state.source_id != source_id;
         if new_source {
             state.adapter =
-                sugarloaf::VirtualMarkdownAdapter::new("neoism-markdown-pane");
-            state.surface = sugarloaf::VirtualSurface::new(VirtualSurfaceConfig {
+                neoism_paint::VirtualMarkdownAdapter::new("neoism-markdown-pane");
+            state.surface = neoism_paint::VirtualSurface::new(VirtualSurfaceConfig {
                 overscan_px: 700.0,
                 warm_distance_px: 12_000.0,
                 cold_distance_px: 60_000.0,
@@ -1677,8 +1677,8 @@ fn prepare_large_line_surface(
                 node_index.saturating_add(1)
             };
             let mut batch = if new_line_count == 0 {
-                let mut batch = sugarloaf::VirtualSurfaceBatch::for_route(
-                    sugarloaf::VirtualSurfaceRoute::markdown_file(source_id),
+                let mut batch = neoism_paint::VirtualSurfaceBatch::for_route(
+                    neoism_paint::VirtualSurfaceRoute::markdown_file(source_id),
                     VirtualSourceRevision(revision),
                 );
                 batch.push(VirtualSurfaceCommand::SpliceNodes {

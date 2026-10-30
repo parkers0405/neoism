@@ -1,6 +1,6 @@
 use super::*;
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 use web_time::Instant;
 
 impl Island {
@@ -199,7 +199,7 @@ impl Island {
     /// Render the color picker dropdown below a tab
     pub(crate) fn render_color_picker(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         tab_x: f32,
         tab_width: f32,
     ) {

@@ -157,7 +157,7 @@ impl HostFinder {
         frame["commands"] = json!(self.paint.commands());
         if let Some(rect)=self.finder.selected_cursor_rect(){
             let was_moving=self.cursor.is_animating();let now=Instant::now();
-            self.cursor.set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);
+            self.cursor.set_cursor_shape(neoism_terminal_types::ansi::CursorShape::Block);
             self.cursor.set_destination(rect[0],rect[1],rect[2],rect[3]);
             self.cursor.animate(rect[2],rect[3],if was_moving{now.duration_since(self.cursor_frame).as_secs_f32()}else{0.0});self.cursor_frame=now;
             frame["cursorQuad"]=json!(self.cursor.quad_points());

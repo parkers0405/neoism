@@ -17,7 +17,7 @@ const option = (name:string,fallback:number) => {
 const sampleMs=option("--sample-ms",2200),hz=option("--hz",240);
 const renderer=createRenderer();
 renderer.init({title:"Neoism code scroll FPS measurement",appId:"ai.neoism.gpuix.code-fps",width:1200,height:800});
-renderer.registerFont(readFileSync(new URL("../../../../sugarloaf/src/font/resources/CascadiaCode/CascadiaCodeNF-Regular.otf",import.meta.url)));
+renderer.registerFont(readFileSync(new URL("../../../../neoism-paint/src/font/resources/CascadiaCode/CascadiaCodeNF-Regular.otf",import.meta.url)));
 const wakeIntervals=observeNativeWake(renderer),displayClock=installDisplayClock(renderer,console.error);
 const loop=startFrameLoop(renderer);
 const config={...loadConfig(["--config","/nonexistent/neoism-code-fps"],{}),vim:true,cursorBlink:false};

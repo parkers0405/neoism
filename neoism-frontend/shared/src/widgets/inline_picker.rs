@@ -2,7 +2,7 @@ mod icons;
 pub use icons::InlinePickerIcon;
 pub(crate) use icons::crop as clip_icon_image;
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::primitives::IdeTheme;

@@ -1,4 +1,4 @@
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use super::draw::{draw_rounded_rect_clipped, draw_text_clipped, opts_with_clip};
 use super::markdown::{

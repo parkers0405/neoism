@@ -2,7 +2,6 @@
 # All COPY paths are relative to the repository-root build context.
 FROM debian:bookworm-slim AS agent-worker
 ARG AGENT_BINARY=worker-artifacts/neoism-agent
-ARG LUA_RUNNER_BINARY=worker-artifacts/neoism-agent-lua-runner
 
 # GBM/xkbcommon are linked by Agent computer-use backends, even headless.
 # jq is used for bootstrap/readiness checks; no renderer, daemon, GUI or nvim.
@@ -16,10 +15,9 @@ RUN apt-get update \
     && chown -R 10001:10001 /workspace /var/lib/neoism
 
 COPY ${AGENT_BINARY} /usr/local/bin/neoism-agent
-COPY ${LUA_RUNNER_BINARY} /usr/local/bin/neoism-agent-lua-runner
 COPY packaging/cloud-worker/entrypoint.sh /usr/local/bin/worker-entrypoint
 COPY packaging/cloud-worker/healthcheck.sh /usr/local/bin/worker-healthcheck
-RUN chmod 0755 /usr/local/bin/neoism-agent /usr/local/bin/neoism-agent-lua-runner /usr/local/bin/worker-entrypoint /usr/local/bin/worker-healthcheck
+RUN chmod 0755 /usr/local/bin/neoism-agent /usr/local/bin/worker-entrypoint /usr/local/bin/worker-healthcheck
 
 ENV HOME=/var/lib/neoism/home \
     XDG_CONFIG_HOME=/var/lib/neoism/config \

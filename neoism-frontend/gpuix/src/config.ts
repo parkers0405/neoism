@@ -44,8 +44,12 @@ const string = (value: unknown, fallback: string) => typeof value === "string" &
 const readOptional = (path: string) => { try { return readFileSync(path, "utf8").trim() || undefined; } catch { return undefined; } };
 
 export function loadConfig(args = process.argv.slice(2), env = process.env, values?: Record<string, unknown>): AppConfig {
-  const value = (flag: string) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
-  const configRoot = join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "neoism");
+  const value = (flag: string) => {
+    const argument = args.findIndex(arg => arg === flag || arg.startsWith(flag + "="));
+    if (argument < 0) return undefined;
+    return args[argument] === flag ? args[argument + 1] : args[argument].slice(flag.length + 1);
+  };
+  const configRoot = env.NEOISM_CONFIG_HOME || join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "neoism");
   const configPath = value("--config") || join(configRoot, "config.json");
   const warnings: string[] = [];
   let raw: Record<string, unknown> = {};
@@ -65,17 +69,17 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
   const theme = { ...(palettes[themeName as keyof typeof palettes] || palettes.pastel_dark) } as Palette;
   const fontSize = Math.max(7, Math.min(42, number(Number(value("--font-size") || fonts.size || 14), 14)));
   const runtimeDir = env.XDG_RUNTIME_DIR || join(tmpdir(), `neoism-${process.getuid?.() ?? "user"}`);
-  const socketPath = join(runtimeDir, "neoism.sock");
+  const socketPath = env.NEOISM_DAEMON_SOCKET || (env.XDG_RUNTIME_DIR ? join(runtimeDir, "neoism.sock") : join(tmpdir(), `neoism-${process.getuid?.() ?? "user"}.sock`));
   const explicit = value("--daemon") || env.NEOISM_GPUIX_DAEMON_URL;
   const endpoint = explicit || (process.platform !== "win32" && existsSync(socketPath)
-    ? `ws+unix://${socketPath}:/session` : "ws://127.0.0.1:7878/session");
+    ? `ws+unix://${socketPath}:/session` : `ws://${env.NEOISM_DAEMON_ADDR || "127.0.0.1:7878"}/session`);
   // Only discover local upgrade credentials for our own default endpoint.
-  const authToken = env.NEOISM_DAEMON_TOKEN || (!explicit ? readOptional(join(runtimeDir, "neoism", "daemon-token")) : undefined);
+  const authToken = env.NEOISM_DAEMON_TOKEN || (!explicit ? readOptional(env.XDG_RUNTIME_DIR ? join(runtimeDir, "neoism", "daemon-token") : join(runtimeDir, "daemon-token")) : undefined);
   if (!palettes[themeName as keyof typeof palettes]) warnings.push(`Theme '${themeName}' is not bundled; using pastel_dark.`);
   let backgroundPath = typeof image.path === "string" ? resolve(image.path.replace(/^~(?=\/)/, homedir())) : undefined;
   const blur = Math.max(0, number(image.blur, 0));
-  // Sugarloaf already caches blurred backgrounds beside the original. Reuse
-  // those exact pixels when available without modifying any personal asset.
+  // Reuse a preblurred sibling image when available without modifying
+  // personal background assets.
   if (backgroundPath && blur > 0) {
     const cached = backgroundPath.slice(0, -extname(backgroundPath).length) + `-blur-${blur}.png`;
     if (existsSync(cached)) backgroundPath = cached;

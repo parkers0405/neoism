@@ -29,20 +29,6 @@ pub enum AppearanceTheme {
 }
 
 impl AppearanceTheme {
-    pub fn to_window_theme(self) -> neoism_window::window::Theme {
-        match self {
-            AppearanceTheme::Dark => neoism_window::window::Theme::Dark,
-            AppearanceTheme::Light => neoism_window::window::Theme::Light,
-        }
-    }
-
-    pub fn from_window_theme(theme: neoism_window::window::Theme) -> Self {
-        match theme {
-            neoism_window::window::Theme::Light => AppearanceTheme::Light,
-            neoism_window::window::Theme::Dark => AppearanceTheme::Dark,
-        }
-    }
-
     pub fn toggled(self) -> Self {
         match self {
             AppearanceTheme::Dark => AppearanceTheme::Light,

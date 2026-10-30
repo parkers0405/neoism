@@ -117,10 +117,10 @@ fn render_frame(view: &mut View) -> Value {
     let painter: &mut dyn Paint = &mut view.painter;
     let top=neoism_ui::panels::agent_pane::view::chat::render_conversation_header(painter,&mut view.pane,rect,&theme,view.mouse,s,&[]);
     let metrics=[content_x,top,content_w,(bottom-top).max(0.0)];
-    // The fixed composer is the visible timeline boundary. Passing the full
-    // pane as paint viewport hid sticky Markdown table/code scrollbars under
-    // the composer despite correct scroll metrics.
-    let paint=metrics;
+    // The composer floats over the transcript. Scroll metrics still stop at
+    // its top, but content paints behind its rounded corners and material.
+    // Markdown controls use the metrics viewport independently of this clip.
+    let paint=[content_x,top,content_w,(view.height-top).max(0.0)];
     let header={use neoism_ui::panels::agent_pane::view::chat::AgentChatPane;
       view.pane.conversation_header().visible_links().map(|(direction,target,rects)|json!({"direction":format!("{:?}",direction).to_lowercase(),"target":target,"rects":rects})).collect::<Vec<_>>()};
     let rail = render_timeline_in_paint_viewport_with::<NeoismAgentPane, SharedTimelineDelegate>(

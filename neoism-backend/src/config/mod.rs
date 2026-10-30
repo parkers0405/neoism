@@ -4,7 +4,6 @@ pub mod bindings;
 pub mod colors;
 pub mod defaults;
 pub mod effects;
-pub mod hints;
 pub mod intelligence;
 mod jsonc_edit;
 pub mod keyboard;
@@ -20,7 +19,6 @@ pub mod window;
 use crate::config::bell::Bell;
 use crate::config::bindings::Bindings;
 use crate::config::defaults::*;
-use crate::config::hints::Hints;
 use crate::config::keyboard::Keyboard;
 use crate::config::layout::{Margin, Panel};
 use crate::config::navigation::Navigation;
@@ -29,13 +27,13 @@ use crate::config::renderer::Renderer;
 use crate::config::title::Title;
 use crate::config::window::Window;
 use colors::Colors;
-use neoism_terminal_core::ansi::CursorShape;
+use neoism_terminal_types::ansi::CursorShape;
 use serde::{Deserialize, Serialize};
 use std::default::Default;
 use std::io::{Error, ErrorKind, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use sugarloaf::font::fonts::SugarloafFonts;
+use neoism_paint::font::fonts::FontConfig;
 use theme::{AdaptiveColors, AdaptiveTheme, AppearanceTheme, Theme};
 use tracing::warn;
 
@@ -99,8 +97,8 @@ pub struct Appearance {
     /// the IDE `theme` above.
     #[serde(default = "String::default")]
     pub palette: String,
-    #[serde(default = "SugarloafFonts::default")]
-    pub fonts: SugarloafFonts,
+    #[serde(default = "FontConfig::default")]
+    pub fonts: FontConfig,
     #[serde(rename = "line-height", default = "default_line_height")]
     pub line_height: f32,
     /// Play one random splash animation when a new terminal or agent tab opens.
@@ -143,7 +141,7 @@ impl Default for Appearance {
         Self {
             theme: default_neoism_theme(),
             palette: String::default(),
-            fonts: SugarloafFonts::default(),
+            fonts: FontConfig::default(),
             line_height: default_line_height(),
             splash_auto_animate: false,
             mashup_pack: None,
@@ -250,8 +248,6 @@ pub struct TerminalConfig {
         rename = "ignore-selection-foreground-color"
     )]
     pub ignore_selection_fg_color: bool,
-    #[serde(default = "Hints::default")]
-    pub hints: Hints,
     #[serde(default = "Bell::default")]
     pub bell: Bell,
     #[serde(default = "default_bool_true", rename = "enable-scroll-bar")]
@@ -278,7 +274,6 @@ impl Default for TerminalConfig {
             hide_cursor_when_typing: false,
             draw_bold_text_with_light_colors: false,
             ignore_selection_fg_color: false,
-            hints: Hints::default(),
             bell: Bell::default(),
             enable_scroll_bar: true,
             scrollback_history_limit: default_scrollback_history_limit(),
@@ -415,29 +410,8 @@ impl Default for AgentPreferences {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum PluginUpdatePolicy {
-    #[default]
-    Manual,
-    Notify,
-    Automatic,
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, rename_all = "kebab-case")]
-pub struct PluginPreferences {
-    pub disabled: Vec<String>,
-    pub grants: std::collections::BTreeMap<String, Vec<String>>,
-    pub update_policy: PluginUpdatePolicy,
-    pub trusted_sources: Vec<String>,
-    /// User replacements for fields in a pack's `editor-plugins` declaration.
-    pub mashup_overrides:
-        std::collections::BTreeMap<String, mashup::EditorPluginOverride>,
-}
-
 /// The golden grouped `config.json`. Every domain is its own block —
-/// `appearance`, `editor`, `terminal`, `ui`, `presence`, `plugins`, `keybinds` —
+/// `appearance`, `editor`, `terminal`, `ui`, `presence`, `keybinds` —
 /// plus the standalone `platform`, `renderer`, and `developer` domains.
 /// The agent server reads its own settings from the shared `agent` block;
 /// this backend types only application-owned preferences.
@@ -455,8 +429,6 @@ pub struct Config {
     pub presence: Presence,
     #[serde(default)]
     pub agent: AgentPreferences,
-    #[serde(default)]
-    pub plugins: PluginPreferences,
     #[serde(default = "Bindings::default")]
     pub keybinds: bindings::Bindings,
     #[serde(default = "Platform::default")]
@@ -1070,12 +1042,12 @@ pub fn write_fonts_family(family: &str) -> std::io::Result<()> {
 
 impl Config {
     /// Apply a complete typed patch produced by another configuration source
-    /// (currently Lua). Missing fields retain their existing values; unknown or
+    /// Missing fields retain their existing values; unknown or
     /// invalid values reject the whole candidate so callers can keep the last
     /// known-good configuration.
     pub fn apply_json_patch(&mut self, patch: &serde_json::Value) -> Result<(), String> {
-        // Style-only init.lua files publish an empty setup patch. This is a
-        // true no-op: do not roundtrip unrelated typed settings (some config
+        // An empty patch is a true no-op: do not roundtrip unrelated typed
+        // settings (some config
         // types have different serialization and user-input representations).
         if patch.is_null() || patch.as_object().is_some_and(|patch| patch.is_empty()) {
             return Ok(());
@@ -1374,10 +1346,6 @@ impl Config {
             if let Some(disable_occluded) = renderer_overwrite.disable_occluded_render {
                 self.renderer.disable_occluded_render = disable_occluded;
             }
-            #[cfg(feature = "wgpu")]
-            if let Some(filters) = &renderer_overwrite.filters {
-                self.renderer.filters = filters.clone();
-            }
             if let Some(strategy) = &renderer_overwrite.strategy {
                 self.renderer.strategy = strategy.clone();
             }
@@ -1418,7 +1386,6 @@ impl Default for Config {
             ui: UiConfig::default(),
             presence: Presence::default(),
             agent: AgentPreferences::default(),
-            plugins: PluginPreferences::default(),
             keybinds: Bindings::default(),
             platform: Platform::default(),
             renderer: Renderer::default(),
@@ -1446,7 +1413,7 @@ mod tests {
     }
 
     #[test]
-    fn config_roundtrip_and_nonempty_lua_patch_preserve_margins() {
+    fn config_roundtrip_and_nonempty_patch_preserve_margins() {
         let mut config = Config::default();
         config.ui.margin = Margin::new(3.0, 7.0, 11.0, 13.0);
         config.ui.panel.margin = Margin::new(2.0, 4.0, 6.0, 8.0);
@@ -1470,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn lua_background_image_patch_validates_blur_without_partial_application() {
+    fn background_image_patch_validates_blur_without_partial_application() {
         let mut config = Config::default();
         for blur in [0.0, 3.0, 100.0] {
             config
@@ -1496,13 +1463,10 @@ mod tests {
     }
 
     #[test]
-    fn style_only_lua_empty_config_patch_is_a_noop() {
+    fn empty_config_patch_is_a_noop() {
         let mut config = parse("{}");
         config.ui.margin = Margin::new(3.0, 7.0, 11.0, 13.0);
         let before = serde_json::to_value(&config).unwrap();
-        // This is the config_patch produced by LuaRuntime for an init.lua
-        // containing only neoism.ui.style calls. Both startup and reload must
-        // accept it before publishing the runtime's separate style snapshot.
         config.apply_json_patch(&serde_json::json!({})).unwrap();
         assert_eq!(serde_json::to_value(&config).unwrap(), before);
         config.apply_json_patch(&serde_json::Value::Null).unwrap();
@@ -1625,7 +1589,7 @@ mod tests {
         let config = parse("{}");
         assert_eq!(config.appearance.palette, String::default());
         assert_eq!(config.terminal.cursor.shape, default_cursor());
-        assert_eq!(config.appearance.fonts, SugarloafFonts::default());
+        assert_eq!(config.appearance.fonts, FontConfig::default());
         assert_eq!(config.appearance.colors, Colors::default());
         assert_eq!(config.developer, Developer::default());
         assert!(!config.renderer.disable_unfocused_render);
@@ -1729,36 +1693,6 @@ mod tests {
         // A key placed at the wrong level (bare root) is ignored, not honored.
         let misplaced = parse(r#"{ "display-name": "parker" }"#);
         assert_eq!(misplaced.presence.display_name, None);
-    }
-
-    #[test]
-    fn plugin_policy_is_grouped_and_typed() {
-        let config = parse(
-            r#"{
-                "plugins": {
-                    "disabled": ["dev.neoism.off"],
-                    "grants": { "dev.neoism.git": ["git.read", "git.write"] },
-                    "update-policy": "notify",
-                    "trusted-sources": ["https://github.com/neoism/"],
-                    "mashup-overrides": {
-                        "focused": { "mode": "only", "enabled": [], "disabled": ["dev.neoism.off"] }
-                    }
-                }
-            }"#,
-        );
-        assert_eq!(config.plugins.disabled, ["dev.neoism.off"]);
-        assert_eq!(
-            config.plugins.grants["dev.neoism.git"],
-            ["git.read", "git.write"]
-        );
-        assert_eq!(config.plugins.update_policy, PluginUpdatePolicy::Notify);
-        assert_eq!(
-            config.plugins.trusted_sources,
-            ["https://github.com/neoism/"]
-        );
-        let mashup = &config.plugins.mashup_overrides["focused"];
-        assert_eq!(mashup.mode, Some(mashup::EditorPluginMode::Only));
-        assert_eq!(mashup.enabled, Some(Vec::new()));
     }
 
     #[test]
@@ -1940,7 +1874,7 @@ mod tests {
     fn default_template_parses_to_defaults() {
         let config = parse(&default_config_file_content());
         assert_eq!(config.appearance.palette, String::default());
-        assert_eq!(config.appearance.fonts, SugarloafFonts::default());
+        assert_eq!(config.appearance.fonts, FontConfig::default());
         assert_eq!(config.keybinds, Bindings::default());
         assert!(config.ui.status_fps);
     }

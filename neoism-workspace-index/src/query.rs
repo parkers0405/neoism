@@ -804,12 +804,7 @@ mod tests {
     #[test]
     fn note_graph_queries_notes_links_tags_tasks_and_search() {
         let root = temp_root("queries");
-        let notes_home = std::env::temp_dir()
-            .join(format!("neoism-query-notes-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&notes_home);
-        unsafe {
-            std::env::set_var("NEOISM_NOTES_HOME", &notes_home);
-        }
+        let notes_home = crate::test_support::temp_notes_home("queries");
         let graph = NoteGraph::open(&root).unwrap();
         let notes_root = graph.workspace().notes_workspace_dir();
         std::fs::create_dir_all(&notes_root).unwrap();

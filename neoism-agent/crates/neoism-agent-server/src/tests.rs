@@ -890,6 +890,22 @@ async fn conversation_search_ranks_older_detailed_match_above_new_incidental_men
 }
 
 #[tokio::test]
+async fn database_retains_locale_fallback_and_language_specific_collation() {
+    let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+    let connection = database.connect().unwrap();
+    for sql in [
+        "SELECT 'z' COLLATE \"sv-SE\" < 'ä'",
+        "SELECT 'ä' COLLATE \"en-US\" < 'z'",
+        "SELECT 'pollo' COLLATE \"es-u-co-trad\" > 'polvo'",
+        "SELECT 'apple' COLLATE \"fr-CA\" < 'banana'",
+    ] {
+        let mut rows = connection.query(sql, ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 1, "{sql}");
+    }
+}
+
+#[tokio::test]
 async fn store_persists_sessions_and_searches_with_fts() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-{}.turso.db",
@@ -4722,7 +4738,12 @@ async fn declarative_plugins_and_custom_tools_load_from_config_dirs() {
     let db_path = root.join("agent.sqlite3");
     cleanup_sqlite_files(&db_path);
 
-    let state = AppState::open_database(db_path.clone()).await.unwrap();
+    // This fixture is an installation-owned plugin directory. Workspace
+    // configuration alone must never activate executable plugins.
+    let services = crate::standard_services().with_config(std::sync::Arc::new(
+        neoism_agent_service_api::StandardConfigSourceService::new(root.join(".agent")),
+    ));
+    let state = AppState::open_database_with_services(&db_path, services).await.unwrap();
     let runtime = state
         .workspace_runtime(root.to_string_lossy().as_ref())
         .await
@@ -5937,7 +5958,7 @@ async fn v2_prompt_and_wait(
         )
         .await;
         if let Some(message) = page.items.into_iter().rev().find(|message| {
-            matches!(&message.info, MessageInfo::Assistant(info) if info.time.completed.is_some())
+            matches!(&message.info, MessageInfo::Assistant(info) if info.time.completed.is_some() && info.finish.as_deref() != Some("tool-calls"))
         }) {
             return message;
         }
@@ -5951,6 +5972,14 @@ async fn v2_prompt_and_wait(
 
 #[tokio::test]
 async fn directory_routes_obey_real_router_auth_policy() {
+    const CHILD: &str = "NEOISM_DIRECTORY_AUTH_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::directory_routes_obey_real_router_auth_policy", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(result.status.success(), "auth-policy subprocess failed: {}", String::from_utf8_lossy(&result.stderr));
+        return;
+    }
     let _guard = env_lock();
     struct Cleanup {
         root: PathBuf,

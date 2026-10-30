@@ -8,7 +8,7 @@ use std::{
 };
 use web_time::Instant;
 
-use sugarloaf::{
+use neoism_paint::{
     text::DrawOpts, VirtualMarkdownAdapter, VirtualScrollAnchor, VirtualSurface,
 };
 

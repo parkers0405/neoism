@@ -32,7 +32,7 @@ pub fn plugin_query(
     language: &str,
     source: &str,
     query: &str,
-) -> Result<Vec<neoism_lua::PluginSyntaxCapture>, String> {
+) -> Result<Vec<neoism_customization::PluginSyntaxCapture>, String> {
     if source.len() > 16 * 1024 * 1024 || query.len() > 4 * 1024 * 1024 {
         return Err("syntax query input exceeds limits".into());
     }
@@ -80,16 +80,16 @@ pub fn plugin_query(
         }
         let capture = capture_match.captures[*index];
         let node = capture.node;
-        output.push(neoism_lua::PluginSyntaxCapture {
+        output.push(neoism_customization::PluginSyntaxCapture {
             name: names
                 .get(capture.index as usize)
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
-            start: neoism_lua::TextPosition {
+            start: neoism_customization::TextPosition {
                 line: node.start_position().row as u32,
                 character: node.start_position().column as u32,
             },
-            end: neoism_lua::TextPosition {
+            end: neoism_customization::TextPosition {
                 line: node.end_position().row as u32,
                 character: node.end_position().column as u32,
             },
@@ -104,7 +104,7 @@ pub fn plugin_query(
     _language: &str,
     _source: &str,
     _query: &str,
-) -> Result<Vec<neoism_lua::PluginSyntaxCapture>, String> {
+) -> Result<Vec<neoism_customization::PluginSyntaxCapture>, String> {
     Err("plugin Tree-sitter queries are unavailable in the web runtime".into())
 }
 

@@ -223,7 +223,7 @@ pub fn render(
     chrome_scale: f32,
     occlusion_rects: &[[f32; 4]],
     checkout_context: &AgentCheckoutContext,
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
 ) {
     render_responsive(
         sugarloaf,
@@ -254,7 +254,7 @@ pub fn render_responsive(
     occlusion_rects: &[[f32; 4]],
     narrow_takeover: bool,
     checkout_context: &AgentCheckoutContext,
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
 ) {
     render_agent_pane_with_responsive::<
         NeoismAgentPane,
@@ -288,7 +288,7 @@ pub fn render_agent_pane_with<P, D, I>(
     chrome_scale: f32,
     occlusion_rects: &[[f32; 4]],
     checkout_context: &AgentCheckoutContext,
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
 ) where
     P: AgentPaneView,
     D: timeline::AgentTimelineDelegate<P>,
@@ -380,7 +380,7 @@ fn render_agent_pane_with_responsive<P, D, I>(
     mouse: Option<(f32, f32)>,
     chrome_scale: f32,
     occlusion_rects: &[[f32; 4]],
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
     narrow_takeover: bool,
     checkout_context: &AgentCheckoutContext,
 ) where

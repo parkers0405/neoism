@@ -15,41 +15,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 profile="${1:-dev}"
 shift || true
 
-case "${profile}" in
-  dev|debug)
-    cargo_args=(run -p neoism --features wgpu)
-    pass_app_args=1
-    ;;
-  build-dev|build-debug)
-    cargo_args=(build -p neoism --features wgpu)
-    pass_app_args=0
-    ;;
-  release|prod)
-    cargo_args=(run -p neoism --release)
-    pass_app_args=1
-    ;;
-  build)
-    cargo_args=(build -p neoism --release)
-    pass_app_args=0
-    ;;
-  wasm)
-    cargo_args=(build -p neoism --target wasm32-unknown-unknown --features web)
-    pass_app_args=0
-    echo "Note: WASM build selected. Use trunk or similar for serving."
-    ;;
-  *)
-    cat >&2 <<'USAGE'
-usage: scripts/dev-neoism.sh [dev|debug|build-dev|build-debug|release|prod|build|wasm] [-- neoism args...]
-
-dev/debug     run an isolated debug desktop build
-build-dev     build an isolated debug desktop binary
-release/prod  run an isolated release desktop build
-build         build an isolated release desktop binary
-wasm          build for wasm32 (web target, for testing)
-USAGE
-    exit 2
-    ;;
+case "$profile" in
+  dev|debug) frontend_command=dev ;;
+  release|prod) frontend_command=run ;;
+  build|build-dev|build-debug) frontend_command=build ;;
+  *) echo 'Usage: scripts/dev-neoism.sh {dev|release|build} [-- app arguments]' >&2; exit 2 ;;
 esac
+if [[ "${1:-}" == -- ]]; then shift; fi
 
 state_root="${NEOISM_DEV_STATE_ROOT:-${repo_root}/.tmp/dev-neoism}"
 runtime_dir="${NEOISM_DEV_RUNTIME_DIR:-${state_root}/runtime}"
@@ -86,21 +58,7 @@ export NEOISM_DAEMON_DATA_DIR="${NEOISM_DEV_DAEMON_DATA_DIR:-${state_root}/daemo
 export NEOISM_DAEMON_SOCKET="${NEOISM_DEV_DAEMON_SOCKET:-${runtime_dir}/neoism.sock}"
 export NEOISM_DAEMON_ADDR="${NEOISM_DEV_DAEMON_ADDR:-127.0.0.1:0}"
 export NEOISM_IPC_SOCKET="${NEOISM_DEV_IPC_SOCKET:-${runtime_dir}/command.sock}"
-export SUGARLOAF_POWER_PREFERENCE="${SUGARLOAF_POWER_PREFERENCE:-high-performance}"
-
-# New: support WASM-specific env for web testing
-if [[ "${profile}" == "wasm" ]]; then
-  export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="wasm-bindgen-test-runner"
-fi
-
-cd "${repo_root}"
-if [[ "${pass_app_args}" == 1 ]]; then
-  exec cargo "${cargo_args[@]}" -- "$@"
-fi
-
-if [[ "$#" -gt 0 ]]; then
-  echo "scripts/dev-neoism.sh: build modes do not accept app args" >&2
-  exit 2
-fi
-
-exec cargo "${cargo_args[@]}"
+export NEOISM_STATE_DIR="${NEOISM_DEV_STATE_DIR:-${state_root}/state}"
+export NEOISM_GPUIX_STATE_PATH="${NEOISM_DEV_SESSION_PATH:-${state_root}/session.json}"
+cd "$repo_root"
+exec bash scripts/gpuix.sh "$frontend_command" "$@"

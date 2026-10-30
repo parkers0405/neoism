@@ -11,8 +11,8 @@ use std::{
         Arc,
     },
 };
-use sugarloaf::{
-    font::{FontLibrary, SugarloafFonts},
+use neoism_paint::{
+    font::{FontLibrary, FontConfig},
     text::{DrawOpts, Text, TextInstance, TextReveal},
     GraphicDataEntry, GraphicOverlay,
 };
@@ -333,6 +333,7 @@ impl TextPaint for RecordedText {
 thread_local! {static FONT_LIBRARIES:RefCell<Vec<((String,u16,Vec<String>),FontLibrary)>>=RefCell::new(Vec::new());}
 
 pub struct RecordingPainter {
+    late_overlay: bool,
     fonts: FontLibrary,
     text: RecordedText,
     overlay: RecordedText,
@@ -351,7 +352,7 @@ impl RecordingPainter {
             if let Some((_, fonts)) = cache.iter().find(|(item, _)| item == &key) {
                 return fonts.clone();
             }
-            let (fonts, _) = FontLibrary::new(SugarloafFonts {
+            let (fonts, _) = FontLibrary::new(FontConfig {
                 family: Some(family.to_owned()),
                 weight: Some(weight),
                 extra_families: Some(extra_families),
@@ -371,6 +372,7 @@ impl RecordingPainter {
         let text = RecordedText::new(&fonts, commands.clone(), 1);
         let overlay = RecordedText::new(&fonts, commands.clone(), 3);
         Self {
+            late_overlay: false,
             fonts,
             text,
             overlay,
@@ -383,6 +385,8 @@ impl RecordingPainter {
     pub fn set_asset(&mut self,path:std::path::PathBuf,text:Option<String>){self.assets.insert(path,text);}
     pub fn take_asset_requests(&mut self)->Vec<std::path::PathBuf>{self.asset_requests.drain().collect()}
     pub fn begin_frame(&mut self) {
+        self.late_overlay = false;
+        self.text.layer = 1;
         self.commands.borrow_mut().clear();
         self.text.clear();
         self.overlay.clear();
@@ -396,13 +400,13 @@ impl RecordingPainter {
             }
         }
         let rgba = match entry.handle.data() {
-            sugarloaf::components::core::image::Data::Rgba { width, height, pixels } => {
+            neoism_paint::image::Data::Rgba { width, height, pixels } => {
                 Some((*width, *height, pixels.to_vec()))
             }
-            sugarloaf::components::core::image::Data::Bytes(bytes) => image_rs::load_from_memory(bytes)
+            neoism_paint::image::Data::Bytes(bytes) => image_rs::load_from_memory(bytes)
                 .ok()
                 .map(|image| { let image = image.to_rgba8(); (image.width(), image.height(), image.into_raw()) }),
-            sugarloaf::components::core::image::Data::Path(path) => image_rs::open(path)
+            neoism_paint::image::Data::Path(path) => image_rs::open(path)
                 .ok()
                 .map(|image| { let image = image.to_rgba8(); (image.width(), image.height(), image.into_raw()) }),
         };
@@ -452,11 +456,16 @@ impl RecordingPainter {
             clip,
             depth,
             order,
-            layer,
+            layer: if self.late_overlay { 3 } else { layer },
         });
     }
 }
 impl Paint for RecordingPainter {
+    fn set_late_overlay_mode(&mut self, enabled: bool) {
+        self.late_overlay = enabled;
+        self.text.layer = if enabled { 3 } else { 1 };
+    }
+
     fn asset_text(&mut self,path:&std::path::Path)->Option<String>{if let Some(text)=self.assets.get(path){return text.clone();}self.asset_requests.insert(path.to_path_buf());None}
 
     fn text_mut(&mut self) -> &mut dyn TextPaint {
@@ -530,14 +539,14 @@ impl Paint for RecordingPainter {
         self.polygon(&[(x1, y1), (x2, y2), (x3, y3)], d, c)
     }
     fn border_ring(&mut self,outer:&[(f32,f32)],inner:&[(f32,f32)],depth:f32,color:[f32;4],order:u8){
-        self.commands.borrow_mut().push(PaintCommand::Ring{outer:outer.to_vec(),inner:inner.to_vec(),color,depth,order,layer:0});
+        self.commands.borrow_mut().push(PaintCommand::Ring{outer:outer.to_vec(),inner:inner.to_vec(),color,depth,order,layer:if self.late_overlay {3} else {0}});
     }
     fn polygon(&mut self, p: &[(f32, f32)], d: f32, c: [f32; 4]) {
         self.commands.borrow_mut().push(PaintCommand::Polygon {
             points: p.to_vec(),
             color: c,
             depth: d,
-            layer: 0,
+            layer: if self.late_overlay {3} else {0},
         });
     }
     fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, w: f32, d: f32, c: [f32; 4]) {
@@ -613,5 +622,33 @@ impl Paint for RecordingPainter {
         o: u8,
     ) {
         self.shape([x, y, w, h], c, [r; 4], None, d, o, 2)
+    }
+}
+
+#[cfg(test)]
+mod paint_order_tests {
+    use super::*;
+
+    #[test]
+    fn text_stays_above_normal_shapes_and_late_overlays_do_not_leak_into_the_next_frame() {
+        let mut painter = RecordingPainter::new("Cascadia Code NF", 400, vec![]);
+        let options = DrawOpts::default();
+        painter.begin_frame();
+        painter.rect(None, 0.0, 0.0, 100.0, 40.0, [1.0; 4], 0.0, 0);
+        painter.text_mut().draw(0.0, 0.0, "normal", &options);
+        painter.set_late_overlay_mode(true);
+        painter.text_mut().draw(0.0, 0.0, "overlay", &options);
+        painter.set_late_overlay_mode(false);
+        painter.text_mut().draw(0.0, 0.0, "restored", &options);
+        let commands = painter.commands.borrow();
+        assert!(matches!(commands.first(), Some(PaintCommand::Rect { layer: 0, .. })));
+        for (label, expected) in [("normal", 1), ("overlay", 3), ("restored", 1)] {
+            assert!(commands.iter().any(|command| matches!(command, PaintCommand::Text { text, layer, .. } if text == label && *layer == expected)));
+        }
+        drop(commands);
+        painter.set_late_overlay_mode(true);
+        painter.begin_frame();
+        painter.text_mut().draw(0.0, 0.0, "next frame", &options);
+        assert!(painter.commands.borrow().iter().any(|command| matches!(command, PaintCommand::Text { text, layer: 1, .. } if text == "next frame")));
     }
 }

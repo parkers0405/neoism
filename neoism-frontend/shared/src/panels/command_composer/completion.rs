@@ -6,8 +6,8 @@
 //! used by the render pass to pick the selected row and strip the `>`
 //! prefix the input layer uses to encode selection.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use super::scrollbar;
 use super::state::CommandComposer;
@@ -36,7 +36,7 @@ impl CommandComposer {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_completion_popup(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         items: &[String],
         detail: Option<&str>,
         anchor_x: f32,

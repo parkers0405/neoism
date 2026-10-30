@@ -76,53 +76,6 @@ pub enum ExtensionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionKind {
     ManagedPackage,
-    LuaPlugin,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LuaPluginLifecycle {
-    Discovered,
-    Lazy,
-    Loaded,
-    Disabled,
-    UpdateAvailable,
-    PermissionRequired,
-    Approved,
-    Revoked,
-    Incompatible,
-    Blocked,
-    Failed,
-    Installing,
-    Updating,
-    Restoring,
-    Removing,
-    RestoreRequired,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LuaPluginAction {
-    Install,
-    Update,
-    Remove,
-    Restore,
-    Enable,
-    Disable,
-    GrantAll,
-    RevokeAll,
-    Retry,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LuaPluginPresentation {
-    pub lifecycle: LuaPluginLifecycle,
-    pub status_text: String,
-    pub requested_permissions: Vec<String>,
-    pub granted_permissions: Vec<String>,
-    pub missing_permissions: Vec<String>,
-    pub installed_commit: Option<String>,
-    pub retryable: bool,
-    pub primary_action: Option<LuaPluginAction>,
-    pub secondary_actions: Vec<LuaPluginAction>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,13 +119,11 @@ pub struct ExtensionEntry {
     /// Drives the source badge so the page reflects what the engine will
     /// actually run.
     pub lsp_source: Option<String>,
-    pub lua_plugin: Option<LuaPluginPresentation>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum RowAction {
     ToggleInstall(String),
-    LuaPlugin(String, LuaPluginAction),
     Focus(usize),
 }
 
@@ -187,10 +138,6 @@ pub enum PaneAction {
         currently_installed: bool,
     },
     OpenRepository(String),
-    LuaPluginActionRequested {
-        id: String,
-        action: LuaPluginAction,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -385,15 +332,6 @@ impl NeoismExtensionsPane {
 
     pub fn set_entries(&mut self, entries: Vec<ExtensionEntry>) {
         self.entries = entries;
-        if self.selected_index >= self.entries.len() {
-            self.selected_index = 0;
-        }
-    }
-
-    pub fn set_lua_plugin_entries(&mut self, entries: Vec<ExtensionEntry>) {
-        self.entries
-            .retain(|entry| entry.kind != ExtensionKind::LuaPlugin);
-        self.entries.extend(entries);
         if self.selected_index >= self.entries.len() {
             self.selected_index = 0;
         }
@@ -660,19 +598,6 @@ impl NeoismExtensionsPane {
     }
 
     fn passes_status(&self, entry: &ExtensionEntry) -> bool {
-        if let Some(plugin) = &entry.lua_plugin {
-            return match self.filter {
-                ExtensionFilter::All => true,
-                ExtensionFilter::Installed => !matches!(
-                    plugin.lifecycle,
-                    LuaPluginLifecycle::Discovered | LuaPluginLifecycle::Installing
-                ),
-                ExtensionFilter::NotInstalled => matches!(
-                    plugin.lifecycle,
-                    LuaPluginLifecycle::Discovered | LuaPluginLifecycle::Installing
-                ),
-            };
-        }
         match self.filter {
             ExtensionFilter::All => true,
             ExtensionFilter::Installed => matches!(
@@ -857,13 +782,6 @@ impl NeoismExtensionsPane {
                     });
                     break;
                 }
-                RowAction::LuaPlugin(id, action) => {
-                    action_target = Some(PaneAction::LuaPluginActionRequested {
-                        id: id.clone(),
-                        action: action.clone(),
-                    });
-                    break;
-                }
                 RowAction::Focus(idx) => {
                     focus_target = Some(*idx);
                     break;
@@ -1027,18 +945,6 @@ impl NeoismExtensionsPane {
                 let clamped = self.selected_index.min(last);
                 let entry_idx = visible[clamped];
                 let entry = &self.entries[entry_idx];
-                if let Some(action) = entry
-                    .lua_plugin
-                    .as_ref()
-                    .and_then(|plugin| plugin.primary_action.clone())
-                {
-                    return KeyResponse::with_action(
-                        PaneAction::LuaPluginActionRequested {
-                            id: entry.id.clone(),
-                            action,
-                        },
-                    );
-                }
                 if matches!(
                     entry.status,
                     ExtensionStatus::BuiltIn
@@ -1189,7 +1095,6 @@ mod interaction_tests {
             status,
             repository_url: None,
             lsp_source: None,
-            lua_plugin: None,
         }
     }
 
@@ -1213,7 +1118,6 @@ mod interaction_tests {
             status,
             repository_url: None,
             lsp_source: None,
-            lua_plugin: None,
         }
     }
 

@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use crate::customization::color_u8;
 use crate::primitives::IdeTheme;
@@ -141,7 +141,7 @@ pub(super) fn draw_row_presence_cluster(
 // inner-fill pair below. Behaviour is bit-identical — same radii,
 // stroke, ORDER stacking — just without the FrameCorners enum surface.
 fn draw_frame_top(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     rect: [f32; 4],
     outer_color: [f32; 4],
     inner_color: [f32; 4],
@@ -208,14 +208,14 @@ impl FileTree {
     /// Draw the panel inside the caller-assigned rect.
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         x_left: f32,
         y_top: f32,
         panel_width: f32,
         panel_height: f32,
         theme: &IdeTheme,
         text_occlusion_rects: &[[f32; 4]],
-        plugins: Option<&neoism_lua::PluginSnapshot>,
+        plugins: Option<&neoism_customization::PluginSnapshot>,
     ) {
         if !self.visible || panel_width <= 0.0 || panel_height <= 0.0 {
             return;
@@ -1031,7 +1031,7 @@ impl FileTree {
 pub(crate) fn truncate_label(
     label: &str,
     budget_px: f32,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     opts: &DrawOpts,
 ) -> String {
     if budget_px <= 0.0 || label.is_empty() {
@@ -1068,7 +1068,7 @@ pub(super) fn truncate_label_cached<'a>(
     cache_items: &mut usize,
     label: &'a str,
     budget_px: f32,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     opts: &DrawOpts,
 ) -> Cow<'a, str> {
     let metrics_key = TruncatedLabelMetricsKey {

@@ -61,3 +61,17 @@ test("history requests serialize per session despite unrelated envelope ids",asy
   expect(model.historyCursors.get("chat")).toBeNull();
  }finally{model.dispose();client.stop();}
 });
+
+test("legacy cursorless pages append older history and terminate without restarting",()=>{
+ const config=loadConfig(["--config","/nonexistent/pagination-cache"],{}),client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+ client.send=(()=>1) as typeof client.send;
+ const page=(ids:string[])=>(model as any).receive({family:"Agent",requestId:99,message:{HistoryChunk:{session_id:"chat",messages:ids.map(id=>({id,role:"User",kind:"User",text:id})),next_cursor:null}}});
+ const request=(cursor:string|null)=>model.sendAgent({GetHistory:{session_id:"chat",cursor,limit:64}});
+ try{
+  request(null);page(["msg_new","prt_new"]);expect(model.historyCursors.get("chat")).toBe("msg_new");
+  request("msg_new");page(["prt_old"]);expect(model.historyCursors.get("chat")).toBe("prt_old");
+  request("prt_old");page([]);expect(model.historyCursors.get("chat")).toBeNull();
+  request(null);page(["msg_new","prt_new"]);expect(model.historyCursors.get("chat")).toBeNull();
+  expect(model.state.history.chat.map(row=>row.id)).toEqual(["prt_old","msg_new","prt_new"]);
+ }finally{model.dispose();client.stop();}
+});

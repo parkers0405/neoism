@@ -1,4 +1,4 @@
-use neoism_terminal_core::crosswords::pos::{Column, Line, Pos, Side};
+use neoism_terminal_types::position::{Column, Line, Pos, Side};
 
 /// Determine which side of a terminal cell a mouse x-position falls on.
 ///

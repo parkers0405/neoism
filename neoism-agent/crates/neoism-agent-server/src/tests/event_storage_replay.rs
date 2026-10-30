@@ -71,10 +71,21 @@ async fn compressed_replay_crosses_byte_and_row_pages_before_live_family_baselin
 
     let mut body = response.into_body().into_data_stream();
     let mut frames = String::new();
+    let live_tail = b"\"delta\":\"after join\"";
     tokio::time::timeout(Duration::from_secs(15), async {
-        while !frames.contains("\"delta\":\"after join\"") {
+        loop {
             let frame = body.next().await.expect("stream must remain live").unwrap();
+            // Search the new bytes and a short overlap for split chunks. The
+            // complete history contains multi-megabyte records; rescanning it
+            // on every frame makes this test quadratic in the replay size.
+            let search_start = frames.len().saturating_sub(live_tail.len() - 1);
             frames.push_str(std::str::from_utf8(&frame).unwrap());
+            if frames.as_bytes()[search_start..]
+                .windows(live_tail.len())
+                .any(|bytes| bytes == live_tail)
+            {
+                break;
+            }
         }
     }).await.expect("all replay pages, baseline and live tail must arrive");
     let markers = frames.lines()

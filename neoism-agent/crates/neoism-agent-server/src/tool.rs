@@ -765,8 +765,11 @@ pub(crate) async fn execute(
             .unwrap_or("*");
         context.ensure_allowed(&permission.permission, target)?;
     }
-    let result = tool
-        .execute(neoism_agent_plugin_api::PluginToolInvocation {
+    // Match production tool dispatch: builtins resolve their generation from
+    // the task-local lease when no session has been attached to the test call.
+    let result = crate::workspace_runtime::scope_generation(
+        snapshot.clone(),
+        tool.execute(neoism_agent_plugin_api::PluginToolInvocation {
             tenant_id: "local".to_string(),
             subject: None,
             workspace_id: None,
@@ -779,9 +782,10 @@ pub(crate) async fn execute(
             cancel: context.cancel.clone(),
             formatter: context.formatter.clone(),
             generation: Some(snapshot.generation),
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(ToolExecutionResult {
         title: result.title,
         output: result.output,

@@ -3,6 +3,7 @@ import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join,resolve} from "node:path";
 import {Effect} from "effect";
+import {daemonExecutable} from "../../src/daemon/local-startup";
 import {loadConfig} from "../../src/config";
 import {DaemonConnection} from "../../src/daemon/client";
 import {expectVariant,type Workspace} from "../../src/daemon/protocol";
@@ -15,7 +16,7 @@ const temp=mkdtempSync(join(tmpdir(),"neoism-shared-doc-")),directory=join(temp,
 const path=join(directory,"shared.md"),initial="hello α\n";writeFileSync(path,initial);
 const token=crypto.randomUUID(),nonce=crypto.randomUUID();let address="",output="";
 const agent=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({workspaceId:"fixture-chat-namespace"})});
-const daemon=Bun.spawn([resolve("artifacts/neoism-workspace-daemon-grid"),"--addr","127.0.0.1:0","--ephemeral","--no-unix-socket","--state-dir",join(temp,"state"),"--workspace",directory],{env:{...process.env,NEOISM_DAEMON_TOKEN:token,NEOISM_AGENT_SERVER:agent.url.origin,NEOISM_FAST_READINESS_NONCE:nonce,NEOISM_DAEMON_DATA_DIR:join(temp,"auth"),NEOISM_CONFIG_HOME:join(temp,"config"),XDG_CONFIG_HOME:join(temp,"config"),XDG_RUNTIME_DIR:runtime,XDG_DATA_HOME:join(temp,"data"),XDG_CACHE_HOME:join(temp,"cache"),NEOISM_REQUIRE_AUTH:"0"},stdout:"pipe",stderr:"pipe"});
+const daemon=Bun.spawn([daemonExecutable(),"--addr","127.0.0.1:0","--ephemeral","--no-unix-socket","--state-dir",join(temp,"state"),"--workspace",directory],{env:{...process.env,NEOISM_DAEMON_TOKEN:token,NEOISM_AGENT_SERVER:agent.url.origin,NEOISM_FAST_READINESS_NONCE:nonce,NEOISM_DAEMON_DATA_DIR:join(temp,"auth"),NEOISM_CONFIG_HOME:join(temp,"config"),XDG_CONFIG_HOME:join(temp,"config"),XDG_RUNTIME_DIR:runtime,XDG_DATA_HOME:join(temp,"data"),XDG_CACHE_HOME:join(temp,"cache"),NEOISM_REQUIRE_AUTH:"0"},stdout:"pipe",stderr:"pipe"});
 const stdout=(async()=>{let pending="";const reader=daemon.stdout.getReader();while(true){const {done,value}=await reader.read();if(done)break;const text=new TextDecoder().decode(value);output+=text;pending+=text;let newline;while((newline=pending.indexOf("\n"))>=0){const line=pending.slice(0,newline);pending=pending.slice(newline+1);try{const ack=JSON.parse(line);if(ack.nonce===nonce&&typeof ack.address==="string")address=ack.address;}catch{}}}})();
 const stderr=(async()=>{const reader=daemon.stderr.getReader();while(true){const {done,value}=await reader.read();if(done)break;output+=new TextDecoder().decode(value);}})();
 const failures:unknown[]=[],editors:NativeEditor[]=[],controllers:DocumentController[]=[],presences:PresenceController[]=[],clients:DaemonConnection[]=[],models:WorkspaceModel[]=[];let markdown:NativeMarkdown|undefined;

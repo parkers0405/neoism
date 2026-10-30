@@ -948,8 +948,8 @@ mod tests {
             HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(PaletteAction::ShowSystems))));
         palette.set_query("abc".into());
         assert!(matches!(handle_command_palette(&input, &mut palette),
-            HandlerResult::Consumed(KeyRouteAction::ConsumeAndRedraw)));
-        assert_eq!(palette.query, "ab");
+            HandlerResult::Consumed(KeyRouteAction::ExecutePaletteAction(PaletteAction::ShowSystems))));
+        assert_eq!(palette.query, "", "system settings have no editable query");
     }
 
     #[test]

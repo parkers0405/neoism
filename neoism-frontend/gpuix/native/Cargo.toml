@@ -8,25 +8,33 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# Separate frontend build; never changes the desktop's feature selection.
+# Keep native bridge profiles independent of the workspace services.
 [workspace]
 
+[patch.crates-io]
+# This independent workspace must use the same service/index compiler patches.
+icu_collator_data = { path = "../../../vendor/blaze-compat/icu_collator_data-2.4.0" }
+turso_core = { path = "../../../vendor/blaze-compat/turso_core-0.8.3" }
+
 [workspace.metadata.blaze]
+version = "0.20261029.5"
 # SQLx's macro links native SQLite/ring archives, so it cannot execute as WASM.
-native-proc-macros = ["sqlx-macros"]
+native-proc-macros = ["sqlx-macros", "enum-as-inner"]
 
 [dependencies]
 neoism-ui = { path = "../../shared" }
 neoism-protocol = { path = "../../../neoism-protocol" }
-neoism-terminal-core = { path = "../../../neoism-terminal-core" }
+neoism-terminal-types = { path = "../../../neoism-terminal-types" }
 neoism-agent-service-api = { path = "../../../neoism-agent/crates/neoism-agent-service-api", default-features = false }
-sugarloaf = { path = "../../../sugarloaf", default-features = false }
+neoism-paint = { path = "../../../neoism-paint" }
 dirs = "6.0.0"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-neoism-window = { path = "../../../neoism-window" }
 bitflags = "2"
 libloading = "0.8"
+# The allocator also comes through the workspace index. This cdylib is loaded
+# after Bun starts, so its TLS must use the allocator's dynamic loading mode.
+mimalloc = { version = "0.1", features = ["local_dynamic_tls"] }
 regex = "1"
 thiserror = "2"
 tracing = "0.1"
@@ -57,3 +65,6 @@ opt-level = 2
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -6,7 +6,7 @@
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use unicode_segmentation::UnicodeSegmentation;
 use web_time::Instant;
 

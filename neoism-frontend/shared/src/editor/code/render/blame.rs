@@ -3,7 +3,7 @@
 //! No layout reservation, syntax changes, or network/image decoding in paint.
 use super::*;
 use std::hash::{Hash, Hasher};
-use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
+use neoism_paint::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
 
 pub(super) const OVERLAY_ID: usize = 0xAB10_0000;
 
@@ -17,7 +17,7 @@ pub(super) struct InlineLayout {
 /// Pure layout pass before any code glyphs are emitted, so a hover detail
 /// rectangle can participate in the editor's ordinary text occlusion list.
 pub(super) fn layout(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     pane: &CodePane,
     line: usize,
     rect: [f32; 4],
@@ -58,7 +58,7 @@ pub(super) fn layout(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn inline(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     pane: &CodePane,
     line: usize,
     layout: &InlineLayout,
@@ -116,7 +116,7 @@ pub(super) fn clean(text: &str, max_chars: usize) -> String {
         .collect()
 }
 
-fn elide(sugarloaf: &mut Sugarloaf, text: &str, opts: &DrawOpts, width: f32) -> String {
+fn elide(sugarloaf: &mut dyn Paint, text: &str, opts: &DrawOpts, width: f32) -> String {
     if sugarloaf.text_mut().measure(text, opts) <= width {
         return text.into();
     }
@@ -138,7 +138,7 @@ pub(super) struct TooltipLayout {
 
 /// Details appear on hover only; layout precedes code paint for occlusion.
 pub(super) fn tooltip_layout(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     pane: &CodePane,
     anchor: [f32; 4],
     viewport: [f32; 4],
@@ -190,7 +190,7 @@ pub(super) fn tooltip_layout(
 }
 
 pub(super) fn tooltip(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     layout: &TooltipLayout,
     opts: &DrawOpts,
     theme: &IdeTheme,
@@ -237,7 +237,7 @@ pub(super) fn tooltip(
     }
 }
 
-fn register(sugarloaf: &mut Sugarloaf, pixels: &[u8]) -> Option<u32> {
+fn register(sugarloaf: &mut dyn Paint, pixels: &[u8]) -> Option<u32> {
     if pixels.len() != 4096 {
         return None;
     }
@@ -246,8 +246,8 @@ fn register(sugarloaf: &mut Sugarloaf, pixels: &[u8]) -> Option<u32> {
     let mut id = 0xAB00_0000 | (hash.finish() as u32 & 0x00ff_ffff);
     // Compare the actual bytes, not just a truncated image ID: a collision
     // must NEVER display another author's face. Probe a vacant ID instead.
-    while let Some(entry) = sugarloaf.image_data.get(&id) {
-        if let sugarloaf::components::core::image::Data::Rgba {
+    while let Some(entry) = sugarloaf.image_data_get(id) {
+        if let neoism_paint::image::Data::Rgba {
             width: 32,
             height: 32,
             pixels: stored,
@@ -259,18 +259,15 @@ fn register(sugarloaf: &mut Sugarloaf, pixels: &[u8]) -> Option<u32> {
         }
         id = 0xAB00_0000 | (id.wrapping_add(1) & 0x00ff_ffff);
     }
-    let keys: Vec<_> = sugarloaf
-        .image_data
-        .keys()
-        .copied()
+    let keys: Vec<_> = sugarloaf.image_data_ids().into_iter()
         .filter(|id| id & 0xff00_0000 == 0xAB00_0000)
         .collect();
     if keys.len() >= 256 {
         if let Some(key) = keys.first() {
-            sugarloaf.image_data.remove(key);
+            sugarloaf.image_data_remove(*key);
         }
     }
-    sugarloaf.image_data.insert(
+    sugarloaf.image_data_insert(
         id,
         GraphicDataEntry::from_graphic_data(GraphicData {
             id: GraphicId::new(id as u64),
@@ -289,7 +286,7 @@ fn register(sugarloaf: &mut Sugarloaf, pixels: &[u8]) -> Option<u32> {
 }
 
 fn paint_avatar(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     id: u32,
     rect: [f32; 4],
     clip: [f32; 4],
@@ -323,7 +320,7 @@ fn paint_avatar(
     for [x, y, w, h] in pieces {
         sugarloaf.push_image_overlay(
             OVERLAY_ID,
-            sugarloaf::GraphicOverlay {
+            neoism_paint::GraphicOverlay {
                 image_id: id,
                 x: x * scale,
                 y: y * scale,

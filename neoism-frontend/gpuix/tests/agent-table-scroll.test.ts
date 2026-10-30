@@ -2,6 +2,18 @@ import {expect,test} from "bun:test";
 import {coreCall} from "../src/native-core";
 import type {PaintCommand} from "../src/ui/PaintLayer";
 
+test("conversation text continues behind the floating composer instead of cutting off across the pane",()=>{
+ const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId:"floating-composer",scale:1,fontFamily:"Cascadia Code NF"});
+ const call=(op:string,args:Record<string,unknown>={})=>coreCall<{commands:PaintCommand[];animating:boolean}>(`agenttimeline.${op}`,{id,...args});
+ try{
+  call("event",{message:{HistoryChunk:{session_id:"floating-composer",messages:Array.from({length:40},(_,index)=>({id:`row-${index}`,role:"Assistant",kind:"Assistant",text:`Floating transcript row ${index}. ${"Conversation text continues below the composer edge. ".repeat(8)}`})),next_cursor:null}}});
+  call("layout",{width:650,height:700,contentBottom:360});call("scroll",{deltaY:1e7,precise:true});
+  let frame=call("frame");for(let i=0;i<250&&frame.animating;i++){Bun.sleepSync(5);frame=call("frame");}
+  const below=frame.commands.filter(command=>command.kind==="text"&&command.y>380&&command.y<680);
+  expect(below.length).toBeGreaterThan(0);
+ }finally{call("dispose");}
+},15000);
+
 test("live Agent tables accept sideways natural trackpad input and keep a draggable scrollbar above composer",()=>{
  const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId:"table-scroll",scale:1,fontFamily:"Cascadia Code NF"});
  type Frame={commands:PaintCommand[];animating:boolean};

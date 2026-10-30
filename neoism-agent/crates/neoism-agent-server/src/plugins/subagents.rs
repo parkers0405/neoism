@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use tokio::sync::Mutex;
 
 use crate::error::ApiError;
+use crate::execution_activity::SubtaskAdmissionGuard;
 use crate::plugins;
 use crate::session_actions::{create_subtask_session, spawn_background_subtask_prompt};
 use crate::state::AppState;
@@ -235,14 +236,14 @@ pub(crate) async fn start_task_tool(
     if background {
         let generation = Id::ascending(IdKind::Message);
         let admission = if continuing {
-            crate::execution_activity::SubtaskAdmissionGuard::admit_continuation(
+            SubtaskAdmissionGuard::admit_continuation(
                 state,
                 &parent,
                 &child_session_id,
             )
             .await
         } else {
-            crate::execution_activity::SubtaskAdmissionGuard::admit(
+            SubtaskAdmissionGuard::admit(
                 state,
                 &parent,
                 &child_session_id,
@@ -279,14 +280,14 @@ pub(crate) async fn start_task_tool(
         });
     }
     let admission = if continuing {
-        crate::execution_activity::SubtaskAdmissionGuard::admit_continuation(
+        SubtaskAdmissionGuard::admit_continuation(
             state,
             &parent,
             &child_session_id,
         )
         .await
     } else {
-        crate::execution_activity::SubtaskAdmissionGuard::admit(
+        SubtaskAdmissionGuard::admit(
             state,
             &parent,
             &child_session_id,

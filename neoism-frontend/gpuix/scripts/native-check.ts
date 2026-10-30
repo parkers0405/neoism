@@ -9,7 +9,7 @@ import { dimensions } from "../src/design/generated";
 const args = process.argv.slice(2).filter((arg) => arg !== "--packaged");
 const packaged = process.argv.includes("--packaged"), config = loadConfig(args);
 const directory = mkdtempSync(join(tmpdir(), "neoism-native-smoke-"));
-const app = await launch({ command: packaged ? resolve("dist/neoism-gpuix") : process.execPath,
+const app = await launch({ command: packaged ? resolve("dist/neoism") : process.execPath,
   args: [...(packaged ? [] : ["src/main.tsx"]), ...args], cwd: packaged ? tmpdir() : process.cwd(),
   env: { ...process.env, NEOISM_GPUIX_STATE_PATH: join(directory, "session.json") } });
 const until = async (predicate: () => Promise<boolean>) => { const end = Date.now() + 15000; while (!await predicate()) { if (Date.now() > end) throw new Error("Native smoke did not converge"); await Bun.sleep(25); } };

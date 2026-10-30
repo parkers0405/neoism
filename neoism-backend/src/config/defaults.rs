@@ -1,5 +1,5 @@
 use crate::config::Shell;
-use neoism_terminal_core::ansi::CursorShape;
+use neoism_terminal_types::ansi::CursorShape;
 
 #[inline]
 pub fn default_bool_true() -> bool {
@@ -295,17 +295,6 @@ pub fn default_config_file_content() -> String {
     //     "display-name": "parker",  // the name collaborators see
     //     "cursor-color": "#44C9F0", // your caret colour (collaborators see it too)
     //     "cursor-style": "rainbow", // "solid" (default) or "rainbow"
-    // },
-
-    // ── [plugins] — Lua plugin permissions + updates ───────────────
-    // "plugins": {
-    //     "disabled": ["dev.example.disabled"],
-    //     "grants": { "dev.example.git": ["git.read", "git.write"] },
-    //     "update-policy": "manual", // manual | notify | automatic
-    //     "trusted-sources": ["https://github.com/example/"],
-    //     "mashup-overrides": { // fields replace the active pack's editor-plugins fields; [] explicitly clears
-    //         "my-pack": { "mode": "overlay", "disabled": ["dev.example.noisy"] }
-    //     },
     // },
 
     // ── [keybinds] — override the built-in shortcuts ──────────────

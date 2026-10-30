@@ -7,7 +7,7 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use sugarloaf::text::TextReveal;
+use neoism_paint::text::TextReveal;
 use web_time::Instant;
 
 pub const REVEAL_DURATION: Duration = Duration::from_millis(180);

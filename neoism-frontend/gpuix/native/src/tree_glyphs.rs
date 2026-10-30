@@ -2,7 +2,7 @@
 use neoism_ui::{panels::file_tree::{ROW_HEIGHT,FONT_SIZE,ICON_FONT_SIZE,INDENT_PX,ICON_GAP,GitStatus,FileTree,TreeEntry,NodeKind},primitives::{paint::Paint,paint_record::{RecordingPainter,PaintCommand},text::{draw_icon_centered_with_occlusion,truncate_to_fit}}};
 use serde_json::{json,Value};
 use std::{cell::RefCell,collections::{HashMap,VecDeque},sync::{Arc,atomic::{AtomicU64,Ordering}}};
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 struct Raster{value:Value,pixels:Arc<Vec<u8>>}
 struct Host{paint:RecordingPainter,cache:HashMap<String,Raster>,order:VecDeque<String>,bytes:usize}
 thread_local!{static HOSTS:RefCell<HashMap<u64,Host>>=RefCell::new(HashMap::new());}

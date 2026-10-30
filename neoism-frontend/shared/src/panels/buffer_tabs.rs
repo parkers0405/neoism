@@ -3,7 +3,7 @@
 //! Sits directly below the OS-window tab bar and shows open editor
 //! buffers, much like Warp's split-pane title row. Render is left to
 //! the host (native: `frontends/neoism/src/chrome/panels/buffer_tabs.rs`
-//! supplies an inherent `render(&mut Sugarloaf, ...)` method that
+//! supplies an inherent `render(&mut dyn Paint, ...)` method that
 //! consumes the `IdeTheme`); web will paint its own pass off the same
 //! state.
 //!
@@ -13,6 +13,7 @@
 //! frontend-specific types. The bound is just enough to let the panel
 //! pick a tab title from the agent: `AgentLabel + Copy + PartialEq`.
 
+use crate::primitives::paint::Paint;
 use std::path::{Path, PathBuf};
 use web_time::Duration;
 
@@ -34,8 +35,8 @@ impl Instant {
     }
 }
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::{Attributes, Sugarloaf};
+use neoism_paint::text::DrawOpts;
+use neoism_paint::{Attributes, };
 
 use crate::event::{Modifiers, PointerButton, UiEvent, WheelMode};
 use crate::primitives::{draw_icon_centered_with_occlusion, draw_text_with_occlusion};
@@ -216,7 +217,7 @@ pub trait AgentIconProvider<A> {
     /// immediate-mode.
     fn draw_agent_icon(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         agent: A,
         x: f32,
         y: f32,
@@ -233,7 +234,7 @@ struct NoopAgentIcons<A>(std::marker::PhantomData<fn(A)>);
 impl<A> AgentIconProvider<A> for NoopAgentIcons<A> {
     fn draw_agent_icon(
         &self,
-        _sugarloaf: &mut Sugarloaf,
+        _sugarloaf: &mut dyn Paint,
         _agent: A,
         _x: f32,
         _y: f32,
@@ -1287,7 +1288,7 @@ impl<A: Copy> BufferTabs<A> {
     /// the two.
     fn draw_visual(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         layout: &PanelLayout,
         _ctx: &PanelContext,
     ) {
@@ -1445,7 +1446,7 @@ impl<A: Send + Copy + 'static> Panel for BufferTabs<A> {
     }
 
     #[allow(invalid_reference_casting)]
-    fn draw(&self, sugarloaf: &mut Sugarloaf, layout: &PanelLayout, ctx: &PanelContext) {
+    fn draw(&self, sugarloaf: &mut dyn Paint, layout: &PanelLayout, ctx: &PanelContext) {
         // The panel trait is shared with cache-by-Cell panels and takes
         // `&self`, but buffer tabs intentionally preserve the native
         // mutable render state: layout slots, scroll interpolation, and

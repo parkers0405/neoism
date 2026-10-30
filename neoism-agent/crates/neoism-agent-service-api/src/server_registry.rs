@@ -123,6 +123,16 @@ pub enum RegistryError {
     Io(io::Error),
 }
 
+/// Explicit unlocking also releases locks inherited by a concurrently forked
+/// subprocess before it reaches exec. Closing only the parent's descriptor can
+/// otherwise leave a completed mutation spuriously busy.
+struct RegistryLock(fs::File);
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 #[derive(Debug)]
 pub struct ServerRegistry {
     directory: PathBuf,
@@ -143,7 +153,7 @@ impl ServerRegistry {
 
     /// Every writer (desktop and daemon) locks the same stable file and reloads
     /// before mutation. Lock contention is explicit, never an unbounded UI wait.
-    fn lock_and_reload(&mut self) -> io::Result<fs::File> {
+    fn lock_and_reload(&mut self) -> io::Result<RegistryLock> {
         fs::create_dir_all(&self.directory)?;
         let lock = fs::OpenOptions::new()
             .create(true)
@@ -154,6 +164,7 @@ impl ServerRegistry {
         lock.try_lock().map_err(|error| {
             io::Error::other(format!("server registry busy: {error}"))
         })?;
+        let lock = RegistryLock(lock);
         let data = read_json(&self.directory.join(REGISTRY_FILE))?.unwrap_or_default();
         let credentials =
             read_json(&self.directory.join(CREDENTIALS_FILE))?.unwrap_or_default();
@@ -671,10 +682,11 @@ mod tests {
         after.name = "Web name".into();
         web.save_entry(after.clone(), Some(before.clone())).unwrap();
         assert_eq!(web.token(&first.id), Some("native-secret"));
-        assert!(matches!(
-            desktop.save_entry(before.clone(), Some(before)),
-            Err(RegistryError::Conflict)
-        ));
+        let stale_write = desktop.save_entry(before.clone(), Some(before));
+        assert!(
+            matches!(stale_write, Err(RegistryError::Conflict)),
+            "unexpected stale-write result: {stale_write:?}"
+        );
         let json = serde_json::to_string(&web.entries()).unwrap();
         assert!(!json.contains("native-secret"));
         assert!(!json.contains("window"));
@@ -682,6 +694,22 @@ mod tests {
         desktop.reload().unwrap();
         assert!(desktop.server(&first.id).is_none());
         assert!(desktop.token(&first.id).is_none());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn completed_mutation_unlocks_even_with_an_inherited_descriptor() {
+        let directory = test_dir();
+        let mut registry = ServerRegistry::load(directory.clone()).unwrap();
+        let lock = registry.lock_and_reload().unwrap();
+        // A duplicate shares the same open-file description, as fork does.
+        let inherited = lock.0.try_clone().unwrap();
+        drop(lock);
+        let mut other = ServerRegistry::load(directory.clone()).unwrap();
+        other
+            .add("wss://after.example/session", None, None)
+            .unwrap();
+        drop(inherited);
         let _ = fs::remove_dir_all(directory);
     }
 

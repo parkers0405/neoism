@@ -1,114 +1,66 @@
-name: Build Stack (Linux)
-
-# Builds everything `./install.sh` builds, on GitHub — Linux only for now:
-#   - neoism (desktop)
-#   - neoism-workspace-daemon
-#   - neoism-agent
-#   - wasm renderer bundle + Vite web build
-# Uploads the binaries and the web dist as workflow artifacts so a green run
-# means a machine can install this commit with `./install.sh`.
-
+name: Build Neoism GPUIX (Linux)
 on:
   workflow_dispatch:
-
+  workflow_call:
+permissions:
+  contents: read
 concurrency:
-  group: build-stack-${{ github.ref }}
+  group: gpuix-build-${{ github.ref }}-${{ github.workflow }}
   cancel-in-progress: true
-
 env:
   CARGO_TERM_COLOR: always
-  # The workspace release profile (debug=full, lto=true, codegen-units=1) OOMs
-  # the 16GB hosted runner while LTO-compiling the desktop crate (SIGTERM/143)
-  # and its target dir outgrows runner disk. CI only proves the stack compiles,
-  # so trade the heavy codegen for fitting on the runner.
-  CARGO_PROFILE_RELEASE_DEBUG: "0"
-  CARGO_PROFILE_RELEASE_LTO: "false"
-  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-
+  CARGO_BUILD_JOBS: 2
+  NEOISM_GPUIX_RUST_BUILDER: blaze
 jobs:
   linux:
-    name: linux-x86_64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Linux build deps
+      - name: Install native prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config cmake \
-            libwayland-dev libxkbcommon-dev libxcb1-dev libgbm-dev \
-            libfontconfig1-dev libfreetype6-dev \
-            glslang-tools libssl-dev
-
-      # rust-toolchain.toml pins 1.92; install it directly so the first cargo
-      # call doesn't spend time bootstrapping the toolchain.
+          sudo apt-get install -y clang cmake ninja-build pkg-config libfontconfig1-dev libfreetype-dev libgbm-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libwayland-dev libasound2-dev libvulkan-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.92"
-          targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: build-stack-linux
-
+          toolchain: '1.92'
+      - uses: ./.github/actions/setup-blaze
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: neoism-frontend/web/package-lock.json
-
-      - name: Install wasm-pack
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack
-
-      - name: Build desktop, daemon, and agent (release)
-        # Unset CI: `fff-search`'s build script demands Zig when CI is set,
-        # but it builds fine natively (exactly like the local build).
+          cache-dependency-path: |
+            neoism-frontend/gpuix/package-lock.json
+            neoism-agent/sdk/typescript/package-lock.json
+      - name: Build the application and services
+        run: make build
+      - name: Check frontend dependencies
+        run: bash scripts/check-frontend-deps.sh
+      - name: Check the frontend
+        working-directory: neoism-frontend/gpuix
         run: |
-          env -u CI cargo build --release --locked \
-            -p neoism -p neoism-workspace-daemon -p neoism-agent -p neoism-agent-lua-runner
-
-      - name: Install web dependencies
-        run: npm --prefix neoism-frontend/web ci
-
-      # `npm run build` regenerates the wasm bundle via scripts/build-wasm.sh
-      # before tsc + vite, matching install.sh's wasm-then-web order.
-      - name: Build wasm bundle + web app
-        run: npm --prefix neoism-frontend/web run build
-
-      - name: Package binaries
+          npm run typecheck
+          npm run check:design
+          npm test
+          node_modules/.bin/bun scripts/verify-core.ts
+      - name: Check Agent GUI assets and tests
+        working-directory: neoism-agent/sdk/typescript/packages/gui
         run: |
-          set -euo pipefail
-          OUT="neoism-linux-x86_64"
-          mkdir -p "stage/$OUT"
-          cp target/release/neoism \
-             target/release/neoism-workspace-daemon \
-             target/release/neoism-agent \
-             target/release/neoism-agent-lua-runner \
-             "stage/$OUT/"
-          # Ship the built web UI NEXT TO the binaries. The daemon's
-          # `web::web_root()` probes `<exe dir>/web` first, so an untarred
-          # release serves the web app from its own origin and the top-bar
-          # "Start Web Server" opens it directly - no npm, no port 5173, no
-          # repo checkout. Without this the tarball carried binaries only,
-          # `web_root()` found nothing, and Start Web Server fell through to
-          # the dev path and reported "web UI is not installed".
-          cp -a neoism-frontend/web/dist "stage/$OUT/web"
-          tar -C stage -czf "$OUT.tar.gz" "$OUT"
-          sha256sum "$OUT.tar.gz" > "$OUT.tar.gz.sha256"
-
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
+          npm run assets:check
+          npm run test:assets
+          npm test
+      - name: Check service and shared code
+        run: node scripts/test-workspace.mjs --locked
+      - name: Check native bridge
+        run: CARGO_TARGET_DIR=target/gpuix-core-blaze bash scripts/blaze.sh test --locked --manifest-path neoism-frontend/gpuix/native/Cargo.toml --lib --release
+      - name: Check installer transaction
+        run: bash scripts/test-gpuix-install.sh
+      - name: Package
+        run: bash scripts/package-gpuix.sh
+      - name: Verify installed release and daemon startup
+        run: python3 scripts/test-gpuix-release.py --without-window
+      - uses: actions/upload-artifact@v4
         with:
           name: neoism-linux-x86_64
           path: |
-            neoism-linux-x86_64.tar.gz
-            neoism-linux-x86_64.tar.gz.sha256
-
-      - name: Upload web build
-        uses: actions/upload-artifact@v4
-        with:
-          name: neoism-web-dist
-          path: neoism-frontend/web/dist
+            release/neoism-linux-x86_64.tar.gz
+            release/neoism-linux-x86_64.tar.gz.sha256

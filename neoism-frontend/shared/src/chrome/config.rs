@@ -37,7 +37,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             Rect::new(0.0, 0.0, 0.0, 0.0),
             1.0,
             &surface_registry,
-            &neoism_lua::SurfaceLayoutPatch::default(),
+            &neoism_customization::SurfaceLayoutPatch::default(),
         )
         .expect("built-in surface registry must resolve");
         if let Ok(mut g) = ACTIVE_IDE_THEME.write() {
@@ -45,7 +45,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
         }
 
         Self {
-            plugins: std::sync::Arc::new(neoism_lua::PluginSnapshot::empty()),
+            plugins: std::sync::Arc::new(neoism_customization::PluginSnapshot::empty()),
             plugin_hitboxes: Vec::new(),
             pending_plugin_commands: Vec::new(),
             layout: ChromeLayout {
@@ -186,17 +186,17 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     pub fn set_plugin_snapshot(
         &mut self,
-        snapshot: std::sync::Arc<neoism_lua::PluginSnapshot>,
+        snapshot: std::sync::Arc<neoism_customization::PluginSnapshot>,
     ) {
         self.plugins = snapshot;
         self.relayout();
     }
 
-    pub fn plugin_snapshot(&self) -> &neoism_lua::PluginSnapshot {
+    pub fn plugin_snapshot(&self) -> &neoism_customization::PluginSnapshot {
         &self.plugins
     }
 
-    pub fn plugin_snapshot_arc(&self) -> std::sync::Arc<neoism_lua::PluginSnapshot> {
+    pub fn plugin_snapshot_arc(&self) -> std::sync::Arc<neoism_customization::PluginSnapshot> {
         self.plugins.clone()
     }
 

@@ -1,8 +1,0 @@
-node_modules/
-dist/
-.vite/
-*.log
-# Playwright (D1 E2E harness) artefacts
-test-results/
-playwright-report/
-.playwright/

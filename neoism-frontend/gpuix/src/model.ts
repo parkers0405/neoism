@@ -14,6 +14,7 @@ import {getWindowWorkspaces,includeWindowWorkspace,openWorkspaceIds,reorderWindo
 import { AgentSdk, sdkModel, sdkPrompt,sdkThread } from "./daemon/sdk";
 import {localPresenceIdentity} from "./agent/local-presence";
 import {catalogThread} from "./agent/catalog-session";
+import {historyPageCursor} from "./agent/history-cursor";
 import {catalogAgentMessage} from "./agent/catalog-event";
 import {FamilyStreamOwnership,CompletedTranscriptRefresh} from "./agent/transcript-sync";
 import {agentFamily,agentFamilyRoot,noteAgentFamily} from "./agent/family";
@@ -1219,7 +1220,7 @@ export class WorkspaceModel {
         // Only the fresh session returned to this create request is ours to
         // close. Existing attached shells are never changed or restarted.
         await this.run(this.client.request("Pty",{ClosePty:{session_id:result.session_id}}));
-        throw new Error("This daemon does not support native-grid shell prompts. An updated daemon is required to create this terminal.");
+        throw new Error("The running daemon is too old for this terminal. Update or restart the workspace daemon, then reconnect.");
       }
       const surface:Surface={ id: `terminal:${result.session_id}`, kind: "terminal", title: "Terminal", sessionId: result.session_id, workspaceId: workspace.id,rootDir:workspace.root_dir||undefined };
       if(this.state.activeWorkspace?.id===workspace.id){
@@ -1365,7 +1366,9 @@ export class WorkspaceModel {
         });
         const previous = this.state.history[sessionId] || [];
         const older = request?.older ?? false;
-        const nextCursor = typeof body.next_cursor === "string" ? body.next_cursor : null;
+        const nextCursor = request
+          ? historyPageCursor(body.next_cursor, history, previous, older)
+          : typeof body.next_cursor === "string" ? body.next_cursor : null;
         const initial = !this.historyCursors.has(sessionId);
         // Head refreshes must not forget the oldest retained page's cursor.
         if (older || initial) this.historyCursors.set(sessionId, nextCursor);

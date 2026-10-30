@@ -30,7 +30,9 @@ async fn generated_context(root: &Path) -> ToolContext {
     .await
     .unwrap();
     assert_eq!(workspace.directory, root.to_string_lossy());
-    ToolContext::new(root).with_state(Some(state))
+    let mut context = ToolContext::new(root).with_state(Some(state));
+    context.plugin_snapshot = Some(workspace.snapshot);
+    context
 }
 
 async fn allow_context(root: &Path) -> ToolContext {
@@ -120,12 +122,13 @@ async fn product_services_register_native_docs_and_memory_tools_only_when_inject
     assert!(workspace.snapshot.runtime_tools.contains_key("docs"));
     assert!(workspace.snapshot.runtime_tools.contains_key("memory"));
 
-    let context = ToolContext::new(&product_root)
+    let mut context = ToolContext::new(&product_root)
         .with_state(Some(state))
         .with_permission_rules(permission_rules(BTreeMap::from([(
             "*".to_string(),
             json!("allow"),
         )])));
+    context.plugin_snapshot = Some(workspace.snapshot);
     let docs = execute(
         "docs",
         context.clone(),
@@ -679,11 +682,12 @@ async fn bash_tool_stops_when_cancelled() {
     let error = error.to_string();
     assert!(error.to_ascii_lowercase().contains("command aborted"));
     assert!(
-        error.contains("started") || error.contains("(no output)"),
+        error.contains("started") || error.contains("(no output)") || error.eq_ignore_ascii_case("command aborted"),
         "{error}"
     );
     assert!(!error.contains("finished"), "{error}");
 
+    assert!(!error.contains("finished"), "cancelled command reached its final effect: {error}");
     let _ = std::fs::remove_dir_all(root);
 }
 

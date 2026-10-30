@@ -88,7 +88,7 @@ try {
     'neoism-frontend/shared/src/primitives/nvchad_themes.rs',
     'neoism-frontend/shared/src/panels/agent_pane/command_controller.rs',
     'neoism-frontend/shared/src/editor/crdt/presence_avatar.rs',
-    'neoism-frontend/web/public/favicon.svg', 'THIRD_PARTY_LICENSES/NvChad-base46.txt',
+    'neoism-frontend/shared/assets/icons/favicon.svg', 'THIRD_PARTY_LICENSES/NvChad-base46.txt',
     scriptDir + 'generate-parity-assets.mjs', scriptDir + 'avatar.template.ts',
   ];
   for (const path of paths) {

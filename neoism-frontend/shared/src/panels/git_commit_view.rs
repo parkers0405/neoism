@@ -1,7 +1,7 @@
 //! Immutable commit metadata used above the shared, read-only diff cards.
 use crate::{layout::Rect, primitives::{IdeTheme, draw_text_with_occlusion}};
 use neoism_protocol::git::GitCommitDetail;
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 pub struct CommitMetadata {

@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 
 const root = new URL('../../../../../../', import.meta.url);
 const gui = new URL('../', import.meta.url);
-const browser = 'neoism-frontend/web/public/fonts/';
+const browser = 'neoism-paint/src/font/resources/browser/';
 const illuminated = 'neoism-frontend/shared/assets/illuminated/fonts/google-ofl/';
 const styles = [['Regular', 400, 'normal'], ['Bold', 700, 'normal'], ['Italic', 400, 'italic'], ['BoldItalic', 700, 'italic']];
 export const fontSources = [
@@ -34,7 +34,7 @@ export const fontSources = [
   { id: 'press-start-2p', name: 'Press Start 2P', family: 'Press Start 2P', kind: 'display', fallback: 'monospace',
     description: 'Exact native agent side-panel pixel heading face; regular 400, scalable, approximately 12px for compact headings.',
     license: 'PressStart2P-OFL.txt', upstream: 'https://github.com/google/fonts/tree/main/ofl/pressstart2p',
-    faces: [{ source: 'sugarloaf/src/font/resources/PressStart2P/PressStart2P-Regular.ttf', weight: 400, style: 'normal' }] },
+    faces: [{ source: 'neoism-paint/src/font/resources/PressStart2P/PressStart2P-Regular.ttf', weight: 400, style: 'normal' }] },
 ];
 const formats = {
   otf: { format: 'opentype', mime: 'font/otf', signature: '4f54544f' },

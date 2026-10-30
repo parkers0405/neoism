@@ -5,7 +5,7 @@
 //! colors come straight from each `TerminalSnapshot`'s palette — not
 //! this struct.
 
-pub use neoism_terminal_core::snapshot::{RgbTriple, ThemeSnapshot};
+pub use neoism_terminal_types::snapshot::{RgbTriple, ThemeSnapshot};
 
 use crate::primitives::IdeTheme;
 

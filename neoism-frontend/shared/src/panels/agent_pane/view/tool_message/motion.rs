@@ -143,7 +143,7 @@ pub(in crate::panels::agent_pane::view) fn active_glyphs(
 
 fn active_glyph_ink(
     sample: crate::panels::agent_pane::tool_motion::ToolMotionSample,
-    glyph: &sugarloaf::text::TextInstance,
+    glyph: &neoism_paint::text::TextInstance,
     scale: f32,
     clip: [f32; 4],
     cuts: &[[f32; 4]],
@@ -223,7 +223,7 @@ mod tests {
             deadline: Some(web_time::Instant::now() + std::time::Duration::from_secs(1)),
             ..ToolMotionSample::default()
         };
-        let glyph = sugarloaf::text::TextInstance {
+        let glyph = neoism_paint::text::TextInstance {
             pos: [40.0, 0.0],
             bearings: [6, 8],
             glyph_size: [16, 20],
@@ -250,7 +250,7 @@ mod tests {
         ));
         assert!(!active_glyph_ink(
             sample,
-            &sugarloaf::text::TextInstance::default(),
+            &neoism_paint::text::TextInstance::default(),
             2.0,
             clip,
             &[]

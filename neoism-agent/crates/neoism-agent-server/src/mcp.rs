@@ -924,6 +924,11 @@ pub(crate) async fn call_tool_in_session(
     let runtime = snapshot.mcp()?;
     let result = runtime.call_tool(directory, client, tool, arguments).await;
     if let Err(error) = &result {
+        if error.downcast_ref::<mcp_transport::RequestNotSent>().is_some() {
+            runtime.disconnect(directory, client).await?;
+            ensure_connected_with_snapshot(directory, client, auth_store, state.clone(), snapshot).await?;
+            return runtime.call_tool(directory, client, tool, retry_arguments).await;
+        }
         if refresh_remote_credentials_after_auth_error(
             client,
             auth_store,

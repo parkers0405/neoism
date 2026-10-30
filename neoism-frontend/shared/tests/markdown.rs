@@ -54,10 +54,9 @@ fn markdown_state_handles_code_block_insertion() {
     let mut pane = MarkdownPane::load(temp_md_path("code"));
     pane.enter_insert();
     pane.insert_text("```rust");
+    assert_eq!(pane.lines, vec!["```rust", "```"], "typing an opening fence pairs it");
     pane.insert_newline();
     pane.insert_text("fn main() {}");
-    pane.insert_newline();
-    pane.insert_text("```");
     assert_eq!(
         pane.lines,
         vec![

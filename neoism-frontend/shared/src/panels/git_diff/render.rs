@@ -1,4 +1,4 @@
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 use crate::primitives::ide_theme::IdeTheme;
@@ -87,7 +87,7 @@ fn pull_request_row_rects(x: f32, y: f32, width: f32, scale: f32) -> (Rect, Rect
 }
 
 fn pull_request_text_opts(
-    fonts: &sugarloaf::font::FontLibrary,
+    fonts: &neoism_paint::font::FontLibrary,
     rect: Rect,
     scale: f32,
     color: [u8; 4],
@@ -127,7 +127,7 @@ mod commit_layout_tests {
 
     #[test]
     fn pull_request_action_uses_regular_proportional_ui_font_not_terminal_primary() {
-        use sugarloaf::font::{constants::FONT_PRESS_START_2P, FontLibrary};
+        use neoism_paint::font::{constants::FONT_PRESS_START_2P, FontLibrary};
         let fonts = FontLibrary {
             inner: Default::default(),
         };
@@ -139,7 +139,7 @@ mod commit_layout_tests {
         assert_ne!(opts.font_id, Some(primary));
         assert!(!opts.bold);
         assert_eq!(opts.clip_rect, Some(rect.as_array()));
-        let mut text = sugarloaf::text::Text::new(&fonts);
+        let mut text = neoism_paint::text::Text::new(&fonts);
         text.init_cpu();
         assert!(text.measure("WWWW", &opts) > text.measure("iiii", &opts) * 2.0);
     }

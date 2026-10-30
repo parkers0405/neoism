@@ -1,6 +1,6 @@
 //! Text / wrap / occluded-draw helpers shared across chrome panels.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use super::geom::rects_intersect;
 
@@ -35,7 +35,7 @@ fn icon_draw_opts(sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Sized
             .font_id_for_family(NERD_ICON_FONT_FAMILY)
             .or_else(|| {
                 sugarloaf.ensure_static_font(
-                    sugarloaf::font::constants::FONT_SYMBOLS_NERD_FONT_MONO,
+                    neoism_paint::font::constants::FONT_SYMBOLS_NERD_FONT_MONO,
                 )
             });
     icon_opts

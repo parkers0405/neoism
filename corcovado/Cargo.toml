@@ -51,7 +51,7 @@ bytes = "1.11.1"
 criterion = { workspace = true }
 
 [[test]]
-name = "test"
+name = "corcovado_io"
 path = "test/mod.rs"
 
 [[bench]]

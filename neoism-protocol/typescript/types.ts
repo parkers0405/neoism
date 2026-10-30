@@ -1,0 +1,2382 @@
+// TypeScript mirrors of `neoism-protocol`.
+//
+// Serde defaults are externally-tagged enums for non-unit variants, which
+// serialize as `{ "<VariantName>": { ...fields } }`. These types match
+// exactly. If `neoism-protocol` adds or renames a variant, update both
+// sides together.
+//
+// Pty messages mirror `neoism-protocol/src/pty.rs`.
+// Files messages mirror `neoism-protocol/src/files.rs`.
+// Git messages mirror `neoism-protocol/src/git.rs`.
+//
+// Files/Git requests are wrapped on the wire with a `request_id` so the
+// JS side can correlate replies to outstanding promises. The wrappers
+// piggyback on the existing externally-tagged top-level `ClientMessage`
+// / `ServerMessage` enums via `Files`/`FilesReply` and `Git`/`GitReply`
+// variants — the daemon will adopt the matching shape when the wire
+// surface for files/git is exposed there.
+
+export interface CreatePtyArgs {
+  cwd: string | null;
+  cols: number;
+  rows: number;
+  /// Optional explicit shell path. Omit (or set to `null`) to let the
+  /// daemon fall back to `$SHELL` / `/bin/sh`.
+  shell?: string | null;
+}
+
+export interface PtyInputArgs {
+  session_id: string;
+  bytes: number[];
+}
+
+export interface ResizeArgs {
+  session_id: string;
+  cols: number;
+  rows: number;
+}
+
+export interface ClosePtyArgs {
+  session_id: string;
+}
+
+export interface AttachPtyArgs {
+  session_id: string;
+  cursor?: number | null;
+}
+
+export type ClientMessage =
+  | { CreatePty: CreatePtyArgs }
+  | { ChangeTerminalDirectory: { session_id: string; directory: string; request_id: string } }
+  | { PtyInput: PtyInputArgs }
+  | { Resize: ResizeArgs }
+  | { ClosePty: ClosePtyArgs }
+  | { AttachPty: AttachPtyArgs }
+  | { Files: FilesEnvelope }
+  | { Git: GitEnvelope }
+  | { Editor: EditorEnvelope }
+  | { Agent: AgentEnvelope }
+  | { Search: SearchEnvelope }
+  | { Workspace: WorkspaceEnvelope }
+  | { Diagnostics: DiagnosticsEnvelope }
+  | { CursorOverlay: CursorOverlayEnvelope }
+  | { Crdt: CrdtEnvelope }
+  | { Config: ConfigEnvelope };
+
+export interface PtyCreatedArgs {
+  session_id: string;
+  shell?: string | null;
+  workspace_root?: string | null;
+}
+
+export interface PtyOutputArgs {
+  session_id: string;
+  bytes: number[];
+  offset?: number | null;
+}
+
+export interface PtyClosedArgs {
+  session_id: string;
+  exit_code: number | null;
+}
+
+export interface SessionCwdArgs {
+  session_id: string;
+  cwd: string;
+}
+
+export interface ErrorArgs {
+  message: string;
+}
+
+export type ServerMessage =
+  | { PtyCreated: PtyCreatedArgs }
+  | { PtyOutput: PtyOutputArgs }
+  | { PtyClosed: PtyClosedArgs }
+  | { TerminalDirectoryChanged: { session_id: string; request_id: string; directory: string } }
+  | { TerminalDirectoryChangeFailed: { session_id: string; request_id: string; message: string } }
+  | { SessionCwd: SessionCwdArgs }
+  | { Error: ErrorArgs }
+  | { FilesReply: FilesReplyEnvelope }
+  | { GitReply: GitReplyEnvelope }
+  | { EditorReply: EditorReplyEnvelope }
+  | { AgentReply: AgentReplyEnvelope }
+  | { SearchReply: SearchReplyEnvelope }
+  | { WorkspaceReply: WorkspaceReplyEnvelope }
+  | { DiagnosticsReply: DiagnosticsReplyEnvelope }
+  | { CursorOverlayReply: CursorOverlayReplyEnvelope }
+  | { CrdtReply: CrdtReplyEnvelope }
+  | { ConfigReply: ConfigReplyEnvelope };
+
+// Files messages ------------------------------------------------------
+// Mirrors `neoism-protocol/src/files.rs`.
+
+export interface DirEntry {
+  name: string;
+  is_dir: boolean;
+  size: number | null;
+}
+
+export interface TreeEntry {
+  path: string;
+  is_dir: boolean;
+  depth: number;
+}
+export interface FileLocationDescriptor {
+  kind: "workspace" | "home" | "documents" | "downloads" | "pictures";
+  label: string;
+  path: string;
+}
+
+export type FilesClientMessage =
+  | "ListBrowserLocations"
+  | { BrowserListDir: { path: string } }
+  | { BrowserStat: { path: string } }
+  | { BrowserReadFile: { path: string } }
+  | { ListDir: { path: string } }
+  | { Stat: { path: string } }
+  | { ReadFile: { path: string } }
+  | { WriteFile: { path: string; bytes: number[] } }
+  | { WalkTree: { path: string; max_depth: number | null } }
+  | { CreateFile: { dir: string; name: string } }
+  | { CreateDir: { dir: string; name: string } }
+  | { Rename: { from: string; to: string } }
+  | { Delete: { path: string } }
+  | { ReadShellHistory: { max_entries: number | null } };
+
+export type FilesServerMessage =
+  | { BrowserLocations: { locations: FileLocationDescriptor[] } }
+  | { DirListing: { path: string; entries: DirEntry[] } }
+  | { Stat: { path: string; entry: DirEntry } }
+  | { FileContent: { path: string; bytes: number[] } }
+  | { FileWritten: { path: string; bytes_written: number } }
+  | { TreeListing: { path: string; entries: TreeEntry[] } }
+  | { FileCreated: { path: string; is_dir: boolean } }
+  | { Renamed: { from: string; to: string } }
+  | { Deleted: { path: string; was_dir: boolean } }
+  | { ShellHistory: { entries: string[] } }
+  | { Changed: { root: string; paths: string[] } }
+  | { Error: { message: string } };
+
+export interface FilesEnvelope {
+  request_id: number;
+  workspace_root?: string | null;
+  message: FilesClientMessage;
+}
+
+export interface FilesReplyEnvelope {
+  request_id: number;
+  message: FilesServerMessage;
+}
+
+// Git messages --------------------------------------------------------
+// Mirrors `neoism-protocol/src/git.rs`.
+
+export type GitFileStatus =
+  | "Modified"
+  | "Added"
+  | "Deleted"
+  | "Renamed"
+  | "Untracked"
+  | "Conflicted";
+
+export interface GitStatusEntry {
+  path: string;
+  status: GitFileStatus;
+}
+
+export interface DiffHunk {
+  path: string;
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  patch: string;
+}
+
+export interface CommitSummary {
+  sha: string;
+  short_sha: string;
+  author: string;
+  message: string;
+  timestamp: number;
+}
+
+/** Mirror of the shared git panel's `FileStatus` — richer than
+ *  `GitFileStatus` (which predates the write surface: `Staged` and
+ *  `Mixed` don't exist there). */
+export type GitChangeStatus =
+  | "Modified"
+  | "Staged"
+  | "Mixed"
+  | "Added"
+  | "Deleted"
+  | "Renamed"
+  | "Untracked"
+  | "Conflict";
+
+/** One changed file with desktop `collect_files` parity: repo-relative
+ *  path, add/del line counts and the porcelain index-column staged bit. */
+export interface GitFileChange {
+  path: string;
+  status: GitChangeStatus;
+  additions: number;
+  deletions: number;
+  staged: boolean;
+}
+
+/** Raw per-file patch text (desktop `load_diff` parity — `git diff
+ *  HEAD`, so staged changes stay visible). */
+export interface GitFileDiff {
+  path: string;
+  patch: string;
+}
+
+export interface GitChangeBlock {
+  old_start: number;
+  new_start: number;
+  old_lines: string[];
+  new_lines: string[];
+}
+
+// Exact externally-tagged serde mirror of neoism-protocol/src/pull_request.rs.
+export interface PullRequestSummary {
+  number: number; title: string; url: string; author: string; state: string; draft: boolean;
+  base_branch: string; head_branch: string; base_sha: string; head_sha: string;
+  review_decision: string; checks_state: string;
+}
+export interface PullRequestComment { id: string; author: string; body: string; created_at: string; url: string }
+export type PullRequestSide = "Left" | "Right";
+export interface PullRequestThread {
+  id: string; path: string; side: PullRequestSide; line: number | null; start_line: number | null;
+  outdated: boolean; resolved: boolean; comments: PullRequestComment[];
+}
+export interface PullRequestCheck { name: string; status: string; conclusion: string; url: string }
+export interface PullRequestInlineComment { path: string; side: PullRequestSide; line: number; start_line: number | null; body: string }
+export type PullRequestReviewEvent = "Comment" | "Approve" | "RequestChanges";
+export type PullRequestMergeMethod = "Merge" | "Squash" | "Rebase";
+export interface PullRequestDetail {
+  summary: PullRequestSummary; body: string; files: GitFileChange[]; diffs: GitFileDiff[];
+  conversation: PullRequestComment[]; threads: PullRequestThread[]; checks: PullRequestCheck[]; truncated: boolean;
+}
+export type PullRequestSort = "Updated" | "Newest" | "Oldest";
+export type PullRequestFilter = "Open" | "Closed" | "Merged" | "All";
+export interface PullRequestInboxItem {
+  summary: PullRequestSummary; repository: string; updated_at: string; additions: number; deletions: number;
+  labels: string[]; reviewers: string[]; authored: boolean; review_requested: boolean; assigned: boolean;
+}
+export interface PullRequestPage {
+  repository: string; viewer: string; generation: number; items: PullRequestInboxItem[];
+  next_cursor: string | null; total_count: number;
+}
+export type PullRequestRequest =
+  | { List: { query: string; sort: PullRequestSort; filter: PullRequestFilter; cursor: string | null; generation: number } }
+  | { ReadInbox: { number: number } }
+  | { Discover: { branch: string | null } }
+  | { Read: { number: number } }
+  | { Create: { title: string; body: string; base: string; draft: boolean; expected_branch: string; expected_head: string } }
+  | { SubmitReview: { number: number; expected_head: string; body: string; event: PullRequestReviewEvent; comments: PullRequestInlineComment[] } }
+  | { ReplyThread: { number: number; thread_id: string; body: string } }
+  | { ResolveThread: { number: number; thread_id: string; resolved: boolean } }
+  | { Checkout: { number: number; expected_head: string; new_worktree: boolean } }
+  | { Merge: { number: number; expected_head: string; method: PullRequestMergeMethod } };
+export type PullRequestErrorKind = "Unsupported" | "Unavailable" | "Authentication" | "Permission" | "Stale" | "Conflict" | "Invalid" | "Failed";
+export type PullRequestReply =
+  | { Listed: { page: PullRequestPage } }
+  | { InboxDetail: { detail: PullRequestDetail; item: PullRequestInboxItem } }
+  | { Discovered: { branch: string; head: string; default_branch: string; pull_request: PullRequestSummary | null } }
+  | { Detail: { detail: PullRequestDetail } }
+  | { Created: { pull_request: PullRequestSummary } }
+  | { ReviewSubmitted: { number: number } }
+  | { ThreadUpdated: { number: number } }
+  | { CheckedOut: { number: number; path: string; worktree: boolean } }
+  | { Merged: { number: number } }
+  | { Error: { kind: PullRequestErrorKind; message: string } };
+
+type BaseGitClientMessage =
+  | { PullRequest: { request: PullRequestRequest } }
+  | { Blame: { path: string } }
+  | "Status"
+  | { Diff: { path: string | null } }
+  | { Log: { max_count: number | null } }
+  // Web git-panel write parity (Pass 2) — mirrors the shared panel's
+  // `GitDiffIo` trait; mutations reply with a refreshed `ChangedFiles`.
+  | "ChangedFiles"
+  | { Stage: { path: string } }
+  | { Unstage: { path: string } }
+  | { Restore: { path: string } }
+  | { ApplyBlock: { path: string; block: GitChangeBlock; restore: boolean } }
+  | { ReadBase: { path: string } }
+  | { ReadCommit: { revision: string } }
+  | { Commit: { message: string } }
+  | "Branches"
+  | "Fetch"
+  | "Pull"
+  | "Push"
+  | "Publish"
+  | { Checkout: { branch: string } }
+  | { DiffFiles: { paths: string[] } };
+
+export interface GitBlameCommit {
+  sha: string;
+  author: string;
+  email: string;
+  timestamp: number;
+  summary: string;
+  avatar: number | null;
+}
+
+export interface GitBlameSnapshot {
+  repo_root: string;
+  path: string;
+  head: string;
+  baseline: string[];
+  lines: (number | null)[];
+  /** Deduplicated base64 32x32 RGBA8 GitHub images, decoded on the daemon. */
+  avatars: string[];
+  commits: GitBlameCommit[];
+}
+
+export interface GitCommitDetail {
+  sha: string;
+  author: string;
+  email: string;
+  timestamp: number;
+  offset_minutes: number;
+  message: string;
+  files: GitFileChange[];
+  diffs: GitFileDiff[];
+}
+
+export type GitServerMessage =
+  | { PullRequest: { reply: PullRequestReply } }
+  | { CommitDetail: { detail: GitCommitDetail } }
+  | { BaseFile: { path: string; text: string } }
+  | { Blame: { snapshot: GitBlameSnapshot } }
+  | { Status: { entries: GitStatusEntry[] } }
+  | { Diff: { hunks: DiffHunk[] } }
+  | { Log: { commits: CommitSummary[] } }
+  | { Branch: { name: string | null } }
+  | { Changes: { added: number; deleted: number } }
+  | { Error: { message: string } }
+  | {
+      ChangedFiles: {
+        files: GitFileChange[];
+        branch: string | null;
+        upstream?: string | null;
+        error: string | null;
+      };
+    }
+  | { Branches: { branches: string[] } }
+  | { FileDiffs: { diffs: GitFileDiff[] } };
+
+export interface GitEnvelope {
+  request_id: number;
+  workspace_root?: string | null;
+  message: GitClientMessage;
+}
+
+export interface GitReplyEnvelope {
+  request_id: number;
+  message: GitServerMessage;
+}
+
+// Editor messages -------------------------------------------------------
+// Mirrors `neoism-protocol/src/editor.rs`. The embedded-nvim backend is
+// gone (the daemon answers editor requests with an "editor backend
+// unavailable" error); the wire types stay because the future native
+// Rust CodePane will reuse this envelope.
+
+export interface GridCell {
+  row: number;
+  col: number;
+  /** Cell text — usually one grapheme; `""` for the trailing half of
+   *  a double-width glyph. */
+  ch: string;
+  /** Resolved fg as `0x00RRGGBB`. */
+  fg: number;
+  /** Resolved bg as `0x00RRGGBB`. */
+  bg: number;
+  /** Bitfield: 0 bold, 1 italic, 2 underline, 3 undercurl,
+   *  4 strikethrough, 5 reverse. */
+  attrs: number;
+}
+
+export interface GridPos {
+  row: number;
+  col: number;
+}
+
+export interface PopupMenuItem {
+  word: string;
+  kind: string;
+  menu: string;
+  info: string;
+}
+
+export type DiagnosticSeverity = "Error" | "Warn" | "Info" | "Hint";
+
+export interface DiagnosticRelatedInformation {
+  path: string;
+  line: number;
+  col: number;
+  end_line: number;
+  end_col: number;
+  message: string;
+}
+
+export interface DiagnosticItem {
+  severity: DiagnosticSeverity;
+  message: string;
+  source: string | null;
+  line: number;
+  col: number;
+  end_line: number;
+  end_col: number;
+  lnum: number;
+  code?: string | null;
+  code_description?: string | null;
+  tags?: string[];
+  related_information?: DiagnosticRelatedInformation[];
+}
+
+export interface LspSnapshotServer {
+  name: string;
+  binary: string;
+  filetype: string;
+  state: string;
+  source?: string | null;
+  message?: string | null;
+  level?: string | null;
+}
+
+export interface HighlightAttrs {
+  fg?: number | null;
+  bg?: number | null;
+  sp?: number | null;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  undercurl: boolean;
+  strikethrough: boolean;
+  reverse: boolean;
+}
+
+export type EditorLspAction =
+  | "hover"
+  | "definition"
+  | "references"
+  | "implementation"
+  | "document_symbols"
+  | "workspace_symbols"
+  | "info"
+  | "format"
+  | "code_actions"
+  | "rename"
+  | "toggle_inlay_hints"
+  | "completion"
+  | "signature_help";
+
+export interface EditorLspCodeAction {
+  server_id: string;
+  file_path: string;
+  document_revision: string;
+  title: string;
+  kind?: string | null;
+  preferred: boolean;
+  disabled_reason?: string | null;
+  payload: unknown;
+}
+
+export interface EditorLspCompletionItem {
+  server_id?: string | null;
+  file_path: string;
+  document_revision: string;
+  label: string;
+  kind: string;
+  detail?: string | null;
+  documentation?: string | null;
+  insert_text: string;
+  filter_text?: string | null;
+  sort_text?: string | null;
+  preselect: boolean;
+  payload?: unknown;
+}
+
+/** One find-references hit with its line text preloaded. */
+export interface EditorLspReference {
+  path: string;
+  /** 1-based line. */
+  line: number;
+  /** 0-based UTF-8 byte column. */
+  column: number;
+  text: string;
+}
+
+/** One text edit in 0-based (line, UTF-8 byte column) coordinates. */
+export interface EditorLspTextEdit {
+  start_line: number;
+  start_col: number;
+  end_line: number;
+  end_col: number;
+  new_text: string;
+}
+
+/** A file's worth of workspace-edit text edits. */
+export interface EditorLspFileEdit {
+  path: string;
+  edits: EditorLspTextEdit[];
+}
+
+type BaseEditorClientMessage =
+  | {
+      /** Ask the daemon to tree-sitter-highlight this text. The browser
+       *  has no parser (all grammars are gated off wasm), so this is how
+       *  the code pane gets whole-buffer spans. */
+      HighlightBuffer: { path: string; text: string; revision: number };
+    }
+  | {
+      OpenBuffer: {
+        path: string;
+        /** Authoritative live buffer text (native-editor LSP sync). */
+        text?: string | null;
+        line?: number | null;
+        character?: number | null;
+        surface_id?: string | null;
+      };
+    }
+  | { SendKeys: { bytes: number[]; surface_id?: string | null } }
+  | {
+      MouseInput: {
+        button: string;
+        action: string;
+        modifier: string;
+        grid: number;
+        row: number;
+        col: number;
+        count: number;
+        surface_id?: string | null;
+      };
+    }
+  | { Resize: { width: number; height: number; surface_id?: string | null } }
+  | {
+      LspAction: {
+        action: EditorLspAction;
+        text?: string | null;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      ApplyLspCodeAction: {
+        action: EditorLspCodeAction;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      LspComplete: {
+        seq: number;
+        trigger_character?: string | null;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      ApplyLspCompletion: {
+        item: EditorLspCompletionItem;
+        replace_prefix: string;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      CancelLspCompletion: {
+        surface_id?: string | null;
+      };
+    }
+  | {
+      LspHoverAt: {
+        seq: number;
+        grid: number;
+        row: number;
+        col: number;
+        surface_id?: string | null;
+      };
+    }
+  | {
+      /** Native-editor position-explicit LSP query: 0-based line +
+       *  0-based UTF-8 byte column, resolved against the text last
+       *  synced via OpenBuffer. */
+      LspQueryAt: {
+        seq: number;
+        action: EditorLspAction;
+        path: string;
+        line: number;
+        character: number;
+        text?: string | null;
+        open_paths?: string[];
+        surface_id?: string | null;
+      };
+    }
+  | {
+      /** Apply one code action from an LspQueryAt CodeActions result
+       *  (seq-tokened, open-path-aware). Replied with LspQueryResult. */
+      ApplyLspCodeActionAt: {
+        seq: number;
+        action: EditorLspCodeAction;
+        open_paths?: string[];
+        surface_id?: string | null;
+      };
+    }
+  | {
+      /** Native-editor save notification: `path` was just written —
+       *  the daemon forwards textDocument/didSave to the workspace
+       *  language servers (save-triggered slow-lane diagnostics).
+       *  Fire-and-forget: no reply. */
+      DidSave: {
+        path: string;
+        surface_id?: string | null;
+      };
+    }
+  | "Close";
+
+export type EditorServerMessage =
+  | {
+      Batch: {
+        surface_id?: string | null;
+        messages: EditorServerMessage[];
+      };
+    }
+  | {
+      GridUpdate: {
+        surface_id?: string | null;
+        grid_id: number;
+        width: number;
+        height: number;
+        cells: GridCell[];
+        cursor: GridPos | null;
+        mode: string | null;
+      };
+    }
+  | {
+      GridResize: {
+        surface_id?: string | null;
+        grid_id: number;
+        width: number;
+        height: number;
+      };
+    }
+  | {
+      GridClear: {
+        surface_id?: string | null;
+        grid_id: number;
+      };
+    }
+  | {
+      GridScroll: {
+        surface_id?: string | null;
+        grid_id: number;
+        top: number;
+        bot: number;
+        left: number;
+        right: number;
+        rows: number;
+        cols: number;
+      };
+    }
+  | {
+      CursorGoto: {
+        surface_id?: string | null;
+        grid_id: number;
+        row: number;
+        col: number;
+      };
+    }
+  | {
+      HighlightDefined: {
+        surface_id?: string | null;
+        hl_id: number;
+        attrs: HighlightAttrs;
+      };
+    }
+  | {
+      WinViewport: {
+        surface_id?: string | null;
+        grid_id: number;
+        topline: number;
+        botline: number;
+        line_count: number;
+        scroll_delta: number;
+        /** Buffer-coordinate cursor (0-based) — what presence
+         *  publishes so remote screens draw the true line. Absent on
+         *  older daemons. */
+        curline?: number;
+        curcol?: number;
+        /** Gutter width in cells. */
+        textoff?: number;
+      };
+    }
+  | {
+      DefaultColors: {
+        surface_id?: string | null;
+        rgb_fg: number;
+        rgb_bg: number;
+        rgb_sp: number;
+      };
+    }
+  | {
+      PopupMenu: {
+        surface_id?: string | null;
+        items: PopupMenuItem[];
+        selected: number | null;
+        anchor: GridPos;
+        grid_id: number;
+      };
+    }
+  | { PopupMenuSelect: { surface_id?: string | null; selected: number | null } }
+  | { PopupHide: { surface_id?: string | null } }
+  | { MouseMode: { surface_id?: string | null; enabled: boolean } }
+  | {
+      Diagnostics: {
+        surface_id?: string | null;
+        error?: number;
+        warn?: number;
+        info?: number;
+        hint?: number;
+        file_path?: string | null;
+        items: DiagnosticItem[];
+      };
+    }
+  | {
+      LspStatus: {
+        surface_id?: string | null;
+        state: string;
+        name?: string | null;
+        binary?: string | null;
+        filetype?: string | null;
+      };
+    }
+  | {
+      LspSnapshot: {
+        surface_id?: string | null;
+        file_path?: string | null;
+        filetype: string;
+        servers: LspSnapshotServer[];
+      };
+    }
+  | {
+      LspMessage: {
+        surface_id?: string | null;
+        server: string;
+        text: string;
+        level: string;
+      };
+    }
+  | {
+      LspActionResult: {
+        surface_id?: string | null;
+        action: EditorLspAction;
+        line: number;
+        character: number;
+        summary: string;
+        hover?: string | null;
+        locations: Array<{ uri: string; line: number; character: number }>;
+        symbol_count: number;
+        symbols: Array<{
+          name: string;
+          kind: string;
+          detail?: string | null;
+          uri: string;
+          line: number;
+          character: number;
+          depth: number;
+        }>;
+        code_actions: EditorLspCodeAction[];
+      };
+    }
+  | {
+      /** Result of LspQueryAt / ApplyLspCodeActionAt; only the fields
+       *  the echoed action produces are populated. Locations are
+       *  0-based (line + UTF-8 byte column). */
+      LspQueryResult: {
+        surface_id?: string | null;
+        seq: number;
+        action: EditorLspAction;
+        root?: string | null;
+        locations?: Array<{ uri: string; line: number; character: number }>;
+        references?: EditorLspReference[];
+        code_actions?: EditorLspCodeAction[];
+        edits?: EditorLspFileEdit[];
+        applied_files?: string[];
+        ran_command?: boolean;
+        title?: string;
+      };
+    }
+  | {
+      LspCompletions: {
+        surface_id?: string | null;
+        seq: number;
+        replace_prefix: string;
+        items: EditorLspCompletionItem[];
+      };
+    }
+  | {
+      LspHoverResult: {
+        surface_id?: string | null;
+        seq: number;
+        line: number;
+        character: number;
+        contents: string;
+      };
+    }
+  | { ModeChange: { surface_id?: string | null; mode: string; mode_idx: number } }
+  | {
+      BufferOpened: {
+        surface_id?: string | null;
+        path: string;
+        line_count: number;
+      };
+    }
+  | {
+      BufferModified: {
+        surface_id?: string | null;
+        path: string;
+        modified: boolean;
+      };
+    }
+  | { Notification: { surface_id?: string | null; message: string; level: string } }
+  | {
+      YankFlash: {
+        surface_id?: string | null;
+        row_top: number;
+        row_bot: number;
+        col_left?: number | null;
+        col_right?: number | null;
+      };
+    }
+  | { Closed: { surface_id?: string | null; reason: string | null } }
+  | { Error: { surface_id?: string | null; message: string } };
+
+export interface EditorEnvelope {
+  request_id: number;
+  workspace_root?: string | null;
+  message: EditorClientMessage;
+}
+
+export interface EditorReplyEnvelope {
+  request_id: number;
+  message: EditorServerMessage;
+}
+
+// CRDT / presence messages -------------------------------------------
+// Mirrors `neoism-protocol/src/crdt.rs`. K3 uses only presence
+// variants in the web frontend; sync payloads are typed so frames do
+// not get dropped when K4 broadcasts them over the same service.
+
+export interface CrdtCursorPosition {
+  line: number;
+  column: number;
+  offset?: number | null;
+}
+
+export interface CrdtSelectionRange {
+  anchor: CrdtCursorPosition;
+  head: CrdtCursorPosition;
+}
+
+export interface CrdtPresenceColor {
+  r: number;
+  g: number;
+  b: number;
+}
+
+interface BaseCrdtPeerPresence {
+  /** OS of the originating client, absent for older peers. */
+  client_os?: string | null;
+  buffer_id: string;
+  peer_id: string;
+  display_name: string;
+  color: CrdtPresenceColor;
+  cursor: CrdtCursorPosition;
+  selection?: CrdtSelectionRange | null;
+  /** Peer is in insert/replace mode → thin beam; normal → block. */
+  insert?: boolean;
+  /** Peer's cursor uses the animated rainbow preset — receivers
+   *  ignore `color` and animate the rainbow locally. */
+  rainbow?: boolean;
+  updated_at_ms: number;
+}
+
+export interface CrdtBufferUpdate {
+  buffer_id: string;
+  origin_client_id: number;
+  update_v1: number[];
+  state_vector_v1?: number[];
+}
+
+export interface CrdtSyncEnvelope {
+  buffer_id: string;
+  origin_client_id: number;
+  update_v1?: number[];
+  state_vector_v1?: number[];
+}
+
+export type CrdtPresenceUpdate =
+  | { Upsert: CrdtPeerPresence }
+  | { Remove: { buffer_id: string; peer_id: string } };
+
+type BaseCrdtClientMessage =
+  | { OpenBuffer: { buffer_id: string; initial_text?: string } }
+  | { RequestSnapshot: { buffer_id: string; state_vector_v1?: number[] } }
+  | { ApplyUpdate: { update: CrdtBufferUpdate } }
+  | { ApplySync: { envelope: CrdtSyncEnvelope } }
+  | { PublishPresence: { presence: CrdtPeerPresence } }
+  | { ClearPresence: { buffer_id: string; peer_id: string } }
+  | {
+      RequestPresenceSnapshot: {
+        buffer_id: string;
+        exclude_peer_id?: string | null;
+      };
+    }
+  | { RequestCompactionStatus: { buffer_id: string } }
+  | { SaveBuffer: { buffer_id: string } };
+
+export type CrdtServerMessage =
+  | { Snapshot: { buffer_id: string; update_v1: number[]; state_vector_v1: number[] } }
+  | {
+      SnapshotFallback: {
+        buffer_id: string;
+        update_v1: number[];
+        state_vector_v1: number[];
+        compacted_through_state_vector_v1: number[];
+        reason: string;
+      };
+    }
+  | { Update: { update: CrdtBufferUpdate } }
+  | { Sync: { envelope: CrdtSyncEnvelope } }
+  | { Presence: { update: CrdtPresenceUpdate } }
+  | { PresenceSnapshot: { buffer_id: string; peers: CrdtPeerPresence[] } }
+  | { CompactionStatus: unknown }
+  | { Saved: { buffer_id: string; bytes_written: number } }
+  | { Error: { buffer_id?: string | null; message: string } };
+
+// Config messages -----------------------------------------------------
+// Mirrors `neoism-protocol/src/config.rs` — generic get/set over the
+// daemon host's unified config.json + the read-only extensions
+// inventory (web Settings + Extensions pages).
+
+export type ConfigClientMessage =
+  | "GetConfig"
+  | "GetConfigSchema"
+  | "GetConfigDocument"
+  | "EnsureConfigDocument"
+  | "ListExtensions"
+  | "ListMashupPacks"
+  | { SaveConfigDocument: { content: string; expected_revision: string } }
+  | { SetSetting: { key: string; value: unknown } }
+  | { SetKeybind: { action: string; key: string; with: string } }
+  | { ApplyMashupPack: { id: string | null } };
+
+export interface ConfigDocument {
+  content: string;
+  display_path: string;
+  revision: string;
+  writable: boolean;
+}
+
+export interface ConfigDescriptor {
+  path: string;
+  label: string;
+  description: string;
+  value_kind: "boolean" | "integer" | "number" | "string" | "array" | "object";
+  default: unknown;
+  static_suggestions: string[];
+  runtime_suggestions: string[];
+  options: ConfigOption[];
+  provider?:
+    | "system_fonts"
+    | "ide_themes"
+    | "terminal_palettes"
+    | "mashup_packs"
+    | "shells"
+    | "executables"
+    | "agent_names"
+    | "provider_ids"
+    | "models"
+    | "lsp_adapters"
+    | null;
+  constraints: {
+    min?: number | null;
+    max?: number | null;
+    step?: number | null;
+    unit?: string | null;
+    placeholder?: string | null;
+    nullable: boolean;
+  };
+  accepted_kinds: ConfigDescriptor["value_kind"][];
+  extensible: boolean;
+  category: string;
+  control: { kind: string } | string;
+}
+
+export interface ConfigOption {
+  value: unknown;
+  label?: string | null;
+  description?: string | null;
+}
+
+export type ExtensionStatusSummary =
+  | "not_installed"
+  | "built_in"
+  | "detected"
+  | "unavailable"
+  | "installed";
+
+export interface ExtensionSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  downloads?: number | null;
+  categories?: string[];
+  languages?: string[];
+  status: ExtensionStatusSummary;
+  installed_version?: string | null;
+  repository_url?: string | null;
+  lsp_source?: string | null;
+}
+
+export interface MashupPackSummary {
+  id: string;
+  name: string;
+  description: string;
+  theme?: string | null;
+  shader_overlay?: string | null;
+  font_family?: string | null;
+  slots?: string[];
+  theme_extends?: string | null;
+  theme_colors?: Record<string, string>;
+}
+
+export type ConfigServerMessage =
+  | { Config: { value: unknown } }
+  | { ConfigSchema: { descriptors: ConfigDescriptor[] } }
+  | { ConfigDocument: { document: ConfigDocument } }
+  | { ConfigDocumentSaved: { document: ConfigDocument } }
+  | { SettingWritten: { key: string } }
+  | { KeybindWritten: { action: string } }
+  | { Extensions: { entries: ExtensionSummary[] } }
+  | { MashupPacks: { entries: MashupPackSummary[] } }
+  | { MashupPackApplied: { id: string | null; config: unknown } }
+  | { Error: { message: string } };
+
+export interface ConfigEnvelope {
+  request_id: number;
+  message: ConfigClientMessage;
+}
+
+export interface ConfigReplyEnvelope {
+  request_id: number;
+  message: ConfigServerMessage;
+}
+
+export interface CrdtEnvelope {
+  request_id: number;
+  message: CrdtClientMessage;
+}
+
+export interface CrdtReplyEnvelope {
+  request_id: number;
+  message: CrdtServerMessage;
+}
+
+// Agent (Claude API proxy) messages ----------------------------------
+// Mirrors `neoism-protocol/src/agent.rs`. The daemon runs the streaming
+// SSE pump against `api.anthropic.com` and emits server messages back
+// over the existing socket.
+
+export type Role = "User" | "Assistant" | "System";
+
+export type ContentKind =
+  | "Text"
+  | "Reasoning"
+  | { Tool: { name: string } };
+
+export type PermissionDecision = "Yes" | "Always" | "No";
+
+export interface Attachment {
+  kind: string;
+  path: string | null;
+  bytes: number[];
+}
+
+export type StreamingState =
+  | "Idle"
+  | "Thinking"
+  | "Working"
+  | "Generating"
+  | "Compacting"
+  | "WaitingSubagents";
+
+export type NoticeLevel = "Info" | "Warn" | "Error";
+
+export type ToolStatus =
+  | "Pending"
+  | "Running"
+  | "Completed"
+  | "Failed"
+  | "Cancelled";
+
+export type SubagentStatus = "Running" | "Blocked" | "Completed" | "Failed";
+
+export type CompactionPhase = "Started" | "Delta" | "Ended";
+
+export type HistoryMessageKind =
+  | "User"
+  | "Assistant"
+  | "Reasoning"
+  | "Tool"
+  | "System"
+  | "Subtask"
+  | "Compaction";
+
+export interface TodoItem {
+  status: string;
+  content: string;
+}
+
+export interface Usage {
+  input: number;
+  output: number;
+  reasoning?: number;
+  cache_read?: number;
+  cache_write?: number;
+  total?: number;
+  cost_micros?: number;
+  context_limit?: number | null;
+}
+
+export interface ThreadSummary {
+  session_id: string;
+  title: string;
+  directory?: string | null;
+  model?: string | null;
+  agent?: string | null;
+  /** Root-only source copied from extra.externalAgent.provider by the daemon. */
+  external_provider?: "opencode" | "claude" | "codex" | null;
+  updated_at?: number;
+  message_count?: number;
+  busy?: boolean;
+}
+
+export interface HistoryMessage {
+  id: string;
+  role: Role;
+  kind: HistoryMessageKind;
+  author?: string | null;
+  title?: string;
+  text?: string;
+  status?: string;
+  tool?: string;
+  tool_batch_id?: string | null;
+  lang?: string;
+  line_offset?: number | null;
+  detail?: string;
+  todos?: TodoItem[];
+  usage?: Usage | null;
+  created_at?: number;
+}
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  context_limit?: number | null;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  models?: ModelInfo[];
+}
+
+export interface AgentInfo {
+  name: string;
+  description: string;
+  mode?: string | null;
+}
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  path?: string | null;
+}
+
+export type AgentClientMessage =
+  // -- Original direct-proxy surface (preserved verbatim) ----------
+  | { SendMessage: { text: string; attachments: Attachment[] } }
+  | "Cancel"
+  | "NewThread"
+  | {
+      ReplyPermission: {
+        request_id: number;
+        decision: PermissionDecision;
+      };
+    }
+  // -- Session lifecycle -------------------------------------------
+  | {
+      CreateThread: {
+        title?: string | null;
+        directory?: string | null;
+        agent?: string | null;
+        model?: string | null;
+        external_provider?: "opencode" | "claude" | "codex" | null;
+      };
+    }
+  | { SwitchThread: { session_id: string } }
+  | { DeleteThread: { session_id: string } }
+  | {
+      AnswerQuestion: {
+        request_id: string;
+        session_id: string;
+        answers: string[][];
+      };
+    }
+  | { RejectQuestion: { request_id: string; session_id: string } }
+  | { SetPinned: { session_id: string; pinned: boolean } }
+  | { ListSessionProjects: { catalog_identity: string; generation: number } }
+  | { ListProjectSessions: { catalog_identity: string; directory: string; cursor: string | null; generation: number } }
+  | { SearchThreads: { query: string; generation: number; directory?: string | null } }
+  | {
+      ListThreads: {
+        directory?: string | null;
+        limit?: number | null;
+        cursor?: string | null;
+      };
+    }
+  | {
+      GetHistory: {
+        session_id: string;
+        cursor?: string | null;
+        limit?: number | null;
+      };
+    }
+  | { ResumeStream: { session_id: string } }
+  | { StopStream: { session_id: string } }
+  // -- Prompt / submission -----------------------------------------
+  | {
+      SubmitPrompt: {
+        session_id: string;
+        message_id: string;
+        text: string;
+        attachments?: Attachment[];
+        mode?: string | null;
+        model?: string | null;
+        thinking?: string | null;
+        delivery: "steer" | "queue";
+      };
+    }
+  | { CancelInflight: { session_id: string } }
+  | { ClearQueue: { session_id: string } }
+  | { StopBackgroundTask: { session_id: string; job_id: string } }
+  | { RetryLast: { session_id: string } }
+  // -- Tool / permission gating ------------------------------------
+  | {
+      ApproveTool: {
+        request_id: string;
+        session_id: string;
+        decision: PermissionDecision;
+      };
+    }
+  | {
+      DenyTool: {
+        request_id: string;
+        session_id: string;
+      };
+    }
+  // -- Edit proposals ----------------------------------------------
+  | { ApplyEdit: { session_id: string; edit_id: string } }
+  | { RejectEdit: { session_id: string; edit_id: string } }
+  // -- Provider / model / agent configuration ----------------------
+  | { SetProvider: { session_id: string; provider_id: string } }
+  | {
+      SetModel: {
+        session_id: string;
+        model: string;
+        thinking?: string | null;
+      };
+    }
+  | { SetAgent: { session_id: string; agent: string } }
+  | { SetThinkingMode: { session_id: string; thinking: string } }
+  | "ListProviders"
+  // -- Local context -----------------------------------------------
+  | { ListAgents: { directory?: string | null } }
+  | { ListSkills: { directory?: string | null } }
+  | {
+      StartSubagent: {
+        session_id: string;
+        agent: string;
+        prompt?: string | null;
+      };
+    }
+  // -- Maintenance -------------------------------------------------
+  | { Compact: { session_id: string; request_id?: string | null } }
+  | { SetTitle: { session_id: string; title: string } }
+  | "Ping";
+
+export type AgentServerMessage =
+  // -- Original direct-proxy surface -------------------------------
+  | { Disabled: { reason: string } }
+  | { QuestionAsked: { session_id: string; request: unknown } }
+  | { QuestionsUpdated: { session_id: string; requests: unknown[] } }
+  | { QuestionRemoved: { session_id: string; request_id: string } }
+  | { QuestionReplyFailed: { request_id: string; error: string } }
+  | {
+      ThreadUpdated: {
+        session_id: string;
+        title?: string | null;
+        pinned?: boolean | null;
+      };
+    }
+  | { MessageStart: { session_id: string; role: Role; message_id: string } }
+  | {
+      ContentDelta: {
+        session_id: string;
+        message_id: string;
+        parent_message_id?: string | null;
+        kind: ContentKind;
+        text: string;
+      };
+    }
+  | {
+      MessageEnd: {
+        session_id: string;
+        message_id: string;
+        stop_reason: string;
+      };
+    }
+  | {
+      PermissionRequest: {
+        request_id: number;
+        tool: string;
+        args: unknown;
+      };
+    }
+  | { Error: { message: string } }
+  // -- Session lifecycle -------------------------------------------
+  | {
+      ThreadCreated: {
+        session_id: string;
+        title?: string | null;
+        directory?: string | null;
+        agent?: string | null;
+        model?: string | null;
+      };
+    }
+  | { ThreadSwitched: { session_id: string } }
+  | { ThreadDeleted: { session_id: string } }
+  | {
+      ThreadList: {
+        threads: ThreadSummary[];
+        requested_cursor?: string | null;
+        next_cursor?: string | null;
+      };
+    }
+  | { ThreadSearchResult: { generation: number; query: string; sessions: unknown; semantic: unknown; error: string | null } }
+  | "SessionProjectsChanged"
+  | { SessionProjects: { catalog_identity: string; generation: number; items: Array<{ directory: string; updatedMs: number }> } }
+  | { SessionProjectsFailed: { catalog_identity: string; generation: number; message: string } }
+  | { ProjectSessionPage: { catalog_identity: string; directory: string; requested_cursor: string | null; generation: number; threads: ThreadSummary[]; next_cursor: string | null } }
+  | { ProjectSessionPageFailed: { catalog_identity: string; directory: string; requested_cursor: string | null; generation: number; message: string } }
+  | { ThreadListFailed: { message: string } }
+  | {
+      HistoryChunk: {
+        session_id: string;
+        messages: HistoryMessage[];
+        next_cursor?: string | null;
+      };
+    }
+  | {
+      SessionEvent: {
+        session_id: string;
+        kind: string;
+        properties: unknown;
+      };
+    }
+  | {
+      MessageUpdated: {
+        session_id: string;
+        message: HistoryMessage;
+        parent_message_id?: string | null;
+      };
+    }
+  | { PartRemoved: { session_id: string; part_id: string } }
+  | { SessionIdle: { session_id: string } }
+  | {
+      StreamingState: {
+        session_id: string;
+        state: StreamingState;
+        label?: string | null;
+      };
+    }
+  | {
+      Notice: {
+        session_id: string;
+        title: string;
+        body: string;
+        level: NoticeLevel;
+      };
+    }
+  // -- Tool / permission gating ------------------------------------
+  | {
+      ToolUseRequest: {
+        session_id: string;
+        request_id: string;
+        tool: string;
+        title: string;
+        patterns?: string[];
+        args?: unknown;
+        source_agent?: string | null;
+      };
+    }
+  | {
+      ToolUseResult: {
+        session_id: string;
+        tool_use_id: string;
+        tool: string;
+        status: ToolStatus;
+        output?: string | null;
+        error?: string | null;
+      };
+    }
+  // -- Edit proposals ----------------------------------------------
+  | {
+      EditProposed: {
+        session_id: string;
+        edit_id: string;
+        path: string;
+        patch: string;
+        tool?: string | null;
+      };
+    }
+  | {
+      EditApplied: {
+        session_id: string;
+        edit_id: string;
+        path: string;
+        bytes_written: number;
+      };
+    }
+  | {
+      EditRejected: {
+        session_id: string;
+        edit_id: string;
+        path: string;
+        reason?: string | null;
+      };
+    }
+  // -- Provider / model / agent state ------------------------------
+  | {
+      ProviderState: {
+        session_id: string;
+        provider_id?: string | null;
+        model?: string | null;
+        agent?: string | null;
+        thinking?: string | null;
+        context_limit?: number | null;
+      };
+    }
+  | { ProviderCatalog: { providers: ProviderInfo[] } }
+  | { AgentCatalog: { agents: AgentInfo[] } }
+  | { SkillCatalog: { skills: SkillInfo[] } }
+  | { UsageUpdate: { session_id: string; usage: Usage } }
+  | { TodoUpdate: { session_id: string; todos: TodoItem[] } }
+  | {
+      QueueUpdate: {
+        session_id: string;
+        count: number;
+        preview?: string | null;
+        started_at?: number | null;
+      };
+    }
+  | {
+      SubagentUpdate: {
+        session_id: string;
+        status: SubagentStatus;
+        title?: string | null;
+        agent?: string | null;
+        current_tool?: string | null;
+        started_at?: number | null;
+      };
+    }
+  | {
+      Compaction: {
+        session_id: string;
+        phase: CompactionPhase;
+        run_continues?: boolean | null;
+        text?: string | null;
+        reason?: string | null;
+      };
+    }
+  | { ConnectOauthUrl: { url: string; auto: boolean; instructions: string; attempt_id?: string | null } }
+  | { McpOauthUrl: { name: string; url: string } }
+  | "Pong";
+
+export interface AgentEnvelope {
+  request_id: number;
+  message: AgentClientMessage;
+}
+
+export interface AgentReplyEnvelope {
+  request_id: number;
+  message: AgentServerMessage;
+}
+
+// Search messages -----------------------------------------------------
+// Mirrors `neoism-protocol/src/search.rs`. The daemon spawns `rg`,
+// `fff_search::FilePicker`, and `git status` directly on the host and
+// pipes hits back over the WebSocket. Every variant carries a `req_id`
+// the JS side uses to correlate replies into the `JsSearchService`
+// pending-correlation slot on the wasm side.
+
+export type SearchFileMode = "Fuzzy" | "Exact";
+export type SearchGrepMode = "Fuzzy" | "Exact" | "Regex";
+export type SearchGitStatus =
+  | "Modified"
+  | "Staged"
+  | "Mixed"
+  | "Added"
+  | "Deleted"
+  | "Renamed"
+  | "Untracked"
+  | "Conflict";
+
+export interface SearchFileHit {
+  score: number;
+  path: string;
+}
+
+export interface SearchDirectoryHit {
+  score: number;
+  path: string;
+}
+
+export interface SearchGrepHit {
+  score: number;
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+}
+
+export interface SearchGitHit {
+  path: string;
+  status: SearchGitStatus;
+  line: number;
+  text: string;
+}
+
+export type SearchClientMessage =
+  | { CollectFiles: { req_id: number; cwd: string } }
+  | {
+      SearchFiles: {
+        req_id: number;
+        query: string;
+        cwd: string;
+        mode: SearchFileMode;
+      };
+    }
+  | { SearchDirectories: { req_id: number; query: string; cwd: string } }
+  | {
+      SearchGrep: {
+        req_id: number;
+        query: string;
+        cwd: string;
+        mode: SearchGrepMode;
+        case_sensitive: boolean | null;
+        file_patterns: string[];
+      };
+    }
+  | { SearchGitChanges: { req_id: number; cwd: string } }
+  | { GitRepoRoot: { req_id: number; cwd: string } }
+  | { CancelSearch: { req_id: number } };
+
+export type SearchServerMessage =
+  | { CollectFilesResult: { req_id: number; paths: string[] } }
+  | { SearchFilesResult: { req_id: number; hits: SearchFileHit[] } }
+  | { SearchDirectoriesResult: { req_id: number; hits: SearchDirectoryHit[] } }
+  | { SearchGrepResult: { req_id: number; hits: SearchGrepHit[] } }
+  | { SearchGitChangesResult: { req_id: number; hits: SearchGitHit[] } }
+  | { GitRepoRootResult: { req_id: number; path: string | null } }
+  | { SearchProgress: { req_id: number; found_so_far: number } }
+  | { SearchError: { req_id: number; message: string } };
+
+export interface SearchEnvelope {
+  request_id: number;
+  message: SearchClientMessage;
+}
+
+export interface SearchReplyEnvelope {
+  request_id: number;
+  message: SearchServerMessage;
+}
+
+// Workspace messages --------------------------------------------------
+// Mirrors `neoism-protocol/src/workspace.rs`. Workspace identity,
+// project registry, per-session cwd, and the active-session pointer.
+
+export interface ProjectRootSummary {
+  id: string;
+  name: string;
+  path: string;
+  last_opened: number;
+}
+
+export interface HostSummary {
+  id: string;
+  label: string;
+  online?: boolean;
+  peer_identity?: string | null;
+  last_seen?: number;
+  /** Canonical dialable daemon endpoint, e.g. `ws://100.64.0.2:7878/session`.
+   *  Used to resolve a workspace's `running_on_host_id` to a URL for re-dial
+   *  when it is promoted/demoted between hosts. Absent for hosts with no
+   *  known address. Mirrors `HostSummary.daemon_url` on the Rust side. */
+  daemon_url?: string | null;
+  /** The workspace this host is currently sitting in (daemon-filled
+   *  from its active pointer). Web boot auto-attaches here so opening
+   *  a browser lands where the desktop already is. */
+  active_workspace_id?: string | null;
+}
+
+export interface WorkspaceSummary {
+  id: string;
+  host_id: string;
+  title: string;
+  host_kind?: "local" | "tailscale" | "docker_sandbox" | "cloud_sandbox";
+  visibility?: "private" | "shared" | "team";
+  main_session_id?: string | null;
+  root_dir?: string | null;
+  /** The notes vault the HOST linked to this workspace's code dir, fully
+   *  resolved where the vaults physically live (e.g.
+   *  `~/Neoism/Vaults/Personal/Projects/MyProject`). This is the ONLY
+   *  directory notes live in - there is no `<root_dir>/notes`. `null`
+   *  when the host linked no vault, which drives the sidebar's
+   *  "no linked vault" empty state. */
+  linked_vault_dir?: string | null;
+  /** The vault this workspace's notes actually resolve to on the host,
+   *  with desktop's full fallback (linked scope, else the user's default
+   *  vault). Use this when viewing your OWN host so an unlinked project
+   *  shows the same notes desktop shows; a guest must use
+   *  `linked_vault_dir` instead, which stays `null` unless the host
+   *  explicitly linked a vault to this project. */
+  notes_vault_dir?: string | null;
+  active_tab_id?: string | null;
+  running_on_host_id?: string | null;
+  controlled_by_host_id?: string | null;
+  layout_snapshot?: string | null;
+  last_active?: number;
+}
+
+export interface WorkspaceTabSummary {
+  id: string;
+  workspace_id: string;
+  title: string;
+  kind?: string | null;
+  session_id?: string | null;
+  surface_id?: string | null;
+  cwd?: string | null;
+  active?: boolean;
+  last_active?: number;
+}
+
+export type InitialWorkspaceReason =
+  | "client_remembered"
+  | "host_active"
+  | "most_recent"
+  | "created_default";
+
+export interface HostWorkspaceTreeSummary {
+  hosts: HostSummary[];
+  workspaces: WorkspaceSummary[];
+  tabs: WorkspaceTabSummary[];
+}
+
+export interface SessionSummary {
+  id: string;
+  workspace_id: string;
+  cwd: string;
+  label: string | null;
+  last_active: number;
+}
+
+export interface EditorSurfaceSummary {
+  surface_id: string;
+  workspace_id: string;
+  session_id: string;
+  path: string | null;
+  // Daemon-assigned PTY / diagnostics route id for this surface.
+  // The chrome uses this as the `route_id` it passes to
+  // `SubscribeDiagnostics`, replacing the hard-coded `1` it used
+  // while every web client ran a single embedded nvim. Optional so
+  // older daemons (which don't assign route ids) stay
+  // wire-compatible; newer daemons always populate it.
+  route_id?: number | null;
+  last_active: number;
+}
+
+export type WorkspaceAction =
+  | "CreateNeoismNote";
+
+export interface ClipboardPayload {
+  mime_type: string;
+  text?: string | null;
+  bytes?: number[];
+  filename?: string | null;
+}
+
+// Pane-layout mutation primitives — mirror of
+// `neoism_protocol::workspace::PaneLayoutOp`. Used by the
+// `PaneLayoutOp` client message (phone agent drives the layout) and
+// echoed inside the daemon's `PaneLayoutChanged` broadcast so paired
+// surfaces converge on the same layout state.
+export type PaneSplitAxis = "Horizontal" | "Vertical";
+
+export type PaneSplitPlacement = "Before" | "After";
+
+export type PaneFocusDir = "Left" | "Right" | "Up" | "Down";
+
+export type PaneLayoutSnapshotNode =
+  | {
+      kind: "leaf";
+      pane_external_id: number;
+      surface_id: string;
+      session_id: string;
+      path?: string | null;
+      route_id?: number | null;
+    }
+  | {
+      kind: "split";
+      axis: PaneSplitAxis;
+      ratios: number[];
+      children: PaneLayoutSnapshotNode[];
+    }
+  | {
+      kind: "tabs";
+      active: number;
+      children: PaneLayoutSnapshotNode[];
+    };
+
+export interface PaneLayoutSnapshot {
+  schema_version: number;
+  workspace_id: string;
+  focused_pane_external_id: number;
+  root: PaneLayoutSnapshotNode;
+}
+
+export type PaneLayoutOp =
+  | "Sync"
+  | { Split: { axis: PaneSplitAxis; placement: PaneSplitPlacement } }
+  | { Focus: { dir: PaneFocusDir } }
+  | "Close"
+  | { ResizeRatio: { delta: number } }
+  | { MoveTab: { from: number; to: number } }
+  | {
+      MovePane: {
+        target_pane_external_id: number;
+        axis: PaneSplitAxis;
+        placement: PaneSplitPlacement;
+      };
+    }
+  | { AdoptPaneAsTab: { target_pane_external_id: number } };
+
+export type WorkspaceClientMessage =
+  | {
+      OpenProjectRoot: {
+        path: string;
+        init_if_missing?: boolean;
+      };
+    }
+  | { CloseProjectRoot: { id: string } }
+  | "ListProjectRoots"
+  | { SwitchProjectRoot: { id: string } }
+  | { GetProjectRootInfo: { id: string } }
+  | { RenameProjectRoot: { id: string; name: string } }
+  | { ForgetProjectRoot: { id: string } }
+  | "ListHosts"
+  | { UpsertHost: { host: HostSummary } }
+  | { ListHostWorkspaces: { host_id?: string | null } }
+  | { ListWorkspaceTabs: { workspace_id: string } }
+  | "RequestHostWorkspaceTree"
+  | { ResolveInitialWorkspace: { preferred_host_id?: string | null } }
+  | {
+      CreateHostWorkspace: {
+        host_id: string;
+        workspace_id?: string | null;
+        title?: string | null;
+        root_dir?: string | null;
+      };
+    }
+  | {
+      CreateWorkspace: {
+        workspace_id?: string | null;
+        title?: string | null;
+        root_dir?: string | null;
+      };
+    }
+  | { CloseHostWorkspace: { workspace_id: string } }
+  | { SwitchHostWorkspace: { workspace_id: string } }
+  | { SetWorkspaceRoot: { workspace_id: string; root_dir: string } }
+  | { CreateWorkspaceVault: { workspace_id: string } }
+  | { RefreshHostWorkspaceNotes: { workspace_id: string } }
+  | { RequestShareTarget: { workspace_id: string | null } }
+  | { ShareWorkspace: { workspace_id: string } }
+  | { StopSharingWorkspace: { workspace_id: string } }
+  | { SendWorkspaceToDockerSandbox: { workspace_id: string } }
+  | { SendWorkspaceToCloud: { workspace_id: string } }
+  | { SubscribeWorkspace: { workspace_id: string } }
+  | { UnsubscribeWorkspace: { workspace_id: string } }
+  | {
+      ControlWorkspace: {
+        workspace_id: string;
+        controller_host_id: string;
+      };
+    }
+  | {
+      ReleaseWorkspaceControl: {
+        workspace_id: string;
+        controller_host_id: string;
+      };
+    }
+  | {
+      MoveWorkspaceToHost: {
+        workspace_id: string;
+        target_host_id: string;
+      };
+    }
+  | {
+      MoveTabToWorkspace: {
+        tab_id: string;
+        target_workspace_id: string;
+      };
+    }
+  | {
+      MoveTabToHostWorkspace: {
+        tab_id: string;
+        target_host_id: string;
+        target_workspace_id: string;
+      };
+    }
+  | {
+      PublishWorkspaceTabs: {
+        workspace_id: string;
+        tabs: WorkspaceTabSummary[];
+      };
+    }
+  | "ListSessions"
+  | { RequestFullSnapshot: { since_offset?: Record<number, number> | null } }
+  | { SwitchSession: { session_id: string } }
+  | {
+      NewSession: {
+        cwd?: string | null;
+        label?: string | null;
+      };
+    }
+  | { CloseSession: { session_id: string } }
+  | { GetSessionState: { session_id: string } }
+  | { SetCwd: { session_id: string; path: string } }
+  | { RenameSession: { session_id: string; label: string } }
+  | {
+      BindEditorSurface: {
+        surface_id: string;
+        session_id: string;
+        path?: string | null;
+      };
+    }
+  | "ListEditorSurfaces"
+  | { CloseEditorSurface: { surface_id: string } }
+  | { RunWorkspaceAction: { action: WorkspaceAction } }
+  | { StoreClipboard: { payload: ClipboardPayload } }
+  | "LoadClipboard"
+  | {
+      MaterializeClipboardImage: {
+        payload: ClipboardPayload;
+        // Opaque correlation token echoed back in the
+        // `ClipboardImageMaterialized` reply. Multi-pane frontends use
+        // it to route the materialised path to the pane that initiated
+        // the paste (the focused surface at reply time may not be the
+        // one that pasted). `undefined`/missing opts out of correlation
+        // — single-pane callers can omit it.
+        request_id?: string | null;
+      };
+    }
+  | {
+      // Phone-driven pane-layout mutation targeting the editor surface
+      // identified by the integer external id used by the chrome's
+      // pane overlay. The daemon validates the op against the active
+      // workspace and broadcasts a sibling `PaneLayoutChanged` to
+      // every connected client so paired surfaces converge on the
+      // same layout.
+      PaneLayoutOp: {
+        pane_external_id: number;
+        op: PaneLayoutOp;
+      };
+    }
+  | {
+      PublishPaneLayout: {
+        layout: PaneLayoutSnapshot;
+      };
+    }
+  | {
+      // First frame the chrome ships after the websocket opens.
+      // `token` is the operator's pairing secret for the focused
+      // daemon (omit / null for the legacy "trust local" path); the
+      // daemon checks it against its `PairingTokenStore` when
+      // `NEOISM_REQUIRE_AUTH=1` is set and replies with `HelloAck`.
+      // `client_name` is a human-facing label used only for log /
+      // audit lines — it never participates in the auth decision.
+      Hello: {
+        token?: string | null;
+        client_name?: string | null;
+      };
+    }
+  | { Ping: { nonce: string } }
+  | {
+      // F3: fetch the daemon-persisted UI preferences (theme, font
+      // size, sidebar widths, last session-layout snapshot) for
+      // `workspace_id`. The daemon replies with a sibling
+      // `WorkplacePreferences` frame even if nothing has been
+      // persisted yet (defaulted shape — no `Error` for first-run).
+      GetWorkplacePreferences: { workspace_id: string };
+    }
+  | {
+      // F3: replace the daemon-persisted preferences for
+      // `workspace_id`. The daemon fans a `WorkplacePreferencesChanged`
+      // out to every connected client (the submitter included) so
+      // paired surfaces re-apply theme / sidebar widths without
+      // polling — this is fire-and-forget; no direct reply is sent.
+      SetWorkplacePreferences: {
+        workspace_id: string;
+        prefs: WorkplacePreferencesWire;
+      };
+    };
+
+/** Wire shape for the F3 per-workplace UI preferences blob. Mirrors
+ *  `neoism_protocol::workspace::WorkplacePreferences` 1:1. All fields
+ *  are optional so partial updates from older clients round-trip
+ *  cleanly — the daemon merges-by-replace, not patch. */
+export interface WorkplacePreferencesWire {
+  theme?: string | null;
+  font_size?: number | null;
+  sidebar_widths?: Record<string, number>;
+  session_tree?: string | null;
+}
+
+export type WorkspaceServerMessage =
+  | { ProjectRootList: { project_roots: ProjectRootSummary[] } }
+  | {
+      ProjectRootInfo: {
+        id: string;
+        name: string;
+        path: string;
+        sessions: SessionSummary[];
+        active: boolean;
+      };
+    }
+  | { ProjectRootOpened: { project_root: ProjectRootSummary } }
+  | { ProjectRootClosed: { id: string } }
+  | { ProjectRootChanged: { id: string | null } }
+  | { HostList: { hosts: HostSummary[] } }
+  | { HostWorkspaceList: { workspaces: WorkspaceSummary[] } }
+  | { WorkspaceTabList: { tabs: WorkspaceTabSummary[] } }
+  | { HostWorkspaceTree: HostWorkspaceTreeSummary }
+  | {
+      InitialWorkspaceResolved: {
+        workspace: WorkspaceSummary;
+        reason: InitialWorkspaceReason;
+      };
+    }
+  | { ShareTarget: { url: string | null; hint: string | null } }
+  | { HostWorkspaceUpserted: { workspace: WorkspaceSummary } }
+  | { HostWorkspaceChanged: { host_id: string; workspace_id?: string | null } }
+  | { WorkspaceControlChanged: { workspace: WorkspaceSummary } }
+  | { WorkspaceTabMoved: { tab: WorkspaceTabSummary } }
+  | { SessionList: { sessions: SessionSummary[] } }
+  | {
+      SessionState: {
+        id: string;
+        workspace_id: string;
+        cwd: string;
+        label: string | null;
+        last_active: number;
+      };
+    }
+  | { SessionChanged: { session_id: string | null } }
+  | { SessionCreated: { session: SessionSummary } }
+  | { SessionClosed: { session_id: string } }
+  | { EditorSurfaceList: { surfaces: EditorSurfaceSummary[] } }
+  | { EditorSurfaceChanged: { surface: EditorSurfaceSummary } }
+  | { EditorSurfaceClosed: { surface_id: string } }
+  | {
+      WorkspaceActionCompleted: {
+        action: WorkspaceAction;
+        path: string | null;
+        message: string;
+      };
+    }
+  | { ClipboardPayload: { payload: ClipboardPayload | null } }
+  | {
+      ClipboardImageMaterialized: {
+        path: string;
+        mime_type: string;
+        filename: string | null;
+        // Echoed correlation token; `null`/missing when the original
+        // request didn't supply one. See `MaterializeClipboardImage`
+        // above for the routing rationale.
+        request_id?: string | null;
+      };
+    }
+  | {
+      // Broadcast notification: a `PaneLayoutOp` mutation landed
+      // successfully. The daemon fans this out to every connected
+      // client (not just the submitter) so paired surfaces (laptop
+      // chrome + phone agent + web) converge on the same layout.
+      // `new_layout_snapshot` is the daemon's serialized
+      // `PaneLayoutSnapshot` (the authoritative N-ary pane tree). The
+      // web lowers it through the shared
+      // `SessionLayout::from_pane_layout_snapshot` mirror in the wasm
+      // bridge so it renders the same split intent the desktop does.
+      PaneLayoutChanged: {
+        pane_external_id: number;
+        op: PaneLayoutOp;
+        new_layout_snapshot?: string | null;
+      };
+    }
+  | {
+      // Daemon reply to the chrome's `Hello` frame. `accepted=false`
+      // means the daemon is about to drop the websocket — the client
+      // should surface `reason` (if present) and clean up. `accepted=true`
+      // optionally carries a `peer_identity` string the daemon
+      // resolved via `tailscale whois`, suitable for rendering
+      // "connected to laptop-A (you@tailnet)" in the chrome.
+      // `connected_host_id` is the stable machine id; unlike the
+      // websocket URL it is unaffected by localhost/LAN/tailnet aliases.
+      HelloAck: {
+        accepted: boolean;
+        reason?: string | null;
+        peer_identity?: string | null;
+        connected_host_id?: string | null;
+      };
+    }
+  | { Pong: { nonce: string } }
+  | {
+      // F3 reply to `GetWorkplacePreferences`. `prefs` is the
+      // daemon's persisted shape; first-run / never-set workspaces
+      // round-trip as the default (all-empty) struct rather than an
+      // `Error`.
+      WorkplacePreferences: {
+        workspace_id: string;
+        prefs: WorkplacePreferencesWire;
+      };
+    }
+  | {
+      // F3 broadcast — fans out of the daemon on every successful
+      // `SetWorkplacePreferences`. Chrome listeners use this to
+      // re-apply theme / sidebar widths without polling. Sent to
+      // every connected client including the submitter, so a
+      // local mutation appears here on the round-trip.
+      WorkplacePreferencesChanged: {
+        workspace_id: string;
+        prefs: WorkplacePreferencesWire;
+      };
+    }
+  | { HostEnded: { reason: string } }
+  | { Error: { message: string } };
+
+export interface WorkspaceEnvelope {
+  message: WorkspaceClientMessage;
+}
+
+export interface WorkspaceReplyEnvelope {
+  message: WorkspaceServerMessage;
+}
+
+// Diagnostics messages ------------------------------------------------
+// Mirrors `neoism-protocol/src/diagnostics.rs`. The web frontend has no
+// local language servers, so the daemon forwards LSP diagnostics across
+// the WebSocket per-route.
+
+export type LspState =
+  | "Starting"
+  | "Ready"
+  | "Indexing"
+  | "Stopped"
+  | { Failed: { message: string } };
+
+export interface LspDiagnosticItem {
+  line: number;
+  col: number;
+  end_line: number;
+  end_col: number;
+  severity: number;
+  message: string;
+  source: string | null;
+  code?: string | null;
+  code_description?: string | null;
+  tags?: string[];
+  related_information?: DiagnosticRelatedInformation[];
+}
+
+export type DiagnosticsClientMessage =
+  | { SubscribeDiagnostics: { route_id: number } }
+  | { UnsubscribeDiagnostics: { route_id: number } };
+
+export type DiagnosticsServerMessage =
+  | {
+      DiagnosticsPush: {
+        route_id: number;
+        items: LspDiagnosticItem[];
+      };
+    }
+  | { DiagnosticsCleared: { route_id: number } }
+  | { LspStatusUpdate: { server: string; state: LspState } };
+
+export interface DiagnosticsEnvelope {
+  message: DiagnosticsClientMessage;
+}
+
+export interface DiagnosticsReplyEnvelope {
+  message: DiagnosticsServerMessage;
+}
+
+// Cursor-overlay messages -------------------------------------------
+// Mirrors `neoism-protocol/src/cursor.rs`. The daemon translates
+// editor cursor / mode / yank events
+// into these push-style envelopes; the dispatcher in
+// `terminal/TerminalPanel.ts` translates cell coordinates to physical
+// pixels via the chrome bridge's `cell_metrics()` before forwarding to
+// the matching `setTrailCursor` / `setCustomCursor` /
+// `setCursorlineOverlay` / `setYankFlash` bridge setter.
+
+export type CursorShape = "Block" | "Beam" | "Underline" | "Hidden";
+
+export interface YankFlashRegion {
+  row_top: number;
+  row_bot: number;
+  col_left?: number | null;
+  col_right?: number | null;
+}
+
+export type CursorOverlayServerMessage =
+  | {
+      TrailCursor: {
+        /** 0-based cell column. */
+        col: number;
+        /** 0-based cell row. */
+        row: number;
+        /** `null` defaults to `Block`. */
+        shape: CursorShape | null;
+        no_jump?: boolean;
+        reset?: boolean;
+        snap?: boolean;
+      };
+    }
+  | {
+      CustomCursor: {
+        /**
+         * Pointer position, physical pixels. `null` / missing on
+         * visibility-only frames (daemon `mouse_on` / `mouse_off`
+         * relays); the dispatcher preserves the last known
+         * coordinate when omitted so the sprite doesn't snap to (0,0).
+         */
+        x?: number | null;
+        y?: number | null;
+        visible?: boolean;
+      };
+    }
+  | {
+      CursorlineOverlay: {
+        /** 0-based pane / rich-text id. */
+        rich_text_id: number;
+        /** 0-based row of the highlighted line (cell coordinates). */
+        target_row: number;
+        snap?: boolean;
+        forget?: boolean;
+      };
+    }
+  | {
+      YankFlash: {
+        regions: YankFlashRegion[];
+      };
+    };
+
+export type CursorOverlayClientMessage =
+  | {
+      CustomCursor: {
+        /** Pointer position, physical pixels. */
+        x: number;
+        y: number;
+        visible?: boolean;
+      };
+    };
+
+export interface CursorOverlayEnvelope {
+  request_id?: number;
+  message: CursorOverlayClientMessage;
+}
+
+export interface CursorOverlayReplyEnvelope {
+  request_id: number;
+  message: CursorOverlayServerMessage;
+}
+
+// Narrowing helpers ---------------------------------------------------
+
+export function isPtyCreated(
+  msg: ServerMessage,
+): msg is { PtyCreated: PtyCreatedArgs } {
+  return Object.prototype.hasOwnProperty.call(msg, "PtyCreated");
+}
+
+export function isPtyOutput(
+  msg: ServerMessage,
+): msg is { PtyOutput: PtyOutputArgs } {
+  return Object.prototype.hasOwnProperty.call(msg, "PtyOutput");
+}
+
+export function isPtyClosed(
+  msg: ServerMessage,
+): msg is { PtyClosed: PtyClosedArgs } {
+  return Object.prototype.hasOwnProperty.call(msg, "PtyClosed");
+}
+
+export function isSessionCwd(
+  msg: ServerMessage,
+): msg is { SessionCwd: SessionCwdArgs } {
+  return Object.prototype.hasOwnProperty.call(msg, "SessionCwd");
+}
+
+export function isServerError(
+  msg: ServerMessage,
+): msg is { Error: ErrorArgs } {
+  return Object.prototype.hasOwnProperty.call(msg, "Error");
+}
+
+export function isFilesReply(
+  msg: ServerMessage,
+): msg is { FilesReply: FilesReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "FilesReply");
+}
+
+export function isGitReply(
+  msg: ServerMessage,
+): msg is { GitReply: GitReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "GitReply");
+}
+
+export function isEditorReply(
+  msg: ServerMessage,
+): msg is { EditorReply: EditorReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "EditorReply");
+}
+
+export function isAgentReply(
+  msg: ServerMessage,
+): msg is { AgentReply: AgentReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "AgentReply");
+}
+
+export function isSearchReply(
+  msg: ServerMessage,
+): msg is { SearchReply: SearchReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "SearchReply");
+}
+
+export function isWorkspaceReply(
+  msg: ServerMessage,
+): msg is { WorkspaceReply: WorkspaceReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "WorkspaceReply");
+}
+
+export function isDiagnosticsReply(
+  msg: ServerMessage,
+): msg is { DiagnosticsReply: DiagnosticsReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "DiagnosticsReply");
+}
+
+export function isCursorOverlayReply(
+  msg: ServerMessage,
+): msg is { CursorOverlayReply: CursorOverlayReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "CursorOverlayReply");
+}
+
+export function isCrdtReply(
+  msg: ServerMessage,
+): msg is { CrdtReply: CrdtReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "CrdtReply");
+}
+
+export function isConfigReply(
+  msg: ServerMessage,
+): msg is { ConfigReply: ConfigReplyEnvelope } {
+  return Object.prototype.hasOwnProperty.call(msg, "ConfigReply");
+}
+
+// Constructors --------------------------------------------------------
+
+export const ClientMessage = {
+  createPty(args: CreatePtyArgs): ClientMessage {
+    return { CreatePty: args };
+  },
+  ptyInput(args: PtyInputArgs): ClientMessage {
+    return { PtyInput: args };
+  },
+  resize(args: ResizeArgs): ClientMessage {
+    return { Resize: args };
+  },
+  closePty(args: ClosePtyArgs): ClientMessage {
+    return { ClosePty: args };
+  },
+  files(envelope: FilesEnvelope): ClientMessage {
+    return { Files: envelope };
+  },
+  git(envelope: GitEnvelope): ClientMessage {
+    return { Git: envelope };
+  },
+  editor(envelope: EditorEnvelope): ClientMessage {
+    return { Editor: envelope };
+  },
+  agent(envelope: AgentEnvelope): ClientMessage {
+    return { Agent: envelope };
+  },
+  search(envelope: SearchEnvelope): ClientMessage {
+    return { Search: envelope };
+  },
+  workspace(envelope: WorkspaceEnvelope): ClientMessage {
+    return { Workspace: envelope };
+  },
+  diagnostics(envelope: DiagnosticsEnvelope): ClientMessage {
+    return { Diagnostics: envelope };
+  },
+  cursorOverlay(envelope: CursorOverlayEnvelope): ClientMessage {
+    return { CursorOverlay: envelope };
+  },
+  crdt(envelope: CrdtEnvelope): ClientMessage {
+    return { Crdt: envelope };
+  },
+  config(envelope: ConfigEnvelope): ClientMessage {
+    return { Config: envelope };
+  },
+};
+
+// Current additive protocol variants shared by GPUIX and other typed clients.
+export type GitClientMessage = BaseGitClientMessage | { WatchStatus: { token: string } } | { UnwatchStatus: { token: string } };
+export type CrdtClientMessage = BaseCrdtClientMessage | { AcknowledgeStateVector: { buffer_id: string; peer_id: string; state_vector_v1: number[] } };
+export type CrdtPeerPresence = BaseCrdtPeerPresence & { client_os?: string | null };
+type WithBufferText<T> = T extends { LspQueryAt: infer P } ? { LspQueryAt: P & { buffer_text?: string | null } }
+  : T extends { ApplyLspCodeActionAt: infer P } ? { ApplyLspCodeActionAt: P & { buffer_text?: string | null } } : T;
+export type EditorClientMessage = WithBufferText<BaseEditorClientMessage> | { CloseLspBuffer: { surface_id?: string | null } };
+export type PtyClientMessage =
+  | { CreatePty: { cwd: string | null; cols: number; rows: number; shell?: string; presentation?: "grid" | "blocks" } }
+  | { AttachPty: { session_id: string; cursor?: number } }
+  | { ChangeTerminalDirectory: { session_id: string; directory: string; request_id: string } }
+  | { PtyInput: { session_id: string; bytes: number[] } }
+  | { Resize: { session_id: string; cols: number; rows: number } }
+  | { ClosePty: { session_id: string } };

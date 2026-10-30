@@ -159,7 +159,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
   "markdown.text"=>return Ok(json!({"text":view.pane.lines.join("\n")})),
   "markdown.snapshot"=>return Ok(snapshot(view)),
   "markdown.restore"=>restore(&mut view.pane,&v["snapshot"]),
-  "markdown.restore-anchor"=>{let anchor=serde_json::from_value::<neoism_ui::sugarloaf::VirtualScrollAnchor>(v["anchor"].clone()).map_err(|error|error.to_string())?;view.pane.restore_host_scroll_anchor(anchor);},
+  "markdown.restore-anchor"=>{let anchor=serde_json::from_value::<neoism_ui::neoism_paint::VirtualScrollAnchor>(v["anchor"].clone()).map_err(|error|error.to_string())?;view.pane.restore_host_scroll_anchor(anchor);},
   "markdown.source"=>{
     if view.pane.doc_history_bound(){if let Some(delta)=md::doc_sync::diff_doc_texts(&view.pane.lines.join("\n"),text(v,"text")){md::doc_sync::apply_remote_delta_to_pane(&mut view.pane,&delta);}}
     else{view.pane.set_source_preserving_view(text(v,"text"));}

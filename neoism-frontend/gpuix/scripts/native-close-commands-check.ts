@@ -18,7 +18,7 @@ server.files.set("drag.rs", "pub fn drag_source() {}\n");
 const packaged = process.argv.includes("--packaged");
 let app: Awaited<ReturnType<typeof launchNative>> | undefined, shell: number | undefined;
 const launch = async (statePath = recovery) => {
-  app = await launchNative({ openWorkspaceIds: ["a", "b"], command: packaged ? join(process.cwd(), "dist/neoism-gpuix") : process.execPath,
+  app = await launchNative({ openWorkspaceIds: ["a", "b"], command: packaged ? join(process.cwd(), "dist/neoism") : process.execPath,
     args: [...(packaged ? [] : ["src/main.tsx"]), "--daemon", server.endpoint, "--workspace", "a", "--config", config],
     cwd: process.cwd(), env: { ...process.env, NEOISM_GPUIX_STATE_PATH: statePath } });
   await app.getByTestId("welcome-page").waitFor({ timeoutMs: 20000 }); shell = (await app.getByTestId("app-shell").element()).id;
@@ -67,7 +67,7 @@ const selectTab = async (tab: TreeNode) => {
 const evidence: string[] = [];
 let stage = "q closes Welcome while retaining a usable application";
 try {
-  await launch(); await closeTab(await requireTab("Welcome")); await app!.getByTestId("welcome-page").waitFor(); evidence.push("Welcome");
+  await launch(); await closeTab(await requireTab("Home")); await app!.getByTestId("welcome-page").waitFor(); evidence.push("Home");
   stage = "q closes a real Terminal without killing its daemon PTY";
   await press("alt-t"); await app!.getByTestId("terminal").waitFor(); await closeTab(await requireTab("Terminal")); evidence.push("Terminal");
   stage = "q closes clean Code and Markdown tabs";
@@ -152,7 +152,7 @@ try {
 
   stage = "q closes only one dirty cloned Code pane and preserves its shared buffer";
   const splitRecovery = join(directory, "split-state.json"), layout = new WorkspaceLayout();
-  const welcome = { id: "welcome:a", kind: "welcome" as const, title: "Welcome", workspaceId: "a" };
+  const welcome = { id: "welcome:a", kind: "welcome" as const, title: "Home", workspaceId: "a" };
   const file = { id: "file:a:code.rs", kind: "file" as const, title: "code.rs", workspaceId: "a", path: "code.rs", rootDir: "/project/a" };
   layout.open(welcome); layout.open(file); const left = layout.frame.focusedLeaf!; layout.split("horizontal", file);
   const editor = new NativeEditor("code.rs", server.files.get("code.rs")!, true);

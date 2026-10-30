@@ -4,12 +4,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 const root = new URL('../../../../../../', import.meta.url);
 const read = p => readFileSync(new URL(p, root), 'utf8');
-const native = read('neoism-frontend/desktop/assets/splash/neoism-wordmark.svg');
-const web = read('neoism-frontend/web/public/assets/neoism-wordmark.svg');
+const native = read('neoism-frontend/shared/assets/splash/neoism-wordmark.svg');
 const extract = svg => [...svg.matchAll(/<g[^>]*fill="#ffffff" fill-opacity="([^"]+)"><g transform="([^"]+)"><g><path d="([^"]+)"/g)].map(m => ({ opacity: Number(m[1]), transform: m[2], d: m[3] }));
 const layers = extract(native);
 assert.equal(layers.length, 18);
-assert.deepEqual(layers, extract(web), 'Desktop/web glyph geometry must agree');
 const constants = read('neoism-frontend/shared/src/panels/agent_pane/view/mod.rs');
 const names = ['LETTER_COUNT', 'LETTER_HOVER_RATE', 'LETTER_HOVER_SCALE', 'LETTER_HOVER_LIFT', 'LETTER_SHIMMER_AMP', 'LETTER_SHIMMER_PERIOD'];
 const motion = Object.fromEntries(names.map(name => {

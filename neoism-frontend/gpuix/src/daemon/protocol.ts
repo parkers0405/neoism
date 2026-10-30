@@ -1,26 +1,11 @@
 import { Schema } from "effect";
 
-// Outbound types come from the existing protocol mirror, without importing
-// its browser host or changing any Rust wire contract.
-export type { WorkspaceClientMessage, FilesClientMessage, AgentClientMessage, Attachment, SearchClientMessage, ConfigClientMessage, DiagnosticsClientMessage } from "../../../web/src/workspace/types";
-import type { GitClientMessage as WebGitClientMessage } from "../../../web/src/workspace/types";
-export type { CrdtServerMessage, CrdtCursorPosition, CrdtSelectionRange } from "../../../web/src/workspace/types";
-import type { CrdtClientMessage as WebCrdtClientMessage, CrdtPeerPresence as WebCrdtPeerPresence } from "../../../web/src/workspace/types";
-export type CrdtPeerPresence = WebCrdtPeerPresence & {client_os?:string|null};
-export type CrdtClientMessage = WebCrdtClientMessage | { AcknowledgeStateVector:{buffer_id:string;peer_id:string;state_vector_v1:number[]} };
-export type GitClientMessage = WebGitClientMessage | { WatchStatus: { token: string } } | { UnwatchStatus: { token: string } };
-import type { EditorClientMessage as WebEditorClientMessage } from "../../../web/src/workspace/types";
-// Additive canonical variants that landed after the web mirror was generated.
-type WithBufferText<T> = T extends { LspQueryAt: infer P } ? { LspQueryAt: P & { buffer_text?: string | null } }
-  : T extends { ApplyLspCodeActionAt: infer P } ? { ApplyLspCodeActionAt: P & { buffer_text?: string | null } } : T;
-export type EditorClientMessage = WithBufferText<WebEditorClientMessage> | { CloseLspBuffer: { surface_id?: string | null } };
-export type PtyMessage =
-  | { CreatePty: { cwd: string | null; cols: number; rows: number; shell?: string;presentation?:"grid"|"blocks" } }
-  | { AttachPty: { session_id: string; cursor?: number } }
-  | { ChangeTerminalDirectory: { session_id: string; directory: string; request_id: string } }
-  | { PtyInput: { session_id: string; bytes: number[] } }
-  | { Resize: { session_id: string; cols: number; rows: number } }
-  | { ClosePty: { session_id: string } };
+// Authoritative typed messages live beside the Rust wire protocol.
+export type { WorkspaceClientMessage, FilesClientMessage, AgentClientMessage, Attachment,
+  SearchClientMessage, ConfigClientMessage, DiagnosticsClientMessage, GitClientMessage,
+  CrdtServerMessage, CrdtCursorPosition, CrdtSelectionRange, CrdtPeerPresence,
+  CrdtClientMessage, EditorClientMessage, PtyClientMessage as PtyMessage,
+} from "../../../../neoism-protocol/typescript/types";
 export type Family = "Workspace" | "Files" | "Agent" | "Pty" | "Search" | "Config" | "Editor" | "Diagnostics" | "Git" | "Crdt";
 export interface WireEvent { family: Family; requestId: number; message: unknown }
 export interface ConnectionState {

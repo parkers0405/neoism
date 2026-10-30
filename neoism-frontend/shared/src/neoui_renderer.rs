@@ -6,17 +6,18 @@
 //! occlusion. Sugarloaf currently submits shapes and text in separate passes, so
 //! arbitrary interleaved text/shape stacking is not a supported scene contract.
 
+use crate::primitives::paint::Paint;
 use neoui::{Frame, PaintCommand, Rect, TextMeasurer, TextStyle};
-use sugarloaf::{text::DrawOpts, Sugarloaf};
+use neoism_paint::{text::DrawOpts, };
 
 use crate::primitives::draw_text_with_occlusion;
 
-pub(crate) struct TextMetrics<'a, 'surface> {
-    pub sugarloaf: &'a mut Sugarloaf<'surface>,
+pub(crate) struct TextMetrics<'a> {
+    pub sugarloaf: &'a mut dyn Paint,
     pub base: DrawOpts,
 }
 
-impl TextMeasurer for TextMetrics<'_, '_> {
+impl TextMeasurer for TextMetrics<'_> {
     fn cache_key(&mut self) -> Option<neoui::MeasurementKey> {
         Some(neoui::MeasurementKey([
             self.sugarloaf.text_mut().font_cache_generation(),
@@ -52,7 +53,7 @@ fn text_color(color: [f32; 4]) -> [u8; 4] {
 /// Caller owns the surrounding late-overlay scope and any higher text layers.
 /// Shapes keep their original geometry: clipping never moves rounded corners.
 pub(crate) fn paint<Action>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     frame: &Frame<Action>,
     base: DrawOpts,
     shape_order: u8,

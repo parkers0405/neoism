@@ -2,7 +2,7 @@ use super::*;
 
 use web_time::Duration;
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::chrome_policy::{
     trail_cursor_overlay_draw_kind, trail_cursor_overlay_target,
@@ -33,12 +33,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// uses `Chrome::layout().terminal` as the canvas rect.
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         services: Services<'_>,
         time: Duration,
     ) {
         let plugins = self.plugins.clone();
-        let app_style = plugins.styles.resolve(neoism_lua::selector::APP);
+        let app_style = plugins.styles.resolve(neoism_customization::selector::APP);
         let mut theme = self.theme.clone();
         let resolve = |value: Option<&str>, fallback: crate::theme::RgbTriple| {
             let color = crate::customization::color_u8(
@@ -439,7 +439,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     let pad_y = 12.0_f32;
                     let max_w = content_rect.w - pad_x * 2.0;
                     let max_h = content_rect.h - pad_y * 2.0;
-                    let opts = sugarloaf::text::DrawOpts {
+                    let opts = neoism_paint::text::DrawOpts {
                         font_size: 13.0,
                         color: theme.u8(theme.fg),
                         clip_rect: Some([
@@ -448,7 +448,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                             max_w.max(0.0),
                             max_h.max(0.0),
                         ]),
-                        ..sugarloaf::text::DrawOpts::default()
+                        ..neoism_paint::text::DrawOpts::default()
                     };
                     // Cull lines that fall outside the visible band
                     // before/after the offset. `i` indexes into the
@@ -890,7 +890,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 ) {
                     let [x, y, w, h] = rect;
                     self.trail_cursor
-                        .set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);
+                        .set_cursor_shape(neoism_terminal_types::ansi::CursorShape::Block);
                     self.trail_cursor.set_destination(x, y, w, h);
                     // `set_destination` only records where the caret is
                     // headed; `draw_quad` builds its triangles from the
@@ -958,7 +958,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     self.draw_content_trail_cursor_rect(
                         sugarloaf,
                         rect,
-                        neoism_terminal_core::ansi::CursorShape::Block,
+                        neoism_terminal_types::ansi::CursorShape::Block,
                         dt,
                         cursor_color,
                     );
@@ -1125,12 +1125,12 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                 sugarloaf,
                 &self.surface_layout,
                 &ide_theme,
-                &ctx.style(neoism_lua::selector::CHROME_TOP),
+                &ctx.style(neoism_customization::selector::CHROME_TOP),
             );
         }
 
-        let mut custom_style = ctx.style(neoism_lua::selector::APP);
-        custom_style.overlay(Some(&ctx.style(neoism_lua::selector::CHROME_TOP)));
+        let mut custom_style = ctx.style(neoism_customization::selector::APP);
+        custom_style.overlay(Some(&ctx.style(neoism_customization::selector::CHROME_TOP)));
         let custom_theme =
             crate::customization::styled_ide_theme(self.ide_theme, &custom_style);
         let (status_slot_left, status_slot_right) = self.status_line.custom_slot_bounds();
@@ -1262,7 +1262,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// painted itself (live terminal grids, listed via
     /// [`Chrome::set_host_drawn_panes`]) are skipped. Anything else
     /// gets a title label over the window clear or wallpaper.
-    fn draw_unfocused_pane_surfaces(&mut self, sugarloaf: &mut Sugarloaf) {
+    fn draw_unfocused_pane_surfaces(&mut self, sugarloaf: &mut dyn Paint) {
         if !self.pane_grid.is_split()
             || self.chrome_overlay_active()
             || self.is_neoism_agent_tab_active()
@@ -1428,11 +1428,11 @@ impl<A: Send + Copy + 'static> Chrome<A> {
                     })
                     .or_else(|| info.as_ref().map(|i| i.kind.clone()))
                     .unwrap_or_else(|| "pane".to_string());
-                let opts = sugarloaf::text::DrawOpts {
+                let opts = neoism_paint::text::DrawOpts {
                     font_size: 12.0 * chrome_scale.max(0.5),
                     color: theme.u8(theme.muted),
                     clip_rect: Some(rect_arr),
-                    ..sugarloaf::text::DrawOpts::default()
+                    ..neoism_paint::text::DrawOpts::default()
                 };
                 sugarloaf.text_mut().draw(
                     content.x + 12.0,
@@ -1448,7 +1448,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// the rects `ChromeLayout::panes` reserved. Top-aligned panes
     /// carry no local strip (the workspace strip serves them), so
     /// their entries have `tabs: None` and are skipped here.
-    fn draw_pane_tab_strips(&mut self, sugarloaf: &mut Sugarloaf) {
+    fn draw_pane_tab_strips(&mut self, sugarloaf: &mut dyn Paint) {
         if !self.pane_grid.is_split()
             || self.chrome_overlay_active()
             || self.is_neoism_agent_tab_active()
@@ -1492,7 +1492,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// drag-to-split. All geometry comes straight from the solved
     /// [`crate::panels::pane_grid::PaneGrid`] so it can never drift
     /// from the hit-test rects the pointer path uses.
-    fn draw_pane_grid_overlay(&mut self, sugarloaf: &mut Sugarloaf) {
+    fn draw_pane_grid_overlay(&mut self, sugarloaf: &mut dyn Paint) {
         if self.chrome_overlay_active() || self.is_neoism_agent_tab_active() {
             return;
         }
@@ -1768,7 +1768,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// LSP status-pill "Server Details" popup.
     fn draw_code_lsp_overlays(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         window_width: f32,
         window_bottom: f32,
         input_modal_active: bool,

@@ -20,5 +20,5 @@ pub fn pixel_font_id(sugarloaf: &mut (impl crate::primitives::paint::Paint + ?Si
     if let Some(id) = sugarloaf.font_id_for_family(PIXEL_FONT_FAMILY) {
         return Some(id);
     }
-    sugarloaf.ensure_static_font(sugarloaf::font::constants::FONT_PRESS_START_2P)
+    sugarloaf.ensure_static_font(neoism_paint::font::constants::FONT_PRESS_START_2P)
 }

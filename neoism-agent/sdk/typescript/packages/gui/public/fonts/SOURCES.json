@@ -36,28 +36,28 @@
   ],
   "files": [
     {
-      "source": "neoism-frontend/web/public/fonts/geist-mono/GeistMono-Regular.otf",
+      "source": "neoism-paint/src/font/resources/browser/geist-mono/GeistMono-Regular.otf",
       "destination": "public/fonts/geist-mono/GeistMono-Regular.otf",
       "bytes": 142188,
       "sha256": "6d1e288917e5173c6d759112cded56a52cd21cc04338611aad191e9d066c5056",
       "mime": "font/otf"
     },
     {
-      "source": "neoism-frontend/web/public/fonts/geist-mono/GeistMono-Bold.otf",
+      "source": "neoism-paint/src/font/resources/browser/geist-mono/GeistMono-Bold.otf",
       "destination": "public/fonts/geist-mono/GeistMono-Bold.otf",
       "bytes": 147696,
       "sha256": "e7ab87eb4684d9a5c7a25cb16523e3d19fe6575a6476fa4a597f74e7b58a3201",
       "mime": "font/otf"
     },
     {
-      "source": "neoism-frontend/web/public/fonts/geist-mono/GeistMono-Italic.otf",
+      "source": "neoism-paint/src/font/resources/browser/geist-mono/GeistMono-Italic.otf",
       "destination": "public/fonts/geist-mono/GeistMono-Italic.otf",
       "bytes": 144572,
       "sha256": "b8e5fa429afca5cf1233f9ba4faf7dbb65c95f4677d4ba69c23c04c7cfe8d30c",
       "mime": "font/otf"
     },
     {
-      "source": "neoism-frontend/web/public/fonts/geist-mono/GeistMono-BoldItalic.otf",
+      "source": "neoism-paint/src/font/resources/browser/geist-mono/GeistMono-BoldItalic.otf",
       "destination": "public/fonts/geist-mono/GeistMono-BoldItalic.otf",
       "bytes": 148628,
       "sha256": "34b0be704df46ed9f468761e73df0e3999d7dc99c310d64d0e91747c22dfa997",
@@ -71,28 +71,28 @@
       "mime": "text/plain"
     },
     {
-      "source": "neoism-frontend/web/public/fonts/jetbrains-mono/JetBrainsMono-Regular.woff2",
+      "source": "neoism-paint/src/font/resources/browser/jetbrains-mono/JetBrainsMono-Regular.woff2",
       "destination": "public/fonts/jetbrains-mono/JetBrainsMono-Regular.woff2",
       "bytes": 92164,
       "sha256": "a9cb1cd82332b23a47e3a1239d25d13c86d16c4220695e34b243effa999f45f2",
       "mime": "font/woff2"
     },
     {
-      "source": "neoism-frontend/web/public/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2",
+      "source": "neoism-paint/src/font/resources/browser/jetbrains-mono/JetBrainsMono-Bold.woff2",
       "destination": "public/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2",
       "bytes": 94588,
       "sha256": "c503cc5ec5f8b2c7666b7ecda1adf44bd45f2e6579b2eba0fc292150416588a2",
       "mime": "font/woff2"
     },
     {
-      "source": "neoism-frontend/web/public/fonts/jetbrains-mono/JetBrainsMono-Italic.woff2",
+      "source": "neoism-paint/src/font/resources/browser/jetbrains-mono/JetBrainsMono-Italic.woff2",
       "destination": "public/fonts/jetbrains-mono/JetBrainsMono-Italic.woff2",
       "bytes": 95864,
       "sha256": "cb6a1b246318ed3885d7dffa14a2609297fe80e9b8e500bea33b52fa312a36a4",
       "mime": "font/woff2"
     },
     {
-      "source": "neoism-frontend/web/public/fonts/jetbrains-mono/JetBrainsMono-BoldItalic.woff2",
+      "source": "neoism-paint/src/font/resources/browser/jetbrains-mono/JetBrainsMono-BoldItalic.woff2",
       "destination": "public/fonts/jetbrains-mono/JetBrainsMono-BoldItalic.woff2",
       "bytes": 98152,
       "sha256": "3a013466c0eee979fb9d42c2d7a8887cd3645dc8b897cfc5b71781cf982efc5a",
@@ -155,7 +155,7 @@
       "mime": "text/plain"
     },
     {
-      "source": "sugarloaf/src/font/resources/PressStart2P/PressStart2P-Regular.ttf",
+      "source": "neoism-paint/src/font/resources/PressStart2P/PressStart2P-Regular.ttf",
       "destination": "public/fonts/press-start-2p/PressStart2P-Regular.ttf",
       "bytes": 118204,
       "sha256": "034c77f1f05ec89421e4a63f0e3a4ca1ecf852cc6d2bf611f126f275728e017d",

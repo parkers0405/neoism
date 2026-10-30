@@ -1,4 +1,4 @@
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::primitives::ide_theme::IdeTheme;
 

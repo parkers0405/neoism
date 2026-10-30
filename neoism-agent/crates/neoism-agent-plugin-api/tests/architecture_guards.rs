@@ -8,6 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::spanned::Spanned;
+use syn::visit::Visit;
 
 const SERVER: &str = "neoism-agent/crates/neoism-agent-server/src/";
 
@@ -56,9 +58,77 @@ fn production_rust_sources() -> Vec<(String, String)> {
             let name = relative(&path);
             let source = fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("failed to read {name}: {error}"));
-            (name, source)
+            (name, production_source(&source))
         })
         .collect()
+}
+
+// Count production dependencies, rather than private test harness imports.
+fn production_source(source: &str) -> String {
+    struct TestItems {
+        ranges: Vec<proc_macro2::Span>,
+    }
+    fn test_only(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attribute| {
+            attribute.path().is_ident("cfg")
+                && attribute
+                    .parse_args::<syn::Path>()
+                    .is_ok_and(|path| path.is_ident("test"))
+        })
+    }
+    impl<'ast> Visit<'ast> for TestItems {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if test_only(&item.attrs) {
+                self.ranges.push(item.span());
+            } else {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if test_only(&item.attrs) {
+                self.ranges.push(item.span());
+            } else {
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+    }
+    let file = syn::parse_file(source).expect("parse inventoried Rust source");
+    let mut tests = TestItems { ranges: Vec::new() };
+    tests.visit_file(&file);
+    let mut lines = vec![0];
+    for (offset, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            lines.push(offset + 1);
+        }
+    }
+    let mut ranges = tests
+        .ranges
+        .into_iter()
+        .map(|span| {
+            let start = span.start();
+            let end = span.end();
+            (
+                lines[start.line - 1] + start.column,
+                lines[end.line - 1] + end.column,
+            )
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+    let mut production = source.to_owned();
+    for (start, end) in ranges.into_iter().rev() {
+        production.replace_range(start..end, "");
+    }
+    production
+}
+
+#[test]
+fn dependency_inventory_excludes_test_items_without_hiding_production() {
+    let source = "use crate::production;\n#[cfg(test)] mod checks { use crate::test_support; }\n#[cfg(test)] fn fixture() { crate::test_fixture(); }\nfn real() { crate::runtime(); }\n";
+    let production = production_source(source);
+    assert!(production.contains("crate::production"));
+    assert!(production.contains("crate::runtime"));
+    assert!(!production.contains("crate::test_support"));
+    assert!(!production.contains("crate::test_fixture"));
 }
 
 fn occurrences(source: &str, needle: &str) -> usize {
@@ -135,23 +205,46 @@ fn server_resource_accessors_are_generation_leased() {
         !runtime.contains("pub(crate) fn plugin_generation("),
         "unleased generation Arc accessor returned"
     );
-    let runtime_accessors = &runtime[runtime
-        .find("impl WorkspaceRuntime {")
-        .expect("workspace runtime implementation")..];
+    let file = syn::parse_file(&runtime).unwrap();
     for accessor in [
+        "mcp",
         "mcp_if_allocated",
+        "lsp",
         "lsp_if_allocated",
+        "pty",
         "pty_if_allocated",
         "background_if_allocated",
-        "subagents_if_allocated",
+        "subagents",
     ] {
-        let signature = format!("fn {accessor}");
-        let start = runtime_accessors
-            .find(&signature)
+        let method = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(item) => match item.self_ty.as_ref() {
+                    syn::Type::Path(path) if path.path.is_ident("WorkspaceRuntime") => {
+                        Some(item)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .flat_map(|item| item.items.iter())
+            .find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == accessor => Some(method),
+                _ => None,
+            })
             .unwrap_or_else(|| panic!("missing accessor `{accessor}`"));
-        let body = &runtime_accessors[start..runtime_accessors.len().min(start + 500)];
+        struct ReturnLease(bool);
+        impl<'ast> Visit<'ast> for ReturnLease {
+            fn visit_path_segment(&mut self, segment: &'ast syn::PathSegment) {
+                self.0 |= segment.ident == "LeasedResource";
+                syn::visit::visit_path_segment(self, segment);
+            }
+        }
+        let mut leased = ReturnLease(false);
+        leased.visit_return_type(&method.sig.output);
         assert!(
-            body.contains("LeasedResource"),
+            leased.0,
             "accessor `{accessor}` does not retain a generation lease"
         );
     }
@@ -275,7 +368,7 @@ fn kernel_and_router_modules_do_not_learn_concrete_plugin_ids() {
             ),
             (
                 "neoism-agent/crates/neoism-agent-server/src/v2_routes.rs",
-                6,
+                2,
             ),
         ],
     );

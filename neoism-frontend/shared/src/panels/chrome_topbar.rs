@@ -27,8 +27,7 @@
 //! `Chrome` state. Chrome drains [`ChromeTopBar::take_action`] each
 //! frame and applies the side effect.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 use crate::editor::crdt::PresenceAvatarPeer;
@@ -42,7 +41,7 @@ use crate::surface_layout::{
     CHROME_NEW_AGENT_ITEM, CHROME_NOTES_ITEM, CHROME_PRESENCE_ITEM, CHROME_SEARCH_ITEM,
     CHROME_SERVERS_ITEM,
 };
-use neoism_lua::DockEdge;
+use neoism_customization::DockEdge;
 pub mod host_frame;
 
 pub const CHROME_TOPBAR_HEIGHT: f32 = 30.0;
@@ -170,7 +169,7 @@ impl MenuItem {
     fn label(self) -> &'static str {
         match self {
             MenuItem::Settings => "Settings",
-            MenuItem::StartWebServer => "Start Web Server",
+            MenuItem::StartWebServer => "Open Agent in Browser",
             MenuItem::ShareWithPhone => "Share with Phone",
             MenuItem::Themes => "Themes",
             MenuItem::Backgrounds => "Backgrounds",
@@ -857,7 +856,7 @@ impl ChromeTopBar {
         y_top: f32,
         width: f32,
         theme: &IdeTheme,
-        style: &neoism_lua::StylePatch,
+        style: &neoism_customization::StylePatch,
     ) {
         if !self.visible || width <= 0.0 {
             return;
@@ -877,7 +876,7 @@ impl ChromeTopBar {
         sugarloaf: &mut (impl Paint + ?Sized),
         layout: &ResolvedSurfaceLayout,
         theme: &IdeTheme,
-        style: &neoism_lua::StylePatch,
+        style: &neoism_customization::StylePatch,
     ) {
         let Some(surface) = layout.surfaces.get(CHROME_ACTIONS_SURFACE) else {
             return;
@@ -896,7 +895,7 @@ impl ChromeTopBar {
         strip: Rect,
         dock: DockEdge,
         theme: &IdeTheme,
-        style: &neoism_lua::StylePatch,
+        style: &neoism_customization::StylePatch,
     ) {
         // Background + hairline border at the bottom edge — matches the
         // breadcrumbs strip so the two rows read as one stacked unit
@@ -1185,7 +1184,7 @@ impl ChromeTopBar {
         hovered: bool,
         active: bool,
         theme: &IdeTheme,
-        style: &neoism_lua::StylePatch,
+        style: &neoism_customization::StylePatch,
     ) {
         if rect.w <= 0.0 || rect.h <= 0.0 {
             return;
@@ -1211,7 +1210,7 @@ impl ChromeTopBar {
                 .font_id_for_family("Symbols Nerd Font Mono")
                 .or_else(|| {
                     sugarloaf.ensure_static_font(
-                        sugarloaf::font::constants::FONT_SYMBOLS_NERD_FONT_MONO,
+                        neoism_paint::font::constants::FONT_SYMBOLS_NERD_FONT_MONO,
                     )
                 })
         } else {
@@ -1247,7 +1246,7 @@ impl ChromeTopBar {
         &self,
         sugarloaf: &mut (impl Paint + ?Sized),
         theme: &IdeTheme,
-        style: &neoism_lua::StylePatch,
+        style: &neoism_customization::StylePatch,
     ) {
         let rect = self.server_btn_rect;
         if self.hover_server_btn {
@@ -1506,7 +1505,7 @@ impl Panel for ChromeTopBar {
 
     fn draw(
         &self,
-        _sugarloaf: &mut Sugarloaf,
+        _sugarloaf: &mut dyn Paint,
         _layout: &PanelLayout,
         _ctx: &PanelContext,
     ) {

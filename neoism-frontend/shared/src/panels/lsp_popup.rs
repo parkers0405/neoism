@@ -5,8 +5,8 @@
 //! cannot show through. The panel shows every LSP candidate for the
 //! active buffer, then a larger details area for the selected server.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 use web_time::Instant;
 
 use crate::panels::status_line::{DiagnosticCounts, LspStatus, PillRect};
@@ -354,7 +354,7 @@ impl LspPopup {
         old != self.detail_scroll_offset
     }
 
-    pub fn render(&mut self, sugarloaf: &mut Sugarloaf, theme: &IdeTheme, scale: f32) {
+    pub fn render(&mut self, sugarloaf: &mut dyn Paint, theme: &IdeTheme, scale: f32) {
         if !self.visible {
             self.row_layout.clear();
             self.message_copy_rect = [0.0; 4];
@@ -480,7 +480,7 @@ impl LspPopup {
 
     fn draw_empty_state(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         theme: &IdeTheme,
         rect: [f32; 4],
         s: f32,
@@ -507,7 +507,7 @@ impl LspPopup {
 
     fn draw_server_rows(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         theme: &IdeTheme,
         rect: [f32; 4],
         s: f32,
@@ -621,7 +621,7 @@ impl LspPopup {
 
     fn draw_details(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         theme: &IdeTheme,
         rect: [f32; 4],
         s: f32,
@@ -850,7 +850,7 @@ impl LspPopup {
 
     fn draw_scrollbar(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         list_clip: [f32; 4],
         visible_rows: usize,
         s: f32,
@@ -893,7 +893,7 @@ impl LspPopup {
 
     fn draw_detail_scrollbar(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         rect: [f32; 4],
         total_lines: usize,
         visible_lines: usize,
@@ -1068,7 +1068,7 @@ mod runtime_tests {
     }
 }
 
-fn paint_outline(sugarloaf: &mut Sugarloaf, rect: [f32; 4], color: [f32; 4], s: f32) {
+fn paint_outline(sugarloaf: &mut dyn Paint, rect: [f32; 4], color: [f32; 4], s: f32) {
     let [x, y, w, h] = rect;
     let t = 1.0_f32.max(s);
     for slab in [
@@ -1212,7 +1212,7 @@ fn diagnostics_details(counts: DiagnosticCounts) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn draw_label_value(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     label_x: f32,
     value_x: f32,
     y: f32,
@@ -1234,7 +1234,7 @@ fn draw_label_value(
 fn truncate_to_fit(
     text: &str,
     max_width: f32,
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     opts: &DrawOpts,
 ) -> String {
     if max_width <= 0.0 || sugarloaf.overlay_text_mut().measure(text, opts) <= max_width {

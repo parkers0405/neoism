@@ -12,11 +12,5 @@ if [[ ! -d "$cef" ]]; then
 fi
 
 export CEF_PATH="$cef"
-cargo build --manifest-path "$root/neoism-frontend/cef-runtime/Cargo.toml" "$@"
-printf '\nLive HTML artifacts use this worker, not Servo. Launch your debug Neoism with:\n'
-if [[ "$cef" == "$HOME/.local/share/cef" ]]; then
-    printf '%q\n' "$root/target/debug/neoism"
-else
-    printf 'NEOISM_CEF_DIR=%q %q\n' "$cef" "$root/target/debug/neoism"
-fi
-printf 'The worker requests Chromium sandboxing. Do not disable it for untrusted HTML.\n'
+bash "$root/scripts/blaze.sh" build --manifest-path "$root/neoism-frontend/cef-runtime/Cargo.toml" "$@"
+printf '\nStandalone experimental CEF worker built. GPUIX does not currently host live HTML artifacts.\n'

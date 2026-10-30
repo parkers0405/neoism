@@ -5,8 +5,8 @@
 //! ellipsis), identifies the producer and source range, and exposes the
 //! Quick Fix entry point when the user pins it.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -63,7 +63,7 @@ pub struct DiagnosticDetailLayout {
 }
 
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     content: &DiagnosticDetailContent,
     layout: DiagnosticDetailLayout,
     theme: &IdeTheme,
@@ -425,7 +425,7 @@ pub fn render(
 /// character. Unlike the compact lens, this function never appends an
 /// ellipsis or drops tail text.
 fn wrap_complete_message(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     message: &str,
     max_width: f32,
     opts: &DrawOpts,

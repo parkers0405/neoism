@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::panels::agent_pane::input_controller::InputWrapRow;
 
@@ -37,7 +37,7 @@ impl FontKey {
     // face and symbol mapping, not just the Arc address/face count. Unchanged
     // calls reuse allocations and skip enumeration/sorting; validation remains
     // O(faces + mappings) under the read lock until Sugarloaf owns a revision.
-    fn from_fonts(address: usize, fonts: &sugarloaf::font::FontLibraryData) -> Self {
+    fn from_fonts(address: usize, fonts: &neoism_paint::font::FontLibraryData) -> Self {
         FONT_KEYS.with(|cached| {
             let mut cached = cached.borrow_mut();
             if let Some(key) = cached.as_ref().filter(|key| {
@@ -268,11 +268,11 @@ mod tests {
 
     #[test]
     fn font_fingerprint_reuses_allocations_but_detects_in_place_mutation() {
-        use sugarloaf::font::{FontData, FontLibraryData, SymbolMap};
+        use neoism_paint::font::{FontData, FontLibraryData, SymbolMap};
         let mut fonts = FontLibraryData::default();
         let bytes = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../sugarloaf/resources/test-fonts/DejaVuSans.ttf"
+            "/../../neoism-paint/resources/test-fonts/DejaVuSans.ttf"
         ));
         fonts.inner.insert(0, FontData::from_slice(bytes).unwrap());
         let first = FontKey::from_fonts(7, &fonts);

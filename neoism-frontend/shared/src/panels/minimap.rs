@@ -1,5 +1,5 @@
 use rustc_hash::{FxHashMap, FxHashSet};
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::editor_snapshot::{MinimapData, MinimapGitChange};
 use crate::primitives::{IdeTheme, IdeThemeName};
@@ -152,7 +152,7 @@ trait MinimapPainter {
         order: u8,
     );
 }
-impl MinimapPainter for Sugarloaf<'_> {
+impl<T: Paint + ?Sized> MinimapPainter for T {
     fn rect(
         &mut self,
         _target: Option<()>,
@@ -164,7 +164,7 @@ impl MinimapPainter for Sugarloaf<'_> {
         depth: f32,
         order: u8,
     ) {
-        Sugarloaf::rect(self, None, x, y, w, h, color, depth, order);
+        Paint::rect(self, None, x, y, w, h, color, depth, order);
     }
     fn rounded_rect(
         &mut self,
@@ -178,7 +178,7 @@ impl MinimapPainter for Sugarloaf<'_> {
         radius: f32,
         order: u8,
     ) {
-        Sugarloaf::rounded_rect(self, None, x, y, w, h, color, depth, radius, order);
+        Paint::rounded_rect(self, None, x, y, w, h, color, depth, radius, order);
     }
 }
 impl MinimapPainter for Vec<MinimapPrimitive> {
@@ -384,7 +384,7 @@ impl Minimap {
     #[allow(clippy::too_many_arguments)]
     pub fn render_pane(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         route_id: usize,
         pane_x: f32,
         pane_y: f32,
@@ -443,7 +443,7 @@ impl Minimap {
     #[allow(clippy::too_many_arguments)]
     fn paint_pane(
         &mut self,
-        sugarloaf: &mut impl MinimapPainter,
+        sugarloaf: &mut (impl MinimapPainter + ?Sized),
         route_id: usize,
         pane_x: f32,
         pane_y: f32,
@@ -607,7 +607,7 @@ impl Minimap {
 
 #[allow(clippy::too_many_arguments)]
 fn render_lines(
-    sugarloaf: &mut impl MinimapPainter,
+    sugarloaf: &mut (impl MinimapPainter + ?Sized),
     snapshot: &mut MinimapSnapshot,
     x: f32,
     y: f32,
@@ -693,7 +693,7 @@ fn build_line_rects(
 }
 
 fn render_git_changes(
-    sugarloaf: &mut impl MinimapPainter,
+    sugarloaf: &mut (impl MinimapPainter + ?Sized),
     snapshot: &MinimapSnapshot,
     x: f32,
     y: f32,
@@ -727,7 +727,7 @@ fn render_git_changes(
 
 #[allow(clippy::too_many_arguments)]
 fn render_viewport(
-    sugarloaf: &mut impl MinimapPainter,
+    sugarloaf: &mut (impl MinimapPainter + ?Sized),
     snapshot: &MinimapSnapshot,
     x: f32,
     width: f32,

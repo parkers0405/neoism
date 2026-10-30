@@ -4,7 +4,7 @@ use crate::{
     primitives::{draw_text_with_occlusion, IdeTheme},
 };
 use neoism_protocol::pull_request::*;
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

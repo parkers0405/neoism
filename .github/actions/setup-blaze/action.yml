@@ -1,0 +1,75 @@
+name: Set up pinned Blaze
+description: Use the same checksum-pinned compiler for local builds and CI.
+runs:
+  using: composite
+  steps:
+    - name: Provision Linux compiler memory
+      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      shell: bash
+      run: bash scripts/prepare-blaze-runner.sh
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - uses: actions/cache@v4
+      with:
+        path: |
+          neoism-frontend/gpuix/artifacts/blaze/bin
+          neoism-frontend/gpuix/artifacts/blaze/release.json
+          neoism-frontend/gpuix/artifacts/blaze/rustup
+          neoism-frontend/gpuix/artifacts/blaze/downloads
+          neoism-frontend/gpuix/artifacts/blaze/cache-main
+          neoism-frontend/gpuix/artifacts/b/toolchains
+          neoism-frontend/gpuix/artifacts/b/library
+          ${{ runner.temp }}/neoism-blaze-bootstrap
+        # Save each job's new compiled functions instead of repeatedly restoring
+        # an immutable dependency-only snapshot. A check-only job must not win
+        # the save race against the job that actually builds the application.
+        key: blaze-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('neoism-frontend/gpuix/native/blaze-pin.json') }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'neoism-frontend/gpuix/native/Cargo.lock') }}-${{ github.sha }}
+        restore-keys: |
+          blaze-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('neoism-frontend/gpuix/native/blaze-pin.json') }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'neoism-frontend/gpuix/native/Cargo.lock') }}-
+          blaze-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('neoism-frontend/gpuix/native/blaze-pin.json') }}-${{ github.workflow }}-${{ github.job }}-
+          blaze-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('neoism-frontend/gpuix/native/blaze-pin.json') }}-
+    - name: Install published Blaze release
+      if: runner.os != 'Windows'
+      shell: bash
+      run: node scripts/setup-blaze.mjs
+    - name: Bootstrap Blaze on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # Upstream publishes Linux/macOS archives. Cargo bootstraps the compiler
+        # itself on Windows; every application check and test below uses Blaze.
+        $ErrorActionPreference = 'Stop'
+        $pin = Get-Content neoism-frontend/gpuix/native/blaze-pin.json | ConvertFrom-Json
+        $tools = Join-Path $env:RUNNER_TEMP 'neoism-blaze-bootstrap'
+        $binary = Join-Path $tools 'release/blaze.exe'
+        # The cached compiler still needs this toolchain's native macro host.
+        rustup toolchain install $pin.toolchain --profile minimal --component rust-src --no-self-update
+        if ($LASTEXITCODE) { throw 'Blaze toolchain installation failed' }
+        if (-not (Test-Path $binary)) {
+          $source = Join-Path $env:RUNNER_TEMP 'neoism-blaze-source'
+          git clone --no-checkout --filter=blob:none $pin.repository $source
+          if ($LASTEXITCODE) { throw 'Blaze source download failed' }
+          git -C $source checkout --detach $pin.revision
+          if ($LASTEXITCODE) { throw 'Blaze source pin checkout failed' }
+          $env:BLAZE_RELEASE = $pin.release
+          $env:BLAZE_GIT_SHA = $pin.revision
+          $env:BLAZE_GIT_DATE = git -C $source show -s --format=%cs HEAD
+          if ($LASTEXITCODE) { throw 'Blaze source date lookup failed' }
+          cargo "+$($pin.toolchain)" build --locked --release --manifest-path "$source/Cargo.toml" --target-dir $tools -p blaze-engine -p blaze-cargo --bins
+          if ($LASTEXITCODE) { throw 'Blaze compiler bootstrap failed' }
+        }
+        "NEOISM_BLAZE_BIN=$binary" >> $env:GITHUB_ENV
+        # The matching Blaze proc-macro server is not released for Windows.
+        # Upstream's documented host macro mode uses the toolchain's server;
+        # application code is still compiled and linked by Blaze.
+        'BLAZE_PROC_MACRO_SERVER=0' >> $env:GITHUB_ENV
+    - name: Use hosted-runner isolation for build scripts
+      shell: bash
+      run: echo 'BLAZE_SANDBOX=off' >> "$GITHUB_ENV"
+    - name: Verify pinned compiler
+      shell: bash
+      run: bash scripts/blaze.sh --version
+    - name: Check compiler installer integrity
+      shell: bash
+      run: node --test scripts/setup-blaze.test.mjs scripts/blaze.test.mjs scripts/test-workspace.test.mjs

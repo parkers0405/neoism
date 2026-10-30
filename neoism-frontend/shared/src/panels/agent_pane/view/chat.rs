@@ -1,4 +1,4 @@
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::panels::agent_pane::conversation_header::{ConversationNavigation, Direction};
 use crate::panels::agent_pane::state::NeoismAgentPane;
@@ -290,7 +290,7 @@ pub fn render_chat(
     s: f32,
     input_rect: [f32; 4],
     occlusion_rects: &[[f32; 4]],
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
 ) {
     render_chat_with::<NeoismAgentPane, SharedTimelineDelegate>(
         sugarloaf,
@@ -321,7 +321,7 @@ pub fn render_chat_with<P, D>(
     s: f32,
     input_rect: [f32; 4],
     occlusion_rects: &[[f32; 4]],
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
     prepared_input_rows: Option<&std::rc::Rc<Vec<InputWrapRow>>>,
     checkout_context: Option<&AgentCheckoutContext>,
 ) where

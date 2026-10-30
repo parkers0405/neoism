@@ -7,7 +7,7 @@
 //! `/proc` foreground-process detection stays in the desktop fork.
 
 use base64::Engine;
-use sugarloaf::{
+use neoism_paint::{
     ColorType, GraphicData, GraphicDataEntry, GraphicId, GraphicOverlay,
 };
 use web_time::Instant;
@@ -233,10 +233,10 @@ impl crate::panels::buffer_tabs::AgentLabel for AgentKind {
 // Keep the existing tab artwork as the single provider-logo source. These
 // files remain in the desktop asset bundle for packaging compatibility, but
 // registration lives here so the shared composer and web host use them too.
-const CLAUDE_PNG: &[u8] = include_bytes!("../../../../desktop/assets/icons/claude.png");
-const CODEX_PNG: &[u8] = include_bytes!("../../../../desktop/assets/icons/codex.png");
+const CLAUDE_PNG: &[u8] = include_bytes!("../../../assets/icons/claude.png");
+const CODEX_PNG: &[u8] = include_bytes!("../../../assets/icons/codex.png");
 const OPENCODE_PNG: &[u8] =
-    include_bytes!("../../../../desktop/assets/icons/opencode.png");
+    include_bytes!("../../../assets/icons/opencode.png");
 const NEOISM_PNG: &[u8] = include_bytes!("../../../assets/icons/neoism.png");
 const PROVIDER_LOGO_ATLAS_BASE64: &str =
     include_str!("../../../assets/icons/provider-logos.png.b64");

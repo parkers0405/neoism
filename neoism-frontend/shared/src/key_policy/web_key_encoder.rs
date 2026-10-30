@@ -69,7 +69,7 @@ pub struct WebTerminalKeyInput<'a> {
 
 /// Live terminal mode bits the encoding decisions read.
 ///
-/// Hosts derive these from `crosswords::Mode` (desktop `Screen::get_mode`,
+/// Hosts derive these from `mode::Mode` (desktop `Screen::get_mode`,
 /// wasm `terminal.inner.mode()`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WebTerminalKeyModes {

@@ -1,6 +1,6 @@
 use crate::config::defaults::*;
+use neoism_paint::ImageProperties;
 use serde::{Deserialize, Serialize};
-use sugarloaf::ImageProperties;
 
 #[derive(Default, Clone, Serialize, Deserialize, Copy, Debug, PartialEq)]
 pub enum WindowMode {
@@ -149,30 +149,12 @@ impl Default for Window {
 }
 
 impl Colorspace {
-    pub fn to_sugarloaf_colorspace(&self) -> sugarloaf::Colorspace {
+    pub fn to_paint_colorspace(&self) -> neoism_paint::Colorspace {
         match self {
-            Colorspace::Srgb => sugarloaf::Colorspace::Srgb,
-            Colorspace::DisplayP3 => sugarloaf::Colorspace::DisplayP3,
-            Colorspace::Rec2020 => sugarloaf::Colorspace::Rec2020,
+            Colorspace::Srgb => neoism_paint::Colorspace::Srgb,
+            Colorspace::DisplayP3 => neoism_paint::Colorspace::DisplayP3,
+            Colorspace::Rec2020 => neoism_paint::Colorspace::Rec2020,
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn to_neoism_window_colorspace(
-        &self,
-    ) -> neoism_window::platform::macos::Colorspace {
-        match self {
-            Colorspace::Srgb => neoism_window::platform::macos::Colorspace::Srgb,
-            Colorspace::DisplayP3 => {
-                neoism_window::platform::macos::Colorspace::DisplayP3
-            }
-            Colorspace::Rec2020 => neoism_window::platform::macos::Colorspace::Rec2020,
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    pub fn to_neoism_window_colorspace(&self) {
-        // No-op for non-macOS platforms
     }
 }
 

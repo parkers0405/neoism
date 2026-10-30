@@ -3,7 +3,7 @@ pub use super::gitdiff::build_review_diff;
 pub use super::types::{ProjectedCodeRow, ProjectedCodeSpec};
 use super::{feed::styled_runs_with_syntax, layout::*, types::*};
 use crate::{primitives::ide_theme::IdeTheme, syntax::syn_color};
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 /// Text/selection/caret only. The host owns backgrounds, gutters and scrolling.
 /// Refresh syntax once for the whole buffer, never render a full pane per row.
@@ -106,7 +106,7 @@ pub fn render_projected_code(
         let col = pane.buffer.cursor_col.clamp(row.byte_start, row.byte_end);
         if spec.focused && caret_row == Some(row_index) {
             let block =
-                pane.cursor_shape() == neoism_terminal_core::ansi::CursorShape::Block;
+                pane.cursor_shape() == neoism_terminal_types::ansi::CursorShape::Block;
             // Host cursor shapes scale within a full cell (the beam is a
             // fraction of its width). Publishing an already-thinned rect makes
             // native Insert almost invisible: the host thins it a second time.
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn projected_caret_keeps_full_cell_geometry_across_vim_modes() {
-        use neoism_terminal_core::ansi::CursorShape;
+        use neoism_terminal_types::ansi::CursorShape;
         let mut pane = CodePane::new("/repo/a.rs".into(), "hello\n");
         pane.input_mode = CodeInputMode::Vim;
         let viewport = [20.0, 10.0, 200.0, 80.0];
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn source_cursor_cell_tracks_utf8_tabs_wrap_indent_and_horizontal_scroll_in_all_modes(
     ) {
-        use neoism_terminal_core::ansi::CursorShape;
+        use neoism_terminal_types::ansi::CursorShape;
         let mut pane = CodePane::new("/repo/a.rs".into(), "hidden\naé\tz\n");
         pane.input_mode = CodeInputMode::Vim;
         let row = ProjectedCodeRow {

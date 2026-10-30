@@ -2,7 +2,7 @@
 //! overlay with a category rail, scrollable setting rows, toggle
 //! switches, and dropdown selects.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::primitives::draw_text_with_occlusion;
 use crate::primitives::geom::intersect_rect;

@@ -417,6 +417,24 @@ async fn local_stdio_runtime_lists_and_calls_tools() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn lost_tool_reply_is_not_replayed_after_the_child_executed_it() {
+    let root = temp_dir("stdio-uncertain-reply");
+    let server = configurable_mock_mcp_server(&root);
+    let pid_file = root.join("pids");
+    write_local_mock_config(&root, &server, &pid_file, "first", true);
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    let state = test_state(&root).await;
+    let directory=root.to_str().unwrap();
+    let error=call_tool(directory,"mock","echo",json!({"loseReply":true}),&store,state.clone()).await.unwrap_err();
+    assert!(!error.to_string().is_empty());
+    assert_eq!(fs::read_to_string(root.join("pids.calls")).unwrap(), "called\n");
+    assert_eq!(wait_for_pid_count(&pid_file,1).len(),1,"an uncertain invocation must not reconnect and replay");
+    state.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn killed_local_runtime_reconnects_before_the_next_call() {
     let root = temp_dir("stdio-reconnect");
     let server = configurable_mock_mcp_server(&root);
@@ -997,6 +1015,9 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
       ;;
     *'"method":"tools/call"'*)
+      case "$line" in
+        *'"loseReply":true'*) printf 'called\n' >> "$PID_FILE.calls"; exit 0 ;;
+      esac
       id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
       printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"%s"}],"isError":false}}\n' "$id" "$RESULT"
       ;;

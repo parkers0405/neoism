@@ -439,8 +439,13 @@ mod tests {
                             let resize = r.elapsed();
                             let p = Instant::now();
                             let mut out = Cursor::new(Vec::new());
-                            image
-                                .write_to(&mut out, image_rs::ImageFormat::Png)
+                            PngEncoder::new(&mut out)
+                                .write_image(
+                                    image.as_bytes(),
+                                    image.width(),
+                                    image.height(),
+                                    image.color().into(),
+                                )
                                 .unwrap();
                             EncodedCapture {
                                 width: image.width(),

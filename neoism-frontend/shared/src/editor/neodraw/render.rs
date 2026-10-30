@@ -10,7 +10,7 @@
 //! entry point serves both the interactive [`DrawPane`](super::DrawPane)
 //! editor and the read-only markdown ```draw embed.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::primitives::ide_theme::IdeTheme;
 

@@ -9,7 +9,7 @@
 
 use web_time::Instant;
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 // TODO(wave6-cutover): switch from `crate::primitives::IdeTheme` to the
 // neoism-ui `ChromeTheme` once that grows the syntax-color budget the
@@ -121,7 +121,7 @@ impl YankFlash {
     /// land in the same coordinate space).
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         pane_x: f32,
         pane_y: f32,
         pane_w: f32,

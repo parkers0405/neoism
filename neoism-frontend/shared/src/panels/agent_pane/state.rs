@@ -27,7 +27,7 @@ use std::hash::{Hash, Hasher};
 use web_time::Duration;
 
 use serde_json::{json, Value};
-use sugarloaf::{
+use neoism_paint::{
     DirtyKind, NodeSourceRange, VirtualAgentAdapter, VirtualAgentMessage,
     VirtualAgentMessageUpdate, VirtualAgentRole, VirtualMeasuredLayout, VirtualScroll,
     VirtualSourceRevision, VirtualSurface, VirtualSurfaceCommand, VirtualSurfaceConfig,

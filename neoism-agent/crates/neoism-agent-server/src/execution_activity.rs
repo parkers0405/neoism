@@ -966,7 +966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_read_reconciles_reopened_quiescent_execution() {
+    async fn graceful_shutdown_settles_quiescent_execution_before_reopen() {
         let path = std::env::temp_dir().join(format!(
             "neoism-aggregate-reopen-{}.sqlite3",
             Id::ascending(IdKind::Event)
@@ -1024,7 +1024,7 @@ mod tests {
         drop(state);
         let reopened = AppState::open_database(path.clone()).await.unwrap();
         assert!(
-            !reopened
+            reopened
                 .inner
                 .store
                 .get_execution_activity(root.id.as_str())

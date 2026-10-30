@@ -21,9 +21,9 @@ installation, Synapse checkout, conversion or font tooling is required.
 ## Exact native pixel heading font
 
 The generator copies Neoism's existing
-`sugarloaf/src/font/resources/PressStart2P/PressStart2P-Regular.ttf` unchanged.
+`neoism-paint/src/font/resources/PressStart2P/PressStart2P-Regular.ttf` unchanged.
 This is the face loaded by `FONT_PRESS_START_2P` in
-`sugarloaf/src/font/constants.rs`, resolved by
+`neoism-paint/src/font/constants.rs`, resolved by
 `neoism-frontend/shared/src/primitives/pixel_font.rs`, and used for headings in
 `neoism-frontend/shared/src/panels/agent_pane/view/side_panel/sections.rs` and
 `draw.rs`. It is **Press Start 2P**, not Geist Pixel or a Synapse font.

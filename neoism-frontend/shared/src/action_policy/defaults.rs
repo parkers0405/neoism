@@ -15,7 +15,7 @@
 
 use crate::key_policy::KeyPolicyNamedKey;
 use crate::mouse_policy::MouseButtonClass;
-use neoism_terminal_core::crosswords::vi_mode::ViMotion;
+use neoism_terminal_types::mode::ViMotion;
 
 use super::{
     char_key, mouse_binding, named_key, Action, ActionModifiersState, BindingMode,

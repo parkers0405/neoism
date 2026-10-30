@@ -91,9 +91,7 @@ fn validate(
             "workspace packages cannot declare global or user Agent scope".into(),
         );
     }
-    if matches!(agent.runtime, AgentEntrypointRuntime::Lua) {
-        validate_entrypoint(root, &agent.entrypoint)?;
-    } else if agent.command.is_empty() {
+    if agent.command.is_empty() {
         validate_entrypoint(root, &agent.entrypoint)?;
     }
     Ok(())
@@ -259,9 +257,6 @@ pub(crate) fn authorized_for(
         }
     }
     match agent.runtime {
-        AgentEntrypointRuntime::Lua if !trust.lua_approved => {
-            Err("Lua execution requires explicit approval".into())
-        }
         AgentEntrypointRuntime::Process if !trust.executable_approved => {
             Err("executable entrypoint requires explicit approval".into())
         }
@@ -386,10 +381,10 @@ mod tests {
         let base = std::env::temp_dir().join(format!("neoism-agent-package-{unique}"));
         let root = base.join(".neoism/plugins/dev.example.fixture");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("agent.lua"), "return {}").unwrap();
+        std::fs::write(root.join("agent-plugin"), "return {}").unwrap();
         std::fs::write(
             root.join("neoism-plugin.json"),
-            r#"{"id":"dev.example.fixture","name":"Fixture","version":"1","agent":{"runtime":"lua","entrypoint":"agent.lua","capabilities":["workspace-read"]}}"#,
+            r#"{"id":"dev.example.fixture","name":"Fixture","version":"1","agent":{"runtime":"process","entrypoint":"agent-plugin","capabilities":["workspace-read"]}}"#,
         )
         .unwrap();
         let package = discover(base.to_str().unwrap())
@@ -417,9 +412,8 @@ mod tests {
             scope: Some(PluginScope::Workspace),
             scope_id: None,
             capabilities: vec![neoism_agent_plugin_api::HostCapability::WorkspaceRead],
-            executable_approved: false,
             native_approved: false,
-            lua_approved: true,
+            executable_approved: true,
         };
         let options = std::collections::BTreeMap::from([(
             "trust".into(),
@@ -439,7 +433,7 @@ mod tests {
             .find(|manifest| manifest.id == "dev.example.fixture")
             .unwrap();
         assert_eq!(trusted.config["agentLifecycle"], "trusted");
-        std::fs::write(root.join("agent.lua"), "return { version = 2 }").unwrap();
+        std::fs::write(root.join("agent-plugin"), "return { version = 2 }").unwrap();
         let changed = load(&root, PackageLocation::Workspace).unwrap();
         assert_ne!(changed.revision, package.revision);
         assert!(authorized(
@@ -460,10 +454,10 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("neoism-agent-session-package-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("agent.lua"), "return {}").unwrap();
+        std::fs::write(root.join("agent-plugin"), "return {}").unwrap();
         std::fs::write(
             root.join("neoism-plugin.json"),
-            r#"{"id":"dev.example.session","name":"Session","version":"1","agent":{"runtime":"lua","entrypoint":"agent.lua","scope":"session","capabilities":["prompt-read"]}}"#,
+            r#"{"id":"dev.example.session","name":"Session","version":"1","agent":{"runtime":"process","entrypoint":"agent-plugin","scope":"session","capabilities":["prompt-read"]}}"#,
         )
         .unwrap();
         let package = load(&root, PackageLocation::User).unwrap();
@@ -474,9 +468,8 @@ mod tests {
             scope: Some(PluginScope::Session),
             scope_id: Some("session-1".into()),
             capabilities: vec![neoism_agent_plugin_api::HostCapability::PromptRead],
-            executable_approved: false,
             native_approved: false,
-            lua_approved: true,
+            executable_approved: true,
         };
         let options = std::collections::BTreeMap::from([(
             "trust".into(),
@@ -519,10 +512,10 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("neoism-agent-global-package-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("agent.lua"), "return {}").unwrap();
+        std::fs::write(root.join("agent-plugin"), "return {}").unwrap();
         std::fs::write(
             root.join("neoism-plugin.json"),
-            r#"{"id":"dev.example.global","name":"Global","version":"1","agent":{"runtime":"lua","entrypoint":"agent.lua","scope":"global"}}"#,
+            r#"{"id":"dev.example.global","name":"Global","version":"1","agent":{"runtime":"process","entrypoint":"agent-plugin","scope":"global"}}"#,
         )
         .unwrap();
         assert!(load(&root, PackageLocation::Workspace)
@@ -565,10 +558,10 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("neoism-installation-package-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("agent.lua"), "return {}").unwrap();
+        std::fs::write(root.join("agent-plugin"), "return {}").unwrap();
         std::fs::write(
             root.join("neoism-plugin.json"),
-            r#"{"id":"dev.example.installation","name":"Installation","version":"1","agent":{"runtime":"lua","entrypoint":"agent.lua","scope":"global"}}"#,
+            r#"{"id":"dev.example.installation","name":"Installation","version":"1","agent":{"runtime":"process","entrypoint":"agent-plugin","scope":"global"}}"#,
         )
         .unwrap();
         let package = load(&root, PackageLocation::User).unwrap();
@@ -579,9 +572,8 @@ mod tests {
             scope: Some(PluginScope::Global),
             scope_id: None,
             capabilities: Vec::new(),
-            executable_approved: false,
             native_approved: false,
-            lua_approved: true,
+            executable_approved: true,
         };
         let options = std::collections::BTreeMap::from([(
             "trust".into(),

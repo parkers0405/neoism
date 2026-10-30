@@ -11,7 +11,7 @@ const chrome=tabChrome(1);
 writeFileSync(config,JSON.stringify(configuration));
 const server=createAgentDaemon({configuration,deferCreations:false});
 const packaged=process.argv.includes("--packaged");
-const launch=()=>launchNative({command:packaged?join(process.cwd(),"dist/neoism-gpuix"):process.execPath,args:[...(packaged?[]:["src/main.tsx"]),"--daemon",server.endpoint,"--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:recovery}});
+const launch=()=>launchNative({command:packaged?join(process.cwd(),"dist/neoism"):process.execPath,args:[...(packaged?[]:["src/main.tsx"]),"--daemon",server.endpoint,"--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:recovery}});
 let app=await launch();
 const flatten=(nodes:TreeNode[]):TreeNode[]=>nodes.flatMap(node=>[node,...flatten(node.children||[])]);
 const nodes=async()=>{const {tree}=await app.call("getTree",{});return flatten(tree?[tree]:[]);};

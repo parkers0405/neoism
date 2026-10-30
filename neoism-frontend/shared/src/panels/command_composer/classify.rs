@@ -7,7 +7,7 @@
 //! - `style_at` / `line_for_byte` are tiny lookup helpers used by the
 //!   render pass.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use unicode_width::UnicodeWidthChar;
 
 use super::types::{InputClassification, InputTextStyle, StyledSpan, WrappedLine};

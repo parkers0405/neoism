@@ -15,7 +15,7 @@
 //! workspace buffer activation, search dispatch) belong to the bridge
 //! layer and are not invoked here.
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::chrome::active_ide_theme;
 use crate::event::{KeyState, LogicalKey, NamedKey, UiEvent};
@@ -145,7 +145,7 @@ impl CommandPalette {
 
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         _layout: &PanelLayout,
         _ctx: &crate::panels::PanelContext,
     ) {
@@ -155,9 +155,9 @@ impl CommandPalette {
         // (the chrome's slot for the palette) is intentionally
         // unused — the panel paints itself.
         let theme = active_ide_theme();
-        let size = sugarloaf.window_size();
+        let size = (_layout.bounds.x + _layout.bounds.w, _layout.bounds.y + _layout.bounds.h);
         let scale_factor = sugarloaf.scale_factor();
-        self.render(sugarloaf, (size.width, size.height, scale_factor), &theme);
+        self.render(sugarloaf, (size.0, size.1, scale_factor), &theme);
     }
 }
 
@@ -247,7 +247,7 @@ impl Finder {
 
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         _layout: &PanelLayout,
         ctx: &crate::panels::PanelContext,
     ) {
@@ -258,11 +258,11 @@ impl Finder {
         // off `PanelContext::services`, which the host already wires
         // for every other panel.
         let theme = active_ide_theme();
-        let size = sugarloaf.window_size();
+        let size = (_layout.bounds.x + _layout.bounds.w, _layout.bounds.y + _layout.bounds.h);
         let scale_factor = sugarloaf.scale_factor();
         self.render(
             sugarloaf,
-            (size.width, size.height, scale_factor),
+            (size.0, size.1, scale_factor),
             &theme,
             ctx.services.search,
             ctx.services.files,

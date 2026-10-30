@@ -1,10 +1,10 @@
-use sugarloaf::text::DrawOpts;
-use sugarloaf::{
+use neoism_paint::text::DrawOpts;
+use neoism_paint::{
     DirtyKind, NodeId, NodeRevision, NodeSource, NodeSourceRange, VirtualMeasuredLayout,
     VirtualNodeKind, VirtualRevealAlign, VirtualScroll, VirtualSourceQuery,
     VirtualSourceRevision, VirtualSurfaceCommand, VirtualSurfaceConfig, VirtualViewport,
 };
-use sugarloaf::VirtualBounds;
+use neoism_paint::VirtualBounds;
 use web_time::Instant;
 
 use crate::editor::markdown::helpers::{

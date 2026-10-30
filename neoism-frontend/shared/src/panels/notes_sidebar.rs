@@ -29,8 +29,8 @@ fn list_local_notes(root: &Path) -> LocalNotesSnapshot {
     }
 }
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use crate::animation::CriticallyDampedSpring;
 use crate::customization::color_u8;
@@ -1390,7 +1390,7 @@ impl NotesSidebar {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         x_left: f32,
         y_top: f32,
         panel_width: f32,
@@ -1399,7 +1399,7 @@ impl NotesSidebar {
         occlusion: &[[f32; 4]],
         mouse: Option<(f32, f32)>,
         _now_seconds: f32,
-        plugins: Option<&neoism_lua::PluginSnapshot>,
+        plugins: Option<&neoism_customization::PluginSnapshot>,
     ) {
         self.panel_rect = Some([x_left, y_top, panel_width, panel_height]);
         if !self.visible || panel_width <= 0.0 || panel_height <= 0.0 {
@@ -1968,7 +1968,7 @@ impl NotesSidebar {
             // Pill button: centered, hover-tinted, returns its rect for
             // hit-testing. Shared by both empty-state variants.
             let draw_btn =
-                |sl: &mut Sugarloaf, icon: &str, label: &str, top: f32| -> [f32; 4] {
+                |sl: &mut dyn Paint, icon: &str, label: &str, top: f32| -> [f32; 4] {
                     let opts = DrawOpts {
                         font_size: btn_font,
                         color: blue,
@@ -3060,7 +3060,7 @@ fn push_visible_children(
 }
 
 fn draw_frame_top(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     rect: [f32; 4],
     outer_color: [f32; 4],
     inner_color: [f32; 4],
@@ -3356,10 +3356,10 @@ mod tests {
         // Both trees must resolve root -> row -> selected from the caller's
         // snapshot; using a global-only helper here would miss these overrides.
         for selector in ["file-tree", "notes-tree"] {
-            let mut styles = neoism_lua::StyleSheet::default();
+            let mut styles = neoism_customization::StyleSheet::default();
             styles.insert(
                 selector,
-                neoism_lua::StylePatch {
+                neoism_customization::StylePatch {
                     opacity: Some(0.5),
                     background: Some("#000000".into()),
                     ..Default::default()
@@ -3367,7 +3367,7 @@ mod tests {
             );
             styles.insert(
                 format!("{selector}.row.selected"),
-                neoism_lua::StylePatch {
+                neoism_customization::StylePatch {
                     background: Some("#ff000080".into()),
                     ..Default::default()
                 },

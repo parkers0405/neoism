@@ -65,3 +65,21 @@ test("diagnostic byte spans and typed LSP edits use the actual code buffer", () 
     expect(editor.call("saved", { revision: editor.frame.revision }).lsp?.requests).toContainEqual({ DidSave: { path: "/project/a/main.ts", surface_id: "test:editor" } });
   } finally { editor.dispose(); }
 });
+
+test("unchanged LSP frames keep overlay state stable without dropping repeated effects",()=>{
+ let receive:((frame:any)=>void)|undefined, sent=0;
+ const editor={id:987654,subscribe:(fn:any)=>{receive=fn;return()=>{};},call:()=>{},requestFrame:()=>{}} as unknown as NativeEditor;
+ const client={state:{phase:"closed"},subscribe:()=>()=>{},subscribeStatus:()=>()=>{},send:()=>++sent} as unknown as DaemonConnection;
+ const controller=createEditorLsp(editor,{client,path:"/project/main.rs",root:"/project",openPaths:()=>[],openLocation:()=>{},applyEdits:()=>{}},{save:async()=>{},focus:()=>{},report:error=>{throw error;}});
+ try{
+  const lsp:LspFrame={menu:null,hover:null,diagnostics:{error:0,warn:0,info:0,hint:0},requests:[],events:[]};
+  receive!({lsp});const original=controller.state();
+  for(let i=0;i<144;i++)receive!({lsp});
+  expect(controller.state()).toBe(original);
+  const changed={...lsp,diagnostics:{...lsp.diagnostics!,error:1}};
+  receive!({lsp:changed});expect(controller.state()?.diagnostics?.error).toBe(1);
+  expect(controller.state()).not.toBe(original);
+  const request={...changed,requests:[{DidSave:{path:"/project/main.rs"}}]};
+  receive!({lsp:request});receive!({lsp:request});expect(sent).toBe(2);
+ }finally{controller.dispose();}
+});

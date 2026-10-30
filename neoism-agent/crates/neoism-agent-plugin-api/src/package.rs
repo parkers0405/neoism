@@ -69,7 +69,7 @@ pub struct PackageAgentEntrypoint {
 impl Default for PackageAgentEntrypoint {
     fn default() -> Self {
         Self {
-            runtime: AgentEntrypointRuntime::Lua,
+            runtime: AgentEntrypointRuntime::Process,
             entrypoint: String::new(),
             command: Vec::new(),
             capabilities: Vec::new(),
@@ -83,7 +83,6 @@ impl Default for PackageAgentEntrypoint {
 #[serde(rename_all = "kebab-case")]
 pub enum AgentEntrypointRuntime {
     #[default]
-    Lua,
     Process,
 }
 
@@ -159,8 +158,6 @@ pub struct PackageTrustRecord {
     pub executable_approved: bool,
     #[serde(default)]
     pub native_approved: bool,
-    #[serde(default)]
-    pub lua_approved: bool,
 }
 
 #[cfg(test)]
@@ -187,6 +184,15 @@ mod tests {
         assert_eq!(agent.capabilities, [HostCapability::WorkspaceRead]);
         assert_eq!(agent.scope, PluginScope::Workspace);
         assert_eq!(agent.event_namespaces, ["session."]);
+    }
+
+    #[test]
+    fn removed_lua_runtime_is_rejected_instead_of_defaulting_to_process() {
+        let error = serde_json::from_str::<PackageAgentEntrypoint>(
+            r#"{"runtime":"lua","entrypoint":"agent.lua"}"#,
+        ).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
+        assert_eq!(PackageAgentEntrypoint::default().runtime, AgentEntrypointRuntime::Process);
     }
 
     #[test]

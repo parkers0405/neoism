@@ -42,14 +42,15 @@ export class TerminalBuffer {
   lastKeyHandled = false;
   get viMode() { return this.reply.viMode; }
   get bindingState() { return { vi: this.reply.viMode, appcursor: this.reply.appCursor, alt: !!this.reply.snapshot.alt_screen }; }
-  constructor(readonly theme: Palette, cols = 100, rows = 30, readonly backend: "crosswords" | "ghostty" = "ghostty", encoding: "runs" | "cells" = "runs") {
+  readonly backend = "ghostty";
+  constructor(readonly theme: Palette, cols = 100, rows = 30, encoding: "runs" | "cells" = "runs") {
     this.palette = [theme.black, theme.red, theme.green, theme.yellow, theme.blue, theme.magenta, theme.cyan, theme.white,
       theme.muted, theme.red, theme.green, theme.yellow, theme.blue, theme.magenta, theme.cyan, theme.fg];
-    if (backend === "ghostty") coreCall("ghostty.load", { path: ghosttyLibraryPath() });
+    coreCall("ghostty.load", { path: ghosttyLibraryPath() });
     this.id = coreCall<{ id: number }>(this.op("new"), { cols, rows, palette: this.palette, foreground: theme.fg, background: theme.bg, compact: encoding === "runs" }).id;
     this.reply = coreCall(this.op("frame"), { id: this.id });
   }
-  private op(name: string) { return `${this.backend === "ghostty" ? "ghostty" : "terminal"}.${name}`; }
+  private op(name: string) { return `ghostty.${name}`; }
   cursor(cellWidth: number, rowHeight: number) { return coreCall<TerminalCursorFrame>(this.op("cursor"), { id: this.id, cellWidth, rowHeight }); }
   get cols() { return this.reply.snapshot.cols; }
   get rows() { return this.reply.snapshot.rows; }
@@ -81,8 +82,8 @@ export class TerminalBuffer {
   scrollPixels(delta: number, rowHeight: number) { this.call("scroll", { delta, rowHeight }); }
   scrollToBottom() { this.call("bottom"); }
   paste(text: string) {
-    if (this.backend === "ghostty") return Uint8Array.from(coreCall<{ bytes: number[] }>(this.op("paste"), { id: this.id, text }).bytes);
-    return new TextEncoder().encode(this.reply.bracketedPaste ? `\x1b[200~${text}\x1b[201~` : text); }
+    return Uint8Array.from(coreCall<{ bytes: number[] }>(this.op("paste"), { id: this.id, text }).bytes);
+  }
   search(op: "start" | "preview" | "commit" | "cancel", args: Record<string, unknown> = {}) { this.call(`search.${op}`, args); }
   select(row: number, col: number, start: boolean, x?: number, cellWidth = 10, clicks = 1) { this.call("select", { row, col, start, x: x ?? (col + (start ? 0 : 0.9)) * cellWidth, cellWidth, clicks }); }
   mouse(event: Record<string, unknown>) {

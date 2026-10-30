@@ -4,8 +4,8 @@
 
 use web_time::Instant;
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use super::classify::{
     draw_opts_for_style, line_for_byte, style_at, styled_spans, wrap_lines,
@@ -47,7 +47,7 @@ pub(super) fn line_clip(x: f32, y: f32, width: f32, height: f32) -> [f32; 4] {
 }
 
 pub(super) fn draw_text_thick(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     x: f32,
     y: f32,
     text: &str,
@@ -62,7 +62,7 @@ pub(super) fn draw_text_thick(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_scramble_text_thick(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     x: f32,
     y: f32,
     target: &str,
@@ -107,7 +107,7 @@ impl CommandComposer {
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         x_left: f32,
         y_top: f32,
         width: f32,
@@ -709,7 +709,7 @@ impl CommandComposer {
                 };
                 let right_edge = send_chip_x - 10.0 * s;
                 let draw_indicator =
-                    |sugarloaf: &mut Sugarloaf, label: String, y: f32| {
+                    |sugarloaf: &mut dyn Paint, label: String, y: f32| {
                         let w = sugarloaf.text_mut().measure(&label, &indicator_opts);
                         let x = (right_edge - w).max(inner_left);
                         let pill_pad = 5.0 * s;
@@ -1029,7 +1029,7 @@ impl CommandComposer {
     #[allow(clippy::too_many_arguments)]
     fn draw_chevrons(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         x: f32,
         row_y: f32,
         row_h: f32,

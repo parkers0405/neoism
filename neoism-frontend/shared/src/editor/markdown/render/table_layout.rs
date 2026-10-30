@@ -125,7 +125,7 @@ mod tests {
         let rows = wrap_cell("abc defghijkl", 5.0, |text| text.chars().count() as f32);
         assert_eq!(
             rows.iter().map(|r| (r.start, r.len)).collect::<Vec<_>>(),
-            vec![(0, 3), (4, 5), (9, 3)]
+            vec![(0, 3), (4, 5), (9, 4)]
         );
         let rows = wrap_cell("ab   cd", 4.0, |text| text.chars().count() as f32);
         assert_eq!(

@@ -1,5 +1,5 @@
 //! Headless Windows composer -> ConPTY -> production parser -> command-block test.
-//! `cargo test -p neoism-ui --test windows_composer -- --ignored --nocapture`
+//! `bash scripts/blaze.sh test -p neoism-ui --test windows_composer -- --ignored --nocapture`
 //! Requires pwsh.exe on PATH (or NEOISM_TEST_PWSH). This deliberately does not
 //! instantiate a window, keyboard dispatcher, backend Machine/messenger, or GPU
 //! block overlay. It exercises their shared input/parser/state boundary, not
@@ -8,8 +8,8 @@
 //! to omit `-NoProfile` (loads existing profiles; never modifies them).
 #![cfg(windows)]
 
-use neoism_terminal_core::{
-    ansi::CursorShape, crosswords::Mode, handler::Processor, Crosswords, TerminalEffect,
+use neoism_terminal_types::{
+    ansi::CursorShape, mode::Mode, handler::Processor, Crosswords, TerminalEffect,
     TerminalId,
 };
 use neoism_terminal_pty::{PtySession, PtySessionConfig};
@@ -161,7 +161,7 @@ impl Harness {
         // Include scrollback, just as block output can extend above viewport.
         (-(self.term.history_size() as i32)..40)
             .map(|row| {
-                self.term.grid[neoism_terminal_core::crosswords::pos::Line(row)]
+                self.term.grid[neoism_terminal_types::position::Line(row)]
                     .inner
                     .iter()
                     .map(|cell| cell.c())

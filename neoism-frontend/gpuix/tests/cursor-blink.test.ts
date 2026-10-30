@@ -4,9 +4,9 @@ import {CursorBlinkClock,cursorBlinkState,cursorBlinkInterval,DEFAULT_CURSOR_BLI
 function harness(){let now=0,next=0;const scheduled=new Map<number,{at:number;run:()=>void}>();return{now:()=>now,schedule:(run:()=>void,delay:number)=>{const id=++next;scheduled.set(id,{at:now+delay,run});return()=>{scheduled.delete(id);};},advance(to:number){for(;;){const pending=[...scheduled].sort((a,b)=>a[1].at-b[1].at)[0];if(!pending||pending[1].at>to)break;now=pending[1].at;scheduled.delete(pending[0]);pending[1].run();}now=to;},jump(to:number){now=to;const pending=[...scheduled.values()];scheduled.clear();for(const callback of pending)callback.run();},get timers(){return scheduled.size;}};}
 const active={active:true,enabled:true,activityToken:"one"};
 test("local cursor uses the original desktop half-period and clamp, not optimistic remote-caret timing",()=>{
- const defaults=readFileSync(new URL("../../../neoism-backend/src/config/defaults.rs",import.meta.url),"utf8"),host=readFileSync(new URL("../../desktop/src/host/mod.rs",import.meta.url),"utf8");
+ const defaults=readFileSync(new URL("../../../neoism-backend/src/config/defaults.rs",import.meta.url),"utf8"),host=readFileSync(new URL("../src/ui/cursor-blink.ts",import.meta.url),"utf8");
  const period=Number(defaults.match(/pub fn default_cursor_interval\(\) -> u64 \{[\s\S]*?\n\s*(\d+)\n\}/)![1]);
- expect(DEFAULT_CURSOR_BLINK_INTERVAL_MS).toBe(period);expect(host).toContain(".clamp(350, 1200)");
+ expect(DEFAULT_CURSOR_BLINK_INTERVAL_MS).toBe(period);expect(host).toContain("Math.max(350,Math.min(1200,");
  expect([cursorBlinkInterval(1),cursorBlinkInterval(2000),cursorBlinkInterval(NaN)]).toEqual([350,1200,530]);
  expect([0,249,250,529,530,1059,1060].map(now=>cursorBlinkState(active,now,0).visible)).toEqual([true,true,true,true,false,false,true]);
 });

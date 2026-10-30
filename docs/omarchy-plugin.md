@@ -86,14 +86,14 @@ activated plugin and an existing Neoism-only hidden array; it writes that same
 array and checks the entire configuration remains unchanged:
 
 ```sh
-cargo test --manifest-path tools/omarchy-installer/Cargo.toml host_verify_array_transport -- --ignored --nocapture
+bash scripts/blaze.sh test --manifest-path tools/omarchy-installer/Cargo.toml host_verify_array_transport -- --ignored --nocapture
 ```
 
 ## Isolated checks (no host shell changes)
 
 ```sh
-cargo test --manifest-path tools/omarchy-installer/Cargo.toml
-cargo check --manifest-path tools/omarchy-installer/Cargo.toml
+bash scripts/blaze.sh test --manifest-path tools/omarchy-installer/Cargo.toml
+bash scripts/blaze.sh check --manifest-path tools/omarchy-installer/Cargo.toml
 omarchy-plugin-validate assets/omarchy/dev.neoism.agent-status
 ```
 
@@ -108,7 +108,7 @@ symlinks, atomic upgrades, and user removal are covered.
 **This mutates the host plugin/config and must be run only after review.**
 
 ```sh
-cargo run --manifest-path tools/omarchy-installer/Cargo.toml -- --install-host
+bash scripts/blaze.sh run --manifest-path tools/omarchy-installer/Cargo.toml -- --install-host
 ```
 
 Without the exact flag the harness refuses to act. No environment opt-in can

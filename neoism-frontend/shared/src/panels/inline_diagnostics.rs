@@ -8,8 +8,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use crate::primitives::ide_theme::IdeTheme;
 
@@ -216,7 +216,7 @@ impl InlineDiagnostics {
 
     pub fn render(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         items: &[InlineDiagnosticItem],
         layout: InlineDiagnosticsLayout,
         paint_lenses: bool,
@@ -272,7 +272,7 @@ impl InlineDiagnostics {
 
     fn draw_item(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         item: &InlineDiagnosticItem,
         layout: InlineDiagnosticsLayout,
         paint_lens: bool,
@@ -481,7 +481,7 @@ impl InlineDiagnostics {
     /// does not float at an obsolete position.
     pub fn render_detail(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         window_w: f32,
         window_h: f32,
         scale: f32,
@@ -655,7 +655,7 @@ fn lens_x(pane_left: f32, cell_w: f32, text_end_col: u32, columns: u32) -> f32 {
 }
 
 fn truncate_to_fit(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     text: &str,
     max_width: f32,
     opts: &DrawOpts,

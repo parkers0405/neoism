@@ -5,9 +5,9 @@
 //! Lifted from `frontends/neoism/src/chrome/primitives/theme.rs` so
 //! native and web reach the same source of truth.
 
-use neoism_terminal_core::colors::ColorRgb;
+use neoism_terminal_types::colors::ColorRgb;
 use std::sync::RwLock;
-use sugarloaf::Color;
+use neoism_paint::Color;
 
 use super::nvchad_themes;
 

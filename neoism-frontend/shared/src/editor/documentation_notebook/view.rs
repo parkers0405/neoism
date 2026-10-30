@@ -1,11 +1,11 @@
 use super::DocumentationNotebook;
 use crate::primitives::IdeTheme;
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 /// Notebook navigation lives in Alt+N. Notebook-bound Markdown keeps its
 /// session/history semantics, but the center pane remains ordinary Markdown.
 pub fn render_navigation(
-    _sugarloaf: &mut Sugarloaf,
+    _sugarloaf: &mut dyn Paint,
     book: &mut DocumentationNotebook,
     rect: [f32; 4],
     _theme: &IdeTheme,

@@ -4,7 +4,7 @@ use crate::panels::agent_pane::composer_interactions::{ComposerInteractions,Comp
 use crate::panels::agent_pane::view::draw::{draw_text_clipped,draw_rect_clipped,opts_with_clip};
 use crate::primitives::{paint::Paint,ide_theme::IdeTheme};
 use crate::render_policy::opencode_scanner_frame;
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 pub struct FooterSnapshot {
     pub help_visible:bool,pub no_providers:bool,pub streaming:AgentStreamingStatus,

@@ -4,7 +4,7 @@
 //! resulting PtyOutput contains the expected bytes, then closes.
 //!
 //! Gated `#[ignore]` because spawning a PTY requires Unix and tends to
-//! be flaky in CI; run with `cargo test -- --ignored` to exercise.
+//! be flaky in CI; run with `bash scripts/blaze.sh test -- --ignored` to exercise.
 
 use std::time::Duration;
 

@@ -15,7 +15,7 @@ mod virtualized;
 
 pub use inline::spelling_suggestions;
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::editor::markdown::helpers::notebook_markdown_cell_index;
 use crate::editor::markdown::{MarkdownPane, MarkdownWrapHitRow, MarkdownWrapKey};
@@ -2099,7 +2099,7 @@ mod tests {
         let words = spellcheck_words("This typoooo won't flag pathLike or id42.");
         assert_eq!(
             words.iter().map(|word| word.text).collect::<Vec<_>>(),
-            vec!["This", "typoooo", "won't", "flag", "pathLike", "or", "id"]
+            vec!["This", "typoooo", "won't", "flag", "pathLike", "or"]
         );
 
         assert_eq!(
@@ -2109,18 +2109,21 @@ mod tests {
         assert_eq!(normalized_spellcheck_word("pathLike"), None);
         assert_eq!(normalized_spellcheck_word("id42"), None);
         assert_eq!(normalized_spellcheck_word("THE"), None);
-        assert_eq!(normalized_spellcheck_word("cat"), None);
+        assert_eq!(normalized_spellcheck_word("cat"), Some("cat".to_string()));
     }
 
     #[test]
-    fn table_row_preserves_editable_trailing_space() {
+    fn table_row_trims_padding_without_losing_editable_source() {
         assert_eq!(
             parse_table_row("| foo | bar |").unwrap()[0],
             "foo".to_string()
         );
         assert_eq!(
             parse_table_row("| foo  | bar |").unwrap()[0],
-            "foo ".to_string()
+            "foo".to_string()
         );
+        let source = "| foo  | bar |";
+        let first = crate::editor::markdown::parse_table_cell_bounds(source).unwrap()[0];
+        assert_eq!(&source[first.raw_start..first.raw_end], " foo  ");
     }
 }

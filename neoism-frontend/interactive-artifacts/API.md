@@ -20,7 +20,7 @@ Debug builds also discover the standard `$HOME/.local/share/cef` install automat
 
 `Viewport` is physical width/height plus physical pixels per CSS pixel. Viewports and HTML sizes are bounded before engine work. The host assigns request generations independently of source revisions, rejecting obsolete geometry, theme, destroyed/recreated keys and hidden-frame replies.
 
-`pump()` drains the latest-per-key frame mailbox and diagnostics. Frames contain tightly packed, top-down, premultiplied RGBA8 pixels. The desktop unpremultiplies them when importing into Sugarloaf. Continuous worker painting must not own an unconditional desktop redraw loop: accepted frame damage wakes the GUI, and notifications coalesce until drained.
+`pump()` drains the latest-per-key frame mailbox and diagnostics. Frames contain tightly packed, top-down, premultiplied RGBA8 pixels. The frontend converts them as required by its image import format. Continuous worker painting must not own an unconditional desktop redraw loop: accepted frame damage wakes the GUI, and notifications coalesce until drained.
 
 Pipe packets have a bounded length prefix. JSON controls and frame metadata are followed by binary RGBA packets. Frame layouts, generations and packet lengths are checked before pixel allocation. Startup/crash/protocol errors become persistent `Error::Backend` values; ordinary console diagnostics appear in `PumpOutput::diagnostics`.
 

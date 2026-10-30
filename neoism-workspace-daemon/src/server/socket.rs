@@ -825,11 +825,13 @@ pub(crate) async fn handle_socket(
                     let root =
                         match resolve_request_workspace_root(workspace_root.as_deref()) {
                             Ok(root) => root,
-                            Err(message) => {
-                                let resp = ServiceServerMessage::FilesReply {
-                                    request_id,
-                                    message: FilesServerMessage::Error { message },
-                                };
+                            Err(error) => {
+                                let message = files_handler::uncreated_notes_listing(
+                                    workspace_root.as_deref(), &message,
+                                    workspace_manager.list_host_workspaces(None).into_iter()
+                                        .filter_map(|workspace| workspace.notes_vault_dir),
+                                ).unwrap_or(FilesServerMessage::Error { message: error });
+                                let resp = ServiceServerMessage::FilesReply { request_id, message };
                                 let _ = send_json(&mut sink, &resp).await;
                                 continue;
                             }

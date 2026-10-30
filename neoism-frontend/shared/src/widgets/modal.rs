@@ -1,11 +1,12 @@
+use crate::primitives::paint::Paint;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use web_time::{Duration, Instant};
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::{GraphicOverlay, Sugarloaf};
+use neoism_paint::text::DrawOpts;
+use neoism_paint::{GraphicOverlay, };
 
 use crate::panels::agent_pane::state::NeoismAgentImage;
 use crate::panels::agent_pane::view::image_preview::register_image;
@@ -970,7 +971,7 @@ impl UniversalModal {
         self.image = Some(image);
     }
 
-    pub fn clear_image_overlay(&self, sugarloaf: &mut Sugarloaf) {
+    pub fn clear_image_overlay(&self, sugarloaf: &mut dyn Paint) {
         sugarloaf.clear_image_overlays_for(IMAGE_OVERLAY_OWNER);
     }
 
@@ -2753,7 +2754,7 @@ impl UniversalModal {
         }
     }
 
-    fn render_image(&mut self, sugarloaf: &mut Sugarloaf, viewport: [f32; 2]) {
+    fn render_image(&mut self, sugarloaf: &mut dyn Paint, viewport: [f32; 2]) {
         let [w, h] = viewport;
         let s = self.scale;
         sugarloaf.overlay_rect(0.0, 0.0, w, h, [0.025, 0.028, 0.035, 0.98], DEPTH_BACKDROP, ORDER);
@@ -2808,7 +2809,7 @@ impl UniversalModal {
         }
     }
 
-    pub fn render(&mut self, sugarloaf: &mut Sugarloaf, dimensions: (f32, f32, f32), theme: &IdeTheme) {
+    pub fn render(&mut self, sugarloaf: &mut dyn Paint, dimensions: (f32, f32, f32), theme: &IdeTheme) {
         sugarloaf.clear_image_overlays_for(IMAGE_OVERLAY_OWNER);
         if self.active && self.is_image_open() {
             self.render_image(sugarloaf, [dimensions.0 / dimensions.2, dimensions.1 / dimensions.2]);

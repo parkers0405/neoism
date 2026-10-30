@@ -19,7 +19,7 @@ server.workspaces.push(
 const packaged = process.argv.includes("--packaged");
 let app: Awaited<ReturnType<typeof launchNative>> | undefined;
 const launch = async () => app = await launchNative({
-  command: packaged ? join(process.cwd(), "dist/neoism-gpuix") : process.execPath,
+  command: packaged ? join(process.cwd(), "dist/neoism") : process.execPath,
   args: [...(packaged ? [] : ["src/main.tsx"]), "--daemon", server.endpoint, "--config", config],
   cwd: process.cwd(), env: { ...process.env, NEOISM_GPUIX_STATE_PATH: recovery },
 });

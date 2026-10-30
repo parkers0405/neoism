@@ -17,8 +17,8 @@
 //! close + docs-link buttons, and paint via `sugarloaf`. The host
 //! decides what to do with the actions it returns.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 /// Convert `[f32; 4]` colour to `[u8; 4]` for the `Text` API (the
 /// vertex shader premultiplies, so pass non-premul RGBA).
@@ -259,7 +259,7 @@ impl AssistantOverlay {
         false
     }
 
-    pub fn render(&mut self, sugarloaf: &mut Sugarloaf, dimensions: (f32, f32, f32)) {
+    pub fn render(&mut self, sugarloaf: &mut dyn Paint, dimensions: (f32, f32, f32)) {
         if !self.is_active() {
             // Immediate mode: not drawing == not visible.
             return;

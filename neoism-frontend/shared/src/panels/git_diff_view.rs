@@ -16,7 +16,7 @@ mod pr;
 #[path = "git_diff_view_toolbar.rs"]
 mod toolbar;
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 #[cfg(test)]
 use crate::editor::code::gitdiff::build_review_diff;

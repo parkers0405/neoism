@@ -10,7 +10,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 cd "$root"
-cargo run --quiet -p neoism-agent -- openapi > "$tmp/v2.json"
+bash "$root/scripts/blaze.sh" run --quiet -p neoism-agent -- openapi > "$tmp/v2.json"
 node -e 'let b=[]; process.stdin.on("data", c => b.push(c)).on("end", () => { const canonical = JSON.stringify(JSON.parse(Buffer.concat(b))); process.stdout.write(require("crypto").createHash("sha256").update(canonical).digest("hex")); })' < "$tmp/v2.json" > "$tmp/v2.sha256"
 node neoism-agent/scripts/generate-contract.mjs < "$tmp/v2.json" > "$tmp/contract.ts"
 

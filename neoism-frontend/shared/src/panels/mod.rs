@@ -6,7 +6,7 @@
 //! `Vec<Box<dyn Panel>>` and routes `UiEvent`s through them in z-order
 //! then draws them in paint order via `sugarloaf`.
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::event::UiEvent;
 use crate::layout::PanelLayout;
@@ -91,11 +91,11 @@ pub struct PanelContext<'a> {
     pub services: Services<'a>,
     pub theme: &'a ChromeTheme,
     pub time: web_time::Duration,
-    pub plugins: Option<&'a neoism_lua::PluginSnapshot>,
+    pub plugins: Option<&'a neoism_customization::PluginSnapshot>,
 }
 
 impl PanelContext<'_> {
-    pub fn style(&self, selector: &str) -> neoism_lua::StylePatch {
+    pub fn style(&self, selector: &str) -> neoism_customization::StylePatch {
         self.plugins
             .map(|plugins| crate::primitives::surface_background::resolve_style(selector, &plugins.styles))
             .unwrap_or_else(|| crate::primitives::look::active_look().styles.resolve(selector))
@@ -104,7 +104,7 @@ impl PanelContext<'_> {
 
 pub trait Panel: Send {
     fn handle_event(&mut self, event: &UiEvent, ctx: &mut PanelContext);
-    fn draw(&self, sugarloaf: &mut Sugarloaf, layout: &PanelLayout, ctx: &PanelContext);
+    fn draw(&self, sugarloaf: &mut dyn Paint, layout: &PanelLayout, ctx: &PanelContext);
     fn wants_focus(&self) -> bool {
         false
     }

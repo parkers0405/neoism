@@ -4,7 +4,7 @@
 //! fires the follow-up prompt when [`prompt_at`] passes (the model
 //! only hears about it once the deed is done).
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 use crate::primitives::ide_theme::IdeTheme;

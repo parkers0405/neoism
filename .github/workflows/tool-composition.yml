@@ -7,7 +7,11 @@ on:
       - "neoism-agent/crates/neoism-agent-server/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/**"
       - ".github/workflows/tool-composition.yml"
+      - ".github/actions/setup-blaze/**"
+      - "scripts/*blaze*"
+      - "neoism-frontend/gpuix/native/blaze-pin.json"
   push:
     branches: [main]
     paths:
@@ -15,7 +19,11 @@ on:
       - "neoism-agent/crates/neoism-agent-server/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/**"
       - ".github/workflows/tool-composition.yml"
+      - ".github/actions/setup-blaze/**"
+      - "scripts/*blaze*"
+      - "neoism-frontend/gpuix/native/blaze-pin.json"
   workflow_dispatch:
 
 permissions:
@@ -36,10 +44,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.92.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: tool-composition
+      - uses: ./.github/actions/setup-blaze
       - name: Check the built-in runtime
-        run: cargo check --locked -p neoism-agent-composition --all-targets
+        run: bash scripts/blaze.sh check --locked -p neoism-agent-composition --all-targets
       - name: Test confinement, limits, and tool composition
-        run: cargo test --locked -p neoism-agent-composition
+        run: bash scripts/blaze.sh test --locked -p neoism-agent-composition

@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::editor::markdown::MarkdownPane;
 use crate::editor::neodraw::{render_scene, Camera, Scene, Vec2};

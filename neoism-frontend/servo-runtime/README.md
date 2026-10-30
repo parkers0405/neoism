@@ -1,6 +1,6 @@
 # Neoism Servo runtime
 
-The **actual** Servo browser engine for interactive artifacts, packaged as the standalone `neoism-servo-runtime` executable. This directory has its own `[workspace]` and must remain excluded from the root Neoism workspace and dependency graph. Servo's FreeType 0.23 native link cannot coexist in Cargo's graph with Sugarloaf/font-kit's FreeType 0.20, even if Servo were optional. The IPC frontend at `../interactive-artifacts` has no Servo dependency.
+The **actual** Servo browser engine for interactive artifacts, packaged as the standalone `neoism-servo-runtime` executable. This directory has its own `[workspace]` and must remain excluded from the root Neoism workspace and dependency graph. Servo's FreeType 0.23 native link cannot coexist in Cargo's graph with the native font stack's FreeType 0.20, even if Servo were optional. The IPC frontend at `../interactive-artifacts` has no Servo dependency.
 
 Servo v0.5.0 is pinned to commit `1d44e5dd6a8b64c02f9dbf7fcbdf4ebdd0740019`; it declares MSRV 1.88 and uses development toolchain 1.95. This worker and its independent lockfile are checked on Neoism's working Rust 1.92 toolchain. Cargo's incompatible-Rust-version fallback avoids newer-MSRV transitive selections when resolving on 1.92. Worker toolchains may be selected explicitly without changing the root application's toolchain/configuration.
 

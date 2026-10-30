@@ -26,7 +26,7 @@ try {
     foreach ($package in @('teletypewriter', 'neoism-terminal-pty', 'neoism-ui')) {
         $args = "$common -p $package"
         if ($package -eq 'neoism-ui') {
-            $args += ' --features sugarloaf/wgpu --test windows_composer -- --ignored --test-threads=1 --nocapture'
+            $args += ' --test windows_composer -- --ignored --test-threads=1 --nocapture'
         } else {
             $args += ' -- --include-ignored --test-threads=1 --nocapture'
         }

@@ -6,7 +6,7 @@ use base64::Engine;
 use serde_json::Value;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
+use neoism_paint::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
 use web_time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -321,8 +321,14 @@ mod tests {
     #[test]
     fn inline_rasters_reject_oversized_dimensions_before_allocation() {
         let mut bytes = std::io::Cursor::new(Vec::new());
-        image_rs::DynamicImage::new_rgba8(257, 1)
-            .write_to(&mut bytes, image_rs::ImageFormat::Png)
+        let image = image_rs::DynamicImage::new_rgba8(257, 1);
+        image_rs::ImageEncoder::write_image(
+            image_rs::codecs::png::PngEncoder::new(&mut bytes),
+            image.as_bytes(),
+            image.width(),
+            image.height(),
+            image.color().into(),
+        )
             .unwrap();
         let source = format!(
             "data:image/png;base64,{}",

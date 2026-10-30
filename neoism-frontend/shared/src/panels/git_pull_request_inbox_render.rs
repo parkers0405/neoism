@@ -1,7 +1,7 @@
 use super::*;
 use crate::primitives::{draw_text_with_occlusion, IdeTheme};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 // Use one metric and option set for wrapping and drawing, including long unbroken titles.

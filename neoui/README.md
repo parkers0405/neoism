@@ -26,7 +26,7 @@ let root = Element::column("settings", [
     Element::spacer("legacy/theme-row").height(Size::Px(40.0)),
 ]);
 
-// Replace with Sugarloaf's complete-string logical-pixel advance measurement.
+// Replace with the host's complete-string logical-pixel advance measurement.
 let mut measure = |text: &str, style: &TextStyle| text.chars().count() as f32 * style.size * 0.5;
 let viewport = Rect::new(20.0, 60.0, 400.0, 500.0);
 let frame = runtime.layout(root, [20.0, 60.0], 400.0, viewport, &mut measure)?;
@@ -83,4 +83,4 @@ The runtime retains its private Taffy nodes and text caches across reconciliatio
 
 ## Verification
 
-`cargo test -p neoui` exercises intrinsic sizing, wrapping, Unicode fallback, newline/empty-line height, padding, flex distribution, fractional geometry, stack z-order, clipping, semantics/disable inheritance, keyed focus, stale events, clear/failure lifecycle, and mixed production-style boolean rows. No app or GPU is needed.
+`bash scripts/blaze.sh test -p neoui` from the repository root exercises intrinsic sizing, wrapping, Unicode fallback, newline/empty-line height, padding, flex distribution, fractional geometry, stack z-order, clipping, semantics/disable inheritance, keyed focus, stale events, clear/failure lifecycle, and mixed production-style boolean rows. No app or GPU is needed.

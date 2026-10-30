@@ -48,7 +48,7 @@ for (const compact of [false, true]) {
   } finally { if (editor) editor.dispose(); else coreCall("dispose", { id }); }
 }
 for (const encoding of ["cells", "runs"] as const) {
-  const terminal = new TerminalBuffer(palettes.pastel_dark, 140, 42, "ghostty", encoding);
+  const terminal = new TerminalBuffer(palettes.pastel_dark, 140, 42, encoding);
   try {
     await terminal.write(new TextEncoder().encode(Array.from({ length: 1500 }, (_, i) => `line ${i} colored \x1b[32mvalue\x1b[0m\r\n`).join("")));
     const idle = await measure(() => terminal.frame());

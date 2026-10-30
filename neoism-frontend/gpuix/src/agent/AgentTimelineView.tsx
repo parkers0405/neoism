@@ -52,7 +52,7 @@ export function scrollAgentHalfPage(model:WorkspaceModel,sessionId:string,config
 }
 
 export function AgentTimelineView(props: { sessionId: string; model: WorkspaceModel; config: AppConfig; report: (error: unknown) => void; openFile: (path: string) => void;
-  /** Composer top in pane coordinates: timeline paint and sticky table/code scrollbars end above this boundary. */
+  /** Composer top: scroll metrics and sticky controls stop here; body paint continues behind the floating card. */
   contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
   const localName=localPresenceIdentity(config).displayName;

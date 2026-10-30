@@ -11,13 +11,15 @@ on:
       - 'Cargo.lock'
       # Workspace members, including their embedded assets and build scripts.
       - 'neoism-*/**'
-      - 'sugarloaf/**'
       - 'teletypewriter/**'
       - 'corcovado/**'
-      - 'copa/**'
       - 'assets/omarchy/**'
-      - 'docs/lua-api.lua'
       - 'README.md'
+      - 'scripts/blaze.sh'
+      - 'scripts/test-workspace.mjs'
+      - 'scripts/prepare-blaze-runner.sh'
+      - '.cargo/**'
+      - 'vendor/blaze-compat/**'
       - 'misc/**'
       - '.github/workflows/nix-build.yml'
 
@@ -27,6 +29,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+      - name: Provision compiler memory
+        run: bash scripts/prepare-blaze-runner.sh
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: DeterminateSystems/flake-checker-action@main
@@ -35,4 +39,6 @@ jobs:
       - name: Check runtime library loading
         run: nix flake check --no-write-lock-file --max-jobs 1 --cores 2 --print-build-logs
       - name: Build native package
-        run: nix build .#neoism --no-write-lock-file --max-jobs 1 --cores 2 --print-build-logs
+        # The published Blaze compiler refuses the unmapped owner of Nix's
+        # sandbox root. This derivation opts out; dependencies remain pinned.
+        run: sudo nix build .#neoism-services --option sandbox relaxed --no-write-lock-file --max-jobs 1 --cores 2 --print-build-logs

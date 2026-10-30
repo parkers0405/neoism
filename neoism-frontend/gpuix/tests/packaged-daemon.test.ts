@@ -3,7 +3,7 @@ import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,chmodSync,statSy
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {packageWorkspaceDaemon} from "../src/daemon/packaged-daemon";
-function fixture(){const root=mkdtempSync(join(tmpdir(),"neoism-package-daemon-"));mkdirSync(join(root,"artifacts"));return{root,source:join(root,"artifacts","neoism-workspace-daemon-grid"),dispose:()=>rmSync(root,{recursive:true,force:true})};}
+function fixture(){const root=mkdtempSync(join(tmpdir(),"neoism-package-daemon-"));mkdirSync(join(root,"artifacts"));return{root,source:join(root,"artifacts","neoism-workspace-daemon"),dispose:()=>rmSync(root,{recursive:true,force:true})};}
 test("packaging includes the exact executable host without touching its source or an already-open distribution inode",()=>{
  const f=fixture();let fd:number|undefined;
  try{

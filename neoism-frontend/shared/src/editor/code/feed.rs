@@ -99,38 +99,38 @@ pub struct CodePluginRenderSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct CodePluginVirtualLine {
-    pub id: neoism_lua::PluginResourceId,
-    pub owner: neoism_lua::PluginOwner,
+    pub id: neoism_customization::PluginResourceId,
+    pub owner: neoism_customization::PluginOwner,
     pub text: String,
-    pub style: neoism_lua::ResolvedDecorationStyle,
-    pub actions: Vec<neoism_lua::PluginDiagnosticAction>,
+    pub style: neoism_customization::ResolvedDecorationStyle,
+    pub actions: Vec<neoism_customization::PluginDiagnosticAction>,
 }
 
 #[derive(Clone, Debug)]
 pub struct CodePluginHitRegion {
     pub rect: [f32; 4],
-    pub owner: neoism_lua::PluginOwner,
-    pub resource: neoism_lua::PluginResourceId,
-    pub action: neoism_lua::PluginDiagnosticAction,
+    pub owner: neoism_customization::PluginOwner,
+    pub resource: neoism_customization::PluginResourceId,
+    pub action: neoism_customization::PluginDiagnosticAction,
 }
 
 #[derive(Clone, Debug)]
 pub struct CodeLinePluginDecoration {
-    pub id: neoism_lua::PluginResourceId,
-    pub owner: neoism_lua::PluginOwner,
+    pub id: neoism_customization::PluginResourceId,
+    pub owner: neoism_customization::PluginOwner,
     pub start: usize,
     pub end: usize,
-    pub layer: neoism_lua::DecorationLayer,
+    pub layer: neoism_customization::DecorationLayer,
     pub text: Option<String>,
     pub icon: Option<String>,
     pub severity: Option<CodeDiagnosticSeverity>,
-    pub style: neoism_lua::ResolvedDecorationStyle,
-    pub actions: Vec<neoism_lua::PluginDiagnosticAction>,
+    pub style: neoism_customization::ResolvedDecorationStyle,
+    pub actions: Vec<neoism_customization::PluginDiagnosticAction>,
 }
 
 impl CodePluginRenderSnapshot {
     pub fn try_from_contract(
-        snapshot: &neoism_lua::PluginDecorationSnapshot,
+        snapshot: &neoism_customization::PluginDecorationSnapshot,
         lines: &[String],
     ) -> Result<Self, String> {
         const MAX_DECORATIONS: usize = 50_000;
@@ -172,7 +172,7 @@ impl CodePluginRenderSnapshot {
                     "plugin virtual text exceeds the immutable snapshot limit".into()
                 );
             }
-            if decoration.layer == neoism_lua::DecorationLayer::VirtualLine {
+            if decoration.layer == neoism_customization::DecorationLayer::VirtualLine {
                 output.virtual_lines.entry(first).or_default().push(
                     CodePluginVirtualLine {
                         id: decoration.id,
@@ -184,7 +184,7 @@ impl CodePluginRenderSnapshot {
                 );
                 continue;
             }
-            if decoration.layer == neoism_lua::DecorationLayer::Fold && last > first {
+            if decoration.layer == neoism_customization::DecorationLayer::Fold && last > first {
                 output
                     .hidden_lines
                     .extend((first + 1)..=last.min(lines.len().saturating_sub(1)));
@@ -216,16 +216,16 @@ impl CodePluginRenderSnapshot {
                         text: decoration.text.clone(),
                         icon: decoration.style.icon.clone(),
                         severity: decoration.severity.map(|severity| match severity {
-                            neoism_lua::PluginDiagnosticSeverity::Error => {
+                            neoism_customization::PluginDiagnosticSeverity::Error => {
                                 CodeDiagnosticSeverity::Error
                             }
-                            neoism_lua::PluginDiagnosticSeverity::Warning => {
+                            neoism_customization::PluginDiagnosticSeverity::Warning => {
                                 CodeDiagnosticSeverity::Warn
                             }
-                            neoism_lua::PluginDiagnosticSeverity::Information => {
+                            neoism_customization::PluginDiagnosticSeverity::Information => {
                                 CodeDiagnosticSeverity::Info
                             }
-                            neoism_lua::PluginDiagnosticSeverity::Hint => {
+                            neoism_customization::PluginDiagnosticSeverity::Hint => {
                                 CodeDiagnosticSeverity::Hint
                             }
                         }),
@@ -240,9 +240,9 @@ impl CodePluginRenderSnapshot {
                 .filter_map(|decoration| {
                     matches!(
                         decoration.layer,
-                        neoism_lua::DecorationLayer::Highlight
-                            | neoism_lua::DecorationLayer::Conceal
-                            | neoism_lua::DecorationLayer::Diagnostic
+                        neoism_customization::DecorationLayer::Highlight
+                            | neoism_customization::DecorationLayer::Conceal
+                            | neoism_customization::DecorationLayer::Diagnostic
                     )
                     .then_some(CodeLinePluginSpan {
                         start: decoration.start,
@@ -251,7 +251,7 @@ impl CodePluginRenderSnapshot {
                         background: decoration.style.background,
                         underline: decoration.style.underline,
                         concealed: decoration.layer
-                            == neoism_lua::DecorationLayer::Conceal,
+                            == neoism_customization::DecorationLayer::Conceal,
                         severity: decoration.severity,
                     })
                 })
@@ -264,7 +264,7 @@ impl CodePluginRenderSnapshot {
     }
 
     pub fn from_contract(
-        snapshot: &neoism_lua::PluginDecorationSnapshot,
+        snapshot: &neoism_customization::PluginDecorationSnapshot,
         lines: &[String],
     ) -> Self {
         Self::try_from_contract(snapshot, lines).unwrap_or_default()

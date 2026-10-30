@@ -97,7 +97,7 @@ mod tests {
             .content
             .contains("Welcome to Neoism"));
         assert!(NeoismDocumentationService
-            .search("shader", 8)
+            .search("wallpaper", 8)
             .unwrap()
             .iter()
             .any(|hit| hit.path == "Neoism/Appearance.md"));

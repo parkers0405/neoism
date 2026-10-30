@@ -18,6 +18,8 @@
 # Refactored for better error handling, added support for custom log levels,
 # and improved comments for open-source contributors.
 set -euo pipefail
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
 
 PORT="${NEOISM_PORT:-7878}"
 LOG_LEVEL="${NEOISM_LOG:-info}"
@@ -93,4 +95,4 @@ say "log level    : ${LOG_LEVEL}"
 # operator-set value is respected.
 export RUST_LOG="${RUST_LOG:-$LOG_LEVEL}"
 say "starting neoism-workspace-daemon …"
-exec cargo run -p neoism-workspace-daemon -- --addr "${ADDR}"
+exec bash "$repo_root/scripts/blaze.sh" run -p neoism-workspace-daemon -- --addr "${ADDR}"

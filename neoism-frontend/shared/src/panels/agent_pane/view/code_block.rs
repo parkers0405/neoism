@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::panels::agent_pane::state::NeoismAgentMessage;
 use crate::syntax::{Lang, SynTok};
@@ -450,7 +450,7 @@ mod tests {
                 assert_eq!(super::intersect_rect(block, clip).is_some(), chrome);
                 for (rect, expected) in [(header, header_visible), (body, body_visible)] {
                     let opts = super::opts_with_clip(
-                        sugarloaf::text::DrawOpts {
+                        neoism_paint::text::DrawOpts {
                             clip_rect: Some(rect),
                             ..Default::default()
                         },

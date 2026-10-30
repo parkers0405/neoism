@@ -5,7 +5,7 @@ import {serverJob,serverDraftValues,serverFormOperation,type ServerDraft,type Se
 import type {SavedSystem,SshHost} from "../daemon/ssh-transport";
 import { Effect, Schema } from "effect";
 import {posix,win32} from "node:path";
-import type { ConfigDocument, ConfigDescriptor } from "../../../web/src/workspace/types";
+import type { ConfigDocument, ConfigDescriptor } from "../../../../neoism-protocol/typescript/types";
 import type { AppConfig } from "../config";
 import { publicEndpoint } from "../config";
 import type { WorkspaceModel } from "../model";
@@ -97,7 +97,7 @@ export class ChromeActionsController {
           const [valuesReply, schemaReply] = await Promise.all([this.request("GetConfig", abort.signal), this.request("GetConfigSchema", abort.signal)]);
           const values = expectVariant(valuesReply, "Config"), schema = expectVariant(schemaReply, "ConfigSchema");
           if (!isRecord(values) || !isRecord(schema) || !Array.isArray(schema.descriptors)) throw new Error("Invalid daemon settings catalog");
-          if (!abort.signal.aborted) { this.create("settings", { values: values.value, descriptors: (schema.descriptors as ConfigDescriptor[]).filter(descriptor => descriptor.path !== "editor.minimap"), snapshot: this.options.model.state.ui.chromeSnapshot }); this.options.model.setUI({ chromeSnapshot: null }); } return;
+          if (!abort.signal.aborted) { this.create("settings", { values: values.value, descriptors: (schema.descriptors as ConfigDescriptor[]).filter(descriptor => descriptor.path !== "editor.minimap" && !/^(?:renderer|platform\.[^.]+\.renderer)(?:\.|$)/.test(descriptor.path)), snapshot: this.options.model.state.ui.chromeSnapshot }); this.options.model.setUI({ chromeSnapshot: null }); } return;
         }
         case "OpenThemes": case "OpenThemePicker": this.create("themes"); return;
         case "ConfigEditor": { this.options.model.openConfigDocument(await this.configDocument(true)); this.close(); return; }

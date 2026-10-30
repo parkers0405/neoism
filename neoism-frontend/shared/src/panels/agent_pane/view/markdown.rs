@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use pulldown_cmark::{Event, Options, Parser};
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
@@ -414,6 +414,11 @@ pub trait AgentMarkdownPane {
     fn markdown_horizontal_scrollbar_visible(&self, _key: &str) -> bool {
         false
     }
+    /// Keep sticky controls above floating chrome while body paint extends
+    /// behind it. Standalone Markdown hosts use their ordinary paint clip.
+    fn markdown_control_viewport(&self) -> Option<[f32; 4]> {
+        None
+    }
     fn code_copy_feedback_progress(&self, _target: &str) -> Option<f32> {
         None
     }
@@ -552,6 +557,10 @@ impl AgentMarkdownPane for NeoismAgentPane {
 
     fn markdown_horizontal_scrollbar_visible(&self, key: &str) -> bool {
         NeoismAgentPane::markdown_horizontal_scrollbar_visible(self, key)
+    }
+
+    fn markdown_control_viewport(&self) -> Option<[f32; 4]> {
+        self.timeline_visible_rect()
     }
 
     fn code_copy_feedback_progress(&self, target: &str) -> Option<f32> {
@@ -3000,9 +3009,13 @@ pub(super) fn render_markdown_code_block(
     ) else {
         return;
     };
+    let control_clip = intersect_rect(
+        viewport_clip,
+        pane.markdown_control_viewport().unwrap_or(viewport_clip),
+    );
     if max_scroll > 1.0 && !suppress_interactions {
         if let Some(body_hit_rect) =
-            intersect_rect([x, body_top, w, (h - header_h).max(0.0)], viewport_clip)
+            control_clip.and_then(|clip| intersect_rect([x, body_top, w, (h - header_h).max(0.0)], clip))
         {
             pane.register_markdown_horizontal_scroll_rect(
                 scroll_key.to_string(),
@@ -3121,12 +3134,11 @@ pub(super) fn render_markdown_code_block(
                         && my <= rect[1] + rect[3]
                 })
             });
-        let track = sticky_markdown_horizontal_scrollbar_track(
-            code_clip,
-            x + code_left_pad,
-            code_viewport_w,
-            s,
-        );
+        let track = control_clip
+            .and_then(|clip| intersect_rect(code_clip, clip))
+            .and_then(|clip| sticky_markdown_horizontal_scrollbar_track(
+                clip, x + code_left_pad, code_viewport_w, s,
+            ));
         render_markdown_horizontal_scrollbar(
             sugarloaf,
             pane,
@@ -3625,12 +3637,16 @@ fn render_markdown_table<P: AgentMarkdownPane>(
     let Some(table_clip) = intersect_rect([x, y, w, h], viewport_clip) else {
         return;
     };
+    let control_clip = intersect_rect(
+        table_clip,
+        pane.markdown_control_viewport().unwrap_or(viewport_clip),
+    );
     if max_scroll > 1.0 && !suppress_interactions {
-        pane.register_markdown_horizontal_scroll_rect(
-            scroll_key.to_string(),
-            table_clip,
-            max_scroll,
-        );
+        if let Some(control_clip) = control_clip {
+            pane.register_markdown_horizontal_scroll_rect(
+                scroll_key.to_string(), control_clip, max_scroll,
+            );
+        }
     }
     let border = theme.f32(theme.fg);
     let border_w = 1.0 * s;
@@ -3738,12 +3754,11 @@ fn render_markdown_table<P: AgentMarkdownPane>(
                     && my >= table_clip[1]
                     && my <= table_clip[1] + table_clip[3]
             });
-        let track = sticky_markdown_horizontal_scrollbar_track(
-            table_clip,
-            x + 1.0 * s,
-            (w - 2.0 * s).max(1.0),
-            s,
-        );
+        let track = control_clip.and_then(|clip| {
+            sticky_markdown_horizontal_scrollbar_track(
+                clip, x + 1.0 * s, (w - 2.0 * s).max(1.0), s,
+            )
+        });
         render_markdown_horizontal_scrollbar(
             sugarloaf,
             pane,

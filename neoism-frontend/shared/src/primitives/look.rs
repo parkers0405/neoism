@@ -115,7 +115,7 @@ pub struct IconOverride {
 #[derive(Clone, Debug, Default)]
 pub struct LookStyle {
     /// Published atomically with the accepted pack look snapshot.
-    pub styles: neoism_lua::StyleSheet,
+    pub styles: neoism_customization::StyleSheet,
     pub scrollbar: ScrollbarStyle,
     pub markdown: MarkdownStyle,
     /// Per-letter tint cycle for the NEOISM wordmarks; empty = tint

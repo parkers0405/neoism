@@ -3,8 +3,8 @@
 // This source code is licensed under the MIT license found in the
 // LICENSE file in the root directory of this source tree.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 use web_time::Instant;
 
 use crate::primitives::draw_overlay_icon_centered;
@@ -214,7 +214,7 @@ impl SearchOverlay {
         false
     }
 
-    pub fn render(&mut self, sugarloaf: &mut Sugarloaf, dimensions: (f32, f32, f32)) {
+    pub fn render(&mut self, sugarloaf: &mut dyn Paint, dimensions: (f32, f32, f32)) {
         if !self.is_active() {
             // Immediate mode: not drawing == not visible. No cleanup
             // needed — previous frame's instances were cleared at

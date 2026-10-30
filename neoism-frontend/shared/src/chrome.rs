@@ -3,10 +3,9 @@
 //! `Chrome` owns every panel that has been lifted into `neoism-ui`,
 //! lays them out within a window-sized viewport, distributes
 //! `UiEvent`s in modal-aware priority order, and orchestrates the
-//! per-frame draw pass through `sugarloaf`.
+//! per-frame draw pass through `neoism_paint`.
 //!
-//! Both the native (winit) and web (wasm) frontends construct a
-//! single `Chrome` per top-level window and call
+//! Hosts can construct a single `Chrome` per top-level viewport and call
 //! [`Chrome::set_layout`] + [`Chrome::handle_event`] + [`Chrome::draw`]
 //! every frame.
 //!
@@ -126,10 +125,8 @@ impl GitBranch {
 }
 
 /// State holder for the custom mouse-cursor sprite. The module exposes
-/// a free `draw(sugarloaf, x, y, scale)`; the desktop renderer feeds it
-/// the live `Mouse` position directly. The web bridge has no equivalent
-/// host-side mouse hook, so this struct caches the latest pointer
-/// position pushed from JS through `ChromeBridge::set_custom_cursor`.
+/// a free draw function; this struct caches the pointer position supplied
+/// by the host.
 /// `Chrome::draw` paints the sprite from the cached position when
 /// `visible` is `true`.
 #[derive(Default, Debug, Clone, Copy)]
@@ -254,9 +251,9 @@ pub enum PanelKey {
 /// `AgentLabel + Copy + PartialEq` API without dragging the host's
 /// `AgentKind` enum into this crate.
 pub struct Chrome<A: Send + Copy + 'static = ()> {
-    /// Immutable per-window plugin output. Lua never enters draw or event
-    /// paths; panels only resolve typed values from this snapshot.
-    plugins: std::sync::Arc<neoism_lua::PluginSnapshot>,
+    /// Immutable per-window contributions. Panels resolve typed values from
+    /// this snapshot without executing a plugin runtime.
+    plugins: std::sync::Arc<neoism_customization::PluginSnapshot>,
     plugin_hitboxes: Vec<crate::panels::custom_ui::CustomUiHitbox>,
     pending_plugin_commands: Vec<String>,
     /// Per-frame rects for each panel. Re-computed by `set_layout`.

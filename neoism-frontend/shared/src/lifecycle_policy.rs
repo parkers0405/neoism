@@ -11,7 +11,7 @@
 //! match them byte-for-byte.
 //!
 //! Renderer-neutral: no Sugarloaf, Taffy, PTY, native-window dependencies.
-//! Mode comes from `neoism_terminal_core::crosswords::Mode`, which is
+//! Mode comes from `neoism_terminal_types::mode::Mode`, which is
 //! already shared.
 //!
 //! What lives here:

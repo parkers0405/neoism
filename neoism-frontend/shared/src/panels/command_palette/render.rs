@@ -6,8 +6,8 @@
 //! Palette drawing pipeline: rect primitives, copy icon, and the main
 //! `render` method that walks the filtered row list each frame.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 use unicode_segmentation::UnicodeSegmentation;
 use web_time::Instant;
 
@@ -489,7 +489,7 @@ impl CommandPalette {
                         < OPEN_POP_MS))
     }
 
-    pub fn render(&mut self, sugarloaf: &mut Sugarloaf, dimensions: (f32, f32, f32), theme: &IdeTheme) {
+    pub fn render(&mut self, sugarloaf: &mut dyn Paint, dimensions: (f32, f32, f32), theme: &IdeTheme) {
         super::background_preview::BackgroundPreviewCache::clear(sugarloaf);
         self.render_with_background(sugarloaf, dimensions, theme, |cache, painter, entry, rect, scale| cache.draw(painter, entry, rect, scale));
     }

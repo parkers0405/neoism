@@ -1,7 +1,7 @@
 //! Inbox list chrome stays compact; menus use the same small overlay treatment as the top bar.
 use super::*;
 use crate::primitives::{draw_text_with_occlusion, visible_rect_fragments, IdeTheme};
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 fn tone(theme: &IdeTheme, tone: format::Tone) -> u32 {
     match tone {

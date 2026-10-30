@@ -1,5 +1,5 @@
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use crate::customization::{color_f32, color_u8};
 use crate::primitives::IdeTheme;
@@ -19,8 +19,8 @@ pub struct CustomUiHitbox {
 }
 
 pub fn render(
-    sugarloaf: &mut Sugarloaf,
-    plugins: &neoism_lua::PluginSnapshot,
+    sugarloaf: &mut dyn Paint,
+    plugins: &neoism_customization::PluginSnapshot,
     layout: CustomUiLayout,
     theme: &IdeTheme,
 ) -> Vec<CustomUiHitbox> {
@@ -105,10 +105,10 @@ pub fn render(
     for panel in panels {
         let style = crate::primitives::surface_background::resolve_style(&format!("panel.{}", panel.id), &plugins.styles);
         let candidate_anchor = match panel.location {
-            neoism_lua::PanelLocation::Left => layout.left,
-            neoism_lua::PanelLocation::Right => layout.right,
-            neoism_lua::PanelLocation::Bottom => layout.bottom,
-            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => {
+            neoism_customization::PanelLocation::Left => layout.left,
+            neoism_customization::PanelLocation::Right => layout.right,
+            neoism_customization::PanelLocation::Bottom => layout.bottom,
+            neoism_customization::PanelLocation::Center | neoism_customization::PanelLocation::Overlay => {
                 layout.window
             }
         };
@@ -122,15 +122,15 @@ pub fn render(
         let width = style.width.unwrap_or(320.0).min(anchor[2]);
         let height = style.height.unwrap_or(240.0).min(anchor[3]);
         let x = match panel.location {
-            neoism_lua::PanelLocation::Right => anchor[0] + anchor[2] - width,
-            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => {
+            neoism_customization::PanelLocation::Right => anchor[0] + anchor[2] - width,
+            neoism_customization::PanelLocation::Center | neoism_customization::PanelLocation::Overlay => {
                 anchor[0] + (anchor[2] - width) * 0.5
             }
             _ => anchor[0],
         };
         let y = match panel.location {
-            neoism_lua::PanelLocation::Bottom => anchor[1] + anchor[3] - height,
-            neoism_lua::PanelLocation::Center | neoism_lua::PanelLocation::Overlay => {
+            neoism_customization::PanelLocation::Bottom => anchor[1] + anchor[3] - height,
+            neoism_customization::PanelLocation::Center | neoism_customization::PanelLocation::Overlay => {
                 anchor[1] + (anchor[3] - height) * 0.5
             }
             _ => anchor[1],

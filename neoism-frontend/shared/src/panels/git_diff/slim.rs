@@ -32,7 +32,7 @@ use std::cell::Cell;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::event::{LogicalKey, NamedKey, UiEvent};
 use crate::layout::{PanelLayout, Rect};
@@ -360,7 +360,7 @@ impl Panel for GitDiff {
         }
     }
 
-    fn draw(&self, sugarloaf: &mut Sugarloaf, layout: &PanelLayout, ctx: &PanelContext) {
+    fn draw(&self, sugarloaf: &mut dyn Paint, layout: &PanelLayout, ctx: &PanelContext) {
         if !self.visible {
             return;
         }

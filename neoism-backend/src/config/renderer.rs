@@ -3,10 +3,6 @@ use std::fmt::Display;
 use std::path::PathBuf;
 // `Filter` is wgpu-only (librashader runtime is wgpu-only upstream).
 // Gated together with the `wgpu` feature.
-#[cfg(feature = "wgpu")]
-use sugarloaf::Filter;
-#[cfg(feature = "wgpu")]
-use sugarloaf::ShaderOverlayConfig;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Renderer {
@@ -19,9 +15,6 @@ pub struct Renderer {
         rename = "disable-occluded-render"
     )]
     pub disable_occluded_render: bool,
-    #[serde(default = "Vec::default")]
-    #[cfg(feature = "wgpu")]
-    pub filters: Vec<Filter>,
     #[serde(default = "Vec::default", rename = "shader-overlays")]
     pub shader_overlays: Vec<PathBuf>,
     #[serde(default = "RendererStategy::default")]
@@ -70,8 +63,6 @@ impl Default for Renderer {
             backend: Backend::default(),
             disable_unfocused_render: false,
             disable_occluded_render: default_disable_occluded_render(),
-            #[cfg(feature = "wgpu")]
-            filters: Vec::default(),
             shader_overlays: Vec::default(),
             strategy: RendererStategy::Events,
             use_cpu: default_use_cpu(),
@@ -79,16 +70,9 @@ impl Default for Renderer {
     }
 }
 
-#[cfg(feature = "wgpu")]
-impl Renderer {
-    pub fn shader_overlay_config(&self) -> ShaderOverlayConfig {
-        ShaderOverlayConfig::new(self.shader_overlays.clone())
-    }
-}
-
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub enum Backend {
-    // Leave Sugarloaf/WGPU to decide
+    // Let the native frontend select its rendering backend.
     #[serde(alias = "automatic")]
     #[cfg_attr(not(target_os = "macos"), default)]
     Automatic,

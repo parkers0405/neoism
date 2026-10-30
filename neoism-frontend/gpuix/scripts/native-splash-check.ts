@@ -10,8 +10,11 @@ const server=createAgentDaemon({deferCreations:false,directoryEntries:{"":[{name
 server.files.set("README.md",Array.from({length:180},(_,i)=>`Paragraph ${i+1} with **rich Markdown text**.`).join("\n\n"));
 server.files.set("scroll.rs",Array.from({length:240},(_,i)=>`pub fn scroll_${i}() -> usize { ${i} }`).join("\n"));
 const packaged=process.argv.includes("--packaged");
-const app=await launchNative({openWorkspaceIds:["a","b"],command:packaged?join(process.cwd(),"dist/neoism-gpuix"):process.execPath,args:[...(packaged?[]:["src/main.tsx"]),"--daemon",server.endpoint,"--workspace","a","--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:join(directory,"state.json")}});
+const app=await launchNative({openWorkspaceIds:["a","b"],command:packaged?(process.env.NEOISM_GPUIX_TEST_BINARY||join(process.cwd(),"dist/neoism")):process.execPath,args:[...(packaged?[]:["src/main.tsx"]),"--daemon",server.endpoint,"--workspace","a","--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:join(directory,"state.json")}});
 const until=async(predicate:()=>Promise<boolean>|boolean)=>{const end=Date.now()+15000;while(!await predicate()){if(Date.now()>end)throw new Error("Welcome state did not converge");await Bun.sleep(10);}};
+// Recovery is checkpointed every two seconds. Observe a full checkpoint
+// interval before comparing the reverse gesture with its settled starting point.
+const settledScroll=async(read:()=>number)=>{let position=read(),stable=Date.now();const deadline=Date.now()+10000;while(Date.now()-stable<2200){await Bun.sleep(50);const next=read();if(Math.abs(next-position)>.5){position=next;stable=Date.now();}if(Date.now()>deadline)throw new Error("Scroll recovery did not settle");}return position;};
 const flatten=(nodes:TreeNode[]):TreeNode[]=>nodes.flatMap(node=>[node,...flatten(node.children||[])]);
 const nodes=async()=>{const {tree}=await app.call("getTree",{});return flatten(tree?[tree]:[]);};
 const creates=()=>server.ptyRequests.filter(request=>request.tag==="CreatePty");
@@ -20,7 +23,8 @@ const tabs=async(title:string)=>(await nodes()).filter(node=>/^pane-tab:\d+$/.te
 let stage="independent default Welcome tab";
 try{
  await app.getByTestId("splash-wordmark").waitFor({timeoutMs:20000});
- const first=(await tabs("Welcome"))[0];if(!first?.testId)throw new Error("First buffer is not Welcome");
+ await until(async()=> (await tabs("Home")).length>0);
+ const first=(await tabs("Home"))[0];if(!first?.testId)throw new Error("First buffer is not Home");
  if(creates().length||await app.getByTestId("terminal").count()||await app.getByTestId("composer").count())throw new Error("Welcome mounted a shell or Agent composer");
  const actions=["change-directory","open-notes","open-file-tree","open-agent","search","open-agent-panel","open-command-palette","new-terminal"];
  for(const action of actions)await app.getByTestId(`splash-action:${action}`).waitFor();
@@ -29,11 +33,11 @@ try{
  if(creates().length||inputs().length||server.requests.some(request=>request.tag==="SubmitPrompt"))throw new Error("Welcome wordmark caused backend mutation");
  stage="plus creates another independent Welcome tab";
  const plus=(await nodes()).find(node=>/^pane-new-/.test(node.testId||""));if(!plus?.testId)throw new Error("Missing tab-strip plus");
- await app.getByTestId(plus.testId).click();await until(async()=>await tabs("Welcome").then(found=>found.length===2));
+ await app.getByTestId(plus.testId).click();await until(async()=>await tabs("Home").then(found=>found.length===2));
  if(creates().length||await app.getByTestId("terminal").count())throw new Error("Plus spawned a terminal");
  stage="Agent menu and its wordmark stay separate";
  await app.getByTestId("splash-action:open-agent").click();await app.getByTestId("composer").waitFor();await app.getByTestId("agent-wordmark").click();
- if(!server.requests.some(request=>request.tag==="CreateThread")||server.requests.some(request=>request.tag==="SubmitPrompt"))throw new Error("Agent action/replay behavior differs");
+ if(server.requests.some(request=>request.tag==="CreateThread"||request.tag==="SubmitPrompt")||creates().length)throw new Error("Opening a draft Agent tab or replaying its wordmark created a server session");
  await app.getByTestId(first.testId).click();await app.getByTestId("splash-wordmark").waitFor();
  stage="Terminal action opens a plain Grid terminal";
  await app.getByTestId("splash-action:new-terminal").click();await app.getByTestId("terminal").waitFor();
@@ -46,17 +50,17 @@ try{
  await app.getByTestId(first.testId).click();await app.getByTestId("splash-wordmark").waitFor();
  await app.call("keystrokes",{keys:"x"});await app.getByTestId("splash-wordmark").waitFor();if(inputs().length!==1)throw new Error("Welcome forwarded typing to terminal");
  await app.getByTestId("workspace:b").click();await app.getByTestId("splash-wordmark").waitFor();if(creates().length!==1)throw new Error("Opening workspace Welcome spawned a PTY");
- await app.getByTestId("workspace:a").click();await app.getByTestId("splash-wordmark").waitFor();if((await tabs("Welcome")).length!==2||creates().length!==1)throw new Error("Roundtrip duplicated/lost tabs or respawned shell");
+ await app.getByTestId("workspace:a").click();await app.getByTestId("splash-wordmark").waitFor();if((await tabs("Home")).length!==2||creates().length!==1)throw new Error("Roundtrip duplicated/lost tabs or respawned shell");
  const saved=()=>{try{return JSON.parse(readFileSync(join(directory,"state.json"),"utf8"));}catch{return {};}};
  const markdownScroll=()=>Math.max(0,...Object.values(saved().ui?.markdownViews||{}).map((view:any)=>Number(view.scrollY)||0));
  const codeScroll=()=>Math.max(0,...Object.entries(saved().editors||{}).filter(([key])=>key.includes("scroll.rs")).map(([,view]:any)=>Number(view.scrollY)||0));
  stage="Markdown and Code follow the same precise trackpad direction";
  await app.getByTestId("file:README.md").click();const markdown=app.getByTestId("rich-markdown-editor");await markdown.waitFor();await markdown.click();
- await markdown.wheel(0,-220);await until(()=>markdownScroll()>100);await Bun.sleep(350);const mdForward=markdownScroll();
- await markdown.wheel(0,130);await until(()=>markdownScroll()<mdForward-50);
+ stage="Markdown trackpad forward";await markdown.wheel(0,-220);await until(()=>markdownScroll()>100);const mdForward=await settledScroll(markdownScroll);
+ stage="Markdown trackpad backward";await markdown.wheel(0,130);await until(()=>markdownScroll()<mdForward-50);
  await app.getByTestId("file:scroll.rs").click();const code=app.getByTestId("code-editor");await code.waitFor();await code.click();
- await code.wheel(0,-220);await until(()=>codeScroll()>100);await Bun.sleep(350);const codeForward=codeScroll();
- await code.wheel(0,130);await until(()=>codeScroll()<codeForward-50);
+ stage="Code trackpad forward";await code.wheel(0,-220);await until(()=>codeScroll()>100);const codeForward=await settledScroll(codeScroll);
+ stage="Code trackpad backward";await code.wheel(0,130);await until(()=>codeScroll()<codeForward-50);
  console.log(JSON.stringify({packaged,independentDefaultWelcome:true,plusCreatesWelcome:true,welcomeCreatesNoPty:true,originalEightMenuActions:true,wordmarkNativeCanvas:true,realSdkAgent:true,plainGridTerminal:true,firstByteExactlyOnce:true,workspaceRoundtrip:true,matchingPreciseScrollDirections:true}));
-}catch(error){console.error(`Native Welcome check failed at ${stage}`);console.error(JSON.stringify({pty:server.ptyRequests,agent:server.requests.map(request=>request.tag)}));throw error;}
+}catch(error){console.error(`Native Welcome check failed at ${stage}`);console.error(JSON.stringify({pty:server.ptyRequests,agent:server.requests.map(request=>request.tag),tabs:(await nodes().catch(()=>[])).filter(node=>node.testId?.startsWith("pane-tab:")).map(node=>({id:node.testId,text:flatten([node]).map(child=>child.text).filter(Boolean)})),saved:JSON.parse(readFileSync(join(directory,"state.json"),"utf8"))}));throw error;}
 finally{await app.close();server.stop();rmSync(directory,{recursive:true,force:true});}

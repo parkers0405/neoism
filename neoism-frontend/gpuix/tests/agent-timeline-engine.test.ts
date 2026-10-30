@@ -56,7 +56,10 @@ test("refining lazy row heights never reverses visible text during slow scrollin
     }
     expect(matched).toBeGreaterThan(1000);
   } finally {coreCall("agenttimeline.dispose",{id});}
-});
+// This exercises 1,200 synchronous paint frames, including the newly exposed
+// area behind the floating composer. Keep all direction/anchor assertions;
+// throughput is measured separately by benchmark:scroll.
+},15000);
 
 test("native canvas encoding matches the original JavaScript paint translation", () => {
   const id = engine(), config={...loadConfig(["--config","/nonexistent/paint-parity"],{}),fontFamily:"Cascadia Code NF",fontWeight:400};

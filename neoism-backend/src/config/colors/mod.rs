@@ -8,23 +8,23 @@ use serde::{de, Deserialize};
 use std::num::ParseIntError;
 
 // Phase 3b: the wire/data forms of `ColorRgb`, `AnsiColor`, and
-// `NamedColor` moved into `neoism-terminal-core` so the terminal
+// `NamedColor` moved into `neoism-terminal-types` so the terminal
 // engine can reference them without depending on sugarloaf. Backend
 // code keeps the renderer-side helpers (theme deserialization, wgpu
 // conversion). Call sites that need the type directly import it from
-// `neoism_terminal_core::colors`; the `ColorRgbExt` trait below adds
+// `neoism_terminal_types::colors`; the `ColorRgbExt` trait below adds
 // the sugarloaf-flavoured `to_wgpu` / `to_composition` helpers.
 //
 // No compatibility re-export — call sites must say
-// `neoism_terminal_core::colors::ColorRgb` (or the relevant alias)
+// `neoism_terminal_types::colors::ColorRgb` (or the relevant alias)
 // explicitly. The local `use` below brings the type into scope only
 // for the helpers defined in this file.
-use neoism_terminal_core::colors::ColorRgb;
+use neoism_terminal_types::colors::ColorRgb;
 
-// `ColorWGPU` is the legacy name; `sugarloaf::Color` is the actual
+// `ColorWGPU` is the legacy name; `neoism_paint::Color` is the actual
 // type now (mirrors `wgpu::Color`'s shape, but doesn't drag wgpu
 // into the dep tree on Linux/macOS native builds).
-pub type ColorWGPU = sugarloaf::Color;
+pub type ColorWGPU = neoism_paint::Color;
 pub type ColorArray = [f32; 4];
 pub type ColorComposition = (ColorArray, ColorWGPU);
 
@@ -549,8 +549,8 @@ impl ColorBuilder {
         }
     }
 
-    pub fn to_wgpu(&self) -> sugarloaf::Color {
-        sugarloaf::Color {
+    pub fn to_wgpu(&self) -> neoism_paint::Color {
+        neoism_paint::Color {
             r: self.red,
             g: self.green,
             b: self.blue,
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_conversion_from_hex_sgb_255() {
-        let color: sugarloaf::Color =
+        let color: neoism_paint::Color =
             ColorBuilder::from_hex(String::from("#151515"), Format::SRGB0_1)
                 .unwrap()
                 .to_wgpu();
@@ -759,7 +759,7 @@ mod tests {
 
     #[test]
     fn test_conversion_from_hex_sgb_1() {
-        let color: sugarloaf::Color =
+        let color: neoism_paint::Color =
             ColorBuilder::from_hex(String::from("#151515"), Format::SRGB0_255)
                 .unwrap()
                 .to_wgpu();

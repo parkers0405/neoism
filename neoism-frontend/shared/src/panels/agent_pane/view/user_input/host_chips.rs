@@ -2,7 +2,7 @@
 use super::{status_chip_font_size,model_chip_label,capitalize_chip_label,model_logo_advance,MODEL_LOGO_SIDE};
 use crate::{primitives::paint::Paint,panels::agent_pane::icon::ProviderLogo};
 use serde::Serialize;
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 #[derive(Serialize)]
 pub struct Chip {pub rect:[f32;4],pub label_rect:[f32;4],pub caret_rect:[f32;4],pub logo_rect:Option<[f32;4]>,pub label:String}
 #[derive(Serialize)]

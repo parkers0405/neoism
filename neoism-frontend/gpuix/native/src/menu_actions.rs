@@ -115,7 +115,6 @@ fn extensions(values: &Value) -> Vec<ExtensionEntry> {
                 status,
                 repository_url: v["repository_url"].as_str().map(str::to_owned),
                 lsp_source: v["lsp_source"].as_str().map(str::to_owned),
-                lua_plugin: None,
             }
         })
         .collect()
@@ -246,7 +245,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
     }
     if op == "menu.background-catalog" {
         let configured =
-            serde_json::from_value::<sugarloaf::ImageProperties>(v["image"].clone()).ok();
+            serde_json::from_value::<neoism_paint::ImageProperties>(v["image"].clone()).ok();
         let packs = v["packs"]
             .as_array()
             .into_iter()

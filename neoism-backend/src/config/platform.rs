@@ -46,7 +46,7 @@ pub struct PlatformWindow {
     #[serde(default = "Option::default")]
     pub blur: Option<bool>,
     #[serde(default, rename = "background-image")]
-    pub background_image: Option<sugarloaf::ImageProperties>,
+    pub background_image: Option<neoism_paint::ImageProperties>,
     /// Independently enable or disable images without clearing the base path.
     /// An absent/null image leaves the base image unchanged. An explicit image
     /// re-enables backgrounds only when this flag is not supplied.
@@ -119,9 +119,6 @@ pub struct PlatformRenderer {
     pub disable_unfocused_render: Option<bool>,
     #[serde(default = "Option::default", rename = "disable-occluded-render")]
     pub disable_occluded_render: Option<bool>,
-    #[cfg(feature = "wgpu")]
-    #[serde(default = "Option::default", skip_serializing)]
-    pub filters: Option<Vec<sugarloaf::Filter>>,
     #[serde(default = "Option::default")]
     pub strategy: Option<renderer::RendererStategy>,
 }

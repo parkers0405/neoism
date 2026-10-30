@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use neoism_terminal_core::crosswords::pos::Pos;
-use neoism_terminal_core::crosswords::search::Match;
+use neoism_terminal_types::position::Pos;
+use neoism_terminal_types::Match;
 
 use super::FinderMode;
 use crate::editor::markdown::is_markdown_path;
@@ -193,7 +193,7 @@ pub fn search_input_action(c: char, history_index: Option<usize>) -> SearchInput
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neoism_terminal_core::crosswords::pos::{Column, Line};
+    use neoism_terminal_types::position::{Column, Line};
 
     fn pos(line: i32, col: usize) -> Pos {
         Pos::new(Line(line), Column(col))

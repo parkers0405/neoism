@@ -1,4 +1,4 @@
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::editor::markdown::{
     parse_table_cell_bounds, source_map::InlineSourceMap, MarkdownPane,

@@ -11,8 +11,8 @@ const server=createAgentDaemon({deferCreations:false,configuration,directoryEntr
 server.files.set("code.rs",Array.from({length:80},(_,i)=>`pub fn code_${i}() -> usize { ${i} }`).join("\n"));
 writeFileSync(recovery,JSON.stringify({version:1,activeWorkspaceId:"a",activeSurfaceId:"terminal:restored",surfaces:[{id:"terminal:restored",kind:"terminal",title:"Restored terminal",workspaceId:"a",sessionId:"restored"}],ui:{openWorkspaceIds:["a","b"],mainTerminals:{a:"restored"}},editors:{},providerStates:{},drafts:{},composerDrafts:{}}));
 const packaged=process.argv.includes("--packaged");
-const app=await launchNative({openWorkspaceIds:["a","b"],command:packaged?join(process.cwd(),"dist/neoism-gpuix"):process.execPath,args:[...(packaged?[]:["src/main.tsx"]),"--daemon",server.endpoint,"--workspace","a","--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:recovery}});
-const until=async(predicate:()=>boolean|Promise<boolean>)=>{const end=Date.now()+15000;while(!await predicate()){if(Date.now()>end)throw new Error("Tab workflow did not converge");await Bun.sleep(10);}};
+const app=await launchNative({openWorkspaceIds:["a","b"],command:packaged?(process.env.NEOISM_GPUIX_TEST_BINARY||join(process.cwd(),"dist/neoism")):process.execPath,args:[...(packaged?[]:["src/main.tsx"]),"--daemon",server.endpoint,"--workspace","a","--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:recovery}});
+const until=async(predicate:()=>boolean|Promise<boolean>)=>{const end=Date.now()+15000;while(true){try{if(await predicate())return;}catch(error){if(!["NotFound","Ambiguous"].includes((error as {code?:string}).code||""))throw error;}if(Date.now()>end)throw new Error("Tab workflow did not converge");await Bun.sleep(10);}};
 const flatten=(nodes:TreeNode[]):TreeNode[]=>nodes.flatMap(node=>[node,...flatten(node.children||[])]);
 const nodes=async()=>{const {tree}=await app.call("getTree",{});return flatten(tree?[tree]:[]);};
 const tabs=async(title:string)=>(await nodes()).filter(node=>/^pane-tab:\d+$/.test(node.testId||"")&&flatten([node]).some(child=>child.text===title));
@@ -36,11 +36,11 @@ try{
  await app.getByTestId("splash-wordmark").waitFor({timeoutMs:20000});if(creates()||server.ptyRequests.some(request=>request.tag==="AttachPty"))throw new Error("Restored terminal mounted before Welcome");
  const logo=await app.getByTestId("splash-wordmark").bounds(),logoCanvas=(await app.getByTestId("splash-wordmark").getByType("canvas").all())[0]?.bounds;
  if(!logoCanvas||logoCanvas.width<=logo.width||logoCanvas.height<=logo.height)throw new Error("Wordmark paint is still clipped to its logo hitbox");
- const welcome=(await tabs("Welcome"))[0]!;
+ const welcome=(await tabs("Home"))[0]!;
  stage="main restored terminal is closable";const restored=(await tabs("Restored terminal"))[0]!;await app.getByTestId(restored.testId!.replace("pane-tab:","pane-close:")).click();await until(async()=>!(await tabs("Restored terminal")).length);
- stage="inline plus follows the last tab and remains usable under overflow";await assertPlus();for(let i=0;i<14;i++){await(await plus()).click();await until(async()=>(await tabs("Welcome")).length===i+2);await assertPlus();}
+ stage="inline plus follows the last tab and remains usable under overflow";await assertPlus();for(let i=0;i<14;i++){await(await plus()).click();await until(async()=>(await tabs("Home")).length===i+2);await assertPlus();}
  if(creates())throw new Error("Welcome plus created a terminal");
- stage="AltT from Welcome and Terminal";await openTerminal("Welcome");const firstTerminal=(await tabs("Terminal"))[0]!;await openTerminal("Terminal");
+ stage="AltT from Welcome and Terminal";await openTerminal("Home");const firstTerminal=(await tabs("Terminal"))[0]!;await openTerminal("Terminal");
  stage="all terminals close including first/main";await app.getByTestId(firstTerminal.testId!.replace("pane-tab:","pane-close:")).click();await until(async()=>(await tabs("Terminal")).length===1);
  stage="Code breadcrumbs reserve original header above the editor";await app.getByTestId("file:code.rs").click();await app.getByTestId("code-editor").waitFor();await app.getByTestId("code-breadcrumbs").waitFor();
  const breadcrumb=await app.getByTestId("code-breadcrumbs").bounds(),editor=await app.getByTestId("code-editor").bounds();if(Math.abs(breadcrumb.height-26)>1||Math.abs(editor.y-breadcrumb.y-breadcrumb.height)>1.3)throw new Error(`Breadcrumb geometry differs ${JSON.stringify({breadcrumb,editor})}`);
@@ -48,7 +48,7 @@ try{
  stage="Markdown tab cursor aligns before icon after scrolling and sidebar moves";await app.getByTestId("file:README.md").click();await app.getByTestId("rich-markdown-editor").waitFor();await assertMarkdownTabCaret();
  stage="AltT from Markdown tab strip";await openTerminal("Markdown");
  stage="AltT from Agent draft";await(await plus()).click();await app.getByTestId("splash-wordmark").waitFor();await app.getByTestId("splash-action:open-agent").click();await app.getByTestId("composer").waitFor();await app.getByTestId("composer").fill("keep my Agent draft");await openTerminal("Agent");
- await until(()=>{try{return JSON.parse(readFileSync(recovery,"utf8")).composerDrafts["created-a"]?.text==="keep my Agent draft";}catch{return false;}});
+ await until(()=>{try{return Object.values(JSON.parse(readFileSync(recovery,"utf8")).composerDrafts||{}).some((draft:any)=>draft.text==="keep my Agent draft");}catch{return false;}});
  if(server.requests.some(request=>request.tag==="SubmitPrompt"))throw new Error("AltT submitted the Agent draft");
  stage="AltT from Settings overlay";await app.getByTestId("topbar-menu").click();await app.getByTestId("menu:OpenSettings").click();await app.getByTestId("chrome-action-overlay").waitFor();await openTerminal("Settings");await until(async()=>await app.getByTestId("chrome-action-overlay").count()===0);
  stage="global font zoom persists and retains the native root";const shell=(await app.getByTestId("app-shell").element()).id,height=(await app.getByTestId("original-topbar").bounds()).height,count=creates();await press("ctrl-=");await until(()=>server.configRequests.some(request=>request.tag==="SetSetting"&&request.body.key==="appearance.fonts.size"&&request.body.value===15));await until(async()=>(await app.getByTestId("original-topbar").bounds()).height>height+.5);

@@ -10,7 +10,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 cd "$root"
-cargo run --quiet -p neoism-cloud-runtime --example openapi > "$tmp/cloud-runtime.v2.json"
+bash "$root/scripts/blaze.sh" run --quiet -p neoism-cloud-runtime --example openapi > "$tmp/cloud-runtime.v2.json"
 node -e 'let b=[]; process.stdin.on("data", c => b.push(c)).on("end", () => { const canonical = JSON.stringify(JSON.parse(Buffer.concat(b))); process.stdout.write(require("crypto").createHash("sha256").update(canonical).digest("hex")); })' < "$tmp/cloud-runtime.v2.json" > "$tmp/cloud-runtime.v2.sha256"
 node neoism-agent/scripts/generate-contract.mjs "Neoism Cloud Runtime" "neoism-agent/scripts/cloud-runtime.sh update" < "$tmp/cloud-runtime.v2.json" > "$tmp/cloud-contract.ts"
 

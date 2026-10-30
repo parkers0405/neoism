@@ -1,4 +1,3 @@
-#[path = "../../../neoism-frontend/desktop/src/bootstrap_omarchy.rs"]
 mod installer;
 
 fn main() {

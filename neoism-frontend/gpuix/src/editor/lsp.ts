@@ -36,10 +36,17 @@ export function createEditorLsp(editor: NativeEditor, connection: EditorLspConne
   let pointerAt = 0;
   let latestPointer: { x: number; y: number } | undefined;
   let pointerInsideHover=false,lastHoverPoint:{x:number;y:number}|undefined;
+  let lastLspFrame: LspFrame | undefined;
   const run = (operation: string, args: Record<string, unknown> = {}) => { if (!disposed) { try { editor.call(`lsp.${operation}`, args); } catch (error) { host.report(error); } } };
   const consume = (frame: EditorFrame) => {
     const lsp = frame.lsp; if (!lsp || disposed) return;
-    setState(previous=>({...lsp,hover:lsp.hover?{...lsp.hover,commands:sharePaintCommands(previous?.hover?.commands||[],lsp.hover.commands)}:lsp.hover}));
+    // NativeEditor already preserves unchanged LSP snapshot identities. Do
+    // not invalidate the overlay on every scroll/caret frame. Requests and
+    // effects below are still consumed on every delivery, even if identical.
+    if (lsp !== lastLspFrame) {
+      lastLspFrame = lsp;
+      setState(previous=>({...lsp,hover:lsp.hover?{...lsp.hover,commands:sharePaintCommands(previous?.hover?.commands||[],lsp.hover.commands)}:lsp.hover}));
+    }
     for (const request of lsp.requests) {
       try { const id = connection.client.send("Editor", request, connection.root); if (!(typeof request === "object" && "DidSave" in request)) pending.add(id); if (pending.size > 512) pending.delete(pending.values().next().value!); }
       catch (error) { host.report(error); }

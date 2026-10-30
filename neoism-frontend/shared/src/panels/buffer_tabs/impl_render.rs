@@ -12,7 +12,7 @@ use super::*;
 /// avoids descenders later in the title (the `g` in "Agent") pulling the
 /// logo down.
 pub(super) fn first_glyph_ink_center_y(
-    instances: &[sugarloaf::text::TextInstance],
+    instances: &[neoism_paint::text::TextInstance],
     first_title_instance: usize,
     scale_factor: f32,
 ) -> Option<f32> {
@@ -49,7 +49,7 @@ impl<A: Copy> BufferTabs<A> {
     /// that don't (web / minimal embedders).
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         x_left: f32,
         y_top: f32,
         available_width: f32,
@@ -77,7 +77,7 @@ impl<A: Copy> BufferTabs<A> {
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_icons<P>(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         x_left: f32,
         y_top: f32,
         available_width: f32,
@@ -97,7 +97,7 @@ impl<A: Copy> BufferTabs<A> {
             return;
         }
         let strip_style = crate::primitives::surface_background::style(
-            neoism_lua::selector::BUFFER_TABS,
+            neoism_customization::selector::BUFFER_TABS,
         );
         let strip_background = crate::primitives::surface_background::base_color(
             "buffer-tabs",
@@ -946,7 +946,7 @@ impl<A: Copy> BufferTabs<A> {
     }
 
     fn draw_floating_tab(
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         theme: &IdeTheme,
         tab: &BufferTab<A>,
         x: f32,
@@ -1014,7 +1014,7 @@ impl<A: Copy> BufferTabs<A> {
 
     pub fn render_drop_target_preview(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         x_left: f32,
         y_top: f32,
         available_width: f32,
@@ -1085,7 +1085,7 @@ impl<A: Copy> BufferTabs<A> {
 /// A single top-rounded quad for translucent fills avoids double-compositing
 /// the bottom squaring rectangle. Keep the original opaque path unchanged.
 fn draw_strip_background(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     [x, y, w, h]: [f32; 4],
     color: [f32; 4],
     radius: f32,

@@ -6,8 +6,8 @@
 //! address, a tunnel, or a tailnet) and pushes it in via
 //! [`ShareSheet::show`]. This panel just encodes and paints it.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use crate::primitives::IdeTheme;
 
@@ -110,7 +110,7 @@ impl ShareSheet {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         viewport: [f32; 4],
         theme: &IdeTheme,
         scale: f32,

@@ -18,7 +18,7 @@
 
 use web_time::Instant;
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::primitives::IdeTheme;
 
@@ -267,7 +267,7 @@ impl<T> Overlay<T> {
     /// area to dim (usually the whole window).
     pub fn draw_scrim(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         viewport: [f32; 4],
         theme: &IdeTheme,
     ) {

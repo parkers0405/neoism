@@ -5,8 +5,8 @@
 //! the accent as text). Animates between shells via a per-glyph
 //! scramble pass that locks in left-to-right.
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use super::render::{draw_scramble_text_thick, draw_text_thick};
 use super::types::{DEPTH, GLYPH_SHELL, ORDER_CHIP_BG};
@@ -37,7 +37,7 @@ pub(super) fn shell_badge_accent(kind: TerminalShellKind, theme: &IdeTheme) -> [
 }
 
 pub(super) fn shell_badge_width(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     font_size: f32,
     label: &str,
     scale: f32,
@@ -55,7 +55,7 @@ pub(super) fn shell_badge_width(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_shell_badge(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     x: f32,
     pill_y: f32,
     pill_h: f32,

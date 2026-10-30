@@ -17,8 +17,8 @@
 
 use web_time::Instant;
 
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
+use crate::primitives::paint::Paint;
 
 use crate::animation::CriticallyDampedSpring;
 use crate::editor_snapshot::{PopupMenu, PopupMenuItem};
@@ -251,7 +251,7 @@ impl CompletionMenu {
 
     pub fn render(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         menu: Option<&PopupMenu>,
         anchor: &EditorAnchor,
         dimensions: (f32, f32, f32),
@@ -449,7 +449,7 @@ impl CompletionMenu {
 
     fn render_selected_detail(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         menu: &PopupMenu,
         list: CompletionMenuLayout,
         dimensions: (f32, f32, f32),

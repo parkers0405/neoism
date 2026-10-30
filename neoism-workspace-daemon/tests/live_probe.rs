@@ -1,7 +1,7 @@
 //! MANUAL live-daemon probe (always #[ignore]; run explicitly):
 //!
 //! ```
-//! cargo test -p neoism-workspace-daemon --test live_probe -- --ignored --nocapture
+//! bash scripts/blaze.sh test -p neoism-workspace-daemon --test live_probe -- --ignored --nocapture
 //! ```
 //!
 //! Connects to the locally running daemon as a real CRDT client,

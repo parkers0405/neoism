@@ -8,6 +8,11 @@
 //! and constrained hardware while allowing Agent mode to submit only validated
 //! high-level intentions later.
 
+// The portable library stays no_std; its host-side test harness needs std's
+// runtime entry point, including when built by Blaze.
+#[cfg(test)]
+extern crate std;
+
 const EMOTION_MAX: u16 = 1_000;
 const CURSE_THRESHOLD: u16 = 700;
 const CURSE_COOLDOWN_SECONDS: f32 = 3.0;

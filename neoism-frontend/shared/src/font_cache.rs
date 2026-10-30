@@ -2,21 +2,21 @@
 //!
 //! Lifted from `frontends/neoism/src/chrome/font_cache.rs` — the
 //! desktop version used `lru::LruCache` plus
-//! `neoism_backend::sugarloaf::swash::Attributes` and
-//! `neoism_backend::sugarloaf::SpanStyle` to build a two-tier (hot
+//! `neoism_backend::neoism_paint::swash::Attributes` and
+//! `neoism_backend::neoism_paint::SpanStyle` to build a two-tier (hot
 //! ASCII + LRU) cache keyed by `(char, Attributes)`. The shared crate
 //! now depends on `lru` directly and accesses the swash / SpanStyle
 //! re-exports through `sugarloaf`, so the implementation is back to
 //! parity with the native fork.
 //!
 //! The `AttributesShim` POD is kept (with a `From` round-trip to the
-//! real `sugarloaf::Attributes`) so callers that haven't been migrated
+//! real `neoism_paint::Attributes`) so callers that haven't been migrated
 //! to the real swash type yet keep compiling.
 
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use sugarloaf::Attributes;
+use neoism_paint::Attributes;
 use tracing::debug;
 use unicode_width::UnicodeWidthChar;
 
@@ -24,7 +24,7 @@ use unicode_width::UnicodeWidthChar;
 /// Increased for better performance with complex terminal content.
 const MAX_FONT_CACHE_SIZE: usize = 8192;
 
-/// POD substitute for `sugarloaf::swash::Attributes`. Mirrors the
+/// POD substitute for `neoism_paint::swash::Attributes`. Mirrors the
 /// fields the chrome's rich-text path actually keys on; convertible to
 /// and from the real `Attributes` via the `From` impls below so hosts
 /// can pass whichever flavour they already have on hand.
@@ -36,7 +36,7 @@ pub struct AttributesShim {
 
 impl From<AttributesShim> for Attributes {
     fn from(shim: AttributesShim) -> Self {
-        use sugarloaf::swash::{Stretch, Style, Weight};
+        use neoism_paint::swash::{Stretch, Style, Weight};
         let weight = if shim.bold {
             Weight::BOLD
         } else {
@@ -138,7 +138,7 @@ impl FontCache {
     /// library — ported verbatim from the native fork so the shared
     /// crate seeds ASCII × {Normal, Bold, Italic} for every host.
     #[allow(dead_code)]
-    pub fn pre_populate(&mut self, font_context: &sugarloaf::font::FontLibrary) {
+    pub fn pre_populate(&mut self, font_context: &neoism_paint::font::FontLibrary) {
         let common_chars = [
             // ASCII printable characters (most common)
             ' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.',
@@ -150,7 +150,7 @@ impl FontCache {
             'z', '{', '|', '}', '~',
         ];
 
-        use sugarloaf::swash::{Stretch, Style, Weight};
+        use neoism_paint::swash::{Stretch, Style, Weight};
         let common_attrs = [
             Attributes::new(Stretch::NORMAL, Weight::NORMAL, Style::Normal),
             Attributes::new(Stretch::NORMAL, Weight::BOLD, Style::Normal),
@@ -162,7 +162,7 @@ impl FontCache {
                 for &attrs in &common_attrs {
                     let key = (ch, attrs);
                     if self.get(&key).is_none() {
-                        let style = sugarloaf::SpanStyle {
+                        let style = neoism_paint::SpanStyle {
                             font_attrs: attrs,
                             ..Default::default()
                         };
@@ -199,7 +199,7 @@ impl Default for FontCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sugarloaf::swash::{Stretch, Style, Weight};
+    use neoism_paint::swash::{Stretch, Style, Weight};
 
     #[test]
     fn test_font_cache_basic_operations() {

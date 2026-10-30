@@ -67,8 +67,8 @@ assert.deepEqual(pixel.faces, [{ url: '/fonts/press-start-2p/PressStart2P-Regula
 assert.match(css, /font-family: "Press Start 2P";[^}]*font-weight: 400;/);
 const pixelBytes = readFileSync(new URL('public' + pixel.faces[0].url, gui));
 assert.equal(createHash('sha256').update(pixelBytes).digest('hex'), '034c77f1f05ec89421e4a63f0e3a4ca1ecf852cc6d2bf611f126f275728e017d');
-assert(pixelBytes.equals(readFileSync(new URL('sugarloaf/src/font/resources/PressStart2P/PressStart2P-Regular.ttf', root))));
-assert(readFileSync(new URL('public' + pixel.licenseUrl, gui)).equals(readFileSync(new URL('sugarloaf/src/font/resources/PressStart2P/OFL.txt', root))));
+assert(pixelBytes.equals(readFileSync(new URL('neoism-paint/src/font/resources/PressStart2P/PressStart2P-Regular.ttf', root))));
+assert(readFileSync(new URL('public' + pixel.licenseUrl, gui)).equals(readFileSync(new URL('neoism-paint/src/font/resources/PressStart2P/OFL.txt', root))));
 assert(!fonts.some(f => f.id === 'inter'), 'Superseded Inter must not remain a UI choice');
 assert(fonts.some(f => f.id === 'geist-mono'));
 assert(fonts.some(f => f.id === 'jetbrains-mono'));

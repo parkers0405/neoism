@@ -1,3 +1,4 @@
+use crate::primitives::paint::Paint;
 // Copyright (c) 2023-present, Raphael Amorim.
 //
 // This source code is licensed under the MIT license found in the
@@ -8,7 +9,7 @@
 
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
-use sugarloaf::{Attributes, Sugarloaf};
+use neoism_paint::{Attributes, };
 use web_time::Instant;
 
 // TODO(wave-cutover): the desktop fork imports its rich
@@ -121,7 +122,7 @@ const TITLE_ELLIPSIS: char = '…';
 /// `Cow::Borrowed(title)` when the full string fits so the common
 /// "no truncation needed" path avoids allocating.
 fn fit_title_to_width<'a>(
-    sugarloaf: &mut Sugarloaf,
+    sugarloaf: &mut dyn Paint,
     title: &'a str,
     max_width: f32,
     font_size: f32,

@@ -570,9 +570,7 @@ fn write_readiness(
     writer.flush()
 }
 
-/// The desktop's default daemon socket — MUST mirror
-/// `neoism::embedded_daemon::default_socket_path` so the desktop's
-/// no-flags probe finds us.
+/// Default local socket, shared with the GPUIX client's endpoint discovery.
 #[cfg(unix)]
 fn default_unix_socket_path() -> PathBuf {
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -582,7 +580,7 @@ fn default_unix_socket_path() -> PathBuf {
         }
     }
     let uid = unsafe { libc::geteuid() };
-    PathBuf::from(format!("/tmp/neoism-{uid}.sock"))
+    std::env::temp_dir().join(format!("neoism-{uid}.sock"))
 }
 
 /// Bind `path` and serve `app` over it with hyper-util's auto builder

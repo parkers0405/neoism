@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use sugarloaf::text::DrawOpts;
-use sugarloaf::{GraphicOverlay};
+use neoism_paint::text::DrawOpts;
+use neoism_paint::{GraphicOverlay};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::DEPTH;
@@ -296,7 +296,7 @@ fn stable_whitespace_advance(
 #[cfg(test)]
 mod measure_tests {
     use super::{stable_whitespace_advance, text_measure_key, whitespace_columns};
-    use sugarloaf::text::DrawOpts;
+    use neoism_paint::text::DrawOpts;
 
     #[test]
     fn measurement_cache_identity_includes_font_and_scale() {
@@ -787,7 +787,7 @@ pub fn draw_text_clipped(
     opts: &DrawOpts,
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    let reveals: &[sugarloaf::text::TextReveal] = &[];
+    let reveals: &[neoism_paint::text::TextReveal] = &[];
     let y = snap_text_y(y);
     if occlusion_rects.is_empty() && reveals.is_empty() {
         return sugarloaf.text_mut().draw(x, y, text, opts);
@@ -883,7 +883,7 @@ pub fn draw_text_revealed_clipped(
     text: &str,
     opts: &DrawOpts,
     occlusion_rects: &[[f32; 4]],
-    reveals: &[sugarloaf::text::TextReveal],
+    reveals: &[neoism_paint::text::TextReveal],
 ) -> f32 {
     if reveals.is_empty() { return draw_text_clipped(sugarloaf,x,y,text,opts,occlusion_rects); }
     let y = snap_text_y(y);

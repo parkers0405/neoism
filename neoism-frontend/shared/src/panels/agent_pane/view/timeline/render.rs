@@ -7,7 +7,7 @@ use super::*;
 use crate::panels::agent_pane::question_rail::{
     question_index_at, TimelineQuestionTarget, TimelineQuestionTargets,
 };
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 // These are ink bounds, not another footer: the word moves ±3.2px and
 // its far echo adds 3.5px; the text renderer allows 14px bottom ink slack.
@@ -102,7 +102,7 @@ pub fn render_timeline_with<P, D>(
     now_seconds: f32,
     mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
 ) where
     P: AgentTimelinePane,
     D: AgentTimelineDelegate<P>,
@@ -138,7 +138,7 @@ pub fn render_timeline_in_paint_viewport_with<P, D>(
     mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
     hit_occlusion_rects: &[[f32; 4]],
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
     question_gutter: Option<[f32; 4]>,
 ) -> Option<TimelineQuestionRailFrame>
 where
@@ -622,7 +622,7 @@ where
 
 fn message_theme(
     theme: &IdeTheme,
-    plugins: Option<&neoism_lua::PluginSnapshot>,
+    plugins: Option<&neoism_customization::PluginSnapshot>,
     kind: AgentTimelineMessageKind,
 ) -> IdeTheme {
     let Some(plugins) = plugins else {

@@ -59,3 +59,21 @@ test("composer material retains configured selector opacity without fading text 
   expect(config({"composer.agent": {opacity: -2}}).composerOpacity).toBe(0);
   expect(config({"composer.agent": {opacity: NaN}}).composerOpacity).toBe(0.85);
 });
+
+test("custom configuration home matches the daemon and an explicit file takes precedence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "neoism-config-home-")); dirs.push(dir);
+  writeFileSync(join(dir, "config.json"), JSON.stringify({appearance:{fonts:{size:19}}}));
+  const explicit = join(dir, "override.json");
+  writeFileSync(explicit, JSON.stringify({appearance:{fonts:{size:22}}}));
+  expect(loadConfig([], {NEOISM_CONFIG_HOME:dir, XDG_CONFIG_HOME:"/nonexistent"}).fontSize).toBe(19);
+  expect(loadConfig(["--config", explicit], {NEOISM_CONFIG_HOME:dir}).fontSize).toBe(22);
+});
+
+test("equals-form launch flags retain explicit endpoint isolation and preferences", () => {
+  const config = loadConfig(["--daemon=wss://example.test/session", "--workspace=work", "--font-size=19", "--theme=tokyo_night"], {}, {});
+  expect(config.endpoint).toBe("wss://example.test/session");
+  expect(config.workspaceId).toBe("work");
+  expect(config.fontSize).toBe(19);
+  expect(config.themeName).toBe("tokyo_night");
+  expect(config.authToken).toBeUndefined();
+});

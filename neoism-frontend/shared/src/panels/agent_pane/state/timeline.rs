@@ -279,6 +279,10 @@ impl NeoismAgentPane {
             .apply(VirtualSurfaceCommand::CommitMeasuredLayouts(measurements));
     }
 
+    pub fn timeline_visible_rect(&self) -> Option<[f32; 4]> {
+        self.timeline_viewport_rect
+    }
+
     pub fn timeline_scrollbar_state(&self) -> Option<(f32, f32, f32, Option<Instant>)> {
         let viewport_h = self.timeline_viewport_height_px.max(0.0);
         let content_h = self.timeline_content_height_px.max(0.0);

@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use neoism_lua::{DockEdge, SurfaceAlign, SurfaceLayoutPatch};
+use neoism_customization::{DockEdge, SurfaceAlign, SurfaceLayoutPatch};
 
 use crate::layout::Rect;
 
@@ -417,7 +417,7 @@ fn snap_rect(rect: Rect, scale: f32) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neoism_lua::{SurfaceItemPatch, SurfacePatch};
+    use neoism_customization::{SurfaceItemPatch, SurfacePatch};
 
     #[test]
     fn default_action_band_and_items_flow_across_the_top() {

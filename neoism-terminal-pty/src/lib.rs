@@ -3,7 +3,7 @@
 //! Phase 4 of the libghostty-style migration extracts the native PTY I/O
 //! loop out of `neoism-backend::performer` and into this standalone crate.
 //! The goal is so a future workspace daemon can spawn shells without
-//! pulling in the desktop frontend (window, sugarloaf, wgpu, …).
+//! pulling in a frontend window, GPU renderer, or terminal emulator.
 //!
 //! The crate exposes a synchronous [`PtySession`] handle that owns the
 //! underlying `teletypewriter::Pty`, runs a background corcovado/mio

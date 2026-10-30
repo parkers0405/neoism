@@ -9,7 +9,7 @@
 // row layout). ESC dismissal, click-outside-to-close, and the fade
 // curve all live in `widgets/overlay.rs`.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 use super::status_line::DiagnosticPill;

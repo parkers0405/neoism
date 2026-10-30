@@ -277,6 +277,9 @@ async fn receive_agent_forwards_each_bundle() {
 
     let _g = EnvGuard::new(&[
         (ENV_CLOUD_PROVISION_TOKEN, Some(TOKEN)),
+        // The proxy signs a workspace credential before forwarding. Supply
+        // its trust root explicitly; tests must not need a running desktop.
+        ("NEOISM_DAEMON_TOKEN", Some("receive-agent-test-signing-key")),
         ("NEOISM_AGENT_SERVER", Some(&fake.base_url)),
         // Make sure the fallback env can't sneak in a different address.
         ("NEOISM_SERVER", None),

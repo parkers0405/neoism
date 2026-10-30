@@ -477,6 +477,33 @@ async fn delete(root: &Path, rel: String) -> Vec<FilesServerMessage> {
     }
 }
 
+/// A newly advertised default vault is deliberately created only on first
+/// note creation. Browsing that exact root should show the empty notes state.
+/// Arbitrary missing roots, nested reads and writes retain normal validation.
+pub(crate) fn uncreated_notes_listing(
+    root: Option<&str>,
+    message: &FilesClientMessage,
+    advertised_roots: impl IntoIterator<Item = PathBuf>,
+) -> Option<FilesServerMessage> {
+    let FilesClientMessage::ListDir { path } = message else {
+        return None;
+    };
+    if !path.is_empty() {
+        return None;
+    }
+    let root = Path::new(root?);
+    if !root.is_absolute() || !matches!(root.try_exists(), Ok(false)) {
+        return None;
+    }
+    advertised_roots
+        .into_iter()
+        .any(|advertised| advertised == root)
+        .then(|| FilesServerMessage::DirListing {
+            path: path.clone(),
+            entries: Vec::new(),
+        })
+}
+
 async fn list_dir(root: &Path, rel: String) -> Vec<FilesServerMessage> {
     let resolved = match resolve_existing_path(root, &rel) {
         Ok(p) => p,
@@ -660,6 +687,41 @@ async fn walk_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advertised_uncreated_notes_root_is_empty_without_creating_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notes = temporary.path().join("Default");
+        let root = notes.to_str();
+        let list = FilesClientMessage::ListDir {
+            path: String::new(),
+        };
+        let reply = uncreated_notes_listing(root, &list, [notes.clone()]);
+        assert!(
+            matches!(reply, Some(FilesServerMessage::DirListing { entries, .. }) if entries.is_empty())
+        );
+        assert!(!notes.exists(), "browsing must retain lazy vault creation");
+        assert!(uncreated_notes_listing(root, &list, []).is_none());
+        assert!(uncreated_notes_listing(
+            root,
+            &FilesClientMessage::ListDir {
+                path: "child".into()
+            },
+            [notes.clone()]
+        )
+        .is_none());
+        assert!(uncreated_notes_listing(
+            root,
+            &FilesClientMessage::WriteFile {
+                path: "note.md".into(),
+                bytes: vec![]
+            },
+            [notes.clone()]
+        )
+        .is_none());
+        std::fs::write(&notes, "not a directory").unwrap();
+        assert!(uncreated_notes_listing(root, &list, [notes.clone()]).is_none());
+    }
 
     #[test]
     fn rejects_absolute_paths() {

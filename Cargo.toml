@@ -1,17 +1,14 @@
 [workspace]
+default-members = ["neoism-frontend/launcher"]
 members = [
+    "neoism-frontend/launcher",
     "neoui",
-    "sugarloaf",
+    "neoism-paint",
     "teletypewriter",
     "corcovado",
-    "copa",
-    "neoism-proc-macros",
     "neoism-backend",
-    "neoism-terminal-core",
-    "neoism-frontend/wasm",
+    "neoism-terminal-types",
     "neoism-grapheme-width",
-    "neoism-window",
-    "neoism-notifier",
     "neoism-protocol",
     "neoism-product-docs",
     "neoism-workspace-index",
@@ -28,20 +25,28 @@ members = [
     "neoism-agent/crates/neoism-agent-builtins",
     "neoism-agent/crates/neoism-agent-composition",
     "neoism-agent/crates/neoism-agent-server",
-    "neoism-agent/crates/neoism-agent-lua-runner",
     "neoism-agent/crates/neoism-agent-cli",
-    "neoism-frontend/desktop",
     "neoism-extensions",
     "neoism-sync",
     "neoism-rm-agent",
     "neoism-remarkable",
     "neoism-neoworld-core",
     "neoism-neoworld",
-    "neoism-lua",
+    "neoism-customization",
 ]
 # Browser workers stay outside normal workspace builds and native linking.
-exclude = ["neoism-frontend/interactive-artifacts", "neoism-frontend/servo-runtime", "neoism-frontend/cef-runtime"]
+exclude = ["neoism-frontend/interactive-artifacts", "neoism-frontend/servo-runtime", "neoism-frontend/cef-runtime", "vendor/blaze-compat/icu_collator_data-2.4.0", "vendor/blaze-compat/turso_core-0.8.3"]
 resolver = "2"
+
+[patch.crates-io]
+# Equivalent source forms supported by the pinned compiler; see the patch record.
+icu_collator_data = { path = "vendor/blaze-compat/icu_collator_data-2.4.0" }
+turso_core = { path = "vendor/blaze-compat/turso_core-0.8.3" }
+
+[workspace.metadata.blaze]
+version = "0.20261029.5"
+# SQLx links native SQLite/ring code and needs the matching native macro host.
+native-proc-macros = ["sqlx-macros", "enum-as-inner"]
 
 [workspace.package]
 version = "0.7.142"
@@ -58,19 +63,14 @@ readme = "README.md"
 
 [workspace.dependencies]
 # Note: https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#multiple-locations
-# Sugarloaf example uses path when used locally, but uses
-# version from crates.io when published.
 teletypewriter = { path = "teletypewriter", version = "0.7.142" }
 neoism-backend = { path = "neoism-backend", version = "0.7.142" }
-neoism-terminal-core = { path = "neoism-terminal-core", version = "0.7.142" }
+neoism-terminal-types = { path = "neoism-terminal-types", version = "0.7.142" }
 neoism-terminal-pty = { path = "neoism-terminal-pty", version = "0.7.142" }
-neoism-terminal-wasm = { path = "neoism-frontend/wasm", version = "0.7.142" }
 neoui = { path = "neoui", version = "0.7.142" }
 neoism-ui = { path = "neoism-frontend/shared", version = "0.7.142" }
-neoism-window = { path = "neoism-window", version = "0.7.142", default-features = false }
-neoism-notifier = { path = "neoism-notifier", version = "0.7.142" }
 neoism-grapheme-width = { path = "neoism-grapheme-width", version = "0.7.142" }
-sugarloaf = { path = "sugarloaf", version = "0.7.142" }
+neoism-paint = { path = "neoism-paint", version = "0.7.142" }
 neoism-agent-core = { path = "neoism-agent/crates/neoism-agent-core", version = "0.7.142" }
 neoism-agent-service-api = { path = "neoism-agent/crates/neoism-agent-service-api", version = "0.7.142" }
 neoism-agent-workspace-search-fff = { path = "neoism-agent/crates/neoism-agent-workspace-search-fff", version = "0.7.142" }
@@ -85,13 +85,11 @@ neoism-sync = { path = "neoism-sync", version = "0.7.142" }
 neoism-remarkable = { path = "neoism-remarkable", version = "0.7.142" }
 neoism-neoworld-core = { path = "neoism-neoworld-core", version = "0.7.142" }
 neoism-neoworld = { path = "neoism-neoworld", version = "0.7.142" }
-neoism-lua = { path = "neoism-lua", version = "0.7.142" }
+neoism-customization = { path = "neoism-customization", version = "0.7.142" }
 
 # Own dependencies
 anyhow = "1.0"
 async-stream = "0.3"
-copa = { path = "copa", default-features = true, version = "0.7.142" }
-neoism-proc-macros = { path = "neoism-proc-macros", version = "0.7.142" }
 corcovado = { path = "corcovado", version = "0.7.142" }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 parking_lot = { version = "0.12.5", features = [
@@ -134,10 +132,8 @@ image_rs = { package = "image", version = "0.25.10", default-features = false, f
     "bmp",
 ] }
 regex = "1.12.3"
-onig = { version = "6.5.1", default-features = false }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
-wgpu = { version = "28.0.0", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "gles", "vulkan", "wgsl"] }
 libc = "0.2.185"
 smol_str = "0.3.2"
 futures = "0.3.31"
@@ -191,10 +187,7 @@ debug = "full"             # No one needs an undebuggable release binary
 codegen-units = 1
 incremental = false
 lto = true                 # reduces binary size by ~14%
-# Lua's protected errors use longjmp, which performs SEH unwinding on Windows
-# MSVC. With panic=abort, crossing mlua's C-unwind callbacks aborts the process
-# ("panic in a function that cannot unwind") instead of returning a Lua error.
-# Keep the desktop and the packaged Lua runner on the same unwind-safe profile.
+# Preserve normal Rust error unwinding across service/task boundaries.
 panic = "unwind"
 
 [profile.dev]

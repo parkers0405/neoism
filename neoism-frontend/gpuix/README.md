@@ -1,8 +1,9 @@
 # Neoism GPUIX frontend
 
-Separate native frontend on `experiment/gpuix-frontend`. SolidJS renders through
+The sole workspace frontend built by this branch, installed as a separate preview. SolidJS renders through
 GPUIX/GPUI; Effect manages the daemon connection and typed requests. The Neoism
-TypeScript SDK handles Agent APIs. The existing desktop frontend remains runnable.
+TypeScript SDK handles Agent APIs. The legacy desktop, WASM renderer, Rio emulator,
+and Lua execution hosts have been removed.
 
 ## Run
 
@@ -15,33 +16,81 @@ npm run build:core
 npm start
 ```
 
-Blaze is the default Rust builder for this frontend. The first build bootstraps
-the pinned compiler from source, installs its private nightly toolchain, builds
-libghostty, and builds the native bridge. Allow several minutes for that initial
-setup. Compiler sources, caches, and toolchains live under ignored `artifacts/`;
-no global Cargo configuration is changed. Remote compilation is disabled.
-`native/blaze-pin.json` records the compiler revision and toolchain.
+Blaze is the Rust builder for the services, native bridge, tests, GitHub Actions,
+and Nix package. `scripts/blaze.sh` and `scripts/setup-blaze.mjs` install the exact
+published release and verify its SHA-256 against `native/blaze-pin.json`.
+Root `make build` builds the services, native bridge, application bundle, and
+standalone Agent web GUI; root `./install.sh` installs that bundle in
+`~/.local/lib/neoism-gpuix/bin`, preserving the existing daily `neoism` launcher.
+Application builds
+never fall back to Cargo. Windows CI bootstraps Blaze itself from the pinned
+source because upstream publishes no Windows archive; its application tests use Blaze.
 
-Use `npm run build:core:cargo` or `npm run build:cargo` for explicit Cargo builds.
-Blaze errors are surfaced instead of silently switching builders. First-build
-time and subsequent build speed depend on which dependencies Blaze can reuse.
-The pinned Blaze compiler and a small shared-library edit/rebuild are verified.
-The full bridge build has not yet completed under Blaze; Cargo produces the
-currently verified preview. Use the explicit Cargo command to reproduce that
-preview while full-project Blaze compatibility remains unverified.
+After building and testing the native bridge, `npm run build -- --reuse-core`
+packages that existing library after another FFI smoke check. The normal build
+compiles the bridge through Blaze before packaging.
+Windows uses upstream's documented `BLAZE_PROC_MACRO_SERVER=0` host macro mode
+because its matching native macro server is also unpublished.
+The compiler's [documented native macro host](https://github.com/indexable-inc/blaze/blob/8f144c2dae639fd093e4c489dace50132002fe0a/docs/cargo.md) handles SQLx and `enum-as-inner`.
+Build profiles select Blaze's backend: development uses Cranelift and release
+uses LLVM at `-O3`. The wrapper preserves an explicit `BLAZE_BACKEND` override.
+
+`node scripts/test-workspace.mjs --locked` from the repository root tests every
+workspace member with Blaze, including its integration tests and documentation
+examples. The pinned compiler fails this repository's combined `--workspace`
+test graph with `unsupported: no lang_start`. The runner selects each unit and
+integration target separately, builds the examples, and runs documentation tests.
+This also bounds retained compiler state that otherwise grows across a package's
+combined targets. It continues after failures and fails if any member fails.
+Development tests use Cranelift consistently and omit debug information to bound
+compiler memory, while retaining debug assertions and overflow checks.
+Explicit profiles and `BLAZE_BACKEND` overrides are preserved; the optimized
+application and native release tests use LLVM at `-O3`.
+If the compiler reports incompatible cached function signatures before tests
+start, the workspace runner retries that target once with a fresh compiler home,
+target directory, and disabled cache. This handles ICU's feature-dependent vector
+layout in the pinned compiler's shared store. Test failures are never retried.
+Before documentation tests, the runner closes the completed unit/integration
+compiler. Blaze runs doctests in a separate process; keeping both large databases
+resident causes swapping. Their compiled functions remain in the disk store.
+
+The [dependency compatibility record](../../vendor/blaze-compat/README.md)
+documents the pinned compiler's locale-data, allocator-method, and AES support
+workarounds, along with the unchanged dependency versions and licenses.
+The wrapper defaults to an 8 GiB budget for retained workers and disables
+speculative workers. `BLAZE_MEMORY_MAX` and `BLAZE_SPARE` can override those
+defaults; a currently compiling worker is retained even if it exceeds the budget.
+`BLAZE_CACHE_MAX` controls the separate disk-store limit, which otherwise depends
+on free disk space. For large local workspace runs, `BLAZE_CACHE_MAX=32G` retains
+more compiled functions when space permits. An explicit `BLAZE_REMOTE` is passed
+through to Blaze; remote caching stays off when none is configured.
+Full builds close their private service compiler session before loading the
+native frontend, while sharing the downloaded toolchain and persistent cache.
+On Linux the wrapper limits compiler pools to four permitted CPUs; Cargo's
+jobserver does not limit Blaze's whole-program pools. `NEOISM_BLAZE_CPUS` changes
+this limit (`0` removes it). Run `bash scripts/blaze.sh stop` before changing the
+limit so the next compiler daemon inherits the new affinity.
+GitHub-hosted Linux jobs reclaim unused SDK space and add 32 GiB of swap through
+`scripts/prepare-blaze-runner.sh`. This is limited to disposable hosted VMs;
+standard runners have [limited memory and disk](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+After services have built successfully, `bash scripts/gpuix.sh build-frontend`
+rebuilds the native bridge and frontend bundle using those service executables.
+The native bridge enables mimalloc's `local_dynamic_tls` mode because Bun loads
+it into an already running process; reserving static TLS at application startup
+is not required.
 
 `npm run dev` enables hot replacement. npm scripts select project-local Bun
 1.3.13, which supports Unix WebSockets. `setup:runtime` also works when npm blocks
 Bun's install script. Native libraries are replaced atomically.
 
-Packaged builds use the optimized release bridge (`opt-level=3`, thin LTO).
-Standalone `build:core` defaults to the development profile; set
-`NEOISM_GPUIX_BUILD_PROFILE=release` for release performance there too. Cargo
-uses `target/gpuix-core-cargo` independently of the daemon's build directory.
+Packaged builds use Blaze's release profile. Standalone `build:core` defaults to
+the development profile; set `NEOISM_GPUIX_BUILD_PROFILE=release` for the packaged
+profile. Native outputs use `target/gpuix-core-blaze`, independently of the
+services' build directory. `NEOISM_GPUIX_TARGET_DIR` overrides that directory.
 
 The app reads `~/.config/neoism/config.json` (JSONC), discovers the local daemon
-socket and token, or connects to `ws://127.0.0.1:7878/session`. It does not start or
-replace the daemon.
+socket and token, or connects to `ws://127.0.0.1:7878/session`. It reuses the local daemon and starts a standalone local daemon if none is reachable.
+An explicit `--daemon` endpoint never starts a local service.
 
 ```sh
 npm start -- --workspace WORKSPACE_ID
@@ -79,9 +128,9 @@ credential. Local credential discovery applies only to the default endpoint.
   geometry; the original Rust footer paints checkout, command/connect hints,
   and activity. Slash commands merge the canonical catalog with SDK commands
   and execute real session/provider actions. Child sessions hide the composer.
-- Cold startup selects an independent Welcome tab showing the original
+- Cold startup selects an independent Home tab showing the original
   splash and eight source menu actions. Welcome creates no PTY and never
-  captures terminal input. The `+` immediately after the buffer tabs opens another Welcome tab
+  captures terminal input. The `+` immediately after the buffer tabs opens another Home tab
   without creating a PTY. The first explicitly opened Terminal owns local cwd
   navigation; every terminal tab can close. Recovered dirty documents stay
   open while Welcome is selected on startup. Original wordmark click effects
@@ -94,11 +143,11 @@ credential. Local credential discovery applies only to the default endpoint.
 - Configured palettes, fonts, wallpaper/cached blur, original dimensions, and
   animation state are reused. Native clipboard operations use platform tools.
 
-The bridge creates no window or backend service. GPUIX owns GPU painting and
-compositing. Original font shaping/measurement and CPU glyph raster routines are
-retained for rich documents and chrome; cached glyph pixels become GPUI image
-textures. No Sugarloaf GPU/window renderer is created. Shared Sugarloaf code and
-types remain dependencies; this is not yet a Sugarloaf-free build.
+GPUIX owns GPU painting, compositing, and the OS window. Reusable CPU font shaping,
+measurement, and glyph rasterization were migrated into `neoism-paint`; cached pixels
+become GPUI image textures. Shared UI entrypoints use the portable `Paint` interface.
+Neither the frontend nor daemon links Sugarloaf, the Rio terminal emulator, the old
+window host, or a Lua VM. `neoism-customization` retains only styling/contribution data.
 
 Shortcuts include Alt+E/C/N/H, Alt+S or Ctrl+P for Finder, Alt+P or Ctrl+Shift+P for commands,
 Alt+T or Ctrl+T for a terminal, Ctrl+S for save, and shared Vim motions/operators/registers/
@@ -121,7 +170,7 @@ invisible stagger. Uncached directory listings show a visible skeleton immediate
 Workspace tabs sit directly above the buffer tabs, beside the sidebar. Both rows
 scroll horizontally and keep their `+` immediately after the last tab. Workspace
 tabs fit their titles, icons, and padding; they scroll when the row fills up. The upper
-`+` creates a workspace with Welcome; the lower `+` creates a Welcome buffer.
+`+` creates a workspace with Welcome; the lower `+` creates a Home buffer.
 Both rows support drag reordering with pointer-following feedback and spring-driven
 neighbor slides; reduced motion applies the new positions immediately. Reordering
 preserves live editor hosts, unsaved buffers and the selected workspace. Workspace
@@ -142,7 +191,7 @@ Alt+S starts in FILES mode with the original Rust Finder painter. Fuzzy file
 searches run in the matching daemon's warm FFF index; exact matching retains the
 existing exact collector. An older running daemon must be replaced on the next
 normal restart to activate FFF. From the repository root,
-`cargo build --profile activation -p neoism-workspace-daemon --bin neoism-workspace-daemon`
+`bash scripts/blaze.sh build --profile activation -p neoism-workspace-daemon --bin neoism-workspace-daemon`
 uses the existing optimized profile with production service paths and no full LTO.
 Building this frontend does not restart it.
 
@@ -214,10 +263,10 @@ npm run check:native -- --packaged
 ```
 
 `bun scripts/native-splash-check.ts --packaged`
-verifies the independent default Welcome tab, all eight source actions, actual
-native wordmark canvas, visual-only logo clicks, real Agent creation, and
+verifies the independent default Home tab, all eight source actions, actual
+native wordmark canvas, visual-only logo clicks, local Agent drafts, and
 workspace return without creating a terminal. The new-tab `+` creates another
-Welcome tab with no PTY. Workspace tabs include a close `×`, and both
+Home tab with no PTY. Workspace tabs include a close `×`, and both
 workspace and buffer tabs support horizontal drag reordering. Explicit New Terminal opens a separate Grid PTY without
 a splash overlay. `bun scripts/native-tab-workflow-check.ts --packaged` also
 checks recovery startup, overflowed tabs, closable main terminals, Alt+T across
@@ -238,6 +287,10 @@ and tree identity, completed reveals, and visible splash painting during rapid z
 `bun scripts/native-agent-composer-check.ts` verifies Alt+A home centering,
 all canonical slash rows plus SDK commands, real reasoning updates, Enter
 selection, the original footer geometry, and chat bottom anchoring.
+`bun scripts/native-composer-float-check.ts` captures a real GPUIX window and
+checks for transcript pixels outside the rounded input card and inset footer,
+including the area below the input. It requires Hyprland, grim, and system Python
+with Pillow, like the other native pixel checks.
 `bun scripts/native-navigation-check.ts` verifies Alt focus/number navigation,
 Finder focus restoration, and numeric/final-line code and Markdown commands.
 
@@ -297,6 +350,6 @@ and closes its own PTY. Other interactive checks use isolated daemon fixtures or
 read-only operations. Linux GPU screenshot capture requires compositor tools;
 personal captures and generated binaries are ignored.
 
-Packaging produces `dist/neoism-gpuix`, the native bridge, libghostty, and its
+Packaging produces `dist/neoism`, the native bridge, libghostty, and its
 license. Keep these files together. GPUIX, fonts, and the wordmark are embedded.
 Override library paths with `NEOISM_GPUIX_CORE` and `NEOISM_GPUIX_GHOSTTY` if needed.

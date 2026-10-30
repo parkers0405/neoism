@@ -1,0 +1,2 @@
+# Preserve published dependency source bytes, including upstream whitespace.
+vendor/blaze-compat/** linguist-vendored -whitespace

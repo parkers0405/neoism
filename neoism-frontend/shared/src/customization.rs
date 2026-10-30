@@ -1,6 +1,6 @@
 use crate::primitives::IdeTheme;
 
-pub fn styled_ide_theme(mut theme: IdeTheme, style: &neoism_lua::StylePatch) -> IdeTheme {
+pub fn styled_ide_theme(mut theme: IdeTheme, style: &neoism_customization::StylePatch) -> IdeTheme {
     theme.bg = color_u32(style.background.as_deref(), &theme, theme.bg);
     theme.surface = color_u32(style.background.as_deref(), &theme, theme.surface);
     theme.fg = color_u32(style.foreground.as_deref(), &theme, theme.fg);
@@ -13,7 +13,7 @@ pub fn styled_ide_theme(mut theme: IdeTheme, style: &neoism_lua::StylePatch) -> 
 }
 
 /// Surface opacity affects material fills, never foreground or focus indicators.
-pub fn background_opacity(style: &neoism_lua::StylePatch) -> f32 {
+pub fn background_opacity(style: &neoism_customization::StylePatch) -> f32 {
     style
         .opacity
         .filter(|value| value.is_finite())
@@ -22,7 +22,7 @@ pub fn background_opacity(style: &neoism_lua::StylePatch) -> f32 {
 }
 
 pub fn apply_background_opacity(
-    style: &neoism_lua::StylePatch,
+    style: &neoism_customization::StylePatch,
     mut color: [f32; 4],
 ) -> [f32; 4] {
     color[3] *= background_opacity(style);
@@ -30,7 +30,7 @@ pub fn apply_background_opacity(
 }
 
 pub fn background_color(
-    style: &neoism_lua::StylePatch,
+    style: &neoism_customization::StylePatch,
     theme: &IdeTheme,
     fallback: [f32; 4],
 ) -> [f32; 4] {
@@ -113,7 +113,7 @@ mod tests {
     fn material_opacity_preserves_defaults_and_rgb() {
         let theme = IdeTheme::default();
         let fallback = [0.1, 0.2, 0.3, 0.6];
-        let mut style = neoism_lua::StylePatch::default();
+        let mut style = neoism_customization::StylePatch::default();
         assert_eq!(background_color(&style, &theme, fallback), fallback);
         style.opacity = Some(1.0);
         assert_eq!(background_color(&style, &theme, fallback), fallback);
@@ -146,7 +146,7 @@ mod tests {
             (Some(f32::NAN), 1.0),
             (Some(f32::INFINITY), 1.0),
         ] {
-            let style = neoism_lua::StylePatch {
+            let style = neoism_customization::StylePatch {
                 opacity: value,
                 ..Default::default()
             };
@@ -156,10 +156,10 @@ mod tests {
 
     #[test]
     fn material_opacity_inherits_without_changing_foreground_theme() {
-        let mut styles = neoism_lua::StyleSheet::default();
+        let mut styles = neoism_customization::StyleSheet::default();
         styles.insert(
             "agent.sidebar",
-            neoism_lua::StylePatch {
+            neoism_customization::StylePatch {
                 opacity: Some(0.25),
                 ..Default::default()
             },
@@ -186,7 +186,7 @@ mod tests {
         );
         styles.insert(
             "agent.sidebar.row.selected",
-            neoism_lua::StylePatch {
+            neoism_customization::StylePatch {
                 opacity: Some(0.5),
                 ..Default::default()
             },

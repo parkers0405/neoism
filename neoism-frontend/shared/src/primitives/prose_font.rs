@@ -1,7 +1,7 @@
 //! Proportional UI documentation text, independent of terminal and notes fonts.
 
 use std::sync::OnceLock;
-use sugarloaf::font::{constants::FONT_UI_PROSE, FontData, FontLibrary};
+use neoism_paint::font::{constants::FONT_UI_PROSE, FontData, FontLibrary};
 
 /// Resolve against this library, including after a browser font-registry reset.
 /// Cache only the bundled identity, never an ID belonging to another library.
@@ -21,8 +21,8 @@ pub fn ui_prose_font_id(fonts: &FontLibrary) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sugarloaf::font::constants::{FONT_CASCADIAMONO_NF_REGULAR, FONT_PRESS_START_2P};
-    use sugarloaf::text::{DrawOpts, Text};
+    use neoism_paint::font::constants::{FONT_CASCADIAMONO_NF_REGULAR, FONT_PRESS_START_2P};
+    use neoism_paint::text::{DrawOpts, Text};
 
     #[test]
     fn prose_font_registers_without_fixed_ids_and_deduplicates() {

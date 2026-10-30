@@ -6,18 +6,8 @@ use neoism_ui::editor::scroll_model::{parse_ex_command,GlobalExCommandPlan};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashMap, sync::LazyLock};
-const ACTION_SOURCE: &str = include_str!("../../../desktop/src/bindings/action.rs");
 static ACTION_ALIASES: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
-    let pattern=Regex::new(r#"(?s)((?:"[a-z]+"\s*\|\s*)*"[a-z]+")\s*=>\s*(?:\{\s*)?Some\(Action::([A-Za-z0-9_]+)(?:\(SearchAction::([A-Za-z0-9_]+)\))?\)"#).unwrap();
-    let names = Regex::new(r#""([a-z]+)""#).unwrap();
-    let mut aliases = HashMap::new();
-    for c in pattern.captures_iter(ACTION_SOURCE) {
-        let action = c.get(3).or_else(|| c.get(2)).unwrap().as_str();
-        for name in names.captures_iter(&c[1]) {
-            aliases.insert(name[1].to_owned(), action.to_owned());
-        }
-    }
-    aliases
+    serde_json::from_str(include_str!("../assets/command-aliases.json")).expect("valid command aliases")
 });
 fn parse_action(value: &str) -> Value {
     let lower = value.to_lowercase();

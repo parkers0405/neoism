@@ -2,11 +2,11 @@ use super::*;
 
 #[test]
 fn geist_title_wrap_uses_regular_proportional_metrics_and_reserves_all_rows() {
-    let fonts = sugarloaf::font::FontLibrary {
+    let fonts = neoism_paint::font::FontLibrary {
         inner: Default::default(),
     };
     let id = crate::primitives::prose_font::ui_prose_font_id(&fonts).unwrap();
-    let mut text = sugarloaf::text::Text::new(&fonts);
+    let mut text = neoism_paint::text::Text::new(&fonts);
     text.init_cpu();
     let opts = DrawOpts {
         font_id: Some(id),

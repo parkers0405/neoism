@@ -2788,7 +2788,7 @@ fn background_entries() -> Vec<super::PaletteBackgroundEntry> {
             path: path.map(str::to_owned),
             opacity: 0.7,
             blur: if id == "forest" { 0.0 } else { 3.0 },
-            fit: sugarloaf::BackgroundImageFit::Contain,
+            fit: neoism_paint::BackgroundImageFit::Contain,
             position_x: 0.25,
             position_y: 0.75,
         },
@@ -2814,7 +2814,7 @@ fn backgrounds_mode_resets_cursor_filters_and_returns_owned_selection() {
     let mut selected = palette.selected_background().unwrap();
     assert_eq!(selected.id, "forest");
     assert_eq!(selected.blur, 0.0);
-    assert_eq!(selected.fit, sugarloaf::BackgroundImageFit::Contain);
+    assert_eq!(selected.fit, neoism_paint::BackgroundImageFit::Contain);
     assert_eq!(selected.position_x, 0.25);
     assert_eq!(selected.position_y, 0.75);
     selected.name.clear();

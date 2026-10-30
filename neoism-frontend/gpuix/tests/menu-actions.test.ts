@@ -35,19 +35,21 @@ test("Settings draws actual descriptor controls and returns real writes from nat
   expect(toggle?.kind).toBe("rect"); if (toggle?.kind !== "rect") throw new Error("Original settings toggle did not paint");
   expect(settings.call("click", { x: toggle.rect[0] + 10, y: toggle.rect[1] + 10 }).action).toEqual({ kind: "setting", key: "editor.vim-mode", value: true });
 });
-test("GPUIX Settings omits the removed minimap while preserving daemon settings data", async () => {
+test("GPUIX Settings omits retired renderer controls and the removed minimap while preserving daemon settings data", async () => {
   const config = loadConfig(["--config", "/nonexistent/menu-minimap-test"], {}), client = new DaemonConnection(config);
   const descriptor = { path: "editor.minimap", label: "Minimap", description: "Desktop minimap", value_kind: "boolean", default: false, static_suggestions: [], runtime_suggestions: [], options: [], constraints: { nullable: false }, accepted_kinds: ["boolean"], extensible: false, category: "general", control: { kind: "toggle" } };
   const original = menu("settings", { values: { editor: { minimap: true } }, descriptors: [descriptor] });
   expect(original.frame.commands.some(command => command.kind === "text" && command.text === "Minimap")).toBe(true);
-  client.request = ((_family: string, message: unknown) => Effect.succeed(message === "GetConfig" ? { Config: { value: { editor: { minimap: true } } } } : { ConfigSchema: { descriptors: [descriptor] } })) as typeof client.request;
+  client.request = ((_family: string, message: unknown) => Effect.succeed(message === "GetConfig" ? { Config: { value: { editor: { minimap: true } } } } : { ConfigSchema: { descriptors: [descriptor, {...descriptor,path:"renderer.use-cpu",label:"Old CPU renderer"}, {...descriptor,path:"platform.windows.renderer.backend",label:"Old renderer override"}] } })) as typeof client.request;
   const model = new WorkspaceModel(client, config), controller = new ChromeActionsController({ model, config, reload: () => {} });
   cleanups.push(() => { controller.dispose(); model.dispose(); });
   await controller.open("OpenSettings");
   expect(controller.frame?.kind).toBe("settings");
-  controller.call("query", { query: "Minimap" });
-  const commands = controller.frame?.commands || [];
-  expect(commands.some(command => command.kind === "text" && command.text === "Minimap")).toBe(false);
+  for(const label of ["Minimap","Old CPU renderer","Old renderer override"]){
+    controller.call("query", { query: label });
+    const commands = controller.frame?.commands || [];
+    expect(commands.some(command => command.kind === "text" && command.text === label)).toBe(false);
+  }
   expect(descriptor.path).toBe("editor.minimap");
 });
 test("extensions preserve actual inventory status while withholding unsupported install actions", () => {

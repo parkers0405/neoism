@@ -3,7 +3,7 @@
 use neoism_ui::primitives::{paint::Paint, paint_record::RecordingPainter};
 use serde_json::{json, Value};
 use std::{collections::{HashMap, HashSet, VecDeque}, sync::{Arc, atomic::{AtomicU64, Ordering}}};
-use sugarloaf::text::{DrawOpts, Text};
+use neoism_paint::text::{DrawOpts, Text};
 
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 1024;

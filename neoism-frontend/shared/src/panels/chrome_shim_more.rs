@@ -16,7 +16,7 @@
 //! the wiring is harmless and lights up the moment the host pushes real
 //! state.
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::chrome::active_ide_theme;
 use crate::editor_snapshot::PopupMenu;
@@ -32,7 +32,7 @@ use crate::panels::yank_flash::YankFlash;
 impl Breadcrumbs {
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         layout: &PanelLayout,
         _ctx: &crate::panels::PanelContext,
     ) {
@@ -45,7 +45,7 @@ impl Breadcrumbs {
 impl Notifications {
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         layout: &PanelLayout,
         _ctx: &crate::panels::PanelContext,
     ) {
@@ -71,7 +71,7 @@ impl CompletionMenu {
     /// `desktop/src/host/run.rs` (`geometry.row_h * scale_factor`).
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         layout: &PanelLayout,
         _ctx: &crate::panels::PanelContext,
         cell_w: f32,
@@ -117,7 +117,7 @@ impl CompletionMenu {
 impl SearchOverlay {
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         layout: &PanelLayout,
         _ctx: &crate::panels::PanelContext,
     ) {
@@ -141,7 +141,7 @@ impl YankFlash {
     /// grid's physical cell dimensions).
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         layout: &PanelLayout,
         _ctx: &crate::panels::PanelContext,
         cell_w: f32,
@@ -173,7 +173,7 @@ impl TrailCursor {
     /// collide. We expose `draw_slim` instead and Chrome calls that.
     pub fn draw_slim(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         layout: &PanelLayout,
         _ctx: &crate::panels::PanelContext,
     ) {
@@ -195,7 +195,7 @@ impl EditorScroll {
     /// case. No-op by design.
     pub fn draw(
         &self,
-        _sugarloaf: &mut Sugarloaf,
+        _sugarloaf: &mut dyn Paint,
         _layout: &PanelLayout,
         _ctx: &crate::panels::PanelContext,
     ) {

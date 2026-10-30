@@ -1,5 +1,5 @@
 import { applyEdits, modify, parse } from "jsonc-parser";
-import type { ConfigDocument } from "../../../web/src/workspace/types";
+import type { ConfigDocument } from "../../../../neoism-protocol/typescript/types";
 
 /** Apply related settings in one revision-checked write, retaining comments. */
 export function editConfigDocument(document: ConfigDocument, updates: readonly [string, unknown][]) {

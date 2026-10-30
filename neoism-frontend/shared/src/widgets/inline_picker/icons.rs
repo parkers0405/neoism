@@ -1,6 +1,6 @@
 //! Presentation-only icons. Callers own loading and image registration.
-use sugarloaf::text::DrawOpts;
-use sugarloaf::{GraphicOverlay};
+use neoism_paint::text::DrawOpts;
+use neoism_paint::{GraphicOverlay};
 
 #[derive(Clone, Copy, Debug)]
 pub enum InlinePickerIcon {

@@ -80,7 +80,7 @@ test("legacy daemon cannot silently create a hidden-prompt grid shell or close a
  try{
   const welcome=model.state.surfaces.find(surface=>surface.kind==="welcome")!;expect(welcome).toBeDefined();expect(welcome.title).toBe("Home");
   model.openTerminal("existing-session");await model.newTerminal();
-  expect(model.state.error).toContain("updated daemon");expect(model.state.surfaces.filter(surface=>surface.kind==="terminal").map(surface=>surface.sessionId)).toEqual(["existing-session"]);
+  expect(model.state.error).toContain("running daemon");expect(model.state.error).toContain("restart");expect(model.state.surfaces.filter(surface=>surface.kind==="terminal").map(surface=>surface.sessionId)).toEqual(["existing-session"]);
   expect(model.state.surfaces.find(surface=>surface.id===welcome.id)).toBe(welcome);
   expect(daemon.ptyRequests.filter(request=>request.tag==="ClosePty").map(request=>request.body.session_id)).toEqual(["fixture-pty"]);
   expect(daemon.ptyRequests.filter(request=>request.tag==="CreatePty")).toHaveLength(1);

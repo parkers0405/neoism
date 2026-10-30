@@ -1,6 +1,6 @@
 //! Original presence flag exported to other native GPU hosts.
 use crate::primitives::paint::Paint;
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 #[allow(clippy::too_many_arguments)]
 pub fn render_presence_name_flag(painter:&mut(impl Paint+?Sized),clip:[f32;4],name:&str,client_os:Option<&str>,origin:[f32;2],font_size:f32,color:[f32;4],ink:[u8;4]){
     if name.is_empty(){return;}

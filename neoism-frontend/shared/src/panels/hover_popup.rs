@@ -4,7 +4,7 @@ use crate::primitives::ide_theme::IdeTheme;
 use crate::syntax::{highlight_line, syn_color, Lang, SynTok};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 use unicode_segmentation::UnicodeSegmentation;
 

@@ -130,7 +130,7 @@ pub type TreeNode = TreeEntry;
 
 // ---- Panel-trait shim --------------------------------------------------------
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use crate::event::UiEvent;
 use crate::layout::PanelLayout;
@@ -141,7 +141,7 @@ impl crate::panels::Panel for FileTree {
         let _ = self.handle_ui_event(event, ctx, None);
     }
 
-    fn draw(&self, sugarloaf: &mut Sugarloaf, layout: &PanelLayout, ctx: &PanelContext) {
+    fn draw(&self, sugarloaf: &mut dyn Paint, layout: &PanelLayout, ctx: &PanelContext) {
         // Slim Panel::draw is `&self`; the native `FileTree::render`
         // is `&mut self` because it ticks the scroll/cursor springs
         // and writes back `last_panel_height_rows` / the truncation

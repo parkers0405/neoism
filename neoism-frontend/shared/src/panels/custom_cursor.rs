@@ -1,4 +1,4 @@
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 const PX: f32 = 1.0;
 const DEPTH: f32 = 0.0;
@@ -53,7 +53,7 @@ fn span_color(value: u8) -> [f32; 4] {
     }
 }
 
-pub fn draw(sugarloaf: &mut Sugarloaf, mouse_x: f32, mouse_y: f32, scale: f32) {
+pub fn draw(sugarloaf: &mut dyn Paint, mouse_x: f32, mouse_y: f32, scale: f32) {
     let px = PX;
     let base_x = mouse_x / scale;
     let base_y = mouse_y / scale;

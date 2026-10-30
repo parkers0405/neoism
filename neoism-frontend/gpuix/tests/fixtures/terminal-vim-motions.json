@@ -1,0 +1,448 @@
+[
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "w"
+      ]
+    },
+    "cursor": {
+      "x": 4,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "w",
+        "w"
+      ]
+    },
+    "cursor": {
+      "x": 8,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "e"
+      ]
+    },
+    "cursor": {
+      "x": 2,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "$"
+      ]
+    },
+    "cursor": {
+      "x": 13,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "$",
+        "$"
+      ]
+    },
+    "cursor": {
+      "x": 29,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "l",
+        "b"
+      ]
+    },
+    "cursor": {
+      "x": 0,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "M"
+      ]
+    },
+    "cursor": {
+      "x": 0,
+      "y": 1,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "L"
+      ]
+    },
+    "cursor": {
+      "x": 0,
+      "y": 4,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "j",
+        "$"
+      ]
+    },
+    "cursor": {
+      "x": 5,
+      "y": 1,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "j",
+        "w"
+      ]
+    },
+    "cursor": {
+      "x": 2,
+      "y": 2,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "j",
+        "W"
+      ]
+    },
+    "cursor": {
+      "x": 2,
+      "y": 2,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "j",
+        "l",
+        "l",
+        "k",
+        "j"
+      ]
+    },
+    "cursor": {
+      "x": 2,
+      "y": 1,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "w",
+        "w",
+        "%"
+      ]
+    },
+    "cursor": {
+      "x": 13,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "G"
+      ]
+    },
+    "cursor": {
+      "x": 0,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "one two (four)\r\nsecond\r\n  third line",
+      "cols": 30,
+      "rows": 5,
+      "keys": [
+        "H",
+        "0",
+        "g"
+      ]
+    },
+    "cursor": {
+      "x": 0,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "a界defghijklmnopq\r\nsecond",
+      "cols": 10,
+      "rows": 4,
+      "keys": [
+        "H",
+        "0",
+        "l"
+      ]
+    },
+    "cursor": {
+      "x": 1,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "a界defghijklmnopq\r\nsecond",
+      "cols": 10,
+      "rows": 4,
+      "keys": [
+        "H",
+        "0",
+        "l",
+        "l"
+      ]
+    },
+    "cursor": {
+      "x": 3,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "a界defghijklmnopq\r\nsecond",
+      "cols": 10,
+      "rows": 4,
+      "keys": [
+        "H",
+        "0",
+        "l",
+        "l",
+        "h"
+      ]
+    },
+    "cursor": {
+      "x": 2,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "a界defghijklmnopq\r\nsecond",
+      "cols": 10,
+      "rows": 4,
+      "keys": [
+        "H",
+        "0",
+        "l",
+        "l",
+        "l",
+        "l"
+      ]
+    },
+    "cursor": {
+      "x": 5,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "a界defghijklmnopq\r\nsecond",
+      "cols": 10,
+      "rows": 4,
+      "keys": [
+        "H",
+        "0",
+        "l",
+        "l",
+        "l",
+        "l",
+        "l",
+        "l",
+        "l",
+        "l",
+        "l",
+        "l"
+      ]
+    },
+    "cursor": {
+      "x": 1,
+      "y": 1,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "a界defghijklmnopq\r\nsecond",
+      "cols": 10,
+      "rows": 4,
+      "keys": [
+        "H",
+        "0",
+        "j",
+        "0"
+      ]
+    },
+    "cursor": {
+      "x": 0,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "a界defghijklmnopq\r\nsecond",
+      "cols": 10,
+      "rows": 4,
+      "keys": [
+        "H",
+        "0",
+        "j",
+        "0",
+        "0"
+      ]
+    },
+    "cursor": {
+      "x": 0,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  },
+  {
+    "scenario": {
+      "content": "a界defghijklmnopq\r\nsecond",
+      "cols": 10,
+      "rows": 4,
+      "keys": [
+        "H",
+        "0",
+        "j",
+        "0",
+        "h"
+      ]
+    },
+    "cursor": {
+      "x": 0,
+      "y": 0,
+      "visible": true,
+      "shape": "Block"
+    }
+  }
+]

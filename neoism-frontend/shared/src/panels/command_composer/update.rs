@@ -4,7 +4,7 @@
 
 use web_time::Instant;
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 use super::classify::wrap_lines_for_width;
 use super::state::CommandComposer;
@@ -220,7 +220,7 @@ impl CommandComposer {
     /// independent.
     pub fn render_status_join(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         status_y: f32,
         status_h: f32,
         theme: &IdeTheme,

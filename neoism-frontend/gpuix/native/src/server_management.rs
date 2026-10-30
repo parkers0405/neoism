@@ -38,7 +38,7 @@ fn stop_hosted(spec:&HostedServerSpec){
    let Ok(pid)=entry.file_name().to_string_lossy().parse::<i32>()else{continue;};
    let Ok(exe)=std::fs::read_link(entry.path().join("exe"))else{continue;};
    let name=exe.file_name().and_then(|name|name.to_str()).unwrap_or("");
-   if !matches!(name.trim_end_matches(" (deleted)"),"neoism-workspace-daemon"|"neoism-workspace-daemon-grid"){continue;}
+   if !matches!(name.trim_end_matches(" (deleted)"),"neoism-workspace-daemon"){continue;}
    let Ok(bytes)=std::fs::read(entry.path().join("cmdline"))else{continue;};
    let args=bytes.split(|byte|*byte==0).map(String::from_utf8_lossy).collect::<Vec<_>>();
    let state=spec.state_dir.to_string_lossy();let address=format!("0.0.0.0:{}",spec.port);

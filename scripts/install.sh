@@ -20,7 +20,7 @@ set -euo pipefail
 REPO="${NEOISM_REPO:-parkers0405/neoism}"  # GitHub repo whose Releases host the prebuilt binaries
 BIN_DIR="${NEOISM_BIN_DIR:-${HOME}/.local/bin}"
 VERSION="${NEOISM_VERSION:-latest}"
-BINARIES=(neoism neoism-workspace-daemon neoism-agent neoism-agent-lua-runner)
+BINARIES=(neoism neoism-workspace-daemon neoism-agent)
 SKIP_CHECKSUM="${NEOISM_SKIP_CHECKSUM:-0}"
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -47,7 +47,7 @@ case "$arch" in
 esac
 asset="neoism-${goos}-${goarch}.tar.gz"
 case "$asset" in
-  neoism-linux-x86_64.tar.gz|neoism-darwin-aarch64.tar.gz) ;;
+  neoism-linux-x86_64.tar.gz) ;;
   *)
     err "no prebuilt release asset for ${goos}/${goarch} yet (${asset}). Clone https://github.com/${REPO} and run ./install.sh to build from source."
     ;;
@@ -86,52 +86,10 @@ payload="$tmp/neoism-${goos}-${goarch}"
 for b in "${BINARIES[@]}"; do
   [ -f "$payload/$b" ] && [ -x "$payload/$b" ] || err "binary '$b' not found in $asset"
 done
-[ -f "$payload/web/index.html" ] || err "web/index.html not found in $asset"
-[ -f "$payload/web/agent-gui/index.html" ] || err "agent GUI missing from $asset; this release is incomplete"
-mkdir -p "$BIN_DIR"
-transaction="$(mktemp -d "$BIN_DIR/.neoism-install.XXXXXX")"
-mkdir "$transaction/new" "$transaction/old"
-components=("${BINARIES[@]}" web)
-moved=()
-committed=0
-cleanup_install() {
-  local result=$? i component
-  trap - EXIT INT TERM
-  if [ "$committed" -eq 0 ]; then
-    for ((i=${#moved[@]}-1; i>=0; i--)); do
-      component="${moved[$i]}"
-      if [ -e "$transaction/old/$component" ] || [ -L "$transaction/old/$component" ]; then
-        rm -rf "$BIN_DIR/$component"
-        mv "$transaction/old/$component" "$BIN_DIR/$component" || {
-          warn "Rollback failed; recovery files remain in $transaction"
-          exit 1
-        }
-      elif [ ! -e "$transaction/new/$component" ]; then
-        rm -rf "$BIN_DIR/$component"
-      fi
-    done
-  fi
-  rm -rf "$transaction" "$tmp"
-  exit "$result"
-}
-trap cleanup_install EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-for b in "${BINARIES[@]}"; do
-  install -m 0755 "$payload/$b" "$transaction/new/$b"
-done
-# Includes agent-gui and every hashed/static asset; never merge old/new trees.
-cp -R "$payload/web" "$transaction/new/web"
-for component in "${components[@]}"; do
-  moved+=("$component")
-  if [ -e "$BIN_DIR/$component" ] || [ -L "$BIN_DIR/$component" ]; then
-    mv "$BIN_DIR/$component" "$transaction/old/$component"
-  fi
-  mv "$transaction/new/$component" "$BIN_DIR/$component"
-  printf '   %s\n' "$BIN_DIR/$component"
-done
-committed=1
-
+[ -f "$payload/install-bundle.sh" ] || err "GPUIX bundle installer is missing; this is not a migrated release"
+# The downloaded archive was checksum-verified above. Its installer validates
+# all binaries, libraries, and Agent GUI assets before replacing installed files.
+bash "$payload/install-bundle.sh" "$payload" "${NEOISM_PREFIX:-$HOME/.local}" "$BIN_DIR"
 say "Done. Neoism ${VERSION} installed."
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -143,4 +101,4 @@ esac
 if ! "$BIN_DIR/neoism" --version >/dev/null 2>&1; then
   warn "installed binary did not run successfully; if this is NixOS or another non-FHS Linux, build from source with ./install.sh"
 fi
-printf '\nClose every running Neoism window, then run:  neoism\nUpdate later:  neoism update   (or re-run this installer if an older updater fails)\n'
+printf '\nClose every running Neoism window, then run:  neoism\nUpdate later: re-run this installer\n'

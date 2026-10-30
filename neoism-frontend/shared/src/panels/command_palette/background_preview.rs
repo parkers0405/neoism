@@ -1,6 +1,7 @@
 //! Neutral, bounded background thumbnails. No filesystem access on wasm.
+use crate::primitives::paint::Paint;
 use super::actions::PaletteBackgroundEntry;
-use sugarloaf::{GraphicOverlay, Sugarloaf};
+use neoism_paint::{GraphicOverlay, };
 
 pub const PANEL_ID: usize = usize::MAX - 24;
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,14 +31,14 @@ struct CachedImage {
 
 impl BackgroundPreviewCache {
     /// Remove retained overlays even when a host skips rendering a closed palette.
-    pub fn clear(sugarloaf: &mut Sugarloaf) {
+    pub fn clear(sugarloaf: &mut dyn Paint) {
         sugarloaf.clear_image_overlays_for(PANEL_ID);
     }
 
     #[cfg(target_arch = "wasm32")]
     fn register(
         &mut self,
-        _sugarloaf: &mut Sugarloaf,
+        _sugarloaf: &mut dyn Paint,
         _entry: &PaletteBackgroundEntry,
     ) -> Option<(u32, f32)> {
         None
@@ -46,10 +47,10 @@ impl BackgroundPreviewCache {
     #[cfg(not(target_arch = "wasm32"))]
     fn register(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         entry: &PaletteBackgroundEntry,
     ) -> Option<(u32, f32)> {
-        use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
+        use neoism_paint::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
         let path = entry.path.as_ref()?;
         let metadata = std::fs::metadata(path).ok()?;
         // Bound input and decoder allocations as well as retained thumbnail bytes.
@@ -98,12 +99,10 @@ impl BackgroundPreviewCache {
         };
         let id = IMAGE_PREFIX | image.slot;
         // Slot reuse must replace the GPU texture (transmit_time is its revision).
-        if sugarloaf
-            .image_data
-            .get(&id)
+        if sugarloaf.image_data_get(id)
             .is_none_or(|entry| entry.transmit_time != image.transmit_time)
         {
-            sugarloaf.image_data.insert(
+            sugarloaf.image_data_insert(
                 id,
                 GraphicDataEntry::from_graphic_data(GraphicData {
                     id: GraphicId::new(id as u64),
@@ -126,7 +125,7 @@ impl BackgroundPreviewCache {
 
     pub fn draw(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         entry: &PaletteBackgroundEntry,
         rect: [f32; 4],
         scale: f32,
@@ -180,7 +179,11 @@ mod tests {
     fn thumbnail_is_bounded_and_preserves_aspect() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wide.png");
-        image_rs::RgbaImage::new(1800, 900).save(&path).unwrap();
+        use image_rs::ImageEncoder;
+        let pixels = image_rs::RgbaImage::new(1800, 900);
+        image_rs::codecs::png::PngEncoder::new(std::fs::File::create(&path).unwrap())
+            .write_image(pixels.as_raw(), 1800, 900, image_rs::ExtendedColorType::Rgba8)
+            .unwrap();
         let image = decode_thumbnail(path.to_str().unwrap()).unwrap();
         assert_eq!(image.dimensions(), (640, 320));
         assert!(image.len() <= 640 * 360 * 4);

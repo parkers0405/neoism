@@ -802,11 +802,11 @@ impl CodePane {
 
     /// Caret shape for the host trail cursor: thick block outside
     /// insert, thin beam while inserting (nvim look).
-    pub fn cursor_shape(&self) -> neoism_terminal_core::ansi::CursorShape {
+    pub fn cursor_shape(&self) -> neoism_terminal_types::ansi::CursorShape {
         match self.buffer.mode {
-            CodeMode::Insert => neoism_terminal_core::ansi::CursorShape::Beam,
+            CodeMode::Insert => neoism_terminal_types::ansi::CursorShape::Beam,
             CodeMode::Normal | CodeMode::Visual => {
-                neoism_terminal_core::ansi::CursorShape::Block
+                neoism_terminal_types::ansi::CursorShape::Block
             }
         }
     }

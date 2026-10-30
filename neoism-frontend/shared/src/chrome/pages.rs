@@ -40,7 +40,7 @@ use crate::widgets::modal::{
     ModalInputSpec, ModalSpec,
 };
 
-use sugarloaf::Sugarloaf;
+use crate::primitives::paint::Paint;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitDiffSourceOpenRequest {
@@ -838,7 +838,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// theme-bg backdrop is down.
     pub(crate) fn draw_chrome_page_body(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         kind: ChromePageKind,
         rect: Rect,
     ) {
@@ -919,7 +919,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
 
     pub(crate) fn draw_git_diff_route(
         &mut self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         route: usize,
         rect: Rect,
     ) {
@@ -975,7 +975,7 @@ impl<A: Send + Copy + 'static> Chrome<A> {
     /// sugarloaf's late-overlay pass so text from panels drawn earlier
     /// this frame can never bleed through the opaque surfaces (the
     /// same trick desktop uses for its modal material).
-    pub(crate) fn draw_chrome_overlays(&mut self, sugarloaf: &mut Sugarloaf) {
+    pub(crate) fn draw_chrome_overlays(&mut self, sugarloaf: &mut dyn Paint) {
         // Image placements are retained even after the last overlay closes.
         self.modal.clear_image_overlay(sugarloaf);
         if !self.chrome_overlay_active() {
@@ -1976,7 +1976,6 @@ impl<A: Send + Copy + 'static> Chrome<A> {
             PaneAction::OpenRepository(_) => {
                 self.pending_extensions_actions.push(action);
             }
-            PaneAction::LuaPluginActionRequested { .. } => {}
         }
     }
 

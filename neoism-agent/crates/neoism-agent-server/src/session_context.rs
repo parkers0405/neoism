@@ -924,6 +924,9 @@ async fn stream_compaction_summary(
             &mut raw,
             event,
         );
+        // Buffered providers can otherwise finish the entire stream in one poll,
+        // preventing subscribers and cooperative cancellation from observing progress.
+        tokio::task::yield_now().await;
     }
     crate::execution_activity::end_provider_segment(activity_segment).await;
     tracing::info!(

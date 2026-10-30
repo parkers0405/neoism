@@ -805,12 +805,12 @@ fn persisted_event_envelope(event: crate::state::PersistedEvent) -> EventEnvelop
 
 fn event_source(kind: &str) -> &'static str {
     match kind.split('.').next().unwrap_or_default() {
-        "mcp" => "dev.neoism.mcp",
-        "lsp" => "dev.neoism.lsp",
-        "pty" => "dev.neoism.pty",
-        "workflow" => "dev.neoism.workflows",
-        "vcs" => "dev.neoism.vcs",
-        "subagent" => "dev.neoism.subagents",
+        "mcp" => neoism_agent_builtins::plugin::mcp::ID,
+        "lsp" => neoism_agent_builtins::plugin::lsp::ID,
+        "pty" => neoism_agent_builtins::plugin::pty::ID,
+        "workflow" => neoism_agent_builtins::plugin::workflows::ID,
+        "vcs" => neoism_agent_builtins::plugin::vcs::ID,
+        "subagent" => neoism_agent_builtins::plugin::subagents::ID,
         _ => "neoism.core",
     }
 }

@@ -7,48 +7,36 @@ daemon, sync/CRDT layer, notebooks, drawing surfaces, extensions system, and UI
 chrome — is original work by the Neoism contributors, licensed under the MIT
 License (see LICENSE).
 
-Neoism's terminal core and GPU renderer descend from Rio Terminal, which in turn
-descends from Alacritty. Those and the other third-party components listed below
-retain their original copyright and license notices. Where a source file carries
-an upstream copyright header, that header is authoritative for that file.
+This branch uses GPUIX for its frontend and Ghostty for terminal emulation.
+GPUIX native and Solid bindings are distributed under Apache-2.0; their licenses
+are included in desktop bundles as licenses/GPUIX-native.txt and licenses/GPUIX-solid.txt.
+The retained CPU font/paint code, PTY support and configuration code include
+Rio Terminal lineage. Upstream copyright and license notices remain applicable
+where code is retained; source-file headers are authoritative.
 
-
-Terminal core & renderer lineage
+Retained renderer and PTY lineage
 ---------------------------------
 
 Rio Terminal — MIT License, Copyright (c) 2022-present Raphael Amorim and
-contributors. Neoism's `sugarloaf` (GPU renderer), `teletypewriter` (PTY),
-`corcovado`, `copa`, `neoism-terminal-core`, `neoism-backend`, and parts of
-`neoism-window` are derived from Rio. Neoism extends the sugarloaf renderer with
-additional first-party subsystems (notably the virtual-surface editor/markdown/
-agent rendering path and shader overlay); the Rio-derived code remains under
-Rio's copyright and MIT license.
+contributors. Retained code in `neoism-paint`, `teletypewriter`, `corcovado`,
+`neoism-terminal-types`, and `neoism-backend` descends from Rio. Neoism's
+virtual-surface and UI code includes first-party extensions. See LICENSE and
+neoism-paint/LICENSE.
 
-Alacritty — Apache-2.0 License, Copyright (c) The Alacritty Project. The terminal
-grid model (`neoism-terminal-core/src/crosswords`) and VTE parser lineage
-originate in Alacritty; affected source files retain their Alacritty attribution.
-
+Alacritty — Apache-2.0 License, Copyright (c) The Alacritty Project.
+Retained terminal value types preserve their source-file attribution.
 
 Bundled and forked third-party components
 -----------------------------------------
 
-vte (via `copa`) — Apache-2.0 OR MIT, Copyright (c) 2016 Joe Wilm and the vte
-contributors. See copa/ORIGINAL-LICENSE-MIT and copa/ORIGINAL-LICENSE-APACHE.
-
 mio 0.6.x (via `corcovado`) — MIT, Copyright (c) 2014 Carl Lerche and the mio
 contributors. See corcovado/ORIGINAL_LICENSE.
 
-winit (via `neoism-window`) — Apache-2.0, Copyright (c) The winit contributors.
-`neoism-window` is a fork of winit; the Apache-2.0 terms apply to the derived
-window and event-loop code.
-
 wezterm-char-props (via `neoism-grapheme-width`) — MIT, Copyright (c) Wez Furlong.
 
-newpixiecrt shaders (`sugarloaf/src/components/filters/builtin/newpixiecrt`) —
-MIT / public domain, Copyright (c) 2016 Mattias Gustavsson, adapted by hunterk.
-
-hlchunk.nvim runtime (`neoism-backend/src/performer/nvim_runtime/lua/hlchunk`) —
-MIT, Copyright (c) 2023 shellRaining.
+Ghostty (`neoism-frontend/gpuix/artifacts/ghostty`) — MIT License, Copyright (c)
+Mitchell Hashimoto and contributors. The packaged libghostty-vt includes
+LICENSE.ghostty; the pinned source revision is recorded in neoism-frontend/gpuix/native/ghostty-pin.json.
 
 models.dev provider/model catalog metadata - MIT License, Copyright (c) 2025 models.dev. The bundled catalog snapshot is derived from https://models.dev/api.json; see misc/licenses/models.dev.txt for the upstream license.
 
@@ -80,15 +68,24 @@ Fonts
 -----
 
 Cascadia Code — SIL Open Font License 1.1, Copyright (c) Microsoft Corporation.
-Geist — SIL Open Font License 1.1, Copyright 2024 The Geist Project Authors. Native and web documentation popups embed the unmodified upright variable face; full license: sugarloaf/src/font/resources/Geist/OFL.txt. Browser pages embed a WOFF2 conversion of the website font; full license: neoism-agent/crates/neoism-agent-service-api/src/browser_pages/geist-LICENSE.txt.
+Geist — SIL Open Font License 1.1, Copyright 2024 The Geist Project Authors. Native and web documentation popups embed the unmodified upright variable face; full license: neoism-paint/src/font/resources/Geist/OFL.txt. Browser pages embed a WOFF2 conversion of the website font; full license: neoism-agent/crates/neoism-agent-service-api/src/browser_pages/geist-LICENSE.txt.
 Symbols Nerd Font — MIT License, Copyright (c) Ryan L McIntyre (Nerd Fonts).
 DejaVu fonts (test resources) — Bitstream Vera / DejaVu license (permissive).
 Exo 2 (test resources) — SIL Open Font License 1.1.
 Cinzel Decorative, MedievalSharp, Pirata One, UnifrakturCook — SIL Open Font
 License 1.1. See neoism-frontend/shared/assets/illuminated/fonts/google-ofl.
 Press Start 2P — SIL Open Font License 1.1, Copyright 2012 The Press Start 2P
-Project Authors (cody@zone38.net). See sugarloaf/src/font/resources/PressStart2P/OFL.txt.
+Project Authors (cody@zone38.net). See neoism-paint/src/font/resources/PressStart2P/OFL.txt.
 
+
+Pinned compiler compatibility sources
+-------------------------------------
+
+vendor/blaze-compat retains ICU4X icu_collator_data 2.4.0 under the Unicode
+License v3 and turso_core 0.8.3 under the MIT license. Their original notices and
+licenses remain with the sources. Small source changes for the pinned Blaze
+compiler are documented in vendor/blaze-compat/README.md. Desktop bundles include
+their licenses and the unmodified Tantivy dependency's MIT notice under licenses/.
 
 Notes
 -----

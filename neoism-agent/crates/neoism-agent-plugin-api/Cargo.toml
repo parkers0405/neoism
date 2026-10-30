@@ -14,3 +14,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

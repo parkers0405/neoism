@@ -1,7 +1,7 @@
 // This file was heavily inspired by neovide implementation.
 
-use neoism_terminal_core::ansi::CursorShape;
-use sugarloaf::Sugarloaf;
+use neoism_terminal_types::ansi::CursorShape;
+use crate::primitives::paint::Paint;
 use web_time::Instant;
 
 /// Animation duration for long jumps (seconds).
@@ -494,7 +494,7 @@ impl TrailCursor {
     /// positions, so one fan covers the same pixels in one draw call.
     pub fn draw(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         scale_factor: f32,
         cursor_color: [f32; 4],
     ) {
@@ -510,7 +510,7 @@ impl TrailCursor {
     /// primitive must also render the resting cursor shape.
     pub fn draw_always(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         scale_factor: f32,
         cursor_color: [f32; 4],
     ) {
@@ -519,7 +519,7 @@ impl TrailCursor {
 
     fn draw_quad(
         &self,
-        sugarloaf: &mut Sugarloaf,
+        sugarloaf: &mut dyn Paint,
         scale_factor: f32,
         cursor_color: [f32; 4],
     ) {

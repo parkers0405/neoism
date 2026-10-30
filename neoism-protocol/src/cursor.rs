@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Logical cursor shape — matches `neoism_terminal_core::ansi::CursorShape`
+/// Logical cursor shape — matches the terminal snapshot cursor shape
 /// but kept palette-free so the wire stays free of crate-private enums.
 /// Wasm-side mapping is case-insensitive (`"block"`, `"beam"`,
 /// `"underline"`, `"hidden"`) — anything unknown falls back to `Block`.

@@ -3,7 +3,7 @@ use std::sync::{Mutex, OnceLock};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use sugarloaf::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
+use neoism_paint::{ColorType, GraphicData, GraphicDataEntry, GraphicId};
 use web_time::Instant;
 
 use crate::panels::agent_pane::composer_interactions::ImagePreviewHit;
@@ -426,8 +426,13 @@ mod tests {
         let source =
             image_rs::RgbaImage::from_pixel(513, 257, image_rs::Rgba([12, 34, 56, 78]));
         let mut encoded = std::io::Cursor::new(Vec::new());
-        source
-            .write_to(&mut encoded, image_rs::ImageFormat::Png)
+        image_rs::ImageEncoder::write_image(
+            image_rs::codecs::png::PngEncoder::new(&mut encoded),
+            source.as_raw(),
+            source.width(),
+            source.height(),
+            image_rs::ExtendedColorType::Rgba8,
+        )
             .unwrap();
         let image = NeoismAgentImage {
             filename: "original.png".into(),

@@ -29,7 +29,7 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
   "keyboard.cursor.seed"=>{
    let rect=v["rect"].as_array().map(|values|std::array::from_fn::<_,4,_>(|index|values.get(index).and_then(Value::as_f64).unwrap_or(0.0) as f32)).unwrap_or([0.0;4]);
    CURSORS.with(|cursors|{if let Some((trail,last))=cursors.borrow_mut().get_mut(&(v["id"].as_u64().unwrap_or(0) as u32)){
-    trail.set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);trail.set_destination(rect[0],rect[1],rect[2],rect[3]);trail.snap_to_destination(rect[2],rect[3]);*last=Instant::now();
+    trail.set_cursor_shape(neoism_terminal_types::ansi::CursorShape::Block);trail.set_destination(rect[0],rect[1],rect[2],rect[3]);trail.snap_to_destination(rect[2],rect[3]);*last=Instant::now();
    }});Value::Null
   },
   "keyboard.cursor.dispose"=>{CURSORS.with(|cursors|cursors.borrow_mut().remove(&(v["id"].as_u64().unwrap_or(0) as u32)));Value::Null},
@@ -42,7 +42,7 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
     _=>neoism_ui::panels::buffer_tabs::keyboard_cursor_rect(rect[0],rect[1],rect[3],n("padding",12.0*scale),scale,v["plus"].as_bool().unwrap_or(false)),
    };
    CURSORS.with(|cursors|{let mut cursors=cursors.borrow_mut();let Some((trail,last))=cursors.get_mut(&(v["id"].as_u64().unwrap_or(0) as u32))else{return json!({"error":"Unknown keyboard cursor"});};
-    let was_animating=trail.is_animating();trail.set_cursor_shape(neoism_terminal_core::ansi::CursorShape::Block);trail.set_destination(target[0],target[1],target[2],target[3]);let now=Instant::now();trail.animate(target[2],target[3],if was_animating{now.duration_since(*last).as_secs_f32()}else{0.0});*last=now;
+    let was_animating=trail.is_animating();trail.set_cursor_shape(neoism_terminal_types::ansi::CursorShape::Block);trail.set_destination(target[0],target[1],target[2],target[3]);let now=Instant::now();trail.animate(target[2],target[3],if was_animating{now.duration_since(*last).as_secs_f32()}else{0.0});*last=now;
     json!({"rect":target,"quad":trail.quad_points(),"animating":trail.is_animating(),"hold":trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS)})
    })
   },_=>return Some(Err(format!("Unknown keyboard policy operation {op}")))

@@ -54,8 +54,7 @@ impl std::ops::Sub<Duration> for Instant {
 }
 
 use serde::{Deserialize, Serialize};
-use sugarloaf::text::DrawOpts;
-use sugarloaf::Sugarloaf;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 use crate::event::UiEvent;
@@ -2126,7 +2125,7 @@ impl Panel for StatusLine {
     /// will pick up the work.
     fn draw(
         &self,
-        _sugarloaf: &mut Sugarloaf,
+        _sugarloaf: &mut dyn Paint,
         _layout: &PanelLayout,
         _ctx: &PanelContext,
     ) {

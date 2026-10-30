@@ -3,7 +3,7 @@ import { coreCall } from "../src/native-core";
 import { statusInfo } from "../src/chrome/status-info";
 import { NativeEditor } from "../src/native-core";
 
-test("the real Rust top bar owns equal icon hit boxes and the original desktop menu", () => {
+test("the real Rust top bar owns equal icon hit boxes and the GPUIX menu", () => {
   const id = coreCall<{ id: number }>("chrome.new", { kind: "topbar", family: "Cascadia Code NF", fonts: ["Symbols Nerd Font Mono"] }).id;
   const params = { id, width: 1100, height: 720, scale: 1, theme: "pastel_dark", sidebar: "files", connection: "connected", agent: true, details: true, menu: false };
   try {
@@ -14,7 +14,7 @@ test("the real Rust top bar owns equal icon hit boxes and the original desktop m
     const menu: any = coreCall("chrome.click", { ...params, x: 19, y: 15 });
     expect(menu.menuOpen).toBe(true);
     expect(menu.menuRect[1]).toBe(30);
-    expect(menu.regions.filter((r: any) => r.menu).map((r: any) => r.label)).toEqual(["About", "Settings", "Start Web Server", "Themes", "Backgrounds", "Extensions"]);
+    expect(menu.regions.filter((r: any) => r.menu).map((r: any) => r.label)).toEqual(["About", "Settings", "Open Agent in Browser", "Themes", "Backgrounds", "Extensions"]);
     const about = menu.regions.find((r: any) => r.id === "menu:OpenAbout").rect;
     const chosen: any = coreCall("chrome.click", { ...params, x: about[0] + 20, y: about[1] + 10 });
     expect(chosen.action).toBe("OpenAbout"); expect(chosen.menuOpen).toBe(false);

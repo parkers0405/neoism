@@ -435,12 +435,12 @@ struct GlyphMask {
 }
 
 fn raster_glyph(character: char) -> Option<GlyphMask> {
-    use sugarloaf::swash::{
+    use neoism_paint::swash::{
         scale::{Render, ScaleContext, Source},
         zeno::Format,
         FontRef,
     };
-    let font = FontRef::from_index(sugarloaf::font::constants::FONT_PRESS_START_2P, 0)?;
+    let font = FontRef::from_index(neoism_paint::font::constants::FONT_PRESS_START_2P, 0)?;
     let id = font.charmap().map(character);
     if id == 0 {
         return None;

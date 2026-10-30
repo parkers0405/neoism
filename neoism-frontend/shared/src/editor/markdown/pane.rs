@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
 };
 
-use neoism_terminal_core::ansi::CursorShape;
+use neoism_terminal_types::ansi::CursorShape;
 use web_time::Instant;
 
 use super::helpers::{parse_blocks, source_from_lines, source_len_from_lines};

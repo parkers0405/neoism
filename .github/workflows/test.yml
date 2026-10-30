@@ -1,134 +1,42 @@
 name: Test
-
-# On-demand CI only (no per-push runs — they burned Actions quota): Windows
-# minutes bill 2x and macOS 10x on the private repo
-# Run the full cross-platform
-# matrix on demand via workflow_dispatch.
 on:
   pull_request:
     paths:
       - '**/*.rs'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
-      - 'neoism-agent/openapi/**'
-      - 'neoism-agent/scripts/**'
+      - 'neoism-frontend/gpuix/**'
       - 'neoism-agent/sdk/typescript/**'
       - '.github/workflows/test.yml'
+      - '.github/actions/setup-blaze/**'
+      - 'scripts/*blaze*'
+      - 'scripts/test-workspace*'
+      - '.cargo/**'
+      - 'vendor/blaze-compat/**'
+      - 'Makefile'
+      - 'install.sh'
+      - 'LICENSE'
+      - 'NOTICE'
+      - '.github/workflows/build-stack.yml'
+      - 'scripts/gpuix.sh'
+      - 'scripts/package-gpuix.sh'
+      - 'scripts/install-gpuix-bundle.sh'
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: full
-
+permissions:
+  contents: read
 jobs:
-  test-native:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["windows-latest", "macos-latest", "ubuntu-latest"]') || fromJSON('["ubuntu-latest"]') }}
-
-    runs-on: ${{ matrix.os }}
+  rust:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
-      - uses: Swatinem/rust-cache@v2
-      - run: rustup toolchain install stable --profile minimal
-      - run: rustup component add rustfmt clippy
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update -yq && sudo apt-get install -yq libasound2-dev libfontconfig1-dev glslang-tools
-      - run: cargo fetch
-      - name: Check Agent API contract drift
-        if: runner.os == 'Linux'
-        run: bash neoism-agent/scripts/openapi.sh check
-      - name: Typecheck the TypeScript SDK
-        if: runner.os == 'Linux'
-        working-directory: neoism-agent/sdk/typescript
-        run: |
-          npm install --no-audit --no-fund
-          npm run typecheck
-          npm test
-      - name: Guard Agent plugin architecture
-        run: cargo test -p neoism-agent-plugin-api --test architecture_guards --test plugin_conformance
-      - run: cargo fmt -- --check --color always
-      - run: cargo clippy --all-targets --all-features
-      - name: Check Windows terminal/daemon packages
-        if: runner.os == 'Windows'
-        run: cargo check -p teletypewriter -p neoism-terminal-pty -p neoism-workspace-daemon -p neoism --features wgpu
-      - run: cargo test --release --features wgpu
-      - name: Guard against UI code leaking into the desktop fork
-        if: runner.os != 'Windows'
-        shell: bash
-        run: ./scripts/check_no_ui_in_desktop_fork.sh
-  msys2-build-test: #cargo test doesn't necessarily build the exec we want
-    if: github.event_name == 'workflow_dispatch'
-    strategy:
-      matrix:
-        sys: [MINGW64, UCRT64, CLANG64]
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Setup MSYS2
-      uses: msys2/setup-msys2@v2
-      with:
-        msystem: ${{ matrix.sys }}
-        update: true
-        install: base-devel git
-        pacboy: >-
-          rust:p
-          cc:p
-          pkgconf:p
-          cmake:p
-          freetype:p
-          python:p
-          fontconfig:p
-
-    - name: Run cargo
-      shell: msys2 {0}
-      run: cargo build --release --features wgpu
-
-  # cli:
-  #   strategy:
-  #     matrix:
-  #       os: [macos-latest]
-
-  #   runs-on: ${{ matrix.os }}
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - uses: Swatinem/rust-cache@v2
-  #     - run: rustup toolchain install stable --profile minimal
-  #     - run: cargo fetch
-  #     - run: cargo build -p rio --bin rio
-  #     - run: RIO_LOG_LEVEL=info ./target/debug/rio -e touch ${HOME}/rio.test
-  #     - run: |
-  #         FILE=${HOME}/rio.test
-  #         if [ -f "$FILE" ]; then
-  #           echo "$FILE exists."
-  #         else
-  #           echo "$FILE does not exist."
-  #           exit 1
-  #         fi
-  #       shell: bash
-
-  # webassembly:
-  #   runs-on: ubuntu-latest
-  #   env:
-  #     GECKODRIVER: chromedriver
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - uses: Swatinem/rust-cache@v2
-  #       with:
-  #         cache-all-crates: "true"
-  #     - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
-  #     - run: cargo fetch
-  #     - run: cargo build -p sugarloaf --target wasm32-unknown-unknown
-  #     - run: cd ./sugarloaf && make install
-  #     - uses: nanasess/setup-chromedriver@v2
-  #     - run: |
-  #         export DISPLAY=:99
-  #         chromedriver --url-base=/wd/hub &
-  #     - run: make test-renderer
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.92'
+      - uses: ./.github/actions/setup-blaze
+      - name: Install native service dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config cmake libfontconfig1-dev libgbm-dev libxkbcommon-dev
+      - run: bash scripts/blaze.sh check --locked --workspace --all-targets
+      - name: Guard the frontend boundary
+        run: bash scripts/check-frontend-deps.sh
+  frontend:
+    uses: ./.github/workflows/build-stack.yml

@@ -1,10 +1,10 @@
 //! Nonblocking host adapter around the original desktop SSH daemon transport.
 //! The terminal stays Ghostty; its PTY is owned by the daemon behind this tunnel.
 #[allow(dead_code)]
-#[path = "../../../desktop/src/ssh_hosts.rs"]
+#[path = "ssh_hosts.rs"]
 pub(crate) mod original;
 #[allow(dead_code)]
-#[path = "../../../desktop/src/system_registry.rs"]
+#[path = "system_registry.rs"]
 mod registry;
 use serde_json::{json, Value};
 use std::collections::HashMap;

@@ -1,8 +1,27 @@
 {
   "repository": "https://github.com/indexable-inc/blaze.git",
-  "revision": "63761ab930912fc6fd3d4d6aa1b2611ddaca47d6",
+  "revision": "8f144c2dae639fd093e4c489dace50132002fe0a",
   "toolchain": "nightly-2026-10-27",
   "rustcVersion": "rustc 1.101.0-nightly (16d1ffac1 2026-10-26)",
   "backend": "cranelift",
-  "bootstrapOptLevel": 1
+  "bootstrapOptLevel": 1,
+  "release": "v0.20261029.5",
+  "archives": {
+    "x86_64-linux": {
+      "target": "x86_64-unknown-linux-gnu",
+      "sha256": "13559b9dc7fb5c650cb8ccb43499b39edd1767a392f0fb9031fa16df53369669"
+    },
+    "aarch64-linux": {
+      "target": "aarch64-unknown-linux-gnu",
+      "sha256": "6fbe5b2f2f3e8d9cd2a5bcae4d972e3db52ca48b2fa470cc563f3c53a4d9ff0b"
+    },
+    "aarch64-macos": {
+      "target": "aarch64-apple-darwin",
+      "sha256": "3e71ab6e6ab907eae250e4cd8eb1cd19b7b0335fada2ec7ec64fb80173f0cf68"
+    }
+  },
+  "library": {
+    "url": "https://github.com/indexable-inc/blaze/releases/download/v0.20261029.5/library-f1524885a07419549a4f11439af96f991e69629cefb51269b971571227b3aa77.tar.xz",
+    "sha256": "436f17c0e7360f79c990e37bcf978136ffc58c8dda6e875dbbd8074c2c7bdea3"
+  }
 }

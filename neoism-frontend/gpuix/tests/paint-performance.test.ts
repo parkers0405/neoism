@@ -35,8 +35,8 @@ test("scrolling one visual row retains existing wrapped glyph hosts at identical
 });
 
 test("compact Ghostty runs preserve colors, erase backgrounds, graphemes, marks and scrolling", async () => {
-  const packed = new TerminalBuffer(palettes.pastel_dark, 32, 5, "ghostty", "runs");
-  const cells = new TerminalBuffer(palettes.pastel_dark, 32, 5, "ghostty", "cells");
+  const packed = new TerminalBuffer(palettes.pastel_dark, 32, 5, "runs");
+  const cells = new TerminalBuffer(palettes.pastel_dark, 32, 5, "cells");
   const compare = () => { expect(packed.frame()).toEqual(cells.frame()); expect(packed.selectedText).toBe(cells.selectedText); };
   const feed = async (text: string) => { await packed.write(new TextEncoder().encode(text)); await cells.write(new TextEncoder().encode(text)); compare(); };
   try {

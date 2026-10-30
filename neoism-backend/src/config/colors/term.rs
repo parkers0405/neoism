@@ -1,11 +1,11 @@
 use crate::config::colors::{ColorArray, ColorBuilder, Format};
 use crate::config::Colors;
-use neoism_terminal_core::colors::term::{COUNT, DIM_FACTOR};
-use neoism_terminal_core::colors::{ColorRgb, NamedColor};
+use neoism_terminal_types::colors::term::{COUNT, DIM_FACTOR};
+use neoism_terminal_types::colors::{ColorRgb, NamedColor};
 use std::ops::{Index, IndexMut};
 
 // Phase 3b: the per-terminal palette storage type `TermColors` moved
-// into `neoism-terminal-core::colors::term`. Backend keeps the
+// into `neoism-terminal-types::colors::term`. Backend keeps the
 // renderer-side `List` (which folds the configured theme together
 // with `TermColors`).
 
@@ -137,8 +137,8 @@ impl List {
     /// the old renderer-side behavior), and `List` never resolves a
     /// real cursor color — seeding it would answer `OSC 12;?` with
     /// black.
-    pub fn as_default_colors(&self) -> neoism_terminal_core::colors::term::TermColors {
-        let mut colors = neoism_terminal_core::colors::term::TermColors::default();
+    pub fn as_default_colors(&self) -> neoism_terminal_types::colors::term::TermColors {
+        let mut colors = neoism_terminal_types::colors::term::TermColors::default();
         for (index, value) in self.0.iter().enumerate() {
             if index == NamedColor::Cursor as usize {
                 continue;

@@ -702,6 +702,10 @@ mod tests {
             .join("\n")
             .to_ascii_lowercase();
 
+        // Whitelist only the actual composition protocol identifiers; prose
+        // and paths must remain independent of the embedding product.
+        let visible = visible.replace("tools.neoism.", "tools.native.")
+            .replace("namespace: 'neoism'", "namespace: 'native'");
         for assumption in ["neoism", "vault", "product documentation"] {
             assert!(
                 !visible.contains(assumption),

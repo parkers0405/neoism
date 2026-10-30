@@ -1896,7 +1896,7 @@ fn conversations_width_clamps_to_supported_drag_range() {
 #[test]
 fn sidebar_material_leaves_default_row_fills_and_foreground_unchanged() {
     let theme = IdeTheme::default();
-    let mut style = neoism_lua::StylePatch::default();
+    let mut style = neoism_customization::StylePatch::default();
     let selected = theme.f32_alpha(theme.surface, 0.55);
     assert_eq!(
         crate::customization::apply_background_opacity(&style, selected),

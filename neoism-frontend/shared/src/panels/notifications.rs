@@ -15,7 +15,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use web_time::Duration;
 use web_time::Instant;
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 use crate::primitives::paint::Paint;
 
 use crate::primitives::IdeTheme;

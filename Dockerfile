@@ -7,36 +7,28 @@ RUN npm --prefix neoism-agent/sdk/typescript ci \
     && npm --prefix neoism-agent/sdk/typescript run gui:build \
     && node scripts/package-agent-gui.mjs neoism-agent/sdk/typescript/packages/gui/dist /gui
 
-FROM rust:1.92-bookworm AS builder
+FROM node:22-bookworm AS builder
 
-# The daemon links the sugarloaf renderer: shaderc-sys builds shaderc from
-# source (cmake + python3), and sugarloaf's build.rs shells out to a GLSL →
-# SPIR-V compiler (glslangValidator from glslang-tools).
-# Agent computer-use backends also link GBM (libwayshot) and xkbcommon.
+# CPU fonts and Agent computer-use libraries; no frontend GPU renderer.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        cmake python3 ninja-build glslang-tools \
+        build-essential clang git curl pkg-config cmake python3 ninja-build libfontconfig1-dev \
         libgbm-dev libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . .
-# Capped parallelism: an uncapped release build inside the container
-# saturates every host core (opt-level=3, codegen-units=1 on the heavy
-# deps) and starves the desktop the developer is actively using.
-# The workspace release profile (fat LTO, codegen-units=1, full debuginfo)
-# OOM-kills hosted runners — the same override release-neoism.yml uses.
-RUN CARGO_BUILD_JOBS=4 \
-    CARGO_PROFILE_RELEASE_DEBUG=0 \
-    CARGO_PROFILE_RELEASE_LTO=thin \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-    cargo build --release -p neoism-workspace-daemon -p neoism-agent -p neoism-agent-lua-runner
+# Blaze installs the pinned, checksum-verified compiler and its toolchain.
+# Docker already isolates the build; nested user namespaces are unavailable
+# under the default BuildKit seccomp policy.
+RUN CARGO_BUILD_JOBS=2 BLAZE_SANDBOX=off \
+    bash scripts/blaze.sh build --locked --release -p neoism-workspace-daemon -p neoism-agent
 
 FROM debian:bookworm-slim AS runtime
 
 # bash: bare `sh` gets no block-prompt integration, so commands look
 # perpetually running to joined clients. Fontconfig (including its FreeType
-# dependency) is linked by the daemon renderer even on a headless host.
+# dependency) is used by daemon configuration/font discovery even on a headless host.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
@@ -67,10 +59,9 @@ RUN useradd --system --create-home --home-dir /var/lib/neoism --shell /usr/sbin/
 COPY --from=builder /src/target/release/neoism-workspace-daemon /usr/local/bin/neoism-workspace-daemon
 COPY --from=agent-gui /gui /usr/local/bin/web/agent-gui
 COPY --from=builder /src/target/release/neoism-agent /usr/local/bin/neoism-agent
-COPY --from=builder /src/target/release/neoism-agent-lua-runner /usr/local/bin/neoism-agent-lua-runner
 # Exercise the runtime loader in the slim image before publishing it. A builder
 # dependency alone does not provide the shared libraries needed at startup.
-RUN neoism-workspace-daemon --version && neoism-agent --version && neoism-agent-lua-runner --version
+RUN neoism-workspace-daemon --version && neoism-agent --version
 USER neoism
 ENV NEOISM_DAEMON_ADDR=0.0.0.0:9876 \
     NEOISM_DAEMON_DATA_DIR=/var/lib/neoism/data \

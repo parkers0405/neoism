@@ -3,14 +3,14 @@
 // integration) can hit-test against the same numbers without re-deriving
 // layout.
 
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::primitives::geom::intersect_rect;
 use crate::primitives::ide_theme::IdeTheme;
 use crate::primitives::{draw_text_with_occlusion, truncate_to_fit};
 
 use super::state::{
-    ExtensionFilter, ExtensionStatus, ExtensionTab, LuaPluginAction, LuaPluginLifecycle,
+    ExtensionFilter, ExtensionStatus, ExtensionTab,
     NeoismExtensionsPane, RowAction, RowHit,
 };
 
@@ -1055,14 +1055,7 @@ fn draw_card_body(
 ) {
     let pad = 14.0 * s;
     let inner_x = x + pad;
-    let lua_action_count = entry.lua_plugin.as_ref().map_or(0, |plugin| {
-        usize::from(plugin.primary_action.is_some()) + plugin.secondary_actions.len()
-    });
-    let button_w = if lua_action_count > 1 {
-        196.0 * s
-    } else {
-        BUTTON_W * s
-    };
+    let button_w = BUTTON_W * s;
     let button_h = BUTTON_H * s;
     let button_x = x + w - pad - button_w;
     let button_y = y + (h - button_h) * 0.5;
@@ -1234,55 +1227,7 @@ fn draw_card_body(
     // Hit-rect for 1.3's click dispatch. Pushed after the row Focus
     // entry so click-resolution can prefer the button before falling
     // back to row-level focus. Informational states have no action.
-    if let Some(plugin) = entry.lua_plugin.as_ref() {
-        let actions = plugin
-            .primary_action
-            .iter()
-            .chain(plugin.secondary_actions.iter())
-            .collect::<Vec<_>>();
-        if actions.is_empty() {
-            paint_install_button(
-                sugarloaf,
-                button_rect,
-                &entry.status,
-                theme,
-                s,
-                false,
-                clip,
-                occlusion_rects,
-                Some(lua_button_label(plugin)),
-            );
-        } else {
-            let gap = 4.0 * s;
-            let width = (button_w - gap * (actions.len().saturating_sub(1) as f32))
-                / actions.len() as f32;
-            for (index, action) in actions.into_iter().enumerate() {
-                let rect = [
-                    button_x + index as f32 * (width + gap),
-                    button_y,
-                    width,
-                    button_h,
-                ];
-                let hovered = mouse.is_some_and(|(mx, my)| point_in_rect(mx, my, rect));
-                paint_install_button(
-                    sugarloaf,
-                    rect,
-                    &entry.status,
-                    theme,
-                    s,
-                    hovered,
-                    clip,
-                    occlusion_rects,
-                    Some(lua_action_label(action)),
-                );
-                row_hits.push(RowHit {
-                    rect,
-                    action: RowAction::LuaPlugin(entry.id.clone(), action.clone()),
-                });
-            }
-        }
-    } else if entry.lua_plugin.is_none()
-        && !matches!(
+    if !matches!(
             entry.status,
             ExtensionStatus::BuiltIn
                 | ExtensionStatus::Detected
@@ -1584,54 +1529,6 @@ fn paint_install_button(
     }
 }
 
-fn lua_button_label(plugin: &super::state::LuaPluginPresentation) -> &'static str {
-    if let Some(action) = &plugin.primary_action {
-        return match action {
-            LuaPluginAction::Install => "+ Install",
-            LuaPluginAction::Update => "Update",
-            LuaPluginAction::Remove => "Remove",
-            LuaPluginAction::Restore => "Restore",
-            LuaPluginAction::Enable => "Enable",
-            LuaPluginAction::Disable => "Disable",
-            LuaPluginAction::GrantAll => "Review access",
-            LuaPluginAction::RevokeAll => "Revoke access",
-            LuaPluginAction::Retry => "Retry",
-        };
-    }
-    match plugin.lifecycle {
-        LuaPluginLifecycle::Lazy => "Lazy",
-        LuaPluginLifecycle::Loaded => "Loaded",
-        LuaPluginLifecycle::Disabled => "Disabled",
-        LuaPluginLifecycle::PermissionRequired => "Access needed",
-        LuaPluginLifecycle::Approved => "Approved",
-        LuaPluginLifecycle::Revoked => "Revoked",
-        LuaPluginLifecycle::Incompatible => "Incompatible",
-        LuaPluginLifecycle::Blocked => "Blocked",
-        LuaPluginLifecycle::Failed => "Failed",
-        LuaPluginLifecycle::Installing => "Installing...",
-        LuaPluginLifecycle::Updating => "Updating...",
-        LuaPluginLifecycle::Restoring => "Restoring...",
-        LuaPluginLifecycle::Removing => "Removing...",
-        LuaPluginLifecycle::RestoreRequired => "Restore needed",
-        LuaPluginLifecycle::Discovered => "Discovered",
-        LuaPluginLifecycle::UpdateAvailable => "Update available",
-    }
-}
-
-fn lua_action_label(action: &LuaPluginAction) -> &'static str {
-    match action {
-        LuaPluginAction::Install => "Install",
-        LuaPluginAction::Update => "Update",
-        LuaPluginAction::Remove => "Remove",
-        LuaPluginAction::Restore => "Restore",
-        LuaPluginAction::Enable => "Enable",
-        LuaPluginAction::Disable => "Disable",
-        LuaPluginAction::GrantAll => "Grant",
-        LuaPluginAction::RevokeAll => "Revoke",
-        LuaPluginAction::Retry => "Retry",
-    }
-}
-
 fn install_button_label(status: &ExtensionStatus) -> &'static str {
     match status {
         ExtensionStatus::BuiltIn => "Built in",
@@ -1832,7 +1729,6 @@ mod tests {
             status,
             repository_url: Some("https://example.com/repo".into()),
             lsp_source: None,
-            lua_plugin: None,
         }
     }
 

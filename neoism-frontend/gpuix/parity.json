@@ -125,15 +125,23 @@
       "checks": [
         "tests/commands.test.ts",
         "scripts/native-command-check.ts",
-        "scripts/native-app-command-check.ts"
+        "scripts/native-app-command-check.ts",
+        "tests/presence-collaboration.test.ts",
+        "tests/presence-app.test.ts",
+        "tests/server-manager.test.ts",
+        "tests/server-actions.test.ts",
+        "tests/new-workspace.test.ts",
+        "tests/close-workspace.test.ts"
       ],
       "remaining": [
         "unimplemented command actions (hidden)",
         "notebook/epub surfaces",
-        "collaboration",
-        "Systems manager and server/workspace CRUD",
         "extension lifecycle backend API",
         "remaining context/management surfaces"
+      ],
+      "verified": [
+        "daemon-owned collaborative code/Markdown documents and remote presence",
+        "Systems manager, saved/SSH/Fast connections and workspace creation/close/root selection"
       ]
     },
     "packaging": {
@@ -143,27 +151,27 @@
         "scripts/native-check.ts --packaged"
       ],
       "verified": [
-        "Cargo-built executable after chrome/Markdown/performance ports",
+        "Blaze-built executable after chrome/Markdown/performance ports",
         "packaged executable launched outside the repository; real daemon file loading, Finder, native geometry and input checks passed"
       ]
     },
     "blazeBuild": {
-      "status": "partial",
+      "status": "verified",
       "checks": [
         "native/blaze-pin.json",
         "scripts/bootstrap-blaze.ts",
         "scripts/build-core.ts",
-        "scripts/verify-core.ts"
+        "scripts/verify-core.ts",
+        "../../scripts/blaze.sh",
+        "../../scripts/test-workspace.mjs"
       ],
       "verified": [
-        "pinned compiler and native macro helper bootstrap",
-        "actual small shared-library edit/rebuild; no Cargo fallback",
-        "pre-publication engine smoke against Cargo artifact"
+        "Pinned compiler and native macro helper bootstrap",
+        "Full native LLVM release bridge built and passed 43 native tests",
+        "All 514 frontend tests and actual packaged native-window checks passed against the Blaze-built bridge",
+        "All 32 workspace members passed with Blaze; no application Cargo fallback"
       ],
-      "remaining": [
-        "complete and smoke-test the full bridge with Blaze"
-      ],
-      "note": "Blaze selected by default. Full native cold build remains unverified; working preview built explicitly with Cargo."
+      "note": "Blaze is the default Rust builder locally and in CI. Release builds retain LLVM optimization; development tests use Cranelift."
     },
     "richMarkdown": {
       "status": "partial",
@@ -328,6 +336,31 @@
         "keyboard arrows reveal hidden workspace tabs and the trailing +; Enter creates a workspace",
         "rapid workspace creation stays ordered; failures preserve existing buffers and drafts"
       ]
+    },
+    "defaultFrontendMigration": {
+      "status": "verified",
+      "checks": [
+        "../../scripts/check-frontend-deps.sh",
+        "../../scripts/test-gpuix-install.sh",
+        "tests/local-startup.test.ts",
+        "scripts/local-daemon-smoke.ts",
+        "scripts/native-splash-check.ts --packaged",
+        "scripts/native-tab-workflow-check.ts --packaged",
+        "../../scripts/test-workspace.mjs --locked",
+        "../../.github/actions/setup-blaze/action.yml",
+        "../../pkgNeoism.nix"
+      ],
+      "verified": [
+        "GPUIX default launcher, build, package and install entrypoints",
+        "Sugarloaf/window/VT/Lua hosts removed; shared CPU UI/editor logic retained",
+        "daemon ownership of PTYs and Agent services preserved; startup and reuse tested",
+        "standalone Agent GUI assets regenerate from retained font and brand sources",
+        "All 32 Rust workspace members verified with Blaze; 514 frontend and 43 native tests passed",
+        "Actual default installation, live upgrade, packaged windows and persistent daemon startup verified",
+        "Nix LLVM services built, installed and checked; repaired signing-key fixture passed its targeted Nix rerun",
+        "Installed GPUIX startup verified against the Nix-built daemon and its real embedded Agent"
+      ],
+      "scope": "Frontend/default-runtime migration. Existing visual parity, IME and notebook/EPUB gates remain explicit separate product work; no FPS improvement is asserted."
     }
   },
   "completionRule": "Do not claim complete until required gates are implemented and verified. Preserve unrelated user changes and existing desktop usability."

@@ -58,7 +58,7 @@ pub(super) struct WorkspaceDrag {
 pub struct CommandPalette {
     pub(super) background_preview:
         std::cell::RefCell<super::background_preview::BackgroundPreviewCache>,
-    pub(super) plugin_commands: Vec<neoism_lua::CommandContribution>,
+    pub(super) plugin_commands: Vec<neoism_customization::CommandContribution>,
     pub(super) enabled: bool,
     pub query: String,
     pub selected_index: usize,
@@ -231,7 +231,7 @@ impl Default for CommandPalette {
 impl CommandPalette {
     pub fn set_plugin_commands(
         &mut self,
-        commands: Vec<neoism_lua::CommandContribution>,
+        commands: Vec<neoism_customization::CommandContribution>,
     ) {
         self.plugin_commands = commands;
         self.selected_index = 0;
@@ -550,7 +550,7 @@ impl CommandPalette {
     }
 
     /// Call once per host frame, including frames where the palette is not drawn.
-    pub fn clear_background_preview_overlays(sugarloaf: &mut sugarloaf::Sugarloaf) {
+    pub fn clear_background_preview_overlays(sugarloaf: &mut dyn crate::primitives::paint::Paint) {
         super::background_preview::BackgroundPreviewCache::clear(sugarloaf);
     }
 

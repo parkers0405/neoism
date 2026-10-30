@@ -942,7 +942,7 @@ pub struct PaletteBackgroundEntry {
     pub path: Option<String>,
     pub opacity: f32,
     pub blur: f32,
-    pub fit: sugarloaf::BackgroundImageFit,
+    pub fit: neoism_paint::BackgroundImageFit,
     pub position_x: f32,
     pub position_y: f32,
 }

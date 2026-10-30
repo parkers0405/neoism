@@ -1,8 +1,7 @@
 [Desktop Entry]
 Type=Application
 TryExec=neoism
-Exec=neoism %U
-MimeType=x-scheme-handler/neoism;text/markdown;application/json;application/x-yaml;text/x-rust;text/x-python;application/javascript;text/x-go;text/x-c;text/x-c++;application/x-shellscript;application/toml;text/html;text/css;text/plain;application/x-ipynb+json;
+Exec=neoism
 Icon=neoism
 Terminal=false
 Categories=System;TerminalEmulator;Development;
@@ -10,9 +9,9 @@ Categories=System;TerminalEmulator;Development;
 Name=Neoism
 GenericName=Terminal-first editor workspace
 Comment=A hardware-accelerated terminal-first editor workspace
-StartupWMClass=neoism
+StartupWMClass=ai.neoism.gpuix
 Actions=New;
 
 [Desktop Action New]
 Name=New Neoism Window
-Exec=neoism --new-window
+Exec=neoism

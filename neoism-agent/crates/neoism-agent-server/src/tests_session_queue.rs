@@ -1458,7 +1458,9 @@ async fn prompt_queue_survives_server_restart() {
     state.inner.store.close().await;
 
     let restarted = AppState::open_database(db_path.clone()).await.unwrap();
-    let messages = tokio::time::timeout(Duration::from_secs(2), async {
+    // Wait for durable consumption, including removing the queue entry. Allow
+    // scheduler and storage contention when the complete suite runs together.
+    let messages = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let messages = restarted
                 .inner
@@ -1466,7 +1468,9 @@ async fn prompt_queue_survives_server_restart() {
                 .list_messages(session.id.as_str())
                 .await
                 .unwrap();
-            if !messages.is_empty() {
+            if !messages.is_empty()
+                && queued_prompt_count(&restarted, session.id.as_str()).await == 0
+            {
                 break messages;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1485,6 +1489,7 @@ async fn prompt_queue_survives_server_restart() {
         0
     );
 
+    restarted.shutdown().await.unwrap();
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
 }

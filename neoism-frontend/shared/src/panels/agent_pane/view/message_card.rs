@@ -1,4 +1,4 @@
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 use crate::panels::agent_pane::state::{
     NeoismAgentImage, NeoismAgentMessage, NeoismAgentMessageKind, NeoismAgentOutputKind,

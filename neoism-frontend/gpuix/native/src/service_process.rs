@@ -9,8 +9,10 @@ pub(crate) fn standalone_executable()->io::Result<PathBuf>{
  if let Some(path)=std::env::var_os("NEOISM_GPUIX_WORKSPACE_DAEMON"){let path=PathBuf::from(path);if path.is_file(){return Ok(path);}return Err(io::Error::new(io::ErrorKind::NotFound,"Configured workspace daemon does not exist"));}
  let beside=std::env::current_exe()?.parent().unwrap().join(if cfg!(windows){"neoism-workspace-daemon.exe"}else{"neoism-workspace-daemon"});
  if beside.is_file(){return Ok(beside);}
- let development=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(if cfg!(windows){"../artifacts/neoism-workspace-daemon-grid.exe"}else{"../artifacts/neoism-workspace-daemon-grid"});
- if development.is_file(){return Ok(development);}
+ for directory in ["../../../target/activation", "../artifacts"] {
+  let development=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(directory).join(if cfg!(windows){"neoism-workspace-daemon.exe"}else{"neoism-workspace-daemon"});
+  if development.is_file(){return Ok(development);}
+ }
  Err(io::Error::new(io::ErrorKind::NotFound,"The packaged workspace daemon is missing"))
 }
 pub(crate) fn launch_persistent_host(

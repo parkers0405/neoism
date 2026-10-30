@@ -33,7 +33,9 @@ export const commands: SlashCommand[] = [
   {
     "name": "/agent",
     "description": "Switch agent",
-    "aliases": []
+    "aliases": [
+      "/agents"
+    ]
   },
   {
     "name": "/compact",

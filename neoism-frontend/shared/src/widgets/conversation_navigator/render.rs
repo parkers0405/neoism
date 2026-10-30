@@ -5,7 +5,7 @@ use crate::primitives::{
     geom::intersect_rect, snap_to_device_px, text::truncate_to_fit, IdeTheme,
 };
 use crate::primitives::paint::Paint;
-use sugarloaf::text::DrawOpts;
+use neoism_paint::text::DrawOpts;
 
 const INPUT_HEIGHT: f32 = 40.0;
 const INPUT_FONT: f32 = 14.0;

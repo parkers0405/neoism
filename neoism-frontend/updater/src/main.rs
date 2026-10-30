@@ -1,8 +1,6 @@
 //! Standalone updater shared by the GPUIX CLI and the legacy migration payload.
 use std::{path::{Path, PathBuf}, time::{Duration, Instant}};
-use futures::StreamExt;
-use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
+mod download;
 #[cfg(unix)]
 mod macos_update;
 #[cfg(windows)]
@@ -13,7 +11,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Default)]
 struct Options { nightly: bool, force: bool, target: Option<String>, executable: Option<PathBuf>, parent: Option<u32>, relaunch: bool }
 fn main() {
-    if let Err(error) = run() { eprintln!("Neoism update failed: {error}"); std::process::exit(1); }
+    if let Err(error) = run() { eprintln!("Neoism update failed: {}", download::error_chain(error.as_ref())); std::process::exit(1); }
 }
 fn run() -> Result<(), Error> {
     #[cfg(target_os="macos")]
@@ -91,7 +89,7 @@ async fn download(options:&Options)->Result<(String,PathBuf,Option<PathBuf>),Err
     if repo.split('/').count()!=2 || !repo.bytes().all(|b|b.is_ascii_alphanumeric()||b"/_-.".contains(&b)) {return Err("Invalid release repository".into());}
     let client=reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).timeout(Duration::from_secs(900)).user_agent(format!("neoism/{VERSION}")).build()?;
     println!("Checking {} releases…",if options.nightly {"nightly"} else {"stable"});
-    let releases=client.get(format!("https://api.github.com/repos/{repo}/releases?per_page=100")).send().await?.error_for_status()?.json().await?;
+    let releases=serde_json::from_str(&download::text(&client, &format!("https://api.github.com/repos/{repo}/releases?per_page=100")).await?)?;
     let release=select_release(&releases,options.nightly,options.target.as_deref())?;
     let tag=release["tag_name"].as_str().ok_or("Missing release tag")?.to_owned();
     if !options.force && release_version(&tag)? <= release_version(VERSION)? {
@@ -105,16 +103,11 @@ async fn download(options:&Options)->Result<(String,PathBuf,Option<PathBuf>),Err
     let temporary=tempfile::Builder::new().prefix("neoism-update-").tempdir()?;
     let archive=temporary.path().join(&asset);
     let base=format!("https://github.com/{repo}/releases/download/{tag}");
-    let expected=client.get(format!("{base}/{asset}.sha256")).send().await?.error_for_status()?.text().await?;
+    let expected=download::text(&client, &format!("{base}/{asset}.sha256")).await?;
     let expected=expected.split_whitespace().next().ok_or("Empty checksum")?;
     if expected.len()!=64||!expected.bytes().all(|b|b.is_ascii_hexdigit()){return Err("Invalid SHA-256 checksum".into());}
     println!("Downloading {tag} ({asset})…");
-    let mut stream=client.get(format!("{base}/{asset}")).send().await?.error_for_status()?.bytes_stream();
-    let mut file=tokio::fs::File::create(&archive).await?;
-    let mut hash=Sha256::new();
-    while let Some(chunk)=stream.next().await {let chunk=chunk?;hash.update(&chunk);file.write_all(&chunk).await?;}
-    file.flush().await?;drop(file);
-    if format!("{:x}",hash.finalize())!=expected.to_ascii_lowercase(){return Err("Release checksum mismatch; installation was not changed".into());}
+    download::verified(&client, &format!("{base}/{asset}"), &archive, expected).await?;
     Ok((tag,temporary.keep(),Some(archive)))
 }
 #[cfg(unix)]

@@ -4,7 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {updateArguments,updaterPath} from "../src/update-cli";
 test("update aliases are handled before window startup while ordinary launches pass through",()=>{
- for(const args of [["update","--nightly"],["--update","nightly"],["upgrade","--force"],["self-update","--target-version","v1.2.3"],["--macos-update-helper","plan.json"]])expect(updateArguments(args)).toEqual(args);
+ for(const args of [["--update"],["--update","--nightly"],["update","--nightly"],["--update","nightly"],["upgrade","--force"],["self-update","--target-version","v1.2.3"],["--macos-update-helper","plan.json"]])expect(updateArguments(args)).toEqual(args);
  expect(updateArguments(["--version"])).toBeUndefined();expect(updateArguments(["src/main.rs"])).toBeUndefined();
 });
 test("updater resolution uses the invoking portable installation or macOS app resources",()=>{

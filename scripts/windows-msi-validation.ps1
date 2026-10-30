@@ -65,6 +65,7 @@ if (($userPath -split ';').TrimEnd('\') -notcontains $installDir.TrimEnd('\')) {
 & "$PSScriptRoot/windows-updater-native-validation.ps1" -CandidateMsi $installer `
     -ManagedDir $installDir -PackagingDir $packagingDir -Version $expectedVersion -Evidence $evidence
 Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--neoism-verify-runtime' "$evidence/native-runtime" 60
+Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--update nightly --help' "$evidence/update-cli" 30
 } finally {
     try {
         $remove = if ($upgraded) { $installer } else { $fixture }

@@ -114,6 +114,7 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     run(installed / ('neoism' + SUFFIX), '--help')
     run(installed / ('neoism' + SUFFIX), '--neoism-verify-runtime')
     run(installed / ('neoism' + SUFFIX), 'update', '--help')
+    run(installed / ('neoism' + SUFFIX), '--update', 'nightly', '--help')
     for artifact in OUT.glob(NAME + '.*'):
         if artifact.suffix == '.sha256':
             continue

@@ -43,6 +43,7 @@ struct HostCommands {
     palette: CommandPalette,
     width: f32,
     height: f32,
+    base_rect: [f32;4],
 }
 fn close_target(query:&str)->Option<(&'static str,&'static str,bool)> {
     let command=query.trim().trim_start_matches(':').trim();
@@ -55,6 +56,7 @@ fn close_target(query:&str)->Option<(&'static str,&'static str,bool)> {
 // The desktop router resolves exact close commands before fuzzy catalog matches.
 fn frame(host:&mut HostCommands)->Value {
     let mut frame=host.palette.host_frame(host.width,host.height);
+    host.base_rect=host.palette.active_rect(host.width,1.0).unwrap_or([0.0;4]);
     let command=host.palette.query.trim().trim_start_matches(':').trim();
     let target=close_target(command);
     if let Some((action,title,discard))=target {
@@ -140,6 +142,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 palette,
                 width: number(v, "width", 1440.0),
                 height: number(v, "height", 900.0),
+                base_rect: [0.0;4],
             };
             let frame = frame(&mut host);
             store.commands.insert(id, host);
@@ -154,6 +157,11 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             .commands
             .get_mut(&id)
             .ok_or("Unknown command palette")?;
+        if op=="commands.frame" && v["retainRows"].as_bool().unwrap_or(false) && close_target(&host.palette.query).is_none() {
+            let mut frame=host.palette.host_motion_frame(host.base_rect);
+            frame["retainedRows"]=json!(true);
+            return Ok(frame);
+        }
         match op {
             "commands.frame" => {}
             "commands.query" => host.palette.set_query(text(v, "query").into()),

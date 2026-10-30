@@ -31,6 +31,7 @@ function shareJson(before: unknown, next: unknown): unknown {
   for (const key of keys) { b[key] = shareJson(a[key], b[key]); if (b[key] !== a[key]) same = false; }
   return same ? before : next;
 }
+export function shareLspFrame(before:EditorFrame["lsp"],next:EditorFrame["lsp"]){return shareJson(before,next) as EditorFrame["lsp"];}
 
 /** Keep text host nodes untouched during caret and sub-row scroll frames. */
 export function shareEditorPaint(before: EditorFrame, next: EditorFrame): EditorFrame {

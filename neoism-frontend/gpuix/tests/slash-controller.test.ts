@@ -22,6 +22,14 @@ test("slash catalog merges actual SDK commands without replacing native builtins
  const request=f.server.requests.find(r=>r.path==="/commands")!;expect(request.directory).toBe("/project/a");expect(request.authorization).toBe("Bearer fixture-token");
  f.server.capabilities.delete("neoism.goals");await f.controller.refresh();expect(f.controller.state.options.some(row=>row.value==="/goal")).toBe(false);
 });
+test("connect provider choices open before auth method discovery",async()=>{
+ const f=await fixture();await f.controller.execute("/connect");
+ expect(f.pickers.at(-1)?.options.some(row=>row.value==="openai")).toBe(true);
+ expect(f.server.requests.some(request=>request.path==="/providers/auth-methods")).toBe(false);
+ await f.pickers.at(-1)?.onSelect?.("openai");
+ expect(f.pickers.at(-1)?.kind).toBe("connect-account");
+ expect(f.server.requests.some(request=>request.path==="/providers/auth-methods")).toBe(true);
+});
 test("server commands use the dedicated SDK endpoint and captured per-thread model, account and reasoning",async()=>{
  const f=await fixture(),other={...f.model.selection("two")};
  const first=f.controller.execute("/review src/main.ts --strict"),duplicate=f.controller.execute("/review src/main.ts --strict");expect(duplicate).toBe(first);await first;

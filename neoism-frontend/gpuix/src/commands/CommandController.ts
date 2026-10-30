@@ -39,7 +39,13 @@ export class CommandController {
   private call(op: string, args: Record<string, unknown> = {}) {
     if (this.disposed) return this.frame;
     const started = performance.now(); this.animation.cancel();
-    this.frame = coreCall(`commands.${op}`, { id: this.id, ...args });
+    const next = coreCall<CommandFrame & {retainedRows?:boolean}>(`commands.${op}`, { id: this.id, ...(op==="frame"?{retainRows:true}:{}), ...args });
+    if(next.retainedRows)this.frame={...this.frame,...next};
+    else {
+      // Input may move selection without changing any catalog entry.
+      if(next.rows.length===this.frame.rows.length&&next.rows.every((row,index)=>JSON.stringify(row)===JSON.stringify(this.frame.rows[index])))next.rows=this.frame.rows;
+      this.frame=next;
+    }
     for (const listener of this.listeners) listener(this.frame);
     this.animate(started);
     return this.frame;

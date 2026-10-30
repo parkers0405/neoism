@@ -49,6 +49,7 @@ const hotState = stateGlobals[stateKey]; delete stateGlobals[stateKey];
 sshAttachment=hotState?.ssh;
 
 async function createSession(config: AppConfig, seed?: HotState) {
+  coreCall("paint.prewarm",{fontFamily:config.fontFamily,fontWeight:config.fontWeight,markdownFontFamily:config.markdownFontFamily});
   for (const warning of config.warnings) console.error(`[neoism-gpuix] ${warning}`);
   const client = new DaemonConnection(config), model = new WorkspaceModel(client, config, seed),visuals=new AppVisualState();
   const store = new SessionStore(config);

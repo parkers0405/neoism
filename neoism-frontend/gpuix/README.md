@@ -16,22 +16,48 @@ npm run build:core
 npm start
 ```
 
-Blaze is the Rust builder for the services, native bridge, tests, GitHub Actions,
+Blaze is the default Rust builder for the services, native bridge, tests, GitHub Actions,
 and Nix package. `scripts/blaze.sh` and `scripts/setup-blaze.mjs` install the exact
 published release and verify its SHA-256 against `native/blaze-pin.json`.
 Root `make build` builds the services, native bridge, application bundle, and
 standalone Agent web GUI; root `./install.sh` installs that bundle in
 `~/.local/lib/neoism-gpuix/bin`, preserving the existing daily `neoism` launcher.
-Application builds
-never fall back to Cargo. Windows CI bootstraps Blaze itself from the pinned
+Application builds never automatically fall back to another compiler.
+For an explicitly selected optimized native bridge, use
+`NEOISM_GPUIX_RUST_BUILDER=cargo NEOISM_GPUIX_BUILD_PROFILE=release bun scripts/build-core.ts`,
+then `bun scripts/build.ts --reuse-core` to package that verified library.
+This affects the bridge only; services and CI retain their existing compiler.
+The bridge's Cargo output is isolated in `target/gpuix-core-cargo`.
+Windows CI bootstraps Blaze itself from the pinned
 source because upstream publishes no Windows archive; its application tests use Blaze.
 
 After building and testing the native bridge, `npm run build -- --reuse-core`
 packages that existing library after another FFI smoke check. The normal build
-compiles the bridge through Blaze before packaging.
+compiles the bridge through the selected compiler (Blaze by default) before packaging.
 Windows uses upstream's documented `BLAZE_PROC_MACRO_SERVER=0` host macro mode
 because its matching native macro server is also unpublished.
 The compiler's [documented native macro host](https://github.com/indexable-inc/blaze/blob/8f144c2dae639fd093e4c489dace50132002fe0a/docs/cargo.md) handles SQLx and `enum-as-inner`.
+`npm run benchmark:render` measures uncached sidebar rasterization, Markdown
+opening, and repeated Markdown hover rendering without opening a window or
+connecting to a daemon. Set `NEOISM_GPUIX_CORE` to compare native libraries in
+separate processes. Compare the output hashes as well as timings, and use the
+same source revision and machine for build comparisons. These are native CPU
+workloads, not measurements of application FPS or total startup time.
+`npm run benchmark:cursor` compares full editor frames with cursor-only updates
+against the same native library and viewport. Cursor-only updates retain the
+document rows; deferred keyboard input, scrolling, and LSP work still request
+full frames. The component regression also checks that cursor animation does
+not rewrite the document canvas or upload its glyphs.
+Fractional editor scroll steps translate retained row ink instead of resending
+all glyph commands. The same component regression checks 80 sub-row offsets,
+native row alignment, edge-row replacement, and edits. Wheel notches convert
+to logical cell pixels; monitor scale is applied by GPUI, not a second time by
+the input handler.
+Terminal text, backgrounds and underlines share a single canvas instead of a
+layout node per styled run. `tests/terminal-paint.test.ts` covers dense ANSI
+scrollback, cell geometry, fractional edge rows, and selection in the actual
+component without creating a window.
+
 Build profiles select Blaze's backend: development uses Cranelift and release
 uses LLVM at `-O3`. The wrapper preserves an explicit `BLAZE_BACKEND` override.
 
@@ -325,6 +351,47 @@ and presentation call durations, excluding asynchronous GPU execution.
 tests without a concurrent build and record power/display settings alongside them.
 Fixture timings do not establish live-chat performance. Validate the packaged
 application with the user's actual workspace, configuration, and conversation.
+`bun run benchmark:frame-paths` compares full and retained palette frames and
+editor LSP pointer updates through the release bridge, without a window or
+daemon. These are CPU/wire-size measurements, not presentation FPS. Palette
+motion retains catalog rows; LSP pointer/overlay updates retain document paint
+and leave pending scroll frames intact. Markdown can opt into native canvas
+packets instead of converting the same paint commands again in JavaScript.
+Display callbacks and each daemon reply publish their reactive changes in one
+batch. Profiling includes `animation.batch`, `daemon.receive.<family>` (parsing,
+request delivery, subscribers, and synchronous reactive flush), and
+`daemon.agentBatch` (deferred Agent FIFO processing), without message contents.
+Background Agent text/history events still hydrate their session cache but do
+not request a repaint of the viewed transcript. Lifecycle and family activity
+events retain their redraws so conversation-header status stays current.
+The display clock reserves one successor callback before preparing an animation
+frame, so mutation flushing cannot postpone registration past the UI thread's
+next frame opportunity. A final empty callback drains that reservation without
+advancing animation or requesting another wake; native tests verify that these
+callbacks do not force redraws. `NEOISM_BENCH_LOOKAHEAD=0` runs the previous
+scheduling policy in `benchmark:fps` for comparisons. `NEOISM_BENCH_CHAT_ONLY=1`
+isolates transcript rendering, and `NEOISM_BENCH_HIDE` accepts comma-separated
+test IDs to omit from layout in the benchmark process. These diagnostic runs
+do not represent the complete application.
+Session initialization also preloads the configured chat/Markdown font library
+on a background thread. Painters share the completed library by font settings;
+the first chat mount can reuse it instead of loading fonts on the UI thread.
+The base picker font library is preloaded too. Picker effects track only their
+own inputs and share one initial paint; query and placement changes do not
+resend the catalog. Model/agent picker opens reuse successful catalogs for
+30 seconds, while explicit refreshes still fetch immediately and concurrent
+refreshes share a request. `/connect` displays providers before fetching auth
+methods for the selected provider.
+The retained chat painter preserves fractional vertical positions through the
+scroll tail, avoiding whole-logical-pixel pauses and jumps on scaled displays.
+Sending inserts the user message and clears the composer immediately, before
+session creation or prompt acknowledgment. The same message ID reconciles the
+server echo; rejection removes only unconfirmed messages and restores the draft
+without erasing newer typing. A temporary local timeline is retired when the
+new session adopts it. First submission leaves home immediately, including
+through empty initial history replies. Head
+history refreshes apply the server's ordering while retaining off-page history
+and live rows, including reasoning that arrived after its answer.
 `SIGUSR2` writes read-only timeline offsets, content/viewport dimensions, visible
 source ranges, and animation reasons alongside the existing state dump. Check
 these before and after scroll samples: clamped boundaries and demand-driven idle
@@ -353,3 +420,8 @@ personal captures and generated binaries are ignored.
 Packaging produces `dist/neoism`, the native bridge, libghostty, and its
 license. Keep these files together. GPUIX, fonts, and the wordmark are embedded.
 Override library paths with `NEOISM_GPUIX_CORE` and `NEOISM_GPUIX_GHOSTTY` if needed.
+
+Element geometry queries read a renderer-local snapshot published after paint.
+They no longer queue a synchronous UI-thread command from menu effects, pointer
+handlers, or keyboard cursor positioning. The snapshot includes translated and
+deferred content and drops boxes that did not paint in the completed frame.

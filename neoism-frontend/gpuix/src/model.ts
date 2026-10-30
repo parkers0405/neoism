@@ -1,9 +1,12 @@
+import {mergeHistoryHead} from "./agent/merge-history";
+import { recoveredEditorState } from "./editor/recovery-state";
+import { profileStart, profileEnd } from "./profiling";
 import {DocumentController} from "./collaboration/DocumentController";
 import {PresenceController} from "./collaboration/PresenceController";
 import { Effect, Schema } from "effect";
 import type { AppConfig } from "./config";
 import { DaemonConnection } from "./daemon/client";
-import { NativeEditor, coreCall } from "./native-core";
+import { NativeEditor, coreCall, type EditorSnapshot } from "./native-core";
 import { NativeMarkdown } from "./markdown/NativeMarkdown";
 import type { SavedSession } from "./session-store";
 import { WorkspaceLayout, type LayoutSnapshot, type SplitAxis, type FocusDirection } from "./layout/WorkspaceLayout";
@@ -35,7 +38,7 @@ export type Surface = {
   hidden?: boolean;
 };
 export interface PendingQuestion { sessionId: string; requestId: string; request: Record<string, unknown>; responding: boolean; error?: string }
-export interface PromptOptions { attachments?: readonly Attachment[]; delivery?: "steer" | "queue"; selection?: ProviderState }
+export interface PromptOptions { attachments?: readonly Attachment[]; delivery?: "steer" | "queue"; selection?: ProviderState; messageId?:string }
 export interface Permission { sessionId: string; requestId: string; tool: string; title: string; responding?: boolean; error?: string }
 export interface ComposerDraft { text: string; attachments: Array<Attachment & { token: string; name: string }> }
 export interface AppState {
@@ -54,6 +57,7 @@ export interface AppState {
   files: Readonly<Record<string, string>>;
   threads: readonly Thread[];
   history: Readonly<Record<string, readonly HistoryMessage[]>>;
+  pendingAgentSessions: Readonly<Record<string,string>>;
   usage: Readonly<Record<string, Usage>>;
   todos: Readonly<Record<string, readonly Todo[]>>;
   streaming: Readonly<Record<string, string>>;
@@ -111,7 +115,7 @@ export class WorkspaceModel {
   state: AppState = {
     ui: {}, composerDrafts: {}, connection: { phase: "closed", attempt: 0 }, workspaces: [], workspaceTabs: [],
     surfaces: [], notesDirectories: {}, notesExpanded: new Set([""]), directories: {}, expanded: new Set([""]), files: {}, threads: [],
-    history: {}, usage: {}, todos: {}, streaming: {}, permissions: [], questions: [], providers: [], agents: [], skills: [], providerStates: {}, drafts: {}, queues: {}, catalogsLoading: false, loading: false,
+    history: {}, pendingAgentSessions:{}, usage: {}, todos: {}, streaming: {}, permissions: [], questions: [], providers: [], agents: [], skills: [], providerStates: {}, drafts: {}, queues: {}, catalogsLoading: false, loading: false,
   };
   constructor(readonly client: DaemonConnection, readonly config: AppConfig, seed?: { state: AppState; editors: Map<string, NativeEditor>; recovery?: SavedSession }) {
     this.agentSdk = new AgentSdk(config);
@@ -189,7 +193,7 @@ export class WorkspaceModel {
   restoreSession(session: SavedSession) {
     this.agentFamilyWatermarks.clear();
     this.startupWelcomePending = true;
-    this.recoveredViews = session.editors;
+    this.recoveredViews = { ...session.editors };
     this.recoveredMarkdownViews = isRecord(session.ui.markdownViews) ? session.ui.markdownViews : {};
     const files: Record<string, string> = {};
     const providers: Record<string, ProviderState> = {}, drafts: Record<string, ProviderState> = {};
@@ -202,11 +206,12 @@ export class WorkspaceModel {
         && Array.isArray(v.bytes) && v.bytes.every((b) => Number.isInteger(b) && b >= 0 && b <= 255));
       composerDrafts[key] = { text: draft.text, attachments };
     }
+    // Retain recovery data without constructing and painting every hidden tab.
+    // The first getEditor restores native state; dirty guards use its saved metadata.
     for (const surface of session.surfaces) {
       if (surface.kind !== "file" || !session.editors[surface.id]) continue;
-      const editor = new NativeEditor(surface.path!, "", this.config.vim);
-      try { editor.call("restore", { snapshot: session.editors[surface.id] }); this.editors.set(surface.id, editor); files[surface.id] = editor.text(); }
-      catch { editor.dispose(); }
+      const recovered = recoveredEditorState(session.editors[surface.id]);
+      if (recovered) files[surface.id] = recovered.text;
     }
     this.restoredWorkspaceId = session.activeWorkspaceId;
     this.update({ surfaces: session.surfaces.map(surface=>surface.kind==="welcome"?{...surface,title:"Home"}:surface), activeSurfaceId: session.activeSurfaceId, files, providerStates: providers, drafts, composerDrafts, ui: this.withoutTerminalSplash(session.ui) });
@@ -657,6 +662,7 @@ export class WorkspaceModel {
         const current=this.state.surfaces.find(surface=>surface.id===owner.surface.id);
         if(!current||current.path!==owner.surface.path||current.rootDir!==owner.surface.rootDir||this.surfaceDirty(current.id)||this.state.files[current.id]!==owner.baseline||this.editors.get(current.id)!==owner.editor||owner.versions.some(version=>version.editor.frame.revision!==version.revision))continue;
         if(owner.editor&&owner.editor.text()!==text){owner.editor.call("replace-source",{text});if(owner.editor.text()===text)owner.editor.call("saved",{revision:owner.editor.frame.revision});}
+        if (!owner.editor) delete this.recoveredViews[current.id];
         if(files[current.id]!==text){files[current.id]=text;changed=true;}
       }
       if(changed)this.update({files});
@@ -727,7 +733,8 @@ export class WorkspaceModel {
   private surfaceDirty(id:string):boolean{
     const surface=this.state.surfaces.find(surface=>surface.id===id);
     if(surface?.kind==="git"&&Array.isArray(surface.gitEditorIds))return surface.gitEditorIds.some(owner=>owner!==id&&this.surfaceDirty(owner));
-    return this.editors.get(id)?.frame.dirty===true||[...this.editorViews.values()].some(view=>view.surfaceId===id&&view.editor.frame.dirty)||[...this.markdownViews.values()].some(view=>view.surfaceId===id&&view.markdown.frame.dirty);
+    const editor = this.editors.get(id);
+    return (editor ? editor.frame.dirty : recoveredEditorState(this.recoveredViews[id])?.dirty)===true||[...this.editorViews.values()].some(view=>view.surfaceId===id&&view.editor.frame.dirty)||[...this.markdownViews.values()].some(view=>view.surfaceId===id&&view.markdown.frame.dirty);
   }
   closeSurface = (id: string, discard = false) => {
     const editor = this.editors.get(id);
@@ -783,7 +790,13 @@ export class WorkspaceModel {
   }
   getEditor(surface: Surface, leaf?: number) {
     let editor = this.editors.get(surface.id);
-    if (!editor) { editor = new NativeEditor(this.hostPath(surface), this.state.files[surface.id] || "", this.config.vim); this.editors.set(surface.id, editor); }
+    if (!editor) {
+      const snapshot = this.recoveredViews[surface.id];
+      editor = new NativeEditor(this.hostPath(surface), snapshot ? "" : this.state.files[surface.id] || "", this.config.vim);
+      if (snapshot) try { editor.restore(snapshot as EditorSnapshot); }
+      catch (error) { editor.dispose(); throw error; }
+      this.editors.set(surface.id, editor);
+    }
     this.observeEditor(surface.id, editor);
     if(!surface.document&&this.state.files[surface.id]!==undefined)this.collaboration.attach(editor,this.hostPath(surface),this.state.workspaces.find(workspace=>workspace.id===surface.workspaceId));
     if (leaf === undefined) return editor;
@@ -851,7 +864,7 @@ export class WorkspaceModel {
   };
   saveFile = async (surface: Surface) => {
     surface = this.state.surfaces.find((current) => current.id === surface.id) || surface;
-    const editor = this.editors.get(surface.id);
+    const editor = this.editors.get(surface.id) || (this.recoveredViews[surface.id] ? this.getEditor(surface) : undefined);
     const workspace = this.state.workspaces.find((w) => w.id === surface.workspaceId);
     if (!editor || !surface.path || !workspace) return;
     const root = surface.rootDir || workspace.root_dir;
@@ -1057,11 +1070,28 @@ export class WorkspaceModel {
       this.update({threads});
     }catch(error){if(epoch===this.epoch)this.report(error);}
   };
-  refreshCatalogs = async () => {
+  private catalogFlights=new Map<string,Promise<void>>();
+  private catalogFetchedAt=new Map<string,number>();
+  refreshCatalogs = (options:{maxAgeMs?:number}={}) => {
+    const workspace=this.state.activeWorkspace;if(!workspace)return Promise.resolve();
+    const key=JSON.stringify([this.epoch,workspace.id,workspace.root_dir]);
+    const pending=this.catalogFlights.get(key);if(pending)return pending;
+    if(options.maxAgeMs&&Date.now()-(this.catalogFetchedAt.get(key)||0)<options.maxAgeMs)return Promise.resolve();
+    const task=this.loadCatalogs().then(()=>{if(!this.state.catalogsError)this.catalogFetchedAt.set(key,Date.now());}).finally(()=>{if(this.catalogFlights.get(key)===task)this.catalogFlights.delete(key);});
+    this.catalogFlights.set(key,task);return task;
+  };
+  private loadCatalogs = async () => {
     const epoch = this.epoch, workspace = this.state.activeWorkspace;
     if (!workspace) return;
-    const sdk = this.agentSdk.forWorkspace(workspace.id), directory = workspace.root_dir || undefined;
-    const key=JSON.stringify([workspace.id,directory||""]);
+    const sdk = this.agentSdk.forWorkspace(workspace.id);
+    // Following a terminal's cwd changes the Explorer, not the daemon's
+    // authorized workspace. Resolve project config within that scope; an
+    // outside cwd must use the workspace endpoint's authoritative default.
+    const root=this.state.workspaces.find(entry=>entry.id===workspace.id)?.root_dir;
+    const paths=root&&(/^[a-z]:[\\/]/i.test(root)||root.startsWith("\\\\"))?win32:posix;
+    const child=root&&workspace.root_dir?paths.relative(root,workspace.root_dir):undefined;
+    const directory=child!==undefined&&child!==".."&&!child.startsWith(`..${paths.sep}`)&&!paths.isAbsolute(child)?workspace.root_dir||undefined:undefined;
+    const key=JSON.stringify([workspace.id,workspace.root_dir||""]);
     const hadReadyModel=!!this.state.agentDefaults?.[key]?.model;
     let config:unknown={},providers:unknown={},configReady=false,providersReady=false;
     const publishDefaults=()=>{
@@ -1082,7 +1112,7 @@ export class WorkspaceModel {
       } catch (error) { if (epoch === this.epoch) {failed?.();this.update({ catalogsError: error instanceof Error ? error.message : "Catalog unavailable" });} }
     };
     await Promise.all([
-      catalog(async()=>{config=await sdk.config.defaults(directory);configReady=true;publishDefaults();return{};},()=>{configReady=true;publishDefaults();}),
+      catalog(async()=>{config=await sdk.config.defaults(directory);configReady=true;publishDefaults();return{};}),
       catalog(async () => {
         const result = await sdk.catalog.providers.configured(directory);
         providers=result;providersReady=true;publishDefaults();
@@ -1096,7 +1126,7 @@ export class WorkspaceModel {
     ]);
     if (epoch === this.epoch) this.update({ catalogsLoading: false,agentDefaultsLoading:false });
   };
-  private async createThread(selection: ProviderState) {
+  private async createThread(selection: ProviderState, optimistic?:{sessionId:string;message:HistoryMessage}) {
     const workspace = this.state.activeWorkspace;
     if (!workspace) throw new Error("Select a workspace first");
     const sourceId=this.state.activeSurfaceId;
@@ -1125,7 +1155,10 @@ export class WorkspaceModel {
       const adopted={...home,sessionId:thread.session_id,title:thread.title};
       this.transaction(()=>{
         const draft=homeDraftKey?this.state.composerDrafts[homeDraftKey]:undefined;
-        this.update({surfaces:this.state.surfaces.map(surface=>surface.id===home.id?adopted:surface),
+        const pendingAgentSessions={...this.state.pendingAgentSessions};delete pendingAgentSessions[home.id];
+        const history={...this.state.history};
+        if(optimistic){history[thread.session_id]=[optimistic.message,...(history[thread.session_id]||[]).filter(row=>row.id!==optimistic.message.id)];delete history[optimistic.sessionId];this.optimisticPrompts.set(optimistic.message.id,thread.session_id);}
+        this.update({pendingAgentSessions,history,surfaces:this.state.surfaces.map(surface=>surface.id===home.id?adopted:surface),
           ...(draft?{composerDrafts:{...this.state.composerDrafts,[thread.session_id]:draft}}:{})});
         this.getLayout(workspace.id).rename(adopted);
       });
@@ -1134,20 +1167,48 @@ export class WorkspaceModel {
     return thread;
   }
   newThread = async () => { try { await this.createThread(this.selection()); } catch (error) { this.report(error); } };
+  private optimisticPrompts=new Map<string,string>();
+  private showPrompt(sessionId:string,message:HistoryMessage){
+    this.optimisticPrompts.set(message.id,sessionId);this.upsertMessage(sessionId,message);
+    const event={MessageUpdated:{session_id:sessionId,message}};
+    for(const listener of this.agentEventListeners){try{listener(event);}catch(error){this.report(error);}}
+  }
+  private rollbackPrompt(messageId:string){
+    const sessionId=this.optimisticPrompts.get(messageId);if(!sessionId)return;
+    this.optimisticPrompts.delete(messageId);
+    this.update({history:{...this.state.history,[sessionId]:(this.state.history[sessionId]||[]).filter(row=>row.id!==messageId)}});
+    for(const listener of this.agentEventListeners){try{listener({PartRemoved:{session_id:sessionId,part_id:messageId}});}catch(error){this.report(error);}}
+  }
+  private promptMessage(request:ReturnType<typeof sdkPrompt>):HistoryMessage {
+    return {id:request.messageId!,role:"User",kind:"User",text:(request.parts||[]).filter(part=>part.type==="text").map(part=>part.text).join("\n"),author:localPresenceIdentity(this.config).displayName,
+      attachments:(request.parts||[]).filter(part=>part.type==="file").map(part=>({filename:part.filename||"image",url:part.url,mime:part.mime}))};
+  }
   submitPrompt = async (sessionId: string, text: string, options: PromptOptions = {}) => {
     const attachments = [...(options.attachments || [])];
     if (!text.trim() && !attachments.length) return false;
+    const selection=options.selection||this.selection(sessionId),request=sdkPrompt(text,attachments,selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
+    if(options.messageId)request.messageId=options.messageId;
+    this.showPrompt(sessionId,this.promptMessage(request));
     try {
-      const selection = options.selection || this.selection(sessionId);
       const sdk = this.sdkForSession(sessionId);
       await this.selectionTasks.get(sessionId);
-      await sdk.sessions.prompt(sessionId, sdkPrompt(text, attachments, selection, options.delivery || "steer",localPresenceIdentity(this.config).displayName));
+      await sdk.sessions.prompt(sessionId,request);
       return true;
-    } catch (error) { this.report(error); return false; }
+    } catch (error) { this.rollbackPrompt(request.messageId!);this.report(error); return false; }
   };
   submitNewPrompt = async (text: string, options: PromptOptions = {}) => {
-    try { const selection = this.selection(); const thread = await this.createThread(selection); return this.submitPrompt(thread.session_id, text, { ...options, selection:this.selection(thread.session_id) }); }
-    catch (error) { this.report(error); return false; }
+    if(!text.trim()&&!options.attachments?.length)return false;
+    const selection=this.selection(),sourceId=this.state.activeSurfaceId;
+    const request=sdkPrompt(text,options.attachments||[],selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
+    const message=this.promptMessage(request),sessionId=`pending:${request.messageId}`;
+    const home=this.state.surfaces.find(surface=>surface.id===sourceId&&surface.kind==="agent"&&!surface.sessionId);
+    if(home)this.transaction(()=>{this.update({pendingAgentSessions:{...this.state.pendingAgentSessions,[home.id]:sessionId}});this.showPrompt(sessionId,message);});
+    try {
+      const thread=await this.createThread(selection,home?{sessionId,message}:undefined);
+      if(home&&this.optimisticPrompts.get(message.id)===sessionId){this.rollbackPrompt(message.id);}
+      return await this.submitPrompt(thread.session_id,text,{...options,messageId:message.id,selection:this.selection(thread.session_id)});
+    }catch(error){this.rollbackPrompt(message.id);this.report(error);return false;}
+    finally{if(home&&this.state.pendingAgentSessions[home.id]===sessionId){const pendingAgentSessions={...this.state.pendingAgentSessions};delete pendingAgentSessions[home.id];this.update({pendingAgentSessions});}}
   };
   answerPermission = async (permission: Permission, decision: "Yes" | "Always" | "No") => {
     const matches = (p: Permission) => p.sessionId === permission.sessionId && p.requestId === permission.requestId;
@@ -1260,6 +1321,7 @@ export class WorkspaceModel {
   private flushAgentEvents(){
     this.incomingAgentTimer=undefined;if(this.disposed)return;
     const started=performance.now();let count=0;
+    const profileStarted=profileStart();
     this.transaction(()=>{
       while(this.incomingAgentHead<this.incomingAgentEvents.length&&count<64){
         const event=this.incomingAgentEvents[this.incomingAgentHead++]!;
@@ -1267,6 +1329,7 @@ export class WorkspaceModel {
         if(performance.now()-started>=4)break;
       }
     });
+    profileEnd("daemon.agentBatch",profileStarted);
     if(this.incomingAgentHead===this.incomingAgentEvents.length){this.incomingAgentEvents=[];this.incomingAgentHead=0;}
     else{if(this.incomingAgentHead>=1024){this.incomingAgentEvents=this.incomingAgentEvents.slice(this.incomingAgentHead);this.incomingAgentHead=0;}this.scheduleAgentEvents();}
   }
@@ -1364,6 +1427,7 @@ export class WorkspaceModel {
           if (!queue?.length) this.queuedHistory.delete(sessionId);
           if (next) this.sendAgent(next);
         });
+        for(const message of history)if(message.kind==="User")this.optimisticPrompts.delete(message.id);
         const previous = this.state.history[sessionId] || [];
         const older = request?.older ?? false;
         const nextCursor = request
@@ -1376,14 +1440,14 @@ export class WorkspaceModel {
         const existing = new Set(previous.map(message => message.id));
         const added = history.filter(message => !existing.has(message.id));
         const retained = previous.map(message => updates.get(message.id) || message);
-        const merged = initial ? [...history, ...previous.filter(message => !updates.has(message.id))] : older ? [...added, ...retained] : [...retained, ...added];
+        const merged = older ? [...added, ...retained] : mergeHistoryHead(previous,history,initial);
         this.update({ history: { ...this.state.history, [sessionId]: merged } });
         // Classify by the request that actually completed, not the pane's
         // loading flag: an older request can be queued behind a head refresh.
         const delivered = {HistoryChunk:{...body,messages:older ? history : merged,next_cursor:this.historyCursors.get(sessionId) ?? null}};
         for (const listener of this.agentEventListeners) { try { listener(delivered, older ? "older" : "head"); } catch (error) { this.report(error); } }
       } else if (tag === "MessageUpdated" && sessionId) {
-        this.upsertMessage(sessionId, Schema.decodeUnknownSync(HistoryMessageSchema)(body.message));
+        const message=Schema.decodeUnknownSync(HistoryMessageSchema)(body.message);if(message.kind==="User")this.optimisticPrompts.delete(message.id);this.upsertMessage(sessionId,message);
       } else if (tag === "ContentDelta" && sessionId && typeof body.message_id === "string" && typeof body.text === "string") {
         const id = body.message_id;
         const previous = this.state.history[sessionId]?.find((m) => m.id === id);

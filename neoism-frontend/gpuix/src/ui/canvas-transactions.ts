@@ -28,7 +28,10 @@ export function trackCanvasTransactions(renderer:Renderer){
  const forget=(id:number)=>{for(const key of state.references.get(id)||[]){const count=(state.counts.get(key)||0)-1;if(count>0)state.counts.set(key,count);else state.counts.delete(key);}state.references.delete(id);};
  renderer.applyBatch=json=>{
   const destroyed=apply(json);
-  for(const [op,id,key,value]of JSON.parse(json))if(op==="setCustomProp"&&key==="commands"){
+  // Most input/layout batches contain no display lists. Avoid allocating a
+  // second copy of their entire mutation tree just to discover that fact.
+  // Destruction and retired leases still run below, even on this fast path.
+  for(const [op,id,key,value]of (json.includes('"commands"') ? JSON.parse(json) : []))if(op==="setCustomProp"&&key==="commands"){
    forget(id);
    const keys=typeof value==="string"?canvasImageKeys(value):new Set<number>();
    // Only native canvas display lists carry a string commands property.

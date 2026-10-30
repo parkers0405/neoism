@@ -11,6 +11,7 @@ import { createAgentDaemon } from "./agent-daemon";
 import { DaemonConnection } from "../../src/daemon/client";
 import { WorkspaceModel } from "../../src/model";
 import { App } from "../../src/ui/App";
+import { AgentTimelineView } from "../../src/agent/AgentTimelineView";
 import { loadConfig } from "../../src/config";
 import { installFrameMeter,notifyFrameActivity } from "../../src/chrome/frame-meter";
 const scrollProfile=process.env.NEOISM_BENCH_SCROLL||"fast";
@@ -30,7 +31,7 @@ renderer.init({title:"Neoism scenario FPS",appId:"ai.neoism.gpuix.scenario-fps",
 for(const name of ["CascadiaCode/CascadiaCodeNF-Regular.otf","PressStart2P/PressStart2P-Regular.ttf"])renderer.registerFont(readFileSync(new URL(`../../../../neoism-paint/src/font/resources/${name}`,import.meta.url)));
 installProfiling(renderer);
 installFrameMeter(renderer);
-const displayClock=installDisplayClock(renderer,console.error);
+const displayClock=installDisplayClock(renderer,console.error,{lookahead:process.env.NEOISM_BENCH_LOOKAHEAD!=="0"});
 const loop=startFrameLoop(renderer);
 const root=render(()=><App model={model} config={config}/>,{renderer,keyboardFocusDim:false,onUncaughtError:error=>console.error("RENDER ERROR",error)});
 const app=new AutomationApp(new InProcessBackend(liveRendererAsTest(renderer)));
@@ -46,6 +47,11 @@ async function compositorFocus(){
 }
 async function measure(label:string,drive:()=>void,ms=3000,period=scrollPeriod){
  label+=`-${scrollProfile}`;
+ if(process.env.NEOISM_BENCH_TREE==="1"){
+  const flatten=(nodes:any[]):any[]=>nodes.flatMap(node=>[node,...flatten(node.children||[])]);
+  const nodes=flatten(await app.getByTestId("app-content").all());
+  console.log("[neoism-tree-shape]",JSON.stringify({label,total:nodes.length,types:nodes.reduce((counts,node)=>(counts[node.type]=(counts[node.type]||0)+1,counts),{}),sections:nodes.filter(node=>["agent-composer-shell","conversation","sidebar","workspace-content"].includes(node.testId)).map(node=>({section:node.testId,nodes:flatten([node]).length}))}));
+ }
  renderer.activateWindow();
  ms=Number(process.env.NEOISM_BENCH_MS)||ms;
  if(process.env.SHOT){console.log("READY",label);await Bun.sleep(2500);}
@@ -112,6 +118,18 @@ try{
    const prose=(i:number)=>`Here is message ${i}. It explains **something** with \`code\` and a list:\n\n- first point ${i}\n- second point\n\n\`\`\`ts\nconst value${i} = compute(${i});\nconsole.log(value${i});\n\`\`\`\n\nAnd a closing paragraph with more words to wrap across lines in the conversation column.`;
    server.push({HistoryChunk:{session_id:"one",messages:Array.from({length:120},(_,i)=>i%4===0?{id:`user-${i}`,role:"User",kind:"User",author:"Parker",text:`Question ${i}: can you check this?`}:i%4===3?{id:`tool-${i}`,role:"Assistant",kind:"Tool",tool:"bash",status:"completed",title:`Run tests ${i}`,detail:"ok"}:{id:`a-${i}`,role:"Assistant",kind:"Assistant",text:prose(i)})}});
    await until(async()=>await app.getByTestId("conversation").count()>0,"conversation");await Bun.sleep(1500);
+   for(const testId of (process.env.NEOISM_BENCH_HIDE||"").split(",").filter(Boolean)){
+    for(const node of await app.getByTestId(testId).all())renderer.applyBatch(JSON.stringify([["setStyle",node.id,{...node.style,display:"none"}]]));
+   }
+   if(process.env.NEOISM_BENCH_HIDE_STATIC_PAINT==="1"){
+    const changes:unknown[]=[];const walk=(nodes:any[],chat=false)=>{for(const node of nodes){const inChat=chat||node.testId==="conversation";if(node.type==="canvas"&&!inChat)changes.push(["setStyle",node.id,{...node.style,display:"none"}]);walk(node.children||[],inChat);}};
+    walk(await app.getByTestId("app-content").all());renderer.applyBatch(JSON.stringify(changes));console.log("STATIC_PAINT_HIDDEN",changes.length);await Bun.sleep(300);
+   }
+   if(process.env.NEOISM_BENCH_CHAT_ONLY==="1"){
+    const bounds=await app.getByTestId("conversation").bounds();
+    root.render(()=><div style={{width:"100%",height:"100%",backgroundColor:config.theme.bg}}><div style={{position:"absolute",display:"flex",flexDirection:"column",left:bounds.x,top:bounds.y,width:bounds.width,height:bounds.height}}><AgentTimelineView sessionId="one" model={model} config={config} report={model.report} openFile={()=>{}}/></div></div>);
+    await Bun.sleep(500);
+   }
    if(process.env.SIDEBAR){await app.getByTestId("conversation").press("alt-c");await Bun.sleep(800);}
    const host=app.getByTestId("conversation");const b=await host.bounds();let dir=1,n=0;
    await measure("agent-scroll",()=>{if(++n%120===0)dir=-dir;queueWheel(b.x+b.width/2,b.y+b.height/2,0,dir*scrollDelta);},3000);

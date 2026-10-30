@@ -37,7 +37,7 @@ async function terminal(){
  try{
   root.render(()=><TerminalView config={config} sessionId="blink" client={client} active onSearch={()=>{}} report={error=>{throw error;}}/>);await host.pump(root);
   await until(root,()=>!!host.find("terminal-caret"),"Terminal cursor must appear");
-  const canvas=[...host.nodes.values()].find(node=>node.type==="canvas");opaque(ops(canvas)[0]);
+  const canvas=host.find("terminal-cursor-layer");opaque(ops(canvas)[0]);
   // Native frame's movement hold is allowed to stay cached true. It cannot
   // prevent the independent UI deadline from hiding and showing this caret.
   await until(root,()=>!host.find("terminal-caret"),"Terminal cached hold must expire while idle");
@@ -48,7 +48,7 @@ async function terminal(){
 }
 async function finder(){
  const host=createRecordingAppRenderer(),root=createRoot(host.renderer),finder=new FinderController({cwd:"/project",search:async()=>({SearchFilesResult:{req_id:0,hits:[{path:"main.rs",score:100}]}})});
- const caret=()=>ops(host.find("original-paint-layer")).findLast(op=>op.k==="p"&&JSON.stringify(op.p?.[0])===JSON.stringify(finder.frame.cursorQuad.flat()));
+ const caret=()=>ops(host.find("original-paint-overlay")).findLast(op=>op.k==="p"&&JSON.stringify(op.p?.[0])===JSON.stringify(finder.frame.cursorQuad.flat()));
  try{
   root.render(()=><FinderView controller={finder} config={config} onAccept={()=>{}} onClose={()=>{}}/>);await host.pump(root);
   await until(root,()=>finder.frame.rows.length===1&&!finder.frame.animating&&!!caret(),"Finder original row cursor must settle visible");opaque(caret());

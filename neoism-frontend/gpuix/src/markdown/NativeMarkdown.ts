@@ -1,9 +1,10 @@
 import type { AppConfig } from "../config";
 import { coreCall, NativeEditor } from "../native-core";
-import type { PaintCommand } from "../ui/PaintLayer";
+import type { PaintCommand,PreparedCanvas } from "../ui/PaintLayer";
 import { sharePaintCommands } from "../editor/paint-command";
 export interface MarkdownSnapshot {anchor?:unknown;width?:number;height?:number;version:1;line:number;col:number;scrollY:number;mode:string;vim:boolean}
 export interface MarkdownFrame {
+ canvas?:PreparedCanvas|null;
  presence?:import("../native-core").EditorFrame["presence"];docHistory?:boolean[];
  menu?:{rect:number[];commands:PaintCommand[]}|null;assets?:string[];cover?:{value:string;rect:number[]}|null;cursorQuad:number[][];cursorHold:boolean;hostAction?:"save"|"save-close"|"close"|null;commands:PaintCommand[];revision:number;mode:"Normal"|"Insert"|"Visual";vim:boolean;dirty:boolean;scrollY:number;contentHeight:number;animating:boolean;dragging:boolean;
  cursor:{line:number;col:number;rect:number[]|null};effects?:{clipboard?:string|null;search?:boolean|null;palette?:boolean;blockMenu?:boolean;yank?:string;titleRename?:string;link?:{url?:string;path?:string;line?:number;target?:string}|null;matches?:Array<[number,number,string]>}|null;

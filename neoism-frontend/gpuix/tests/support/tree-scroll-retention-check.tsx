@@ -47,6 +47,15 @@ try{
  model.update({directories:{"":{path:"",entries:[]}}});await host.pump(root);assert.equal(frame().top,0);
  model.update({directories:listing});await host.pump(root);await wheel(-1600);
  root.dispatch({elementId:node()!.id,eventType:"keyDown",key:"home",modifiers:{shift:false,ctrl:false,alt:false,cmd:false}});await host.pump(root);assert.equal(frame().top,0,"Explicit keyboard navigation still reveals selection");
+ // Held arrows reveal their selected row and carry the shared chrome cursor.
+ root.dispatch({elementId:node()!.id,eventType:"mouseDown",button:0});await host.pump(root);
+ const advance=async()=>{for(const callback of [...frames]){frames.delete(callback);callback();}await host.pump(root);};
+ for(let i=0;i<70;i++){root.dispatch({elementId:node()!.id,eventType:"keyDown",key:"down"});await Bun.sleep(8);await advance();}
+ for(let i=0;i<50;i++){await Bun.sleep(8);await advance();}
+ assert.equal(frame().selected,70);assert.ok(frame().top>0);
+ const caret=host.find("chrome-focus-cursor:sidebar");assert.ok(caret,"Keyboard tree selection owns a visible cursor");
+ assert.ok(Number(caret.style.top)>400,`Arrow cursor follows the selected row, not the top (${caret.style.top})`);
+ const selected=frame().selected;await wheel(-300);assert.equal(frame().selected,selected,"Mouse scrolling still retains keyboard selection");
  const originalId=treeId();
  model.update({activeWorkspace:{...workspaces[0],root_dir:"/different-root"},directories:listing});await host.pump(root);assert.notEqual(treeId(),originalId,"Different roots own different viewports");assert.equal(frame().top,0);
  console.log(JSON.stringify({actualApp:true,noWindow:true,independentPanels:true,independentWorkspaces:true,loadingAndRelistsRetained:true,firstPaintRetained:true,fontGenerationRetained:true,emptyAndKeyboardClamp:true,rootScoped:true}));

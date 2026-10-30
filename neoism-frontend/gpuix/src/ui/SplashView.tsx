@@ -8,10 +8,10 @@ import {sharePaintCommands} from "../editor/paint-command";
 import {focusNativeElement} from "../native-focus";
 interface SplashFrame{commands:PaintCommand[];rows:Array<{action:string;label:string;key:string;rect:number[]}>;wordmark:number[];alpha:number}
 /** Independent Welcome tab: original splash composition, without a terminal. */
-export function SplashView(props:{contextId:string;config:AppConfig;wordmarkHosts?:WordmarkHosts;active?:boolean;focusToken?:number;onCustomKey?:(event:KeyEvent)=>boolean;onFocus?:()=>void;onAction:(action:string)=>void}){
+export function SplashView(props:{contextId:string;config:AppConfig;wordmarkHosts?:WordmarkHosts;initialViewport?:{width:number;height:number};active?:boolean;focusToken?:number;onCustomKey?:(event:KeyEvent)=>boolean;onFocus?:()=>void;onAction:(action:string)=>void}){
  const config=props.config,renderer=useGpuixRequired();
  const id=coreCall<{id:number}>("splash.new",{fontFamily:config.fontFamily,fontWeight:config.fontWeight}).id;
- const [viewport,setViewport]=createSignal(props.wordmarkHosts?.splashViewport(props.contextId)||{width:0,height:0});
+ const [viewport,setViewport]=createSignal(props.initialViewport&&props.initialViewport.width>0&&props.initialViewport.height>0?props.initialViewport:props.wordmarkHosts?.splashViewport(props.contextId)||{width:0,height:0});
  const [frame,setFrame]=createSignal<SplashFrame>({commands:[],rows:[],wordmark:[0,0,0,0],alpha:1});
  const active=createMemo(()=>props.active!==false);let host:HostElement|undefined,disposed=false,pointer:{x:number;y:number}|undefined;
  const focus=()=>{if(host&&active()){host.root?.mutations.flushMutations();focusNativeElement(renderer,host.id);}};
@@ -20,8 +20,9 @@ export function SplashView(props:{contextId:string;config:AppConfig;wordmarkHost
   const next=coreCall<SplashFrame>("splash.frame",{id,...view,cols:Math.floor(view.width/(config.fontSize*.6)),rows:Math.floor(view.height/(config.fontSize*1.3)),cellHeight:config.fontSize*1.3,scale:config.scale,theme:config.themeName,...(pointer?{pointer:true,...pointer}:{})});
   setFrame(before=>({...next,commands:sharePaintCommands(before.commands,next.commands)}));
  };
- // Recompute original menu geometry at the new font scale immediately using
- // the last pane bounds, before the replacement generation's first paint.
+ // The parent already knows the native pane bounds. Prepare menu glyphs and
+ // logo geometry in the mount transaction, before any asynchronous onLayout.
+ // Cached bounds remain a fallback for hosts without initial geometry.
  draw();
  createEffect(()=>{viewport();untrack(draw);});
  createEffect(()=>{props.focusToken;if(active())focus();});onMount(focus);

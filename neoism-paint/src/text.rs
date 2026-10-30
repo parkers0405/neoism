@@ -601,6 +601,23 @@ impl Text {
         &self.instances
     }
 
+    /// Replay recorder-owned glyph geometry from this font-cache generation.
+    /// These instances accompany an immutable host raster; callers must discard
+    /// both when `font_cache_generation` changes. Position and clip are current.
+    pub fn replay_host_instances(&mut self, instances: &[TextInstance], x: f32, y: f32, clip: Option<[f32; 4]>, scaled: bool) {
+        let origin = [x * self.scale_factor, y * self.scale_factor];
+        let has_clip = clip.is_some();
+        let clip = clip.map(|rect| if scaled { rect.map(|n| n * self.scale_factor) } else { snap_clip_rect(rect, self.scale_factor) }).unwrap_or([0.0; 4]);
+        if !scaled && has_clip && (clip[2] <= 0.0 || clip[3] <= 0.0) { return; }
+        self.instances.extend(instances.iter().map(|instance| {
+            let mut instance = *instance;
+            instance.pos[0] += origin[0];
+            instance.pos[1] += origin[1];
+            instance.clip_rect = clip;
+            instance
+        }));
+    }
+
     /// Replace the font registry used by immediate-mode UI text.
     ///
     /// A config reload constructs a new `FontLibrary` (and therefore a new
@@ -1937,6 +1954,27 @@ mod tests {
     };
     use crate::font::{fonts::FontConfig, FontLibrary};
     use std::sync::Arc;
+
+    #[test]
+    fn replay_host_instances_preserves_geometry_and_current_clipping() {
+        let (library, _) = FontLibrary::new(FontConfig::default());
+        let mut text = Text::new(&library);
+        text.set_scale_factor(2.0);
+        let glyph = TextInstance { pos: [3.5, 7.0], glyph_size: [8, 12], bearings: [-1, 2], color: [1, 2, 3, 255], ..Default::default() };
+        let clip = [5.2, 10.2, 80.0, 40.0];
+        text.replay_host_instances(&[glyph], 11.25, 20.125, Some(clip), false);
+        let replayed = text.instances()[0];
+        assert_eq!(replayed.pos, [26.0, 47.25]);
+        assert_eq!(replayed.glyph_size, glyph.glyph_size);
+        assert_eq!(replayed.bearings, glyph.bearings);
+        assert_eq!(replayed.color, glyph.color);
+        assert_eq!(replayed.clip_rect, snap_clip_rect(clip, 2.0));
+        text.clear();
+        text.replay_host_instances(&[glyph], 0.0, 0.0, Some([0.0, 0.0, 10.0, 0.01]), false);
+        assert!(text.instances().is_empty(), "An empty clip must not become unbounded");
+        text.replay_host_instances(&[glyph], 0.0, 0.0, Some(clip), true);
+        assert_eq!(text.instances()[0].clip_rect, clip.map(|n| n * 2.0));
+    }
 
     #[test]
     fn subpixel_text_clip_snaps_to_empty_instead_of_becoming_unclipped() {

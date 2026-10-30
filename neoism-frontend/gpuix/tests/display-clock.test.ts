@@ -15,7 +15,7 @@ function nativeDisplay() {
   return { renderer, clock, order, errors, get requests() { return requests; }, get ticks() { return ticks; }, frame() { callback?.(); } };
 }
 
-test("animation owners share the native display callback and submit after queued host mutations", async () => {
+test("animation owners share a display callback and reserve its successor before host flushes", async () => {
   const display = nativeDisplay(), first = new AnimationFrameScheduler(1000 / 240), second = new AnimationFrameScheduler(1000 / 240);
   let a = 0, b = 0;
   const animate = () => { a++; queueMicrotask(() => display.order.push("host flush")); if (a < 2) first.request(animate); };
@@ -23,9 +23,11 @@ test("animation owners share the native display callback and submit after queued
     first.request(animate); second.request(() => b++);
     await settle(); expect(display.requests).toBe(1); expect(a + b).toBe(0);
     display.frame(); expect(a).toBe(1); expect(b).toBe(1); expect(display.ticks).toBe(1);
-    await settle(); expect(display.order).toEqual(["request", "host flush", "request"]);
+    await settle(); expect(display.order).toEqual(["request", "request", "host flush"]);
     display.frame(); await settle();
-    expect(a).toBe(2); expect(b).toBe(1); expect(display.requests).toBe(2); expect(first.pending).toBe(false);
+    expect(a).toBe(2); expect(b).toBe(1); expect(display.requests).toBe(3); expect(first.pending).toBe(false);
+    display.frame();await settle();
+    expect(a).toBe(2);expect(b).toBe(1);expect(display.requests).toBe(3);
     expect(display.errors).toEqual([]);
   } finally { first.dispose(); second.dispose(); display.clock.dispose(); }
 });
@@ -50,7 +52,8 @@ test("refresh-rate changes control animation advancement through native callback
     animation.request(animate); await settle();
     for (const timestamp of [6.94, 13.89, 30.56, 47.22]) { time = timestamp; display.frame(); await settle(); }
     expect(observed).toEqual([6.94, 13.89, 30.56, 47.22]);
-    expect(display.requests).toBe(4);
+    expect(display.requests).toBe(5);
+    display.frame();await settle();expect(display.requests).toBe(5);
   } finally { animation.dispose(); display.clock.dispose(); }
 });
 

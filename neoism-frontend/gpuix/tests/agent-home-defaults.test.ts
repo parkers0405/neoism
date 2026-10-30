@@ -4,6 +4,24 @@ import{DaemonConnection}from"../src/daemon/client";
 import{WorkspaceModel}from"../src/model";
 import{createAgentDaemon}from"./support/agent-daemon";
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+3500;while(!predicate()){if(Date.now()>end)throw Error("Agent home defaults did not converge");await Bun.sleep(5);}};
+test("terminal cwd outside the workspace keeps saved model and reasoning without sending an unauthorized catalog directory",async()=>{
+ const f=fixture({agentConfigDefaults:{a:{defaultAgent:"build",model:"openai/advanced",variant:"high"}}});
+ try{
+  await until(()=>f.model.state.activeWorkspace?.id==="a"&&!f.model.state.agentDefaultsLoading);
+  for(const cwd of ["/project/a/subdirectory","/home/fixture","/project/ab"]){
+   f.model.setUI({terminalWorkspaceRoots:{a:{declaredRoot:"/project/a",root:cwd}}});
+   const before=f.daemon.httpRequests.length;
+   await f.model.activateWorkspace(f.daemon.workspaces[0]);
+   await until(()=>!f.model.state.catalogsLoading);
+   expect(f.model.state.activeWorkspace?.root_dir).toBe(cwd);
+   expect(f.model.selection()).toMatchObject({model:"openai/advanced",thinking:"high"});
+   expect(f.model.state.catalogsError).toBeUndefined();
+   const reads=f.daemon.httpRequests.slice(before).filter(r=>/\/(config\/defaults|providers\/configured|agents|skills)$/.test(r.path));
+   expect(reads).toHaveLength(4);
+   expect(reads.every(r=>r.directory===(cwd==="/project/a/subdirectory"?cwd:null))).toBe(true);
+  }
+ }finally{f.close();}
+});
 function fixture(options:Parameters<typeof createAgentDaemon>[0]){const daemon=createAgentDaemon(options),config={...loadConfig(["--config","/nonexistent/agent-home-defaults"],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);model.start();client.start();return{daemon,model,close(){model.dispose();client.stop();daemon.stop();}};}
 test("empty Agent home resolves configured agent/model/thinking through workspace SDK and explicit choice overrides defaults without changing conversation state",async()=>{
  const f=fixture({deferCreations:false,agentConfigDefaults:{a:{defaultAgent:"plan",model:"openai/advanced",variant:"high"}}});try{await until(()=>f.model.state.activeWorkspace?.id==="a"&&!f.model.state.agentDefaultsLoading);f.model.newAgentHome();expect(f.model.selection()).toMatchObject({agent:"plan",model:"openai/advanced",thinking:"high"});expect(f.daemon.httpRequests.some(r=>r.path.endsWith("/v2/config/defaults")&&r.directory==="/project/a")).toBe(true);expect(f.daemon.requests.some(r=>r.tag==="CreateThread")).toBe(false);

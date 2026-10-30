@@ -69,7 +69,17 @@ export class WorkspaceLayout {
     const leaf=this.frame.leaves.find(leaf=>leaf.surfaceId===surfaceId)?.leaf;
     return leaf===undefined?this.frame:this.call("first-tab",{leaf});
   }
-  reorder(leaf:number,target:number,before=true) { return this.call("reorder",{leaf,target,before}); }
+  reorder(leaf:number,target:number,before=true) {
+    if (leaf === target) return this.frame;
+    const tabs = this.frame.panes.find(pane => pane.tabs.some(tab => tab.leaf === leaf))?.tabs;
+    const from = tabs?.findIndex(tab => tab.leaf === leaf) ?? -1;
+    const targetIndex = tabs?.findIndex(tab => tab.leaf === target) ?? -1;
+    if (from >= 0 && targetIndex >= 0) {
+      const insertion = targetIndex + Number(!before);
+      if (insertion - Number(from < insertion) === from) return this.frame;
+    }
+    return this.call("reorder",{leaf,target,before});
+  }
   focusDirection(direction: FocusDirection) { return this.call("focus-direction", { direction }); }
   close(leaf: number) { return this.call("close", { leaf }); }
   closeSurface(surfaceId: string) {

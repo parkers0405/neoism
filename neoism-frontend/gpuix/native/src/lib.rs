@@ -28,6 +28,7 @@ mod editor_lsp;
 mod editor_raster;
 mod editor_collaboration;
 mod editor_presence;
+mod presence_cache;
 mod finder;
 mod command_catalog;
 mod chrome;
@@ -66,6 +67,7 @@ struct Editor {
     lsp: editor_lsp::EditorLsp,
     compact: bool,
     raster: editor_raster::EditorRaster,
+    presence: presence_cache::PresenceCache,
 }
 #[derive(Default)]
 struct Engines {
@@ -94,7 +96,7 @@ impl Editor {
         Self { collaboration:None, peers:self.peers.clone(), peer_paint:Default::default(), pane, register: self.register.clone(), clipboard: None, host_action: None,
             width: self.width, height: self.height, cell: self.cell, row: self.row,
             trail: neoism_ui::panels::trail_cursor::TrailCursor::new(),
-            last_frame: Instant::now(), last_cursor: self.last_cursor, lsp: Default::default(), compact: self.compact, raster: self.raster.clone_settings() }
+            last_frame: Instant::now(), last_cursor: self.last_cursor, lsp: Default::default(), compact: self.compact, raster: self.raster.clone_settings(), presence:Default::default() }
     }
     fn snapshot(&mut self) -> Value {
         let collaboration=self.collaboration.as_mut().map(|binding|binding.snapshot(&mut self.pane.buffer));
@@ -114,11 +116,26 @@ impl Editor {
         pane.restore_host_scroll(n(snapshot,"scrollX",0.0), n(snapshot,"scrollY",0.0));
         self.collaboration=if snapshot["collaboration"].is_null(){None}else{Some(editor_collaboration::EditorCollaboration::restore(&snapshot["collaboration"],&mut pane.buffer)?)};
         self.pane = pane;
+        self.presence.clear();
         self.register = text(snapshot,"register").to_owned();
         self.clipboard = None;
         self.host_action = None;
         self.trail = neoism_ui::panels::trail_cursor::TrailCursor::new();
         Ok(())
+    }
+    /// Advance only the already-positioned cursor. Document input, scrolling,
+    /// collaboration and LSP requests still go through a full frame; the host
+    /// uses this path solely for the tail of a settled viewport's cursor spring.
+    fn cursor_frame(&mut self) -> Value {
+        let row = self.pane.geometry.row_h.max(1.0);
+        let cell = self.cell.max(1.0);
+        let caret_h = (self.row / 1.5 * 1.2).min(row).round();
+        let now = Instant::now();
+        self.trail.animate(cell, caret_h, now.duration_since(self.last_frame).as_secs_f32());
+        self.last_frame = now;
+        json!({"cursorOnly":true,"cursorQuad":self.trail.quad_points(),
+            "cursorHold":self.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),
+            "animating":self.trail.is_animating()})
     }
     fn frame(&mut self) -> Value {
         if let Some(collaboration)=self.collaboration.as_mut(){collaboration.drain(&mut self.pane.buffer);}
@@ -267,12 +284,13 @@ impl Editor {
         // time predates this transition and must not consume its spring.
         self.trail.animate(cell, caret_h, if was_animating { dt } else { 0.0 });
         let lsp = self.lsp.frame(pane);
-        json!({"peerCommands":self.peer_paint.frame(pane,&self.peers),"remotePeers":self.peers,"collaborationBound":pane.buffer.doc_history_bound(),"presence":editor_collaboration::cursor(&pane.buffer),"packedRuns":self.compact,"lsp":lsp,"lines":lines,"searchHits":search_hits,"extraCarets":extra_carets,"rowHeight":row,"cellWidth":cell,"textX":text_x,"gutterWidth":gutter,
+        let presence=self.presence.frame(pane.buffer.revision,&pane.buffer.lines,(pane.buffer.cursor_line,pane.buffer.cursor_col),selection.map(|(a,b)|((a.line,a.col),(b.line,b.col))),pane.buffer.mode==CodeMode::Insert);
+        json!({"peerCommands":self.peer_paint.frame(pane,&self.peers),"remotePeers":self.peers,"collaborationBound":pane.buffer.doc_history_bound(),"presence":presence,"packedRuns":self.compact,"lsp":lsp,"lines":lines,"searchHits":search_hits,"extraCarets":extra_carets,"rowHeight":row,"cellWidth":cell,"textX":text_x,"gutterWidth":gutter,
             "cursor":{"x":cursor_x,"y":cursor_y,"line":pane.buffer.cursor_line,"col":pane.buffer.cursor_col,
               "shape":format!("{:?}",pane.cursor_shape()),"visible":cursor_y+row>0.0 && cursor_y<self.height},
             "mode":format!("{:?}",pane.buffer.mode),"wrap":pane.wrap,"vim":pane.input_mode==CodeInputMode::Vim,"dirty":pane.buffer.is_dirty(),"revision":pane.buffer.revision,
             "totalLines":pane.buffer.line_count(),"pendingKeys":pane.buffer.vim.pending.showcmd(),
-            "scrollY":pane.scroll_y,"contentHeight":view.content_h,"animating":view.scroll_animating||self.trail.is_animating(),
+            "scrollY":pane.scroll_y,"contentHeight":view.content_h,"scrollAnimating":view.scroll_animating,"animating":view.scroll_animating||self.trail.is_animating(),
             "clipboard":self.clipboard.take(),"hostAction":self.host_action.take(),"pendingEmpty":pane.buffer.vim.pending.is_empty()&&!pane.leader_pending,
             "cursorQuad":self.trail.quad_points(),"cursorHold":self.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),
             "selection":selection.map(|(a,b)|json!({"start":[a.line,a.col],"end":[b.line,b.col]}))})
@@ -579,6 +597,15 @@ impl Editor {
 }
 
 fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
+    if v["op"]=="paint.prewarm" {
+        let family=v["fontFamily"].as_str().unwrap_or("Cascadia Code NF");
+        let document=v["markdownFontFamily"].as_str().unwrap_or("");
+        let weight=v["fontWeight"].as_u64().unwrap_or(400) as u16;
+        let extras=if document.is_empty(){vec![]}else{vec![document.to_owned()]};
+        let base_ready=neoism_ui::primitives::paint_record::prewarm_fonts(family.to_owned(),weight,vec![]).map_err(|error|error.to_string())?;
+        let ready=neoism_ui::primitives::paint_record::prewarm_fonts(family.to_owned(),weight,extras).map_err(|error|error.to_string())? && base_ready;
+        return Ok(json!({"ready":ready}));
+    }
     if let Some(result) = ssh_transport::dispatch(&v) { return result; }
     if let Some(result) = presence::dispatch(&v) { return result; }
     if let Some(result) = diagnostic_popup::dispatch(&v,engines) { return result; }
@@ -731,6 +758,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
             let source_id = v["sourceID"].as_u64().ok_or("Missing source editor")? as u32;
             let buffer = engines.editors.get(&source_id).ok_or("Unknown source editor")?.pane.buffer.clone();
             let target = engines.editors.get_mut(&id).ok_or("Unknown editor")?;
+            target.presence.clear();
             if buffer.doc_history_bound(){
                 let old=target.pane.buffer.lines.join("\n");let new=buffer.lines.join("\n");
                 if let Some(delta)=neoism_ui::editor::markdown::doc_sync::diff_doc_texts(&old,&new){neoism_ui::editor::code::doc_sync::apply_remote_delta_to_buffer(&mut target.pane.buffer,&delta);}
@@ -773,6 +801,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                     lsp: Default::default(),
                     compact: v["compact"].as_bool().unwrap_or(false),
                     raster: Default::default(),
+                    presence: Default::default(),
                 },
             );
             Ok(json!({"id":id}))
@@ -790,7 +819,9 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
         }
         op if op.starts_with("editor.") => {
             let e = engines.editors.get_mut(&id).ok_or("Unknown editor")?;
+            if !matches!(op,"editor.frame"|"editor.cursor-frame"){e.presence.clear();}
             match op {
+                "editor.cursor-frame" => return Ok(e.cursor_frame()),
                 "editor.crdt.bind" => {
                     if let Some(binding)=e.collaboration.as_mut(){
                         let expected=neoism_ui::editor::crdt::presence_buffer_id_for_path(std::path::Path::new(text(&v,"path")));
@@ -1058,6 +1089,9 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                 "editor.paste" => e.pane.buffer.insert_text(text(&v, "text")),
                 "editor.frame" => {}
                 _ => return Err("Unknown editor operation".into()),
+            }
+            if v["overlayOnly"].as_bool().unwrap_or(false) && matches!(op,"editor.lsp.pointer"|"editor.lsp.geometry"|"editor.lsp.hover-configure"|"editor.lsp.hover-input"|"editor.lsp.wheel") {
+                return Ok(json!({"lspOnly":true,"lsp":e.lsp.frame(&e.pane)}));
             }
             Ok(e.frame())
         }

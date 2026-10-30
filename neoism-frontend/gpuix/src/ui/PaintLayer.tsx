@@ -1,4 +1,4 @@
-import { createMemo, onCleanup } from "solid-js";
+import { createMemo, onCleanup, Show } from "solid-js";
 import { useGpuixRequired } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { CanvasImages, RecentCanvasImages, cssColor, paintColor as packPaintColor, RasterSource, type CanvasOp,type CanvasRaster } from "./canvas";
@@ -51,13 +51,19 @@ export function PaintLayer(props:{commands:readonly PaintCommand[];prepared?:Pre
  const renderer=useGpuixRequired(),recent=props.cacheImageBytes?new RecentCanvasImages(renderer,props.cacheImageBytes):undefined;
  const images=new CanvasImages(renderer,(source,raster)=>{props.pinImage?.(source,raster);recent?.use(source,raster);});
  onCleanup(()=>{images.dispose();recent?.dispose();});
+ const commands=createMemo(()=>props.commands),prepared=createMemo(()=>props.prepared);
  const source=createMemo(()=>{
-  if(props.prepared){
-   for(const image of props.prepared.images)images.use(image.source,image.raster);
+  const ready=prepared();
+  if(ready){
+   for(const image of ready.images)images.use(image.source,image.raster);
    images.commit();
-   return props.extra?.length?JSON.stringify([...JSON.parse(props.prepared.commands),...props.extra]):props.prepared.commands;
+   return ready.commands;
   }
-  const ops=paintOps(props.commands,props.config,images);if(props.extra?.length)ops.push(...props.extra);return JSON.stringify(ops);
+  return JSON.stringify(paintOps(commands(),props.config,images));
  });
- return <canvas testId="original-paint-layer" commands={source()} style={{position:"absolute",left:0,right:0,top:0,bottom:0,pointerEvents:"none"}}/>;
+ // Cursor/blink changes must not re-sort, re-encode or invalidate the retained
+ // document display list. The overlay preserves the existing paint order.
+ const overlay=createMemo(()=>JSON.stringify(props.extra||[]));
+ return <><canvas testId="original-paint-layer" commands={source()} style={{position:"absolute",left:0,right:0,top:0,bottom:0,pointerEvents:"none"}}/>
+  <Show when={props.extra!==undefined}><canvas testId="original-paint-overlay" commands={overlay()} style={{position:"absolute",left:0,right:0,top:0,bottom:0,pointerEvents:"none"}}/></Show></>;
 }

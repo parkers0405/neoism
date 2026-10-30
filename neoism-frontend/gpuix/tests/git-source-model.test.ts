@@ -86,3 +86,25 @@ test("late source reads retain their captured review/workspace without stealing 
   expect(f.model.getLayout("b").frame.leaves.some(leaf=>leaf.surfaceId===owner.id)).toBe(false);expect(f.daemon.ptyRequests).toHaveLength(0);
  }finally{f.close();}
 });
+
+test("Git refresh of a hidden recovered source cannot revive its old snapshot on first open", async () => {
+ const root = "/project/a", first = await fixture();
+ let saved: SavedSession, id: string;
+ try {
+  const editor = await first.model.loadGitEditor(root, path);
+  id = first.model.state.surfaces.find(surface => surface.kind === "file")!.id;
+  expect(editor.frame.dirty).toBe(false);
+  saved = first.model.captureSession();
+ } finally { first.close(); }
+ const restored = await fixture(saved!);
+ try {
+  expect(restored.model.editors.has(id!)).toBe(false);
+  const changed = "const restored = true;\n";
+  restored.daemon.files.set(path, changed);
+  await restored.model.refreshGitSource(root, path);
+  expect(restored.model.editors.has(id!)).toBe(false);
+  const surface = restored.model.state.surfaces.find(surface => surface.id === id!)!;
+  expect(restored.model.getEditor(surface).text()).toBe(changed);
+  expect(restored.model.isSurfaceModified(id!)).toBe(false);
+ } finally { restored.close(); }
+});

@@ -338,10 +338,10 @@ where
         s,
         &virtual_rows,
     );
-    // Keep scroll/range math fractional, but snap draw-space coordinates to
-    // physical pixels. Text-heavy rows (especially code blocks) get visibly
-    // soft if their glyph baselines ride half-pixels during inertial scroll.
-    let render_scroll_top = snap_px(draw_scroll_top);
+    // Preserve fractional translation in retained hosts. Rounding logical
+    // pixels creates long stationary frames followed by one-pixel jumps at
+    // the end of a glide, especially on fractionally scaled displays.
+    let render_scroll_top = sugarloaf.snap_y(draw_scroll_top);
     let viewport_clip = body_clip;
     // Keep ordinary scroll frames tight, but preserve the wide registration
     // band while selecting text so drag-to-select still works past the edge.
@@ -464,7 +464,7 @@ where
     let mut visible_user_orb = false;
     for row in &layout.rows[row_range.clone()] {
         let card_h = row.height;
-        let card_y = snap_px(y + row.top - render_scroll_top);
+        let card_y = sugarloaf.snap_y(y + row.top - render_scroll_top);
         let card_bottom = card_y + card_h;
 
         if card_bottom < y - register_margin

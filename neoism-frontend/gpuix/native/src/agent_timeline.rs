@@ -350,13 +350,22 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 let parsed: AgentServerMessage =
                     serde_json::from_value(v["message"].clone()).map_err(|error| error.to_string())?;
                 let history_older = match v["historyKind"].as_str() { Some("head") => Some(false), Some("older") => Some(true), _ => None };
+                let visible = agent_event_session_id(&parsed).is_none_or(|session| session == view.session_id);
+                // Cached text/history changes cannot change the viewed transcript.
+                // Keep lifecycle/roster events paintable: they may update family
+                // activity in the conversation header even for another session.
+                let needs_paint = visible || !matches!(&parsed,
+                    AgentServerMessage::ContentDelta { .. }
+                    | AgentServerMessage::MessageUpdated { .. }
+                    | AgentServerMessage::HistoryChunk { .. }
+                    | AgentServerMessage::MessageEnd { .. });
                 // Only this conversation's events reach its pane (the hosts'
                 // live gate); session-less events (notices) always apply.
-                if agent_event_session_id(&parsed).is_none_or(|session| session == view.session_id) {
+                if visible {
                     apply_agent_event_to_pane_with_history_kind(&mut view.pane, parsed, history_older);
                 }else{apply_agent_event_to_cache_with_history_kind(&mut view.pane,parsed,history_older);}
                 // Events never publish paint; the host schedules a frame.
-                Ok(json!({"animating": view.pane.animation_reason().is_some()}))
+                Ok(json!({"animating": view.pane.animation_reason().is_some(), "needsPaint": needs_paint}))
             }
             "agenttimeline.family"=>{
                 use neoism_ui::panels::agent_pane::state::side_panel::NeoismAgentSessionEntry;

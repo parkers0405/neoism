@@ -11,6 +11,8 @@ import type {AgentFamilyRow} from "./family";
 import { wheelCellPixels } from "../ui/wheel";
 import {localPresenceIdentity} from "./local-presence";
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
+import {paintedChromeBounds} from "../ui/chrome-target-bounds";
+import {openExternalUrl} from "../menu-actions/web-frontend";
 
 interface TimelineFrame { canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
 interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
@@ -30,7 +32,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   coreCall("agenttimeline.family",{id,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});
   const dirty = new Set<() => void>();
   const event = (message: unknown, historyKind?: "head" | "older") => {
-    try { coreCall("agenttimeline.event", { id, message, historyKind }); } catch (error) { model.report(error); return; }
+    try { if(coreCall<{needsPaint?:boolean}>("agenttimeline.event", { id, message, historyKind }).needsPaint===false)return; } catch (error) { model.report(error); return; }
     for (const listener of dirty) listener();
   };
   // Seed what the model already holds; later daemon events stream in live.
@@ -53,8 +55,9 @@ export function scrollAgentHalfPage(model:WorkspaceModel,sessionId:string,config
 
 export function AgentTimelineView(props: { sessionId: string; model: WorkspaceModel; config: AppConfig; report: (error: unknown) => void; openFile: (path: string) => void;
   /** Composer top: scroll metrics and sticky controls stop here; body paint continues behind the floating card. */
-  contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void }) {
+  provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
+  const provisional=!!props.provisional;
   const localName=localPresenceIdentity(config).displayName;
   const engine = untrack(() => engineFor(props.model, props.sessionId, config,props.rootSessionId||props.sessionId));
   const [commands, setCommands] = createSignal<readonly PaintCommand[]>([]);
@@ -63,20 +66,22 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   let bounds = { x: 0, y: 0, width: 0, height: 0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const apply = (next: TimelineFrame) => {
-    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setHeader(next.header||[]);});
-    for(const message of next.send||[])props.model.sendAgent(message as never);
+    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
+    if(!provisional)for(const message of next.send||[])props.model.sendAgent(message as never);
     if(next.navigate)props.onNavigate?.(next.navigate);
     if (next.copy) void writeClipboard(next.copy).catch(props.report);
     if (next.link) {
       const target = next.link;
-      if (/^(https?|mailto|tel):/i.test(target)) { const child = Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", target], { stderr: "ignore", stdout: "ignore" }); void child.exited; }
+      if (/^(https?|mailto|tel):/i.test(target)) void openExternalUrl(target).catch(props.report);
       else if (!target.startsWith("#")) props.openFile(target.split("#")[0]);
     }
     if (next.animating) schedule();
   };
+  let pointerPending:{x:number;y:number}|undefined;
+  const flushPointer=()=>{const point=pointerPending;pointerPending=undefined;if(point)coreCall("agenttimeline.pointer",{id:engine.id,kind:"move",deferFrame:true,...point});};
   const call = (op: string, args: Record<string, unknown> = {}) => {
     startedAt = performance.now(); animation.cancel();
-    try { apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id,...(op==="layout"?{localName}:{}), ...args })); } catch (error) { props.report(error); }
+    try { flushPointer();apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id,...(op==="layout"?{localName}:{}), ...args })); } catch (error) { props.report(error); }
   };
   let layoutSignature = "";
   const layout = (contentBottom = props.contentBottom ?? bounds.height) => {
@@ -89,17 +94,23 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   // One paint per display frame however many events or animations arrive.
   const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame"); }, startedAt); };
   engine.dirty.add(schedule);
-  onCleanup(() => { disposed = true; engine.dirty.delete(schedule); animation.dispose(); });
+  onCleanup(() => { disposed = true; engine.dirty.delete(schedule); animation.dispose(); if(provisional)engine.dispose(); });
   onMount(() => schedule());
   let familySignature="";
   createEffect(()=>{const family={rootSessionId:props.rootSessionId||props.sessionId,sessionId:props.sessionId,roster:props.familyRoster||[],rootTitle:props.model.state.threads.find(thread=>thread.session_id===(props.rootSessionId||props.sessionId))?.title||props.rootSessionId||props.sessionId};const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>call("family",family));}});
   createEffect(() => { const bottom = props.contentBottom; untrack(() => layout(bottom ?? bounds.height)); });
-  const local = (event: { x?: number; y?: number }) => ({ x: (event.x || 0) - bounds.x, y: (event.y || 0) - bounds.y });
+  const local = (event: {x?:number;y?:number}) => {
+    // Read the completed paint snapshot, including moves without resize events.
+    const painted=host&&paintedChromeBounds(renderer,host.id);
+    if(painted){bounds={...bounds,x:painted.x,y:painted.y};}
+    return {x:(event.x||0)-bounds.x,y:(event.y||0)-bounds.y};
+  };
   const keyDown = (event: KeyEvent) => {
     if(handleApplicationShortcut(renderer,event))return;
     const key = event.key || "", ctrl = !!event.modifiers?.ctrl, modified = ctrl || !!event.modifiers?.alt || !!event.modifiers?.cmd;
     const handled = () => { event.preventDefault(); event.stopPropagation(); };
     if ((ctrl || event.modifiers?.cmd) && key.toLowerCase() === "c") {
+      flushPointer();
       const text = coreCall<{ text: string | null }>("agenttimeline.copy", { id: engine.id }).text;
       if (text) { handled(); void writeClipboard(text).catch(props.report); }
     } else if (ctrl && !event.modifiers?.alt && !event.modifiers?.cmd && !event.modifiers?.shift && ["d", "u"].includes(key)) { handled(); call("half", { older: key === "u" }); }
@@ -117,8 +128,8 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
       try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: event.deltaY || 0, precise: !!event.precise, ...(typeof event.x==="number"&&typeof event.y==="number"?local(event):{}), shift:!!event.modifiers?.shift, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
       schedule();
     }}
-    onMouseDown={(event) => { if (host) focusNativeElement(renderer, host.id); if (event.button === 0) call("pointer", { kind: "down", ...local(event) }); }}
-    onMouseMove={(event) => { try { coreCall("agenttimeline.pointer", { id: engine.id, kind: "move", deferFrame: true, ...local(event) }); } catch (error) { props.report(error); } schedule(); }}
+    onMouseDown={(event) => { const point=local(event);if (host) focusNativeElement(renderer, host.id); if (event.button === 0) call("pointer", { kind: "down", ...point }); }}
+    onMouseMove={(event) => {pointerPending=local(event);schedule();}}
     onMouseUp={(event) => call("pointer", { kind: "up", ...local(event) })}
     onMouseLeave={() => call("pointer", { kind: "leave" })}
     style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", userSelect: "none", cursor: "text" }}>

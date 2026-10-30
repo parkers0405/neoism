@@ -13,6 +13,7 @@ import {registerSurfaceCaret,surfaceCursorSuppressed} from "../ui/cursor-handoff
 import { cursorPaint, documentPaintRows, sameBounds, type EditorPaintRow } from "./paint-frame";
 import { wheelPixels } from "../ui/wheel";
 import { CursorBlinkClock } from "../ui/cursor-blink";
+import { LatestFrameInput } from "../animation/latest-frame-input";
 
 export function EditorView(props: {
   onCustomKey?: (event: KeyEvent) => boolean;
@@ -42,6 +43,8 @@ export function EditorView(props: {
   const [size, setSize] = createSignal({ width: 0, height: 0, x: 0, y: 0 }, { equals: sameBounds });
   const [cell, setCell] = createSignal(editor.frame.cellWidth || config.fontSize * 0.6);
   let host: HostElement | undefined, selecting = false;
+  const motion = new LatestFrameInput();
+  onCleanup(() => motion.dispose());
   let inputQueue = Promise.resolve();
   let reported: EditorFrame | undefined;
   const display = (next: EditorFrame) => {
@@ -52,13 +55,14 @@ export function EditorView(props: {
       || reported.lsp?.diagnostics !== next.lsp?.diagnostics) {
       reported = next; props.onState({ mode: next.mode, line: next.cursor.line, col: next.cursor.col, dirty: next.dirty });
     }
-    if (next.animating) editor.requestFrame();
+    if (next.animating) editor.requestFrame(true);
   };
   const receiveFocus = (value: boolean) => {
     if (focused() === value) return;
     setFocused(value);
     if (value) { props.onFocus?.(); reported = undefined; display(editor.frame); }
     else {
+      motion.flush();
       if (selecting) { selecting = false; editor.call("pointer-up"); }
     }
   };
@@ -87,6 +91,7 @@ export function EditorView(props: {
   onMount(() => { if(host)releaseCaret=registerSurfaceCaret(renderer,host,()=>frame().cursorQuad.map(point=>[point[0]+size().x,point[1]+size().y]));if (active() && host) focusNativeElement(renderer, host.id); });
   onCleanup(()=>releaseCaret());
   const keyDown = (event: KeyEvent) => {
+    motion.flush();
     if (props.onCustomKey?.(event)) { event.preventDefault(); event.stopPropagation(); return; }
     const key = event.key?.toLowerCase() || "";
     if (lsp) {
@@ -138,14 +143,25 @@ export function EditorView(props: {
   const caret = createMemo(() => cursorPaint(frame().cursorQuad));
   const images = new CanvasImages(renderer);
   onCleanup(() => images.dispose());
+  const content = createMemo(() => {
+    const f=frame();
+    return {rows:rows(),rowHeight:f.rowHeight,gutterWidth:f.gutterWidth,activeLine:f.cursor.line};
+  },undefined,{equals:(a,b)=>a.rows===b.rows&&a.rowHeight===b.rowHeight&&a.gutterWidth===b.gutterWidth&&a.activeLine===b.activeLine});
+  // Fractional spring steps translate one retained display list. Rebuild its
+  // ink only when rows enter/leave or their text/selection/diagnostics change.
+  // Rebase near the viewport so very large files do not create giant canvases.
+  const paintOrigin=createMemo(()=>rows()[0]?.y||0);
+  const backgroundPaint=createMemo(()=>{
+    const f=frame(),ops:CanvasOp[]=[{k:"r",b:[0,f.cursor.y,1e5,f.rowHeight],c:cssColor(c.hover+"88")}];
+    for(const hit of f.searchHits)ops.push({k:"r",b:[hit.x,hit.y,hit.width,f.rowHeight],c:cssColor(hit.selection?c.accent+"47":c.yellow+"4d")});
+    return JSON.stringify(ops);
+  });
   const paint = createMemo(() => {
-    const f = frame(), rh = f.rowHeight, ops: CanvasOp[] = [], wide = 1e5;
+    const f = content(), rh = f.rowHeight, ops: CanvasOp[] = [], origin=paintOrigin();
     const font = config.fontFamily, size = config.fontSize, weight = config.fontWeight;
-    ops.push({ k: "r", b: [0, f.cursor.y, wide, rh], c: cssColor(c.hover + "88") });
-    for (const hit of f.searchHits) ops.push({ k: "r", b: [hit.x, hit.y, hit.width, rh], c: cssColor(hit.selection ? c.accent + "47" : c.yellow + "4d") });
-    const selection = cssColor(c.blue + "66"), activeLine = f.cursor.line;
-    for (const line of rows()) {
-      const top = line.y - f.scrollY;
+    const selection = cssColor(c.blue + "66"), activeLine = f.activeLine;
+    for (const line of f.rows) {
+      const top = line.y - origin;
       ops.push({ k: "t", x: 10, y: top, t: line.continuation ? "↳" : String(line.line + 1), s: size, c: cssColor(line.line === activeLine ? c.fg : c.muted),
         f: font, w: weight, lh: rh, aw: Math.max(0, f.gutterWidth - 20), al: "r" });
       for (const run of line.runs) if (run.selected) ops.push({ k: "r", b: [run.x, top, run.width || 0, rh], c: selection });
@@ -163,15 +179,16 @@ export function EditorView(props: {
       }
     }
     images.commit();
-    const caretTone = cssColor(c.accent + (f.mode === "Insert" ? "d9" : "8c"));
-    for (const caret of f.extraCarets) ops.push({ k: "r", b: [caret.x, caret.y, caret.width, caret.height], c: caretTone });
-    if (caretShown())
-      ops.push({ k: "p", c: cssColor(color()), p: [f.cursorQuad.flatMap((point) => [point[0], point[1]])] });
+    return JSON.stringify(ops);
+  });
+  const cursorPaintCommands=createMemo(()=>{
+    const f=frame(),tone=cssColor(c.accent+(f.mode==="Insert"?"d9":"8c"));
+    const ops:CanvasOp[]=f.extraCarets.map(caret=>({k:"r",b:[caret.x,caret.y,caret.width,caret.height],c:tone}));
+    if(caretShown())ops.push({k:"p",c:cssColor(color()),p:[f.cursorQuad.flat()]});
     return JSON.stringify(ops);
   });
   const pointer = (x = 0, y = 0, extend: boolean, clicks = 1, drag = false) => {
-    if (!drag) props.onFocus?.();
-    if (host) focusNativeElement(renderer, host.id);
+    if (!drag) { props.onFocus?.(); if (host) focusNativeElement(renderer, host.id); }
     editor.call("pointer", { x: x - size().x, y: y - size().y, extend, clicks, drag });
   };
   return <div style={{display:"flex",flexDirection:"column",flexGrow:1,minHeight:0,minWidth:0}}>
@@ -180,17 +197,19 @@ export function EditorView(props: {
     onKeyDown={keyDown} onFocus={() => { invalidateNativeFocus(renderer); receiveFocus(true); }} onBlur={() => { invalidateNativeFocus(renderer); receiveFocus(false); }}
     onLayout={(event) => setSize({ x: event.x || 0, y: event.y || 0, width: event.width || 0, height: event.height || 0 })}
     onScroll={(event) => {if(lsp?.hoverCaptures(event.x,event.y))return;editor.queueScroll(wheelPixels(event, config.fontSize).y);}}
-    onMouseDown={(event) => { if(lsp?.hoverCaptures(event.x,event.y)||event.button !== 0) return;
+    onMouseDown={(event) => { motion.flush(); if(lsp?.hoverCaptures(event.x,event.y)||event.button !== 0) return;
       if (lsp && (event.modifiers?.ctrl || event.modifiers?.cmd)) { pointer(event.x,event.y,false); lsp.action("definition"); return; }
       selecting = true; pointer(event.x, event.y, event.modifiers?.shift || false, event.clickCount || 1); }}
-    onMouseMove={(event) => { if(lsp?.hoverCaptures(event.x,event.y))return; if (selecting && event.pressedButton === 0) pointer(event.x, event.y, true, 1, true);
+    onMouseMove={(event) => { if(lsp?.hoverCaptures(event.x,event.y))return; if (selecting && event.pressedButton === 0) motion.queue(() => { try { pointer(event.x, event.y, true, 1, true); } catch(error) { props.report(error); } });
       else lsp?.pointer((event.x || 0)-size().x,(event.y || 0)-size().y); }}
     onMouseLeave={() => lsp?.pointer()}
-    onMouseUp={event => {if(lsp?.hoverCaptures(event.x,event.y))return; selecting = false; editor.call("pointer-up"); }}
+    onMouseUp={event => {motion.flush();if(lsp?.hoverCaptures(event.x,event.y))return; selecting = false; editor.call("pointer-up"); }}
     style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", cursor: "text", userSelect: "none" }}>
     <text onLayout={(event) => { if (event.width) setCell(event.width / 10); }} style={{ position: "absolute", opacity: 0,
       fontFamily: config.fontFamily, fontSize: config.fontSize, fontWeight: config.fontWeight, pointerEvents: "none" }}>0000000000</text>
-    <canvas testId="code-viewport" commands={paint()} style={{ position: "absolute", left: 0, top: 0, right: 0, bottom: 0, pointerEvents: "none" }} />
+    <canvas testId="code-highlight-layer" commands={backgroundPaint()} style={{position:"absolute",left:0,top:0,right:0,bottom:0,pointerEvents:"none"}}/>
+    <canvas testId="code-viewport" commands={paint()} style={{ position: "absolute", left: 0, top: paintOrigin()-frame().scrollY, right: 0, height: size().height+frame().rowHeight*2, pointerEvents: "none" }} />
+    <canvas testId="code-cursor-layer" commands={cursorPaintCommands()} style={{ position: "absolute", left: 0, top: 0, right: 0, bottom: 0, pointerEvents: "none" }} />
     <PaintLayer commands={frame().peerCommands||[]} config={config}/>
     {/* Painted by the canvas; this empty box only locates the caret for automation. */}
     <Show when={caretShown()}><div testId="code-editor-caret" style={{ position: "absolute", left: caret().left, top: caret().top, width: caret().width, height: caret().height, pointerEvents: "none" }} /></Show>

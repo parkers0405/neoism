@@ -23,6 +23,20 @@ const texts = (frame: Frame) => frame.commands.filter((c) => c.kind === "text");
 const run = (id: number, ms: number) => { let frame = coreCall<Frame>("agenttimeline.frame", { id }); const end = Date.now() + ms; while (Date.now() < end) { Bun.sleepSync(8); frame = coreCall<Frame>("agenttimeline.frame", { id }); } return frame; };
 const settle = (id: number) => { let frame = coreCall<Frame>("agenttimeline.layout", { id, width: 900, height: 700 }); for (let i = 0; i < 300 && frame.animating; i++) { Bun.sleepSync(8); frame = coreCall<Frame>("agenttimeline.frame", { id }); } return frame; };
 
+test("background text stays cached without requesting a viewed transcript repaint",()=>{
+  const id=engine();
+  const event=(message:unknown)=>coreCall<{needsPaint:boolean}>("agenttimeline.event",{id,message});
+  try {
+    expect(event({HistoryChunk:{session_id:"background",messages:[{id:"background-message",role:"Assistant",kind:"Assistant",text:"backgroundToken"}],next_cursor:null}}).needsPaint).toBe(false);
+    expect(event({ContentDelta:{session_id:"background",message_id:"background-message",kind:"Text",text:" appendedToken"}}).needsPaint).toBe(false);
+    expect(event({ContentDelta:{session_id:"s1",message_id:"a1",kind:"Text",text:" visibleToken"}}).needsPaint).toBe(true);
+    expect(event({StreamingState:{session_id:"background",state:"Generating",label:null}}).needsPaint).toBe(true);
+    const switched=coreCall<Frame>("agenttimeline.family",{id,rootSessionId:"s1",sessionId:"background",roster:[{id:"background",title:"Background",agent:"",depth:1,status:"running"}]});
+    const body=texts(switched).map(command=>command.text).join(" ");
+    expect(body).toContain("backgroundToken");expect(body).toContain("appendedToken");
+  } finally {coreCall("agenttimeline.dispose",{id});}
+});
+
 test("explicit older adapter pages prepend even without a pane loading latch", () => {
   const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId:"paging",scale:1});
   const row=(id:string)=>({id,role:"Assistant",kind:"Assistant",text:`pageToken${id}`});

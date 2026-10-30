@@ -8,7 +8,7 @@ use std::{
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex, OnceLock,
     },
 };
 use neoism_paint::{
@@ -116,13 +116,23 @@ type Commands = Rc<RefCell<Vec<PaintCommand>>>;
 /// measures and shapes at 2x too. Measuring at 1x while painting 2x glyphs let
 /// right-aligned rows drift past their slot (bold faces run ~2.5% wider).
 const DEVICE_SCALE: f32 = 2.0;
+#[derive(Clone)]
+struct CachedTextRun {
+    raster: PaintRaster,
+    width: f32,
+    family: Option<String>,
+    instances: Arc<[TextInstance]>,
+}
+impl CachedTextRun {
+    fn bytes(&self) -> usize { self.raster.len + self.instances.len() * std::mem::size_of::<TextInstance>() }
+}
 struct RecordedText {
     original: Text,
     fonts: FontLibrary,
     commands: Commands,
     emitted: Vec<(usize, usize)>,
     layer: u8,
-    raster_cache: HashMap<String, PaintRaster>,
+    raster_cache: HashMap<String, CachedTextRun>,
     raster_order: VecDeque<String>,
     raster_bytes: usize,
     generation: u64,
@@ -159,69 +169,50 @@ impl RecordedText {
             self.raster_bytes = 0;
             self.generation = generation;
         }
-        let first = self.original.instances().len();
-        let width = if scale == 1.0 {
-            self.original.draw(x, y, text, opts)
-        } else {
-            self.original.draw_scaled(x, y, text, opts, scale)
-        };
-        if text.is_empty() {
-            return width;
-        }
-        let family = self
-            .fonts
-            .inner
-            .read()
-            .inner
-            .get(&opts.font_id.unwrap_or(0))
-            .and_then(|f| f.family_name())
-            .map(str::to_owned);
+        if text.is_empty() { return 0.0; }
         let key = format!(
             "{text}\0{}:{}:{}:{:?}:{}:{}:{}",
-            opts.font_size.to_bits(),
-            opts.bold,
-            opts.italic,
-            opts.font_id,
-            opts.extrude,
-            u32::from_be_bytes(opts.color),
-            scale.to_bits()
+            opts.font_size.to_bits(), opts.bold, opts.italic, opts.font_id,
+            opts.extrude, u32::from_be_bytes(opts.color), scale.to_bits()
         );
-        let mut raster = self.raster_cache.get(&key).cloned();
-        #[cfg(not(target_arch = "wasm32"))]
-        if raster.is_none() {
-            // The original draw above already shaped and rasterized this run.
-            // Export its exact instances instead of repeating the work through
-            // a second font engine on each newly visible text run.
-            if let Some(image) = self.original.host_run_raster(first) {
-                let data = Arc::new(image.rgba);
-                static NEXT_RASTER: AtomicU64 = AtomicU64::new(1);
-                let item = PaintRaster {
-                    id: NEXT_RASTER.fetch_add(1, Ordering::Relaxed),
-                    ptr: data.as_ptr() as usize,
-                    len: data.len(),
-                    width: image.width,
-                    height: image.height,
-                    scale:2.0,
-                    dx: image.left/2.0 - x,
-                    dy: image.top/2.0 - y,
-                    _backing: data,
-                };
-                self.raster_bytes += item.len;
-                self.raster_cache.insert(key.clone(), item.clone());
-                self.raster_order.push_back(key.clone());
-                raster = Some(item);
-                while self.raster_bytes > 32 * 1024 * 1024
-                    || self.raster_cache.len() > 2048
-                {
-                    let Some(old) = self.raster_order.pop_front() else {
-                        break;
+        let first = self.original.instances().len();
+        static REPLAY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NEOISM_GPUIX_REPLAY_TEXT").as_deref() != Ok("0"));
+        let cached = self.raster_cache.get(&key).cloned();
+        let (width, family, raster) = if let Some(cached) = cached.filter(|_| *REPLAY) {
+            self.original.replay_host_instances(&cached.instances, x, y, opts.clip_rect, scale != 1.0);
+            (cached.width, cached.family, Some(cached.raster))
+        } else {
+            let width = if scale == 1.0 { self.original.draw(x, y, text, opts) }
+                else { self.original.draw_scaled(x, y, text, opts, scale) };
+            let family = self.fonts.inner.read().inner.get(&opts.font_id.unwrap_or(0))
+                .and_then(|f| f.family_name()).map(str::to_owned);
+            let mut raster = self.raster_cache.get(&key).map(|run| run.raster.clone());
+            #[cfg(not(target_arch = "wasm32"))]
+            if raster.is_none() {
+                if let Some(image) = self.original.host_run_raster(first) {
+                    let data = Arc::new(image.rgba);
+                    static NEXT_RASTER: AtomicU64 = AtomicU64::new(1);
+                    let item = PaintRaster {
+                        id: NEXT_RASTER.fetch_add(1, Ordering::Relaxed), ptr: data.as_ptr() as usize,
+                        len: data.len(), width: image.width, height: image.height, scale: DEVICE_SCALE,
+                        dx: image.left / DEVICE_SCALE - x, dy: image.top / DEVICE_SCALE - y, _backing: data,
                     };
-                    if let Some(old) = self.raster_cache.remove(&old) {
-                        self.raster_bytes -= old.len;
+                    let instances = self.original.instances()[first..].iter().map(|glyph| {
+                        let mut glyph = *glyph; glyph.pos[0] -= x * DEVICE_SCALE; glyph.pos[1] -= y * DEVICE_SCALE; glyph
+                    }).collect::<Arc<[_]>>();
+                    let run = CachedTextRun { raster: item.clone(), width, family: family.clone(), instances };
+                    self.raster_bytes += run.bytes();
+                    self.raster_cache.insert(key.clone(), run);
+                    self.raster_order.push_back(key);
+                    raster = Some(item);
+                    while self.raster_bytes > 32 * 1024 * 1024 || self.raster_cache.len() > 2048 {
+                        let Some(old) = self.raster_order.pop_front() else { break; };
+                        if let Some(old) = self.raster_cache.remove(&old) { self.raster_bytes -= old.bytes(); }
                     }
                 }
             }
-        }
+            (width, family, raster)
+        };
         let mut commands = self.commands.borrow_mut();
         let index = commands.len();
         commands.push(PaintCommand::Text {
@@ -330,7 +321,33 @@ impl TextPaint for RecordedText {
         changed
     }
 }
-thread_local! {static FONT_LIBRARIES:RefCell<Vec<((String,u16,Vec<String>),FontLibrary)>>=RefCell::new(Vec::new());}
+type FontKey = (String,u16,Vec<String>);
+type FontEntry = Arc<OnceLock<FontLibrary>>;
+static FONT_LIBRARIES: OnceLock<Mutex<Vec<(FontKey,FontEntry)>>> = OnceLock::new();
+fn font_entry(key:&FontKey)->(FontEntry,bool) {
+    let mut cache=FONT_LIBRARIES.get_or_init(Mutex::default).lock().unwrap();
+    if let Some((_,fonts))=cache.iter().find(|(item,_)|item==key){return (fonts.clone(),false);}
+    if cache.len()>=16 {
+        if let Some(index)=cache.iter().position(|(_,entry)|Arc::strong_count(entry)==1){cache.remove(index);}
+    }
+    let entry=Arc::new(OnceLock::new());cache.push((key.clone(),entry.clone()));(entry,true)
+}
+fn load_fonts(key:FontKey)->FontLibrary {
+    FontLibrary::new(FontConfig{family:Some(key.0),weight:Some(key.1),extra_families:Some(key.2),disable_warnings_not_found:true,..Default::default()}).0
+}
+
+/// Resolve fonts off the UI thread before a pane first needs them. Concurrent
+/// users of a key share one load; existing painters retain their font library
+/// independently of cache eviction. Returns true once the key is ready.
+pub fn prewarm_fonts(family:String,weight:u16,extra_families:Vec<String>)->std::io::Result<bool> {
+    let key=(family,weight,extra_families);
+    let (entry,created)=font_entry(&key);
+    if entry.get().is_some(){return Ok(true);}
+    if created {
+        std::thread::Builder::new().name("neoism-font-load".into()).spawn(move||{entry.get_or_init(||load_fonts(key));})?;
+    }
+    Ok(false)
+}
 
 pub struct RecordingPainter {
     late_overlay: bool,
@@ -346,25 +363,9 @@ pub struct RecordingPainter {
 }
 impl RecordingPainter {
     pub fn new(family: &str, weight: u16, extra_families: Vec<String>) -> Self {
-        let key = (family.to_owned(), weight, extra_families.clone());
-        let fonts = FONT_LIBRARIES.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if let Some((_, fonts)) = cache.iter().find(|(item, _)| item == &key) {
-                return fonts.clone();
-            }
-            let (fonts, _) = FontLibrary::new(FontConfig {
-                family: Some(family.to_owned()),
-                weight: Some(weight),
-                extra_families: Some(extra_families),
-                disable_warnings_not_found: true,
-                ..Default::default()
-            });
-            if cache.len() >= 8 {
-                cache.remove(0);
-            }
-            cache.push((key, fonts.clone()));
-            fonts
-        });
+        let key = (family.to_owned(), weight, extra_families);
+        let (entry,_)=font_entry(&key);
+        let fonts=entry.get_or_init(||load_fonts(key)).clone();
         Self::from_fonts(fonts)
     }
     pub fn from_fonts(fonts: FontLibrary) -> Self {
@@ -461,6 +462,7 @@ impl RecordingPainter {
     }
 }
 impl Paint for RecordingPainter {
+    fn snap_y(&self, y: f32) -> f32 { y }
     fn set_late_overlay_mode(&mut self, enabled: bool) {
         self.late_overlay = enabled;
         self.text.layer = if enabled { 3 } else { 1 };

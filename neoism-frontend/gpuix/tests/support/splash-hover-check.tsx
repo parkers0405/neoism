@@ -7,7 +7,11 @@ const config={...loadConfig(["--config","/nonexistent/splash-hover"],{}),reduced
 const host=createRecordingAppRenderer(),root=createRoot(host.renderer),actions:string[]=[];
 const rounded=()=>JSON.parse(String(host.find("original-paint-layer")!.props.commands)).filter((op:any)=>op.k==="r"&&op.r?.some((radius:number)=>radius>0));
 try{
- root.render(()=><SplashView config={config} contextId="hover-proof" onAction={action=>actions.push(action)}/>);await host.pump(root);
+ root.render(()=><SplashView config={config} contextId="hover-proof" initialViewport={{width:1200,height:800}} onAction={action=>actions.push(action)}/>);root.flush();
+ assert.equal([...host.nodes.values()].filter(node=>String(node.props.testId||" ").startsWith("splash-action:")).length,8,"All menu actions must exist before the first layout callback");
+ assert.ok(JSON.parse(String(host.find("original-paint-layer")!.props.commands)).length,"Menu glyphs must paint in the mount transaction");
+ assert.ok(Number(host.find("splash-wordmark")!.style.width)>0,"Wordmark geometry must be ready before layout");
+ await host.pump(root);
  const parent=host.find("welcome-page")!;root.dispatch({elementId:parent.id,eventType:"layout",x:300,y:120,width:1200,height:800});root.flush();
  const rows=[...host.nodes.values()].filter(node=>String(node.props.testId||"").startsWith("splash-action:"));assert.equal(rows.length,8);assert.equal(rounded().length,0);
  for(const row of rows){

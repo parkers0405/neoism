@@ -15,6 +15,26 @@ test("each Alt+A home is a distinct local tab with independent persisted drafts 
   expect(daemon.requests.some(request=>request.tag==="CreateThread")).toBe(false);expect(daemon.ptyRequests).toEqual([]);
  }finally{close();}
 });
+test("fresh catalogs are reused for picker opens and concurrent refreshes share requests",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  await model.refreshCatalogs();const before=daemon.httpRequests.length;
+  await Promise.all([model.refreshCatalogs({maxAgeMs:30000}),model.refreshCatalogs({maxAgeMs:30000})]);
+  expect(daemon.httpRequests.length).toBe(before);
+  const first=model.refreshCatalogs(),second=model.refreshCatalogs();expect(second).toBe(first);await first;
+  expect(daemon.httpRequests.length).toBeGreaterThan(before);
+ }finally{close();}
+});
+test("canonical history order reaches both the model and the native timeline subscribers",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  const message=(id:string)=>({id,role:"Assistant",kind:id==="thinking"?"Reasoning":"Assistant",text:id});
+  daemon.push({HistoryChunk:{session_id:"one",messages:[message("answer"),message("thinking")],next_cursor:null}});
+  await until(()=>model.state.history.one?.length===2);
+  let delivered:string[]=[];const off=model.subscribeAgentEvents((event:any)=>{if(event.HistoryChunk?.session_id==="one")delivered=event.HistoryChunk.messages.map((row:any)=>row.id);});
+  daemon.push({HistoryChunk:{session_id:"one",messages:[message("thinking"),message("answer")],next_cursor:null}});
+  await until(()=>delivered.length===2);off();
+  expect(model.state.history.one.map(row=>row.id)).toEqual(["thinking","answer"]);expect(delivered).toEqual(["thinking","answer"]);
+ }finally{close();}
+});
 test("a deferred submission adopts its originating home without stealing a newer home or its draft",async()=>{
  const {daemon,model,close}=await fixture();try{
   const source=model.newAgentHome()!,submission=model.submitNewPrompt("source prompt");await until(()=>daemon.creations.length===1);
@@ -65,5 +85,18 @@ test("a generated title arriving before the create response survives home adopti
   await until(()=>observed);off();daemon.creations.shift()!();expect(await pending).toBe(true);
   expect(model.state.surfaces.find(surface=>surface.id===home.id)?.title).toBe("Generated before adoption");
   expect(model.getLayout().frame.leaves.find(tab=>tab.surfaceId===home.id)?.title).toBe("Generated before adoption");
+ }finally{close();}
+});
+
+test("prompts appear before ACK, reconcile by id, and roll back only unconfirmed sends",async()=>{
+ const {daemon,model,close}=await fixture({deferPrompts:true,promptError:"Delayed rejection"});try{
+  model.openThread({session_id:"one",title:"One",directory:"/project/a"});await until(()=>model.state.history.one!==undefined);
+  let removals=0;const off=model.subscribeAgentEvents((event:any)=>{if(event.PartRemoved)removals++;});
+  const first=model.submitPrompt("one","same text"),second=model.submitPrompt("one","same text");
+  const local=model.state.history.one.filter(row=>row.text==="same text");expect(local).toHaveLength(2);expect(local[0].id).not.toBe(local[1].id);
+  await until(()=>daemon.prompts.length===2);
+  daemon.push({MessageUpdated:{session_id:"one",message:{...local[0],author:"canonical"}}});await until(()=>model.state.history.one.some(row=>row.author==="canonical"));
+  daemon.prompts.splice(0).forEach(resolve=>resolve());expect(await first).toBe(false);expect(await second).toBe(false);
+  expect(model.state.history.one.filter(row=>row.text==="same text")).toEqual([{...local[0],author:"canonical"}]);expect(removals).toBe(1);off();
  }finally{close();}
 });

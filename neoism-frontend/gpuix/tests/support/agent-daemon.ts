@@ -2,7 +2,7 @@ import type { ServerWebSocket } from "bun";
 import { applyEdits, modify, parse } from "jsonc-parser";
 // An isolated protocol fixture used only by tests. The production frontend has
 // no fixture mode and connects through the same daemon transport in every test.
-export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSessionUpdates?:boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;usageResponse?:unknown;usageDelayMs?:number;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
+export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSessionUpdates?:boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;deferPrompts?:boolean;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;usageResponse?:unknown;usageDelayMs?:number;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
   const workspaces = [{ id: "a", host_id: "host", title: "A", root_dir: "/project/a" }, { id: "b", host_id: "host", title: "B", root_dir: "/project/b" }];
   const threads = [{ session_id: "one", title: "One", directory: "/project/a", agent: "build", model: "openai/base" }, { session_id: "two", title: "Two", directory: "/project/a", agent: "plan", model: "other/second" }];
   const history=new Map<string,unknown[]>(),agentStreams=new Set<string>();
@@ -14,6 +14,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
   const searchRequests:Array<{tag:string;body:Record<string,unknown>}>=[];
   const ptyRequests:Array<{tag:string;body:Record<string,unknown>}>=[],socketWorkspaces=new WeakMap<object,string>(),ptyModes=new Map<string,unknown>();let nextPty=0;
   const creations: Array<() => void> = [];
+  const prompts: Array<() => void> = [];
   const workspaceSubscriptions:Array<{workspaceId:string;release:()=>void}>=[];
   const directoryChanges:Array<()=>void>=[];
   const httpRequests: Array<{ path: string; authorization: string | null; directory: string | null }> = [];
@@ -51,6 +52,10 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       const match = url.pathname.match(/^\/agent\/workspaces\/([^/]+)\/v2\/(.*)$/);
       if (!match) return new Response("Not found", { status: 404 });
       if(!workspaces.some(workspace=>workspace.id===match[1]))return new Response("Unknown workspace",{status:404});
+      if(["config/defaults","providers/configured","agents","skills"].includes(match[2])){
+        const root=workspaces.find(workspace=>workspace.id===match[1])!.root_dir,directory=url.searchParams.get("directory");
+        if(directory&&directory!==root&&!directory.startsWith(root+"/"))return Response.json({code:"forbidden",message:"The caller is not authorized for this directory",retryable:false,details:{}},{status:403});
+      }
       if(match[2]==="session-catalog/events"){
         const directory=url.searchParams.get("directory")||undefined;
         let controller:ReadableStreamDefaultController<Uint8Array>|undefined;
@@ -99,6 +104,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
             thinking: payload.model?.variant, delivery: payload.delivery,
             attachments: payload.parts?.filter((p: any) => p.type === "file").map((p: any) => ({ kind: p.mime, path: p.filename, bytes: [...Buffer.from(p.url.split(",")[1], "base64")] })),
           } });
+          if(config.deferPrompts)await new Promise<void>(resolve=>prompts.push(resolve));
           if(config.promptError)return Response.json({code:"fixture.prompt",message:config.promptError,retryable:false,details:{}},{status:400});
           return new Response(null, { status: 204 });
         }
@@ -249,6 +255,6 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       },
     },
   });
-  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
+  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,prompts,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
     mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);} };
 }

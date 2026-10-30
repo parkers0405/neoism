@@ -206,10 +206,17 @@ export class SlashController{
   },scope.selection.connection_id||undefined,{usage,onRefresh:async()=>{try{await this.usagePicker(scope);}catch(error){await this.pickerFailure(scope,error);}}});
  }
  private async connectPicker(scope:Scope){
-  const [catalog,methods]=await Promise.all([scope.sdk.catalog.providers.list(scope.directory),scope.sdk.catalog.providers.authMethods(scope.directory)]);this.assertCurrent(scope);
+  // Provider choices do not depend on authentication-method discovery.
+  // Fetch methods only when an account flow needs them, so a slow plugin
+  // cannot hold the initial /connect list behind an unrelated request.
+  const catalog=await scope.sdk.catalog.providers.list(scope.directory);this.assertCurrent(scope);
   const rows=coreCall<SlashOption[]>("picker.connect-options",{catalog});
   await this.picker(scope,"connect","Connect a provider",rows,async providerId=>{
-   const provider=catalog.all.find(provider=>provider.id===providerId);if(provider)await this.connectAccounts(scope,provider,methods);
+   const provider=catalog.all.find(provider=>provider.id===providerId);if(provider){
+    await this.loadingPicker(scope,"connect-account","Choose an account");
+    const methods=await scope.sdk.catalog.providers.authMethods(scope.directory);this.assertCurrent(scope);
+    await this.connectAccounts(scope,provider,methods);
+   }
   });
  }
  private async connectAccounts(scope:Scope,provider:{id:string;name:string},methods:Record<string,ProviderAuthMethod[]>){

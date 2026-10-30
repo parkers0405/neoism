@@ -1,6 +1,6 @@
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
-import { createEffect, createSignal, Index, onCleanup, onMount, Show } from "solid-js";
+import { batch, createEffect, createSignal, Index, onCleanup, onMount, Show, untrack } from "solid-js";
 import { createWindowSize,useGpuixRequired, type HostElement, type KeyEvent } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { coreCall } from "../native-core";
@@ -23,6 +23,7 @@ export function InlinePicker(props: {
   question?: Record<string, unknown>; anchor: Anchor; loading?: boolean; error?: string; responding?: boolean;
   entry?:boolean; secret?:boolean; initialValue?:string; placeholder?:string; query?: string; onAcceptHandler?: (handler:(()=>void)|undefined)=>void; onKeyHandler?: (handler: ((event: KeyEvent) => boolean) | undefined) => void;
   onSelect?: (value: string) => void; onAnswers?: (answers: string[][]) => void; onClose: () => void;
+  ignoreOutsideClick?: (x: number, y: number) => boolean;
   activity?: PickerActivity; mcpServer?: string; mcpEntry?: unknown;
   usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;
 }) {
@@ -47,22 +48,28 @@ export function InlinePicker(props: {
   const update = (op: string, args: Record<string, unknown> = {}) => {
     const started = performance.now(); animation.cancel();
     const next = coreCall<PickerFrame>(`${engine}.${op}`, { id, ...placement(), scale: s, headerExtra: headerExtra(), entry:props.entry, footer: props.kind === "permission" && !!(props.responding || props.error), ...args });
-    setFrame(next);
     let animating = next.animating;
     if (native) {
       const painted = coreCall<{ commands: PaintCommand[]; rect?: Anchor | null; animating: boolean }>("picker.paint", { id, ...placement(), scale: s,
         theme: config.themeName, fontFamily: config.fontFamily, fontWeight: config.fontWeight, caret: props.query === undefined });
-      setCard(painted); animating ||= painted.animating;
+      batch(()=>{setFrame(next);setCard(painted);}); animating ||= painted.animating;
     }
+    else setFrame(next);
     if (animating) animation.request(() => { if (!disposed) update("frame"); }, started);
     return next;
   };
-  createEffect(() => { if (native) { const a = props.activity; coreCall("picker.activity", { id, ...(a ? { body: a.body, status: a.status, busy: !!a.busy, url: a.url } : {}) }); update("frame"); } });
-  createEffect(() => { props.anchor; headerExtra(); update("frame"); });
-  createEffect(() => { if (engine === "picker") update("options", { options: props.options || [], loading: props.loading }); });
-  createEffect(()=>{if(props.kind==="usage")update("usage",{usage:props.usage,loading:props.loading,error:props.error});});
-  createEffect(() => { if (engine === "question" && props.error) update("retry"); });
-  createEffect(() => { if (props.query !== undefined && engine === "picker") update("query", { query: props.query }); });
+  // Track only each effect's inputs. Painting reads query, geometry and other
+  // props; allowing those reads to escape would resend the full catalog on
+  // every query edit or layout change. Initial effects share one paint.
+  let paintQueued=false;
+  const refresh=()=>{if(paintQueued)return;paintQueued=true;queueMicrotask(()=>{paintQueued=false;if(!disposed)untrack(()=>update("frame"));});};
+  const mutate=(op:string,args:Record<string,unknown>)=>untrack(()=>{coreCall(`${engine}.${op}`,{id,...args,deferFrame:true});refresh();});
+  createEffect(()=>{if(native){const a=props.activity;mutate("activity",a?{body:a.body,status:a.status,busy:!!a.busy,url:a.url}:{});}});
+  createEffect(()=>{viewport();props.anchor;headerExtra();props.responding;props.error;refresh();});
+  createEffect(()=>{if(engine==="picker")mutate("options",{options:props.options||[],loading:props.loading});});
+  createEffect(()=>{if(props.kind==="usage")mutate("usage",{usage:props.usage,loading:props.loading,error:props.error});});
+  createEffect(()=>{if(engine==="question"&&props.error)untrack(()=>update("retry"));});
+  createEffect(()=>{const query=props.query;if(query!==undefined&&engine==="picker")mutate("query",{query});});
   onMount(() => { if(props.initialValue!==undefined)update("query",{query:props.initialValue}); if (input && props.query === undefined) renderer.focusElement?.(input.id); });
   onCleanup(() => { props.onKeyHandler?.(undefined); props.onAcceptHandler?.(undefined); disposed = true; animation.dispose(); coreCall(`${engine}.dispose`, { id }); });
   const accept = (index?: number) => {
@@ -100,7 +107,7 @@ export function InlinePicker(props: {
     return <anchored fill="window" deferred={true} priority={1} occlude={false} style={{ backgroundColor: "transparent", pointerEvents: "none" }}>
       <PaintLayer commands={card().commands} config={config} />
       <div testId={`agent-picker:${props.kind}`} role="dialog" aria-label={frame().title} onKeyDown={keyDown}
-        onMouseDownOutside={event => { const [x,y,w,h]=rect(); if(event.x!==undefined&&event.y!==undefined&&event.x>=x-1&&event.y>=y-1&&event.x<=x+w+1&&event.y<=y+h+1)return; if(!props.responding)props.onClose(); }}
+        onMouseDownOutside={event => { const [x,y,w,h]=rect(); if(event.x!==undefined&&event.y!==undefined&&(props.ignoreOutsideClick?.(event.x,event.y)||event.x>=x-1&&event.y>=y-1&&event.x<=x+w+1&&event.y<=y+h+1))return; if(!props.responding)props.onClose(); }}
         onMouseDown={(event) => { const result = hit(event); if (result.url) { const child = Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", result.url], { stderr: "ignore", stdout: "ignore" }); void child.exited; } else if (result.hit) { update("frame"); accept(); } }}
         onScroll={(event) => update("scroll", { delta: (event.deltaY || 0) * (event.precise ? 1 / s : d.pickerRowHeight * 3) })}
         style={{ position: "absolute", left: rect()[0], top: rect()[1], width: rect()[2], height: rect()[3], pointerEvents: "auto", userSelect: "none" }}>

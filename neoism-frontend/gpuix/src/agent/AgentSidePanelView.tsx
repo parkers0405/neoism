@@ -6,7 +6,7 @@ import { coreCall } from "../native-core";
 import { PaintLayer, type PaintCommand } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
 import { focusNativeElement,invalidateNativeFocus } from "../native-focus";
-import type {ChromeBounds} from "../ui/chrome-target-bounds";
+import {paintedChromeBounds,type ChromeBounds} from "../ui/chrome-target-bounds";
 import {CanvasImages,RasterSource} from "../ui/canvas";
 
 interface PanelFrame { commands: PaintCommand[]; animating: boolean; send: unknown[];cursor?:number[]|null;focused?:boolean;selected?:string; result?: { action?: string; anchor?: number[] | null; projects?: string[]; root?: boolean; open?: { id: string; title: string; directory?: string | null;familyRootId?:string|null;pointer?:boolean } } | null }
@@ -68,7 +68,7 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
     if(panel){let images=panel.images.get(renderer);if(!images){images=new CanvasImages(renderer);panel.images.set(renderer,images);}for(const command of next.commands){if(command.kind==="text"&&command.raster)images.use(RasterSource.painter,command.raster);else if(command.kind==="image")images.use(RasterSource.paintImage,command.raster);}images.commit();}
     setCommands(next.commands); if (panel) panel.commands = next.commands;
     setSelected(next.selected||"");
-    if(host){const rect=next.cursor;props.onCursor?.(rect?{x:bounds.x+rect[0]!,y:bounds.y+rect[1]!,width:rect[2]!,height:rect[3]!}:undefined,host,bounds);}
+    if(host){const painted=paintedChromeBounds(renderer,host.id);if(painted)bounds={...bounds,x:painted.x,y:painted.y};const rect=next.cursor;props.onCursor?.(rect?{x:bounds.x+rect[0]!,y:bounds.y+rect[1]!,width:rect[2]!,height:rect[3]!}:undefined,host,bounds);}
     for (const message of next.send || []) model.sendAgent(message as never);
     const result = next.result;
     if (result?.open) {

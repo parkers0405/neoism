@@ -52,6 +52,9 @@
     "check:markdown": "bun scripts/native-markdown-check.ts",
     "check:scroll": "bun scripts/native-scroll-check.ts",
     "benchmark:scroll": "bun scripts/benchmark-scroll.ts",
+    "benchmark:render": "bun scripts/benchmark-native-render.ts",
+    "benchmark:cursor": "bun scripts/benchmark-cursor.ts",
+    "benchmark:frame-paths": "bun scripts/benchmark-frame-paths.ts",
     "benchmark:fps": "bun scripts/native-scenario-fps.ts",
     "prebenchmark:fps": "npm run build:sdk"
   },

@@ -24,3 +24,16 @@ test("local reorder rejects cross-pane leaves atomically and self-reorder keeps 
   layout.reorder(left,left);expect(layout.snapshot()).toEqual(before);
  }finally{layout.dispose();}
 });
+test("dragging a tab already beside its target does not republish the whole workspace",()=>{
+ const layout=new WorkspaceLayout();
+ try{
+  for(const id of ["one","two","three"])layout.open(file(id));
+  const [one,two,three]=layout.frame.panes[0].tabs.map(tab=>tab.leaf);
+  let publications=0;layout.subscribe(()=>publications++);
+  const before=layout.frame;
+  for(let i=0;i<100;i++){layout.reorder(one,two,true);layout.reorder(three,two,false);layout.reorder(two,two);}
+  expect(publications).toBe(0);expect(layout.frame).toBe(before);
+  layout.reorder(one,three,false);
+  expect(publications).toBe(1);expect(layout.frame.panes[0].tabs.map(tab=>tab.surfaceId)).toEqual(["two","three","one"]);
+ }finally{layout.dispose();}
+});

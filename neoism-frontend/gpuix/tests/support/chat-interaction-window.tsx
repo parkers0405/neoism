@@ -1,0 +1,53 @@
+// Real GPUI hit-testing and full-App picker/scroll diagnostics; isolated daemon.
+import {mock} from 'bun:test';
+import assert from 'node:assert/strict';
+import {createSignal,Show} from 'solid-js';
+import {createRenderer,render} from '@gpuix/solid';
+import {startFrameLoop} from '@gpuix/native/runtime';
+import {App as AutomationApp,InProcessBackend,liveRendererAsTest} from '@gpuix/native/automation';
+import {readFileSync} from 'node:fs';
+import * as native from '../../src/native-core';
+import {installDisplayClock} from '../../src/animation/display-clock';
+import {createAgentDaemon} from './agent-daemon';
+import {loadConfig} from '../../src/config';
+import {WorkspaceModel} from '../../src/model';
+import {DaemonConnection} from '../../src/daemon/client';
+const original=native.coreCall,opened:string[]=[],calls:Array<{op:string;ms:number}>=[];let engine=0;
+mock.module('../../src/native-core',()=>({...native,coreCall:(op:string,args?:Record<string,unknown>)=>{const t=performance.now();const value=original<any>(op,args);calls.push({op,ms:performance.now()-t});if(op==='agenttimeline.new')engine=value.id;if(op==='agenttimeline.pointer'&&args?.kind==='down')console.log('LINK_HIT',JSON.stringify({x:args.x,y:args.y,link:value.link}));return value;}}));
+mock.module('../../src/menu-actions/web-frontend',()=>({openExternalUrl:async(url:string)=>{opened.push(url);console.log('OPENED',url);},localDaemon:()=>true}));
+const {App}=await import('../../src/ui/App');
+const server=createAgentDaemon({deferCreations:false}),config={...loadConfig(['--config','/nonexistent/chat-interaction'],{}),endpoint:server.endpoint,authToken:undefined,cursorBlink:false};
+const client=new DaemonConnection(config),model=new WorkspaceModel(client,config);model.start();client.start();
+const renderer=createRenderer(event=>{if(['mouseDown','mouseUp'].includes(event.eventType))console.log('MOUSE',JSON.stringify(event));});
+renderer.init({title:'Neoism interaction check',appId:'ai.neoism.gpuix.interaction-check',width:1440,height:900,titlebarTransparent:true,focus:false});
+for(const name of ['CascadiaCode/CascadiaCodeNF-Regular.otf','PressStart2P/PressStart2P-Regular.ttf'])renderer.registerFont(readFileSync(new URL(`../../../../neoism-paint/src/font/resources/${name}`,import.meta.url)));
+const clock=installDisplayClock(renderer),loop=startFrameLoop(renderer),root=render(()=><App model={model} config={config}/>,{renderer,onUncaughtError:console.error});
+const app=new AutomationApp(new InProcessBackend(liveRendererAsTest(renderer)));
+const until=async(f:()=>boolean|Promise<boolean>)=>{const end=Date.now()+10000;while(!await f()){if(Date.now()>end)throw Error('timeout');await Bun.sleep(20);}};
+try{
+ await until(()=>!!model.state.activeWorkspace&&!model.state.catalogsLoading);model.openThread(server.threads[0] as any);await Bun.sleep(700);
+ server.push({HistoryChunk:{session_id:'one',messages:[{id:'a',role:'Assistant',kind:'Assistant',text:'Source: [GitHub: anomalyco/opentui](https://github.com/anomalyco/opentui).'}],next_cursor:null}});
+ await until(()=>!!engine);await Bun.sleep(1600);
+ const host=app.getByTestId('conversation'),bounds=await host.bounds();
+ const frame=original<any>('agenttimeline.frame',{id:engine,includeCommands:true,compactPaint:false});
+ const link=frame.commands.find((c:any)=>c.kind==='text'&&c.text?.includes('anomalyco/opentui'));if(!link)throw Error('no link');
+ console.log('LINK_POSITION',JSON.stringify({bounds,x:link.x,y:link.y,size:link.size}));
+ const x=bounds.x+link.x+5,y=bounds.y+link.y+link.size/2;
+ renderer.simulateMouseMove(x,y);await Bun.sleep(120);renderer.simulateClick(x,y,0);await Bun.sleep(250);console.log('LINK_RESULT',opened.length);assert.deepEqual(opened,['https://github.com/anomalyco/opentui']);
+ const hostId=Number((await host.all())[0].id),queryStart=performance.now();for(let i=0;i<10000;i++)assert.ok(renderer.getElementBounds(hostId));console.log('BOUNDS_10000_MS',performance.now()-queryStart);assert.ok(performance.now()-queryStart<250,'Bounds reads must not wait for UI commands');
+ const options=Array.from({length:2000},(_,i)=>({id:`model-${i}`,name:`Model ${i}`}));
+ model.update({providers:[{id:'openai',name:'OpenAI',models:options}],providerCatalog:{providers:[{id:'openai',name:'OpenAI',models:Object.fromEntries(options.map(m=>[m.id,m]))}]}} as any);
+ calls.length=0;let t=performance.now();await app.getByTestId('select-model').click();await app.getByTestId('agent-picker:model').waitFor({timeoutMs:10000});
+ console.log('PICKER_OPEN',JSON.stringify({ms:performance.now()-t,calls:calls.sort((a,b)=>b.ms-a.ms).slice(0,12)}));
+ t=performance.now();for(let i=0;i<30;i++)await app.getByTestId('inline-picker-input').press('down');console.log('PICKER_30_KEYS_MS',performance.now()-t);
+ t=performance.now();await app.getByTestId('inline-picker-input').fill('1999');await Bun.sleep(100);console.log('PICKER_QUERY',JSON.stringify({ms:performance.now()-t}));
+ const [left,setLeft]=createSignal(30),[visible,setVisible]=createSignal(true);let marker:any,layouts=0;
+ root.render(()=><Show when={visible()}><div ref={marker} onLayout={()=>layouts++} style={{position:"absolute",left:left(),top:60,width:200,height:100}}/></Show>);
+ await Bun.sleep(200);console.log("MARKER_INITIAL",marker?.id,marker&&renderer.getElementBounds(marker.id),layouts);await until(()=>!!marker&&Math.abs((renderer.getElementBounds(marker.id)?.x??-1)-30)<.01);const reported=layouts;
+ setLeft(130);await until(()=>Math.abs((renderer.getElementBounds(marker.id)?.x??-1)-130)<1);console.log("MARKER_MOVED");assert.equal(layouts,reported,"Translation changes snapshot without a resize event");
+ assert.equal(createRenderer().getElementBounds(marker.id),null,"Snapshots belong to their renderer");
+ const markerId=marker.id;setVisible(false);console.log("MARKER_REMOVING",markerId);await until(()=>renderer.getElementBounds(markerId)===null);
+ console.log('BOUNDS_TRANSLATE_REMOVE_PASS');
+
+}catch(e){console.error(e);process.exitCode=1;}finally{root.unmount();model.dispose();client.stop();server.stop();loop.stop();clock.dispose();}
+process.exit(process.exitCode||0);

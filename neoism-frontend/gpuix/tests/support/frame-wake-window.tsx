@@ -1,5 +1,6 @@
 import {createRenderer,render} from "@gpuix/solid";
-import type {DisplayRenderer} from "../../src/animation/display-clock";
+import {installDisplayClock,type DisplayRenderer} from "../../src/animation/display-clock";
+import {AnimationFrameScheduler} from "../../src/animation/frame-scheduler";
 const renderer=createRenderer();
 renderer.init({title:"Neoism native frame wake verification",appId:"ai.neoism.gpuix.frame-wake-test",width:800,height:450});
 const native=renderer as typeof renderer&Required<DisplayRenderer>;
@@ -19,6 +20,13 @@ try{
  native.setFrameWakeCallback(()=>{chain++;if(chain<4)native.requestFrameWake();});
  native.requestFrameWake();await until(()=>chain===4);await Bun.sleep(50);
  native.setFrameWakeCallback(null);if(native.requestFrameWake())throw new Error("Cleared display callback still accepts frame requests");
+ const clock=installDisplayClock(renderer),animation=new AnimationFrameScheduler(1000/144);
+ let advanced=0,wakes=0;
+ renderer.setFrameWakeCallback(()=>wakes++);
+ const advance=()=>{advanced++;if(advanced<4)animation.request(advance);};
+ animation.request(advance);await until(()=>wakes===5);await Bun.sleep(100);
+ if(advanced!==4||wakes!==5)throw new Error(`Pipelined callbacks did not park: ${advanced} updates, ${wakes} wakes`);
+ animation.dispose();clock.dispose();
  const after=renderer.getDebugFrameOverlayStats().frames;
  if(after!==before)throw new Error(`Callback-only frame requests forced ${after-before} unnecessary native draws`);
  console.log(JSON.stringify({nativeFrameWake:"passed",burstCallbacks:callbacks,chainedCallbacks:chain,unnecessaryDraws:after-before}));

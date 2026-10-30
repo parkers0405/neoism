@@ -26,6 +26,8 @@ struct View {
     leader_pending:Option<std::time::Instant>,
     menu:ContextMenu,
     menu_painter:Option<RecordingPainter>,
+    presence:crate::presence_cache::PresenceCache,
+    canvas_style:Option<(String,u16)>,
 }
 #[derive(Default)]
 struct Store {
@@ -105,10 +107,11 @@ fn frame(view: &mut View) -> Value {
       let painter=view.menu_painter.as_mut().unwrap();painter.begin_frame();view.menu.render(painter,(view.width,view.height,1.0),&IdeTheme::by_name(&view.theme));Some(json!({"rect":view.menu.rect(),"commands":&*painter.borrowed_commands()}))
     }else{None};
     let effects = std::mem::replace(&mut view.effects, Value::Null);
-    fn point(pane:&MarkdownPane,line:usize,col:usize)->Value{let line=line.min(pane.lines.len().saturating_sub(1));let source=&pane.lines[line];let mut col=col.min(source.len());while !source.is_char_boundary(col){col-=1;}let column=source[..col].encode_utf16().count();let offset=pane.lines[..line].iter().map(|s|s.encode_utf16().count()+1).sum::<usize>()+column;json!({"line":line,"column":column,"offset":offset})}
-    let presence=json!({"cursor":point(&view.pane,view.pane.cursor_line,view.pane.cursor_col),"selection":view.pane.visual_selection().map(|(anchor,head,_)|json!({"anchor":point(&view.pane,anchor.line,anchor.col),"head":point(&view.pane,head.line,head.col)})),"insert":view.pane.mode==MarkdownMode::Insert});
+    let presence=view.presence.frame(view.pane.source_revision(),&view.pane.lines,(view.pane.cursor_line,view.pane.cursor_col),view.pane.visual_selection().map(|(a,b,_)|((a.line,a.col),(b.line,b.col))),view.pane.mode==MarkdownMode::Insert);
     let history=view.pane.take_doc_history_requests().into_iter().map(|request|matches!(request,md::MarkdownDocHistoryRequest::Redo)).collect::<Vec<_>>();
-    json!({"presence":presence,"docHistory":history,"commands":&*view.painter.borrowed_commands(),"menu":menu,"assets":assets,"cover":cover,"revision":view.pane.source_revision(),"mode":format!("{:?}",view.pane.mode),"vim":view.pane.vim_enabled,"cursor":{"line":view.pane.cursor_line,"col":view.pane.cursor_col,"rect":view.pane.cursor_rect},"dirty":view.pane.is_dirty(),"scrollY":view.pane.scroll_y,"contentHeight":view.pane.content_height(),"animating":moving||reveal||view.pane.has_pending_scroll_animation()||view.trail.is_animating()||view.menu.is_animating(),"cursorQuad":view.trail.quad_points(),"cursorHold":view.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),"hostAction":effects.get("hostAction"),"dragging":view.pane.is_dragging(),"effects":effects})
+    let canvas=view.canvas_style.as_ref().map(|(font,weight)|crate::paint_canvas::encode(&view.painter.borrowed_commands(),font,*weight));
+    let commands=if canvas.is_some(){json!([])}else{json!(&*view.painter.borrowed_commands())};
+    json!({"presence":presence,"docHistory":history,"commands":commands,"canvas":canvas,"menu":menu,"assets":assets,"cover":cover,"revision":view.pane.source_revision(),"mode":format!("{:?}",view.pane.mode),"vim":view.pane.vim_enabled,"cursor":{"line":view.pane.cursor_line,"col":view.pane.cursor_col,"rect":view.pane.cursor_rect},"dirty":view.pane.is_dirty(),"scrollY":view.pane.scroll_y,"contentHeight":view.pane.content_height(),"animating":moving||reveal||view.pane.has_pending_scroll_animation()||view.trail.is_animating()||view.menu.is_animating(),"cursorQuad":view.trail.quad_points(),"cursorHold":view.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),"hostAction":effects.get("hostAction"),"dragging":view.pane.is_dragging(),"effects":effects})
 }
 fn snapshot(view: &mut View) -> Value {
     let anchor=view.pane.capture_host_scroll_anchor();
@@ -149,13 +152,15 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
   let mut look=(*neoism_ui::primitives::look::active_look()).clone();look.markdown.font_family=(!document.is_empty()).then(||document.to_owned());neoism_ui::primitives::look::set_active_look(look);
   let mut pane=MarkdownPane::from_source(PathBuf::from(text(v,"path")),text(v,"text"));pane.vim_enabled=v["vim"].as_bool().unwrap_or(true);if !pane.vim_enabled{pane.enter_insert();}
   let painter=RecordingPainter::new(if family.is_empty(){"Cascadia Code NF"}else{family},v["fontWeight"].as_u64().unwrap_or(400) as u16,if document.is_empty(){vec![]}else{vec![document.to_owned()]});
-  store.views.insert(id,View{pane,painter,width:800.0,height:600.0,scale:number(v,"scale",1.0),theme:text(v,"theme").to_owned(),mouse:None,effects:Value::Null,trail:neoism_ui::panels::trail_cursor::TrailCursor::new(),last_cursor:(usize::MAX,usize::MAX),last_frame:std::time::Instant::now(),leader_pending:None,menu:ContextMenu::new(),menu_painter:None});return Ok(json!({"id":id}));
+  store.views.insert(id,View{pane,painter,width:800.0,height:600.0,scale:number(v,"scale",1.0),theme:text(v,"theme").to_owned(),mouse:None,effects:Value::Null,trail:neoism_ui::panels::trail_cursor::TrailCursor::new(),last_cursor:(usize::MAX,usize::MAX),last_frame:std::time::Instant::now(),leader_pending:None,menu:ContextMenu::new(),menu_painter:None,presence:Default::default(),canvas_style:None});return Ok(json!({"id":id}));
  }
  let id=v["id"].as_u64().unwrap_or(0) as u32;
  if op=="markdown.dispose"{store.views.remove(&id);return Ok(Value::Null);}
  if op=="markdown.block-options"{return Ok(json!(md::menus::markdown_block_menu_entries().iter().enumerate().map(|(i,e)|json!({"title":e.label,"value":i.to_string(),"description":e.hint,"footer":e.preview})).collect::<Vec<_>>()));}
  let view=store.views.get_mut(&id).ok_or("Unknown rich Markdown view")?;
+ if op!="markdown.frame"{view.presence.clear();}
  match op{
+  "markdown.canvas-paint"=>{view.canvas_style=if v["enabled"].as_bool()==Some(false){None}else{Some((text(v,"fontFamily").to_owned(),v["fontWeight"].as_u64().unwrap_or(400) as u16))};},
   "markdown.text"=>return Ok(json!({"text":view.pane.lines.join("\n")})),
   "markdown.snapshot"=>return Ok(snapshot(view)),
   "markdown.restore"=>restore(&mut view.pane,&v["snapshot"]),

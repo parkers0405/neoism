@@ -7,10 +7,12 @@ import { LoadingSkeleton } from "../ui/LoadingSkeleton";
 import { readClipboard } from "../clipboard";
 import { ChromeActionsController } from "./ChromeActionsController";
 import {dialogOverlayOffset,useDialogViewport,overlayPoint} from "../ui/overlay-viewport";
+import {LatestFrameInput} from "../animation/latest-frame-input";
 
 export function ChromeActionsView(props: { controller: ChromeActionsController; config: AppConfig; pageMode?: boolean; active?: boolean; focusToken?: number; onFocus?: () => void; onCustomKey?: (event: KeyEvent) => boolean }) {
   const renderer = useGpuixRequired(), window = createWindowSize(), page = !!props.pageMode;
   const viewport=useDialogViewport(renderer,window);
+  const motion=new LatestFrameInput();onCleanup(()=>motion.dispose());
   const [frame, setFrame] = createSignal(page ? props.controller.extensionFrame : props.controller.frame);
   const [bounds, setBounds] = createSignal({ x: 0, y: 0, width: 0, height: 0 });
   const imagePath = createMemo(() => frame()?.image?.path);
@@ -25,6 +27,7 @@ export function ChromeActionsView(props: { controller: ChromeActionsController; 
   const offset=createMemo(()=>{const rect=frame()?.rect;return !page&&rect?dialogOverlayOffset(viewport(),rect):{x:0,y:0};});
   const point = (event: { x?: number; y?: number }) => {const local=overlayPoint(page?bounds():viewport(),event),shift=offset();return{x:local.x-shift.x,y:local.y-shift.y};};
   const key = (event: KeyEvent) => {
+    motion.flush();
     if(handleApplicationShortcut(renderer,event))return;
     if (page && props.onCustomKey?.(event)) return;
     event.preventDefault(); event.stopPropagation();
@@ -36,9 +39,9 @@ export function ChromeActionsView(props: { controller: ChromeActionsController; 
   const content = <div ref={host} testId={page ? "extensions-page" : "chrome-action-overlay"} role={page ? "region" : "dialog"} aria-label={frame()?.kind || "Extensions"} tabIndex={0}
     onFocus={props.onFocus} onKeyDown={key}
     onLayout={(event) => { const next = { x: event.x || 0, y: event.y || 0, width: event.width || 0, height: event.height || 0 }; setBounds((old) => Object.keys(next).every((key) => next[key as keyof typeof next] === old[key as keyof typeof old]) ? old : next); if (page && next.width && next.height) props.controller.layout(next.width, next.height, true); }}
-    onMouseDown={(event) => { if (event.button !== undefined && event.button !== 0) return; focus(); props.controller.call("click", point(event), page); }}
-    onMouseMove={(event) => props.controller.call("pointer", point(event), page)}
-    onScroll={(event) => props.controller.call("scroll", { ...point(event), delta: (event.deltaY || 0) * (event.precise ? 1 : frame()?.kind === "settings" ? 48 : 40 * props.config.scale) }, page)}
+    onMouseDown={(event) => {motion.flush(); if (event.button !== undefined && event.button !== 0) return; focus(); props.controller.call("click", point(event), page); }}
+    onMouseMove={(event) => {const local=point(event);motion.queue(()=>props.controller.call("pointer",local,page));}}
+    onScroll={(event) => {motion.flush();props.controller.call("scroll", { ...point(event), delta: (event.deltaY || 0) * (event.precise ? 1 : frame()?.kind === "settings" ? 48 : 40 * props.config.scale) }, page);}}
     style={page ? { position: "relative", flexGrow: 1, minHeight: 0, minWidth: 0, overflow: "hidden", backgroundColor: props.config.theme.bg } : { position: "absolute", left: viewport().x, top: viewport().y, width: viewport().width, height: viewport().height, overflow: "hidden" }}>
     <Show when={frame()} fallback={<LoadingSkeleton kind="document" config={props.config} />}>
       <div testId="chrome-action-paint-origin" style={{position:"absolute",left:offset().x,top:offset().y,width:"100%",height:"100%",pointerEvents:"none"}}>

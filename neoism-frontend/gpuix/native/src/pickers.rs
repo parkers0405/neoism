@@ -104,7 +104,7 @@ fn paint_picker(
         painter.begin_frame();
         neoism_ui::panels::agent_pane::view::picker::render_usage_picker(painter,picker,anchor,&theme,s,max_rows,min_y);
         let geometry=picker.usage_layout(anchor,s,max_rows,min_y);
-        return json!({"commands":painter.commands(),"rect":geometry.rect,"animating":picker.loading||picker.is_animating(),"selectedValue":Value::Null});
+        return json!({"commands":painter.commands(),"rect":geometry.rect,"animating":picker.is_animating(),"selectedValue":Value::Null});
     }
     let show_search_caret = v["caret"].as_bool().unwrap_or(true);
     let empty_message = picker.empty_message();
@@ -176,7 +176,7 @@ fn paint_picker(
     json!({
         "commands": painter.commands(),
         "rect": state.map(|state| state.rect),
-        "animating": picker.is_animating() || picker.loading || picker.activity().is_some_and(|a| a.busy),
+        "animating": picker.is_animating(),
         "selectedValue": picker.selected_option().map(|o| &o.value),
     })
 }
@@ -395,6 +395,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                     "picker.frame" => {}
                     _ => return Err("Unknown picker operation".into()),
                 }
+                if v["deferFrame"].as_bool().unwrap_or(false) { return Ok(Value::Null); }
                 Ok(picker_frame(p, v))
             }
             _ => {

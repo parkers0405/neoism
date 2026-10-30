@@ -83,6 +83,9 @@ impl TextPaint for Text {
 }
 #[allow(clippy::too_many_arguments)]
 pub trait Paint {
+    /// Immediate pixel renderers snap baselines; retained hosts can translate
+    /// cached glyph images fractionally without reshaping their ink.
+    fn snap_y(&self, y: f32) -> f32 { if y.is_finite() { y.round() } else { y } }
     fn asset_text(&mut self,path:&std::path::Path)->Option<String>{std::fs::read_to_string(path).ok()}
 
     fn text_mut(&mut self) -> &mut dyn TextPaint;

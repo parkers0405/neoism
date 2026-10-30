@@ -166,3 +166,31 @@ test("legacy untagged override migrates to the first identity before another pro
   const savedB = { ...saved, activeWorkspaceId: "host-b-workspace" }; b.write(savedB);
   expect(a.read()).toEqual(saved); expect(b.read()).toEqual(savedB);
 });
+
+test("hidden recovered editors stay unallocated, preserve undo, and protect unsaved tabs", () => {
+  const app = model(), editor = app.getEditor(surface);
+  editor.call("paste", { text: "unsaved " });
+  const saved = app.captureSession(), restored = model();
+  restored.restoreSession(saved);
+  expect(restored.editors.size).toBe(0);
+  expect(restored.state.files[surface.id]).toBe(editor.text());
+  expect(restored.isSurfaceModified(surface.id)).toBe(true);
+  restored.closeSurface(surface.id);
+  expect(restored.state.surfaces.some(s => s.id === surface.id)).toBe(true);
+  expect(restored.editors.size).toBe(0);
+  expect(restored.captureSession().editors[surface.id]).toEqual(saved.editors[surface.id]);
+  const opened = restored.getEditor(surface);
+  expect(opened.text()).toBe(editor.text());
+  expect(restored.getEditor(surface)).toBe(opened);
+  opened.call("key", { key: "z", ctrl: true });
+  expect(opened.text()).toBe("one\ntwo\nthree");
+});
+
+test("clean recovered tabs can close without allocating native editors", () => {
+  const app = model(); app.getEditor(surface);
+  const restored = model(); restored.restoreSession(app.captureSession());
+  expect(restored.isSurfaceModified(surface.id)).toBe(false);
+  restored.closeSurface(surface.id);
+  expect(restored.editors.size).toBe(0);
+  expect(restored.state.surfaces.some(s => s.id === surface.id)).toBe(false);
+});

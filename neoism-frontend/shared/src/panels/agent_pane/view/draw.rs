@@ -788,7 +788,7 @@ pub fn draw_text_clipped(
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
     let reveals: &[neoism_paint::text::TextReveal] = &[];
-    let y = snap_text_y(y);
+    let y = sugarloaf.snap_y(y);
     if occlusion_rects.is_empty() && reveals.is_empty() {
         return sugarloaf.text_mut().draw(x, y, text, opts);
     }
@@ -886,7 +886,7 @@ pub fn draw_text_revealed_clipped(
     reveals: &[neoism_paint::text::TextReveal],
 ) -> f32 {
     if reveals.is_empty() { return draw_text_clipped(sugarloaf,x,y,text,opts,occlusion_rects); }
-    let y = snap_text_y(y);
+    let y = sugarloaf.snap_y(y);
     if occlusion_rects.is_empty() && reveals.is_empty() {
         return sugarloaf.text_mut().draw(x, y, text, opts);
     }
@@ -1026,14 +1026,6 @@ mod reveal_visibility_tests {
             clip,
             &[(0.0, 100.0)]
         ));
-    }
-}
-
-fn snap_text_y(y: f32) -> f32 {
-    if y.is_finite() {
-        y.round()
-    } else {
-        y
     }
 }
 

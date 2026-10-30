@@ -82,7 +82,9 @@ export function PaneLayoutView(props: {
     const pane=strip.pane(),border=paneCount()>1?s:0,left=origin().x+pane.rect[0]+border,top=origin().y+pane.rect[1]+border;
     if(x<left||x>left+pane.rect[2]-2*border||y<top||y>top+chrome.height+36*s)return false;
     for(let pass=0;pass<pane.tabs.length;pass++){
-      const tabs=strip.pane().tabs,index=tabs.findIndex(tab=>tab.leaf===active.leaf);
+      // Reordering publishes signals inside a batched pointer event. Read the
+      // canonical result immediately, rather than a possibly stale render memo.
+      const tabs=props.controller.frame.panes.find(pane=>pane.tabs.some(tab=>tab.leaf===active.leaf))?.tabs||[],index=tabs.findIndex(tab=>tab.leaf===active.leaf);
       if(index<0)break;
       const width=strip.widths.get(active.leaf)||chrome.width,start=tabs.slice(0,index).reduce((sum,tab)=>sum+(strip.widths.get(tab.leaf)||chrome.width),0);
       const center=x-left-strip.scroll()-active.grab+width*.5;

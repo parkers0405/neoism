@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Index, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { useGpuixRequired, type HostElement, type KeyEvent, type EventPayload } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import type { DaemonConnection } from "../daemon/client";
@@ -12,6 +12,7 @@ import { coreCall, type SearchHost } from "../native-core";
 import { cursorPaint, sameBounds } from "../editor/paint-frame";
 import { focusedNativeElement, focusNativeElement, invalidateNativeFocus } from "../native-focus";
 import {CursorBlinkClock} from "../ui/cursor-blink";
+import {terminalPaintOps} from "./paint";
 
 export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean; active?: boolean; focusToken?: number; onFocus?: () => void; sessionId: string; client: DaemonConnection; config: AppConfig; onSearch: (kind: "/" | "?", host: SearchHost) => void; report: (error: unknown) => void }) {
   const renderer = useGpuixRequired();
@@ -27,6 +28,8 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
   const [cursor, setCursor] = createSignal<TerminalCursorFrame>({ quad: [], hold: false,animating:false }, { equals: (a, b) => a.hold === b.hold && a.animating === b.animating && a.quad.length === b.quad.length && a.quad.every((point,i) => point.every((n,j) => n === b.quad[i][j])) });
   const [cursorColor, setCursorColor] = createSignal(props.config.cursorColor || props.config.theme.accent);
   const offset = createMemo(() => frame().offset);
+  const ink=createMemo(()=>({lines:frame().lines,extra:frame().extra}),undefined,{equals:(a,b)=>a.lines===b.lines&&a.extra===b.extra});
+  const paint=createMemo(()=>JSON.stringify(terminalPaintOps(ink(),props.config,cellWidth(),lineHeight)));
   const caret = createMemo(() => cursorPaint(cursor().quad));
   let host: HostElement | undefined, selecting = false;
   const send = session.send;
@@ -121,20 +124,9 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
     style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", cursor: "text", userSelect: "none" }}>
     <text onLayout={(event) => { if (event.width) setCellWidth(event.width / 10); }}
       style={{ position: "absolute", opacity: 0, fontFamily: props.config.fontFamily, fontSize: props.config.fontSize, fontWeight: props.config.fontWeight, pointerEvents: "none" }}>MMMMMMMMMM</text>
-    <Index each={frame().lines}>{(line, y) => <div style={{ position: "absolute", left: 0, top: y * lineHeight + offset(), height: lineHeight, width: "100%", pointerEvents: "none" }}>
-      <Index each={line()}>{(run) => <text style={{ position: "absolute", left: run().column * cellWidth(), width: run().width * cellWidth(), height: lineHeight,
-        fontFamily: props.config.fontFamily, fontSize: props.config.fontSize, fontWeight: run().bold ? 700 : props.config.fontWeight,
-        color: run().fg, backgroundColor: run().bg, whiteSpace: "nowrap", lineHeight,
-        pointerEvents: "none", textDecoration: run().underline ? "underline" : "none" }}>{run().text}</text>}</Index>
-    </div>}</Index>
-    <Show when={frame().extra} keyed>{(extra) => <div style={{ position: "absolute", left: 0, top: (extra.above ? -1 : frame().lines.length) * lineHeight + offset(), height: lineHeight, width: "100%", pointerEvents: "none" }}>
-      <Index each={extra.line}>{(run) => <text style={{ position: "absolute", left: run().column * cellWidth(), width: run().width * cellWidth(), height: lineHeight,
-        fontFamily: props.config.fontFamily, fontSize: props.config.fontSize, fontWeight: run().bold ? 700 : props.config.fontWeight,
-        color: run().fg, backgroundColor: run().bg, whiteSpace: "nowrap", lineHeight,
-        pointerEvents: "none", textDecoration: run().underline ? "underline" : "none" }}>{run().text}</text>}</Index>
-    </div>}</Show>
+    <canvas testId="terminal-viewport" commands={paint()} style={{position:"absolute",left:0,top:offset()-lineHeight,right:0,height:size().height+lineHeight*2,pointerEvents:"none"}}/>
     <Show when={focused() && !surfaceCursorSuppressed(renderer) && frame().cursor.visible && frame().cursor.shape !== "Hidden" && blink() && frame().cursor.y >= 0 && frame().cursor.y < frame().rows}>
-      <canvas commands={JSON.stringify([{k:"p",c:cssColor(cursorColor()),p:[cursor().quad.flatMap(point=>[point[0],point[1]])]}])}
+      <canvas testId="terminal-cursor-layer" commands={JSON.stringify([{k:"p",c:cssColor(cursorColor()),p:[cursor().quad.flatMap(point=>[point[0],point[1]])]}])}
         style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"none"}}/>
       <div testId="terminal-caret" style={{position:"absolute",left:caret().left,top:caret().top,width:caret().width,height:caret().height,pointerEvents:"none"}}/>
     </Show>

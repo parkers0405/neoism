@@ -1,5 +1,7 @@
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import WebSocket from "ws";
+import { batch } from "solid-js";
+import { profileStart, profileEnd } from "../profiling";
 import type { AppConfig } from "../config";
 import { parseEnvelope, variant, isRecord, type WireEvent, type ConnectionState, type Family,
   type WorkspaceClientMessage, type FilesClientMessage, type AgentClientMessage, type PtyMessage, type SearchClientMessage, type ConfigClientMessage, type EditorClientMessage, type DiagnosticsClientMessage, type GitClientMessage, type CrdtClientMessage } from "./protocol";
@@ -83,14 +85,20 @@ export class DaemonConnection {
     });
     socket.on("message", (data) => {
       if (!current()) return;
+      const started = profileStart();
+      let family: Family | undefined;
+      let bytes = 0;
+      try { batch(() => {
       let event: WireEvent | undefined;
       const raw=data.toString();
       try { event = parseEnvelope(raw); }
       catch { this.failed(generation, "Daemon sent invalid JSON"); return; }
       if (!event) return;
+      family = event.family;
+      bytes = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(raw);
       this.lastMessageAt = Date.now();
       const message = variant(event.message);
-      this.lastMessage={family:event.family,kind:(message?.[0]||"unknown").slice(0,80),bytes:Buffer.isBuffer(data)?data.length:Buffer.byteLength(raw)};
+      this.lastMessage={family:event.family,kind:(message?.[0]||"unknown").slice(0,80),bytes};
       if (event.family === "Workspace" && message?.[0] === "HelloAck") {
         let ack: { readonly accepted: boolean; readonly reason?: string | null;readonly connected_host_id?:string|null };
         try { ack = Schema.decodeUnknownSync(Schema.Struct({ accepted: Schema.Boolean, reason: Schema.optionalKey(Schema.NullOr(Schema.String)),connected_host_id:Schema.optionalKey(Schema.NullOr(Schema.String)) }))(message[1]); }
@@ -115,6 +123,7 @@ export class DaemonConnection {
         else pending.resume(Effect.succeed(event.message));
       }
       for (const listener of this.listeners) listener(event);
+      }); } finally { profileEnd(`daemon.receive.${family ?? "invalid"}`, started, bytes); }
     });
     socket.on("error", (error:Error&{code?:string}) => { if (current()) this.failed(generation, `Daemon connection failed${error.code?` [${error.code}]`:""}: ${error.message}`); });
     socket.on("close", (code?:number) => { if (current()) this.failed(generation, `Daemon disconnected${code?` (WebSocket ${code})`:""}`); });

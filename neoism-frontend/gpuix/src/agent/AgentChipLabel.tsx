@@ -1,4 +1,4 @@
-import {createEffect,createSignal,onCleanup} from "solid-js";
+import {createEffect,createMemo,createSignal,onCleanup} from "solid-js";
 import {useGpuixRequired} from "@gpuix/solid";
 import type {AppConfig} from "../config";
 import {coreCall} from "../native-core";
@@ -24,10 +24,12 @@ export class AgentChipHosts {
 export function AgentChipLabel(props:{config:AppConfig;hosts:AgentChipHosts;paintPins:WordmarkHosts;scope:string;kind:"agent"|"model"|"thinking";label:string;displayLabel?:string;maxWidth?:number;size:number;loading:boolean}){
  const renderer=useGpuixRequired(),animation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
  const [frame,setFrame]=createSignal<ChipFrame>();let disposed=false;
+ // Parent model signals may update without changing this chip's appearance.
+ // Compare paint inputs before crossing into the synchronous native renderer.
+ const parameters=createMemo(()=>({id:props.hosts.acquire(props.scope,props.kind,props.config),kind:props.kind,label:props.label,displayLabel:props.displayLabel,fontSize:props.size*props.config.scale,theme:props.config.themeName,loading:props.loading,reducedMotion:props.config.reducedMotion}),undefined,{equals:(a,b)=>JSON.stringify(a)===JSON.stringify(b)});
  const draw=()=>{
   if(disposed)return;animation.cancel();
-  const id=props.hosts.acquire(props.scope,props.kind,props.config);
-  const next=coreCall<ChipFrame>("agentcomposer.chip-frame",{id,kind:props.kind,label:props.label,displayLabel:props.displayLabel,fontSize:props.size*props.config.scale,theme:props.config.themeName,loading:props.loading,reducedMotion:props.config.reducedMotion});
+  const next=coreCall<ChipFrame>("agentcomposer.chip-frame",parameters());
   setFrame(next);if(next.animating)animation.request(draw);
  };
  createEffect(draw);

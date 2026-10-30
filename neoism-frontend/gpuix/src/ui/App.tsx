@@ -102,6 +102,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   const [composerAnchors, setComposerAnchors] = createSignal<Record<string, Anchor>>({});
   const composerInputs = new Map<string, HostElement>();
   const composerShells = new Map<string, HostElement>();
+  const composerPickerButtons = new Set<HostElement>();
   const tabHosts=new Map<number,HostElement>(),newTabHosts=new Map<number,HostElement>(),workspaceHosts=new Map<string,HostElement>(),sidebarHosts=new Map<string,HostElement>();
   let workspaceNewHost:HostElement|undefined;
   const sidebarTargets=new Map<string,()=>ChromeCursorTarget|undefined>();
@@ -267,7 +268,12 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   });
   const pendingPermission = () => state().permissions.find((p) => p.sessionId === active()?.sessionId);
   const pendingQuestion = () => state().questions.find((q) => q.sessionId === active()?.sessionId);
-  const measuredComposerAnchor = (key: string): Anchor | undefined => composerAnchors()[key];
+  const measuredComposerAnchor = (key: string): Anchor | undefined => {
+    const cached = composerAnchors()[key], shell = composerShells.get(key);
+    // Layout events only report size changes; the card can move without resizing.
+    const bounds = shell && paintedChromeBounds(renderer, shell.id);
+    return bounds ? [bounds.x, bounds.y, bounds.width, bounds.height] : cached;
+  };
   const activeComposerKey=()=>active()?.sessionId||active()?.id||"home";
   const composerAnchor = () => measuredComposerAnchor(activeComposerKey()) || [320, windowSize().height - 160 * s, Math.max(200, windowSize().width - 360), 100] as Anchor;
   const focusComposer = () => { const input = composerInputs.get(activeComposerKey()); if (input) focusNativeElement(renderer,input.id); };
@@ -697,7 +703,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     };
     onCleanup(() => animation.dispose());
     onMount(() => { if (host&&chromeFocus().zone==="content") focusNativeElement(renderer,host.id); });
-    const revealStarts=()=>visuals.treeReveals(state().activeWorkspace?.id||"",!!props.notes,root());
+    const revealStarts=()=>visuals.treeReveals(activeWorkspaceId()||"",!!props.notes,root());
     type TreeEntry = { path: string; name: string; dir: boolean; depth: number; revealStart: number };
     const rowCache = new Map<string, TreeEntry>();
     let revealRoot: string | undefined;
@@ -749,7 +755,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       } else update("key", { key, ctrl: event.modifiers?.ctrl });
     };
     const sidebarKey=props.notes?"notes":"files";
-    const target=():ChromeCursorTarget|undefined=>{const rowY=treeCursorRowY(rows().length,height(),d.treeRowHeight*s,view());return host&&rowY!==undefined?{host,kind:"tree",bounds:chromeBounds.get(host.id),rowY,rowHeight:d.treeRowHeight*s}:undefined;};
+    const target=():ChromeCursorTarget|undefined=>{const rowY=treeCursorRowY(rows().length,height(),d.treeRowHeight*s,view());return host&&rowY!==undefined?{host,kind:"tree",bounds:paintedChromeBounds(renderer,host.id)||chromeBounds.get(host.id),rowY,rowHeight:d.treeRowHeight*s}:undefined;};
     sidebarTargets.set(sidebarKey,target);
     const publishTarget=()=>{const next=target();setChromeTarget(previous=>next&&previous?.host===next.host?{...next,origin:previous.origin}:next);};
     createEffect(()=>{view();rows();if(focused()&&chromeFocus().zone==="sidebar")publishTarget();});
@@ -799,7 +805,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         onAction={(action, detail) => { if (action === "new-chat") {model.newAgentHome();focusChrome({zone:"content"});} else if (action === "focus-content")focusChrome({zone:"content"});else if (action === "search") openFind("files"); else if (action === "projects") openProjectPicker(detail); else void chooseDirectory().then(commitWorkspaceRoot); }} />}</Show>
     </div>;
   }
-  function Composer(props: { surfaceId: string; sessionId?: string; home: boolean; viewport: {width:number;height:number}; onFrame: (frame: ComposerFrame) => void }) {
+  function Composer(props: { surfaceId: string; sessionId?: string; home: boolean; viewport: {width:number;height:number}; onFrame: (frame: ComposerFrame) => void; onPromptStart:()=>void; onPromptFailed:()=>void }) {
     const initialDraftKey=model.composerDraftKey(props.sessionId,props.surfaceId),initialDraft=model.state.composerDrafts[initialDraftKey];
     const [draft, setDraft] = createSignal(initialDraft?.text||"");
     const [submitting, setSubmitting] = createSignal(false);
@@ -828,8 +834,10 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     let effectActive=false, disposed=false, effectScope="";
     const activityAnimation = new AnimationFrameScheduler(1000/44);
     const effectsAnimation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
-    const localBusy=()=>!!props.sessionId && ![undefined,"Idle"].includes(state().streaming[props.sessionId]);
-    const cwd=()=>state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined;
+    const activityState=createMemo(()=>props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle");
+    const localBusy=createMemo(()=>activityState()!=="Idle");
+    const noProviders=createMemo(()=>!state().catalogsLoading&&!state().catalogsError&&providerCatalog().length===0);
+    const cwd=createMemo(()=>state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined);
     const slash=new SlashController({model,config,sessionId:()=>props.sessionId,attachments,hooks:{
       openSelectionPicker:kind=>{setSlashDismissed(true);setSlashPicker(undefined);openPicker(kind);},
       picker:request=>{setSlashDismissed(true);setSlashPicker(request);},
@@ -851,23 +859,24 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const sample=()=>{
       if(disposed)return;
       const started=performance.now();activityAnimation.cancel();
-      const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),noProviders:state().providers.length===0,busy:localBusy(),state:props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle"});
+      const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),noProviders:noProviders(),busy:localBusy(),state:activityState()});
       cached.frame=next;setFrame(next);props.onFrame(next);
       if(next.animating&&!config.reducedMotion)activityAnimation.request(sample,started);
     };
-    createEffect(()=>{props.viewport;props.home;draft();help();attachments();cwd();state().providers;localBusy();untrack(sample);});
+    createEffect(()=>{props.viewport;props.home;draft();help();attachments();cwd();noProviders();activityState();untrack(sample);});
     const sampleEffect=()=>{if(disposed||!effectActive)return;if(effectScope!==`${state().activeWorkspace?.id}\0${state().activeSurfaceId||"home"}`){effectActive=false;setEffectCommands([]);return;}const started=performance.now(),next=native.effect({width:props.viewport.width,height:props.viewport.height,inputY:frame()?.inputRect[1]||0});setEffectCommands(next.commands);effectActive=next.animating;
       if(next.prompt){if(props.sessionId)void model.submitPrompt(props.sessionId,next.prompt);else void model.submitNewPrompt(next.prompt);}
       if(next.animating)effectsAnimation.request(sampleEffect,started);
     };
     onCleanup(()=>{disposed=true;slashInput()?.resolve(undefined);slash.dispose();activityAnimation.dispose();effectsAnimation.dispose();});
-    const width=()=>frame()?.cardRect[2]||800;
+    const width=createMemo(()=>frame()?.cardRect[2]||800);
     const absolute=(rect:readonly number[]|undefined):StyleDesc=>({position:"absolute",left:rect?.[0]||0,top:rect?.[1]||0,width:rect?.[2]||0,height:rect?.[3]||0});
 
     const labels = createMemo(() => coreCall<{ agent: string; model: string; thinking: string; narrow: boolean }>("composer.labels", {
       agent: selection().agent || "build", model: selection().model || "Default model", thinking: selection().thinking || "none", width: width(), scale: s,
     }));
-    const chipGeometry=createMemo(()=>native.chips({width:frame()?.controls.chips_rect[2]||0,height:frame()?.controls.chips_rect[3]||0,agent:selection().agent||"build",model:selection().model||"Default model",thinking:selection().thinking||"none"}));
+    const chipParameters=createMemo(()=>({width:frame()?.controls.chips_rect[2]||0,height:frame()?.controls.chips_rect[3]||0,agent:selection().agent||"build",model:selection().model||"Default model",thinking:selection().thinking||"none"}),undefined,{equals:(a,b)=>JSON.stringify(a)===JSON.stringify(b)});
+    const chipGeometry=createMemo(()=>native.chips(chipParameters()));
     let input: HostElement | undefined, shell: HostElement | undefined, anchor: Anchor = [0, 0, 0, 0];
     const focus = () => { if (input && composerInputs.get(key()) === input&&chromeFocus().zone==="content"&&!pendingPermission()&&!pendingQuestion()&&!choice()&&!commands()&&!palette()&&(props.sessionId?active()?.sessionId===props.sessionId:active()?.id===props.surfaceId)){input.root?.mutations.flushMutations();focusNativeElement(renderer,input.id);} };
     createEffect(()=>{
@@ -877,19 +886,31 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     });
     onMount(()=>queueMicrotask(focus));
     onCleanup(() => { if (composerInputs.get(key()) === input) composerInputs.delete(key()); if (composerShells.get(key()) === shell) { composerShells.delete(key()); setComposerAnchors(current=>{const next={...current};delete next[key()];return next;}); } });
-    const openPicker = (kind: Choice["kind"]) => {
+    const pickerButtons: HostElement[] = [];
+    onCleanup(() => { for (const button of pickerButtons) composerPickerButtons.delete(button); });
+    const openPicker = (kind: Choice["kind"], toggle = false) => {
+      if (toggle && choice()?.kind === kind && choice()?.sessionId === props.sessionId) {
+        closeChoice();
+        return;
+      }
       setChoice({ kind, sessionId: props.sessionId, anchor, restore: focus });
-      if (kind !== "thinking") void model.refreshCatalogs();
+      if (kind !== "thinking") void model.refreshCatalogs({maxAgeMs:30_000});
     };
     const submit = async (delivery: "steer" | "queue" = "steer") => {
       if ((!draft().trim() && !attachments().length) || !draft().startsWith("/") && state().connection.phase !== "connected" || submitting()) return;
-      const submitted = draft(), files = attachments().map(({ token, name, ...attachment }) => attachment);
+      const submitted = draft(), submittedAttachments = attachments(), files = submittedAttachments.map(({ token, name, ...attachment }) => attachment);
+      const prompt=!submitted.trimStart().startsWith("/");
       setSubmitting(true);
+      // Clear before starting network work; a later ACK must not erase new typing.
+      if(prompt){setDraft("");setAttachments([]);setSlashDismissed(false);props.onPromptStart();}
+      const restore=()=>{if(prompt){if(!draft()&&!attachments().length){setDraft(submitted);setAttachments(submittedAttachments);}props.onPromptFailed();}};
       try {
-        const accepted = await slash.execute(submitted) || (props.sessionId ? await model.submitPrompt(props.sessionId, submitted, { attachments: files, delivery })
-          : await model.submitNewPrompt(submitted, { attachments: files, delivery }));
-        if (accepted) { setDraft(""); setAttachments([]); setSlashDismissed(false); }
-      } catch(error) { model.report(error); } finally { setSubmitting(false); }
+        const accepted = prompt
+          ? await (props.sessionId ? model.submitPrompt(props.sessionId, submitted, { attachments: files, delivery }) : model.submitNewPrompt(submitted, { attachments: files, delivery }))
+          : await slash.execute(submitted);
+        if (accepted) { if(!prompt&&draft()===submitted){setDraft("");setAttachments([]);setSlashDismissed(false);} }
+        else restore();
+      } catch(error) { restore();model.report(error); } finally { setSubmitting(false); }
     };
     const attachPaths = async (paths: readonly string[]) => {
       try {
@@ -933,7 +954,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
           <div testId="composer-chip-row" style={{...absolute(frame()?.controls.chips_rect),pointerEvents:"none"}}>
             <For each={["agent","model","thinking"] as const}>{(kind,index)=>{
               const geometry=()=>chipGeometry().chips[index()];
-              return <div role="button" testId={`select-${kind}`} aria-label={kind==="thinking"?"Select reasoning":`Select ${kind}`} onClick={()=>openPicker(kind)} style={{...absolute(geometry().rect),cursor:"pointer",overflow:"hidden",pointerEvents:"auto"}}>
+              return <div ref={element=>{pickerButtons.push(element);composerPickerButtons.add(element);}} role="button" testId={`select-${kind}`} aria-label={kind==="thinking"?"Select reasoning":`Select ${kind}`} onClick={()=>openPicker(kind,true)} style={{...absolute(geometry().rect),cursor:"pointer",overflow:"hidden",pointerEvents:"auto"}}>
                 <Show when={geometry().logo_rect}>{rect=><div style={{...absolute(rect()),pointerEvents:"none"}}><ProviderLogo model={selection().model} config={config}/></div>}</Show>
                 <div style={{...absolute(geometry().label_rect),pointerEvents:"none"}}><AgentChipLabel config={config} hosts={visuals.agentChips} paintPins={wordmarkHosts} scope={model.composerDraftKey(props.sessionId,props.surfaceId)} kind={kind} label={labels()[kind]} displayLabel={geometry().label} maxWidth={geometry().label_rect[2]} size={chipGeometry().font_size/s} loading={!props.sessionId&&!!state().agentDefaultsLoading}/></div>
                 <div style={{...absolute(geometry().caret_rect),pointerEvents:"none"}}><Icon glyph={"\uf078"} color={c.muted} size={chipGeometry().font_size/s*.66}/></div>
@@ -949,6 +970,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         <Show when={frame()?.joinRect}>{rect=><div style={{...absolute(rect()),backgroundColor:frame()?.trayColor?rgba(frame()!.trayColor):c.surface,pointerEvents:"none"}}/>}</Show>
         <Show when={frame()?.trayRect}>{rect=><div testId="agent-composer-footer" style={{...absolute(rect()),pointerEvents:"none"}}/>}</Show>
         <div style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"none"}}><PaintLayer commands={frame()?.commands||[]} config={config} pinImage={(source,raster)=>wordmarkHosts.pinPaintImage(renderer,source,raster)}/></div>
+        <Show when={state().catalogsError}>{error=><text testId="agent-catalog-error" style={{position:"absolute",right:16*s,top:(frame()?.cardRect[3]||0)+8*s,...text(11,c.red)}}>Model settings unavailable: {error()}</text>}</Show>
         <For each={frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>
       </div></Show>
       <Show when={slashOpen()}><InlinePicker config={config} kind="slash" title="Commands" options={slashOptions()} loading={slash.state.loading} error={slash.state.error} anchor={anchor} query={draft().replace(/^\/+/,"")} onKeyHandler={handler=>slashKey=handler} onAcceptHandler={handler=>slashAccept=handler} onSelect={acceptSlash} onClose={()=>{setSlashDismissed(true);focus();}}/></Show>
@@ -961,14 +983,19 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   }
   function AgentSurface(props:{surfaceId:string;sessionId?:string;initialViewport:{width:number;height:number}}) {
     const cached=visuals.agentComposer(props.surfaceId,config,props.initialViewport);
-    const messages=()=>props.sessionId?state().history[props.sessionId]||[]:[];
+    const timelineSession=createMemo(()=>props.sessionId||state().pendingAgentSessions[props.surfaceId]);
+    const messages=createMemo(()=>timelineSession()?state().history[timelineSession()!]||[]:[]);
     const family=()=>{state().ui;return model.agentFamily(props.sessionId||"");};
-    const subagent=()=>!!props.sessionId&&family().root!==props.sessionId;
+    const subagent=createMemo(()=>!!props.sessionId&&family().root!==props.sessionId);
     // A conversation is "home" only once its history is known to be empty:
     // before the first HistoryChunk an existing chat must not flash the
     // new-chat wordmark page.
-    const historyKnown=()=>!props.sessionId||state().history[props.sessionId]!==undefined;
-    const home=()=>!subagent()&&historyKnown()&&!messages().some(message=>message.kind!=="System");
+    const [startedPrompt,setStartedPrompt]=createSignal(false);
+    let promptSession=props.sessionId;
+    createEffect(()=>{const session=props.sessionId;if(promptSession!==undefined&&session!==promptSession)setStartedPrompt(false);promptSession=session;});
+    createEffect(()=>{if(messages().some(message=>message.kind!=="System"))setStartedPrompt(false);});
+    const historyKnown=createMemo(()=>!props.sessionId||state().history[props.sessionId]!==undefined);
+    const home=createMemo(()=>!startedPrompt()&&!subagent()&&historyKnown()&&!messages().some(message=>message.kind!=="System"));
     // Wordmark mounts before Composer in the original paint order. Its first
     // frame must already have the native logo rectangle, rather than mounting
     // at 0px and waiting for Composer or another layout pass to supply it.
@@ -977,17 +1004,17 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       const native=cached.native||(cached.native=new NativeComposer(config));
       cached.frame=native.frame({...cached.viewport,home:home(),text:draft?.text||"",images:draft?.attachments?.length||0,help:model.state.ui.agentHints!==false,
         cwd:state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined,
-        noProviders:state().providers.length===0,busy:!!props.sessionId&&![undefined,"Idle"].includes(state().streaming[props.sessionId]),state:props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle"});
+        noProviders:!state().catalogsLoading&&!state().catalogsError&&state().providers.length===0,busy:!!props.sessionId&&![undefined,"Idle"].includes(state().streaming[props.sessionId]),state:props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle"});
     }
     const [viewport,setViewport]=createSignal(cached.viewport);
     const [frame,setFrame]=createSignal<ComposerFrame|undefined>(cached.frame);
     return <div testId="agent-pane" data-home={home()} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",minWidth:0,minHeight:0,overflow:"hidden"}}
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
-      <Show when={!home()&&props.sessionId}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><Show when={props.sessionId} keyed>{(sessionId)=><AgentTimelineView sessionId={sessionId} rootSessionId={family().root} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
+      <Show when={!home()&&timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><Show when={timelineSession()} keyed>{(sessionId)=><AgentTimelineView sessionId={sessionId} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:sessionId} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
         contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]??viewport().height)}
         openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/>}</Show></div></Show>
-      <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={setFrame}/></Show>
+      <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={setFrame} onPromptStart={()=>setStartedPrompt(true)} onPromptFailed={()=>setStartedPrompt(false)}/></Show>
     </div>;
   }
   function Conversation(props: { surfaceId: string;initialViewport:{width:number;height:number} }) { const surface=()=>state().surfaces.find(surface=>surface.id===props.surfaceId);return <AgentSurface surfaceId={props.surfaceId} sessionId={surface()?.sessionId} initialViewport={props.initialViewport}/>; }
@@ -1086,7 +1113,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
               return <Show when={state().surfaces.find((s) => s.id === id)} fallback={<div style={{ position: "relative", flexGrow: 1 }}><LoadingSkeleton config={config} kind="document" /></div>}>{(found) => {
               const surface = found();
               return <Switch>
-                <Match when={surface.kind === "welcome"}><SplashView config={config} contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onAction={action=>{
+                <Match when={surface.kind === "welcome"}><SplashView initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border-16*s),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border-16*s)};})()} config={config} contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onAction={action=>{
                   closeChoice();if(palette())closePalette();if(commands())closeCommands();chromeActions.close();setMenu(false);
                   switch(action){case "open-file-tree":toggle("files");break;case "open-notes":void onChromeAction("OpenNotes");break;case "open-agent":model.openAgentHome();break;case "open-agent-panel":toggle("conversations");break;case "search":openFind("files");break;case "open-command-palette":openCommands();break;case "new-terminal":void model.newTerminal();break;case "change-directory":chooseStatusDirectory();break;}
                 }}/></Match>
@@ -1136,6 +1163,10 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       }} />
     <ToastNotifications id={visuals.notifications()} delivery={visuals.notificationDelivery} config={config} message={state().error||(state().connection.phase==="auth-rejected"?state().connection.reason:undefined)} consume={model.clearError} report={model.report}/>
     <Show when={choice()} keyed>{(request) => <InlinePicker config={config} kind={request.kind}
+      ignoreOutsideClick={(x,y)=>[...composerPickerButtons].some(button=>{
+        const bounds=paintedChromeBounds(renderer,button.id);
+        return bounds&&x>=bounds.x&&x<bounds.x+bounds.width&&y>=bounds.y&&y<bounds.y+bounds.height;
+      })}
       title={request.kind === "agent" ? "Agents" : request.kind === "model" ? "Select model" : request.kind === "account" ? "Select account" : "Reasoning"}
       options={pickerOptions()} current={request.kind === "account" ? request.current : request.kind === "model" ? choiceSelection().model ?? "" : choiceSelection()[request.kind]} anchor={measuredComposerAnchor(request.sessionId || activeComposerKey()) || request.anchor}
       loading={request.kind !== "thinking" && request.kind !== "account" && state().catalogsLoading} error={state().catalogsError}

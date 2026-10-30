@@ -9,6 +9,27 @@ index 0000000..512cf66
 +---
 +
 +Expose coalesced one-shot native platform frame wakes for display-paced animation on Linux, Windows, and FreeBSD, retaining macOS display-link wakes.
+diff --git c/.changeset/neoism-frame-pacing.md w/.changeset/neoism-frame-pacing.md
+new file mode 100644
+index 0000000..26f7359
+--- /dev/null
++++ w/.changeset/neoism-frame-pacing.md
+@@ -0,0 +1,15 @@
++---
++"@gpuix/native": patch
++---
++
++Use output-aware Wayland retry timing and publish coherent native frame samples.
++
++Avoid cloning unchanged custom properties and move canvas payload strings into their cache; add opt-in CPU-side GPU submission and canvas parsing diagnostics.
++
++Reuse unchanged raster canvas paint through GPUI cached views and stop invalidating
++all views for ordinary root mutations. Normalize Wayland continuous-axis travel
++to the original frontend without changing discrete wheel behavior.
++
++Avoid redundant root notifications after changed canvas lists already paint.
++Send platform window titles only when changed and add opt-in tree phase timings.
++Batch disjoint consecutive canvas images to reduce bounds-tree insertion work.
 diff --git c/.changeset/neoism-input-caret-geometry.md w/.changeset/neoism-input-caret-geometry.md
 new file mode 100644
 index 0000000..85c3705
@@ -20,8 +41,19 @@ index 0000000..85c3705
 +---
 +
 +Expose opt-in native input caret geometry from the existing shaped insertion point, with passive change-only events for custom renderer hosts.
+diff --git c/.changeset/neoism-painted-bounds.md w/.changeset/neoism-painted-bounds.md
+new file mode 100644
+index 0000000..fd841b9
+--- /dev/null
++++ w/.changeset/neoism-painted-bounds.md
+@@ -0,0 +1,5 @@
++---
++"@gpuix/native": patch
++---
++
++Read element bounds from a renderer-local completed-paint snapshot. Linux and Windows input and rendering callbacks no longer block waiting for a UI-thread response to geometry queries. Bounds retain GPUI paint positions, including translated and deferred content, and disappear when an element stops painting.
 diff --git c/README.md w/README.md
-index 4459e7b..8dcb5b2 100644
+index 4459e7b..89e04ce 100644
 --- c/README.md
 +++ w/README.md
 @@ -1,5 +1,55 @@
@@ -97,6 +129,15 @@ index 4459e7b..8dcb5b2 100644
  When the clipboard has no text, `Cmd+V` or `Ctrl+V` continues to `onKeyDown`
  instead of disappearing inside the editor. Applications can then handle an
  image-only or file-only clipboard themselves. Copied files also propagate even
+@@ -2494,7 +2554,7 @@ elements live in the tree, not the order gpui paints them in.
+ 
+ ### Measure an element
+ 
+-`getElementBounds(id)` returns the last painted box, or `null` if that node did
++`getElementBounds(id)` reads a renderer-local snapshot of the last completed paint without a UI-thread command or response wait. It returns the last painted box, or `null` if that node did
+ not paint. It works on the live `GpuixRenderer` and on the test renderer.
+ Bounds are recorded during **paint**, so read them after a frame, not in the
+ same commit as mount. The box is the element's border box, like a DOM
 @@ -4044,3 +4104,9 @@ See [AGENTS.md](https://github.com/remorses/gpuix/blob/main/AGENTS.md) for detai
  ## License
  
@@ -145,10 +186,40 @@ index 4eded3a..15ea2c6 100644
 +/** Window tab navigation precedes native input word selection. No window is created. */
 +export declare function applicationTabShortcutsSupported(): boolean
 diff --git c/packages/native/src/automation.rs w/packages/native/src/automation.rs
-index bdbf95b..075d317 100644
+index bdbf95b..7d9ce1c 100644
 --- c/packages/native/src/automation.rs
 +++ w/packages/native/src/automation.rs
-@@ -413,11 +413,24 @@ pub fn dispatch_scroll_wheel(
+@@ -126,6 +126,29 @@ pub fn all_bounds() -> HashMap<u64, ElementBounds> {
+     BOUNDS.with(|cell| cell.borrow().clone())
+ }
+ 
++/// Renderer-local last completed paint. Readers never dispatch to the UI thread.
++pub type SharedPaintedBounds = Arc<Mutex<HashMap<u64, ElementBounds>>>;
++
++/// Publish after paint, including deferred anchored layers. The map is built
++/// outside the lock; JS holds that lock only long enough to copy one rectangle.
++/// GPUI owns the geometry: this only snapshots its existing paint registry.
++pub fn bounds_frame_publish(snapshot: SharedPaintedBounds) -> impl IntoElement {
++    canvas(
++        |_, _, _| (),
++        move |_, _, _, cx| {
++            let snapshot = snapshot.clone();
++            cx.defer(move |_| {
++                let bounds = all_bounds();
++                let previous = std::mem::replace(&mut *snapshot.lock().unwrap(), bounds);
++                drop(previous);
++            });
++        },
++    )
++    .absolute()
++    .w(px(0.0))
++    .h(px(0.0))
++}
++
+ pub fn bounds_tracker(id: u64, selection_start: Option<bool>) -> impl IntoElement {
+     canvas(
+         |bounds, _, _| bounds,
+@@ -413,11 +436,24 @@ pub fn dispatch_scroll_wheel(
      delta_x: f64,
      delta_y: f64,
      modifiers: Modifiers,
@@ -815,7 +886,7 @@ index 7be2d25..7875923 100644
 @@ -153,7 +153,7 @@ fn single_line_text(text: &str) -> String {
      text.replace("\r\n", " ").replace(['\r', '\n'], " ")
  }
-
+ 
 -pub fn init(cx: &mut App) {
 +fn registered_text_editor_bindings() -> Vec<KeyBinding> {
      let word_navigation_uses_alt = word_navigation_uses_alt();
@@ -856,7 +927,7 @@ index 7be2d25..7875923 100644
 +        })
 +    })
  }
-
+ 
  /// A terminal app quits on ctrl-c. Unbinding the text field's ctrl-c copy lets
 @@ -359,6 +387,7 @@ impl CustomElement for TextEditorElement {
          let emits_submit = ctx.events.contains("submit");
@@ -1128,7 +1199,7 @@ index c5f4fa1..b600860 100644
 @@ -56,6 +57,15 @@ const TEST_GPUIX_RENDERER_UNAVAILABLE: &str = concat!(
      "GpuixRenderer still works on Linux."
  );
-
+ 
 +/// Neoism buffer navigation is captured before native textarea word selection.
 +#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 +#[napi]
@@ -1166,7 +1237,7 @@ index c5f4fa1..b600860 100644
      not(all(target_arch = "wasm32", target_os = "unknown")),
      not(all(
 diff --git c/packages/native/src/renderer.rs w/packages/native/src/renderer.rs
-index 8c104a4..17c13df 100644
+index 8c104a4..2a8b240 100644
 --- c/packages/native/src/renderer.rs
 +++ w/packages/native/src/renderer.rs
 @@ -25,7 +25,7 @@ use napi_derive::napi;
@@ -1318,7 +1389,7 @@ index 8c104a4..17c13df 100644
                                  );
                              }
                          }
-@@ -957,9 +1032,28 @@ pub fn is_terminal() -> bool {
+@@ -957,16 +1032,37 @@ pub fn is_terminal() -> bool {
      TERMINAL_MODE.load(std::sync::atomic::Ordering::Acquire)
  }
  
@@ -1346,9 +1417,10 @@ index 8c104a4..17c13df 100644
  #[napi]
 +/// The main GPUI renderer exposed to Node.js.
  pub struct GpuixRenderer {
++    painted_bounds: crate::automation::SharedPaintedBounds,
      event_callback: Mutex<Option<Arc<ThreadsafeFunction<EventPayload>>>>,
      tree: Arc<Mutex<RetainedTree>>,
-@@ -967,6 +1061,7 @@ pub struct GpuixRenderer {
+     initialized: Arc<Mutex<bool>>,
      /// Shared with GpuixView so napi methods can read the live selection
      /// without an App context. Paint and napi calls can use different threads.
      selection: SharedSelection,
@@ -1356,7 +1428,7 @@ index 8c104a4..17c13df 100644
      #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
      ui_commands: Mutex<Option<mpsc::UnboundedSender<UiCommand>>>,
      /// False after `Platform::run` returns. `tick()` reports that so JS can
-@@ -977,9 +1072,103 @@ pub struct GpuixRenderer {
+@@ -977,9 +1073,103 @@ pub struct GpuixRenderer {
      ui_running: Arc<AtomicBool>,
  }
  
@@ -1460,15 +1532,53 @@ index 8c104a4..17c13df 100644
      fn event_callback_for_view(&self) -> Option<EventCallback> {
          self.event_callback.lock().unwrap().clone().map(|tsf| {
              Arc::new(move |payload: EventPayload| {
-@@ -1178,6 +1367,7 @@ impl GpuixRenderer {
-             tree: Arc::new(Mutex::new(RetainedTree::new())),
+@@ -1123,26 +1313,9 @@ impl GpuixRenderer {
+     }
+ 
+     fn element_bounds(&self, id: u64) -> Result<Option<crate::automation::ElementBounds>> {
+-        #[cfg(target_os = "macos")]
+-        return Ok(crate::automation::get_bounds(id));
+-
+-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+-        {
+-            let (response, receiver) = sync_channel(1);
+-            self.send_ui_command(UiCommand::GetElementBounds { id, response })?;
+-            return recv_ui_response(receiver, "the element bounds query");
+-        }
+-
+-        #[cfg(not(any(
+-            target_os = "macos",
+-            target_os = "windows",
+-            target_os = "linux",
+-            target_os = "freebsd"
+-        )))]
+-        {
+-            let _ = id;
+-            Err(Error::from_reason("Unsupported operating system"))
+-        }
++        // Never wait on the UI command queue from a JS input/render callback.
++        // The last completed paint is the API's source of truth on every OS.
++        Ok(self.painted_bounds.lock().unwrap().get(&id).copied())
+     }
+ 
+     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+@@ -1173,11 +1346,14 @@ impl GpuixRenderer {
+     #[napi(constructor)]
+     pub fn new(event_callback: Option<ThreadsafeFunction<EventPayload>>) -> Self {
+         let _ = env_logger::try_init();
++        let tree = RetainedTree::new();
+         Self {
++            painted_bounds: tree.painted_bounds.clone(),
+             event_callback: Mutex::new(event_callback.map(Arc::new)),
+-            tree: Arc::new(Mutex::new(RetainedTree::new())),
++            tree: Arc::new(Mutex::new(tree)),
              initialized: Arc::new(Mutex::new(false)),
              selection: SharedSelection::default(),
 +            frame_wake: Mutex::new(None),
              #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
              ui_commands: Mutex::new(None),
              #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
-@@ -1511,11 +1701,16 @@ impl GpuixRenderer {
+@@ -1511,11 +1687,16 @@ impl GpuixRenderer {
      /// Acquires the tree mutex ONCE for the entire batch.
      #[napi]
      pub fn apply_batch(&self, json: String) -> Result<Vec<f64>> {
@@ -1485,7 +1595,7 @@ index 8c104a4..17c13df 100644
          // A re-render that changed nothing sends a batch of identical resends.
          // Waking the window for it makes it rebuild and diff the whole element
          // tree to draw the frame it already has.
-@@ -1574,59 +1769,117 @@ impl GpuixRenderer {
+@@ -1574,59 +1755,117 @@ impl GpuixRenderer {
      }
  
  
@@ -1643,7 +1753,7 @@ index 8c104a4..17c13df 100644
      /// Whether JavaScript must call tick() until it returns false.
      ///
      /// macOS: tick() pumps AppKit. Windows/Linux: tick() only reports whether
-@@ -2380,17 +2633,18 @@ impl GpuixRenderer {
+@@ -2380,17 +2619,18 @@ impl GpuixRenderer {
  
          #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
          {
@@ -1667,7 +1777,7 @@ index 8c104a4..17c13df 100644
          }
  
          #[cfg(not(any(
-@@ -2758,22 +3012,27 @@ impl GpuixRenderer {
+@@ -2758,22 +2998,27 @@ impl GpuixRenderer {
          delta_x: f64,
          delta_y: f64,
          modifiers: Option<String>,
@@ -1703,7 +1813,7 @@ index 8c104a4..17c13df 100644
  
          #[cfg(not(any(
              target_os = "macos",
-@@ -3626,6 +3885,10 @@ impl WebGpuixRenderer {
+@@ -3626,6 +3871,10 @@ impl WebGpuixRenderer {
  #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
  impl Drop for GpuixRenderer {
      fn drop(&mut self) {
@@ -1714,7 +1824,7 @@ index 8c104a4..17c13df 100644
          #[cfg(target_os = "macos")]
          if *self.initialized.lock().unwrap() {
              EMBEDDED_PLATFORM
-@@ -3647,6 +3910,7 @@ pub(crate) struct GpuixView {
+@@ -3647,6 +3896,7 @@ pub(crate) struct GpuixView {
      pub(crate) tree: Arc<Mutex<RetainedTree>>,
      pub(crate) event_callback: Option<EventCallback>,
      pub(crate) window_title: String,
@@ -1722,7 +1832,7 @@ index 8c104a4..17c13df 100644
      pub(crate) window_key_down: bool,
      pub(crate) window_key_up: bool,
      pub(crate) window_key_event_id: u64,
-@@ -3842,6 +4106,17 @@ fn window_key_events(
+@@ -3842,6 +4092,17 @@ fn window_key_events(
              window.on_root_key_event(move |event: &gpui::KeyDownEvent, phase, _window, _cx| {
                  if phase == gpui::DispatchPhase::Capture {
                      next_keystroke_id();
@@ -1740,7 +1850,7 @@ index 8c104a4..17c13df 100644
                      return;
                  }
                  if key_down {
-@@ -3967,6 +4242,7 @@ impl GpuixView {
+@@ -3967,6 +4228,7 @@ impl GpuixView {
              tree,
              event_callback,
              window_title,
@@ -1748,7 +1858,7 @@ index 8c104a4..17c13df 100644
              window_key_down: false,
              window_key_up: false,
              window_key_event_id: 0,
-@@ -5090,7 +5366,28 @@ impl gpui::Render for GpuixView {
+@@ -5090,7 +5352,28 @@ impl gpui::Render for GpuixView {
      ) -> impl gpui::IntoElement {
          use gpui::IntoElement;
  
@@ -1778,7 +1888,7 @@ index 8c104a4..17c13df 100644
  
          #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
          if let Some(id) = PENDING_FOCUS_ELEMENT.with(|pending| pending.borrow_mut().take()) {
-@@ -5099,7 +5396,9 @@ impl gpui::Render for GpuixView {
+@@ -5099,7 +5382,9 @@ impl gpui::Render for GpuixView {
  
          // Clone Arc so we don't borrow self.tree — frees self for focus_handles access.
          let tree_arc = self.tree.clone();
@@ -1788,7 +1898,7 @@ index 8c104a4..17c13df 100644
          let callback = self.event_callback.clone();
  
          // Sync focus handles before building elements.
-@@ -5151,6 +5450,7 @@ impl gpui::Render for GpuixView {
+@@ -5151,6 +5436,7 @@ impl gpui::Render for GpuixView {
          });
          let mut highlight_events = Vec::new();
          let keyboard_focus = self.keyboard_focus_path(&tree, window, cx);
@@ -1796,7 +1906,7 @@ index 8c104a4..17c13df 100644
          let result = match tree.root_id {
              Some(root_id) => {
                  let mut ctx = BuildCtx {
-@@ -5173,6 +5473,7 @@ impl gpui::Render for GpuixView {
+@@ -5173,6 +5459,7 @@ impl gpui::Render for GpuixView {
              }
              None => gpui::Empty.into_any_element(),
          };
@@ -1804,7 +1914,15 @@ index 8c104a4..17c13df 100644
          // Flushed after the root build so a `setState` in the handler cannot
          // re-enter this build.
          emit_highlight_events(&callback, &highlight_events);
-@@ -5246,6 +5547,20 @@ impl gpui::Render for GpuixView {
+@@ -5218,6 +5505,7 @@ impl gpui::Render for GpuixView {
+                 ))
+                 .child(crate::automation::bounds_frame_reset())
+                 .child(result)
++                .child(crate::automation::bounds_frame_publish(tree.painted_bounds.clone()))
+                 .into_any_element()
+         };
+ 
+@@ -5246,6 +5534,20 @@ impl gpui::Render for GpuixView {
              window.request_animation_frame();
          }
  
@@ -1825,7 +1943,7 @@ index 8c104a4..17c13df 100644
          result
      }
  }
-@@ -5843,20 +6158,30 @@ pub(crate) fn build_host_container(
+@@ -5843,20 +6145,30 @@ pub(crate) fn build_host_container(
  
              // ── Scroll wheel ─────────────────────────────────────
              "scroll" => {
@@ -1863,7 +1981,7 @@ index 8c104a4..17c13df 100644
  
                          p.touch_phase = Some(match scroll_event.touch_phase {
                              gpui::TouchPhase::Started => "started".to_string(),
-@@ -7657,6 +7982,9 @@ fn to_gpui_window_options(
+@@ -7657,6 +7969,9 @@ fn to_gpui_window_options(
          focus: options.focus.unwrap_or(true),
          show: options.show.unwrap_or(true),
          app_id: options.app_id.clone(),
@@ -1873,7 +1991,7 @@ index 8c104a4..17c13df 100644
          ..Default::default()
      };
  
-@@ -8171,6 +8499,7 @@ mod window_options_tests {
+@@ -8171,6 +8486,7 @@ mod window_options_tests {
          let gpui_options = mapped(WindowOptions::default());
          assert!(gpui_options.focus);
          assert!(gpui_options.show);
@@ -1882,10 +2000,26 @@ index 8c104a4..17c13df 100644
  
      #[test]
 diff --git c/packages/native/src/retained_tree.rs w/packages/native/src/retained_tree.rs
-index ee95967..7323cca 100644
+index ee95967..56b2425 100644
 --- c/packages/native/src/retained_tree.rs
 +++ w/packages/native/src/retained_tree.rs
-@@ -419,6 +419,11 @@ impl RetainedTree {
+@@ -238,6 +238,7 @@ impl StyleTable {
+ }
+ 
+ pub struct RetainedTree {
++    pub painted_bounds: crate::automation::SharedPaintedBounds,
+     pub elements: ElementMap,
+     pub motion_ids: HashSet<u64>,
+     /// Elements that `needs_focus`, in id order. Kept as mutations arrive so the
+@@ -263,6 +264,7 @@ pub struct RetainedTree {
+ impl RetainedTree {
+     pub fn new() -> Self {
+         Self {
++            painted_bounds: Default::default(),
+             elements: ElementMap::default(),
+             motion_ids: HashSet::new(),
+             focusable_ids: Default::default(),
+@@ -419,6 +421,11 @@ impl RetainedTree {
      }
  
      pub fn insert_before(&mut self, parent_id: u64, child_id: u64, before_id: u64) {
@@ -1897,7 +2031,7 @@ index ee95967..7323cca 100644
          // Remove from old parent if any
          let old_parent_id = self.elements.get(&child_id).and_then(|e| e.parent);
          if let Some(old_parent_id) = old_parent_id {
-@@ -811,6 +816,24 @@ fn element_to_json(
+@@ -811,6 +818,24 @@ fn element_to_json(
  mod tests {
      use super::*;
  

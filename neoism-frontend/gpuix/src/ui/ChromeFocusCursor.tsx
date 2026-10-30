@@ -16,7 +16,7 @@ export function ChromeFocusCursor(props:{config:AppConfig;target?:ChromeCursorTa
  createEffect(()=>{const target=props.target;if(target&&target.kind!=="content")onCleanup(registerSurfaceCaret(renderer,target.host,quad));});
  let seeded:number[]|undefined;
  const draw=()=>{
-  animation.cancel();const target=props.target,bounds=target?.kind==="content"?surfaceCaret(renderer,target.host.id)?.bounds:target?.bounds;if(!target?.host.mounted||!bounds||bounds.width<=0||bounds.height<=0){if(target?.kind==="content")props.onSettled?.(target);return;}
+  animation.cancel();const target=props.target,bounds=target?.kind==="content"?surfaceCaret(renderer,target.host.id)?.bounds:target?.bounds;if(!target?.host.mounted||!bounds||bounds.width<=0||bounds.height<=0){setQuad([]);setMoving(false);if(target?.kind==="content")props.onSettled?.(target);return;}
   if(target.origin&&seeded!==target.origin){coreCall("keyboard.cursor.seed",{id,rect:target.origin});seeded=target.origin;}
   const start=performance.now(),frame=coreCall<{quad:number[][];animating:boolean;hold:boolean}>("keyboard.cursor.frame",{id,kind:target.kind==="content"||target.kind==="sidebar"?"rect":target.kind==="workspace"&&target.plus?"buffer":target.kind,...bounds,scale:props.config.scale,padding:target.padding,plus:target.plus,rowY:bounds.y+(target.rowY||0),rowHeight:target.rowHeight});
   setQuad(frame.quad);setMoving(frame.animating);

@@ -1,10 +1,10 @@
-/** Wheel events carry pixels for precise trackpads and notches for mouse
- * wheels. Desktop (`Screen::scroll`) sizes a code/markdown notch as one
- * terminal cell in physical pixels, so it travels the same distance here. */
+/** GPUI events and pane geometry use logical pixels. Precise trackpads
+ * already supply those pixels; mouse wheels supply notches. */
 export interface WheelEvent { deltaX?: number; deltaY?: number; precise?: boolean; scaleFactor?: number }
 
-/** Physical-pixel cell height the desktop multiplies wheel notches by. */
-export function wheelCellPixels(event: WheelEvent, fontSize: number) { return Math.round(fontSize * 1.3) * (event.scaleFactor || 1); }
+/** One terminal cell per notch, in the same units as the pane. Applying
+ * display scale here again makes wheels jump farther on HiDPI monitors. */
+export function wheelCellPixels(_event: WheelEvent, fontSize: number) { return Math.round(fontSize * 1.3); }
 
 export function wheelPixels(event: WheelEvent, fontSize: number) {
   const cell = event.precise ? 1 : wheelCellPixels(event, fontSize);

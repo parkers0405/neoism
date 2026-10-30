@@ -35,12 +35,12 @@ const bootstrap=bootstrapGlobal.__neoismWindowBootstrap;
 delete bootstrapGlobal.__neoismWindowBootstrap;
 
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
-  console.log(`Neoism ${appVersion}`);
+  console.log(`neoism ${appVersion}`);
   process.exit(0);
 }
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log(`Neoism — native workspace client\n\nUsage: neoism [options]\n\n  --daemon URL       ws://host:7878/session or ws+unix:///path/neoism.sock:/session\n  --workspace ID     Open a particular existing daemon workspace\n  --config PATH      Read appearance from a Neoism JSONC config\n  --theme NAME       Override the configured theme\n  --font-size SIZE   Override the configured font size\n  --maximized        Start with a maximized window\n  --reduced-motion  Disable transitions\n\nCredentials: NEOISM_DAEMON_TOKEN (upgrade), NEOISM_PAIRING_TOKEN (Hello).\nDefault: reuse the local daemon or start one when missing.\nShortcuts: Alt+E files, Alt+C conversations, Alt+H details, Ctrl+P find, Alt+T terminal.`);
+  console.log(`Neoism — native workspace client\n\nUsage: neoism [options]\n       neoism update [--nightly] [--force]\n\n  --daemon URL       ws://host:7878/session or ws+unix:///path/neoism.sock:/session\n  --workspace ID     Open a particular existing daemon workspace\n  --config PATH      Read appearance from a Neoism JSONC config\n  --theme NAME       Override the configured theme\n  --font-size SIZE   Override the configured font size\n  --maximized        Start with a maximized window\n  --reduced-motion  Disable transitions\n\nCredentials: NEOISM_DAEMON_TOKEN (upgrade), NEOISM_PAIRING_TOKEN (Hello).\nDefault: reuse the local daemon or start one when missing.\nShortcuts: Alt+E files, Alt+C conversations, Alt+H details, Ctrl+P find, Alt+T terminal.`);
   process.exit(0);
 }
 

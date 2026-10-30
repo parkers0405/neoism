@@ -33,12 +33,24 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     bundle = stage / NAME
     bundle.mkdir()
     for name in ['neoism' + SUFFIX, 'neoism-workspace-daemon' + SUFFIX,
-                 'neoism-agent' + SUFFIX, *LIBRARIES, 'LICENSE.ghostty', 'LICENSE', 'NOTICE']:
+                 'neoism-agent' + SUFFIX, 'neoism-agent-lua-runner' + SUFFIX, *LIBRARIES, 'LICENSE.ghostty', 'LICENSE', 'NOTICE']:
         shutil.copy2(DIST / name, bundle / name)
     for name in ['licenses', 'web']:
         shutil.copytree(DIST / name, bundle / name)
     assert (bundle / 'web/agent-gui/index.html').is_file()
+    runtime = bundle / 'web/native'
+    runtime.mkdir(exist_ok=True)
+    for name in LIBRARIES:
+        shutil.copy2(bundle / name, runtime / name)
+    shutil.copytree(bundle / 'licenses', runtime / 'licenses')
+    for name in ['LICENSE', 'NOTICE', 'LICENSE.ghostty']:
+        shutil.copy2(bundle / name, runtime / name)
+    # Immutable old updaters require web/index.html and copy the whole tree.
+    (bundle / 'web/index.html').write_text('<!doctype html><meta http-equiv="refresh" content="0;url=agent-gui/">')
+    run(bundle / ('neoism' + SUFFIX), '--neoism-verify-runtime')
     assert VERSION in run(bundle / ('neoism' + SUFFIX), '--version')
+    if SYSTEM == 'linux':
+        subprocess.run(['cargo', 'test', '--locked', '--release', '-p', 'neoism-update-helper', '--bin', 'neoism-update-helper', 'legacy_installer_keeps_gpuix_runtime'], cwd=ROOT, env={**os.environ, 'NEOISM_TEST_UPDATE_PAYLOAD': str(bundle)}, check=True)
     commit = run('git', 'rev-parse', 'HEAD')
     metadata = json.dumps({'version': VERSION, 'commit': commit,
         'platform': SYSTEM, 'architecture': ARCH}, indent=2) + '\n'
@@ -49,26 +61,36 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
         shutil.copy2(ROOT / 'misc/neoism.desktop', bundle / 'neoism.desktop')
         shutil.copy2(ROOT / 'neoism-frontend/shared/assets/icons/neoism.png', bundle / 'neoism.png')
     elif SYSTEM == 'darwin':
-        app = stage / 'Neoism.app'
+        app = bundle / 'Neoism.app'
         contents = app / 'Contents'
         contents.mkdir(parents=True)
-        shutil.move(bundle, contents / 'MacOS')
-        bundle = contents / 'MacOS'
+        macos = contents / 'MacOS'
+        macos.mkdir()
+        for name in ['neoism', 'neoism-workspace-daemon', 'neoism-agent', 'neoism-agent-lua-runner']:
+            shutil.copy2(bundle / name, macos / name)
         resources = contents / 'Resources'
         resources.mkdir()
+        shutil.copytree(bundle / 'web', resources / 'web')
         shutil.copy2(ROOT / 'misc/macos/neoism.icns', resources / 'neoism.icns')
         plist = (ROOT / 'misc/macos/Info.plist').read_text()
         (contents / 'Info.plist').write_text(plist.replace('{{RELEASE_VERSION}}', VERSION).replace('{{VERSION}}', VERSION.split('-')[0]))
-        for name in [*LIBRARIES, 'neoism', 'neoism-workspace-daemon', 'neoism-agent']:
-            run('codesign', '--force', '--sign', '-', bundle / name)
+        for name in [*LIBRARIES, 'neoism-update-helper']:
+            run('codesign', '--force', '--sign', '-', resources / 'web/native' / name)
+        for name in ['neoism', 'neoism-workspace-daemon', 'neoism-agent', 'neoism-agent-lua-runner']:
+            run('codesign', '--force', '--sign', '-', macos / name)
         run('codesign', '--force', '--deep', '--sign', '-', app)
         run('codesign', '--verify', '--deep', '--strict', app)
-        assert VERSION in run(bundle / 'neoism', '--version')
-        os.symlink('/Applications', stage / 'Applications')
-        run('hdiutil', 'create', '-volname', 'Neoism', '-srcfolder', stage,
+        assert VERSION in run(macos / 'neoism', '--version')
+        run(macos / 'neoism', '--neoism-verify-runtime')
+        dmg_source = stage / 'dmg'
+        dmg_source.mkdir()
+        shutil.copytree(app, dmg_source / 'Neoism.app')
+        os.symlink('/Applications', dmg_source / 'Applications')
+        run('hdiutil', 'create', '-volname', 'Neoism', '-srcfolder', dmg_source,
             '-ov', '-format', 'UDZO', OUT / f'{NAME}.dmg')
     archive = OUT / (NAME + ('.zip' if SYSTEM == 'windows' else '.tar.gz'))
     if SYSTEM == 'windows':
+        shutil.copytree(bundle / 'web', DIST / 'web', dirs_exist_ok=True)
         (bundle / 'README.txt').write_text('Extract the entire folder, then run neoism.exe. Keep the DLLs, services, web and licenses beside it.\n')
         with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:
             for path in bundle.rglob('*'):
@@ -76,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
                     output.write(path, path.relative_to(stage))
     else:
         with tarfile.open(archive, 'w:gz') as output:
-            payload = stage / 'Neoism.app' if SYSTEM == 'darwin' else bundle
+            payload = bundle
             output.add(payload, arcname=payload.name)
     # Validate the archive, not just the staging directory.
     extracted = stage / 'extracted'
@@ -87,9 +109,11 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     else:
         with tarfile.open(archive) as source:
             source.extractall(extracted, filter='data')
-    installed = extracted / ('Neoism.app/Contents/MacOS' if SYSTEM == 'darwin' else NAME)
+    installed = extracted / NAME / 'Neoism.app/Contents/MacOS' if SYSTEM == 'darwin' else extracted / NAME
     assert VERSION in run(installed / ('neoism' + SUFFIX), '--version')
     run(installed / ('neoism' + SUFFIX), '--help')
+    run(installed / ('neoism' + SUFFIX), '--neoism-verify-runtime')
+    run(installed / ('neoism' + SUFFIX), 'update', '--help')
     for artifact in OUT.glob(NAME + '.*'):
         if artifact.suffix == '.sha256':
             continue

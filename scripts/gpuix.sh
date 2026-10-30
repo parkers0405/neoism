@@ -29,7 +29,7 @@ build_services() {
   mkdir -p -m 0700 "$service_home"
   ln -sfn "$shared_home/library" "$service_home/library"
   ln -sfn "$shared_home/toolchains" "$service_home/toolchains"
-  (cd "$repo_root" && BLAZE_HOME="$service_home" bash "$repo_root/scripts/blaze.sh" build --locked --profile activation -p neoism-workspace-daemon -p neoism-agent) || result=$?
+  (cd "$repo_root" && BLAZE_HOME="$service_home" bash "$repo_root/scripts/blaze.sh" build --locked --profile activation -p neoism-workspace-daemon -p neoism-agent -p neoism-update-helper) || result=$?
   if ! BLAZE_HOME="$service_home" bash "$repo_root/scripts/blaze.sh" stop; then
     echo 'Unable to release the service compiler worker.' >&2
     if ((result == 0)); then result=1; fi
@@ -64,6 +64,13 @@ build_frontend() {
   cp "$frontend/node_modules/@gpuix/solid/LICENSE" "$frontend/dist/licenses/GPUIX-solid.txt"
   cp "$repo_root/misc/neoism.desktop" "$frontend/dist/neoism.desktop"
   cp "$repo_root/neoism-frontend/shared/assets/icons/neoism.png" "$frontend/dist/neoism.png"
+  install -m 0755 "$repo_root/target/activation/neoism-agent-lua-runner" "$frontend/dist/neoism-agent-lua-runner"
+  mkdir -p "$frontend/dist/web/native"
+  install -m 0755 "$repo_root/target/activation/neoism-update-helper" "$frontend/dist/web/native/neoism-update-helper"
+  cp "$frontend/dist/libneoism_gpuix_core.so" "$frontend/dist/libghostty-vt.so" "$frontend/dist/web/native/"
+  cp -a "$frontend/dist/licenses" "$frontend/dist/web/native/"
+  cp "$frontend/dist/LICENSE" "$frontend/dist/NOTICE" "$frontend/dist/LICENSE.ghostty" "$frontend/dist/web/native/"
+  printf '%s\n' '<!doctype html><meta http-equiv="refresh" content="0;url=agent-gui/">' > "$frontend/dist/web/index.html"
 
 }
 build() {

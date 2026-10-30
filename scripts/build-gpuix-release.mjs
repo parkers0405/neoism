@@ -15,14 +15,17 @@ function run(program,args,cwd=root){
 }
 run('npm',['ci'],sdk);run('npm',['ci'],frontend);
 const bun=join(frontend,'node_modules/bun/bin/bun.exe');
-run('cargo',['build','--locked','--release','-p','neoism-workspace-daemon','-p','neoism-agent']);
+run('cargo',['build','--locked','--release','-p','neoism-workspace-daemon','-p','neoism-agent','-p','neoism-update-helper']);
+run('cargo',['test','--locked','--release','-p','neoism-update-helper','--bin','neoism-update-helper']);
 env.NEOISM_GPUIX_WORKSPACE_DAEMON=join(root,`target/release/neoism-workspace-daemon${suffix}`);
 run(bun,['scripts/build-sdk.ts'],frontend);
 run(bun,['scripts/build.ts'],frontend);
 run('npm',['run','gui:build'],sdk);
 run('node',['scripts/package-agent-gui.mjs',join(sdk,'packages/gui/dist'),join(frontend,'dist/web/agent-gui')]);
 const dist=join(frontend,'dist'),licenses=join(dist,'licenses');mkdirSync(licenses,{recursive:true});
-copyFileSync(join(root,`target/release/neoism-agent${suffix}`),join(dist,`neoism-agent${suffix}`));
+for(const name of ['neoism-agent','neoism-agent-lua-runner'])copyFileSync(join(root,`target/release/${name}${suffix}`),join(dist,`${name}${suffix}`));
+const runtime=join(dist,'web/native');mkdirSync(runtime,{recursive:true});
+copyFileSync(join(root,`target/release/neoism-update-helper${suffix}`),join(runtime,`neoism-update-helper${suffix}`));
 for(const name of ['LICENSE','NOTICE'])copyFileSync(join(root,name),join(dist,name));
 for(const [source,name]of [
  ['neoism-paint/src/font/resources/CascadiaCode/LICENSE','CascadiaCode.txt'],

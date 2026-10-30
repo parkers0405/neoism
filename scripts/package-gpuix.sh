@@ -10,7 +10,7 @@ staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
 bundle="$staging/neoism-linux-x86_64"
 mkdir -p "$bundle"
-for file in neoism neoism-workspace-daemon libneoism_gpuix_core.so libghostty-vt.so LICENSE.ghostty; do
+for file in neoism neoism-workspace-daemon neoism-agent-lua-runner libneoism_gpuix_core.so libghostty-vt.so LICENSE.ghostty; do
   [[ -f "$frontend/dist/$file" ]] || { echo "Missing built artifact: $file" >&2; exit 1; }
   cp -p "$frontend/dist/$file" "$bundle/$file"
 done

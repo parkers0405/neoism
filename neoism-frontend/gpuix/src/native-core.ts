@@ -9,7 +9,7 @@ import { profileStart, profileEnd } from "./profiling";
 let binding: ReturnType<typeof open> | undefined;
 function open() {
   const name = process.platform === "win32" ? "neoism_gpuix_core.dll" : process.platform === "darwin" ? "libneoism_gpuix_core.dylib" : "libneoism_gpuix_core.so";
-  const paths = [process.env.NEOISM_GPUIX_CORE, join(dirname(process.execPath), name), fileURLToPath(new URL(`../artifacts/${name}`, import.meta.url))].filter((path): path is string => !!path);
+  const paths = [process.env.NEOISM_GPUIX_CORE, join(dirname(process.execPath), "web/native", name), join(dirname(process.execPath), "../Resources/web/native", name), join(dirname(process.execPath), name), fileURLToPath(new URL(`../artifacts/${name}`, import.meta.url))].filter((path): path is string => !!path);
   const path = paths.find(existsSync);
   if (!path) throw new Error("Neoism's native engine is not built. Run npm run build:core in neoism-frontend/gpuix.");
   return dlopen(path, {

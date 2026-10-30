@@ -16,13 +16,13 @@ if (await core.exited !== 0) process.exit(1);
 const {binding,stamp}=verifiedDisplayBinding();
 const executable=process.platform==="win32"?"neoism.exe":"neoism",pendingExecutable=process.platform==="win32"?"neoism.next.exe":"neoism.next";
 const result = await Bun.build({
-  entrypoints: ["./src/launch.ts"],
+  entrypoints: ["./src/cli.ts"],
   target: "bun",
   // ESM bytecode preserves top-level await while avoiding bundle parsing on
   // every launch. Keep the source beside it for Bun's diagnostic stack traces.
   format: "esm",
   bytecode: true,
-  compile: { outfile: `dist/${pendingExecutable}`, autoloadBunfig: false, autoloadTsconfig: false },
+  compile: { outfile: `dist/${pendingExecutable}`, autoloadBunfig: false, autoloadTsconfig: false, ...(process.platform==="win32"?{windows:{icon:resolve("../../misc/windows/neoism.ico"),title:"Neoism"}}:{}) },
   plugins: [solid, {
     name: "embed-gpuix-binding",
     setup(build) {

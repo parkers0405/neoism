@@ -6,6 +6,8 @@ install_prefix="${2:?installation prefix required}"
 install_bin="${3:-$install_prefix/bin}"
 [[ "$(uname -s)" == Linux ]] || { echo 'This bundle installer currently supports Linux.' >&2; exit 1; }
 binaries=(neoism neoism-workspace-daemon neoism-agent)
+# Legacy update compatibility companion is present in new nightly bundles.
+[[ ! -f "$payload/neoism-agent-lua-runner" ]] || binaries+=(neoism-agent-lua-runner)
 resources=(libneoism_gpuix_core.so libghostty-vt.so LICENSE.ghostty LICENSE NOTICE)
 for name in "${binaries[@]}"; do [[ -f "$payload/$name" && -x "$payload/$name" ]] || { echo "Missing executable: $name" >&2; exit 1; }; done
 for name in "${resources[@]}"; do [[ -f "$payload/$name" ]] || { echo "Missing resource: $name" >&2; exit 1; }; done

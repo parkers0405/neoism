@@ -107,10 +107,22 @@ jobs:
           restore-keys: gpuix-display-${{ matrix.asset }}-
       - name: Build, test, and package native app and services
         run: node scripts/build-gpuix-release.mjs
+      - name: Build and validate Windows MSI and updater transactions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed' }
+          wix extension add --global WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX UI installation failed' }
+          ./scripts/build-gpuix-msi.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: neoism-${{ matrix.asset }}
-          path: release/neoism-${{ matrix.asset }}.*
+          path: |
+            release/neoism-${{ matrix.asset }}.*
+            release/Neoism-x86_64.msi
+            release/Neoism-x86_64.msi.sha256
           if-no-files-found: error
       # Each job publishes immediately. There is deliberately no all-platform
       # success barrier, and GitHub's rerun-failed-jobs retains successful legs.
@@ -122,7 +134,9 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           ASSET: ${{ matrix.asset }}
         run: |
-          gh release upload "$RELEASE_TAG" release/neoism-"$ASSET".* --clobber
+          assets=(release/neoism-"$ASSET".*)
+          if [[ "$ASSET" == windows-* ]]; then assets+=(release/Neoism-x86_64.msi release/Neoism-x86_64.msi.sha256); fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           flags=()
           if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease --latest=false); fi
           gh release edit "$RELEASE_TAG" --draft=false "${flags[@]}"

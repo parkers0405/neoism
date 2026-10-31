@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {mkdtempSync,rmSync} from "node:fs";
+import {mkdtempSync,rmSync,realpathSync} from "node:fs";
 import {join} from "node:path";
 import {DaemonConnection} from "../../src/daemon/client";
 import {loadConfig} from "../../src/config";
@@ -15,7 +15,7 @@ try{
  const config={...loadConfig(["--config","/nonexistent/host-test"],{}),endpoint:server.endpoint,authToken:server.authToken,pairingToken:server.pairingToken};
  const a=new DaemonConnection(config,undefined,()=>{}),b=new DaemonConnection(config,undefined,()=>{});clients.push(a,b);a.start();b.start();
  await until(()=>a.state.phase==="connected"&&b.state.phase==="connected","Both clients must authenticate to the hosted daemon");
- const tree=expectVariant(await Effect.runPromise(a.request("Workspace","RequestHostWorkspaceTree")),"HostWorkspaceTree");assert.ok(isRecord(tree)&&Array.isArray(tree.workspaces));assert.ok(tree.workspaces.some((workspace:any)=>workspace.root_dir===directory),"Hosted daemon declares the requested directory");
+ const tree=expectVariant(await Effect.runPromise(a.request("Workspace","RequestHostWorkspaceTree")),"HostWorkspaceTree");assert.ok(isRecord(tree)&&Array.isArray(tree.workspaces));assert.ok(tree.workspaces.some((workspace:any)=>realpathSync(workspace.root_dir)===realpathSync(directory)),"Hosted daemon declares the requested directory");
  const listed=coreCall<{entries:Array<{id:string;hosted:boolean}>}>("server.list");assert.ok(listed.entries.some(entry=>entry.id===id&&entry.hosted));
  await serverJob("remove",{serverId:id});id=undefined;
  await until(()=>a.state.phase!=="connected"&&b.state.phase!=="connected","Removing the exact hosted recipe stops its daemon and disconnects both clients");

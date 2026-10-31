@@ -1,0 +1,37 @@
+name: GPUIX packaging portability checks
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    name: ${{ matrix.os }} packaging checks
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Preserve source bytes before checkout
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install SDK and frontend dependencies
+        shell: bash
+        run: |
+          npm --prefix neoism-agent/sdk/typescript ci
+          npm --prefix neoism-frontend/gpuix ci
+      # Catch host filesystem/transport assumptions before an expensive native
+      # build. The release still runs its full suite against the native bridge.
+      - name: Check design bytes, updater paths, daemon packaging, and SDK transport
+        working-directory: neoism-frontend/gpuix
+        shell: bash
+        run: |
+          ./node_modules/bun/bin/bun.exe scripts/build-sdk.ts
+          ./node_modules/bun/bin/bun.exe scripts/sync-design.ts --check
+          ./node_modules/bun/bin/bun.exe test ./tests/update-cli.test.ts ./tests/packaged-daemon.test.ts ./tests/sdk.test.ts ./tests/config.test.ts

@@ -1,7 +1,6 @@
 import importlib.util
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
 
@@ -11,33 +10,38 @@ spec.loader.exec_module(cache_times)
 
 
 class CacheSourceTimes(unittest.TestCase):
-    def test_changed_dirty_and_different_native_cache_sources_stay_fresh(self):
+    def test_only_identical_sources_in_every_cache_get_their_original_time(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            def git(*args):
-                return subprocess.check_output(['git', '-C', directory, *args]).decode().strip()
-            git('init', '-q')
-            git('config', 'user.email', 'fixture@example.test')
-            git('config', 'user.name', 'Fixture')
-            git('config', 'core.autocrlf', 'false')
-            for name in ['same.rs', 'changed.rs', 'dirty.rs', 'native.rs']:
-                (root / name).write_text('original\n')
-            git('add', '.')
-            git('commit', '-qm', 'original cache')
-            native = git('rev-parse', 'HEAD')
-            (root / 'native.rs').write_text('new native source\n')
-            git('commit', '-qam', 'service cache with newer source')
-            service = git('rev-parse', 'HEAD')
-            (root / 'changed.rs').write_text('new release source\n')
-            git('commit', '-qam', 'release')
-            (root / 'dirty.rs').write_text('uncommitted edit\n')
-            (root / 'untracked.rs').write_text('generated\n')
+            files = {}
+            for name in ['same.rs', 'changed.rs', 'native.rs']:
+                path = root / name
+                path.write_text('original\n')
+                files[name] = {'sha256': cache_times.digest(path), 'mtime_ns': 1_000_000_000}
+                os.utime(path, ns=(3_000_000_000, 3_000_000_000))
+            native = {name: dict(entry) for name, entry in files.items()}
+            native['native.rs']['sha256'] = 'different-cache-source'
+            (root / 'changed.rs').write_text('edited\n')
             before = {p.name: p.stat().st_mtime_ns for p in root.glob('*.rs')}
-            self.assertEqual(cache_times.restore(root, [service, native]), 1)
-            self.assertLess((root / 'same.rs').stat().st_mtime_ns, before['same.rs'])
-            for name in ['changed.rs', 'dirty.rs', 'native.rs', 'untracked.rs']:
-                self.assertEqual((root / name).stat().st_mtime_ns, before[name], name)
-            self.assertEqual((root / 'dirty.rs').read_text(), 'uncommitted edit\n')
+            self.assertEqual(cache_times.restore(root, [files, native]), 1)
+            self.assertEqual((root / 'same.rs').stat().st_mtime_ns, 1_000_000_000)
+            for name in ['changed.rs', 'native.rs']:
+                self.assertEqual((root / name).stat().st_mtime_ns, before[name])
+
+    def test_failed_build_keeps_uncompiled_source_newer_than_cached_objects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'source.rs'
+            path.write_text('new source not yet compiled\n')
+            old_object_time = 1_000_000_000
+            fresh_source_time = 2_000_000_000
+            files = {'source.rs': {'sha256': cache_times.digest(path), 'mtime_ns': fresh_source_time}}
+            # A new checkout is later again. Restore the actual failed-build
+            # timestamp, never an arbitrary ancient time based on commit identity.
+            os.utime(path, ns=(3_000_000_000, 3_000_000_000))
+            self.assertEqual(cache_times.restore(root, [files]), 1)
+            self.assertEqual(path.stat().st_mtime_ns, fresh_source_time)
+            self.assertGreater(path.stat().st_mtime_ns, old_object_time)
 
 
 if __name__ == '__main__':

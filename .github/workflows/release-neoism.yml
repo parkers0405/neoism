@@ -14,7 +14,6 @@ on:
         options: [all, linux, macos, windows]
 permissions:
   contents: write
-  actions: read
 jobs:
   prepare:
     runs-on: ubuntu-24.04
@@ -144,7 +143,6 @@ jobs:
           key: zig-archives-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/ghostty-pin.json') }}
       - name: Reuse unchanged source from restored compilation
         env:
-          GH_TOKEN: ${{ github.token }}
           SERVICE_CACHE_KEY: ${{ steps.service-cache.outputs.cache-matched-key }}
           NATIVE_CACHE_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
           COMBINED_CACHE_KEY: ${{ steps.combined-cache.outputs.cache-matched-key }}
@@ -191,6 +189,12 @@ jobs:
           flags=()
           if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease --latest=false); fi
           gh release edit "$RELEASE_TAG" --draft=false "${flags[@]}"
+      - name: Record source freshness for complete and partial compilation
+        if: always()
+        env:
+          NATIVE_CACHE_SAVE_KEY: ${{ steps.native-cache.outputs.cache-primary-key }}
+          SERVICE_CACHE_SAVE_KEY: ${{ steps.service-cache.outputs.cache-primary-key }}
+        run: python scripts/restore-cached-source-times.py --save
       - name: Save native compilation progress even if later checks fail
         if: always() && steps.native-cache.outputs.cache-primary-key != ''
         uses: actions/cache/save@v4

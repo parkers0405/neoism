@@ -5,6 +5,11 @@ on:
     paths:
       - .github/workflows/gpuix-packaging-checks.yml
       - scripts/windows-updater-tests.ps1
+      - scripts/check-native-toolchain.py
+      - scripts/restore-cached-source-times.py
+      - scripts/test_restore_cached_source_times.py
+      - neoism-frontend/gpuix/native/Cargo.toml
+      - neoism-frontend/gpuix/native/Cargo.lock
       - neoism-frontend/updater/src/windows_update.ps1
       - neoism-frontend/gpuix/tests/update-cli.test.ts
       - neoism-frontend/gpuix/tests/packaged-daemon.test.ts
@@ -47,6 +52,10 @@ jobs:
           ./scripts/windows-updater-tests.ps1
           & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/windows-updater-tests.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell updater policy tests failed' }
+      - name: Check the native compiler and cached source freshness
+        run: |
+          python scripts/check-native-toolchain.py
+          python scripts/test_restore_cached_source_times.py
       - name: Install SDK and frontend dependencies
         shell: bash
         run: |

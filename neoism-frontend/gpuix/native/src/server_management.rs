@@ -32,6 +32,22 @@ fn host(spec:&HostedServerSpec,password:Option<&str>)->Result<(),String>{
 /// Only the exact persistent daemon recipe may be stopped, including after a
 /// frontend restart. Never signal a process just because it owns the port.
 fn stop_hosted(spec:&HostedServerSpec){
+ #[cfg(any(target_os="macos",windows))]
+ if let Ok(system)=sysinfo::System::new_all(){
+  let address=format!("0.0.0.0:{}",spec.port);
+  for process in system.processes().values(){
+   let Some(exe)=process.exe() else{continue;};
+   let name=exe.file_name().and_then(|name|name.to_str()).unwrap_or("");
+   if !matches!(name,"neoism-workspace-daemon"|"neoism-workspace-daemon.exe"){continue;}
+   let args=process.cmd();
+   if args.iter().any(|arg|arg=="--neoism-internal-hosted-workspace-daemon")
+    && args.windows(2).any(|pair|pair[0]=="--state-dir"&&std::path::Path::new(&pair[1])==spec.state_dir)
+    && args.windows(2).any(|pair|pair[0]=="--addr"&&pair[1]==std::ffi::OsStr::new(&address)){
+     // Windows has no SIGTERM; use the verified process handle's native kill.
+     if process.kill_with(sysinfo::Signal::Term).is_none(){process.kill();}
+   }
+  }
+ }
  #[cfg(target_os="linux")]
  if let Ok(entries)=std::fs::read_dir("/proc"){
   for entry in entries.flatten(){

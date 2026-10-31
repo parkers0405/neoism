@@ -107,6 +107,7 @@ jobs:
             neoism-frontend/gpuix/artifacts/gpuix-rustup
             target/gpuix-native-vsync
             target/gpuix-core-cargo
+            target/release
           # A fresh key retains compilation completed since the previous retry.
           key: gpuix-native-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/*') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
@@ -131,6 +132,13 @@ jobs:
           wix extension add --global WixToolset.UI.wixext/5.0.2
           if ($LASTEXITCODE -ne 0) { throw 'WiX UI installation failed' }
           ./scripts/build-gpuix-msi.ps1
+      - name: Retain Windows installer diagnostics
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-diagnostics
+          path: windows-validation/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: neoism-${{ matrix.asset }}
@@ -163,6 +171,7 @@ jobs:
             neoism-frontend/gpuix/artifacts/gpuix-rustup
             target/gpuix-native-vsync
             target/gpuix-core-cargo
+            target/release
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Save verified Zig archives
         if: always() && steps.zig-cache.outputs.cache-primary-key != '' && steps.zig-cache.outputs.cache-hit != 'true'

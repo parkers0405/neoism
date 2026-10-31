@@ -2,17 +2,16 @@ import {expect,test} from "bun:test";
 import {mkdtempSync,readFileSync,writeFileSync,rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {createRequire} from "node:module";
 import {frontendRoot,readDisplayPin,verifiedDisplayBinding} from "../src/display-binding";
 
-test("production addon verifies its actual GPUI input keymaps release tab arrows in every native input context",()=>{
+test("production addon verifies its actual GPUI input keymaps release tab arrows in every native input context",async()=>{
  const {binding}=verifiedDisplayBinding();
- const native=createRequire(import.meta.url)(binding);
- // This capability executes Keymap::bindings_for_input against the exact
- // binding table registered by native inputs. It checks reserved chords are
- // unbound and ordinary left/right/shift selection remain bound; no window.
- expect(native.applicationTabShortcutsSupported()).toBe(true);
- expect(native.testSupportEnabled()).toBe(false);
+ // Other tests import the package addon. macOS ObjC classes cannot be
+ // registered twice by loading that addon and the patched addon together.
+ const script=`const native=require(process.argv[1]); if(!native.applicationTabShortcutsSupported()||native.testSupportEnabled())process.exit(1);`;
+ const child=Bun.spawn([process.execPath,"-e",script,binding],{stdout:"pipe",stderr:"pipe"});
+ const [status,err]=await Promise.all([child.exited,new Response(child.stderr).text()]);
+ expect({status,err}).toEqual({status:0,err:""});
 });
 
 test("pinned native capture policy reserves tab arrows before textarea SelectWord, preserving other chords",async()=>{

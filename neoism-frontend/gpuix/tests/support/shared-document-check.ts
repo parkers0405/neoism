@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync} from "node:fs";
+import {realpathSync,mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join,resolve} from "node:path";
 import {Effect} from "effect";
@@ -12,7 +12,7 @@ import {NativeMarkdown} from "../../src/markdown/NativeMarkdown";
 import {PresenceController} from "../../src/collaboration/PresenceController";
 import {WorkspaceModel,type Surface} from "../../src/model";
 import {DocumentController} from "../../src/collaboration/DocumentController";
-const temp=mkdtempSync(join(tmpdir(),"neoism-shared-doc-")),directory=join(temp,"project"),runtime=join(temp,"runtime");mkdirSync(directory);mkdirSync(runtime,{mode:0o700});
+const temp=realpathSync(mkdtempSync(join(tmpdir(),"neoism-shared-doc-"))),directory=join(temp,"project"),runtime=join(temp,"runtime");mkdirSync(directory);mkdirSync(runtime,{mode:0o700});
 const path=join(directory,"shared.md"),initial="hello α\n";writeFileSync(path,initial);
 const token=crypto.randomUUID(),nonce=crypto.randomUUID();let address="",output="";
 const agent=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({workspaceId:"fixture-chat-namespace"})});

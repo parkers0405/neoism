@@ -2685,6 +2685,7 @@ pub struct GhosttyApi {
         encoder: *mut GhosttyKeyEncoder,
     ) -> GhosttyResult,
     pub ghostty_key_encoder_free: unsafe extern "C" fn(encoder: GhosttyKeyEncoder),
+    pub ghostty_key_encoder_setopt: unsafe extern "C" fn(encoder: GhosttyKeyEncoder, option: GhosttyKeyEncoderOption, value: *const ::std::os::raw::c_void),
     pub ghostty_key_encoder_setopt_from_terminal:
         unsafe extern "C" fn(encoder: GhosttyKeyEncoder, terminal: GhosttyTerminal),
     pub ghostty_key_encoder_encode: unsafe extern "C" fn(
@@ -2901,6 +2902,7 @@ impl GhosttyApi {
         let ghostty_key_encoder_free = __library
             .get(b"ghostty_key_encoder_free\0")
             .map(|sym| *sym)?;
+        let ghostty_key_encoder_setopt = __library.get(b"ghostty_key_encoder_setopt\0").map(|sym| *sym)?;
         let ghostty_key_encoder_setopt_from_terminal = __library
             .get(b"ghostty_key_encoder_setopt_from_terminal\0")
             .map(|sym| *sym)?;
@@ -3011,6 +3013,7 @@ impl GhosttyApi {
             ghostty_key_event_set_unshifted_codepoint,
             ghostty_key_encoder_new,
             ghostty_key_encoder_free,
+            ghostty_key_encoder_setopt,
             ghostty_key_encoder_setopt_from_terminal,
             ghostty_key_encoder_encode,
             ghostty_mouse_event_new,

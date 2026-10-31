@@ -5,7 +5,6 @@ import {tmpdir} from "node:os";
 import {fileURLToPath} from "node:url";
 import {composerCaretGeometry} from "../src/agent/ComposerCaret";
 import {coreCall} from "../src/native-core";
-import {createRequire} from "node:module";
 import {verifiedDisplayBinding} from "../src/display-binding";
 const cwd=fileURLToPath(new URL("..",import.meta.url));
 test("actual source geometry module preserves native wrapped/scrolled insertion points, Unicode byte offsets and selection visibility",async()=>{
@@ -33,9 +32,9 @@ test("real Solid native textarea custom event drives the original GPU block trai
 },15_000);
 
 
-test("compiled native input factories retain caretGeometry through the real custom-element event whitelist",()=>{
- const binding=createRequire(import.meta.url)(verifiedDisplayBinding().binding);
- expect(typeof binding.inputCaretGeometrySupported).toBe("function");
- expect(binding.inputCaretGeometrySupported()).toBe(true);
- expect(binding.testSupportEnabled()).toBe(false);
+test("compiled native input factories retain caretGeometry through the real custom-element event whitelist",async()=>{
+ const script=`const native=require(process.argv[1]); if(!native.inputCaretGeometrySupported()||native.testSupportEnabled())process.exit(1);`;
+ const child=Bun.spawn([process.execPath,"-e",script,verifiedDisplayBinding().binding],{stdout:"pipe",stderr:"pipe"});
+ const [status,err]=await Promise.all([child.exited,new Response(child.stderr).text()]);
+ expect({status,err}).toEqual({status:0,err:""});
 });

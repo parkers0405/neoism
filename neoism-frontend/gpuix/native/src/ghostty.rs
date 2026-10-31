@@ -1593,6 +1593,10 @@ impl Terminal {
         let key = text(v, "key");
         let typed = text(v, "char");
         a.ghostty_key_encoder_setopt_from_terminal(self.key_encoder, self.inner);
+        // Terminal mode synchronization resets macOS Option-as-Alt. The
+        // frontend supplies explicit Alt intent, so preserve its Meta prefix.
+        let option_as_alt = GHOSTTY_OPTION_AS_ALT_TRUE;
+        (a.ghostty_key_encoder_setopt)(self.key_encoder, GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT, (&option_as_alt as *const GhosttyOptionAsAlt).cast());
         a.ghostty_key_event_set_action(
             self.key_event,
             if flag(v, "released") {

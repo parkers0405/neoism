@@ -48,7 +48,7 @@ test("the readiness probe checks a real Unix listener and does not trust socket-
 test("a detached daemon that exits immediately reports startup failure instead of waiting for readiness", async () => {
  if(process.platform === "win32")return;
  const folder=mkdtempSync(join(tmpdir(),"neoism-startup-exit-"));
- const env={...process.env,NEOISM_GPUIX_DAEMON_URL:undefined,NEOISM_DAEMON_SOCKET:join(folder,"missing.sock"),NEOISM_DAEMON_ADDR:"127.0.0.1:0",NEOISM_GPUIX_WORKSPACE_DAEMON:"/bin/false",XDG_STATE_HOME:folder};
+ const env={...process.env,NEOISM_GPUIX_DAEMON_URL:undefined,NEOISM_DAEMON_SOCKET:join(folder,"missing.sock"),NEOISM_DAEMON_ADDR:"127.0.0.1:0",NEOISM_GPUIX_WORKSPACE_DAEMON:Bun.which("false")!,XDG_STATE_HOME:folder};
  try {
   const config=loadConfig([],env,{});
   await expect(ensureLocalDaemon(config,[],env,{refresh:()=>config,timeoutMs:3000})).rejects.toThrow("exited during startup");

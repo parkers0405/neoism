@@ -21,7 +21,9 @@ const engine = () => {
 const texts = (frame: Frame) => frame.commands.filter((c) => c.kind === "text");
 // Reveal/scroll animations run on wall time: step real frames.
 const run = (id: number, ms: number) => { let frame = coreCall<Frame>("agenttimeline.frame", { id }); const end = Date.now() + ms; while (Date.now() < end) { Bun.sleepSync(8); frame = coreCall<Frame>("agenttimeline.frame", { id }); } return frame; };
-const settle = (id: number) => { let frame = coreCall<Frame>("agenttimeline.layout", { id, width: 900, height: 700 }); for (let i = 0; i < 300 && frame.animating; i++) { Bun.sleepSync(8); frame = coreCall<Frame>("agenttimeline.frame", { id }); } return frame; };
+// Decoration pulses can keep `animating` true after geometry has settled.
+// Bound elapsed time rather than assuming 300 sleeps take 2.4s on every OS.
+const settle = (id: number) => { coreCall<Frame>("agenttimeline.layout", { id, width: 900, height: 700 }); return run(id, 700); };
 
 test("background text stays cached without requesting a viewed transcript repaint",()=>{
   const id=engine();

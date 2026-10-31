@@ -1,16 +1,23 @@
 import {expect,test} from "bun:test";
-import {mkdtempSync,rmSync} from "node:fs";
+import {mkdtempSync,rmSync,readFileSync,writeFileSync} from "node:fs";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
 import {fileURLToPath} from "node:url";
 import {composerCaretGeometry} from "../src/agent/ComposerCaret";
 import {coreCall} from "../src/native-core";
-import {verifiedDisplayBinding} from "../src/display-binding";
+import {verifiedDisplayBinding,readDisplayPin,sha256} from "../src/display-binding";
 const cwd=fileURLToPath(new URL("..",import.meta.url));
 test("actual source geometry module preserves native wrapped/scrolled insertion points, Unicode byte offsets and selection visibility",async()=>{
  const temporary=mkdtempSync(join(tmpdir(),"neoism-native-caret-"));
  try{
-  const output=join(temporary,process.platform==="win32"?"caret-tests.exe":"caret-tests"),source=join(cwd,"artifacts/gpuix-pacing-source/packages/native/src/custom_elements/input_caret_geometry.rs");
+  // A verified cached binding intentionally needs no source checkout. Compile
+  // the exact added module from the pinned patch instead of a build artifact.
+  const pin=readDisplayPin(),path="packages/native/src/custom_elements/input_caret_geometry.rs";
+  const patch=readFileSync(join(cwd,pin.patch),"utf8"),section=patch.split("\ndiff --git ").find(section=>section.includes(`\n+++ w/${path}\n`));
+  expect(section).toContain("\n--- /dev/null\n");
+  const contents=section!.split("\n").filter(line=>line.startsWith("+")&&!line.startsWith("+++")).map(line=>line.slice(1)).join("\n")+"\n";
+  expect(sha256(contents)).toBe(pin.patchedFiles[path]);
+  const output=join(temporary,process.platform==="win32"?"caret-tests.exe":"caret-tests"),source=join(temporary,"input_caret_geometry.rs");writeFileSync(source,contents);
   const build=Bun.spawn(["rustc","--edition=2021","--test",source,"-o",output],{stdout:"pipe",stderr:"pipe"});
   expect({status:await build.exited,stderr:await new Response(build.stderr).text()}).toEqual({status:0,stderr:""});
   const run=Bun.spawn([output],{stdout:"pipe",stderr:"pipe"});const [status,stdout]=await Promise.all([run.exited,new Response(run.stdout).text()]);

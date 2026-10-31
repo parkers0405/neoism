@@ -506,7 +506,7 @@ fn workspace_catalog_scope(directory: Option<&str>) -> Option<String> {
     let bytes = directory.as_bytes();
     let filesystem_root = directory.is_empty()
         || (bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':');
-    let home = std::env::var("HOME").ok().map(|home| home.trim_end_matches('/').to_owned());
+    let home = dirs::home_dir().map(|home| home.to_string_lossy().trim_end_matches(['/', '\\']).to_owned());
     if filesystem_root || home.as_deref() == Some(directory) {
         None
     } else {

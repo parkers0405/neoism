@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import {expect,test} from "bun:test";
 import {GitController} from "../src/git/GitController";
 import {WorkspaceModel,type Surface} from "../src/model";
@@ -56,7 +57,7 @@ test("hosted PR read/write operations preserve complete typed payloads, scoped r
    {Checkout:{number:8,expected_head:head,new_worktree:true}},{Merge:{number:8,expected_head:head,method:"Squash"}},
   ]){expect(await controller.execute({kind:"pull-request",root,request},root)).toBe(true);expect(daemon.requests.at(-1)?.message).toEqual({PullRequest:{request}});}
   expect(replies).toHaveLength(6);
-  await expect(controller.execute({kind:"pull-request",root,request:{Merge:{number:8,expected_head:"stale",method:"Squash"}}},root)).rejects.toThrow("Fixture PR head changed");
+  await assert.rejects(controller.execute({kind:"pull-request",root,request:{Merge:{number:8,expected_head:"stale",method:"Squash"}}},root), /Fixture PR head changed/);
   expect(await read({Read:{number:8}})).toMatchObject({PullRequest:{reply:{Detail:{detail:{summary:{state:"MERGED"},body:"Complete body\nsecond line"}}}}});
  }finally{controller.dispose();model.dispose();client.stop();daemon.close();}
 },15000);

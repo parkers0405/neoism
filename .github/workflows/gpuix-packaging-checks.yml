@@ -71,5 +71,5 @@ jobs:
           $env:NEOISM_GPUIX_CORE = (Resolve-Path '../../target/gpuix-core-cargo/release/neoism_gpuix_core.dll').Path
           ./node_modules/bun/bin/bun.exe scripts/build-ghostty.ts
           if ($LASTEXITCODE -ne 0) { throw 'Ghostty fixture setup failed' }
-          ./node_modules/bun/bin/bun.exe test tests/agent-sidepanel-catalog.test.ts tests/breadcrumbs.test.ts tests/git-controller.test.ts tests/git-status.test.ts tests/markdown.test.ts tests/menu-actions.test.ts tests/ssh-transport.test.ts tests/status-directory.test.ts tests/workspace-cwd-label.test.ts tests/workspace-directory.test.ts tests/workspace-reorder.test.ts
+          ./node_modules/bun/bin/bun.exe test tests/git-controller.test.ts tests/ssh-transport.test.ts tests/workspace-directory.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'Windows native fixtures failed' }

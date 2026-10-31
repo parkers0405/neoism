@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import {expect,test} from "bun:test";
 import {WorkspaceModel} from "../src/model";
 import {DaemonConnection} from "../src/daemon/client";
@@ -30,7 +31,7 @@ test("first terminal host-confirmed actual cwd wins, secondary shells and dirty 
 });
 test("busy or unsupported terminal never changes workspace metadata",async()=>{
  for(const terminalDirectoryChange of ["failure","ack"] as const){const f=await fixture({terminalDirectoryChange});try{
-  await f.model.newTerminal();await expect(f.model.changeWorkspaceDirectory("/requested","a")).rejects.toThrow();expect(f.model.state.activeWorkspace?.root_dir).toBe("/project/a");expect(f.daemon.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot")).toBe(false);expect(f.daemon.ptyRequests.some(request=>request.tag==="PtyInput")).toBe(false);
+  await f.model.newTerminal();await assert.rejects(f.model.changeWorkspaceDirectory("/requested","a"));expect(f.model.state.activeWorkspace?.root_dir).toBe("/project/a");expect(f.daemon.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot")).toBe(false);expect(f.daemon.ptyRequests.some(request=>request.tag==="PtyInput")).toBe(false);
  }finally{f.close();}}
 },15000);
 test("a delayed first-terminal confirmation updates only captured A while B remains active",async()=>{

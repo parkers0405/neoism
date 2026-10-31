@@ -31,6 +31,12 @@ Upgrades retain the previous installed bundle while its windows or daemons are
 running, so their helpers and resources remain available. A later upgrade prunes
 that bundle after those processes exit.
 
+For packaged releases, update to the nightly with `neoism update --nightly`.
+Use this spelling when upgrading an older Sugarloaf installation too. The new
+GPUIX release additionally accepts `neoism --update nightly`; older executables
+may interpret `nightly` as a filename instead. Windows updates install the MSI.
+Each platform becomes available after its own release checks pass.
+
 Use `neoism --daemon ws://HOST:7878/session` to attach explicitly to another host. Explicit endpoints do not start a local daemon. `--workspace ID`, `--config PATH`, `--theme NAME`, `--font-size SIZE`, and `--maximized` select launch preferences. Configuration is JSONC in `~/.config/neoism/config.json` or `NEOISM_CONFIG_HOME`; `init.lua` is no longer evaluated.
 
 Terminals load the real pinned `libghostty-vt` library for terminal emulation, keyboard/mouse encoding, selection, and search. GPUIX paints its cell data; the daemon owns the shell and PTY. Fonts, colors, and supported terminal preferences come from Neoism's configuration. The standalone Ghostty application's configuration is not loaded.

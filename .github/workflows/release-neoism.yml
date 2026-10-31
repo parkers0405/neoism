@@ -62,7 +62,9 @@ jobs:
     timeout-minutes: 180
     concurrency:
       group: nightly-${{ needs.prepare.outputs.tag }}-${{ matrix.platform }}
-      cancel-in-progress: false
+      # An explicit single-platform retry supersedes that platform's obsolete
+      # attempt without interrupting the other jobs in its original run.
+      cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' && inputs.platform == matrix.platform }}
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_TERM_COLOR: always

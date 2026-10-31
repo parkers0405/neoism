@@ -33,7 +33,8 @@ fn host(spec:&HostedServerSpec,password:Option<&str>)->Result<(),String>{
 /// frontend restart. Never signal a process just because it owns the port.
 fn stop_hosted(spec:&HostedServerSpec){
  #[cfg(any(target_os="macos",windows))]
- if let Ok(system)=sysinfo::System::new_all(){
+ {
+  let system=sysinfo::System::new_all();
   let address=format!("0.0.0.0:{}",spec.port);
   for process in system.processes().values(){
    let Some(exe)=process.exe() else{continue;};

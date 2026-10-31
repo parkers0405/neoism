@@ -49,7 +49,9 @@ def restore(root, commits):
 
 def main():
     combined = os.environ.get('COMBINED_CACHE_KEY', '')
-    keys = [combined] if combined else [os.environ.get('SERVICE_CACHE_KEY', ''), os.environ.get('NATIVE_CACHE_KEY', '')]
+    # Cache extraction overlays directories: an older restored artifact can
+    # survive if a later cache never built that target. Check every source.
+    keys = [combined, os.environ.get('SERVICE_CACHE_KEY', ''), os.environ.get('NATIVE_CACHE_KEY', '')]
     keys = list(dict.fromkeys(key for key in keys if key))
     if not keys:
         print('No compiled workspace cache to reuse.')

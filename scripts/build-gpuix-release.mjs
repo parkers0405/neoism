@@ -18,6 +18,7 @@ function run(program,args,cwd=root){
 }
 run('npm',['ci'],sdk);run('npm',['ci'],frontend);
 const bun=join(frontend,'node_modules/bun/bin/bun.exe');
+run('python',['scripts/check-native-toolchain.py']);
 // Fail early on toolchain/network problems before compiling the Rust services.
 run(bun,['scripts/build-ghostty.ts'],frontend);
 run('cargo',['build','--locked','--release','-p','neoism-workspace-daemon','-p','neoism-agent','-p','neoism-update-helper']);

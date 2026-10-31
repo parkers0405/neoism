@@ -70,4 +70,4 @@ lto = "thin"
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
-sysinfo = { version = "=0.40.1", default-features = false, features = ["system"] }
+sysinfo = { version = "=0.37.2", default-features = false, features = ["system"] }

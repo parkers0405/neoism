@@ -1,3 +1,5 @@
+// Bun's rejects matcher can nest the Windows socket event loop and hold
+// replies until timeout (oven-sh/bun#44429). Node assert awaits normally.
 import assert from "node:assert/strict";
 import {expect,test} from "bun:test";
 import {GitController} from "../src/git/GitController";
@@ -60,7 +62,7 @@ test("hosted PR read/write operations preserve complete typed payloads, scoped r
   await assert.rejects(controller.execute({kind:"pull-request",root,request:{Merge:{number:8,expected_head:"stale",method:"Squash"}}},root), /Fixture PR head changed/);
   expect(await read({Read:{number:8}})).toMatchObject({PullRequest:{reply:{Detail:{detail:{summary:{state:"MERGED"},body:"Complete body\nsecond line"}}}}});
  }finally{controller.dispose();model.dispose();client.stop();daemon.close();}
-},15000);
+});
 
 test("partial staging and confirmed restore preserve the exact native change block",async()=>{
  const context=await fixture();try{const block={old_start:0,new_start:0,old_lines:["const value = 1;"],new_lines:["const value = 2;"]};const path="src/main.ts",root="/fixture";

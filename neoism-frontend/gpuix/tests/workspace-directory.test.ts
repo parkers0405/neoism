@@ -1,3 +1,5 @@
+// Bun's rejects matcher can nest the Windows socket event loop and hold
+// replies until timeout (oven-sh/bun#44429). Node assert awaits normally.
 import assert from "node:assert/strict";
 import {expect,test} from "bun:test";
 import {WorkspaceModel} from "../src/model";
@@ -33,7 +35,7 @@ test("busy or unsupported terminal never changes workspace metadata",async()=>{
  for(const terminalDirectoryChange of ["failure","ack"] as const){const f=await fixture({terminalDirectoryChange});try{
   await f.model.newTerminal();await assert.rejects(f.model.changeWorkspaceDirectory("/requested","a"));expect(f.model.state.activeWorkspace?.root_dir).toBe("/project/a");expect(f.daemon.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot")).toBe(false);expect(f.daemon.ptyRequests.some(request=>request.tag==="PtyInput")).toBe(false);
  }finally{f.close();}}
-},15000);
+});
 test("a delayed first-terminal confirmation updates only captured A while B remains active",async()=>{
  const f=await fixture({terminalDirectoryChange:"defer"});try{
   await f.model.newTerminal();const change=f.model.changeWorkspaceDirectory("/captured/a","a");await until(()=>f.daemon.directoryChanges.length===1);await f.model.activateWorkspace(f.model.state.workspaces.find(workspace=>workspace.id==="b")!);

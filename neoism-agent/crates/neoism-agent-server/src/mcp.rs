@@ -314,21 +314,15 @@ async fn status_for_entry_with_directory(
                     error: "MCP local server is missing a command".to_string(),
                 }
             } else {
-                McpStatus::Failed {
-                    error: "MCP client runtime is not connected yet".to_string(),
-                }
+                McpStatus::Disconnected
             }
         }
         McpConfig::Remote { url, oauth, .. } => {
             if usable_oauth_config(oauth).is_none() {
-                return McpStatus::Failed {
-                    error: "MCP client runtime is not connected yet".to_string(),
-                };
+                return McpStatus::Disconnected;
             }
             match valid_tokens_for_url(name, url, auth_store).await {
-                Ok(Some(true)) => McpStatus::Failed {
-                    error: "MCP client runtime is not connected yet".to_string(),
-                },
+                Ok(Some(true)) => McpStatus::Disconnected,
                 Ok(Some(false)) | Ok(None) => McpStatus::NeedsAuth,
                 Err(error) => McpStatus::Failed {
                     error: error.to_string(),
@@ -1001,6 +995,7 @@ async fn ensure_connected_with_snapshot(
         .await?
     {
         McpStatus::Connected => Ok(()),
+        McpStatus::Disconnected => Err(anyhow!("MCP server {name} is disconnected")),
         McpStatus::Disabled => Err(anyhow!("MCP server {name} is disabled")),
         McpStatus::NeedsAuth => {
             Err(anyhow!("MCP server {name} needs OAuth authentication"))

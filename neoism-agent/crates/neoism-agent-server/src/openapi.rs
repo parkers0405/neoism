@@ -4026,7 +4026,7 @@ fn authoritative_schemas() -> Value {
         "LspTouchRequest": { "type": "object", "additionalProperties": false, "required": ["file"], "properties": { "directory": { "type": "string" }, "file": { "type": "string" }, "text": { "type": ["string", "null"] } } },
         "LspShutdownResponse": { "type": "object", "additionalProperties": false, "required": ["shutdown"], "properties": { "shutdown": { "type": "boolean", "const": true } } },
         "McpStatus": { "oneOf": [
-            { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "enum": ["connected", "disabled", "needs_auth"] } } },
+            { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "enum": ["connected", "disconnected", "disabled", "needs_auth"] } } },
             { "type": "object", "additionalProperties": false, "required": ["status", "error"], "properties": { "status": { "enum": ["failed", "needs_client_registration"] }, "error": { "type": "string" } } }
         ]},
         "McpStatusMap": { "type": "object", "additionalProperties": r("McpStatus") },

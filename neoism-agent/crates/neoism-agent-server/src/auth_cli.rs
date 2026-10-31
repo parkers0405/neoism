@@ -167,6 +167,7 @@ struct McpAuthRemove {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum McpStatus {
     Connected,
+    Disconnected,
     Disabled,
     NeedsAuth,
     NeedsClientRegistration { error: String },
@@ -510,6 +511,7 @@ fn auth_kind(auth: Option<&Value>) -> &'static str {
 fn mcp_status_label(status: &McpStatus) -> String {
     match status {
         McpStatus::Connected => "connected".into(),
+        McpStatus::Disconnected => "disconnected".into(),
         McpStatus::Disabled => "disabled".into(),
         McpStatus::NeedsAuth => "authentication required".into(),
         McpStatus::NeedsClientRegistration { error } => {

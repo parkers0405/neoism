@@ -7,6 +7,18 @@ import type { PaintCommand } from "../src/ui/PaintLayer";
 const config={...loadConfig(["--config","/nonexistent/markdown-test-config"],{}),vim:true};
 const source="# Rich document\n\n- [ ] Task body\n\n| Name | Value |\n| --- | --- |\n| café | **bold** |\n\n> [!NOTE] Preserve formatting\n\n```ts\nconst answer = 42;\n```\n\n[Neoism](README.md)\n";
 const texts=(commands:PaintCommand[])=>commands.filter((c):c is Extract<PaintCommand,{kind:"text"}>=>c.kind==="text");
+test("inline-code pipes in a Markdown bullet wrap normally without a gray table fallback",()=>{
+ const source="- Read paths must support `SYNAPSE_READ_MODEL=hybrid|qdrant|postgres` so local/dev/hosted reads remain available through the final sentinel.\n\n- Next bullet";
+ const editor=new NativeEditor("pipes.md",source,true),markdown=new NativeMarkdown(editor,config,"/project/pipes.md");
+ try{
+  const frame=markdown.call("layout",{width:600,height:700}),runs=texts(frame.commands);
+  const rendered=runs.map(run=>run.text).join(" ");
+  expect(rendered).toContain("sentinel.");
+  expect(rendered).not.toContain("…");
+  expect(new Set(runs.filter(run=>run.text.includes("sentinel")||run.text==="Read").map(run=>run.y)).size).toBe(2);
+  expect(frame.commands.some(command=>command.kind==="rect"&&command.radii.some(radius=>radius>0)&&command.rect[2]>500&&command.rect[3]<60)).toBe(false);
+ }finally{markdown.dispose();editor.dispose();}
+});
 test("original rich renderer emits native geometry and cached original glyph pixels",()=>{
  const editor=new NativeEditor("README.md",source,true),markdown=new NativeMarkdown(editor,config,"/project/README.md");
  try{

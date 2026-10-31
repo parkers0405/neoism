@@ -8,6 +8,7 @@ import { startFrameLoop } from "@gpuix/native/runtime";
 import { App as AutomationApp,InProcessBackend,liveRendererAsTest } from "@gpuix/native/automation";
 import { readFileSync } from "node:fs";
 import { createAgentDaemon } from "./agent-daemon";
+import { wrappedJsonFixture } from "./wrapped-json";
 import { DaemonConnection } from "../../src/daemon/client";
 import { WorkspaceModel } from "../../src/model";
 import { App } from "../../src/ui/App";
@@ -85,6 +86,17 @@ try{
   await Bun.sleep(500);
  }
  for(const scenario of scenarios){
+  if(scenario==="wrapped-json"){
+   server.files.set("wrapped.json",wrappedJsonFixture());
+   await model.openFile("wrapped.json");const host=app.getByTestId("code-editor");await host.waitFor({timeoutMs:8000});await host.click();
+   const surface=model.state.surfaces.find(s=>s.id===model.state.activeSurfaceId)!;
+   const editor=model.getEditor(surface,model.getLayout().frame.focusedLeaf||undefined);
+   editor.call("lsp.reply",{message:{LspSnapshot:{file_path:model.hostPath(surface),filetype:"json",servers:[{name:"json-language-server",binary:"vscode-json-language-server",filetype:"json",state:"connected",source:"managed"}]}}});
+   editor.call("goto",{line:1,col:20000});await Bun.sleep(800);
+   let n=0;
+   await measure("wrapped-json-arrows",()=>{const key=++n%2?"down":"up";renderer.simulateKeyDown(key);renderer.simulateKeyUp(key);});
+   console.log(JSON.stringify({wrappedJsonCursor:editor.frame.cursor,arrowsSent:n}));
+  }
   if(scenario==="markdown"){
    await model.openFile("notes.md");const host=app.getByTestId("rich-markdown-editor");await host.waitFor({timeoutMs:8000});await host.click();
    const b=await host.bounds();let dir=-1,n=0;

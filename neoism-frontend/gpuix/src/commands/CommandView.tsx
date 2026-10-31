@@ -13,7 +13,7 @@ export function CommandView(props: { controller: CommandController; config: AppC
   createEffect(() => { const controller = props.controller; setFrame(controller.frame); onCleanup(controller.subscribe(setFrame)); });
   createEffect(() => { props.controller.layout(viewport().width, viewport().height); });
   let input: HostElement | undefined;
-  onMount(() => { if (input) renderer.focusElement?.(input.id); });
+  onMount(() => { if (input) { input.root?.mutations.flushMutations(); renderer.focusElement?.(input.id); } });
   const accept = (index?: number) => { if (index !== undefined) props.controller.select(index); const target = props.controller.target(); if (target) props.onAccept(target); };
   const keyDown = (event: KeyEvent) => {
     if(handleApplicationShortcut(renderer,event))return true;

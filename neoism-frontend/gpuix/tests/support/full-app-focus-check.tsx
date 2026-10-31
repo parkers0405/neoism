@@ -55,6 +55,18 @@ try {
     stage = `actual ${file} SpaceX close`;
     await model.openFile(file); await until(() => !!host.find(testId));
     const editor = host.find(testId)!; closedTargets.push(editor.id);
+    stage = `rapid AltP typing from ${testId} before native focus catches up`;
+    const burst=(key:string,alt=false)=>host.dispatchKey(root,editor.id,{key,keyChar:key.length===1?key:"",keystrokeId:++keystrokeId,modifiers:{alt,ctrl:false,shift:false,cmd:false}});
+    burst("p",true);burst("q");burst("x");burst("backspace");
+    await host.pump(root);
+    const commandInput=host.find("command-palette")!;
+    assert.equal(commandInput.props.value,"q","Queued typing must reach the palette, including the first q");
+    // Once focused, native input changes are the sole source of query updates.
+    root.dispatch({elementId:commandInput.id,eventType:"change",value:"qall"});
+    await press("l",commandInput.id);
+    assert.equal(host.find("command-palette")!.props.value,"qall","Native input keys must not be appended twice");
+    await press("escape",commandInput.id);
+    assert.equal(host.focused,editor.id);
     await press("space", editor.id, false, " "); await press("x", editor.id);
     await until(() => !host.find(testId) && model.state.surfaces.every(surface => surface.path !== file));
     assert.ok(host.find("welcome-page")); assert.equal(model.state.activeWorkspace?.id, "a");

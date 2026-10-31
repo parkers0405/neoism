@@ -4700,6 +4700,7 @@
               "status": {
                 "enum": [
                   "connected",
+                  "disconnected",
                   "disabled",
                   "needs_auth"
                 ]

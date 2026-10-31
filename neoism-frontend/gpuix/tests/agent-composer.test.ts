@@ -2,11 +2,39 @@ import {afterEach,expect,test} from "bun:test";
 import {coreCall} from "../src/native-core";
 import {loadConfig} from "../src/config";
 import {NativeComposer,type ComposerInput} from "../src/agent/NativeComposer";
+import {fileURLToPath} from "node:url";
 const actors:NativeComposer[]=[];
 afterEach(()=>{actors.splice(0).forEach(actor=>actor.dispose());});
 function composer(){const actor=new NativeComposer(loadConfig(["--config","/nonexistent/agent-composer"],{}));actors.push(actor);return actor;}
 const base:ComposerInput={width:800,height:600,home:true,text:"",help:true,images:0,cwd:"/project/a",noProviders:false,busy:false,state:"Idle"};
 const texts=(frame:ReturnType<NativeComposer["frame"]>)=>frame.commands.flatMap(command=>command.kind==="text"?[command.text]:[]);
+test("Agent stars default on, animate independently, stop for reduced motion and disappear when disabled",()=>{
+ const actor=composer();
+ const frame=(options:Record<string,unknown>={})=>coreCall<{commands:import("../src/ui/PaintLayer").PaintCommand[];animating:boolean}>("agentcomposer.stars-frame",{id:actor.id,width:752,height:102,radius:16,seconds:0,...options});
+ const first=frame();expect(first.animating).toBe(true);expect(first.commands.length).toBeGreaterThan(15);
+ expect(frame({seconds:10}).commands).not.toEqual(first.commands);
+ const still=frame({reducedMotion:true});expect(still.animating).toBe(false);
+ expect(frame({reducedMotion:true,seconds:10}).commands).toEqual(still.commands);
+ expect(frame({enabled:false})).toEqual({commands:[],animating:false});
+ expect(frame({width:0})).toEqual({commands:[],animating:false});
+ for(const scale of [.5,1,1.25,2,3]){
+  for(const command of frame({scale,width:752*scale,height:102*scale,radius:16*scale}).commands){
+   expect(command.kind).toBe("rect");if(command.kind!=="rect")continue;
+   const [x,y,w,h]=command.rect;
+   expect(command.radii.every(radius=>radius===0)).toBe(true);
+   expect(x).toBeGreaterThanOrEqual(0);expect(y).toBeGreaterThanOrEqual(0);
+   expect(x+w).toBeLessThanOrEqual(752*scale);expect(y+h).toBeLessThanOrEqual(102*scale);
+  }
+ }
+ // Sampling the decorative layer must not change prompt/footer geometry.
+ expect(actor.frame(base).inputRect).toEqual([24,276,752,102]);
+});
+test("Agent star component cancels frame scheduling when disabled, reduced or unmounted",async()=>{
+ const child=Bun.spawn([process.execPath,"run","tests/support/agent-stars-check.tsx"],{cwd:fileURLToPath(new URL("..",import.meta.url)),stdout:"pipe",stderr:"pipe"});
+ const [status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
+ if(status!==0)throw new Error(stdout+stderr);
+ expect(status).toBe(0);
+});
 test("original Agent home pins card at 46% and keeps the wordmark 44px above",()=>{
  const actor=composer(),frame=actor.frame(base);
  expect(frame.inputRect).toEqual([24,276,752,102]);

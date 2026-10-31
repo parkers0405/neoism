@@ -8,7 +8,7 @@ impl Drop for Cleanup {fn drop(&mut self){self.0.handle(ClientMessage::ClosePty{
 
 #[test]
 fn configured_grid_profiles_keep_visible_prompt_and_safe_directory_control() {
-    for name in ["bash", "zsh"] {
+    for (name,login) in [("bash",false), ("zsh",false), ("zsh",true)] {
         let shell=std::env::var_os("PATH").and_then(|path|std::env::split_paths(&path).map(|directory|directory.join(name)).find(|path|path.is_file()));
         let Some(shell)=shell else {continue};
         let home=tempfile::tempdir().unwrap();
@@ -16,10 +16,13 @@ fn configured_grid_profiles_keep_visible_prompt_and_safe_directory_control() {
         std::fs::create_dir(&profiles).unwrap();
         std::fs::write(home.path().join(".bashrc"),"PS1='GRID_PROFILE>>> '\nprintf 'PROFILE_%s\\n' LOADED\n").unwrap();
         std::fs::write(profiles.join(".zshenv"),"export GRID_ZSHENV=loaded\n").unwrap();
+        std::fs::write(profiles.join(".zprofile"),"export GRID_ZPROFILE=profile\n").unwrap();
+        std::fs::write(profiles.join(".zlogin"),"printf 'LOGIN_%s:%s:%s\\n' LOADED $GRID_ZPROFILE $options[login]\n").unwrap();
         std::fs::write(profiles.join(".zshrc"),"PROMPT='GRID_PROFILE>>> '\nRPROMPT='right-profile'\nprintf 'PROFILE_%s:%s\\n' LOADED $GRID_ZSHENV\n").unwrap();
         let output=std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact","grid_shell_child","--ignored","--nocapture"])
             .env("HOME",home.path()).env("ZDOTDIR",&profiles).env("GRID_TEST_SHELL",&shell)
+            .env("GRID_TEST_LOGIN",if login {"1"}else{"0"})
             .output().unwrap();
         assert!(output.status.success(),"{}: {}\n{}",shell.display(),String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
     }
@@ -46,9 +49,11 @@ async fn grid_shell_child() {
     let target=std::path::Path::new(&root).join("dir 'quoted' ; $(touch INJECTED)");
     std::fs::create_dir(&target).unwrap();
     let (registry,mut rx)=SessionRegistry::new();
-    let created=registry.handle_subscribed(ClientMessage::CreatePty{cwd:Some(root.clone()),cols:120,rows:24,shell:Some(shell.clone()),presentation:Some(Presentation::Grid)},Some(&rx));
+    let login=std::env::var("GRID_TEST_LOGIN").as_deref()==Ok("1");
+    let created=registry.handle_subscribed(ClientMessage::CreatePty{
+        shell_args:login.then(||vec!["--login".into()]),cwd:Some(root.clone()),cols:120,rows:24,shell:Some(shell.clone()),presentation:Some(Presentation::Grid)},Some(&rx));
     let id=match &created[..] {
-        [ServerMessage::PtyCreated{session_id,presentation:Some(Presentation::Grid),..}]=>session_id.clone(),
+        [ServerMessage::PtyCreated{session_id,presentation:Some(Presentation::Grid),shell:Some(actual_shell),..}]=>{assert_eq!(actual_shell,&shell);session_id.clone()},
         other=>panic!("{other:?}"),
     };
     let _cleanup=Cleanup(registry.clone(),id.clone());
@@ -57,6 +62,7 @@ async fn grid_shell_child() {
     assert!(startup.contains("\x1b]7;file://"),"{startup:?}");
     assert!(startup.contains("\x1b]777;neoism-control;"),"{startup:?}");
     if shell.ends_with("zsh") {assert!(startup.contains("PROFILE_LOADED:loaded"),"{startup:?}");}
+    if login {assert!(startup.contains("LOGIN_LOADED:profile:on"),"{startup:?}");}
     // Do not inject cd while a foreground built-in read owns the terminal.
     registry.handle(ClientMessage::PtyInput{session_id:id.clone(),bytes:b"stty -echo; printf 'BUSY_%s\\n' READY; if read -t 0.5 answer; then printf 'BAD_INPUT=%s\\n' \"$answer\"; else printf 'NO_%s\\n' INPUT; fi\r".to_vec()});
     until(&mut rx,"BUSY_READY").await;

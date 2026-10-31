@@ -1,4 +1,5 @@
-import { createEffect, createSignal, onCleanup, untrack } from "solid-js";
+import {SidebarContext,type SidebarContextSpec} from "../ui/SidebarContext";
+import { createEffect, createSignal, Show, onCleanup, untrack } from "solid-js";
 import { useGpuixRequired, type HostElement,type KeyEvent } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import type { WorkspaceModel } from "../model";
@@ -9,7 +10,8 @@ import { focusNativeElement,invalidateNativeFocus } from "../native-focus";
 import {paintedChromeBounds,type ChromeBounds} from "../ui/chrome-target-bounds";
 import {CanvasImages,RasterSource} from "../ui/canvas";
 
-interface PanelFrame { commands: PaintCommand[]; animating: boolean; send: unknown[];cursor?:number[]|null;focused?:boolean;selected?:string; result?: { action?: string; anchor?: number[] | null; projects?: string[]; root?: boolean; open?: { id: string; title: string; directory?: string | null;familyRootId?:string|null;pointer?:boolean } } | null }
+interface ChatTarget {id:string;title:string;pinned:boolean;directory?:string}
+interface PanelFrame { commands: PaintCommand[]; animating: boolean; send: unknown[];cursor?:number[]|null;focused?:boolean;selected?:string; result?: { context?:ChatTarget; action?: string; anchor?: number[] | null; projects?: string[]; root?: boolean; open?: { id: string; title: string; directory?: string | null;familyRootId?:string|null;pointer?:boolean } } | null }
 
 /** The original desktop conversations sidebar (shared `render_side_panel_with_icons`
  * over a catalog pane): project groups, running / sub-agent / background
@@ -60,6 +62,18 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
   const id = panel?.id ?? untrack(() => coreCall<{ id: number }>("agentsidepanel.new", { directory: props.directory || "", theme: config.themeName, scale: config.scale, fontFamily: config.fontFamily, fontWeight: config.fontWeight }).id);
   const [commands, setCommands] = createSignal<readonly PaintCommand[]>(panel?.commands ?? []);
   const [selected,setSelected]=createSignal("");
+  const [context,setContext]=createSignal<SidebarContextSpec>();
+  let contextPoint={x:0,y:0};
+  const openContext=(chat:ChatTarget)=>{
+    const workspaceId=props.cacheKey||model.state.activeWorkspace?.id;if(!workspaceId)return;
+    const mutate=(mutation:Parameters<WorkspaceModel["mutateSidebarSession"]>[2])=>void model.mutateSidebarSession(workspaceId,chat.id,mutation).catch(props.report);
+    setContext({title:"",...contextPoint,items:[{id:"pin",label:chat.pinned?"Unpin Chat":"Pin Chat",hint:"p"},{id:"rename",label:"Rename Chat",hint:"r"},{id:"delete",label:"Delete Chat",hint:"d"}],onSelect:command=>{
+      if(command==="pin")mutate({kind:"pin",pinned:!chat.pinned});
+      else if(command==="rename")setContext({kind:"form",title:"Rename Chat",body:`Rename “${chat.title}”.`,meta:"Changes the conversation title everywhere.",input:chat.title,placeholder:"new title",accept:"Rename",onSelect:(_,value)=>mutate({kind:"rename",title:value||""})});
+      else if(command==="delete")setContext({kind:"form",title:"Delete Chat?",body:`Delete “${chat.title}” and its conversation history?`,meta:"This cannot be undone.",accept:"Delete",onSelect:()=>mutate({kind:"delete"})});
+    }});
+  };
+
   const selectionDescription=()=>selected()==="new-chat"?"New chat":selected()==="search"?"Search":selected()==="projects"?"Project directory":selected().startsWith("row:")?`Conversation: ${model.state.threads.find(thread=>thread.session_id===selected().slice(4))?.title||model.agentFamily(selected().slice(4)).roster.find(row=>row.id===selected().slice(4))?.title||"Selected conversation"}`:"Conversation browser";
   let bounds = { x: 0, y: 0, width:panel?.viewport.width||0,height:panel?.viewport.height||0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
   let actualFocused=false;
@@ -71,7 +85,8 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
     if(host){const painted=paintedChromeBounds(renderer,host.id);if(painted)bounds={...bounds,x:painted.x,y:painted.y};const rect=next.cursor;props.onCursor?.(rect?{x:bounds.x+rect[0]!,y:bounds.y+rect[1]!,width:rect[2]!,height:rect[3]!}:undefined,host,bounds);}
     for (const message of next.send || []) model.sendAgent(message as never);
     const result = next.result;
-    if (result?.open) {
+    if(result?.context)openContext(result.context);
+    else if (result?.open) {
       const known = model.state.threads.find((thread) => thread.session_id === result.open!.id);
       model.openThread(known || { session_id: result.open.id, title: result.open.title, directory: result.open.directory ?? props.directory ?? "" } as never,false,result.open.familyRootId||undefined,!!result.open.pointer);
       props.onActivate?.();
@@ -113,10 +128,11 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
       if (resized && next.width > 0 && next.height > 0) call("frame", { width: next.width, height: next.height, theme: config.themeName, viewedSession: props.viewedSession ?? null });
     }}
     onScroll={(event) => call("scroll", { deltaY: event.deltaY || 0, precise: !!event.precise })}
-    onMouseDown={(event) => { if (host) focusNativeElement(renderer, host.id); if (event.button === 0) call("pointer", { kind: "down", ...local(event) }); }}
+    onMouseDown={(event) => { if (host) focusNativeElement(renderer, host.id); if(event.button===2){const painted=host&&paintedChromeBounds(renderer,host.id);if(painted)bounds={...bounds,x:painted.x,y:painted.y};contextPoint={x:event.x||0,y:event.y||0};call("pointer",{kind:"context",...local(event)});}else if (event.button === 0) call("pointer", { kind: "down", ...local(event) }); }}
     onMouseMove={(event) => { try { coreCall("agentsidepanel.pointer", { id, kind: "move", ...local(event) }); } catch {} schedule(); }}
     onMouseLeave={() => call("pointer", { kind: "leave" })}
     style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", userSelect: "none", cursor: "pointer" }}>
     <PaintLayer commands={commands()} config={config} />
+    <Show when={context()} keyed>{spec=><SidebarContext config={config} spec={spec} onClose={()=>setContext(undefined)}/>}</Show>
   </div>;
 }

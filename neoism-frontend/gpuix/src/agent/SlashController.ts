@@ -177,9 +177,17 @@ export class SlashController{
  }
  private async mcpPicker(scope:Scope){
   const client=await scope.sdk.plugins.use(mcp,{directory:scope.directory}),catalog=await client.catalog(scope.directory);this.assertCurrent(scope);
-  // Footers use the original status vocabulary so the card paints its status dots.
-  const status=(entry:{enabled:boolean;status:{status:string}})=>entry.enabled?String(entry.status.status).replace(/_/g," ").toLowerCase():"disabled";
-  await this.picker(scope,"mcp","MCP servers",Object.entries(catalog).map(([name,entry])=>({...option(name,entry.status.status,name,status(entry)),mcp:{name,...entry}})),async name=>{
+  // Older daemons reported an unstarted runtime as a failure. Normalize only
+  // that exact placeholder; real connection errors retain their red status.
+  const status=(entry:{enabled:boolean;status:{status:string;error?:string}})=>{
+   if(!entry.enabled)return "disabled";
+   if(entry.status.status==="failed"&&entry.status.error==="MCP client runtime is not connected yet")return "disconnected";
+   return entry.status.status.replace(/_/g," ").toLowerCase();
+  };
+  await this.picker(scope,"mcp","MCP servers",Object.entries(catalog).map(([name,entry])=>{
+   const label=status(entry),description=label==="disconnected"?"Not connected yet":label==="failed"||label==="needs client registration"?("error" in entry.status?entry.status.error:label):label;
+   return {...option(name,description,name,label),mcp:{name,...entry}};
+  }),async name=>{
    const entry=catalog[name];if(!entry)return;
    const actions=[option(entry.runtimeConnected?"Disconnect":"Connect",name,entry.runtimeConnected?"disconnect":"connect"),option(entry.enabled?"Disable":"Enable",name,entry.enabled?"disable":"enable"),option("Tools",name,"tools"),option("Resources",name,"resources"),option("Prompts",name,"prompts")];
    if(entry.oauthCapable)actions.push(option("Authorize",name,"authorize"));

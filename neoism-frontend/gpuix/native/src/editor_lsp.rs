@@ -10,6 +10,7 @@ use neoism_ui::{
     },
     services::{IoError, LspRequest, LspService},
     panels::hover_popup::{self, HoverPopupLayout},
+    panels::{lsp_popup::{LspServerRow, LspServerState}, status_line::LspStatus},
     primitives::{ide_theme::IdeTheme, paint_record::RecordingPainter},
 };
 use serde_json::{json, Value};
@@ -26,6 +27,10 @@ impl LspService for Requests {
     }
 }
 pub struct EditorLsp {
+    pub status: Option<LspStatus>,
+    pub label: Option<String>,
+    pub servers: Vec<LspServerRow>,
+    pub status_revision: u64,
     pub session: CodeLspUi,
     requests: Arc<Requests>,
     pub surface: String,
@@ -44,6 +49,10 @@ pub struct EditorLsp {
 impl Default for EditorLsp {
     fn default() -> Self {
         Self {
+            status: None,
+            label: None,
+            servers: vec![],
+            status_revision: 0,
             session: Default::default(),
             requests: Default::default(),
             surface: String::new(),
@@ -62,7 +71,16 @@ impl Default for EditorLsp {
     }
 }
 impl EditorLsp {
+    fn set_status_snapshot(&mut self, status: Option<LspStatus>, label: Option<String>, servers: Vec<LspServerRow>) {
+        if self.status != status || self.label != label || self.servers != servers {
+            self.status = status;
+            self.label = label;
+            self.servers = servers;
+            self.status_revision = self.status_revision.wrapping_add(1);
+        }
+    }
     pub fn enable(&mut self, surface: String, open_paths: Vec<PathBuf>) {
+        self.set_status_snapshot(Some(LspStatus::Initializing), None, vec![]);
         self.session = Default::default();
         self.surface = surface;
         self.open_paths = open_paths;
@@ -148,7 +166,7 @@ impl EditorLsp {
                     "selectedText":h.interaction.selected_text(),"dragging":h.interaction.is_dragging(),
                     "hoveredLink":h.interaction.link_at(self.hover_pointer.0,self.hover_pointer.1),"commands":painter.commands()}))
             })}else{None};
-        json!({"menu":menu,"hover":hover,"requests":requests,"events":events,"diagnostics":self.session.diagnostics.counts_for(&pane.path)})
+        json!({"menu":menu,"hover":hover,"requests":requests,"events":events,"diagnostics":self.session.diagnostics.counts_for(&pane.path),"status":self.status,"label":self.label,"statusRevision":self.status_revision})
     }
     pub fn key(
         &mut self,
@@ -314,6 +332,48 @@ impl EditorLsp {
         let wire: EditorServerMessage = serde_json::from_value(message)
             .map_err(|e| format!("Invalid LSP reply: {e}"))?;
         match wire {
+            EditorServerMessage::LspSnapshot { surface_id, file_path, servers, .. }
+                if !self.surface.is_empty() && surface_id.as_deref().is_none_or(|id| id == self.surface)
+                    && file_path.as_ref().is_none_or(|path| path == &pane.path) => {
+                let servers: Vec<LspServerRow> = servers.into_iter().map(|server| LspServerRow {
+                    name: server.name, binary: (!server.binary.is_empty()).then_some(server.binary),
+                    filetype: Some(server.filetype), state: LspServerState::from_str(&server.state),
+                    message: server.message, level: server.level, source: server.source,
+                    runtime_source: server.runtime_source, runtime_path: server.runtime_path,
+                    runtime_version: server.runtime_version, diagnostics: Default::default(),
+                }).collect();
+                let active: Vec<_> = servers.iter().filter(|server| server.state == LspServerState::Active).collect();
+                let (status, label) = if let Some(first) = active.first() {
+                    (LspStatus::Active, if active.len() > 1 { format!("{}+{}", first.name, active.len()-1) } else { first.name.clone() })
+                } else if let Some(server) = servers.iter().find(|server| matches!(server.state, LspServerState::Ready | LspServerState::Initializing)) {
+                    (LspStatus::Initializing, server.name.clone())
+                } else {
+                    (LspStatus::Missing, if servers.iter().any(|server| server.state == LspServerState::Errored) { "LSP error".into() } else { String::new() })
+                };
+                self.set_status_snapshot(Some(status), (!label.is_empty()).then_some(label), servers);
+            }
+            EditorServerMessage::LspStatus { surface_id, state, name, binary, filetype }
+                if !self.surface.is_empty() && surface_id.as_deref().is_none_or(|id| id == self.surface) => {
+                let status = match state.as_str() {
+                    "none" => None,
+                    "connected" | "active" | "attached" | "daemon" => Some(LspStatus::Active),
+                    "missing" | "error" | "errored" | "failed" | "disabled" => Some(LspStatus::Missing),
+                    _ => Some(LspStatus::Initializing),
+                };
+                let label = name.clone().filter(|name| !name.is_empty());
+                let servers = name.into_iter().map(|name| LspServerRow { name, binary: binary.clone(), filetype: filetype.clone(), state: LspServerState::from_str(&state), ..Default::default() }).collect();
+                if status.is_none() { self.set_status_snapshot(None, None, vec![]); }
+                else { self.set_status_snapshot(status, label, servers); }
+            }
+            EditorServerMessage::LspMessage { surface_id, server, text, level }
+                if !self.surface.is_empty() && surface_id.as_deref().is_none_or(|id| id == self.surface) => {
+                if let Some(row) = self.servers.iter_mut().find(|row| row.name == server) {
+                    if row.message.as_deref() != Some(&text) || row.level.as_deref() != Some(&level) {
+                        row.message = Some(text); row.level = Some(level);
+                        self.status_revision = self.status_revision.wrapping_add(1);
+                    }
+                }
+            }
             EditorServerMessage::LspHoverResult { seq, contents, .. } => {
                 if let Some(path) = self.session.hover.as_ref().map(|h| h.path.clone()) {
                     self.session.on_hover_result(seq, &path, &[contents]);

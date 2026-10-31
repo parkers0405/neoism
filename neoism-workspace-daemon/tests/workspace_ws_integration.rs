@@ -476,6 +476,7 @@ async fn fresh_socket_never_receives_unattached_pty_backlog() {
     send_pty(
         &mut owner,
         &PtyClientMessage::CreatePty {
+            shell_args: None,
             presentation: None,
             cwd: None,
             cols: 80,
@@ -819,6 +820,7 @@ async fn pty_registry_is_shared_across_websocket_clients_with_backlog() {
     send_pty(
         &mut client_a,
         &PtyClientMessage::CreatePty {
+            shell_args: None,
             presentation: Some(neoism_protocol::pty::Presentation::Grid),
             cwd: None,
             cols: 80,

@@ -587,6 +587,11 @@ export class WorkspaceModel {
     })();
     this.directoryLoads.set(key, task); return task;
   };
+  refreshTreeDirectory = (path:string,notes=false) => {
+    const root=notes?this.state.activeWorkspace?.notes_vault_dir:this.state.activeWorkspace?.root_dir;
+    if(root)this.directoryVersions.set(root,(this.directoryVersions.get(root)||0)+1);
+    return this.listDirectory(path,undefined,notes);
+  };
   toggleDirectory = (path: string, notes = false) => {
     const expanded = new Set(notes ? this.state.notesExpanded : this.state.expanded);
     if (expanded.has(path)) expanded.delete(path);
@@ -594,7 +599,7 @@ export class WorkspaceModel {
     this.update(notes ? { notesExpanded: expanded } : { expanded });
   };
   /** A tree drop is a host-scoped rename, including for joined workspaces. */
-  moveTreePath = async (from: string, directory: string, notes = false) => {
+  moveTreePath = async (from: string, directory: string, notes = false, newName?:string) => {
     const workspace=this.state.activeWorkspace,epoch=this.epoch;
     const root=notes?workspace?.notes_vault_dir:workspace?.root_dir;
     if(!workspace||!root)return;
@@ -603,7 +608,9 @@ export class WorkspaceModel {
     from=relativePath(from);directory=relativePath(directory);
     const outside=(path:string)=>path===".."||path.startsWith("../")||paths.isAbsolute(path);
     if(!from||outside(from)||outside(directory))throw new Error("The move must stay inside this tree's root.");
-    const name=posix.basename(from),to=directory?`${directory}/${name}`:name;
+    const oldName=posix.basename(from),name=newName??oldName;
+    if(!name||name==="."||name===".."||/[\\/\0]/.test(name))throw new Error("Enter a file name without path separators");
+    const to=directory?`${directory}/${name}`:name;
     if(to===from)return;
     if(directory===from||directory.startsWith(from+"/"))throw new Error("A folder cannot be moved inside itself.");
     // Older daemons allow replacing a destination. Check the authoritative
@@ -635,9 +642,9 @@ export class WorkspaceModel {
     const directories={...(notes?source.notesDirectories:source.directories)},expanded=new Set([...(notes?source.notesExpanded:source.expanded)].map(remap));
     for(const path of Object.keys(directories))if(path===from||path.startsWith(from+"/")){const next=remap(path);directories[next]={...directories[path],path:next};delete directories[path];}
     const oldParent=posix.dirname(from)==="."?"":posix.dirname(from),old=directories[oldParent];
-    const movedEntry=old?.entries.find(entry=>entry.name===name)||{name,is_dir:Object.keys(directories).some(path=>path===to||path.startsWith(to+"/"))};
-    if(old)directories[oldParent]={...old,entries:old.entries.filter(entry=>entry.name!==name)};
-    directories[directory]={path:directory,entries:[...listing.entries,movedEntry].sort((a,b)=>Number(b.is_dir)-Number(a.is_dir)||a.name.localeCompare(b.name))};
+    const movedEntry=old?.entries.find(entry=>entry.name===oldName)||{name,is_dir:Object.keys(directories).some(path=>path===to||path.startsWith(to+"/"))};
+    if(old)directories[oldParent]={...old,entries:old.entries.filter(entry=>entry.name!==oldName)};
+    directories[directory]={path:directory,entries:[...listing.entries.filter(entry=>oldParent!==directory||entry.name!==oldName),{...movedEntry,name}].sort((a,b)=>Number(b.is_dir)-Number(a.is_dir)||a.name.localeCompare(b.name))};
     let parent=directory;while(parent){expanded.add(parent);parent=posix.dirname(parent);if(parent===".")break;}expanded.add("");
     const patch=notes?{notesDirectories:directories,notesExpanded:expanded}:{directories,expanded};
     if(current){this.update(patch);await Promise.all([...new Set([oldParent,directory,...[...expanded].filter(path=>path===to||path.startsWith(to+"/"))])].map(path=>this.listDirectory(path,epoch,notes)));}
@@ -1174,7 +1181,7 @@ export class WorkspaceModel {
             context_limit: isRecord(model.limit) && typeof model.limit.context === "number" && model.limit.context > 0 ? model.limit.context : undefined })) }));
         return { providers: Schema.decodeUnknownSync(Schema.Array(ProviderSchema))(catalog), providerCatalog: result };
       },()=>{providersReady=true;publishDefaults();}),
-      catalog(async () => ({ agents: Schema.decodeUnknownSync(Schema.Array(AgentSchema))((await sdk.catalog.agents.list(directory)).filter((a) => !a.hidden).map((a) => ({ ...a, description: a.description || "" }))) })),
+      catalog(async () => ({ agents: Schema.decodeUnknownSync(Schema.Array(AgentSchema))((await sdk.catalog.agents.list(directory)).filter((a) => !a.hidden && a.mode !== "subagent").map((a) => ({ ...a, description: a.description || "" }))) })),
       catalog(async () => ({ skills: Schema.decodeUnknownSync(Schema.Array(SkillSchema))((await sdk.catalog.skills.list(directory)).map((a) => ({ ...a, description: a.description || "" }))) })),
     ]);
     if (epoch === this.epoch) this.update({ catalogsLoading: false,agentDefaultsLoading:false });
@@ -1328,7 +1335,8 @@ export class WorkspaceModel {
     const workspace = this.state.activeWorkspace;
     if (!workspace) return;
     try {
-      const result = expectVariant(await this.run(this.client.request("Pty", { CreatePty: { cwd: workspace.root_dir ?? null, cols: 100, rows: 30,presentation:"grid" } })), "PtyCreated");
+      const result = expectVariant(await this.run(this.client.request("Pty", { CreatePty: { cwd: workspace.root_dir ?? null, cols: 100, rows: 30,presentation:"grid",
+        ...(this.config.shell?.program?{shell:this.config.shell.program}:{}),...(this.config.shell?.args!==undefined?{shell_args:this.config.shell.args}:{}) } })), "PtyCreated");
       if (!isRecord(result) || typeof result.session_id !== "string") throw new Error("Invalid terminal session");
       if(result.presentation!=="grid"){
         // Only the fresh session returned to this create request is ours to
@@ -1387,6 +1395,14 @@ export class WorkspaceModel {
     else{if(this.incomingAgentHead>=1024){this.incomingAgentEvents=this.incomingAgentEvents.slice(this.incomingAgentHead);this.incomingAgentHead=0;}this.scheduleAgentEvents();}
   }
   private agentEventListeners = new Set<(message: unknown, historyKind?: "head" | "older") => void>();
+  async mutateSidebarSession(workspaceId:string,sessionId:string,mutation:{kind:"pin";pinned:boolean}|{kind:"rename";title:string}|{kind:"delete"}) {
+    const sdk=this.agentSdk.forSession(workspaceId,sessionId);
+    let message:unknown;
+    if(mutation.kind==="pin"){await sdk.sessions.pin(sessionId,mutation.pinned);message={ThreadUpdated:{session_id:sessionId,pinned:mutation.pinned}};}
+    else if(mutation.kind==="rename"){const title=mutation.title.trim();if(!title)throw new Error("Enter a chat title");await sdk.sessions.update(sessionId,{title});message={ThreadUpdated:{session_id:sessionId,title}};}
+    else{await sdk.sessions.delete(sessionId);message={ThreadDeleted:{session_id:sessionId}};}
+    if(!this.disposed)this.receive({family:"Agent",requestId:0,message});
+  }
   private updateAgentTitle(sessionId:string,title:string){
     if(!title.trim())return;
     this.agentTitles.set(sessionId,title);
@@ -1521,6 +1537,9 @@ export class WorkspaceModel {
         this.upsertMessage(sessionId, { ...previous, id, role: "Assistant", kind, ...(tool ? { tool } : {}), text: (previous?.text || "") + body.text });
       } else if (tag === "ProviderState" && sessionId) {
         this.update({ providerStates: { ...this.state.providerStates, [sessionId]: Schema.decodeUnknownSync(ProviderStateSchema)(body) } });
+      } else if (tag === "ThreadDeleted" && sessionId) {
+        for(const surface of this.state.surfaces.filter(surface=>surface.kind==="agent"&&(surface.sessionId===sessionId||surface.agentRootSessionId===sessionId)))this.closeSurface(surface.id);
+        this.update({threads:this.state.threads.filter(thread=>thread.session_id!==sessionId)});
       } else if (tag === "ThreadUpdated" && sessionId) {
         if (typeof body.title === "string") this.updateAgentTitle(sessionId,body.title);
       } else if (tag === "SessionEvent" && body.kind === "session.updated" && isRecord(body.properties) && isRecord(body.properties.info)) {

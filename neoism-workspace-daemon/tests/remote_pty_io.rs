@@ -422,6 +422,7 @@ async fn correlated_create_is_acknowledged_only_to_requester() {
         &mut client_a,
         REQUEST_ID,
         &PtyClientMessage::CreatePty {
+            shell_args: None,
             presentation: None,
             cwd: None,
             cols: 80,
@@ -501,6 +502,7 @@ async fn multiplayer_ls_reconnect_replays_only_missing_output() {
     send_pty(
         &mut host,
         &PtyClientMessage::CreatePty {
+            shell_args: None,
             presentation: None,
             cwd: Some(directory.path().to_string_lossy().into_owned()),
             cols: 100,
@@ -653,6 +655,7 @@ async fn two_clients_share_one_live_pty_bidirectional() {
     send_pty(
         &mut client_a,
         &PtyClientMessage::CreatePty {
+            shell_args: None,
             presentation: None,
             cwd: None,
             cols: 80,

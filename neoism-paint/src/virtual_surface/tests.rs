@@ -252,6 +252,23 @@ fn markdown_adapter_builds_virtual_nodes_for_common_blocks() {
 }
 
 #[test]
+fn markdown_pipes_in_prose_and_inline_code_do_not_create_tables() {
+    let mut adapter = VirtualMarkdownAdapter::new("pipe-prose");
+    let source = "- Read paths must support `SYNAPSE_READ_MODEL=hybrid|qdrant|postgres` so local/dev/hosted reads work.\n- Plain alternatives: local | server | cloud\n\n| A | B |\n| :--- | ---: |\n| one | two |\n";
+    let mut surface = VirtualSurface::default();
+    adapter.build_replace_batch("pipes.md", source, VirtualSourceRevision(1))
+        .apply_to(&mut surface).unwrap();
+    let tables: Vec<_> = surface.nodes().iter()
+        .filter(|node| node.kind == VirtualNodeKind::Table).collect();
+    assert_eq!(tables.len(), 1, "Only a header followed by a delimiter row is a table");
+    assert_eq!(tables[0].content.as_ref().unwrap().line_start, 3);
+    assert_eq!(tables[0].content.as_ref().unwrap().line_count, 3);
+    for node in surface.nodes().iter().filter(|node| node.content.as_ref().unwrap().line_start < 2) {
+        assert_eq!(node.kind, VirtualNodeKind::MarkdownBlock);
+    }
+}
+
+#[test]
 fn markdown_adapter_preserves_notebook_cell_boundary_nodes() {
     let mut adapter = VirtualMarkdownAdapter::new("notebook-md");
     let source = "%%neoism_notebook_cell 0 markdown\n# Title\nbody\n```python neoism_notebook_cell=1 neoism_state=idle neoism_count=_\nprint(1)\n```\n";

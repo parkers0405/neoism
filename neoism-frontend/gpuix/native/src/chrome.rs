@@ -44,6 +44,7 @@ fn render(host:&mut Host,v:&Value)->Result<Value,String>{
             let mut hits=Vec::new();
             // Keep diagnostic/LSP anchors and all hit classification inside the original panel.
             for (name,pill) in [("error",neoism_ui::panels::status_line::DiagnosticPill::Error),("warn",neoism_ui::panels::status_line::DiagnosticPill::Warn)] {if let Some((x,y))=line.diagnostic_pill_anchor(pill){hits.push(json!({"kind":name,"x":x,"y":y}));}}
+            if let Some(rect)=line.lsp_pill_rect(){hits.push(json!({"kind":"lsp","x":rect.x,"y":rect.y,"width":rect.w,"height":rect.h}));}
             Ok(json!({"commands":host.paint.commands(),"height":line.scaled_height(),"animating":line.is_animating(),"anchors":hits}))
         }
     }

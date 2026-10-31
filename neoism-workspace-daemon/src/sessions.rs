@@ -283,8 +283,9 @@ impl SessionRegistry {
                 cols,
                 rows,
                 shell,
+                shell_args,
                 presentation,
-            } => match presentation { Some(mode)=>self.create_with_presentation(cwd,cols,rows,shell,subscription,mode),None=>self.create(cwd,cols,rows,shell,subscription) },
+            } => match (presentation,shell_args) { (None,None)=>self.create(cwd,cols,rows,shell,subscription), (mode,args)=>self.create_with_presentation(cwd,cols,rows,shell,subscription,mode.unwrap_or_default(),args) },
             ClientMessage::ChangeTerminalDirectory {
                 session_id,
                 directory,
@@ -364,17 +365,18 @@ impl SessionRegistry {
         explicit_shell: Option<String>,
         subscription: Option<&SessionOutputSubscription>,
     ) -> Vec<ServerMessage> {
-        self.create_with_presentation(cwd,cols,rows,explicit_shell,subscription,Presentation::Blocks)
+        self.create_with_presentation(cwd,cols,rows,explicit_shell,subscription,Presentation::Blocks,None)
     }
-    fn create_with_presentation(&self,cwd:Option<String>,cols:u16,rows:u16,explicit_shell:Option<String>,subscription:Option<&SessionOutputSubscription>,presentation:Presentation)->Vec<ServerMessage>{
-        let (shell, args) = if presentation==Presentation::Grid { match shell_for_grid(explicit_shell) { Ok(spawn)=>spawn, Err(message)=>return vec![ServerMessage::Error{message}] } }else{shell_for_create(explicit_shell)};
+    fn create_with_presentation(&self,cwd:Option<String>,cols:u16,rows:u16,explicit_shell:Option<String>,subscription:Option<&SessionOutputSubscription>,presentation:Presentation,shell_args:Option<Vec<String>>)->Vec<ServerMessage>{
+        let (shell, args, integrated) = if presentation==Presentation::Grid || shell_args.is_some() { match shell_for_grid(explicit_shell,shell_args,presentation) { Ok(spawn)=>spawn, Err(message)=>return vec![ServerMessage::Error{message}] } }else{let (shell,args)=shell_for_create(explicit_shell);(shell,args,true)};
         // Recognize only wrappers installed by this spawn, never an arbitrary
         // legacy/published PTY whose program happens to be named bash or zsh.
-        let integrated_program = match shell.as_deref().and_then(|s| Path::new(s).file_name()).and_then(|s| s.to_str()) {
+        let integrated_program = match shell.as_deref().filter(|_|integrated).and_then(|s| Path::new(s).file_name()).and_then(|s| s.to_str()) {
             Some("bash") if args.first().is_some_and(|s| s == "--rcfile") => shell.clone(),
             Some("env") if args.first().is_some_and(|s| s.starts_with("ZDOTDIR=")) => args.get(1).cloned(),
             _ => None,
         };
+        let actual_shell = integrated_program.clone().or_else(|| shell.clone());
         let executable = integrated_program.and_then(|s| {
             let program = if Path::new(&s).is_absolute() { s } else { command_in_path(&s)? };
             fs::canonicalize(program).ok()
@@ -393,7 +395,6 @@ impl SessionRegistry {
             env.push(("TERM".to_string(), "xterm-256color".to_string()));
         }
         ensure_neoism_pty_env(&mut env);
-        let actual_shell = shell.clone();
         let config = PtySessionConfig {
             shell,
             args,
@@ -636,19 +637,27 @@ fn workspace_root_label() -> String {
 
 /// Grid clients keep the configured shell's visible prompt while retaining
 /// authenticated command lifecycle/cwd integration for safe directory changes.
-fn shell_for_grid(explicit_shell:Option<String>)->Result<(Option<String>,Vec<String>),String>{
+fn shell_for_grid(explicit_shell:Option<String>,shell_args:Option<Vec<String>>,presentation:Presentation)->Result<(Option<String>,Vec<String>,bool),String>{
     #[cfg(windows)]
     let requested=explicit_shell.unwrap_or_else(default_windows_shell);
     #[cfg(not(windows))]
     let requested=explicit_shell.or_else(||std::env::var("SHELL").ok().filter(|s|!s.is_empty())).or_else(preferred_zsh).or_else(preferred_bash).unwrap_or_else(||"/bin/sh".into());
     let name=Path::new(&requested).file_name().and_then(|name|name.to_str()).unwrap_or("").to_ascii_lowercase();
     #[cfg(not(windows))]
-    if matches!(name.as_str(),"bash"|"zsh") {
-        let spawn=if name=="bash" { integrated_bash_for_spawn(&requested,Presentation::Grid) }else{ integrated_zsh_for_spawn(&requested,Presentation::Grid) };
-        return spawn.map(|(program,args)|(Some(program),args)).ok_or_else(||format!("failed to install visible-prompt shell integration for {requested}"));
+    if matches!(name.as_str(),"bash"|"zsh") && shell_args.as_ref().is_none_or(|args| args.iter().all(|arg| {
+        matches!(arg.as_str(),"-i"|"--interactive") || name=="zsh" && matches!(arg.as_str(),"-l"|"--login"|"-il"|"-li")
+    })) {
+        // Bash login/command options bypass --rcfile. Preserve those argv
+        // verbatim instead of claiming to have installed an inactive hook.
+        let spawn=if name=="bash" { integrated_bash_for_spawn(&requested,presentation) }else{ integrated_zsh_for_spawn(&requested,presentation) };
+        return spawn.map(|(program,mut args)| {
+            if let Some(configured)=shell_args { args.pop();args.extend(configured);args.push("-i".into()); }
+            (Some(program),args,true)
+        }).ok_or_else(||format!("failed to install shell integration for {requested}"));
     }
-    let args=neoism_terminal_pty::shell_integration::powershell_args(&requested,&[]).unwrap_or_else(|| match name.as_str(){"sh"|"fish"=>vec!["-i".into()],_=>vec![]});
-    Ok((Some(requested),args))
+    let configured=shell_args.unwrap_or_else(||match name.as_str(){"sh"|"fish"=>vec!["-i".into()],_=>vec![]});
+    let args=neoism_terminal_pty::shell_integration::powershell_args(&requested,&configured).unwrap_or(configured);
+    Ok((Some(requested),args,false))
 }
 
 fn shell_for_create(explicit_shell: Option<String>) -> (Option<String>, Vec<String>) {
@@ -847,6 +856,9 @@ fn integrated_zsh_for_spawn(shell: &str,presentation:Presentation) -> Option<(St
         // zsh reads the user's .zshenv before .zshrc. Restore the wrapper
         // location only until our .zshrc has loaded, then restore their ZDOTDIR.
         fs::write(zsh_rc_dir.join(".zshenv"),format!("ZDOTDIR={}\nif [ -r \"$ZDOTDIR/.zshenv\" ]; then source \"$ZDOTDIR/.zshenv\"; fi\n__neoism_user_zdotdir=$ZDOTDIR\nZDOTDIR={}\n",quote(&original),quote(&zsh_rc_dir))).ok()?;
+        // Login zsh reads .zprofile before .zshrc, while ZDOTDIR still
+        // points at our wrapper. Forward it, retaining any user ZDOTDIR change.
+        fs::write(zsh_rc_dir.join(".zprofile"),format!("ZDOTDIR=$__neoism_user_zdotdir\nif [ -r \"$ZDOTDIR/.zprofile\" ]; then source \"$ZDOTDIR/.zprofile\"; fi\n__neoism_user_zdotdir=$ZDOTDIR\nZDOTDIR={}\n",quote(&zsh_rc_dir))).ok()?;
         grid_zsh_script(&zsh_rc_dir)
     }else{block_zsh_script(&zsh_rc_dir)};
     fs::write(&zsh_rc, script).ok()?;
@@ -1067,6 +1079,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configured_shell_arguments_preserve_command_argv() {
+        let configured=vec!["-c".to_owned(),"printf '%s' \"$1\"".to_owned(),"neoism-test".to_owned(),"literal $HOME; argument with spaces".to_owned()];
+        let (program,args,integrated)=shell_for_grid(Some("/bin/sh".into()),Some(configured.clone()),Presentation::Grid).unwrap();
+        assert!(!integrated);
+        assert_eq!(program.as_deref(),Some("/bin/sh"));
+        assert_eq!(args,configured);
+        #[cfg(not(windows))]
+        {
+            let output=std::process::Command::new(program.unwrap()).args(args).output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout),"literal $HOME; argument with spaces");
+        }
+    }
+
+    #[test]
+    fn configured_startup_options_are_not_mistaken_for_installed_integration() {
+        for (program,configured) in [
+            ("/bin/bash",vec!["--login"]),
+            ("/bin/bash",vec!["--rcfile","/user/shellrc","-i"]),
+            ("env",vec!["ZDOTDIR=/user/config","/bin/zsh","-i"]),
+        ] {
+            let configured:Vec<String>=configured.into_iter().map(str::to_owned).collect();
+            let (actual,args,integrated)=shell_for_grid(Some(program.into()),Some(configured.clone()),Presentation::Grid).unwrap();
+            assert_eq!(actual.as_deref(),Some(program));
+            assert_eq!(args,configured);
+            assert!(!integrated);
+        }
+    }
+
+    #[test]
     fn grid_wrappers_preserve_visible_prompts_and_authenticated_lifecycle() {
         let bash=grid_bash_script();
         let zsh=grid_zsh_script(&PathBuf::from("/tmp/neoism-grid-zsh-test"));
@@ -1203,6 +1245,7 @@ neoism cd - >/dev/null
         // so this test needs a tokio runtime.
         let reg = SessionRegistry::new_for_test();
         let created = reg.handle(ClientMessage::CreatePty {
+            shell_args: None,
             presentation: None,
             cwd: None,
             cols: 80,

@@ -37,6 +37,32 @@ fn standalone_server_services_inject_the_local_mcp_store() {
 
 struct FakeBuiltinMcp;
 
+#[tokio::test]
+async fn configured_mcp_servers_are_disconnected_until_started_not_failed() {
+    let root = temp_dir("mcp-disconnected");
+    let store = McpAuthStore::new(root.join("mcp-auth.json"));
+    for config in [
+        json!({"type":"local","command":["unused-mcp-command"]}),
+        json!({"type":"remote","url":"https://example.invalid/mcp","oauth":false}),
+    ] {
+        let config: McpConfig = serde_json::from_value(config).unwrap();
+        assert_eq!(status_for_entry("idle", &config, &store).await, McpStatus::Disconnected);
+    }
+    let disabled = serde_json::from_value(json!({"type":"local","command":["unused"],"enabled":false})).unwrap();
+    assert_eq!(status_for_entry("disabled", &disabled, &store).await, McpStatus::Disabled);
+    let missing = serde_json::from_value(json!({"type":"local","command":[]})).unwrap();
+    assert!(matches!(status_for_entry("missing", &missing, &store).await, McpStatus::Failed { .. }));
+    let oauth = serde_json::from_value(json!({"type":"remote","url":"https://example.invalid/mcp","oauth":true})).unwrap();
+    assert_eq!(status_for_entry("oauth", &oauth, &store).await, McpStatus::NeedsAuth);
+    store.set_for_url("oauth", "https://example.invalid/mcp", crate::mcp_auth::McpAuthEntry {
+        tokens: Some(McpAuthTokens { access_token: "fixture-token".into(), refresh_token: None, expires_at: None }),
+        ..Default::default()
+    }).await.unwrap();
+    assert_eq!(status_for_entry("oauth", &oauth, &store).await, McpStatus::Disconnected);
+    assert_eq!(serde_json::to_value(McpStatus::Disconnected).unwrap(), json!({"status":"disconnected"}));
+    fs::remove_dir_all(root).unwrap();
+}
+
 impl neoism_agent_service_api::BuiltinMcpService for FakeBuiltinMcp {
     fn id(&self) -> &str {
         "fake-service"

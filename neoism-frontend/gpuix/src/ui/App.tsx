@@ -1,3 +1,5 @@
+import {SidebarContext,type SidebarContextSpec} from "./SidebarContext";
+import {treeContextItems,treeContextCurrent,performTreeContext,type TreeContextTarget} from "./tree-context-actions";
 import type {WorkspaceNavigation} from "../workspaces/window-sessions";
 import{ToastNotifications}from"./ToastNotifications";
 import {cachedGitStatus,watchGitStatus,type GitStatusSnapshot} from "../daemon/git-status";
@@ -37,6 +39,7 @@ import { AgentSidePanelView } from "../agent/AgentSidePanelView";
 import { DirectoryBrowserView } from "../agent/DirectoryBrowserView";
 import { ConversationNavigatorView, type NavigatorRow } from "../agent/ConversationNavigatorView";
 import {AgentChipLabel} from "../agent/AgentChipLabel";
+import {AgentStars} from "../agent/AgentStars";
 import {ComposerCaret} from "../agent/ComposerCaret";
 import { NativeComposer, type ComposerFrame } from "../agent/NativeComposer";
 import { SlashController, type SlashPickerRequest } from "../agent/SlashController";
@@ -45,6 +48,7 @@ import { FinderController } from "../finder/FinderController";
 import { FinderView } from "../finder/FinderView";
 import { CommandController, type CommandTarget } from "../commands/CommandController";
 import { CommandView } from "../commands/CommandView";
+import {cssColor} from "./canvas";
 import { KeyboardBindings, paletteActionForBinding } from "../commands/KeyboardBindings";
 import {handleApplicationShortcut,registerApplicationShortcuts} from "../commands/application-shortcuts";
 import { readClipboard, writeClipboard } from "../clipboard";
@@ -569,7 +573,23 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     if(chromeFocus().zone!=="content"||projectPicker()||directoryBrowser()||gitRestore()||menu()||surface?.kind!=="agent"||!surface.sessionId||!mods?.ctrl||mods.alt||mods.shift||mods.cmd||!["d","u"].includes(key||"")||chromeFrame()||commands()||palette()||choice()||pendingPermission()||pendingQuestion())return false;
     event.preventDefault();event.stopPropagation();scrollAgentHalfPage(model,surface.sessionId,config,key==="u");return true;
   };
-  const handleSurfaceKey = (event: KeyEvent) => { try { return handleApplicationShortcut(renderer,event) || handleAgentHistoryKey(event) || handleCustomKey(event) || handleApplicationKey(event); } catch (error) { model.report(error); return true; } };
+  const handleCommandHandoffKey = (event: KeyEvent) => {
+    const controller=commands();if(!controller)return false;
+    // Native focus changes asynchronously. Keys already queued for the previous
+    // surface belong to the newly opened palette. Its own input stops bubbling,
+    // so normal input editing/IME continues to be handled by the native control.
+    event.preventDefault();event.stopPropagation();
+    const key=event.key?.toLowerCase(),mods=event.modifiers;
+    if(key==="escape")closeCommands();
+    else if(key==="enter"){const target=controller.target();if(target){closeCommands();dispatchCommand(target);}}
+    else if(key==="up"||key==="down")controller.move(key==="up"?-1:1);
+    else if(!mods?.ctrl&&!mods?.cmd&&!mods?.alt){
+      if(key==="backspace")controller.query(Array.from(controller.frame.query).slice(0,-1).join(""));
+      else {const character=event.keyChar||(key==="space"?" ":key?.length===1?key:"");if(character)controller.query(controller.frame.query+character);}
+    }
+    return true;
+  };
+  const handleSurfaceKey = (event: KeyEvent) => { try { return handleApplicationShortcut(renderer,event) || handleCommandHandoffKey(event) || handleAgentHistoryKey(event) || handleCustomKey(event) || handleApplicationKey(event); } catch (error) { model.report(error); return true; } };
   onCleanup(registerApplicationShortcuts(renderer,(action,event)=>{
     if(action==="zoom-in"||action==="zoom-out"){
       if(chromeFrame()?.kind==="settings")model.setUI({chromeAction:"OpenSettings",chromeSnapshot:chromeFrame()?.snapshot});
@@ -760,7 +780,29 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       focusChrome({zone:source.dir?"sidebar":"content"});
       if(outcome.kind==="move"&&outcome.source&&outcome.directory!==undefined)void model.moveTreePath(outcome.source,outcome.directory,!!props.notes).catch(model.report);
     };
+    const [context,setContext]=createSignal<SidebarContextSpec>();
+    createEffect(()=>{scope();setContext(undefined);});
+    const contextPress=(event:EventPayload)=>{
+      if(event.button!==2){focusChrome({zone:"sidebar"});return;}
+      cancelDrag();pressed=false;focusChrome({zone:"sidebar"});
+      const base=root(),workspaceId=activeWorkspaceId(),bounds=host&&(paintedChromeBounds(renderer,host.id)||chromeBounds.get(host.id));if(!base||!workspaceId||!bounds)return;
+      const index=Math.floor(((event.y||0)-bounds.y-view().offset)/(d.treeRowHeight*s))+view().top;
+      const entry=rows()[index];if(entry)update("select",{index});
+      const target:TreeContextTarget={workspaceId,root:base,notes:!!props.notes,path:entry?.path,directory:entry?.dir?entry.path:entry?.path.split("/").slice(0,-1).join("/")||""};
+      const perform=(action:string,value?:string)=>void performTreeContext(model,target,action,value).then(()=>{if(action==="new-file"&&treeContextCurrent(model,target))focusChrome({zone:"content"});}).catch(model.report);
+      setContext({title:entry?.path||base,x:event.x,y:event.y,items:treeContextItems(entry?.path,showHidden()),onSelect:action=>{
+        if(!treeContextCurrent(model,target))return;
+        if(action==="open"){if(entry)open(entry);}
+        else if(action==="hidden"){viewport().showHidden=!showHidden();setHiddenRevision(value=>value+1);}
+        else if(action==="rename"||action==="new-file"||action==="new-folder"){
+          const title=action==="rename"?"Rename":action==="new-file"?"New File":"New Folder";
+          setContext({kind:"form",title,body:action==="rename"?`Rename “${entry!.path}”.`:`Create in ${target.directory||base}`,input:action==="rename"?entry!.name:"",placeholder:"name",accept:action==="rename"?"Rename":"Create",onSelect:(_,value)=>perform(action,value)});
+        }else if(action==="delete")setContext({kind:"form",title:"Delete?",body:`Delete “${entry!.path}”${entry!.dir?" and its contents":""}?`,meta:"This cannot be undone.",accept:"Delete",onSelect:()=>perform(action)});
+        else perform(action);
+      }});
+    };
     const pressRow=(entry:TreeEntry,index:number,event:EventPayload)=>{
+      if(event.button===2){contextPress(event);return;}
       if(event.button!==undefined&&event.button!==0)return;
       cancelDrag();pressed=true;update("select",{index});focusChrome({zone:"sidebar"});
       // Deleted Git ghosts are visible, but have no physical item to move.
@@ -796,7 +838,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     createEffect(()=>{view();rows();if(focused()&&chromeFocus().zone==="sidebar")publishTarget();});
     onCleanup(()=>{sidebarHosts.delete(sidebarKey);sidebarTargets.delete(sidebarKey);});
     function keyEscapeDrag(event:KeyEvent){if(event.key!=="escape"||!armed)return false;event.preventDefault();event.stopPropagation();const source=armed.entry;cancelDrag();focusChrome({zone:source.dir?"sidebar":"content"});return true;}
-    return <motion.div initial={config.reducedMotion||!opening?false:{left:-6*s}} animate={{left:0}} transition={{duration:config.reducedMotion?0:.12,ease:easeOutCubicBezier}} ref={element=>{host=element;sidebarHosts.set(props.notes?"notes":"files",element);}} tabIndex={0} onKeyDown={keyDown} onMouseUp={finishDrag} onMouseLeave={event=>{if(armed&&!drag()?.live){moveDrag(event);driveDrag();}}} onMouseDown={()=>focusChrome({zone:"sidebar"})} onFocus={() => {invalidateNativeFocus(renderer);setFocused(true);if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});publishTarget();}}} onBlur={() => {invalidateNativeFocus(renderer);setFocused(false);}}
+    return <motion.div initial={config.reducedMotion||!opening?false:{left:-6*s}} animate={{left:0}} transition={{duration:config.reducedMotion?0:.12,ease:easeOutCubicBezier}} ref={element=>{host=element;sidebarHosts.set(props.notes?"notes":"files",element);}} tabIndex={0} onKeyDown={keyDown} onMouseUp={finishDrag} onMouseLeave={event=>{if(armed&&!drag()?.live){moveDrag(event);driveDrag();}}} onMouseDown={contextPress} onFocus={() => {invalidateNativeFocus(renderer);setFocused(true);if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});publishTarget();}}} onBlur={() => {invalidateNativeFocus(renderer);setFocused(false);}}
       onLayout={(event) => {measuredHeight=event.height||0;if(viewport().height!==measuredHeight){viewport().height=measuredHeight;setHeightRevision(value=>value+1);}updateChromeBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:measuredHeight});}}
       onScroll={scrollTree}
       data-tree-id={id()} style={{ ...column, flexGrow: 1, position: "relative", overflow: "hidden" }} role="tree" aria-label={props.notes ? "Notes" : "Files"} testId={props.notes ? "notes-tree" : "file-tree"}>
@@ -814,7 +856,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         const git=()=>gitDecorations().get(entry.path);
         const glyphKey=JSON.stringify([state().activeWorkspace?.id,!!props.notes,root(),entry.path]);
         return <div data-reveal-opacity={1} data-reveal-start={entry.revealStart} role="treeitem" aria-label={entry.name} aria-description={git()?`Git ${git()!.status}: ${git()!.marker}`:undefined} aria-expanded={entry.dir ? expanded().has(entry.path) : undefined} aria-selected={selected()}
-          testId={`${props.notes ? "note" : "file"}:${entry.path}`} onMouseDown={event=>pressRow(entry,index(),event)} onMouseMove={moveDrag} onMouseUp={finishDrag} onClick={() => { if(pressed){pressed=false;return;}update("select", { index: index() });focusChrome({zone:"sidebar"});open(entry); }}
+          testId={`${props.notes ? "note" : "file"}:${entry.path}`} onMouseDown={event=>pressRow(entry,index(),event)} onMouseMove={moveDrag} onMouseUp={finishDrag} onClick={event => { if(event.button!==undefined&&event.button!==0)return;if(pressed){pressed=false;return;}update("select", { index: index() });focusChrome({zone:"sidebar"});open(entry); }}
           style={{ ...row, position: "absolute", left: 0, right: 0, top: index() * d.treeRowHeight * s, height: d.treeRowHeight * s, flexShrink: 0, paddingLeft: (d.treePadding + entry.depth * d.treeIndent) * s,
             paddingRight: 8 * s, gap: 8 * s, cursor: "pointer",opacity:drag()?.live&&drag()?.source===index()? .35:1,backgroundColor:drag()?.live&&drag()?.target===index()?c.accent+"38":selected()?c.surface:undefined,
             hover: { backgroundColor: c.hover }, focusVisible: { outlineColor: c.accent, outlineWidth: 1 } }}>
@@ -831,6 +873,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
           <TreeRowGlyphs host={glyphs} config={config} initialWidth={Math.min(260,40+entry().name.length*8)*s} name={entry().name} chevron={entry().dir?(expanded().has(entry().path)?"\uf078":"\uf054"):""} icon={entry().dir?(expanded().has(entry().path)?"\uf07c":"\uf07b"):fileIcon(entry().name).glyph} iconColor={entry().dir?c.folder:fileIcon(entry().name).color} labelColor={c.fg} chevronColor={c.muted}/>
         </div>}</Show>
       </anchored></Show>
+      <Show when={context()} keyed>{spec=><SidebarContext config={config} spec={spec} onClose={()=>setContext(undefined)}/>}</Show>
       <Show when={!rows().length}><Show when={state().loading||!!root()&&!directories()[""]&&!state().error} fallback={<div style={{ padding: 16 * s }}><Label color={c.muted}>{props.notes ? root() ? "No notes" : "No notes vault linked" : "No files"}</Label></div>}><LoadingSkeleton config={config} kind="tree" immediate initialSize={{width:Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-d.frameStroke*s),height:height()}} /></Show></Show>
     </motion.div>;
   }
@@ -983,6 +1026,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         <div ref={element=>{shell=element;composerShells.set(key(),element);}} onFileDrop={event=>{if(event.paths?.length)void attachPaths(event.paths);}}
           onLayout={event=>{anchor=[event.x||0,event.y||0,event.width||0,event.height||0];setComposerAnchors(current=>current[key()]?.every((n,i)=>n===anchor[i])?current:{...current,[key()]:anchor});}}
           testId="agent-input-card" style={{...absolute(frame()?.cardRect),backgroundColor:frame()?.cardColor?rgba(frame()!.cardColor):c.bg,borderColor:c.border+"bf",borderWidth:Math.max(1,d.frameStroke*.5*s),borderRadius:frame()?.cardRadius}}>
+          <Show when={config.agentStars!==false}><AgentStars config={config} composerId={native.id} width={frame()?.cardRect[2]||0} height={frame()?.cardRect[3]||0} radius={frame()?.cardRadius||0}/></Show>
           <Show when={attachments().length}><div style={{...row,position:"absolute",left:18*s,right:18*s,top:(props.home?15:11)*s,height:82*s,gap:6*s,overflow:"hidden"}}><For each={attachments()}>{attachment=><div style={{...row,gap:6*s,padding:5*s,backgroundColor:c.surface,borderRadius:5*s}}><Label size={11}>{attachment.name}</Label><div role="button" aria-label={`Remove ${attachment.name}`} onClick={()=>removeAttachment(attachment.token)}><Label size={11} color={c.muted}>×</Label></div></div>}</For></div></Show>
           <textarea ref={element=>{input=element;composerInputs.set(key(),element);}} testId="composer" aria-label="Message" value={draft()} placeholder="Ask anything" minRows={1} maxRows={5} theme={{...nativeTheme,caret:"#00000000"}}
             onChange={event=>{setDraft(event.value||"");setSlashDismissed(false);}} onSubmit={()=>{if(slashOpen()&&!slashOptions().some(row=>row.value===draft())&&slashOptions().some(row=>row.value.startsWith(draft()))){slashAccept?.();return;}void submit();}}
@@ -1064,6 +1108,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   function Conversation(props: { surfaceId: string;initialViewport:{width:number;height:number} }) { const surface=()=>state().surfaces.find(surface=>surface.id===props.surfaceId);return <AgentSurface surfaceId={props.surfaceId} sessionId={surface()?.sessionId} initialViewport={props.initialViewport}/>; }
 
   function DetailRail() {
+    // Fixed ink geometry avoids font bearings/baselines moving the checkmark.
+    const checkmark=JSON.stringify([{k:"p",c:cssColor(c.green),p:[[3,7,5,9,11,2,12,3,5,12,2,8].map(n=>n*s)]}]);
     const session = () => active()?.sessionId || "";
     const usage = createMemo(() => contextUsage(state().history[session()]||[],state().usage[session()]));
     const todos = createMemo(() => sessionTodos(state().history[session()]||[],state().todos[session()]));
@@ -1111,7 +1157,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         <PixelHeading>Tasks</PixelHeading>
         <For each={todos()}>{(todo) => <div style={{ ...row, alignItems: "flex-start", position: "relative", height: 46 * s, flexShrink: 0, paddingLeft: 46 * s, paddingTop: 2 * s }}>
           <div style={{ position: "absolute", left: 16 * s, top: s, width: 16 * s, height: 16 * s, borderWidth: s, borderColor: c.muted, pointerEvents: "none" }}>
-            <Show when={todo.status === "completed"}><text style={{ ...text(12, c.green), pointerEvents: "none" }}>✓</text></Show>
+            <Show when={todo.status === "completed"}><canvas testId="task-checkmark" commands={checkmark} style={{position:"absolute",left:0,top:0,width:14*s,height:14*s,pointerEvents:"none"}}/></Show>
             <Show when={todo.status === "in_progress"}><div style={{ width: 6 * s, height: 6 * s, borderRadius: 3 * s, backgroundColor: c.yellow, margin: 4 * s }} /></Show>
           </div>
           <text style={{ ...text(14, todo.status === "in_progress" ? c.yellow : c.fg), whiteSpace: "normal", lineClamp: 2, lineHeight: 15 * s, flexGrow: 1 }}>{todo.content}</text>

@@ -34,6 +34,7 @@ mod command_catalog;
 mod chrome;
 mod notifications;
 mod diagnostic_popup;
+mod lsp_popup;
 mod presence;
 mod keyboard_policy;
 mod tree_glyphs;
@@ -174,6 +175,8 @@ impl Editor {
         let mut lines = Vec::new();
         let mut search_hits = Vec::new();
         self.raster.begin_frame();
+        let mut styled_line = None;
+        let mut spans = Vec::new();
         for visual in first..(first + fits.ceil() as usize + 2).min(view.total_rows) {
             let Some(VisualRow::Source { line, segment }) = view.wrap.row_kind(visual)
             else {
@@ -193,11 +196,11 @@ impl Editor {
                         continue;
                     }
                     let x = seg.visual_indent
-                        + layout::display_col_for_byte(source, lo, TAB_DISPLAY_WIDTH)
+                        + seg.source_col_for_byte(source, lo, TAB_DISPLAY_WIDTH)
                             .saturating_sub(seg.source_col);
                     let width =
-                        layout::display_col_for_byte(source, hi, TAB_DISPLAY_WIDTH)
-                            - layout::display_col_for_byte(source, lo, TAB_DISPLAY_WIDTH);
+                        seg.source_col_for_byte(source, hi, TAB_DISPLAY_WIDTH)
+                            - seg.source_col_for_byte(source, lo, TAB_DISPLAY_WIDTH);
                     search_hits.push(json!({"x":text_x+x as f32*cell-pane.scroll_x,"y":visual as f32*row-pane.scroll_y,"width":width as f32*cell}));
                 }
             }
@@ -217,34 +220,38 @@ impl Editor {
                     let hi = anchor.col.max(extra.col).min(seg.byte_end);
                     if lo < hi {
                         let start = seg.visual_indent
-                            + layout::display_col_for_byte(source, lo, TAB_DISPLAY_WIDTH)
+                            + seg.source_col_for_byte(source, lo, TAB_DISPLAY_WIDTH)
                                 .saturating_sub(seg.source_col);
                         let width =
-                            layout::display_col_for_byte(source, hi, TAB_DISPLAY_WIDTH)
-                                - layout::display_col_for_byte(
-                                    source,
-                                    lo,
-                                    TAB_DISPLAY_WIDTH,
-                                );
+                            seg.source_col_for_byte(source, hi, TAB_DISPLAY_WIDTH)
+                                - seg.source_col_for_byte(source, lo, TAB_DISPLAY_WIDTH);
                         search_hits.push(json!({"x":text_x+start as f32*cell-pane.scroll_x,"y":visual as f32*row-pane.scroll_y,"width":width as f32*cell,"selection":true}));
                     }
                 }
             }
-            let spans = neoism_ui::editor::code::styled_runs_with_syntax(
-                source,
-                pane.highlight.line_runs(line),
-                pane.language,
-                selected,
-                pane.diagnostics.get(&line).map_or(&[][..], Vec::as_slice),
-                &[],
-            );
+            // A logical line can occupy the entire viewport. Merge its syntax,
+            // selection and diagnostics once, then visit only this row's spans.
+            if styled_line != Some(line) {
+                spans = neoism_ui::editor::code::styled_runs_with_syntax(
+                    source,
+                    pane.highlight.line_runs(line),
+                    pane.language,
+                    selected,
+                    pane.diagnostics.get(&line).map_or(&[][..], Vec::as_slice),
+                    &[],
+                );
+                styled_line = Some(line);
+            }
             let mut glyph_runs = Vec::new();
-            let runs: Vec<Value> = spans.into_iter().filter_map(|span| {
+            let start = spans.partition_point(|span| span.end <= seg.byte_start);
+            let runs: Vec<Value> = spans[start..].iter().take_while(|span| span.start < seg.byte_end).filter_map(|span| {
                 let lo = span.start.max(seg.byte_start); let hi = span.end.min(seg.byte_end);
                 if lo >= hi { return None }
-                let col = seg.visual_indent + layout::display_col_for_byte(source, lo, TAB_DISPLAY_WIDTH).saturating_sub(seg.source_col);
-                let text=layout::expand_tabs_from(&source[lo..hi],layout::display_col_for_byte(source,lo,TAB_DISPLAY_WIDTH),TAB_DISPLAY_WIDTH);
-                let width=(layout::display_col_for_byte(source,hi,TAB_DISPLAY_WIDTH)-layout::display_col_for_byte(source,lo,TAB_DISPLAY_WIDTH)) as f32*cell;
+                let start_col = seg.source_col_for_byte(source, lo, TAB_DISPLAY_WIDTH);
+                let end_col = seg.source_col_for_byte(source, hi, TAB_DISPLAY_WIDTH);
+                let col = seg.visual_indent + start_col.saturating_sub(seg.source_col);
+                let text=layout::expand_tabs_from(&source[lo..hi],start_col,TAB_DISPLAY_WIDTH);
+                let width=(end_col-start_col) as f32*cell;
                 let glyph_x=text_x+col as f32*cell;
                 let x=glyph_x-pane.scroll_x;
                 let token=format!("{:?}",span.token);
@@ -619,6 +626,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
     if let Some(result) = ssh_transport::dispatch(&v) { return result; }
     if let Some(result) = presence::dispatch(&v) { return result; }
     if let Some(result) = diagnostic_popup::dispatch(&v,engines) { return result; }
+    if let Some(result) = lsp_popup::dispatch(&v,engines) { return result; }
     if let Some(result) = notifications::dispatch(&v) { return result; }
     if let Some(result) = chrome::dispatch(&v) { return result; }
     if let Some(result) = keyboard_policy::dispatch(&v) { return result; }

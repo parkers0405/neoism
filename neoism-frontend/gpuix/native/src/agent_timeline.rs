@@ -727,6 +727,15 @@ fn panel_pointer(panel: &mut Panel, v: &Value) -> Value {
         panel.mouse = None;
         return Value::Null;
     }
+    if text(v, "kind") == "context" {
+        let side=panel.pane.side_panel_mut();
+        let entry=side.last_panel_rect().and_then(|rect|side.hit_test_row(x,y,rect)).and_then(|row|{
+            let entry=side.sessions().get(row)?;
+            (!entry.is_header&&!entry.is_excerpt&&entry.branch_root_id.is_none()&&entry.external_preview.is_none()&&!entry.id.starts_with("external:")).then_some((row,entry.clone()))
+        });
+        if let Some((row,entry))=entry {side.set_focused(true);side.set_selected(row);return json!({"context":{"id":entry.id,"title":entry.title,"pinned":entry.pinned,"directory":entry.directory}});}
+        return Value::Null;
+    }
     if text(v, "kind") != "down" {
         return Value::Null;
     }

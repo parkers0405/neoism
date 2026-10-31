@@ -6,9 +6,9 @@ import { createAgentDaemon } from "./support/agent-daemon";
 import { absoluteTerminalDirectory,followsTerminalDirectory,terminalDirectoryFollowsWorkspace } from "../src/terminal/workspace";
 
 async function until(predicate:()=>boolean){const deadline=Date.now()+2500;while(!predicate()){if(Date.now()>deadline)throw new Error("Terminal workspace did not converge");await Bun.sleep(5);}}
-async function fixture(options:Parameters<typeof createAgentDaemon>[0]={},createTerminal=true){
+async function fixture(options:Parameters<typeof createAgentDaemon>[0]={},createTerminal=true,values?:Record<string,unknown>){
  const daemon=createAgentDaemon(options);daemon.threads.splice(0);
- const config={...loadConfig(["--config","/nonexistent/terminal-workspace-test"],{}),endpoint:daemon.endpoint,authToken:undefined};
+ const config={...loadConfig(["--config","/nonexistent/terminal-workspace-test"],{},values),endpoint:daemon.endpoint,authToken:undefined};
  const client=new DaemonConnection(config),model=new WorkspaceModel(client,config);model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);
  // Welcome is UI-only. Terminal-specific tests explicitly request their PTY.
  expect(daemon.ptyRequests.filter(request=>request.tag==="CreatePty")).toHaveLength(0);
@@ -111,4 +111,15 @@ test("SSH tunnel identity permits private home cwd follow without treating other
  expect(terminalDirectoryFollowsWorkspace(remote,{endpoint:tunnel.endpoint,serverId:"joined",remote:true})).toBe(false);
  expect(terminalDirectoryFollowsWorkspace(remote,{endpoint:tunnel.endpoint,serverId:"local"})).toBe(true);
  expect(terminalDirectoryFollowsWorkspace({...quick,host_kind:"tailscale"},tunnel)).toBe(false);
+});
+
+test("new terminals forward configured shell and arguments; defaults remain host selected",async()=>{
+ for(const shell of [undefined,{program:"/custom path/zsh",args:["--login"]},{program:"pwsh.exe",args:["-NoLogo"]},{program:"/bin/fish",args:[]}]){
+  const {daemon,model,close}=await fixture({},false,{terminal:{shell}});
+  try{
+   await model.newTerminal();const request=daemon.ptyRequests.find(row=>row.tag==="CreatePty")!.body;
+   expect(request.shell).toBe(shell?.program);expect(request.shell_args).toEqual(shell?.args);
+   expect(request).toMatchObject({cwd:"/project/a",presentation:"grid"});
+  }finally{close();}
+ }
 });

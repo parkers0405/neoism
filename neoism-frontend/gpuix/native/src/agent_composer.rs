@@ -32,6 +32,13 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
    if op=="agentcomposer.dispose"{hosts.remove(&id);return Ok(Value::Null);}
    let host=hosts.get_mut(&id).ok_or("Unknown Agent composer")?;
    let scale=n(v,"scale",1.0).clamp(0.5,3.0);let width=n(v,"width",800.0).max(0.0);let height=n(v,"height",600.0).max(0.0);let theme=IdeTheme::by_name(v["theme"].as_str().unwrap_or("pastel_dark"));
+   if op=="agentcomposer.stars-frame"{
+    host.effects.begin_frame();
+    let enabled=v["enabled"].as_bool().unwrap_or(true)&&width>0.0&&height>0.0;
+    let reduced=v["reducedMotion"].as_bool().unwrap_or(false);
+    if enabled{neoism_ui::primitives::surface_background::render_agent_stars(&mut host.effects,[0.0,0.0,width,height],n(v,"radius",16.0*scale),scale,if reduced{0.0}else{n(v,"seconds",0.0)},theme.f32(theme.fg));}
+    return Ok(json!({"commands":host.effects.commands(),"animating":enabled&&!reduced}));
+   }
    if op=="agentcomposer.chips-layout"{
     return serde_json::to_value(user_input::host_chips::layout(&mut host.paint,width,height,scale,text(v,"agent"),text(v,"model"),text(v,"thinking"))).map_err(|error|error.to_string());
    }

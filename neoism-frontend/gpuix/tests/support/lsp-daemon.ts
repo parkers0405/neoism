@@ -1,4 +1,6 @@
+import type {ServerWebSocket} from "bun";
 export function createLspDaemon() {
+  const sockets=new Set<ServerWebSocket<unknown>>();
   const root = "/project/lsp", path = `${root}/main.ts`;
   const workspace = { id: "lsp", host_id: "host", title: "LSP", root_dir: root };
   const requests: Array<{ tag: string; body: Record<string, any> }> = [], writes: string[] = [];
@@ -8,10 +10,12 @@ export function createLspDaemon() {
       const url = new URL(request.url);
       if (url.pathname === "/session") return server.upgrade(request) ? undefined : new Response("", { status: 400 });
       if (url.pathname.endsWith("providers/configured")) return Response.json({ providers: [], default: {} });
+      if (url.pathname.endsWith("config/defaults")) return Response.json({});
       if (url.pathname.endsWith("agents") || url.pathname.endsWith("skills")) return Response.json([]);
       return new Response("Not found", { status: 404 });
     },
-    websocket: { message(socket, data) {
+    websocket: { close(socket){sockets.delete(socket);}, message(socket, data) {
+      sockets.add(socket);
       const [family, envelope] = Object.entries(JSON.parse(String(data)))[0] as [string, { request_id: number; message: any }];
       const tag = typeof envelope.message === "string" ? envelope.message : Object.keys(envelope.message)[0];
       const body = typeof envelope.message === "string" ? {} : envelope.message[tag];
@@ -44,5 +48,7 @@ export function createLspDaemon() {
       if (tag === "ApplyLspCodeActionAt") scoped({ LspQueryResult: { seq: body.seq, action: "code_actions", root, title: "Apply fix", edits: [{ path, edits: [{ start_line: 0, start_col: 0, end_line: 0, end_col: 4, new_text: "FIXD" }] }] } });
     } },
   });
-  return { endpoint: `ws://127.0.0.1:${server.port}/session`, root, path, requests, writes, stop: () => server.stop(true) };
+  return { endpoint: `ws://127.0.0.1:${server.port}/session`, root, path, requests, writes,
+    push:(message:unknown)=>{for(const socket of sockets)socket.send(JSON.stringify({EditorReply:{request_id:0,message}}));},
+    stop: () => server.stop(true) };
 }

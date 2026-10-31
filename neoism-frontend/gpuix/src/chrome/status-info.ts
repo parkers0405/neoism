@@ -15,5 +15,7 @@ export function statusInfo(surface: Surface | undefined, root: string | null | u
     cursor_lines: surface?.kind === "file" && total ? [line, total] : null,
     workspace: surface?.kind === "file" && total ? `WS ${line}/${total}` : null,
     pending_keys: surface?.kind === "file" ? editor?.pendingKeys || null : null,
+    lsp_status: surface?.kind === "file" ? editor?.lsp?.status ?? null : null,
+    lsp_label: surface?.kind === "file" && editor?.lsp?.status ? "LSP" : null,
     diagnostics: editor?.lsp?.diagnostics || { error: 0, warn: 0, info: 0, hint: 0 } };
 }

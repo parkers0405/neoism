@@ -54,7 +54,7 @@ impl LspServerState {
             // "attached" is the Rust engine's live-client state; without it the
             // popup fell through to the catch-all and mislabeled a working
             // server as "Binary missing".
-            "active" | "daemon" | "attached" => LspServerState::Active,
+            "connected" | "active" | "daemon" | "attached" => LspServerState::Active,
             "ready" | "configured" | "available" => LspServerState::Ready,
             "initializing" | "starting" => LspServerState::Initializing,
             "errored" | "error" | "failed" => LspServerState::Errored,
@@ -75,7 +75,7 @@ impl LspServerState {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LspServerRow {
     /// Human-facing server name, e.g. `rust-analyzer`.
     pub name: String,
@@ -125,6 +125,7 @@ pub struct LspPopup {
     message_copy_rect: [f32; 4],
     details_rect: [f32; 4],
     last_rect: [f32; 4],
+    host_viewport: Option<[f32; 2]>,
 }
 
 impl Default for LspPopup {
@@ -148,6 +149,7 @@ impl Default for LspPopup {
             message_copy_rect: [0.0; 4],
             details_rect: [0.0; 4],
             last_rect: [0.0; 4],
+            host_viewport: None,
         }
     }
 }
@@ -171,6 +173,27 @@ impl LspPopup {
 
     pub fn server_count(&self) -> usize {
         self.servers.len()
+    }
+
+    pub fn set_host_geometry(&mut self, anchor: PillRect, viewport: [f32; 2]) {
+        self.anchor = anchor;
+        self.host_viewport = Some(viewport);
+    }
+
+    pub fn host_rows(&self) -> &[(usize, [f32; 4])] { &self.row_layout }
+    pub fn host_selected(&self) -> usize { self.selected_index }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let next = self.selected_index.saturating_add_signed(delta).min(self.servers.len().saturating_sub(1));
+        if next != self.selected_index {
+            self.selected_index = next;
+            self.detail_scroll_offset = 0;
+            self.ensure_selected_visible();
+        }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.visible && [self.last_scroll, self.detail_last_scroll].into_iter().flatten().any(|at| at.elapsed().as_millis() < scrollbar::FADE_OUT_DELAY_MS + scrollbar::FADE_OUT_DURATION_MS)
     }
 
     pub fn open(&mut self, anchor: PillRect) {
@@ -1020,9 +1043,15 @@ impl LspPopup {
             + DETAIL_HEIGHT * s;
         let w_min = PANEL_MIN_WIDTH * s;
         let w_max = PANEL_MAX_WIDTH * s;
-        let w = (self.anchor.w.max(w_min)).min(w_max);
+        let mut w = (self.anchor.w.max(w_min)).min(w_max);
+        let mut h = h;
+        if let Some([width, height]) = self.host_viewport {
+            w = w.min((width - 16.0*s).max(0.0));
+            h = h.min((height - 16.0*s).max(0.0));
+        }
         let gap = 7.0 * s;
-        let x = (self.anchor.x + self.anchor.w - w).max(8.0 * s);
+        let mut x = (self.anchor.x + self.anchor.w - w).max(8.0 * s);
+        if let Some([width, _]) = self.host_viewport { x = x.min((width-w-8.0*s).max(0.0)); }
         let y = (self.anchor.y - h - gap).max(8.0 * s);
         [x, y, w, h]
     }

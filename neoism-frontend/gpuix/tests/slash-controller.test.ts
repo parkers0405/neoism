@@ -6,8 +6,8 @@ import {SlashController,type SlashPickerRequest,type SlashEffect,type SlashInput
 import {createSlashDaemon} from "./support/slash-daemon";
 const cleanups:Array<()=>void>=[];afterEach(()=>cleanups.splice(0).reverse().forEach(close=>close()));
 const until=async(test:()=>boolean)=>{const limit=Date.now()+2000;while(!test()){if(Date.now()>limit)throw new Error("Slash SDK fixture did not converge");await Bun.sleep(5);}};
-async function fixture(){
- const server=createSlashDaemon(),config={...loadConfig(["--config","/nonexistent/slash-fixture"],{}),endpoint:server.endpoint,authToken:"fixture-token"},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+async function fixture(mcpCatalog?:Record<string,unknown>){
+ const server=createSlashDaemon(mcpCatalog),config={...loadConfig(["--config","/nonexistent/slash-fixture"],{}),endpoint:server.endpoint,authToken:"fixture-token"},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
  const workspace={id:"a",host_id:"host",title:"A",root_dir:"/project/a"};
  model.update({activeWorkspace:workspace,workspaces:[workspace],threads:[{session_id:"one",title:"One",directory:"/project/a"},{session_id:"two",title:"Two",directory:"/project/a"}],surfaces:[{id:"agent:one",kind:"agent",sessionId:"one",title:"One",workspaceId:"a"},{id:"agent:two",kind:"agent",sessionId:"two",title:"Two",workspaceId:"a"}],activeSurfaceId:"agent:one",providers:[{id:"openai",name:"OpenAI",models:[{id:"base",name:"Base"},{id:"advanced",name:"Advanced"}]}],agents:[{name:"build",description:"Build"},{name:"plan",description:"Plan"}],providerStates:{one:{agent:"build",model:"openai/base",thinking:"high",connection_id:"account-a"},two:{agent:"plan",model:"other/second",thinking:"low",connection_id:"account-b"}}});
  client.start();await until(()=>client.state.phase==="connected");
@@ -58,9 +58,19 @@ test("native picker/UI commands retain real hooks, skill insertion and inherited
  await f.controller.execute("/model");expect(f.pickers.at(-1)?.kind).toBe("model");await f.pickers.at(-1)?.onSelect?.("openai/advanced");expect(f.model.selection("one").model).toBe("openai/advanced");
  await f.controller.execute("/new");const created=f.server.requests.find(r=>r.path==="/sessions"&&r.method==="POST")!;expect(created.body).toEqual({agent:"build",model:{providerId:"openai",id:"advanced",variant:"xhigh",connectionId:"account-a"}});expect(f.model.selection("created-1")).toMatchObject({model:"openai/advanced",thinking:"xhigh",connection_id:"account-a"});expect(f.model.selection("two").model).toBe("other/second");
 });
+test("MCP distinguishes idle connections, real errors, disabled servers and legacy idle statuses",async()=>{
+ const entry=(status:unknown,enabled=true)=>({configScope:"workspace",configWritable:true,enabled,hasCredentials:false,oauthCapable:false,runtimeConnected:false,status});
+ const f=await fixture({idle:entry({status:"disconnected"}),legacy:entry({status:"failed",error:"MCP client runtime is not connected yet"}),broken:entry({status:"failed",error:"Connection refused"}),off:entry({status:"disabled"},false)});
+ await f.controller.execute("/mcp");const rows=f.pickers.at(-1)!.options;
+ for(const name of ["idle","legacy"])expect(rows.find(row=>row.value===name)).toMatchObject({footer:"disconnected",description:"Not connected yet"});
+ expect(rows.find(row=>row.value==="broken")).toMatchObject({footer:"failed",description:"Connection refused"});
+ expect(rows.find(row=>row.value==="off")).toMatchObject({footer:"disabled",description:"disabled"});
+ expect(f.server.requests.some(request=>request.method==="POST")).toBe(false);
+});
 test("MCP and subagent pickers execute plugin operations rather than send substitute prompts",async()=>{
  const f=await fixture();await f.controller.execute("/mcp");expect(f.pickers.at(-1)?.kind).toBe("mcp");await f.pickers.at(-1)?.onSelect?.("local");expect(f.pickers.at(-1)?.kind).toBe("mcp-action");await f.pickers.at(-1)?.onSelect?.("connect");
  expect(f.server.requests.some(r=>r.method==="POST"&&r.path==="/plugins/dev.neoism.mcp/local/connect")).toBe(true);
+ expect(f.pickers.at(-1)?.options.find(row=>row.value==="local")?.footer).toBe("connected");
  await f.controller.execute("/sub-agent");expect(f.pickers.at(-1)?.kind).toBe("subagents");expect(f.pickers.at(-1)?.options[0].value).toBe("two");await f.pickers.at(-1)?.onSelect?.("two");expect(f.model.state.activeSurfaceId).toBe("agent:one");expect(f.model.state.surfaces.find(surface=>surface.id==="agent:one")).toMatchObject({sessionId:"two",agentRootSessionId:"one"});expect(f.model.state.ui.agentParentSessions).toEqual({two:"one"});expect(f.model.selection("two").connection_id).toBe("account-b");
  expect(f.server.requests.some(r=>r.path.endsWith("/prompt"))).toBe(false);
 });

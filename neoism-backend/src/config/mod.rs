@@ -104,6 +104,9 @@ pub struct Appearance {
     /// Play one random splash animation when a new terminal or agent tab opens.
     #[serde(default, rename = "splash-auto-animate")]
     pub splash_auto_animate: bool,
+    /// Subtle pixel stars behind the Agent composer.
+    #[serde(default = "default_bool_true", rename = "agent-stars")]
+    pub agent_stars: bool,
     /// Active Mash Up Pack id (a directory under `packs/`). Its resolved
     /// theme/font are persisted above; shader, filters, and look slots are
     /// re-applied on startup. Empty/unset = no pack.
@@ -144,6 +147,7 @@ impl Default for Appearance {
             fonts: FontConfig::default(),
             line_height: default_line_height(),
             splash_auto_animate: false,
+            agent_stars: true,
             mashup_pack: None,
             mashup_baseline: None,
             look: mashup::LookConfig::default(),
@@ -1521,6 +1525,17 @@ mod tests {
             r#"{"appearance":{"splash-auto-animate":"on"}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn agent_stars_default_on_and_persist_opt_out() {
+        assert!(parse("{}").appearance.agent_stars);
+        let text = r#"{"appearance":{"agent-stars":false}}"#;
+        validate_config_document(text).unwrap();
+        let config = parse(text);
+        assert!(!config.appearance.agent_stars);
+        assert_eq!(serde_json::to_value(config).unwrap()["appearance"]["agent-stars"], false);
+        assert!(validate_config_document(r#"{"appearance":{"agent-stars":"off"}}"#).is_err());
     }
 
     #[test]

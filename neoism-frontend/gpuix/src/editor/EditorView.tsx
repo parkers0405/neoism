@@ -52,7 +52,7 @@ export function EditorView(props: {
     setFrame(next);
     if (!reported || reported.mode !== next.mode || reported.cursor.line !== next.cursor.line || reported.cursor.col !== next.cursor.col || reported.dirty !== next.dirty
       || reported.revision !== next.revision || reported.totalLines !== next.totalLines || reported.pendingKeys !== next.pendingKeys
-      || reported.lsp?.diagnostics !== next.lsp?.diagnostics) {
+      || reported.lsp?.diagnostics !== next.lsp?.diagnostics || reported.lsp?.status !== next.lsp?.status || reported.lsp?.label !== next.lsp?.label) {
       reported = next; props.onState({ mode: next.mode, line: next.cursor.line, col: next.cursor.col, dirty: next.dirty });
     }
     if (next.animating) editor.requestFrame(true);

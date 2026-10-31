@@ -133,6 +133,17 @@ fn geometry(
     s: f32,
     time: f32,
 ) -> Vec<Spark> {
+    geometry_with_pixels(effect, inner, radius, s, time, false)
+}
+
+fn geometry_with_pixels(
+    effect: &BackgroundEffect,
+    inner: [f32; 4],
+    radius: f32,
+    s: f32,
+    time: f32,
+    pixels: bool,
+) -> Vec<Spark> {
     let [x, y, w, h] = inner;
     let v = effect.options();
     if v.validate().is_err()
@@ -164,20 +175,42 @@ fn geometry(
     };
     match effect {
         BackgroundEffect::Stars(_) => {
-            let count = ((w / s * h / s / 1800.0 * v.density).ceil() as usize).min(96);
+            let density = v.density * if pixels { 1.5 } else { 1.0 };
+            let count = ((w / s * h / s / 1800.0 * density).ceil() as usize)
+                .min(if pixels { 144 } else { 96 });
+            let drift = time * if pixels { 8.0 } else { 1.0 };
             for i in 0..count as u32 {
                 let rand = |salt: u32| random(i, salt.wrapping_add(v.seed));
                 let phase = rand(31) * std::f32::consts::TAU;
                 let px = x
-                    + (rand(7) + time * (0.35 + rand(19) * 0.3) * s / w).rem_euclid(1.0)
+                    + (rand(7) + drift * (0.35 + rand(19) * 0.3) * s / w).rem_euclid(1.0)
                         * w;
-                let py = y + (rand(11) + time * 0.12 * s / h).rem_euclid(1.0) * h;
+                let py = y + (rand(11) + drift * 0.12 * s / h).rem_euclid(1.0) * h;
                 let twinkle = 0.5 + 0.5 * (time * (0.35 + rand(23) * 0.25) + phase).sin();
                 let edge = ((px - x).min(x + w - px).min(py - y).min(y + h - py)
                     / (8.0 * s))
                     .clamp(0.0, 1.0);
                 let size = (0.55 + rand(41) * 0.45) * s;
                 let alpha = (0.13 + 0.23 * twinkle) * edge;
+                if pixels {
+                    // Chunky square cores and stepped glints retain the pixel
+                    // look; continuous positions let the faster drift stay fluid.
+                    let unit = s.max(1.0);
+                    let size = 2.0 * unit;
+                    push([px, py, size, size], alpha);
+                    if i % 5 == 0 {
+                        let glint = (0.2 + 0.8 * twinkle) * alpha * 0.65;
+                        for rect in [
+                            [px - unit, py, unit, size],
+                            [px + size, py, unit, size],
+                            [px, py - unit, size, unit],
+                            [px, py + size, size, unit],
+                        ] {
+                            push(rect, glint);
+                        }
+                    }
+                    continue;
+                }
                 for (sw, sh, a) in
                     [(size * 3.5, size * 3.5, alpha * 0.08), (size, size, alpha)]
                 {
@@ -213,6 +246,25 @@ fn geometry(
         }
     }
     sparks
+}
+
+/// Standalone Agent background for the retained GPUIX composer. Its own
+/// paint layer can tick without measuring the prompt or repainting the footer.
+pub fn render_agent_stars(
+    painter: &mut (impl Paint + ?Sized),
+    inner: [f32; 4],
+    radius: f32,
+    scale: f32,
+    time: f32,
+    color: [f32; 4],
+) {
+    let effect = BackgroundEffect::Stars(Default::default());
+    for spark in geometry_with_pixels(&effect, inner, radius, scale, time, true) {
+        let [x, y, w, h] = spark.rect;
+        let mut ink = color;
+        ink[3] *= spark.alpha;
+        painter.rect(None, x, y, w, h, ink, 0.0, 0);
+    }
 }
 
 fn plan(

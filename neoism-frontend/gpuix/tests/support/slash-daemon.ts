@@ -1,5 +1,5 @@
 import type {Session,ProviderConnectionSummary} from "@neoism/sdk";
-export function createSlashDaemon(){
+export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
  const requests:Array<{workspace:string;path:string;method:string;body:any;directory:string|null;authorization:string|null}>=[];
  const session=(id:string,workspace="a",model={providerId:"openai",id:"base",variant:"high",connectionId:"account-a"}):Session=>({id,title:id,directory:`/project/${workspace}`,projectId:`project-${workspace}`,slug:id,version:"1",time:{created:1,updated:1},agent:"build",model,permission:[{permission:"read",pattern:"*",action:"ask"}]});
  const sessions=new Map([['one',session('one')],['two',{...session('two','a',{providerId:"other",id:"second",variant:"low",connectionId:"account-b"}),parentId:"one"}]]);
@@ -75,7 +75,7 @@ export function createSlashDaemon(){
   if(path==="/interactions/questions")return Response.json(questions.filter(q=>!url.searchParams.get("sessionId")||q.sessionId===url.searchParams.get("sessionId")));
   const permission=path.match(/^\/interactions\/permissions\/([^/]+)\/reply$/);if(permission){const index=permissions.findIndex(p=>p.id===permission[1]);if(index>=0)permissions.splice(index,1);return Response.json(true);}
   const question=path.match(/^\/interactions\/questions\/([^/]+)\/(reply|reject)$/);if(question){const index=questions.findIndex(q=>q.id===question[1]);if(index>=0)questions.splice(index,1);return Response.json(true);}
-  if(path==="/plugins/dev.neoism.mcp/catalog")return Response.json({local:{configScope:"workspace",configWritable:true,enabled:true,hasCredentials:false,oauthCapable:false,runtimeConnected:connected,status:{status:connected?"connected":"disabled"}}});
+  if(path==="/plugins/dev.neoism.mcp/catalog")return Response.json(mcpCatalog||{local:{configScope:"workspace",configWritable:true,enabled:true,hasCredentials:false,oauthCapable:false,runtimeConnected:connected,status:{status:connected?"connected":"disconnected"}}});
   if(path.includes("/plugins/dev.neoism.mcp/local/connect")){connected=true;return Response.json(true);}
   if(path.includes("/plugins/dev.neoism.mcp/local/disconnect")){connected=false;return Response.json(true);}
   if(path.startsWith("/plugins/dev.neoism.subagents/sessions/"))return Response.json([{id:"task",sessionId:"one",childSessionId:"two",agent:"plan",description:"Inspect source",status:"done",nested:false}]);

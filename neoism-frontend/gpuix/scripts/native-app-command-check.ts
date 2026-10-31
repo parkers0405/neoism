@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { launchNative } from "../tests/support/native-launch";
 import { createAgentDaemon } from "../tests/support/agent-daemon";
 const directory = mkdtempSync(join(tmpdir(), "neoism-command-app-")), config = join(directory, "config.json");
-writeFileSync(config, JSON.stringify({ appearance: { fonts: { family: "Cascadia Code NF", size: 14 } }, editor: { "vim-mode": true },
+writeFileSync(config, JSON.stringify({ appearance: { fonts: { family: "Cascadia Code NF", size: 14 } }, editor: { "vim-mode": true },terminal:{cursor:{blinking:false}},
   keybinds: { keys: [{ key: "y", with: "control | shift", action: "OpenCommandPalette" }] } }));
 const server = createAgentDaemon({ deferCreations: false });
 server.files.set("command.ts", "# Neoism " + "long wrap fixture ".repeat(25) + "\nLine 2");
@@ -15,20 +15,31 @@ const select = async (query: string, action: string) => {
   await app.getByTestId("command-dialog").waitFor(); await app.getByTestId("command-palette").fill(query);
   await app.getByTestId(`command:${action}`).waitFor(); await app.getByTestId(`command:${action}`).click();
 };
+const rapidPalette = async (testId: string) => {
+  const surface=await app.getByTestId(testId).waitFor();await app.call("focus",{elementId:surface.id});
+  // One native burst, with no wait for a dialog, frame, or focus event.
+  await app.call("keystrokes",{keys:"alt-p q"});
+  await app.getByTestId("command:CloseTab").waitFor();
+  await app.getByTestId("command-palette").press("escape");
+};
 let stage = "composer custom binding";
 try {
   await app.getByTestId("file:command.ts").waitFor({ timeoutMs: 15000 });
-  const composer = app.getByTestId("composer"); await composer.waitFor(); await composer.click(); await composer.press("ctrl-shift-y");
+  await app.call("keystrokes",{keys:"alt-a"});
+  const composer = app.getByTestId("composer"); await composer.waitFor();await rapidPalette("composer"); await composer.click(); await composer.press("ctrl-shift-y");
   await select("New Tab", "TabCreate"); await app.getByTestId("terminal").waitFor();
   stage = "terminal custom binding"; await app.getByTestId("terminal").press("ctrl-shift-y"); await app.getByTestId("command-dialog").waitFor();
   await app.getByTestId("command-palette").press("escape");
+  await rapidPalette("terminal");
   stage = "editor custom binding"; await app.getByTestId("file:command.ts").waitFor(); await app.getByTestId("file:command.ts").click();
   const editor = app.getByTestId("code-editor"); await editor.waitFor(); await editor.press("ctrl-shift-y");
   await app.getByTestId("command-palette").press("escape");
-  await until(async () => await editor.getByText("↳").count() > 0);
+  await rapidPalette("code-editor");
+  // Text is rasterized now; verify wrapping through the real caret geometry.
+  await editor.press("G");await app.getByTestId("code-editor-caret").waitFor();const wrapped=await app.getByTestId("code-editor-caret").bounds();
   await editor.press("ctrl-shift-y"); await select("Word Wrap", "ToggleWordWrap");
-  await until(async () => await editor.getByText("↳").count() === 0);
-  stage = "editor command save"; await editor.press("i"); await editor.press("Z"); await editor.press("escape");
+  await until(async () => !!await app.getByTestId("code-editor-caret").count()&&(await app.getByTestId("code-editor-caret").bounds()).y<wrapped.y-10);
+  stage = "editor command save"; await editor.press("g");await editor.press("g");await editor.press("i"); await editor.press("Z"); await editor.press("escape");
   await editor.press("ctrl-shift-y"); await select("Write File", "SaveDocument");
   await until(() => server.fileRequests.some((r) => r.tag === "WriteFile"));
   if (!server.files.get("command.ts")?.startsWith("Z# Neoism")) throw new Error("Command save lost the edit or typed the custom binding into the buffer");

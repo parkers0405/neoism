@@ -11,8 +11,15 @@ let stage="open file";
 try {
   await app.getByTestId("file:main.ts").waitFor({timeoutMs:15000});await app.getByTestId("file:main.ts").click();
   const editor=app.getByTestId("code-editor");await editor.waitFor();
+  stage="LSP status and details";await until(()=>server.requests.some(request=>request.tag==="OpenBuffer"));
+  const surface_id=server.requests.find(request=>request.tag==="OpenBuffer")!.body.surface_id;
+  server.push({LspSnapshot:{surface_id,file_path:server.path,filetype:"typescript",servers:[{name:"typescript-language-server",binary:"typescript-language-server",filetype:"typescript",state:"connected",source:"managed"},{name:"eslint",binary:"vscode-eslint-language-server",filetype:"typescript",state:"available",source:"path"}]}});
+  stage="LSP status pill";await app.getByTestId("status-lsp").waitFor();stage="LSP status click";await app.getByTestId("status-lsp").click();
+  const statusPopup=app.getByTestId("lsp-status-popup");await statusPopup.waitFor();stage="LSP server rows";await app.getByTestId("lsp-server:typescript-language-server").waitFor();await app.getByTestId("lsp-server:eslint").waitFor();
+  if(process.env.NEOISM_CAPTURE_FIXTURE&&Bun.which("grim"))await Bun.spawn(["grim","/tmp/neoism-gpuix-lsp-status.png"]).exited;
+  await statusPopup.press("down");await statusPopup.press("escape");await until(async()=>await statusPopup.count()===0);
   stage="completion";await editor.press("i");await editor.press("ctrl-space");await app.getByTestId("lsp-option:done").waitFor();await app.getByTestId("lsp-option:done").click();
-  stage="hover";await editor.press("escape");await editor.press("shift-k");await app.getByTestId("lsp-hover").waitFor();const hover = (await app.getByTestId("lsp-hover").all())[0];if(!hover.children?.some((node)=>node.type==="markdown"&&(node.bounds?.height||0)>40))throw new Error("Hover documentation did not paint");if(process.env.NEOISM_CAPTURE_FIXTURE&&Bun.which("grim"))await Bun.spawn(["grim","/tmp/neoism-gpuix-lsp-hover.png"]).exited;await editor.press("escape");
+  stage="hover";await editor.press("escape");await editor.press("shift-k");await app.getByTestId("lsp-hover").waitFor();const hover = (await app.getByTestId("lsp-hover").all())[0],hoverPaint=(await app.getByTestId("lsp-hover-paint").all())[0];if((hover.bounds?.height||0)<=40||!hoverPaint?.children?.some(node=>node.type==="canvas"&&(node.bounds?.height||0)>40))throw new Error("Original hover documentation did not paint");if(process.env.NEOISM_CAPTURE_FIXTURE&&Bun.which("grim"))await Bun.spawn(["grim","/tmp/neoism-gpuix-lsp-hover.png"]).exited;await editor.press("escape");
   stage="code actions";await editor.press("ctrl-.");await app.getByTestId("lsp-option:Apply fix").waitFor();await app.getByTestId("lsp-option:Apply fix").click();
   await until(()=>server.requests.some((r)=>r.tag==="ApplyLspCodeActionAt"));
   const action=server.requests.find((r)=>r.tag==="ApplyLspCodeActionAt")!.body;
@@ -25,6 +32,6 @@ try {
   stage="format";await editor.press("alt-shift-f");await until(()=>server.requests.some((r)=>r.tag==="LspQueryAt"&&r.body.action==="format"));stage="save after format";await until(()=>server.writes.length>0);stage="didSave";await until(()=>server.requests.some((r)=>r.tag==="DidSave"));
   if(!server.writes[0].startsWith("FORM"))throw new Error("Formatted buffer was not saved");
   if(!server.requests.some((r)=>r.tag==="OpenBuffer"&&typeof r.body.text==="string"))throw new Error("LSP never received native unsaved text");
-  console.log("Native LSP completion, hover, code-action identity/revision, rename, definition/reference byte coordinates, format, save, and diagnostics passed against isolated daemon fixture.");
-} catch(error){console.error("Native LSP failed at",stage);console.error("tags",server.requests.map((r)=>r.tag));console.error(server.requests.filter((r)=>["LspQueryAt","ApplyLspCodeActionAt"].includes(r.tag)).map((r)=>({tag:r.tag,action:r.body.action,line:r.body.line,col:r.body.character})));throw error;}
+  console.log("Native LSP status/details, completion, hover, code-action identity/revision, rename, definition/reference byte coordinates, format, save, and diagnostics passed against isolated daemon fixture.");
+} catch(error){console.error("Native LSP failed at",stage);console.error("status nodes",JSON.stringify(await app.getByTestId("status-lsp").all()));console.error("popup nodes",JSON.stringify(await app.getByTestId("lsp-status-popup").all()));console.error("tags",server.requests.map((r)=>r.tag));console.error(server.requests.filter((r)=>["LspQueryAt","ApplyLspCodeActionAt"].includes(r.tag)).map((r)=>({tag:r.tag,action:r.body.action,line:r.body.line,col:r.body.character})));throw error;}
 finally {await app.close();server.stop();rmSync(directory,{recursive:true,force:true});}

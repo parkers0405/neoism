@@ -18,6 +18,10 @@ pub enum ClientMessage {
         /// daemon's `SessionRegistry::create` already handles `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<String>,
+        /// Arguments for the requested shell, passed as argv (never shell text).
+        /// Omission preserves the daemon's existing interactive defaults.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell_args: Option<Vec<String>>,
         #[serde(default,skip_serializing_if="Option::is_none")]
         presentation: Option<Presentation>,
     },
@@ -147,6 +151,7 @@ mod tests {
     #[test]
     fn client_create_pty_roundtrip() {
         roundtrip_client(&ClientMessage::CreatePty {
+            shell_args: None,
             presentation: None,
             cwd: Some("/tmp".into()),
             cols: 80,
@@ -154,6 +159,7 @@ mod tests {
             shell: None,
         });
         roundtrip_client(&ClientMessage::CreatePty {
+            shell_args: None,
             presentation: None,
             cwd: None,
             cols: 132,
@@ -163,6 +169,7 @@ mod tests {
         // Round-trip with an explicit shell so we cover both
         // `#[serde(default)]` (missing field) and the populated path.
         roundtrip_client(&ClientMessage::CreatePty {
+            shell_args: None,
             presentation: None,
             cwd: Some("/work".into()),
             cols: 100,

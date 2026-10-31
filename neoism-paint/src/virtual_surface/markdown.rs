@@ -568,7 +568,11 @@ fn markdown_nodes(
             continue;
         }
 
-        if looks_like_table(current.line) {
+        // Pipes in prose, shell commands, or inline code are not a table.
+        // Require the delimiter row before choosing the table renderer.
+        if looks_like_table(current.line)
+            && lines.peek().is_some_and(|next| is_table_delimiter(next.line))
+        {
             let table_start = current.start;
             let mut table_end = current.end;
             let mut table_lines = 1usize;
@@ -1121,6 +1125,21 @@ fn heading_level(line: &str) -> Option<usize> {
 fn looks_like_table(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.contains('|') && trimmed.matches('|').count() >= 2
+}
+
+fn is_table_delimiter(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.contains('|') {
+        return false;
+    }
+    let cells = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let cells = cells.strip_suffix('|').unwrap_or(cells);
+    cells.split('|').all(|cell| {
+        let cell = cell.trim();
+        let core = cell.strip_prefix(':').unwrap_or(cell);
+        let core = core.strip_suffix(':').unwrap_or(core);
+        !core.is_empty() && core.bytes().all(|byte| byte == b'-')
+    })
 }
 
 fn stable_node_id(

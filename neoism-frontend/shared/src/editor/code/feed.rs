@@ -354,13 +354,24 @@ pub fn styled_runs_with_syntax(
     cuts.sort_unstable();
     cuts.dedup();
 
+    // Syntax from the lexer/tree-sitter is ordered and disjoint. Walk it once
+    // instead of searching from the start at every escape in a long JSON string.
+    // Retain the original precedence for callers supplying overlapping spans.
+    let ordered_syntax = syntax.windows(2).all(|pair| pair[0].1 <= pair[1].0);
+    let mut syntax_index = 0;
     let mut runs: Vec<CodeStyledRun> = Vec::new();
     for window in cuts.windows(2) {
         let (start, end) = (window[0], window[1]);
         if start >= end {
             continue;
         }
-        let token = syntax
+        if ordered_syntax {
+            while syntax_index < syntax.len() && syntax[syntax_index].1 <= start {
+                syntax_index += 1;
+            }
+        }
+        let candidates = if ordered_syntax { &syntax[syntax_index..syntax.len().min(syntax_index + 1)] } else { &syntax[..] };
+        let token = candidates
             .iter()
             .find(|(s, e, _)| *s <= start && end <= *e)
             .map(|(_, _, token)| *token)

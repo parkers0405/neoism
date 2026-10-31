@@ -29,11 +29,13 @@ export interface AppConfig {
   presenceDisplayName?: string;
   terminalScrollMultiplier?: number;
   terminalScrollDivider?: number;
+  shell?: {program?:string;args?:string[]};
   scale: number;
   composerOpacity?: number;
   background?: { path: string; opacity: number; blur: number };
   reducedMotion: boolean;
   splashAutoAnimate?: boolean;
+  agentStars?: boolean;
   warnings: string[];
 }
 function object(value: unknown): Record<string, unknown> {
@@ -60,6 +62,12 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
     if (errors.length) { warnings.push("Neoism config contains invalid JSONC; using appearance defaults."); raw = {}; }
   }
   const appearance = object(raw.appearance);
+  // Match the backend's TerminalConfig, including Config service snapshots.
+  // Keep the former top-level spelling as a fallback for older frontend configs.
+  const shell=object(object(raw.terminal).shell ?? raw.shell);
+  const shellProgram=typeof shell.program==="string"&&shell.program.trim()?shell.program:undefined;
+  const shellArgs=Array.isArray(shell.args)&&shell.args.every(arg=>typeof arg==="string")?shell.args as string[]:undefined;
+  if(shell.args!==undefined&&shellArgs===undefined)warnings.push("Shell arguments must be an array of strings; using default shell arguments.");
   const fonts = object(appearance.fonts);
   const windowConfig = object(object(raw.ui).window ?? raw.window);
   const image = object(windowConfig["background-image"]);
@@ -100,12 +108,14 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
     presenceDisplayName: typeof object(raw.presence)["display-name"] === "string" ? object(raw.presence)["display-name"] as string : undefined,
     terminalScrollMultiplier: Math.max(0, number(object(object(raw.terminal).scroll).multiplier, 3)),
     terminalScrollDivider: Math.max(0.01, number(object(object(raw.terminal).scroll).divider, 1)),
+    shell:shellProgram!==undefined||shellArgs!==undefined?{program:shellProgram,args:shellArgs}:undefined,
     fontWeight: number(fonts.weight, 400), scale: Math.max(0.5, Math.min(3, fontSize / 14)),
     composerOpacity: Math.max(0, Math.min(1, composerOpacity)),
     background: backgroundPath && !windowConfig["background-image-disabled"]
       ? { path: backgroundPath, opacity: Math.max(0, Math.min(1, number(image.opacity, 0.35))), blur } : undefined,
     reducedMotion: args.includes("--reduced-motion") || env.NEOISM_REDUCED_MOTION === "1",
     splashAutoAnimate: appearance["splash-auto-animate"] === true,
+    agentStars: appearance["agent-stars"] !== false,
     warnings,
   };
 }

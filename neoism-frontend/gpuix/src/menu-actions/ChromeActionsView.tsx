@@ -11,9 +11,13 @@ import {LatestFrameInput} from "../animation/latest-frame-input";
 
 export function ChromeActionsView(props: { controller: ChromeActionsController; config: AppConfig; pageMode?: boolean; active?: boolean; focusToken?: number; onFocus?: () => void; onCustomKey?: (event: KeyEvent) => boolean }) {
   const renderer = useGpuixRequired(), window = createWindowSize(), page = !!props.pageMode;
-  const viewport=useDialogViewport(renderer,window);
+  const dialogViewport=useDialogViewport(renderer,window);
   const motion=new LatestFrameInput();onCleanup(()=>motion.dispose());
   const [frame, setFrame] = createSignal(page ? props.controller.extensionFrame : props.controller.frame);
+  // Settings already centers its native panel with equal margins. Lay it out
+  // against the whole window so header rows don't shift its center downward.
+  const settings=createMemo(()=>frame()?.kind==="settings");
+  const viewport=createMemo(()=>settings()?{x:0,y:0,...window()}:dialogViewport());
   const [bounds, setBounds] = createSignal({ x: 0, y: 0, width: 0, height: 0 });
   const imagePath = createMemo(() => frame()?.image?.path);
   let host: HostElement | undefined, previousFocus: number | null | undefined;

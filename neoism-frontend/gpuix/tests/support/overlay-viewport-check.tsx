@@ -4,6 +4,7 @@ import {join} from "node:path";
 import {tmpdir} from "node:os";
 import {createRoot,type NativeRenderer} from "@gpuix/solid";
 import {createSignal} from "solid-js";
+import {Effect} from "effect";
 import {CommandView} from "../../src/commands/CommandView";
 import {CommandController} from "../../src/commands/CommandController";
 import {InlinePicker} from "../../src/ui/InlinePicker";
@@ -46,7 +47,15 @@ try{
  for(const [next,composerOffset] of [[bounds,590],[{x:360,y:246,width:820,height:610},180]] as const){
   bounds=next;root.flushSync(()=>{setOverlayViewport(renderer,next);setAnchor([next.x+40,next.y+composerOffset,next.width-80,100]);});await Promise.resolve();root.flush();
   assert.equal(overlayViewport(renderer)()?.y,next.y);
-  for(const id of dialogs){const node=byTest(id);assert.ok(node,`${id} must mount its real original component`);const rect=origin(node);assert.ok(rect.y>=next.y-0.1,`${id} overlaps reserved headers: ${rect.y} < ${next.y}`);assert.ok(rect.x>=(["command-dialog","chrome-action-overlay","directory-browser"].includes(id)?0:next.x)-0.1,`${id} starts outside its intended viewport`);checks++;}
+  for(const id of dialogs){const node=byTest(id);assert.ok(node,`${id} must mount its real original component`);const rect=origin(node);
+   if(id==="original-hamburger-menu"){
+    const button=byTest("topbar-menu"),anchor=origin(button);
+    assert.ok(Math.abs(rect.x-anchor.x)<1,"Hamburger stays under its top-chrome button over the tree");
+    assert.ok(rect.y>=anchor.y+Number(button.style.height)&&rect.y<next.y,"Hamburger starts below its button, above the pane headers");
+   }else{
+    assert.ok(rect.y>=next.y-0.1,`${id} overlaps reserved headers: ${rect.y} < ${next.y}`);
+    assert.ok(rect.x>=(["command-dialog","chrome-action-overlay","directory-browser"].includes(id)?0:next.x)-0.1,`${id} starts outside its intended viewport`);
+   }checks++;}
   const centered=()=>{const dialog=byTest("command-dialog"),rect=origin(dialog);assert.ok(Math.abs(rect.x+Number(dialog.style.width)/2-720)<.1,"Command palette must center horizontally in the full window");assert.ok(Math.abs(rect.y-(next.y+commands.frame.rect[1]))<.1,"Command palette retains its original upper native anchor");};
   centered();commands.query("q");root.flush();centered();commands.query("");root.flush();centered();
   for(const id of ["agent-picker:agent","agent-picker:permission","agent-question"]){const node=byTest(id),rect=origin(node);assert.ok(rect.y+Number(node.style.height)<=anchor()[1]+.1,`${id} must stay above the composer`);}
@@ -71,6 +80,20 @@ try{
  root.flushSync(()=>setDialogViewport(renderer,{x:0,y:86,width:900,height:600}));
  command=byTest("command-dialog");point=origin(command);assert.ok(Math.abs(point.x+Number(command.style.width)/2-450)<.1);assert.ok(point.y>=86);
  root.flushSync(()=>{setDialogViewport(renderer,undefined);setOverlayViewport(renderer,{x:360,y:246,width:820,height:610});});
+ client.request=((_family:string,message:unknown)=>Effect.succeed(message==="GetConfig"?{Config:{value:{}}}:{ConfigSchema:{descriptors:[]}})) as typeof client.request;
+ await chrome.open("OpenSettings");root.flush();
+ for(const reservedTop of [86,246,600]){
+  root.flushSync(()=>setDialogViewport(renderer,{x:0,y:reservedTop,width:1440,height:978-reservedTop}));
+  const host=byTest("chrome-action-overlay"),paint=origin(byTest("chrome-action-paint-origin"));
+  assert.deepEqual(origin(host),{x:0,y:0},"Settings uses the window origin regardless of headers or splits");
+  assert.equal(host.style.width,1440);assert.equal(host.style.height,1000);
+  const panel=chrome.frame?.commands.find(command=>command.kind==="rect"&&command.radii.some(radius=>radius>0));
+  assert.ok(panel?.kind==="rect","Original Settings panel must paint");
+  assert.equal(paint.x+panel.rect[0]+panel.rect[2]/2,720);
+  assert.equal(paint.y+panel.rect[1]+panel.rect[3]/2,500);
+ }
+ root.dispatch({elementId:byTest("chrome-action-overlay").id,eventType:"keyDown",key:"escape"});
+ assert.ok(!chrome.frame?.active,"Centered Settings retains keyboard dismissal");
  const item=[...nodes.values()].find(node=>String(node.props.testId).startsWith("menu:"))!;assert.ok(item);const target=origin(item);root.dispatch({elementId:item.id,eventType:"mouseDown",button:0,x:target.x+5,y:target.y+5});assert.equal(actions.length,1,"Translated hamburger row must dispatch its original action");
  console.log(JSON.stringify({dialogs:dialogs.length,boundsChanges:2,checks,nativePickerSelections:selected.length,hamburgerActions:actions.length,nativeWindowsCreated:0}));
 }finally{root.unmount();commands.dispose();chrome.dispose();model.dispose();setOverlayViewport(renderer,undefined);setDialogViewport(renderer,undefined);resetSchedule();rmSync(rootDir,{recursive:true,force:true});}

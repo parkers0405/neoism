@@ -41,6 +41,12 @@ test("wordmark autoplay follows the original opt-in preference without changing 
   expect(reduced.splashAutoAnimate).toBe(true);
   expect(reduced.reducedMotion).toBe(true);
 });
+test("Agent stars default on and can be disabled independently of reduced motion",()=>{
+ expect(loadConfig([],{},{}).agentStars).toBe(true);
+ expect(loadConfig([],{}, {appearance:{"agent-stars":false}}).agentStars).toBe(false);
+ const reduced=loadConfig(["--reduced-motion"],{},{});
+ expect(reduced.agentStars).toBe(true);expect(reduced.reducedMotion).toBe(true);
+});
 test("tree reveal matches the production ease-out cubic and per-row delay", () => {
   expect(easeOutCubic(0)).toBe(0); expect(easeOutCubic(0.5)).toBe(0.875); expect(easeOutCubic(1)).toBe(1);
   expect(revealProgress(12, 1, 320, 12)).toBe(0);
@@ -76,4 +82,16 @@ test("equals-form launch flags retain explicit endpoint isolation and preference
   expect(config.fontSize).toBe(19);
   expect(config.themeName).toBe("tokyo_night");
   expect(config.authToken).toBeUndefined();
+});
+
+test("terminal shell config preserves program paths and literal argv including explicit empty arguments",()=>{
+ const program="/home/parker/.nix-profile/bin/zsh";
+ expect(loadConfig([],{}, {terminal:{shell:{program,args:["--login","argument with spaces"]}}}).shell).toEqual({program,args:["--login","argument with spaces"]});
+ expect(loadConfig([],{}, {terminal:{shell:{program,args:[]}}}).shell?.args).toEqual([]);
+ expect(loadConfig([],{}, {terminal:{shell:{program}}}).shell?.args).toBeUndefined();
+ expect(loadConfig([],{}, {terminal:{shell:{program,args:["--login"]}},shell:{program:"/bin/bash"}}).shell).toEqual({program,args:["--login"]});
+ expect(loadConfig([],{}, {shell:{program,args:[]}}).shell).toEqual({program,args:[]});
+ expect(loadConfig([],{}, {}).shell).toBeUndefined();
+ const invalid=loadConfig([],{}, {terminal:{shell:{program,args:["--login",4]}}});
+ expect(invalid.shell).toEqual({program,args:undefined});expect(invalid.warnings).toContain("Shell arguments must be an array of strings; using default shell arguments.");
 });

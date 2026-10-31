@@ -6,7 +6,7 @@ import type { AppConfig } from "../config";
 import { coreCall } from "../native-core";
 import { sharePaintCommands } from "../editor/paint-command";
 import { PaintLayer, type PaintCommand } from "./PaintLayer";
-import {useOverlayViewport,placeOverlayRect} from "./overlay-viewport";
+import {placeOverlayRect} from "./overlay-viewport";
 import {translatePaintCommands} from "./translate-paint";
 import {observeTitlebarInset} from "../chrome/window-titlebar";
 
@@ -16,7 +16,7 @@ interface Frame { commands: PaintCommand[]; regions: Region[]; menuOpen: boolean
 export function TopBar(props: { config: AppConfig; peers?:readonly PresenceAvatar[]; sidebar?: string; details: boolean; agent: boolean; search: boolean; connection: string;
   menuOpen: boolean; onMenuChange: (open: boolean) => void; onAction: (action: string) => void | Promise<void>; report: (error: unknown) => void }) {
   const size = createWindowSize(), config = props.config;
-  const renderer=useGpuixRequired(),viewport=useOverlayViewport(renderer,size);
+  const renderer=useGpuixRequired();
   const [leftSafeInset,setLeftSafeInset]=createSignal(0);
   onCleanup(observeTitlebarInset(renderer as typeof renderer & {isFullscreen:()=>boolean},process.platform,setLeftSafeInset));
   const id = coreCall<{ id: number }>("chrome.new", { kind: "topbar", family: config.fontFamily, weight: config.fontWeight, fonts: [config.iconFontFamily, "Symbols Nerd Font Mono"] }).id;
@@ -42,7 +42,8 @@ export function TopBar(props: { config: AppConfig; peers?:readonly PresenceAvata
   onCleanup(() => { animation.dispose(); coreCall("chrome.dispose", { id }); });
   const height=createMemo(()=>Math.max(frame().height,leftSafeInset()>0?30:0));
   const base = createMemo(() => frame().commands.filter((command) => command.layer < 2));
-  const menuRect=createMemo(()=>placeOverlayRect(frame().menuRect,viewport()));
+  // Top chrome belongs to the window, including the sidebar and tab strips.
+  const menuRect=createMemo(()=>placeOverlayRect(frame().menuRect,{x:0,y:0,...size()}));
   const menuShift=createMemo(()=>({x:menuRect()[0]-frame().menuRect[0],y:menuRect()[1]-frame().menuRect[1]}));
   const overlay = createMemo(() => translatePaintCommands(frame().commands.filter((command) => command.layer >= 2),frame().menuOpen?menuShift().x:0,frame().menuOpen?menuShift().y:0));
   const move = (x = -1, y = -1) => {

@@ -18,6 +18,7 @@ export interface LspMenu { kind: "completion" | "actions"; selected?: number; re
   items: Array<{ word: string; kind: string; menu: string; info: string }> }
 export interface LspHover {line:number;col:number;x:number;y:number;lines:string[];rect:number[];viewport:number[];paintOrigin:number[];paintSize:number[];commands:PaintCommand[];selectedText?:string|null;dragging:boolean;scrollY:number;maxScroll:number;hoveredLink?:string|null}
 export interface LspFrame { menu?: LspMenu | null; hover?: LspHover | null;
+  status?: "Initializing" | "Active" | "Missing" | null; label?: string | null; statusRevision?: number;
   diagnostics?: { error: number; warn: number; info: number; hint: number };
   requests: EditorClientMessage[]; events: Array<{ kind: string; message?: string; level?: string; path?: string; line?: number; col?: number; root?: string; rows?: ReferenceRow[]; edits?: CodeTextEdit[]; word?: string;url?:string }> }
 export interface ReferenceRow { path: string; line: number; column: number; text: string }

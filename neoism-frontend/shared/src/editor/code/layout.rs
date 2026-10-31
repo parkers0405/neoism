@@ -22,8 +22,14 @@ pub const TAB_DISPLAY_WIDTH: usize = 4;
 /// Display column of a byte offset, expanding tabs to the next stop.
 /// Offsets inside a grapheme snap to its beginning.
 pub fn display_col_for_byte(line: &str, byte: usize, tab: usize) -> usize {
+    display_col_for_byte_from(line, byte, 0, tab)
+}
+
+/// Map within a slice that starts at a known source column. Wrap segments
+/// already store that column; rescanning the entire line is unnecessary.
+pub fn display_col_for_byte_from(line: &str, byte: usize, start_col: usize, tab: usize) -> usize {
     let tab = tab.max(1);
-    let mut col = 0usize;
+    let mut col = start_col;
     for (i, cluster) in line.grapheme_indices(true) {
         if i >= byte || i + cluster.len() > byte {
             break;
@@ -189,6 +195,16 @@ pub struct WrapSegment {
 }
 
 impl WrapSegment {
+    pub fn source_col_for_byte(self, line: &str, byte: usize, tab: usize) -> usize {
+        let byte = byte.clamp(self.byte_start, self.byte_end);
+        display_col_for_byte_from(
+            &line[self.byte_start..self.byte_end],
+            byte - self.byte_start,
+            self.source_col,
+            tab,
+        )
+    }
+
     pub fn visual_col(self, source_col: usize) -> usize {
         self.visual_indent + source_col.saturating_sub(self.source_col)
     }
@@ -514,7 +530,9 @@ pub fn wrap_segments(line: &str, cols: usize, tab: usize) -> Vec<WrapSegment> {
         }
 
         let min_pretty_col = source_col + available.saturating_mul(2) / 5;
-        let best = candidates
+        let candidate_start = candidates.partition_point(|candidate| candidate.byte <= byte_start);
+        let candidate_end = candidates.partition_point(|candidate| candidate.byte <= hard_byte);
+        let best = candidates[candidate_start..candidate_end]
             .iter()
             .copied()
             .filter(|candidate| {
@@ -742,10 +760,10 @@ impl WrapIndex {
             return (0, 0);
         }
         let byte = byte.min(line.len());
-        let source_col = display_col_for_byte(line, byte, tab);
         let segment = segments
             .partition_point(|segment| segment.byte_start <= byte)
             .saturating_sub(1);
+        let source_col = segments[segment].source_col_for_byte(line, byte, tab);
         (segment, segments[segment].visual_col(source_col))
     }
 

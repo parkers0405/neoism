@@ -17,9 +17,14 @@ const flatten = (nodes: TreeNode[]): TreeNode[] => nodes.flatMap((node) => [node
 const until = async (predicate: () => boolean | Promise<boolean>) => { const end = Date.now() + 12000; while (!await predicate()) { if (Date.now() > end) throw new Error("Native menu state did not converge"); await Bun.sleep(20); } };
 const overlay = app.getByTestId("chrome-action-overlay");
 let reference: number | undefined;
-const menu = async (action: string) => { await app.getByTestId("topbar-menu").click(); await app.getByTestId(`menu:${action}`).waitFor(); await app.getByTestId(`menu:${action}`).click(); await overlay.waitFor();
+const menu = async (action: string) => { await until(async()=>await app.getByTestId("topbar-menu").count()===1); await app.getByTestId("topbar-menu").click(); await app.getByTestId(`menu:${action}`).waitFor();
+  const button=await app.getByTestId("topbar-menu").bounds(),dropdown=await app.getByTestId("original-hamburger-menu").bounds(),tree=await app.getByTestId("file-tree").bounds();
+  if(Math.abs(dropdown.x-button.x)>1||dropdown.x>=tree.x+tree.width||dropdown.y<button.y+button.height)throw new Error("Top-chrome hamburger must open below its button over the tree");
+  await app.getByTestId(`menu:${action}`).click(); await overlay.waitFor();
   if (reference !== undefined) { coreCall("menu.dispose", { id: reference }); reference = undefined; }
-  if (action === "OpenSettings") { const bounds = await overlay.bounds(); reference = coreCall<{ id: number }>("menu.new", { kind: "settings", ...bounds, values: parse(server.configDocument().content), descriptors: server.descriptors }).id; }
+  if (action === "OpenSettings") { const bounds = await overlay.bounds();
+    if(bounds.x!==0||bounds.y!==0)throw new Error("Settings must center against the full window without a header offset");
+    reference = coreCall<{ id: number }>("menu.new", { kind: "settings", ...bounds, values: parse(server.configDocument().content), descriptors: server.descriptors }).id; }
 };
 const clickNode = async (node: TreeNode) => { if (!node.bounds) throw new Error("Original painted target has no native bounds"); await app.mouse.click({ x: node.bounds.x + node.bounds.width / 2, y: node.bounds.y + node.bounds.height / 2 }); };
 // Native automation intentionally strips customProps (including img.alt).
@@ -64,7 +69,7 @@ try {
   await editor.waitFor(); await editor.press("space"); const external = server.configDocument().content + "\n// external revision\n"; server.mutateConfigDocument(external);
   const before = server.configRequests.length; await editor.press("ctrl-s");
   await until(() => server.configRequests.slice(before).some((request) => request.tag === "SaveConfigDocument"));
-  await app.getByText("Config revision conflict: reload before saving").waitFor();
+  await app.getByTestId("app-notification").waitFor();
   if (server.configDocument().content !== external) throw new Error("Revision conflict overwrote the daemon document");
   await editor.press("ctrl-z");
   stage = "Extensions actual singleton page";

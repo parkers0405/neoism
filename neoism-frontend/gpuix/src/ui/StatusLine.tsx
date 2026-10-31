@@ -1,4 +1,5 @@
 import {DiagnosticsPopup} from "./DiagnosticsPopup";
+import {LspStatusPopup} from "./LspStatusPopup";
 import type {NativeEditor} from "../native-core";
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 import { createEffect, createMemo, createSignal, onCleanup,Show } from "solid-js";
@@ -12,7 +13,7 @@ import { sharePaintCommands } from "../editor/paint-command";
 import { PaintLayer, type PaintCommand } from "./PaintLayer";
 import { measuredFrameRate, onFrameActivity } from "../chrome/frame-meter";
 
-interface Frame { commands: PaintCommand[]; height: number; animating: boolean;anchors?:Array<{kind:string;x:number;y:number}> }
+interface Frame { commands: PaintCommand[]; height: number; animating: boolean;anchors?:Array<{kind:string;x:number;y:number;width?:number;height?:number}> }
 /** Uses the original StatusLine pill geometry, colors, scramble and hit tests. */
 export function StatusLine(props: { config: AppConfig; info: Record<string, unknown>; client: DaemonConnection; root?: string | null; connected: boolean;
   editor?:NativeEditor;onDiagnosticActivate?:(editor:NativeEditor,line:number,column:number)=>void;
@@ -47,15 +48,25 @@ export function StatusLine(props: { config: AppConfig; info: Record<string, unkn
   createEffect(() => { props.activity; props.editorActivity; if (config.statusFps !== false && measuredFrameRate(renderer) !== paintedFps) draw(); });
   onCleanup(() => { animation.dispose(); coreCall("chrome.dispose", { id }); });
   const[popup,setPopup]=createSignal<{editor:NativeEditor;pill:"Error"|"Warn";anchor:number[]}>();
+  const[lspPopup,setLspPopup]=createSignal<{editor:NativeEditor;anchor:number[]}>();
   createEffect(()=>{const editor=props.editor;if(popup()?.editor!==editor)setPopup(undefined);});
+  createEffect(()=>{const editor=props.editor;if(lspPopup()?.editor!==editor||!props.info.lsp_status)setLspPopup(undefined);});
   let hovered = false, origin = { x: 0, y: 0 };
   const local = (x = 0, y = 0) => ({ x: x - origin.x, y: y - origin.y });
+  const lspAnchor=()=>{const anchor=frame().anchors?.find(anchor=>anchor.kind==="lsp");return anchor?[anchor.x+origin.x,anchor.y+origin.y,anchor.width||80,anchor.height||frame().height]:lspPopup()?.anchor||[0,0,0,0];};
+  const toggleLsp=()=>{const editor=props.editor;if(!editor)return;setPopup(undefined);const anchor=lspAnchor();setLspPopup(current=>current?.editor===editor?undefined:{editor,anchor});};
   return <div testId="original-statusline" onLayout={(event) => { origin = { x: event.x || 0, y: event.y || 0 }; }}
     onMouseMove={(event) => { const next = coreCall<{ branch: boolean }>("chrome.hit", { id, ...local(event.x, event.y) }).branch; if (next !== hovered) { hovered = next; draw(next); } }}
     onMouseLeave={() => { if (hovered) { hovered = false; draw(false); } }}
-    onMouseDown={(event) => { if (event.button !== undefined && event.button !== 0) return; const hit = coreCall<{ action?: Record<string, unknown> }>("chrome.hit", { id, ...local(event.x, event.y) }); if(hit.action?.kind==="diagnostics"&&props.editor){const pill=hit.action.pill==="Warn"?"Warn":"Error";const anchor=frame().anchors?.find(anchor=>anchor.kind===(pill==="Warn"?"warn":"error"));setPopup({editor:props.editor,pill,anchor:anchor?[anchor.x+origin.x,anchor.y+origin.y]:[event.x||0,origin.y]});}else if(hit.action)props.onAction(hit.action); }}
+    onMouseDown={(event) => { if (event.button !== undefined && event.button !== 0) return; const hit = coreCall<{ action?: Record<string, unknown> }>("chrome.hit", { id, ...local(event.x, event.y) }); if(hit.action?.kind==="toggle_lsp_popup"&&props.editor){toggleLsp();}else if(hit.action?.kind==="diagnostics"&&props.editor){setLspPopup(undefined);const pill=hit.action.pill==="Warn"?"Warn":"Error";const anchor=frame().anchors?.find(anchor=>anchor.kind===(pill==="Warn"?"warn":"error"));setPopup({editor:props.editor,pill,anchor:anchor?[anchor.x+origin.x,anchor.y+origin.y]:[event.x||0,origin.y]});}else if(hit.action)props.onAction(hit.action); }}
     style={{ position: "relative", height: frame().height, minHeight: frame().height, flexShrink: 0 }}>
     <PaintLayer commands={frame().commands} config={config} />
+    <Show when={props.editor&&props.info.lsp_status?frame().anchors?.find(anchor=>anchor.kind==="lsp"):undefined}>{anchor=><div testId="status-lsp" role="button" tabIndex={0}
+      aria-label={`${props.info.lsp_label||"LSP"}: ${props.info.lsp_status}`} aria-expanded={!!lspPopup()}
+      onMouseDown={event=>{if(event.button===undefined||event.button===0)toggleLsp();}}
+      onKeyDown={event=>{if(event.key==="enter"||event.key==="space"){event.preventDefault();event.stopPropagation();toggleLsp();}}}
+      style={{position:"absolute",left:anchor().x,top:anchor().y,width:anchor().width,height:anchor().height,backgroundColor:"transparent",cursor:"pointer"}}/>}</Show>
+    <Show when={lspPopup()} keyed>{request=><LspStatusPopup config={config} editor={request.editor} anchor={lspAnchor()} report={props.report} onDone={()=>setLspPopup(current=>current===request?undefined:current)}/>}</Show>
     <Show when={popup()} keyed>{request=><DiagnosticsPopup config={config} editor={request.editor} pill={request.pill} anchor={request.anchor} report={props.report}
       onActivate={(line,column)=>props.onDiagnosticActivate?.(request.editor,line,column)} onDone={()=>setPopup(current=>current===request?undefined:current)}/>}</Show>
   </div>;

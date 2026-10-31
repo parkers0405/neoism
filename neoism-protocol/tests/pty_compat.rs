@@ -14,11 +14,13 @@ fn legacy_create_pty_without_shell_still_decodes() {
             cols,
             rows,
             shell,
+            shell_args,
             presentation,
         } => {
             assert_eq!(cwd.as_deref(), Some("/workspace"));
             assert_eq!((cols, rows), (80, 24));
             assert_eq!(shell, None);
+            assert_eq!(shell_args, None);
             assert_eq!(presentation,None);
         }
         other => panic!("unexpected message: {other:?}"),
@@ -28,6 +30,7 @@ fn legacy_create_pty_without_shell_still_decodes() {
 #[test]
 fn absent_optional_pty_fields_stay_off_the_wire() {
     let create = serde_json::to_string(&ClientMessage::CreatePty {
+        shell_args: None,
         presentation: None,
         cwd: None,
         cols: 120,
@@ -123,4 +126,12 @@ fn grid_presentation_is_explicit_and_survives_create_and_attach_metadata() {
     let wire=serde_json::to_value(&reply).unwrap();
     assert_eq!(wire["PtyCreated"]["presentation"],"grid");
     assert!(matches!(serde_json::from_value::<ServerMessage>(wire).unwrap(),ServerMessage::PtyCreated{presentation:Some(Presentation::Grid),..}));
+}
+
+#[test]
+fn configured_shell_arguments_roundtrip_without_splitting_or_interpolation() {
+    let wire=r#"{"CreatePty":{"cwd":null,"cols":80,"rows":24,"shell":"/custom path/zsh","shell_args":["--login","literal $HOME"],"presentation":"grid"}}"#;
+    let request:ClientMessage=serde_json::from_str(wire).unwrap();
+    assert!(matches!(&request,ClientMessage::CreatePty{shell_args:Some(args),..} if args==&["--login","literal $HOME"]));
+    assert_eq!(serde_json::to_value(request).unwrap(),serde_json::from_str::<serde_json::Value>(wire).unwrap());
 }

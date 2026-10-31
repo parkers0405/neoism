@@ -29,6 +29,9 @@ mod background_catalog;
 #[path = "server_forms.rs"]
 mod server_forms;
 
+#[path = "sidebar_context.rs"]
+mod sidebar_context;
+
 enum Panel {
     Settings(NeoismSettingsPane),
     Extensions(NeoismExtensionsPane),
@@ -239,6 +242,7 @@ impl Host {
     }
 }
 pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
+    if let Some(result)=sidebar_context::dispatch(v){return Some(result);}
     let op = text(v, "op");
     if !op.starts_with("menu.") {
         return None;

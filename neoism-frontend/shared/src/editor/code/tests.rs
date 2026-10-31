@@ -9,6 +9,39 @@ fn buffer(text: &str) -> CodeBuffer {
 }
 
 #[test]
+fn wrapped_segment_columns_match_full_lines_with_tabs_and_graphemes() {
+    use unicode_segmentation::UnicodeSegmentation;
+    let line = "\tlong JSON-ish text 界 e\u{301} 👩‍💻\t\"quoted\\nstring\" ".repeat(20);
+    for cols in [1, 4, 12, 37, 100] {
+        for segment in wrap_segments(&line, cols, TAB_DISPLAY_WIDTH) {
+            for (relative, _) in line[segment.byte_start..segment.byte_end].grapheme_indices(true) {
+                let byte = segment.byte_start + relative;
+                assert_eq!(segment.source_col_for_byte(&line, byte, TAB_DISPLAY_WIDTH), display_col_for_byte(&line, byte, TAB_DISPLAY_WIDTH));
+            }
+            assert_eq!(segment.source_col_for_byte(&line, segment.byte_end, TAB_DISPLAY_WIDTH), segment.source_end_col);
+        }
+    }
+}
+
+#[test]
+fn styled_syntax_keeps_gaps_selections_and_overlap_precedence() {
+    let line = "0123456789";
+    for syntax in [
+        vec![(SynTok::String, 1, 4), (SynTok::Keyword, 6, 8)],
+        vec![(SynTok::String, 1, 7), (SynTok::Keyword, 3, 9)],
+        vec![(SynTok::Keyword, 6, 8), (SynTok::String, 1, 4)],
+    ] {
+        let runs = styled_runs_with_syntax(line, Some(&syntax), Lang::Json, Some((2, 8)), &[], &[]);
+        for byte in 0..line.len() {
+            let run = runs.iter().find(|run| run.start <= byte && byte < run.end).unwrap();
+            let expected = syntax.iter().find(|(_, start, end)| *start <= byte && byte < *end).map(|(token, _, _)| *token).unwrap_or(SynTok::Plain);
+            assert_eq!(run.token, expected);
+            assert_eq!(run.selected, (2..8).contains(&byte));
+        }
+    }
+}
+
+#[test]
 fn from_text_roundtrip_preserves_line_ending_and_trailing_newline() {
     let crlf = CodeBuffer::from_text("a\r\nb\r\n");
     assert_eq!(crlf.lines, vec!["a".to_string(), "b".to_string()]);

@@ -101,6 +101,8 @@ pub struct McpOAuthConfig {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum McpStatus {
     Connected,
+    /// Enabled and configured, but no active runtime connection.
+    Disconnected,
     Disabled,
     Failed { error: String },
     NeedsAuth,

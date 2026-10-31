@@ -24,6 +24,16 @@ test("fresh catalogs are reused for picker opens and concurrent refreshes share 
   expect(daemon.httpRequests.length).toBeGreaterThan(before);
  }finally{close();}
 });
+test("conversation agent catalog excludes hidden and subagent-only agents by mode",async()=>{
+ const {model,close}=await fixture({agentCatalog:[
+  {name:"build",mode:"primary"},{name:"plan",mode:"primary"},{name:"both",mode:"all"},
+  {name:"legacy"},{name:"explore",mode:"subagent"},{name:"general",mode:"subagent"},
+  {name:"custom-worker",mode:"subagent"},{name:"internal",mode:"primary",hidden:true},
+ ]});try{
+  await model.refreshCatalogs();
+  expect(model.state.agents.map(agent=>agent.name)).toEqual(["build","plan","both","legacy"]);
+ }finally{close();}
+});
 test("canonical history order reaches both the model and the native timeline subscribers",async()=>{
  const {daemon,model,close}=await fixture();try{
   const message=(id:string)=>({id,role:"Assistant",kind:id==="thinking"?"Reasoning":"Assistant",text:id});

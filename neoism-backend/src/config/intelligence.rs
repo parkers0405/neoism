@@ -243,6 +243,17 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Toggle,
         ),
         d(
+            "appearance.agent-stars",
+            "Agent stars",
+            "Show gently drifting pixel stars behind the Agent input. Reduced motion keeps the stars still.",
+            Kind::Boolean,
+            json!(true),
+            &[],
+            false,
+            C::Appearance,
+            Control::Toggle,
+        ),
+        d(
             "appearance.effects.trail-cursor",
             "Cursor trail",
             "Animate a trail behind the caret.",

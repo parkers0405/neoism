@@ -324,6 +324,16 @@ fn replace_loose_with(
 /// failure, including rollback failure. Old installs need not have an agent GUI.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
+    install_unix_loose_with(target, source, || Ok(()), || Ok(()))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn install_unix_loose_with(
+    target: &Path,
+    source: &Path,
+    before_replace: impl FnOnce() -> Result<(), Error>,
+    after_verify: impl FnOnce() -> Result<(), Error>,
+) -> Result<(), Error> {
     let parent = target.parent().ok_or("executable has no parent")?;
     let _lock = UpdateLock::acquire(&parent.join("neoism"))?;
     if !source.join("web/agent-gui/index.html").is_file() {
@@ -349,6 +359,9 @@ pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
     if loose_manifest(&staged, std::ffi::OsStr::new("neoism"))? != expected {
         return Err("staged update hashes differ from release payload".into());
     }
+    // Do not interrupt a running workspace until the entire replacement is
+    // staged and verified. A refused shutdown leaves the installation intact.
+    before_replace()?;
     let recovery = work.keep();
     let result = replace_loose_with(
         target,
@@ -363,7 +376,7 @@ pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
             {
                 return Err("installed update hashes differ from release payload".into());
             }
-            Ok(())
+            after_verify()
         },
     );
     match result {
@@ -1456,6 +1469,32 @@ mod tests {
         )
         .is_ok());
         assert!(check_compiled_version("neoism 0.7.8\n", "neoism", expected).is_err());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_restart_runs_after_staging_and_rolls_back_failed_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let target = loose_fixture(&installed, "0.7.102");
+        let payload = root.path().join("payload");
+        loose_fixture(&payload, "0.7.103");
+        let stopped = std::cell::Cell::new(false);
+        let result = install_unix_loose_with(&target, &payload, || {
+            assert_eq!(fs::read_to_string(installed.join("web/index.html"))?, "0.7.102");
+            stopped.set(true);
+            Ok(())
+        }, || {
+            assert!(stopped.get());
+            assert_eq!(fs::read_to_string(installed.join("web/index.html"))?, "0.7.103");
+            Err("test launch failure".into())
+        });
+        assert!(result.unwrap_err().to_string().contains("original components restored"));
+        assert_eq!(fs::read_to_string(installed.join("web/index.html")).unwrap(), "0.7.102");
+        fs::remove_file(payload.join("web/agent-gui/index.html")).unwrap();
+        assert!(install_unix_loose_with(&target, &payload,
+            || panic!("invalid payload must never close the app"),
+            || panic!("invalid payload must never launch the app")).is_err());
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

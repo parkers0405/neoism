@@ -1,6 +1,8 @@
 //! Standalone updater shared by the GPUIX CLI and the legacy migration payload.
 use std::{path::{Path, PathBuf}, time::{Duration, Instant}};
 mod download;
+#[cfg(target_os="linux")]
+mod linux_restart;
 #[cfg(unix)]
 mod macos_update;
 #[cfg(windows)]
@@ -21,26 +23,12 @@ fn run() -> Result<(), Error> {
         println!("{} {VERSION}", env!("CARGO_BIN_NAME")); return Ok(());
     }
     if args.iter().any(|a| a=="--help" || a=="-h") {
-        println!("Usage: neoism update [--nightly] [--force] [--target-version TAG]\nUpdates the invoking installation, including its complete native runtime. Windows uses the MSI installer."); return Ok(());
+        println!("Usage: neoism update [--nightly] [--force] [--target-version TAG]\nUpdates the invoking installation, including its complete native runtime. Windows uses the MSI installer.\nAfter installation, Neoism closes the old app/services and opens a new window. Use --no-relaunch to leave it closed."); return Ok(());
     }
     if args.first().is_some_and(|a| a=="--manifest") {
         return Err("The legacy Lua plugin runner was retired; this companion is retained for installer compatibility.".into());
     }
-    let mut options = Options::default();
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "update" | "upgrade" | "self-update" | "--update" => {},
-            "--nightly" | "nightly" => options.nightly=true,
-            "--force" => options.force=true,
-            "--relaunch" => options.relaunch=true,
-            "--target-version" => options.target=Some(args.next().ok_or("missing release tag")?.to_owned()),
-            "--invoking-exe" => options.executable=Some(PathBuf::from(args.next().ok_or("missing invoking executable")?)),
-            "--parent-pid" => options.parent=Some(args.next().ok_or("missing process ID")?.parse()?),
-            _ => return Err(format!("unknown update option: {arg}").into()),
-        }
-    }
-    if options.nightly && options.target.is_some() { return Err("--nightly and --target-version cannot be combined".into()); }
+    let options = parse_options(&args)?;
     let executable = std::fs::canonicalize(options.executable.as_ref().ok_or("Invoke this updater through neoism update")?)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let (tag, temporary, archive) = runtime.block_on(download(&options))?;
@@ -62,12 +50,40 @@ fn run() -> Result<(), Error> {
             println!("Update staged. Result: {}",handoff.result_path.display());
         }
         #[cfg(not(target_os="macos"))] {
+            #[cfg(target_os="linux")]
+            {
+                let graphical = std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+                let relaunch = options.relaunch && graphical;
+                macos_update::install_unix_loose_with(&executable, &source,
+                    || { linux_restart::protect_from_terminal_close()?; linux_restart::stop_stack(&executable, options.parent, Duration::from_secs(30)) },
+                    || if relaunch { linux_restart::relaunch(&executable) } else { Ok(()) })?;
+                println!("Installed Neoism {tag}. {}", if relaunch { "Opened a new Neoism window." } else { "Neoism is closed; launch it when ready." });
+            }
+            #[cfg(not(target_os="linux"))]
             macos_update::install_unix_loose(&executable,&source)?;
-            println!("Installed Neoism {tag}. Restart Neoism to use the updated application and services.");
         }
         std::fs::remove_dir_all(temporary)?;
         Ok(())
     }
+}
+fn parse_options(args: &[String]) -> Result<Options, Error> {
+    let mut options = Options { relaunch: true, ..Options::default() };
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "update" | "upgrade" | "self-update" | "--update" => {},
+            "--nightly" | "nightly" => options.nightly=true,
+            "--force" => options.force=true,
+            "--relaunch" => options.relaunch=true,
+            "--no-relaunch" => options.relaunch=false,
+            "--target-version" => options.target=Some(args.next().ok_or("missing release tag")?.to_owned()),
+            "--invoking-exe" => options.executable=Some(PathBuf::from(args.next().ok_or("missing invoking executable")?)),
+            "--parent-pid" => options.parent=Some(args.next().ok_or("missing process ID")?.parse()?),
+            _ => return Err(format!("unknown update option: {arg}").into()),
+        }
+    }
+    if options.nightly && options.target.is_some() { return Err("--nightly and --target-version cannot be combined".into()); }
+    Ok(options)
 }
 fn platform() -> &'static str { if cfg!(windows) {"windows"} else if cfg!(target_os="macos") {"darwin"} else {"linux"} }
 fn architecture() -> Result<&'static str, Error> { match std::env::consts::ARCH {"x86_64"=>Ok("x86_64"),"aarch64"=>Ok("aarch64"),_=>Err("Unsupported update architecture".into())} }
@@ -117,6 +133,16 @@ fn wait_for_process_exit(pid:u32,timeout:Duration)->Result<(),Error>{let end=Ins
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn update_relaunches_by_default_on_every_platform_and_can_be_disabled() {
+        for args in [vec!["update", "--nightly"], vec!["--update", "nightly"], vec!["upgrade"]] {
+            let mut args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(parse_options(&args).unwrap().relaunch);
+            args.push("--no-relaunch".into());
+            assert!(!parse_options(&args).unwrap().relaunch);
+            args.push("--relaunch".into());
+            assert!(parse_options(&args).unwrap().relaunch);
+        }
+    }
     #[test]
     #[cfg(all(unix, not(target_os="macos")))]
     fn legacy_installer_keeps_gpuix_runtime() {

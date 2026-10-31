@@ -31,7 +31,7 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
   const ink=createMemo(()=>({lines:frame().lines,extra:frame().extra}),undefined,{equals:(a,b)=>a.lines===b.lines&&a.extra===b.extra});
   const paint=createMemo(()=>JSON.stringify(terminalPaintOps(ink(),props.config,cellWidth(),lineHeight)));
   const caret = createMemo(() => cursorPaint(cursor().quad));
-  let host: HostElement | undefined, selecting = false;
+  let host: HostElement | undefined, selecting = false, disposed = false;
   const send = session.send;
   const cursorAnimation=new TerminalCursorAnimation(()=>buffer.cursor(cellWidth(),lineHeight),setCursor,focused);
   createEffect(()=>{const position=frame().cursor;blinkClock.update({active:focused(),enabled:props.config.cursorBlink,intervalMs:props.config.cursorBlinkInterval,animating:cursor().animating,mode:"terminal",activityToken:`${position.x}:${position.y}:${position.shape}:${cellWidth()}:${lineHeight}`});});
@@ -61,23 +61,36 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
   let releaseCaret=()=>{};
   onMount(() => {if(host)releaseCaret=registerSurfaceCaret(renderer,host,()=>cursor().quad.map(point=>[point[0]+size().x,point[1]+size().y]));if (active() && host) focusNativeElement(renderer, host.id); });
   onCleanup(()=>releaseCaret());
-  onCleanup(() => { cursorAnimation.dispose(); blinkClock.dispose(); buffer.focus(false); cleanupBuffer(); clearInterval(blinkTimer); });
+  onCleanup(() => { disposed = true; cursorAnimation.dispose(); blinkClock.dispose(); buffer.focus(false); cleanupBuffer(); clearInterval(blinkTimer); });
   const intercepted = new Set<string>();
   const keyDown = (event: KeyEvent, released = false) => {
     const key = event.key?.toLowerCase() || "";
     if (released && intercepted.delete(key)) { event.preventDefault(); event.stopPropagation(); return; }
+    const mods=event.modifiers||{ctrl:false,cmd:false,shift:false,alt:false},primary = mods.ctrl || mods.cmd;
+    // Terminal control/clipboard keys belong to this focused session before
+    // global bindings. A selection must never turn the shell's Ctrl+C into Copy.
+    if(key==="c"&&mods.ctrl&&!mods.shift&&!mods.alt&&!mods.cmd){
+      event.preventDefault(); event.stopPropagation();
+      const input={key:"c",char:"c",ctrl:true,repeat:event.isHeld,released};
+      const wasVi=buffer.viMode;
+      let bytes=buffer.key(input);
+      // Leave terminal scrollback/Vim mode and interrupt on the same press.
+      if(!released&&wasVi&&!buffer.viMode)bytes=buffer.key(input);
+      if(bytes.length)send(bytes);
+      if(!released){blinkClock.activity();buffer.scrollToBottom();}
+      return;
+    }
+    const clipboardChord=!mods.alt&&((mods.cmd&&!mods.ctrl)||(mods.ctrl&&mods.shift&&!mods.cmd));
+    if(clipboardChord&&(key==="c"||key==="v")){
+      event.preventDefault(); event.stopPropagation();
+      if(!released){
+        intercepted.add(key);
+        if(key==="c"){const selected=buffer.selectedText;if(selected)void writeClipboard(selected).catch(props.report);}
+        else void readClipboard().then(text=>{if(disposed)return;const bytes=buffer.paste(text);if(bytes.length){blinkClock.activity();send(bytes);buffer.scrollToBottom();}}).catch(props.report);
+      }
+      return;
+    }
     if (!released && props.onCustomKey?.(event)) { intercepted.add(key); event.preventDefault(); event.stopPropagation(); return; }
-    const primary = event.modifiers?.ctrl || event.modifiers?.cmd;
-    if (primary && (key === "v" && event.modifiers?.shift || key === "v" && event.modifiers?.cmd)) {
-      event.preventDefault(); event.stopPropagation();
-      if (!released) void readClipboard().then((text) => {blinkClock.activity();send(buffer.paste(text));}).catch(props.report);
-      return;
-    }
-    if (primary && key === "c" && (event.modifiers?.shift || event.modifiers?.cmd || buffer.selectedText && !buffer.viMode)) {
-      event.preventDefault(); event.stopPropagation();
-      if (!released && buffer.selectedText) void writeClipboard(buffer.selectedText).catch(props.report);
-      return;
-    }
     // Leave application shortcuts to the parent.
     if (event.modifiers?.ctrl && (key === "tab" || event.modifiers.shift && ["r", "d", "[", "]", "left", "right", "up", "down", "w"].includes(key))) return;
     if (event.modifiers?.alt && ["e", "n", "c", "h"].includes(key)) return;
@@ -112,7 +125,7 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
   };
   return <div ref={host} testId="terminal" tabIndex={0} role="terminal" aria-label="Terminal"
     onClick={() => { props.onFocus?.(); if (host) focusNativeElement(renderer, host.id); }}
-    onMouseDown={(event) => { if (mouse(event, "down")) return; if (event.button === 0) { selecting = true; select(event.x || 0, event.y || 0, true, event.clickCount); } }}
+    onMouseDown={(event) => { if(event.button===0){props.onFocus?.();if(host)focusNativeElement(renderer,host.id);} if (mouse(event, "down")) return; if (event.button === 0) { selecting = true; select(event.x || 0, event.y || 0, true, event.clickCount); } }}
     onMouseMove={(event) => { if (mouse(event, "move")) return; if (selecting && event.pressedButton === 0) select(event.x || 0, event.y || 0, false); }}
     onMouseUp={(event) => { mouse(event, "up"); selecting = false; }}
     onFocus={() => { invalidateNativeFocus(renderer); receiveFocus(true); }} onBlur={() => { invalidateNativeFocus(renderer); receiveFocus(false); }} onKeyDown={(event) => keyDown(event)} onKeyUp={(event) => keyDown(event, true)}

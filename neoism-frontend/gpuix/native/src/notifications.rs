@@ -21,6 +21,10 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
    "notifications.dismiss"=>host.view.dismiss(v["index"].as_u64().unwrap_or(0)as usize),_=>{}
   }
   host.paint.begin_frame();host.view.render(&mut host.paint,(width,height,1.0),0.0,&IdeTheme::by_name(v["theme"].as_str().unwrap_or("pastel_dark")));
-  Ok(json!({"commands":host.paint.commands(),"rects":host.view.host_rects(width,0.0),"messages":host.view.host_messages(),"active":host.view.is_active()}))
+  // Rendering may cross the expiry deadline after render()'s initial tick.
+  // If animation stops now, remove expired pointer regions/messages in this
+  // same response; otherwise there is no next frame to clear the final toast.
+  let active=host.view.is_active();if !active{host.view.tick();if host.view.host_messages().is_empty(){host.paint.begin_frame();}}
+  Ok(json!({"commands":host.paint.commands(),"rects":host.view.host_rects(width,0.0),"messages":host.view.host_messages(),"active":active}))
  }))
 }

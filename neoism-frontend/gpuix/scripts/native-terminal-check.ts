@@ -46,6 +46,17 @@ try {
   await terminal.fill("printf '\\033[32mNEOISM_GHOSTTY_%s\\033[0m\\n' READY; printf 'NEOISM_PID_%s\\n' \"$$\""); await terminal.press("enter");
   await until(() => output.includes("NEOISM_GHOSTTY_READY"));
   await until(() => /NEOISM_PID_\d+/.test(output)); const pid = output.match(/NEOISM_PID_(\d+)/)![1];
+  stage = "Ctrl+C interrupts a foreground process despite a terminal selection";
+  output="";
+  await terminal.fill("printf 'NEOISM_INTERRUPT_%s\\n' STARTED; sleep 30");await terminal.press("enter");
+  await until(()=>output.includes("NEOISM_INTERRUPT_STARTED"));
+  const bounds=await terminal.bounds();
+  await app.mouse.down({x:bounds.x+3,y:bounds.y+8});
+  await app.mouse.move({x:bounds.x+90,y:bounds.y+8},{pressedButton:0});
+  await app.mouse.up({x:bounds.x+90,y:bounds.y+8});
+  await terminal.press("ctrl-c");
+  await terminal.fill("printf 'NEOISM_INTERRUPT_%s\\n' CANCELLED");await terminal.press("enter");
+  await until(()=>output.includes("NEOISM_INTERRUPT_CANCELLED"));
   stage = "UI restart and retained shell"; await app.close(); app = await launch();
   await selectTerminal();
   await app.getByTestId("terminal").waitFor({ timeoutMs: 15000 }); await app.getByTestId("terminal-viewport").waitFor();
@@ -59,7 +70,7 @@ try {
   await app.getByTestId("topbar-menu").click();
   await app.getByTestId("original-hamburger-menu").waitFor();
   sessionId = undefined;
-  console.log("Ghostty keyboard/ANSI output, retained shell across frontend restart, and shell exit closing only its tab while Neoism remains interactive passed.");
+  console.log("Ghostty keyboard/ANSI output, Ctrl+C interrupt, retained shell across frontend restart, and shell exit closing only its tab while Neoism remains interactive passed.");
 } catch (error) { console.error(`Native terminal check failed at ${stage}`); throw error; }
 finally {
   await app?.close();

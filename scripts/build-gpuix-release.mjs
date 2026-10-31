@@ -18,6 +18,8 @@ function run(program,args,cwd=root){
 }
 run('npm',['ci'],sdk);run('npm',['ci'],frontend);
 const bun=join(frontend,'node_modules/bun/bin/bun.exe');
+// Version/design drift must fail before the expensive native compilation.
+run('npm',['run','check:design'],frontend);
 run('python',['scripts/check-native-toolchain.py']);
 // Fail early on toolchain/network problems before compiling the Rust services.
 run(bun,['scripts/build-ghostty.ts'],frontend);
@@ -48,7 +50,6 @@ for(const [source,name]of [
 run(join(dist,`neoism${suffix}`),['--version']);
 run(bun,['scripts/verify-core.ts'],frontend);
 run('npm',['run','typecheck'],frontend);
-run('npm',['run','check:design'],frontend);
 // The host test must find this run's freshly built standalone daemon.
 run(bun,['test','./tests'],frontend);
 run('python',['scripts/package-gpuix-release.py']);

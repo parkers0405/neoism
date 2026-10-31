@@ -9,7 +9,7 @@ test("fresh-install Solid patch is checked, repeatable, and rejects unrelated de
  try{
   mkdirSync(join(base,"dist"),{recursive:true});mkdirSync(join(root,"native"));
   const pin=readFileSync(new URL("../native/solid-host-pin.json",import.meta.url),"utf8");writeFileSync(join(root,"native/solid-host-pin.json"),pin);writeFileSync(join(base,"package.json"),JSON.stringify({version:"0.11.0"}));
-  const installed=readFileSync(new URL("../node_modules/@gpuix/solid/dist/host.js",import.meta.url),"utf8"),original=installed.replace("    // Solid keyed swaps rely on DOM insertBefore(node, node) being a no-op.\n    if (node === anchor) return;\n","");
+  const installed=readFileSync(new URL("../node_modules/@gpuix/solid/dist/host.js",import.meta.url),"utf8"),original=installed.replace('(name === "data-preserve-keyboard-focus" || UNIVERSAL_PROPS.has(name))',"UNIVERSAL_PROPS.has(name)").replace("    // Solid keyed swaps rely on DOM insertBefore(node, node) being a no-op.\n    if (node === anchor) return;\n","");
   writeFileSync(path,original);expect(patch(root)).toBe(true);expect(readFileSync(path,"utf8")).toBe(installed);expect(patch(root)).toBe(false);
   const other=installed+"\n// unrelated local change\n";writeFileSync(path,other);expect(()=>patch(root)).toThrow("unrecognized edits");expect(readFileSync(path,"utf8")).toBe(other);
   writeFileSync(join(base,"package.json"),JSON.stringify({version:"0.12.0"}));expect(()=>patch(root)).toThrow("installed version");expect(readFileSync(path,"utf8")).toBe(other);

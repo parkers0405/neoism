@@ -29,6 +29,7 @@ import { EditorView } from "../editor/EditorView";
 import { MarkdownView } from "../markdown/MarkdownView";
 import { PaneLayoutView } from "../layout/PaneLayoutView";
 import { AgentTimelineView,scrollAgentHalfPage } from "../agent/AgentTimelineView";
+import {contextUsage} from "../agent/context-usage";
 import { AgentSidePanelView } from "../agent/AgentSidePanelView";
 import { DirectoryBrowserView } from "../agent/DirectoryBrowserView";
 import { ConversationNavigatorView, type NavigatorRow } from "../agent/ConversationNavigatorView";
@@ -827,7 +828,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     return <div style={{ ...column, flexGrow: 1, minHeight: 0 }}>
       <Show when={activeWorkspaceId()} keyed>{(workspaceId) => <AgentSidePanelView model={model} config={config} cacheKey={workspaceId} directory={state().activeWorkspace?.id === workspaceId ? state().activeWorkspace?.root_dir : undefined} viewedSession={active()?.sessionId} report={model.report}
         onHost={host=>{if(host)sidebarHosts.set("conversations",host);else sidebarHosts.delete("conversations");}}
-        onCursor={(rect,host,bounds)=>{chromeBounds.set(host.id,bounds);target=rect?{host,kind:"sidebar",bounds:rect}:undefined;if(chromeFocus().zone==="sidebar")setChromeTarget(previous=>target?{...target,origin:previous?.host===host?previous.origin:pendingSidebarOrigin}:previous);}}
+        onCursor={(rect,host,bounds)=>{chromeBounds.set(host.id,bounds);target=rect?{host,kind:"sidebar",bounds:rect}:undefined;if(chromeFocus().zone==="sidebar")setChromeTarget(previous=>target?{...target,origin:previous?.host===host?previous.origin:pendingSidebarOrigin}:undefined);}}
         onFocus={()=>{if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});const next=target;if(next)setChromeTarget(previous=>({...next,origin:previous?.host===next.host?previous.origin:pendingSidebarOrigin}));}}}
         onCustomKey={handleSurfaceKey} onActivate={()=>focusChrome({zone:"content"})}
         onAction={(action, detail) => { if (action === "new-chat") {model.newAgentHome();focusChrome({zone:"content"});} else if (action === "focus-content")focusChrome({zone:"content"});else if (action === "search") openFind("files"); else if (action === "projects") openProjectPicker(detail); else void chooseDirectory().then(commitWorkspaceRoot); }} />}</Show>
@@ -1040,6 +1041,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
       <Show when={!home()&&timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><Show when={timelineSession()} keyed>{(sessionId)=><AgentTimelineView sessionId={sessionId} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:sessionId} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
+        preserveSidebarFocus={chromeFocus().zone==="sidebar"} onFocus={()=>{++contentFocusSerial;contentFocusFrames.cancel();pendingContentFocus=false;noteContentFocus();setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}
         contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]??viewport().height)}
         openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/>}</Show></div></Show>
       <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={setFrame} onPromptStart={()=>setStartedPrompt(true)} onPromptFailed={()=>setStartedPrompt(false)}/></Show>
@@ -1049,8 +1051,12 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
 
   function DetailRail() {
     const session = () => active()?.sessionId || "";
-    const usage = () => state().usage[session()];
-    const limit = () => usage()?.context_limit || state().providerStates[session()]?.context_limit;
+    const usage = createMemo(() => contextUsage(state().history[session()]||[],state().usage[session()]));
+    const limit = () => {
+      const selected=activeSelection().model||"",slash=selected.indexOf("/");
+      const catalog=state().providers.find(provider=>provider.id===selected.slice(0,slash))?.models?.find(model=>model.id===selected.slice(slash+1));
+      return state().providerStates[session()]?.context_limit||catalog?.context_limit||usage()?.context_limit;
+    };
     const count = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}m` : n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n);
     const total = () => usage()?.total ?? (usage()?.input || 0) + (usage()?.output || 0);
     const directory = () => {

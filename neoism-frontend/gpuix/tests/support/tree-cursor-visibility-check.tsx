@@ -27,6 +27,14 @@ try{
  for(let i=0;i<5;i++)await pulse();assert.equal(native().top,down.top,"Hiding the cursor preserves the wheel viewport");
  await wheel(1600);await until(()=>native().top===0&&!!caret());assert.equal(native().selected,0);assert.equal(host.focused,node().id);
  await until(()=>Math.abs(Number(caret()!.style.top)-originalTop)<1);
+ // Keyboard navigation must reveal the selected row after wheel scrolling,
+ // including a trip out to the content pane and back with Alt+Left.
+ await wheel(-1600);await until(()=>!caret());
+ host.dispatchKey(root,host.focused,{key:"right",modifiers:{alt:true,ctrl:false,cmd:false,shift:false}});await pulse();
+ host.dispatchKey(root,host.focused,{key:"left",modifiers:{alt:true,ctrl:false,cmd:false,shift:false}});await pulse();
+ root.dispatch({elementId:node().id,eventType:"keyDown",key:"down",modifiers:{alt:false,ctrl:false,cmd:false,shift:false}});
+ await until(()=>native().selected===1&&!!caret());
+ assert.ok(Number(caret()!.style.top)>=90&&Number(caret()!.style.top)<770,"Keyboard cursor must return inside the sidebar, not the window origin");
  // Both boundaries matter: select the last row, wheel toward the top, then return.
  root.dispatch({elementId:node().id,eventType:"keyDown",key:"end",modifiers:{shift:false,ctrl:false,alt:false,cmd:false}});await until(()=>native().selected===199&&!!caret());
  await wheel(1600);await until(()=>!caret());assert.equal(native().selected,199);assert.equal(host.focused,node().id);

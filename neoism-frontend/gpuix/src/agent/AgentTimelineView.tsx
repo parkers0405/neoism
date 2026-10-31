@@ -6,7 +6,8 @@ import { coreCall } from "../native-core";
 import { writeClipboard } from "../clipboard";
 import { PaintLayer, type PaintCommand, type PreparedCanvas } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
-import { focusNativeElement } from "../native-focus";
+import { focusNativeElement,invalidateNativeFocus } from "../native-focus";
+import {profileStart,profileEnd} from "../profiling";
 import type {AgentFamilyRow} from "./family";
 import { wheelCellPixels } from "../ui/wheel";
 import {localPresenceIdentity} from "./local-presence";
@@ -15,7 +16,7 @@ import {paintedChromeBounds} from "../ui/chrome-target-bounds";
 import {openExternalUrl} from "../menu-actions/web-frontend";
 import {timelineReceivesEvent} from "./timeline-event-routing";
 
-interface TimelineFrame { canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
+interface TimelineFrame { canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; reason?:string; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
 interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
 
 /** One original agent timeline engine per conversation (the shared Rust
@@ -57,7 +58,7 @@ export function scrollAgentHalfPage(model:WorkspaceModel,sessionId:string,config
 
 export function AgentTimelineView(props: { sessionId: string; model: WorkspaceModel; config: AppConfig; report: (error: unknown) => void; openFile: (path: string) => void;
   /** Composer top: scroll metrics and sticky controls stop here; body paint continues behind the floating card. */
-  provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void }) {
+  provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void;onFocus?:()=>void;preserveSidebarFocus?:boolean }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
   const provisional=!!props.provisional;
   const localName=localPresenceIdentity(config).displayName;
@@ -69,6 +70,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   let bounds = { x: 0, y: 0, width: 0, height: 0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const apply = (next: TimelineFrame) => {
+    if(next.animating)profileEnd(`agent.animation.${next.reason||"scroll"}`,profileStart());
     batch(() => {setCommands(next.commands);setCanvas(next.canvas);setPointer(!!next.pointer);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
     if(!provisional)for(const message of next.send||[])props.model.sendAgent(message as never);
     if(next.navigate)props.onNavigate?.(next.navigate);
@@ -108,6 +110,13 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     if(painted){bounds={...bounds,x:painted.x,y:painted.y};}
     return {x:(event.x||0)-bounds.x,y:(event.y||0)-bounds.y};
   };
+  // Repeated navigation keys share the same display-frame scroll commit as
+  // trackpad events. Rendering here as well doubled work between display wakes.
+  const scroll = (deltaY:number) => {
+    try { coreCall("agenttimeline.scroll",{id:engine.id,deferFrame:true,deltaY,precise:true}); }
+    catch(error){props.report(error);}
+    schedule();
+  };
   const keyDown = (event: KeyEvent) => {
     if(handleApplicationShortcut(renderer,event))return;
     const key = event.key || "", ctrl = !!event.modifiers?.ctrl, modified = ctrl || !!event.modifiers?.alt || !!event.modifiers?.cmd;
@@ -117,11 +126,13 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
       const text = coreCall<{ text: string | null }>("agenttimeline.copy", { id: engine.id }).text;
       if (text) { handled(); void writeClipboard(text).catch(props.report); }
     } else if (ctrl && !event.modifiers?.alt && !event.modifiers?.cmd && !event.modifiers?.shift && ["d", "u"].includes(key)) { handled(); call("half", { older: key === "u" }); }
-    else if (["pageup", "pagedown"].includes(key)) { handled(); call("scroll", { deltaY: (key === "pageup" ? 1 : -1) * bounds.height * 0.9, precise: true }); }
-    else if (key === "home" || key === "end") { handled(); call("scroll", { deltaY: key === "home" ? 1e7 : -1e7, precise: true }); }
-    else if (config.vim && !modified && ["j", "k"].includes(key)) { handled(); call("scroll", { deltaY: (key === "k" ? 1 : -1) * 19 * s, precise: true }); }
+    else if (["pageup", "pagedown"].includes(key)) { handled(); scroll((key === "pageup" ? 1 : -1) * bounds.height * 0.9); }
+    else if (key === "home" || key === "end") { handled(); scroll(key === "home" ? 1e7 : -1e7); }
+    else if (config.vim && !modified && ["j", "k"].includes(key)) { handled(); scroll((key === "k" ? 1 : -1) * 19 * s); }
   };
-  return <div ref={host} testId="conversation" tabIndex={0} aria-label="Conversation history" onKeyDown={keyDown}
+  return <div ref={host} testId="conversation" data-preserve-keyboard-focus={!!props.preserveSidebarFocus} tabIndex={0} aria-label="Conversation history" onKeyDown={keyDown}
+    onFocus={()=>{invalidateNativeFocus(renderer);props.onFocus?.();}}
+    onBlur={()=>invalidateNativeFocus(renderer)}
     onLayout={(event) => {
       const next = { x: event.x || 0, y: event.y || 0, width: event.width || 0, height: event.height || 0 };
       const resized = next.width !== bounds.width || next.height !== bounds.height; bounds = next;
@@ -131,7 +142,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
       try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: event.deltaY || 0, precise: !!event.precise, ...(typeof event.x==="number"&&typeof event.y==="number"?local(event):{}), shift:!!event.modifiers?.shift, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
       schedule();
     }}
-    onMouseDown={(event) => { const point=local(event);if (host) focusNativeElement(renderer, host.id); if (event.button === 0) call("pointer", { kind: "down", ...point }); }}
+    onMouseDown={(event) => { const point=local(event);if (host&&!props.preserveSidebarFocus) focusNativeElement(renderer, host.id); if (event.button === 0) call("pointer", { kind: "down", ...point }); }}
     onMouseMove={(event) => {pointerPending=local(event);schedule();}}
     onMouseUp={(event) => call("pointer", { kind: "up", ...local(event) })}
     onMouseLeave={() => call("pointer", { kind: "leave" })}

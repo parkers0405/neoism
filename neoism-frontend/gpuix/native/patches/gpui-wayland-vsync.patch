@@ -256,10 +256,10 @@ index a5c6dc8..9b43c8e 100644
 +        }
 +    }
 +}
-diff --git c/crates/gpui_linux/src/linux/wayland/window.rs w/crates/gpui_linux/src/linux/wayland/window.rs
-index 2d25416..d5a5ae2 100644
---- c/crates/gpui_linux/src/linux/wayland/window.rs
-+++ w/crates/gpui_linux/src/linux/wayland/window.rs
+diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
+index 2d25416..33a0567 100644
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
 @@ -571,8 +571,13 @@ impl WaylandWindowState {
                      height: DevicePixels(f32::from(options.bounds.size.height) as i32),
                  },
@@ -276,7 +276,25 @@ index 2d25416..d5a5ae2 100644
              };
              WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
          };
-@@ -994,6 +999,10 @@ impl WaylandWindowStatePtr {
+@@ -931,6 +936,9 @@ impl WaylandWindowStatePtr {
+             self.frame_loop.set(FrameLoop::Parked);
+             return;
+         };
++        let trace = std::env::var_os("GPUI_WAYLAND_FRAME_TRACE").is_some();
++        let started = trace.then(std::time::Instant::now);
++        if trace { eprintln!("[wayland-frame-start] force={} present={}", force_render, require_presentation); }
+         request_frame_callback(RequestFrameOptions {
+             force_render,
+             require_presentation,
+@@ -938,6 +946,7 @@ impl WaylandWindowStatePtr {
+         self.update_ime_enabled();
+         drop(callbacks);
+ 
++        if let Some(started) = started { eprintln!("[wayland-frame-end] state={:?} us={}", self.frame_loop.get(), started.elapsed().as_micros()); }
+         self.complete_frame();
+     }
+ 
+@@ -994,6 +1003,10 @@ impl WaylandWindowStatePtr {
          }
      }
  
@@ -287,7 +305,7 @@ index 2d25416..d5a5ae2 100644
      pub fn scheduled_frame_fired(&self) {
          if self.frame_loop.get() == FrameLoop::Scheduled {
              self.frame();
-@@ -1929,6 +1938,9 @@ impl PlatformWindow for WaylandWindow {
+@@ -1929,6 +1942,9 @@ impl PlatformWindow for WaylandWindow {
              let callback = state.surface.frame(&state.globals.qh, state.surface.id());
              state.pending_frame_callback = Some(callback);
          }
@@ -335,10 +353,10 @@ index 4a83d21..8a66dfa 100644
              flags: wgpu::InstanceFlags::default(),
              backend_options: wgpu::BackendOptions::default(),
              memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-diff --git c/crates/gpui_wgpu/src/wgpu_renderer.rs w/crates/gpui_wgpu/src/wgpu_renderer.rs
+diff --git a/crates/gpui_wgpu/src/wgpu_renderer.rs b/crates/gpui_wgpu/src/wgpu_renderer.rs
 index 47ce2a3..b87fffd 100644
---- c/crates/gpui_wgpu/src/wgpu_renderer.rs
-+++ w/crates/gpui_wgpu/src/wgpu_renderer.rs
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
 @@ -286,38 +286,50 @@ impl WgpuRenderer {
              .window_handle()
              .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;

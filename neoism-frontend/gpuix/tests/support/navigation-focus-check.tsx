@@ -16,6 +16,7 @@ import {createAgentDaemon} from "./agent-daemon";
 const directory=mkdtempSync(join(tmpdir(),"neoism-navigation-focus-")),path=join(directory,"config.json");
 const configuration={appearance:{fonts:{family:"Cascadia Code NF",size:14}},editor:{"vim-mode":true}};writeFileSync(path,JSON.stringify(configuration));process.argv.push("--config",path);
 const daemon=createAgentDaemon({configuration,deferCreations:false,fileReadDelayMs:25});daemon.files.set("code.rs","pub fn code() {}\n");daemon.files.set("second.rs","fn second() { let needle = 1; }\n");
+daemon.threads.push(...Array.from({length:100},(_,i)=>({...daemon.threads[0],session_id:`older-${i}`,title:`Older ${i}`})));
 const config={...loadConfig(["--config",path],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState();model.setUI({openWorkspaceIds:["a"],sidebar:"files"});
 const host=createRecordingAppRenderer(),keys=createWindowKeyRouter(),root=createRoot(host.renderer,{onKeyDown:keys.dispatch,keyboardFocusDim:false});
@@ -48,7 +49,17 @@ try{
  await press("enter");await until(()=>model.state.surfaces.filter(surface=>surface.kind==="agent").length===beforeAgents+1&&host.focused===host.find("composer")?.id);
  stage="directory dropdown and Search are original keyboard activation paths";await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);for(let i=0;i<8&&panelFocus()!=="new-chat";i++)await press("up");await pulse();await press("down");assert.equal(panelFocus(),"search");await press("down");assert.equal(panelFocus(),"projects");await press("enter");await until(()=>!!host.find("conversation-navigator"));await press("escape");await until(()=>!host.find("conversation-navigator"));
  await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);await press("up");assert.equal(panelFocus(),"search");await press("enter");await until(()=>!!host.find("finder"));await press("escape");await until(()=>!host.find("finder"));
- stage="chat rows can be traversed and activated without creating a backend thread";await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);await press("down");await press("down");assert.match(panelFocus(),/^row:/);const selected=panelFocus().slice(4);await press("enter");await until(()=>model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)?.sessionId===selected&&host.focused===host.find("composer")?.id);
+ stage="chat rows can be traversed and activated without creating a backend thread";await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);await press("down");await press("down");assert.match(panelFocus(),/^row:/);
+ stage="agent wheel preserves selection and hides offscreen cursor";
+ const wheelSelection=panelFocus();await event("conversation-list","scroll",{deltaY:-1600,precise:true});
+ await until(()=>!host.find("chrome-focus-cursor:sidebar"));assert.equal(panelFocus(),wheelSelection);
+ assert.equal(host.focused,host.find("conversation-list")?.id);
+ stage="agent Alt return and arrow key reveal the selected row";
+ await press("right",true);await pulse();await press("left",true);await pulse();await press("down");
+ await until(()=>!!host.find("chrome-focus-cursor:sidebar"));
+ const revealed=host.find("chrome-focus-cursor:sidebar")!;
+ assert.ok(Number(revealed.style.top)>=90&&Number(revealed.style.top)<770,"Agent arrow cursor must be within its viewport");
+ const selected=panelFocus().slice(4);await press("enter");await until(()=>model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)?.sessionId===selected&&host.focused===host.find("composer")?.id);
  assert.equal(editor.text(),dirty);assert.equal(editor.frame.dirty,true);assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.some(request=>["CreateThread","SubmitPrompt"].includes(request.tag)),false);
  console.log(JSON.stringify({noWindow:true,actualApp:true,treeClickNativeFocus:true,warmFileKeepsDirtyEditorAndHost:true,treeEnterNativeFocus:true,sharedCursorHasIntermediateFrames:true,finderKeyboardNativeFocus:true,finderMouseNativeFocus:true,agentAltArrowFocusAndExactCursor:true,originalAgentControlsTraverseAndActivate:true,newChatCreatesFreshLocalTab:true,unrelatedDirtyDocumentPreserved:true,noBackendThreadsOrPty:true}));
 }catch(error){console.error(JSON.stringify({stage,focused:host.focused,surface:model.state.activeSurfaceId,chrome:[...host.nodes.values()].filter(node=>String(node.props.testId||"").startsWith("chrome-focus-cursor")).map(node=>({props:node.props,style:node.style})),panel:panelFocus(),error:model.state.error}));throw error;}

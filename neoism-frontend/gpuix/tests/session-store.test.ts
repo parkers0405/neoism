@@ -76,7 +76,7 @@ test("session files are atomic and private, scoped to daemon identity, and omit 
   const different = new SessionStore({ ...config, authToken: "someone-else" }, { XDG_STATE_HOME: directory });
   expect(store.path).not.toBe(different.path);
   const saved = model().captureSession(); store.write(saved);
-  expect(store.read()).toEqual(saved); expect(statSync(store.path).mode & 0o777).toBe(0o600);
+  expect(store.read()).toEqual(saved); if(process.platform!=="win32")expect(statSync(store.path).mode & 0o777).toBe(0o600);
   const raw = readFileSync(store.path, "utf8"); expect(raw).not.toContain("operator-secret"); expect(raw).not.toContain("secret-upgrade");
   writeFileSync(store.path, "{unfinished"); expect(store.read()).toBeUndefined();
   expect(decodeSession({ version: 2, surfaces: [] })).toBeUndefined();
@@ -155,7 +155,7 @@ test("an explicit state path preserves isolated unsaved profiles across A to B t
   expect(new SessionStore({ endpoint: "ws://host-a/session", pairingToken: "another-identity" }, env).read()).toBeUndefined();
   const raw = readFileSync(a.path, "utf8"), envelope = JSON.parse(raw);
   expect(Object.keys(envelope.profiles)).toHaveLength(2); expect(envelope.editors).toEqual(savedA.editors);
-  expect(raw).not.toContain("paired-token-a"); expect(raw).not.toContain("paired-token-b"); expect(statSync(a.path).mode & 0o777).toBe(0o600);
+  expect(raw).not.toContain("paired-token-a"); expect(raw).not.toContain("paired-token-b"); if(process.platform!=="win32")expect(statSync(a.path).mode & 0o777).toBe(0o600);
 });
 test("legacy untagged override migrates to the first identity before another profile is written", () => {
   const directory = mkdtempSync(join(tmpdir(), "neoism-profile-migration-")); cleanups.push(() => rmSync(directory, { recursive: true, force: true }));

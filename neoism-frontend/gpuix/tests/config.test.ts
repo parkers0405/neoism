@@ -14,7 +14,7 @@ test("reads actual Neoism JSONC appearance and ui.window paths without writing c
     "appearance": {"theme":"tokyo_night","fonts":{"family":"Geist Mono","size":20,"weight":700,"symbol-map":[{"font-family":"JetBrainsMono Nerd Font"}]}},
     "look":{"markdown":{"font-family":"Monocraft"}},
     "terminal":{"scroll":{"multiplier":4,"divider":2}},
-    "ui":{"window":{"background-image":{"path":"${dir}/image.png","opacity":0.35}}},
+    "ui":{"window":{"background-image":{"path":${JSON.stringify(join(dir,"image.png"))},"opacity":0.35}}},
   }`);
   const config = loadConfig(["--config", path], {});
   expect(config.fontSize).toBe(20); expect(config.scale).toBeCloseTo(20 / 14);

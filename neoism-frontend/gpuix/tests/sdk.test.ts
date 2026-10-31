@@ -16,17 +16,17 @@ test("SDK endpoints preserve the daemon origin and proxy prefix with an explicit
   expect(() => agentSdkEndpoint("ws+unix:///missing-separator", "a")).toThrow();
 });
 
-test("the real SDK sends prompts through the scoped Unix proxy with header authentication and exact attachment bytes", async () => {
+test("the real SDK sends prompts through the scoped local proxy with header authentication and exact attachment bytes", async () => {
   const directory = mkdtempSync(join(tmpdir(), "neoism-sdk-"));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const socket = join(directory, "daemon.sock");
   let received: { path: string; authorization: string | null; body: any } | undefined;
-  const server = Bun.serve({ unix: socket, fetch: async (request) => {
+  const server = Bun.serve({ ...(process.platform==="win32"?{hostname:"127.0.0.1",port:0}:{unix:socket}), fetch: async (request) => {
     received = { path: new URL(request.url).pathname, authorization: request.headers.get("authorization"), body: await request.json() };
     return new Response(null, { status: 204 });
   } });
   cleanups.push(() => server.stop(true));
-  const sdk = new AgentSdk({ endpoint: `ws+unix://${socket}:/session`, authToken: "operator", pairingToken: "device" });
+  const sdk = new AgentSdk({ endpoint: process.platform==="win32"?`${server.url.origin.replace(/^http/,"ws")}/session`:`ws+unix://${socket}:/session`, authToken: "operator", pairingToken: "device" });
   cleanups.push(() => sdk.dispose());
   const selection = { agent: "plan", model: "openai/model/variant", thinking: "high" };
   await sdk.forWorkspace("a").sessions.prompt("session/one", sdkPrompt("Review", [{ kind: "image/png", path: "capture.png", bytes: [0, 127, 128, 255] }], selection, "queue"));
@@ -52,16 +52,16 @@ test("SDK mutations are never replayed on transport failure and disposal aborts 
   expect(aborted).toBe(true); expect(attempts).toBe(1);
 });
 
-test("catalog SSE uses the scoped authenticated Unix SDK stream and drains a baseline larger than the WebSocket reply budget",async()=>{
+test("catalog SSE uses the scoped authenticated local SDK stream and drains a baseline larger than the WebSocket reply budget",async()=>{
  const directory=mkdtempSync(join(tmpdir(),"neoism-sdk-catalog-")),socket=join(directory,"daemon.sock");
  cleanups.push(()=>rmSync(directory,{recursive:true,force:true}));
  const requests:Array<{path:string;scope:string|null;directory:string|null;authorization:string|null}>=[];
  const events=Array.from({length:825},(_,index)=>({id:`catalog-${index}`,sequence:index+1,schemaVersion:"2",source:"fixture",timestamp:index,type:"session.catalog.family",data:{sessionID:`root-${index}`,snapshot:{branches:[],familyRevision:1}}}));
- const server=Bun.serve({unix:socket,fetch(request){
+ const server=Bun.serve({...(process.platform==="win32"?{hostname:"127.0.0.1",port:0}:{unix:socket}),fetch(request){
   const url=new URL(request.url);requests.push({path:url.pathname,scope:url.searchParams.get("scope"),directory:url.searchParams.get("directory"),authorization:request.headers.get("authorization")});
   return new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(events.map(event=>`data: ${JSON.stringify(event)}\r\n\r\n`).join("")));}}),{headers:{"content-type":"text/event-stream"}});
  }});cleanups.push(()=>server.stop(true));
- const sdk=new AgentSdk({endpoint:`ws+unix://${socket}:/session`,authToken:"operator",pairingToken:"device"});cleanups.push(()=>sdk.dispose());
+ const sdk=new AgentSdk({endpoint:process.platform==="win32"?`${server.url.origin.replace(/^http/,"ws")}/session`:`ws+unix://${socket}:/session`,authToken:"operator",pairingToken:"device"});cleanups.push(()=>sdk.dispose());
  let resets=0;const ids:string[]=[];
  for await(const event of sdk.catalogEvents("space/a",{onReset:()=>resets++})){ids.push(event.id);if(ids.length===825)break;}
  expect(resets).toBe(1);

@@ -9,8 +9,16 @@ test("packaging includes the exact executable host without touching its source o
  const f=fixture();let fd:number|undefined;
  try{
   writeFileSync(f.source,"first daemon");chmodSync(f.source,0o755);const before=statSync(f.source),output=packageWorkspaceDaemon(f.root,{},platform);expect(readFileSync(output,"utf8")).toBe("first daemon");if(platform!=="win32")expect(statSync(output).mode&0o111).toBe(0o111);
-  fd=openSync(output,"r");writeFileSync(f.source,"second daemon");const sourceBefore=statSync(f.source);expect(packageWorkspaceDaemon(f.root,{},platform)).toBe(output);expect(readFileSync(output,"utf8")).toBe("second daemon");
-  const old=Buffer.alloc(12);readSync(fd,old,0,12,0);expect(old.toString()).toBe("first daemon");expect(statSync(f.source).ino).toBe(before.ino);expect(statSync(f.source).mtimeMs).toBe(sourceBefore.mtimeMs);expect(existsSync(output+".next")).toBe(false);
+  fd=openSync(output,"r");writeFileSync(f.source,"second daemon");const sourceBefore=statSync(f.source);
+  if(platform==="win32"){
+   // Windows refuses replacement while this reader holds the file open.
+   // Verify the original survives, then release our own handle and retry.
+   expect(()=>packageWorkspaceDaemon(f.root,{},platform)).toThrow();
+   expect(readFileSync(output,"utf8")).toBe("first daemon");
+   closeSync(fd);fd=undefined;
+  }
+  expect(packageWorkspaceDaemon(f.root,{},platform)).toBe(output);expect(readFileSync(output,"utf8")).toBe("second daemon");
+  if(fd!==undefined){const old=Buffer.alloc(12);readSync(fd,old,0,12,0);expect(old.toString()).toBe("first daemon");}expect(statSync(f.source).ino).toBe(before.ino);expect(statSync(f.source).mtimeMs).toBe(sourceBefore.mtimeMs);expect(existsSync(output+".next")).toBe(false);
  }finally{if(fd!==undefined)closeSync(fd);f.dispose();}
 });
 test("an explicit daemon override is honored and missing/non-executable hosts fail before distribution replacement",()=>{

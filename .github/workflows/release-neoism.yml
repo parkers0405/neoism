@@ -70,11 +70,13 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: thin
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
     steps:
-      - uses: actions/checkout@v4
-      - name: Preserve pinned source bytes and support long Windows paths
+      # Configure Git before checkout: changing this afterward leaves CRLF
+      # conversions in the patch and generated files already on disk.
+      - name: Preserve source bytes and support long Windows paths
         run: |
           git config --global core.autocrlf false
           git config --global core.longpaths true
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22

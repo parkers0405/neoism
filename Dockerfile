@@ -13,7 +13,7 @@ FROM node:22-bookworm AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential clang git curl pkg-config cmake python3 ninja-build libfontconfig1-dev \
-        libgbm-dev libxkbcommon-dev \
+        libgbm-dev libxkbcommon-dev libwayland-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -38,6 +38,8 @@ RUN apt-get update \
         libfontconfig1 \
         libgbm1 \
         libxkbcommon0 \
+        libwayland-client0 \
+        libwayland-server0 \
         openssh-client \
         tini \
     && rm -rf /var/lib/apt/lists/*

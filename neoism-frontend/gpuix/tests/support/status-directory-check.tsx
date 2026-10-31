@@ -2,7 +2,7 @@ import {canonicalPath} from "./canonical-path";
 import assert from "node:assert/strict";
 import {mkdtempSync,mkdirSync,rmSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {join,sep} from "node:path";
 import {createRoot} from "@gpuix/solid";
 import {App} from "../../src/ui/App";
 import {WorkspaceModel} from "../../src/model";
@@ -42,7 +42,7 @@ try{
  assert.equal(host.find("chrome-action-overlay"),undefined,"The displayed Alt+D shortcut opens the same folder browser");await key("escape");
  assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="SetWorkspaceRoot").length,0);
  await clickDirectory();await until(()=>!!host.find("directory-browser"));assert.equal(host.find("chrome-action-overlay"),undefined,"Status path must open the actual FileBrowserModal rather than command-directory search");
- for(const char of "/selected")await key(char);await key("enter");await key("enter");
+ for(const char of `${sep}selected`)await key(char);await key("enter");await key("enter");
  await until(()=>model.state.activeWorkspace?.root_dir===selected&&!model.state.loading&&!host.find("directory-browser"));
  assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="SetWorkspaceRoot").length,1);assert.equal(daemon.workspaceRequests.find(request=>request.tag==="SetWorkspaceRoot")!.body.root_dir,selected);
  assert.ok(daemon.fileRequests.length>beforeReads,"Explorer must refresh after the scoped directory commit");assert.equal(daemon.ptyRequests.length,0);assert.equal(host.nativeRoot,shell);

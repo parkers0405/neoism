@@ -1032,16 +1032,60 @@ pub(crate) async fn session_todo_list(
     {
         return Ok(Json(todos));
     }
-    Ok(Json(
-        state
+    if let Some(todos) = state.inner.todos.read().await.get(&session_id).cloned() {
+        return Ok(Json(todos));
+    }
+    // Ordinary todowrite results are durable transcript parts, while the
+    // live projection above is lost on restart. Read newest pages first and
+    // stop at the latest successful write, including an explicit empty list.
+    let mut cursor = None;
+    let mut restored = Vec::new();
+    'history: loop {
+        let page = state
             .inner
-            .todos
-            .read()
-            .await
-            .get(&session_id)
-            .cloned()
-            .unwrap_or_default(),
-    ))
+            .store
+            .list_messages_page(&session_id, cursor.as_deref(), Some(32), true)
+            .await?;
+        for message in &page {
+            for part in message.parts.iter().rev() {
+                let Part::Tool(tool) = part else {
+                    continue;
+                };
+                if !matches!(
+                    tool.tool.to_ascii_lowercase().as_str(),
+                    "todowrite" | "todo_write" | "todo"
+                ) {
+                    continue;
+                }
+                let neoism_agent_core::ToolState::Completed { input, .. } = &tool.state
+                else {
+                    continue;
+                };
+                if let Some(todos) = input.get("todos").and_then(|value| {
+                    serde_json::from_value::<Vec<TodoInfo>>(value.clone()).ok()
+                }) {
+                    restored = todos;
+                    break 'history;
+                }
+            }
+        }
+        let next = page.last().map(message_id_of);
+        if page.len() < 32 || next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    // A live write may have arrived while history was loading. Keep that
+    // newer value and cache the restoration so reopening does not rescan.
+    let todos = state
+        .inner
+        .todos
+        .write()
+        .await
+        .entry(session_id)
+        .or_insert(restored)
+        .clone();
+    Ok(Json(todos))
 }
 
 pub(crate) async fn session_fork(

@@ -31,7 +31,7 @@ try{
  };
  const a=make("Alice",[230,110,130]),b=make("Bob",[110,180,230]);await until(()=>clients.every(client=>client.state.phase==="connected"),"Both real WebSocket clients authenticate: "+JSON.stringify(clients.map(client=>client.state)));
  const tree=expectVariant(await Effect.runPromise(a.client.request("Workspace","RequestHostWorkspaceTree")),"HostWorkspaceTree") as {hosts:Array<{id:string}>;workspaces:Workspace[]};assert.ok(tree.hosts.length);
- const declared=tree.workspaces.find(workspace=>workspace.root_dir===directory);assert.ok(declared);const id=declared.id,workspace={...declared,visibility:"shared"};
+ const declared=tree.workspaces.find(workspace=>workspace.root_dir&&canonicalPath(workspace.root_dir)===canonicalPath(directory));assert.ok(declared);const id=declared.id,workspace={...declared,visibility:"shared"};
  await Promise.all(clients.map(client=>Effect.runPromise(client.request("Workspace",{SubscribeWorkspace:{workspace_id:id}}))));a.presence.setWorkspace(workspace);b.presence.setWorkspace(workspace);
  const ea=new NativeEditor(path,initial,false),eb=new NativeEditor(path,initial,false);editors.push(ea,eb);ea.call("layout",{width:800,height:500,cellWidth:10,rowHeight:21});eb.call("layout",{width:800,height:500,cellWidth:10,rowHeight:21});
  a.document.attach(ea,path,workspace);b.document.attach(eb,path,workspace);markdown=new NativeMarkdown(eb,config,path);markdown.call("layout",{width:800,height:500});await until(()=>a.document.isBound(ea)&&b.document.isBound(eb),"Both documents seed from the daemon Yrs snapshot");

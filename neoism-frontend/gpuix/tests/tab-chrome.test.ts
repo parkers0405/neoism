@@ -23,3 +23,11 @@ test("workspace chrome and inactive icon colors come from the original source co
   expect(workspaceLabel("ktblack-main-api", "/home/me/projects/neoism/", "/home/me")).toBe("neoism");
   expect(inactiveTabIcon("#7ebae4")).toBe("#427ea8a0");
 });
+
+test("Windows workspace labels recognize home and folders across path spellings",()=>{
+  expect(workspaceLabel("Workspace",String.raw`C:\Users\Parker`,String.raw`C:\Users\Parker`)).toBe("~");
+  expect(workspaceLabel("Workspace",String.raw`\\?\C:\Users\Parker`+"\\","c:/users/parker")).toBe("~");
+  expect(workspaceLabel("Workspace",String.raw`C:\Users\Parker\projects\neoism`+"\\")).toBe("neoism");
+  expect(workspaceLabel("Workspace",String.raw`\\server\share\project`+"\\")).toBe("project");
+  expect(workspaceLabel("Workspace",String.raw`/home/me/a\b`)).toBe(String.raw`a\b`);
+});

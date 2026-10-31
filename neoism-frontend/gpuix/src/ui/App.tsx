@@ -30,6 +30,7 @@ import { MarkdownView } from "../markdown/MarkdownView";
 import { PaneLayoutView } from "../layout/PaneLayoutView";
 import { AgentTimelineView,scrollAgentHalfPage } from "../agent/AgentTimelineView";
 import {contextUsage} from "../agent/context-usage";
+import {sessionTodos} from "../agent/session-todos";
 import { AgentSidePanelView } from "../agent/AgentSidePanelView";
 import { DirectoryBrowserView } from "../agent/DirectoryBrowserView";
 import { ConversationNavigatorView, type NavigatorRow } from "../agent/ConversationNavigatorView";
@@ -1052,6 +1053,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   function DetailRail() {
     const session = () => active()?.sessionId || "";
     const usage = createMemo(() => contextUsage(state().history[session()]||[],state().usage[session()]));
+    const todos = createMemo(() => sessionTodos(state().history[session()]||[],state().todos[session()]));
     const limit = () => {
       const selected=activeSelection().model||"",slash=selected.indexOf("/");
       const catalog=state().providers.find(provider=>provider.id===selected.slice(0,slash))?.models?.find(model=>model.id===selected.slice(slash+1));
@@ -1091,10 +1093,10 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         </Show>
         <Label size={12.35}>{`${count(total())}${limit() ? ` / ${count(limit()!)}` : ""} tokens`}</Label>
       </Show>
-      <Show when={state().todos[session()]?.length}>
+      <Show when={todos().length}>
         <div style={{ height: 10 * s, flexShrink: 0 }} />
         <PixelHeading>Tasks</PixelHeading>
-        <For each={state().todos[session()] || []}>{(todo) => <div style={{ ...row, alignItems: "flex-start", position: "relative", height: 46 * s, flexShrink: 0, paddingLeft: 46 * s, paddingTop: 2 * s }}>
+        <For each={todos()}>{(todo) => <div style={{ ...row, alignItems: "flex-start", position: "relative", height: 46 * s, flexShrink: 0, paddingLeft: 46 * s, paddingTop: 2 * s }}>
           <div style={{ position: "absolute", left: 16 * s, top: s, width: 16 * s, height: 16 * s, borderWidth: s, borderColor: c.muted, pointerEvents: "none" }}>
             <Show when={todo.status === "completed"}><text style={{ ...text(12, c.green), pointerEvents: "none" }}>✓</text></Show>
             <Show when={todo.status === "in_progress"}><div style={{ width: 6 * s, height: 6 * s, borderRadius: 3 * s, backgroundColor: c.yellow, margin: 4 * s }} /></Show>

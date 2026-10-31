@@ -342,17 +342,103 @@ async fn todowrite_tool_updates_session_todos_and_event() {
     assert_eq!(event.properties["sessionID"], session.id.to_string());
 
     let todos: Vec<TodoInfo> = response_json(
-        app.oneshot(request(
-            Method::GET,
-            &format!("/v2/sessions/{}/todos", session.id),
-            None,
-        ))
-        .await
-        .unwrap(),
+        app.clone()
+            .oneshot(request(
+                Method::GET,
+                &format!("/v2/sessions/{}/todos", session.id),
+                None,
+            ))
+            .await
+            .unwrap(),
     )
     .await;
     assert_eq!(todos.len(), 2);
     assert_eq!(todos[0].content, "ship runtime");
+
+    // A process restart loses the live projection. Persist realistic tool
+    // parts, then use a fresh AppState to exercise the HTTP restoration path.
+    let history_row = |todos: Value, completed: bool| {
+        let [_, mut message] = test_compaction_pair(&session.id, None, "");
+        let message_id = match &mut message.info {
+            MessageInfo::Assistant(info) => {
+                info.mode = "build".into();
+                info.id.clone()
+            }
+            _ => unreachable!(),
+        };
+        let input = json!({"todos": todos});
+        let time = PartTime {
+            start: 20,
+            end: Some(21),
+        };
+        let tool_state = if completed {
+            ToolState::Completed {
+                input,
+                output: "updated".into(),
+                metadata: json!({}),
+                title: "Tasks".into(),
+                time,
+            }
+        } else {
+            ToolState::Error {
+                input,
+                error: "Rejected".into(),
+                time,
+            }
+        };
+        message.parts = vec![Part::Tool(ToolPart {
+            id: Id::ascending(IdKind::Part),
+            session_id: session.id.clone(),
+            message_id,
+            tool: "todowrite".into(),
+            call_id: "persisted-todo".into(),
+            state: tool_state,
+            metadata: None,
+        })];
+        message
+    };
+    state
+        .inner
+        .store
+        .append_message(session.id.as_str(), &history_row(json!(todos), true))
+        .await
+        .unwrap();
+    // Newer failed writes must not clear tasks; cross a page boundary too.
+    for _ in 0..33 {
+        state
+            .inner
+            .store
+            .append_message(session.id.as_str(), &history_row(json!([]), false))
+            .await
+            .unwrap();
+    }
+    let restarted = AppState::open_database(db_path.clone()).await.unwrap();
+    let read_tasks = || {
+        crate::session_routes::session_todo_list(
+            axum::extract::State(restarted.clone()),
+            axum::extract::Path(session.id.to_string()),
+        )
+    };
+    let restored = read_tasks().await.unwrap().0;
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored[0].content, "ship runtime");
+    // A live explicit clear overrides history, and its persisted successful
+    // tool result remains empty after the projection is lost again.
+    restarted
+        .inner
+        .todos
+        .write()
+        .await
+        .insert(session.id.to_string(), vec![]);
+    assert!(read_tasks().await.unwrap().0.is_empty());
+    restarted
+        .inner
+        .store
+        .append_message(session.id.as_str(), &history_row(json!([]), true))
+        .await
+        .unwrap();
+    restarted.inner.todos.write().await.clear();
+    assert!(read_tasks().await.unwrap().0.is_empty());
 
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);

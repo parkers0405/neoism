@@ -1,4 +1,5 @@
 import { coreCall } from "../native-core";
+import { homedir } from "node:os";
 import type { Workspace } from "../daemon/protocol";
 import {absoluteTerminalDirectory,terminalDirectoryFollowsWorkspace,type TerminalTransport} from "../terminal/workspace";
 export interface TabChrome {
@@ -8,13 +9,19 @@ export interface TabChrome {
 export const tabChrome = (scale: number, titleWidth = 0, iconWidth = 12 * scale, close = true) => coreCall<TabChrome>("layout.chrome", { scale, titleWidth, iconWidth, close });
 /** A workspace is its declared directory: the tab names that folder (`~` for
  * home), so re-rooting it never leaves a stale title. Title only without one. */
-export function workspaceLabel(title: string, root?: string | null, home = process.env.HOME) {
-  const directory = root?.replace(/\/+$/, "");
+export function workspaceLabel(title: string, root?: string | null, home = process.env.HOME || homedir()) {
+  const normalize=(path:string)=>{
+    if(/^[a-z]:[\\/]/i.test(path)||path.startsWith("\\\\"))path=path.replace(/^\\\\\?\\UNC\\/i,"\\\\").replace(/^\\\\\?\\/,"").replaceAll("\\","/");
+    return path.replace(/\/+$/, "");
+  };
+  const directory = root == null ? root : normalize(root);
   if (directory !== undefined && directory !== null && root) {
-    if (home && directory === home.replace(/\/+$/, "")) return "~";
+    const windows=/^[a-z]:\//i.test(directory)||directory.startsWith("//");
+    const equal=(a:string,b:string)=>windows?a.toLowerCase()===b.toLowerCase():a===b;
+    if (home && equal(directory,normalize(home))) return "~";
     return directory.split("/").pop() || "/";
   }
-  return title.replace(/\/+$/, "").split("/").pop() || "~";
+  return normalize(title).split("/").pop() || "~";
 }
 /** The Explorer's first-terminal cwd follow is window-local. Display its
  * confirmed directory without rewriting the saved host workspace metadata. */

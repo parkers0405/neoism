@@ -11,13 +11,13 @@ frontend = root / 'neoism-frontend/gpuix'
 parser = argparse.ArgumentParser()
 parser.add_argument('--target', help='Validate another platform without compiling it')
 args = parser.parse_args()
-compiler = subprocess.check_output(['rustc', '-vV'], cwd=frontend, text=True)
+compiler = subprocess.check_output(['rustc', '-vV'], cwd=frontend, encoding="utf-8")
 version = tuple(map(int, re.search(r'^release: (\d+)\.(\d+)\.(\d+)', compiler, re.M).groups()))
 target = args.target or re.search(r'^host: (.+)$', compiler, re.M)[1]
 metadata = json.loads(subprocess.check_output([
     'cargo', 'metadata', '--locked', '--format-version', '1',
     '--manifest-path', 'native/Cargo.toml', '--filter-platform', target,
-], cwd=frontend, text=True))
+], cwd=frontend, encoding="utf-8"))
 nodes = {node['id']: node for node in metadata['resolve']['nodes']}
 pending = [metadata['resolve']['root']]
 used = set()

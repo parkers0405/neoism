@@ -147,7 +147,17 @@ jobs:
           NATIVE_CACHE_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
           COMBINED_CACHE_KEY: ${{ steps.combined-cache.outputs.cache-matched-key }}
         run: python scripts/restore-cached-source-times.py
+      - name: Restore verified native display binding
+        id: binding-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: neoism-frontend/gpuix/artifacts/gpuix-display-*
+          # The loader also verifies the pin and artifact hash before reuse.
+          # Include build flags/tooling so a differently built binding cannot
+          # silently stand in for this workflow's production configuration.
+          key: gpuix-binding-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/gpuix-pin.json', 'neoism-frontend/gpuix/native/patches/*', 'neoism-frontend/gpuix/scripts/build-display-binding.ts', 'neoism-frontend/gpuix/src/display-binding.ts', '.cargo/config.toml', '.github/workflows/release-neoism.yml') }}
       - name: Build, test, and package native app and services
+        id: bundle
         run: node scripts/build-gpuix-release.mjs
       - name: Build and validate Windows MSI and updater transactions
         if: runner.os == 'Windows'
@@ -189,6 +199,12 @@ jobs:
           flags=()
           if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease --latest=false); fi
           gh release edit "$RELEASE_TAG" --draft=false "${flags[@]}"
+      - name: Retain verified display binding for installer retries
+        if: always() && steps.bundle.outcome == 'success' && steps.binding-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: neoism-frontend/gpuix/artifacts/gpuix-display-*
+          key: ${{ steps.binding-cache.outputs.cache-primary-key }}
       - name: Record source freshness for complete and partial compilation
         if: always()
         env:

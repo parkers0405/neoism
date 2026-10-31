@@ -60,7 +60,6 @@ jobs:
             neoism-frontend/gpuix/artifacts/gpuix-rustup
             target/gpuix-native-vsync
             target/gpuix-core-cargo
-            target/release
           key: fixture-diagnosis-${{ github.run_id }}
           restore-keys: gpuix-native-windows-x86_64-
           fail-on-cache-miss: true

@@ -107,13 +107,18 @@ jobs:
             neoism-frontend/gpuix/artifacts/gpuix-rustup
             target/gpuix-native-vsync
             target/gpuix-core-cargo
-            target/release
           # A fresh key retains compilation completed since the previous retry.
           key: gpuix-native-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/*') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             gpuix-native-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/*') }}-
             gpuix-native-${{ matrix.asset }}-
             gpuix-display-${{ matrix.asset }}-
+      - uses: actions/cache/restore@v4
+        id: service-cache
+        with:
+          path: target/release
+          key: gpuix-services-${{ matrix.asset }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: gpuix-services-${{ matrix.asset }}-
       - uses: actions/cache/restore@v4
         id: zig-cache
         with:
@@ -171,8 +176,13 @@ jobs:
             neoism-frontend/gpuix/artifacts/gpuix-rustup
             target/gpuix-native-vsync
             target/gpuix-core-cargo
-            target/release
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
+      - name: Save service compilation progress
+        if: always() && steps.service-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: target/release
+          key: ${{ steps.service-cache.outputs.cache-primary-key }}
       - name: Save verified Zig archives
         if: always() && steps.zig-cache.outputs.cache-primary-key != '' && steps.zig-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4

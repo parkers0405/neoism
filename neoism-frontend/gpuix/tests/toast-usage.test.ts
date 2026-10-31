@@ -14,6 +14,20 @@ test("original Rust toasts stack, dedupe, wrap, pause on hover and retain messag
   call("dismiss",{index:1});call("hover",{x:changed.rects[0][0]+1,y:changed.rects[0][1]+1,scale:1.5,width:280});expect(call("frame",{scale:1.5,width:280}).active).toBe(false);expect(call("leave").active).toBe(true);
  }finally{coreCall("notifications.dispose",{id});}
 });
+test("expired notifications stop animation with no remaining paint or pointer regions",async()=>{
+ const ids=Array.from({length:8},()=>coreCall<{id:number}>("notifications.new").id);
+ const pending=new Set(ids);
+ const frame=(id:number,op="frame")=>coreCall<{active:boolean;rects:number[][];commands:Command[];messages:string[]}>(`notifications.${op}`,{id,message:"Expiring notification",level:"error",width:900,height:600,scale:1,theme:"pastel_dark",fontFamily:"Cascadia Code NF",fontWeight:400});
+ try{
+  for(const id of ids)frame(id,"push");
+  const deadline=Date.now()+7000;
+  while(pending.size&&Date.now()<deadline){
+   for(const id of pending){const next=frame(id);if(!next.active){expect(next.rects).toEqual([]);expect(next.messages).toEqual([]);expect(next.commands).toEqual([]);pending.delete(id);}}
+   if(pending.size)await Bun.sleep(3);
+  }
+  expect(pending.size).toBe(0);
+ }finally{for(const id of ids)coreCall("notifications.dispose",{id});}
+},10000);
 test("usage picker paints original account plans, remaining bars, reset details, inline account errors and skeleton",()=>{
  const{id}=coreCall<{id:number}>("picker.new",{kind:"usage",title:"Codex",loading:true});
  const call=(op:string,args:Record<string,unknown>={})=>coreCall<any>(`picker.${op}`,{id,anchor:[20,650,900,100],minY:100,scale:1,theme:"pastel_dark",fontFamily:"Cascadia Code NF",fontWeight:400,...args});

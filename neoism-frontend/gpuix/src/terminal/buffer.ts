@@ -51,13 +51,17 @@ export class TerminalBuffer {
     this.reply = coreCall(this.op("frame"), { id: this.id });
   }
   private op(name: string) { return `ghostty.${name}`; }
-  cursor(cellWidth: number, rowHeight: number) { return coreCall<TerminalCursorFrame>(this.op("cursor"), { id: this.id, cellWidth, rowHeight }); }
+  cursor(cellWidth: number, rowHeight: number): TerminalCursorFrame {
+    if (this.disposed) return { quad: [], hold: false, animating: false };
+    return coreCall<TerminalCursorFrame>(this.op("cursor"), { id: this.id, cellWidth, rowHeight });
+  }
   get cols() { return this.reply.snapshot.cols; }
   get rows() { return this.reply.snapshot.rows; }
   get selectedText() { return this.reply.selection || ""; }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   onPtyWrite(listener: (bytes: Uint8Array) => void) { this.writeListeners.add(listener); return () => { this.writeListeners.delete(listener); }; }
   private call(op: string, args: Record<string, unknown> = {}) {
+    if (this.disposed) return;
     this.reply = coreCall(this.op(op), { id: this.id, ...args });
     if (this.reply.writes.length) for (const listener of this.writeListeners) listener(Uint8Array.from(this.reply.writes));
     if (!this.disposed) for (const listener of this.listeners) listener();
@@ -73,6 +77,7 @@ export class TerminalBuffer {
     this.call("feed", { bytes: [...data] });
   }
   resize(cols: number, rows: number, cellWidth = 10, rowHeight = 20) {
+    if (this.disposed) return false;
     cols = Math.max(2, Math.min(500, Math.floor(cols))); rows = Math.max(1, Math.min(200, Math.floor(rows)));
     const resized = cols !== this.cols || rows !== this.rows;
     if (!resized && cellWidth === this.metrics.cellWidth && rowHeight === this.metrics.rowHeight) return false;
@@ -82,20 +87,26 @@ export class TerminalBuffer {
   scrollPixels(delta: number, rowHeight: number) { this.call("scroll", { delta, rowHeight }); }
   scrollToBottom() { this.call("bottom"); }
   paste(text: string) {
+    if (this.disposed) return new Uint8Array();
     return Uint8Array.from(coreCall<{ bytes: number[] }>(this.op("paste"), { id: this.id, text }).bytes);
   }
   search(op: "start" | "preview" | "commit" | "cancel", args: Record<string, unknown> = {}) { this.call(`search.${op}`, args); }
   select(row: number, col: number, start: boolean, x?: number, cellWidth = 10, clicks = 1) { this.call("select", { row, col, start, x: x ?? (col + (start ? 0 : 0.9)) * cellWidth, cellWidth, clicks }); }
   mouse(event: Record<string, unknown>) {
+    if (this.disposed) return false;
     const reply = coreCall<{ bytes: number[]; handled: boolean }>(this.op("mouse"), { id: this.id, ...event });
     if (reply.bytes.length) for (const listener of this.writeListeners) listener(Uint8Array.from(reply.bytes));
     return reply.handled;
   }
   focus(focused: boolean) {
+    // PTY exit disposes the engine before Solid unmounts its terminal views.
+    // Their blur/cleanup callbacks must not call a freed native terminal.
+    if (this.disposed) return;
     const reply = coreCall<{ bytes: number[] }>(this.op("focus"), { id: this.id, focused });
     if (reply.bytes.length) for (const listener of this.writeListeners) listener(Uint8Array.from(reply.bytes));
   }
   key(event: Record<string, unknown>) {
+    if (this.disposed) { this.lastKeyHandled = false; return new Uint8Array(); }
     const reply = coreCall<{ bytes: number[]; clipboard?: string; handled?: boolean }>(this.op("key"), { id: this.id, ...event });
     this.lastKeyHandled = !!reply.handled;
     this.pendingClipboard = reply.clipboard ?? undefined;
@@ -169,5 +180,9 @@ export class TerminalBuffer {
     return this.painted = { lines, cursor: { x: snapshot.cursor.col, y: snapshot.cursor.row, visible: snapshot.cursor.visible, shape: snapshot.cursor.shape }, cols: snapshot.cols, rows: snapshot.rows, offset: this.reply.offset, extra };
   }
   get nextOffset() { return this.offset; }
-  dispose() { this.disposed = true; this.listeners.clear(); this.writeListeners.clear(); coreCall("dispose", { id: this.id }); }
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true; this.pendingClipboard = undefined; this.lastKeyHandled = false;
+    this.listeners.clear(); this.writeListeners.clear(); coreCall("dispose", { id: this.id });
+  }
 }

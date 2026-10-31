@@ -19,6 +19,9 @@ use std::fs;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
+#[path = "lsp_text_change.rs"]
+mod text_change;
+
 use super::{
     capability_enabled,
     lsp_adapters::ResolvedLanguageRoute,
@@ -1037,12 +1040,18 @@ impl LspClient {
                     .lock()
                     .map(|encoding| *encoding)
                     .map_err(|_| anyhow!("LSP position encoding lock poisoned"))?;
-                let (end_line, end_byte) = document_end_byte_position(&previous);
+                let (old_range, new_range) =
+                    text_change::changed_ranges(&previous, text);
+                let (start_line, start_byte) =
+                    document_end_byte_position(&previous[..old_range.start]);
+                let start_character =
+                    byte_column_to_protocol(&previous, start_line, start_byte, encoding);
+                let (end_line, end_byte) =
+                    document_end_byte_position(&previous[..old_range.end]);
                 let end_character =
                     byte_column_to_protocol(&previous, end_line, end_byte, encoding);
-                // A whole-document replacement with an explicit range is a
-                // valid incremental change and avoids an invalid range-less
-                // payload for servers that advertise Incremental (2).
+                // Preserve the unchanged prefix/suffix so a one-character edit
+                // does not replace the whole syntax tree in incremental servers.
                 self.notify_raw(
                     "textDocument/didChange",
                     json!({
@@ -1052,13 +1061,13 @@ impl LspClient {
                         },
                         "contentChanges": [{
                             "range": {
-                                "start": { "line": 0, "character": 0 },
+                                "start": { "line": start_line, "character": start_character },
                                 "end": {
                                     "line": end_line,
                                     "character": end_character,
                                 },
                             },
-                            "text": text,
+                            "text": &text[new_range],
                         }],
                     }),
                 )?;

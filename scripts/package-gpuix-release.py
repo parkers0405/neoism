@@ -38,8 +38,29 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     for name in ['licenses', 'web']:
         shutil.copytree(DIST / name, bundle / name)
     assert (bundle / 'web/agent-gui/index.html').is_file()
+    application = bundle / 'web/app'
+    manifest = json.loads((application / 'manifest.json').read_text())
+    assert manifest['entry'] in manifest['files']
+    assert manifest['entry'] + '.jsc' in manifest['files']
+    for name, digest in manifest['files'].items():
+        file = application / name
+        assert file.resolve().is_relative_to(application.resolve())
+        assert file.is_file(), f'Application resource is missing: {name}'
+        assert hashlib.file_digest(file.open('rb'), 'sha256').hexdigest() == digest
+    for stale in application.rglob('*'):
+        if stale.is_file() and stale.relative_to(application).as_posix() not in {*manifest['files'], 'manifest.json'}:
+            stale.unlink()
     runtime = bundle / 'web/native'
     runtime.mkdir(exist_ok=True)
+    native_platform = 'win32' if SYSTEM == 'windows' else SYSTEM
+    native_arch = 'arm64' if ARCH == 'aarch64' else 'x64'
+    display_stamp = json.loads((ROOT / 'neoism-frontend/gpuix/artifacts' / f'gpuix-display-{native_platform}-{native_arch}.json').read_text())
+    display_library = runtime / display_stamp['artifact']
+    assert display_library.is_file(), 'Native display library is missing from the bundle'
+    assert hashlib.file_digest(display_library.open('rb'), 'sha256').hexdigest() == display_stamp['sha256']
+    for stale in runtime.glob('gpuix-display-*.node'):
+        if stale.name != display_library.name:
+            stale.unlink()
     for name in LIBRARIES:
         shutil.copy2(bundle / name, runtime / name)
     shutil.copytree(bundle / 'licenses', runtime / 'licenses')
@@ -74,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
         shutil.copy2(ROOT / 'misc/macos/neoism.icns', resources / 'neoism.icns')
         plist = (ROOT / 'misc/macos/Info.plist').read_text()
         (contents / 'Info.plist').write_text(plist.replace('{{RELEASE_VERSION}}', VERSION).replace('{{VERSION}}', VERSION.split('-')[0]))
-        for name in [*LIBRARIES, 'neoism-update-helper']:
+        for name in [*LIBRARIES, display_library.name, 'neoism-update-helper']:
             run('codesign', '--force', '--sign', '-', resources / 'web/native' / name)
         for name in ['neoism', 'neoism-workspace-daemon', 'neoism-agent', 'neoism-agent-lua-runner']:
             run('codesign', '--force', '--sign', '-', macos / name)

@@ -46,3 +46,21 @@ test("status metadata follows actual editor input mode and source line count", (
     expect(statusInfo({ ...surface, path: "README.md" }, "/project", { mode: "Normal", line: 0, col: 0, dirty: false }, editor.frame).mode).toBe("Markdown");
   } finally { editor.dispose(); }
 });
+
+test("traffic-light space moves the painted controls and menu hits without scaling the OS reservation",()=>{
+ const id=coreCall<{id:number}>("chrome.new",{kind:"topbar"}).id;
+ try{
+  for(const scale of [.75,1,2]){
+   const params={id,width:1100,height:720,scale,menu:false};
+   const plain=coreCall<any>("chrome.frame",params);
+   const reserved=coreCall<any>("chrome.frame",{...params,leftSafeInset:80});
+   const menu=(frame:any)=>frame.regions.find((r:any)=>r.id==="topbar-menu").rect;
+   expect(menu(reserved)[0]-menu(plain)[0]).toBe(80);
+   expect(coreCall<any>("chrome.click",{...params,leftSafeInset:80,x:menu(plain)[0]+5,y:menu(plain)[1]+5}).menuOpen).toBe(false);
+   const hit=menu(reserved);
+   expect(coreCall<any>("chrome.click",{...params,leftSafeInset:80,x:hit[0]+5,y:hit[1]+5}).menuOpen).toBe(true);
+   const fullscreen=coreCall<any>("chrome.frame",{...params,leftSafeInset:0});
+   expect(menu(fullscreen)).toEqual(menu(plain));
+  }
+ }finally{coreCall("chrome.dispose",{id});}
+});

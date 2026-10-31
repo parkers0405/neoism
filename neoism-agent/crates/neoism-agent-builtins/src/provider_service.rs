@@ -648,12 +648,12 @@ mod tests {
                     .iter()
                     .find(|p| p["id"] == "openai")
                     .unwrap();
-                assert!(openai["models"].get("gpt-5").is_some(),
-                    "pending discovery retains basic model IDs for immediate-send validation");
-                assert_eq!(openai["models"]["gpt-5"]["limit"]["context"], 272000,
-                    "pending discovery must still use conservative subscription limits");
+                assert!(openai["models"].as_object().unwrap().is_empty(),
+                    "pending discovery must not advertise unverified API models");
+                assert!(result["default"].get("openai").is_none());
             } else if matches!(action, ProviderRouteAction::Configured) {
-                assert!(result["providers"].as_array().unwrap().iter().any(|p| p["id"] == "openai"));
+                assert!(result["providers"].as_array().unwrap().iter().all(|p|
+                    p["id"] != "openai" || p["models"].as_object().unwrap().is_empty()));
             } else {
                 assert!(!result["openai"].as_array().unwrap().is_empty());
             }

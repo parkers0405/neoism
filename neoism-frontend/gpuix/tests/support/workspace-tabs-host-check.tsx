@@ -116,7 +116,7 @@ try{
   setTabConfig({...config,...metadata});await settle();for(const id of ["a","b","c"])assert.equal(ink(`workspace-icon:${id}`),WORKSPACE_CLOUD_ICON,"joined, SSH and hosted connections all use cloud glyphs");
  }
  setTabConfig(config);model.update({workspaces:model.state.workspaces.map(workspace=>workspace.id==="a"?{...workspace,visibility:"shared"}:workspace.id==="b"?{...workspace,host_kind:"tailscale"}:workspace)});await settle();
- assert.equal(ink("workspace-icon:a"),WORKSPACE_CLOUD_ICON,"host users get a cloud from advertised sharing metadata even on Local Server");assert.equal(ink("workspace-icon:b"),WORKSPACE_CLOUD_ICON);assert.equal(ink("workspace-icon:c"),tabChrome(config.scale).workspace.iconGlyph);
+ assert.equal(ink("workspace-icon:a"),tabChrome(config.scale).workspace.iconGlyph,"sharing a local workspace does not turn it into a remote connection");assert.equal(ink("workspace-icon:b"),WORKSPACE_CLOUD_ICON);assert.equal(ink("workspace-icon:c"),tabChrome(config.scale).workspace.iconGlyph);
  assertNonselectableText(node("workspace-tab-scroll").id);
  const requestsBefore=server.workspaceRequests.length,activeBefore=model.state.activeWorkspace!.id;
  await closeWithNativeBubbling("b");assert.equal(closes,1);assert.equal(activations,0);assert.equal(model.state.activeWorkspace!.id,activeBefore);assert.deepEqual(order(),["a","b","c"]);assert.ok(model.state.error?.includes(":qall!"));assert.equal(model.getEditor(dirtySurface).frame.dirty,true);

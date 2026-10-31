@@ -4,6 +4,22 @@ import { TerminalBuffer } from "../src/terminal/buffer";
 import { palettes } from "../src/design/generated";
 const bytes = (text: string) => new TextEncoder().encode(text);
 const text = (buffer: TerminalBuffer, row = 0) => buffer.frame().lines[row].map((run) => run.text).join("").trimEnd();
+test("terminal exit tolerates late view cleanup and input without touching the freed Ghostty engine", async () => {
+  const buffer = new TerminalBuffer(palettes.pastel_dark), writes: Uint8Array[] = [];
+  buffer.onPtyWrite(data => writes.push(data));
+  await buffer.write(bytes("\x1b[?1004h"));
+  buffer.dispose();
+  expect(() => buffer.focus(false)).not.toThrow();
+  expect(() => buffer.dispose()).not.toThrow();
+  expect(buffer.cursor(10, 20)).toEqual({ quad: [], hold: false, animating: false });
+  expect(buffer.resize(80, 24)).toBe(false);
+  expect(buffer.key({ key: "enter" })).toHaveLength(0);
+  expect(buffer.paste("late clipboard text")).toHaveLength(0);
+  expect(buffer.mouse({ kind: "up", row: 0, col: 0 })).toBe(false);
+  buffer.scrollToBottom(); buffer.search("cancel");
+  await buffer.write(bytes("late output"));
+  expect(writes).toEqual([]);
+});
 test("Ghostty is the default terminal engine and keeps combining graphemes and VT replies", async () => {
   const buffer = new TerminalBuffer(palettes.pastel_dark, 30, 4), writes: string[] = [];
   const cleanup = buffer.onPtyWrite((data) => writes.push(new TextDecoder().decode(data)));

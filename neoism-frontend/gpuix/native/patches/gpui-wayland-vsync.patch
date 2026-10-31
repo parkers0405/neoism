@@ -31,6 +31,19 @@ index 51379b8..c75e98b 100644
              },
          )
      }
+diff --git c/crates/gpui/src/platform.rs w/crates/gpui/src/platform.rs
+index e37ab99..02d34b8 100644
+--- c/crates/gpui/src/platform.rs
++++ w/crates/gpui/src/platform.rs
+@@ -1953,6 +1953,8 @@ pub struct WindowOptions {
+ #[allow(missing_docs)]
+ pub struct WindowParams {
+     pub bounds: Bounds<Pixels>,
++    pub window_background: WindowBackgroundAppearance,
++    pub window_decorations: WindowDecorations,
+ 
+     /// The titlebar configuration of the window
+     #[cfg_attr(feature = "wayland", allow(dead_code))]
 diff --git c/crates/gpui/src/view.rs w/crates/gpui/src/view.rs
 index f8343be..eba9c3c 100644
 --- c/crates/gpui/src/view.rs
@@ -81,6 +94,60 @@ index f8343be..eba9c3c 100644
                                  },
                              },
                          )
+diff --git c/crates/gpui/src/window.rs w/crates/gpui/src/window.rs
+index 076d3c8..b9cf6bf 100644
+--- c/crates/gpui/src/window.rs
++++ w/crates/gpui/src/window.rs
+@@ -1197,6 +1197,7 @@ pub struct Window {
+     active: Rc<Cell<bool>>,
+     hovered: Rc<Cell<bool>>,
+     pub(crate) needs_present: Rc<Cell<bool>>,
++    presentation_paused: bool,
+     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
+     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
+     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
+@@ -1406,6 +1407,8 @@ impl Window {
+         let mut platform_window = cx.platform.open_window(
+             handle,
+             WindowParams {
++                window_background,
++                window_decorations: window_decorations.unwrap_or(WindowDecorations::Server),
+                 bounds: window_bounds.get_bounds(),
+                 titlebar,
+                 kind,
+@@ -1882,6 +1885,7 @@ impl Window {
+             active,
+             hovered,
+             needs_present,
++            presentation_paused: false,
+             input_rate_tracker,
+             #[cfg(feature = "profiler")]
+             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
+@@ -2030,6 +2034,16 @@ impl Window {
+     }
+ 
+     /// Mark the window as dirty, scheduling it to be redrawn on the next frame.
++    /// Prepare layout and glyphs while a host assembles its initial UI, but
++    /// defer presentation until the host commits that first transaction.
++    pub fn set_presentation_paused(&mut self, paused: bool) {
++        if self.presentation_paused != paused {
++            self.presentation_paused = paused;
++            if !paused { self.refresh(); }
++        }
++    }
++
++    /// Request a new frame for this window.
+     pub fn refresh(&mut self) {
+         if self.invalidator.not_drawing() {
+             self.refreshing = true;
+@@ -3084,6 +3098,7 @@ impl Window {
+ 
+     #[profiling::function]
+     fn present(&mut self) {
++        if self.presentation_paused { return; }
+         #[cfg(feature = "profiler")]
+         let _foreground_turn = profiler::journal::foreground_turn();
+         #[cfg(feature = "profiler")]
 diff --git c/crates/gpui_linux/src/gpui_linux.rs w/crates/gpui_linux/src/gpui_linux.rs
 index 62d972d..6f14eee 100644
 --- c/crates/gpui_linux/src/gpui_linux.rs
@@ -100,6 +167,28 @@ index 62d972d..6f14eee 100644
 +pub fn presented_frame_sample() -> Option<(u64, u64)> {
 +    PRESENTED_SAMPLE.lock().ok().and_then(|sample| (sample.0 > 0).then_some(*sample))
 +}
+diff --git c/crates/gpui_linux/src/linux/dispatcher.rs w/crates/gpui_linux/src/linux/dispatcher.rs
+index fd9caf8..ac088d3 100644
+--- c/crates/gpui_linux/src/linux/dispatcher.rs
++++ w/crates/gpui_linux/src/linux/dispatcher.rs
+@@ -26,12 +26,16 @@ pub(crate) struct LinuxDispatcher {
+ }
+ 
+ const MIN_THREADS: usize = 2;
++// Neoism opens a frontend process per window; workspace indexing, LSP and
++// agents live in its daemon. Do not allocate a CPU-sized GUI worker pool for
++// every window (24 workers apiece on a 24-thread laptop).
++const MAX_THREADS: usize = 4;
+ 
+ impl LinuxDispatcher {
+     pub fn new(main_sender: PriorityQueueCalloopSender<RunnableVariant>) -> Self {
+         let (background_sender, background_receiver) = PriorityQueueReceiver::new();
+         let thread_count =
+-            std::thread::available_parallelism().map_or(MIN_THREADS, |i| i.get().max(MIN_THREADS));
++            std::thread::available_parallelism().map_or(MIN_THREADS, |i| i.get().clamp(MIN_THREADS, MAX_THREADS));
+ 
+         let mut background_threads = (0..thread_count)
+             .map(|i| {
 diff --git c/crates/gpui_linux/src/linux/wayland/client.rs w/crates/gpui_linux/src/linux/wayland/client.rs
 index a5c6dc8..9b43c8e 100644
 --- c/crates/gpui_linux/src/linux/wayland/client.rs
@@ -256,16 +345,32 @@ index a5c6dc8..9b43c8e 100644
 +        }
 +    }
 +}
-diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
-index 2d25416..33a0567 100644
---- a/crates/gpui_linux/src/linux/wayland/window.rs
-+++ b/crates/gpui_linux/src/linux/wayland/window.rs
-@@ -571,8 +571,13 @@ impl WaylandWindowState {
+diff --git c/crates/gpui_linux/src/linux/wayland/window.rs w/crates/gpui_linux/src/linux/wayland/window.rs
+index 2d25416..b305d19 100644
+--- c/crates/gpui_linux/src/linux/wayland/window.rs
++++ w/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -555,6 +555,12 @@ impl WaylandWindowState {
+         options: WindowParams,
+         parent: Option<WaylandWindowStatePtr>,
+     ) -> anyhow::Result<Self> {
++        let decorations = if surface_state.decoration().is_some() {
++            options.window_decorations
++        } else {
++            WindowDecorations::Client
++        };
++        let background_appearance = options.window_background;
+         let renderer = {
+             let raw_window = RawWindow {
+                 window: surface.id().as_ptr().cast::<c_void>(),
+@@ -570,9 +576,15 @@ impl WaylandWindowState {
+                     width: DevicePixels(f32::from(options.bounds.size.width) as i32),
                      height: DevicePixels(f32::from(options.bounds.size.height) as i32),
                  },
-                 transparent: true,
+-                transparent: true,
 -                // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
 -                preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
++                transparent: decorations == WindowDecorations::Client
++                    || background_appearance != WindowBackgroundAppearance::Opaque,
 +                // Keep compositor-paced Mailbox nonblocking by default. FIFO is available
 +                // for controlled comparisons of compositor/driver pacing.
 +                preferred_present_mode: Some(if std::env::var("GPUI_WAYLAND_PRESENT_MODE").as_deref() == Ok("fifo") {
@@ -276,7 +381,26 @@ index 2d25416..33a0567 100644
              };
              WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
          };
-@@ -931,6 +936,9 @@ impl WaylandWindowStatePtr {
+@@ -609,8 +621,8 @@ impl WaylandWindowState {
+             bounds: options.bounds,
+             scale: 1.0,
+             input_handler: None,
+-            decorations: WindowDecorations::Client,
+-            background_appearance: WindowBackgroundAppearance::Opaque,
++            decorations,
++            background_appearance,
+             fullscreen: false,
+             maximized: false,
+             tiling: Tiling::default(),
+@@ -919,6 +931,7 @@ impl WaylandWindowStatePtr {
+     pub fn frame(&self) {
+         self.frame_loop.set(FrameLoop::Ticking);
+         let mut state = self.state.borrow_mut();
++        state.renderer.prepare_surface();
+         state.resize_throttle = false;
+         // GPUI may throttle this tick without calling draw, so leave the request
+         // latched until a draw actually reaches the renderer.
+@@ -931,6 +944,9 @@ impl WaylandWindowStatePtr {
              self.frame_loop.set(FrameLoop::Parked);
              return;
          };
@@ -286,7 +410,7 @@ index 2d25416..33a0567 100644
          request_frame_callback(RequestFrameOptions {
              force_render,
              require_presentation,
-@@ -938,6 +946,7 @@ impl WaylandWindowStatePtr {
+@@ -938,6 +954,7 @@ impl WaylandWindowStatePtr {
          self.update_ime_enabled();
          drop(callbacks);
  
@@ -294,7 +418,7 @@ index 2d25416..33a0567 100644
          self.complete_frame();
      }
  
-@@ -994,6 +1003,10 @@ impl WaylandWindowStatePtr {
+@@ -994,6 +1011,10 @@ impl WaylandWindowStatePtr {
          }
      }
  
@@ -305,7 +429,7 @@ index 2d25416..33a0567 100644
      pub fn scheduled_frame_fired(&self) {
          if self.frame_loop.get() == FrameLoop::Scheduled {
              self.frame();
-@@ -1929,6 +1942,9 @@ impl PlatformWindow for WaylandWindow {
+@@ -1929,6 +1950,9 @@ impl PlatformWindow for WaylandWindow {
              let callback = state.surface.frame(&state.globals.qh, state.surface.id());
              state.pending_frame_callback = Some(callback);
          }
@@ -331,11 +455,265 @@ index 91d336a..d6ea5cd 100644
 +    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 +    { None }
 +}
+diff --git c/crates/gpui_wgpu/Cargo.toml w/crates/gpui_wgpu/Cargo.toml
+index 3d889ff..3992cbc 100644
+--- c/crates/gpui_wgpu/Cargo.toml
++++ w/crates/gpui_wgpu/Cargo.toml
+@@ -46,6 +46,11 @@ wgpu = { workspace = true, features = ["webgl"] }
+ criterion.workspace = true
+ naga = { version = "29.0.4", features = ["wgsl-in"] }
+ 
++[target.'cfg(target_os = "linux")'.dependencies]
++ash = "0.38"
++libloading = "0.8"
++serde_json.workspace = true
++
+ [[bench]]
+ name = "layout_line"
+ harness = false
+diff --git c/crates/gpui_wgpu/src/cosmic_text_system.rs w/crates/gpui_wgpu/src/cosmic_text_system.rs
+index e84d924..0ef9b1a 100644
+--- c/crates/gpui_wgpu/src/cosmic_text_system.rs
++++ w/crates/gpui_wgpu/src/cosmic_text_system.rs
+@@ -21,7 +21,29 @@ use swash::{
+ };
+ use unicode_segmentation::UnicodeSegmentation;
+ 
+-pub struct CosmicTextSystem(RwLock<CosmicTextSystemState>);
++pub struct CosmicTextSystem(FontState);
++
++// Font discovery can overlap native window/GPU creation. Every font operation
++// joins the same initialization, so no fallback font is exposed temporarily.
++struct FontState {
++    ready: std::sync::OnceLock<RwLock<CosmicTextSystemState>>,
++    pending: parking_lot::Mutex<Option<std::thread::JoinHandle<CosmicTextSystemState>>>,
++}
++impl FontState {
++    fn ready(state: CosmicTextSystemState) -> Self {
++        Self { ready: std::sync::OnceLock::from(RwLock::new(state)), pending: parking_lot::Mutex::new(None) }
++    }
++}
++impl std::ops::Deref for FontState {
++    type Target = RwLock<CosmicTextSystemState>;
++    fn deref(&self) -> &Self::Target {
++        self.ready.get_or_init(|| {
++            let handle = self.pending.lock().take().expect("font initialization is pending");
++            let state = handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
++            RwLock::new(state)
++        })
++    }
++}
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+ struct FontKey {
+@@ -84,17 +106,30 @@ impl FontMatchProperties {
+ }
+ 
+ impl CosmicTextSystem {
++    #[cfg(target_os = "linux")]
+     pub fn new(system_font_fallback: &str) -> Self {
+-        let font_system = FontSystem::new();
++        let fallback = system_font_fallback.to_owned();
++        let pending = std::thread::Builder::new().name("gpui-fonts".into()).spawn(move || {
++            CosmicTextSystemState {
++                font_system: FontSystem::new(),
++                scratch: ShapeBuffer::default(),
++                swash_scale_context: ScaleContext::new(),
++                pending_glyph_images: HashMap::default(),
++                loaded_fonts: Vec::new(),
++                font_ids_by_family_cache: HashMap::default(),
++                system_font_fallback: fallback,
++            }
++        }).expect("start font discovery");
++        Self(FontState { ready: std::sync::OnceLock::new(), pending: parking_lot::Mutex::new(Some(pending)) })
++    }
+ 
+-        Self(RwLock::new(CosmicTextSystemState {
+-            font_system,
+-            scratch: ShapeBuffer::default(),
+-            swash_scale_context: ScaleContext::new(),
+-            pending_glyph_images: HashMap::default(),
+-            loaded_fonts: Vec::new(),
+-            font_ids_by_family_cache: HashMap::default(),
+-            system_font_fallback: system_font_fallback.to_string(),
++    #[cfg(not(target_os = "linux"))]
++    pub fn new(system_font_fallback: &str) -> Self {
++        Self(FontState::ready(CosmicTextSystemState {
++            font_system: FontSystem::new(), scratch: ShapeBuffer::default(),
++            swash_scale_context: ScaleContext::new(), pending_glyph_images: HashMap::default(),
++            loaded_fonts: Vec::new(), font_ids_by_family_cache: HashMap::default(),
++            system_font_fallback: system_font_fallback.to_owned(),
+         }))
+     }
+ 
+@@ -104,7 +139,7 @@ impl CosmicTextSystem {
+             cosmic_text::fontdb::Database::new(),
+         );
+ 
+-        Self(RwLock::new(CosmicTextSystemState {
++        Self(FontState::ready(CosmicTextSystemState {
+             font_system,
+             scratch: ShapeBuffer::default(),
+             swash_scale_context: ScaleContext::new(),
+diff --git c/crates/gpui_wgpu/src/gpui_wgpu.rs w/crates/gpui_wgpu/src/gpui_wgpu.rs
+index 452c3c0..0397196 100644
+--- c/crates/gpui_wgpu/src/gpui_wgpu.rs
++++ w/crates/gpui_wgpu/src/gpui_wgpu.rs
+@@ -2,6 +2,8 @@ mod cosmic_text_system;
+ mod wgpu_atlas;
+ mod wgpu_context;
+ mod wgpu_renderer;
++#[cfg(target_os = "linux")]
++mod preferred_driver;
+ 
+ pub use cosmic_text_system::*;
+ pub use wgpu;
+diff --git c/crates/gpui_wgpu/src/preferred_driver.rs w/crates/gpui_wgpu/src/preferred_driver.rs
+new file mode 100644
+index 0000000..c44ce5d
+--- /dev/null
++++ w/crates/gpui_wgpu/src/preferred_driver.rs
+@@ -0,0 +1,126 @@
++//! Load the compositor's driver first without changing the process environment.
++//! Normal loader discovery remains the fallback for unsupported loaders, user
++//! overrides, unknown drivers and devices unable to present to this surface.
++use std::path::{Path, PathBuf};
++use anyhow::{Context, bail};
++use ash::vk;
++use crate::CompositorGpuHint;
++
++pub(crate) fn preferred_instance(hint: Option<CompositorGpuHint>) -> Option<wgpu::Instance> {
++    let hint = hint?;
++    if wgpu::InstanceFlags::default().intersects(wgpu::InstanceFlags::DEBUG | wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION) || user_driver_override(hint) {
++        return None;
++    }
++    let library = preferred_library(hint.vendor_id)?;
++    match create_instance(&library) {
++        Ok(instance) => {
++            log::info!("Initialized compositor Vulkan driver directly (vendor={:#06x})", hint.vendor_id);
++            Some(instance)
++        }
++        Err(error) => {
++            log::info!("Direct Vulkan driver loading unavailable ({error:#}); using normal discovery");
++            None
++        }
++    }
++}
++
++fn user_driver_override(hint: CompositorGpuHint) -> bool {
++    if ["VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VK_ADD_DRIVER_FILES", "VK_LOADER_DRIVERS_SELECT",
++        "VK_LOADER_DRIVERS_DISABLE", "VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH",
++        "VK_LOADER_SETTINGS_PATH", "VK_LOADER_LAYERS_ENABLE", "VK_LOADER_LAYERS_DISABLE",
++        "GPUI_DISABLE_DIRECT_DRIVER_LOADING"].iter().any(|key| std::env::var_os(key).is_some()) {
++        return true;
++    }
++    if let Ok(device) = std::env::var("ZED_DEVICE_ID") {
++        let value = device.trim().trim_start_matches("0x");
++        if u32::from_str_radix(value, 16).ok() != Some(hint.device_id) { return true; }
++    }
++    // Keep older Neoism GPU-selection overrides on the ordinary path too.
++    std::env::var("NEOISM_VULKAN_DEVICE").is_ok_and(|v| !matches!(v.trim(), "" | "auto"))
++}
++
++fn library_vendor(path: &Path) -> Option<u32> {
++    let name = path.file_name()?.to_str()?;
++    if name.starts_with("libvulkan_radeon.so") { Some(0x1002) }
++    else if name.starts_with("libvulkan_intel.so") { Some(0x8086) }
++    else if name.starts_with("libGLX_nvidia.so") || name.starts_with("libvulkan_nvidia.so") { Some(0x10de) }
++    else { None }
++}
++
++fn preferred_library(vendor: u32) -> Option<PathBuf> {
++    let mut dirs = vec![PathBuf::from("/usr/share/vulkan/icd.d"), PathBuf::from("/usr/local/share/vulkan/icd.d"), PathBuf::from("/etc/vulkan/icd.d")];
++    for key in ["XDG_CONFIG_HOME", "XDG_DATA_HOME"] {
++        if let Some(path) = std::env::var_os(key) { dirs.push(PathBuf::from(path).join("vulkan/icd.d")); }
++    }
++    if let Some(home) = std::env::var_os("HOME") {
++        dirs.push(PathBuf::from(&home).join(".config/vulkan/icd.d"));
++        dirs.push(PathBuf::from(home).join(".local/share/vulkan/icd.d"));
++    }
++    for key in ["XDG_CONFIG_DIRS", "XDG_DATA_DIRS"] {
++        if let Some(paths) = std::env::var_os(key) { dirs.extend(std::env::split_paths(&paths).map(|p| p.join("vulkan/icd.d"))); }
++    }
++    let mut libraries = Vec::new();
++    for dir in dirs {
++        let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
++        for entry in entries.flatten() {
++            let path = entry.path();
++            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
++            let Ok(bytes) = std::fs::read(&path) else { continue; };
++            let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue; };
++            let Some(library) = manifest["ICD"]["library_path"].as_str() else { continue; };
++            let mut library = PathBuf::from(library);
++            if library_vendor(&library) != Some(vendor) { continue; }
++            if library.is_relative() && library.components().count() > 1 { library = dir.join(library); }
++            if !libraries.contains(&library) { libraries.push(library); }
++        }
++    }
++    // Do not choose between multiple implementations of the same vendor.
++    (libraries.len() == 1).then(|| libraries.remove(0))
++}
++
++struct InstanceOwner {
++    raw: ash::Instance,
++    _driver: libloading::Library,
++    _loader: ash::Entry,
++}
++impl Drop for InstanceOwner {
++    fn drop(&mut self) {
++        // The HAL invokes this only after its last instance/device/surface
++        // reference disappears. Both libraries remain loaded through this call.
++        unsafe { self.raw.destroy_instance(None); }
++    }
++}
++
++fn create_instance(path: &Path) -> anyhow::Result<wgpu::Instance> {
++    // These are the same installed ICDs consumed by the system loader. Keep
++    // their function pointers alive in InstanceOwner until HAL teardown.
++    let driver = unsafe { libloading::Library::new(path) }.context("loading preferred ICD")?;
++    let gipa = unsafe { *driver.get::<vk::PFN_vkGetInstanceProcAddr>(b"vk_icdGetInstanceProcAddr\0")? };
++    let driver_entry = unsafe { ash::Entry::from_static_fn(ash::StaticFn { get_instance_proc_addr: gipa }) };
++    let loader = unsafe { ash::Entry::load() }?;
++    let version = unsafe { loader.try_enumerate_instance_version() }?.unwrap_or(vk::API_VERSION_1_0).min(vk::API_VERSION_1_3);
++    if version < vk::API_VERSION_1_1 { bail!("Vulkan loader is older than 1.1"); }
++
++    // Query only this ICD's extensions. Calling the loader's global extension
++    // query would initialize every installed driver before exclusive loading.
++    // All instance creation/dispatch still goes through the real system loader.
++    let mut functions = loader.fp_v1_0().clone();
++    functions.enumerate_instance_extension_properties = driver_entry.fp_v1_0().enumerate_instance_extension_properties;
++    let entry = ash::Entry::from_parts_1_1(loader.static_fn().clone(), functions, loader.fp_v1_1().clone());
++    let flags = wgpu::InstanceFlags::default();
++    let mut extensions = wgpu::hal::vulkan::Instance::desired_extensions(&entry, version, flags)?;
++    if !extensions.contains(&ash::khr::wayland_surface::NAME) { bail!("preferred driver has no Wayland surface support"); }
++    extensions.push(ash::lunarg::direct_driver_loading::NAME);
++    let pointers: Vec<_> = extensions.iter().map(|s| s.as_ptr()).collect();
++    let drivers = [vk::DirectDriverLoadingInfoLUNARG::default().pfn_get_instance_proc_addr(Some(gipa))];
++    let mut direct = vk::DirectDriverLoadingListLUNARG::default().mode(vk::DirectDriverLoadingModeLUNARG::EXCLUSIVE).drivers(&drivers);
++    let app = vk::ApplicationInfo::default().application_name(c"Neoism").engine_name(c"wgpu-hal").api_version(version);
++    let info = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&pointers).push_next(&mut direct);
++    let raw = unsafe { entry.create_instance(&info, None) }.context("creating direct-driver instance")?;
++    let owner = InstanceOwner { raw: raw.clone(), _driver: driver, _loader: loader };
++    // Extensions are exactly desired_extensions(entry), plus direct loading;
++    // flags/API match creation. The drop callback owns the instance and both
++    // dynamic libraries, and is also safe if from_raw returns an error.
++    let hal = unsafe { wgpu::hal::vulkan::Instance::from_raw(entry, raw, version, 0, None, extensions, flags, Default::default(), false, Some(Box::new(move || drop(owner)))) }?;
++    Ok(unsafe { wgpu::Instance::from_hal::<wgpu::hal::api::Vulkan>(hal) })
++}
 diff --git c/crates/gpui_wgpu/src/wgpu_context.rs w/crates/gpui_wgpu/src/wgpu_context.rs
-index 4a83d21..8a66dfa 100644
+index 4a83d21..246d7d4 100644
 --- c/crates/gpui_wgpu/src/wgpu_context.rs
 +++ w/crates/gpui_wgpu/src/wgpu_context.rs
-@@ -339,8 +339,16 @@ impl WgpuContext {
+@@ -292,6 +292,8 @@ impl WgpuContext {
+             .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+ 
+         let mut required_features = wgpu::Features::empty();
++        #[cfg(target_os = "linux")]
++        { required_features |= adapter.features() & wgpu::Features::PIPELINE_CACHE; }
+         if dual_source_blending {
+             required_features |= wgpu::Features::DUAL_SOURCE_BLENDING;
+         } else {
+@@ -339,8 +341,16 @@ impl WgpuContext {
  
      #[cfg(not(target_family = "wasm"))]
      pub fn instance(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> wgpu::Instance {
@@ -353,11 +731,25 @@ index 4a83d21..8a66dfa 100644
              flags: wgpu::InstanceFlags::default(),
              backend_options: wgpu::BackendOptions::default(),
              memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-diff --git a/crates/gpui_wgpu/src/wgpu_renderer.rs b/crates/gpui_wgpu/src/wgpu_renderer.rs
-index 47ce2a3..b87fffd 100644
---- a/crates/gpui_wgpu/src/wgpu_renderer.rs
-+++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
-@@ -286,38 +286,50 @@ impl WgpuRenderer {
+diff --git c/crates/gpui_wgpu/src/wgpu_renderer.rs w/crates/gpui_wgpu/src/wgpu_renderer.rs
+index 47ce2a3..8e82cda 100644
+--- c/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ w/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -247,6 +247,7 @@ pub struct WgpuRenderer {
+     failed_frame_count: u32,
+     device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+     surface_configured: bool,
++    initial_surface_config_pending: bool,
+     needs_redraw: bool,
+ }
+ 
+@@ -282,42 +283,71 @@ impl WgpuRenderer {
+     where
+         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
+     {
++        let started = std::time::Instant::now();
++        let report = |stage| { if std::env::var("NEOISM_GPUIX_PROFILE").as_deref() == Ok("1") { eprintln!("[neoism-native-startup] {stage} {:?}", started.elapsed()); } };
+         let window_handle = window
              .window_handle()
              .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
  
@@ -367,8 +759,9 @@ index 47ce2a3..b87fffd 100644
 -            raw_window_handle: window_handle.as_raw(),
 +        let make_surface = |instance: &wgpu::Instance| {
 +            let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-+                // InstanceDescriptor already owns the display handle.
-+                raw_display_handle: None,
++                // Also supply it for HAL-backed instances, which do not carry
++                // an InstanceDescriptor display. The native window outlives us.
++                raw_display_handle: Some(window.display_handle()?.as_raw()),
 +                raw_window_handle: window_handle.as_raw(),
 +            };
 +            // Safety: RawWindow outlives the renderer. Each surface belongs to
@@ -413,6 +806,19 @@ index 47ce2a3..b87fffd 100644
 +            // ordering. If it cannot present, retain the full GL/software
 +            // fallback instead of requiring Vulkan or a particular GPU.
 +            let preferred = (|| {
++                #[cfg(target_os = "linux")]
++                if let Some(instance) = crate::preferred_driver::preferred_instance(compositor_gpu) {
++                    report("driver-instance");
++                    let direct = (|| {
++                        let surface = make_surface(&instance)?;
++                        let context = WgpuContext::new_rejecting_software(instance, &surface, compositor_gpu)?;
++                        Ok::<_, anyhow::Error>((context, surface))
++                    })();
++                    match direct {
++                        Ok(pair) => return Ok(pair),
++                        Err(error) => log::info!("Preferred driver could not present ({error:#}); trying all Vulkan drivers"),
++                    }
++                }
 +                let instance = WgpuContext::instance_with_backends(
 +                    Box::new(window.clone()), wgpu::Backends::VULKAN,
 +                );
@@ -433,20 +839,197 @@ index 47ce2a3..b87fffd 100644
 +            *ctx_ref = Some(context);
 +            surface
          };
++        report("gpu-context");
 +        let context = ctx_ref.as_mut().expect("GPU context initialized above");
  
          let atlas = Arc::new(WgpuAtlas::from_context(context));
  
-@@ -1322,6 +1334,8 @@ impl WgpuRenderer {
+@@ -382,6 +412,8 @@ impl WgpuRenderer {
+         compositor_gpu: Option<CompositorGpuHint>,
+         atlas: Arc<WgpuAtlas>,
+     ) -> anyhow::Result<Self> {
++        let started = std::time::Instant::now();
++        let report = |stage| { if std::env::var("NEOISM_GPUIX_PROFILE").as_deref() == Ok("1") { eprintln!("[neoism-native-startup] {stage} {:?}", started.elapsed()); } };
+         let surface_caps = match &surface {
+             Some(surface) => surface.get_capabilities(&context.adapter),
+             // Offscreen frames are read back as RGBA, the layout image consumers expect.
+@@ -469,12 +501,17 @@ impl WgpuRenderer {
+             alpha_mode,
+             view_formats: vec![],
+         };
+-        // Configure the surface immediately. The adapter selection process already validated
+-        // that this adapter can successfully configure this surface.
+-        if let Some(surface) = &surface {
+-            surface.configure(&context.device, &surface_config);
++        // Wayland delivers the actual size/scale after opening the window.
++        // Keep the adapter's validated test surface until first paint instead
++        // of allocating and immediately replacing a requested-size swapchain.
++        let initial_surface_config_pending = cfg!(target_os = "linux") && surface.is_some();
++        if !initial_surface_config_pending {
++            if let Some(surface) = &surface {
++                surface.configure(&context.device, &surface_config);
++            }
+         }
+ 
++        report("surface-configured");
+         let queue = Arc::clone(&context.queue);
+         let rendering_params = RenderingParameters::new(&context.adapter, surface_format);
+         let uses_webgl_instance_data = context.uses_webgl_instance_data();
+@@ -483,6 +520,7 @@ impl WgpuRenderer {
+         let bind_group_layouts = Self::create_bind_group_layouts(&device, uses_webgl_instance_data);
+         let pipelines = Self::create_pipelines(
+             &device,
++            &context.adapter.get_info(),
+             &bind_group_layouts,
+             surface_format,
+             alpha_mode,
+@@ -491,6 +529,7 @@ impl WgpuRenderer {
+             uses_webgl_instance_data,
+         );
+ 
++        report("pipelines-created");
+         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+             label: Some("atlas_sampler"),
+             mag_filter: wgpu::FilterMode::Linear,
+@@ -667,6 +706,7 @@ impl WgpuRenderer {
+             failed_frame_count: 0,
+             device_lost: context.device_lost_flag(),
+             surface_configured: true,
++            initial_surface_config_pending,
+             needs_redraw: false,
+         })
+     }
+@@ -832,8 +872,35 @@ impl WgpuRenderer {
+         )
      }
  
++    #[cfg(target_os = "linux")]
++    fn load_pipeline_cache(device: &wgpu::Device, adapter: &wgpu::AdapterInfo) -> (Option<wgpu::PipelineCache>, Option<std::path::PathBuf>) {
++        if !device.features().contains(wgpu::Features::PIPELINE_CACHE) || std::env::var_os("GPUI_DISABLE_PIPELINE_CACHE").is_some() {
++            return (None, None);
++        }
++        let Some(key) = wgpu::util::pipeline_cache_key(adapter) else { return (None, None); };
++        let directory = std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
++            .filter(|path| path.is_absolute())
++            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")));
++        let Some(directory) = directory else { return (None, None); };
++        // A separate filename per shader revision avoids unbounded growth as
++        // nightlies change shaders. wgpu also validates the device/driver key.
++        use std::hash::{Hash, Hasher};
++        let mut hash = std::collections::hash_map::DefaultHasher::new();
++        STORAGE_BUFFER_SHADERS.hash(&mut hash); SUBPIXEL_SHADERS.hash(&mut hash);
++        let path = directory.join("neoism/gpu-pipelines").join(format!("{key}-{:016x}", hash.finish()));
++        let data = std::fs::metadata(&path).ok().filter(|metadata| metadata.len() <= 64 * 1024 * 1024).and_then(|_| std::fs::read(&path).ok());
++        // SAFETY: this app-owned file is written exclusively from get_data().
++        // Atomic replacement prevents partial writes; wgpu rejects stale or
++        // incompatible cache headers and fallback preserves normal startup.
++        let cache = unsafe { device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
++            label: Some("Neoism GPU pipelines"), data: data.as_deref(), fallback: true,
++        }) };
++        (Some(cache), Some(path))
++    }
++
+     fn create_pipelines(
+         device: &wgpu::Device,
++        _adapter_info: &wgpu::AdapterInfo,
+         layouts: &WgpuBindGroupLayouts,
+         surface_format: wgpu::TextureFormat,
+         alpha_mode: wgpu::CompositeAlphaMode,
+@@ -869,6 +936,10 @@ impl WgpuRenderer {
+         } else {
+             STORAGE_BUFFER_SHADERS
+         };
++        #[cfg(target_os = "linux")]
++        let (pipeline_cache, cache_path) = Self::load_pipeline_cache(device, _adapter_info);
++        #[cfg(not(target_os = "linux"))]
++        let pipeline_cache: Option<wgpu::PipelineCache> = None;
+         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+             label: Some("gpui_shaders"),
+             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+@@ -945,7 +1016,7 @@ impl WgpuRenderer {
+                     alpha_to_coverage_enabled: false,
+                 },
+                 multiview_mask: None,
+-                cache: None,
++                cache: pipeline_cache.as_ref(),
+             })
+         };
+ 
+@@ -1108,6 +1179,25 @@ impl WgpuRenderer {
+             &shader_module,
+         );
+ 
++        #[cfg(target_os = "linux")]
++        if let (Some(cache), Some(path)) = (pipeline_cache, cache_path) {
++            // Disk writes are outside the first-frame path. Each process writes
++            // its own temporary file, so simultaneous launches cannot truncate
++            // a cache another process is reading.
++            let _ = std::thread::Builder::new().name("gpu-pipeline-cache".into()).spawn(move || {
++                if let Some(data) = cache.get_data() {
++                    if let Some(parent) = path.parent() {
++                        if std::fs::create_dir_all(parent).is_err() { return; }
++                    }
++                    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
++                    let temporary = path.with_extension(format!("{}-{nonce}.tmp", std::process::id()));
++                    if std::fs::write(&temporary, data).is_ok() {
++                        let _ = std::fs::rename(&temporary, &path);
++                    }
++                    let _ = std::fs::remove_file(temporary);
++                }
++            });
++        }
+         WgpuPipelines {
+             quads,
+             shadows,
+@@ -1192,6 +1282,9 @@ impl WgpuRenderer {
+             self.surface_config.width = clamped_width.max(1);
+             self.surface_config.height = clamped_height.max(1);
+             let surface_config = self.surface_config.clone();
++            if self.initial_surface_config_pending {
++                return;
++            }
+ 
+             let Some(resources) = self.resources.as_mut() else {
+                 return;
+@@ -1277,6 +1370,7 @@ impl WgpuRenderer {
+             }
+             resources.pipelines = Self::create_pipelines(
+                 &resources.device,
++                &self.adapter_info,
+                 &resources.bind_group_layouts,
+                 surface_config.format,
+                 surface_config.alpha_mode,
+@@ -1321,7 +1415,20 @@ impl WgpuRenderer {
+         self.max_texture_size
+     }
+ 
++    /// Allocate the initial swapchain once the compositor has supplied its
++    /// size, even if the host is still assembling the first frame's contents.
++    pub fn prepare_surface(&mut self) {
++        if self.initial_surface_config_pending {
++            if let Some(surface) = &self.resources().surface {
++                surface.configure(&self.resources().device, &self.surface_config);
++            }
++            self.initial_surface_config_pending = false;
++        }
++    }
++
      pub fn draw(&mut self, scene: &Scene) -> bool {
 +        let trace = std::env::var_os("GPUI_GPU_TIMING_TRACE").is_some();
 +        let started = trace.then(std::time::Instant::now);
          #[cfg(target_family = "wasm")]
          if self.device_lost() {
              if self.surface_configured {
-@@ -1371,6 +1385,7 @@ impl WgpuRenderer {
+@@ -1341,6 +1448,8 @@ impl WgpuRenderer {
+             return false;
+         }
+ 
++        self.prepare_surface();
++
+         let last_error = self.last_error.lock().unwrap().take();
+         if let Some(error) = last_error {
+             self.failed_frame_count += 1;
+@@ -1371,6 +1480,7 @@ impl WgpuRenderer {
              log::error!("draw() called on an offscreen renderer; use render_to_pixels()");
              return false;
          };
@@ -454,7 +1037,7 @@ index 47ce2a3..b87fffd 100644
          let frame = match surface.get_current_texture() {
              wgpu::CurrentSurfaceTexture::Success(frame) => frame,
              wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-@@ -1393,6 +1408,7 @@ impl WgpuRenderer {
+@@ -1393,6 +1503,7 @@ impl WgpuRenderer {
              }
          };
  
@@ -462,7 +1045,7 @@ index 47ce2a3..b87fffd 100644
          // Now that we know the surface is healthy, ensure intermediate textures exist
          self.ensure_intermediate_textures();
  
-@@ -1408,7 +1424,12 @@ impl WgpuRenderer {
+@@ -1408,7 +1519,12 @@ impl WgpuRenderer {
              return false;
          }
  
@@ -475,3 +1058,11 @@ index 47ce2a3..b87fffd 100644
          true
      }
  
+@@ -2289,6 +2405,7 @@ impl WgpuRenderer {
+         }
+ 
+         self.surface_configured = true;
++        self.initial_surface_config_pending = false;
+ 
+         Ok(())
+     }

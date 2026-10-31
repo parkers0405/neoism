@@ -21,5 +21,7 @@ try{
  buffer.select(0,0,true,0,config.fontSize*.6);buffer.select(0,5,false,config.fontSize*3.6,config.fontSize*.6);root.flush();
  assert.ok(buffer.selectedText.length>0);assert.ok(host.nodes.size<12);
  assert.ok(JSON.parse(String(host.find("terminal-viewport")!.props.commands)).some((op:any)=>op.k==="r"),"Selection background must be painted");
+ // PTY exit retires the engine before the mounted view receives its cleanup.
+ disposeTerminalSessions(client); root.unmount();
  console.log(JSON.stringify({noWindow:true,nodes,runs,selectionPreserved:true,scrollbackChanged:true}));
 }finally{root.unmount();disposeTerminalSessions(client);}

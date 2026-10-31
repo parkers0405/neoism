@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 // Authoritative typed messages live beside the Rust wire protocol.
 export type { WorkspaceClientMessage, FilesClientMessage, AgentClientMessage, Attachment,

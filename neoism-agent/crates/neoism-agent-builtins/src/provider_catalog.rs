@@ -1093,8 +1093,11 @@ fn effective_catalog_with_config(
                     provider.models.insert(id.clone(), model);
                 }
             }
-            if restrict_to_listed && !matches!(access, OpenAiModelAccess::CodexPending) {
+            if restrict_to_listed {
                 // Match the actual wire ID, not a picker alias or variant label.
+                // Pending/failed OAuth discovery cannot authorize API catalog
+                // entries. Keep them only for resolving an existing selection's
+                // generation metadata (restrict_to_listed = false).
                 provider
                     .models
                     .retain(|_, model| models.contains_key(&model.api.id));
@@ -1164,6 +1167,9 @@ pub fn connect_provider_catalog(
     let mut output = effective_provider_catalog(providers, openai_access);
     output.retain(|provider| connectable.contains(provider.id.as_str()));
     for provider in &mut output {
+        // This catalog also feeds conversation selectors and their defaults.
+        // Keep media/embedding models in the raw catalog for dedicated tools.
+        provider.models.retain(|_, model| model_available_in_picker(model));
         if provider.id == "opencode" && !connected.contains(provider.id.as_str()) {
             provider.models.clear();
         }
@@ -1173,6 +1179,37 @@ pub fn connect_provider_catalog(
 
 fn model_available_in_picker(model: &ModelInfo) -> bool {
     !matches!(&model.status, ModelStatus::Alpha | ModelStatus::Deprecated)
+        && model_supports_conversation(model)
+}
+
+fn model_supports_conversation(model: &ModelInfo) -> bool {
+    // Embeddings can advertise text -> text modalities in models.dev. Check
+    // their purpose using the family and wire ID, never a user-facing alias.
+    let wire_id = model.api.id.to_ascii_lowercase();
+    let family = model.family.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let dedicated_task = |value: &str| {
+        value.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| {
+            matches!(part, "embed" | "embedding" | "embeddings" | "rerank" | "reranker" | "moderation")
+        })
+    };
+    if dedicated_task(&wire_id) || dedicated_task(&family) {
+        return false;
+    }
+    // These OpenAI model families require image, audio, video, or Realtime
+    // endpoints that the conversation stream does not implement. Some also
+    // advertise text output, so modalities alone cannot identify them.
+    let id = wire_id.rsplit('/').next().unwrap_or(&wire_id);
+    if ["gpt-image", "chatgpt-image", "dall-e", "tts", "whisper", "sora", "gpt-realtime", "gpt-audio"]
+        .iter().any(|prefix| id.strip_prefix(prefix).is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('-')))
+        || id.split('-').any(|part| matches!(part, "realtime" | "transcribe" | "transcription"))
+        || family == "gpt-image"
+    {
+        return false;
+    }
+    let output = &model.capabilities.output;
+    // Missing metadata is common for local and newly discovered Codex IDs.
+    // Preserve those; reject explicitly non-text output modalities.
+    output.text || !(output.audio || output.image || output.video || output.pdf)
 }
 
 fn model_supported_in_picker(provider_id: &str, model: &ModelInfo) -> bool {
@@ -2381,6 +2418,78 @@ mod tests {
     }
 
     #[test]
+    fn conversation_catalog_excludes_dedicated_models_for_api_and_codex_auth() {
+        let mut raw = parse_models(include_str!("provider_catalog_fallback.json")).unwrap();
+        let openai = raw.iter_mut().find(|p| p.id == "openai").unwrap();
+        let mut text_only = openai.models["gpt-6.1-sol"].clone();
+        text_only.id = "text-only-conversation".into();
+        text_only.api.id = text_only.id.clone();
+        text_only.api.tool_call = Some(false);
+        text_only.capabilities.tool_call = false;
+        openai.models.insert(text_only.id.clone(), text_only);
+        let connected = vec!["openai".to_string()];
+        let non_conversation = [
+            "text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002",
+            "gpt-image-1", "gpt-image-1.5", "gpt-image-2", "chatgpt-image-latest",
+            "gpt-realtime-2.1",
+        ];
+        let openai = raw.iter().find(|p| p.id == "openai").unwrap();
+        for id in non_conversation {
+            assert!(openai.models.contains_key(id), "raw tool catalog retains {id}");
+        }
+        for api in [
+            usable_provider_catalog(&raw, &connected, &OpenAiModelAccess::Api),
+            connect_provider_catalog(&raw, &connected, &OpenAiModelAccess::Api),
+        ] {
+            let openai = api.iter().find(|p| p.id == "openai").unwrap();
+            for id in non_conversation {
+                assert!(!openai.models.values().any(|model| model.api.id == id), "{id}");
+            }
+            assert!(openai.models.contains_key("gpt-6.1-sol"));
+            // Tool calling is not required merely to hold a conversation.
+            assert!(openai.models.contains_key("text-only-conversation"));
+            assert!(!openai.models["text-only-conversation"].capabilities.tool_call);
+        }
+
+        // Codex availability comes from the account's list, not from matching
+        // "codex" in names or copying the broader platform API catalog.
+        let access = OpenAiModelAccess::Codex(BTreeMap::from([
+            ("gpt-6.1-sol".into(), CodexModelMetadata::default()),
+            ("new-account-model".into(), CodexModelMetadata::default()),
+        ]));
+        for codex in [
+            usable_provider_catalog(&raw, &connected, &access),
+            connect_provider_catalog(&raw, &connected, &access),
+        ] {
+            let openai = codex.iter().find(|p| p.id == "openai").unwrap();
+            let wire_ids = openai.models.values().map(|model| model.api.id.as_str()).collect::<BTreeSet<_>>();
+            assert_eq!(wire_ids, BTreeSet::from(["gpt-6.1-sol", "new-account-model"]));
+        }
+    }
+
+    #[test]
+    fn conversation_filter_uses_wire_ids_and_family_and_preserves_unknown_metadata() {
+        let raw = parse_codex_limit_fixture();
+        let mut model = raw[0].models.values().next().unwrap().clone();
+        model.id = "friendly-chat-alias".into();
+        model.name = "Friendly chat model".into();
+        model.capabilities.output.text = true;
+        model.api.id = "openai/text-embedding-3-small".into();
+        assert!(!model_supports_conversation(&model));
+        model.api.id = "custom-wire-id".into();
+        model.family = Some("text-embedding".into());
+        assert!(!model_supports_conversation(&model));
+        model.family = None;
+        model.capabilities.output = ProviderModalities { image: true, ..Default::default() };
+        assert!(!model_supports_conversation(&model));
+        model.capabilities.output = ProviderModalities::default();
+        assert!(model_supports_conversation(&model));
+        model.capabilities.output.text = true;
+        model.capabilities.input.image = true;
+        assert!(model_supports_conversation(&model));
+    }
+
+    #[test]
     fn codex_catalog_is_restricted_to_account_model_ids() {
         let providers = parse_codex_limit_fixture();
         let visible = effective_provider_catalog(
@@ -2447,10 +2556,21 @@ mod tests {
     }
 
     #[test]
-    fn pending_codex_keeps_basic_models_but_successfully_empty_discovery_restricts() {
+    fn pending_codex_hides_unverified_picker_models_but_preserves_generation_metadata() {
         let raw = parse_codex_limit_fixture();
         let pending = effective_provider_catalog(&raw, &OpenAiModelAccess::CodexPending);
         let openai = pending.iter().find(|p| p.id == "openai").unwrap();
+        assert!(openai.models.is_empty());
+        assert!(!default_model_ids(&pending).contains_key("openai"));
+        assert_eq!(
+            pending.iter().find(|p| p.id == "github-copilot").unwrap().models.len(),
+            raw.iter().find(|p| p.id == "github-copilot").unwrap().models.len(),
+        );
+
+        let generation = effective_catalog_with_config(
+            &raw, &OpenAiModelAccess::CodexPending, &BTreeMap::new(), false,
+        );
+        let openai = generation.iter().find(|p| p.id == "openai").unwrap();
         assert!(!openai.models.is_empty());
         for model in openai.models.values() {
             assert!(model.limit.context <= CODEX_OPENAI_CONTEXT_LIMIT);

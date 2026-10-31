@@ -175,6 +175,20 @@ index 4459e7b..079dbbf 100644
 +Neoism diagnostics: `GPUI_GPU_TIMING_TRACE=1` logs CPU time spent acquiring a surface texture, recording/submitting GPU commands, and presenting. These timings exclude asynchronous GPU execution; use Wayland presentation feedback for confirmed display cadence.
 +
 +`GPUI_CANVAS_PARSE_TRACE=1` reports canvas JSON bytes and UI-thread decoding time without logging content. Unchanged custom props are compared before cloning; canvas command strings transfer ownership into the retained parser cache.
+diff --git c/packages/native/Cargo.lock w/packages/native/Cargo.lock
+index d11a8f8..15f40bf 100644
+--- c/packages/native/Cargo.lock
++++ w/packages/native/Cargo.lock
+@@ -2559,6 +2559,9 @@ dependencies = [
+ name = "gpui_wgpu"
+ version = "0.1.0"
+ dependencies = [
++ "serde_json",
++ "libloading 0.8.9",
++ "ash",
+  "anyhow",
+  "bytemuck",
+  "collections",
 diff --git c/packages/native/Cargo.toml w/packages/native/Cargo.toml
 index 9d339ee..5912a2c 100644
 --- c/packages/native/Cargo.toml
@@ -190,19 +204,30 @@ index 9d339ee..5912a2c 100644
  serde = { version = "1", features = ["derive"] }
  serde_json = { version = "1", features = ["raw_value"] }
 diff --git c/packages/native/index.d.ts w/packages/native/index.d.ts
-index 4eded3a..df88b6d 100644
+index 4eded3a..78682d4 100644
 --- c/packages/native/index.d.ts
 +++ w/packages/native/index.d.ts
-@@ -37,6 +37,8 @@ export declare class GpuixRenderer {
+@@ -37,6 +37,10 @@ export declare class GpuixRenderer {
    constructor(eventCallback?: (((err: Error | null, arg: EventPayload) => any)) | undefined | null)
    /** Initialize GPUI using the native event-loop architecture for this OS. */
    init(options?: WindowOptions | undefined | null): void
 +  /** Await before native commands. Keeps JS responsive during threaded platform startup. */
 +  initAsync(options?: WindowOptions | undefined | null): Promise<void>
++  /** Validate bundled fonts and install them before opening the first window. */
++  setStartupFonts(fonts: Buffer[]): void
    /**
     * Apply a batch of mutations in a single FFI call.
     *
-@@ -578,6 +580,8 @@ export interface EventPayload {
+@@ -84,6 +88,8 @@ export declare class GpuixRenderer {
+    * wrong place on every window that was not exactly that size.
+    */
+   getWindowSize(): WindowSize
++  /** Actual native fullscreen state, including changes made by window controls. */
++  isFullscreen(): boolean
+   getWindowInsets(): WindowInsets
+   /** `"hidden"` | `"minimal"` | `"full"`. Paints into the scene after layout. */
+   setDebugFrameOverlay(mode: string): string
+@@ -578,6 +584,8 @@ export interface EventPayload {
     * Populated for: scroll.
     */
    precise?: boolean
@@ -211,7 +236,7 @@ index 4eded3a..df88b6d 100644
    /**
     * Touch phase for scroll: "started", "moved", "ended".
     * Populated for: scroll (trackpad gestures).
-@@ -802,3 +806,9 @@ export interface WindowSize {
+@@ -802,3 +810,9 @@ export interface WindowSize {
    width: number
    height: number
  }
@@ -313,7 +338,7 @@ index ab9f8b4..82f4200 100644
      let parsed = csscolorparser::parse(value).ok()?.clamp();
      Some(gpui::Rgba {
          r: parsed.r,
-diff --git i/packages/native/src/custom_elements/canvas.rs w/packages/native/src/custom_elements/canvas.rs
+diff --git c/packages/native/src/custom_elements/canvas.rs w/packages/native/src/custom_elements/canvas.rs
 new file mode 100644
 index 0000000..ebaf28e
 --- /dev/null
@@ -916,19 +941,24 @@ index 0000000..ebaf28e
 +    }
 +}
 diff --git c/packages/native/src/custom_elements/input.rs w/packages/native/src/custom_elements/input.rs
-index 7be2d25..7875923 100644
+index 7be2d25..1268857 100644
 --- c/packages/native/src/custom_elements/input.rs
 +++ w/packages/native/src/custom_elements/input.rs
-@@ -153,7 +153,7 @@ fn single_line_text(text: &str) -> String {
+@@ -153,8 +153,11 @@ fn single_line_text(text: &str) -> String {
      text.replace("\r\n", " ").replace(['\r', '\n'], " ")
  }
  
 -pub fn init(cx: &mut App) {
+-    let word_navigation_uses_alt = word_navigation_uses_alt();
 +fn registered_text_editor_bindings() -> Vec<KeyBinding> {
-     let word_navigation_uses_alt = word_navigation_uses_alt();
++    application_text_editor_bindings(word_navigation_uses_alt())
++}
++
++fn application_text_editor_bindings(word_navigation_uses_alt: bool) -> Vec<KeyBinding> {
      let bind_paste_shortcut = !cfg!(all(target_arch = "wasm32", target_os = "unknown"));
      let mut bindings = text_editor_bindings(
-@@ -177,7 +177,35 @@ pub fn init(cx: &mut App) {
+         INPUT_KEY_CONTEXT,
+@@ -177,7 +180,38 @@ pub fn init(cx: &mut App) {
          word_navigation_uses_alt,
          bind_paste_shortcut,
      ));
@@ -952,7 +982,9 @@ index 7be2d25..7875923 100644
 +/// A reserved chord must have no native SelectWord action in any input context,
 +/// while ordinary character/selection navigation must stay available.
 +pub(crate) fn application_tab_shortcuts_supported() -> bool {
-+    let keymap=gpui::Keymap::new(registered_text_editor_bindings());
++    // Verify both macOS Option-word bindings and Ctrl-word bindings on every host.
++    [true, false].into_iter().all(|word_navigation_uses_alt| {
++    let keymap=gpui::Keymap::new(application_text_editor_bindings(word_navigation_uses_alt));
 +    [INPUT_KEY_CONTEXT,TEXTAREA_KEY_CONTEXT,TEXTAREA_SUBMIT_KEY_CONTEXT].into_iter().all(|context| {
 +        let context=[gpui::KeyContext::parse(context).unwrap()];
 +        crate::window_shortcuts::BUFFER_CHORDS.into_iter().all(|chord| {
@@ -962,10 +994,11 @@ index 7be2d25..7875923 100644
 +            !keymap.bindings_for_input(&[gpui::Keystroke::parse(chord).unwrap()],&context).0.is_empty()
 +        })
 +    })
++    })
  }
  
  /// A terminal app quits on ctrl-c. Unbinding the text field's ctrl-c copy lets
-@@ -359,6 +387,7 @@ impl CustomElement for TextEditorElement {
+@@ -359,6 +393,7 @@ impl CustomElement for TextEditorElement {
          let emits_submit = ctx.events.contains("submit");
          let emits_key_down = ctx.events.contains("keyDown");
          let emits_key_up = ctx.events.contains("keyUp");
@@ -973,7 +1006,7 @@ index 7be2d25..7875923 100644
          let callback = ctx.event_callback.clone();
  
          let state = self
-@@ -382,6 +411,8 @@ impl CustomElement for TextEditorElement {
+@@ -382,6 +417,8 @@ impl CustomElement for TextEditorElement {
                      emits_submit,
                      emits_key_down,
                      emits_key_up,
@@ -982,7 +1015,7 @@ index 7be2d25..7875923 100644
                      focus_handle: state_focus_handle,
                      content: value,
                      placeholder: placeholder.into(),
-@@ -428,6 +459,11 @@ impl CustomElement for TextEditorElement {
+@@ -428,6 +465,11 @@ impl CustomElement for TextEditorElement {
              }
              state.emits_key_down = emits_key_down;
              state.emits_key_up = emits_key_up;
@@ -994,7 +1027,7 @@ index 7be2d25..7875923 100644
              state.placeholder = self.placeholder.clone().into();
              state.read_only = self.read_only;
              state.min_rows = self.min_rows.max(1);
-@@ -553,9 +589,7 @@ impl CustomElement for TextEditorElement {
+@@ -553,9 +595,7 @@ impl CustomElement for TextEditorElement {
      }
  
      fn supported_events(&self) -> &'static [&'static str] {
@@ -1005,7 +1038,7 @@ index 7be2d25..7875923 100644
      }
  
      fn destroy(&mut self) {
-@@ -643,6 +677,10 @@ fn push_undo_snapshot(history: &mut VecDeque<EditSnapshot>, snapshot: EditSnapsh
+@@ -643,6 +683,10 @@ fn push_undo_snapshot(history: &mut VecDeque<EditSnapshot>, snapshot: EditSnapsh
      history.push_back(snapshot);
  }
  
@@ -1016,7 +1049,7 @@ index 7be2d25..7875923 100644
  struct TextEditorState {
      element_id: u64,
      callback: Option<EventCallback>,
-@@ -650,6 +688,8 @@ struct TextEditorState {
+@@ -650,6 +694,8 @@ struct TextEditorState {
      emits_submit: bool,
      emits_key_down: bool,
      emits_key_up: bool,
@@ -1025,7 +1058,7 @@ index 7be2d25..7875923 100644
      focus_handle: FocusHandle,
      content: String,
      placeholder: SharedString,
-@@ -685,6 +725,29 @@ struct TextEditorState {
+@@ -685,6 +731,29 @@ struct TextEditorState {
  }
  
  impl TextEditorState {
@@ -1055,7 +1088,7 @@ index 7be2d25..7875923 100644
      fn reset_blink(&mut self, cx: &Context<Self>) {
          self.blink_anchor = cx.background_executor().now();
      }
-@@ -1797,12 +1860,13 @@ impl gpui::Element for EditorTextElement {
+@@ -1797,12 +1866,13 @@ impl gpui::Element for EditorTextElement {
          _: Option<&gpui::InspectorElementId>,
          bounds: Bounds<Pixels>,
          _: &mut (),
@@ -1272,9 +1305,9 @@ index c5f4fa1..b600860 100644
  #[cfg(all(
      not(all(target_arch = "wasm32", target_os = "unknown")),
      not(all(
-diff --git i/packages/native/src/renderer.rs w/packages/native/src/renderer.rs
-index 8c104a4..6ea663e 100644
---- i/packages/native/src/renderer.rs
+diff --git c/packages/native/src/renderer.rs w/packages/native/src/renderer.rs
+index 8c104a4..a865178 100644
+--- c/packages/native/src/renderer.rs
 +++ w/packages/native/src/renderer.rs
 @@ -25,7 +25,7 @@ use napi_derive::napi;
  use std::cell::RefCell;
@@ -1365,15 +1398,26 @@ index 8c104a4..6ea663e 100644
      },
  }
  
-@@ -435,6 +497,7 @@ enum ClockControl {
+@@ -435,6 +497,8 @@ enum ClockControl {
  #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
  enum UiCommand {
      Invalidate,
++    SetPresentationPaused(bool),
 +    RequestFrameWake(NativeFrameWake),
      ActivateWindow,
      MinimizeWindow,
      ZoomWindow,
-@@ -545,10 +608,20 @@ fn refresh_ui_window(
+@@ -499,6 +563,9 @@ enum UiCommand {
+     GetWindowSize {
+         response: SyncSender<WindowSize>,
+     },
++    IsFullscreen {
++        response: SyncSender<bool>,
++    },
+     GetElementBounds {
+         id: u64,
+         response: SyncSender<Option<crate::automation::ElementBounds>>,
+@@ -545,10 +612,20 @@ fn refresh_ui_window(
      window: gpui::WindowHandle<GpuixView>,
      cx: &mut gpui::AsyncApp,
  ) -> anyhow::Result<()> {
@@ -1397,10 +1441,13 @@ index 8c104a4..6ea663e 100644
  }
  
  #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
-@@ -560,6 +633,16 @@ async fn run_ui_commands(
+@@ -560,6 +637,19 @@ async fn run_ui_commands(
      while let Some(command) = commands.next().await {
          let result = match command {
              UiCommand::Invalidate => refresh_ui_window(window, cx),
++            UiCommand::SetPresentationPaused(paused) => {
++                window.update(cx, |_, window, _| window.set_presentation_paused(paused))
++            }
 +            UiCommand::RequestFrameWake(wake) => {
 +                let queued = wake.requested.clone();
 +                let result = window.update(cx, move |_view, window, _cx| {
@@ -1414,7 +1461,7 @@ index 8c104a4..6ea663e 100644
              UiCommand::ActivateWindow => window.update(cx, |_view, window, cx| {
                  cx.activate(true);
                  window.activate_window();
-@@ -665,9 +748,11 @@ async fn run_ui_commands(
+@@ -665,9 +755,11 @@ async fn run_ui_commands(
                  format,
                  response,
              } => window.update(cx, move |view, window, cx| {
@@ -1429,7 +1476,19 @@ index 8c104a4..6ea663e 100644
              }),
              UiCommand::SetImage {
                  id,
-@@ -859,9 +944,10 @@ async fn run_ui_commands(
+@@ -722,6 +814,11 @@ async fn run_ui_commands(
+                 response.send(top).ok();
+                 Ok(())
+             }
++            UiCommand::IsFullscreen { response } => {
++                window.update(cx, move |_view, window, _cx| {
++                    response.send(window.is_fullscreen()).ok();
++                })
++            }
+             UiCommand::GetWindowSize { response } => {
+                 window.update(cx, move |_view, window, _cx| {
+                     let size = window.viewport_size();
+@@ -859,9 +956,10 @@ async fn run_ui_commands(
                                  delta_x,
                                  delta_y,
                                  modifiers,
@@ -1442,7 +1501,7 @@ index 8c104a4..6ea663e 100644
                                  );
                              }
                          }
-@@ -957,16 +1043,37 @@ pub fn is_terminal() -> bool {
+@@ -957,16 +1055,40 @@ pub fn is_terminal() -> bool {
      TERMINAL_MODE.load(std::sync::atomic::Ordering::Acquire)
  }
  
@@ -1471,9 +1530,12 @@ index 8c104a4..6ea663e 100644
 +/// The main GPUI renderer exposed to Node.js.
  pub struct GpuixRenderer {
 +    painted_bounds: crate::automation::SharedPaintedBounds,
++    window_size: SharedWindowSize,
      event_callback: Mutex<Option<Arc<ThreadsafeFunction<EventPayload>>>>,
      tree: Arc<Mutex<RetainedTree>>,
      initialized: Arc<Mutex<bool>>,
++    startup_fonts: Mutex<Vec<Vec<u8>>>,
++    startup_rendering_ready: Arc<AtomicBool>,
      /// Shared with GpuixView so napi methods can read the live selection
      /// without an App context. Paint and napi calls can use different threads.
      selection: SharedSelection,
@@ -1481,7 +1543,7 @@ index 8c104a4..6ea663e 100644
      #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
      ui_commands: Mutex<Option<mpsc::UnboundedSender<UiCommand>>>,
      /// False after `Platform::run` returns. `tick()` reports that so JS can
-@@ -977,9 +1084,103 @@ pub struct GpuixRenderer {
+@@ -977,9 +1099,103 @@ pub struct GpuixRenderer {
      ui_running: Arc<AtomicBool>,
  }
  
@@ -1585,7 +1647,7 @@ index 8c104a4..6ea663e 100644
      fn event_callback_for_view(&self) -> Option<EventCallback> {
          self.event_callback.lock().unwrap().clone().map(|tsf| {
              Arc::new(move |payload: EventPayload| {
-@@ -1123,26 +1324,9 @@ impl GpuixRenderer {
+@@ -1123,26 +1339,9 @@ impl GpuixRenderer {
      }
  
      fn element_bounds(&self, id: u64) -> Result<Option<crate::automation::ElementBounds>> {
@@ -1615,23 +1677,64 @@ index 8c104a4..6ea663e 100644
      }
  
      #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
-@@ -1173,11 +1357,14 @@ impl GpuixRenderer {
+@@ -1173,11 +1372,17 @@ impl GpuixRenderer {
      #[napi(constructor)]
      pub fn new(event_callback: Option<ThreadsafeFunction<EventPayload>>) -> Self {
          let _ = env_logger::try_init();
 +        let tree = RetainedTree::new();
          Self {
 +            painted_bounds: tree.painted_bounds.clone(),
++            window_size: tree.window_size.clone(),
              event_callback: Mutex::new(event_callback.map(Arc::new)),
 -            tree: Arc::new(Mutex::new(RetainedTree::new())),
 +            tree: Arc::new(Mutex::new(tree)),
              initialized: Arc::new(Mutex::new(false)),
++            startup_fonts: Mutex::new(Vec::new()),
++            startup_rendering_ready: Arc::new(AtomicBool::new(true)),
              selection: SharedSelection::default(),
 +            frame_wake: Mutex::new(None),
              #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
              ui_commands: Mutex::new(None),
              #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
-@@ -1208,6 +1395,39 @@ impl GpuixRenderer {
+@@ -1185,6 +1390,37 @@ impl GpuixRenderer {
+         }
+     }
+ 
++    /// Register bundled fonts before opening the first window. This avoids
++    /// synchronous UI round trips queued behind its initial GPU presentation.
++    /// Keep the first native frame pending until the host commits its root.
++    #[napi]
++    pub fn set_startup_rendering_ready(&self, ready: bool) -> Result<()> {
++        self.startup_rendering_ready.store(ready, Ordering::Release);
++        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
++        if self.ui_commands.lock().unwrap().is_some() {
++            self.send_ui_command(UiCommand::SetPresentationPaused(!ready))?;
++        }
++        Ok(())
++    }
++
++    #[napi]
++    pub fn set_startup_fonts(&self, fonts: Vec<Buffer>) -> Result<()> {
++        if *self.initialized.lock().unwrap() {
++            return Err(Error::from_reason("Startup fonts must be set before initialization"));
++        }
++        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
++        if self.ui_commands.lock().unwrap().is_some() {
++            return Err(Error::from_reason("Startup fonts must be set before initialization"));
++        }
++        let mut checked = Vec::with_capacity(fonts.len());
++        for font in fonts {
++            check_font(&font).map_err(Error::from_reason)?;
++            checked.push(font.to_vec());
++        }
++        *self.startup_fonts.lock().unwrap() = checked;
++        Ok(())
++    }
++
+     /// Initialize GPUI using the native event-loop architecture for this OS.
+     #[napi]
+     pub fn init(&self, options: Option<WindowOptions>) -> Result<()> {
+@@ -1208,6 +1444,39 @@ impl GpuixRenderer {
          return self.init_threaded(options);
      }
  
@@ -1671,7 +1774,36 @@ index 8c104a4..6ea663e 100644
      #[cfg(target_os = "macos")]
      fn init_macos(&self, options: Option<WindowOptions>) -> Result<()> {
          let options = options.unwrap_or_default();
-@@ -1362,8 +1582,18 @@ impl GpuixRenderer {
+@@ -1232,6 +1501,7 @@ impl GpuixRenderer {
+         // decides key status inside the app, activation is what steals focus.
+         let activate = options.focus.unwrap_or(true);
+         let window_options = options.clone();
++        let fonts = std::mem::take(&mut *self.startup_fonts.lock().unwrap());
+ 
+         let terminal = terminal_requested(&options);
+         let platform = if terminal {
+@@ -1256,6 +1526,10 @@ impl GpuixRenderer {
+         let app = gpui::Application::with_platform(platform.platform())
+             .with_quit_mode(gpui::QuitMode::LastWindowClosed);
+         let app_handle = app.run_embedded(move |cx: &mut gpui::App| {
++            if let Err(error) = cx.text_system().add_fonts(fonts.into_iter().map(std::borrow::Cow::Owned).collect()) {
++                *startup_error_for_app.borrow_mut() = Some(format!("Failed to register startup fonts: {error}"));
++                return;
++            }
+             crate::custom_elements::input::init(cx);
+             crate::custom_elements::img::init(cx);
+             // After the other bindings: `set_menus` reads key equivalents out of
+@@ -1274,7 +1548,8 @@ impl GpuixRenderer {
+ 
+             match cx.open_window(
+                 to_gpui_window_options(&window_options, bounds),
+-                |_window, cx| {
++                |window, cx| {
++                    tree.lock().unwrap().window_size.update(window.viewport_size());
+                     cx.new(|_| {
+                         GpuixView::new(tree.clone(), callback.clone(), title, selection.clone())
+                     })
+@@ -1362,18 +1637,31 @@ impl GpuixRenderer {
  
      #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
      fn init_threaded(&self, options: Option<WindowOptions>) -> Result<()> {
@@ -1691,7 +1823,64 @@ index 8c104a4..6ea663e 100644
              return Err(Error::from_reason("Renderer is already initialized"));
          }
  
-@@ -1478,16 +1708,10 @@ impl GpuixRenderer {
+         let width = options.width.unwrap_or(800.0);
+         let height = options.height.unwrap_or(600.0);
++        self.window_size.update(gpui::size(gpui::px(width as f32), gpui::px(height as f32)));
+         let title = options.title.clone().unwrap_or_else(|| "GPUIX".to_string());
+         // `focus: false` must also skip `cx.activate`: the window flag only
+         // decides key status inside the app, activation is what steals focus.
+         let activate = options.focus.unwrap_or(true);
+         let window_options = options.clone();
++        let fonts = std::mem::take(&mut *self.startup_fonts.lock().unwrap());
++        let startup_rendering_ready = self.startup_rendering_ready.clone();
+         let tree = self.tree.clone();
+         let selection = self.selection.clone();
+         let callback = self.event_callback_for_view();
+@@ -1395,6 +1683,8 @@ impl GpuixRenderer {
+             .spawn(move || {
+                 #[cfg(target_os = "windows")]
+                 Self::enable_per_monitor_dpi();
++                let started = std::time::Instant::now();
++                let report = move |stage| { if std::env::var("NEOISM_GPUIX_PROFILE").as_deref() == Ok("1") { eprintln!("[neoism-native-startup] {stage} {:?}", started.elapsed()); } };
+                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                     let application = if terminal {
+@@ -1410,6 +1700,7 @@ impl GpuixRenderer {
+                     };
+                     #[cfg(target_os = "windows")]
+                     let application = gpui_platform::application();
++                    report("platform-created");
+                     // Default is already LastWindowClosed on Windows/Linux.
+                     // Set it anyway so a GPUI default change cannot leave bun
+                     // running after the last window closes, as on macOS.
+@@ -1432,9 +1723,12 @@ impl GpuixRenderer {
+                             } else {
+                                 gpui::Bounds::centered(None, size, cx)
+                             };
++                            report("opening-window");
+                             let window = match cx.open_window(
+                                 to_gpui_window_options(&window_options, bounds),
+-                                |_window, cx| {
++                                |window, cx| {
++                                    window.set_presentation_paused(!startup_rendering_ready.load(Ordering::Acquire));
++                                    tree.lock().unwrap().window_size.update(window.viewport_size());
+                                     cx.new(|_| GpuixView::new(tree, callback, title, selection))
+                                 },
+                             ) {
+@@ -1450,6 +1744,12 @@ impl GpuixRenderer {
+                                 }
+                             };
+ 
++                            if let Err(error) = cx.text_system().add_fonts(fonts.into_iter().map(std::borrow::Cow::Owned).collect()) {
++                                startup_sender.send(Err(format!("Failed to register startup fonts: {error}"))).ok();
++                                cx.quit();
++                                return;
++                            }
++                            report("native-window-created");
+                             cx.spawn(async move |cx| {
+                                 run_ui_commands(command_receiver, window, cx).await;
+                             })
+@@ -1478,16 +1778,10 @@ impl GpuixRenderer {
                  Error::from_reason(format!("Failed to spawn the GPUI UI thread: {error}"))
              })?;
  
@@ -1709,7 +1898,7 @@ index 8c104a4..6ea663e 100644
      }
  
      /// Apply a batch of mutations in a single FFI call.
-@@ -1511,11 +1735,16 @@ impl GpuixRenderer {
+@@ -1511,11 +1805,16 @@ impl GpuixRenderer {
      /// Acquires the tree mutex ONCE for the entire batch.
      #[napi]
      pub fn apply_batch(&self, json: String) -> Result<Vec<f64>> {
@@ -1726,7 +1915,7 @@ index 8c104a4..6ea663e 100644
          // A re-render that changed nothing sends a batch of identical resends.
          // Waking the window for it makes it rebuild and diff the whole element
          // tree to draw the frame it already has.
-@@ -1574,59 +1803,117 @@ impl GpuixRenderer {
+@@ -1574,59 +1873,122 @@ impl GpuixRenderer {
      }
  
  
@@ -1761,7 +1950,11 @@ index 8c104a4..6ea663e 100644
 -                return Err(Error::from_reason(
 -                    "Call init() before setting a frame wake callback",
 -                ));
-+            if callback.is_some() && !self.is_initialized() {
++            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
++            let initializing = self.ui_commands.lock().unwrap().is_some();
++            #[cfg(target_os = "macos")]
++            let initializing = false;
++            if callback.is_some() && !self.is_initialized() && !initializing {
 +                return Err(Error::from_reason("Call init() before setting a frame wake callback"));
              }
 -            let pending = Arc::new(AtomicBool::new(false));
@@ -1850,7 +2043,8 @@ index 8c104a4..6ea663e 100644
 +        }
 +        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 +        {
-+            if !self.ui_running.load(Ordering::Acquire) {
++            if !self.ui_running.load(Ordering::Acquire) &&
++                (*self.initialized.lock().unwrap() || self.ui_commands.lock().unwrap().is_none()) {
 +                return Ok(false);
 +            }
 +            if wake.requested.swap(true, Ordering::AcqRel) {
@@ -1884,7 +2078,41 @@ index 8c104a4..6ea663e 100644
      /// Whether JavaScript must call tick() until it returns false.
      ///
      /// macOS: tick() pumps AppKit. Windows/Linux: tick() only reports whether
-@@ -2380,17 +2667,18 @@ impl GpuixRenderer {
+@@ -1659,6 +2021,9 @@ impl GpuixRenderer {
+ 
+         #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+         {
++            if let Some(size) = self.window_size.read() {
++                return Ok(size);
++            }
+             let (response, receiver) = sync_channel(1);
+             self.send_ui_command(UiCommand::GetWindowSize { response })?;
+             return recv_ui_response(receiver, "the window size query");
+@@ -1675,6 +2040,23 @@ impl GpuixRenderer {
+         ))
+     }
+ 
++    /// Actual native fullscreen state, including changes made by window controls.
++    #[napi]
++    pub fn is_fullscreen(&self) -> Result<bool> {
++        #[cfg(target_os = "macos")]
++        return update_window(|_view, window, _cx| window.is_fullscreen());
++
++        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
++        {
++            let (response, receiver) = sync_channel(1);
++            self.send_ui_command(UiCommand::IsFullscreen { response })?;
++            return recv_ui_response(receiver, "the fullscreen state query");
++        }
++
++        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", target_os = "freebsd")))]
++        Err(Error::from_reason("Fullscreen state is unavailable on this platform"))
++    }
++
+     #[napi]
+     pub fn get_window_insets(&self) -> Result<WindowInsets> {
+         #[cfg(target_os = "macos")]
+@@ -2380,17 +2762,18 @@ impl GpuixRenderer {
  
          #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
          {
@@ -1908,7 +2136,7 @@ index 8c104a4..6ea663e 100644
          }
  
          #[cfg(not(any(
-@@ -2758,22 +3046,27 @@ impl GpuixRenderer {
+@@ -2758,22 +3141,27 @@ impl GpuixRenderer {
          delta_x: f64,
          delta_y: f64,
          modifiers: Option<String>,
@@ -1944,7 +2172,7 @@ index 8c104a4..6ea663e 100644
  
          #[cfg(not(any(
              target_os = "macos",
-@@ -3626,6 +3919,10 @@ impl WebGpuixRenderer {
+@@ -3626,6 +4014,10 @@ impl WebGpuixRenderer {
  #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
  impl Drop for GpuixRenderer {
      fn drop(&mut self) {
@@ -1955,7 +2183,11 @@ index 8c104a4..6ea663e 100644
          #[cfg(target_os = "macos")]
          if *self.initialized.lock().unwrap() {
              EMBEDDED_PLATFORM
-@@ -3647,6 +3944,7 @@ pub(crate) struct GpuixView {
+@@ -3644,9 +4036,11 @@ impl Drop for GpuixRenderer {
+ // ── GPUI View ────────────────────────────────────────────────────────
+ 
+ pub(crate) struct GpuixView {
++    window_size: SharedWindowSize,
      pub(crate) tree: Arc<Mutex<RetainedTree>>,
      pub(crate) event_callback: Option<EventCallback>,
      pub(crate) window_title: String,
@@ -1963,7 +2195,7 @@ index 8c104a4..6ea663e 100644
      pub(crate) window_key_down: bool,
      pub(crate) window_key_up: bool,
      pub(crate) window_key_event_id: u64,
-@@ -3842,6 +4140,17 @@ fn window_key_events(
+@@ -3842,6 +4236,17 @@ fn window_key_events(
              window.on_root_key_event(move |event: &gpui::KeyDownEvent, phase, _window, _cx| {
                  if phase == gpui::DispatchPhase::Capture {
                      next_keystroke_id();
@@ -1981,7 +2213,13 @@ index 8c104a4..6ea663e 100644
                      return;
                  }
                  if key_down {
-@@ -3967,6 +4276,7 @@ impl GpuixView {
+@@ -3963,10 +4368,13 @@ impl GpuixView {
+         window_title: String,
+         selection: SharedSelection,
+     ) -> Self {
++        let window_size = tree.lock().unwrap().window_size.clone();
+         Self {
++            window_size,
              tree,
              event_callback,
              window_title,
@@ -1989,11 +2227,13 @@ index 8c104a4..6ea663e 100644
              window_key_down: false,
              window_key_up: false,
              window_key_event_id: 0,
-@@ -5090,7 +5400,28 @@ impl gpui::Render for GpuixView {
+@@ -5090,7 +5498,30 @@ impl gpui::Render for GpuixView {
      ) -> impl gpui::IntoElement {
          use gpui::IntoElement;
  
 -        window.set_window_title(&self.window_title);
++        self.window_size.update(window.viewport_size());
++
 +        let profile_start = tree_profile_now();
 +
 +        // GPUI forwards every call to the platform (including a Wayland
@@ -2019,7 +2259,7 @@ index 8c104a4..6ea663e 100644
  
          #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
          if let Some(id) = PENDING_FOCUS_ELEMENT.with(|pending| pending.borrow_mut().take()) {
-@@ -5099,7 +5430,9 @@ impl gpui::Render for GpuixView {
+@@ -5099,7 +5530,9 @@ impl gpui::Render for GpuixView {
  
          // Clone Arc so we don't borrow self.tree — frees self for focus_handles access.
          let tree_arc = self.tree.clone();
@@ -2029,7 +2269,7 @@ index 8c104a4..6ea663e 100644
          let callback = self.event_callback.clone();
  
          // Sync focus handles before building elements.
-@@ -5151,6 +5484,7 @@ impl gpui::Render for GpuixView {
+@@ -5151,6 +5584,7 @@ impl gpui::Render for GpuixView {
          });
          let mut highlight_events = Vec::new();
          let keyboard_focus = self.keyboard_focus_path(&tree, window, cx);
@@ -2037,7 +2277,7 @@ index 8c104a4..6ea663e 100644
          let result = match tree.root_id {
              Some(root_id) => {
                  let mut ctx = BuildCtx {
-@@ -5173,6 +5507,7 @@ impl gpui::Render for GpuixView {
+@@ -5173,6 +5607,7 @@ impl gpui::Render for GpuixView {
              }
              None => gpui::Empty.into_any_element(),
          };
@@ -2045,7 +2285,7 @@ index 8c104a4..6ea663e 100644
          // Flushed after the root build so a `setState` in the handler cannot
          // re-enter this build.
          emit_highlight_events(&callback, &highlight_events);
-@@ -5218,6 +5553,7 @@ impl gpui::Render for GpuixView {
+@@ -5218,6 +5653,7 @@ impl gpui::Render for GpuixView {
                  ))
                  .child(crate::automation::bounds_frame_reset())
                  .child(result)
@@ -2053,7 +2293,7 @@ index 8c104a4..6ea663e 100644
                  .into_any_element()
          };
  
-@@ -5246,6 +5582,20 @@ impl gpui::Render for GpuixView {
+@@ -5246,6 +5682,20 @@ impl gpui::Render for GpuixView {
              window.request_animation_frame();
          }
  
@@ -2074,7 +2314,7 @@ index 8c104a4..6ea663e 100644
          result
      }
  }
-@@ -5267,6 +5617,16 @@ pub(crate) fn build_element(
+@@ -5267,6 +5717,16 @@ pub(crate) fn build_element(
          return gpui::Empty.into_any_element();
      };
  
@@ -2091,7 +2331,7 @@ index 8c104a4..6ea663e 100644
      let animated_style = if element.custom_props().contains_key("motion") {
          ctx.motion_states
              .get(&id)
-@@ -5328,7 +5688,7 @@ pub(crate) fn build_element(
+@@ -5328,7 +5788,7 @@ pub(crate) fn build_element(
                  .children
                  .iter()
                  .copied()
@@ -2100,7 +2340,7 @@ index 8c104a4..6ea663e 100644
                  .map(|child_id| build_element(child_id, ctx, window, cx))
                  .collect();
              let inherited = ctx.inherited.clone();
-@@ -5687,6 +6047,15 @@ pub(crate) fn build_host_container(
+@@ -5687,6 +6147,15 @@ pub(crate) fn build_host_container(
          }
      }
  
@@ -2116,7 +2356,7 @@ index 8c104a4..6ea663e 100644
      // Wire up events.
      // Some events (on_hover, on_aux_click) require a stateful element (.id()),
      // which we already set above. Others (on_mouse_down, on_key_down) work
-@@ -5738,7 +6107,8 @@ pub(crate) fn build_host_container(
+@@ -5738,7 +6207,8 @@ pub(crate) fn build_host_container(
                      gpui::MouseButton::Right,
                  ] {
                      let callback = callback.clone();
@@ -2126,7 +2366,7 @@ index 8c104a4..6ea663e 100644
                          emit_event_full(&callback, id, "mouseDown", |p| {
                              let (x, y) = point_to_xy(mouse_event.position);
                              p.x = Some(x);
-@@ -5747,6 +6117,10 @@ pub(crate) fn build_host_container(
+@@ -5747,6 +6217,10 @@ pub(crate) fn build_host_container(
                              p.click_count = Some(mouse_event.click_count as u32);
                              p.modifiers = Some(mouse_event.modifiers.into());
                          });
@@ -2137,7 +2377,7 @@ index 8c104a4..6ea663e 100644
                      });
                  }
              }
-@@ -5843,20 +6217,30 @@ pub(crate) fn build_host_container(
+@@ -5843,20 +6317,30 @@ pub(crate) fn build_host_container(
  
              // ── Scroll wheel ─────────────────────────────────────
              "scroll" => {
@@ -2175,7 +2415,7 @@ index 8c104a4..6ea663e 100644
  
                          p.touch_phase = Some(match scroll_event.touch_phase {
                              gpui::TouchPhase::Started => "started".to_string(),
-@@ -5916,6 +6300,9 @@ pub(crate) fn build_host_container(
+@@ -5916,6 +6400,9 @@ pub(crate) fn build_host_container(
  
      // Children
      for &child_id in &element.children {
@@ -2185,7 +2425,7 @@ index 8c104a4..6ea663e 100644
          let child = build_element(child_id, ctx, window, cx);
          el = if overflow_x_only {
              el.child(gpui::div().flex_none().child(child))
-@@ -6220,7 +6607,7 @@ fn text_content(
+@@ -6220,7 +6707,7 @@ fn text_content(
      content: &str,
      ctx: &BuildCtx,
  ) -> gpui::AnyElement {
@@ -2194,7 +2434,7 @@ index 8c104a4..6ea663e 100644
          group: crate::text::search::group_id(ctx.tree, element.id),
          selectable: ctx.inherited.selectable,
          highlight: ctx
-@@ -6236,7 +6623,7 @@ fn text_content(
+@@ -6236,7 +6723,7 @@ fn text_content(
              ctx.selection.clone(),
              ctx.inherited.selection_wash,
          )
@@ -2203,7 +2443,35 @@ index 8c104a4..6ea663e 100644
  }
  
  /// Explicit `userSelect` on this node. `None` means inherit; the ancestor
-@@ -7657,6 +8044,9 @@ fn to_gpui_window_options(
+@@ -7327,6 +7814,27 @@ pub struct WindowSize {
+     pub height: f64,
+ }
+ 
++/// A coherent per-renderer snapshot; polling dimensions must never wait for
++/// a GPU present or contend with the retained tree's layout lock.
++#[derive(Clone, Default)]
++pub(crate) struct SharedWindowSize(Arc<std::sync::atomic::AtomicU64>);
++
++impl SharedWindowSize {
++    fn update(&self, size: gpui::Size<gpui::Pixels>) {
++        let width = f32::from(size.width).to_bits() as u64;
++        let height = f32::from(size.height).to_bits() as u64;
++        self.0.store((width << 32) | height, std::sync::atomic::Ordering::Relaxed);
++    }
++
++    fn read(&self) -> Option<WindowSize> {
++        let bits = self.0.load(std::sync::atomic::Ordering::Relaxed);
++        (bits != 0).then(|| WindowSize {
++            width: f32::from_bits((bits >> 32) as u32) as f64,
++            height: f32::from_bits(bits as u32) as f64,
++        })
++    }
++}
++
+ #[derive(Debug, Clone, Default)]
+ #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), napi(object))]
+ pub struct EdgeInsets {
+@@ -7657,6 +8165,9 @@ fn to_gpui_window_options(
          focus: options.focus.unwrap_or(true),
          show: options.show.unwrap_or(true),
          app_id: options.app_id.clone(),
@@ -2213,7 +2481,7 @@ index 8c104a4..6ea663e 100644
          ..Default::default()
      };
  
-@@ -8171,6 +8561,7 @@ mod window_options_tests {
+@@ -8171,6 +8682,7 @@ mod window_options_tests {
          let gpui_options = mapped(WindowOptions::default());
          assert!(gpui_options.focus);
          assert!(gpui_options.show);
@@ -2222,7 +2490,7 @@ index 8c104a4..6ea663e 100644
  
      #[test]
 diff --git c/packages/native/src/retained_tree.rs w/packages/native/src/retained_tree.rs
-index ee95967..62eae9d 100644
+index ee95967..6a83b24 100644
 --- c/packages/native/src/retained_tree.rs
 +++ w/packages/native/src/retained_tree.rs
 @@ -67,6 +67,23 @@ struct ElementExtras {
@@ -2249,23 +2517,25 @@ index ee95967..62eae9d 100644
      /// The element's `tabIndex`, when it has a usable one.
      pub fn tab_index(&self) -> Option<isize> {
          self.custom_props()
-@@ -238,6 +255,7 @@ impl StyleTable {
+@@ -238,6 +255,8 @@ impl StyleTable {
  }
  
  pub struct RetainedTree {
 +    pub painted_bounds: crate::automation::SharedPaintedBounds,
++    pub(crate) window_size: crate::renderer::SharedWindowSize,
      pub elements: ElementMap,
      pub motion_ids: HashSet<u64>,
      /// Elements that `needs_focus`, in id order. Kept as mutations arrive so the
-@@ -263,6 +281,7 @@ pub struct RetainedTree {
+@@ -263,6 +282,8 @@ pub struct RetainedTree {
  impl RetainedTree {
      pub fn new() -> Self {
          Self {
 +            painted_bounds: Default::default(),
++            window_size: Default::default(),
              elements: ElementMap::default(),
              motion_ids: HashSet::new(),
              focusable_ids: Default::default(),
-@@ -419,6 +438,11 @@ impl RetainedTree {
+@@ -419,6 +440,11 @@ impl RetainedTree {
      }
  
      pub fn insert_before(&mut self, parent_id: u64, child_id: u64, before_id: u64) {
@@ -2277,7 +2547,7 @@ index ee95967..62eae9d 100644
          // Remove from old parent if any
          let old_parent_id = self.elements.get(&child_id).and_then(|e| e.parent);
          if let Some(old_parent_id) = old_parent_id {
-@@ -811,6 +835,65 @@ fn element_to_json(
+@@ -811,6 +837,65 @@ fn element_to_json(
  mod tests {
      use super::*;
  
@@ -2502,17 +2772,18 @@ index 23005b0..aa68efb 100644
  /// Paint one run's highlight washes and log their geometry.
 diff --git c/packages/native/src/window_shortcuts.rs w/packages/native/src/window_shortcuts.rs
 new file mode 100644
-index 0000000..6d2b585
+index 0000000..d0496bb
 --- /dev/null
 +++ w/packages/native/src/window_shortcuts.rs
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,24 @@
 +//! Neoism window-owned buffer navigation must precede native text editing.
-+//! In particular a Textarea binds ctrl-shift-left/right to SelectWord, which
-+//! consumes the action before the ordinary keyDown and root bubble listeners.
-+pub(crate) const BUFFER_CHORDS: [&str; 2] = ["ctrl-shift-left", "ctrl-shift-right"];
++//! Native text word navigation (Option+Arrow on macOS) and selection actions
++//! otherwise consume these before ordinary keyDown and root bubble listeners.
++pub(crate) const BUFFER_CHORDS: [&str; 6] = ["ctrl-shift-left", "ctrl-shift-right", "alt-left", "alt-right", "alt-up", "alt-down"];
 +
 +pub(crate) fn capture_buffer_shortcut(key: &str, ctrl: bool, shift: bool, alt: bool, platform: bool) -> bool {
-+    ctrl && shift && !alt && !platform && matches!(key, "left" | "right")
++    !platform && ((ctrl && shift && !alt && matches!(key, "left" | "right"))
++        || (alt && !ctrl && !shift && matches!(key, "left" | "right" | "up" | "down")))
 +}
 +
 +#[cfg(test)]
@@ -2520,11 +2791,11 @@ index 0000000..6d2b585
 +    use super::*;
 +    #[test]
 +    fn buffer_navigation_precedes_text_selection_only_for_its_exact_chord() {
-+        assert_eq!(BUFFER_CHORDS, ["ctrl-shift-left", "ctrl-shift-right"]);
++        assert_eq!(BUFFER_CHORDS.len(), 6);
 +        for mask in 0..16 {
 +            for key in ["left", "right", "up", "down", "tab", "a", "enter"] {
 +                assert_eq!(capture_buffer_shortcut(key, mask & 1 != 0, mask & 2 != 0, mask & 4 != 0, mask & 8 != 0),
-+                    mask == 3 && matches!(key, "left" | "right"), "{key} modifiers={mask}");
++                    (mask == 3 && matches!(key, "left" | "right")) || (mask == 4 && matches!(key, "left" | "right" | "up" | "down")), "{key} modifiers={mask}");
 +            }
 +        }
 +    }

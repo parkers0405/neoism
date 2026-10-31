@@ -1,4 +1,4 @@
-import {Effect} from "effect";
+import * as Effect from "effect/Effect";
 import type {AppConfig} from "../config";
 import type {DaemonConnection} from "../daemon/client";
 import {isRecord,type CrdtClientMessage,type CrdtPeerPresence,type Workspace} from "../daemon/protocol";

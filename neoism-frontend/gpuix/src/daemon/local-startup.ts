@@ -6,6 +6,7 @@ import {homedir} from "node:os";
 import {fileURLToPath} from "node:url";
 import {setTimeout as delay} from "node:timers/promises";
 import {loadConfig,type AppConfig} from "../config";
+import {startupDirectory} from "./startup-directory";
 
 export function explicitDaemon(args:readonly string[],env:NodeJS.ProcessEnv){
  return !!env.NEOISM_GPUIX_DAEMON_URL||args.some(arg=>arg==="--daemon"||arg.startsWith("--daemon="));
@@ -56,7 +57,8 @@ export async function ensureLocalDaemon(config:AppConfig,args:readonly string[]=
    const state=env.XDG_STATE_HOME||join(homedir(),".local/state");const folder=join(state,"neoism");mkdirSync(folder,{recursive:true});
    const log=join(folder,"daemon.log"),fd=openSync(log,"a",0o600);
    try{
-    const child=spawn(binary,["--workspace",env.NEOISM_LAUNCH_DIRECTORY||process.cwd()],{env,detached:true,stdio:["ignore",fd,fd],windowsHide:true});
+    const directory=startupDirectory(env);
+    const child=spawn(binary,["--workspace",directory],{env,cwd:directory,detached:true,stdio:["ignore",fd,fd],windowsHide:true});
     await new Promise<void>((resolve,reject)=>{child.once("spawn",resolve);child.once("error",reject);});child.once("exit",(code,signal)=>{startupExit=`The local workspace daemon exited during startup (${signal||code}). See the daemon.log in XDG_STATE_HOME/neoism or ~/.local/state/neoism.`;});child.unref();
    }finally{closeSync(fd);}
   },...overrides};

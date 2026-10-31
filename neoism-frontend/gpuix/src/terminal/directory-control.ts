@@ -1,4 +1,4 @@
-import {Effect} from "effect";
+import * as Effect from "effect/Effect";
 import type {DaemonConnection} from "../daemon/client";
 import {isRecord,variant} from "../daemon/protocol";
 import {absoluteTerminalDirectory} from "./workspace";

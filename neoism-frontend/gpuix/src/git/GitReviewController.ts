@@ -1,4 +1,4 @@
-import {Effect} from "effect";
+import * as Effect from "effect/Effect";
 import type {AppConfig} from "../config";
 import type {WorkspaceModel} from "../model";
 import {coreCall,type NativeEditor} from "../native-core";

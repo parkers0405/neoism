@@ -3,7 +3,8 @@ import { recoveredEditorState } from "./editor/recovery-state";
 import { profileStart, profileEnd } from "./profiling";
 import {DocumentController} from "./collaboration/DocumentController";
 import {PresenceController} from "./collaboration/PresenceController";
-import { Effect, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type { AppConfig } from "./config";
 import { DaemonConnection } from "./daemon/client";
 import { NativeEditor, coreCall, type EditorSnapshot } from "./native-core";
@@ -366,7 +367,7 @@ export class WorkspaceModel {
       const tree = Schema.decodeUnknownSync(TreeSchema)(expectVariant(await this.run(this.client.request("Workspace", "RequestHostWorkspaceTree")), "HostWorkspaceTree"));
       if (epoch !== this.epoch) return;
       this.update({ workspaces: tree.workspaces, workspaceTabs: tree.tabs });
-      const preferred = this.config.workspaceId || this.state.activeWorkspace?.id || this.restoredWorkspaceId;
+      const preferred = this.state.activeWorkspace?.id || this.config.workspaceId || this.restoredWorkspaceId;
       const rememberedWindow=openWorkspaceIds(this.state.ui);
       const opened=this.windowWorkspaces();
       let workspace = !this.config.workspaceId&&rememberedWindow!==undefined
@@ -388,8 +389,7 @@ export class WorkspaceModel {
     if(ids.every((id,index)=>id===previous[index]))return false;
     this.setUI({openWorkspaceIds:ids});return true;
   };
-  newWorkspace = (): Promise<Workspace | undefined> => {
-    const parent=this.state.activeWorkspace;
+  newWorkspace = (parent=this.state.activeWorkspace): Promise<Workspace | undefined> => {
     if(!parent){this.report(new Error("Select a host workspace first"));return Promise.resolve(undefined);}
     const id=crypto.randomUUID();
     this.pendingWorkspaceCreations.add(id);this.update({creatingWorkspace:true});
@@ -433,7 +433,7 @@ export class WorkspaceModel {
       }catch(error){this.report(error);return undefined;}
       finally{this.pendingWorkspaceCreations.delete(id);this.update({creatingWorkspace:this.pendingWorkspaceCreations.size>0});}
   }
-  closeWorkspace = (discard=false,workspaceId=this.state.activeWorkspace?.id):Promise<boolean> => {
+  closeWorkspace = (discard=false,workspaceId=this.state.activeWorkspace?.id,keepOne=true):Promise<boolean> => {
     const task=this.workspaceCreations.then(async()=>{
       if(this.disposed||!workspaceId)return false;
       const opened=this.windowWorkspaces(),index=opened.findIndex(workspace=>workspace.id===workspaceId),workspace=opened[index];
@@ -443,7 +443,7 @@ export class WorkspaceModel {
       if(this.state.activeWorkspace?.id===workspaceId){
         const adjacent=opened[index+1]||opened[index-1];
         if(adjacent)await this.activateWorkspace(adjacent);
-        else if(!await this.createWorkspace(this.workspaceView(workspace)))return false;
+        else if(keepOne&&!await this.createWorkspace(this.workspaceView(workspace)))return false;
       }
       if(this.disposed)return false;
       this.transaction(()=>{
@@ -1111,7 +1111,7 @@ export class WorkspaceModel {
     const workspaceId = this.sessionWorkspaces.get(sessionId) || this.state.surfaces.find((s) => s.sessionId === sessionId)?.workspaceId || this.state.activeWorkspace?.id;
     if (!workspaceId) throw new Error("Select a workspace first");
     this.sessionWorkspaces.set(sessionId, workspaceId);
-    return this.agentSdk.forWorkspace(workspaceId);
+    return this.agentSdk.forSession(workspaceId,sessionId);
   }
   /** Plain SDK list does not create a second catalog SSE subscription. The
    * visible original sidebar owns its directory/all-projects live catalog. */

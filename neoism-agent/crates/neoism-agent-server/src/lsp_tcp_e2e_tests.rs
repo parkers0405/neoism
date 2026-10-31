@@ -143,8 +143,10 @@ fn tcp_transport_runs_full_document_and_server_request_lifecycle() {
     );
     assert_eq!(
         (observed.change_end_line, observed.change_end_character),
-        (1, 20)
+        (1, 19)
     );
+    assert_eq!(observed.change_start, json!({"line":1,"character":13}));
+    assert_eq!(observed.change_text, "changed");
     assert!(observed.change_had_range);
     assert!(observed.did_save);
     assert_eq!(
@@ -339,6 +341,8 @@ struct ObservedLifecycle {
     hover_character: i64,
     change_end_line: i64,
     change_end_character: i64,
+    change_start: Value,
+    change_text: String,
     change_had_range: bool,
     did_save: bool,
     did_save_text: Option<String>,
@@ -460,6 +464,8 @@ fn run_fake_tcp_server(
                 .expect("write hover response");
             }
             Some("textDocument/didChange") => {
+                observed.change_start = message["params"]["contentChanges"][0]["range"]["start"].clone();
+                observed.change_text = message["params"]["contentChanges"][0]["text"].as_str().unwrap_or_default().to_owned();
                 observed.change_had_range =
                     message.pointer("/params/contentChanges/0/range").is_some();
                 observed.change_end_line = message

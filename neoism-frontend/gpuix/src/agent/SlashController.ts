@@ -64,7 +64,7 @@ export class SlashController{
   const model=this.options.model,workspace=model.state.activeWorkspace;if(!workspace)throw new Error("Select a workspace first");
   const sessionId=this.options.sessionId(),thread=model.state.threads.find(thread=>thread.session_id===sessionId);
   return {workspaceId:workspace.id,directory:thread?.directory||workspace.root_dir||"",sessionId,surfaceId:model.state.activeSurfaceId,
-   selection:{...model.selection(sessionId)},sdk:model.agentSdk.forWorkspace(workspace.id)};
+   selection:{...model.selection(sessionId)},sdk:sessionId?model.agentSdk.forSession(workspace.id,sessionId):model.agentSdk.forWorkspace(workspace.id)};
  }
  private current(scope:Scope){
   const state=this.options.model.state;if(state.activeWorkspace?.id!==scope.workspaceId)return false;

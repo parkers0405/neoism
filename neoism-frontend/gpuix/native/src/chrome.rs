@@ -14,6 +14,8 @@ fn render(host:&mut Host,v:&Value)->Result<Value,String>{
     match &mut host.kind {
         Kind::Top(top)=>{
             top.set_scale(scale);top.set_visible(true);
+            // OS controls use window logical pixels; the panel scales its insets internally.
+            top.set_left_safe_inset(n(v,"leftSafeInset",0.0)/scale);
             if let Some(peers)=v["peers"].as_array(){
                 top.set_peers(peers.iter().filter_map(|p|Some(neoism_ui::editor::crdt::PresenceAvatarPeer{
                     peer_id:p["peer_id"].as_str()?.to_owned(),display_name:p["display_name"].as_str()?.to_owned(),

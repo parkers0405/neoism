@@ -26,7 +26,7 @@ export function installProfiling(renderer:GpuixRenderer){
   if(!profilingEnabled||installed.has(renderer))return;installed.add(renderer);
   let previousSample:number[]|undefined,reportedSample:number[]|undefined,sampleSource:string|undefined;
   const methods=renderer as unknown as Record<string,(...args:unknown[])=>unknown>;
-  for(const name of ["applyBatch","tick","getDebugFrameOverlayStats","getPresentedFrameSample","getRenderedFrameSample","getFocusedElementId","getElementBounds","setImagePixels","putPaintImage","dropPaintImage"]){
+  for(const name of ["applyBatch","tick","getDebugFrameOverlayStats","getPresentedFrameSample","getRenderedFrameSample","getFocusedElementId","getElementBounds","getWindowSize","getWindowInsets","setWindowTitle","setWindowKeyEvents","setWindowSelectionChange","getSelectedText","setImagePixels","putPaintImage","dropPaintImage"]){
     const original=methods[name];if(typeof original!=="function")continue;
     methods[name]=(...args:unknown[])=>{
       const start=performance.now();

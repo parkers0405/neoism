@@ -1,4 +1,4 @@
-import {Effect} from "effect";
+import * as Effect from "effect/Effect";
 import {coreCall} from "../native-core";
 import type {DaemonConnection} from "./client";
 import {expectVariant,isRecord} from "./protocol";

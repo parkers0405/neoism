@@ -37,7 +37,7 @@ export class TerminalSession {
       }
       if (!entry || !isRecord(entry[1]) || entry[1].session_id !== id) return;
       if (entry[0] === "PtyCreated") this.attachRequest = undefined;
-      if (entry[0] === "PtyClosed") this.report(new Error(`Terminal exited${typeof entry[1].exit_code === "number" ? ` (${entry[1].exit_code})` : ""}. Open a new terminal with Ctrl+T.`));
+      if (entry[0] === "PtyClosed") { terminalUnavailable(client, id); return; }
       if (entry[0] === "PtyOutput" && Array.isArray(entry[1].bytes)) {
         const bytes=Uint8Array.from(entry[1].bytes),offset=typeof entry[1].offset === "number" ? entry[1].offset : undefined;
         void this.buffer.write(bytes,offset).catch(this.report);

@@ -1,7 +1,9 @@
+import type {WorkspaceNavigation} from "../workspaces/window-sessions";
 import{ToastNotifications}from"./ToastNotifications";
 import {cachedGitStatus,watchGitStatus,type GitStatusSnapshot} from "../daemon/git-status";
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
-import { Effect, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { createEffect, createMemo, createSignal, untrack, For, onCleanup, onMount, Show, Switch, Match, type Accessor, type JSX } from "solid-js";
 import { createWindowSize, motion, useGpuixRequired, type GpuixTheme, type HostElement, type KeyEvent, type EventPayload, type StyleDesc } from "@gpuix/solid";
 import type { AppConfig } from "../config";
@@ -47,6 +49,7 @@ import { KeyboardBindings, paletteActionForBinding } from "../commands/KeyboardB
 import {handleApplicationShortcut,registerApplicationShortcuts} from "../commands/application-shortcuts";
 import { readClipboard, writeClipboard } from "../clipboard";
 import { terminalSession } from "../terminal/sessions";
+import { modelPickerOptions, modelCatalogStatus } from "../agent/model-picker";
 import type { FinderMode } from "../finder/FinderController";
 import { visibleTreeRange, treeCursorRowY, beginTreePanel, clearHiddenTreePanels } from "./tree-viewport";
 import { tabChrome,rgba } from "../layout/tab-chrome";
@@ -70,7 +73,7 @@ import { openExternalUrl } from "../menu-actions/web-frontend";
 export function fileIcon(name: string) {
   return namedIcons[name.toLowerCase()] || extensionIcons[name.split(".").pop()?.toLowerCase() || ""] || { glyph: "\uf15b", color: "#c8c8c8" };
 }
-export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: () => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
+export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: () => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
   const config = props.config, model = props.model, c = config.theme, s = config.scale;
   let activeTreeEscape:((event:KeyEvent)=>boolean)|undefined;
   const [presencePeers,setPresencePeers]=createSignal(model.presence.peers());
@@ -164,7 +167,14 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   onMount(() => { if (model.state.ui.chromeAction === "OpenSettings") { model.setUI({ chromeAction: null }); void chromeActions.open("OpenSettings"); } });
   const active = createMemo(() => state().surfaces.find((surface) => surface.id === state().activeSurfaceId));
   const activeWorkspaceId = createMemo(() => state().activeWorkspace?.id);
-  const windowWorkspaces = createMemo(() => model.windowWorkspaces(state()));
+  const [workspaceRevision,setWorkspaceRevision]=createSignal(0);
+  if(props.workspaceNavigation)onCleanup(props.workspaceNavigation.subscribe(()=>setWorkspaceRevision(value=>value+1)));
+  const windowWorkspaces = createMemo(() => {workspaceRevision();return props.workspaceNavigation?.workspaces()||model.windowWorkspaces(state());});
+  const activeWindowWorkspaceId=()=>{workspaceRevision();return props.workspaceNavigation?.activeId()||activeWorkspaceId();};
+  const activateWindowWorkspace=(workspace:typeof model.state.workspaces[number])=>props.workspaceNavigation?props.workspaceNavigation.activate(workspace):model.activateWorkspace(workspace);
+  const newWindowWorkspace=()=>props.workspaceNavigation?props.workspaceNavigation.newWorkspace():model.newWorkspace();
+  const closeWindowWorkspace=(discard=false,id=activeWindowWorkspaceId())=>props.workspaceNavigation?props.workspaceNavigation.close(discard,id):model.closeWorkspace(discard,id);
+  const reorderWindowWorkspace=(dragId:string,targetId:string,position:"before"|"after")=>props.workspaceNavigation?props.workspaceNavigation.reorder(dragId,targetId,position):model.reorderWorkspace(dragId,targetId,position);
   const workspaceLayout = createMemo(() => state().activeWorkspace ? model.getLayout(state().activeWorkspace!.id) : undefined);
   const gitController=createMemo(()=>{const id=activeWorkspaceId();return id?visuals.gitPanel(id,model,config):undefined;});
   const [gitFrame,setGitFrame]=createSignal<GitFrame>();
@@ -293,17 +303,20 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     if (request.kind === "account") return request.accounts || [];
     // Desktop parity (pane/input.rs `model_picker_options`): Current, Recent,
     // then the connected-provider catalog in the shared desktop ranking.
-    const catalog = modelCatalogOptions(), recent = recentModels();
-    const found = selected.model ? [...catalog, ...recent].find((option) => !option.header && option.value === selected.model) : undefined;
-    const slash = selected.model?.indexOf("/") ?? -1;
-    const current: PickerOption = !selected.model ? { title: "server default", description: "Use Neoism default", footer: "selected", value: "", section: "Current", current: true }
-      : found ? { ...found, header: false, description: found.description || found.section, footer: "selected", section: "Current", current: true }
-      : { title: slash > 0 ? selected.model.slice(slash + 1) : selected.model, description: slash > 0 ? selected.model.slice(0, slash) : "", footer: "selected", value: selected.model, section: "Current", current: true };
-    return [current, ...(recent.length ? [{ title: "Recent", value: "header:recent", header: true, section: "Recent" }, ...recent] : []), ...catalog];
+    return modelPickerOptions(modelCatalogOptions(), recentModels(), selected.model);
   });
   const configuredProviderCatalog = createMemo(() => state().providerCatalog);
   const modelCatalogOptions = createMemo(() => coreCall<PickerOption[]>("picker.model-options", { catalog: configuredProviderCatalog() ?? { providers: [] } }));
   const recentModels = createMemo(() => (Array.isArray(state().ui.recentModels) ? state().ui.recentModels as PickerOption[] : []));
+  const modelAvailability = createMemo(() => modelCatalogStatus(configuredProviderCatalog()));
+  const catalogsLoading = createMemo(() => state().catalogsLoading);
+  createEffect(() => {
+    if (choice()?.kind !== "model" || catalogsLoading()) return;
+    const delay = modelAvailability().retryAfterMs;
+    if (delay === undefined) return;
+    const timer = setTimeout(() => { void model.refreshCatalogs(); }, delay);
+    onCleanup(() => clearTimeout(timer));
+  });
   const rememberModel = (value: string) => {
     const option = modelCatalogOptions().find((candidate) => !candidate.header && candidate.value === value);
     if (!option || !value.trim()) return;
@@ -435,7 +448,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
   const handleChromeKey=(event:KeyEvent)=>{
     const key=event.key?.toLowerCase(),alt=event.modifiers?.alt&&!event.modifiers?.ctrl&&!event.modifiers?.cmd&&!event.modifiers?.shift;
     if(!(alt&&["left","right","up","down"].includes(key||""))&&!(chromeFocus().zone==="buffers"||chromeFocus().zone==="workspaces"))return false;
-    const pane=focusedPane(),navigation=navigateChrome(currentChromeFocus(),event,{bufferCount:pane?.tabs.length||0,activeBuffer:pane?.tabs.findIndex(tab=>tab.leaf===pane.leaf)??0,workspaceCount:windowWorkspaces().length,workspacePlus:true,activeWorkspace:windowWorkspaces().findIndex(workspace=>workspace.id===activeWorkspaceId()),sidebar:!!sidebar()});
+    const pane=focusedPane(),navigation=navigateChrome(currentChromeFocus(),event,{bufferCount:pane?.tabs.length||0,activeBuffer:pane?.tabs.findIndex(tab=>tab.leaf===pane.leaf)??0,workspaceCount:windowWorkspaces().length,workspacePlus:true,activeWorkspace:windowWorkspaces().findIndex(workspace=>workspace.id===activeWindowWorkspaceId()),sidebar:!!sidebar()});
     if(!navigation)return false;event.preventDefault();event.stopPropagation();
     if(navigation.direction){const before=workspaceLayout()?.frame.focusedLeaf;model.focusPane(navigation.direction);const after=workspaceLayout()?.frame.focusedLeaf;
       focusChrome(before===after&&navigation.direction==="left"&&sidebar()?{zone:"sidebar"}:{zone:"content"});return true;}
@@ -444,7 +457,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       const tab=pane?.tabs[navigation.focus.index];if(tab?.surfaceId){workspaceLayout()?.focus(tab.leaf);model.selectSurface(tab.surfaceId,true);queueMicrotask(()=>focusChrome(navigation.focus));}
       else if(pane){const created=model.newWelcome(),current=focusedPane();const index=current?.tabs.findIndex(tab=>tab.surfaceId===created?.id)??-1;focusChrome({zone:"buffers",index:Math.max(0,index)});}
     }else if(navigation.activate==="workspace"&&navigation.focus.zone==="workspaces"){
-      const workspace=windowWorkspaces()[navigation.focus.index];if(workspace)void model.activateWorkspace(workspace).then(()=>focusChrome(navigation.focus)).catch(model.report);else void model.newWorkspace().then(()=>focusChrome({zone:"workspaces",index:windowWorkspaces().length-1})).catch(model.report);
+      const workspace=windowWorkspaces()[navigation.focus.index];if(workspace)void activateWindowWorkspace(workspace).then(()=>focusChrome(navigation.focus)).catch(model.report);else void newWindowWorkspace().then(()=>focusChrome({zone:"workspaces",index:windowWorkspaces().length-1})).catch(model.report);
     }
     return true;
   };
@@ -453,12 +466,12 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const surface = active(), editor = activeEditor(), terminal = activeTerminal(), layout = workspaceLayout();
     switch (action) {
       case "None": case "ReceiveChar": return;
-      case "CreateWorkspace": await model.newWorkspace(); return;
+      case "CreateWorkspace": await newWindowWorkspace(); return;
       case "TabCreate": await model.newTerminal(); return;
       case "OpenNeoismAgent": model.newAgentHome(); return;
       case "OpenNeoismNotes": toggle("notes"); return;
       case "CloseTab": closeFocusedTab(argument==="discard"); return;
-      case "CloseWorkspace": await model.closeWorkspace(argument==="discard"); return;
+      case "CloseWorkspace": await closeWindowWorkspace(argument==="discard"); return;
       case "TabClose": case "CloseCurrentSplitOrTab": closeFocusedTab(); return;
       case "TabCloseUnfocused": { const focused = layout?.frame.focusedLeaf; for (const tab of layout?.frame.panes.find((p) => p.focused)?.tabs || []) if (tab.leaf !== focused && tab.surfaceId) model.closePane(tab.surfaceId, tab.leaf); return; }
       case "SelectNextTab": selectTab(false); return; case "SelectPrevTab": selectTab(true); return;
@@ -522,7 +535,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         const delta = binding.action === "Scroll" ? (binding.argument || 0) * row : (binding.action.endsWith("Up") || binding.action === "ScrollToTop" ? 1 : -1) * row * (binding.action.includes("Half") ? rows / 2 : binding.action.includes("To") ? 100000 : rows);
         if (terminal) terminal.buffer.scrollPixels(delta, row); else editor?.call("scroll", { delta }); continue;
       }
-      if (binding.action === "SelectTab") { const workspace=windowWorkspaces()[binding.argument||0];if(workspace)void model.activateWorkspace(workspace).then(()=>focusChrome({zone:"content"})).catch(model.report);continue; }
+      if (binding.action === "SelectTab") { const workspace=windowWorkspaces()[binding.argument||0];if(workspace)void activateWindowWorkspace(workspace).then(()=>focusChrome({zone:"content"})).catch(model.report);continue; }
       if (binding.action.startsWith("MoveDivider")) { const axis = binding.action.endsWith("Left") || binding.action.endsWith("Right") ? "horizontal" : "vertical"; workspaceLayout()?.nudge(axis, binding.action.endsWith("Left") || binding.action.endsWith("Up") ? -0.03 : 0.03); continue; }
       dispatchCommand({ action: paletteActionForBinding(binding.action) });
     }
@@ -532,7 +545,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     if (chromeFrame() || commands() || palette() || choice() || pendingPermission() || pendingQuestion()) return false;
     const key = event.key?.toLowerCase(), ctrl = event.modifiers?.ctrl || event.modifiers?.cmd, shift = event.modifiers?.shift, alt = event.modifiers?.alt;
     const workspaceIndex=workspaceShortcut(event);
-    if(workspaceIndex!==undefined){event.preventDefault();event.stopPropagation();const workspace=windowWorkspaces()[workspaceIndex];if(workspace)void model.activateWorkspace(workspace).then(()=>focusChrome({zone:"content"})).catch(model.report);return true;}
+    if(workspaceIndex!==undefined){event.preventDefault();event.stopPropagation();const workspace=windowWorkspaces()[workspaceIndex];if(workspace)void activateWindowWorkspace(workspace).then(()=>focusChrome({zone:"content"})).catch(model.report);return true;}
     if(handleChromeKey(event))return true;
     let action: string | undefined;
     if (alt && !ctrl && !shift && key === "d") {event.preventDefault();event.stopPropagation();chooseStatusDirectory();return true;}
@@ -580,7 +593,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     setChoice(undefined);setMenu(false);if(palette())closePalette();
     const previous=commands();setCommands(undefined);previous?.dispose();commandFocus=undefined;
     chromeActions.close();setChromeFocus({zone:"content"});setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);
-    const opened=action==="new-workspace"?model.newWorkspace():model.newTerminal();
+    const opened=action==="new-workspace"?newWindowWorkspace():model.newTerminal();
     void opened.then(()=>setEditorFocus(value=>value+1)).catch(model.report);
   }));
   const keyDown = (event: KeyEvent) => {
@@ -866,7 +879,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
     const effectsAnimation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
     const activityState=createMemo(()=>props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle");
     const localBusy=createMemo(()=>activityState()!=="Idle");
-    const noProviders=createMemo(()=>!state().catalogsLoading&&!state().catalogsError&&providerCatalog().length===0);
+    const noProviders=createMemo(()=>!state().catalogsLoading&&!state().catalogsError&&!modelAvailability().loading&&!modelAvailability().error&&providerCatalog().length===0);
     const cwd=createMemo(()=>state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined);
     const slash=new SlashController({model,config,sessionId:()=>props.sessionId,attachments,hooks:{
       openSelectionPicker:kind=>{setSlashDismissed(true);setSlashPicker(undefined);openPicker(kind);},
@@ -924,7 +937,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         return;
       }
       setChoice({ kind, sessionId: props.sessionId, anchor, restore: focus });
-      if (kind !== "thinking") void model.refreshCatalogs({maxAgeMs:30_000});
+      if (kind !== "thinking") void model.refreshCatalogs(kind === "model" ? {} : {maxAgeMs:30_000});
     };
     const submit = async (delivery: "steer" | "queue" = "steer") => {
       if ((!draft().trim() && !attachments().length) || !draft().startsWith("/") && state().connection.phase !== "connected" || submitting()) return;
@@ -1129,9 +1142,9 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
         </Switch>
       </div></Show>
       <div testId="workspace-content" onLayout={event=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0};setWorkspaceBounds(before=>before.x===next.x&&before.y===next.y&&before.width===next.width&&before.height===next.height?before:next);}} style={{ ...column, flexGrow: 1, minWidth: 0, position: "relative", overflow: "hidden" }}>
-        <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWorkspaceId()} connectedHostId={state().connection.connectedHostId} directoryRoots={state().ui.terminalWorkspaceRoots}
+        <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWindowWorkspaceId()} workspaceContext={props.workspaceNavigation?.context} connectedHostId={state().connection.connectedHostId} directoryRoots={state().ui.terminalWorkspaceRoots}
           keyboardIndex={chromeFocus().zone==="workspaces"?(chromeFocus() as {index:number}).index:undefined}
-          onActivate={workspace=>void model.activateWorkspace(workspace).catch(model.report)} onNew={()=>void model.newWorkspace().catch(model.report)} onClose={workspaceId=>void model.closeWorkspace(false,workspaceId).catch(model.report)} onReorder={model.reorderWorkspace}
+          onActivate={workspace=>void activateWindowWorkspace(workspace).catch(model.report)} onNew={()=>void newWindowWorkspace().catch(model.report)} onClose={workspaceId=>void closeWindowWorkspace(false,workspaceId).catch(model.report)} onReorder={reorderWindowWorkspace}
           registerHost={(id,host)=>{if(host)workspaceHosts.set(id,host);else workspaceHosts.delete(id);}}
           registerNewHost={host=>{workspaceNewHost=host;}} onBounds={updateChromeBounds} onScroll={refreshChromeTargetBounds}/>
         <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0 }}>
@@ -1205,7 +1218,7 @@ export function App(props: { model: WorkspaceModel; config: AppConfig; visuals?:
       })}
       title={request.kind === "agent" ? "Agents" : request.kind === "model" ? "Select model" : request.kind === "account" ? "Select account" : "Reasoning"}
       options={pickerOptions()} current={request.kind === "account" ? request.current : request.kind === "model" ? choiceSelection().model ?? "" : choiceSelection()[request.kind]} anchor={measuredComposerAnchor(request.sessionId || activeComposerKey()) || request.anchor}
-      loading={request.kind !== "thinking" && request.kind !== "account" && state().catalogsLoading} error={state().catalogsError}
+      loading={request.kind !== "thinking" && request.kind !== "account" && (state().catalogsLoading || request.kind === "model" && modelAvailability().loading)} error={state().catalogsError || (request.kind === "model" ? modelAvailability().error : undefined)}
       onSelect={(value) => {
         if (request.kind === "model") { void chooseModel(request, value); return; }
         if (request.kind === "account") { model.setSelection("model", request.model!, request.sessionId, value); closeChoice(); return; }

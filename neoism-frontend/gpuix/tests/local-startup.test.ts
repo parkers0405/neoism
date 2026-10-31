@@ -1,6 +1,6 @@
 import {expect,test} from "bun:test";
 import {createServer} from "node:net";
-import {mkdtempSync,rmSync} from "node:fs";
+import {existsSync,mkdirSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {loadConfig} from "../src/config";
@@ -53,4 +53,17 @@ test("a detached daemon that exits immediately reports startup failure instead o
   const config=loadConfig([],env,{});
   await expect(ensureLocalDaemon(config,[],env,{refresh:()=>config,timeoutMs:3000})).rejects.toThrow("exited during startup");
  } finally {rmSync(folder,{recursive:true,force:true});}
+});
+
+test("the daemon receives the selected project as both its workspace and process working directory",async()=>{
+ if(process.platform==="win32")return;
+ const folder=mkdtempSync(join(tmpdir(),"neoism-startup-directory-")),project=join(folder,"project with spaces"),capture=join(folder,"launch.txt"),binary=join(folder,"daemon");
+ mkdirSync(project);
+ writeFileSync(binary,'#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "$NEOISM_STARTUP_CAPTURE"\n',{mode:0o700});
+ const env={...process.env,NEOISM_GPUIX_DAEMON_URL:undefined,NEOISM_GPUIX_WORKSPACE_DAEMON:binary,NEOISM_LAUNCH_DIRECTORY:project,NEOISM_STARTUP_CAPTURE:capture,XDG_STATE_HOME:folder};
+ const config=configuration();
+ try{
+  await ensureLocalDaemon(config,[],env,{probe:async()=>existsSync(capture),refresh:()=>config,timeoutMs:3000});
+  expect(readFileSync(capture,"utf8").trimEnd().split("\n")).toEqual([project,"--workspace",project]);
+ }finally{rmSync(folder,{recursive:true,force:true});}
 });

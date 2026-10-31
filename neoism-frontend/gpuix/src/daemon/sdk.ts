@@ -48,6 +48,7 @@ export function agentSdkEndpoint(endpoint: string, workspaceId: string) {
 
 export class AgentSdk {
   private clients = new Map<string, NeoismClient>();
+  private sessionClients = new Map<string, NeoismClient>();
   private abort = new AbortController();
   private masterCatalog?:Promise<ReturnType<typeof agentSdkEndpoint>|undefined>;
   private catalogReaders=new Map<string,NeoismClient>();
@@ -67,13 +68,33 @@ export class AgentSdk {
     this.clients.set(workspaceId, client);
     return client;
   }
+  /** Existing conversations use the same daemon-granted access as the catalog.
+   * Local legacy/cross-workspace chats keep their stored scope on the server;
+   * paired callers still use their authorized workspace. Never retry a mutation. */
+  forSession(workspaceId: string, sessionId: string): NeoismClient {
+    const key=JSON.stringify([workspaceId,sessionId]);
+    const cached=this.sessionClients.get(key);if(cached)return cached;
+    const endpoint=agentSdkEndpoint(this.config.endpoint,workspaceId),signal=this.abort.signal;
+    const request=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+      const url=new URL(input instanceof Request?input.url:String(input));
+      const path=url.pathname.slice(new URL(endpoint.baseUrl).pathname.length);
+      const sessionPath=`v2/sessions/${encodeURIComponent(sessionId)}`;
+      const existingSession=path===sessionPath||path.startsWith(sessionPath+"/");
+      const interaction=/^v2\/interactions\/(permissions|questions)\/[^/]+\/(reply|reject)$/.test(path);
+      const target=existingSession||interaction?await this.catalogEndpoint(workspaceId):endpoint;
+      url.pathname=new URL(target.baseUrl).pathname+path;
+      return this.fetcher(url.toString(),{...init,signal:AbortSignal.any([signal,...(init?.signal?[init.signal]:[])]),...(target.socket?{unix:target.socket}:{})});
+    })as typeof fetch;
+    const client=createHttpClient({baseUrl:endpoint.baseUrl,token:this.config.pairingToken||this.config.authToken||endpoint.token,fetch:request});
+    this.sessionClients.set(key,client);return client;
+  }
   /** The catalog's initial family/activity baseline can exceed the daemon
    * WebSocket reply queue. Read its SSE endpoint directly through the SDK's
    * existing authenticated parser/reconnect loop, with HTTP backpressure. */
   private async catalogEndpoint(workspaceId:string){
     const raw=agentSdkEndpoint(this.config.endpoint,workspaceId),scoped={...raw,token:this.config.pairingToken||this.config.authToken||raw.token};
     // Existing desktop catalogs include legacy sessions outside a workspace's
-    // tenant. Only a daemon-confirmed master catalog capability may read them.
+    // tenant. Only a daemon-confirmed master workflow capability may access them.
     // A paired client always keeps its authorized workspace scope.
     if(!this.config.authToken||this.config.pairingToken)return scoped;
     if(!this.masterCatalog)this.masterCatalog=(async()=>{
@@ -118,5 +139,5 @@ export class AgentSdk {
     })as typeof fetch;
     yield*createHttpClient({baseUrl:endpoint.baseUrl,token:endpoint.token||this.config.pairingToken||this.config.authToken,fetch:request}).events.subscribe({signal});
   }
-  dispose() { this.abort.abort(); this.clients.clear();this.catalogReaders.clear(); }
+  dispose() { this.abort.abort(); this.clients.clear();this.sessionClients.clear();this.catalogReaders.clear(); }
 }

@@ -1,4 +1,8 @@
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import * as Context from "effect/Context";
+import * as Data from "effect/Data";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import WebSocket from "ws";
 import { batch } from "solid-js";
 import { profileStart, profileEnd } from "../profiling";

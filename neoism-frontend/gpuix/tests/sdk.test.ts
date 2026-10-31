@@ -72,7 +72,7 @@ test("catalog SSE uses the scoped authenticated local SDK stream and drains a ba
  expect(requests[1]).toEqual({path:"/agent/workspaces/b/v2/session-catalog/events",scope:null,directory:"/project with spaces",authorization:"Bearer device"});
 });
 
-test("legacy catalog reads use only a daemon-granted master capability while paired reads and all mutations retain workspace scope",async()=>{
+test("legacy catalog reads use a daemon-granted capability while paired reads and explicit workspace clients stay scoped",async()=>{
  const requests:Array<{path:string;authorization:string|null;method:string}>=[];
  const fetcher=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
   const url=new URL(String(input)),authorization=new Headers(init?.headers).get("authorization");requests.push({path:url.pathname,authorization,method:init?.method||"GET"});
@@ -93,4 +93,48 @@ test("legacy catalog reads use only a daemon-granted master capability while pai
  expect(requests.slice(start)).toEqual([{path:"/agent/workspaces/a/v2/session-projects",authorization:"Bearer device",method:"GET"}]);
  const denied=new AgentSdk({endpoint:"ws://localhost:7878/session",authToken:"not-master"},fetcher);cleanups.push(()=>denied.dispose());
  await denied.catalogProjects("b");expect(requests.at(-1)?.path).toBe("/agent/workspaces/b/v2/session-projects");
+});
+
+test("reopened conversations send once through their catalog capability while creation and provider settings stay workspace scoped",async()=>{
+ const requests:Array<{path:string;method:string;body?:any}>=[];
+ const fetcher=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+  const path=new URL(String(input)).pathname,method=init?.method||"GET";
+  requests.push({path,method,body:typeof init?.body==="string"?JSON.parse(init.body):undefined});
+  if(path==="/agent/system/info")return Response.json({systemId:"fixture",capabilityVersion:1});
+  if(path.includes("/agent/workspaces/current/v2/sessions/old-session"))return Response.json({code:"not_found",message:"Session not found",retryable:false},{status:404});
+  if(path.endsWith("/prompt"))return new Response(null,{status:204});
+  if(path.endsWith("/v2/sessions"))return Response.json({id:"new-session",title:"New",directory:"/current",time:{created:1,updated:1}});
+  return Response.json({id:"old-session",title:"Old conversation",directory:"/old",time:{created:1,updated:1}});
+ })as typeof fetch;
+ const sdk=new AgentSdk({endpoint:"ws://localhost:7878/session",authToken:"master"},fetcher);cleanups.push(()=>sdk.dispose());
+ const session=sdk.forSession("current","old-session");
+ await session.sessions.prompt("old-session",sdkPrompt("Continue",[],{model:"openai/base"},"steer"));
+ await session.sessions.update("old-session",{agent:"plan"});
+ await session.sessions.abort("old-session");
+  await session.interactions.permissions.reply("permission-one","once");
+  await session.interactions.questions.reply("question-one",[["yes"]]);
+ await session.sessions.create({directory:"/current"});
+ await session.transport.request({path:"v2/providers/configured"});
+ expect(requests.filter(r=>r.path.endsWith("/prompt"))).toEqual([expect.objectContaining({path:"/agent/system/v2/sessions/old-session/prompt",method:"POST",body:expect.objectContaining({parts:[{type:"text",text:"Continue"}]})})]);
+ expect(requests.some(r=>r.path==="/agent/system/v2/sessions/old-session"&&r.method==="PATCH")).toBe(true);
+ expect(requests.some(r=>r.path==="/agent/system/v2/sessions/old-session/abort")).toBe(true);
+ expect(requests.some(r=>r.path==="/agent/system/v2/interactions/permissions/permission-one/reply")).toBe(true);
+ expect(requests.some(r=>r.path==="/agent/system/v2/interactions/questions/question-one/reply")).toBe(true);
+ expect(requests.some(r=>r.path==="/agent/workspaces/current/v2/sessions"&&r.method==="POST")).toBe(true);
+ expect(requests.at(-1)?.path).toBe("/agent/workspaces/current/v2/providers/configured");
+ expect(requests.filter(r=>r.path==="/agent/system/info")).toHaveLength(1);
+});
+
+test("session routing keeps paired and denied callers scoped and never retries a failed send",async()=>{
+ for(const paired of [true,false]){
+  const requests:string[]=[];
+  const fetcher=(async(input:Parameters<typeof fetch>[0])=>{
+   const path=new URL(String(input)).pathname;requests.push(path);
+   if(path.endsWith("/info"))return Response.json({code:"forbidden",message:"Denied",retryable:false},{status:403});
+   return Response.json({code:"not_found",message:"Session not found",retryable:false},{status:404});
+  })as typeof fetch;
+  const sdk=new AgentSdk({endpoint:"ws://localhost:7878/session",authToken:"operator",...(paired?{pairingToken:"guest"}:{})},fetcher);cleanups.push(()=>sdk.dispose());
+  await expect(sdk.forSession("shared","old").sessions.prompt("old",sdkPrompt("Continue",[],{},"steer"))).rejects.toThrow();
+  expect(requests).toEqual([...(paired?[]:["/agent/system/info"]),"/agent/workspaces/shared/v2/sessions/old/prompt"]);
+ }
 });

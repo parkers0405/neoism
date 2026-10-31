@@ -1,18 +1,17 @@
-import { readFileSync } from "node:fs";
-import { Effect, ManagedRuntime } from "effect";
+import {WindowWorkspaceSessions,localWorkspaceSession} from "./workspaces/window-sessions";
+import * as Effect from "effect/Effect";
 import { createRenderer, render } from "@gpuix/solid";
 import { createSignal } from "solid-js";
 import { startFrameLoop, enableAutomation, type FrameLoop } from "@gpuix/native/runtime";
 import type { GpuixRenderer } from "@gpuix/native";
-import cascadia from "../../../neoism-paint/src/font/resources/CascadiaCode/CascadiaCodeNF-Regular.otf" with { type: "file" };
-import pixel from "../../../neoism-paint/src/font/resources/PressStart2P/PressStart2P-Regular.ttf" with { type: "file" };
+import {prepareBundledFonts} from "./bundled-fonts";
 import { loadConfig, type AppConfig } from "./config";
 import {appVersion} from "./design/generated";
 import {ensureLocalDaemon} from "./daemon/local-startup";
 import {createWindowKeyRouter} from "./commands/window-key-router";
 import {FontZoomController} from "./commands/font-zoom";
 import { expectVariant, isRecord } from "./daemon/protocol";
-import { Daemon, DaemonConnection, daemonLayer } from "./daemon/client";
+import { DaemonConnection } from "./daemon/client";
 import { WorkspaceModel, type AppState } from "./model";
 import { coreCall, type NativeEditor } from "./native-core";
 import { App } from "./ui/App";
@@ -29,10 +28,14 @@ import type {ServerSelection} from "./menu-actions/ChromeActionsController";
 import {localDaemon} from "./menu-actions/web-frontend";
 import type { WindowBootstrap } from "./window-bootstrap";
 
+export type {ServerSelection} from "./menu-actions/ChromeActionsController";
+
+async function startApplication(){
 profileStartup("modules-ready");
 const bootstrapGlobal=globalThis as typeof globalThis & {__neoismWindowBootstrap?:WindowBootstrap};
 const bootstrap=bootstrapGlobal.__neoismWindowBootstrap;
 delete bootstrapGlobal.__neoismWindowBootstrap;
+if(bootstrap)bootstrap.onInput=profileInput;
 
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(`neoism ${appVersion}`);
@@ -44,7 +47,6 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
   process.exit(0);
 }
 
-export type {ServerSelection} from "./menu-actions/ChromeActionsController";
 let sshAttachment:SshAttachment|undefined;
 let releaseReconnectFocus:(()=>void)|undefined;
 const sshReconnect=new SelectedSshReconnect(server=>connectServer(server,true),error=>session.model.report(error));
@@ -86,32 +88,47 @@ async function createSession(config: AppConfig, seed?: HotState) {
     }
   };
   const timer = setInterval(()=>{void checkpoint();}, 2000); timer.unref();
-  const runtime = ManagedRuntime.make(daemonLayer(client));
-  model.start(); await runtime.runPromise(Daemon);
+  model.start(); client.start();
   let disposal: Promise<void> | undefined;
-  return { config, client, model, visuals,checkpoint, dispose(preserveEditors = false) {
+  return { config, client, model, visuals,checkpoint, ssh:undefined as SshAttachment|undefined, server:undefined as ServerSelection|undefined, dispose(preserveEditors = false) {
     return disposal ||= (async () => {
-      clearInterval(timer); await checkpoint(); visuals.dispose();model.dispose(preserveEditors); await runtime.dispose();
+      clearInterval(timer); await checkpoint(); visuals.dispose();model.dispose(preserveEditors); client.stop();
     })();
   } };
 }
-const initialConfig = hotState?.config || bootstrap?.config || await ensureLocalDaemon(loadConfig());
+const initialConfig = hotState?.config || await (bootstrap?.config || ensureLocalDaemon(loadConfig()));
 profileStartup("config-ready");
 let session = await createSession(initialConfig, hotState);
+session.ssh=sshAttachment;
 profileStartup("session-created");
 const localServerConfig=new LocalServerConfig(session.config);
 const hostKey = Symbol.for("neoism/gpuix/native-host");
 const globals = globalThis as typeof globalThis & { [hostKey]?: { renderer: GpuixRenderer; loop: FrameLoop; displayClock?: DisplayClock; shutdown?: () => Promise<void> } };
 let host = globals[hostKey];
+let windowReady:Promise<void>=Promise.resolve();
 if (!host) {
   const renderer: GpuixRenderer = bootstrap?.renderer || createRenderer((event) => { profileInput(event);notifyFrameActivity(renderer, event); });
-  await (bootstrap?.ready || (renderer as GpuixRenderer & {initAsync(options:Parameters<GpuixRenderer["init"]>[0]):Promise<void>}).initAsync({ title: "Neoism", appName: "Neoism", appId: "ai.neoism.gpuix", width: 1440, height: 900,
-    minWidth: 720, minHeight: 480, titlebarTransparent: true, windowBackground: "opaque" }));
-  // The upstream runtime installs stdio automation only through sync init().
-  if(process.stdin&&!process.stdin.isTTY)enableAutomation(renderer);
-  profileStartup("window-created");
-  for (const path of [cascadia, pixel]) renderer.registerFont(readFileSync(path));
-  if (process.argv.includes("--maximized")) renderer.zoomWindow();
+  if(!bootstrap){
+    prepareBundledFonts(renderer);
+    if(process.platform!=="darwin")(renderer as typeof renderer & {setStartupRenderingReady(ready:boolean):void}).setStartupRenderingReady(false);
+  }
+  const ready = bootstrap?.ready || (renderer as GpuixRenderer & {initAsync(options:Parameters<GpuixRenderer["init"]>[0]):Promise<void>}).initAsync({ title: "Neoism", appName: "Neoism", appId: "ai.neoism.gpuix", width: 1440, height: 900,
+    minWidth: 720, minHeight: 480, titlebarTransparent: true, windowBackground: "opaque" });
+  // Build the retained UI while the native thread initializes graphics. Its
+  // command queue and requested viewport already exist; first paint can use
+  // the real root instead of drawing an empty window and mounting afterward.
+  let initialized=false;
+  const tick=renderer.tick.bind(renderer);
+  renderer.tick=()=>initialized?tick():true;
+  windowReady=ready.then(()=>{
+    initialized=true;
+    if(process.stdin&&!process.stdin.isTTY)enableAutomation(renderer);
+    profileStartup("window-created");
+    profileStartup("fonts-registered");
+    if(process.argv.includes("--maximized"))renderer.zoomWindow();
+  });
+  void windowReady.catch(()=>{});
+  if(process.platform==="darwin")await windowReady;
   installProfiling(renderer);
   installFrameMeter(renderer);
   const displayClock = installDisplayClock(renderer, error => console.error("[neoism-gpuix] Display frame error:", error));
@@ -129,9 +146,29 @@ let root: ReturnType<typeof render> | undefined;
 // Each App generation gets its own config snapshot: reloads update the
 // session config in place, and the outgoing generation stays on screen until
 // its replacement has settled (AppGeneration), so it must keep its own values.
-const generationOf = () => ({ model: session.model, config: { ...session.config } });
+const generationOf = () => ({ model: session.model, config: { ...session.config }, visuals:session.visuals });
 const [appGeneration, setAppGeneration] = createSignal(generationOf());
-host.shutdown = async () => {sshReconnect.dispose();releaseReconnectFocus?.();try{await session.dispose();}finally{try{sshAttachment?.dispose();}finally{try{coreCall("ssh.shutdown");}finally{coreCall("server.shutdown");}}}};
+function resolveLocalConfig(){
+  return localServerConfig.resolve(()=>{
+    const args:string[]=[];
+    for(let i=2;i<process.argv.length;i++){if(["--daemon","--workspace"].includes(process.argv[i])){i++;continue;}args.push(process.argv[i]);}
+    return loadConfig(args,{...process.env,NEOISM_GPUIX_DAEMON_URL:undefined,NEOISM_DAEMON_TOKEN:undefined,NEOISM_PAIRING_TOKEN:undefined});
+  });
+}
+const windowSessions=new WindowWorkspaceSessions(session,{
+  activate(next){
+    session=next;sshAttachment=next.ssh;localServerConfig.observe(next.config);
+    sshReconnect.select(next.server,next.ssh);
+    root?.flushSync(()=>setAppGeneration(generationOf()));
+  },
+  local:async()=>createSession(await ensureLocalDaemon(resolveLocalConfig())),
+  dispose:async previous=>{await previous.dispose();previous.ssh?.dispose();},
+});
+host.shutdown = async () => {
+  sshReconnect.dispose();releaseReconnectFocus?.();windowSessions.dispose();
+  try{await Promise.all(windowSessions.sessions().map(async current=>{try{await current.dispose();}finally{current.ssh?.dispose();}}));}
+  finally{try{coreCall("ssh.shutdown");}finally{coreCall("server.shutdown");}}
+};
 installFrameMeter(host.renderer);
 let transition = Promise.resolve();
 function update(work: () => Promise<void>,reportErrors=true) {
@@ -172,38 +209,55 @@ async function connectServer(server: ServerSelection,reconnecting=false) {
   const resume=reconnecting?()=>{}:sshReconnect.pause();
   try{return await update(async () => {
     localServerConfig.observe(session.config);
-    const prepared=await prepareServerConnection(server,session.config,()=>localServerConfig.resolve(()=>{
-      const args:string[]=[];
-      for(let i=2;i<process.argv.length;i++){if(["--daemon","--workspace"].includes(process.argv[i])){i++;continue;}args.push(process.argv[i]);}
-      return loadConfig(args,{...process.env,NEOISM_GPUIX_DAEMON_URL:undefined,NEOISM_DAEMON_TOKEN:undefined,NEOISM_PAIRING_TOKEN:undefined});
-    }),{signal:server.signal});
+    if(!reconnecting){
+      const existing=windowSessions.sessions().find(current=>server.id==="local"?localWorkspaceSession(current):
+        current.server?.id===server.id&&current.server.endpoint===server.endpoint&&JSON.stringify(current.server.ssh)===JSON.stringify(server.ssh));
+      if(existing){
+        const target=server.workspaceId&&existing.model.state.workspaces.find(workspace=>workspace.id===server.workspaceId);
+        const activation=target?existing.model.activateWorkspace(target):Promise.resolve();
+        windowSessions.select(existing);await activation;return;
+      }
+    }
+    const previous=session;
+    const prepared=await prepareServerConnection(server,session.config,resolveLocalConfig,{signal:server.signal});
     if(server.signal?.aborted){prepared.ssh?.dispose();return;}
-    await session.checkpoint();
-    const focus={workspaceId:session.model.state.activeWorkspace?.id,surfaceId:session.model.state.activeSurfaceId};
-    if(reconnecting&&prepared.config.transportIdentity===session.config.transportIdentity)prepared.config.workspaceId=focus.workspaceId;
-    const previousSsh=sshAttachment;
-    // Construct recovery/native state before tearing down the working UI.
-    // An invalid recovery file or failed initialization leaves it usable.
-    let replacement:Awaited<ReturnType<typeof createSession>>;
-    try{replacement=await createSession(prepared.config);}catch(error){prepared.ssh?.dispose();throw error;}
-    if(server.signal?.aborted){await replacement.dispose();prepared.ssh?.dispose();return;}
-    releaseReconnectFocus?.();releaseReconnectFocus=reconnecting?preserveReconnectFocus(replacement.model,focus):undefined;
-    root?.unmount();await session.dispose();session=replacement;sshAttachment=prepared.ssh;sshReconnect.select(server,prepared.ssh);mount();previousSsh?.dispose();
+    const focus={workspaceId:previous.model.state.activeWorkspace?.id,surfaceId:previous.model.state.activeSurfaceId};
+    if(reconnecting){
+      await previous.checkpoint();
+      if(prepared.config.transportIdentity===previous.config.transportIdentity)prepared.config.workspaceId=focus.workspaceId;
+    }
+    let next:typeof session;
+    try{next=await createSession(prepared.config);}catch(error){prepared.ssh?.dispose();throw error;}
+    next.ssh=prepared.ssh;next.server={...server,signal:undefined};
+    if(server.signal?.aborted){await next.dispose();next.ssh?.dispose();return;}
+    if(reconnecting){
+      releaseReconnectFocus?.();releaseReconnectFocus=preserveReconnectFocus(next.model,focus);
+      windowSessions.replace(previous,next);
+      await previous.dispose();previous.ssh?.dispose();
+    }else{
+      // Keep every existing connection/model alive. Opening another host adds
+      // its workspace tabs instead of converting the selected local workspace.
+      windowSessions.add(next);windowSessions.select(next);
+    }
   },!reconnecting);}finally{resume();}
 }
 
 const windowKeys=createWindowKeyRouter();
 function mount() {
   setAppGeneration(generationOf());
-  root = render(() => <AppGeneration value={appGeneration()} background={appGeneration().config.background} backgroundColor={appGeneration().config.theme.bg}>{current => <App model={current.model} config={current.config} visuals={session.visuals} registerWindowKeys={windowKeys.register} reloadConfig={reloadConfig} onZoomFont={delta=>fontZoom.change(delta)} onConnectServer={connectServer} />}</AppGeneration>, {
+  root = render(() => <AppGeneration value={appGeneration()} background={appGeneration().config.background} backgroundColor={appGeneration().config.theme.bg}>{current => <App model={current.model} config={current.config} visuals={current.visuals} workspaceNavigation={windowSessions} registerWindowKeys={windowKeys.register} reloadConfig={reloadConfig} onZoomFont={delta=>fontZoom.change(delta)} onConnectServer={connectServer} />}</AppGeneration>, {
     renderer: host!.renderer,
     keyboardFocusDim: false,
     onKeyDown:windowKeys.dispatch,
     onUncaughtError: error => console.error("[neoism-gpuix] Render error:", error),
   });
 }
+profileStartup("app-mount-started");
 mount();
+root?.flushSync(()=>{});
+if(process.platform!=="darwin")(host.renderer as GpuixRenderer & {setStartupRenderingReady(ready:boolean):void}).setStartupRenderingReady(true);
 profileStartup("app-mounted");
+await windowReady;
 let stopping = false;
 const stop = () => { if (stopping) return; stopping = true; root?.unmount(); host!.loop.stop(); host!.displayClock?.dispose(); void host!.shutdown!().finally(() => process.exit(0)); };
 process.once("SIGINT", stop); process.once("SIGTERM", stop);
@@ -230,5 +284,10 @@ process.on("SIGUSR2", () => {
 if (import.meta.hot) import.meta.hot.dispose(() => {
   process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
   stateGlobals[stateKey] = { ssh:sshAttachment,state: session.model.state, editors: session.model.editors, config: session.config, recovery: session.model.captureSession() };
+  windowSessions.dispose();sshReconnect.dispose();releaseReconnectFocus?.();
   session.checkpoint(); root?.unmount(); void session.dispose(true);
+  for(const current of windowSessions.sessions())if(current!==session)void current.dispose().finally(()=>current.ssh?.dispose());
 });
+
+}
+export const ready=startApplication();

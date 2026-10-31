@@ -1,3 +1,4 @@
+import {homedir} from "node:os";
 import assert from "node:assert/strict";
 import {createRoot} from "@gpuix/solid";
 import {App} from "../../src/ui/App";
@@ -7,7 +8,7 @@ import {DaemonConnection} from "../../src/daemon/client";
 import {WorkspaceModel} from "../../src/model";
 import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
-const server=createAgentDaemon();server.threads.splice(0);const home=process.env.HOME||"/home/fixture";server.workspaces[0]!.root_dir=home;
+const server=createAgentDaemon();server.threads.splice(0);const home=homedir();server.workspaces[0]!.root_dir=home;
 const config={...loadConfig(["--config","/nonexistent/workspace-cwd-label"],{}),endpoint:server.endpoint,reducedMotion:true,cursorBlink:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
 let stage="startup";

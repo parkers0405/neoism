@@ -1,6 +1,7 @@
+import {canonicalPath} from "./support/canonical-path";
 import { afterEach, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "jsonc-parser";
@@ -72,7 +73,7 @@ test("background discovery reuses backend format, explicit-selection precedence 
   symlinkSync(join(base, "bg", "one.PNG"), join(base, "alias.png"));
   const result = coreCall<{ entries: Array<{ name: string; path: string; opacity: number }> }>("menu.background-catalog", { base, image: { path: "alias.png", opacity: 0.23 }, packs: [] });
   expect(result.entries).toHaveLength(1); expect(result.entries[0].name).toBe("alias"); expect(result.entries[0].opacity).toBeCloseTo(0.23);
-  expect(realpathSync(result.entries[0].path)).toBe(realpathSync(join(base, "bg", "one.PNG")));
+  expect(canonicalPath(result.entries[0].path)).toBe(canonicalPath(join(base, "bg", "one.PNG")));
 });
 test("theme/background transactions retain JSONC comments and optimistic revision", () => {
   const document = { content: '{\n // keep me\n "appearance":{"mashup-pack":"my-pack","mashup-baseline":{"theme":"old","font-family":"Mono"}},\n "editor":{"vim-mode":true}\n}', display_path: "/config.json", revision: "revision-1", writable: true };

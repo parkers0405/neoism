@@ -37,7 +37,7 @@ test("actual pinned GPUI cached-scene matcher repaints hidden and fractional-alp
  expect(div).toContain("+                window.with_element_opacity(style.opacity, |window| {");
  const directory=mkdtempSync(join(tmpdir(),"neoism-native-paint-opacity-"));
  try{
-  const source=join(directory,"paint-opacity.rs"),binary=join(directory,"paint-opacity");writeFileSync(source,code);
+  const source=join(directory,"paint-opacity.rs"),binary=join(directory,process.platform==="win32"?"paint-opacity.exe":"paint-opacity");writeFileSync(source,code);
   for(const command of [["rustc","--edition=2021","--test",source,"-o",binary],[binary]]){
    const child=Bun.spawn(command,{stdout:"pipe",stderr:"pipe"}),[status,out,err]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
    expect({status,err}).toEqual({status:0,err:""});if(command[0]===binary)expect(out).toContain("1 passed");

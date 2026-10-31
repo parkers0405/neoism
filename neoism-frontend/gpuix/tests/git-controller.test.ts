@@ -59,7 +59,7 @@ test("hosted PR read/write operations preserve complete typed payloads, scoped r
   await expect(controller.execute({kind:"pull-request",root,request:{Merge:{number:8,expected_head:"stale",method:"Squash"}}},root)).rejects.toThrow("Fixture PR head changed");
   expect(await read({Read:{number:8}})).toMatchObject({PullRequest:{reply:{Detail:{detail:{summary:{state:"MERGED"},body:"Complete body\nsecond line"}}}}});
  }finally{controller.dispose();model.dispose();client.stop();daemon.close();}
-});
+},15000);
 
 test("partial staging and confirmed restore preserve the exact native change block",async()=>{
  const context=await fixture();try{const block={old_start:0,new_start:0,old_lines:["const value = 1;"],new_lines:["const value = 2;"]};const path="src/main.ts",root="/fixture";

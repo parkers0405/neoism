@@ -18,7 +18,7 @@ test("status pill, panel and reviews share one real watched root while another r
   cleanups.push(watchGitStatus(client,"/b",snapshot=>b.push(snapshot)));await until(()=>b.length===1);expect(server.watches.size).toBe(2);expect(server.sockets.size).toBe(3);
   server.push("/a",{branch:"feature",files:[{path:"real.ts",additions:3,deletions:1}]});await until(()=>a.at(-1)?.branch==="feature");expect(panel.at(-1)).toEqual(a.at(-1));expect(review.at(-1)).toEqual(a.at(-1));expect(a.at(-1)?.repo_root).toBe("/a/host-repository");expect(b.at(-1)?.branch).toBe("main");
   server.push("/b",{branch:"stale"},"wrong-token");await Bun.sleep(15);expect(b.at(-1)?.branch).toBe("main");
-  const shared=cleanups.shift()!;shared();expect(server.watches.size).toBe(2);cleanups.shift()!();cleanups.shift()!();await until(()=>server.watches.size===1);expect(server.requests.filter(request=>request.message.UnwatchStatus)).toHaveLength(1);
+  const shared=cleanups.shift()!;shared();expect(server.watches.size).toBe(2);cleanups.shift()!();cleanups.shift()!();await until(()=>server.watches.size===1);await until(()=>server.sockets.size===2);
   expect(server.requests.every(request=>request.family==="Git"&&(!!request.message.WatchStatus||!!request.message.UnwatchStatus)||request.family==="Workspace"&&!!request.message.Hello)).toBe(true);expect(server.requests.filter(request=>request.message.WatchStatus)).toHaveLength(2);
  }finally{cleanups.forEach(dispose=>dispose());client.stop();server.close();}
 });

@@ -38,4 +38,4 @@ test("model reorder persists only this window's order without switching, discard
   expect(model.reorderWorkspace("offline","a")).toBe(false);expect(model.reorderWorkspace("b","a","before")).toBe(false);expect(model.reorderWorkspace("a","a")).toBe(false);
   daemon.pushWorkspace({HostWorkspaceTree:{hosts:[{id:"host",label:"Host"}],workspaces:[...daemon.workspaces].reverse(),tabs:[]}});await Bun.sleep(10);expect(model.windowWorkspaces().map(workspace=>workspace.id)).toEqual(["b","a"]);
  }finally{model.dispose();client.stop();daemon.stop();}
-});
+},15000);

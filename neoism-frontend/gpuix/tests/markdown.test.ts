@@ -42,13 +42,13 @@ test("rich tasks, Vim editing, undo, canonical save state and snapshots use the 
 test("original Mermaid scene and daemon-supplied ink assets produce real diagram primitives",async()=>{
  const editor=new NativeEditor("README.md","# Diagrams\n\n```mermaid\ngraph TD\n A[Start] --> B[Done]\n```\n\n```draw\n./scene.neodraw\n```",true);
  const requested:string[]=[],scene=JSON.stringify({version:1,shapes:[{id:1,type:"rect",x:0,y:0,w:100,h:60,style:{fill:"#ff0000",stroke:"#ff0000",roughness:0,width:1}}]});
- const markdown=new NativeMarkdown(editor,config,"/project/README.md",async path=>{requested.push(path);if(path.endsWith("/.README.ink.neodraw"))return new TextEncoder().encode(scene);throw new Error("Missing fixture asset");});
+ const markdown=new NativeMarkdown(editor,config,"/project/README.md",async path=>{requested.push(path);if(path.replaceAll("\\","/").endsWith("/.README.ink.neodraw"))return new TextEncoder().encode(scene);throw new Error("Missing fixture asset");});
  try{
   markdown.call("layout",{width:900,height:1000});
   const initial=texts(markdown.frame.commands).map(run=>run.text);
   expect(initial).toContain("Start");expect(initial).toContain("Done");
   const end=Date.now()+2000;while(!markdown.frame.commands.some(command=>command.kind!=="text"&&"color" in command&&command.color[0]===1&&command.color[1]===0)){if(Date.now()>end)throw new Error("Original ink layer did not load through its host service");await Bun.sleep(5);}
-  expect(requested.some(path=>path.endsWith("/.README.ink.neodraw"))).toBe(true);
+  expect(requested.some(path=>path.replaceAll("\\","/").endsWith("/.README.ink.neodraw"))).toBe(true);
   expect(markdown.frame.commands.filter(command=>command.kind==="polygon").length).toBeGreaterThan(10);
   expect(editor.frame.dirty).toBe(false);
  }finally{markdown.dispose();editor.dispose();}

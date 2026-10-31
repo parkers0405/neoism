@@ -1,6 +1,7 @@
+import {fileURLToPath} from "node:url";
 import assert from "node:assert/strict";
 import {writeFileSync,chmodSync,readFileSync,existsSync} from "node:fs";
-import {join} from "node:path";
+import {join,delimiter} from "node:path";
 import {createAgentDaemon} from "./agent-daemon";
 import {attachSsh,prepareSshWorkspace,type SshAttachment} from "../../src/daemon/ssh-transport";
 import {DaemonConnection} from "../../src/daemon/client";
@@ -10,7 +11,7 @@ import {terminalSession,disposeTerminalSessions} from "../../src/terminal/sessio
 import {coreCall} from "../../src/native-core";
 import {SelectedSshReconnect,preserveReconnectFocus} from "../../src/daemon/ssh-reconnect";
 const directory=process.env.NEOISM_SSH_FIXTURE_DIR;
-if(!directory||process.env.NEOISM_CONFIG_HOME!==directory||!process.env.PATH?.split(":").includes(directory))throw new Error("SSH fixture isolation must be configured before process startup");
+if(!directory||process.env.NEOISM_CONFIG_HOME!==directory||!process.env.PATH?.split(delimiter).includes(directory))throw new Error("SSH fixture isolation must be configured before process startup");
 const local=createAgentDaemon(),remote=createAgentDaemon();
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+5000;while(!predicate()){if(Date.now()>end)throw new Error("Remote terminal fixture did not settle");await Bun.sleep(5);}};
 const script=`#!/usr/bin/env node
@@ -21,7 +22,12 @@ fs.appendFileSync(${JSON.stringify(join(directory,"control-pids"))},String(proce
 const port=Number(args[index+1].split(':')[0]);
 net.createServer(socket=>{const upstream=net.connect(${new URL(remote.endpoint).port},'127.0.0.1');socket.on('error',()=>upstream.destroy());upstream.on('error',()=>socket.destroy());socket.pipe(upstream);upstream.pipe(socket);}).listen(port,'127.0.0.1');}
 `;
-writeFileSync(join(directory,"ssh"),script);chmodSync(join(directory,"ssh"),0o700);
+if(process.platform==="win32"||process.env.NEOISM_TEST_NATIVE_SSH_FIXTURE==="1"){
+ writeFileSync(join(directory,"remote-port"),new URL(remote.endpoint).port);
+ const source=fileURLToPath(new URL("./ssh-fixture.rs",import.meta.url));
+ const build=Bun.spawn(["rustc","--edition=2021",source,"-o",join(directory,process.platform==="win32"?"ssh.exe":"ssh")],{stdout:"pipe",stderr:"pipe"});
+ const [status,error]=await Promise.all([build.exited,new Response(build.stderr).text()]);assert.equal(status,0,error);
+}else{writeFileSync(join(directory,"ssh"),script);chmodSync(join(directory,"ssh"),0o700);}
 let attachment:SshAttachment|undefined,client:DaemonConnection|undefined,model:WorkspaceModel|undefined;
 try{
  const saved=coreCall<{system:{id:string;enabled:boolean}}>("ssh.systems.add",{name:"Fixture remote",target:"tester@fixture.invalid",args:["-p","2222"]}).system;assert.equal(saved.enabled,false);

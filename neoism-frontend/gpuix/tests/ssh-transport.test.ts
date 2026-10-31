@@ -1,6 +1,6 @@
 import {expect,test} from "bun:test";
 import {mkdtempSync,rmSync,readFileSync,existsSync} from "node:fs";
-import {join} from "node:path";
+import {join,delimiter} from "node:path";
 import {tmpdir} from "node:os";
 import {attachSsh,type SshNativeCall} from "../src/daemon/ssh-transport";
 const ready={phase:"ready",endpoint:"ws://127.0.0.1:45678/session",authToken:"test-only-credential",workspaceId:"neoism-quick-ssh-home-0123456789abcdef",target:"dev@fixture.invalid"};
@@ -19,7 +19,7 @@ test("SSH failure and cancellation never return a local fallback and retire pend
 test("actual original SSH transport and Ghostty route terminal I/O exclusively to the selected remote daemon",async()=>{
  const directory=mkdtempSync(join(tmpdir(),"neoism-ssh-e2e-"));
  try{
-  const child=Bun.spawn([process.execPath,"run","tests/support/ssh-terminal-check.ts"],{env:{...process.env,NEOISM_SSH_FIXTURE_DIR:directory,NEOISM_CONFIG_HOME:directory,PATH:directory+":"+process.env.PATH},stdout:"pipe",stderr:"pipe"});
+  const child=Bun.spawn([process.execPath,"run","tests/support/ssh-terminal-check.ts"],{env:{...process.env,NEOISM_SSH_FIXTURE_DIR:directory,NEOISM_CONFIG_HOME:directory,PATH:directory+delimiter+process.env.PATH},stdout:"pipe",stderr:"pipe"});
   const [status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
   expect({status,stderr}).toEqual({status:0,stderr:""});expect(JSON.parse(stdout)).toMatchObject({noWindow:true,originalSshTransport:true,remoteHomeWorkspace:true,ghosttyTerminal:true,remoteCreateAttachInputResizeDirectory:true,noLocalPtyOperations:true,reconnectRetainsRemoteRoute:true,tunnelDisposed:true,savedSystemRegistry:true,shutdownReapsCancelledTunnel:true,selectedTunnelReconnectResumesPty:true});
   expect(existsSync(join(directory,"systems.json"))).toBe(true);expect(JSON.parse(readFileSync(join(directory,"systems.json"),"utf8")).systems).toEqual([]);

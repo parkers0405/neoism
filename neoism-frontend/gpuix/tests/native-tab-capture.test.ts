@@ -23,7 +23,7 @@ test("pinned native capture policy reserves tab arrows before textarea SelectWor
  const source=section!.split("\n").filter(line=>line.startsWith("+")&&!line.startsWith("+++")).map(line=>line.slice(1)).join("\n");
  const directory=mkdtempSync(join(tmpdir(),"neoism-native-tab-capture-"));
  try{
-  const path=join(directory,"window_shortcuts.rs"),binary=join(directory,"capture-test");writeFileSync(path,source);
+  const path=join(directory,"window_shortcuts.rs"),binary=join(directory,process.platform==="win32"?"capture-test.exe":"capture-test");writeFileSync(path,source);
   for(const command of [["rustc","--edition=2021","--test",path,"-o",binary],[binary]]){
    const child=Bun.spawn(command,{stdout:"pipe",stderr:"pipe"});const [status,out,err]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
    expect({status,err}).toEqual({status:0,err:""});if(command[0]===binary)expect(out).toContain("1 passed");

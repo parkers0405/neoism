@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import {homedir} from "node:os";
 import { coreCall } from "../src/native-core";
 
 const thread = (id: string, directory: string, updated: number) => ({ session_id: id, title: id, directory, updated_at: updated });
@@ -30,7 +31,7 @@ test("a declared-workspace sidebar ignores another consumer's ThreadList and kee
 });
 
 test("the filesystem root and home directory are the all-workspace dashboard", () => {
-  for (const directory of ["/", process.env.HOME!]) {
+  for (const directory of ["/", homedir()]) {
     const id = panel(directory);
     try { expect(Object.keys(frame(id).send[0] || {})).toEqual(["ListSessionProjects"]); }
     finally { coreCall("agentsidepanel.dispose", { id }); }

@@ -10,7 +10,7 @@ const cwd=fileURLToPath(new URL("..",import.meta.url));
 test("actual source geometry module preserves native wrapped/scrolled insertion points, Unicode byte offsets and selection visibility",async()=>{
  const temporary=mkdtempSync(join(tmpdir(),"neoism-native-caret-"));
  try{
-  const output=join(temporary,"caret-tests"),source=join(cwd,"artifacts/gpuix-pacing-source/packages/native/src/custom_elements/input_caret_geometry.rs");
+  const output=join(temporary,process.platform==="win32"?"caret-tests.exe":"caret-tests"),source=join(cwd,"artifacts/gpuix-pacing-source/packages/native/src/custom_elements/input_caret_geometry.rs");
   const build=Bun.spawn(["rustc","--edition=2021","--test",source,"-o",output],{stdout:"pipe",stderr:"pipe"});
   expect({status:await build.exited,stderr:await new Response(build.stderr).text()}).toEqual({status:0,stderr:""});
   const run=Bun.spawn([output],{stdout:"pipe",stderr:"pipe"});const [status,stdout]=await Promise.all([run.exited,new Response(run.stdout).text()]);

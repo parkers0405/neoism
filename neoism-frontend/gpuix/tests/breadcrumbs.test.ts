@@ -16,7 +16,7 @@ test("original code breadcrumbs use root-relative path components, file icons an
  expect(host.frame({root:"/project",scale:1.5}).height).toBe(39);
  // Path::strip_prefix is component-aware: a similarly named project is not
  // silently removed, and remote/editor path overrides use the actual root.
- expect(host.frame({root:"/proj"}).segments).toEqual(["/","project","src","network","client.rs"]);
+ expect(host.frame({root:"/proj"}).segments).toEqual([process.platform==="win32"?"\\":"/","project","src","network","client.rs"]);
  expect(host.frame({path:"/remote/work/sub/file.ts",root:"/remote/work"}).segments).toEqual(["sub","file.ts"]);
  expect(labels(host.frame({root:"/project",width:40}))).not.toContain("client.rs");
 });

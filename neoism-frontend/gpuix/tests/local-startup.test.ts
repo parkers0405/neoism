@@ -1,6 +1,6 @@
 import {expect,test} from "bun:test";
 import {createServer} from "node:net";
-import {existsSync,mkdirSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from "node:fs";
+import {existsSync,mkdirSync,mkdtempSync,readFileSync,realpathSync,rmSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {loadConfig} from "../src/config";
@@ -64,6 +64,8 @@ test("the daemon receives the selected project as both its workspace and process
  const config=configuration();
  try{
   await ensureLocalDaemon(config,[],env,{probe:async()=>existsSync(capture),refresh:()=>config,timeoutMs:3000});
-  expect(readFileSync(capture,"utf8").trimEnd().split("\n")).toEqual([project,"--workspace",project]);
+  const [cwd,...args]=readFileSync(capture,"utf8").trimEnd().split("\n");
+  expect(realpathSync(cwd!)).toBe(realpathSync(project));
+  expect(args).toEqual(["--workspace",project]);
  }finally{rmSync(folder,{recursive:true,force:true});}
 });

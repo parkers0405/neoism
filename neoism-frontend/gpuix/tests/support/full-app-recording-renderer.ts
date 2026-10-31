@@ -12,7 +12,7 @@ export function createRecordingAppRenderer() {
   let nativeRoot: number | undefined, focused: number | null = null, windowId = 0;
   const bounds = new Map<number, { x: number; y: number; width: number; height: number }>();
   const renderer = {
-    getWindowSize: () => ({ width: 1440, height: 900 }),
+    isFullscreen: () => false, getWindowSize: () => ({ width: 1440, height: 900 }),
     setWindowTitle() {}, setImage() {}, putPaintImage() {}, dropPaintImage() {},
     getSelectedText: () => null, getScrollOffset: () => [0, 0], scrollIntoView() {},
     getFocusedElementId: () => focused, getFocusedElementIdSnapshot: () => focused,

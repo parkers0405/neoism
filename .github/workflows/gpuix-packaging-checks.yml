@@ -4,6 +4,8 @@ on:
     branches: [fix/gpuix-chat-performance]
     paths:
       - .github/workflows/gpuix-packaging-checks.yml
+      - scripts/windows-updater-tests.ps1
+      - neoism-frontend/updater/src/windows_update.ps1
       - neoism-frontend/gpuix/tests/update-cli.test.ts
       - neoism-frontend/gpuix/tests/packaged-daemon.test.ts
       - neoism-frontend/gpuix/tests/sdk.test.ts
@@ -38,6 +40,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check Windows updater policies and rollback in both PowerShell hosts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/windows-updater-tests.ps1
+          & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./scripts/windows-updater-tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell updater policy tests failed' }
       - name: Install SDK and frontend dependencies
         shell: bash
         run: |

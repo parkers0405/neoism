@@ -64,17 +64,35 @@ async function createSession(config: AppConfig, seed?: HotState) {
   if (!seed) { const recovery = store.read(); if (recovery) model.restoreSession(recovery); }
   profileStartup("recovery-loaded");
   let savedDependencies: unknown[] | undefined;
-  const checkpoint = () => { const start=profileStart();try {
-    const dependencies = model.sessionDependencies();
+  let pendingCheckpoint: Promise<void> | undefined;
+  const checkpoint = async () => {
+    // Final shutdown waits for an in-flight write, then captures any edits made
+    // during it. Filesystem latency must never park the render/input thread.
+    while (pendingCheckpoint) await pendingCheckpoint;
+    const start=profileStart();let write:Promise<void>|undefined;let dependencies:unknown[]|undefined;
+    try {
+    dependencies = model.sessionDependencies();
     if (savedDependencies?.length === dependencies.length && dependencies.every((value,index) => Object.is(value,savedDependencies![index]))) return;
-    store.write(model.captureSession()); savedDependencies = dependencies;
-  } catch (error) { console.error("[neoism-gpuix] Recovery checkpoint failed:", error instanceof Error ? error.message : "write failed"); }finally{profileEnd("recovery.checkpoint",start);} };
-  const timer = setInterval(checkpoint, 2000); timer.unref();
+    write = store.writeAsync(model.captureSession());
+    } catch (error) { console.error("[neoism-gpuix] Recovery checkpoint failed:", error instanceof Error ? error.message : "write failed"); }
+    finally { profileEnd("recovery.checkpoint",start); }
+    if (write) {
+      const pending=write.then(()=>{savedDependencies=dependencies;}).catch(error=>{
+        console.error("[neoism-gpuix] Recovery checkpoint failed:",error instanceof Error?error.message:"write failed");
+      });
+      pendingCheckpoint=pending;
+      await pending;
+      if(pendingCheckpoint===pending)pendingCheckpoint=undefined;
+    }
+  };
+  const timer = setInterval(()=>{void checkpoint();}, 2000); timer.unref();
   const runtime = ManagedRuntime.make(daemonLayer(client));
   model.start(); await runtime.runPromise(Daemon);
-  let disposed = false;
-  return { config, client, model, visuals,checkpoint, async dispose(preserveEditors = false) {
-    if (disposed) return; disposed = true; clearInterval(timer); checkpoint(); visuals.dispose();model.dispose(preserveEditors); await runtime.dispose();
+  let disposal: Promise<void> | undefined;
+  return { config, client, model, visuals,checkpoint, dispose(preserveEditors = false) {
+    return disposal ||= (async () => {
+      clearInterval(timer); await checkpoint(); visuals.dispose();model.dispose(preserveEditors); await runtime.dispose();
+    })();
   } };
 }
 const initialConfig = hotState?.config || bootstrap?.config || await ensureLocalDaemon(loadConfig());
@@ -160,7 +178,7 @@ async function connectServer(server: ServerSelection,reconnecting=false) {
       return loadConfig(args,{...process.env,NEOISM_GPUIX_DAEMON_URL:undefined,NEOISM_DAEMON_TOKEN:undefined,NEOISM_PAIRING_TOKEN:undefined});
     }),{signal:server.signal});
     if(server.signal?.aborted){prepared.ssh?.dispose();return;}
-    session.checkpoint();
+    await session.checkpoint();
     const focus={workspaceId:session.model.state.activeWorkspace?.id,surfaceId:session.model.state.activeSurfaceId};
     if(reconnecting&&prepared.config.transportIdentity===session.config.transportIdentity)prepared.config.workspaceId=focus.workspaceId;
     const previousSsh=sshAttachment;

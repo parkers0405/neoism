@@ -82,6 +82,30 @@ test("session files are atomic and private, scoped to daemon identity, and omit 
   expect(decodeSession({ version: 2, surfaces: [] })).toBeUndefined();
   expect(decodeSession({ version: 1, surfaces: [{ id: "bad", kind: "file" }] })?.surfaces).toEqual([]);
 });
+test("asynchronous checkpoints retain the newest snapshot and concurrent server profiles", async () => {
+  const directory=mkdtempSync(join(tmpdir(),"neoism-async-recovery-"));cleanups.push(()=>rmSync(directory,{recursive:true,force:true}));
+  const env={NEOISM_GPUIX_STATE_PATH:join(directory,"session.json")};
+  const a=new SessionStore({endpoint:"ws://host-a/session"},env),b=new SessionStore({endpoint:"ws://host-b/session"},env);
+  const saved=model().captureSession();
+  await Promise.all([
+    a.writeAsync({...saved,composerDrafts:{home:{text:"first"}}}),
+    b.writeAsync({...saved,composerDrafts:{home:{text:"other server"}}}),
+    a.writeAsync({...saved,composerDrafts:{home:{text:"latest unsent draft"}}}),
+  ]);
+  expect(a.read()?.composerDrafts.home.text).toBe("latest unsent draft");
+  expect(b.read()?.composerDrafts.home.text).toBe("other server");
+  if(process.platform!=="win32")expect(statSync(a.path).mode&0o777).toBe(0o600);
+});
+test("a failed asynchronous checkpoint does not poison later recovery writes", async () => {
+  const directory=mkdtempSync(join(tmpdir(),"neoism-recovery-retry-"));cleanups.push(()=>rmSync(directory,{recursive:true,force:true}));
+  const blocked=join(directory,"blocked");writeFileSync(blocked,"not a directory");
+  const store=new SessionStore({endpoint:"ws://fixture/session"},{NEOISM_GPUIX_STATE_PATH:join(blocked,"session.json")});
+  const saved=model().captureSession();
+  await expect(store.writeAsync(saved)).rejects.toThrow();
+  rmSync(blocked);
+  await store.writeAsync(saved);
+  expect(store.read()).toEqual(saved);
+});
 test("Welcome is recovered as its own tab without a terminal or Agent session", () => {
   const app = model(), welcome: Surface = { id: "welcome:a", kind: "welcome", title: "Welcome", workspaceId: "a" };
   app.update({ surfaces: [...app.state.surfaces, welcome], activeSurfaceId: welcome.id });

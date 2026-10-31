@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AppConfig } from "./config";
@@ -17,6 +18,9 @@ export interface SavedSession {
   ui: Record<string, unknown>;
 }
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+// Hot remounts and server profiles can briefly have separate stores for one
+// path. Keep their read/merge/replace transactions in order too.
+const pendingWrites = new Map<string, Promise<void>>();
 export function decodeSession(value: unknown): SavedSession | undefined {
   if (!record(value) || value.version !== 1 || !Array.isArray(value.surfaces)) return;
   const surfaces = value.surfaces.filter((s): s is Surface => record(s) && typeof s.id === "string" && typeof s.title === "string"
@@ -58,9 +62,7 @@ export class SessionStore {
     }
     catch { return; }
   }
-  write(session: SavedSession) {
-    let previous: Record<string, unknown> = {};
-    if (this.profiles && existsSync(this.path)) try { const value: unknown = JSON.parse(readFileSync(this.path, "utf8")); if (record(value)) previous = value; } catch {}
+  private encode(session: SavedSession, previous: Record<string, unknown>) {
     const profiles: Record<string, SavedSession> = {};
     if (this.profiles) {
       if (record(previous.profiles)) for (const [identity, value] of Object.entries(previous.profiles)) {
@@ -72,11 +74,37 @@ export class SessionStore {
     }
     // Keep the current snapshot at the top level for existing CLI/debug tools.
     // An explicit shared path additionally retains every server's private state.
-    const raw = JSON.stringify({ ...session, identity: this.identity, ...(this.profiles ? { profiles } : {}) });
+    return JSON.stringify({ ...session, identity: this.identity, ...(this.profiles ? { profiles } : {}) });
+  }
+  write(session: SavedSession) {
+    let previous: Record<string, unknown> = {};
+    if (this.profiles && existsSync(this.path)) try { const value: unknown = JSON.parse(readFileSync(this.path, "utf8")); if (record(value)) previous = value; } catch {}
+    const raw = this.encode(session, previous);
     if (raw === this.last) return;
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     const pending = `${this.path}.${process.pid}.next`;
     writeFileSync(pending, raw, { mode: 0o600 }); chmodSync(pending, 0o600);
     renameSync(pending, this.path); this.last = raw;
+  }
+  /** Serialize atomic replacements without blocking input/paint on filesystem
+   * latency. A failed write must not prevent subsequent recovery attempts. */
+  writeAsync(session: SavedSession): Promise<void> {
+    const next = (pendingWrites.get(this.path) || Promise.resolve()).then(async () => {
+      let previous: Record<string, unknown> = {};
+      if (this.profiles) try { const value: unknown = JSON.parse(await readFile(this.path, "utf8")); if (record(value)) previous = value; } catch {}
+      const raw = this.encode(session, previous);
+      if (raw === this.last) return;
+      await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+      const pending = `${this.path}.${process.pid}.next`;
+      await writeFile(pending, raw, { mode: 0o600 });
+      await chmod(pending, 0o600);
+      await rename(pending, this.path);
+      this.last = raw;
+    });
+    const settled = next.catch(() => {}).finally(() => {
+      if (pendingWrites.get(this.path) === settled) pendingWrites.delete(this.path);
+    });
+    pendingWrites.set(this.path, settled);
+    return next;
   }
 }

@@ -23,7 +23,13 @@ fn main() {
     // We use `git rev-parse --git-dir` instead of hardcoding ".git" to support worktrees,
     // where the git directory lives elsewhere (e.g., ../.git/worktrees/my-worktree).
     // Silently ignored if git unavailable (e.g., building from tarball).
-    let (git_hash, git_commit_epoch) = if source_date_epoch.is_some() {
+    // Cargo's packaged source has no repository of its own. In a vendored
+    // directory, git otherwise finds the embedding application's repository
+    // and invalidates this library (and all services) on unrelated commits.
+    let packaged_source = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join(".cargo_vcs_info.json")
+        .is_file();
+    let (git_hash, git_commit_epoch) = if source_date_epoch.is_some() || packaged_source {
         (None, None)
     } else {
         // Resolve git dir dynamically to support worktrees.

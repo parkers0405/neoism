@@ -13,6 +13,11 @@ on:
       - neoism-frontend/gpuix/tests/support/canonical-path.ts
       - neoism-frontend/gpuix/scripts/download-pinned.ts
   workflow_dispatch:
+    inputs:
+      native_fixtures:
+        description: Diagnose Windows fixtures with the previous compiled native bridge (never publishes)
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -47,3 +52,25 @@ jobs:
           ./node_modules/bun/bin/bun.exe scripts/build-sdk.ts
           ./node_modules/bun/bin/bun.exe scripts/sync-design.ts --check
           ./node_modules/bun/bin/bun.exe test ./tests/update-cli.test.ts ./tests/packaged-daemon.test.ts ./tests/sdk.test.ts ./tests/config.test.ts ./tests/pinned-download.test.ts ./tests/canonical-path.test.ts
+      - name: Restore previous Windows native bridge for fixture diagnosis
+        if: inputs.native_fixtures && runner.os == 'Windows'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            neoism-frontend/gpuix/artifacts/gpuix-rustup
+            target/gpuix-native-vsync
+            target/gpuix-core-cargo
+            target/release
+          key: fixture-diagnosis-${{ github.run_id }}
+          restore-keys: gpuix-native-windows-x86_64-
+          fail-on-cache-miss: true
+      - name: Diagnose Windows native fixtures without rebuilding services
+        if: inputs.native_fixtures && runner.os == 'Windows'
+        working-directory: neoism-frontend/gpuix
+        shell: pwsh
+        run: |
+          $env:NEOISM_GPUIX_CORE = (Resolve-Path '../../target/gpuix-core-cargo/release/neoism_gpuix_core.dll').Path
+          ./node_modules/bun/bin/bun.exe scripts/build-ghostty.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Ghostty fixture setup failed' }
+          ./node_modules/bun/bin/bun.exe test tests/agent-sidepanel-catalog.test.ts tests/breadcrumbs.test.ts tests/git-controller.test.ts tests/git-status.test.ts tests/markdown.test.ts tests/menu-actions.test.ts tests/ssh-transport.test.ts tests/status-directory.test.ts tests/workspace-cwd-label.test.ts tests/workspace-directory.test.ts tests/workspace-reorder.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Windows native fixtures failed' }

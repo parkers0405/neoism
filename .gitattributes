@@ -1,2 +1,5 @@
 # Preserve published dependency source bytes, including upstream whitespace.
 vendor/blaze-compat/** linguist-vendored -whitespace
+
+# Display patches are verified byte-for-byte on every build host.
+neoism-frontend/gpuix/native/patches/*.patch text eol=lf

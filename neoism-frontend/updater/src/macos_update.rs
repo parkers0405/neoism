@@ -1761,12 +1761,12 @@ mod tests {
         let renamed = bundle(root.path(), "home/Applications/Neoism Preview.app");
         assert_eq!(
             resolve(&renamed.join("Contents/MacOS/neoism")).unwrap(),
-            Installation::Bundle(renamed)
+            Installation::Bundle(fs::canonicalize(renamed).unwrap())
         );
         let no_extension = bundle(root.path(), "Neoism renamed without extension");
         assert_eq!(
             resolve(&no_extension.join("Contents/MacOS/neoism")).unwrap(),
-            Installation::Bundle(no_extension)
+            Installation::Bundle(fs::canonicalize(no_extension).unwrap())
         );
     }
 
@@ -1777,12 +1777,12 @@ mod tests {
         let app = bundle(root.path(), "Renamed.app");
         let launcher = root.path().join("neoism");
         std::os::unix::fs::symlink(app.join("Contents/MacOS/neoism"), &launcher).unwrap();
-        assert_eq!(resolve(&launcher).unwrap(), Installation::Bundle(app));
+        assert_eq!(resolve(&launcher).unwrap(), Installation::Bundle(fs::canonicalize(app).unwrap()));
         fs::remove_file(&launcher).unwrap();
         let cli = root.path().join("loose");
         fs::write(&cli, "cli").unwrap();
         std::os::unix::fs::symlink(&cli, &launcher).unwrap();
-        assert_eq!(resolve(&launcher).unwrap(), Installation::Loose(cli));
+        assert_eq!(resolve(&launcher).unwrap(), Installation::Loose(fs::canonicalize(cli).unwrap()));
     }
 
     #[test]

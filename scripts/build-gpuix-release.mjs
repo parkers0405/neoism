@@ -9,7 +9,10 @@ const frontend=join(root,'neoism-frontend/gpuix'),sdk=join(root,'neoism-agent/sd
 const windows=process.platform==='win32',suffix=windows?'.exe':'';
 const env={...process.env,NEOISM_GPUIX_RUST_BUILDER:'cargo',NEOISM_GPUIX_BUILD_PROFILE:'release',CARGO_PROFILE_RELEASE_DEBUG:'0',CARGO_PROFILE_RELEASE_LTO:'thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS:'16'};
 function run(program,args,cwd=root){
+ const label=`${program} ${args.join(' ')}`;
+ console.log(process.env.GITHUB_ACTIONS?`::group::${label}`:label);
  const result=spawnSync(program,args,{cwd,env,stdio:'inherit',shell:windows&&program==='npm'});
+ if(process.env.GITHUB_ACTIONS)console.log('::endgroup::');
  if(result.error)throw result.error;
  if(result.status!==0)throw Error(`${program} ${args.join(' ')} failed (${result.status})`);
 }

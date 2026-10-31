@@ -1,5 +1,5 @@
 import {expect,test} from "bun:test";
-import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from "node:fs";
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync,realpathSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {updateArguments,updaterPath} from "../src/update-cli";
@@ -8,7 +8,7 @@ test("update aliases are handled before window startup while ordinary launches p
  expect(updateArguments(["--version"])).toBeUndefined();expect(updateArguments(["src/main.rs"])).toBeUndefined();
 });
 test("updater resolution uses the invoking portable installation or macOS app resources",()=>{
- const root=mkdtempSync(join(tmpdir(),"neoism update spaces "));
+ const root=realpathSync(mkdtempSync(join(tmpdir(),"neoism update spaces ")));
  try{
   for(const platform of ["linux","win32","darwin"] as const){
    const dir=join(root,platform,platform==="darwin"?"Neoism.app/Contents/MacOS":"bin"),exe=join(dir,platform==="win32"?"neoism.exe":"neoism");

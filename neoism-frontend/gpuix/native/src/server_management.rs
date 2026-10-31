@@ -44,7 +44,7 @@ fn stop_hosted(spec:&HostedServerSpec){
    if args.iter().any(|arg|arg=="--neoism-internal-hosted-workspace-daemon")
     && args.windows(2).any(|pair|pair[0]=="--state-dir"&&std::path::Path::new(&pair[1])==spec.state_dir)
     && args.windows(2).any(|pair|pair[0]=="--addr"&&pair[1]==std::ffi::OsStr::new(&address)){
-     // Windows has no SIGTERM; use the verified process handle's native kill.
+     // Windows has no SIGTERM; use its supported kill signal for this matched process.
      if process.kill_with(sysinfo::Signal::Term).is_none(){process.kill();}
    }
   }

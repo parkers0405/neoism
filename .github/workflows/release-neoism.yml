@@ -113,6 +113,13 @@ jobs:
             gpuix-native-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/*') }}-
             gpuix-native-${{ matrix.asset }}-
             gpuix-display-${{ matrix.asset }}-
+      - uses: actions/cache/restore@v4
+        id: zig-cache
+        with:
+          path: |
+            neoism-frontend/gpuix/artifacts/zig-*.tar.xz
+            neoism-frontend/gpuix/artifacts/zig-*.zip
+          key: zig-archives-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/ghostty-pin.json') }}
       - name: Build, test, and package native app and services
         run: node scripts/build-gpuix-release.mjs
       - name: Build and validate Windows MSI and updater transactions
@@ -157,3 +164,11 @@ jobs:
             target/gpuix-native-vsync
             target/gpuix-core-cargo
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
+      - name: Save verified Zig archives
+        if: always() && steps.zig-cache.outputs.cache-primary-key != '' && steps.zig-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            neoism-frontend/gpuix/artifacts/zig-*.tar.xz
+            neoism-frontend/gpuix/artifacts/zig-*.zip
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}

@@ -8,6 +8,8 @@ on:
       - neoism-frontend/gpuix/tests/packaged-daemon.test.ts
       - neoism-frontend/gpuix/tests/sdk.test.ts
       - neoism-frontend/gpuix/tests/config.test.ts
+      - neoism-frontend/gpuix/tests/pinned-download.test.ts
+      - neoism-frontend/gpuix/scripts/download-pinned.ts
   workflow_dispatch:
 permissions:
   contents: read
@@ -42,4 +44,4 @@ jobs:
         run: |
           ./node_modules/bun/bin/bun.exe scripts/build-sdk.ts
           ./node_modules/bun/bin/bun.exe scripts/sync-design.ts --check
-          ./node_modules/bun/bin/bun.exe test ./tests/update-cli.test.ts ./tests/packaged-daemon.test.ts ./tests/sdk.test.ts ./tests/config.test.ts
+          ./node_modules/bun/bin/bun.exe test ./tests/update-cli.test.ts ./tests/packaged-daemon.test.ts ./tests/sdk.test.ts ./tests/config.test.ts ./tests/pinned-download.test.ts

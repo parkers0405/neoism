@@ -18,6 +18,8 @@ function run(program,args,cwd=root){
 }
 run('npm',['ci'],sdk);run('npm',['ci'],frontend);
 const bun=join(frontend,'node_modules/bun/bin/bun.exe');
+// Fail early on toolchain/network problems before compiling the Rust services.
+run(bun,['scripts/build-ghostty.ts'],frontend);
 run('cargo',['build','--locked','--release','-p','neoism-workspace-daemon','-p','neoism-agent','-p','neoism-update-helper']);
 run('cargo',['test','--locked','--release','-p','neoism-update-helper','--bin','neoism-update-helper']);
 env.NEOISM_GPUIX_WORKSPACE_DAEMON=join(root,`target/release/neoism-workspace-daemon${suffix}`);

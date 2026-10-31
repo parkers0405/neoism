@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import {downloadPinned,zigDownloadUrls} from "./download-pinned";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { resolve, join } from "node:path";
 
@@ -30,14 +30,7 @@ const tools = join(artifacts, `zig-${pin.zigVersion}-${target}`);
 const zig = join(tools, platform === "windows" ? "zig.exe" : "zig");
 if (!existsSync(zig)) {
   const archive = join(artifacts, `zig-${pin.zigVersion}-${target}${platform === "windows" ? ".zip" : ".tar.xz"}`);
-  if (!existsSync(archive)) {
-    console.log(`Downloading pinned Zig ${pin.zigVersion} for ${target}…`);
-    const response = await fetch(release.url);
-    if (!response.ok) throw new Error(`Zig download failed (${response.status})`);
-    await Bun.write(archive, response);
-  }
-  const digest = createHash("sha256").update(readFileSync(archive)).digest("hex");
-  if (digest !== release.sha256) throw new Error("Pinned Zig archive checksum mismatch");
+  await downloadPinned(zigDownloadUrls(release.url),archive,release.sha256);
   mkdirSync(tools, { recursive: true });
   // Windows ships bsdtar, which also extracts the verified ZIP archive.
   await run(["tar", "-xf", archive, "--strip-components=1", "-C", tools]);

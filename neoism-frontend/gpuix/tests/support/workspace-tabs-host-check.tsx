@@ -27,7 +27,7 @@ function recordingRenderer(){
   if(testId==="workspace-tabs"||testId==="workspace-tab-scroll")return{x:300,y:30,width:360,height:30};
   if(testId.startsWith("workspace:")){const logical=logicalBounds(id);return{...logical,x:logical.x+Number(node?.style.left||0)};}
   if(testId.startsWith("workspace-close:")){const parent=byTestId(`workspace:${testId.slice("workspace-close:".length)}`),tab=parent&&bounds(parent.id);return tab?{x:tab.x+100,y:36,width:18,height:18}:null;}
-  if(testId==="workspace-drag-preview"){const parent=[...nodes.values()].find(parent=>parent.children.includes(id));return{x:Number(parent?.style.left||0)+Number(node?.style.left||0),y:Number(parent?.style.top||0),width:Number(node?.style.width||0),height:Number(node?.style.height||0)};}
+  if(testId==="workspace-drag-preview"){const parent=[...nodes.values()].find(parent=>parent.children.includes(id));return{x:Number(parent?.style.left||0)+Number(node?.style.left||0),y:Number(parent?.style.top||0)+Number(node?.style.top||0),width:Number(node?.style.width||0),height:Number(node?.style.height||0)};}
   if(testId==="workspace-new")return{x:300+tabNodes().length*130-offset,y:30,width:30,height:30};
   return null;
  };
@@ -61,7 +61,7 @@ const host=recordingRenderer(),root=createRoot(host.renderer),registered=new Map
 const[tabConfig,setTabConfig]=createSignal(config);
 const[state,setState]=createSignal(model.state);let release=()=>{},failure:unknown;
 let activations=0,closes=0,creates=0,reorders=0;let closeTask:Promise<boolean>|undefined,createTask:ReturnType<WorkspaceModel["newWorkspace"]>|undefined;
-let pointerFollowingSamples=0,intermediateSlideSamples=0;
+let pointerFollowingSamples=0,intermediateSlideSamples=0,retargetedCloseClicks=0;
 const dispatch=(id:number,type:string,x:number,y:number)=>root.dispatch({elementId:id,eventType:type,x,y,button:0,pressedButton:0} satisfies EventPayload);
 const node=(testId:string)=>{const node=host.byTestId(testId);assert.ok(node,`missing ${testId}`);return node;};
 const box=(testId:string)=>{const value=host.bounds(node(testId).id);assert.ok(value,`missing bounds ${testId}`);return value;};
@@ -71,24 +71,30 @@ const membership=()=>model.windowWorkspaces().map(workspace=>workspace.id);
 const settle=async()=>{await Promise.resolve();root.flush();};
 const assertNonselectableText=(id:number)=>{const texts=host.descendants(id).filter(node=>node.type==="text"&&(node.props.testId!==undefined||node.children.length>0));assert.ok(texts.length>0);for(const text of texts){assert.equal(text.style.userSelect,"none","tab chrome cannot initiate native text selection");assert.equal(text.style.pointerEvents,"none","tab text forwards the full grab area to the tab host");}};
 async function closeWithNativeBubbling(id:string){
+ const following=membership()[membership().indexOf(id)+1];
  const close=node(`workspace-close:${id}`),tab=node(`workspace:${id}`),bounds=box(`workspace-close:${id}`),x=bounds.x+9,y=bounds.y+9;
- dispatch(close.id,"mouseDown",x,y);await settle();dispatch(tab.id,"mouseDown",x,y);await settle();
- dispatch(close.id,"click",x,y);
+ dispatch(close.id,"mouseDown",x,y);await closeTask;await settle();dispatch(tab.id,"mouseDown",x,y);await settle();
+ // After removal, the same physical release/click can hit the next X.
+ const retargeted=!host.byTestId(`workspace:${id}`)&&following?host.byTestId(`workspace-close:${following}`):undefined;
+ dispatch(retargeted?.id||close.id,"click",x,y);
+ if(retargeted){retargetedCloseClicks++;dispatch(node(`workspace:${following}`).id,"click",x,y);}
  // GPUI delivers child and parent native callbacks separately; the old
  // queueMicrotask close guard expired here and activated the closed tab.
  await settle();dispatch(tab.id,"click",x,y);await closeTask;await settle();
 }
 async function drag(id:string,targetId:string,side:"before"|"after"){
- const before=membership(),originalHosts=new Map([...registered].map(([id,host])=>[id,host])),ids=new Map(host.tabNodes().map(node=>[node.props.testId,node.id]));
+ const before=membership(),expected=before.filter(value=>value!==id);expected.splice(expected.indexOf(targetId)+(side==="after"?1:0),0,id);
+ const originalHosts=new Map([...registered].map(([id,host])=>[id,host])),ids=new Map(host.tabNodes().map(node=>[node.props.testId,node.id]));
  const tab=node(`workspace:${id}`),source=box(`workspace:${id}`),target=host.logicalBounds(node(`workspace:${targetId}`).id),x=Math.max(310,source.x+60),y=45,endX=target.x+(side==="before"?30:90),grab=x-source.x;
  dispatch(tab.id,"mouseDown",x,y);dispatch(tab.id,"mouseMove",x+(endX>=x?8:-8),y);await settle();
  const layer=node("workspace-drag-layer");dispatch(layer.id,"mouseMove",endX,y);await settle();assert.ok(Math.abs(box(`workspace:${id}`).x+grab-endX)<.01,"dragged stable host follows actual pointer");
+ assert.deepEqual(membership(),expected,"Neighbors must reorder while the mouse is still held, like buffer tabs");
+ assert.equal(box("workspace-drag-preview").y,y-box("workspace-drag-preview").height/2,"Drag preview is centered on the pointer like buffer tabs");
  assertNonselectableText(node("workspace-drag-preview").id);
  assert.equal(ink("workspace-drag-preview-icon"),ink(`workspace-icon:${id}`),"drag preview preserves exact cloud/folder metadata of its source tab");
  assert.ok(Math.abs(box("workspace-drag-preview").x+grab-endX)<.01,"foreground painted preview follows the same pointer");assert.equal(node(`workspace:${id}`).style.opacity,0);pointerFollowingSamples++;
  dispatch(layer.id,"mouseUp",endX,y);await settle();
  dispatch(tab.id,"click",endX,y);await settle();
- const expected=before.filter(value=>value!==id);expected.splice(expected.indexOf(targetId)+(side==="after"?1:0),0,id);
  assert.deepEqual(membership(),expected);assert.deepEqual(order(),expected);
  for(const[id,original]of originalHosts)assert.equal(registered.get(id),original,"keyed drag must retain the actual Solid HostElement");
  for(const tab of host.tabNodes())assert.equal(tab.id,ids.get(tab.props.testId),"keyed drag must retain native element IDs");
@@ -121,12 +127,13 @@ try{
  const requestsBefore=server.workspaceRequests.length,activeBefore=model.state.activeWorkspace!.id;
  await closeWithNativeBubbling("b");assert.equal(closes,1);assert.equal(activations,0);assert.equal(model.state.activeWorkspace!.id,activeBefore);assert.deepEqual(order(),["a","b","c"]);assert.ok(model.state.error?.includes(":qall!"));assert.equal(model.getEditor(dirtySurface).frame.dirty,true);
  assert.equal(server.workspaceRequests.length,requestsBefore,"dirty inactive X never activates/subscribes");
- await model.saveFile(dirtySurface);await closeWithNativeBubbling("b");assert.equal(closes,2);assert.equal(activations,0);assert.deepEqual(order(),["a","c"]);assert.equal(model.state.activeWorkspace!.id,"a");assert.equal(server.workspaces.length,3);
+ await model.saveFile(dirtySurface);await closeWithNativeBubbling("b");assert.equal(closes,2);assert.equal(retargetedCloseClicks,1,"A release/click must actually land on the neighboring X after the first tab disappears");assert.equal(activations,0);assert.deepEqual(order(),["a","c"]);assert.equal(model.state.activeWorkspace!.id,"a");assert.equal(server.workspaces.length,3);
  assert.equal(server.workspaceRequests.length,requestsBefore,"clean inactive X only hides membership");
  await drag("a","c","after");assert.equal(activations,0);assert.equal(reorders,1);assert.equal(server.workspaceRequests.length,requestsBefore);
  // Translate the painted hosts without onLayout, as horizontal scrolling
  // does in GPUIX. The component must query current bounds at final drop.
  host.setOffset(65);await drag("c","a","after");assert.equal(activations,0);assert.equal(reorders,2);
+ await Bun.sleep(300);await settle();
  const tab=node("workspace:a"),tabBox=box("workspace:a"),beforeCancel=membership();dispatch(tab.id,"mouseDown",tabBox.x+60,45);dispatch(tab.id,"mouseMove",tabBox.x+80,45);await settle();const layer=node("workspace-drag-layer");dispatch(layer.id,"mouseUp",tabBox.x+80,120);await settle();dispatch(tab.id,"click",tabBox.x+80,120);assert.deepEqual(membership(),beforeCancel);assert.equal(reorders,2);assert.equal(activations,0);
  const plus=node("workspace-new"),plusBounds=box("workspace-new");dispatch(plus.id,"mouseDown",plusBounds.x+15,45);dispatch(plus.id,"click",plusBounds.x+15,45);const created=await createTask;await settle();assert.ok(created);assert.equal(creates,1);assert.equal(server.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length,1);assert.equal(model.state.activeSurfaceId,`welcome:${created.id}`);assert.deepEqual(order(),membership());
  // Full disk decoding plus a new model, never a window relaunch.

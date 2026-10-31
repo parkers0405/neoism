@@ -1,3 +1,4 @@
+import {connectionRecovery} from "./workspaces/connection-recovery";
 import {WindowWorkspaceSessions,localWorkspaceSession} from "./workspaces/window-sessions";
 import * as Effect from "effect/Effect";
 import { createRenderer, render } from "@gpuix/solid";
@@ -56,14 +57,14 @@ const stateGlobals = globalThis as typeof globalThis & { [stateKey]?: HotState }
 const hotState = stateGlobals[stateKey]; delete stateGlobals[stateKey];
 sshAttachment=hotState?.ssh;
 
-async function createSession(config: AppConfig, seed?: HotState) {
+async function createSession(config: AppConfig, seed?: HotState, singleWorkspace=false) {
   coreCall("paint.prewarm",{fontFamily:config.fontFamily,fontWeight:config.fontWeight,markdownFontFamily:config.markdownFontFamily,iconFontFamily:config.iconFontFamily});
   profileStartup("fonts-started");
   for (const warning of config.warnings) console.error(`[neoism-gpuix] ${warning}`);
   const client = new DaemonConnection(config), model = new WorkspaceModel(client, config, seed),visuals=new AppVisualState();
   profileStartup("model-created");
   const store = new SessionStore(config);
-  if (!seed) { const recovery = store.read(); if (recovery) model.restoreSession(recovery); }
+  if (!seed) { const recovery = store.read(); if (recovery) model.restoreSession(singleWorkspace?connectionRecovery(recovery,config.workspaceId):recovery); }
   profileStartup("recovery-loaded");
   let savedDependencies: unknown[] | undefined;
   let pendingCheckpoint: Promise<void> | undefined;
@@ -227,7 +228,7 @@ async function connectServer(server: ServerSelection,reconnecting=false) {
       if(prepared.config.transportIdentity===previous.config.transportIdentity)prepared.config.workspaceId=focus.workspaceId;
     }
     let next:typeof session;
-    try{next=await createSession(prepared.config);}catch(error){prepared.ssh?.dispose();throw error;}
+    try{next=await createSession(prepared.config,undefined,!reconnecting&&server.id!=="local");}catch(error){prepared.ssh?.dispose();throw error;}
     next.ssh=prepared.ssh;next.server={...server,signal:undefined};
     if(server.signal?.aborted){await next.dispose();next.ssh?.dispose();return;}
     if(reconnecting){

@@ -14,6 +14,7 @@ on:
         options: [all, linux, macos, windows]
 permissions:
   contents: write
+  actions: read
 jobs:
   prepare:
     runs-on: ubuntu-24.04
@@ -123,6 +124,7 @@ jobs:
       # versions include the complete path list, so recover that snapshot once
       # when no separate service cache exists, then save the split caches below.
       - name: Recover compilation from the transitional combined cache
+        id: combined-cache
         if: steps.service-cache.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v4
         with:
@@ -140,6 +142,13 @@ jobs:
             neoism-frontend/gpuix/artifacts/zig-*.tar.xz
             neoism-frontend/gpuix/artifacts/zig-*.zip
           key: zig-archives-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/ghostty-pin.json') }}
+      - name: Reuse unchanged source from restored compilation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERVICE_CACHE_KEY: ${{ steps.service-cache.outputs.cache-matched-key }}
+          NATIVE_CACHE_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
+          COMBINED_CACHE_KEY: ${{ steps.combined-cache.outputs.cache-matched-key }}
+        run: python scripts/restore-cached-source-times.py
       - name: Build, test, and package native app and services
         run: node scripts/build-gpuix-release.mjs
       - name: Build and validate Windows MSI and updater transactions

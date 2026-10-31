@@ -11,6 +11,7 @@ import { NativeMarkdown } from "./markdown/NativeMarkdown";
 import type { SavedSession } from "./session-store";
 import { WorkspaceLayout, type LayoutSnapshot, type SplitAxis, type FocusDirection } from "./layout/WorkspaceLayout";
 import { relative, isAbsolute, posix, win32 } from "node:path";
+import {hostPaths} from "./workspaces/host-paths";
 import { closeTerminalSession, disposeTerminalSessions,onTerminalUnavailable,terminalSession } from "./terminal/sessions";
 import { absoluteTerminalDirectory,mainTerminalSurface,followsTerminalDirectory,terminalDirectoryFollowsWorkspace } from "./terminal/workspace";
 import {getWindowWorkspaces,includeWindowWorkspace,openWorkspaceIds,reorderWindowWorkspace} from "./workspaces/window-tabs";
@@ -597,7 +598,7 @@ export class WorkspaceModel {
     const workspace=this.state.activeWorkspace,epoch=this.epoch;
     const root=notes?workspace?.notes_vault_dir:workspace?.root_dir;
     if(!workspace||!root)return;
-    const paths=/^[a-z]:[\\/]/i.test(root)||root.startsWith("\\\\")?win32:posix;
+    const paths=hostPaths(root);
     const relativePath=(value:string)=>paths.relative(root,paths.resolve(root,value)).replaceAll("\\","/");
     from=relativePath(from);directory=relativePath(directory);
     const outside=(path:string)=>path===".."||path.startsWith("../")||paths.isAbsolute(path);
@@ -661,7 +662,7 @@ export class WorkspaceModel {
   loadGitEditor = async (root: string, path: string): Promise<NativeEditor> => {
     const workspace = this.state.activeWorkspace;
     if (!workspace || !root) throw new Error("Select a repository workspace first");
-    const paths = /^[a-z]:[\\/]/i.test(root) ? win32 : posix;
+    const paths = hostPaths(root);
     const absolute = paths.resolve(root, path), relativePath = paths.relative(root, absolute);
     if (!relativePath || relativePath === ".." || relativePath.startsWith(".." + paths.sep) || paths.isAbsolute(relativePath))
       throw new Error("Git source is outside its repository");
@@ -694,7 +695,7 @@ export class WorkspaceModel {
   /** Successful host restore changed disk. Refresh only existing, unchanged
    * clean owners; neither a late reply nor Git may overwrite local edits. */
   refreshGitSource = async (root:string,path:string):Promise<void> => {
-    const paths=/^[a-z]:[\\/]/i.test(root)||root.startsWith("\\\\")?win32:posix;
+    const paths=hostPaths(root);
     const absolute=paths.resolve(root,path),relativePath=paths.relative(root,absolute);
     if(!root||!relativePath||relativePath===".."||relativePath.startsWith(".."+paths.sep)||paths.isAbsolute(relativePath))throw new Error("Git source is outside its repository");
     const owners=this.state.surfaces.filter(surface=>surface.kind==="file"&&!surface.document&&paths.normalize(this.hostPath(surface))===absolute&&!this.surfaceDirty(surface.id)).map(surface=>{
@@ -869,7 +870,7 @@ export class WorkspaceModel {
     if (!view) {
       const markdown = new NativeMarkdown(this.getEditor(surface, leaf), this.config, this.hostPath(surface), async path => {
         const root = surface.rootDir || this.state.workspaces.find(w => w.id === surface.workspaceId)?.root_dir || "";
-        const paths = /^[a-z]:[\\/]/i.test(root) ? win32 : posix;
+        const paths = hostPaths(root);
         const relativePath = paths.relative(root, path);
         if (root && relativePath !== ".." && !relativePath.startsWith(".." + paths.sep) && !paths.isAbsolute(relativePath)) {
           const reply = await this.run(this.client.request("Files", { ReadFile: { path: relativePath.replaceAll("\\", "/") } }, root));
@@ -884,13 +885,13 @@ export class WorkspaceModel {
   }
   hostPath(surface: Surface) {
     const root = surface.rootDir || this.state.workspaces.find((w) => w.id === surface.workspaceId)?.root_dir || "";
-    const paths = /^[a-z]:[\\/]/i.test(root) ? win32 : posix;
+    const paths = hostPaths(root);
     return paths.resolve(root, surface.path || "");
   }
   private scopedEditorPath(path: string) {
     const workspace = this.state.activeWorkspace, root = workspace?.root_dir;
     if (!workspace || !root) throw new Error("Select a workspace first");
-    const paths = /^[a-z]:[\\/]/i.test(root) ? win32 : posix;
+    const paths = hostPaths(root);
     const relativePath = paths.isAbsolute(path) ? paths.relative(root, path) : path;
     if (relativePath === ".." || relativePath.startsWith(".." + paths.sep) || paths.isAbsolute(relativePath)) throw new Error("This location is outside the current workspace");
     return { workspace, path: relativePath.replaceAll("\\", "/"), root };
@@ -1140,7 +1141,7 @@ export class WorkspaceModel {
     // authorized workspace. Resolve project config within that scope; an
     // outside cwd must use the workspace endpoint's authoritative default.
     const root=this.state.workspaces.find(entry=>entry.id===workspace.id)?.root_dir;
-    const paths=root&&(/^[a-z]:[\\/]/i.test(root)||root.startsWith("\\\\"))?win32:posix;
+    const paths=hostPaths(root||"");
     const child=root&&workspace.root_dir?paths.relative(root,workspace.root_dir):undefined;
     const directory=child!==undefined&&child!==".."&&!child.startsWith(`..${paths.sep}`)&&!paths.isAbsolute(child)?workspace.root_dir||undefined:undefined;
     const key=JSON.stringify([workspace.id,workspace.root_dir||""]);

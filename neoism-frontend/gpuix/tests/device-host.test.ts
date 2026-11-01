@@ -733,6 +733,11 @@ function pam(width: number, height: number, fill: number): Uint8Array {
   out.set(header); out.fill(fill, header.length); return out;
 }
 
+// FFmpeg is a user-supplied dependency of the optional device preview only.
+// Enabled builds must exercise it; ordinary builds still run every protocol
+// and mocked-decoder check without requiring an excluded runtime dependency.
+const testRealDecoder = test.skipIf(!Bun.which("ffmpeg") && process.env.NEOISM_GPUIX_DEVICE_PREVIEW !== "1");
+
 describe("ffmpeg RGBA process adapter", () => {
   test("parses fragmented PAM and changing dimensions; rejects oversized frames", () => {
     const parser = new PamFrames();
@@ -764,7 +769,7 @@ describe("ffmpeg RGBA process adapter", () => {
     await expect(decoder.write(new Uint8Array([1]))).rejects.toThrow("closed");
   });
 
-  test("real ffmpeg decodes H264 into RGBA without Chromium", async () => {
+  testRealDecoder("real ffmpeg decodes H264 into RGBA without Chromium", async () => {
     const fixture = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=16x16:r=10", "-frames:v", "4", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-f", "h264", "pipe:1"], { maxBuffer: 1024 * 1024 });
     expect(fixture.status).toBe(0);
     const frames: DeviceFrame[] = [];
@@ -783,7 +788,7 @@ describe("ffmpeg RGBA process adapter", () => {
     } finally { decoder.close(); }
   });
 
-  test("real ffmpeg contain-scales a large simulator framebuffer to a 1280-pixel longest edge", async () => {
+  testRealDecoder("real ffmpeg contain-scales a large simulator framebuffer to a 1280-pixel longest edge", async () => {
     const width = 1260, height = 2740;
     const fixture = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=blue:s=${width}x${height}:r=10`, "-frames:v", "4", "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-tune", "zerolatency", "-f", "h264", "pipe:1"], { maxBuffer: 1024 * 1024 });
     expect(fixture.status).toBe(0);
@@ -807,7 +812,7 @@ describe("ffmpeg RGBA process adapter", () => {
     } finally { decoder.close(); }
   });
 
-  test("end-to-end HTTP discovery + actual WebSocket H264 + lazy ffmpeg + touch input", async () => {
+  testRealDecoder("end-to-end HTTP discovery + actual WebSocket H264 + lazy ffmpeg + touch input", async () => {
     const fixture = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=16x16:r=10", "-frames:v", "4", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-f", "h264", "pipe:1"]);
     expect(fixture.status).toBe(0);
     const inputs: any[] = [];
@@ -848,7 +853,7 @@ describe("ffmpeg RGBA process adapter", () => {
     } finally { host.close(); server.stop(true); }
   });
 
-  test("real decoder preserves changing framebuffer sizes rather than autoscaling", async () => {
+  testRealDecoder("real decoder preserves changing framebuffer sizes rather than autoscaling", async () => {
     const segments = ["16x16", "32x16"].map(size => spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=red:s=${size}:r=10`, "-frames:v", "4", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-f", "h264", "pipe:1"]));
     expect(segments.every(segment => segment.status === 0)).toBe(true);
     const frames: DeviceFrame[] = [];

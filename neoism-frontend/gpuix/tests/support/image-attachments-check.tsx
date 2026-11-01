@@ -15,7 +15,12 @@ const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer();
 const uploaded:Uint8Array[]=[];host.renderer.setImage=(_id,bytes)=>{uploaded.push(bytes);};
 const root=createRoot(host.renderer);let stage="setup",replayed=0;
-(host.renderer as typeof host.renderer & {simulateKeystrokes:(keys:string)=>void}).simulateKeystrokes=()=>{replayed++;root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"v",modifiers:{ctrl:true,cmd:false,alt:false,shift:false}});};
+(host.renderer as typeof host.renderer & {simulateKeystrokes:(keys:string)=>void}).simulateKeystrokes=(keys)=>{
+ assert.equal(keys,process.platform==="darwin"?"cmd-v":"ctrl-v");replayed++;
+ // Native Paste consumes the canonical chord. Only an image clipboard emits
+ // the image-only fallback; text is inserted by the native input itself.
+ if(clipboard)root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"paste"});
+};
 const until=async(check:()=>boolean)=>{const end=Date.now()+5000;while(!check()){await host.pump(root);if(Date.now()>end)throw Error(`Attachment test stalled: ${stage}`);await Bun.sleep(5);}await host.pump(root);};
 const paste=async(cmd=false)=>{root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"v",modifiers:{ctrl:!cmd,cmd,alt:false,shift:false}});await host.pump(root);};
 const preview=()=>[...host.nodes.values()].find(n=>String(n.props.testId).startsWith("attachment-preview:"))!;
@@ -25,7 +30,7 @@ try{
  root.render(()=><App model={model} config={config} visuals={visuals}/>);await until(()=>!!host.find("composer"));
  host.renderer.focusElement?.(host.find("composer")!.id);await host.pump(root);
  stage="paste screenshot";await paste();await until(()=>!!preview());
- assert.equal(replayed,0,"Image paste must not also insert text");assert.ok(uploaded.some(bytes=>Buffer.from(bytes).equals(png)),"Thumbnail uploads the actual screenshot");
+ assert.equal(replayed,1,"A forwarded image shortcut invokes native Paste once");assert.ok(uploaded.some(bytes=>Buffer.from(bytes).equals(png)),"Thumbnail uploads the actual screenshot");
  root.dispatch({elementId:preview().id,eventType:"click"});stage="open preview";await until(()=>!!host.find("image-preview-modal")&&host.focused===host.find("image-preview-modal")?.id);
  assert.ok(host.find("image-preview-full"));root.dispatch({elementId:host.find("image-preview-close")!.id,eventType:"click"});await until(()=>!host.find("image-preview-modal"));
  assert.equal(host.focused,host.find("composer")!.id,"Closing preview restores typing focus");
@@ -33,7 +38,7 @@ try{
  stage="mac shortcut";await paste(true);await until(()=>Object.values(model.state.composerDrafts).some(d=>d.attachments.length===2));
  const draft=Object.values(model.state.composerDrafts).find(d=>d.attachments.length===2)!;
  assert.notEqual(draft.attachments[0].token,draft.attachments[1].token);assert.deepEqual(draft.attachments[0].bytes,Array.from(png));
- stage="text fallback";clipboard=undefined;await paste();await host.pump(root);assert.equal(replayed,0,"Keyboard text paste remains native and is never replayed twice");assert.equal(draft.attachments.length,2);
+ stage="text fallback";clipboard=undefined;await paste();await host.pump(root);assert.equal(replayed,3,"Each forwarded shortcut invokes native Paste exactly once");assert.equal(draft.attachments.length,2);
  stage="remove";const remove=[...host.nodes.values()].find(n=>n.props["aria-label"]==="Remove clipboard-image-1.png")!;root.dispatch({elementId:remove.id,eventType:"click"});await host.pump(root);
  assert.ok(Object.values(model.state.composerDrafts).some(d=>d.attachments.length===1&&!d.text.includes(draft.attachments[0].token)));
  console.log("screenshot paste, thumbnail, modal close/Escape, mac shortcut, text fallback and removal passed");

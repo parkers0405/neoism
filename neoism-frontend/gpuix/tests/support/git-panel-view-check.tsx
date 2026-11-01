@@ -42,6 +42,12 @@ try{
  root.dispatch({elementId:drag.id,eventType:"mouseMove",pressedButton:0,x:x-35,y});root.dispatch({elementId:drag.id,eventType:"mouseUp",button:0,x:x-35,y});await host.pump(root);assert.equal(controller.frame.width,width+35);
  await until(()=>!!cursor?.bounds);const rect=controller.frame.cursorRect!;assert.deepEqual(cursor!.bounds,{x:viewport.x+rect[0],y:viewport.y+rect[1],width:rect[2],height:rect[3]});
  assert.equal(host.find("original-paint-layer")!.id,paint);assert.equal(host.find("git-diff-panel")!.id,panel.id);assert.ok(daemon.requests.filter(request=>request.family==="Git").every(request=>request.workspaceRoot==="/fixture"));
+ const scrolls:Record<string,unknown>[]=[];const originalCall=controller.call.bind(controller);
+ controller.call=(op,args={})=>{if(op==="scroll")scrolls.push(args);return originalCall(op,args);};
+ for(const precise of [true,false]){
+  root.dispatch({elementId:panel.id,eventType:"scroll",deltaY:-7.75,precise,x:viewport.x+50,y:viewport.y+100});
+  assert.equal(scrolls.at(-1)!.delta,precise?-15.5:-310);assert.equal(scrolls.at(-1)!.precise,precise);
+ }
  await click("close");assert.equal(closed,1);assert.equal(host.find("git-diff-panel"),undefined);
  console.log(JSON.stringify({noWindow:true,originalRustGitPaint:true,sourceCoordinateTranslation:true,actualScopedFixtureRequests:true,nativeFileReviewAndStage:true,commitMessagePreservedOnFailure:true,branchCheckoutAndResize:true,exactGlobalCursorTarget:true,stablePaintAndFocusHosts:true,backgroundRefreshDoesNotRefocus:true,closeWorks:true}));
 }catch(error){console.error(JSON.stringify({frame:controller&&{visible:controller.frame.visible,error:controller.frame.error,commit:controller.frame.commitText,files:controller.frame.files,branch:controller.frame.branch,cursor:controller.frame.cursorRect,hits:controller.frame.hits},requests:daemon.requests,closed}));throw error;}

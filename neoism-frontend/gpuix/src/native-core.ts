@@ -30,7 +30,10 @@ export function coreCall<T = unknown>(op: string, args: Record<string, unknown> 
   if (!result) throw new Error("Native engine returned no response");
   try {
     const decodeStart=profileStart(),json=new CString(result).toString();
+    profileEnd("core.readResponse",decodeStart,json.length);
+    const parseStart=profileStart();
     const value: { ok?: T; error?: string } = JSON.parse(json);
+    profileEnd("core.parseResponse",parseStart);
     profileEnd("core.decode",decodeStart,json.length);
     if (value.error) throw new Error(value.error);
     return value.ok as T;
@@ -53,7 +56,7 @@ export interface EditorFrame {
   cursor: { x: number; y: number; line: number; col: number; shape: "Block" | "Beam"; visible: boolean };
   mode: "Normal" | "Insert" | "Visual"; dirty: boolean; revision: number;
   totalLines: number; pendingKeys: string;
-  scrollY: number; contentHeight: number; animating: boolean; scrollAnimating?: boolean;
+  scrollY: number; contentHeight: number; animating: boolean; scrollAnimating?: boolean; highlightAnimating?: boolean;
   hostAction?: "save" | "save-close" | "close"; searchHits: { x: number; y: number; width: number; selection?: boolean }[];
   extraCarets: { x: number; y: number; width: number; height: number }[];
   clipboard?: string | null; pendingEmpty: boolean;
@@ -71,6 +74,7 @@ export class NativeEditor {
   private configuration = new Map<string,string>();
   subscribe(listener: (frame: EditorFrame) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   frame: EditorFrame;
+  recoveryVersion = 0;
   constructor(path: string, text: string, vim: boolean, viewOf?: NativeEditor) {
     this.historyOwner=viewOf;
     this.id = viewOf ? coreCall<{ id: number }>("editor.clone-view", { id: viewOf.id }).id
@@ -84,6 +88,7 @@ export class NativeEditor {
     const signature=configurable?JSON.stringify(args):undefined;
     if(signature!==undefined&&this.configuration.get(op)===signature)return this.frame;
     const overlayOnly=["lsp.pointer","lsp.geometry","lsp.hover-configure","lsp.hover-input","lsp.wheel"].includes(op);
+    if(!op.startsWith("lsp.")&&!["frame","cursor-frame","scroll"].includes(op))this.recoveryVersion++;
     if(!overlayOnly){this.animation.cancel(); this.fullFrameRequested = false; this.lastFrameStarted = performance.now();}
     const next = coreCall<EditorFrame | {lspOnly:true;lsp:EditorFrame["lsp"]} | {cursorOnly:true;cursorQuad:number[][];cursorHold:boolean;animating:boolean}>(`editor.${op}`, { id: this.id, ...args, ...(overlayOnly?{overlayOnly:true}:{}) });
     if("lspOnly" in next){
@@ -111,6 +116,7 @@ export class NativeEditor {
   /** Apply motion immediately, but paint/tick springs on the native display
    * frame. Input repeat events never cancel an already-requested frame. */
   queueKey(args: Record<string, unknown>) {
+    this.recoveryVersion++;
     const next = coreCall<EditorFrame | { deferred:true; cursor:Pick<EditorFrame["cursor"],"line"|"col">;mode:EditorFrame["mode"];pendingEmpty:boolean;pendingKeys:string;selection:EditorFrame["selection"] }>("editor.key", {id:this.id,...args,deferFrame:true});
     if ("deferred" in next) {
       // Refresh logical state and snapshot identity immediately, without
@@ -141,7 +147,7 @@ export class NativeEditor {
     this.animation.request(() => {
       const delta = this.pendingScroll; this.pendingScroll = 0;
       const full = this.fullFrameRequested; this.fullFrameRequested = false;
-      this.call(delta ? "scroll" : !full && this.frame.scrollAnimating === false ? "cursor-frame" : "frame", delta ? { delta } : {});
+      this.call(delta ? "scroll" : !full && this.frame.scrollAnimating === false && !this.frame.highlightAnimating ? "cursor-frame" : "frame", delta ? { delta } : {});
     }, this.lastFrameStarted);
   }
   cancelFrame() { this.animation.cancel(); this.pendingScroll = 0; this.fullFrameRequested = false; }

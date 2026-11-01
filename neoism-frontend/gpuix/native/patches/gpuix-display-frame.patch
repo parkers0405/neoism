@@ -940,14 +940,23 @@ index 0000000..ebaf28e
 +        assert_eq!(image_group(&[image([f32::INFINITY, 0.0, 10.0, 10.0]), image([20.0, 0.0, 10.0, 10.0])], 0), None);
 +    }
 +}
-diff --git c/packages/native/src/custom_elements/input.rs w/packages/native/src/custom_elements/input.rs
-index 7be2d25..1268857 100644
---- c/packages/native/src/custom_elements/input.rs
+diff --git i/packages/native/src/custom_elements/input.rs w/packages/native/src/custom_elements/input.rs
+index 7be2d25..e1b04b7 100644
+--- i/packages/native/src/custom_elements/input.rs
 +++ w/packages/native/src/custom_elements/input.rs
-@@ -153,8 +153,11 @@ fn single_line_text(text: &str) -> String {
+@@ -58,6 +58,8 @@ actions!(
+         DeleteToLineStart,
+         DeleteToLineEnd,
+         Copy,
++        ComposerInterrupt,
++        ComposerEscape,
+         Cut,
+         Paste,
+         Undo,
+@@ -153,8 +155,11 @@ fn single_line_text(text: &str) -> String {
      text.replace("\r\n", " ").replace(['\r', '\n'], " ")
  }
- 
+
 -pub fn init(cx: &mut App) {
 -    let word_navigation_uses_alt = word_navigation_uses_alt();
 +fn registered_text_editor_bindings() -> Vec<KeyBinding> {
@@ -958,11 +967,14 @@ index 7be2d25..1268857 100644
      let bind_paste_shortcut = !cfg!(all(target_arch = "wasm32", target_os = "unknown"));
      let mut bindings = text_editor_bindings(
          INPUT_KEY_CONTEXT,
-@@ -177,7 +180,38 @@ pub fn init(cx: &mut App) {
+@@ -177,7 +182,41 @@ pub fn init(cx: &mut App) {
          word_navigation_uses_alt,
          bind_paste_shortcut,
      ));
 -    cx.bind_keys(bindings);
++    // The submit composer owns Ctrl+C; normal inputs and Cmd+C retain Copy.
++    bindings.push(KeyBinding::new("ctrl-c", ComposerInterrupt, Some(TEXTAREA_SUBMIT_KEY_CONTEXT)));
++    bindings.push(KeyBinding::new("escape", ComposerEscape, Some(TEXTAREA_SUBMIT_KEY_CONTEXT)));
 +    // GPUI resolves text actions BEFORE even root low-level key capture.
 +    // Unbind these exact text-selection actions so the window-owned buffer
 +    // shortcut reaches root capture without mutating native input selection.
@@ -996,17 +1008,17 @@ index 7be2d25..1268857 100644
 +    })
 +    })
  }
- 
+
  /// A terminal app quits on ctrl-c. Unbinding the text field's ctrl-c copy lets
-@@ -359,6 +393,7 @@ impl CustomElement for TextEditorElement {
+@@ -359,6 +398,7 @@ impl CustomElement for TextEditorElement {
          let emits_submit = ctx.events.contains("submit");
          let emits_key_down = ctx.events.contains("keyDown");
          let emits_key_up = ctx.events.contains("keyUp");
 +        let emits_caret_geometry = ctx.events.contains("caretGeometry");
          let callback = ctx.event_callback.clone();
- 
+
          let state = self
-@@ -382,6 +417,8 @@ impl CustomElement for TextEditorElement {
+@@ -382,6 +422,8 @@ impl CustomElement for TextEditorElement {
                      emits_submit,
                      emits_key_down,
                      emits_key_up,
@@ -1015,7 +1027,7 @@ index 7be2d25..1268857 100644
                      focus_handle: state_focus_handle,
                      content: value,
                      placeholder: placeholder.into(),
-@@ -428,6 +465,11 @@ impl CustomElement for TextEditorElement {
+@@ -428,6 +470,11 @@ impl CustomElement for TextEditorElement {
              }
              state.emits_key_down = emits_key_down;
              state.emits_key_up = emits_key_up;
@@ -1027,21 +1039,21 @@ index 7be2d25..1268857 100644
              state.placeholder = self.placeholder.clone().into();
              state.read_only = self.read_only;
              state.min_rows = self.min_rows.max(1);
-@@ -553,9 +595,7 @@ impl CustomElement for TextEditorElement {
+@@ -553,9 +600,7 @@ impl CustomElement for TextEditorElement {
      }
- 
+
      fn supported_events(&self) -> &'static [&'static str] {
 -        &[
 -            "change", "submit", "click", "keyDown", "keyUp", "focus", "blur", "fileDrop",
 -        ]
 +        caret_geometry::INPUT_EVENTS
      }
- 
+
      fn destroy(&mut self) {
-@@ -643,6 +683,10 @@ fn push_undo_snapshot(history: &mut VecDeque<EditSnapshot>, snapshot: EditSnapsh
+@@ -643,6 +688,10 @@ fn push_undo_snapshot(history: &mut VecDeque<EditSnapshot>, snapshot: EditSnapsh
      history.push_back(snapshot);
  }
- 
+
 +#[path = "input_caret_geometry.rs"]
 +mod caret_geometry;
 +use caret_geometry::CaretGeometry;
@@ -1049,7 +1061,7 @@ index 7be2d25..1268857 100644
  struct TextEditorState {
      element_id: u64,
      callback: Option<EventCallback>,
-@@ -650,6 +694,8 @@ struct TextEditorState {
+@@ -650,6 +699,8 @@ struct TextEditorState {
      emits_submit: bool,
      emits_key_down: bool,
      emits_key_up: bool,
@@ -1058,9 +1070,9 @@ index 7be2d25..1268857 100644
      focus_handle: FocusHandle,
      content: String,
      placeholder: SharedString,
-@@ -685,6 +731,29 @@ struct TextEditorState {
+@@ -685,6 +736,29 @@ struct TextEditorState {
  }
- 
+
  impl TextEditorState {
 +    fn report_caret_geometry(&mut self, bounds: Bounds<Pixels>, window: &Window) {
 +        if !self.emits_caret_geometry { return; }
@@ -1088,7 +1100,92 @@ index 7be2d25..1268857 100644
      fn reset_blink(&mut self, cx: &Context<Self>) {
          self.blink_anchor = cx.background_executor().now();
      }
-@@ -1797,12 +1866,13 @@ impl gpui::Element for EditorTextElement {
+@@ -933,13 +1007,31 @@ impl TextEditorState {
+         self.move_to(offset, cx);
+     }
+
++    // Native actions run before JS key handlers. Delegate composer boundary
++    // navigation and empty clipboard actions without changing normal text editing.
++    fn emit_composer_key(&self, key: &str) {
++        emit_event_full(&self.callback, self.element_id, "keyDown", |payload| {
++            payload.key = Some(key.to_owned());
++        });
++    }
++
++    fn history_boundary(&self, direction: f32) -> bool {
++        self.multiline && self.emits_submit && self.emits_key_down &&
++            self.point_for_index(self.cursor_offset()).map(|point| {
++                let next = f32::from(point.y) + direction * f32::from(self.line_height);
++                next < 0.0 || next >= self.content_height
++            }).unwrap_or(self.content.is_empty())
++    }
++
+     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
++        if self.history_boundary(-1.0) { self.emit_composer_key("up"); return; }
+         if let Some(offset) = self.vertical_target(-1.0) {
+             self.move_to(offset, cx);
+         }
+     }
+
+     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
++        if self.history_boundary(1.0) { self.emit_composer_key("down"); return; }
+         if let Some(offset) = self.vertical_target(1.0) {
+             self.move_to(offset, cx);
+         }
+@@ -1088,11 +1180,21 @@ impl TextEditorState {
+         self.replace_text_in_range(None, "", window, cx);
+     }
+
++    fn composer_escape(&mut self, _: &ComposerEscape, _: &mut Window, _: &mut Context<Self>) {
++        self.emit_composer_key("composer-escape");
++    }
++
++    fn composer_interrupt(&mut self, _: &ComposerInterrupt, _: &mut Window, _: &mut Context<Self>) {
++        self.emit_composer_key("composer-interrupt");
++    }
++
+     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+         if !self.selected_range.is_empty() {
+             cx.write_to_clipboard(ClipboardItem::new_string(
+                 self.content[self.selected_range.clone()].to_string(),
+             ));
++        } else if self.multiline && self.emits_submit && self.emits_key_down {
++            self.emit_composer_key("copy");
+         }
+     }
+
+@@ -1110,6 +1212,10 @@ impl TextEditorState {
+             return;
+         }
+         let Some(text) = cx.read_from_clipboard().and_then(clipboard_text) else {
++            if self.multiline && self.emits_submit && self.emits_key_down {
++                self.emit_composer_key("paste");
++                return;
++            }
+             cx.propagate();
+             return;
+         };
+@@ -1433,7 +1539,9 @@ impl TextEditorState {
+             .collect(),
+             _ => vec![run(display.len(), false)],
+         };
+-        let wrap_width = self.multiline.then_some(width);
++        let wrap_width = self.multiline.then_some(if self.emits_caret_geometry {
++            px(caret_geometry::block_caret_wrap_width(f32::from(width), f32::from(font_size)))
++        } else { width });
+         let lines = window
+             .text_system()
+             .shape_text(display, font_size, &runs, wrap_width, None)
+@@ -1703,6 +1811,8 @@ impl gpui::Render for TextEditorState {
+             .on_action(cx.listener(Self::delete_to_line_start))
+             .on_action(cx.listener(Self::delete_to_line_end))
+             .on_action(cx.listener(Self::copy))
++            .on_action(cx.listener(Self::composer_interrupt))
++            .on_action(cx.listener(Self::composer_escape))
+             .on_action(cx.listener(Self::cut))
+             .on_action(cx.listener(Self::paste))
+             .on_action(cx.listener(Self::undo))
+@@ -1797,12 +1907,13 @@ impl gpui::Element for EditorTextElement {
          _: Option<&gpui::InspectorElementId>,
          bounds: Bounds<Pixels>,
          _: &mut (),
@@ -1103,12 +1200,11 @@ index 7be2d25..1268857 100644
          });
          let input = self.input.read(cx);
          let origin = point(
-diff --git c/packages/native/src/custom_elements/input_caret_geometry.rs w/packages/native/src/custom_elements/input_caret_geometry.rs
+diff --git i/packages/native/src/custom_elements/input_caret_geometry.rs w/packages/native/src/custom_elements/input_caret_geometry.rs
 new file mode 100644
-index 0000000..0dd107a
 --- /dev/null
 +++ w/packages/native/src/custom_elements/input_caret_geometry.rs
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,96 @@
 +//! Data-only projection of the native editor's shaped insertion point. This
 +//! module has no window/backend dependencies so its real geometry contract can
 +//! also be verified with `rustc --test` on a headless builder.
@@ -1119,6 +1215,13 @@ index 0000000..0dd107a
 +pub(crate) const INPUT_EVENTS:&[&str]=&[
 +    "change","submit","click","keyDown","keyUp","focus","blur","fileDrop","caretGeometry",
 +];
++
++/// Leave a whole custom block after the final glyph instead of clipping the
++/// cursor to the few pixels left at a soft-wrap boundary. Native shaping still
++/// owns wrapping, hit testing, selection, IME and vertical caret navigation.
++pub(crate) fn block_caret_wrap_width(width:f32,font_size:f32)->f32 {
++    (width-(font_size*0.6).max(2.0)).max(1.0)
++}
 +
 +#[derive(Clone, Debug, PartialEq)]
 +pub(crate) struct CaretGeometry {
@@ -1151,6 +1254,17 @@ index 0000000..0dd107a
 +        let requested=["change","caretGeometry","unsupported"];
 +        let retained:Vec<_>=requested.into_iter().filter(|event|INPUT_EVENTS.contains(event)).collect();
 +        assert_eq!(retained,vec!["change","caretGeometry"]);
++    }
++    #[test]
++    fn wrapped_line_end_has_room_for_the_full_block_at_every_scale(){
++        for font in [8.0,14.0,16.0,24.0,42.0] {
++            let width=300.0;
++            let end=block_caret_wrap_width(width,font);
++            let geometry=CaretGeometry::from_shaped([0.0,0.0,width,100.0],[end,0.0],[0.0,0.0],font*1.5,font,true,5,5..5);
++            assert!(geometry.visible);
++            assert!(geometry.remaining_width+0.0001 >= (font*0.6).max(2.0));
++        }
++        assert_eq!(block_caret_wrap_width(3.0,16.0),1.0);
 +    }
 +    fn project(point:[f32;2],scroll:[f32;2],focused:bool,selection:Range<usize>)->CaretGeometry {
 +        CaretGeometry::from_shaped([120.0,240.0,300.0,44.0],point,scroll,22.0,16.0,focused,selection.end,selection)

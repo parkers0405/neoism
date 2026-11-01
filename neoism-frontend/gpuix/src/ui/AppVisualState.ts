@@ -1,5 +1,6 @@
+import type {ChromeFocus} from "../commands/chrome-keyboard";
 import {WordmarkHosts} from "./AnimatedWordmark";
-import {CanvasImages,RasterSource,type CanvasRaster} from "./canvas";
+import {CanvasImages,RecentCanvasImages,RasterSource,type CanvasRaster} from "./canvas";
 import {createTreeGlyphHost} from "./TreeRowGlyphs";
 import type {AppConfig} from "../config";
 import {coreCall} from "../native-core";
@@ -14,6 +15,13 @@ export interface CachedTreeViewport {showHidden:boolean;height:number;frame:{top
 
 /** Window resources outlive font/theme component generations, but not the session. */
 export class AppVisualState {
+ readonly workspaceFocus=new Map<string,ChromeFocus>();
+ private timelineImages=new Map<object,RecentCanvasImages>();
+ pinTimelineImage(renderer:object,source:number,raster:CanvasRaster){
+  let images=this.timelineImages.get(renderer);
+  if(!images){images=new RecentCanvasImages(renderer,16*1024*1024);this.timelineImages.set(renderer,images);}
+  images.use(source,raster);
+ }
  readonly agentChips=new AgentChipHosts();
  readonly wordmarks=new WordmarkHosts();
  private notificationsId?:number;
@@ -58,5 +66,5 @@ export class AppVisualState {
   const key=JSON.stringify([workspaceId,notes,root]);let value=this.reveals.get(key);
   if(!value){value=new Map();this.reveals.set(key,value);}return value;
  }
- dispose(){if(this.notificationsId!==undefined)coreCall("notifications.dispose",{id:this.notificationsId});this.agentChips.dispose();for(const entry of this.agentComposers.values())entry.state.native?.dispose();this.agentComposers.clear();for(const entry of this.gitReviews.values())entry.controller.dispose();this.gitReviews.clear();for(const controller of this.gitPanels.values())controller.dispose();this.gitPanels.clear();this.wordmarks.dispose();for(const id of this.trees.values())coreCall("dispose",{id});this.trees.clear();this.treeViewports.clear();this.reveals.clear();this.treeWidths.clear();for(const images of this.rasterPins.values())images.dispose();this.rasterPins.clear();for(const host of this.glyphHosts.values())host.dispose();this.glyphHosts.clear();}
+ dispose(){this.workspaceFocus.clear();for(const images of this.timelineImages.values())images.dispose();this.timelineImages.clear();if(this.notificationsId!==undefined)coreCall("notifications.dispose",{id:this.notificationsId});this.agentChips.dispose();for(const entry of this.agentComposers.values())entry.state.native?.dispose();this.agentComposers.clear();for(const entry of this.gitReviews.values())entry.controller.dispose();this.gitReviews.clear();for(const controller of this.gitPanels.values())controller.dispose();this.gitPanels.clear();this.wordmarks.dispose();for(const id of this.trees.values())coreCall("dispose",{id});this.trees.clear();this.treeViewports.clear();this.reveals.clear();this.treeWidths.clear();for(const images of this.rasterPins.values())images.dispose();this.rasterPins.clear();for(const host of this.glyphHosts.values())host.dispose();this.glyphHosts.clear();}
 }

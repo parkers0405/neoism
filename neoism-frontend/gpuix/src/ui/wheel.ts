@@ -10,3 +10,11 @@ export function wheelPixels(event: WheelEvent, fontSize: number) {
   const cell = event.precise ? 1 : wheelCellPixels(event, fontSize);
   return { x: (event.deltaX || 0) * cell, y: (event.deltaY || 0) * cell };
 }
+
+/** More travel per trackpad gesture in long conversations and diffs. Keep
+ * fractional deltas and event cadence so native inertia/animation is preserved.
+ * Sideways gestures and Shift-scroll retain their original axis and distance. */
+export function readingScrollY(event: WheelEvent & { modifiers?: { shift?: boolean } }) {
+  const y = event.deltaY || 0;
+  return event.precise && !event.modifiers?.shift && Math.abs(event.deltaX || 0) <= Math.abs(y) ? y * 2 : y;
+}

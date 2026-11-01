@@ -6,7 +6,8 @@ import {cssColor,type CanvasOp} from "../ui/canvas";
 import {focusNativeElement,invalidateNativeFocus} from "../native-focus";
 import {registerSurfaceCaret,surfaceCursorSuppressed} from "../ui/cursor-handoff";
 import {CursorBlinkClock} from "../ui/cursor-blink";
-import {wheelPixels} from "../ui/wheel";
+import {readingScrollY,wheelPixels} from "../ui/wheel";
+import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
 import {LoadingSkeleton} from "../ui/LoadingSkeleton";
 import type {GitReviewController} from "./GitReviewController";
 /** Original GitDiffView painter and input host, including the canonical source
@@ -25,7 +26,13 @@ export function GitReviewView(props:{controller:GitReviewController;config:AppCo
  const cursor=()=>focused()&&active()&&blink()&&!surfaceCursorSuppressed(renderer)&&frame().cursorQuad?.length===4;
  const extra=createMemo<CanvasOp[]>(()=>cursor()?[{k:"p",p:[frame().cursorQuad!.flat()],c:cssColor(config.cursorColor||config.theme.accent)}]:[]);
  const caretBounds=createMemo(()=>{const q=frame().cursorQuad||[];if(q.length!==4)return;const xs=q.map(p=>p[0]),ys=q.map(p=>p[1]);return{x:Math.min(...xs),y:Math.min(...ys),width:Math.max(...xs)-Math.min(...xs),height:Math.max(...ys)-Math.min(...ys)};});
- const keyDown=(event:KeyEvent)=>{if(props.onCustomKey?.(event)){event.preventDefault();event.stopPropagation();return;}if(event.modifiers?.alt)return;
+ const pointerFrames=new AnimationFrameScheduler(ANIMATION_FRAME_MS);let pendingPointer:{x:number;y:number}|undefined;
+ const flushPointer=()=>{pointerFrames.cancel();const point=pendingPointer;pendingPointer=undefined;if(point)controller.pointer("move",point.x,point.y);};
+ onCleanup(()=>pointerFrames.dispose());
+ const scrollFrames=new AnimationFrameScheduler(ANIMATION_FRAME_MS);let pendingScroll:{x:number;y:number;deltaX:number;deltaY:number}|undefined;
+ const flushScroll=()=>{scrollFrames.cancel();const scroll=pendingScroll;pendingScroll=undefined;if(scroll)controller.call("scroll",scroll);};
+ onCleanup(()=>scrollFrames.dispose());
+ const keyDown=(event:KeyEvent)=>{flushScroll();flushPointer();if(props.onCustomKey?.(event)){event.preventDefault();event.stopPropagation();return;}if(event.modifiers?.alt)return;
   const key=event.key?.toLowerCase()||"";if((event.modifiers?.ctrl||event.modifiers?.cmd)&&key==="s"){event.preventDefault();event.stopPropagation();void controller.save().catch(controller.options.model.report);return;}
   event.preventDefault();event.stopPropagation();void controller.queueKey({key,char:event.keyChar||"",ctrl:!!event.modifiers?.ctrl,shift:!!event.modifiers?.shift,alt:false,cmd:!!event.modifiers?.cmd});
  };
@@ -34,11 +41,12 @@ export function GitReviewView(props:{controller:GitReviewController;config:AppCo
   onBlur={()=>{invalidateNativeFocus(renderer);setFocused(false);controller.call("focus",{focused:false});}}
   onKeyDown={keyDown}
   onLayout={event=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0},old=bounds();if(next.x!==old.x||next.y!==old.y||next.width!==old.width||next.height!==old.height)setBounds(next);if(next.width>0&&next.height>0&&(next.width!==old.width||next.height!==old.height))controller.layout(next.width,next.height);}}
-  onScroll={event=>{const wheel=wheelPixels(event,config.fontSize);controller.call("scroll",{deltaY:event.modifiers?.shift&&Math.abs(wheel.x)<.01?0:-wheel.y,deltaX:event.modifiers?.shift&&Math.abs(wheel.x)<.01?-wheel.y:-wheel.x,x:(event.x||0)-bounds().x,y:(event.y||0)-bounds().y});}}
-  onMouseDown={event=>{if(event.button!==0)return;props.onFocus?.();if(host)focusNativeElement(renderer,host.id);controller.pointer("down",(event.x||0)-bounds().x,(event.y||0)-bounds().y);}}
-  onMouseMove={event=>controller.pointer("move",(event.x||0)-bounds().x,(event.y||0)-bounds().y)}
-  onMouseUp={event=>controller.pointer("up",(event.x||0)-bounds().x,(event.y||0)-bounds().y)}
-  onMouseLeave={()=>controller.pointer("leave",0,0)}
+  onScroll={event=>{const wheel=wheelPixels({...event,deltaY:readingScrollY(event)},config.fontSize),shift=event.modifiers?.shift&&Math.abs(wheel.x)<.01;
+   pendingScroll={deltaY:(pendingScroll?.deltaY||0)+(shift?0:-wheel.y),deltaX:(pendingScroll?.deltaX||0)+(shift?-wheel.y:-wheel.x),x:(event.x||0)-bounds().x,y:(event.y||0)-bounds().y};scrollFrames.request(flushScroll);}}
+  onMouseDown={event=>{if(event.button!==0)return;flushScroll();flushPointer();props.onFocus?.();if(host)focusNativeElement(renderer,host.id);controller.pointer("down",(event.x||0)-bounds().x,(event.y||0)-bounds().y);}}
+  onMouseMove={event=>{pendingPointer={x:(event.x||0)-bounds().x,y:(event.y||0)-bounds().y};pointerFrames.request(flushPointer);}}
+  onMouseUp={event=>{flushScroll();flushPointer();controller.pointer("up",(event.x||0)-bounds().x,(event.y||0)-bounds().y);}}
+  onMouseLeave={()=>{flushScroll();flushPointer();controller.pointer("leave",0,0);}}
   style={{flexGrow:1,minHeight:0,minWidth:0,position:"relative",overflow:"hidden",userSelect:"none",cursor:frame().pointer?"pointer":frame().textPointer?"text":"default"}}>
   <PaintLayer commands={frame().commands} extra={extra()} config={config}/>
   <For each={frame().loadingRects||[]}>{rect=><LoadingSkeleton config={config} kind="diff" immediate initialSize={{width:rect[2],height:rect[3]}} style={{left:rect[0],top:rect[1],right:undefined,bottom:undefined,width:rect[2],height:rect[3]}}/>}</For>

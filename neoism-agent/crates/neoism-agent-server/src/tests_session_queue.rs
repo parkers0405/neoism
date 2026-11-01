@@ -2226,3 +2226,48 @@ async fn queued_child_prompt_supersedes_older_wrapper_and_notifies_at_final_idle
     cleanup_sqlite_files(&db_path);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn two_user_prompts_run_while_background_child_is_still_active() {
+    let path = std::env::temp_dir().join(format!("neoism-parent-steer-{}.db", Id::ascending(IdKind::Event)));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let mut parent: SessionInfo = response_json(app.clone().oneshot(request(
+        Method::POST, "/v2/sessions", Some(json!({"model":{"providerId":"neoism","id":"stub"}})),
+    )).await.unwrap()).await;
+    crate::execution_activity::ensure_for_prompt(&state, &mut parent, "initial-turn", true).await.unwrap();
+    let mut child = parent.clone();
+    child.id = neoism_agent_core::new_session_id();
+    child.parent_id = Some(parent.id.clone());
+    child.slug = "background-child".into();
+    state.inner.store.insert_session(&child).await.unwrap();
+    assert!(crate::execution_activity::register_subtask(&state, &parent, child.id.as_str()).await.unwrap());
+    let child_run = crate::session_run::start_session_run(&state, &child.id).await.unwrap();
+    // Hold startup so both user messages are visibly queued together.
+    let gate = state.inner.session_coordinator.prompt_admission_guard(parent.id.as_str()).await;
+    for text in ["first user followup", "second user followup"] {
+        let response = app.clone().oneshot(request(Method::POST,
+            &format!("/v2/sessions/{}/prompt", parent.id),
+            Some(json!({"delivery":"steer","model":{"providerId":"neoism","modelId":"stub"},"parts":[{"type":"text","text":text}]})),
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(state.inner.store.queued_prompt_count(parent.id.as_str()).await.unwrap(), 2);
+    drop(gate);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let messages = state.inner.store.list_messages(parent.id.as_str()).await.unwrap();
+            let user_count = messages.iter().filter(|m| matches!(m.info, MessageInfo::User(_))).count();
+            let replied = messages.iter().any(|m| matches!(m.info, MessageInfo::Assistant(_))
+                && m.parts.iter().any(|p| matches!(p, Part::Text(t) if t.text.contains("second user followup"))));
+            if user_count == 2 && replied && !state.inner.session_coordinator.worker_active(parent.id.as_str()).await { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("both messages must reach the model without waiting for the child");
+    assert!(state.inner.session_coordinator.active_run(child.id.as_str()).await.is_some());
+    assert!(!child_run.cancel.load(std::sync::atomic::Ordering::SeqCst));
+    crate::session_run::finish_session_run(&state, child.id.as_str(), &child_run.id).await;
+    state.shutdown().await.unwrap();
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}

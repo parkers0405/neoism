@@ -1004,7 +1004,7 @@ impl NeoismAgentPane {
     }
 
     #[allow(dead_code)]
-    pub(in crate::panels::agent_pane::state) fn reconcile_task_message_statuses(
+    pub(crate) fn reconcile_task_message_statuses(
         &mut self,
     ) {
         let active_task_ids = self.active_subagent_ids.clone();
@@ -1038,6 +1038,16 @@ impl NeoismAgentPane {
                 None,
             );
         }
+        self.reconcile_task_message_rows();
+    }
+
+    /// Refresh transcript ink without changing roster order or lifecycle.
+    pub(crate) fn reconcile_task_message_rows(&mut self) {
+        let active_task_ids = &self.active_subagent_ids;
+        let explicit_statuses = self.side_panel.subagents().iter().filter_map(|entry| {
+            task_message_status_from_runtime(entry.runtime_status.as_deref()?)
+                .map(|status| (entry.id.clone(), status))
+        }).collect::<HashMap<_, _>>();
         let task_updates = self
             .messages
             .iter()
@@ -1054,6 +1064,12 @@ impl NeoismAgentPane {
                     .or_else(|| explicit_statuses.get(&task_id).copied())
                     .or_else(|| {
                         active_task_ids.contains(&task_id).then_some("running")
+                    })
+                    .or_else(|| {
+                        if matches!(message.status.as_str(), "error" | "stopped" | "cancelled") { return None; }
+                        crate::panels::agent_pane::stream_events::task_status_from_output(&message.detail)
+                            .or_else(|| crate::panels::agent_pane::stream_events::task_status_from_output(&message.text))
+                            .and_then(task_message_status_from_runtime)
                     })?;
                 Some((index, status))
             })

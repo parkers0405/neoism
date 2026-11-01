@@ -9,9 +9,25 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width_sequences::UnicodeWidthStr;
 
+/// ASCII source (including tabs) has single-byte graphemes. Avoid running
+/// Unicode segmentation repeatedly while building a whole document's wraps.
+fn layout_clusters(line: &str) -> impl Iterator<Item = (usize, &str)> {
+    let ascii = line.bytes().all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte));
+    let mut unicode = (!ascii).then(|| line.grapheme_indices(true));
+    let mut byte = 0;
+    std::iter::from_fn(move || {
+        if let Some(unicode) = unicode.as_mut() { return unicode.next(); }
+        if byte == line.len() { return None; }
+        let offset = byte; byte += 1;
+        Some((offset, &line[offset..byte]))
+    })
+}
+
 fn cluster_width(cluster: &str, col: usize, tab: usize) -> usize {
     if cluster == "\t" {
         tab.max(1) - col % tab.max(1)
+    } else if cluster.len() == 1 && (b' '..=b'~').contains(&cluster.as_bytes()[0]) {
+        1
     } else {
         UnicodeWidthStr::width(cluster)
     }
@@ -28,9 +44,14 @@ pub fn display_col_for_byte(line: &str, byte: usize, tab: usize) -> usize {
 /// Map within a slice that starts at a known source column. Wrap segments
 /// already store that column; rescanning the entire line is unnecessary.
 pub fn display_col_for_byte_from(line: &str, byte: usize, start_col: usize, tab: usize) -> usize {
+    // Printable ASCII has one cell per byte. Keep tabs, controls and Unicode
+    // on the grapheme-aware path, including offsets within a CRLF cluster.
+    if line.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+        return start_col + byte.min(line.len());
+    }
     let tab = tab.max(1);
     let mut col = start_col;
-    for (i, cluster) in line.grapheme_indices(true) {
+    for (i, cluster) in layout_clusters(line) {
         if i >= byte || i + cluster.len() > byte {
             break;
         }
@@ -44,7 +65,7 @@ pub fn display_col_for_byte_from(line: &str, byte: usize, start_col: usize, tab:
 pub fn byte_for_display_col(line: &str, target: usize, tab: usize) -> usize {
     let tab = tab.max(1);
     let mut col = 0usize;
-    for (i, cluster) in line.grapheme_indices(true) {
+    for (i, cluster) in layout_clusters(line) {
         let width = cluster_width(cluster, col, tab);
         if col + width > target {
             return i;
@@ -231,7 +252,7 @@ enum LexState {
     LineComment,
 }
 
-fn break_candidates(line: &str, tab: usize) -> Vec<BreakCandidate> {
+fn break_candidates(clusters: &[(usize, &str)], chars: &[(usize, char)], tab: usize) -> Vec<BreakCandidate> {
     fn is_operator(ch: char) -> bool {
         matches!(
             ch,
@@ -240,11 +261,6 @@ fn break_candidates(line: &str, tab: usize) -> Vec<BreakCandidate> {
     }
 
     let tab = tab.max(1);
-    let clusters: Vec<(usize, &str)> = line.grapheme_indices(true).collect();
-    let chars: Vec<(usize, char)> = clusters
-        .iter()
-        .map(|(byte, cluster)| (*byte, cluster.chars().next().unwrap()))
-        .collect();
     let mut candidates = Vec::new();
     let mut state = LexState::Normal;
     let mut escaped = false;
@@ -387,17 +403,12 @@ fn leading_indent(line: &str, tab: usize) -> usize {
     display_col_for_byte(line, first_content, tab)
 }
 
-fn delimiter_snapshots(line: &str, tab: usize) -> Vec<(usize, Option<usize>)> {
+fn delimiter_snapshots(clusters: &[(usize, &str)], chars: &[(usize, char)], tab: usize) -> Vec<(usize, Option<usize>)> {
     let mut stack: Vec<(char, usize)> = Vec::new();
     let mut snapshots = vec![(0, None)];
     let mut state = LexState::Normal;
     let mut escaped = false;
     let mut col = 0usize;
-    let clusters: Vec<(usize, &str)> = line.grapheme_indices(true).collect();
-    let chars: Vec<(usize, char)> = clusters
-        .iter()
-        .map(|(byte, cluster)| (*byte, cluster.chars().next().unwrap()))
-        .collect();
     let mut i = 0usize;
     while let Some(&(byte, ch)) = chars.get(i) {
         let next = chars.get(i + 1).map(|(_, ch)| *ch);
@@ -476,7 +487,7 @@ fn continuation_indent(
 /// Full wrap geometry for one buffer line.
 pub fn wrap_segments(line: &str, cols: usize, tab: usize) -> Vec<WrapSegment> {
     let line_width = display_width(line, tab);
-    if cols == 0 || line.is_empty() {
+    if cols == 0 || line_width <= cols {
         return vec![WrapSegment {
             byte_start: 0,
             byte_end: line.len(),
@@ -486,8 +497,13 @@ pub fn wrap_segments(line: &str, cols: usize, tab: usize) -> Vec<WrapSegment> {
         }];
     }
 
-    let candidates = break_candidates(line, tab);
-    let delimiter_snapshots = delimiter_snapshots(line, tab);
+    let clusters: Vec<(usize, &str)> = layout_clusters(line).collect();
+    let chars: Vec<(usize, char)> = clusters
+        .iter()
+        .map(|(byte, cluster)| (*byte, cluster.chars().next().unwrap()))
+        .collect();
+    let candidates = break_candidates(&clusters, &chars, tab);
+    let delimiter_snapshots = delimiter_snapshots(&clusters, &chars, tab);
     let source_indent = leading_indent(line, tab);
     let mut segments = Vec::new();
     let mut byte_start = 0usize;
@@ -510,7 +526,7 @@ pub fn wrap_segments(line: &str, cols: usize, tab: usize) -> Vec<WrapSegment> {
         let limit = source_col + available;
         let mut hard_byte = byte_start;
         let mut hard_col = source_col;
-        for (relative, cluster) in line[byte_start..].grapheme_indices(true) {
+        for (relative, cluster) in layout_clusters(&line[byte_start..]) {
             let byte = byte_start + relative;
             let width = cluster_width(cluster, hard_col, tab);
             if hard_col + width > limit && byte > byte_start {
@@ -624,7 +640,9 @@ pub struct WrapIndex {
     /// `row_of_line[i]` = first visual row of buffer line `i`, plus a
     /// final sentinel entry holding the total visual row count.
     row_of_line: Vec<u32>,
-    segments_by_line: Vec<Vec<WrapSegment>>,
+    segments_by_line: Vec<std::sync::Arc<[WrapSegment]>>,
+    source_lines: Vec<std::sync::Arc<str>>,
+    tab: usize,
     /// Text columns the index was built for; 0 = NoWrap (identity).
     cols: usize,
     row_to_line: Vec<VisualRow>,
@@ -663,16 +681,46 @@ impl WrapIndex {
         hidden_lines: &std::collections::BTreeSet<usize>,
         virtual_rows_after: &std::collections::BTreeMap<usize, usize>,
     ) -> Self {
+        Self::build_with_projection_reusing(lines, cols, tab, hidden_lines, virtual_rows_after, None)
+    }
+
+    /// Reuse exact per-line wraps across edits. Prefix/suffix matching also
+    /// preserves the unchanged tail after inserting or deleting source lines.
+    /// Projection rows and prefix sums are always rebuilt for current indices.
+    pub fn build_with_projection_reusing(
+        lines: &[String], cols: usize, tab: usize,
+        hidden_lines: &std::collections::BTreeSet<usize>,
+        virtual_rows_after: &std::collections::BTreeMap<usize, usize>,
+        previous: Option<&Self>,
+    ) -> Self {
+        let previous = previous.filter(|old| old.cols == cols && old.tab == tab);
+        let mut suffix = 0;
+        if let Some(old) = previous {
+            suffix = lines.iter().rev().zip(old.source_lines.iter().rev())
+                .take_while(|(line, before)| line.as_str() == before.as_ref()).count();
+        }
+        let mut source_lines = Vec::with_capacity(lines.len());
         let mut row_of_line = Vec::with_capacity(lines.len() + 1);
         let mut segments_by_line = Vec::with_capacity(lines.len());
         let mut row_to_line = Vec::new();
         let mut acc = 0u32;
         for (line_ix, line) in lines.iter().enumerate() {
             row_of_line.push(acc);
-            let segments = if hidden_lines.contains(&line_ix) {
-                Vec::new()
+            let reusable = previous.and_then(|old| {
+                let index = if line_ix >= lines.len() - suffix {
+                    old.source_lines.len() - (lines.len() - line_ix)
+                } else { line_ix };
+                (old.source_lines.get(index).is_some_and(|text| text.as_ref() == line))
+                    .then_some((old, index))
+            });
+            source_lines.push(reusable.map(|(old,index)|old.source_lines[index].clone())
+                .unwrap_or_else(||std::sync::Arc::<str>::from(line.as_str())));
+            let segments: std::sync::Arc<[WrapSegment]> = if hidden_lines.contains(&line_ix) {
+                Vec::new().into()
+            } else if let Some((old,index)) = reusable.filter(|(old,index)| !old.segments_by_line[*index].is_empty()) {
+                old.segments_by_line[index].clone()
             } else {
-                wrap_segments(line, cols, tab)
+                wrap_segments(line, cols, tab).into()
             };
             row_to_line.extend((0..segments.len()).map(|segment| VisualRow::Source {
                 line: line_ix,
@@ -696,6 +744,8 @@ impl WrapIndex {
         Self {
             row_of_line,
             segments_by_line,
+            source_lines,
+            tab,
             cols,
             row_to_line,
         }
@@ -739,7 +789,7 @@ impl WrapIndex {
     }
 
     pub fn segments_of_line(&self, line: usize) -> Option<&[WrapSegment]> {
-        self.segments_by_line.get(line).map(Vec::as_slice)
+        self.segments_by_line.get(line).map(|segments| segments.as_ref())
     }
 
     pub fn segment(&self, line: usize, segment: usize) -> Option<WrapSegment> {
@@ -789,5 +839,48 @@ impl WrapIndex {
 
     pub fn row_kind(&self, vrow: usize) -> Option<VisualRow> {
         self.row_to_line.get(vrow).copied()
+    }
+}
+
+#[cfg(test)]
+mod fast_path_tests {
+    use super::*;
+    #[test]
+    fn reused_wraps_match_fresh_layout_after_edits_and_projection_changes() {
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut lines = vec!["first line with a long value".into(), "\t界 é second".into(), "third line with another long value".into()];
+        let mut previous = WrapIndex::build(&lines, 12, 4);
+        let tail = previous.segments_by_line[2].clone();
+        lines.insert(1, "inserted".into());
+        let next = WrapIndex::build_with_projection_reusing(&lines,12,4,&BTreeSet::new(),&BTreeMap::new(),Some(&previous));
+        assert_eq!(next,WrapIndex::build(&lines,12,4));
+        assert!(std::sync::Arc::ptr_eq(&tail,&next.segments_by_line[3]));
+        previous=next;
+        for step in 0..6 {
+            match step {0=>lines[0].push_str(" changed"),1=>{lines.remove(1);},2=>lines.push("tail".into()),3=>lines[1]="different".into(),_=>{}}
+            let hidden=if step==4 {BTreeSet::from([1])}else{BTreeSet::new()};
+            let virtual_rows=BTreeMap::from([(0,2)]);
+            let next=WrapIndex::build_with_projection_reusing(&lines,12,4,&hidden,&virtual_rows,Some(&previous));
+            assert_eq!(next,WrapIndex::build_with_projection(&lines,12,4,&hidden,&virtual_rows));
+            previous=next;
+        }
+        assert_eq!(WrapIndex::build_with_projection_reusing(&lines,20,8,&BTreeSet::new(),&BTreeMap::new(),Some(&previous)),WrapIndex::build(&lines,20,8));
+    }
+    #[test]
+    fn fitting_lines_keep_exact_grapheme_and_tab_geometry() {
+        for line in ["", "const value = {count: 42};", "\tvalue", "界é 👨‍👩‍👧‍👦", "a\r\nb", "a\0b"] {
+            for start in [0, 3] {
+                for byte in 0..=line.len()+1 {
+                    let mut expected = start;
+                    for (offset, cluster) in line.grapheme_indices(true) {
+                        if offset >= byte || offset + cluster.len() > byte { break; }
+                        expected += cluster_width(cluster, expected, 4);
+                    }
+                    assert_eq!(display_col_for_byte_from(line, byte, start, 4), expected);
+                }
+            }
+            let width = display_width(line, 4);
+            assert_eq!(wrap_segments(line, width.max(1), 4), vec![WrapSegment {byte_start:0,byte_end:line.len(),source_col:0,source_end_col:width,visual_indent:0}]);
+        }
     }
 }

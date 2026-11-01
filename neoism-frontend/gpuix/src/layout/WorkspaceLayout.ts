@@ -91,6 +91,7 @@ export class WorkspaceLayout {
     for (const leaf of this.frame.leaves.filter((l) => l.surfaceId === surface.id)) this.call("rename", { leaf: leaf.leaf, title: surface.title });
     return this.frame;
   }
+  get measuredViewport(){return this.viewport;}
   layout(width: number, height: number, scale = 1) {
     if (this.viewport.width === width && this.viewport.height === height && this.viewport.scale === scale) return this.frame;
     this.viewport = { width, height, scale };

@@ -665,6 +665,9 @@ impl NeoismAgentPane {
         // it so the restored transcript replaces the parked one on the
         // next sync even if the restored layout epoch coincides.
         self.timeline_content_revision = self.timeline_content_revision.wrapping_add(1);
+        // Parked transcript updates can carry the task tool's launch status.
+        // Reconcile with the live family before publishing the restored frame.
+        self.reconcile_task_message_rows();
         self.sync_subagent_waiting_clock();
         true
     }
@@ -895,8 +898,9 @@ impl NeoismAgentPane {
         if !can_drive && !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System) {
             return;
         }
+        let drives_activity = super::ingest::part_update_drives_activity(&cached.messages, &message);
         upsert_cached_part_message(&mut cached.messages, message);
-        if can_drive {
+        if can_drive && drives_activity {
             cached.runtime.refresh_streaming_from_tail(&cached.messages);
         }
         cached.invalidate_timeline_layout();

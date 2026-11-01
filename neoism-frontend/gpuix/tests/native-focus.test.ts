@@ -31,3 +31,31 @@ test("focus commands and native focus/blur events bypass the fallback delay", ()
   expect(focusedNativeElement(f.renderer, f.clock)).toBe(3);
   expect(f.reads).toBe(4);
 });
+
+
+test("initial focus observation uses the nonblocking snapshot; explicit changes stay ordered", () => {
+  let reads = 0, owner: number | null = null, snapshot: number | null = null;
+  const renderer = {
+    getFocusedElementId() { reads++; return owner; },
+    getFocusedElementIdSnapshot() { return snapshot; },
+    focusElement(id: number) { owner = id; },
+  };
+  expect(focusedNativeElement(renderer, () => 1)).toBe(null);
+  expect(reads).toBe(0);
+  focusNativeElement(renderer, 42);
+  expect(focusedNativeElement(renderer, () => 2)).toBe(42);
+  expect(reads).toBe(1);
+  snapshot = 42;
+  expect(focusedNativeElement(renderer, () => 60)).toBe(42);
+  expect(reads).toBe(1);
+  owner = null; invalidateNativeFocus(renderer);
+  expect(focusedNativeElement(renderer, () => 61)).toBe(null);
+  expect(reads).toBe(2);
+});
+
+test("a focus request before the first observation cannot be lost to an old snapshot", () => {
+  let owner = 1;
+  const renderer = {getFocusedElementId: () => owner, getFocusedElementIdSnapshot: () => 1, focusElement(id: number) { owner = id; }};
+  focusNativeElement(renderer, 2);
+  expect(focusedNativeElement(renderer, () => 1)).toBe(2);
+});

@@ -8685,3 +8685,83 @@ fn follow_scroll_fast_follow_is_not_a_user_fling_that_swallows_taps() {
     assert!(pane.fling_timeline(0.0));
     assert!(!pane.timeline_is_inertial());
 }
+
+#[test]
+fn history_refresh_and_launch_result_preserve_live_task_lifecycle() {
+    use crate::panels::agent_pane::server_events::apply_agent_event_to_pane;
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("parent".into()));
+    pane.note_subagent_event("child".into(), BranchStatus::Active, None, None, None, None);
+    let task = task_tool_message("child", "completed").with_id("launch");
+    pane.upsert_part_message(task);
+    assert_eq!(pane.messages.last().unwrap().status, "running");
+    let history = serde_json::from_value(serde_json::json!({"HistoryChunk": {
+        "session_id": "parent", "next_cursor": null, "messages": [{
+            "id": "launch", "role": "Assistant", "kind": "Tool", "tool": "task",
+            "status": "completed", "text": "task_id: child\nstatus: running"
+        }]
+    }})).unwrap();
+    apply_agent_event_to_pane(&mut pane, history);
+    assert_eq!(pane.side_panel.branch_activity("child").unwrap().status, BranchStatus::Active);
+    assert_eq!(pane.messages.iter().find(|row| row.id == "launch").unwrap().status, "running");
+    pane.switch_session("child".into());
+    pane.cache_upsert_part_message("parent", task_tool_message("child", "completed").with_id("launch"));
+    pane.switch_session("parent".into());
+    assert_eq!(pane.side_panel.branch_activity("child").unwrap().status, BranchStatus::Active);
+    assert_eq!(pane.messages.iter().find(|row| row.id == "launch").unwrap().status, "running");
+    pane.note_subagent_event("child".into(), BranchStatus::Completed, None, None, None, None);
+    pane.upsert_part_message(task_tool_message("child", "running").with_id("launch"));
+    assert_eq!(pane.messages.iter().find(|row| row.id == "launch").unwrap().status, "completed");
+}
+
+#[test]
+fn parked_parent_metadata_does_not_revive_old_thinking() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("parent".into()));
+    pane.messages = (0..250).map(|index| NeoismAgentMessage::assistant("old reply").with_id(format!("old-{index}"))).collect();
+    let mut reasoning = NeoismAgentMessage::assistant("finished reasoning").with_id("reasoning");
+    reasoning.kind = NeoismAgentMessageKind::Reasoning;
+    pane.messages.push(reasoning.clone());
+    pane.note_streaming(NeoismAgentStreamingState::Idle, None);
+    pane.switch_session("child".into());
+    reasoning.status = "completed".into();
+    pane.cache_upsert_part_message("parent", reasoning);
+    let mut old = NeoismAgentMessage::assistant("updated old reply").with_id("old-0");
+    old.status = "completed".into();
+    pane.cache_upsert_part_message("parent", old);
+    assert_eq!(pane.session_cache.get("parent").unwrap().runtime.streaming_state, NeoismAgentStreamingState::Idle);
+    pane.switch_session("parent".into());
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.messages.len(), 251);
+    assert_eq!(pane.messages.first().unwrap().id, "old-0");
+    assert_eq!(pane.messages.last().unwrap().id, "reasoning");
+}
+
+#[test]
+fn visible_parent_metadata_does_not_revive_old_thinking_or_reveal_trace() {
+    let mut pane = NeoismAgentPane::default();
+    pane.set_session_id(Some("parent".into()));
+    let reasoning = NeoismAgentMessage::reasoning("finished reasoning").with_id("reasoning");
+    pane.ingest_live_part_message(reasoning.clone());
+    pane.note_session_idle();
+    let trace = pane.timeline_live_trace_start;
+    pane.ingest_live_part_message(reasoning);
+    assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Idle);
+    assert_eq!(pane.timeline_live_trace_start, trace);
+}
+
+#[test]
+fn cold_history_never_invents_child_completion_from_background_launch() {
+    use crate::panels::agent_pane::server_events::subagent_seeds_from_history;
+    let mut launch = task_tool_message("child", "running");
+    assert!(subagent_seeds_from_history(&[launch.clone()]).is_empty());
+    launch.status = "completed".into();
+    assert!(subagent_seeds_from_history(&[launch.clone()]).is_empty());
+    let mut pane = NeoismAgentPane::default();
+    pane.messages.push(launch);
+    pane.reconcile_task_message_rows();
+    assert_eq!(pane.messages[0].status, "running");
+    assert_eq!(pane.active_subagent_count(), 0, "history alone cannot start live activity");
+    let completed = task_tool_message("child", "completed");
+    assert_eq!(subagent_seeds_from_history(&[completed])[0].1, BranchStatus::Completed);
+}

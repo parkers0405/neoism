@@ -223,6 +223,21 @@ where
             let growth = measured_tail_growth(&cache, live_baseline);
             return (cache, needs_patch, growth);
         }
+        // A scroll can move the old logical anchor entirely out of view before
+        // this frame. Rebase it in the previous geometry before replacing that
+        // geometry with estimates. Otherwise build_lazy_rows includes both the
+        // destination and the old anchor, exactly measuring the entire gap.
+        if let Some((key, screen_offset)) = pane.timeline_view_anchor() {
+            if let Some(source) = resolve_timeline_view_anchor(pane.messages(), &key) {
+                if let Some((source, offset)) = retarget_scrolled_anchor(
+                    &cache.rows, source, screen_offset, paint_h.max(viewport_h),
+                ) {
+                    pane.set_timeline_view_anchor(
+                        TimelineViewAnchorKey::for_source(pane.messages(), source), offset,
+                    );
+                }
+            }
+        }
     }
 
     let layout = build_timeline_layout::<P, D>(
@@ -863,6 +878,22 @@ where
         + image_h
 }
 
+/// Preserve the requested scroll position, but anchor it to a row at that
+/// position instead of forcing the departed row into the exact layout band.
+pub(super) fn retarget_scrolled_anchor<M>(
+    rows: &[TimelineLayoutRow<M>], source: usize, screen_offset: f32, viewport_h: f32,
+) -> Option<(usize, f32)> {
+    let old = timeline_row_for_anchor_source(rows, source)?;
+    if screen_offset < viewport_h && screen_offset + old.height > 0.0 {
+        return None; // Includes a reader deep inside a tall card.
+    }
+    let top = (old.top - screen_offset).max(0.0);
+    let index = rows.partition_point(|row| row.top + row.height <= top)
+        .min(rows.len().saturating_sub(1));
+    let row = rows.get(index)?;
+    Some((row.source_index, row.top - top))
+}
+
 pub(super) fn patch_start_row<M>(
     cache: &TimelineLayoutCache<M>,
     start_source: usize,
@@ -874,9 +905,11 @@ pub(super) fn patch_start_row<M>(
             row.source_index >= start_source || row.source_end_index >= start_source
         })
         .unwrap_or(cache.rows.len());
-    // Patching beyond an estimated suffix would strand estimated rows between
-    // two exact regions, which this cache cannot represent. Rebuild lazily.
-    (start_pos <= cache.estimated_suffix_start).then_some(start_pos)
+    // A suffix patch measures every subsequent row. It must not promote an
+    // estimated suffix (or prefix) into exact layout just because one visible
+    // card changed. Rebuild the viewport band lazily in those cases.
+    (cache.estimated_suffix_start == cache.rows.len()
+        && start_pos >= cache.estimated_prefix_rows).then_some(start_pos)
 }
 
 #[allow(clippy::too_many_arguments)]

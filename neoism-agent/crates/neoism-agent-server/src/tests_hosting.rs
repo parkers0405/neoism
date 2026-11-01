@@ -293,6 +293,24 @@ async fn hosting_http_requires_operator_and_guests_read_same_history() {
     )
     .await;
     assert_eq!(adopted["workspaceId"], "http-host");
+    state.start_session_list_backfill();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !state.inner.store.session_list_index_ready().await.unwrap() {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("hosted catalog index ready");
+    // The guest's sidebar must discover an older shared chat, not merely be
+    // able to read its history if the guest somehow already knows its ID.
+    let listed = app.clone().oneshot(signed("device:guest", Method::GET, "/v2/sessions?roots=true")).await.unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed: Value = response_json(listed).await;
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["items"][0]["id"], old.id.as_str());
+    let projects = app.clone().oneshot(signed("device:guest", Method::GET, "/v2/session-projects")).await.unwrap();
+    assert_eq!(projects.status(), StatusCode::OK);
+    let projects: Value = response_json(projects).await;
+    assert_eq!(projects["items"][0]["directory"], old.directory);
+
     let mcp_catalog = app
         .clone()
         .oneshot(signed(
@@ -1389,4 +1407,60 @@ async fn hosting_rejects_conflicting_family_atomically_and_guest_cannot_associat
     );
     state.inner.store.close().await;
     let _ = std::fs::remove_dir_all(dir);
+}
+
+
+#[tokio::test]
+async fn hosting_indexed_catalog_includes_older_shared_local_history() {
+    let dir = std::env::temp_dir().join(format!("hosting-index-{}", neoism_agent_core::new_session_id()));
+    let root = dir.join("project");
+    let other = dir.join("other");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let store = SessionStore::open(dir.join("agent.db")).await.unwrap();
+    let mut old = store_test_session(&neoism_agent_core::new_session_id(), 100);
+    old.directory = root.to_string_lossy().into_owned();
+    old.extra.insert("pinned".into(), json!(true));
+    let mut unrelated = old.clone();
+    unrelated.id = neoism_agent_core::new_session_id();
+    unrelated.directory = other.to_string_lossy().into_owned();
+    unrelated.time.updated = 500;
+    for session in [&old, &unrelated] { store.insert_session(session).await.unwrap(); }
+    store.associate_host_directory(root.to_str().unwrap(), "catalog-host").await.unwrap();
+    // Older shared rows retain their local owner in both history and the index.
+    // A later hosted row already carries the hosting tenant in the index.
+    let mut current = old.clone();
+    current.id = neoism_agent_core::new_session_id();
+    current.time.updated = 200;
+    current.workspace_id = Some("catalog-host".into());
+    current.extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("workspace:catalog-host"));
+    current.extra.remove("pinned");
+    store.insert_session(&current).await.unwrap();
+    let mut private = old.clone();
+    private.id = neoism_agent_core::new_session_id();
+    private.time.updated = 300;
+    store.insert_session(&private).await.unwrap();
+    let mut foreign = private.clone();
+    foreign.id = neoism_agent_core::new_session_id();
+    foreign.time.updated = 400;
+    foreign.workspace_id = Some("different-host".into());
+    foreign.extra.insert(crate::caller::TENANT_EXTRA_KEY.into(), json!("workspace:different-host"));
+    store.insert_session(&foreign).await.unwrap();
+    let guest = claims(&root, "catalog-host", "device:guest");
+    let scope = crate::state::TenantQueryScope::Tenant("workspace:catalog-host");
+    let before = store.hosting_history_json_for_test().await.unwrap();
+    // Project discovery and pins include the old row without persisting its overlay.
+    let pinned = store.pinned_root_sessions(scope, Some(&guest)).await.unwrap();
+    assert_eq!(pinned.iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&old.id]);
+    assert_eq!(store.session_projects(scope, Some(&guest)).await.unwrap(), vec![(old.directory.clone(), 200)]);
+    let first = store.list_root_sessions_page(scope, true, false, root.to_str(), None, None, None, None, Some(1)).await.unwrap();
+    assert_eq!(first.items.iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&current.id]);
+    let cursor = crate::state::SessionListCursor::decode(first.next_cursor.as_deref().expect("older shared history has another page")).unwrap();
+    let second = store.list_root_sessions_page(scope, true, false, root.to_str(), None, None, None, Some(&cursor), Some(1)).await.unwrap();
+    assert_eq!(second.items.iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&old.id]);
+    assert!(second.next_cursor.is_none());
+    assert!(crate::caller::allows_session(&guest, &second.items[0]));
+    assert_eq!(store.hosting_history_json_for_test().await.unwrap(), before);
+    store.close().await;
+    std::fs::remove_dir_all(dir).ok();
 }

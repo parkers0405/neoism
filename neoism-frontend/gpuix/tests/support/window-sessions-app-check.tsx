@@ -46,6 +46,12 @@ try{
  assert.equal(local.model.getEditor(file),editor);assert.ok(editor.text().includes("unsaved local edit"));assert.equal(editor.frame.dirty,true);
  await click(`workspace:${remoteTab.id}`);await until(()=>selected()===remote);
  assert.ok(host.find(`workspace:${localTab.id}`));
+ remote.model.newAgentHome();await until(()=>!!host.find("composer")&&host.focused===host.find("composer")?.id);
+ await click(`workspace:${localTab.id}`);await until(()=>selected()===local);
+ local.model.newAgentHome();await until(()=>!!host.find("composer")&&host.focused===host.find("composer")?.id);
+ for(const [tab,owner] of [[remoteTab,remote],[localTab,local],[remoteTab,remote]] as const){
+  await click(`workspace:${tab.id}`);await until(()=>selected()===owner&&!!host.find("composer")&&host.focused===host.find("composer")?.id);
+ }
  console.log("Actual App host switching, retained dirty editor, remote tab selection, and local plus routing passed.");
 }finally{
  root.unmount();tabs.dispose();

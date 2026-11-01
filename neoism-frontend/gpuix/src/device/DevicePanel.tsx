@@ -203,7 +203,7 @@ export function DevicePanel(input:DevicePanelProps) {
       </Show>
       <Show when={nativeError()||notice()||state().detail}><div style={{position:"absolute",left:14*s,right:66*s,bottom:12*s,padding:10*s,borderRadius:6*s,backgroundColor:c.surface,borderWidth:1,borderColor:c.border}}><text testId="device-notice" style={text(11,c.dim)}>{nativeError()||notice()||state().detail}</text></div></Show>
     </div>
-    <Show when={menu()}><anchored fill="window" deferred priority={6} occlude>
+    <Show when={menu()}><anchored fill="window" deferred priority={6} occlude style={{backgroundColor:"transparent"}}>
       <div onMouseDown={()=>setMenu(undefined)} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"auto"}}/>
       <div testId="device-action-menu" role="menu" onKeyDown={event=>{if(event.key==="escape"){event.preventDefault();event.stopPropagation();setMenu(undefined);}}}
         style={{position:"absolute",left:menu()==="more"?Math.max(panelBounds().x+10*s,menuAnchor().x-menuWidth()-8*s):panelBounds().x+10*s,top:menu()==="more"?Math.max(panelBounds().y+34*s,Math.min(menuAnchor().y+28*s-moreHeight(),panelBounds().y+panelBounds().height-moreHeight()-10*s)):panelBounds().y+34*s,width:menuWidth(),maxHeight:Math.max(120*s,panelBounds().height-52*s),display:"flex",flexDirection:"column",padding:5*s,gap:2*s,overflowY:"scroll",backgroundColor:c.surface,borderRadius:8*s,borderWidth:1,borderColor:c.border,pointerEvents:"auto"}}>

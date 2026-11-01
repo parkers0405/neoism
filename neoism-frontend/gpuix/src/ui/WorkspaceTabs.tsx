@@ -10,6 +10,7 @@ import {HoverTabTitle} from "../layout/HoverTabTitle";
 import {verticalTabScroll,consumeTabScroll} from "../layout/tab-scroll";
 import {TabSlide} from "../layout/tab-slide";
 import {workspaceIcon,cloudWorkspace} from "../workspaces/workspace-icon";
+import {invalidateNativeFocus} from "../native-focus";
 
 /** Window-owned workspace tabs size to their titles and share one horizontal strip with their add button. */
 export function WorkspaceTabs(props:{
@@ -22,7 +23,7 @@ export function WorkspaceTabs(props:{
   onBounds:(host:HostElement,bounds:ChromeBounds)=>void;onScroll:()=>void;
   accessory?:JSX.Element;accessoryWidth?:number;
 }){
- const context=(id:string)=>props.workspaceContext?.(id)||{config:props.config,connectedHostId:props.connectedHostId,directoryRoots:props.directoryRoots};
+ const context=(id:string):WorkspaceContext=>props.workspaceContext?.(id)||{config:props.config,connectedHostId:props.connectedHostId,directoryRoots:props.directoryRoots};
  const c=props.config.theme,s=props.config.scale,spec=tabChrome(s),chrome=spec.workspace;
  const row={display:"flex" as const,flexDirection:"row" as const,alignItems:"center" as const};
  const text={fontFamily:props.config.fontFamily,fontWeight:props.config.fontWeight,fontSize:chrome.titleFontSize,color:c.fg,whiteSpace:"nowrap" as const,pointerEvents:"none" as const,userSelect:"none" as const};
@@ -59,6 +60,7 @@ export function WorkspaceTabs(props:{
   }
  };
  const move=(event:EventPayload)=>{
+  if(event.pressedButton!==0){if(drag())slide.end();armed=undefined;setDrag(undefined);dragOrder=undefined;return;}
   pointer={x:event.x??0,y:event.y??0};
   if(armed&&!drag()&&Math.hypot(pointer.x-armed.x,pointer.y-armed.y)>=5*s){
    dragOrder=props.workspaces.map(workspace=>workspace.id);grab=armed.grab;
@@ -76,7 +78,7 @@ export function WorkspaceTabs(props:{
  function Tab(p:{id:string;index:number}){
   const initial=untrack(()=>props.workspaces.find(w=>w.id===p.id))!;
   const workspace=createMemo(()=>props.workspaces.find(w=>w.id===p.id)||initial);
-  const title=createMemo(()=>workspaceLabel(workspace().title,workspaceTabRoot(workspace(),context(p.id).config,context(p.id).directoryRoots)));
+  const title=createMemo(()=>workspaceLabel(workspace().title,workspaceTabRoot(workspace(),context(p.id).config,context(p.id).directoryRoots,context(p.id).workspaceId)));
   const selected=()=>props.activeId===p.id;
   const [hovered,setHovered]=createSignal(false),[closeHovered,setCloseHovered]=createSignal(false);
   const [titleWidth,setTitleWidth]=createSignal([...title()].length*chrome.titleFontSize*.6);
@@ -96,6 +98,7 @@ export function WorkspaceTabs(props:{
   createEffect(()=>{if(selected())reveal();});
   onCleanup(()=>{disposed=true;hosts.delete(p.id);widths.delete(p.id);props.registerHost(p.id,undefined);});
   return <div ref={value=>{host=value;hosts.set(p.id,value);props.registerHost(p.id,value);}} tabIndex={0} role="tab" testId={`workspace:${p.id}`} aria-label={title()} aria-selected={selected()} data-keyboard-focused={props.keyboardIndex===p.index}
+   onFocus={()=>invalidateNativeFocus(renderer)} onBlur={()=>invalidateNativeFocus(renderer)}
    onLayout={event=>{rememberWidth(p.id,event.width||0);if(host)props.onBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});if(selected())reveal();}}
    onMouseDown={press}
    onMouseMove={move} onMouseUp={finish}
@@ -119,6 +122,7 @@ export function WorkspaceTabs(props:{
    <div ref={host=>scrollHost=host} testId="workspace-tab-scroll" onLayout={event=>{setViewportWidth(event.width||0);stripWidth=event.width||0;stripOriginX=event.x||0;stripOriginY=event.y||0;}} onScroll={event=>{consumeTabScroll(event);const next=verticalTabScroll(event,scrollX,stripWidth,[...widths.values()].reduce((sum,width)=>sum+width,0)+spec.buffer.newWidth);if(next!==undefined&&next!==scrollX&&scrollHost){consumeTabScroll(event,true);scrollX=next;renderer.scrollTo?.(scrollHost.id,next,0);props.onScroll();}}} onScrollChange={event=>{scrollX=event.scrollX??scrollX;props.onScroll();if(drag()){slide.move(contentPoint(pointer.x));reorderInStrip();}}} style={{...row,position:"absolute",left:0,right:props.accessoryWidth||0,top:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
    <For each={props.workspaces.map(w=>w.id)}>{(id,index)=><Tab id={id} index={index()}/>}</For>
    <div ref={host=>{newHost=host;props.registerNewHost(host);}} tabIndex={0} role="button" testId="workspace-new" aria-label="New workspace" data-keyboard-focused={props.keyboardIndex===props.workspaces.length}
+    onFocus={()=>invalidateNativeFocus(renderer)} onBlur={()=>invalidateNativeFocus(renderer)}
     onMouseDown={()=>{armed=undefined;closeGesture=false;suppressActivation=false;}} onClick={()=>{if(!closeGesture&&!suppressActivation)props.onNew();}} onLayout={event=>{if(newHost)props.onBounds(newHost,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});}}
     style={{...row,justifyContent:"center",position:"relative",width:spec.buffer.newWidth,height:chrome.height,flexShrink:0,cursor:"pointer",backgroundColor:props.keyboardIndex===props.workspaces.length?c.accent+"1a":undefined,hover:{backgroundColor:c.accent+"0f"}}}>
     <text style={{...text,fontFamily:props.config.iconFontFamily,fontSize:spec.buffer.iconSize,color:c.muted}}>{spec.buffer.newIcon}</text>
@@ -129,7 +133,7 @@ export function WorkspaceTabs(props:{
    <div testId="workspace-drag-layer" onMouseMove={move} onMouseUp={finish} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"auto",cursor:"grabbing"}}/>
     <div testId="workspace-drag-preview" aria-hidden={true} style={{...row,position:"absolute",left:(slideRevision(),pointer.x-grab),top:(slideRevision(),pointer.y-chrome.height/2),width:widths.get(drag()!)||0,height:chrome.height,paddingLeft:chrome.tabPaddingX,paddingRight:9*s+spec.buffer.closeHitSize/2+spec.buffer.padding,gap:9*s,overflow:"hidden",backgroundColor:c.bg,borderTopLeftRadius:3*s,borderTopRightRadius:3*s,pointerEvents:"none"}}>
      <text testId="workspace-drag-preview-icon" style={{...text,flexShrink:0,lineHeight:chrome.height,fontFamily:props.config.iconFontFamily,fontSize:12*s,color:rgba(chrome.iconColor)}}>{workspaceIcon(props.workspaces.find(workspace=>workspace.id===drag()),context(drag()!).config,chrome.iconGlyph,context(drag()!).connectedHostId)}</text>
-     <text style={{...text,flexShrink:0,lineHeight:chrome.height,color:c.fg}}>{(()=>{const workspace=props.workspaces.find(workspace=>workspace.id===drag());return workspace?workspaceLabel(workspace.title,workspaceTabRoot(workspace,context(workspace.id).config,context(workspace.id).directoryRoots)):"Workspace";})()}</text>
+     <text style={{...text,flexShrink:0,lineHeight:chrome.height,color:c.fg}}>{(()=>{const workspace=props.workspaces.find(workspace=>workspace.id===drag());return workspace?workspaceLabel(workspace.title,workspaceTabRoot(workspace,context(workspace.id).config,context(workspace.id).directoryRoots,context(workspace.id).workspaceId)):"Workspace";})()}</text>
      <div style={{...row,position:"absolute",right:spec.buffer.padding-spec.buffer.closeHitSize/2,top:(chrome.height-spec.buffer.closeHitSize)/2,justifyContent:"center",width:spec.buffer.closeHitSize,height:spec.buffer.closeHitSize,flexShrink:0,pointerEvents:"none"}}><text style={{...text,fontSize:spec.buffer.fontSize,color:c.muted}}>×</text></div>
     </div>
   </anchored></Show>

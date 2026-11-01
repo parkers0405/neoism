@@ -68,15 +68,15 @@ async function createSession(config: AppConfig, seed?: HotState, singleWorkspace
   profileStartup("recovery-loaded");
   let savedDependencies: unknown[] | undefined;
   let pendingCheckpoint: Promise<void> | undefined;
-  const checkpoint = async () => {
+  const checkpoint = async (force = false) => {
     // Final shutdown waits for an in-flight write, then captures any edits made
     // during it. Filesystem latency must never park the render/input thread.
     while (pendingCheckpoint) await pendingCheckpoint;
     const start=profileStart();let write:Promise<void>|undefined;let dependencies:unknown[]|undefined;
     try {
     dependencies = model.sessionDependencies();
-    if (savedDependencies?.length === dependencies.length && dependencies.every((value,index) => Object.is(value,savedDependencies![index]))) return;
-    write = store.writeAsync(model.captureSession());
+    if (!force && savedDependencies?.length === dependencies.length && dependencies.every((value,index) => Object.is(value,savedDependencies![index]))) return;
+    write = store.writeAsync(model.captureSession(force));
     } catch (error) { console.error("[neoism-gpuix] Recovery checkpoint failed:", error instanceof Error ? error.message : "write failed"); }
     finally { profileEnd("recovery.checkpoint",start); }
     if (write) {
@@ -93,7 +93,7 @@ async function createSession(config: AppConfig, seed?: HotState, singleWorkspace
   let disposal: Promise<void> | undefined;
   return { config, client, model, visuals,checkpoint, ssh:undefined as SshAttachment|undefined, server:undefined as ServerSelection|undefined, dispose(preserveEditors = false) {
     return disposal ||= (async () => {
-      clearInterval(timer); await checkpoint(); visuals.dispose();model.dispose(preserveEditors); client.stop();
+      clearInterval(timer); await checkpoint(true); visuals.dispose();model.dispose(preserveEditors); client.stop();
     })();
   } };
 }
@@ -121,6 +121,12 @@ if (!host) {
   let initialized=false;
   const tick=renderer.tick.bind(renderer);
   renderer.tick=()=>initialized?tick():true;
+  // Overlay components capture prior focus while mounting, before the native
+  // window exists. A synchronous query here serializes all UI construction
+  // behind GPU initialization. No native focus can change before ready.
+  const queryFocus=renderer.getFocusedElementId?.bind(renderer);
+  const queryFocusSnapshot=(renderer as GpuixRenderer & {getFocusedElementIdSnapshot?:()=>number|null}).getFocusedElementIdSnapshot?.bind(renderer);
+  if(queryFocus)renderer.getFocusedElementId=()=>initialized?queryFocus():queryFocusSnapshot?.()??null;
   windowReady=ready.then(()=>{
     initialized=true;
     if(process.stdin&&!process.stdin.isTTY)enableAutomation(renderer);
@@ -175,16 +181,17 @@ let transition = Promise.resolve();
 function update(work: () => Promise<void>,reportErrors=true) {
   const next = transition.then(work); transition = next.catch(error => {if(reportErrors&&!(error instanceof ServerHandshakeError&&error.phase==="cancelled"))session.model.report(error);}); return next;
 }
-async function reloadConfig(fontSizeOverride?:number,expectedSession?:typeof session) {
+async function reloadConfig(fontSizeOverride?:number,useConfiguredFontSize=false) {
   return update(async () => {
-    if(expectedSession&&expectedSession!==session)return;
     const reply = expectVariant(await Effect.runPromise(session.client.request("Config", "GetConfig")), "Config");
     if (!isRecord(reply) || !isRecord(reply.value)) throw new Error("Invalid config reply");
     const next = loadConfig(process.argv.slice(2), process.env, reply.value);
-    if(fontSizeOverride!==undefined){next.fontSize=fontSizeOverride;next.scale=fontSizeOverride/14;}
+    windowSessions.setFontSize(fontSizeOverride??(useConfiguredFontSize?next.fontSize:windowSessions.fontSize));
+    next.fontSize=windowSessions.fontSize;next.scale=next.fontSize/14;
     const previous = session.config;
     const beforeVim = previous.vim;
-    // Appearance follows the selected host's config; transport identity remains
+    // Other appearance follows the selected host; font zoom belongs to the window.
+    // Transport identity remains
     // scoped to the server the user explicitly selected.
     Object.assign(previous, next, { endpoint: previous.endpoint, authToken: previous.authToken, pairingToken: previous.pairingToken, workspaceId: previous.workspaceId,
       serverId:previous.serverId,collaborative:previous.collaborative,transportIdentity:previous.transportIdentity,
@@ -195,15 +202,14 @@ async function reloadConfig(fontSizeOverride?:number,expectedSession?:typeof ses
     root?.flushSync(() => setAppGeneration(generationOf()));
   });
 }
-let zoomSession=session;
-const fontZoom=new FontZoomController(()=>session.config.fontSize,async size=>{
-  zoomSession=session;
+const fontZoom=new FontZoomController(()=>windowSessions.fontSize,async size=>{
+  const zoomSession=windowSessions.sessions().find(localWorkspaceSession)||session;
   const reply=await Effect.runPromise(zoomSession.client.request("Config",{SetSetting:{key:"appearance.fonts.size",value:size}}));
   expectVariant(reply,"SettingWritten");
 },size=>{
   // Local, immediate: no config round trip before the new size shows. The
   // size is current synchronously so rapid presses accumulate correctly.
-  Object.assign(session.config,{fontSize:size,scale:size/14});
+  windowSessions.setFontSize(size);
   return update(async()=>{root?.flushSync(()=>setAppGeneration(generationOf()));});
 });
 async function connectServer(server: ServerSelection,reconnecting=false) {

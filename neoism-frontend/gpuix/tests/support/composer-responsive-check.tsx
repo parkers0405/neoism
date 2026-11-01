@@ -77,19 +77,32 @@ try{
  }
  stage="Ctrl+C clears the composer draft";
  root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"clear this draft"});await host.pump(root);
- root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"c",modifiers:{ctrl:true,alt:false,cmd:false,shift:false}});await host.pump(root);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"composer-interrupt"});await host.pump(root);
  assert.equal(host.find("composer")!.props.value,"");
  assert.equal(daemon.requests.filter(request=>request.tag==="CancelInflight").length,0);
  stage="Ctrl+C clears first, then interrupts an active session";
  model.openThread(daemon.threads[0]);await until(()=>!!host.find("composer"));
  model.update({streaming:{...model.state.streaming,one:"Working"}});await host.pump(root);
  root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"keep the run"});await host.pump(root);
- root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"c",modifiers:{ctrl:true,alt:false,cmd:false,shift:false}});await host.pump(root);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"composer-interrupt"});await host.pump(root);
  assert.equal(host.find("composer")!.props.value,"");
  assert.equal(daemon.requests.filter(request=>request.tag==="CancelInflight").length,0);
- root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"c",modifiers:{ctrl:true,alt:false,cmd:false,shift:false}});
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"composer-interrupt"});
  await until(()=>daemon.requests.some(request=>request.tag==="CancelInflight"));
  assert.equal(daemon.requests.filter(request=>request.tag==="CancelInflight").length,1);
+ stage="Escape interrupts a queued handoff even while parent is idle";
+ model.update({streaming:{...model.state.streaming,one:"Idle"},queues:{one:{count:2,preview:"next prompt"}}});await host.pump(root);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"composer-escape"});
+ await until(()=>daemon.requests.filter(request=>request.tag==="CancelInflight").length===2);
+ assert.equal(model.state.queues.one.count,2,"Escape must preserve queued messages");
+ assert.equal(daemon.requests.some(request=>request.tag==="ClearQueue"),false);
+ stage="Escape interrupts active children with an idle parent";
+ model.update({queues:{},ui:{...model.state.ui,agentFamilyRosters:{one:[{id:"child",parent:"one",title:"Child",status:"running",depth:1}]}}});
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"reset guard"});await host.pump(root);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:""});await host.pump(root);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"composer-escape"});
+ await until(()=>daemon.requests.filter(request=>request.tag==="CancelInflight").length===3);
+ assert.equal(model.state.error,undefined,"Native stop handoff must succeed before HTTP cancellation");
  assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.filter(request=>request.tag==="SubmitPrompt").length,0);
  console.log(JSON.stringify({actualApp:true,noWindow:true,narrowMeasuredControls:true,nonOverlappingChips:true,boundedInk:true,draftAndInputRetained:true,reasoningPickerWorks:true,slashAndChipPickersIdentical:true,noBackendSideEffects:true}));
 }finally{root.unmount();visuals.dispose();model.dispose();client.stop();daemon.stop();}

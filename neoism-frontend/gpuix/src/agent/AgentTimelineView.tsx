@@ -1,6 +1,7 @@
+import type {CanvasRaster} from "../ui/canvas";
 import type {ImagePreview} from "../ui/AttachmentImage";
-import { batch, createEffect, createSignal, For, onCleanup, onMount, untrack } from "solid-js";
-import { useGpuixRequired, type HostElement, type KeyEvent } from "@gpuix/solid";
+import { batch, createEffect, createSignal, For, Show, onCleanup, onMount, untrack } from "solid-js";
+import { useGpuixRequired, type HostElement, type KeyEvent, type EventPayload } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import type { WorkspaceModel } from "../model";
 import { coreCall } from "../native-core";
@@ -10,14 +11,14 @@ import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-
 import { invalidateNativeFocus } from "../native-focus";
 import {profileStart,profileEnd} from "../profiling";
 import type {AgentFamilyRow} from "./family";
-import { wheelCellPixels } from "../ui/wheel";
+import { readingScrollY, wheelCellPixels } from "../ui/wheel";
 import {localPresenceIdentity} from "./local-presence";
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
 import {paintedChromeBounds} from "../ui/chrome-target-bounds";
 import {openExternalUrl} from "../menu-actions/web-frontend";
 import {timelineReceivesEvent} from "./timeline-event-routing";
 
-interface TimelineFrame { preview?:{name:string;url:string}; canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; reason?:string; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
+interface TimelineFrame { selecting?:boolean; preview?:{name:string;url:string}; canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; reason?:string; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
 interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
 
 /** One original agent timeline engine per conversation (the shared Rust
@@ -50,6 +51,19 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   return engine;
 }
 
+/** Read the visible family's selection without creating an unseen timeline engine. */
+export function agentSelectedText(model:WorkspaceModel,sessionId:string):string|undefined {
+ const engine=engines.get(model)?.get(model.agentFamily(sessionId).root);
+ return engine?coreCall<{text:string|null}>("agenttimeline.copy",{id:engine.id}).text||undefined:undefined;
+}
+
+/** Enter the original queue handoff immediately, before the abort round trip. */
+export function stopAgentTimeline(model:WorkspaceModel,sessionId:string){
+ const engine=engines.get(model)?.get(model.agentFamily(sessionId).root);if(!engine)return;
+ coreCall("agenttimeline.stop",{id:engine.id,sessionId});
+ for(const listener of engine.dirty)listener();
+}
+
 /** Route the original Agent half-page command while its composer owns focus. */
 export function scrollAgentHalfPage(model:WorkspaceModel,sessionId:string,config:AppConfig,older:boolean){
  const engine=engineFor(model,sessionId,config,model.agentFamily(sessionId).root);
@@ -59,7 +73,7 @@ export function scrollAgentHalfPage(model:WorkspaceModel,sessionId:string,config
 
 export function AgentTimelineView(props: { sessionId: string; model: WorkspaceModel; config: AppConfig; report: (error: unknown) => void; openFile: (path: string) => void;
   /** Composer top: scroll metrics and sticky controls stop here; body paint continues behind the floating card. */
-  onPreview?:(image:ImagePreview)=>void;provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void;onFocus?:()=>void }) {
+  viewport?:{width:number;height:number};pinImage?:(source:number,raster:CanvasRaster)=>void;onPreview?:(image:ImagePreview)=>void;provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void;onFocus?:()=>void }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
   const provisional=!!props.provisional;
   const localName=localPresenceIdentity(config).displayName;
@@ -68,11 +82,12 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   const [canvas, setCanvas] = createSignal<PreparedCanvas>();
   const [header,setHeader]=createSignal<NonNullable<TimelineFrame["header"]>>([]);
   const [pointer,setPointer]=createSignal(false);
-  let bounds = { x: 0, y: 0, width: 0, height: 0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
+  const [selecting,setSelecting]=createSignal(false);
+  let bounds = { x: 0, y: 0, width: props.viewport?.width||0, height: props.viewport?.height||0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const apply = (next: TimelineFrame) => {
     if(next.animating)profileEnd(`agent.animation.${next.reason||"scroll"}`,profileStart());
-    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setPointer(!!next.pointer);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
+    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setPointer(!!next.pointer);setSelecting(!!next.selecting);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
     if(!provisional)for(const message of next.send||[])props.model.sendAgent(message as never);
     if(next.preview){
       const match=/^data:image\/[^;,]+;base64,(.*)$/s.exec(next.preview.url);
@@ -94,20 +109,25 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     try { flushPointer();apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id,...(op==="layout"?{localName}:{}), ...args })); } catch (error) { props.report(error); }
   };
   let layoutSignature = "";
+  const familyArgs=()=>({rootSessionId:props.rootSessionId||props.sessionId,sessionId:props.sessionId,roster:props.familyRoster||[],rootTitle:props.model.state.threads.find(thread=>thread.session_id===(props.rootSessionId||props.sessionId))?.title||props.rootSessionId||props.sessionId});
+  // Select the requested member in the mounting transaction. Solid effects
+  // run later; waiting for one exposes the previously viewed child's frame.
+  let pendingFamily:Record<string,unknown>|undefined=untrack(familyArgs);
+  const applyFamily=()=>{if(pendingFamily&&bounds.width>0&&bounds.height>0){const family=pendingFamily;pendingFamily=undefined;call("family",family);}};
   const layout = (contentBottom = props.contentBottom ?? bounds.height) => {
     if (bounds.width <= 0 || bounds.height <= 0) return;
     const signature = `${bounds.width}:${bounds.height}:${contentBottom}`;
     if (signature === layoutSignature) return;
     layoutSignature = signature;
-    call("layout", { width: bounds.width, height: bounds.height, contentBottom, scale: s, theme: config.themeName });
+    batch(()=>{call("layout", { width: bounds.width, height: bounds.height, contentBottom, scale: s, theme: config.themeName });applyFamily();});
   };
   // One paint per display frame however many events or animations arrive.
   const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame"); }, startedAt); };
   engine.dirty.add(schedule);
   onCleanup(() => { disposed = true; engine.dirty.delete(schedule); animation.dispose(); if(provisional)engine.dispose(); });
   onMount(() => schedule());
-  let familySignature="";
-  createEffect(()=>{const family={rootSessionId:props.rootSessionId||props.sessionId,sessionId:props.sessionId,roster:props.familyRoster||[],rootTitle:props.model.state.threads.find(thread=>thread.session_id===(props.rootSessionId||props.sessionId))?.title||props.rootSessionId||props.sessionId};const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>call("family",family));}});
+  let familySignature=JSON.stringify(pendingFamily);
+  createEffect(()=>{const family=familyArgs();const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>{pendingFamily=family;layout();applyFamily();});}});
   createEffect(() => { const bottom = props.contentBottom; untrack(() => layout(bottom ?? bounds.height)); });
   const local = (event: {x?:number;y?:number}) => {
     // Read the completed paint snapshot, including moves without resize events.
@@ -115,6 +135,11 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     if(painted){bounds={...bounds,x:painted.x,y:painted.y};}
     return {x:(event.x||0)-bounds.x,y:(event.y||0)-bounds.y};
   };
+  const movePointer=(event:EventPayload)=>{
+    if(selecting()&&event.pressedButton!==0){call("pointer",{kind:"up",...local(event)});return;}
+    pointerPending=local(event);schedule();
+  };
+  const releasePointer=(event:EventPayload)=>{if(event.button===undefined||event.button===0)call("pointer",{kind:"up",...local(event)});};
   // Repeated navigation keys share the same display-frame scroll commit as
   // trackpad events. Rendering here as well doubled work between display wakes.
   const scroll = (deltaY:number) => {
@@ -135,6 +160,9 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     else if (key === "home" || key === "end") { handled(); scroll(key === "home" ? 1e7 : -1e7); }
     else if (config.vim && !modified && ["j", "k"].includes(key)) { handled(); scroll((key === "k" ? 1 : -1) * 19 * s); }
   };
+  // Seed paint at the restored pane size in the mounting transaction. Never
+  // expose the engine's default/previous geometry while waiting for onLayout.
+  layout();
   return <div ref={host} testId="conversation" data-preserve-keyboard-focus={true} tabIndex={0} aria-label="Conversation history" onKeyDown={keyDown}
     onFocus={()=>{invalidateNativeFocus(renderer);props.onFocus?.();}}
     onBlur={()=>invalidateNativeFocus(renderer)}
@@ -144,15 +172,21 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
       if (resized) layout();
     }}
     onScroll={(event) => {
-      try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: event.deltaY || 0, precise: !!event.precise, ...(typeof event.x==="number"&&typeof event.y==="number"?local(event):{}), shift:!!event.modifiers?.shift, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
+      try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: readingScrollY(event), precise: !!event.precise, ...(typeof event.x==="number"&&typeof event.y==="number"?local(event):{}), shift:!!event.modifiers?.shift, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
       schedule();
     }}
     onMouseDown={(event) => { const point=local(event);if (event.button === 0) call("pointer", { kind: "down", ...point }); }}
-    onMouseMove={(event) => {pointerPending=local(event);schedule();}}
-    onMouseUp={(event) => call("pointer", { kind: "up", ...local(event) })}
+    onMouseMove={movePointer}
+    onMouseUp={releasePointer}
     onMouseLeave={() => call("pointer", { kind: "leave" })}
     style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", userSelect: "none", cursor: pointer()?"pointer":"text" }}>
-    <PaintLayer commands={commands()} prepared={canvas()} config={config} cacheImageBytes={16 * 1024 * 1024} />
+    <Show when={selecting()}><anchored fill="window" deferred priority={3} occlude style={{backgroundColor:"transparent"}}>
+      <div testId="timeline-selection-capture" data-preserve-keyboard-focus={true}
+        onMouseMove={event=>{movePointer(event);}}
+        onMouseUp={event=>{releasePointer(event);}}
+        style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",cursor:"text",pointerEvents:"auto"}}/>
+    </anchored></Show>
+    <PaintLayer commands={commands()} prepared={canvas()} config={config} pinImage={props.pinImage} cacheImageBytes={props.pinImage?undefined:16 * 1024 * 1024} />
     <For each={header()}>{link=><For each={link.rects}>{rect=><div testId={`agent-family-navigation:${link.direction}`} aria-label={link.direction==="next"?"Next conversation":"Previous conversation"} style={{position:"absolute",left:rect[0],top:rect[1],width:rect[2],height:rect[3],pointerEvents:"none"}}/>}</For>}</For>
   </div>;
 }

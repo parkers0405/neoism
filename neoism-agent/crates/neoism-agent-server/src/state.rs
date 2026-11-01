@@ -3516,7 +3516,7 @@ impl SessionStore {
         ];
         let mut params = Vec::new();
         if let TenantQueryScope::Tenant(tenant) = scope {
-            clauses.push("i.tenant_id = ?".to_string());
+            clauses.push(hosting::tenant_predicate("i", "session_id", "?1"));
             params.push(text(tenant));
         }
         if exclude_pinned {
@@ -3597,9 +3597,9 @@ impl SessionStore {
         let mut params = Vec::new();
         let tenant = if let TenantQueryScope::Tenant(tenant) = scope {
             params.push(text(tenant));
-            " AND i.tenant_id = ?"
+            format!(" AND {}", hosting::tenant_predicate("i", "session_id", "?1"))
         } else {
-            ""
+            String::new()
         };
         // Without caller claims or hosting overlays there is nothing to hydrate
         // or authorize per root. Aggregate in SQL instead of decoding every chat.
@@ -3653,9 +3653,9 @@ impl SessionStore {
         let mut params = Vec::new();
         let tenant = if let TenantQueryScope::Tenant(tenant) = scope {
             params.push(text(tenant));
-            " AND i.tenant_id = ?"
+            format!(" AND {}", hosting::tenant_predicate("i", "session_id", "?1"))
         } else {
-            ""
+            String::new()
         };
         let rows = self.db.fetch_all(
             &format!("SELECT i.session_id, i.directory, i.path, i.parent_id, i.title, i.updated, i.archived, i.tenant_id, i.workspace_id, i.summary_json FROM session_list_index i WHERE i.parent_id IS NULL AND json_type(i.summary_json, '$.pinned') = 'true' AND {NEOISM_ROOT_INDEX_CONDITION}{tenant} ORDER BY i.updated DESC, i.session_id DESC"),

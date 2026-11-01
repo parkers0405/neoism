@@ -11,8 +11,9 @@ const snapshots = new WeakMap<object, Snapshot>();
  * explicit focus requests invalidate it immediately. */
 export function focusedNativeElement(renderer: FocusRenderer, clock = () => performance.now()) {
   let state = snapshots.get(renderer);
-  if (!state) { state = { owner: undefined, nextRead: -Infinity }; snapshots.set(renderer, state); }
+  if (!state) { state = { owner: undefined, nextRead: 0 }; snapshots.set(renderer, state); }
   if (clock() >= state.nextRead) {
+    // Initial observation must not wait for graphics/window initialization.
     // Right after a focus event, ask the UI thread (it may not have drawn yet).
     // Steady-state polls read the lock-free snapshot from the latest draw: the
     // synchronous query parks JavaScript behind an in-progress paint.
@@ -26,6 +27,7 @@ export function focusedNativeElement(renderer: FocusRenderer, clock = () => perf
 export function invalidateNativeFocus(renderer: object) {
   const state = snapshots.get(renderer);
   if (state) state.nextRead = -Infinity;
+  else snapshots.set(renderer, { owner: undefined, nextRead: -Infinity });
 }
 
 export function focusNativeElement(renderer: FocusRenderer, id: number) {

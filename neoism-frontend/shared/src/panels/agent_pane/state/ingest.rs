@@ -20,8 +20,9 @@ impl NeoismAgentPane {
         if !can_drive && !matches!(kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System) {
             return;
         }
+        let drives_activity = part_update_drives_activity(&self.messages, &message);
         self.upsert_part_message(message);
-        if can_drive {
+        if can_drive && drives_activity {
             self.note_streaming_from_part(kind, &title);
         }
     }
@@ -424,7 +425,22 @@ impl NeoismAgentPane {
         let _ = (summary, kind);
     }
 
-    pub fn upsert_part_message(&mut self, message: NeoismAgentMessage) {
+    pub fn upsert_part_message(&mut self, mut message: NeoismAgentMessage) {
+        // Task tool completion acknowledges launch; the tracked child owns
+        // the card lifecycle. Normalize before recording animation changes.
+        if message.kind == NeoismAgentMessageKind::Tool && message.tool == "task" {
+            if let Some(status) = task_id_from_task_message(&message)
+                .and_then(|id| self.side_panel.branch_activity(&id))
+                .and_then(|activity| if activity.status == BranchStatus::Active {
+                    Some("running")
+                } else { task_message_status_from_branch(activity.status) })
+            {
+                message.status = status.to_owned();
+                for field in [&mut message.text, &mut message.detail] {
+                    rewrite_task_status_markers(field, status);
+                }
+            }
+        }
         let footer_only = self.messages.iter()
             .find(|m| !message.id.is_empty() && m.id == message.id)
             .is_some_and(|old| {
@@ -565,6 +581,9 @@ impl NeoismAgentPane {
                 | NeoismAgentMessageKind::Subtask
                 | NeoismAgentMessageKind::Compaction
         ) && !is_background_completion_card(&message)
+            && (message.id.is_empty() || self.messages.iter().find(|old| old.id == message.id)
+                .is_none_or(|old| old.kind != message.kind || old.text != message.text
+                    || old.detail != message.detail || old.tool != message.tool))
         {
             // Open the live-trace window for real turn output, but NOT for
             // the background-task completion card. That card lands in an
@@ -757,4 +776,18 @@ impl NeoismAgentPane {
 /// must not drag the whole settled turn back into view with it.
 fn is_background_completion_card(message: &NeoismAgentMessage) -> bool {
     message.tool == "background_task_result" && message.id.starts_with("background-task-")
+}
+
+/// Whole-part snapshots also carry footer/finalization replays. Only changed
+/// live tail content can advance the model activity indicator.
+pub(super) fn part_update_drives_activity(messages: &[NeoismAgentMessage], message: &NeoismAgentMessage) -> bool {
+    if matches!(message.status.as_str(), "completed" | "error" | "stopped" | "cancelled") {
+        return false;
+    }
+    if message.id.is_empty() { return true; }
+    let Some(old) = messages.iter().find(|old| old.id == message.id) else { return true; };
+    messages.last().is_some_and(|tail| tail.id == message.id)
+        && (old.kind != message.kind || old.text != message.text || old.detail != message.detail
+            || old.tool != message.tool || message.kind == NeoismAgentMessageKind::Tool
+                && old.status != message.status && matches!(message.status.as_str(), "running" | "pending"))
 }

@@ -78,7 +78,7 @@ fn open_spelling_menu(view:&mut View,x:f32,y:f32){
 fn frame(view: &mut View) -> Value {
     let moving = view.pane.tick_scroll();
     view.painter.begin_frame();
-    md::render::render(
+    neoism_ui::syntax::with_async_highlighting(|| md::render::render(
         &mut view.painter,
         &mut view.pane,
         [0.0, 0.0, view.width, view.height],
@@ -87,7 +87,7 @@ fn frame(view: &mut View) -> Value {
         &[],
         view.scale,
         0.0,
-    );
+    ));
     if std::env::var("NEOISM_RM_OVERLAY").as_deref()!=Ok("0"){
       use neoism_ui::editor::neodraw::{ink_sidecar_path,legacy_ink_sidecar_path,Scene,strokes_only,render_scene,Camera,Vec2};
       let ink=view.painter.asset_text(&ink_sidecar_path(&view.pane.path)).filter(|text|!text.trim().is_empty()).or_else(||view.painter.asset_text(&legacy_ink_sidecar_path(&view.pane.path)).filter(|text|!text.trim().is_empty()));
@@ -111,7 +111,7 @@ fn frame(view: &mut View) -> Value {
     let history=view.pane.take_doc_history_requests().into_iter().map(|request|matches!(request,md::MarkdownDocHistoryRequest::Redo)).collect::<Vec<_>>();
     let canvas=view.canvas_style.as_ref().map(|(font,weight)|crate::paint_canvas::encode(&view.painter.borrowed_commands(),font,*weight));
     let commands=if canvas.is_some(){json!([])}else{json!(&*view.painter.borrowed_commands())};
-    json!({"presence":presence,"docHistory":history,"commands":commands,"canvas":canvas,"menu":menu,"assets":assets,"cover":cover,"revision":view.pane.source_revision(),"mode":format!("{:?}",view.pane.mode),"vim":view.pane.vim_enabled,"cursor":{"line":view.pane.cursor_line,"col":view.pane.cursor_col,"rect":view.pane.cursor_rect},"dirty":view.pane.is_dirty(),"scrollY":view.pane.scroll_y,"contentHeight":view.pane.content_height(),"animating":moving||reveal||view.pane.has_pending_scroll_animation()||view.trail.is_animating()||view.menu.is_animating(),"cursorQuad":view.trail.quad_points(),"cursorHold":view.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),"hostAction":effects.get("hostAction"),"dragging":view.pane.is_dragging(),"effects":effects})
+    json!({"presence":presence,"docHistory":history,"commands":commands,"canvas":canvas,"menu":menu,"assets":assets,"cover":cover,"revision":view.pane.source_revision(),"mode":format!("{:?}",view.pane.mode),"vim":view.pane.vim_enabled,"cursor":{"line":view.pane.cursor_line,"col":view.pane.cursor_col,"rect":view.pane.cursor_rect},"dirty":view.pane.is_dirty(),"scrollY":view.pane.scroll_y,"contentHeight":view.pane.content_height(),"animating":neoism_ui::syntax::highlighters_compiling()||moving||reveal||view.pane.has_pending_scroll_animation()||view.trail.is_animating()||view.menu.is_animating(),"cursorQuad":view.trail.quad_points(),"cursorHold":view.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),"hostAction":effects.get("hostAction"),"dragging":view.pane.is_dragging(),"effects":effects})
 }
 fn snapshot(view: &mut View) -> Value {
     let anchor=view.pane.capture_host_scroll_anchor();

@@ -171,7 +171,10 @@ impl Editor {
             wrap: view.wrap.clone(),
             ..Default::default()
         };
-        pane.highlight.refresh(&pane.buffer, pane.language);
+        // Grammar compilation must not block first paint. Existing whole-file
+        // spans are refreshed once the shared grammar worker has finished.
+        let syntax_ready = neoism_ui::syntax::try_highlight_line("", pane.language).is_some();
+        if syntax_ready { pane.highlight.refresh(&pane.buffer, pane.language); }
         let selection = pane.buffer.selection_range();
         let mut lines = Vec::new();
         let mut search_hits = Vec::new();
@@ -233,14 +236,14 @@ impl Editor {
             // A logical line can occupy the entire viewport. Merge its syntax,
             // selection and diagnostics once, then visit only this row's spans.
             if styled_line != Some(line) {
-                spans = neoism_ui::editor::code::styled_runs_with_syntax(
+                spans = neoism_ui::syntax::with_async_highlighting(|| neoism_ui::editor::code::styled_runs_with_syntax(
                     source,
-                    pane.highlight.line_runs(line),
+                    if syntax_ready { pane.highlight.line_runs(line) } else { None },
                     pane.language,
                     selected,
                     pane.diagnostics.get(&line).map_or(&[][..], Vec::as_slice),
                     &[],
-                );
+                ));
                 styled_line = Some(line);
             }
             let mut glyph_runs = Vec::new();
@@ -298,7 +301,7 @@ impl Editor {
               "shape":format!("{:?}",pane.cursor_shape()),"visible":cursor_y+row>0.0 && cursor_y<self.height},
             "mode":format!("{:?}",pane.buffer.mode),"wrap":pane.wrap,"vim":pane.input_mode==CodeInputMode::Vim,"dirty":pane.buffer.is_dirty(),"revision":pane.buffer.revision,
             "totalLines":pane.buffer.line_count(),"pendingKeys":pane.buffer.vim.pending.showcmd(),
-            "scrollY":pane.scroll_y,"contentHeight":view.content_h,"scrollAnimating":view.scroll_animating,"animating":view.scroll_animating||self.trail.is_animating(),
+            "scrollY":pane.scroll_y,"contentHeight":view.content_h,"scrollAnimating":view.scroll_animating,"highlightAnimating":neoism_ui::syntax::highlighters_compiling(),"animating":view.scroll_animating||self.trail.is_animating()||neoism_ui::syntax::highlighters_compiling(),
             "clipboard":self.clipboard.take(),"hostAction":self.host_action.take(),"pendingEmpty":pane.buffer.vim.pending.is_empty()&&!pane.leader_pending,
             "cursorQuad":self.trail.quad_points(),"cursorHold":self.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),
             "selection":selection.map(|(a,b)|json!({"start":[a.line,a.col],"end":[b.line,b.col]}))})

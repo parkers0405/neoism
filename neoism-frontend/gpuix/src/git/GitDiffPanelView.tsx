@@ -7,6 +7,7 @@ import {useOverlayViewport,type OverlayViewport} from "../ui/overlay-viewport";
 import type {ChromeCursorTarget} from "../ui/ChromeFocusCursor";
 import {focusNativeElement,invalidateNativeFocus} from "../native-focus";
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
+import {readingScrollY} from "../ui/wheel";
 import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
 
 /** A reserved right-hand slot for the original GitDiffPanel paint/input.
@@ -53,7 +54,7 @@ export function GitDiffPanelView(props:{controller:GitController;config:AppConfi
    onMouseDown={event=>{if(event.button!==undefined&&event.button!==0)return;focus(true);pointerFrames.cancel();pointer=local(event);call("pointer",{kind:"down",...pointer});setDragging(true);}}
    onMouseMove={move} onMouseUp={finish}
    onMouseLeave={()=>{if(!dragging())call("pointer",{kind:"hover",x:-1,y:-1});}}
-   onScroll={event=>call("scroll",{...local(event),delta:(event.deltaY||0)*(event.precise?1:40),precise:!!event.precise})}
+   onScroll={event=>call("scroll",{...local(event),delta:readingScrollY(event)*(event.precise?1:40),precise:!!event.precise})}
    style={{position:"relative",width:frame().width,height:viewport().height,flexShrink:0,minWidth:0,minHeight:0,overflow:"hidden",userSelect:"none"}}>
    <div testId="git-panel-native-paint" style={{position:"absolute",left:frame().width-viewport().width,top:0,width:viewport().width,height:viewport().height,pointerEvents:"none"}}>
     <PaintLayer commands={frame().commands} config={props.config}/>

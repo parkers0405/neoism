@@ -3,6 +3,7 @@ import {loadConfig} from "../src/config";
 import type {WorkspaceModel} from "../src/model";
 import type {Workspace} from "../src/daemon/protocol";
 import {WindowWorkspaceSessions} from "../src/workspaces/window-sessions";
+import {FontZoomController} from "../src/commands/font-zoom";
 import {cloudWorkspace} from "../src/workspaces/workspace-icon";
 
 function session(remote=false){
@@ -69,4 +70,28 @@ test("a window opened directly on SSH acquires one local connection for repeated
  await Promise.all([tabs.newWorkspace(),tabs.newWorkspace()]);
  expect(opened).toBe(1);expect(local.calls.new).toBe(2);expect(remote.calls.new).toBe(0);
  expect(tabs.sessions()).toEqual([remote,local]);expect(tabs.context(tabs.activeId()!)!.config).toBe(local.config);tabs.dispose();
+});
+
+
+test("font zoom follows the window across local, SSH, new and reconnected workspaces",async()=>{
+ const {tabs,local}=window(),remote=session(true);
+ remote.config.fontSize=27;remote.config.scale=27/14;
+ tabs.add(remote);
+ const initial=tabs.fontSize;
+ expect(remote.config.fontSize).toBe(initial);
+ const zoom=new FontZoomController(()=>tabs.fontSize,async()=>{},async size=>{tabs.setFontSize(size);});
+ try{
+  const localTab=tabs.workspaces()[0],remoteTab=tabs.workspaces()[1];
+  await tabs.activate(remoteTab);await zoom.change(1);
+  await tabs.activate(localTab);expect(local.config.fontSize).toBe(initial+1);
+  await zoom.change(1);await tabs.activate(remoteTab);
+  expect(remote.config.fontSize).toBe(initial+2);expect(remote.config.scale).toBe((initial+2)/14);
+  await Promise.all([zoom.change(1),zoom.change(-1)]);
+  expect(local.config.fontSize).toBe(remote.config.fontSize);
+  const replacement=session(true);replacement.config.fontSize=9;
+  tabs.replace(remote,replacement);expect(replacement.config.fontSize).toBe(initial+2);
+  const added=session(true);added.config.fontSize=35;tabs.add(added);
+  expect(added.config.fontSize).toBe(initial+2);expect(added.config.scale).toBe((initial+2)/14);
+  expect(local.model.editors.get("file") as unknown).toBe(local.draft);
+ }finally{await zoom.settled();tabs.dispose();}
 });

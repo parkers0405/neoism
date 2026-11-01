@@ -348,6 +348,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         derivations: ScrollFrameDerivations,
         total_us: u128,
     ) {
+        static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *PROFILE.get_or_init(|| std::env::var("NEOISM_GPUIX_PROFILE").as_deref() == Ok("1")) && total_us >= 2_000 {
+            eprintln!("[neoism-timeline-slow] messages={} rows={} visible={} layout_us={:?} rows_us={:?} prep_us={:?} post_us={:?} total_us={} markdown={} clones={}", self.messages().len(), row_count, rendered_rows, layout_us, rows_us, prep_us, post_us, total_us, derivations.markdown_layouts, derivations.message_clones);
+        }
         if !crate::panels::agent_pane::state::perf::enabled() {
             return;
         }

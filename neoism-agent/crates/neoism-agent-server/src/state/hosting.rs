@@ -1,6 +1,16 @@
 //! Trusted hosting associations. Session IDs/history are never copied or moved.
 use super::*;
 
+// Apply authoritative hosting associations BEFORE catalog/search pagination.
+// History and compact list rows keep their original tenant until a later write;
+// filtering that raw tenant alone hides older, successfully shared conversations.
+// Canonical SQL is an eligibility prefilter, never a replacement for hydrated
+// caller authorization. Local access via a registered host namespace is only
+// provisionally admitted here; the authoritative hydration checks paths/markers.
+pub(super) fn tenant_predicate(alias: &str, id_column: &str, parameter: &str) -> String {
+    format!("((({alias}.tenant_id={parameter} OR ({alias}.tenant_id='local' AND EXISTS (SELECT 1 FROM hosted_chat_sessions h WHERE h.session_id={alias}.{id_column} AND 'workspace:' || h.workspace_id={parameter}))) AND NOT EXISTS (SELECT 1 FROM hosted_chat_revocations r WHERE r.session_id={alias}.{id_column} AND 'workspace:' || r.workspace_id={parameter})) OR ({parameter}='local' AND (EXISTS (SELECT 1 FROM hosted_chat_revocations r WHERE r.session_id={alias}.{id_column} AND 'workspace:' || r.workspace_id={alias}.tenant_id) OR EXISTS (SELECT 1 FROM hosted_chat_directories d WHERE 'workspace:' || d.workspace_id={alias}.tenant_id))))")
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HostingSession {

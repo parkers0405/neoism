@@ -24,10 +24,12 @@ export function workspaceLabel(title: string, root?: string | null, home = proce
   return normalize(title).split("/").pop() || "~";
 }
 /** The Explorer's first-terminal cwd follow is window-local. Display its
- * confirmed directory without rewriting the saved host workspace metadata. */
-export function workspaceTabRoot(workspace:Workspace,transport:TerminalTransport,roots:unknown):string|null|undefined{
+ * confirmed directory without rewriting the saved host workspace metadata.
+ * Window tabs have connection-scoped IDs; SSH policy needs the daemon's
+ * original workspace ID while the display root map uses the tab ID. */
+export function workspaceTabRoot(workspace:Workspace,transport:TerminalTransport,roots:unknown,sourceWorkspaceId=workspace.id):string|null|undefined{
   const entry=roots&&typeof roots==="object"&&!Array.isArray(roots)?(roots as Record<string,unknown>)[workspace.id]:undefined;
-  if(terminalDirectoryFollowsWorkspace(workspace,transport)&&entry&&typeof entry==="object"&&!Array.isArray(entry)){
+  if(terminalDirectoryFollowsWorkspace({...workspace,id:sourceWorkspaceId},transport)&&entry&&typeof entry==="object"&&!Array.isArray(entry)){
     const observed=entry as Record<string,unknown>;
     if(observed.declaredRoot===(workspace.root_dir||null)&&absoluteTerminalDirectory(observed.root))return observed.root;
   }

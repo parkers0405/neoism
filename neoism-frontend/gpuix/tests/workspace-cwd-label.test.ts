@@ -17,3 +17,10 @@ test("actual App workspace strip follows confirmed terminal cwd in place and ret
  const [status,out,err]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);expect({status,err}).toEqual({status:0,err:""});
  expect(JSON.parse(out)).toEqual({actualApp:true,noWindow:true,confirmedTerminalCwdLabelsExistingTab:true,inactiveWorkspaceRetained:true,manualRootWins:true,noSharedRootMutation:true});
 },15000);
+
+test("Quick SSH window tabs follow the confirmed remote folder through namespaced IDs",async()=>{
+ const child=Bun.spawn([process.execPath,"run","tests/support/workspace-cwd-label-check.tsx","--ssh"],{cwd:fileURLToPath(new URL("..",import.meta.url)),stdout:"pipe",stderr:"pipe"});
+ const [status,out,err]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
+ expect({status,err}).toEqual({status:0,err:""});
+ expect(JSON.parse(out).confirmedTerminalCwdLabelsExistingTab).toBe(true);
+},15000);

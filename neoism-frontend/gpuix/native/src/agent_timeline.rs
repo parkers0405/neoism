@@ -463,6 +463,15 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 out["navigate"] = result["navigate"].clone();
                 Ok(out)
             }
+            "agenttimeline.stop" => {
+                if text(v, "sessionId") == view.session_id {
+                    // Same immediate queue handoff and stale-stream suppression
+                    // as the original GUI. The host owns the HTTP abort.
+                    view.pane.abort_session();
+                    view.pane.drain_pending_outbound();
+                }
+                Ok(Value::Null)
+            }
             "agenttimeline.copy" => Ok(json!({"text": view.selection})),
             _ => Err("Unknown agent timeline operation".into()),
         }

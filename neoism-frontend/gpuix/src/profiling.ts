@@ -25,6 +25,7 @@ const installed=new WeakSet<object>();
 export function installProfiling(renderer:GpuixRenderer){
   if(!profilingEnabled||installed.has(renderer))return;installed.add(renderer);
   let previousSample:number[]|undefined,reportedSample:number[]|undefined,sampleSource:string|undefined;
+  const cadence:number[]=[];
   const methods=renderer as unknown as Record<string,(...args:unknown[])=>unknown>;
   for(const name of ["applyBatch","tick","getDebugFrameOverlayStats","getPresentedFrameSample","getRenderedFrameSample","getFocusedElementId","getElementBounds","getWindowSize","getWindowInsets","setWindowTitle","setWindowKeyEvents","setWindowSelectionChange","getSelectedText","setImagePixels","putPaintImage","dropPaintImage"]){
     const original=methods[name];if(typeof original!=="function")continue;
@@ -37,6 +38,7 @@ export function installProfiling(renderer:GpuixRenderer){
           if(sampleSource!==name){previousSample=undefined;reportedSample=undefined;sampleSource=name;}
           if(previousSample&&sample[0]>previousSample[0]&&sample[1]>previousSample[1]){
             const count=sample[0]-previousSample[0],elapsed=sample[1]-previousSample[1];
+            cadence.push(count*1000/elapsed);
             nativeFrames+=count;draw={source:name==="getPresentedFrameSample"?"presented":"drawn",frames:count,elapsedMs:elapsed,fps:count*1000/elapsed};
             if(lastInput){profileEnd("input.firstDrawObserved",lastInput);lastInput=0;}
           }
@@ -57,7 +59,7 @@ export function installProfiling(renderer:GpuixRenderer){
       return [name,{count:metric.count,ms:Math.round(metric.ms*100)/100,meanMs:Math.round(metric.ms/metric.count*1000)/1000,
         p95Ms:Math.round(samples[Math.floor((samples.length-1)*.95)]*1000)/1000,maxMs:Math.round(metric.maxMs*100)/100,bytes:metric.bytes}];
     }));
-    console.error("[neoism-gpuix-profile]",JSON.stringify({elapsedMs:Math.round(elapsed),nativeFrames:nativeFrames-reportedFrames,nativeFps:previousSample&&reportedSample&&previousSample[1]>reportedSample[1]?(previousSample[0]-reportedSample[0])*1000/(previousSample[1]-reportedSample[1]):undefined,draw,operations}));
-    metrics.clear();lastReport=now;reportedFrames=nativeFrames;reportedSample=previousSample;
+    console.error("[neoism-gpuix-profile]",JSON.stringify({elapsedMs:Math.round(elapsed),nativeFrames:nativeFrames-reportedFrames,nativeFps:previousSample&&reportedSample&&previousSample[1]>reportedSample[1]?(previousSample[0]-reportedSample[0])*1000/(previousSample[1]-reportedSample[1]):undefined,draw,cadence:cadence.length?{samples:cadence.length,minFps:Math.min(...cadence),maxFps:Math.max(...cadence)}:undefined,operations}));
+    cadence.length=0;metrics.clear();lastReport=now;reportedFrames=nativeFrames;reportedSample=previousSample;
   },2000);timer.unref();
 }

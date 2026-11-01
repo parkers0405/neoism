@@ -228,6 +228,9 @@ pub(super) fn render_virtual(
             });
         pane.virtual_render.last_cursor_change_at = Some(now);
     }
+    static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let profile = *PROFILE.get_or_init(|| std::env::var("NEOISM_GPUIX_PROFILE").as_deref() == Ok("1"));
+    let started = profile.then(Instant::now);
     invalidate_reveal_layout(pane);
     if !prepare_surface(pane, body_content_w, y + pad_top, viewport_h) {
         return false;
@@ -253,6 +256,7 @@ pub(super) fn render_virtual(
             }));
     }
 
+    let prepared = started.map(|start| start.elapsed().as_secs_f64() * 1000.0);
     let mut items = collect_visible_items(pane);
     if commit_visible_measurements(
         sugarloaf,
@@ -268,6 +272,7 @@ pub(super) fn render_virtual(
         // next frame when measured heights have shifted the rows below it.
         items = collect_visible_items(pane);
     }
+    let measured = started.map(|start| start.elapsed().as_secs_f64() * 1000.0);
     let content_height = pane.virtual_render.surface.content_height();
 
     let total_height = content_height + pad_top + 60.0;
@@ -473,6 +478,13 @@ pub(super) fn render_virtual(
     }
     draw_remote_markdown_carets(sugarloaf, pane, theme, clip, font_scale);
     draw_markdown_scrollbar(sugarloaf, pane, rect, total_height, theme, mouse, clip);
+    if let Some(started) = started {
+        let total = started.elapsed().as_secs_f64() * 1000.0;
+        if total >= 2.0 {
+            eprintln!("[neoism-gpuix-markdown] total={:.2} prepare={:.2} measure={:.2} draw={:.2} lines={}", total, prepared.unwrap_or(0.0), measured.unwrap_or(0.0)-prepared.unwrap_or(0.0), total-measured.unwrap_or(0.0), pane.lines.len());
+        }
+    }
+
     if let Some(footer) = pane.reader_footer.as_deref() {
         let opts = DrawOpts {
             font_size: markdown_font(12.0, font_scale),

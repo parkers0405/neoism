@@ -783,7 +783,26 @@ impl Lang {
     }
 }
 
+thread_local! {
+    static ASYNC_HIGHLIGHTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Paint hosts that schedule frames while `highlighters_compiling()` is true
+/// can compile cold grammars off-thread. Fallback spans are never cached as
+/// final syntax. Other callers retain the synchronous highlighting contract.
+pub fn with_async_highlighting<T>(paint: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) { ASYNC_HIGHLIGHTING.set(self.0); }
+    }
+    let _restore = Restore(ASYNC_HIGHLIGHTING.replace(true));
+    paint()
+}
+
 pub fn highlight_line<'a>(line: &'a str, lang: Lang) -> Vec<(SynTok, &'a str)> {
+    if ASYNC_HIGHLIGHTING.get() {
+        return try_highlight_line(line, lang).unwrap_or_else(|| fallback_highlight_line(line, lang));
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(spans) = tree_sitter_highlight_line(line, lang) {
         return spans;
@@ -1712,6 +1731,19 @@ pub fn syn_color(tok: SynTok, theme: &IdeTheme, dim: bool) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn async_highlighting_scope_restores_nested_and_unwound_callers() {
+        assert!(!super::ASYNC_HIGHLIGHTING.get());
+        super::with_async_highlighting(|| {
+            assert!(super::ASYNC_HIGHLIGHTING.get());
+            super::with_async_highlighting(|| assert!(super::ASYNC_HIGHLIGHTING.get()));
+            assert!(super::ASYNC_HIGHLIGHTING.get());
+        });
+        assert!(!super::ASYNC_HIGHLIGHTING.get());
+        let _ = std::panic::catch_unwind(|| super::with_async_highlighting(|| panic!("scope exit")));
+        assert!(!super::ASYNC_HIGHLIGHTING.get());
+    }
+
     use super::*;
 
     fn has_token(spans: &[(SynTok, &str)], kind: SynTok, text: &str) -> bool {

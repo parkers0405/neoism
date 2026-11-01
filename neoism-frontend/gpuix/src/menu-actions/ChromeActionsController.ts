@@ -25,7 +25,7 @@ export interface MenuFrame {
   snapshot?: unknown;
 }
 export interface ChromeActionsOptions {
-  model: WorkspaceModel; config: AppConfig; reload: () => void | Promise<void>;
+  model: WorkspaceModel; config: AppConfig; reload: (fontSizeOverride?:number) => void | Promise<void>;
   onConnectServer?: (server: ServerSelection) => void | Promise<void>;
   onRunAction?: (action: string) => void | Promise<void>;
   supportedActions?: () => readonly string[];
@@ -219,7 +219,7 @@ export class ChromeActionsController {
   }
   private async perform(action: Record<string, any>, target?: Record<string, any> | null) {
     switch (action.kind) {
-      case "setting": await this.request({ SetSetting: { key: action.key, value: action.value } }); this.options.model.setUI({ chromeAction: "OpenSettings", chromeSnapshot: this.frame?.snapshot }); await this.options.reload(); return;
+      case "setting": await this.request({ SetSetting: { key: action.key, value: action.value } }); this.options.model.setUI({ chromeAction: "OpenSettings", chromeSnapshot: this.frame?.snapshot }); await this.options.reload(action.key==="appearance.fonts.size"&&typeof action.value==="number"?action.value:undefined); return;
       case "keybind": await this.request({ SetKeybind: { action: action.action, key: action.key, with: action.with } }); this.options.model.setUI({ chromeAction: "OpenSettings", chromeSnapshot: this.frame?.snapshot }); await this.options.reload(); return;
       case "config-document": { const document = await this.configDocument(true); this.options.model.openConfigDocument(document); this.close(); return; }
       case "url": await (this.options.openUrl || openExternalUrl)(action.url); return;

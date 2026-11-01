@@ -1842,9 +1842,9 @@ fn streaming_tail_patch_cannot_strand_estimated_edit_rows() {
     // patch row 4 exactly while leaving short Edit rows 2 and 3 in the middle.
     assert_eq!(super::layout::patch_start_row(&cache, 4), None);
     assert!(!super::layout::prepend_cache_is_exact(&cache));
-    // Starting at the first estimated row removes the entire estimated suffix.
-    assert_eq!(super::layout::patch_start_row(&cache, 2), Some(2));
-    assert_eq!(super::layout::patch_start_row(&cache, 1), Some(1));
+    // A visible-row update must not turn the entire offscreen suffix exact.
+    assert_eq!(super::layout::patch_start_row(&cache, 2), None);
+    assert_eq!(super::layout::patch_start_row(&cache, 1), None);
 }
 
 #[test]
@@ -2153,4 +2153,27 @@ fn measured_tail_growth_keeps_appended_live_rows_but_rejects_changed_group_bound
     );
     let changed = lazy_cache(vec![layout_row(1, 0.0, 400.0)], 0, 1);
     assert_eq!(super::layout::measured_tail_growth(&changed, baseline), 0.0);
+}
+
+#[test]
+fn large_scroll_reanchors_at_destination_without_measuring_the_gap() {
+    use super::layout::retarget_scrolled_anchor;
+    let rows = (0..500).map(|i| layout_row(i, i as f32 * 100.0, 80.0)).collect::<Vec<_>>();
+    // Home moved the bottom row down by the entire transcript height.
+    assert_eq!(retarget_scrolled_anchor(&rows, 499, 49900.0, 500.0), Some((0, 0.0)));
+    // The reverse jump and a partial-row landing keep the requested position.
+    assert_eq!(retarget_scrolled_anchor(&rows, 0, -45027.0, 500.0), Some((450, -27.0)));
+    assert_eq!(retarget_scrolled_anchor(&rows, 450, -27.0, 500.0), None);
+    let tall = vec![layout_row(0, 0.0, 20000.0), layout_row(1, 20018.0, 80.0)];
+    assert_eq!(retarget_scrolled_anchor(&tall, 0, -18000.0, 500.0), None);
+}
+
+#[test]
+fn suffix_patch_only_measures_rows_in_an_already_exact_tail() {
+    let rows = (0..500).map(|i| layout_row(i, i as f32 * 100.0, 80.0)).collect::<Vec<_>>();
+    let tail = lazy_cache(rows.clone(), 490, 500);
+    assert_eq!(super::layout::patch_start_row(&tail, 495), Some(495));
+    assert_eq!(super::layout::patch_start_row(&tail, 40), None);
+    let middle = lazy_cache(rows, 240, 260);
+    assert_eq!(super::layout::patch_start_row(&middle, 250), None);
 }

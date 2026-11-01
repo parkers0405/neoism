@@ -8,7 +8,7 @@ export function createGitDaemon(options:{pullRequests?:boolean}={}){
  const fileContents=new Map([["src/main.ts","const value = 2;\nconsole.log(value);\n"]]);
  let restoreError:string|undefined;
  let staged=false,branch="feature/fixture",upstream:string|null=null,commitError:string|undefined;
- const patch="diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,2 +1,2 @@\n-const value = 1;\n+const value = 2;\n console.log(value);\n";
+ let patch="diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,2 +1,2 @@\n-const value = 1;\n+const value = 2;\n console.log(value);\n";
  let prNumber=7,prTitle="Fixture pull request",prBody="Original PR body",merged=false;
  const summary=()=>({number:prNumber,title:prTitle,url:`https://example.test/fixture/pull/${prNumber}`,author:"fixture",state:merged?"MERGED":"OPEN",draft:false,base_branch:"main",head_branch:branch,base_sha:"b".repeat(40),head_sha:"a".repeat(40),review_decision:"REVIEW_REQUIRED",checks_state:"SUCCESS"});
  const detail=()=>({summary:summary(),body:prBody,files:files(),diffs:[{path:"src/main.ts",patch}],conversation:[],threads:[],checks:[],truncated:false});
@@ -58,5 +58,5 @@ export function createGitDaemon(options:{pullRequests?:boolean}={}){
    reply({Error:{message:"Unsupported fixture Git message"}});
   }
  }});
- return{endpoint:`ws://127.0.0.1:${server.port}`,requests,files,push,setRestoreError(value:string|undefined){restoreError=value;},holdNextDiff(){if(heldDiff)throw new Error("A fixture diff is already held");let received!:()=>void;const pending=new Promise<void>(resolve=>{received=resolve;});const held={received,reply:undefined as undefined|(()=>void)};heldDiff=held;return{received:pending,release(){if(heldDiff!==held)return;heldDiff=undefined;held.reply?.();}};},setCommitError(value:string|undefined){commitError=value;},close(){for(const socket of sockets)socket.close();server.stop(true);}};
+ return{endpoint:`ws://127.0.0.1:${server.port}`,requests,files,push,setPatch(value:string){patch=value;},setRestoreError(value:string|undefined){restoreError=value;},holdNextDiff(){if(heldDiff)throw new Error("A fixture diff is already held");let received!:()=>void;const pending=new Promise<void>(resolve=>{received=resolve;});const held={received,reply:undefined as undefined|(()=>void)};heldDiff=held;return{received:pending,release(){if(heldDiff!==held)return;heldDiff=undefined;held.reply?.();}};},setCommitError(value:string|undefined){commitError=value;},close(){for(const socket of sockets)socket.close();server.stop(true);}};
 }

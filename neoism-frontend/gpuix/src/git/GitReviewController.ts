@@ -16,6 +16,7 @@ interface Options{model:WorkspaceModel;config:AppConfig;descriptor:GitReviewDesc
  * Reviews share scoped status while retaining independent patch/read epochs. */
 export class GitReviewController{
  readonly id:number;frame:GitReviewFrame;readonly descriptor:GitReviewDescriptor;
+ private statusSignature="";private diffRunning=false;private diffRequested=false;private patches=new Map<string,string>();
  private listeners=new Set<(frame:GitReviewFrame)=>void>();private animation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
  private disposed=false;private revision=0;private configuration:string;private source?:NativeEditor;private releaseSource?:()=>void;private publishingSource=false;private attachSerial=0;private pending=new Set<string>();private unconnection:()=>void;private releaseWatch?:()=>void;private connection:string;private input=Promise.resolve();private workspaceRoot:string;private pointerDown?:{x:number;y:number};
  constructor(readonly options:Options){
@@ -41,7 +42,34 @@ export class GitReviewController{
   if(this.descriptor.mode==="working")void this.request("ChangedFiles","status");
   else if(this.descriptor.mode==="commit"&&!this.descriptor.detail&&this.descriptor.revision)void this.request({ReadCommit:{revision:this.descriptor.revision}},"commit");
  }
- private status(message:unknown){if(this.disposed||this.descriptor.mode!=="working")return;this.revision++;const revision=this.revision;this.call("reply",{message});const paths=this.frame.files.map(file=>file.path);if(paths.length)void this.request({DiffFiles:{paths}},`diff:${revision}`,revision);}
+ private status(message:unknown){
+  if(this.disposed||this.descriptor.mode!=="working")return;
+  this.revision++;
+  const reply=message as {RepoStatus?:{snapshot:unknown};ChangedFiles?:unknown},status=reply.RepoStatus?.snapshot||reply.ChangedFiles;
+  const signature=JSON.stringify(isRecord(status)?{files:status.files,error:status.error??null}:status);
+  if(signature!==this.statusSignature){this.statusSignature=signature;this.call("reply",{message});}
+  const paths=new Set(this.frame.files.map(file=>file.path));for(const path of this.patches.keys())if(!paths.has(path))this.patches.delete(path);
+  // Identical status counts can still mean changed file contents. Always check
+  // patches, but permit only one read in flight and one latest follow-up.
+  void this.refreshDiffs();
+ }
+ private async refreshDiffs(){
+  this.diffRequested=true;if(this.diffRunning)return;this.diffRunning=true;
+  try{while(this.diffRequested&&!this.disposed){
+   this.diffRequested=false;const revision=this.revision,paths=this.frame.files.map(file=>file.path);if(!paths.length)continue;
+   try{
+    const reply=await this.read({DiffFiles:{paths}});
+    if(this.disposed||revision!==this.revision)continue;
+    if(isRecord(reply)&&isRecord(reply.FileDiffs)&&Array.isArray(reply.FileDiffs.diffs)){
+     const changed=reply.FileDiffs.diffs.filter(diff=>isRecord(diff)&&typeof diff.path==="string"&&typeof diff.patch==="string"&&(this.patches.get(diff.path)!==diff.patch||!!this.frame.error));
+     if(changed.length){
+      this.call("reply",{message:{FileDiffs:{diffs:changed}}});
+      for(const diff of changed)this.patches.set(diff.path as string,diff.patch as string);
+     }
+    }else this.call("reply",{message:reply});
+   }catch(error){if(!this.disposed&&revision===this.revision){this.call("reply",{message:{Error:{message:error instanceof Error?error.message:String(error)}}});this.report(error);}}
+  }}finally{this.diffRunning=false;}
+ }
  call(op:string,args:Record<string,unknown>={}):GitReviewFrame{
   if(this.disposed)return this.frame;const started=performance.now();this.animation.cancel();const next=coreCall<GitReviewFrame>(`gitreview.${op}`,{id:this.id,...args});this.apply(next);
   if(next.animating)this.animation.request(()=>this.call("frame"),started);return next;
@@ -77,5 +105,5 @@ export class GitReviewController{
   else this.key(args);
  }).catch(this.report);return this.input;}
  save(){return this.source?(this.options.model as WorkspaceModel & {saveGitEditor(editor:NativeEditor):Promise<void>}).saveGitEditor(this.source):Promise.resolve();}
- dispose(){if(this.disposed)return;this.disposed=true;this.attachSerial++;this.releaseWatch?.();this.animation.dispose();this.releaseSource?.();this.unconnection();this.listeners.clear();coreCall("gitreview.dispose",{id:this.id});}
+ dispose(){if(this.disposed)return;this.disposed=true;this.attachSerial++;this.releaseWatch?.();this.animation.dispose();this.releaseSource?.();this.unconnection();this.listeners.clear();this.patches.clear();coreCall("gitreview.dispose",{id:this.id});}
 }

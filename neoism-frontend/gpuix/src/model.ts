@@ -97,7 +97,7 @@ export class WorkspaceModel {
   private fileLoads = new Map<string, Promise<void>>();
   private directoryVersions = new Map<string,number>();
   private directoryLoads = new Map<string, Promise<void>>();
-  private editorSnapshots = new WeakMap<NativeEditor, { frame: NativeEditor["frame"]; snapshot: ReturnType<NativeEditor["snapshot"]> }>();
+  private editorSnapshots = new WeakMap<NativeEditor, { version: number; frame: NativeEditor["frame"]; snapshot: ReturnType<NativeEditor["snapshot"]> }>();
   private updateDepth = 0;
   private updatePending = false;
   readonly editors: Map<string, NativeEditor>;
@@ -166,14 +166,30 @@ export class WorkspaceModel {
     const surface=surfaceId?this.state.surfaces.find(surface=>surface.id===surfaceId):undefined;
     return surface?.kind==="agent"&&!surface.sessionId&&surface.id!==`agent-home:${surface.workspaceId}`?`home:${surface.id}`:`home:${surface?.workspaceId||this.state.activeWorkspace?.id||""}`;
   };
+  readonly composerHistory:ComposerDraft[]=[];
+  rememberComposerPrompt(draft:ComposerDraft){
+    this.composerHistory.push(draft);if(this.composerHistory.length>100)this.composerHistory.shift();
+  }
   setComposerDraft = (key: string, draft: ComposerDraft) => {
     if (JSON.stringify(this.state.composerDrafts[key]) === JSON.stringify(draft)) return;
     this.update({ composerDrafts: { ...this.state.composerDrafts, [key]: draft } });
   };
-  private snapshotEditor(editor: NativeEditor) {
+  private recoveryFrame(editor: NativeEditor) {
+    const saved=this.editorSnapshots.get(editor),frame=editor.frame;
+    // Scroll springs do not change recovery-owned document/history state.
+    // Keep the last checkpoint during motion; capture the final viewport on
+    // settling. Keys, edits and remote revisions always bypass this reuse.
+    if(saved&&saved.version===editor.recoveryVersion&&saved.frame.revision===frame.revision&&saved.frame.dirty===frame.dirty
+      && saved.frame.mode===frame.mode && saved.frame.pendingKeys===frame.pendingKeys && saved.frame.collaborationBound===frame.collaborationBound
+      && (frame.scrollAnimating || saved.frame.scrollY===frame.scrollY
+        && saved.frame.cursor.line===frame.cursor.line && saved.frame.cursor.col===frame.cursor.col
+        && JSON.stringify(saved.frame.selection)===JSON.stringify(frame.selection)))return saved.frame;
+    return frame;
+  }
+  private snapshotEditor(editor: NativeEditor, force = false) {
     let saved = this.editorSnapshots.get(editor);
-    if (!saved || saved.frame !== editor.frame) {
-      saved = { frame: editor.frame, snapshot: editor.snapshot() }; this.editorSnapshots.set(editor, saved);
+    if (!saved || saved.frame !== (force ? editor.frame : this.recoveryFrame(editor)) || saved.version !== editor.recoveryVersion) {
+      saved = { version: editor.recoveryVersion, frame: editor.frame, snapshot: editor.snapshot() }; this.editorSnapshots.set(editor, saved);
     }
     return saved.snapshot;
   }
@@ -184,14 +200,14 @@ export class WorkspaceModel {
       this.state.surfaces, this.state.ui, this.state.providerStates, this.state.drafts, this.state.composerDrafts,
       ...Object.entries(this.recoveredViews).flat(), ...Object.entries(this.recoveredMarkdownViews).flat(),
       ...[...this.agentFamilyWatermarks].flat(),
-      ...[...this.editors].flatMap(([key, editor]) => [key, editor.frame]),
-      ...[...this.editorViews].flatMap(([key, view]) => [key, view.editor.frame]),
+      ...[...this.editors].flatMap(([key, editor]) => [key, editor.recoveryVersion, this.recoveryFrame(editor)]),
+      ...[...this.editorViews].flatMap(([key, view]) => [key, view.editor.recoveryVersion, this.recoveryFrame(view.editor)]),
       ...[...this.markdownViews].flatMap(([key, view]) => [key, view.markdown.frame])];
   }
-  captureSession(): SavedSession {
+  captureSession(force = true): SavedSession {
     return { version: 1, activeWorkspaceId: this.state.activeWorkspace?.id, activeSurfaceId: this.state.activeSurfaceId,
       surfaces: [...this.state.surfaces], ui: { ...this.state.ui,agentFamilyVersions:{...(isRecord(this.state.ui.agentFamilyVersions)?this.state.ui.agentFamilyVersions:{}),...Object.fromEntries(this.agentFamilyWatermarks)}, markdownViews: { ...this.recoveredMarkdownViews, ...Object.fromEntries([...this.markdownViews].map(([key, view]) => [key, view.markdown.snapshot()])) } }, providerStates: this.state.providerStates, drafts: this.state.drafts,
-      composerDrafts: { ...this.state.composerDrafts }, editors: { ...this.recoveredViews, ...Object.fromEntries([...this.editors].map(([id, editor]) => [id, this.snapshotEditor(editor)]).concat([...this.editorViews].map(([id, view]) => ["view:" + id, this.snapshotEditor(view.editor)]))) } };
+      composerDrafts: { ...this.state.composerDrafts }, editors: { ...this.recoveredViews, ...Object.fromEntries([...this.editors].map(([id, editor]) => [id, this.snapshotEditor(editor,force)]).concat([...this.editorViews].map(([id, view]) => ["view:" + id, this.snapshotEditor(view.editor,force)]))) } };
   }
   restoreSession(session: SavedSession) {
     this.agentFamilyWatermarks.clear();

@@ -4,7 +4,7 @@ import type {WorkspaceModel} from "../model";
 import {localDaemon} from "../menu-actions/web-frontend";
 
 export interface WorkspaceSession {config:AppConfig;model:WorkspaceModel}
-export interface WorkspaceContext {config:AppConfig;connectedHostId?:string;directoryRoots?:unknown}
+export interface WorkspaceContext {workspaceId?:string;config:AppConfig;connectedHostId?:string;directoryRoots?:unknown}
 export interface WorkspaceNavigation {
  subscribe(listener:()=>void):()=>void;
  workspaces():readonly Workspace[];
@@ -29,9 +29,17 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
  private dependencies:unknown[]=[];
  private selected:S;
  private localPending?:Promise<S>;
+ private windowFontSize:number;
  constructor(initial:S,private hooks:{activate:(session:S)=>void;local:()=>Promise<S>;dispose:(session:S)=>Promise<void>}){
-  this.selected=initial;this.add(initial);
+  this.windowFontSize=initial.config.fontSize;this.selected=initial;this.add(initial);
  }
+ get fontSize(){return this.windowFontSize;}
+ /** Zoom belongs to the window, including inactive and newly joined hosts. */
+ setFontSize(size:number){
+  this.windowFontSize=Math.max(7,Math.min(42,size));
+  for(const session of this.sessions())this.applyFontSize(session);
+ }
+ private applyFontSize(session:S){Object.assign(session.config,{fontSize:this.windowFontSize,scale:this.windowFontSize/14});}
  sessions=()=>[...this.entries.values()].map(entry=>entry.session);
  subscribe=(listener:()=>void)=>{this.listeners.add(listener);return()=>{this.listeners.delete(listener);};};
  workspaces=()=>this.rows;
@@ -39,18 +47,20 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
  context=(id:string):WorkspaceContext|undefined=>{
   const owner=this.owners.get(id);if(!owner)return;
   const {session,workspace}=owner,roots=session.model.state.ui.terminalWorkspaceRoots as Record<string,unknown>|undefined;
-  return {config:session.config,connectedHostId:session.model.state.connection.connectedHostId,directoryRoots:roots?{[id]:roots[workspace.id]}:undefined};
+  return {workspaceId:workspace.id,config:session.config,connectedHostId:session.model.state.connection.connectedHostId,directoryRoots:roots?{[id]:roots[workspace.id]}:undefined};
  };
  private key(session:S){return [...this.entries].find(([,entry])=>entry.session===session)?.[0];}
  private tabId(session:S,id?:string){const key=this.key(session);return key&&id?JSON.stringify([key,id]):undefined;}
  add(session:S,key=localWorkspaceSession(session)?"local":crypto.randomUUID()){
   if(this.key(session))return;
   if(this.entries.has(key))throw new Error("This window already owns that connection");
+  this.applyFontSize(session);
   this.entries.set(key,{session,unsubscribe:session.model.subscribe(()=>this.refresh())});this.refresh();
  }
  replace(previous:S,next:S){
   const key=this.key(previous);if(!key)throw new Error("The connection is no longer open");
   this.entries.get(key)!.unsubscribe();
+  this.applyFontSize(next);
   this.entries.set(key,{session:next,unsubscribe:next.model.subscribe(()=>this.refresh())});
   if(this.selected===previous)this.select(next);else this.refresh();
  }

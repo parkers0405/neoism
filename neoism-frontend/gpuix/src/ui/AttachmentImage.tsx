@@ -15,7 +15,7 @@ export function ImagePreviewModal(props:{image:ImagePreview;config:AppConfig;onC
  const previous=renderer.getFocusedElementId?.();
  onMount(()=>queueMicrotask(()=>{if(host?.mounted){host.root?.mutations.flushMutations();renderer.focusElement?.(host.id);}}));
  onCleanup(()=>{if(previous!=null)renderer.focusElement?.(previous);});
- return <anchored fill="window" priority={10} deferred occlude><div ref={host} testId="image-preview-modal" role="dialog" aria-label={`Image preview: ${props.image.name}`} tabIndex={0}
+ return <anchored fill="window" priority={10} deferred occlude style={{backgroundColor:"transparent"}}><div ref={host} testId="image-preview-modal" role="dialog" aria-label={`Image preview: ${props.image.name}`} tabIndex={0}
   onKeyDown={event=>{event.stopPropagation();if(event.key?.toLowerCase()==="escape"){event.preventDefault();props.onClose();}}}
   style={{position:"absolute",left:0,top:0,width:size().width,height:size().height,backgroundColor:"#000000dd"}}>
   <AttachmentImage image={props.image} testId="image-preview-full" style={{position:"absolute",left:32,top:64,width:Math.max(1,size().width-64),height:Math.max(1,size().height-96)}}/>

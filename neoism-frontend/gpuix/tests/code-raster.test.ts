@@ -1,8 +1,16 @@
-import { expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
 import { toArrayBuffer, type Pointer } from "bun:ffi";
 import { coreCall, NativeEditor, type EditorFrame } from "../src/native-core";
 import { documentPaintRows } from "../src/editor/paint-frame";
 import { palettes, type Palette } from "../src/design/generated";
+
+// These assertions isolate scrolling/selection texture identity from the
+// intentional initial transition from fallback to compiled syntax colors.
+beforeAll(async()=>{
+ const editor=new NativeEditor("raster-warmup.rs","fn warmup() {}",true);
+ try{const deadline=Date.now()+5000;while(editor.frame.highlightAnimating){if(Date.now()>deadline)throw Error("Grammar did not settle");await Bun.sleep(10);editor.call("frame");}}
+ finally{editor.dispose();}
+});
 
 type Raster = {id:number;ptr:number;len:number;width:number;height:number;scale:number;x:number;y:number};
 type Row = EditorFrame["lines"][number] & {raster?:Raster|null};

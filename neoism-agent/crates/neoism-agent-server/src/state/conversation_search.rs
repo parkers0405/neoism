@@ -765,7 +765,7 @@ async fn cache_canonical(
         let mut params: Vec<_> = chunk.iter().map(text).collect();
         let tenant_clause = if let Some(tenant) = tenant {
             params.push(text(tenant));
-            format!(" AND {}", tenant_predicate("s", &format!("?{}", params.len())))
+            format!(" AND {}", super::hosting::tenant_predicate("s", "id", &format!("?{}", params.len())))
         } else {
             String::new()
         };
@@ -862,13 +862,6 @@ async fn root(
 // No JOIN/GROUP BY/DISTINCT/window in this SELECT: those can suppress FTS
 // substitution, leaving scalar fts_match (OR-only!) or scalar fts_score=0.
 const CANDIDATES: &str = "SELECT key, session_id, message_id, role, created, fts_score(title, body, ?1) AS score FROM conversation_search_docs WHERE fts_match(title, body, ?1) ORDER BY score DESC LIMIT ?2";
-
-// Canonical SQL is an eligibility prefilter, never a replacement for hydrated
-// caller authorization. Local access via a registered host namespace is only
-// provisionally admitted here; the authoritative hydration checks paths/markers.
-fn tenant_predicate(alias: &str, parameter: &str) -> String {
-    format!("((({alias}.tenant_id={parameter} OR ({alias}.tenant_id='local' AND EXISTS (SELECT 1 FROM hosted_chat_sessions h WHERE h.session_id={alias}.id AND 'workspace:' || h.workspace_id={parameter}))) AND NOT EXISTS (SELECT 1 FROM hosted_chat_revocations r WHERE r.session_id={alias}.id AND 'workspace:' || r.workspace_id={parameter})) OR ({parameter}='local' AND (EXISTS (SELECT 1 FROM hosted_chat_revocations r WHERE r.session_id={alias}.id AND 'workspace:' || r.workspace_id={alias}.tenant_id) OR EXISTS (SELECT 1 FROM hosted_chat_directories d WHERE 'workspace:' || d.workspace_id={alias}.tenant_id))))")
-}
 
 // Keep canonical checks separate from native FTS so its LIMIT stays pushed down.
 // Look up messages directly, not docs -> correlated sessions -> messages EXISTS:

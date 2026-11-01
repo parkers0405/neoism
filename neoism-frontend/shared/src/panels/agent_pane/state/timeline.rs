@@ -110,9 +110,10 @@ impl NeoismAgentPane {
             if can_patch_messages {
                 let previous_signatures =
                     self.virtual_timeline.message_signatures.clone();
+                // The projection is already owned. Consuming it avoids
+                // cloning every historical body before skipping unchanged rows.
                 for (index, (message, (previous, next))) in messages
-                    .iter()
-                    .cloned()
+                    .into_iter()
                     .zip(previous_signatures.iter().zip(next_signatures.iter()))
                     .enumerate()
                 {

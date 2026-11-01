@@ -218,3 +218,26 @@ test("clean recovered tabs can close without allocating native editors", () => {
   expect(restored.editors.size).toBe(0);
   expect(restored.state.surfaces.some(s => s.id === surface.id)).toBe(false);
 });
+
+
+test("scroll checkpoints reuse history until settling but edits and explicit recovery remain immediate", () => {
+  const app=model(),editor=app.getEditor(surface);
+  editor.call("replace-source",{text:Array.from({length:300},(_,i)=>`line ${i}`).join("\n")});
+  editor.call("layout",{width:600,height:300,cellWidth:8,rowHeight:20});
+  const initial=app.captureSession(false).editors[surface.id];
+  editor.call("lsp.enable",{surface:"recovery-focus",openPaths:["/project/note.txt"]});
+  expect(app.captureSession(false).editors[surface.id]).toBe(initial);
+  editor.call("scroll",{delta:-500});
+  expect(editor.frame.scrollAnimating).toBe(true);
+  expect(app.captureSession(false).editors[surface.id]).toBe(initial);
+  // Explicit capture (including final shutdown) always saves current state.
+  const forced=app.captureSession().editors[surface.id];
+  expect(forced).not.toBe(initial);
+  editor.call("paste",{text:"changed "});
+  const edited=app.captureSession(false).editors[surface.id] as {text:string};
+  expect(edited.text).toContain("changed ");
+  const beforeSettle=app.captureSession(false).editors[surface.id];
+  editor.call("restore",{snapshot:{...(beforeSettle as object),scrollY:240}});
+  const settled=app.captureSession(false).editors[surface.id] as {scrollY:number};
+  expect(settled.scrollY).toBe(240);
+});

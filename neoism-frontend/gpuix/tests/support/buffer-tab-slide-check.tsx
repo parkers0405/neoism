@@ -24,6 +24,16 @@ try{
  for(let i=0;i<ids.length;i++)root.dispatch({elementId:tab(ids[i]!).id,eventType:"layout",x:10+i*100,y:50,width:100,height:28});
  for(let i=0;i<100&&ids.some(id=>Number(tab(id).style.left)!==0);i++)await tick();
  const originalIds=ids.map(id=>tab(id).id),originalEditor=host.find("code-editor")!.id,pane=host.find(`pane:${source}`)!.id;
+ // A missed release must never turn the next ordinary hover into a drag.
+ root.dispatch({elementId:tab(source).id,eventType:"mouseDown",button:0,x:45,y:64});
+ root.dispatch({elementId:tab(source).id,eventType:"mouseMove",x:220,y:160});root.flush();
+ assert.equal(host.find("pane-drag-layer"),undefined);assert.deepEqual(layout.frame.panes[0].tabs.map(tab=>tab.surfaceId),["a","b","c","d"]);
+ // Recover a drag whose release happened outside the window without dropping a split.
+ root.dispatch({elementId:tab(source).id,eventType:"mouseDown",button:0,x:45,y:64});
+ root.dispatch({elementId:tab(source).id,eventType:"mouseMove",pressedButton:0,x:45,y:180});root.flush();
+ assert.ok(host.find("pane-drag-layer"));
+ root.dispatch({elementId:host.find("pane-drag-layer")!.id,eventType:"mouseMove",x:45,y:180});root.flush();
+ assert.equal(host.find("pane-drag-layer"),undefined);assert.equal(layout.frame.panes.length,1);
  root.dispatch({elementId:tab(source).id,eventType:"mouseDown",button:0,x:45,y:64});
  root.dispatch({elementId:tab(source).id,eventType:"mouseMove",pressedButton:0,x:220,y:64});root.flush();
  assert.deepEqual(layout.frame.panes[0].tabs.map(tab=>tab.surfaceId),["b","c","a","d"]);

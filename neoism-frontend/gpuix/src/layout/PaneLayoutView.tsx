@@ -28,7 +28,7 @@ const cachedTerminalAgentIcons=new Map<string,Buffer>();
 /** Measured tab title/icon widths, kept across remounts (bounded by distinct titles). */
 const measuredTabWidths = new Map<string, number>();
 /** Last laid-out pane area, used to size a workspace layout before its first pass. */
-let lastPaneArea: { width: number; height: number; scale: number } | undefined;
+const lastPaneAreas=new WeakMap<object,{width:number;height:number;scale:number}>();
 
 export function PaneLayoutView(props: {
   controller: WorkspaceLayout; config: AppConfig;
@@ -47,6 +47,16 @@ export function PaneLayoutView(props: {
   onNewLayout?:(leaf:number,rect:{x:number;y:number;width:number;height:number})=>void;
   empty?: JSX.Element;
 }) {
+  const renderer=useGpuixRequired();
+  const seed=(controller:WorkspaceLayout)=>{
+    const measured=controller.measuredViewport,last=lastPaneAreas.get(renderer);
+    // A returning workspace owns its geometry. Borrowing the outgoing area's
+    // size can reflow every surface before onLayout restores the right size.
+    if(measured.width>0&&measured.height>0&&measured.scale===props.config.scale)return;
+    if(last?.scale===props.config.scale)controller.layout(last.width,last.height,last.scale);
+  };
+  // Seed before constructing children, which capture their initial viewport.
+  untrack(()=>seed(props.controller));
   const [frame, setFrame] = createSignal(props.controller.frame);
   // While a replacement generation settles, keep this one's last geometry: the
   // shared controller is being laid out at the replacement's scale.
@@ -55,11 +65,10 @@ export function PaneLayoutView(props: {
     const controller = props.controller;
     // A workspace's layout is unsized until its first layout pass; the pane
     // area is the same window region, so seed it and skip a 0x0 first frame.
-    const scale = props.config.scale;
-    if (lastPaneArea?.scale === scale && !untrack(retiring)) controller.layout(lastPaneArea.width, lastPaneArea.height, scale);
+    if(!untrack(retiring))seed(controller);
     setFrame(controller.frame); onCleanup(controller.subscribe(next => { if (!untrack(retiring)) setFrame(next); }));
   });
-  const config = props.config, s = config.scale, c = config.theme,renderer=useGpuixRequired();
+  const config = props.config, s = config.scale, c = config.theme;
   const chrome = tabChrome(s).buffer;
   const paneCount = createMemo(() => frame().panes.length);
   const paneHosts = createMemo(() => { const next=frame();return new Map(next.panes.map(pane=>[paneHostKey(next,pane),pane])); });
@@ -99,7 +108,12 @@ export function PaneLayoutView(props: {
     }
     return true;
   };
+  const cancelDrag = () => {
+    const active=drag();if(active?.kind==="tab")stripFor(active.leaf)?.slide.end();
+    armed=undefined;setDrag(undefined);setPreview(undefined);
+  };
   const move = (event: EventPayload) => {
+    if(event.pressedButton!==0){cancelDrag();return;}
     const x = event.x || 0, y = event.y || 0;
     setDragPoint({x,y});
     if (!drag() && armed && Math.hypot(x - armed.x, y - armed.y) >= 5 * s) {
@@ -246,7 +260,7 @@ export function PaneLayoutView(props: {
     </div>;
   }
   return <div testId="pane-layout" onMouseMove={move} onMouseUp={finish}
-    onLayout={(event) => { setOrigin((old) => old.x === event.x && old.y === event.y ? old : { x: event.x || 0, y: event.y || 0 }); if (!retiring()) { lastPaneArea = { width: event.width || 0, height: event.height || 0, scale: s }; props.controller.layout(lastPaneArea.width, lastPaneArea.height, s); } }}
+    onLayout={(event) => { setOrigin((old) => old.x === event.x && old.y === event.y ? old : { x: event.x || 0, y: event.y || 0 }); if (!retiring()) { const area = { width: event.width || 0, height: event.height || 0, scale: s }; if(area.width>0&&area.height>0)lastPaneAreas.set(renderer,area);props.controller.layout(area.width,area.height,s); } }}
     style={{ position: "relative", flexGrow: 1, minWidth: 0, minHeight: 0, overflow: "hidden" }}>
     <Show when={frame().panes.length} fallback={props.empty}>
       <For each={paneIds()}>{(hostKey) => <Pane hostKey={hostKey} />}</For>

@@ -133,7 +133,8 @@ export class TerminalBuffer {
       if (mark) bg = mark === 2 ? this.theme.blue + "66" : this.theme.yellow + "4d";
       return { text, column, width, fg, bg, bold: !!(flags & 1), italic: !!(flags & 2), underline: !!(flags & 4) };
     };
-    const extraRow = this.reply.extraRow, extra = extraRow ? { above: extraRow.above, line: extraRow.runs.map(packedRun) } : undefined;
+    const extraRow = this.reply.extraRow;
+    let extra: TerminalFrame["extra"] = extraRow ? { above: extraRow.above, line: extraRow.runs.map(packedRun) } : undefined;
     let lines = this.reply.paintRows ? this.reply.paintRows.map(line => line.map(packedRun)) : snapshot.viewport.map((line, y) => {
       const runs: CellRun[] = []; let last: CellRun | undefined;
       for (let x = 0; x < line.length; x++) {
@@ -158,12 +159,11 @@ export class TerminalBuffer {
       }
       return runs;
     });
-    // Solid's Index observes item identity. Preserve glyph/style objects when
-    // only the viewport offset or cursor changes instead of repainting all text.
+    // Preserve glyph/style identities so the canvas display list stays cached
+    // when only the viewport offset or cursor changes.
     const previous = this.painted;
     if (previous) {
-      lines = lines.map((line, y) => {
-        const old = previous.lines[y];
+      const retainLine = (line: CellRun[], old?: readonly CellRun[]) => {
         if (!old || old.length !== line.length) return line;
         let same = true;
         for (let x = 0; x < line.length; x++) {
@@ -173,7 +173,14 @@ export class TerminalBuffer {
           else same = false;
         }
         return same ? old as CellRun[] : line;
-      });
+      };
+      lines = lines.map((line, y) => retainLine(line, previous.lines[y]));
+      // Fractional scroll moves the canvas without changing its ink. The edge
+      // row belongs to that retained display list too, not just visible rows.
+      if (extra && previous.extra && extra.above === previous.extra.above) {
+        extra.line = retainLine(extra.line as CellRun[], previous.extra.line);
+        if (extra.line === previous.extra.line) extra = previous.extra;
+      }
       if (previous.lines.length === lines.length && lines.every((line, y) => line === previous.lines[y])) lines = previous.lines as CellRun[][];
     }
     this.paintedReply = this.reply;

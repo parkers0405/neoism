@@ -66,12 +66,13 @@ pub fn update_viewport(
                     .collect()
             })
             .unwrap_or_default();
-        pane.wrap_index = std::sync::Arc::new(WrapIndex::build_with_projection(
+        pane.wrap_index = std::sync::Arc::new(WrapIndex::build_with_projection_reusing(
             &pane.buffer.lines,
             cols,
             TAB_DISPLAY_WIDTH,
             &hidden,
             &virtual_rows,
+            Some(&pane.wrap_index),
         ));
         pane.wrap_index_key = Some(wrap_key);
     }

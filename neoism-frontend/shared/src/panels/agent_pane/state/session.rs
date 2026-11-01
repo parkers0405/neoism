@@ -1305,7 +1305,7 @@ impl NeoismAgentPane {
         thinking
     }
 
-    pub(in crate::panels::agent_pane::state) fn abort_session(&mut self) {
+    pub fn abort_session(&mut self) {
         // Never retain the stopped run's label through the display hold.
         // Real queued work gets a neutral handoff; no ordinary queue is idle.
         self.side_panel.clear_status_display_hold();

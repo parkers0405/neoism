@@ -289,8 +289,13 @@ pub fn apply_agent_event_to_pane_with_history_kind(
             let seeds = subagent_seeds_from_history(&mapped);
             pane.apply_history_page_with_kind(mapped, next_cursor, history_older);
             for (task_id, status, title) in seeds {
-                pane.note_subagent_event(task_id, status, title, None, None, None);
+                // History is recovery evidence, never a lifecycle edge. A
+                // launch result (or an older page) cannot finish a live child.
+                if pane.side_panel().branch_activity(&task_id).is_none() {
+                    pane.note_subagent_event(task_id, status, title, None, None, None);
+                }
             }
+            pane.reconcile_task_message_rows();
         }
         AgentServerMessage::SessionEvent {
             session_id,
@@ -1629,14 +1634,17 @@ pub fn subagent_seeds_from_history(
         let Some(task_id) = task_id_from_text(&message.detail, &message.text) else {
             continue;
         };
-        // Historical cards default to Completed: a card whose child was
-        // still live when the client disconnected shows a stale
-        // "running" marker, and resurrecting it as Active would blink a
-        // white working dot forever. A genuinely-live child re-announces
-        // itself through `SubagentUpdate` right after `ResumeStream`.
-        let status = match message.status.trim().to_ascii_lowercase().as_str() {
-            "error" | "failed" | "stopped" | "aborted" => BranchStatus::Stopped,
-            _ => BranchStatus::Completed,
+        // A completed background Task call may only acknowledge launch.
+        // Recover explicit terminal child evidence; a historical running row
+        // is neither proof of completion nor authority to start a live dot.
+        // The runtime/family snapshot supplies its current lifecycle.
+        let reported = crate::panels::agent_pane::stream_events::task_status_from_output(&message.detail)
+            .or_else(|| crate::panels::agent_pane::stream_events::task_status_from_output(&message.text))
+            .unwrap_or(&message.status);
+        let status = match reported.trim().to_ascii_lowercase().as_str() {
+            "error" | "failed" | "stopped" | "aborted" | "cancelled" => BranchStatus::Stopped,
+            "completed" | "complete" | "done" | "finished" => BranchStatus::Completed,
+            _ => continue,
         };
         let title = {
             let trimmed = message.title.trim();

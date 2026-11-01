@@ -58,6 +58,27 @@ test("Ghostty: " + "terminal scrollback, fractional wheel displacement, and sele
     expect(buffer.frame().lines[0].map((run) => run.text).join("").trimEnd()).toBe("two");
   } finally { buffer.dispose(); }
 });
+test("Ghostty: fractional scrolling retains ink until a row or selection changes", async () => {
+  const buffer = new TerminalBuffer(palettes.pastel_dark, 30, 4);
+  try {
+    await buffer.write(bytes(Array.from({length:30}, (_,i)=>`row ${i}`).join("\r\n")));
+    buffer.scrollPixels(41, 20);
+    const first = buffer.frame();
+    expect(first.extra).toBeDefined();
+    buffer.scrollPixels(1, 20);
+    const moved = buffer.frame();
+    expect(moved.offset).not.toBe(first.offset);
+    expect(moved.lines).toBe(first.lines);
+    expect(moved.extra).toBe(first.extra);
+    buffer.scrollPixels(20, 20);
+    expect(buffer.frame().lines).not.toBe(moved.lines);
+    expect(buffer.frame().extra).not.toBe(moved.extra);
+    const beforeSelection = buffer.frame();
+    buffer.select(0, 0, true); buffer.select(0, 2, false);
+    expect(buffer.frame().lines).not.toBe(beforeSelection.lines);
+    expect(buffer.selectedText).toBe("row");
+  } finally { buffer.dispose(); }
+});
 test("Ghostty: " + "a missing reconnect backlog resets partial ANSI state", async () => {
   const buffer = new TerminalBuffer(palettes.pastel_dark, 20, 2);
   try {

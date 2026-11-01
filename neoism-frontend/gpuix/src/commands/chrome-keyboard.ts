@@ -1,7 +1,7 @@
 import { coreCall } from "../native-core";
 import type { CommandTarget } from "./CommandController";
 export interface ChromeKey {key?:string;keyChar?:string;modifiers?:{alt?:boolean;ctrl?:boolean;shift?:boolean;cmd?:boolean}}
-export type ChromeFocus = {zone:"content"|"sidebar"|"details"}|{zone:"buffers"|"workspaces";index:number};
+export type ChromeFocus = {zone:"content"|"sidebar"|"details"|"device"}|{zone:"buffers"|"workspaces";index:number};
 export interface ChromeNavigationContext {bufferCount:number;activeBuffer:number;workspaceCount:number;workspacePlus?:boolean;activeWorkspace:number;sidebar:boolean}
 export interface ChromeNavigation {focus:ChromeFocus;activate?:"buffer"|"workspace";direction?:"left"|"right"|"down"}
 /** Linux/Windows desktop SelectPrev/NextBufferTab defaults. Modified vertical
@@ -40,7 +40,7 @@ export function navigateChrome(focus:ChromeFocus,event:ChromeKey,context:ChromeN
    const index=coreCall<number>("keyboard.focus-step",{kind:focus.zone==="buffers"||context.workspacePlus?"buffer":"workspace",count:focus.zone==="buffers"?context.bufferCount:context.workspaceCount,index:focus.index,previous:key==="left"});
    return {focus:{...focus,index}};
   }
-  if(alt){if(focus.zone==="sidebar")return {focus:key==="right"?{zone:"content"}:focus};if(focus.zone==="details")return {focus:key==="left"?{zone:"content"}:focus};return {focus,direction:key};}
+   if(alt){if(focus.zone==="sidebar")return {focus:key==="right"?{zone:"content"}:focus};if(focus.zone==="details"||focus.zone==="device")return {focus:key==="left"?{zone:"content"}:focus};return {focus,direction:key};}
  }
  if(plain&&(focus.zone==="buffers"||focus.zone==="workspaces")){
   if(key==="enter")return {focus,activate:focus.zone==="buffers"?"buffer":"workspace"};

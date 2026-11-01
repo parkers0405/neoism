@@ -67,3 +67,37 @@ test("a delayed new conversation preserves the submitted workspace, options, and
   expect(prompt.session_id).toBe("created-a"); expect(prompt.mode).toBe("plan"); expect(prompt.model).toBe("openai/chosen"); expect(prompt.thinking).toBe("high");
   expect(prompt.attachments).toEqual([{ kind: "image/png", path: "capture.png", bytes: [1, 2, 3] }]); expect(prompt.delivery).toBe("queue");
 });
+
+test("queued follow-ups stay out of history until the server publishes the actual message",async()=>{
+ const {model,requests,push}=await fixture();
+ await until(()=>model.state.history.one!==undefined);
+ const timelineEvents:unknown[]=[];const off=model.subscribeAgentEvents(event=>timelineEvents.push(event));
+ try{
+  expect(await model.submitPrompt("one","Wait for this",{delivery:"queue"})).toBe(true);
+  // Steer can also queue on the server, even before this client learns it is busy.
+  expect(await model.submitPrompt("one","Also wait",{delivery:"steer"})).toBe(true);
+  const sends=requests.filter(r=>r.tag==="SubmitPrompt"),ids=sends.map(r=>String(r.body.message_id));
+  push({QueueUpdate:{session_id:"one",count:2,preview:"Wait for this"}});
+  await until(()=>model.state.queues.one?.count===2);
+  expect(model.state.history.one.filter(row=>ids.includes(row.id))).toEqual([]);
+  expect(timelineEvents.some((event:any)=>event.MessageUpdated&&ids.includes(event.MessageUpdated.message.id))).toBe(false);
+  const message={id:ids[0],role:"User",kind:"User",text:"Wait for this"};
+  push({QueueUpdate:{session_id:"one",count:1,preview:"Also wait"}});
+  push({MessageUpdated:{session_id:"one",message}});
+  await until(()=>model.state.history.one.some(row=>row.id===ids[0]));
+  push({MessageUpdated:{session_id:"one",message}});
+  model.clearQueue("one");await until(()=>model.state.queues.one?.count===0);
+  expect(model.state.history.one.filter(row=>row.id===ids[0])).toHaveLength(1);
+  expect(model.state.history.one.some(row=>row.id===ids[1])).toBe(false);
+ }finally{off();}
+});
+
+test("explicitly queued first prompts do not create provisional timeline messages",async()=>{
+ const {model,requests,creations}=await fixture();
+ model.newAgentHome();const submission=model.submitNewPrompt("Queue first",{delivery:"queue"});
+ await until(()=>creations.length===1);
+ expect(Object.values(model.state.history).flat().some(row=>row.text==="Queue first")).toBe(false);
+ creations.shift()!();expect(await submission).toBe(true);
+ const id=String(requests.find(r=>r.tag==="SubmitPrompt")!.body.message_id);
+ expect(Object.values(model.state.history).flat().some(row=>row.id===id)).toBe(false);
+});

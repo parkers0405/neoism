@@ -64,3 +64,17 @@ test("real daemon envelopes keep family deltas once, format partial Markdown bef
   daemon.agentStreams.add("two");daemon.push({ThreadSwitched:{session_id:"two"}});await until(()=>!daemon.agentStreams.has("two"));expect(model.state.surfaces.some(surface=>surface.id===tab.id)).toBe(false);
  }finally{off();model.dispose();client.stop();daemon.stop();coreCall("agenttimeline.dispose",{id});}
 },10000);
+
+test("streamed session failures remain visible after the run becomes idle",async()=>{
+ const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/session-error"],{}),endpoint:daemon.endpoint},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+ try{
+  model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);
+  daemon.push({SessionEvent:{session_id:"one",kind:"session.error",properties:{error:{message:"Provider executable could not start"}}}});
+  daemon.push({SessionIdle:{session_id:"one"}});
+  await until(()=>model.state.error==="Provider executable could not start");
+  expect(model.state.history.one.some(message=>message.title==="Agent error"&&message.text==="Provider executable could not start")).toBe(true);
+  model.clearError();
+  daemon.push({SessionEvent:{session_id:"one",kind:"session.error",properties:{error:{message:"Session aborted",interrupted:true}}}});
+  await Bun.sleep(30);expect(model.state.error).toBeUndefined();
+ }finally{model.dispose();client.stop();daemon.stop();}
+});

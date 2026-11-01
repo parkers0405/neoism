@@ -2,9 +2,9 @@ import {copyFileSync,existsSync,mkdirSync,readFileSync,readdirSync,renameSync,un
 import {dirname,join,resolve} from "node:path";
 import {frontendRoot as root,readDisplayPin,sha256,displayIdentity,displayStampPath,verifiedDisplayBinding,type DisplayStamp} from "../src/display-binding";
 
-const pin=readDisplayPin(),source=join(root,"artifacts/gpuix-pacing-source"),patch=join(root,pin.patch);
-const toolchains=join(root,"artifacts/gpuix-rustup"),target=resolve(root,"../../target/gpuix-native-vsync");
-const publishOnly=process.argv.includes("--publish-only"),checkOnly=process.argv.includes("--check");
+const pin=readDisplayPin(),overlay=pin.devicePreview,capture=pin.deviceWindowCapture,source=join(root,overlay?"artifacts/gpuix-device-preview-source":"artifacts/gpuix-pacing-source"),patch=join(root,pin.patch);
+const toolchains=join(root,"artifacts/gpuix-rustup"),target=resolve(root,overlay?"../../target/gpuix-native-device-preview":"../../target/gpuix-native-vsync");
+const publishOnly=process.argv.includes("--publish-only"),checkOnly=process.argv.includes("--check"),prepareOnly=process.argv.includes("--prepare-only"),cargoCheckOnly=process.argv.includes("--check-only");
 const env:NodeJS.ProcessEnv={...process.env,RUSTUP_HOME:toolchains,RUSTUP_TOOLCHAIN:pin.toolchain,RUSTUP_NO_UPDATE_CHECK:"1",CARGO_TARGET_DIR:target,CARGO_BUILD_JOBS:String(pin.jobs)};
 async function run(command:string[],cwd=root,capture=false){
  const child=Bun.spawn(command,{cwd,env,stdout:capture?"pipe":"inherit",stderr:"inherit"});
@@ -14,7 +14,7 @@ async function run(command:string[],cwd=root,capture=false){
 }
 async function succeeds(command:string[],cwd=source){const child=Bun.spawn(command,{cwd,env,stdout:"ignore",stderr:"ignore"});return await child.exited===0;}
 if(checkOnly){console.log(verifiedDisplayBinding().binding);process.exit(0);}
-if(!publishOnly){try{const ready=verifiedDisplayBinding();console.log(`Native display binding ${ready.pin.revision.slice(0,12)} is verified and built.`);process.exit(0);}catch{/* A missing/old artifact is rebuilt from the pinned inputs below. */}}
+if(!publishOnly&&!prepareOnly&&!cargoCheckOnly){try{const ready=verifiedDisplayBinding();console.log(`Native display binding ${ready.pin.revision.slice(0,12)} is verified and built.`);process.exit(0);}catch{/* A missing/old artifact is rebuilt from the pinned inputs below. */}}
 if(!["linux","darwin","win32"].includes(process.platform))throw new Error(`The display binding build does not support ${process.platform}`);
 mkdirSync(join(root,"artifacts"),{recursive:true});
 if(!existsSync(join(source,".git"))){
@@ -30,9 +30,17 @@ if(!existsSync(join(source,"zed/.git"))){
  await run(["git","submodule","update","--init","--depth","1","--","zed"],source);
 }
 if(await run(["git","rev-parse","HEAD"],join(source,"zed"),true)!==pin.zedRevision)throw new Error("The existing Zed submodule has another revision; it was left intact");
+if(!await run(["git","branch","--show-current"],join(source,"zed"),true)){
+ const zed=join(source,"zed");
+ if(await succeeds(["git","show-ref","--verify","--quiet","refs/heads/gpuix"],zed)){
+  if(await run(["git","rev-parse","gpuix"],zed,true)!==pin.zedRevision)throw new Error("The existing local gpuix branch differs from the pin; it was left intact");
+  await run(["git","switch","gpuix"],zed);
+ }else await run(["git","switch","-c","gpuix"],zed);
+}
 if(pin.zedPatch){
  const zed=join(source,"zed"),zedPatch=join(root,pin.zedPatch);
- for(const [path,hash] of Object.entries(pin.zedPatchedFiles||{})){
+  for(const [path,hash] of Object.entries(pin.zedPatchedFiles||{})){
+   if(capture?.patchedFiles[path]&&sha256(readFileSync(join(zed,path)))===capture.patchedFiles[path])continue;
   const apply=["git","apply",`--include=${path}`];
   if(!await succeeds([...apply,"--reverse","--check",zedPatch],zed)){
    if(!await succeeds([...apply,"--check",zedPatch],zed))throw new Error(`GPUI patch conflicts with local changes in ${path}`);
@@ -40,13 +48,25 @@ if(pin.zedPatch){
   }
   if(sha256(readFileSync(join(zed,path)))!==hash)throw new Error(`GPUI source differs from pin: ${path}`);
  }
- for(const line of (await run(["git","status","--porcelain","--untracked-files=all"],zed,true)).split("\n").filter(Boolean)){
-  if(!Object.hasOwn(pin.zedPatchedFiles||{},line.slice(3)))throw new Error(`Unpinned GPUI edit: ${line.slice(3)}`);
+  if(capture){
+   const capturePatch=join(root,capture.patch);
+   for(const [path,hash] of Object.entries(capture.patchedFiles)){
+    const apply=["git","apply",`--include=${path}`];
+    if(!await succeeds([...apply,"--reverse","--check",capturePatch],zed)){
+     if(!await succeeds([...apply,"--check",capturePatch],zed))throw new Error(`Optional window capture patch conflicts with local changes in ${path}`);
+     await run([...apply,capturePatch],zed);
+    }
+    if(sha256(readFileSync(join(zed,path)))!==hash)throw new Error(`Optional window capture source differs from its pin: ${path}`);
+   }
+  }
+  for(const line of (await run(["git","status","--porcelain","--untracked-files=all"],zed,true)).split("\n").filter(Boolean)){
+   const path=line.slice(3);if(!Object.hasOwn(pin.zedPatchedFiles||{},path)&&!Object.hasOwn(capture?.patchedFiles||{},path))throw new Error(`Unpinned GPUI edit: ${path}`);
  }
 }else if(await run(["git","status","--porcelain"],join(source,"zed"),true))throw new Error("The pinned Zed submodule has local changes; it was left intact");
 // Per-file checks support a partially prepared checkout without resetting or
 // overwriting edits. Every patched file must then match its pinned hash.
 for(const [path,hash]of Object.entries(pin.patchedFiles)){
+ if(overlay?.patchedFiles[path]&&existsSync(join(source,path))&&sha256(readFileSync(join(source,path)))===overlay.patchedFiles[path])continue;
  const apply=["git","apply",`--include=${path}`];
  if(!await succeeds([...apply,"--reverse","--check",patch])){
   if(!await succeeds([...apply,"--check",patch]))throw new Error(`GPUIX patch conflicts with local changes in ${path}`);
@@ -54,10 +74,22 @@ for(const [path,hash]of Object.entries(pin.patchedFiles)){
  }
  if(sha256(readFileSync(join(source,path)))!==hash)throw new Error(`The patched GPUIX source differs from the pin: ${path}`);
 }
-for(const line of (await run(["git","status","--porcelain","--untracked-files=all"],source,true)).split("\n").filter(Boolean)){
- const path=line.slice(3);if(!(path==="zed"&&pin.zedPatch)&&!Object.hasOwn(pin.patchedFiles,path))throw new Error(`GPUIX source contains an unpinned edit: ${path}`);
+if(overlay){
+ const optionalPatch=join(root,overlay.patch);
+ for(const [path,hash] of Object.entries(overlay.patchedFiles)){
+  const apply=["git","apply",`--include=${path}`];
+  if(!await succeeds([...apply,"--reverse","--check",optionalPatch])){
+   if(!await succeeds([...apply,"--check",optionalPatch]))throw new Error(`Optional device-preview patch conflicts with local changes in ${path}`);
+   await run([...apply,optionalPatch],source);
+  }
+  if(sha256(readFileSync(join(source,path)))!==hash)throw new Error(`Optional device-preview source differs from its pin: ${path}`);
+ }
 }
-if(sha256(readFileSync(join(source,"packages/native/Cargo.lock")))!==pin.cargoLockSha256)throw new Error("The pinned GPUIX Cargo.lock checksum differs");
+for(const line of (await run(["git","status","--porcelain","--untracked-files=all"],source,true)).split("\n").filter(Boolean)){
+ const path=line.slice(3);if(!(path==="zed"&&pin.zedPatch)&&!Object.hasOwn(pin.patchedFiles,path)&&!Object.hasOwn(overlay?.patchedFiles||{},path))throw new Error(`GPUIX source contains an unpinned edit: ${path}`);
+}
+if(sha256(readFileSync(join(source,"packages/native/Cargo.lock")))!==(overlay?.cargoLockSha256||pin.cargoLockSha256))throw new Error("The pinned GPUIX Cargo.lock checksum differs");
+if(prepareOnly){console.log(`Verified pinned GPUIX source${overlay?" with device-preview":""}: ${source}`);process.exit(0);}
 let rustc:string;
 try{rustc=await run(["rustup","which","--toolchain",pin.toolchain,"rustc"],root,true);}catch{
  if(publishOnly)throw new Error("Publish-only requires the already installed private Rust toolchain");
@@ -68,10 +100,14 @@ if(await run([rustc,"-V"],root,true)!==pin.rustcVersion)throw new Error("The pri
 // Calling the pinned cargo does not select its sibling rustc: Cargo otherwise
 // resolves `rustc` through PATH (which can be a system or Nix installation).
 env.RUSTC=rustc;
+if(cargoCheckOnly){
+ await run([join(dirname(rustc),process.platform==="win32"?"cargo.exe":"cargo"),"check","--locked","--no-default-features",...(overlay?["--features","device-preview"]:[]),"--manifest-path","packages/native/Cargo.toml"],source);
+ process.exit(0);
+}
 if(!publishOnly){
  if(pin.profile!=="release"||pin.defaultFeatures||!pin.lto)throw new Error("The GPUIX pin requires another production build configuration");
  console.log(`Building pinned GPUIX ${pin.revision.slice(0,12)} with native display frames (${pin.jobs} jobs)…`);
- await run([join(dirname(rustc),process.platform==="win32"?"cargo.exe":"cargo"),"build","--release","--locked","--no-default-features","--manifest-path","packages/native/Cargo.toml"],source);
+ await run([join(dirname(rustc),process.platform==="win32"?"cargo.exe":"cargo"),"build","--release","--locked","--no-default-features",...(overlay?["--features","device-preview"]:[]),"--manifest-path","packages/native/Cargo.toml"],source);
 }
 const library=process.platform==="win32"?"gpuix_native.dll":process.platform==="darwin"?"libgpuix_native.dylib":"libgpuix_native.so";
 const candidate=join(target,"release",library);
@@ -80,8 +116,10 @@ const digest=sha256(readFileSync(candidate)),artifact=`gpuix-display-${process.p
 const staged=join(root,"artifacts",`gpuix-display-stage-${process.pid}.node`),output=join(root,"artifacts",artifact);
 copyFileSync(candidate,staged);
 await run([process.execPath,"scripts/verify-display-binding.ts",staged]);
+if(overlay)await run([process.execPath,"-e",`const binding=require(${JSON.stringify(staged)});if(typeof binding.devicePreviewSupported!=="function"||binding.devicePreviewSupported()!==${process.platform==="linux"||process.platform==="freebsd"}||!["createDeviceViewport","updateDeviceViewport","putDeviceFrame","clearDeviceFrame","dropDeviceViewport","hitDeviceViewport","facingDeviceViewport","captureScreenshot"].every(name=>typeof binding.GpuixRenderer.prototype[name]==="function"))throw new Error("The candidate addon lacks the device-preview API");`]);
 if(existsSync(output)&&sha256(readFileSync(output))===digest)unlinkSync(staged);else renameSync(staged,output);
 const stamp:DisplayStamp={version:1,identity:displayIdentity(pin),artifact,sha256:digest,platform:process.platform,arch:process.arch,revision:pin.revision,patchSha256:pin.patchSha256,rustcVersion:pin.rustcVersion};
+if(overlay)stamp.devicePreview=true;
 const destination=displayStampPath(),pending=`${destination}.${process.pid}.next`;
 writeFileSync(pending,JSON.stringify(stamp));renameSync(pending,destination);
 verifiedDisplayBinding();

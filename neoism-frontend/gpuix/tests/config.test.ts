@@ -27,6 +27,12 @@ test("does not automatically send a local secret to an explicit remote endpoint"
   const config = loadConfig(["--config", "/nonexistent/neoism-gpuix-test", "--daemon", "wss://example.test/session"], {});
   expect(config.authToken).toBeUndefined(); expect(config.pairingToken).toBeUndefined();
 });
+test("VI editing follows Neoism's enabled default and explicit opt out", () => {
+  expect(loadConfig([], {}, {}).vim).toBe(true);
+  expect(loadConfig([], {}, { editor: {} }).vim).toBe(true);
+  expect(loadConfig([], {}, { editor: { "vim-mode": true } }).vim).toBe(true);
+  expect(loadConfig([], {}, { editor: { "vim-mode": false } }).vim).toBe(false);
+});
 test("cursor blink reads the original local half-period and desktop bounds", () => {
   expect(loadConfig([], {}, {}).cursorBlinkInterval).toBe(530);
   const cursor = (value: number) => loadConfig([], {}, {terminal:{cursor:{"blinking-interval":value}}}).cursorBlinkInterval;

@@ -531,3 +531,4 @@
 - [History I/O candidate verified, activation pending](reference_history_io_candidate_verified.md) - History I/O candidate built, hash b8da1984;35 focused tests pass; NOT installed/restarted; live activation and actual I/O validation pending
 - [Official Turso upgrade and lossless event storage](project_official_turso_upgrade.md) - Official Turso0.8.3 newest stable pinned; vendor removed; FTS fixture migration and codec checks pending; do not activate live
 - [Official Turso first runtime checks](reference_official_turso_first_checks.md) - 43 official-Turso runtime checks pass; latest recovery/migration still needs final test rebuild; transport lock aligned
+- [GPUIX device preview (optional native 3D)](feature_gpuix_device_preview.md) - Literal T3 sidebar rewrite, real native capture proofs, book presentation, drag fix, optional build and production launch workflow

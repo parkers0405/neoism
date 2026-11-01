@@ -7,7 +7,9 @@ import {fileURLToPath} from 'node:url';
 const root=fileURLToPath(new URL('..',import.meta.url));
 const frontend=join(root,'neoism-frontend/gpuix'),sdk=join(root,'neoism-agent/sdk/typescript');
 const windows=process.platform==='win32',suffix=windows?'.exe':'';
-const env={...process.env,NEOISM_GPUIX_RUST_BUILDER:'cargo',NEOISM_GPUIX_BUILD_PROFILE:'release',CARGO_PROFILE_RELEASE_DEBUG:'0',CARGO_PROFILE_RELEASE_LTO:'thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS:'16'};
+// Experimental device previews remain available to opt-in development builds.
+// Release packaging must exclude them even when the caller enabled the feature.
+const env={...process.env,NEOISM_GPUIX_DEVICE_PREVIEW:'0',NEOISM_GPUIX_RUST_BUILDER:'cargo',NEOISM_GPUIX_BUILD_PROFILE:'release',CARGO_PROFILE_RELEASE_DEBUG:'0',CARGO_PROFILE_RELEASE_LTO:'thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS:'16'};
 function run(program,args,cwd=root){
  const label=`${program} ${args.join(' ')}`;
  console.log(process.env.GITHUB_ACTIONS?`::group::${label}`:label);

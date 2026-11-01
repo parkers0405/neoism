@@ -16,6 +16,7 @@ use std::{
     time::Instant,
 };
 mod pickers;
+mod background_cache;
 mod ssh_transport;
 use ssh_transport::original as ssh_hosts;
 #[path = "layout.rs"]
@@ -657,6 +658,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
     let op = text(&v, "op");
     let id = v["id"].as_u64().unwrap_or(0) as u32;
     match op {
+        "background.prepare" => background_cache::prepare(&v).map(|path| json!({"path":path})),
         "tree.visible" => {
             let root=PathBuf::from(text(&v,"root").replace('\\',"/"));
             let hidden=v["showHidden"].as_bool().unwrap_or(true);

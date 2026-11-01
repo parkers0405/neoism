@@ -7,14 +7,15 @@ import{DaemonConnection}from"../../src/daemon/client";
 import{WorkspaceModel}from"../../src/model";
 import{createSlashDaemon}from"./slash-daemon";
 import{createRecordingAppRenderer}from"./full-app-recording-renderer";
-const daemon=createSlashDaemon(),config={...loadConfig(["--config","/nonexistent/connect-app"],{}),endpoint:daemon.endpoint,authToken:"fixture-token",reducedMotion:true,cursorBlink:false},client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
+const daemon=createSlashDaemon(),config={...loadConfig(["--config","/nonexistent/connect-app"],{}),endpoint:daemon.endpoint,authToken:"fixture-token",reducedMotion:true,agentStars:false,cursorBlink:false},client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
 const workspace={id:"a",host_id:"host",title:"A",root_dir:"/project/a"};
 let stage="setup";
 const until=async(check:()=>boolean)=>{const end=Date.now()+5000;while(!check()){await host.pump(root);if(Date.now()>end)throw new Error(`Connect App stalled at ${stage}; error=${model.state.error}; dialogs=${[...host.nodes.values()].filter(n=>n.props.role==="dialog").map(n=>String(n.props["aria-label"])).join(",")}`);await Bun.sleep(4);}await host.pump(root);};
 const entry=()=>host.find("inline-picker-input")!;
 const dialog=(kind:string)=>host.find(`agent-picker:${kind}`);
-const change=async(value:string)=>{assert.ok(entry(),`No native picker input at ${stage}`);root.dispatch({elementId:entry().id,eventType:"change",value});await host.pump(root);};
-const submit=async()=>{root.dispatch({elementId:entry().id,eventType:"submit"});await host.pump(root);};
+const change=async(value:string)=>{assert.ok(entry(),`No native picker input at ${stage}`);assert.equal(host.focused,entry().id,`Picker must own typing focus at ${stage}`);root.dispatch({elementId:host.focused!,eventType:"change",value});await host.pump(root);};
+const key=async(key:string)=>{assert.equal(host.focused,entry().id,`Picker must own keyboard focus at ${stage}`);root.dispatch({elementId:host.focused!,eventType:"keyDown",key,modifiers:{ctrl:false,shift:false,alt:false,cmd:false}});await host.pump(root);};
+const submit=async()=>key("Enter");
 const choose=async(query:string)=>{await change(query);await submit();};
 try{
  model.update({activeWorkspace:workspace,workspaces:[workspace],loading:false,providers:[{id:"openai",name:"OpenAI",models:[{id:"base",name:"Base"}]}],agents:[{name:"build",description:"Build"},{name:"plan",description:"Plan"}],catalogsLoading:false});
@@ -29,7 +30,7 @@ try{
  stage="connected accounts";await choose("OpenAI");await until(()=>!!dialog("connect-account")&&!!host.find("picker-option:account-a"));
  assert.ok(host.find("picker-option:__add_account__"));assert.ok([...host.nodes.values()].some(n=>n.props["aria-label"]==="Connected accounts"));
  assert.ok(!host.find("picker-option:foreign"),"Other workspace accounts stay confined");
- stage="label escape back";await choose("Add account");await until(()=>!!dialog("connect-input"));assert.equal(dialog("connect-input")!.props["aria-label"],"Label new account");assert.ok(!host.find("agent-question"));
+ stage="label escape back";await key("ArrowDown");await key("ArrowUp");await submit();await until(()=>!!dialog("connect-input"));assert.equal(dialog("connect-input")!.props["aria-label"],"Label new account");assert.ok(!host.find("agent-question"));
  root.dispatch({elementId:dialog("connect-input")!.id,eventType:"keyDown",key:"escape",modifiers:{ctrl:false,shift:false,alt:false,cmd:false}});await until(()=>!!dialog("connect-account")&&!!host.find("picker-option:account-a"));
  stage="label submit";await choose("Add account");await until(()=>!!dialog("connect-input"));await change("New production account");await submit();
  stage="auth methods";await until(()=>!!dialog("connect-method"));assert.ok(!host.find("agent-question"));await choose("API key");

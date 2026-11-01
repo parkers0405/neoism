@@ -80,6 +80,8 @@ export class GitController{
  }
  private feed(message:unknown){
   if(!isRecord(message)||this.disposed)return;
+  // Identical counts can hide changed diff text, and mutation replies must
+  // settle native loading state even when the repository status is unchanged.
   if(message.RepoStatus||message.ChangedFiles)this.statusRevision++;
   this.call("reply",{message});for(const listener of this.replies)listener(message,this.workspaceRoot);
  }

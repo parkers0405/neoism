@@ -14,7 +14,7 @@ import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
 const directory=mkdtempSync(join(tmpdir(),"neoism-buffer-shortcuts-")),path=join(directory,"config.json");writeFileSync(path,"{}");process.argv.push("--config",path);
 const daemon=createAgentDaemon({deferCreations:false});daemon.history.set("one",[{id:"existing",role:"Assistant",kind:"Assistant",text:"Existing conversation history"}]);daemon.files.set("code.rs","fn retained() {}\nsecond\nthird\n");
-const config={...loadConfig(["--config",path],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
+const config={...loadConfig(["--config",path],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false,agentStars:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),keys=createWindowKeyRouter(),root=createRoot(host.renderer,{onKeyDown:keys.dispatch,keyboardFocusDim:false});
 let sequence=0,stage="startup";
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+4000;while(!predicate()){await host.pump(root);if(Date.now()>end)throw new Error("Buffer shortcut App did not settle");await Bun.sleep(3);}await host.pump(root);};
@@ -23,6 +23,26 @@ try{
  model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);const home=model.state.activeSurfaceId!;await model.openFile("code.rs");const code=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!;const editor=model.getEditor(code);editor.call("paste",{text:"dirty "});const bytes=editor.text();await model.openFile("README.md");const markdown=model.state.activeSurfaceId!;const agent=model.newAgentHome()!;
  root.render(()=><App model={model} config={config} visuals={visuals} registerWindowKeys={keys.register}/>);await host.pump(root);model.selectSurface(home);await host.pump(root);
  const layout=model.getLayout(),order=layout.frame.panes[0].tabs.map(tab=>tab.surfaceId);
+ stage="Option+Shift reorders the active buffer tab without changing selection";
+ await press("ArrowRight",{ctrl:false,shift:true,alt:true,cmd:false});
+ assert.deepEqual(layout.frame.panes[0].tabs.map(tab=>tab.surfaceId),[order[1],order[0],...order.slice(2)]);
+ assert.equal(model.state.activeSurfaceId,home);
+ await press("ArrowLeft",{ctrl:false,shift:true,alt:true,cmd:false});
+ assert.deepEqual(layout.frame.panes[0].tabs.map(tab=>tab.surfaceId),order);
+ stage="Control+Option+Shift reorders the top workspace tab";
+ model.setUI({openWorkspaceIds:["a","b"]});await host.pump(root);
+ await press("ArrowRight",{ctrl:true,shift:true,alt:true,cmd:false});
+ assert.deepEqual(model.state.ui.openWorkspaceIds,["b","a"]);
+ assert.equal(model.state.activeWorkspace?.id,"a");
+ await press("ArrowLeft",{ctrl:true,shift:true,alt:true,cmd:false});
+ assert.deepEqual(model.state.ui.openWorkspaceIds,["a","b"]);
+ stage="Option+Shift moves the top tab when its strip owns keyboard focus";
+ host.renderer.focusElement?.(host.find("workspace:a")!.id);await host.pump(root);
+ await press("ArrowRight",{ctrl:false,shift:true,alt:true,cmd:false});
+ assert.deepEqual(model.state.ui.openWorkspaceIds,["b","a"]);
+ await press("ArrowLeft",{ctrl:false,shift:true,alt:true,cmd:false});
+ assert.deepEqual(model.state.ui.openWorkspaceIds,["a","b"]);
+ host.renderer.focusElement?.(host.find("welcome-page")!.id);await host.pump(root);
  for(const id of [code.id,markdown,agent.id,home]){stage=`cycling to ${id}`;await press("right");assert.equal(model.state.activeSurfaceId,id);}
  await press("ArrowLeft");assert.equal(model.state.activeSurfaceId,agent.id,"Left wraps to final buffer");
  stage="Agent picker must not trap the buffer navigation chord";
@@ -59,7 +79,7 @@ try{
   root.dispatch({elementId:host.windowId,eventType:"windowKeyDown",key:"left",modifiers:{ctrl:true,shift:true,alt:false,cmd:false},keystrokeId:++sequence});await host.pump(root);
   assert.equal(model.state.activeSurfaceId,id);assert.equal(model.state.composerDrafts[draftKey]?.text,"keep these draft words");
  }
- model.selectSurface(conversation);await host.pump(root);const history=host.find("conversation")!;root.dispatch({elementId:history.id,eventType:"mouseDown",button:0,x:400,y:150});await host.pump(root);assert.equal(host.focused,history.id);await press("right");assert.equal(model.state.activeSurfaceId,terminal,"History focus routes the same chord without interpreting it as chat input");
+ model.selectSurface(conversation);await host.pump(root);const history=host.find("conversation")!;root.dispatch({elementId:history.id,eventType:"mouseDown",button:0,x:400,y:150});await host.pump(root);assert.equal(host.focused,host.find("composer")?.id);await press("right");assert.equal(model.state.activeSurfaceId,terminal,"History click retains composer focus and the same buffer shortcut");
  stage="CtrlU/D half-page navigation works while Agent composer owns focus";
  model.selectSurface(conversation);await host.pump(root);
  const sessionId=model.state.surfaces.find(surface=>surface.id===conversation)!.sessionId!;

@@ -1,3 +1,4 @@
+import {openExternalUrl} from "../menu-actions/web-frontend";
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 import { batch, createEffect, createSignal, Index, onCleanup, onMount, Show, untrack } from "solid-js";
@@ -70,7 +71,13 @@ export function InlinePicker(props: {
   createEffect(()=>{if(props.kind==="usage")mutate("usage",{usage:props.usage,loading:props.loading,error:props.error});});
   createEffect(()=>{if(engine==="question"&&props.error)untrack(()=>update("retry"));});
   createEffect(()=>{const query=props.query;if(query!==undefined&&engine==="picker")mutate("query",{query});});
-  onMount(() => { if(props.initialValue!==undefined)update("query",{query:props.initialValue}); if (input && props.query === undefined) renderer.focusElement?.(input.id); });
+  const focusInput = () => queueMicrotask(() => {
+    if (!disposed && input && props.query === undefined) {
+      input.root?.mutations.flushMutations();
+      renderer.focusElement?.(input.id);
+    }
+  });
+  onMount(() => { if(props.initialValue!==undefined)update("query",{query:props.initialValue}); focusInput(); });
   onCleanup(() => { props.onKeyHandler?.(undefined); props.onAcceptHandler?.(undefined); disposed = true; animation.dispose(); coreCall(`${engine}.dispose`, { id }); });
   const accept = (index?: number) => {
     if (props.responding || frame().responding) return;
@@ -78,6 +85,8 @@ export function InlinePicker(props: {
     if (index !== undefined) update("select", { index });
     if (engine === "question") {
       const next = update("commit"); if (next.answers) props.onAnswers?.(next.answers);
+      // A clicked suggestion can advance to a free-text question in this same input.
+      focusInput();
     } else {
       const value = frame().selectedValue;
       if (value !== undefined && value !== null) props.onSelect?.(value);
@@ -86,12 +95,12 @@ export function InlinePicker(props: {
   const keyDown = (event: KeyEvent) => {
     if(handleApplicationShortcut(renderer,event))return true;
     let handled = true;
-    const key = event.key || "", ctrl = event.modifiers?.ctrl;
+    const key = event.key?.toLowerCase().replace(/^arrow/, "") || "", ctrl = event.modifiers?.ctrl;
     if(props.kind==="usage"&&key==="enter"){event.preventDefault();event.stopPropagation();if(!props.loading)void props.onRefresh?.();}
     else if (key === "escape") { event.preventDefault(); event.stopPropagation(); if (!props.responding) props.onClose(); }
     else if (["up", "down"].includes(key) || ctrl && ["n", "p"].includes(key)) {
       event.preventDefault(); event.stopPropagation(); update("move", { delta: key === "up" || key === "p" ? -1 : 1 });
-    } else if (key === "enter" && props.query !== undefined) { event.preventDefault(); event.stopPropagation(); accept(); }
+    } else if (key === "enter") { event.preventDefault(); event.stopPropagation(); accept(); }
     else if (ctrl && key === "u" && props.query === undefined) { event.preventDefault(); event.stopPropagation(); update("query", { query: "" }); }
     else handled = false;
     return handled;
@@ -108,14 +117,14 @@ export function InlinePicker(props: {
       <PaintLayer commands={card().commands} config={config} />
       <div testId={`agent-picker:${props.kind}`} role="dialog" aria-label={frame().title} onKeyDown={keyDown}
         onMouseDownOutside={event => { const [x,y,w,h]=rect(); if(event.x!==undefined&&event.y!==undefined&&(props.ignoreOutsideClick?.(event.x,event.y)||event.x>=x-1&&event.y>=y-1&&event.x<=x+w+1&&event.y<=y+h+1))return; if(!props.responding)props.onClose(); }}
-        onMouseDown={(event) => { const result = hit(event); if (result.url) { const child = Bun.spawn([process.platform === "darwin" ? "open" : "xdg-open", result.url], { stderr: "ignore", stdout: "ignore" }); void child.exited; } else if (result.hit) { update("frame"); accept(); } }}
+        onMouseDown={(event) => { const result = hit(event); if (result.url) { void openExternalUrl(result.url).catch(error=>console.error("Could not open authorization link",error)); } else if (result.hit) { update("frame"); accept(); } }}
         onScroll={(event) => update("scroll", { delta: (event.deltaY || 0) * (event.precise ? 1 / s : d.pickerRowHeight * 3) })}
         style={{ position: "absolute", left: rect()[0], top: rect()[1], width: rect()[2], height: rect()[3], pointerEvents: "auto", userSelect: "none" }}>
         <Index each={frame().rows}>{(option) => <div role="option" aria-label={option().title} testId={props.secret ? "picker-option:credential" : `picker-option:${option().value}`} style={{ position: "absolute", width: 0, height: 0, pointerEvents: "none" }} />}</Index>
         <Show when={props.kind==="usage"}><Index each={props.usage?.accounts||[]}>{account=><div role="listitem" testId={`usage-account:${account().connection_id}`} aria-label={account().label} style={{width:0,height:0,pointerEvents:"none"}}/>}</Index></Show>
         <Show when={props.query === undefined}>
           {/* Typing target only; the original card paints query, caret and mask. */}
-          <input ref={input} testId="inline-picker-input" autoFocus={true} aria-label={`Search ${props.title || "options"}`} value={frame().query}
+          <input ref={input} testId="inline-picker-input" onKeyDown={keyDown} autoFocus={true} aria-label={`Search ${props.title || "options"}`} value={frame().query}
             onChange={(event) => {if(props.kind!=="usage")update("query", { query: event.value || "" });}} onSubmit={() => {if(props.kind==="usage"){if(!props.loading)void props.onRefresh?.();}else accept();}}
             style={{ position: "absolute", left: 0, top: 0, width: 1, height: 1, opacity: 0, color: "transparent", backgroundColor: "transparent", borderWidth: 0, pointerEvents: "none" }} />
         </Show>
@@ -138,7 +147,7 @@ export function InlinePicker(props: {
         whiteSpace: engine === "question" ? "normal" : "nowrap", textOverflow: "ellipsis" }}>{frame().title}</text>
     <text onClick={props.onClose} style={{ ...text(12, c.muted), position: "absolute", right: 14 * s, top: 10 * s, cursor: "pointer", pointerEvents: "auto" }}>esc</text>
     <Show when={props.query === undefined} fallback={<text style={{ ...text(13), position: "absolute", left: 14 * s, right: 30 * s, top: headerHeight() - 24 * s, height: 22 * s }}>{props.query || "Search"}</text>}>
-    <input ref={input} testId="inline-picker-input" autoFocus={true} aria-label={engine === "question" ? "Answer question" : `Search ${props.title || "options"}`}
+    <input ref={input} testId="inline-picker-input" onKeyDown={keyDown} autoFocus={true} aria-label={engine === "question" ? "Answer question" : `Search ${props.title || "options"}`}
       value={frame().query} placeholder={engine === "question" ? "Type your answer" : "Search"}
       onChange={(event) => {if(props.kind!=="usage")update("query", { query: event.value || "" });}} onSubmit={() => {if(props.kind==="usage"){if(!props.loading)void props.onRefresh?.();}else accept();}}
       style={{ ...text(13, props.secret ? "transparent" : c.fg), position: "absolute", left: 14 * s, width: Math.max(1, frame().rect[2] - 30 * s), top: headerHeight() - 24 * s, height: 22 * s,
@@ -154,7 +163,7 @@ export function InlinePicker(props: {
         height: rowHeight, backgroundColor: c.hover, pointerEvents: "none" }} /></Show>
       {/* Rows are the native visible window; `index` is the absolute position. */}
       <Index each={frame().rows}>{(option, slot) => { const index = () => option().index ?? slot; return <div role="option" aria-selected={frame().selected === index()} aria-label={props.secret?"Submit credentials":option().title}
-        testId={props.secret?"picker-option:credential":`picker-option:${option().value}`} onMouseDown={() => { if (!option().header) accept(index()); }}
+        testId={props.secret?"picker-option:credential":`picker-option:${option().value}`} data-preserve-keyboard-focus={true} onMouseDown={() => { if (!option().header) accept(index()); }}
         style={{ position: "absolute", left: 0, right: 0, top: (index() - frame().top) * rowHeight + frame().offset * s,
           height: rowHeight, userSelect: "none", paddingLeft: 14 * s, paddingRight: 14 * s, cursor: option().header ? "default" : "pointer", hover: option().header ? undefined : { backgroundColor: c.hover } }}>
         <text style={{ ...text(13, option().header ? c.muted : c.fg), position: "absolute", left: 14 * s, right: 86 * s, top: 5 * s, whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{option().current ? "● " : ""}{props.secret?"Submit credentials":option().title}</text>

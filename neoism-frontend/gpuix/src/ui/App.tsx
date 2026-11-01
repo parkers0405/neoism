@@ -1,3 +1,4 @@
+import {AttachmentImage,ImagePreviewModal,type ImagePreview} from "./AttachmentImage";
 import {SidebarContext,type SidebarContextSpec} from "./SidebarContext";
 import {treeContextItems,treeContextCurrent,performTreeContext,type TreeContextTarget} from "./tree-context-actions";
 import type {WorkspaceNavigation} from "../workspaces/window-sessions";
@@ -51,7 +52,7 @@ import { CommandView } from "../commands/CommandView";
 import {cssColor} from "./canvas";
 import { KeyboardBindings, paletteActionForBinding } from "../commands/KeyboardBindings";
 import {handleApplicationShortcut,registerApplicationShortcuts} from "../commands/application-shortcuts";
-import { readClipboard, writeClipboard } from "../clipboard";
+import { readClipboardImage, readClipboard, writeClipboard } from "../clipboard";
 import { terminalSession } from "../terminal/sessions";
 import { modelPickerOptions, modelCatalogStatus } from "../agent/model-picker";
 import type { FinderMode } from "../finder/FinderController";
@@ -73,6 +74,7 @@ import {surfaceCaret,suppressSurfaceCursor,surfaceCursorSuppressed} from "./curs
 import { focusedNativeElement,focusNativeElement,invalidateNativeFocus } from "../native-focus";
 import { localDaemon } from "../menu-actions/web-frontend";
 import { openExternalUrl } from "../menu-actions/web-frontend";
+import {devicePreviewEnabled,DevicePreviewSlot,DevicePreviewButton} from "../device/feature";
 
 export function fileIcon(name: string) {
   return namedIcons[name.toLowerCase()] || extensionIcons[name.split(".").pop()?.toLowerCase() || ""] || { glyph: "\uf15b", color: "#c8c8c8" };
@@ -80,8 +82,8 @@ export function fileIcon(name: string) {
 export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: () => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
   const config = props.config, model = props.model, c = config.theme, s = config.scale;
   let activeTreeEscape:((event:KeyEvent)=>boolean)|undefined;
-  const [presencePeers,setPresencePeers]=createSignal(model.presence.peers());
-  const stopPresence=model.presence.subscribe(()=>setPresencePeers(model.presence.peers()));onCleanup(stopPresence);
+  const [presencePeers,setPresencePeers]=createSignal(model.presence.topBarPeers());
+  const stopPresence=model.presence.subscribe(()=>setPresencePeers(model.presence.topBarPeers()));onCleanup(stopPresence);
   const visuals=props.visuals||new AppVisualState();if(!props.visuals)onCleanup(()=>visuals.dispose());
   const wordmarkHosts=visuals.wordmarks;
   const tabChromeSpec = tabChrome(s);
@@ -99,7 +101,6 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   const [commands, setCommands] = createSignal<CommandController>();
   const [finderMode, setFinderMode] = createSignal<FinderMode>("files");
   let commandFocus: number | undefined;
-  let clipboardReplay: "v" | undefined;
   onCleanup(() => commands()?.dispose());
   const [palette, setPalette] = createSignal(false);
   const [paletteMode, setPaletteMode] = createSignal<"find" | "/" | "?" | ":">("find");
@@ -110,6 +111,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   type Choice = { kind: "agent" | "model" | "thinking" | "account"; sessionId?: string; anchor: Anchor; restore: () => void; model?: string; accounts?: PickerOption[]; current?: string };
   const [choice, setChoice] = createSignal<Choice>();
   const [composerAnchors, setComposerAnchors] = createSignal<Record<string, Anchor>>({});
+  const [imagePreview,setImagePreview]=createSignal<ImagePreview>();
+  const composerPaste=new Map<string,()=>Promise<void>>();
   const composerInputs = new Map<string, HostElement>();
   const composerShells = new Map<string, HostElement>();
   const composerPickerButtons = new Set<HostElement>();
@@ -189,6 +192,13 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   const [gitRestore,setGitRestore]=createSignal<{target:GitRestoreTarget;workspaceId:string;resolve:(confirmed:boolean)=>void;focus?:number}>();
   let gitHost:HostElement|undefined;
   const gitVisible=createMemo(()=>!!gitFrame()?.visible);
+  const [deviceFocusToken,setDeviceFocusToken]=createSignal(0);
+  let deviceHost:HostElement|undefined;
+  const deviceVisible=createMemo(()=>{const panels=state().ui.devicePreviewPanels;return devicePreviewEnabled&&!gitVisible()&&isRecord(panels)&&panels[state().activeWorkspace?.id||""]===true;});
+  const deviceWidth=()=>Math.min(540*s,Math.max(240*s,windowSize().width-(sidebar()?d.sidebarWidth:0)-360*s),windowSize().width*.7);
+  const setDeviceVisible=(visible:boolean)=>{const id=activeWorkspaceId();if(!devicePreviewEnabled||!id)return;const panels=isRecord(model.state.ui.devicePreviewPanels)?model.state.ui.devicePreviewPanels:{};model.setUI({devicePreviewPanels:{...panels,[id]:visible}});};
+  const closeDevice=()=>{setDeviceVisible(false);focusChrome({zone:"content"});};
+  const toggleDevice=()=>{const opening=!deviceVisible();if(opening&&gitVisible())toggleGit();setDeviceVisible(opening);if(opening){setChromeFocus({zone:"device"});setChromeTarget(undefined);setDeviceFocusToken(value=>value+1);}else focusChrome({zone:"content"});};
   const openGitReview=(descriptor:GitReviewDescriptor)=>{model.openGitReview(descriptor);setGitFocused(false);focusChrome({zone:"content"});};
   const relativeGitPath=(root:string,path:string)=>{const paths=/^[a-z]:[\\/]/i.test(root)?win32:posix;return paths.isAbsolute(path)?paths.relative(root,path).replaceAll("\\","/"):path;};
   const finishGitRestore=(confirmed:boolean)=>{const pending=gitRestore();if(!pending)return;setGitRestore(undefined);pending.resolve(confirmed&&pending.workspaceId===activeWorkspaceId());if(pending.focus)focusNativeElement(renderer,pending.focus);};
@@ -293,7 +303,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   };
   const activeComposerKey=()=>active()?.sessionId||active()?.id||"home";
   const composerAnchor = () => measuredComposerAnchor(activeComposerKey()) || [320, windowSize().height - 160 * s, Math.max(200, windowSize().width - 360), 100] as Anchor;
-  const focusComposer = () => { const input = composerInputs.get(activeComposerKey()); if (input) focusNativeElement(renderer,input.id); };
+  const focusComposer = () => { const input = composerInputs.get(activeComposerKey()); if (input) {input.root?.mutations.flushMutations();if(focusedNativeElement(renderer)!==input.id)focusNativeElement(renderer,input.id);} };
   const closeChoice = () => { const previous = choice(); setChoice(undefined); previous?.restore(); };
   const providerCatalog = createMemo(() => state().providers);
   const agentCatalog = createMemo(() => state().agents);
@@ -363,7 +373,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     metrics: { codeTextSize: config.fontSize, codeLineHeight: config.fontSize * 1.5, mdTextSize: d.chatTextSize * s, mdLineHeight: d.chatLineHeight * s,
       mdHeadingSizes: [21 * s, 18 * s, 16 * s, 16 * s] } };
   const toggle = (view: typeof sidebar extends Accessor<infer T> ? T : never) => setSidebar(sidebar() === view ? undefined : view);
-  const availableWidth = () => windowSize().width - (sidebar() ? d.sidebarWidth : 0);
+   const availableWidth = () => windowSize().width - (sidebar() ? d.sidebarWidth : 0) - (deviceVisible()?deviceWidth():0);
   const detailWidth = () => Math.min(d.detailRailWidth, Math.max(0, availableWidth() / s - d.detailMinChatWidth - d.detailGap)) * s;
   const showDetails = () => details() && active()?.kind === "agent" && (!!(state().ui.agentParentSessions as Record<string,string>|undefined)?.[active()?.sessionId||""] || (state().history[active()?.sessionId||""]||[]).some(message=>message.kind!=="System")) && availableWidth() >= (d.detailMinChatWidth + d.detailMinRailWidth + d.detailGap) * s;
   const chatWidth = () => availableWidth() - (showDetails() ? detailWidth() + d.detailGap * s : 0);
@@ -411,6 +421,9 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       const finish=()=>{
         if(serial!==contentFocusSerial)return;
         if(chromeFocus().zone!=="content"||active()?.id!==expectedSurface){pendingContentFocus=false;suppressSurfaceCursor(renderer,false);return;}
+        // A sidebar action can create the Agent surface before its textarea
+        // mounts. Keep the handoff alive until the real input host is ready.
+        if(active()?.kind==="agent"&&!imagePreview()&&!pendingPermission()&&!pendingQuestion()&&!choice()&&!commands()&&!palette())focusComposer();
         const owner=focusedNativeElement(renderer),chromeOwner=[...sidebarHosts.values(),...tabHosts.values(),...workspaceHosts.values(),...newTabHosts.values(),...(workspaceNewHost?[workspaceNewHost]:[])].some(host=>host.id===owner);
         const caret=chromeOwner?undefined:surfaceCaret(renderer,owner);
         if(caret){pendingContentFocus=false;if(handoff)setChromeTarget({host:caret.host,kind:"content",bounds:caret.bounds,...(externalOrigin?{origin:externalOrigin}:{})});else{setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}return;}
@@ -425,7 +438,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     setChromeFocus(next);suppressSurfaceCursor(renderer,false);let host:HostElement|undefined;
     if(next.zone==="workspaces")host=workspaceHosts.get(windowWorkspaces()[next.index]?.id)||workspaceNewHost;
     else if(next.zone==="buffers"){const pane=focusedPane(),tab=pane?.tabs[next.index];host=tab?tabHosts.get(tab.leaf):pane?newTabHosts.get(pane.leaf):undefined;}
-    else if(next.zone==="sidebar")host=sidebarHosts.get(sidebar()||"");
+     else if(next.zone==="sidebar")host=sidebarHosts.get(sidebar()||"");
+     else if(next.zone==="device"){host=deviceHost;setDeviceFocusToken(value=>value+1);}
     if(host){host.root?.mutations.flushMutations();if(focusedNativeElement(renderer)!==host.id)focusNativeElement(renderer,host.id);host.scrollIntoView();}
     const target=next.zone==="sidebar"?sidebarTargets.get(sidebar()||"")?.():host&&(next.zone==="buffers"||next.zone==="workspaces")?{host,kind:next.zone==="workspaces"?"workspace" as const:"buffer" as const,plus:next.zone==="buffers"?next.index>=(focusedPane()?.tabs.length||0):next.zone==="workspaces"&&next.index>=windowWorkspaces().length,padding:tabChromeSpec.buffer.padding,bounds:chromeBounds.get(host.id)}:undefined;
     setChromeTarget(target?{...target,origin}:undefined);
@@ -440,7 +454,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   const currentChromeFocus=():ChromeFocus=>{
     // Explicit keyboard parking wins while native focus catches up. Its
     // snapshot can still report the old content host during this keystroke.
-    const requested=chromeFocus();if(requested.zone==="buffers"||requested.zone==="workspaces")return requested;
+     const requested=chromeFocus();if(requested.zone==="buffers"||requested.zone==="workspaces"||requested.zone==="device"&&deviceVisible())return requested;
     const owner=focusedNativeElement(renderer),workspaces=windowWorkspaces(),pane=focusedPane();
     if(workspaceNewHost?.id===owner)return {zone:"workspaces",index:workspaces.length};
     const workspaceIndex=workspaces.findIndex(workspace=>workspaceHosts.get(workspace.id)?.id===owner);if(workspaceIndex>=0)return {zone:"workspaces",index:workspaceIndex};
@@ -455,7 +469,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const pane=focusedPane(),navigation=navigateChrome(currentChromeFocus(),event,{bufferCount:pane?.tabs.length||0,activeBuffer:pane?.tabs.findIndex(tab=>tab.leaf===pane.leaf)??0,workspaceCount:windowWorkspaces().length,workspacePlus:true,activeWorkspace:windowWorkspaces().findIndex(workspace=>workspace.id===activeWindowWorkspaceId()),sidebar:!!sidebar()});
     if(!navigation)return false;event.preventDefault();event.stopPropagation();
     if(navigation.direction){const before=workspaceLayout()?.frame.focusedLeaf;model.focusPane(navigation.direction);const after=workspaceLayout()?.frame.focusedLeaf;
-      focusChrome(before===after&&navigation.direction==="left"&&sidebar()?{zone:"sidebar"}:{zone:"content"});return true;}
+       focusChrome(before===after&&navigation.direction==="left"&&sidebar()?{zone:"sidebar"}:before===after&&navigation.direction==="right"&&deviceVisible()?{zone:"device"}:{zone:"content"});return true;}
     focusChrome(navigation.focus);
     if(navigation.activate==="buffer"&&navigation.focus.zone==="buffers"){
       const tab=pane?.tabs[navigation.focus.index];if(tab?.surfaceId){workspaceLayout()?.focus(tab.leaf);model.selectSurface(tab.surfaceId,true);queueMicrotask(()=>focusChrome(navigation.focus));}
@@ -466,6 +480,17 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     return true;
   };
   const closeFocusedTab=(discard=false)=>{const closed=model.closeCurrentTab(discard);if(closed)queueMicrotask(()=>setEditorFocus(value=>value+1));return closed;};
+  const moveActiveBufferTab=(previous:boolean)=>{
+    const layout=workspaceLayout(),pane=layout?.frame.panes.find(pane=>pane.focused);
+    if(!layout||!pane)return;
+    const index=pane.tabs.findIndex(tab=>tab.leaf===pane.leaf),target=pane.tabs[index+(previous?-1:1)];
+    if(index>=0&&target)layout.reorder(pane.leaf,target.leaf,previous);
+  };
+  const moveActiveWorkspaceTab=(previous:boolean)=>{
+    const workspaces=windowWorkspaces(),id=activeWindowWorkspaceId();if(!id)return;
+    const index=workspaces.findIndex(workspace=>workspace.id===id),target=workspaces[index+(previous?-1:1)];
+    if(index>=0&&target)reorderWindowWorkspace(id,target.id,previous?"before":"after");
+  };
   const runCommand = async ({ action, argument }: CommandTarget) => {
     const surface = active(), editor = activeEditor(), terminal = activeTerminal(), layout = workspaceLayout();
     switch (action) {
@@ -479,6 +504,10 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       case "TabClose": case "CloseCurrentSplitOrTab": closeFocusedTab(); return;
       case "TabCloseUnfocused": { const focused = layout?.frame.focusedLeaf; for (const tab of layout?.frame.panes.find((p) => p.focused)?.tabs || []) if (tab.leaf !== focused && tab.surfaceId) model.closePane(tab.surfaceId, tab.leaf); return; }
       case "SelectNextTab": selectTab(false); return; case "SelectPrevTab": selectTab(true); return;
+      case "MoveActiveBufferTabToPrev": moveActiveBufferTab(true); return;
+      case "MoveActiveBufferTabToNext": moveActiveBufferTab(false); return;
+      case "MoveWorkspaceTabToPrev": moveActiveWorkspaceTab(true); return;
+      case "MoveWorkspaceTabToNext": moveActiveWorkspaceTab(false); return;
       case "SelectNextSplit": model.focusPane("next"); setEditorFocus((n) => n + 1); return;
       case "SelectPrevSplit": model.focusPane("previous"); setEditorFocus((n) => n + 1); return;
       case "SplitRight": model.splitSurface("horizontal"); return; case "SplitDown": model.splitSurface("vertical"); return;
@@ -494,7 +523,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       case "ToggleViMode": if (editor) editor.call("toggle-vim"); else terminal?.buffer.key({ key: "space", char: " ", alt: true, shift: true }); return;
       case "ClearHistory": if (terminal) await terminal.buffer.write(new TextEncoder().encode("\x1b[3J")); return;
       case "Copy": { const selected = editor ? coreCall<{ text: string }>("editor.copy", { id: editor.id }).text : terminal?.buffer.selectedText || renderer.getSelectedText?.() || ""; if (selected) await writeClipboard(selected); return; }
-      case "Paste": { const text = await readClipboard(); if (editor) editor.call("paste", { text }); else if (terminal) terminal.send(terminal.buffer.paste(text)); else { const input = composerInputs.get(activeComposerKey()); if (input) { focusNativeElement(renderer,input.id); clipboardReplay = "v"; if ("simulateKeystrokes" in renderer && typeof renderer.simulateKeystrokes === "function") renderer.simulateKeystrokes("ctrl-v"); } } return; }
+      case "Paste": { if(editor)editor.call("paste",{text:await readClipboard()});else if(terminal)terminal.send(terminal.buffer.paste(await readClipboard()));else await composerPaste.get(activeComposerKey())?.();return; }
       case "SearchForward": case "SearchBackward": {
         const kind = action === "SearchBackward" ? "?" : "/";
         if (editor) openEditorPrompt(kind);
@@ -526,8 +555,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     }
   };
   const handleCustomKey = (event: KeyEvent) => {
-    if (clipboardReplay && event.key?.toLowerCase() === clipboardReplay) { clipboardReplay = undefined; event.stopPropagation(); return false; }
-    if (chromeFrame() || commands() || palette() || choice() || pendingPermission() || pendingQuestion()) return false;
+    if (imagePreview() || chromeFrame() || commands() || palette() || choice() || pendingPermission() || pendingQuestion()) return false;
     const editor = activeEditor(), terminal = activeTerminal();
     const matches = keyBindings.match(event, terminal?.buffer.bindingState || { vi: !!editor && !!editor.frame.vim && editor.frame.mode !== "Insert" }).filter(binding=>binding.kind!=="action"||binding.action!=="ToggleMinimap");
     if (!matches.length) return false;
@@ -546,14 +574,21 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     return true;
   };
   const handleApplicationKey = (event: KeyEvent) => {
-    if (chromeFrame() || commands() || palette() || choice() || pendingPermission() || pendingQuestion()) return false;
-    const key = event.key?.toLowerCase(), ctrl = event.modifiers?.ctrl || event.modifiers?.cmd, shift = event.modifiers?.shift, alt = event.modifiers?.alt;
+    if (imagePreview() || chromeFrame() || commands() || palette() || choice() || pendingPermission() || pendingQuestion()) return false;
+    const key = event.key?.toLowerCase().replace(/^arrow/,""), ctrl = event.modifiers?.ctrl || event.modifiers?.cmd, shift = event.modifiers?.shift, alt = event.modifiers?.alt;
+    if(alt&&shift&&!event.modifiers?.cmd&&(key==="left"||key==="right")){
+      if(event.modifiers?.ctrl||currentChromeFocus().zone==="workspaces")moveActiveWorkspaceTab(key==="left");
+      else moveActiveBufferTab(key==="left");
+      event.preventDefault();event.stopPropagation();return true;
+    }
+     if(devicePreviewEnabled&&alt&&shift&&!ctrl&&key==="d"){event.preventDefault();event.stopPropagation();toggleDevice();return true;}
     const workspaceIndex=workspaceShortcut(event);
     if(workspaceIndex!==undefined){event.preventDefault();event.stopPropagation();const workspace=windowWorkspaces()[workspaceIndex];if(workspace)void activateWindowWorkspace(workspace).then(()=>focusChrome({zone:"content"})).catch(model.report);return true;}
     if(handleChromeKey(event))return true;
     let action: string | undefined;
     if (alt && !ctrl && !shift && key === "d") {event.preventDefault();event.stopPropagation();chooseStatusDirectory();return true;}
     if (alt && shift && !ctrl && key === "space") action = "ToggleViMode";
+    else if (alt && !ctrl && !shift && key === ",") action = "ConfigEditor";
     else if (alt && !ctrl && !shift && ["p", "a", "s", "g"].includes(key || "")) action = key === "p" ? "OpenCommandPalette" : key === "a" ? "OpenNeoismAgent" : key === "s" ? "SearchFiles" : "SearchGitChanges";
     else if (ctrl && shift && key === "p") action = "OpenCommandPalette";
     else if (ctrl && shift && ["r", "d"].includes(key || "")) action = key === "r" ? "SplitRight" : "SplitDown";
@@ -818,7 +853,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       if(keyEscapeDrag(event))return;
       if(bufferTabShortcut(event)&&handleSurfaceKey(event))return;
       if (event.modifiers?.alt || event.modifiers?.cmd) return;
-      const key = event.keyChar || event.key || "";
+      // macOS supplies a newline keyChar for Enter; named keys must use key.
+      const key = event.key || event.keyChar || "";
       if (!["j", "k", "g", "G", "up", "down", "home", "end", "d", "u", "enter", "right", "left", "h", "l", "escape"].includes(key) && !/^\d$/.test(key)) return;
       if(key==="h"&&event.modifiers?.ctrl)return;
       event.preventDefault(); event.stopPropagation();
@@ -895,6 +931,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const initialDraftKey=model.composerDraftKey(props.sessionId,props.surfaceId),initialDraft=model.state.composerDrafts[initialDraftKey];
     const [draft, setDraft] = createSignal(initialDraft?.text||"");
     const [submitting, setSubmitting] = createSignal(false);
+    const [pasting,setPasting]=createSignal(false);
     const [attachments, setAttachments] = createSignal<Array<Attachment & { token: string; name: string }>>(initialDraft?.attachments||[]);
     const key = () => props.sessionId || props.surfaceId;
     let restoredDraftKey: string | undefined=initialDraftKey;
@@ -964,7 +1001,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const chipParameters=createMemo(()=>({width:frame()?.controls.chips_rect[2]||0,height:frame()?.controls.chips_rect[3]||0,agent:selection().agent||"build",model:selection().model||"Default model",thinking:selection().thinking||"none"}),undefined,{equals:(a,b)=>JSON.stringify(a)===JSON.stringify(b)});
     const chipGeometry=createMemo(()=>native.chips(chipParameters()));
     let input: HostElement | undefined, shell: HostElement | undefined, anchor: Anchor = [0, 0, 0, 0];
-    const focus = () => { if (input && composerInputs.get(key()) === input&&chromeFocus().zone==="content"&&!pendingPermission()&&!pendingQuestion()&&!choice()&&!commands()&&!palette()&&(props.sessionId?active()?.sessionId===props.sessionId:active()?.id===props.surfaceId)){input.root?.mutations.flushMutations();focusNativeElement(renderer,input.id);} };
+    const focus = () => { if (input && composerInputs.get(key()) === input&&!slashPicker()&&!slashInput()&&chromeFocus().zone==="content"&&!imagePreview()&&!pendingPermission()&&!pendingQuestion()&&!choice()&&!commands()&&!palette()&&(props.sessionId?active()?.sessionId===props.sessionId:active()?.id===props.surfaceId)){input.root?.mutations.flushMutations();focusNativeElement(renderer,input.id);} };
     createEffect(()=>{
       const id=key();if(input)composerInputs.set(id,input);if(shell)composerShells.set(id,shell);
       if(anchor[2]>0)setComposerAnchors(current=>({...current,[id]:anchor}));
@@ -983,7 +1020,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       if (kind !== "thinking") void model.refreshCatalogs(kind === "model" ? {} : {maxAgeMs:30_000});
     };
     const submit = async (delivery: "steer" | "queue" = "steer") => {
-      if ((!draft().trim() && !attachments().length) || !draft().startsWith("/") && state().connection.phase !== "connected" || submitting()) return;
+      if ((!draft().trim() && !attachments().length) || !draft().startsWith("/") && state().connection.phase !== "connected" || submitting() || pasting()) return;
       const submitted = draft(), submittedAttachments = attachments(), files = submittedAttachments.map(({ token, name, ...attachment }) => attachment);
       const prompt=!submitted.trimStart().startsWith("/");
       setSubmitting(true);
@@ -1014,6 +1051,25 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         focus();
       } catch (error) { model.report(error); }
     };
+    const paste = async (replayText=true) => {
+      if(pasting()||disposed)return;
+      setPasting(true);const draftKey=restoredDraftKey;
+      try {
+        const bytes=await readClipboardImage(d.maxAttachmentBytes);
+        if(disposed||draftKey!==restoredDraftKey||composerInputs.get(activeComposerKey())!==input)return;
+        if(bytes){
+          const name=`clipboard-image-${attachments().length+1}.png`;
+          const {token}=coreCall<{token:string}>("attachment.token",{filename:name,mime:"image/png",index:attachments().length+1,input:draft(),tokens:attachments().map(a=>a.token)});
+          setAttachments(current=>[...current,{name,token,kind:"image/png",path:name,bytes:Array.from(bytes)}]);
+          setDraft(current=>[current.trimEnd(),token].filter(Boolean).join(" ")+" ");
+          focus();
+        }else if(replayText&&input&&"simulateKeystrokes" in renderer&&typeof renderer.simulateKeystrokes==="function"){
+          focus();
+          renderer.simulateKeystrokes(process.platform==="darwin"?"cmd-v":"ctrl-v");
+        }
+      }catch(error){model.report(error);}finally{setPasting(false);}
+    };
+    createEffect(()=>{const id=key();composerPaste.set(id,paste);onCleanup(()=>{if(composerPaste.get(id)===paste)composerPaste.delete(id);});});
     const attach = async () => { try { const paths = await renderer.promptForPaths?.({ files: true, directories: false, multiple: true }); if (paths) await attachPaths(paths); } catch (error) { model.report(error); } };
     const removeAttachment = (token: string) => { setAttachments((current) => current.filter((a) => a.token !== token)); setDraft((current) => current.replace(token, "")); };
     const acceptSlash=(value:string)=>{setSlashDismissed(true);setDraft(value);void submit();};
@@ -1027,10 +1083,26 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
           onLayout={event=>{anchor=[event.x||0,event.y||0,event.width||0,event.height||0];setComposerAnchors(current=>current[key()]?.every((n,i)=>n===anchor[i])?current:{...current,[key()]:anchor});}}
           testId="agent-input-card" style={{...absolute(frame()?.cardRect),backgroundColor:frame()?.cardColor?rgba(frame()!.cardColor):c.bg,borderColor:c.border+"bf",borderWidth:Math.max(1,d.frameStroke*.5*s),borderRadius:frame()?.cardRadius}}>
           <Show when={config.agentStars!==false}><AgentStars config={config} composerId={native.id} width={frame()?.cardRect[2]||0} height={frame()?.cardRect[3]||0} radius={frame()?.cardRadius||0}/></Show>
-          <Show when={attachments().length}><div style={{...row,position:"absolute",left:18*s,right:18*s,top:(props.home?15:11)*s,height:82*s,gap:6*s,overflow:"hidden"}}><For each={attachments()}>{attachment=><div style={{...row,gap:6*s,padding:5*s,backgroundColor:c.surface,borderRadius:5*s}}><Label size={11}>{attachment.name}</Label><div role="button" aria-label={`Remove ${attachment.name}`} onClick={()=>removeAttachment(attachment.token)}><Label size={11} color={c.muted}>×</Label></div></div>}</For></div></Show>
+          <Show when={attachments().length}><div testId="attachment-strip" style={{...row,position:"absolute",left:18*s,right:18*s,top:(props.home?15:11)*s,height:82*s,gap:6*s,overflowX:"scroll"}}><For each={attachments()}>{attachment=>{
+            const image=attachment.kind.startsWith("image/")?{name:attachment.name,bytes:Uint8Array.from(attachment.bytes||[])}:undefined;
+            return <div style={{...row,gap:6*s,padding:5*s,backgroundColor:c.surface,borderRadius:5*s,flexShrink:0}}>
+              <Show when={image} fallback={<Label size={11}>{attachment.name}</Label>}>{image=><div role="button" testId={`attachment-preview:${attachment.token}`} aria-label={`Preview ${attachment.name}`} data-preserve-keyboard-focus={true} onClick={()=>setImagePreview(image())} style={{width:64*s,height:64*s,cursor:"pointer"}}><AttachmentImage image={image()} style={{width:64*s,height:64*s}}/></div>}</Show>
+              <div role="button" aria-label={`Remove ${attachment.name}`} data-preserve-keyboard-focus={true} onClick={()=>removeAttachment(attachment.token)} style={{cursor:"pointer"}}><Label size={11} color={c.muted}>×</Label></div>
+            </div>;
+          }}</For></div></Show>
           <textarea ref={element=>{input=element;composerInputs.set(key(),element);}} testId="composer" aria-label="Message" value={draft()} placeholder="Ask anything" minRows={1} maxRows={5} theme={{...nativeTheme,caret:"#00000000"}}
             onChange={event=>{setDraft(event.value||"");setSlashDismissed(false);}} onSubmit={()=>{if(slashOpen()&&!slashOptions().some(row=>row.value===draft())&&slashOptions().some(row=>row.value.startsWith(draft()))){slashAccept?.();return;}void submit();}}
             onKeyDown={event=>{
+              if(event.key?.toLowerCase()==="v"&&(event.modifiers?.ctrl||event.modifiers?.cmd)&&!event.modifiers?.alt){
+                // Native text paste runs as an input action; only image paste reaches this handler.
+                event.preventDefault();event.stopPropagation();void paste(false);return;
+              }
+              if(event.key?.toLowerCase()==="c"&&event.modifiers?.ctrl&&!event.modifiers.cmd&&!event.modifiers.alt&&!event.modifiers.shift){
+                event.preventDefault();event.stopPropagation();
+                if(draft()||attachments().length){setDraft("");setAttachments([]);setSlashDismissed(false);}
+                else if(localBusy()&&props.sessionId)model.cancelPrompt(props.sessionId);
+                return;
+              }
               if(handleSurfaceKey(event))return;
               if(slashOpen()&&slashKey?.(event))return;
               if(event.key==="tab"&&!event.modifiers?.ctrl&&!event.modifiers?.alt){event.preventDefault();model.setSelection("agent",selection().agent==="plan"?"build":"plan",props.sessionId);}
@@ -1098,8 +1170,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     return <div testId="agent-pane" data-home={home()} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",minWidth:0,minHeight:0,overflow:"hidden"}}
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
-      <Show when={!home()&&timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><Show when={timelineSession()} keyed>{(sessionId)=><AgentTimelineView sessionId={sessionId} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:sessionId} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
-        preserveSidebarFocus={chromeFocus().zone==="sidebar"} onFocus={()=>{++contentFocusSerial;contentFocusFrames.cancel();pendingContentFocus=false;noteContentFocus();setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}
+      <Show when={!home()&&timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><Show when={timelineSession()} keyed>{(sessionId)=><AgentTimelineView onPreview={setImagePreview} sessionId={sessionId} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:sessionId} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
+        onFocus={()=>{++contentFocusSerial;contentFocusFrames.cancel();pendingContentFocus=false;noteContentFocus();setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}
         contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]??viewport().height)}
         openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/>}</Show></div></Show>
       <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={setFrame} onPromptStart={()=>setStartedPrompt(true)} onPromptFailed={()=>setStartedPrompt(false)}/></Show>
@@ -1174,7 +1246,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     { label: "New terminal", type: "Command", action: () => void model.newTerminal() },
     { label: "New conversation", type: "Command", action: model.openAgentHome },
   ].filter((entry) => entry.label.toLowerCase().includes(query().toLowerCase())).slice(0, 30);
-  return <div data-font-size={config.fontSize} testId="app-content" onKeyDown={keyDown} onMouseDown={event=>{const host=sidebarHosts.get(sidebar()||""),bounds=host&&chromeBounds.get(host.id);if(bounds&&event.x!==undefined&&event.y!==undefined&&event.x>=bounds.x&&event.x<bounds.x+bounds.width&&event.y>=bounds.y&&event.y<bounds.y+bounds.height)return;const git=gitViewport();if(gitVisible()&&event.x!==undefined&&event.y!==undefined&&event.x>=git.x+git.width-(gitFrame()?.width||0)&&event.x<git.x+git.width&&event.y>=git.y&&event.y<git.y+git.height)return;setChromeFocus({zone:"content"});setChromeTarget(undefined);}} style={{ ...column, width: "100%", height: "100%", backgroundColor: config.background?"transparent":c.bg, position: "relative", overflow: "hidden" }}>
+   return <div data-font-size={config.fontSize} testId="app-content" onKeyDown={keyDown} onMouseDown={event=>{const host=sidebarHosts.get(sidebar()||""),bounds=host&&chromeBounds.get(host.id);if(bounds&&event.x!==undefined&&event.y!==undefined&&event.x>=bounds.x&&event.x<bounds.x+bounds.width&&event.y>=bounds.y&&event.y<bounds.y+bounds.height)return;const device=deviceVisible()&&deviceHost&&paintedChromeBounds(renderer,deviceHost.id);if(device&&event.x!==undefined&&event.y!==undefined&&event.x>=device.x&&event.x<device.x+device.width&&event.y>=device.y&&event.y<device.y+device.height)return;const git=gitViewport();if(gitVisible()&&event.x!==undefined&&event.y!==undefined&&event.x>=git.x+git.width-(gitFrame()?.width||0)&&event.x<git.x+git.width&&event.y>=git.y&&event.y<git.y+git.height)return;setChromeFocus({zone:"content"});setChromeTarget(undefined);}} style={{ ...column, width: "100%", height: "100%", backgroundColor: config.background?"transparent":c.bg, position: "relative", overflow: "hidden" }}>
     <TopBar config={config} peers={presencePeers()} sidebar={sidebar()} details={details()} agent={active()?.kind === "agent"} search={palette() && paletteMode() === "find"}
       connection={state().connection.phase} menuOpen={menu()} onMenuChange={setMenu} report={model.report}
       onAction={(action) => ["TogglePanel", "ToggleConversations", "ToggleAgentSidePanel", "OpenNotes", "OpenAgent", "OpenSearch"].includes(action) ? onChromeAction(action) : chromeActions.open(action)} />
@@ -1188,7 +1260,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         </Switch>
       </div></Show>
       <div testId="workspace-content" onLayout={event=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0};setWorkspaceBounds(before=>before.x===next.x&&before.y===next.y&&before.width===next.width&&before.height===next.height?before:next);}} style={{ ...column, flexGrow: 1, minWidth: 0, position: "relative", overflow: "hidden" }}>
-        <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWindowWorkspaceId()} workspaceContext={props.workspaceNavigation?.context} connectedHostId={state().connection.connectedHostId} directoryRoots={state().ui.terminalWorkspaceRoots}
+         <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWindowWorkspaceId()} workspaceContext={props.workspaceNavigation?.context} connectedHostId={state().connection.connectedHostId} directoryRoots={state().ui.terminalWorkspaceRoots}
+           accessoryWidth={devicePreviewEnabled?36*s:0} accessory={devicePreviewEnabled?<DevicePreviewButton config={config} selected={deviceVisible()} onClick={toggleDevice}/>:undefined}
           keyboardIndex={chromeFocus().zone==="workspaces"?(chromeFocus() as {index:number}).index:undefined}
           onActivate={workspace=>void activateWindowWorkspace(workspace).catch(model.report)} onNew={()=>void newWindowWorkspace().catch(model.report)} onClose={workspaceId=>void closeWindowWorkspace(false,workspaceId).catch(model.report)} onReorder={reorderWindowWorkspace}
           registerHost={(id,host)=>{if(host)workspaceHosts.set(id,host);else workspaceHosts.delete(id);}}
@@ -1241,7 +1314,9 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
               </Switch>;
               }}</Show>;
             }} />}</Show>
-          <Show when={showDetails()&&!gitVisible()}><DetailRail /></Show>
+           <Show when={showDetails()&&!gitVisible()&&!deviceVisible()}><DetailRail /></Show>
+           <DevicePreviewSlot config={config} visible={deviceVisible()} workspaceId={activeWorkspaceId()} width={deviceWidth()} active={chromeFocus().zone==="device"} focusToken={deviceFocusToken()}
+             onHost={host=>deviceHost=host} onFocus={()=>{setChromeFocus({zone:"device"});setChromeTarget(undefined);}} onClose={closeDevice} onCustomKey={handleApplicationKey}/>
           <Show when={gitVisible()&&gitController()} keyed>{controller=><div testId="git-panel-slot" style={{...column,flexShrink:0,minWidth:0,minHeight:0}}>
             <GitDiffPanelView controller={controller} config={config} viewport={gitViewport()} active={gitFocused()} focusToken={gitFocusToken()}
               onHost={host=>{gitHost=host;}} onFocus={()=>setGitFocused(true)} onClose={()=>{setGitFocused(false);setChromeTarget(undefined);focusChrome({zone:"content"});}}
@@ -1276,6 +1351,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     <Show when={!pendingPermission() && pendingQuestion() && measuredComposerAnchor(activeComposerKey()) ? `${pendingQuestion()!.sessionId}:${pendingQuestion()!.requestId}` : undefined} keyed>{(_id) => <InlinePicker config={config} kind="question" anchor={composerAnchor()}
       question={pendingQuestion()!.request} responding={pendingQuestion()!.responding} error={pendingQuestion()!.error}
       onAnswers={(answers) => model.answerQuestion(pendingQuestion()!, answers)} onClose={() => model.rejectQuestion(pendingQuestion()!)} />}</Show>
+    <Show when={imagePreview()} keyed>{image=><ImagePreviewModal image={image} config={config} onClose={()=>setImagePreview(undefined)}/>}</Show>
     <ChromeFocusCursor config={config} target={chromeTarget()} onSettled={target=>{if(chromeTarget()===target){setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}}/>
     <Show when={projectPicker()} keyed>{(picker) => <ConversationNavigatorView config={config} rows={picker.rows} anchor={picker.anchor} onDone={activateProject} />}</Show>
     <Show when={directoryBrowser()} keyed>{(request) => <DirectoryBrowserView config={config} start={request.start || state().activeWorkspace?.root_dir || ""} root={state().activeWorkspace?.root_dir || ""}

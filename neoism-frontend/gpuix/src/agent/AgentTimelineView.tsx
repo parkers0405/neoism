@@ -1,3 +1,4 @@
+import type {ImagePreview} from "../ui/AttachmentImage";
 import { batch, createEffect, createSignal, For, onCleanup, onMount, untrack } from "solid-js";
 import { useGpuixRequired, type HostElement, type KeyEvent } from "@gpuix/solid";
 import type { AppConfig } from "../config";
@@ -6,7 +7,7 @@ import { coreCall } from "../native-core";
 import { writeClipboard } from "../clipboard";
 import { PaintLayer, type PaintCommand, type PreparedCanvas } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
-import { focusNativeElement,invalidateNativeFocus } from "../native-focus";
+import { invalidateNativeFocus } from "../native-focus";
 import {profileStart,profileEnd} from "../profiling";
 import type {AgentFamilyRow} from "./family";
 import { wheelCellPixels } from "../ui/wheel";
@@ -16,7 +17,7 @@ import {paintedChromeBounds} from "../ui/chrome-target-bounds";
 import {openExternalUrl} from "../menu-actions/web-frontend";
 import {timelineReceivesEvent} from "./timeline-event-routing";
 
-interface TimelineFrame { canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; reason?:string; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
+interface TimelineFrame { preview?:{name:string;url:string}; canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; reason?:string; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
 interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
 
 /** One original agent timeline engine per conversation (the shared Rust
@@ -58,7 +59,7 @@ export function scrollAgentHalfPage(model:WorkspaceModel,sessionId:string,config
 
 export function AgentTimelineView(props: { sessionId: string; model: WorkspaceModel; config: AppConfig; report: (error: unknown) => void; openFile: (path: string) => void;
   /** Composer top: scroll metrics and sticky controls stop here; body paint continues behind the floating card. */
-  provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void;onFocus?:()=>void;preserveSidebarFocus?:boolean }) {
+  onPreview?:(image:ImagePreview)=>void;provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void;onFocus?:()=>void }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
   const provisional=!!props.provisional;
   const localName=localPresenceIdentity(config).displayName;
@@ -73,6 +74,10 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     if(next.animating)profileEnd(`agent.animation.${next.reason||"scroll"}`,profileStart());
     batch(() => {setCommands(next.commands);setCanvas(next.canvas);setPointer(!!next.pointer);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
     if(!provisional)for(const message of next.send||[])props.model.sendAgent(message as never);
+    if(next.preview){
+      const match=/^data:image\/[^;,]+;base64,(.*)$/s.exec(next.preview.url);
+      if(match)props.onPreview?.({name:next.preview.name,bytes:Buffer.from(match[1],"base64")});
+    }
     if(next.navigate)props.onNavigate?.(next.navigate);
     if (next.copy) void writeClipboard(next.copy).catch(props.report);
     if (next.link) {
@@ -130,7 +135,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     else if (key === "home" || key === "end") { handled(); scroll(key === "home" ? 1e7 : -1e7); }
     else if (config.vim && !modified && ["j", "k"].includes(key)) { handled(); scroll((key === "k" ? 1 : -1) * 19 * s); }
   };
-  return <div ref={host} testId="conversation" data-preserve-keyboard-focus={!!props.preserveSidebarFocus} tabIndex={0} aria-label="Conversation history" onKeyDown={keyDown}
+  return <div ref={host} testId="conversation" data-preserve-keyboard-focus={true} tabIndex={0} aria-label="Conversation history" onKeyDown={keyDown}
     onFocus={()=>{invalidateNativeFocus(renderer);props.onFocus?.();}}
     onBlur={()=>invalidateNativeFocus(renderer)}
     onLayout={(event) => {
@@ -142,7 +147,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
       try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: event.deltaY || 0, precise: !!event.precise, ...(typeof event.x==="number"&&typeof event.y==="number"?local(event):{}), shift:!!event.modifiers?.shift, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
       schedule();
     }}
-    onMouseDown={(event) => { const point=local(event);if (host&&!props.preserveSidebarFocus) focusNativeElement(renderer, host.id); if (event.button === 0) call("pointer", { kind: "down", ...point }); }}
+    onMouseDown={(event) => { const point=local(event);if (event.button === 0) call("pointer", { kind: "down", ...point }); }}
     onMouseMove={(event) => {pointerPending=local(event);schedule();}}
     onMouseUp={(event) => call("pointer", { kind: "up", ...local(event) })}
     onMouseLeave={() => call("pointer", { kind: "leave" })}

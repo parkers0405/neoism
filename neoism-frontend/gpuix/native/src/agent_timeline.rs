@@ -140,6 +140,7 @@ fn render_frame(view: &mut View) -> Value {
     render_timeline_scrollbar_with(painter, &mut view.pane, &theme, s, rail.as_ref());
     let pointer = view.mouse.is_some_and(|(x, y)| {
         view.pane.conversation_navigation_at(x, y).is_some()
+            || view.pane.composer_interactions.image_at(x, y).is_some()
             || view.pane.link_at(x, y).is_some()
             || view.pane.tool_hit(x, y)
             || view.pane.activity_status_contains(x, y)
@@ -207,6 +208,7 @@ fn pointer(view: &mut View, v: &Value) -> Value {
     let (x, y) = (number(v, "x", 0.0), number(v, "y", 0.0));
     view.mouse = Some((x, y));
     let pane = &mut view.pane;
+    let mut preview = None;
     let mut copy = None;
     let mut link = None;
     match text(v, "kind") {
@@ -225,6 +227,8 @@ fn pointer(view: &mut View, v: &Value) -> Value {
                 view.scrollbar_drag = true;
             } else if pane.begin_markdown_horizontal_scrollbar_drag(x, y) {
                 view.horizontal_drag = true;
+            } else if let Some(image) = pane.composer_interactions.image_at(x, y) {
+                preview = Some(json!({"name":image.filename,"url":image.url.as_str()}));
             } else if let Some(target) = pane.link_at(x, y) {
                 if let Some(key) = mermaid_toggle_key_from_link_target(&target) {
                     pane.toggle_mermaid_raw_mode(key);
@@ -266,7 +270,7 @@ fn pointer(view: &mut View, v: &Value) -> Value {
         "leave" => view.mouse = None,
         _ => {}
     }
-    json!({"copy": copy, "link": link})
+    json!({"copy": copy, "link": link,"preview":preview})
 }
 
 pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
@@ -453,6 +457,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                     return Ok(result);
                 }
                 let mut out = frame(view);
+                out["preview"] = result["preview"].clone();
                 out["copy"] = result["copy"].clone();
                 out["link"] = result["link"].clone();
                 out["navigate"] = result["navigate"].clone();

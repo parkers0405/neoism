@@ -1,5 +1,5 @@
 import type {WorkspaceContext} from "../workspaces/window-sessions";
-import {createEffect,createMemo,createSignal,For,onCleanup,Show,untrack} from "solid-js";
+import {createEffect,createMemo,createSignal,For,onCleanup,Show,untrack,type JSX} from "solid-js";
 import {motion,useGpuixRequired,createWindowSize,type EventPayload,type HostElement} from "@gpuix/solid";
 import type {AppConfig} from "../config";
 import type {Workspace} from "../daemon/protocol";
@@ -19,7 +19,8 @@ export function WorkspaceTabs(props:{
  onReorder?:(dragId:string,targetId:string,position:"before"|"after")=>void;
  registerHost:(id:string,host:HostElement|undefined)=>void;
  registerNewHost:(host:HostElement|undefined)=>void;
- onBounds:(host:HostElement,bounds:ChromeBounds)=>void;onScroll:()=>void;
+  onBounds:(host:HostElement,bounds:ChromeBounds)=>void;onScroll:()=>void;
+  accessory?:JSX.Element;accessoryWidth?:number;
 }){
  const context=(id:string)=>props.workspaceContext?.(id)||{config:props.config,connectedHostId:props.connectedHostId,directoryRoots:props.directoryRoots};
  const c=props.config.theme,s=props.config.scale,spec=tabChrome(s),chrome=spec.workspace;
@@ -115,14 +116,15 @@ export function WorkspaceTabs(props:{
   </div>;
  }
  return <div role="tablist" aria-label="Workspaces" testId="workspace-tabs" onLayout={props.onScroll} onMouseMove={move} onMouseUp={finish} style={{height:chrome.height,flexShrink:0,position:"relative",minWidth:0,backgroundColor:c.surface,overflow:"hidden",borderBottomWidth:1,borderColor:c.border}}>
-  <div ref={host=>scrollHost=host} testId="workspace-tab-scroll" onLayout={event=>{setViewportWidth(event.width||0);stripWidth=event.width||0;stripOriginX=event.x||0;stripOriginY=event.y||0;}} onScroll={event=>{consumeTabScroll(event);const next=verticalTabScroll(event,scrollX,stripWidth,[...widths.values()].reduce((sum,width)=>sum+width,0)+spec.buffer.newWidth);if(next!==undefined&&next!==scrollX&&scrollHost){consumeTabScroll(event,true);scrollX=next;renderer.scrollTo?.(scrollHost.id,next,0);props.onScroll();}}} onScrollChange={event=>{scrollX=event.scrollX??scrollX;props.onScroll();if(drag()){slide.move(contentPoint(pointer.x));reorderInStrip();}}} style={{...row,position:"absolute",left:0,right:0,top:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
+   <div ref={host=>scrollHost=host} testId="workspace-tab-scroll" onLayout={event=>{setViewportWidth(event.width||0);stripWidth=event.width||0;stripOriginX=event.x||0;stripOriginY=event.y||0;}} onScroll={event=>{consumeTabScroll(event);const next=verticalTabScroll(event,scrollX,stripWidth,[...widths.values()].reduce((sum,width)=>sum+width,0)+spec.buffer.newWidth);if(next!==undefined&&next!==scrollX&&scrollHost){consumeTabScroll(event,true);scrollX=next;renderer.scrollTo?.(scrollHost.id,next,0);props.onScroll();}}} onScrollChange={event=>{scrollX=event.scrollX??scrollX;props.onScroll();if(drag()){slide.move(contentPoint(pointer.x));reorderInStrip();}}} style={{...row,position:"absolute",left:0,right:props.accessoryWidth||0,top:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
    <For each={props.workspaces.map(w=>w.id)}>{(id,index)=><Tab id={id} index={index()}/>}</For>
    <div ref={host=>{newHost=host;props.registerNewHost(host);}} tabIndex={0} role="button" testId="workspace-new" aria-label="New workspace" data-keyboard-focused={props.keyboardIndex===props.workspaces.length}
     onMouseDown={()=>{armed=undefined;closeGesture=false;suppressActivation=false;}} onClick={()=>{if(!closeGesture&&!suppressActivation)props.onNew();}} onLayout={event=>{if(newHost)props.onBounds(newHost,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});}}
     style={{...row,justifyContent:"center",position:"relative",width:spec.buffer.newWidth,height:chrome.height,flexShrink:0,cursor:"pointer",backgroundColor:props.keyboardIndex===props.workspaces.length?c.accent+"1a":undefined,hover:{backgroundColor:c.accent+"0f"}}}>
     <text style={{...text,fontFamily:props.config.iconFontFamily,fontSize:spec.buffer.iconSize,color:c.muted}}>{spec.buffer.newIcon}</text>
    </div>
-  </div>
+   </div>
+   <Show when={props.accessory}><div style={{position:"absolute",right:0,top:0,bottom:0,width:props.accessoryWidth||0}}>{props.accessory}</div></Show>
   <Show when={drag()}><anchored fill="window" deferred={true} priority={4} occlude={true} style={{backgroundColor:"transparent"}}>
    <div testId="workspace-drag-layer" onMouseMove={move} onMouseUp={finish} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"auto",cursor:"grabbing"}}/>
     <div testId="workspace-drag-preview" aria-hidden={true} style={{...row,position:"absolute",left:(slideRevision(),pointer.x-grab),top:(slideRevision(),pointer.y-chrome.height/2),width:widths.get(drag()!)||0,height:chrome.height,paddingLeft:chrome.tabPaddingX,paddingRight:9*s+spec.buffer.closeHitSize/2+spec.buffer.padding,gap:9*s,overflow:"hidden",backgroundColor:c.bg,borderTopLeftRadius:3*s,borderTopRightRadius:3*s,pointerEvents:"none"}}>

@@ -8,7 +8,7 @@ import {WorkspaceModel} from "../../src/model";
 import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
 import {usePresentationScheduler} from "../../src/animation/frame-scheduler";
-const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/sidebar-focus"],{}),endpoint:daemon.endpoint,reducedMotion:true,cursorBlink:false};
+const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/sidebar-focus"],{}),endpoint:daemon.endpoint,reducedMotion:true,cursorBlink:false,agentStars:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
 const callbacks=new Set<()=>void>(),restore=usePresentationScheduler(callback=>{callbacks.add(callback);return()=>callbacks.delete(callback);});
 const pulse=async()=>{const list=[...callbacks];callbacks.clear();for(const frame of list)frame();await host.pump(root);await Bun.sleep(5);};
@@ -36,6 +36,11 @@ try {
  await key("down");assert.equal(host.focused,tree);
  // Explicit keyboard movement still transfers to the composer normally.
  stage="focus composer";await key("right",true);await until(()=>host.focused===host.find("composer")?.id);
- assert.equal(conversation.props["data-preserve-keyboard-focus"],false);
- console.log(JSON.stringify({actualApp:true,sidebarSurvivesTranscriptSelection:true,explicitKeyboardTransfer:true}));
+ assert.equal(conversation.props["data-preserve-keyboard-focus"],true);
+ const composer=host.focused;
+ stage="timeline click preserves composer focus";
+ root.dispatch({elementId:conversation.id,eventType:"mouseDown",button:0,x:400,y:200});
+ root.dispatch({elementId:conversation.id,eventType:"mouseUp",button:0,x:400,y:200});
+ await pulse();assert.equal(host.focused,composer,"Clicking transcript content must leave the message input ready to type");
+ console.log(JSON.stringify({actualApp:true,sidebarSurvivesTranscriptSelection:true,explicitKeyboardTransfer:true,composerSurvivesTranscriptClick:true}));
 } finally {root.unmount();restore();visuals.dispose();model.dispose();client.stop();daemon.stop();}

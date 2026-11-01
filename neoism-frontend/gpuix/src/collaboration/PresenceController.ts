@@ -49,6 +49,10 @@ export class PresenceController {
  bufferId=(path:string)=>coreCall<{bufferId:string}>("presence.buffer-id",{path}).bufferId;
  row=(bufferId:string,config:AppConfig)=>coreCall<{commands:import("../ui/PaintLayer").PaintCommand[];width:number;height:number}>("presence.row",{id:this.id,bufferId,scale:config.scale,theme:config.themeName,family:config.fontFamily,weight:config.fontWeight});
  peers=()=>this.frame.peers;
+ /** Include this participant in shared chrome, but keep file cursors remote-only. */
+ topBarPeers=():PresenceAvatar[]=>this.enabled&&this.connected&&this.frame.peers.length
+  ? [{peer_id:this.identity.peerId,display_name:this.identity.displayName,client_os:process.platform==="win32"?"windows":process.platform==="darwin"?"macos":process.platform,color:this.color(),rainbow:this.config.cursorColor==="rainbow"},...this.frame.peers]
+  : [];
  filePeers=(bufferId:string)=>this.frame.buffers[bufferId]||[];
  subscribe=(listener:()=>void)=>{this.listeners.add(listener);return()=>{this.listeners.delete(listener);};};
  private apply(frame:Frame){

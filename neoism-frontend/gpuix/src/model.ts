@@ -1248,7 +1248,8 @@ export class WorkspaceModel {
     if (!text.trim() && !attachments.length) return false;
     const selection=options.selection||this.selection(sessionId),request=sdkPrompt(text,attachments,selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
     if(options.messageId)request.messageId=options.messageId;
-    this.showPrompt(sessionId,this.promptMessage(request));
+    // Admission can queue even a steer request while our local busy state is stale.
+    // Only the server message event confirms that an existing-chat prompt belongs in history.
     try {
       const sdk = this.sdkForSession(sessionId);
       await this.selectionTasks.get(sessionId);
@@ -1262,9 +1263,10 @@ export class WorkspaceModel {
     const request=sdkPrompt(text,options.attachments||[],selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
     const message=this.promptMessage(request),sessionId=`pending:${request.messageId}`;
     const home=this.state.surfaces.find(surface=>surface.id===sourceId&&surface.kind==="agent"&&!surface.sessionId);
-    if(home)this.transaction(()=>{this.update({pendingAgentSessions:{...this.state.pendingAgentSessions,[home.id]:sessionId}});this.showPrompt(sessionId,message);});
+    const optimistic=home&&options.delivery!=="queue"?{sessionId,message}:undefined;
+    if(home&&optimistic)this.transaction(()=>{this.update({pendingAgentSessions:{...this.state.pendingAgentSessions,[home.id]:sessionId}});this.showPrompt(sessionId,message);});
     try {
-      const thread=await this.createThread(selection,home?{sessionId,message}:undefined);
+      const thread=await this.createThread(selection,optimistic);
       if(home&&this.optimisticPrompts.get(message.id)===sessionId){this.rollbackPrompt(message.id);}
       return await this.submitPrompt(thread.session_id,text,{...options,messageId:message.id,selection:this.selection(thread.session_id)});
     }catch(error){this.rollbackPrompt(message.id);this.report(error);return false;}
@@ -1542,6 +1544,13 @@ export class WorkspaceModel {
         this.update({threads:this.state.threads.filter(thread=>thread.session_id!==sessionId)});
       } else if (tag === "ThreadUpdated" && sessionId) {
         if (typeof body.title === "string") this.updateAgentTitle(sessionId,body.title);
+      } else if (tag === "SessionEvent" && body.kind === "session.error" && isRecord(body.properties)) {
+        const failure=isRecord(body.properties.error)?body.properties.error:body.properties;
+        const message=typeof failure.message==="string"?failure.message:"Agent session failed";
+        if(!failure.interrupted&&message.toLowerCase()!=="session aborted"){
+          this.report(new Error(message));
+          if(sessionId)this.upsertMessage(sessionId,{id:`error:${Date.now()}:${crypto.randomUUID()}`,role:"system",kind:"System",title:"Agent error",text:message});
+        }
       } else if (tag === "SessionEvent" && body.kind === "session.updated" && isRecord(body.properties) && isRecord(body.properties.info)) {
         const info=body.properties.info,id=typeof info.id==="string"?info.id:sessionId;
         if(id&&typeof info.title==="string")this.updateAgentTitle(id,info.title);

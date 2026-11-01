@@ -638,6 +638,11 @@ impl GitDiffView {
                 "staged":s.change.staged,"rows":s.lines.as_ref().map_or(0,Vec::len)
             })).collect::<Vec<_>>(),
             "headers":self.header_rects.iter().map(|(i,r)|serde_json::json!({"path":self.sections[*i].change.path,"rect":rect(*r)})).collect::<Vec<_>>(),
+            "loadingRects":self.header_rects.iter().filter_map(|(i,r)|{
+                let section=&self.sections[*i];
+                (!section.collapsed&&section.lines.is_none()&&self.error.is_none()&&self.pull_request.is_none())
+                    .then(||[r.x,r.y+r.h,r.w,section.body_height.min(180.0)])
+            }).collect::<Vec<_>>(),
             "toolbar":self.toolbar_hits.iter().map(|hit|serde_json::json!({"id":format!("{:?}",hit.control),"rect":rect(hit.rect),"enabled":hit.enabled})).collect::<Vec<_>>(),
             "fileActions":self.header_actions.iter().map(|(i,restore,r,enabled)|serde_json::json!({"path":self.sections[*i].change.path,"restore":restore,"rect":rect(*r),"enabled":enabled})).collect::<Vec<_>>(),
             "sourceHits":self.source_hits.iter().map(|hit|serde_json::json!({"path":hit.path,"line":hit.line,"rect":rect(hit.rect)})).collect::<Vec<_>>(),
@@ -1681,11 +1686,8 @@ impl GitDiffView {
                     );
                     continue;
                 }
-                let unavailable = if self.pull_request.is_some() {
-                    "No text diff available for this file."
-                } else {
-                    "Loading diff..."
-                };
+                if self.pull_request.is_none() && self.error.is_none() { continue; }
+                let unavailable = "No text diff available for this file.";
                 draw_text_with_occlusion(
                     sugarloaf,
                     viewport.x + 12.0 * scale,

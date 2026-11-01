@@ -276,6 +276,53 @@ lack an implementation are hidden from the palette.
 
 Linux x64 is the validated native target. `parity.json` tracks individual gates.
 
+## Experimental device preview
+
+Device preview is an off-by-default **build feature**, not a setting that loads a browser. Published releases explicitly set `NEOISM_GPUIX_DEVICE_PREVIEW=0`, excluding the unfinished iPhone/iPad preview even if the build environment enables it. Build with `NEOISM_GPUIX_DEVICE_PREVIEW=1 npm run build` to include it. The normal `npm run build` excludes the device panel and transport modules, compiles the display binding without the Rust `device-preview` feature, and uses the original artifact identity. Optional builds use a separate source checkout, Cargo target directory, and verified display stamp; they do not replace the ordinary binding.
+
+In an enabled build, click the phone button at the right of the workspace strip or press **Alt+Shift+D**. The right-hand panel reserves layout space rather than covering the editor. **Alt+Right** enters it from the rightmost content pane; **Alt+Left** returns to content. Its open state is per workspace. The Git panel takes precedence when open. Closing the device panel releases its viewport, network streams, and decoder without powering down a simulator.
+
+The native viewport currently supports Linux's GPUI wgpu backend. The model selector covers T3's full four-device lineup using original Neoism geometry, not copied GLBs, CAD, logos, or textures. Models have distinct bodies and displays, camera hardware, edge details, selectable finishes, and studio-style lighting. They are preview representations, not manufacturer CAD or a claim of pixel-identical lighting.
+
+| Model | Preview hardware |
+| --- | --- |
+| iPhone 18 Pro | Compact Pro body, triple-camera assembly, front glass, buttons and ports |
+| iPhone 18 Pro Max | Larger body/display with its own proportions and camera placement |
+| iPhone Duo | Articulated halves and hinge, inner display, and outer cover screen |
+| iPad Pro 13-inch (M5) | Thin tablet and an optional original keyboard, trackpad, and stand |
+
+The panel follows the supplied screenshot's viewport-first layout: a small model tab, a neutral black (or light-theme neutral) stage, a quiet right-side icon rail, and contextual menus. There is no permanent back-header, status footer, connection form, finish-control row, text-button toolbar, or experimental banner. Click the model title for models/finishes; More contains front/back views, display selection, and connection actions. Device tools opens discovery without reducing preview height. The icon rail provides Home, supported hardware controls, 3D/flat presentation, keyboard attachment where available, and Restore view. UI text uses a sans-serif family instead of the editor font, and the device pane starts at the reference's 540-pixel preferred width when space permits.
+
+Choose a model for an offline preview or let the connected simulator name select its matching profile. The offline preview uses original abstract artwork, not a fabricated OS or a substitute for a failed live stream. Unrecognized devices use a clearly labeled preview override, and manual overrides remain available. The Duo starts in a broad, slightly folded book hold; More can switch between book and portrait holds. The iPad keyboard/stand is landscape. Drag outside the live screen to orbit, Alt-drag to orbit regardless of screen hits, and use the wheel/trackpad to zoom. Consecutive orbit updates preserve the active gesture; changes to physical geometry or input readiness cancel it. Only the focused device screen forwards text, never menus or controls. Connected touches are picked against the native triangles. Flat view contain-fits the raw video.
+
+The output texture is composited directly on GPUI's existing GPU device/queue, without normal-frame GPU-to-CPU readback, Chromium, a second rendering window, or an independent loop. Only video frames and pose changes invalidate the 3D pass. Mesh geometry is reused during orbiting; material and camera changes do not reupload video. Rendering is bounded to a 1536-pixel longest edge to retain HiDPI detail. The optional build also carries a separately pinned Linux window-capture patch for explicit automation screenshots: it re-rasterizes the actual window's last painted client scene using its existing renderer, atlas, and device, then reads it back only on request. Capture does not enable test-support, continuously copy frames, or change the default build. BGRA windows are normalized to RGBA; capture is bounded to 4096 pixels per edge.
+
+Duo hinge controls change the offline model immediately; for a connected device, helper-reported posture remains authoritative. **Inner** and **Cover** select the preview screen and, where supported, request the matching physical orientation from the real helper. Live selection is not an optimistic texture swap: it requires the helper acknowledgement, elected `screenId` (1 = cover, 3 = inner), and fresh video before input resumes. Unsupported helpers disable live display controls. Orbit-driven display following runs when the drag ends and only requests a supported alternate resting face for a partly open hardware pose; failures/timeouts are surfaced rather than pretending a switch succeeded. One elected device stream is active at a time.
+
+Enter an existing trusted **expo-device-hub** URL, click **Connect** to list devices, then explicitly choose **Watch** or **Boot**. Opening the panel or listing devices never starts a decoder, boots a device, downloads helpers, or installs an SDK. An optional `NEOISM_DEVICE_HUB_URL` supplies the initial URL. The URL is not persisted by this panel; use HTTPS for remote connections and treat device streams/input as sensitive. iOS requires a Mac device host with Xcode; Android requires a host with its emulator tooling. The client needs `ffmpeg` on `PATH` (or `NEOISM_DEVICE_FFMPEG` set to an executable path). See [`src/device/HOST.md`](src/device/HOST.md) for the protocol and capability limits.
+
+The initial decoder uses an explicitly launched ffmpeg process and software H.264 decoding, followed by one RGBA upload to the GPU. Decoded output is contain-scaled to a maximum 1280-pixel longest edge, never upscaled, with one filter thread; input coordinates remain normalized to the full device. It keeps only the latest pending decoded frame and stops on backlog/timeouts instead of accumulating input latency. Hardware decoding/zero-copy video import, real-device validation, and integrated-GPU presentation benchmarks remain follow-up work. WebRTC-only hosts and physical-device streams report unsupported errors; there is no screenshot polling or browser fallback.
+
+Hardware actions are capability-gated. iOS screen rotation uses the helper's tagged orientation protocol and waits for confirmed screen metadata; Android user-rotation policy is not presented as a captured-screen rotation API. Appearance uses supported Android helper readback and updates only after confirmation. Save screenshot explicitly requests one PNG from the device helper and writes a uniquely named file under `~/Downloads`; it never screenshots the desktop or becomes a video source. Unsupported REST routes disable the corresponding control without interrupting video. Device screenshots and native-window automation screenshots are separate operations.
+
+```sh
+# Validate the optional native source without building a release addon:
+NEOISM_GPUIX_DEVICE_PREVIEW=1 bun scripts/build-display-binding.ts --check-only
+
+# Build/package the optional feature through the normal production pipeline:
+NEOISM_GPUIX_DEVICE_PREVIEW=1 npm run build
+
+# Return to the ordinary package (the original display artifact stays available):
+npm run build
+
+bun test tests/device-preview-build.test.ts tests/device-display-binding.test.ts tests/device-host.test.ts tests/device-panel.test.ts tests/device-interaction.test.ts
+
+# Actual production panel in a focus-disabled native window; PNGs under artifacts/device-preview:
+NEOISM_GPUIX_DEVICE_PREVIEW=1 bun scripts/capture-device-panel.ts
+```
+
+The transport tests include real H.264/ffmpeg decoding against a local HTTP/WebSocket test hub. The application test opens the actual panel using a recording native boundary, performs discovery and streaming, checks RGBA uploads, continuous orbiting, keyboard isolation, touch forwarding, and cleanup. Native validation separately exercises the 3D renderer. `capture-device-panel.ts` opens the production component in an actual native window and captures the complete client scene, including typography, icon rail, menus, and model, instead of treating a custom-pass render as proof of the panel's appearance. These checks do not substitute for live simulator or integrated-GPU performance validation.
+
 ## Validate and package
 
 ```sh

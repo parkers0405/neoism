@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve, extname } from "node:path";
+import { join, resolve } from "node:path";
 import { parse, type ParseError } from "jsonc-parser";
 import { palettes, type Palette } from "./design/generated";
 import { cursorBlinkInterval, DEFAULT_CURSOR_BLINK_INTERVAL_MS } from "./ui/cursor-blink";
+import { coreCall } from "./native-core";
 
 export interface AppConfig {
   endpoint: string;
@@ -86,12 +87,11 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
   if (!palettes[themeName as keyof typeof palettes]) warnings.push(`Theme '${themeName}' is not bundled; using pastel_dark.`);
   let backgroundPath = typeof image.path === "string" ? resolve(image.path.replace(/^~(?=\/)/, homedir())) : undefined;
   const blur = Math.max(0, number(image.blur, 0));
-  // Reuse a preblurred sibling image when available without modifying
-  // personal background assets.
-  if (backgroundPath && blur > 0) {
-    const cached = backgroundPath.slice(0, -extname(backgroundPath).length) + `-blur-${blur}.png`;
-    if (existsSync(cached)) backgroundPath = cached;
-    else warnings.push("Background blur has no cached image; showing the original image for now.");
+  // The native engine writes a content-versioned PNG to the user cache once.
+  // Every display frame then uses the same image resource as an unblurred wallpaper.
+  if (backgroundPath && blur > 0 && !windowConfig["background-image-disabled"] && number(image.opacity,0.35)>0) {
+    try { backgroundPath = coreCall<{path:string}>("background.prepare",{path:backgroundPath,blur}).path; }
+    catch (error) { warnings.push(`Background blur unavailable: ${String(error)}`); }
   }
   return {
     endpoint, authToken, pairingToken: env.NEOISM_PAIRING_TOKEN,
@@ -99,7 +99,7 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
     fontFamily: string(fonts.family, "Cascadia Code NF"), fontSize,
     markdownFontFamily: string(object(object(raw.look).markdown)["font-family"], string(fonts.family, "Cascadia Code NF")),
     iconFontFamily: Array.isArray(fonts["symbol-map"]) ? string(object(fonts["symbol-map"][0])["font-family"], "Cascadia Code NF") : "Cascadia Code NF",
-    vim: object(raw.editor)["vim-mode"] === true,
+    vim: object(raw.editor)["vim-mode"] !== false,
     statusFps: object(raw.ui)["status-fps"] !== false,
     cursorBlink: object(object(raw.terminal).cursor).blinking !== false,
     cursorBlinkInterval: cursorBlinkInterval(number(object(object(raw.terminal).cursor)["blinking-interval"], DEFAULT_CURSOR_BLINK_INTERVAL_MS)),

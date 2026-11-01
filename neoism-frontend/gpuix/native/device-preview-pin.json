@@ -1,0 +1,19 @@
+{
+  "baseRevision": "a53b294401280014e94eb9bd98a7c7ed1929f92d",
+  "basePatchSha256": "5653270fbd8970785e959a7ff67713bf4350b9786033837ef29e72873417e1cd",
+  "patch": "native/patches/gpuix-device-preview.patch",
+  "patchSha256": "be7a7deaeab19d55e06d9d2a839c8e6d6e2b5d570966891fc647ef2636410b45",
+  "cargoLockSha256": "7bf9299930614da86a47d7cbc1ee71dc76435b934cc3a169a32900cf6f7712de",
+  "patchedFiles": {
+    ".changeset/neoism-device-preview.md": "427a5f741880fc81af8c48725122eba0750e25cc9603ce4ebe6f67534f6a75d9",
+    "README.md": "6f30e851017c4b0910df08138c7592e1e62426f92aa8b1fdabfd8da1c0c58801",
+    "packages/native/Cargo.toml": "5bfbc4ee13e3af60facb76e68e032976684e7dc17e8194851f6fd0b6273437e1",
+    "packages/native/Cargo.lock": "7bf9299930614da86a47d7cbc1ee71dc76435b934cc3a169a32900cf6f7712de",
+    "packages/native/src/custom_elements/mod.rs": "fba8f41d67e245c180c03588297c380c75ea820b190e7b064ada0e6adafc63f9",
+    "packages/native/src/custom_elements/anchored.rs": "e24fd34ef2b3517fd7846904094f0f57643e53b890e566ff0f3832b8d9cffdec",
+    "packages/native/src/custom_elements/device_viewport.rs": "67f6c6a651718ec18e6422d9dcafc6ff62bca2c4d5bddca1c2696898a61a7d22",
+    "packages/native/src/custom_elements/device_viewport_mesh.rs": "b5dbdcded3bade1393cdd75884ca07b849c18a7eeb6978c4abb821aa5c5d7404",
+    "packages/native/src/custom_elements/device_viewport.wgsl": "4e7ffd4ee845af5e6f18253a475a42ec242a7f46e02f31ad2c0081e280a41fe7",
+    "packages/native/src/renderer.rs": "f44da3a4082b0127dddd49290a657403e697b1326ff995356007eb12a906dcf7"
+  }
+}

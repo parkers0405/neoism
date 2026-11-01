@@ -3,8 +3,8 @@ export function localDaemon(endpoint: string) {
   try { const url = new URL(endpoint); return url.protocol === "ws+unix:" || ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname); } catch { return false; }
 }
 export async function openExternalUrl(url: string) {
-  const command = process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["cmd.exe", "/c", "start", "", url] : ["xdg-open", url];
-  const child = Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "pipe" });
+  const command = process.platform === "darwin" ? ["open", url] : process.platform === "win32" ? ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "Start-Process -FilePath $env:NEOISM_BROWSER_URL"] : ["xdg-open", url];
+  const child = Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "pipe", windowsHide: true, env: {...process.env,NEOISM_BROWSER_URL:url} });
   if (await child.exited !== 0) throw new Error((await new Response(child.stderr).text()).trim() || "Could not open the browser");
 }
 /** Open the daemon-served standalone Agent GUI. Workspace rendering is GPUIX. */

@@ -1,0 +1,165 @@
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -50,8 +50,7 @@
+ use anyhow::{Context as _, Result};
+ use async_task::Runnable;
+ use futures::channel::oneshot;
+-#[cfg(any(test, feature = "test-support"))]
+-use image::RgbaImage;
++pub use image::RgbaImage;
+ use image::codecs::gif::GifDecoder;
+ use image::{AnimationDecoder as _, DynamicImage, Frame};
+ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+@@ -1013,7 +1012,6 @@
+     /// Renders the given scene to a texture and returns the pixel data as an RGBA image.
+     /// This does not present the frame to screen - useful for visual testing where we want
+     /// to capture what would be rendered without displaying it or requiring the window to be visible.
+-    #[cfg(any(test, feature = "test-support"))]
+     fn render_to_image(&self, _scene: &Scene) -> Result<RgbaImage> {
+         anyhow::bail!("render_to_image not implemented for this platform")
+     }
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2521,7 +2521,6 @@
+     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
+     /// This does not present the frame to screen - useful for visual testing where we want
+     /// to capture what would be rendered without displaying it or requiring the window to be visible.
+-    #[cfg(any(test, feature = "test-support"))]
+     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
+         self.platform_window
+             .render_to_image(&self.rendered_frame.scene)
+diff --git a/crates/gpui_linux/src/linux/wayland/window.rs b/crates/gpui_linux/src/linux/wayland/window.rs
+--- a/crates/gpui_linux/src/linux/wayland/window.rs
++++ b/crates/gpui_linux/src/linux/wayland/window.rs
+@@ -1919,6 +1919,10 @@
+         self.0.callbacks.borrow_mut().button_layout_changed = Some(callback);
+     }
+ 
++    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<gpui::RgbaImage> {
++        self.borrow_mut().renderer.render_scene_to_pixels(scene)
++    }
++
+     fn draw(&self, scene: &Scene) {
+         let mut state = self.borrow_mut();
+ 
+diff --git a/crates/gpui_linux/src/linux/x11/window.rs b/crates/gpui_linux/src/linux/x11/window.rs
+--- a/crates/gpui_linux/src/linux/x11/window.rs
++++ b/crates/gpui_linux/src/linux/x11/window.rs
+@@ -1714,6 +1714,10 @@
+         self.0.callbacks.borrow_mut().button_layout_changed = Some(callback);
+     }
+ 
++    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<gpui::RgbaImage> {
++        self.0.state.borrow_mut().renderer.render_scene_to_pixels(scene)
++    }
++
+     fn draw(&self, scene: &Scene) {
+         let mut inner = self.0.state.borrow_mut();
+ 
+diff --git a/crates/gpui_wgpu/src/wgpu_renderer.rs b/crates/gpui_wgpu/src/wgpu_renderer.rs
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -1600,6 +1600,38 @@
+         );
+ 
+         self.update_drawable_size(size);
++        self.read_scene_to_pixels(scene, width, height, pixels)
++    }
++
++    /// Captures a complete scene with this renderer's device, atlas and current viewport.
++    /// Allocates readback resources only on request; never acquires or presents a drawable.
++    pub fn render_scene_to_pixels(&mut self, scene: &Scene) -> Result<gpui::RgbaImage> {
++        let width = self.surface_config.width;
++        let height = self.surface_config.height;
++        anyhow::ensure!(
++            width > 0 && height > 0 && width <= 4096 && height <= 4096,
++            "capture dimensions must be within 1..=4096, got {width}x{height}"
++        );
++        let mut pixels = vec![0; width as usize * height as usize * 4];
++        self.read_scene_to_pixels(scene, width, height, &mut pixels)?;
++        gpui::RgbaImage::from_raw(width, height, pixels).context("invalid capture dimensions")
++    }
++
++    fn read_scene_to_pixels(
++        &mut self,
++        scene: &Scene,
++        width: u32,
++        height: u32,
++        pixels: &mut [u8],
++    ) -> Result<()> {
++        anyhow::ensure!(!self.device_lost(), "the GPU device was lost");
++        let format = self.surface_config.format;
++        anyhow::ensure!(
++            matches!(format, wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb
++                | wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb),
++            "unsupported capture format: {format:?}"
++        );
++        let unpadded_bytes_per_row = width * 4;
+         self.atlas.before_frame();
+         self.ensure_intermediate_textures();
+         self.ensure_readback(width, height);
+@@ -1668,6 +1700,11 @@
+                 .zip(pixels.chunks_exact_mut(unpadded))
+             {
+                 target.copy_from_slice(&source[..unpadded]);
++                if matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
++                    for pixel in target.chunks_exact_mut(4) {
++                        pixel.swap(0, 2);
++                    }
++                }
+             }
+         }
+         readback.buffer.unmap();
+@@ -2575,6 +2612,50 @@
+     use super::*;
+     use gpui::{MonochromeSprite, PolychromeSprite, Quad, Shadow, SubpixelSprite, Underline};
+ 
++    #[test]
++    fn scene_capture_preserves_rgba_colors_and_padded_rows() -> Result<()> {
++        let context = WgpuContext::new_offscreen()?;
++        for format in [wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Bgra8Unorm] {
++            let size = gpui::size(DevicePixels(65), DevicePixels(3));
++            let mut renderer = WgpuRenderer::new_offscreen(&context, size)?;
++            renderer.surface_config.format = format;
++            let resources = renderer.resources();
++            let pipelines = WgpuRenderer::create_pipelines(
++                &resources.device,
++                &renderer.adapter_info,
++                &resources.bind_group_layouts,
++                format,
++                renderer.surface_config.alpha_mode,
++                renderer.rendering_params.path_sample_count,
++                renderer.dual_source_blending,
++                renderer.uses_webgl_instance_data,
++            );
++            renderer.resources_mut().pipelines = pipelines;
++            let bounds = gpui::Bounds {
++                origin: gpui::point(gpui::ScaledPixels(0.), gpui::ScaledPixels(0.)),
++                size: gpui::size(gpui::ScaledPixels(65.), gpui::ScaledPixels(3.)),
++            };
++            let mut scene = Scene::default();
++            scene.insert_primitive(Quad {
++                bounds,
++                content_mask: gpui::ContentMask { bounds },
++                background: gpui::rgb(0xff0000).into(),
++                ..Default::default()
++            });
++            scene.finish();
++            assert!(renderer.resources().readback.is_none());
++            for _ in 0..2 {
++                let image = renderer.render_scene_to_pixels(&scene)?;
++                assert_eq!(image.dimensions(), (65, 3));
++                for pixel in image.pixels() {
++                    assert_eq!(pixel.0, [255, 0, 0, 255], "{format:?}");
++                }
++                assert_eq!(renderer.viewport_size(), size);
++            }
++        }
++        Ok(())
++    }
++
+     #[test]
+     fn webgl_shader_is_valid_wgsl_without_storage_buffers() {
+         assert!(!WEBGL_SHADERS.contains("var<storage"));

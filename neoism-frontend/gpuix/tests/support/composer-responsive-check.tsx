@@ -7,7 +7,7 @@ import{DaemonConnection}from"../../src/daemon/client";
 import{WorkspaceModel}from"../../src/model";
 import{createAgentDaemon}from"./agent-daemon";
 import{createRecordingAppRenderer,type RecordedAppNode}from"./full-app-recording-renderer";
-const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/composer-responsive-app"],{}),endpoint:daemon.endpoint,scale:1.67,reducedMotion:true,cursorBlink:false};
+const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/composer-responsive-app"],{}),endpoint:daemon.endpoint,scale:1.67,reducedMotion:true,cursorBlink:false,agentStars:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
 let stage="startup";
 const until=async(check:()=>boolean)=>{const end=Date.now()+4000;while(!check()){await host.pump(root);if(Date.now()>end)throw new Error("Responsive composer App did not settle: "+stage);await Bun.sleep(3);}await host.pump(root);};
@@ -75,6 +75,21 @@ try{
   assert.equal(host.find(`agent-picker:${kind}`)!.props["aria-label"],title);assert.deepEqual(rows(),clicked,"Slash and clicked chips must expose identical current/recent/catalog rows");
   await closePicker(kind);assert.equal(host.find("composer")!.id,originalInput);
  }
+ stage="Ctrl+C clears the composer draft";
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"clear this draft"});await host.pump(root);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"c",modifiers:{ctrl:true,alt:false,cmd:false,shift:false}});await host.pump(root);
+ assert.equal(host.find("composer")!.props.value,"");
+ assert.equal(daemon.requests.filter(request=>request.tag==="CancelInflight").length,0);
+ stage="Ctrl+C clears first, then interrupts an active session";
+ model.openThread(daemon.threads[0]);await until(()=>!!host.find("composer"));
+ model.update({streaming:{...model.state.streaming,one:"Working"}});await host.pump(root);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"keep the run"});await host.pump(root);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"c",modifiers:{ctrl:true,alt:false,cmd:false,shift:false}});await host.pump(root);
+ assert.equal(host.find("composer")!.props.value,"");
+ assert.equal(daemon.requests.filter(request=>request.tag==="CancelInflight").length,0);
+ root.dispatch({elementId:host.find("composer")!.id,eventType:"keyDown",key:"c",modifiers:{ctrl:true,alt:false,cmd:false,shift:false}});
+ await until(()=>daemon.requests.some(request=>request.tag==="CancelInflight"));
+ assert.equal(daemon.requests.filter(request=>request.tag==="CancelInflight").length,1);
  assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.filter(request=>request.tag==="SubmitPrompt").length,0);
  console.log(JSON.stringify({actualApp:true,noWindow:true,narrowMeasuredControls:true,nonOverlappingChips:true,boundedInk:true,draftAndInputRetained:true,reasoningPickerWorks:true,slashAndChipPickersIdentical:true,noBackendSideEffects:true}));
 }finally{root.unmount();visuals.dispose();model.dispose();client.stop();daemon.stop();}

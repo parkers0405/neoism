@@ -26,6 +26,11 @@ pub(crate) fn launch_persistent_host(
     // Anonymous file avoids pipe deadlock and keeps daemon logs available even
     // after the GUI exits. Read only a bounded tail on startup failure.
     let mut diagnostics = tempfile::tempfile()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
     command.env(HOSTED_READINESS_NONCE_ENV, &nonce)
         .stdin(Stdio::null()).stdout(Stdio::piped())
         .stderr(Stdio::from(diagnostics.try_clone()?));

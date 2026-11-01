@@ -5,6 +5,7 @@ import {createHash} from "node:crypto";
 import {resolve,basename,join} from "node:path";
 import {displayBindingLoader,verifiedDisplayBinding} from "../src/display-binding";
 import {createRequire} from "node:module";
+import {devicePreviewPlugin} from "./device-preview-build";
 createRequire(import.meta.url)("./patch-solid-host.cjs")();
 const display=Bun.spawn([process.execPath,"scripts/build-display-binding.ts"],{stdout:"inherit",stderr:"inherit"});
 if(await display.exited!==0)process.exit(1);
@@ -25,7 +26,7 @@ const assets=new Set<string>();
 const appDirectory=resolve("dist/web/app");mkdirSync(join(appDirectory,"assets"),{recursive:true});
 const appResult=await Bun.build({entrypoints:["./src/main.tsx"],target:"bun",format:"cjs",bytecode:true,minify:true,
   outdir:appDirectory,naming:{entry:"[name]-[hash].[ext]"},
-  plugins:[solid,nativePlugin(),{name:"relocatable-app-assets",setup(build){
+   plugins:[devicePreviewPlugin(),solid,nativePlugin(),{name:"relocatable-app-assets",setup(build){
     build.onLoad({filter:/\.(?:png|otf|ttf)$/},args=>{
       const bytes=readFileSync(args.path),name=createHash("sha256").update(bytes).digest("hex").slice(0,16)+"-"+basename(args.path);
       copyFileSync(args.path,join(appDirectory,"assets",name));assets.add("assets/"+name);
@@ -42,7 +43,7 @@ const manifest={entry:basename(appEntry.path),files:Object.fromEntries(appFiles.
 writeFileSync(join(appDirectory,"manifest.json.next"),JSON.stringify(manifest));renameSync(join(appDirectory,"manifest.json.next"),join(appDirectory,"manifest.json"));
 const result = await Bun.build({
   entrypoints: ["./src/cli.ts"], target: "bun",format:"esm",bytecode:true,minify:true,
-  compile: { outfile: `dist/${pendingExecutable}`, autoloadBunfig: false, autoloadTsconfig: false, ...(process.platform==="win32"?{windows:{icon:resolve("../../misc/windows/neoism.ico"),title:"Neoism"}}:{}) },
+  compile: { outfile: `dist/${pendingExecutable}`, autoloadBunfig: false, autoloadTsconfig: false, ...(process.platform==="win32"?{windows:{hideConsole:true,icon:resolve("../../misc/windows/neoism.ico"),title:"Neoism"}}:{}) },
   plugins: [{name:"load-shared-application",setup(build){
     build.onLoad({filter:/[/\\]src[/\\]main\.tsx$/},()=>({loader:"js",contents:`
       import {existsSync} from "node:fs";import {dirname,join} from "node:path";import {pathToFileURL} from "node:url";

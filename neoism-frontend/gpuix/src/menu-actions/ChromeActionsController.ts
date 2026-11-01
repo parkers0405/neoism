@@ -199,9 +199,9 @@ export class ChromeActionsController {
     const id = this.ids.get(page); if (id === undefined || this.disposed) return;
     try {
       const started = performance.now(), frame = coreCall<MenuFrame>(`menu.${op}`, { id, ...args }); this.setFrame(frame, page, started);
-      if (!frame.active && !page) { this.close(); return; }
       if (frame.kind === "directories" && ["key", "text", "query"].includes(op)) this.searchDirectories();
       if (frame.action) void this.perform(frame.action, frame.target).catch(this.options.model.report);
+      else if (!frame.active && !page) this.close();
     } catch (error) { this.options.model.report(error); }
   }
   private searchDirectories() {

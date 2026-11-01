@@ -4,7 +4,7 @@ import type { AppConfig } from "../config";
 import { easeOutCubic } from "../design/animation";
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 
-export type SkeletonKind = "tree" | "sessions" | "picker" | "document";
+export type SkeletonKind = "tree" | "sessions" | "picker" | "document" | "diff";
 export interface SkeletonBar { x: number; y: number; width: number; height: number; radius: number; alpha: number }
 const widths = [0.58, 0.72, 0.46, 0.64, 0.38, 0.55, 0.68, 0.44, 0.52, 0.36, 0.62, 0.48];
 const depths = [0, 0, 1, 1, 2, 1, 0, 1, 2, 2, 0, 1];
@@ -25,6 +25,10 @@ export function loadingSkeletonBars(kind: SkeletonKind, width: number, height: n
       add(22 * s, y + 8 * s, available * title, 12 * s, 6 * s, alpha(i));
       add(22 * s, y + 26 * s, available * description, 9 * s, 4.5 * s, alpha(i) * 0.7);
     });
+  } else if (kind === "diff") {
+    const contentWidth=Math.max(0,width-32*s),row=22*s;
+    for(let i=0,y=12*s;y+row<=height&&i<7;i++,y+=row)
+      add(16*s,y,contentWidth*[.75,.48,.9,.62,.8,.55,.7][i],10*s,3*s,alpha(i));
   } else if (kind === "document") {
     const ramp = easeOutCubic((elapsed * 1000 - 80) / 240), row = 16 * s * (14 / 17) * 1.3;
     const contentWidth = Math.max(220, Math.min(920, width - 96)), x = Math.max((width - contentWidth) * 0.5, Math.min(48, width * 0.08));

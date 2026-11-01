@@ -66,6 +66,8 @@ jobs:
       # attempt without interrupting the other jobs in its original run.
       cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' && inputs.platform == matrix.platform }}
     env:
+      # Keep the unfinished iPhone/iPad device preview out of published bundles.
+      NEOISM_GPUIX_DEVICE_PREVIEW: '0'
       CARGO_BUILD_JOBS: 2
       CARGO_TERM_COLOR: always
       CARGO_PROFILE_RELEASE_DEBUG: 0

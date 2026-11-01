@@ -1,0 +1,25 @@
+{
+  "zedRevision": "f77e5cfe9dad04288566f00c66ecf3c58d6f84b3",
+  "basePatch": "native/patches/gpui-wayland-vsync.patch",
+  "basePatchSha256": "c1c7b10563396bc65649d0bdb75a35a1d392294ba74a6730331282f911aa58cf",
+  "patch": "native/patches/gpui-device-window-capture.patch",
+  "patchSha256": "cec1f38e44670c46d213f845f1cf37a56a5d4e1e3c97953e3dbb2d9cf26a2668",
+  "patchedFiles": {
+    "crates/gpui/src/platform.rs": "e908a1fcd115afda0b0a41f987fc49d49a74aaf083d10f91b8a7d98945a33cb7",
+    "crates/gpui/src/window.rs": "2fe9c3f5a0ce17ef7478f3097e1e7cb177261802c8cf8a02f21b93130e701532",
+    "crates/gpui_linux/src/linux/wayland/window.rs": "be304b87ae296ab0e5c1f92eae2c30238f4b6450721bcae112e8e7170674b4ce",
+    "crates/gpui_linux/src/linux/x11/window.rs": "b94a57647d5df30a6dc6afba26906243178dac2e64b6cb04155c045a409fd828",
+    "crates/gpui_wgpu/src/wgpu_renderer.rs": "5edbad9a7f5189e153976c1a458f3351fdf0eacebe37ac621ebd8e2b5b047619"
+  },
+  "description": "Optional Linux actual-window scene capture only. Apply after the existing pinned platform patch, with zed-relative paths. No global Cargo feature or test-support is required. Window::render_to_image(&self) -> anyhow::Result<image::RgbaImage> re-rasterizes the last completed GPUI scene, including custom texture surfaces, via the window's existing WgpuRenderer::render_scene_to_pixels(&mut self, &Scene) -> anyhow::Result<gpui::RgbaImage>. It does not wait for a future frame, acquire a swapchain image, present, create another renderer/device, resize the viewport, or enable automatic readback. Only an explicit caller allocates/caches the readback texture and staging buffer. New window capture rejects dimensions outside 1..=4096 (64 MiB each for pixels/target/staging at the maximum), device loss, unsupported non-RGBA8/BGRA8 formats and GPU/map failures. Row padding is stripped and BGRA8 converted to RGBA8, retaining the renderer's alpha/color-space semantics. The old offscreen render_to_pixels contract and surface guard remain. gpui re-exports RgbaImage to avoid adding Linux image dependencies outside the five owned source files. Unsupported platform backends retain the trait's not-implemented error. Native command gates, README/changelog integration, request authorization and build wiring belong to the parent overlay, not this platform patch.",
+  "upstreamResearch": [
+    "https://github.com/zed-industries/zed/pull/63012",
+    "https://github.com/zed-industries/zed/pull/66344"
+  ],
+  "upstreamResearchOutcome": "Searched zed-industries/zed issues and PRs using gh search issues --repo zed-industries/zed --include-prs for render_to_image and render_to_pixels/render_scene_to_pixels; read PR bodies and changed-file lists. Merged Windows PR 63012 explicitly leaves Linux unimplemented. Open macOS PR 66344 factors offscreen capture to avoid drawable acquisition owned by the display link. No matching Linux implementation was returned; this isolated local optional patch follows the same no-present design. No PR, push, branch switch or default source changes.",
+  "verification": {
+    "cargoCheck": "Passed through packages/native/Cargo.toml --locked --no-default-features --features device-preview with toolchain 1.97.1 and cached target/gpuix-native-device-preview; compiled gpui, gpui_wgpu and gpui_linux without test-support.",
+    "patch": "git apply --reverse --check passes against the optional checkout; git diff --check passes for the five owned source files; patch and resulting source SHA-256 values computed with sha256sum.",
+    "gpuRegression": "Added scene_capture_preserves_rgba_colors_and_padded_rows: real GPU red quad, RGBA8 and BGRA8 renderer pipelines, 65-pixel padded rows, repeated capture and unchanged viewport. Execution blocked by owning Zed workspace resolution (uncached tree-sitter-cpp git revision). Testing -p gpui_wgpu through the cached native manifest is rejected by Cargo because this dependency has dev-dependencies and is not a workspace member. Test not claimed as passed."
+  }
+}

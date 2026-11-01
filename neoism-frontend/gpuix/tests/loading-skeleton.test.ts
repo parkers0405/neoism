@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
 import { loadingSkeletonBars } from "../src/ui/LoadingSkeleton";
+test("diff skeleton pulses within the unloaded body", () => {
+  const early=loadingSkeletonBars("diff",320,160,1,0.3),later=loadingSkeletonBars("diff",320,160,1,0.8);
+  expect(early.length).toBeGreaterThan(2);
+  expect(early.every(bar=>bar.x>=0&&bar.y>=0&&bar.x+bar.width<=320&&bar.y+bar.height<=160)).toBe(true);
+  expect(early[0].alpha).not.toBe(later[0].alpha);
+});
 
 test("original tree loader keeps its depth pattern, clipping and travelling shimmer", () => {
   const hidden = loadingSkeletonBars("tree", 360, 600, 1, 0);

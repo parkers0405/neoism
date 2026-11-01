@@ -24,7 +24,7 @@ if (!process.argv.some(arg => ["--help", "-h", "--version", "-V"].includes(arg))
   profileStartup("window-init-started");
   const ready = (renderer as typeof renderer & {initAsync(options:Parameters<typeof renderer.init>[0]):Promise<void>}).initAsync({
     title: "Neoism", appName: "Neoism", appId: "ai.neoism.gpuix", width: 1440, height: 900,
-    minWidth: 720, minHeight: 480, titlebarTransparent: true, windowBackground: "opaque",
+    minWidth: 720, minHeight: 480, titlebarTransparent: true, windowBackground: "opaque",focus:process.env.GPUIX_BACKGROUND!=="1",
   });
   // main consumes the rejection after module evaluation; attach a handler now
   // so a fast platform failure cannot become an unhandled rejection meanwhile.

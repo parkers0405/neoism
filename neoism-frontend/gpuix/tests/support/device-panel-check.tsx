@@ -72,11 +72,14 @@ try {
     assert.equal(live.size,0);assert.equal(dropped,1);
     await event("device-preview-toggle","click");await until(()=>created===2);
     assert.equal(live.size,1);
+    let socketClosed=false;
+    // Always exercise the panel lifecycle; real streaming additionally needs
+    // the optional, user-supplied decoder, which release hosts need not install.
+    if(Bun.which("ffmpeg")){
     const video=spawnSync("ffmpeg",["-hide_banner","-loglevel","error","-f","lavfi","-i","color=c=blue:s=16x16:r=10","-frames:v","4","-c:v","libx264","-preset","ultrafast","-tune","zerolatency","-f","h264","pipe:1"]);
     assert.equal(video.status,0,"Codec integration test requires ffmpeg with libx264");
     const inputs:Array<{type:string;action?:string;x?:number;y?:number}>=[];
     const controlRequests:string[]=[];
-    let socketClosed=false;
     hub=Bun.serve<undefined>({hostname:"127.0.0.1",port:0,fetch(request,server){
       const path=new URL(request.url).pathname;
       if(path==="/api/devices")return Response.json({simulators:[],emulators:[{id:"test-emulator",name:"Test Android",platform:"android",version:"35",booted:true,physical:false}]});
@@ -103,8 +106,9 @@ try {
     await event("device-viewport","mouseUp",{button:0,x:bounds.x+bounds.width/2,y:bounds.y+bounds.height/2});
     await until(()=>inputs.some(input=>input.type==="touch"&&input.action==="up"));
     assert.ok(inputs.some(input=>input.action==="down"&&input.x!>=0&&input.x!<=1&&input.y!>=0&&input.y!<=1));
-    await event("device-preview-close","click");await until(()=>socketClosed&&!recording.find("device-preview-panel"));
+    }
+    await event("device-preview-close","click");await until(()=>(!hub||socketClosed)&&!recording.find("device-preview-panel"));
     assert.equal(live.size,0);assert.equal(dropped,2);
   }
-  console.log(JSON.stringify({defaultOff:process.env.NEOISM_GPUIX_DEVICE_PREVIEW!=="1",created,dropped,uploaded,noPty:true}));
+  console.log(JSON.stringify({defaultOff:process.env.NEOISM_GPUIX_DEVICE_PREVIEW!=="1",created,dropped,uploaded,codecTested:uploaded>0,noPty:true}));
 } finally {root.unmount();hub?.stop(true);restore();visuals.dispose();model.dispose();client.stop();daemon.stop();assert.equal(live.size,0);}

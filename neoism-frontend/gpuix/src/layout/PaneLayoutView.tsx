@@ -19,7 +19,8 @@ import {TabDropPreview,tabDropPoint} from "./TabDropPreview";
 import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
 
 const sameTab = (a: LayoutTab, b: LayoutTab) => a.leaf === b.leaf && a.surfaceId === b.surfaceId && a.title === b.title && a.kind === b.kind;
-const samePane = (a: LayoutPane, b: LayoutPane) => a.leaf === b.leaf && a.focused === b.focused && a.surfaceId === b.surfaceId && a.rect.every((n, i) => n === b.rect[i]) && a.tabs.length === b.tabs.length && a.tabs.every((tab, i) => sameTab(tab, b.tabs[i]));
+type RenderPane = LayoutPane & {previewTabs?: number[]; hidden?: boolean};
+const samePane = (a: RenderPane, b: RenderPane) => a.hidden === b.hidden && sameIds(a.previewTabs||[],b.previewTabs||[]) && a.leaf === b.leaf && a.focused === b.focused && a.surfaceId === b.surfaceId && a.rect.every((n, i) => n === b.rect[i]) && a.tabs.length === b.tabs.length && a.tabs.every((tab, i) => sameTab(tab, b.tabs[i]));
 const sameIds = (a: readonly number[], b: readonly number[]) => a.length === b.length && a.every((n, i) => n === b[i]);
 const sameKeys = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((key, i) => key === b[i]);
 let cachedNeoismIcon: Buffer | undefined;
@@ -77,7 +78,18 @@ export function PaneLayoutView(props: {
   const config = props.config, s = config.scale, c = config.theme;
   const chrome = tabChrome(s).buffer;
   const paneCount = createMemo(() => frame().panes.length);
-  const paneHosts = createMemo(() => { const next=frame();return new Map(next.panes.map(pane=>[paneHostKey(next,pane),pane])); });
+  const paneHosts = createMemo(() => {
+    const base=committedFrame(),preview=previewFrame();
+    const hosts=new Map<string,RenderPane>();
+    // Hover changes geometry, not ownership. Keep committed panes and their
+    // tab/editor hosts alive so cancelling a preview cannot reset them.
+    for(const pane of base.panes){
+      const projected=preview?.panes.find(next=>next.tabs.some(tab=>tab.leaf===pane.leaf));
+      hosts.set(paneHostKey(base,pane),projected?{...pane,rect:projected.rect,previewTabs:projected.tabs.map(tab=>tab.leaf),hidden:projected.leaf!==pane.leaf}:pane);
+    }
+    for(const pane of preview?.panes||[])if(!base.panes.some(current=>current.leaf===pane.leaf))hosts.set(`preview:${pane.leaf}`,pane);
+    return hosts;
+  });
   const paneIds = createMemo(() => [...paneHosts().keys()], [], { equals: sameKeys });
   const [origin, setOrigin] = createSignal({ x: 0, y: 0 });
   type ResizeDrag = { kind: "resize"; divider: LayoutDivider; x: number; y: number };
@@ -155,6 +167,8 @@ export function PaneLayoutView(props: {
   const row: StyleDesc = { display: "flex", flexDirection: "row", alignItems: "center" };
   const tabIcon=(tab:LayoutTab)=>tab.kind==="terminal"?{glyph:"\uf489",color:c.accent}:tab.kind==="welcome"?{glyph:"\uf015",color:c.accent}:tab.kind==="agent"?{glyph:"n",color:c.accent}:tab.kind==="git"?{glyph:"\uf126",color:c.accent}:tab.kind==="page"?{glyph:"\uf12e",color:c.accent}:namedIcons[tab.title.toLowerCase()]||extensionIcons[tab.title.split(".").pop()?.toLowerCase()||""]||{glyph:"\uf15b",color:"#c8c8c8"};
   function Pane(p: { hostKey: string }) {
+    const previewOnly=p.hostKey.startsWith("preview:");
+    const testId=(name:string)=>previewOnly?`preview-${name}`:name;
     const initial = paneHosts().get(p.hostKey)!;
     const pane = createMemo(() => paneHosts().get(p.hostKey) || initial, initial, { equals: samePane });
     const paneFocused=createMemo(()=>!previewFrame()&&pane().focused);
@@ -163,10 +177,10 @@ export function PaneLayoutView(props: {
     const widths=new Map<number,number>();let scrollX=0,scrollHost:HostElement|undefined;
     const [widthRevision,setWidthRevision]=createSignal(0),[slideRevision,setSlideRevision]=createSignal(0);
     const slide=new TabSlide<number>({reducedMotion:config.reducedMotion,onChange:()=>setSlideRevision(value=>value+1)});
-    strips.set(p.hostKey,{pane,widths,scroll:()=>scrollX,slide});onCleanup(()=>{strips.delete(p.hostKey);slide.dispose();});
+    if(!previewOnly)strips.set(p.hostKey,{pane,widths,scroll:()=>scrollX,slide});onCleanup(()=>{if(!previewOnly)strips.delete(p.hostKey);slide.dispose();});
     createEffect(()=>{widthRevision();slide.layout(pane().tabs.map(tab=>({id:tab.leaf,width:widths.get(tab.leaf)||chrome.width})));});
     let newTabHost:HostElement|undefined;
-    createEffect(()=>{const leaf=pane().leaf;if(newTabHost)props.registerNewHost?.(leaf,newTabHost);onCleanup(()=>props.registerNewHost?.(leaf,undefined));});
+    createEffect(()=>{const leaf=pane().leaf;if(newTabHost&&!previewOnly)props.registerNewHost?.(leaf,newTabHost);onCleanup(()=>{if(!previewOnly)props.registerNewHost?.(leaf,undefined);});});
     const tabIds = createMemo(() => pane().tabs.map((tab) => tab.leaf), [], { equals: sameIds });
     function Tab(t: { leaf: number }) {
       const initialTab = pane().tabs.find((tab) => tab.leaf === t.leaf)!;
@@ -181,7 +195,7 @@ export function PaneLayoutView(props: {
       const setTitleWidth = (width: number) => { measuredTabWidths.set(measured("title", untrack(tab).title), width); setTitleWidthSignal(width); };
       const setIconWidth = (width: number) => { measuredTabWidths.set(measured("icon", untrack(icon).glyph), width); setIconWidthSignal(width); };
       const geometry = createMemo(() => tabChrome(s, tab().kind === "agent" || tab().kind === "welcome" || /\.md(?:own)?$/i.test(tab().title) ? Math.min(titleWidth(), 140 * s) : titleWidth(), iconWidth(), true).buffer);
-      createEffect(()=>{tabGeometry.set(t.leaf,geometry());});
+      createEffect(()=>{if(!previewOnly)tabGeometry.set(t.leaf,geometry());});
       const modified = () => !!tab().surfaceId && !!props.modified?.(tab().surfaceId!);
       const icon = () => tabIcon(tab());
       const slideOffset=()=>{slideRevision();return slide.offset(t.leaf);};
@@ -197,11 +211,11 @@ export function PaneLayoutView(props: {
         });
       };
       createEffect(()=>{if(selected())reveal();});
-      onCleanup(()=>{disposed=true;widths.delete(t.leaf);tabGeometry.delete(t.leaf);props.registerTabHost?.(t.leaf,undefined);});
+      onCleanup(()=>{disposed=true;widths.delete(t.leaf);if(!previewOnly){tabGeometry.delete(t.leaf);props.registerTabHost?.(t.leaf,undefined);}});
       onMount(() => queueMicrotask(() => { if (!image?.mounted) return; image.root?.mutations.flushMutations(); const path=terminalAgentIcons[tab().title];image.setImage(path?(cachedTerminalAgentIcons.get(path)??readFileSync(path)):(cachedNeoismIcon ||= readFileSync(neoismIcon))); }));
       createEffect(()=>{const title=tab().kind==="terminal"?tab().title:"";const path=terminalAgentIcons[title];if(!path||!image?.mounted)return;image.root?.mutations.flushMutations();let data=cachedTerminalAgentIcons.get(path);if(!data){data=readFileSync(path);cachedTerminalAgentIcons.set(path,data);}image.setImage(data);});
-      return <div ref={host=>{tabHost=host;props.registerTabHost?.(t.leaf,host);}} tabIndex={0} role="tab" testId={`pane-tab:${t.leaf}`} aria-label={tab().title} aria-selected={selected()} data-keyboard-focused={props.keyboardTab===t.leaf}
-        onLayout={event=>{const width=event.width||geometry().width;if(widths.get(t.leaf)!==width){widths.set(t.leaf,width);setWidthRevision(value=>value+1);}props.onTabLayout?.(t.leaf,{x:event.x||0,y:event.y||0,width:width,height:event.height||0});if(selected())reveal();}}
+      return <div ref={host=>{tabHost=host;if(!previewOnly)props.registerTabHost?.(t.leaf,host);}} tabIndex={0} role="tab" testId={testId(`pane-tab:${t.leaf}`)} aria-label={tab().title} aria-selected={selected()} data-keyboard-focused={props.keyboardTab===t.leaf}
+        onLayout={event=>{const width=event.width||geometry().width;if(widths.get(t.leaf)!==width){widths.set(t.leaf,width);setWidthRevision(value=>value+1);}if(!previewOnly)props.onTabLayout?.(t.leaf,{x:event.x||0,y:event.y||0,width:width,height:event.height||0});if(selected())reveal();}}
         onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
         onMouseDown={(event) => {
           if(suppressTabPress||event.button!==undefined&&event.button!==0||!pane().tabs.some(tab=>tab.leaf===t.leaf))return;
@@ -210,7 +224,7 @@ export function PaneLayoutView(props: {
           armed={kind:"tab",leaf:t.leaf,x:event.x||0,y:event.y||0,grab:Math.max(0,Math.min(widths.get(t.leaf)||geometry().width,(event.x||0)-left))};
         }}
         onMouseMove={move} onMouseUp={finish}
-        style={{ position: "relative", left:slideOffset(),width: geometry().width, height: chrome.height, flexShrink: 0, cursor: "pointer", borderTopLeftRadius: selected() || hovered() ? 3 * s : 0,
+        style={{ display:pane().previewTabs&&!pane().previewTabs!.includes(t.leaf)?"none":undefined, position: "relative", left:slideOffset(),width: geometry().width, height: chrome.height, flexShrink: 0, cursor: "pointer", borderTopLeftRadius: selected() || hovered() ? 3 * s : 0,
           borderTopRightRadius: selected() || hovered() ? 3 * s : 0, backgroundColor: selected() ? c.bg : undefined,opacity:drag()?.kind==="tab"&&(drag() as TabDrag).leaf===t.leaf ? 0 : 1 }}>
         <motion.div initial={false} animate={{ opacity: (hovered()||props.keyboardTab===t.leaf) && !selected() ? 1 : 0 }} transition={{ duration: 0.15, ease: easeOutCubicBezier }}
           style={{ position: "absolute", left: 0, right: 0, top: 0, height: chrome.height, borderTopLeftRadius: 3 * s, borderTopRightRadius: 3 * s, backgroundColor: c.hover + "b8", pointerEvents: "none" }} />
@@ -220,7 +234,7 @@ export function PaneLayoutView(props: {
           <img ref={host=>{image=host;queueMicrotask(()=>{if(!host.mounted)return;host.root?.mutations.flushMutations();const path=terminalAgentIcons[tab().title];host.setImage(path?(cachedTerminalAgentIcons.get(path)??readFileSync(path)):(cachedNeoismIcon ||= readFileSync(neoismIcon)));});}} testId={`pane-tab-icon:${t.leaf}`} objectFit="contain" alt={tab().kind==="agent"?"Neoism":tab().title} style={{ position: "absolute", left: chrome.padding, top: (chrome.height - chrome.iconSize) / 2, width: chrome.iconSize, height: chrome.iconSize, pointerEvents: "none" }} />
         </Show>
         <div style={{position:"absolute",left:chrome.padding+geometry().iconWidth+chrome.iconGap,top:0,pointerEvents:"none"}}><HoverTabTitle label={tab().title} width={geometry().titleWidth} naturalWidth={titleWidth()} height={chrome.height} scale={s} hovered={hovered()} reducedMotion={config.reducedMotion} style={{...text,lineHeight:chrome.height,color:selected()?c.fg:c.muted}}/></div>
-        <div role="button" aria-label={`Close ${tab().title}`} testId={`pane-close:${t.leaf}`}
+        <div role="button" aria-label={`Close ${tab().title}`} testId={testId(`pane-close:${t.leaf}`)}
           onMouseEnter={() => setCloseHovered(true)} onMouseLeave={() => setCloseHovered(false)}
           onMouseDown={() => { suppressTabPress=true;queueMicrotask(()=>{suppressTabPress=false;});armed = undefined; const id = tab().surfaceId; if (id) props.onClose(id, t.leaf); }}
           style={{ position: "absolute", left: (geometry().closeCenter || 0) - chrome.closeHitSize / 2, top: (chrome.height - chrome.closeHitSize) / 2, width: chrome.closeHitSize, height: chrome.closeHitSize, cursor: "pointer", ...row, justifyContent: "center" }}>
@@ -249,24 +263,24 @@ export function PaneLayoutView(props: {
       animation.request(tick);
     });
     onCleanup(()=>animation.dispose());
-    return <div testId={`pane:${pane().leaf}`} data-drop-preview={!!previewFrame()}
+    return <div testId={testId(`pane:${pane().leaf}`)} data-drop-preview={!!previewFrame()}
       style={{ position: "absolute", left:paintRect()[0],top:paintRect()[1],width:paintRect()[2],height:paintRect()[3],
-        display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0, minHeight: 0,
+        display: pane().hidden?"none":"flex", flexDirection: "column", overflow: "hidden", minWidth: 0, minHeight: 0,
         borderRadius: paneCount() > 1 ? d.frameRadius * s : 0,
         borderWidth: paneCount() > 1 ? s : 0, borderColor: pane().focused ? c.border : c.surface }}>
-      <div role="tablist" aria-label="Pane tabs" testId={`pane-tabs:${pane().leaf}`}
+      <div role="tablist" aria-label="Pane tabs" testId={testId(`pane-tabs:${pane().leaf}`)}
         style={{ position:"relative", height: chrome.height, flexShrink: 0, backgroundColor: c.surface, overflow: "hidden", minWidth: 0,
           borderTopLeftRadius: 6 * s, borderTopRightRadius: 6 * s, borderBottomWidth: 1, borderColor: c.border }}>
-        <div ref={host=>scrollHost=host} testId={`pane-tab-scroll:${pane().leaf}`} onScroll={event=>{consumeTabScroll(event);const content=pane().tabs.reduce((sum,tab)=>sum+(widths.get(tab.leaf)||tabGeometry.get(tab.leaf)?.width||chrome.width),0)+(props.onNewWelcome?chrome.newWidth:0);const next=verticalTabScroll(event,scrollX,Math.max(0,pane().rect[2]-(paneCount()>1?2*s:0)),content);if(next!==undefined&&next!==scrollX&&scrollHost){consumeTabScroll(event,true);scrollX=next;renderer.scrollTo?.(scrollHost.id,next,0);props.onTabScroll?.();}}} onScrollChange={event=>{scrollX=event.scrollX||0;const active=drag();if(active?.kind==="tab"&&pane().tabs.some(tab=>tab.leaf===active.leaf))slide.move(dragPoint().x-origin().x-pane().rect[0]-(paneCount()>1?s:0)-scrollX);props.onTabScroll?.();}} style={{...row,position:"absolute",left:0,top:0,right:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
+        <div ref={host=>scrollHost=host} testId={testId(`pane-tab-scroll:${pane().leaf}`)} onScroll={event=>{consumeTabScroll(event);const content=pane().tabs.reduce((sum,tab)=>sum+(widths.get(tab.leaf)||tabGeometry.get(tab.leaf)?.width||chrome.width),0)+(props.onNewWelcome?chrome.newWidth:0);const next=verticalTabScroll(event,scrollX,Math.max(0,pane().rect[2]-(paneCount()>1?2*s:0)),content);if(next!==undefined&&next!==scrollX&&scrollHost){consumeTabScroll(event,true);scrollX=next;renderer.scrollTo?.(scrollHost.id,next,0);props.onTabScroll?.();}}} onScrollChange={event=>{scrollX=event.scrollX||0;const active=drag();if(active?.kind==="tab"&&pane().tabs.some(tab=>tab.leaf===active.leaf))slide.move(dragPoint().x-origin().x-pane().rect[0]-(paneCount()>1?s:0)-scrollX);props.onTabScroll?.();}} style={{...row,position:"absolute",left:0,top:0,right:0,height:chrome.height,overflowX:"scroll",overflowY:"hidden",minWidth:0}}>
           <For each={tabIds()}>{(leaf) => <Tab leaf={leaf} />}</For>
-          <Show when={props.onNewWelcome}><div ref={host=>{newTabHost=host;}} tabIndex={0} role="button" testId={`pane-new-welcome:${pane().leaf}`} aria-label="New Home" data-keyboard-focused={props.keyboardNewPane===pane().leaf} onClick={() => { focus(pane().leaf); props.onNewWelcome?.(pane().leaf); }}
-            onLayout={event=>props.onNewLayout?.(pane().leaf,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0})}
+          <Show when={props.onNewWelcome}><div ref={host=>{newTabHost=host;}} tabIndex={0} role="button" testId={testId(`pane-new-welcome:${pane().leaf}`)} aria-label="New Home" data-keyboard-focused={props.keyboardNewPane===pane().leaf} onClick={() => { focus(pane().leaf); props.onNewWelcome?.(pane().leaf); }}
+            onLayout={event=>!previewOnly&&props.onNewLayout?.(pane().leaf,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0})}
             style={{ ...row, justifyContent: "center", width: chrome.newWidth, height: chrome.height, flexShrink: 0, cursor: "pointer",backgroundColor:props.keyboardNewPane===pane().leaf?c.accent+"1a":undefined, hover: { backgroundColor: c.accent + "0f" } }}>
             <text style={{ ...text, fontFamily: config.iconFontFamily, fontSize: chrome.iconSize, color: c.muted }}>{chrome.newIcon}</text>
           </div></Show>
         </div>
       </div>
-      <div testId={`pane-content:${pane().leaf}`} onLayout={event=>setBodyBounds({x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0})} onMouseDown={() => {if(!paneFocused())focus(pane().leaf);}} style={{ display: "flex", flexDirection: "column", flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative" }}>
+      <div testId={testId(`pane-content:${pane().leaf}`)} onLayout={event=>setBodyBounds({x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0})} onMouseDown={() => {if(!paneFocused())focus(pane().leaf);}} style={{ display: "flex", flexDirection: "column", flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative" }}>
         <Show when={pane().surfaceId ? `${pane().leaf}:${pane().surfaceId}` : undefined} keyed>{(_identity) => props.renderSurface(pane().surfaceId!, pane().leaf, paneFocused)}</Show>
       </div>
     </div>;

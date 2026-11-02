@@ -617,7 +617,7 @@ fn render_single_tool_message(
         truncate_to_fit(&message.title_text(), title_avail_w, sugarloaf, &title_opts);
     let text_x = x + 42.0 * s;
     let line_y = y + 2.0 * s;
-    if !suppress_interactions {
+    if !suppress_interactions || pane.has_tool_selection() {
         let title_w = sugarloaf.text_mut().measure(&title, &title_opts).max(12.0);
         let stops = measured_caret_stops(sugarloaf, &title, &title_opts, text_x);
         let title_sel = pane.register_selectable_line_with_caret_stops(
@@ -933,7 +933,7 @@ fn render_single_tool_message(
         } else {
             Vec::new()
         };
-        if !suppress_interactions {
+        if !suppress_interactions || pane.has_tool_selection() {
             let line_w = sugarloaf.text_mut().measure(rendered, text_opts).max(12.0);
             let stops = measured_caret_stops(sugarloaf, rendered, text_opts, text_x);
             let sel_index = pane.register_selectable_line_with_caret_stops(
@@ -1996,7 +1996,7 @@ fn render_tool_todos_painted<Todo: AgentToolTodo, P: AgentToolPane>(
                     state.mark_visible(motion);
                 }
             }
-            if !suppress_interactions {
+            if !suppress_interactions || pane.has_tool_selection() {
                 let line_w = sugarloaf.text_mut().measure(&line, &text_opts).max(12.0);
                 let stops = measured_caret_stops(sugarloaf, &line, &text_opts, text_x);
                 let selection_index = pane.register_selectable_line_with_caret_stops(

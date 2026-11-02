@@ -31,10 +31,10 @@ try{
  emit("workspace:a","click",x+25,y+h/2);assert.deepEqual(activations,[]);assert.equal(closes.length,2);
  // Fresh title press must clear the close latch even without a child click.
  emit("workspace:a","mouseDown",x+25,y+h/2);emit("workspace:a","mouseUp",x+25,y+h/2);emit("workspace:a","click",x+25,y+h/2);assert.deepEqual(activations,["a"]);
- emit("workspace:a","mouseDown",x+25,y+h/2);emit("workspace:a","mouseMove",x+360,y+h/2);assert.ok(host.find("workspace-drag-preview"),"A refused close cannot disable the next drag gesture");
- emit("workspace-drag-layer","mouseUp",x+360,y+h/2);emit("workspace:a","click",x+360,y+h/2);assert.deepEqual(activations,["a"]);assert.equal(moves.length,1);assert.equal(closes.length,2);
+ emit("workspace:a","mouseDown",x+25,y+h/2);assert.deepEqual(activations,["a","a"],"The fresh press activates immediately");emit("workspace:a","mouseMove",x+360,y+h/2);assert.ok(host.find("workspace-drag-preview"),"A refused close cannot disable the next drag gesture");
+ emit("workspace-drag-layer","mouseUp",x+360,y+h/2);emit("workspace:a","click",x+360,y+h/2);assert.deepEqual(activations,["a","a"]);assert.equal(moves.length,1);assert.equal(closes.length,2);
  // The onLayout fallback is used if native paint bounds are unavailable.
- boxes.delete(close.id);emit("workspace-close:a","mouseDown",center,y+h/2);emit("workspace:a","mouseDown",center,y+h/2);emit("workspace-close:a","click",center,y+h/2);emit("workspace:a","click",center,y+h/2);assert.equal(closes.length,3);assert.deepEqual(activations,["a"]);
+ boxes.delete(close.id);emit("workspace-close:a","mouseDown",center,y+h/2);emit("workspace:a","mouseDown",center,y+h/2);emit("workspace-close:a","click",center,y+h/2);emit("workspace:a","click",center,y+h/2);assert.equal(closes.length,3);assert.deepEqual(activations,["a","a"]);
  assert.ok((await Promise.all(closes)).every(result=>!result));assert.equal(editor.text(),"dirty saved");
  console.log(JSON.stringify({noWindow:true,actualSolidPressClosesImmediately:true,clickDeduplicated:true,inactiveDirtyCloseNeverActivates:true,outsideReleaseCannotStickLatch:true,freshDragStillWorks:true,sourceTrailingInsetAtZoom:true,onLayoutBoundsFallback:true,dirtyBytesRetained:true}));
 }finally{root.unmount();model.dispose();}

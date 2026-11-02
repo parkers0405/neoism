@@ -1,5 +1,6 @@
 import {createEffect,createMemo,createSignal,onCleanup,type JSX} from "solid-js";
-import {useGpuixRequired,type StyleDesc} from "@gpuix/solid";
+import {useGpuixRequired,type StyleDesc,type HostElement} from "@gpuix/solid";
+import {paintedChromeBounds} from "./chrome-target-bounds";
 import type {AppConfig} from "../config";
 import {coreCall} from "../native-core";
 import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
@@ -98,10 +99,12 @@ export function AnimatedWordmark(props:{config:AppConfig;style?:StyleDesc;kind?:
  const [size,setSize]=createSignal(initialWordmarkSize(props.style));
  const [frame,setFrame]=createSignal<WordmarkFrame>({letters:[],commands:[],showOriginal:true,animating:false});
  const paintBounds=createMemo<WordmarkPaintBounds>(()=>props.paintBounds||[-size().width,-size().height*4,size().width*3,size().height*9]);
- let mouse:number[]|undefined,disposed=false;
+ let mouse:number[]|undefined,disposed=false,host:HostElement|undefined;
  const draw=()=>{
   if(disposed)return;const bounds=size();if(bounds.width<=0||bounds.height<=0)return;
-  const next=coreCall<WordmarkFrame>("wordmark.frame",{id,width:bounds.width,height:bounds.height,clip:paintBounds(),mouse,fg:props.config.theme.fg,
+  const painted=host&&paintedChromeBounds(renderer,host.id),origin=painted||bounds;
+  const localMouse=mouse?[mouse[0]-origin.x,mouse[1]-origin.y]:undefined;
+  const next=coreCall<WordmarkFrame>("wordmark.frame",{id,width:bounds.width,height:bounds.height,clip:paintBounds(),mouse:localMouse,fg:props.config.theme.fg,
    autoAnimate:!!props.config.splashAutoAnimate,reducedMotion:props.config.reducedMotion});
   if(next.image&&retained)retained.hosts.pinImage(retained.key,renderer,next.image);
   setFrame(next);if(next.animating)animation.request(draw);
@@ -121,9 +124,9 @@ export function AnimatedWordmark(props:{config:AppConfig;style?:StyleDesc;kind?:
   const clip=paintBounds();return JSON.stringify(translateWordmarkOps(ops,-clip[0],-clip[1]));
  });
  const replay=()=>{if(props.config.reducedMotion)return;coreCall("wordmark.replay",{id});draw();};
- return <div testId={props.testId||`neoism-wordmark:${props.kind||"agent"}`} role="button" aria-label="Animate Neoism wordmark"
+ return <div ref={element=>host=element} testId={props.testId||`neoism-wordmark:${props.kind||"agent"}`} role="button" aria-label="Animate Neoism wordmark"
   onLayout={event=>setSize(previous=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0};return Object.keys(next).every(key=>previous[key as keyof typeof previous]===next[key as keyof typeof next])?previous:next;})}
-  onMouseMove={event=>{const bounds=size();mouse=[(event.x||0)-bounds.x,(event.y||0)-bounds.y];if(!props.config.reducedMotion)animation.request(draw);}}
+  onMouseMove={event=>{mouse=[event.x||0,event.y||0];if(!props.config.reducedMotion)animation.request(draw);}}
   onMouseLeave={()=>{mouse=undefined;if(!props.config.reducedMotion)animation.request(draw);}}
   onClick={replay}
   style={{...props.style,overflow:"visible",cursor:props.config.reducedMotion?"default":"pointer",pointerEvents:"auto"}}>

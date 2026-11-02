@@ -424,6 +424,7 @@ pub trait AgentToolPane {
         self.register_selectable_line(text, rect)
     }
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)>;
+    fn has_tool_selection(&self) -> bool { false }
     fn suppress_tool_interactions(&self) -> bool {
         false
     }
@@ -570,6 +571,8 @@ macro_rules! neoism_ui_impl_agent_tool_message {
                 <$pane>::selectable_line_highlight(self, index)
             }
 
+            fn has_tool_selection(&self) -> bool { <$pane>::has_selection(self) }
+
             fn suppress_tool_interactions(&self) -> bool {
                 <$pane>::suppress_markdown_interactions(self)
             }
@@ -667,6 +670,8 @@ impl AgentToolPane for NeoismAgentPane {
     fn selectable_line_highlight(&self, index: usize) -> Option<(f32, f32)> {
         NeoismAgentPane::selectable_line_highlight(self, index)
     }
+
+    fn has_tool_selection(&self) -> bool { NeoismAgentPane::has_selection(self) }
 
     fn suppress_tool_interactions(&self) -> bool {
         NeoismAgentPane::suppress_markdown_interactions(self)

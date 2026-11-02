@@ -645,6 +645,7 @@ impl GitDiffView {
             }).collect::<Vec<_>>(),
             "toolbar":self.toolbar_hits.iter().map(|hit|serde_json::json!({"id":format!("{:?}",hit.control),"rect":rect(hit.rect),"enabled":hit.enabled})).collect::<Vec<_>>(),
             "fileActions":self.header_actions.iter().map(|(i,restore,r,enabled)|serde_json::json!({"path":self.sections[*i].change.path,"restore":restore,"rect":rect(*r),"enabled":enabled})).collect::<Vec<_>>(),
+            "blockActions":self.block_controls.iter().filter(|c|c.shown).map(|c|serde_json::json!({"path":c.path,"stage":rect(c.stage),"restore":rect(c.restore)})).collect::<Vec<_>>(),
             "sourceHits":self.source_hits.iter().map(|hit|serde_json::json!({"path":hit.path,"line":hit.line,"rect":rect(hit.rect)})).collect::<Vec<_>>(),
             "editHits":self.edit_hits.iter().map(|hit|serde_json::json!({"path":hit.path,"line":hit.line,"rect":rect(hit.rect)})).collect::<Vec<_>>()
         })

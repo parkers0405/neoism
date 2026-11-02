@@ -1463,7 +1463,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     for line in wrap_user_message(sugarloaf, text, text_w, &opts) {
         let line_w = measure_text_cached(sugarloaf, &line, &opts).max(12.0);
         let line_x = user_message_line_x(text_x, text_w, line_w);
-        if !suppress_interactions {
+        if !suppress_interactions || pane.has_selection() {
             // User bubbles belong to the same transcript selection surface as
             // assistant Markdown and tool output. Previously these rows were
             // only painted, so a downward drag commonly appeared to stop as

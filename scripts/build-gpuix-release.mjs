@@ -23,8 +23,6 @@ const bun=join(frontend,'node_modules/bun/bin/bun.exe');
 // Version/design drift must fail before the expensive native compilation.
 run('npm',['run','check:design'],frontend);
 run(bun,['scripts/build-sdk.ts'],frontend);
-// Exercise Windows socket rejection before spending time on Rust compilation.
-if(windows)run(bun,['test','./tests/window-workspaces.test.ts','--test-name-pattern','default resolution sends'],frontend);
 run('python',['scripts/check-native-toolchain.py']);
 // Fail early on toolchain/network problems before compiling the Rust services.
 run(bun,['scripts/build-ghostty.ts'],frontend);
@@ -35,6 +33,9 @@ run(bun,['scripts/build.ts'],frontend);
 const dist=stageGpuixRelease(root);
 run(join(dist,`neoism${suffix}`),['--version']);
 run(bun,['scripts/verify-core.ts'],frontend);
+// WorkspaceModel constructs native presence state: even this focused socket
+// test requires the freshly built core DLL, not just the generated SDK.
+if(windows)run(bun,['test','./tests/window-workspaces.test.ts','--test-name-pattern','default resolution sends'],frontend);
 run('npm',['run','typecheck'],frontend);
 // The host test must find this run's freshly built standalone daemon.
 run(bun,['test','./tests'],frontend);

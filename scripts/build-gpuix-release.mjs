@@ -22,13 +22,15 @@ run('npm',['ci'],sdk);run('npm',['ci'],frontend);
 const bun=join(frontend,'node_modules/bun/bin/bun.exe');
 // Version/design drift must fail before the expensive native compilation.
 run('npm',['run','check:design'],frontend);
+run(bun,['scripts/build-sdk.ts'],frontend);
+// Exercise Windows socket rejection before spending time on Rust compilation.
+if(windows)run(bun,['test','./tests/window-workspaces.test.ts','--test-name-pattern','default resolution sends'],frontend);
 run('python',['scripts/check-native-toolchain.py']);
 // Fail early on toolchain/network problems before compiling the Rust services.
 run(bun,['scripts/build-ghostty.ts'],frontend);
 run('cargo',['build','--locked','--release','-p','neoism-workspace-daemon','-p','neoism-agent','-p','neoism-update-helper']);
 run('cargo',['test','--locked','--release','-p','neoism-update-helper','--bin','neoism-update-helper']);
 env.NEOISM_GPUIX_WORKSPACE_DAEMON=join(root,`target/release/neoism-workspace-daemon${suffix}`);
-run(bun,['scripts/build-sdk.ts'],frontend);
 run(bun,['scripts/build.ts'],frontend);
 const dist=stageGpuixRelease(root);
 run(join(dist,`neoism${suffix}`),['--version']);

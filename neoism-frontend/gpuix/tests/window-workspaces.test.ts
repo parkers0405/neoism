@@ -34,7 +34,12 @@ test("default resolution sends the connected host identity and rejects a foreign
   expect((await model.resolveHostWorkspace()).host_id).toBe("host");
   expect(daemon.workspaceRequests.filter(request=>request.tag==="ResolveInitialWorkspace").at(-1)?.body).toEqual({preferred_host_id:"host"});
   Object.assign(model.state.connection,{connectedHostId:"new-machine"});
-  await expect(model.resolveHostWorkspace()).rejects.toThrow("different host");
+  // Let the socket/event loop resolve the request before entering Bun's
+  // synchronous throw matcher (its rejects path can stall Windows I/O).
+  const rejection=await model.resolveHostWorkspace().then(()=>undefined,(error:unknown)=>error);
+  expect(rejection).toBeInstanceOf(Error);
+  expect((rejection as Error).message).toContain("different host");
+  expect(daemon.workspaceRequests.filter(request=>request.tag==="ResolveInitialWorkspace").at(-1)?.body).toEqual({preferred_host_id:"new-machine"});
  }finally{close();}
 });
 test("legacy recovery migrates only the chosen startup workspace and retains hidden dirty state",async()=>{

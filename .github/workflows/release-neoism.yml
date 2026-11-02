@@ -7,6 +7,9 @@ on:
       release_tag:
         description: Existing nightly tag to update (blank uses the selected tag)
         type: string
+      source_ref:
+        description: Exact source commit to build (nightly dispatcher pins this)
+        type: string
       platform:
         description: Build all platforms, or retry one platform after a fix
         type: choice
@@ -15,13 +18,32 @@ on:
 permissions:
   contents: write
 jobs:
+  dispatch-nightly:
+    if: github.event_name == 'push' && contains(github.ref_name, '-nightly.')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
+    concurrency:
+      group: nightly-cache-dispatch
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build nightlies on one reusable cache scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python scripts/dispatch-nightly-release.py
   prepare:
+    if: github.event_name != 'push' || !contains(github.ref_name, '-nightly.')
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       matrix: ${{ steps.release.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
       - name: Prepare shared release and independent platform jobs
         id: release
         env:
@@ -37,6 +59,7 @@ jobs:
           # retry may build a fix from this branch; each asset records its SHA.
           if [[ "$tag" != *-nightly.* ]]; then
             [[ "$GITHUB_REF" == "refs/tags/$tag" ]] || exit 1
+            [[ "$GITHUB_SHA" == "$(git rev-parse HEAD)" ]] || exit 1
           fi
           flags=()
           if [[ "$tag" == *-* ]]; then flags+=(--prerelease --latest=false); fi
@@ -81,6 +104,8 @@ jobs:
           git config --global core.autocrlf false
           git config --global core.longpaths true
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -99,6 +124,9 @@ jobs:
           sudo apt-get install -y clang cmake ninja-build pkg-config libfontconfig1-dev libfreetype-dev libgbm-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libwayland-dev libasound2-dev libvulkan-dev
       - uses: Swatinem/rust-cache@v2
         with:
+          # The dedicated native/service caches below already retain targets.
+          # Duplicating them here evicts other platforms from the shared quota.
+          cache-targets: false
           workspaces: |
             . -> target
             neoism-frontend/gpuix/native -> target/gpuix-core-cargo
@@ -151,6 +179,13 @@ jobs:
           NATIVE_CACHE_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
           COMBINED_CACHE_KEY: ${{ steps.combined-cache.outputs.cache-matched-key }}
         run: python scripts/restore-cached-source-times.py
+      - name: Report actual compilation cache reuse
+        shell: bash
+        env:
+          NATIVE_CACHE: ${{ steps.native-cache.outputs.cache-matched-key }}
+          SERVICE_CACHE: ${{ steps.service-cache.outputs.cache-matched-key }}
+        run: |
+          printf 'Cache scope: %s\nNative cache: %s\nService cache: %s\n' "$GITHUB_REF" "${NATIVE_CACHE:-MISS (cold build)}" "${SERVICE_CACHE:-MISS (cold build)}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Restore verified native display binding
         id: binding-cache
         uses: actions/cache/restore@v4

@@ -2,13 +2,25 @@ import {expect,test} from "bun:test";
 import {coreCall} from "../src/native-core";
 
 type Text={kind:string;text?:string;x:number;y:number};
-type Frame={commands:Text[]};
+type Frame={commands:Text[];reason:string|null;preparing:boolean};
 
 test("composition calls stay inset with independent parent and child disclosures",async()=>{
  const sessionId="composition-disclosure";
  const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId});
  const frame=()=>coreCall<Frame>("agenttimeline.frame",{id});
- const settle=async()=>{const until=Date.now()+400;let value=frame();while(Date.now()<until){await Bun.sleep(10);value=frame();}return value;};
+ // Wait for actual native work, not six unconditional 400ms render loops. In
+ // particular, serializing debug paint frames is expensive on Windows CI.
+ const settle=async()=>{
+  const deadline=Date.now()+1000;
+  let value=frame();
+  // Decorative animations (such as the user orb) intentionally never finish.
+  const geometryMotion=new Set(["tool_motion","text_reveal","tool_expansion","timeline_inertia","timeline_interaction_settle"]);
+  while(value.preparing||geometryMotion.has(value.reason||"")){
+   if(Date.now()>=deadline)throw new Error(`Composition timeline did not settle: ${value.reason}`);
+   await Bun.sleep(16);value=frame();
+  }
+  return value;
+ };
  const texts=(value:Frame)=>value.commands.filter(command=>command.kind==="text");
  const text=(value:Frame)=>texts(value).map(command=>command.text).join("\n");
  const row=(value:Frame,label:string)=>{const found=texts(value).find(command=>command.text===label);expect(found,`Missing ${label} in ${text(value)}`).toBeDefined();return found!;};

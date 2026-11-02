@@ -614,7 +614,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     if (alt && shift && !ctrl && key === "space") action = "ToggleViMode";
     else if (alt && !ctrl && !shift && key === ",") action = "ConfigEditor";
     else if (alt && !ctrl && !shift && ["p", "a", "s", "g"].includes(key || "")) action = key === "p" ? "OpenCommandPalette" : key === "a" ? "OpenNeoismAgent" : key === "s" ? "SearchFiles" : "SearchGitChanges";
-    else if (ctrl && shift && key === "p") action = "OpenCommandPalette";
+    else if (!alt && key === "p" && (event.modifiers?.cmd || ctrl && shift)) action = "OpenCommandPalette";
     else if (ctrl && shift && ["r", "d"].includes(key || "")) action = key === "r" ? "SplitRight" : "SplitDown";
     else if (ctrl && key === "tab") action = shift ? "SelectPrevTab" : "SelectNextTab";
     else if (ctrl && shift && ["[", "]"].includes(key || "")) action = key === "[" ? "SelectPrevSplit" : "SelectNextSplit";
@@ -1412,9 +1412,9 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
             }} />}</Show>
            <Show when={showDetails()&&!gitVisible()&&!deviceVisible()}><DetailRail /></Show>
            <DevicePreviewSlot config={config} visible={deviceVisible()} workspaceId={activeWorkspaceId()} width={deviceWidth()} active={chromeFocus().zone==="device"} focusToken={deviceFocusToken()}
-             onHost={host=>deviceHost=host} onFocus={()=>{setChromeFocus({zone:"device"});setChromeTarget(undefined);}} onClose={closeDevice} onCustomKey={handleApplicationKey}/>
+             onHost={host=>deviceHost=host} onFocus={()=>{setChromeFocus({zone:"device"});setChromeTarget(undefined);}} onClose={closeDevice} onCustomKey={handleSurfaceKey}/>
           <Show when={gitVisible()&&gitController()} keyed>{controller=><div testId="git-panel-slot" style={{...column,flexShrink:0,minWidth:0,minHeight:0}}>
-            <GitDiffPanelView controller={controller} config={config} viewport={gitViewport()} active={gitFocused()} focusToken={gitFocusToken()}
+            <GitDiffPanelView controller={controller} config={config} viewport={gitViewport()} active={gitFocused()} focusToken={gitFocusToken()} onCustomKey={handleSurfaceKey}
               onHost={host=>{gitHost=host;}} onFocus={()=>setGitFocused(true)} onClose={()=>{setGitFocused(false);setChromeTarget(undefined);focusChrome({zone:"content"});}}
               onCursorTarget={target=>{if(target)setChromeTarget(target);else setChromeTarget(before=>before?.host===gitHost?undefined:before);}}/>
           </div>}</Show>

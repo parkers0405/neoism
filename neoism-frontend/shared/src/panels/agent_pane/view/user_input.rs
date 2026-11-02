@@ -8,6 +8,7 @@ use neoism_paint::text::DrawOpts;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::panels::agent_pane::input_controller::{visual_row_index, InputWrapRow};
+use crate::panels::agent_pane::selection_model::WrappedSelectionLine;
 use crate::panels::agent_pane::state::{
     NeoismAgentImage, NeoismAgentPane, NeoismAgentPendingPermission,
     NeoismAgentPermissionChoice, NeoismAgentStreamingState,
@@ -1233,13 +1234,15 @@ fn wrap_user_message_with(
     width: f32,
     limit: usize,
     mut measure: impl FnMut(&str) -> f32,
-) -> Vec<String> {
+) -> Vec<WrappedSelectionLine> {
     let mut lines = Vec::new();
     let mut current = String::new();
+    let mut separator = "\n";
     let width = width.max(0.0);
     for (paragraph_index, paragraph) in text.split('\n').enumerate() {
         if paragraph_index > 0 {
-            lines.push(std::mem::take(&mut current));
+            lines.push(WrappedSelectionLine::new(std::mem::take(&mut current), separator));
+            separator = "\n";
             if lines.len() >= limit {
                 return lines;
             }
@@ -1255,7 +1258,8 @@ fn wrap_user_message_with(
                 continue;
             }
             if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
+                lines.push(WrappedSelectionLine::new(std::mem::take(&mut current), separator));
+                separator = " ";
                 if lines.len() >= limit {
                     return lines;
                 }
@@ -1283,7 +1287,8 @@ fn wrap_user_message_with(
                 current = graphemes[start..end].concat();
                 start = end;
                 if start < graphemes.len() {
-                    lines.push(std::mem::take(&mut current));
+                    lines.push(WrappedSelectionLine::new(std::mem::take(&mut current), separator));
+                    separator = "";
                     if lines.len() >= limit {
                         return lines;
                     }
@@ -1292,7 +1297,7 @@ fn wrap_user_message_with(
         }
     }
     if lines.len() < limit {
-        lines.push(current);
+        lines.push(WrappedSelectionLine::new(current, separator));
     }
     lines
 }
@@ -1302,7 +1307,7 @@ pub(super) fn wrap_user_message(
     text: &str,
     width: f32,
     opts: &DrawOpts,
-) -> Vec<String> {
+) -> Vec<WrappedSelectionLine> {
     wrap_cache::bubble(sugarloaf, text, width, opts, |sugarloaf| {
         wrap_user_message_with(text, width, USER_MESSAGE_MAX_LINES, |part| {
             measure_text_cached(sugarloaf, part, opts)
@@ -1325,7 +1330,7 @@ mod user_message_wrap_tests {
     fn url_and_long_token_wrap_at_the_measured_column() {
         let text = "See https://app.read.ai/analytics/meetings/01M3Z0Y8V3T1PFUB1RXYZ now";
         let lines = wrap_user_message_with(text, 12.0, 30, measure);
-        assert_eq!(lines.concat().replace(' ', ""), text.replace(' ', ""));
+        assert_eq!(lines.iter().map(|line| line.text.as_str()).collect::<String>().replace(' ', ""), text.replace(' ', ""));
         assert!(lines.len() > 3);
         assert!(lines.iter().all(|line| measure(line) <= 12.0));
     }
@@ -1335,7 +1340,7 @@ mod user_message_wrap_tests {
         let text = "界界 e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}\n👩‍💻👩‍💻👩‍💻";
         let lines = wrap_user_message_with(text, 4.0, 30, measure);
         assert_eq!(
-            lines,
+            lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
             [
                 "界界",
                 "e\u{301}e\u{301}e\u{301}e\u{301}",
@@ -1352,10 +1357,22 @@ mod user_message_wrap_tests {
         assert_eq!(user_message_text_width(100.0, 1.0), 44.0);
         let text = "abcdefghij";
         assert_eq!(
-            wrap_user_message_with(text, 4.0, 2, measure),
+            wrap_user_message_with(text, 4.0, 2, measure).iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
             ["abcd", "efgh"]
         );
-        assert_eq!(wrap_user_message_with(text, 10.0, 2, measure), [text]);
+        assert_eq!(wrap_user_message_with(text, 10.0, 2, measure)[0].text, text);
+    }
+
+    #[test]
+    fn clipboard_boundaries_survive_word_grapheme_and_explicit_breaks() {
+        let text = "first sentence https://example.test/longtoken\n\n界界 e\u{301}e\u{301} end";
+        for width in [1.0, 4.0, 12.0, 100.0] {
+            let lines = wrap_user_message_with(text, width, 200, measure);
+            let copied = lines.iter().enumerate().map(|(i, line)| {
+                format!("{}{}", if i == 0 { "" } else { line.separator }, line.text)
+            }).collect::<String>();
+            assert_eq!(copied, text);
+        }
     }
 }
 
@@ -1472,6 +1489,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
                 &line,
                 [line_x, line_y - 3.0 * s, line_w, opts.font_size + 8.0 * s],
             );
+            pane.set_selectable_line_separator(line_index, line.separator);
             if let Some((sel_left, sel_right)) =
                 pane.selectable_line_highlight(line_index)
             {

@@ -605,6 +605,7 @@ fn build_rows(
             Row {
                 line: SelectableLine {
                     text: doc.text[range.clone()].into(),
+                    separator: "\n",
                     rect: [0.0, y, x, line_h],
                     content_y: y,
                     caret_stops: stops.into(),

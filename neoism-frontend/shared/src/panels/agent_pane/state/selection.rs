@@ -36,6 +36,16 @@ impl NeoismAgentPane {
         self.register_selectable_line_with_caret_stops(text, rect, &[])
     }
 
+    pub fn set_selectable_line_separator(&mut self, index: usize, separator: &'static str) {
+        let line = &mut self.selectable_lines[index];
+        line.separator = separator;
+        if let Some(retained) = self.selection_history.get_mut(
+            &crate::panels::agent_pane::selection_model::selection_line_key(line),
+        ) {
+            retained.separator = separator;
+        }
+    }
+
     pub fn register_selectable_line_with_caret_stops(
         &mut self,
         text: &str,
@@ -404,8 +414,8 @@ impl NeoismAgentPane {
             .filter(|line| selection_contains_line(start, end, line))
             .collect();
         rows.sort_by(|a, b| compare_line_order(a, b));
-        let mut out = Vec::new();
-        for line in rows {
+        let mut joined = String::new();
+        for (index, line) in rows.into_iter().enumerate() {
             let at_start = selection_point_matches_line(start, line);
             let at_end = selection_point_matches_line(end, line);
             let (start_byte, end_byte) = if single_row {
@@ -420,13 +430,11 @@ impl NeoismAgentPane {
             } else {
                 (0, line.text.len())
             };
-            out.push(line.slice_between(start_byte, end_byte));
+            if index > 0 {
+                joined.push_str(line.separator);
+            }
+            joined.push_str(&line.slice_between(start_byte, end_byte));
         }
-        let joined = out
-            .iter()
-            .map(|s| s.trim_end_matches('\n'))
-            .collect::<Vec<_>>()
-            .join("\n");
         if joined.trim().is_empty() {
             self.clear_selection();
             None
@@ -505,6 +513,26 @@ mod retained_geometry_tests {
         SelectableCaretStop, SelectionGeometry,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn clipboard_uses_logical_boundaries_in_both_drag_directions() {
+        for reverse in [false, true] {
+            let mut pane = NeoismAgentPane::default();
+            let rows = [("paragraph", "\n"), ("wrap", " "), ("ped", ""),
+                ("", "\n"), ("    code", "\n"), ("", "\n"),
+                ("    more code", "\n")];
+            for (i, (text, separator)) in rows.iter().enumerate() {
+                let index = pane.register_selectable_line(text, [0.0, i as f32 * 24.0, 100.0, 18.0]);
+                pane.set_selectable_line_separator(index, separator);
+            }
+            let start = (0.0, 4.0);
+            let end = (100.0, 148.0);
+            let (anchor, focus) = if reverse { (end, start) } else { (start, end) };
+            assert!(pane.begin_selection_on_text_at(anchor.0, anchor.1));
+            assert!(pane.drag_selection_to(focus.0, focus.1));
+            assert_eq!(pane.end_selection().as_deref(), Some("paragraph wrapped\n\n    code\n\n    more code"));
+        }
+    }
 
     #[test]
     fn translated_clipped_rows_share_history_and_copy_across_scroll_windows() {

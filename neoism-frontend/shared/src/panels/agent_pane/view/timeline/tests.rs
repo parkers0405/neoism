@@ -1583,7 +1583,8 @@ diff --git a/src/lib.rs b/src/lib.rs
 "
     .to_string();
 
-    assert!(prepared_message_tool_diff_sections(&patch, false).is_some());
+    // Collapsed patch parents render only the summary; prepare file diffs on expand.
+    assert!(prepared_message_tool_diff_sections(&patch, false).is_none());
     let mut pending = patch.clone();
     pending.status = "running".to_string();
     assert!(prepared_message_tool_diff_sections(&pending, false).is_none());

@@ -17,7 +17,13 @@ test("a twelve-fence transcript finishes intrinsic preparation and stays finishe
       messages: [{ id: "answer", role: "Assistant", kind: "Assistant", text }], next_cursor: null,
     } } });
     let frame = coreCall<{ preparing: boolean }>("agenttimeline.layout", { id, width: 1100, height: 900 });
-    for (let i = 0; i < 300 && frame.preparing; i++) {
+    // Preparation has a 1.5ms wall-clock budget per frame, not a fixed line
+    // count. Cold macOS font measurement needs more frames than Linux; 300
+    // frames can expire while it is still making legitimate forward progress.
+    // Keep a finite deadline so cache eviction/restart loops still fail, and
+    // a work bound allowing one line of progress per frame plus finalization.
+    const deadline = performance.now() + 30_000;
+    for (let i = 0; i < 12_050 && frame.preparing && performance.now() < deadline; i++) {
       frame = coreCall<{ preparing: boolean }>("agenttimeline.frame", { id });
     }
     expect(frame.preparing).toBe(false);
@@ -27,4 +33,4 @@ test("a twelve-fence transcript finishes intrinsic preparation and stays finishe
   } finally {
     coreCall("agenttimeline.dispose", { id });
   }
-}, 10000);
+}, 35000);

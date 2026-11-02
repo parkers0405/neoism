@@ -7,13 +7,14 @@ use std::rc::Rc;
 use neoism_paint::text::DrawOpts;
 
 use crate::panels::agent_pane::input_controller::InputWrapRow;
+use crate::panels::agent_pane::selection_model::WrappedSelectionLine;
 
 const ENTRY_LIMIT: usize = 32;
 const BYTE_LIMIT: usize = 512 * 1024;
 
 thread_local! {
     static PROMPTS: RefCell<WrapCache<Rc<Vec<InputWrapRow>>>> = RefCell::new(WrapCache::default());
-    static BUBBLES: RefCell<WrapCache<Vec<String>>> = RefCell::new(WrapCache::default());
+    static BUBBLES: RefCell<WrapCache<Vec<WrappedSelectionLine>>> = RefCell::new(WrapCache::default());
     static FONT_KEYS: RefCell<Option<FontKey>> = const { RefCell::new(None) };
 }
 
@@ -232,8 +233,8 @@ pub(super) fn bubble(
     text: &str,
     width: f32,
     opts: &DrawOpts,
-    build: impl FnOnce(&mut dyn crate::primitives::paint::Paint) -> Vec<String>,
-) -> Vec<String> {
+    build: impl FnOnce(&mut dyn crate::primitives::paint::Paint) -> Vec<WrappedSelectionLine>,
+) -> Vec<WrappedSelectionLine> {
     let key = LayoutKey::new(sugarloaf, width, opts);
     cached(
         &BUBBLES,
@@ -241,8 +242,8 @@ pub(super) fn bubble(
         text,
         || build(sugarloaf),
         |lines| {
-            lines.len() * std::mem::size_of::<String>()
-                + lines.iter().map(String::len).sum::<usize>()
+            lines.len() * std::mem::size_of::<WrappedSelectionLine>()
+                + lines.iter().map(|line| line.len()).sum::<usize>()
         },
     )
 }
@@ -404,7 +405,7 @@ mod tests {
     fn bubble_hits_preserve_graphemes_and_resize_rewraps() {
         use unicode_segmentation::UnicodeSegmentation;
         thread_local! {
-            static TEST: RefCell<WrapCache<Vec<String>>> = RefCell::new(WrapCache::default());
+            static TEST: RefCell<WrapCache<Vec<WrappedSelectionLine>>> = RefCell::new(WrapCache::default());
         }
         let text = "e\u{301}e\u{301}e\u{301}\n👩‍💻👩‍💻👩‍💻";
         let builds = std::cell::Cell::new(0);
@@ -421,8 +422,9 @@ mod tests {
                         part.graphemes(true).count() as f32
                     })
                 },
-                |lines| lines.iter().map(String::len).sum(),
+                |lines| lines.iter().map(|line| line.len()).sum(),
             )
+            .into_iter().map(|line| line.text).collect::<Vec<_>>()
         };
         for _ in 0..10 {
             assert_eq!(wrap(2.0), ["e\u{301}e\u{301}", "e\u{301}", "👩‍💻👩‍💻", "👩‍💻"]);

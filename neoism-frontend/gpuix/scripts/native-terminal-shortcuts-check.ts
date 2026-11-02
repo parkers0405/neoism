@@ -34,6 +34,21 @@ try{
  stage="unbound Control+Shift+V retains terminal paste fallback";
  await terminal.press("ctrl-shift-v");await until(()=>input().length>0);
  if(new TextDecoder().decode(Uint8Array.from(input()))!=="\x1b[200~pasted one\npasted two\x1b[201~")throw new Error("Terminal paste fallback failed");
- console.log(JSON.stringify({ok:true,checks:["native selected terminal copy","Ctrl+C respects configured Copy","Ctrl+V brackets exact clipboard bytes once","explicit None disables default paste","unbound terminal clipboard fallback"]}));
+  server.ptyRequests.splice(0);
+  stage="Hyprland universal paste arrives as Shift+Insert";
+  await terminal.press("shift-insert");await until(()=>input().length>0);
+  if(new TextDecoder().decode(Uint8Array.from(input()))!=="\x1b[200~pasted one\npasted two\x1b[201~")throw new Error(`Compositor paste leaked Insert instead of clipboard: ${input()}`);
+  server.ptyRequests.splice(0);
+  for(const chord of ["cmd-p","alt-p","ctrl-shift-p"]){
+   stage=`${chord} opens the command modal from the terminal`;
+   await terminal.press(chord);await app.getByTestId("command-dialog").waitFor();
+   if(await app.getByTestId("finder").count())throw new Error(`${chord} opened file search`);
+   await app.getByTestId("command-palette").press("escape");await terminal.waitFor();
+  }
+  if(input().length)throw new Error("Command modal shortcuts leaked input to PTY");
+  stage="Control+P remains file search";
+  await terminal.press("ctrl-p");await app.getByTestId("finder").waitFor();
+  if(await app.getByTestId("command-dialog").count())throw new Error("Control+P unexpectedly opened commands");
+  console.log(JSON.stringify({ok:true,checks:["native selected terminal copy","Ctrl+C respects configured Copy","Ctrl+V brackets exact clipboard bytes once","explicit None disables default paste","unbound terminal clipboard fallback","Shift+Insert pastes without escape leakage","Command+P, Alt+P and Ctrl+Shift+P open command modal","Ctrl+P remains file search"]}));
 }catch(error){console.error(`Terminal shortcut check failed at ${stage}`);throw error;}
 finally{await app.close();server.stop();rmSync(directory,{recursive:true,force:true});}

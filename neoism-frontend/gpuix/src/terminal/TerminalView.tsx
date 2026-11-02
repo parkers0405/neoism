@@ -82,7 +82,9 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
       return;
     }
     const clipboardChord=!mods.alt&&((mods.cmd&&!mods.ctrl)||(mods.ctrl&&mods.shift&&!mods.cmd));
-    if(clipboardChord&&(key==="c"||key==="v")){
+    // Compositor "universal paste" shortcuts commonly arrive as Shift+Insert.
+    const shiftInsert=key==="insert"&&mods.shift&&!mods.ctrl&&!mods.alt&&!mods.cmd;
+    if(clipboardChord&&(key==="c"||key==="v")||shiftInsert){
       event.preventDefault(); event.stopPropagation();
       if(!released){
         intercepted.add(key);

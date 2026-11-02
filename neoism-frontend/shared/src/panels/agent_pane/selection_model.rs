@@ -1,5 +1,28 @@
 use std::sync::Arc;
 
+/// A painted row retains the logical boundary that wrapping removed. In-word
+/// wraps join with nothing, word wraps with a space, and source lines with LF.
+#[derive(Clone, Debug)]
+pub struct WrappedSelectionLine {
+    pub text: String,
+    pub separator: &'static str,
+}
+
+impl WrappedSelectionLine {
+    pub fn new(text: String, separator: &'static str) -> Self {
+        Self { text, separator }
+    }
+}
+
+impl std::ops::Deref for WrappedSelectionLine {
+    type Target = str;
+    fn deref(&self) -> &str { &self.text }
+}
+
+impl From<&str> for WrappedSelectionLine {
+    fn from(text: &str) -> Self { Self::new(text.into(), "\n") }
+}
+
 /// Immutable exact geometry; clones retain both allocations. Code rows use
 /// local stops plus a registration origin. Inline Markdown retains its historic
 /// screen-origin accumulation (registered with zero additional translation).
@@ -25,6 +48,7 @@ pub struct SelectableCaretStop {
 #[derive(Clone, Debug)]
 pub struct SelectableLine {
     pub text: Arc<str>,
+    pub separator: &'static str,
     pub rect: [f32; 4],
     pub content_y: f32,
     pub caret_stops: Arc<[SelectableCaretStop]>,
@@ -35,6 +59,7 @@ impl SelectableLine {
     pub fn new(text: &str, rect: [f32; 4], content_y: f32) -> Self {
         Self {
             text: text.into(),
+            separator: "\n",
             rect,
             content_y,
             caret_stops: uniform_caret_stops(text, rect).into(),
@@ -53,6 +78,7 @@ impl SelectableLine {
             self.text = text.into();
         }
         self.rect = rect;
+        self.separator = "\n";
         self.content_y = content_y;
         self.caret_origin_x = 0.0;
         self.caret_stops =
@@ -78,6 +104,7 @@ impl SelectableLine {
         };
         Self {
             text: geometry.text.clone(),
+            separator: "\n",
             caret_stops: geometry.stops.clone(),
             rect,
             content_y,
@@ -245,6 +272,7 @@ mod tests {
     fn exact_stops_select_a_narrow_subrange() {
         let line = SelectableLine {
             text: "WW ii".into(),
+            separator: "\n",
             rect: [10.0, 20.0, 50.0, 18.0],
             content_y: 20.0,
             caret_origin_x: 0.0,

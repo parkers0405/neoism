@@ -133,7 +133,7 @@ fn measured_card_equals_sum_of_block_heights() {
 fn heading_height_matches_drawn_line_advance() {
     let s = 1.5;
     for level in 1..=4 {
-        let lines = vec!["x".to_string(); 3];
+        let lines = vec![WrappedSelectionLine::from("x"); 3];
         let block = AssistantMarkdownBlock::Heading {
             level,
             lines: lines.clone(),
@@ -698,7 +698,7 @@ fn outer_blank_blocks_never_inflate_a_message_card() {
     assert!(matches!(
         blocks.as_slice(),
         [AssistantMarkdownBlock::Paragraph(lines)]
-            if lines.len() == 1 && lines[0] == "visible"
+            if lines.len() == 1 && lines[0].text == "visible"
     ));
 }
 

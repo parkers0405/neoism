@@ -50,6 +50,14 @@ try{
   await press("c",{ctrl:true},"\x03");assert.equal(writes,3);assert.equal(clipboard,buffer.selectedText);assert.deepEqual(sent,[]);
   clipboard="configured paste\nsecond line";
   await press("v",{ctrl:true},"\x16");assert.equal(reads,3);assert.equal(new TextDecoder().decode(Uint8Array.from(sent.flat())),"\x1b[200~configured paste\nsecond line\x1b[201~");
-  sent.length=0;await press("v",{cmd:true});assert.equal(reads,3);assert.deepEqual(sent,[]);assert.equal(global,3);
-  console.log(JSON.stringify({interruptWithSelection:true,interruptFromVi:true,commandClipboard:true,bracketedPaste:true,globalBindingsRespected:true}));
+   sent.length=0;await press("v",{cmd:true});assert.equal(reads,3);assert.deepEqual(sent,[]);assert.equal(global,3);
+   bindings=new KeyboardBindings();
+   clipboard="compositor paste\nsecond line";
+   await press("insert",{shift:true},"");assert.equal(reads,4);assert.equal(new TextDecoder().decode(Uint8Array.from(sent.flat())),"\x1b[200~compositor paste\nsecond line\x1b[201~");
+   sent.length=0;await buffer.write(new TextEncoder().encode("\x1b[?2004l"));
+   await press("insert",{shift:true},"");assert.equal(reads,5);assert.equal(new TextDecoder().decode(Uint8Array.from(sent.flat())),"compositor paste\rsecond line");
+   sent.length=0;await press("insert",{},"");assert.equal(reads,5);assert.equal(new TextDecoder().decode(Uint8Array.from(sent.flat())),"\x1b[2~","Plain Insert remains terminal input");
+   sent.length=0;bindings=new KeyboardBindings([{key:"Insert",with:"Shift",action:"None"}]);
+   await press("insert",{shift:true},"");assert.equal(reads,5);assert.deepEqual(sent,[]);
+   console.log(JSON.stringify({interruptWithSelection:true,interruptFromVi:true,commandClipboard:true,bracketedPaste:true,globalBindingsRespected:true,compositorPaste:true}));
 }finally{root.unmount();disposeTerminalSessions(client);}

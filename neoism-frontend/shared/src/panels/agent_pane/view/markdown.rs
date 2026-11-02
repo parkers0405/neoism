@@ -9,7 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
 use crate::editor::neodraw::{render_scene, Camera, Vec2};
-use crate::panels::agent_pane::selection_model::SelectableCaretStop;
+use crate::panels::agent_pane::selection_model::{SelectableCaretStop, WrappedSelectionLine};
 use crate::panels::agent_pane::state::NeoismAgentPane;
 
 use super::code_block::{
@@ -126,7 +126,7 @@ pub enum AssistantListMarker {
 pub struct AssistantListItem {
     pub marker: AssistantListMarker,
     pub depth: usize,
-    pub lines: Vec<String>,
+    pub lines: Vec<WrappedSelectionLine>,
 }
 
 fn inline_segment_link_target(segment: &MarkdownInlineSegment) -> Option<&str> {
@@ -233,13 +233,13 @@ impl CopySourceCache {
 
 #[derive(Clone, Debug)]
 pub enum AssistantMarkdownBlock {
-    Paragraph(Vec<String>),
+    Paragraph(Vec<WrappedSelectionLine>),
     Heading {
         level: usize,
-        lines: Vec<String>,
+        lines: Vec<WrappedSelectionLine>,
     },
     ListItem(AssistantListItem),
-    Quote(Vec<String>),
+    Quote(Vec<WrappedSelectionLine>),
     Rule,
     Table {
         rows: Vec<Vec<String>>,
@@ -348,6 +348,7 @@ pub trait AgentMarkdownPane {
     );
 
     fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize;
+    fn set_selectable_line_separator(&mut self, _index: usize, _separator: &'static str) {}
     fn register_selectable_line_with_caret_stops(
         &mut self,
         text: &str,
@@ -478,6 +479,10 @@ impl AgentMarkdownPane for NeoismAgentPane {
 
     fn register_selectable_line(&mut self, text: &str, rect: [f32; 4]) -> usize {
         NeoismAgentPane::register_selectable_line(self, text, rect)
+    }
+
+    fn set_selectable_line_separator(&mut self, index: usize, separator: &'static str) {
+        NeoismAgentPane::set_selectable_line_separator(self, index, separator)
     }
 
     fn register_selectable_line_with_caret_stops(
@@ -652,6 +657,7 @@ fn wrap_table_cells(
             let text_w = (cell_w - 28.0 * s).max(24.0 * s);
             cell.lines()
                 .flat_map(|line| wrap_inline_aware(sugarloaf, line.trim(), text_w, opts))
+                .map(|line| line.text)
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -833,10 +839,11 @@ fn wrap_inline_aware(
     text: &str,
     width: f32,
     opts: &DrawOpts,
-) -> Vec<String> {
+) -> Vec<WrappedSelectionLine> {
     let tokens = inline_wrap_tokens(text);
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines = Vec::new();
     let mut current = String::new();
+    let mut separator = "\n";
     // Running width of `current` from per-token (shape-cached) advances. The
     // exact whole-line measure re-parses and re-shapes the entire line, so it
     // only runs when the estimate lands near the wrap edge; doing it for every
@@ -877,7 +884,8 @@ fn wrap_inline_aware(
                     current_width = candidate_width;
                 }
                 None => {
-                    lines.push(std::mem::take(&mut current));
+                    lines.push(WrappedSelectionLine::new(std::mem::take(&mut current), separator));
+                    separator = if add_space { " " } else { "" };
                     current = source;
                     current_width = source_width;
                 }
@@ -885,10 +893,10 @@ fn wrap_inline_aware(
         }
     }
     if !current.is_empty() {
-        lines.push(current);
+        lines.push(WrappedSelectionLine::new(current, separator));
     }
     if lines.is_empty() {
-        lines.push(String::new());
+        lines.push(WrappedSelectionLine::new(String::new(), separator));
     }
     lines
 }
@@ -2491,6 +2499,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                         text_x,
                         line_y,
                         line,
+                        line.separator,
                         &opts,
                         theme,
                         suppress_interactions,
@@ -2526,6 +2535,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                         text_x,
                         line_y,
                         line,
+                        line.separator,
                         &heading_opts,
                         theme,
                         suppress_interactions,
@@ -2622,6 +2632,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                         content_x,
                         line_y,
                         line,
+                        line.separator,
                         &opts,
                         theme,
                         suppress_interactions,
@@ -2652,6 +2663,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                         text_x + 14.0 * s,
                         line_y,
                         line,
+                        line.separator,
                         &muted_opts,
                         theme,
                         suppress_interactions,
@@ -3360,6 +3372,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
     mut x: f32,
     y: f32,
     line: &str,
+    separator: &'static str,
     opts: &DrawOpts,
     theme: &IdeTheme,
     suppress_interactions: bool,
@@ -3389,6 +3402,7 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
             [x, y - 3.0, geometry.width.max(12.0), opts.font_size + 8.0],
             0.0,
         );
+        pane.set_selectable_line_separator(line_index, separator);
         if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(line_index) {
             // Sub-line highlight follows the drag end-points so the user can
             // grab a single word instead of being forced into a full row.
@@ -3759,6 +3773,7 @@ fn render_markdown_table<P: AgentMarkdownPane>(
                     column_x + 14.0 * s,
                     line_y,
                     line,
+                    if col > 0 && line_ix == 0 { "\t" } else { "\n" },
                     &cell_opts,
                     theme,
                     suppress_interactions,

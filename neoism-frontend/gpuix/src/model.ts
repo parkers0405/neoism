@@ -1223,9 +1223,12 @@ export class WorkspaceModel {
     const sourceId=this.state.activeSurfaceId;
     const home=this.state.surfaces.find(surface=>surface.id===sourceId&&surface.kind==="agent"&&!surface.sessionId&&surface.workspaceId===workspace.id);
     const homeDraftKey=home?this.composerDraftKey(undefined,home.id):undefined;
-    const session = await this.agentSdk.forWorkspace(workspace.id).sessions.create({
+    const declaredRoot=this.state.workspaces.find(entry=>entry.id===workspace.id)?.root_dir;
+    const paths=hostPaths(declaredRoot||""),relative=declaredRoot&&workspace.root_dir?paths.relative(declaredRoot,workspace.root_dir):undefined;
+    const outsideWorkspace=relative!==undefined&&(relative===".."||relative.startsWith(`..${paths.sep}`)||paths.isAbsolute(relative));
+    const session = await this.agentSdk.createSession(workspace.id,{
       directory: workspace.root_dir || undefined, agent: selection.agent || undefined, model: sdkModel(selection),
-    });
+    },outsideWorkspace);
     const thread = Schema.decodeUnknownSync(ThreadSchema)({ session_id: session.id, directory: workspace.root_dir, title: this.agentTitles.get(session.id) || session.title || "New conversation" });
     this.sessionWorkspaces.set(thread.session_id, workspace.id);
     // Creating with defaults lets the Agent choose a concrete model. Retain

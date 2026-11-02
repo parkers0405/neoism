@@ -138,3 +138,22 @@ test("session routing keeps paired and denied callers scoped and never retries a
   expect(requests).toEqual([...(paired?[]:["/agent/system/info"]),"/agent/workspaces/shared/v2/sessions/old/prompt"]);
  }
 });
+
+test("terminal-followed directory creation uses desktop capability once while paired callers stay scoped",async()=>{
+ for(const mode of ["desktop","paired","denied"]){
+  const requests:Array<{path:string;directory:string|null;body?:any}>=[];
+  const fetcher=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+   const path=new URL(String(input)).pathname;
+   requests.push({path,directory:new URL(String(input)).searchParams.get("directory"),body:typeof init?.body==="string"?JSON.parse(init.body):undefined});
+   if(path.endsWith("/info"))return mode==="desktop"?Response.json({systemId:"fixture",capabilityVersion:1}):new Response(null,{status:403});
+   if(path==="/agent/system/v2/sessions")return Response.json({id:"followed",title:"New",directory:"/sibling",time:{created:1,updated:1}});
+   return Response.json({code:"forbidden",message:"The caller is not authorized for this directory",retryable:false,details:{}},{status:403});
+  })as typeof fetch;
+  const sdk=new AgentSdk({endpoint:"ws://localhost:7878/session",authToken:"operator",...(mode==="paired"?{pairingToken:"guest"}:{})},fetcher);cleanups.push(()=>sdk.dispose());
+  let error:unknown;
+  try{await sdk.createSession("original",{directory:"/sibling"},true);}catch(caught){error=caught;}
+  expect(!!error).toBe(mode!=="desktop");
+  expect(requests.map(request=>request.path)).toEqual([...(mode==="paired"?[]:["/agent/system/info"]),mode==="desktop"?"/agent/system/v2/sessions":"/agent/workspaces/original/v2/sessions"]);
+  expect(requests.at(-1)?.directory).toBe("/sibling");
+ }
+});

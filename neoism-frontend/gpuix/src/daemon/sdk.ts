@@ -68,6 +68,13 @@ export class AgentSdk {
     this.clients.set(workspaceId, client);
     return client;
   }
+  /** A local terminal may navigate beyond the workspace's declared root.
+   * Only the daemon-confirmed desktop capability can create there. Paired
+   * callers retain workspace authorization, and creation is sent just once. */
+  async createSession(workspaceId:string,request:Parameters<NeoismClient["sessions"]["create"]>[0],outsideWorkspace=false){
+    const client=outsideWorkspace?await this.catalogReader(workspaceId):this.forWorkspace(workspaceId);
+    return client.sessions.create(request);
+  }
   /** Existing conversations use the same daemon-granted access as the catalog.
    * Local legacy/cross-workspace chats keep their stored scope on the server;
    * paired callers still use their authorized workspace. Never retry a mutation. */

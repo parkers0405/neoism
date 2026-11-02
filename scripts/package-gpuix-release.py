@@ -65,8 +65,11 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     shutil.copytree(bundle / 'licenses', runtime / 'licenses')
     for name in ['LICENSE', 'NOTICE', 'LICENSE.ghostty']:
         shutil.copy2(bundle / name, runtime / name)
-    # Immutable old updaters require web/index.html and copy the whole tree.
-    (bundle / 'web/index.html').write_text('<!-- Neoism native runtime resources; no browser UI. -->\n')
+    # Immutable old Linux updaters require BOTH HTML paths and copy the whole tree.
+    # Only native trees were copied above: never preserve an old browser GUI.
+    (bundle / 'web/agent-gui').mkdir()
+    for marker in ['web/index.html', 'web/agent-gui/index.html']:
+        (bundle / marker).write_bytes(b'<!-- Neoism native runtime resources; no browser UI. -->\n')
     run(bundle / ('neoism' + SUFFIX), '--neoism-verify-runtime')
     assert VERSION in run(bundle / ('neoism' + SUFFIX), '--version')
     if SYSTEM == 'linux':

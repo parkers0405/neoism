@@ -24,7 +24,10 @@ cp "$repo_root/neoism-frontend/shared/assets/icons/neoism.png" "$bundle/neoism.p
 # Never copy stale browser distributions from a previous native build.
 mkdir -p "$bundle/web"
 cp -a "$frontend/dist/web/app" "$frontend/dist/web/native" "$bundle/web/"
-printf '%s\n' '<!-- Neoism native runtime resources; no browser UI. -->' > "$bundle/web/index.html"
+mkdir -p "$bundle/web/agent-gui"
+for marker in index.html agent-gui/index.html; do
+  printf '%s\n' '<!-- Neoism native runtime resources; no browser UI. -->' > "$bundle/web/$marker"
+done
 cp "$repo_root/scripts/install-gpuix-bundle.sh" "$bundle/install-bundle.sh"
 tar -C "$staging" -czf "$out/neoism-linux-x86_64.tar.gz.next" neoism-linux-x86_64
 mv -f "$out/neoism-linux-x86_64.tar.gz.next" "$out/neoism-linux-x86_64.tar.gz"

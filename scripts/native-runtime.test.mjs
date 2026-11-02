@@ -15,9 +15,15 @@ test('native staging drops both stale browser UIs but keeps native runtime bytes
     writeFileSync(join(root, 'index.html'), '<html>old browser UI</html>');
     writeFileSync(join(root, 'neoism_bg.wasm'), 'old workspace UI');
     pruneBrowserAssets(root);
-    assert.deepEqual(readdirSync(root).sort(), ['app', 'index.html', 'native']);
+    assert.deepEqual(readdirSync(root).sort(), ['agent-gui', 'app', 'index.html', 'native']);
+    assert.deepEqual(readdirSync(join(root, 'agent-gui')), ['index.html']);
     assert.equal(readFileSync(join(root, 'app/payload'), 'utf8'), 'app');
     assert.equal(readFileSync(join(root, 'native/payload'), 'utf8'), 'native');
     assert.equal(readFileSync(join(root, 'index.html'), 'utf8'), runtimeMarker);
+    assert.equal(readFileSync(join(root, 'agent-gui/index.html'), 'utf8'), runtimeMarker);
+    assert.match(runtimeMarker, /^<!--[^<>]*-->\n$/);
+    pruneBrowserAssets(root);
+    assert.deepEqual(readdirSync(join(root, 'agent-gui')), ['index.html']);
+    assert.equal(readFileSync(join(root, 'agent-gui/index.html'), 'utf8'), runtimeMarker);
   } finally { rmSync(root, {recursive: true, force: true}); }
 });

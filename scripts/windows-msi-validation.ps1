@@ -38,9 +38,13 @@ foreach ($binary in @('neoism.exe', 'neoism-workspace-daemon.exe', 'neoism-agent
 foreach ($binary in @("neoism.exe", "neoism-workspace-daemon.exe", "neoism-agent.exe", "neoism-agent-lua-runner.exe")) {
   if (-not (Test-Path (Join-Path $installDir $binary))) { throw "$binary was not installed" }
 }
-if (-not (Test-Path (Join-Path $installDir "web\index.html"))) { throw "web UI was not installed" }
+foreach ($marker in @('web\index.html', 'web\agent-gui\index.html')) {
+    $content = [IO.File]::ReadAllText((Join-Path $installDir $marker))
+    if ($content -cne "<!-- Neoism native runtime resources; no browser UI. -->`n") { throw "Invalid native runtime compatibility marker: $marker" }
+}
 if (-not (Test-Path (Join-Path $installDir "web\app\manifest.json"))) { throw "native application runtime was not installed" }
-if (Test-Path (Join-Path $installDir "web\agent-gui")) { throw "browser GUI was installed" }
+$guiFiles = @(Get-ChildItem (Join-Path $installDir 'web\agent-gui') -Force)
+if ($guiFiles.Count -ne 1 -or $guiFiles[0].Name -ne 'index.html' -or $guiFiles[0].PSIsContainer) { throw "browser GUI assets were installed instead of only the inert marker" }
 Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--version' "$evidence/version" 30
 $version = (Get-Content "$evidence/version.stdout.log" | Out-String).Trim()
 if ($version -notmatch "neoism") { throw "installed executable did not report its version" }

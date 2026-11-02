@@ -66,7 +66,11 @@ for name in "${binaries[@]}"; do install -m 0755 "$payload/$name" "$transaction/
 for name in "${resources[@]}"; do install -m 0644 "$payload/$name" "$transaction/new/$name"; done
 mkdir -p "$transaction/new/web"
 cp -a "$payload/web/app" "$payload/web/native" "$transaction/new/web/"
-printf '%s\n' '<!-- Neoism native runtime resources; no browser UI. -->' > "$transaction/new/web/index.html"
+# Recreate only inert markers, never copy a payload's stale browser assets.
+mkdir -p "$transaction/new/web/agent-gui"
+for marker in index.html agent-gui/index.html; do
+  printf '%s\n' '<!-- Neoism native runtime resources; no browser UI. -->' > "$transaction/new/web/$marker"
+done
 cp -a "$payload/licenses" "$transaction/new/licenses"
 for component in "${components[@]}"; do
   moved+=("$component")

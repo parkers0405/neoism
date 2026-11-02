@@ -13,7 +13,7 @@ cleanup() {
 trap cleanup EXIT
 payload="$fixture/payload"
 prefix="$fixture/installed"
-mkdir -p "$payload/web/app" "$payload/web/native" "$payload/web/agent-gui" "$payload/licenses" "$prefix/bin"
+mkdir -p "$payload/web/app" "$payload/web/native" "$payload/web/agent-gui/assets" "$payload/licenses" "$prefix/bin"
 printf '{}' > "$payload/web/app/manifest.json"
 printf 'native library' > "$payload/web/native/display.node"
 for binary in neoism neoism-workspace-daemon neoism-agent; do
@@ -23,6 +23,7 @@ done
 for resource in libneoism_gpuix_core.so libghostty-vt.so LICENSE.ghostty LICENSE NOTICE; do printf '%s\n' "$resource" > "$payload/$resource"; done
 printf 'font license' > "$payload/licenses/font.txt"
 printf '<html>Agent GUI</html>' > "$payload/web/agent-gui/index.html"
+printf 'stale browser JS' > "$payload/web/agent-gui/assets/app.js"
 printf 'previous version\n' > "$prefix/bin/neoism"
 # Incomplete bundles must leave the installed executable intact.
 mv "$payload/libghostty-vt.so" "$fixture/ghostty"
@@ -32,12 +33,21 @@ mv "$fixture/ghostty" "$payload/libghostty-vt.so"
 bash "$repo_root/scripts/install-gpuix-bundle.sh" "$payload" "$prefix"
 [[ "$("$prefix/bin/neoism")" == migrated-neoism ]]
 [[ -f "$prefix/bin/libneoism_gpuix_core.so" && -f "$prefix/bin/libghostty-vt.so" && -f "$prefix/bin/web/app/manifest.json" && -f "$prefix/bin/web/native/display.node" ]]
-[[ ! -e "$prefix/bin/web/agent-gui" ]]
+assert_markers() {
+  local marker
+  for marker in index.html agent-gui/index.html; do
+    [[ "$(cat "$prefix/bin/web/$marker")" == '<!-- Neoism native runtime resources; no browser UI. -->' ]]
+  done
+  [[ ! -e "$prefix/bin/web/agent-gui/assets" ]]
+  [[ "$(printf '%s\n' "$prefix/bin/web/agent-gui/"*)" == "$prefix/bin/web/agent-gui/index.html" ]]
+}
+assert_markers
 # Even a dirty payload must not install either browser UI. Upgrades drop old assets.
 mkdir -p "$prefix/bin/web/agent-gui"
 printf stale > "$prefix/bin/web/agent-gui/stale.js"
 bash "$repo_root/scripts/install-gpuix-bundle.sh" "$payload" "$prefix"
 [[ ! -e "$prefix/bin/web/agent-gui/stale.js" ]]
+assert_markers
 # A running daemon/window must retain its executable-relative resources and
 # be able to spawn itself after an upgrade. Use a real executable, as the app is.
 cat > "$fixture/previous.c" <<'C'

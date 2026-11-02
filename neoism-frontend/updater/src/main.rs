@@ -147,6 +147,11 @@ fn wait_for_process_exit(pid:u32,timeout:Duration)->Result<(),Error>{let end=Ins
     #[cfg(all(unix, not(target_os="macos")))]
     fn legacy_installer_keeps_gpuix_runtime() {
         let Some(payload)=std::env::var_os("NEOISM_TEST_UPDATE_PAYLOAD") else { return; };
+        // Keep the deployed .2 validator's contract even when the current
+        // installer stops requiring the retired browser UI. Only a marker is needed.
+        for required in ["web/index.html", "web/agent-gui/index.html"] {
+            assert!(Path::new(&payload).join(required).is_file(), "deployed updater requires {required}");
+        }
         let target=tempfile::tempdir().unwrap();
         let executable=target.path().join("neoism");
         std::fs::write(&executable,"old installation").unwrap();

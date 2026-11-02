@@ -33,7 +33,11 @@ def main():
                          "licenses/GPUIX-native.txt", "licenses/GPUIX-solid.txt",
                          "web/app/manifest.json"]:
             assert (prefix / "bin" / resource).is_file(), resource
-        assert {p.name for p in (prefix / 'bin/web').iterdir()} == {'app', 'native', 'index.html'}
+        assert {p.name for p in (prefix / 'bin/web').iterdir()} == {'agent-gui', 'app', 'native', 'index.html'}
+        for web in [payload / 'web', prefix / 'bin/web']:
+            assert {p.name for p in (web / 'agent-gui').iterdir()} == {'index.html'}
+            for marker in ['index.html', 'agent-gui/index.html']:
+                assert (web / marker).read_text() == '<!-- Neoism native runtime resources; no browser UI. -->\n'
         env = {**os.environ,
                "NEOISM_GPUIX_TEST_BINARY": str(binary),
                "NEOISM_GPUIX_WORKSPACE_DAEMON": str(prefix / "bin/neoism-workspace-daemon")}

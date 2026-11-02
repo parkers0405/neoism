@@ -7,7 +7,7 @@ export interface RecordedAppNode {
 /** A native boundary for full component-graph tests. It records public GPUIX
  * mutations and sends fixed positive layout events, never initializes a GPU
  * renderer/window and deliberately does not implement a layout engine. */
-export function createRecordingAppRenderer() {
+export function createRecordingAppRenderer(layoutBounds?:(node:RecordedAppNode,box:{x:number;y:number;width:number;height:number})=>{x:number;y:number;width:number;height:number}) {
   const nodes = new Map<number, RecordedAppNode>(), layouts = new Set<number>(), focusRequests: number[] = [];
   let nativeRoot: number | undefined, focused: number | null = null, windowId = 0;
   const bounds = new Map<number, { x: number; y: number; width: number; height: number }>();
@@ -65,7 +65,8 @@ export function createRecordingAppRenderer() {
         for (const node of [...nodes.values()]) if (node.events.has("layout") && !layouts.has(node.id)) {
           layouts.add(node.id); if (!nodes.has(node.id)) continue;
           const small = node.type === "text", testId = String(node.props.testId || "");
-          const box = { x: testId === "file-tree" ? 0 : 300, y: 90, width: small ? Math.max(12, node.text.length * 8) : 960, height: small ? 24 : 680 };
+          const fallback = { x: testId === "file-tree" ? 0 : 300, y: 90, width: small ? Math.max(12, node.text.length * 8) : 960, height: small ? 24 : 680 };
+          const box=layoutBounds?.(node,fallback)||fallback;
           bounds.set(node.id, box); root.dispatch({ elementId: node.id, eventType: "layout", ...box }); progress = true;
         }
         while (focusRequests.length) {

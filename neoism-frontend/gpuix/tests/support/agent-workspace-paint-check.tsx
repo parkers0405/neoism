@@ -6,10 +6,15 @@ import {loadConfig} from "../../src/config";
 import {WorkspaceModel} from "../../src/model";
 import {DaemonConnection} from "../../src/daemon/client";
 import {coreCall} from "../../src/native-core";
+import {tabChrome} from "../../src/layout/tab-chrome";
 import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer,type RecordedAppNode} from "./full-app-recording-renderer";
 const daemon=createAgentDaemon({deferCreations:false}),config={...loadConfig(["--config","/nonexistent/agent-workspace-paint"],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
-const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
+const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer((node,box)=>{
+ // Agent content lives below the buffer strip. Give this fixture the same
+ // geometry as the native pane instead of sizing both parent and child alike.
+ return ["agent-pane","conversation"].includes(String(node.props.testId))?{...box,y:box.y+tabChrome(config.scale).buffer.height,height:box.height-tabChrome(config.scale).buffer.height}:box;
+}),root=createRoot(host.renderer);
 model.setUI({workspaceSidebars:{a:"conversations",b:"conversations"},openWorkspaceIds:["a","b"]});
 const uploads:number[]=[],drops:number[]=[];
 const imageRenderer=host.renderer as unknown as {putPaintImage:(id:number)=>void;dropPaintImage:(id:number)=>void};

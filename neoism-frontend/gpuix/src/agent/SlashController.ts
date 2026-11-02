@@ -7,9 +7,9 @@ import {coreCall} from "../native-core";
 import {thinkingOptions} from "../design/generated";
 import {connectCatalog} from "./connect-catalog";
 
-export interface SlashOption{title:string;description:string;footer:string;value:string;header?:boolean;section?:string;mcp?:unknown}
+export interface SlashOption{title:string;description:string;footer:string;value:string;header?:boolean;section?:string;current?:boolean;pinned?:boolean;mcp?:unknown}
 export type SlashEffect="piss"|"cuss"|"glitch"|"disco"|"gangfight"|"praise";
-export interface SlashPickerRequest{token?:string;loading?:boolean;error?:string;usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;onCancel?:()=>void;onBack?:()=>void|Promise<void>;kind:string;title:string;options:SlashOption[];selected?:string;onSelect?:(value:string)=>void|Promise<void>;
+export interface SlashPickerRequest{token?:string;loading?:boolean;error?:string;usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;onLoadMore?:()=>void|Promise<void>;onCancel?:()=>void;onBack?:()=>void|Promise<void>;kind:string;title:string;options:SlashOption[];selected?:string;onSelect?:(value:string)=>void|Promise<void>;
  /** Original-card stage status (connect / OAuth / MCP authorization). */
  activity?:{body:string;status:string;busy?:boolean;url?:string};mcpServer?:string;mcpEntry?:unknown}
 export interface SlashInputRequest{title:string;description?:string;secret?:boolean;initialValue?:string;placeholder?:string;activity?:SlashPickerRequest["activity"]}
@@ -137,6 +137,42 @@ export class SlashController{
   if(!this.options.model.state.catalogsLoading)return;
   await new Promise<void>(resolve=>{let stop=()=>{};const done=()=>{stop();this.abort.signal.removeEventListener("abort",done);resolve();};stop=this.options.model.subscribe(()=>{if(!this.options.model.state.catalogsLoading||!this.current(scope)||this.disposed)done();});this.abort.signal.addEventListener("abort",done,{once:true});});
   this.assertCurrent(scope);
+ }
+ private async sessionsPicker(scope:Scope){
+  // Match the sidebar's authorized catalog, including legacy/cross-project chats.
+  const catalog=this.options.model.agentSdk;
+  const [projects,page]=await Promise.all([catalog.catalogProjects(scope.workspaceId),catalog.catalogSessions(scope.workspaceId,{roots:true,limit:50})]);
+  if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
+  const sessions=new Map([...projects.pinnedSessions,...page.items].filter(session=>!session.parentId).map(session=>[session.id,session]));
+  let cursor=page.cursor?.next,loading=false,error:string|undefined;
+  const select=async(id:string)=>{
+   this.assertCurrent(scope);scope.pickerCancelled=true;
+   this.openSession(scope,await this.options.model.agentSdk.forSession(scope.workspaceId,id).sessions.get(id));
+  };
+  const publish=async()=>{
+   if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
+   const sorted=[...sessions.values()].sort((a,b)=>b.time.updated-a.time.updated);
+   const rows:SlashOption[]=[];
+   for(const pinned of [true,false]){
+    const group=sorted.filter(session=>!!session.pinned===pinned);if(!group.length)continue;
+    rows.push({...option(pinned?"Pinned":"Recent","","",""),header:true});
+    rows.push(...group.map(session=>({...option(session.title||"New conversation",session.directory,session.id,""),pinned:!!session.pinned,current:session.id===scope.sessionId})));
+   }
+   if(loading||error)rows.push({...option(error||"Loading more sessions...","","",""),header:true});
+   await this.options.hooks.picker(this.pickerRequest(scope,{kind:"sessions",title:"Sessions",options:rows,selected:scope.sessionId,loading,error,onSelect:select,onLoadMore:cursor?loadMore:undefined}));
+  };
+  const loadMore=async()=>{
+   if(!cursor||loading||scope.pickerCancelled||this.disposed||!this.current(scope))return;
+   const requested=cursor;loading=true;error=undefined;await publish();
+   try{
+    const next=await catalog.catalogSessions(scope.workspaceId,{roots:true,limit:50,cursor:requested});
+    if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
+    for(const session of next.items)if(!session.parentId)sessions.set(session.id,session);
+    cursor=next.cursor?.next===requested?undefined:next.cursor?.next;
+   }catch(cause){error=cause instanceof Error?cause.message:"Could not load older sessions. Scroll to retry.";}
+   finally{loading=false;await publish();}
+  };
+  scope.pickerShell=undefined;await publish();
  }
  private async changeDirectory(scope:Scope,directory:string){
   const id=await this.ensureSession(scope);this.assertCurrent(scope);
@@ -335,9 +371,7 @@ export class SlashController{
    case "ApplyThinking":model.setSelection("thinking",coreCall<string>("agentcomposer.normalize-thinking",{value:String(value)}),scope.sessionId);break;
    case "OpenThinkingPicker":await this.picker(scope,"thinking","Reasoning effort",thinkingOptions.filter(row=>!("modelIncludes"in row)||scope.selection.model?.toLowerCase().includes(row.modelIncludes)).map(row=>({...row})),value=>model.setSelection("thinking",value,scope.sessionId),scope.selection.thinking||undefined);break;
    case "SwitchSession":this.openSession(scope,await scope.sdk.sessions.get(String(value)));break;
-   case "OpenSessionsPicker":{
-    const sessions=await scope.sdk.sessions.list({directory:scope.directory});await this.picker(scope,"sessions","Sessions",sessions.items.map(s=>option(s.title,s.directory,s.id)),async id=>this.openSession(scope,await scope.sdk.sessions.get(id)),scope.sessionId);break;
-   }
+   case "OpenSessionsPicker":await this.sessionsPicker(scope);break;
    case "ChangeDirectory":await this.changeDirectory(scope,String(value));break;
    case "OpenDirectoryPicker":{if(hooks.chooseDirectory){const path=await hooks.chooseDirectory(scope.directory);this.assertCurrent(scope);if(path)await this.changeDirectory(scope,path);}else await this.directoryPicker(scope);break;}
    case "OpenSubagentPicker":{const client=await scope.sdk.plugins.use(subagents,{directory:scope.directory}),tasks=await client.list(this.requireSession(scope));await this.picker(scope,"subagents","Subagent sessions",tasks.map(task=>option(task.description||task.agent,task.status,task.childSessionId,task.agent)),async id=>this.openSession(scope,await scope.sdk.sessions.get(id)));break;}

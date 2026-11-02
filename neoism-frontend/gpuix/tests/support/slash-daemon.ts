@@ -1,6 +1,6 @@
 import type {Session,ProviderConnectionSummary} from "@neoism/sdk";
 export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
- const requests:Array<{workspace:string;path:string;method:string;body:any;directory:string|null;authorization:string|null}>=[];
+ const requests:Array<{workspace:string;path:string;method:string;body:any;directory:string|null;authorization:string|null;query:Partial<Record<string,string>>}>=[];
  const session=(id:string,workspace="a",model={providerId:"openai",id:"base",variant:"high",connectionId:"account-a"}):Session=>({id,title:id,directory:`/project/${workspace}`,projectId:`project-${workspace}`,slug:id,version:"1",time:{created:1,updated:1},agent:"build",model,permission:[{permission:"read",pattern:"*",action:"ask"}]});
  const sessions=new Map([['one',session('one')],['two',{...session('two','a',{providerId:"other",id:"second",variant:"low",connectionId:"account-b"}),parentId:"one"}]]);
  const connections=new Map<string,Map<string,ProviderConnectionSummary>>([
@@ -15,15 +15,16 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
  const capabilities=new Set(["neoism.goals","neoism.mcp","neoism.subagents"]);
  const permissions=[{id:"p-one",sessionId:"one",messageId:"m",permission:"read",patterns:["*"],always:["*"],title:"Read file"},{id:"p-two",sessionId:"two",messageId:"m",permission:"read",patterns:["*"],always:["*"],title:"Read other file"}];
  const questions=[{id:"q-one",sessionId:"one",messageId:"m",questions:[{question:"First?"},{question:"Second?"}]},{id:"q-two",sessionId:"two",messageId:"m",questions:[{question:"Other?"}]}];
- let goal:any=null,connected=false,failCommand=false,deferCreation=false,count=0;
+ let goal:any=null,connected=false,failCommand=false,deferCreation=false,count=0,masterCatalog=false,failSessionPage=false;
  const creations:Array<()=>void>=[];
  const deferred=new Set<string>(),releases=new Map<string,Array<()=>void>>();
  const release=(path:string)=>{deferred.delete(path);for(const done of releases.get(path)||[])done();releases.delete(path);};
  const server=Bun.serve({hostname:"127.0.0.1",port:0,async fetch(request,server){
   const url=new URL(request.url);if(url.pathname==="/session")return server.upgrade(request)?undefined:new Response("",{status:400});
-  const route=url.pathname.match(/^\/agent\/workspaces\/([^/]+)\/v2(.*)$/);if(!route)return new Response("Not found",{status:404});
-  const workspace=decodeURIComponent(route[1]),path=route[2],body=await request.json().catch(()=>undefined);
-  requests.push({workspace,path,method:request.method,body,directory:url.searchParams.get("directory"),authorization:request.headers.get("authorization")});
+  if(masterCatalog&&url.pathname==="/agent/system/info")return Response.json({systemId:"fixture",capabilityVersion:1});
+  const route=url.pathname.match(/^\/agent\/(?:workspaces\/([^/]+)|(system))\/v2(.*)$/);if(!route||route[2]&&!masterCatalog)return new Response("Not found",{status:404});
+  const workspace=route[2]||decodeURIComponent(route[1]),path=route[3],body=await request.json().catch(()=>undefined);
+  requests.push({workspace,path,method:request.method,body,directory:url.searchParams.get("directory"),authorization:request.headers.get("authorization"),query:Object.fromEntries(url.searchParams)});
   if(deferred.has(path))await new Promise<void>(resolve=>{const list=releases.get(path)||[];list.push(resolve);releases.set(path,list);});
   if(path==="/providers")return Response.json({all:[{id:"openai",name:"OpenAI",env:[],models:{},options:{},source:"builtin"}],connected:["openai"],default:{}});
   if(path==="/providers/auth-methods")return Response.json({openai:[{type:"api",label:"API key"},{type:"oauth",label:"Browser sign in",prompts:[{key:"region",message:"Region",type:"select",options:[{value:"us",label:"US"}]},{key:"tenant",message:"Tenant",type:"text",condition:{key:"region",op:"eq",value:"us"}}]}]});
@@ -51,7 +52,13 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   if(path==="/capabilities")return Response.json([...capabilities].map(id=>({id,enabled:true,version:"1.0.0",source:"plugin",disableable:true})));
   if(path==="/skills")return Response.json([{name:"review",description:"Repository review",path:"/project/a/.neoism/skills/review.md"}]);
   if(path==="/directories"){const directory=url.searchParams.get("path")||`/project/${workspace}`;return Response.json({path:directory,parent:"/project",entries:[{name:"sub",path:`${directory}/sub`}]});}
-  if(path==="/sessions"&&request.method==="GET")return Response.json({items:[...sessions.values()],cursor:{next:null,hasMore:false}});
+  if(path==="/session-projects")return Response.json({items:[],pinnedSessions:[...sessions.values()].filter(session=>session.pinned&&!session.parentId)});
+  if(path==="/sessions"&&request.method==="GET"){
+   if(failSessionPage){failSessionPage=false;return Response.json({message:"Session page unavailable"},{status:500});}
+   const roots=url.searchParams.get("roots")==="true",rows=[...sessions.values()].filter(session=>(workspace==="system"||session.directory===`/project/${workspace}`)&&(!roots||!session.parentId)).sort((a,b)=>b.time.updated-a.time.updated);
+   const start=Number(url.searchParams.get("cursor")||0),limit=Number(url.searchParams.get("limit")||50),items=rows.slice(start,start+limit),next=start+limit<rows.length?String(start+limit):null;
+   return Response.json({items,cursor:{next,hasMore:!!next}});
+  }
   if(path==="/sessions"&&request.method==="POST"){
    const created={...session(`created-${++count}`,workspace),directory:url.searchParams.get("directory")||`/project/${workspace}`,...body};sessions.set(created.id,created);
    if(deferCreation)return new Promise<Response>(resolve=>creations.push(()=>resolve(Response.json(created))));return Response.json(created);
@@ -81,5 +88,5 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   if(path.startsWith("/plugins/dev.neoism.subagents/sessions/"))return Response.json([{id:"task",sessionId:"one",childSessionId:"two",agent:"plan",description:"Inspect source",status:"done",nested:false}]);
   return Response.json({message:`Unhandled fixture operation ${request.method} ${path}`},{status:404});
  },websocket:{message(socket,data){const [family,envelope]=Object.entries(JSON.parse(String(data)))[0]as[string,{request_id:number;message:any}];const reply=(message:unknown)=>socket.send(JSON.stringify({[family+"Reply"]:{request_id:envelope.request_id,message}}));if(envelope.message.Hello)reply({HelloAck:{accepted:true}});else if(envelope.message.GetHistory)reply({HistoryChunk:{session_id:envelope.message.GetHistory.session_id,messages:[]}});}}});
- return {defer:(path:string)=>{deferred.add(path);},release,endpoint:`ws://127.0.0.1:${server.port}/session`,requests,sessions,connections,capabilities,creations,failConnection:(method:string)=>{failConnectionMethod=method;},setFailCommand:()=>{failCommand=true;},deferCreation:()=>{deferCreation=true;},stop:()=>{for(const path of deferred)release(path);server.stop(true);}};
+ return {defer:(path:string)=>{deferred.add(path);},release,endpoint:`ws://127.0.0.1:${server.port}/session`,requests,sessions,connections,capabilities,creations,enableMasterCatalog:()=>{masterCatalog=true;},failSessionPage:()=>{failSessionPage=true;},failConnection:(method:string)=>{failConnectionMethod=method;},setFailCommand:()=>{failCommand=true;},deferCreation:()=>{deferCreation=true;},stop:()=>{for(const path of deferred)release(path);server.stop(true);}};
 }

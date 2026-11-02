@@ -164,3 +164,57 @@ test("connect nested Back actions return to provider/account stages without stor
  await f.pickers.at(-1)!.onSelect!("account-extra");await f.pickers.at(-1)!.onSelect!("disconnect");await f.pickers.at(-1)!.onBack!();expect(f.pickers.at(-1)?.kind).toBe("connect-account");
  expect(f.server.requests.some(request=>request.path.includes("/connections")&&request.method!=="GET")).toBe(false);expect(f.server.connections.get("a")!.size).toBe(2);expect(f.model.state.providerStates).toEqual(before);
 });
+
+test("sessions uses the sidebar catalog capability, with old pins above recent roots from other directories",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();
+ const base=f.server.sessions.get("one")!;f.server.sessions.clear();
+ f.server.sessions.set("old-pin",{...base,id:"old-pin",title:"Pinned legacy chat",directory:"/legacy",pinned:true});
+ f.server.sessions.set("recent",{...base,id:"recent",title:"Recent chat",directory:"/elsewhere",time:{created:1,updated:100}});
+ f.server.sessions.set("child",{...base,id:"child",parentId:"recent",time:{created:1,updated:200}});
+ expect(f.server.requests).toHaveLength(0);await f.controller.execute("/session");
+ const ready=f.pickers.at(-1)!;expect(ready.kind).toBe("sessions");
+ expect(ready.options.map(row=>row.title)).toEqual(["Pinned","Pinned legacy chat","Recent","Recent chat"]);
+ expect(ready.options[1].pinned).toBe(true);expect(ready.onLoadMore).toBeUndefined();
+ const list=f.server.requests.find(request=>request.path==="/sessions")!;
+ expect(list).toMatchObject({workspace:"system",directory:null,query:{roots:"true",limit:"50"}});
+ expect(f.server.requests.some(request=>request.path.includes("events"))).toBe(false);
+ await ready.onSelect!("recent");
+ expect(f.server.requests.find(request=>request.path==="/sessions/recent")?.workspace).toBe("system");
+ expect(f.model.state.surfaces.find(surface=>surface.id===f.model.state.activeSurfaceId)?.sessionId).toBe("recent");
+});
+
+function seedSessionPages(f:Awaited<ReturnType<typeof fixture>>){
+ const base=f.server.sessions.get("one")!;f.server.sessions.clear();
+ for(let n=0;n<105;n++)f.server.sessions.set(`chat-${n}`,{...base,id:`chat-${n}`,title:`Chat ${n}`,pinned:n===104,time:{created:1,updated:1000-n}});
+}
+test("sessions pagination is bounded, single-flight and lazy, retaining its token, current mark and pins",async()=>{
+ const f=await fixture();seedSessionPages(f);await f.controller.execute("/sessions");
+ const first=f.pickers.at(-1)!,count=()=>f.server.requests.filter(request=>request.path==="/sessions").length;
+ expect(count()).toBe(1);expect(first.options.filter(row=>!row.header)).toHaveLength(51);
+ expect(first.options[1]).toMatchObject({value:"chat-104",pinned:true});
+ f.server.defer("/sessions");const pending=first.onLoadMore!();await until(()=>count()===2);
+ await first.onLoadMore!();expect(count()).toBe(2);expect(f.pickers.at(-1)?.loading).toBe(true);
+ f.server.release("/sessions");await pending;
+ const second=f.pickers.at(-1)!;expect(second.token).toBe(first.token);expect(second.options.filter(row=>!row.header)).toHaveLength(101);
+ expect(f.server.requests.filter(request=>request.path==="/sessions").at(-1)?.query.cursor).toBe("50");
+ await Bun.sleep(20);expect(count()).toBe(2);
+ await second.onLoadMore!();const last=f.pickers.at(-1)!;
+ expect(last.options.filter(row=>!row.header)).toHaveLength(105);expect(new Set(last.options.filter(row=>!row.header).map(row=>row.value)).size).toBe(105);
+ expect(last.onLoadMore).toBeUndefined();expect(count()).toBe(3);
+});
+test("a failed sessions continuation keeps rows and cursor for an explicit retry",async()=>{
+ const f=await fixture();seedSessionPages(f);await f.controller.execute("/sessions");const first=f.pickers.at(-1)!;
+ f.server.failSessionPage();await first.onLoadMore!();const failed=f.pickers.at(-1)!;
+ expect(failed.error).toContain("Session page unavailable");expect(failed.options.filter(row=>!row.header)).toEqual(first.options.filter(row=>!row.header));
+ await failed.onLoadMore!();expect(f.pickers.at(-1)?.error).toBeUndefined();
+ expect(f.server.requests.filter(request=>request.path==="/sessions").map(request=>request.query.cursor??null)).toEqual([null,"50","50"]);
+});
+test("cancelled or workspace-switched session pages never reopen the picker or fetch further pages",async()=>{
+ for(const cancelled of [true,false]){
+  const f=await fixture();seedSessionPages(f);await f.controller.execute("/sessions");const first=f.pickers.at(-1)!;
+  f.server.defer("/sessions");const pending=first.onLoadMore!();await until(()=>f.server.requests.filter(request=>request.path==="/sessions").length===2);
+  if(cancelled)f.pickers.at(-1)!.onCancel!();else f.model.update({activeWorkspace:{id:"b",host_id:"host",title:"B",root_dir:"/project/b"}});
+  const count=f.pickers.length;f.server.release("/sessions");await pending;expect(f.pickers).toHaveLength(count);
+  await first.onLoadMore!();expect(f.server.requests.filter(request=>request.path==="/sessions")).toHaveLength(2);
+ }
+});

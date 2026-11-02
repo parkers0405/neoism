@@ -62,3 +62,19 @@ test("auth entry keeps source form geometry stable while committing its actual t
   expect(call("commit").answers).toEqual([["fixture-secret-only"]]);
  }finally{coreCall("question.dispose",{id});}
 });
+
+test("session pages keep native scroll, selection and query without mounting the entire catalog",async()=>{
+ const options=[{title:"Pinned",value:"",header:true},{title:"Pinned chat",value:"pin",pinned:true},{title:"Recent",value:"",header:true},...Array.from({length:50},(_,n)=>({title:`Chat ${n}`,value:String(n),current:n===0}))];
+ const{id}=coreCall<{id:number}>("picker.new",{kind:"sessions",title:"Sessions",options});
+ const call=(op:string,args:Record<string,unknown>={})=>coreCall<PickerFrame>(`picker.${op}`,{id,...geometry,...args});
+ try{
+  const first=call("frame");expect(first.rows[1].pinned).toBe(true);expect(first.rows[3].current).toBe(true);expect(first.selectedValue).toBe("pin");
+  expect(call("move",{delta:1}).selectedValue).toBe("0");
+  call("scroll",{delta:-2000});for(let n=0;n<15;n++){await Bun.sleep(30);call("frame");}
+  const tail=call("frame");expect(tail.top).toBeGreaterThan(0);
+  const appended=call("options",{options:[...options,...Array.from({length:50},(_,n)=>({title:`Chat ${n+50}`,value:String(n+50)}))]});
+  expect(appended.top).toBe(tail.top);expect(appended.selectedValue).toBe(tail.selectedValue);expect(appended.rows.length).toBeLessThanOrEqual(appended.limit+3);
+  call("query",{query:"Chat 99"});const filtered=call("options",{options:[...options,{title:"Chat 99",value:"99"}]});
+  expect(filtered.query).toBe("Chat 99");expect(filtered.rows.filter(row=>!row.header).map(row=>row.value)).toEqual(["99"]);
+ }finally{coreCall("picker.dispose",{id});}
+});

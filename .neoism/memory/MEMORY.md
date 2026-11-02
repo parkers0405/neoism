@@ -532,3 +532,6 @@
 - [Official Turso upgrade and lossless event storage](project_official_turso_upgrade.md) - Official Turso0.8.3 newest stable pinned; vendor removed; FTS fixture migration and codec checks pending; do not activate live
 - [Official Turso first runtime checks](reference_official_turso_first_checks.md) - 43 official-Turso runtime checks pass; latest recovery/migration still needs final test rebuild; transport lock aligned
 - [GPUIX device preview (optional native 3D)](feature_gpuix_device_preview.md) - Literal T3 sidebar rewrite, real native capture proofs, book presentation, drag fix, optional build and production launch workflow
+- [Agent composer phantom extra row](bug_gpuix_composer_phantom_row.md) - GPUIX composer grew phantom third row while prompt still displayed two; fix uses native shaped rows, requires native rebuild
+- [GPUix provider/OAuth error visibility](bug_gpuix_provider_error_visibility.md) - Per-session persistent composer failure footer, nested OAuth/provider errors, durable history extraction and passing checks
+- [GPUiX /sessions empty and missing pagination fixed](bug_gpuix_slash_sessions_empty.md) - GPUiX slash sessions now shares sidebar catalog capability, pinned/recent sections and lazy 50-row pagination

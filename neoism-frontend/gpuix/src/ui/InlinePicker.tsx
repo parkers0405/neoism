@@ -26,7 +26,7 @@ export function InlinePicker(props: {
   onSelect?: (value: string) => void; onAnswers?: (answers: string[][]) => void; onClose: () => void;
   ignoreOutsideClick?: (x: number, y: number) => boolean;
   activity?: PickerActivity; mcpServer?: string; mcpEntry?: unknown;
-  usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;
+  usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;onLoadMore?:()=>void|Promise<void>;
 }) {
   const config = props.config, c = config.theme, s = config.scale, renderer = useGpuixRequired();
   const viewport=useOverlayViewport(renderer,createWindowSize());
@@ -57,6 +57,8 @@ export function InlinePicker(props: {
     }
     else setFrame(next);
     if (animating) animation.request(() => { if (!disposed) update("frame"); }, started);
+    // Only user navigation may fetch another page, never paints or page appends.
+    if((op==="scroll"&&Number(args.delta)<0||op==="move"&&Number(args.delta)>0)&&!props.loading&&Math.max(next.top,next.selected)+next.limit>=(next.count||0)-3)void props.onLoadMore?.();
     return next;
   };
   // Track only each effect's inputs. Painting reads query, geometry and other

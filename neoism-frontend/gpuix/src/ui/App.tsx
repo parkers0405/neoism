@@ -1218,7 +1218,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue} placeholder={entry.request.placeholder} activity={entry.request.activity}
         onSelect={value=>{setSlashInput(undefined);entry.resolve(value);focus();}} onClose={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}/>}</Show>
       <Show when={slashPicker()?.token||slashPicker()} keyed>{_token=>{const initial=slashPicker()!;const request=()=>slashPicker()?.token===initial.token?slashPicker()!:initial;return <InlinePicker config={config} kind={request().kind} title={request().title} options={request().options} current={request().selected} anchor={anchor}
-        loading={request().loading} error={request().error} usage={request().usage} onRefresh={request().onRefresh} activity={request().activity} mcpServer={request().mcpServer} mcpEntry={request().mcpEntry}
+        loading={request().loading} error={request().error} usage={request().usage} onRefresh={request().onRefresh} onLoadMore={request().onLoadMore} activity={request().activity} mcpServer={request().mcpServer} mcpEntry={request().mcpEntry}
         onSelect={value=>{const current=request();setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{const current=request();setSlashPicker(undefined);if(current.onBack)void Promise.resolve(current.onBack()).catch(model.report);else current.onCancel?.();focus();}}/>;}}</Show>
     </>;
   }

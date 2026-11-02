@@ -67,8 +67,9 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
     const key = event.key?.toLowerCase() || "";
     if (released && intercepted.delete(key)) { event.preventDefault(); event.stopPropagation(); return; }
     const mods=event.modifiers||{ctrl:false,cmd:false,shift:false,alt:false},primary = mods.ctrl || mods.cmd;
-    // Terminal control/clipboard keys belong to this focused session before
-    // global bindings. A selection must never turn the shell's Ctrl+C into Copy.
+    // Configured bindings (including None) override terminal defaults too.
+    if (!released && props.onCustomKey?.(event)) { intercepted.add(key); event.preventDefault(); event.stopPropagation(); return; }
+    // Unbound Ctrl+C interrupts even when terminal output is selected.
     if(key==="c"&&mods.ctrl&&!mods.shift&&!mods.alt&&!mods.cmd){
       event.preventDefault(); event.stopPropagation();
       const input={key:"c",char:"c",ctrl:true,repeat:event.isHeld,released};
@@ -90,7 +91,6 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
       }
       return;
     }
-    if (!released && props.onCustomKey?.(event)) { intercepted.add(key); event.preventDefault(); event.stopPropagation(); return; }
     // Leave application shortcuts to the parent.
     if (event.modifiers?.ctrl && (key === "tab" || event.modifiers.shift && ["r", "d", "[", "]", "left", "right", "up", "down", "w"].includes(key))) return;
     if (event.modifiers?.alt && ["e", "n", "c", "h"].includes(key)) return;

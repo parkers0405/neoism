@@ -53,7 +53,9 @@ try{
   reportRows(screenshot,3);reportRows(screenshot+"d",3,1);await host.pump(root);
   assert.equal(number("agent-input-card","height"),twoRowHeight,"Stale text and width cannot grow the card");
   reportRows(screenshot+"d",3);await host.pump(root);
-  assert.ok(Math.abs(number("agent-input-card","height")-twoRowHeight-22*config.scale)<.001,"A real third shaped row grows the card exactly once");
+  // ComposerGeometry snaps card edges to device pixels. At scale 1.67,
+  // a 36.74px text row therefore adds 37px to the rounded card.
+  assert.ok(Math.abs(number("agent-input-card","height")-twoRowHeight-22*config.scale)<=1,"A real third shaped row grows the card exactly once, within device-pixel rounding");
   root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"Keep my draft while resizing"});await host.pump(root);
  const originalInput=host.find("composer")!.id;
  for(const logicalWidth of [240,310,360,440,800]){

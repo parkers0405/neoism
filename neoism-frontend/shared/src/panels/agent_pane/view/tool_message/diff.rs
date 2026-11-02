@@ -904,14 +904,14 @@ fn visible_diff_lines_owned(section: &ToolDiffSection, expanded: bool) -> Vec<Di
 
 pub(crate) fn cached_diff_card_view(
     section: &ToolDiffSection,
-    card_w: f32,
+    _card_w: f32,
     s: f32,
     expanded: bool,
 ) -> Rc<ToolDiffCardView> {
-    let body_width = diff_card::body_text_width(card_w, s);
+    // These rows do not wrap. Pane resizing changes clipping/scroll limits,
+    // not their text or measured content width; retain both across widths.
     let key = ToolDiffCardViewKey {
         section_fingerprint: hash_value(&(section.fingerprint, &section.path)),
-        body_width_bits: body_width.to_bits(),
         scale_bits: s.to_bits(),
         expanded,
     };

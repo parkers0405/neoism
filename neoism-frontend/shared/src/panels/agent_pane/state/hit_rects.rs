@@ -65,6 +65,7 @@ impl NeoismAgentPane {
         self.link_hit_rects.clear();
         // Retain the Vec + String allocations; reset logical length only.
         self.selectable_lines_len = 0;
+        self.selection_content_offset = None;
     }
 
     pub fn register_diff_scroll_rect(

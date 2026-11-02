@@ -15,6 +15,7 @@ fn timeline_diff_rows_do_not_wrap_when_the_pane_narrows() {
             super::diff::cached_diff_card_view(&section, 120.0 * scale, scale, false);
         let wide =
             super::diff::cached_diff_card_view(&section, 900.0 * scale, scale, false);
+        assert!(Rc::ptr_eq(&narrow, &wide), "non-wrapping cards retain their rows and measured widths across pane resizing");
         assert_eq!(narrow.visual_rows, section.lines.len());
         assert_eq!(narrow.preview_visual_rows, wide.preview_visual_rows);
         assert_eq!(

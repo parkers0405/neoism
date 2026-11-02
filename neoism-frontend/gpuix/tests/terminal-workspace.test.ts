@@ -123,3 +123,22 @@ test("new terminals forward configured shell and arguments; defaults remain host
   }finally{close();}
  }
 });
+
+for(const source of ["home","code"] as const)test(`terminal split below ${source} uses the existing grid PTY and keeps its source pane`,async()=>{
+ const {daemon,model,close}=await fixture({},false);
+ try{
+  if(source==="code")await model.openFile("README.md");
+  const original=model.state.activeSurfaceId!,layout=model.getLayout("a");
+  layout.layout(1000,700);
+  await model.newTerminal("vertical");
+  expect(layout.frame.panes).toHaveLength(2);
+  expect(layout.frame.panes[0].surfaceId).toBe(original);
+  expect(layout.frame.panes[1].surfaceId).toBe(model.state.activeSurfaceId);
+  expect(layout.frame.dividers[0].axis).toBe("vertical");
+  const terminal=model.state.activeSurfaceId;
+  model.focusPane("up");expect(model.state.activeSurfaceId).toBe(original);
+  model.focusPane("down");expect(model.state.activeSurfaceId).toBe(terminal);
+  expect(daemon.ptyRequests.filter(request=>request.tag==="CreatePty")).toHaveLength(1);
+  expect(daemon.ptyRequests.find(request=>request.tag==="CreatePty")?.body).toMatchObject({presentation:"grid",cwd:"/project/a"});
+ }finally{close();}
+});

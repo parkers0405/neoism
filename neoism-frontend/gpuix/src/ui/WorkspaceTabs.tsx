@@ -93,6 +93,8 @@ export function WorkspaceTabs(props:{
    // A refused close can end outside the X, so its click never clears the
    // latch. A fresh press outside the current close bounds is a new gesture.
    closeGesture=false;closingClick=false;suppressActivation=false;if(props.onReorder){measureWidths();armed={id:p.id,x,y,grab:Math.max(0,Math.min(widths.get(p.id)||0,contentPoint(x,true)-slide.position(p.id)))};}
+   // Activate on press, but consume the later click so release cannot switch again.
+   suppressActivation=true;props.onActivate(workspace());
   };
   const reveal=()=>{if(queued)return;queued=true;queueMicrotask(()=>{queued=false;if(disposed||!host?.mounted||!selected()||drag())return;host.root?.mutations.flushMutations();host.scrollIntoView();if(props.workspaces.at(-1)?.id===p.id)newHost?.scrollIntoView();props.onScroll();});};
   createEffect(()=>{if(selected())reveal();});
@@ -102,7 +104,7 @@ export function WorkspaceTabs(props:{
    onLayout={event=>{rememberWidth(p.id,event.width||0);if(host)props.onBounds(host,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0});if(selected())reveal();}}
    onMouseDown={press}
    onMouseMove={move} onMouseUp={finish}
-   onMouseEnter={()=>setHovered(true)} onMouseLeave={()=>setHovered(false)} onClick={()=>{if(!closingClick&&!closeGesture&&!suppressActivation)props.onActivate(workspace());}}
+   onMouseEnter={()=>setHovered(true)} onMouseLeave={()=>setHovered(false)} onClick={()=>{if(!closingClick&&!closeGesture&&!suppressActivation)props.onActivate(workspace());suppressActivation=false;}}
    style={{...row,position:"relative",left:(slideRevision(),slide.offset(p.id)),opacity:drag()===p.id?0:1,paddingLeft:chrome.tabPaddingX,paddingRight:9*s+spec.buffer.closeHitSize/2+spec.buffer.padding,gap:9*s,height:chrome.height,flexShrink:0,overflow:"hidden",cursor:drag()===p.id?"grabbing":"pointer",backgroundColor:selected()||drag()===p.id?c.bg:undefined,borderTopLeftRadius:chrome.tabRadius,borderTopRightRadius:chrome.tabRadius}}>
    <motion.div initial={false} animate={{opacity:(hovered()||props.keyboardIndex===p.index)&&!selected()?1:0}} transition={{duration:.15,ease:easeOutCubicBezier}} style={{position:"absolute",left:0,right:0,top:0,height:chrome.height,backgroundColor:c.accent+"17",pointerEvents:"none"}}/>
    <text testId={`workspace-icon:${p.id}`} aria-label={cloudWorkspace(workspace(),context(p.id).config,context(p.id).connectedHostId)?"Cloud workspace":"Local workspace"} style={{...text,flexShrink:0,lineHeight:chrome.height,fontFamily:props.config.iconFontFamily,fontSize:12*s,color:rgba(chrome.iconColor)}}>{workspaceIcon(workspace(),context(p.id).config,chrome.iconGlyph,context(p.id).connectedHostId)}</text>

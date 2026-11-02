@@ -224,7 +224,9 @@ test("subagent round trips preserve visible tool cards and their clickable detai
   let frame=settle(id);expect(body(frame)).toContain("RoundtripTool");
   frame=click(frame,"RoundtripTool");expect(body(frame)).toContain("PreservedToolDetail");
   for(let visit=0;visit<2;visit++){
-   frame=call("family",{rootSessionId:"parent",sessionId:"child",roster});
+   expect(call("layout",{width:900,height:700,deferFrame:true})).toBeNull();
+   expect(call("family",{rootSessionId:"parent",sessionId:"child",roster,deferFrame:true})).toBeNull();
+   frame=call("frame");
    expect(body(frame)).not.toContain("PreservedToolDetail");
    call("event",{message:{HistoryChunk:{session_id:"child",messages:[{id:"child-answer",role:"Assistant",kind:"Assistant",text:"Child result"}],next_cursor:null}}});
    // A parent history refresh while parked must retain disclosure state too.

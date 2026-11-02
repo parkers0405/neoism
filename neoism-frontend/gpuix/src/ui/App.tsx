@@ -488,7 +488,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const pane=focusedPane(),navigation=navigateChrome(currentChromeFocus(),event,{bufferCount:pane?.tabs.length||0,activeBuffer:pane?.tabs.findIndex(tab=>tab.leaf===pane.leaf)??0,workspaceCount:windowWorkspaces().length,workspacePlus:true,activeWorkspace:windowWorkspaces().findIndex(workspace=>workspace.id===activeWindowWorkspaceId()),sidebar:!!sidebar()});
     if(!navigation)return false;event.preventDefault();event.stopPropagation();
     if(navigation.direction){const before=workspaceLayout()?.frame.focusedLeaf;model.focusPane(navigation.direction);const after=workspaceLayout()?.frame.focusedLeaf;
-       focusChrome(before===after&&navigation.direction==="left"&&sidebar()?{zone:"sidebar"}:before===after&&navigation.direction==="right"&&deviceVisible()?{zone:"device"}:{zone:"content"});return true;}
+       focusChrome(before===after&&navigation.direction==="up"?navigation.focus:before===after&&navigation.direction==="left"&&sidebar()?{zone:"sidebar"}:before===after&&navigation.direction==="right"&&deviceVisible()?{zone:"device"}:{zone:"content"});return true;}
     focusChrome(navigation.focus);
     if(navigation.activate==="buffer"&&navigation.focus.zone==="buffers"){
       const tab=pane?.tabs[navigation.focus.index];if(tab?.surfaceId){workspaceLayout()?.focus(tab.leaf);model.selectSurface(tab.surfaceId,true);queueMicrotask(()=>focusChrome(navigation.focus));}
@@ -572,6 +572,9 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       }
       default: await runCommand({ action });
     }
+  };
+  const splitTerminalBelow = () => {
+    void model.newTerminal("vertical").then(()=>focusChrome({zone:"content"})).catch(model.report);
   };
   const handleCustomKey = (event: KeyEvent) => {
     if (imagePreview() || chromeFrame() || commands() || palette() || choice() || pendingPermission() || pendingQuestion()) return false;
@@ -1340,7 +1343,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
               return <Switch>
                 <Match when={surface.kind === "welcome"}><SplashView initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border-16*s),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border-16*s)};})()} config={config} contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onAction={action=>{
                   closeChoice();if(palette())closePalette();if(commands())closeCommands();chromeActions.close();setMenu(false);
-                  switch(action){case "open-file-tree":toggle("files");break;case "open-notes":void onChromeAction("OpenNotes");break;case "open-agent":model.openAgentHome();break;case "open-agent-panel":toggle("conversations");break;case "search":openFind("files");break;case "open-command-palette":openCommands();break;case "new-terminal":void model.newTerminal();break;case "change-directory":chooseStatusDirectory();break;}
+                  switch(action){case "split-terminal":splitTerminalBelow();break;case "open-file-tree":toggle("files");break;case "open-notes":void onChromeAction("OpenNotes");break;case "open-agent":model.openAgentHome();break;case "open-agent-panel":toggle("conversations");break;case "search":openFind("files");break;case "open-command-palette":openCommands();break;case "new-terminal":void model.newTerminal();break;case "change-directory":chooseStatusDirectory();break;}
                 }}/></Match>
                 <Match when={surface.kind === "page" && surface.page === "extensions"}><ChromeActionsView controller={chromeActions} config={config} pageMode active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} /></Match>
@@ -1356,7 +1359,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
                         openPaths: () => state().surfaces.filter((s) => s.kind === "file" && s.workspaceId === surface.workspaceId).map((s) => model.hostPath(s)),
                         openLocation: model.openLocation, applyEdits: model.applyEditorEdits,
                       }}
-                      onClose={()=>closeFocusedTab()} onState={(next) => { if (focused()) setEditorState(next); }} />}>
+                      onClose={()=>closeFocusedTab()} onSplitTerminal={splitTerminalBelow} onState={(next) => { if (focused()) setEditorState(next); }} />}>
                       <MarkdownView markdown={model.getMarkdown(surface, leaf)} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()}
                         onCustomKey={handleSurfaceKey} onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }}
                         save={() => saveSurface(surface)} report={model.report} openLocation={model.openLocation} prompt={openEditorPrompt} onSearch={openTerminalSearch}

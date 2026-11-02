@@ -4,7 +4,7 @@ use neoism_protocol::git::{GitCommitDetail,GitServerMessage};
 use neoism_ui::{panels::git_diff_view::{GitDiffView,GitDiffViewAction},primitives::{paint::Paint,paint_record::RecordingPainter,IdeTheme},layout::Rect};
 use serde_json::{json,Value};
 use std::{cell::RefCell,collections::HashMap,path::{Path,PathBuf}};
-struct Host{view:GitDiffView,paint:RecordingPainter,width:f32,height:f32,font_size:f32,font_family:String,theme:String,editor:Option<u32>,mouse:Option<[f32;2]>}
+struct Host{view:GitDiffView,paint:RecordingPainter,width:f32,height:f32,font_size:f32,font_family:String,theme:String,editor:Option<u32>,mouse:Option<[f32;2]>,canvas:bool,font_weight:u16}
 thread_local!{static HOSTS:RefCell<HashMap<u64,Host>>=RefCell::new(HashMap::new());static NEXT:RefCell<u64>=RefCell::new(0xe000_0000);}
 fn text<'a>(v:&'a Value,key:&str)->&'a str{v[key].as_str().unwrap_or("")}
 fn n(v:&Value,key:&str,default:f32)->f32{v[key].as_f64().map_or(default,|n|n as f32)}
@@ -22,7 +22,7 @@ impl Host{
   self.paint.begin_frame();let theme=IdeTheme::by_name(&self.theme);let font=self.paint.font_id_for_family(&self.font_family).unwrap_or(0);
   let editor=self.editor.and_then(|id|engines.editors.get_mut(&id));
   self.view.render_with_editor(&mut self.paint,Rect::new(0.0,0.0,self.width,self.height),font,self.font_size,&theme,editor.map(|e|&mut e.pane));
-  let mut frame=self.view.host_frame();frame["commands"]=json!(self.paint.commands());frame["animating"]=json!(self.view.needs_redraw());
+  let mut frame=self.view.host_frame();if self.canvas {frame["commands"]=json!([]);frame["canvas"]=json!(crate::paint_canvas::encode(&self.paint.borrowed_commands(),&self.font_family,self.font_weight));}else{frame["commands"]=json!(self.paint.serializable_commands(false));}frame["animating"]=json!(self.view.needs_redraw());
   frame["actions"]=json!(self.view.take_actions().into_iter().map(action).collect::<Vec<_>>());
   frame["copy"]=json!(self.view.take_commit_copy());
   frame["edit"]=self.view.take_edit_request().map_or(Value::Null,|edit|json!({"root":edit.root,"path":edit.path,"line":edit.line,"column":edit.column}));
@@ -61,10 +61,10 @@ fn make_view(v:&Value)->Result<GitDiffView,String>{let root=PathBuf::from(text(v
 pub(super) fn dispatch(v:&Value,engines:&mut super::Engines)->Option<Result<Value,String>>{
  let op=text(v,"op");if !op.starts_with("gitreview."){return None;}
  Some(HOSTS.with(|hosts|{let mut hosts=hosts.borrow_mut();
-  if op=="gitreview.new"{let id=NEXT.with(|next|{let mut next=next.borrow_mut();*next+=1;*next});let family=text(v,"fontFamily").to_owned();hosts.insert(id,Host{view:make_view(v)?,paint:RecordingPainter::new(&family,v["fontWeight"].as_u64().unwrap_or(400)as u16,vec![]),width:960.0,height:680.0,font_size:n(v,"fontSize",14.0),font_family:family,theme:text(v,"theme").to_owned(),editor:None,mouse:None});return Ok(json!({"id":id}));}
+  if op=="gitreview.new"{let id=NEXT.with(|next|{let mut next=next.borrow_mut();*next+=1;*next});let family=text(v,"fontFamily").to_owned();hosts.insert(id,Host{view:make_view(v)?,paint:RecordingPainter::new(&family,v["fontWeight"].as_u64().unwrap_or(400)as u16,vec![]),width:960.0,height:680.0,font_size:n(v,"fontSize",14.0),font_family:family,theme:text(v,"theme").to_owned(),editor:None,mouse:None,canvas:v["canvasPaint"].as_bool().unwrap_or(false),font_weight:v["fontWeight"].as_u64().unwrap_or(400)as u16});return Ok(json!({"id":id}));}
   let id=v["id"].as_u64().ok_or("Missing Git review ID")?;if op=="gitreview.dispose"{hosts.remove(&id);return Ok(json!(null));}let host=hosts.get_mut(&id).ok_or("Unknown Git review")?;
   match op{
-   "gitreview.configure"=>{host.font_family=text(v,"fontFamily").to_owned();host.paint=RecordingPainter::new(&host.font_family,v["fontWeight"].as_u64().unwrap_or(400)as u16,vec![]);host.font_size=n(v,"fontSize",host.font_size);host.theme=text(v,"theme").to_owned();},
+   "gitreview.configure"=>{host.font_weight=v["fontWeight"].as_u64().unwrap_or(400)as u16;host.font_family=text(v,"fontFamily").to_owned();host.paint=RecordingPainter::new(&host.font_family,v["fontWeight"].as_u64().unwrap_or(400)as u16,vec![]);host.font_size=n(v,"fontSize",host.font_size);host.theme=text(v,"theme").to_owned();},
    "gitreview.layout"=>{host.width=n(v,"width",host.width).max(1.0);host.height=n(v,"height",host.height).max(1.0);},
    "gitreview.reply"=>host.reply(&v["message"])?,
    "gitreview.focus"=>host.view.set_host_focused(v["focused"].as_bool().unwrap_or(true)),
@@ -92,6 +92,7 @@ pub(super) fn dispatch(v:&Value,engines:&mut super::Engines)->Option<Result<Valu
    "gitreview.text"=>{host.view.pull_request_text_input(text(v,"text"));},
    "gitreview.column"=>{host.view.focus_column(v["column"].as_u64().unwrap_or(1)as usize);},
    "gitreview.navigate-file"=>host.view.navigate_file(v["next"].as_bool().unwrap_or(true)),
+   "gitreview.canvas-paint"=>{host.canvas=true;},
    "gitreview.frame"=>{},_=>return Err(format!("Unknown Git review operation {op}"))
   }Ok(host.frame(engines))
  }))

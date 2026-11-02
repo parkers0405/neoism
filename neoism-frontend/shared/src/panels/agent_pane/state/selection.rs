@@ -3,6 +3,11 @@ use super::*;
 impl NeoismAgentPane {
     const MARKDOWN_INTERACTION_SETTLE: Duration = Duration::from_millis(90);
 
+    /// The current card's exact paint translation, including host snapping.
+    pub fn set_selection_content_offset(&mut self, offset: Option<f32>) {
+        self.selection_content_offset = offset;
+    }
+
     pub fn register_selectable_geometry(
         &mut self,
         geometry: &crate::panels::agent_pane::selection_model::SelectionGeometry,
@@ -65,6 +70,9 @@ impl NeoismAgentPane {
         &self,
         screen_y: f32,
     ) -> f32 {
+        if let Some(offset) = self.selection_content_offset {
+            return screen_y + offset;
+        }
         let viewport_y = self.timeline_viewport_rect.map(|r| r[1]).unwrap_or(0.0);
         let max_scroll = self.max_timeline_scroll();
         let scroll_top = (max_scroll - self.timeline_scroll_px).clamp(0.0, max_scroll);

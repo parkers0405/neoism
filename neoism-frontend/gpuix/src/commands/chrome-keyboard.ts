@@ -3,7 +3,7 @@ import type { CommandTarget } from "./CommandController";
 export interface ChromeKey {key?:string;keyChar?:string;modifiers?:{alt?:boolean;ctrl?:boolean;shift?:boolean;cmd?:boolean}}
 export type ChromeFocus = {zone:"content"|"sidebar"|"details"|"device"}|{zone:"buffers"|"workspaces";index:number};
 export interface ChromeNavigationContext {bufferCount:number;activeBuffer:number;workspaceCount:number;workspacePlus?:boolean;activeWorkspace:number;sidebar:boolean}
-export interface ChromeNavigation {focus:ChromeFocus;activate?:"buffer"|"workspace";direction?:"left"|"right"|"down"}
+export interface ChromeNavigation {focus:ChromeFocus;activate?:"buffer"|"workspace";direction?:"left"|"right"|"up"|"down"}
 /** Linux/Windows desktop SelectPrev/NextBufferTab defaults. Modified vertical
  * arrows remain available to each editor/terminal's own input engine. */
 export function bufferTabShortcut(event:ChromeKey):"previous"|"next"|undefined{
@@ -27,7 +27,7 @@ export function navigateChrome(focus:ChromeFocus,event:ChromeKey,context:ChromeN
  if(alt&&key==="up"){
   if(focus.zone==="workspaces")return {focus};
   if(focus.zone==="buffers")return {focus:{zone:"workspaces",index:Math.max(0,context.activeWorkspace)}};
-  return {focus:context.bufferCount?{zone:"buffers",index:Math.max(0,context.activeBuffer)}:{zone:"workspaces",index:Math.max(0,context.activeWorkspace)}};
+  return {focus:context.bufferCount?{zone:"buffers",index:Math.max(0,context.activeBuffer)}:{zone:"workspaces",index:Math.max(0,context.activeWorkspace)},direction:focus.zone==="content"?"up":undefined};
  }
  if((alt||plain)&&key==="down"){
   if(focus.zone==="workspaces")return {focus:context.bufferCount?{zone:"buffers",index:Math.max(0,context.activeBuffer)}:{zone:"content"}};

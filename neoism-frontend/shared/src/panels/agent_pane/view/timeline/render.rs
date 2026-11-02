@@ -483,6 +483,10 @@ where
                 visible_user_orb = true;
             }
         }
+        // Recover stable content coordinates from the actual painted card,
+        // not a separately rounded scroll offset. Fractional glides must not
+        // make selection endpoints appear to belong to another line.
+        pane.set_selection_content_offset(Some(row.top - card_y));
         let markdown_blocks =
             row.markdown_blocks.as_ref().map(|blocks| blocks.as_slice());
         let tool_diff_sections = row
@@ -543,6 +547,7 @@ where
             );
         }
     }
+    pane.set_selection_content_offset(None);
     let rows_ended = web_time::Instant::now();
     let rows_us = Some(
         rows_ended
@@ -737,7 +742,7 @@ where
         tool_expand_progress,
     );
     if cacheable {
-        pane.store_timeline_measure(key, height);
+        if !super::super::markdown::preparation_pending(){pane.store_timeline_measure(key, height);}
     }
     height
 }

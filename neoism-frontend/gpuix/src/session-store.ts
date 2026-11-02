@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import {RecoveryWriter} from "./session-writer";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AppConfig } from "./config";
@@ -22,6 +22,8 @@ const record = (v: unknown): v is Record<string, unknown> => typeof v === "objec
 // path. Keep their read/merge/replace transactions in order too.
 const pendingWrites = new Map<string, Promise<void>>();
 export function decodeSession(value: unknown): SavedSession | undefined {
+  // Self-contained so the identical decoder can run inside the recovery worker.
+  const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
   if (!record(value) || value.version !== 1 || !Array.isArray(value.surfaces)) return;
   const surfaces = value.surfaces.filter((s): s is Surface => record(s) && typeof s.id === "string" && typeof s.title === "string"
     && typeof s.workspaceId === "string" && ["file", "terminal", "agent", "page", "welcome", "git"].includes(String(s.kind))
@@ -44,6 +46,7 @@ export class SessionStore {
   private readonly identity: string;
   private readonly profiles: boolean;
   private last = "";
+  private readonly writer=new RecoveryWriter();
   constructor(config: Pick<AppConfig, "endpoint" | "authToken" | "pairingToken" | "transportIdentity">, env = process.env) {
     // Scope recovery to the endpoint and authenticated identity without writing credentials.
     this.identity = createHash("sha256").update(JSON.stringify(config.transportIdentity ? [config.transportIdentity] : [config.endpoint, config.pairingToken || config.authToken || ""])).digest("hex").slice(0, 24);
@@ -88,18 +91,12 @@ export class SessionStore {
   }
   /** Serialize atomic replacements without blocking input/paint on filesystem
    * latency. A failed write must not prevent subsequent recovery attempts. */
-  writeAsync(session: SavedSession): Promise<void> {
+  writeAsync(session: SavedSession, options:{reuseEditors?:boolean}={}): Promise<void> {
     const next = (pendingWrites.get(this.path) || Promise.resolve()).then(async () => {
-      let previous: Record<string, unknown> = {};
-      if (this.profiles) try { const value: unknown = JSON.parse(await readFile(this.path, "utf8")); if (record(value)) previous = value; } catch {}
-      const raw = this.encode(session, previous);
-      if (raw === this.last) return;
-      await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-      const pending = `${this.path}.${process.pid}.next`;
-      await writeFile(pending, raw, { mode: 0o600 });
-      await chmod(pending, 0o600);
-      await rename(pending, this.path);
-      this.last = raw;
+      await this.writer.write({path:this.path,identity:this.identity,profiles:this.profiles,session},decodeSession,options.reuseEditors);
+      // The worker deliberately returns no multi-megabyte JSON string to the UI.
+      // A later synchronous write/read must establish its own comparison value.
+      this.last = "";
     });
     const settled = next.catch(() => {}).finally(() => {
       if (pendingWrites.get(this.path) === settled) pendingWrites.delete(this.path);
@@ -107,4 +104,5 @@ export class SessionStore {
     pendingWrites.set(this.path, settled);
     return next;
   }
+  dispose(){this.writer.dispose();}
 }

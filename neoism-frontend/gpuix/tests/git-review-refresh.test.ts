@@ -21,9 +21,11 @@ test("status bursts bound diff work and unchanged patches retain the painted rev
   held.release();held=undefined;await until(()=>diffCount()===first+1);await Bun.sleep(40);
   expect(applied).toBe(0);
   // Same status metadata must still fetch changed bytes, then apply them once.
+  const previousPaint=review.frame.canvas!.commands;
   daemon.setPatch("diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1 @@\n-old\n+updated content\n");
   daemon.push();await until(()=>applied===1);
-  expect(review.frame.commands.some(command=>command.kind==="text"&&command.text.includes("updated"))).toBe(true);
+  expect(review.frame.canvas!.commands).not.toBe(previousPaint);
+  expect(review.frame.canvas!.images.length).toBeGreaterThan(0);
   const refreshed=diffCount();daemon.push();await until(()=>diffCount()>refreshed);await Bun.sleep(30);expect(applied).toBe(1);
  }finally{held?.release();review.dispose();git.dispose();model.dispose();client.stop();daemon.close();}
 });

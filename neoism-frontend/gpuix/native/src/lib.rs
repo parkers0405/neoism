@@ -372,6 +372,7 @@ impl Editor {
                     if let (Some(character),None) = (chars.next(),chars.next()) {
                         match character.to_ascii_lowercase() {
                             'x' => self.host_action = Some("close"),
+                            'h' => self.host_action = Some("split-terminal"),
                             'a' => self.lsp.session.request_code_actions(&mut self.pane),
                             'r' => self.lsp.session.open_rename_prompt(&mut self.pane),
                             _ => {},

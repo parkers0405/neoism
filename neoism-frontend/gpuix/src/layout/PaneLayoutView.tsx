@@ -3,18 +3,20 @@ import { GenerationRetiring } from "../ui/AppGeneration";
 import { motion, useGpuixRequired, type EventPayload, type StyleDesc, type HostElement } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { dimensions as d, namedIcons, extensionIcons } from "../design/generated";
-import { WorkspaceLayout, type DropPreview, type LayoutDivider, type LayoutPane, type LayoutTab } from "./WorkspaceLayout";
+import { WorkspaceLayout, type LayoutFrame, type LayoutRect, type LayoutDivider, type LayoutPane, type LayoutTab } from "./WorkspaceLayout";
 import { inactiveTabIcon, tabChrome } from "./tab-chrome";
 import neoismIcon from "../../../shared/assets/icons/neoism.png" with { type: "file" };
 import claudeIcon from "../../../shared/assets/icons/claude.png" with { type: "file" };
 import codexIcon from "../../../shared/assets/icons/codex.png" with { type: "file" };
 import opencodeIcon from "../../../shared/assets/icons/opencode.png" with { type: "file" };
 import { readFileSync } from "node:fs";
-import { easeOutCubicBezier } from "../design/animation";
+import { easeOutCubic, easeOutCubicBezier } from "../design/animation";
 import { paneHostKey } from "./pane-host";
 import { HoverTabTitle } from "./HoverTabTitle";
 import { verticalTabScroll,consumeTabScroll } from "./tab-scroll";
 import { TabSlide } from "./tab-slide";
+import {TabDropPreview,tabDropPoint} from "./TabDropPreview";
+import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
 
 const sameTab = (a: LayoutTab, b: LayoutTab) => a.leaf === b.leaf && a.surfaceId === b.surfaceId && a.title === b.title && a.kind === b.kind;
 const samePane = (a: LayoutPane, b: LayoutPane) => a.leaf === b.leaf && a.focused === b.focused && a.surfaceId === b.surfaceId && a.rect.every((n, i) => n === b.rect[i]) && a.tabs.length === b.tabs.length && a.tabs.every((tab, i) => sameTab(tab, b.tabs[i]));
@@ -57,7 +59,11 @@ export function PaneLayoutView(props: {
   };
   // Seed before constructing children, which capture their initial viewport.
   untrack(()=>seed(props.controller));
-  const [frame, setFrame] = createSignal(props.controller.frame);
+  const [committedFrame, setFrame] = createSignal(props.controller.frame);
+  const [previewFrame,setPreviewFrame]=createSignal<LayoutFrame>();
+  const frame=()=>previewFrame()||committedFrame();
+  const dropPreview=new TabDropPreview();
+  const clearPreview=()=>{setPreviewFrame(undefined);dropPreview.clear();};
   // While a replacement generation settles, keep this one's last geometry: the
   // shared controller is being laid out at the replacement's scale.
   const retiring = useContext(GenerationRetiring);
@@ -80,7 +86,6 @@ export function PaneLayoutView(props: {
   const tabGeometry=new Map<number,ReturnType<typeof tabChrome>["buffer"]>();
   const [drag, setDrag] = createSignal<ResizeDrag | TabDrag>();
   const [dragPoint,setDragPoint]=createSignal({x:0,y:0});
-  const [preview, setPreview] = createSignal<DropPreview>();
   let armed: TabDrag | undefined;
   const focus = (leaf: number) => {
     const next = props.controller.focus(leaf);
@@ -93,8 +98,10 @@ export function PaneLayoutView(props: {
   const reorderInStrip=(active:TabDrag,x:number,y:number)=>{
     const strip=stripFor(active.leaf);
     if(!strip)return false;
-    const pane=strip.pane(),border=paneCount()>1?s:0,left=origin().x+pane.rect[0]+border,top=origin().y+pane.rect[1]+border;
-    if(x<left||x>left+pane.rect[2]-2*border||y<top||y>top+chrome.height+36*s)return false;
+    const pane=props.controller.frame.panes.find(pane=>pane.tabs.some(tab=>tab.leaf===active.leaf));
+    if(!pane)return false;
+    const border=props.controller.frame.panes.length>1?s:0,left=origin().x+pane.rect[0]+border,top=origin().y+pane.rect[1]+border;
+    if(x<left||x>left+pane.rect[2]-2*border||y<top||y>top+chrome.height)return false;
     for(let pass=0;pass<pane.tabs.length;pass++){
       // Reordering publishes signals inside a batched pointer event. Read the
       // canonical result immediately, rather than a possibly stale render memo.
@@ -110,7 +117,7 @@ export function PaneLayoutView(props: {
   };
   const cancelDrag = () => {
     const active=drag();if(active?.kind==="tab")stripFor(active.leaf)?.slide.end();
-    armed=undefined;setDrag(undefined);setPreview(undefined);
+    armed=undefined;setDrag(undefined);clearPreview();
   };
   const move = (event: EventPayload) => {
     if(event.pressedButton!==0){cancelDrag();return;}
@@ -127,8 +134,8 @@ export function PaneLayoutView(props: {
       props.controller.resize(active.divider.path, active.divider.gap, active.divider.ratio + pixels / active.divider.available);
     } else {
       const strip=stripFor(active.leaf);if(strip)strip.slide.move(localPointer(strip,x));
-      if(reorderInStrip(active,x,y))setPreview(undefined);
-      else setPreview(props.controller.dropPreview(x - origin().x, y - origin().y));
+      if(reorderInStrip(active,x,y))clearPreview();
+      else setPreviewFrame(dropPreview.update(props.controller,active.leaf,x-origin().x,y-origin().y,chrome.height+2*s));
     }
   };
   const finish = (event: EventPayload) => {
@@ -136,11 +143,12 @@ export function PaneLayoutView(props: {
     const source=active?.kind==="tab"?stripFor(active.leaf):undefined;
     if(source)source.slide.move(localPointer(source,event.x||0));
     if (active?.kind === "tab"&&!reorderInStrip(active,event.x||0,event.y||0)) {
-      const next = props.controller.drop(active.leaf, (event.x || 0) - origin().x, (event.y || 0) - origin().y);
+      const point=tabDropPoint(props.controller.frame,active.leaf,(event.x||0)-origin().x,(event.y||0)-origin().y,chrome.height+2*s);
+      const next = props.controller.drop(active.leaf,point.x,point.y);
       if (next.focusedSurfaceId && next.focusedLeaf != null) props.onFocus?.(next.focusedSurfaceId, next.focusedLeaf);
     }
     source?.slide.end();
-    armed = undefined; setDrag(undefined); setPreview(undefined);
+    armed = undefined; setDrag(undefined); clearPreview();
   };
   const text: StyleDesc = { fontFamily: config.fontFamily, fontSize: d.tabFontSize * s,
     fontWeight: config.fontWeight, whiteSpace: "nowrap", userSelect: "none", pointerEvents: "none", color: c.fg };
@@ -149,7 +157,7 @@ export function PaneLayoutView(props: {
   function Pane(p: { hostKey: string }) {
     const initial = paneHosts().get(p.hostKey)!;
     const pane = createMemo(() => paneHosts().get(p.hostKey) || initial, initial, { equals: samePane });
-    const paneFocused=createMemo(()=>pane().focused);
+    const paneFocused=createMemo(()=>!previewFrame()&&pane().focused);
     const [bodyBounds,setBodyBounds]=createSignal<{x:number;y:number;width:number;height:number}>();
     createEffect(()=>{const bounds=bodyBounds();if(paneFocused()&&bounds)props.onContentBounds?.(bounds);});
     const widths=new Map<number,number>();let scrollX=0,scrollHost:HostElement|undefined;
@@ -222,8 +230,27 @@ export function PaneLayoutView(props: {
         </div>
       </div>;
     }
-    return <div testId={`pane:${pane().leaf}`}
-      style={{ position: "absolute", left: pane().rect[0], top: pane().rect[1], width: pane().rect[2], height: pane().rect[3],
+    const original=committedFrame().panes.find(p=>p.tabs.some(tab=>tab.leaf===initial.leaf))?.rect||initial.rect;
+    const [paintRect,setPaintRect]=createSignal<LayoutRect>(previewFrame()&&!config.reducedMotion?original:initial.rect);
+    const animation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
+    let target:LayoutRect|undefined;
+    createEffect(()=>{
+      const next=pane().rect,immediate=config.reducedMotion||drag()?.kind!=="tab";
+      if(target?.every((value,index)=>value===next[index])&&!immediate)return;
+      target=next;animation.cancel();
+      const from=untrack(paintRect);
+      if(immediate||from.every((value,index)=>value===next[index])){setPaintRect(next);return;}
+      const started=performance.now();
+      const tick=()=>{
+        const progress=Math.min(1,(performance.now()-started)/120),eased=easeOutCubic(progress);
+        setPaintRect(next.map((value,index)=>from[index]+(value-from[index])*eased) as LayoutRect);
+        if(progress<1)animation.request(tick);
+      };
+      animation.request(tick);
+    });
+    onCleanup(()=>animation.dispose());
+    return <div testId={`pane:${pane().leaf}`} data-drop-preview={!!previewFrame()}
+      style={{ position: "absolute", left:paintRect()[0],top:paintRect()[1],width:paintRect()[2],height:paintRect()[3],
         display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0, minHeight: 0,
         borderRadius: paneCount() > 1 ? d.frameRadius * s : 0,
         borderWidth: paneCount() > 1 ? s : 0, borderColor: pane().focused ? c.border : c.surface }}>
@@ -274,8 +301,7 @@ export function PaneLayoutView(props: {
           style={{ position: "absolute", left: divider().rect[0], top: divider().rect[1], width: divider().rect[2], height: divider().rect[3],
             cursor: divider().axis === "horizontal" ? "col-resize" : "row-resize", hover: { backgroundColor: c.border } }} />;
       }}</For>
-      <Show when={preview()?.rect}>{(rect) => <div style={{ position: "absolute", left: rect()[0], top: rect()[1], width: rect()[2], height: rect()[3],
-        backgroundColor: c.blue + "33", borderColor: c.blue, borderWidth: 2 * s, borderRadius: 8 * s, pointerEvents: "none" }} />}</Show>
+
     </Show>
     <Show when={drag()}><anchored fill="window" deferred={true} priority={4} occlude={true}
       style={{ backgroundColor: "transparent" }}>

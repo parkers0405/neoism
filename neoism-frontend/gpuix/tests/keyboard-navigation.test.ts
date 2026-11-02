@@ -65,3 +65,12 @@ test("plain 1 and $ command-palette queries execute original source-line jumps i
   }finally{palette.dispose();markdown?.dispose();editor.dispose();}
  }
 });
+
+test("Alt vertical arrows try adjacent panes before falling back to the chrome ladder",()=>{
+ const up=navigateChrome({zone:"content"},alt("up"),context)!;
+ expect(up.direction).toBe("up");
+ expect(up.focus).toEqual({zone:"buffers",index:1});
+ expect(navigateChrome({zone:"content"},alt("down"),context)?.direction).toBe("down");
+ expect(navigateChrome({zone:"buffers",index:1},alt("up"),context)?.direction).toBeUndefined();
+ expect(navigateChrome({zone:"content"},plain("up"),context)).toBeUndefined();
+});

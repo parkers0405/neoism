@@ -114,6 +114,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::timeline_scroll_offset(self)
     }
 
+    fn set_selection_content_offset(&mut self, offset: Option<f32>) {
+        NeoismAgentPane::set_selection_content_offset(self, offset);
+    }
+
     fn has_active_selection(&self) -> bool {
         NeoismAgentPane::has_active_selection(self)
     }

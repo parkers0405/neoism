@@ -173,6 +173,7 @@ pub struct TimelineViewAnchorKey {
 }
 
 impl TimelineViewAnchorKey {
+    pub fn message_id(&self)->&str{&self.message_id}
     pub fn is_for_source(&self, source_index: usize, source_len: usize) -> bool {
         self.source_index == source_index && self.source_len == source_len
     }
@@ -405,6 +406,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn timeline_scroll_offset(&self) -> f32;
     fn timeline_follow_bottom(&self) -> bool;
     fn has_active_selection(&self) -> bool;
+    fn set_selection_content_offset(&mut self, _offset: Option<f32>) {}
     fn has_status_activity(&self) -> bool;
     fn streaming_label(&self) -> String;
     /// First source row observed live during this visit to the session. `None`

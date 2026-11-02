@@ -63,6 +63,19 @@ impl NeoismAgentPane {
         std::mem::take(&mut self.ui_events)
     }
 
+    pub fn continue_timeline_preparation(&mut self){self.invalidate_timeline_layout();}
+
+    /// Restore a dormant view without retaining its layout/raster caches.
+    pub fn restore_timeline_position(&mut self, offset: f32, follow: bool, anchor: Option<(&str,f32)>) {
+        self.cancel_timeline_follow_motion();
+        self.timeline_scroll_px = offset.max(0.0);
+        self.timeline_follow_bottom = follow;
+        self.timeline_wheel_target_px = None;
+        self.timeline_velocity_px_s = 0.0;
+        self.timeline_history_position_hydrated = true;
+        if let Some((id,y))=anchor{if let Some(index)=self.messages.iter().position(|m|m.id==id){self.set_timeline_view_anchor(Some(crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey::at_source(index,self.messages.len(),id)),y);}}
+    }
+
     pub fn timeline_scroll_offset(&self) -> f32 {
         self.timeline_scroll_px
     }

@@ -76,7 +76,7 @@ async function createSession(config: AppConfig, seed?: HotState, singleWorkspace
     try {
     dependencies = model.sessionDependencies();
     if (!force && savedDependencies?.length === dependencies.length && dependencies.every((value,index) => Object.is(value,savedDependencies![index]))) return;
-    write = store.writeAsync(model.captureSession(force));
+    write = store.writeAsync(model.captureSession(force),{reuseEditors:true});
     } catch (error) { console.error("[neoism-gpuix] Recovery checkpoint failed:", error instanceof Error ? error.message : "write failed"); }
     finally { profileEnd("recovery.checkpoint",start); }
     if (write) {
@@ -93,7 +93,7 @@ async function createSession(config: AppConfig, seed?: HotState, singleWorkspace
   let disposal: Promise<void> | undefined;
   return { config, client, model, visuals,checkpoint, ssh:undefined as SshAttachment|undefined, server:undefined as ServerSelection|undefined, dispose(preserveEditors = false) {
     return disposal ||= (async () => {
-      clearInterval(timer); await checkpoint(true); visuals.dispose();model.dispose(preserveEditors); client.stop();
+      clearInterval(timer); await checkpoint(true); store.dispose();visuals.dispose();model.dispose(preserveEditors); client.stop();
     })();
   } };
 }

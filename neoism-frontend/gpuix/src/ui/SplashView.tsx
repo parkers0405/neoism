@@ -1,3 +1,4 @@
+import {HomeTerminalShortcut} from "../commands/home-terminal-shortcut";
 import {createEffect,createMemo,createSignal,Index,onCleanup,onMount,Show,untrack} from "solid-js";
 import {useGpuixRequired,type HostElement,type KeyEvent} from "@gpuix/solid";
 import type {AppConfig} from "../config";
@@ -14,6 +15,8 @@ export function SplashView(props:{contextId:string;config:AppConfig;wordmarkHost
  const [viewport,setViewport]=createSignal(props.initialViewport&&props.initialViewport.width>0&&props.initialViewport.height>0?props.initialViewport:props.wordmarkHosts?.splashViewport(props.contextId)||{width:0,height:0});
  const [frame,setFrame]=createSignal<SplashFrame>({commands:[],rows:[],wordmark:[0,0,0,0],alpha:1});
  const active=createMemo(()=>props.active!==false);let host:HostElement|undefined,disposed=false,pointer:{x:number;y:number}|undefined;
+ const terminalShortcut=new HomeTerminalShortcut();
+ createEffect(()=>{if(!active())terminalShortcut.reset();});
  const focus=()=>{if(host&&active()){host.root?.mutations.flushMutations();focusNativeElement(renderer,host.id);}};
  const draw=()=>{
   if(disposed)return;const view=viewport();if(view.width<=0||view.height<=0)return;
@@ -27,7 +30,11 @@ export function SplashView(props:{contextId:string;config:AppConfig;wordmarkHost
  createEffect(()=>{viewport();untrack(draw);});
  createEffect(()=>{props.focusToken;if(active())focus();});onMount(focus);
  onCleanup(()=>{disposed=true;coreCall("splash.dispose",{id});});
- return <div ref={host} testId="welcome-page" tabIndex={0} role="region" aria-label="Welcome" onFocus={props.onFocus} onMouseDown={()=>{props.onFocus?.();focus();}} onKeyDown={event=>{props.onCustomKey?.(event);}}
+ return <div ref={host} testId="welcome-page" tabIndex={0} role="region" aria-label="Welcome" onFocus={props.onFocus} onMouseDown={()=>{props.onFocus?.();focus();}} onBlur={()=>terminalShortcut.reset()} onKeyDown={event=>{
+   if(props.onCustomKey?.(event)){terminalShortcut.reset();return;}
+   const action=terminalShortcut.key(event);if(!action)return;
+   event.preventDefault();event.stopPropagation();if(action==="split-terminal")props.onAction(action);
+ }}
   onLayout={event=>{const next={width:event.width||0,height:event.height||0};props.wordmarkHosts?.rememberSplashViewport(props.contextId,next);setViewport(before=>before.width===next.width&&before.height===next.height?before:next);}}
   style={{position:"absolute",left:8*config.scale,top:8*config.scale,right:8*config.scale,bottom:8*config.scale}}>
   <PaintLayer commands={frame().commands} config={config} pinImage={(source,raster)=>props.wordmarkHosts?.pinPaintImage(renderer,source,raster)}/>

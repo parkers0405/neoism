@@ -17,7 +17,7 @@ import { LatestFrameInput } from "../animation/latest-frame-input";
 
 export function EditorView(props: {
   onCustomKey?: (event: KeyEvent) => boolean;
-  lsp?: EditorLspConnection; onFocus?: () => void; onClose?: () => void;
+  lsp?: EditorLspConnection; onFocus?: () => void; onClose?: () => void; onSplitTerminal?: () => void;
   active?: boolean; editor: NativeEditor; config: AppConfig; focusToken: number; prompt: (kind: "/" | "?" | ":") => void; save: () => Promise<void>;
   report: (error: unknown) => void; onState: (state: { mode: string; line: number; col: number; dirty: boolean }) => void;
 }) {
@@ -131,6 +131,7 @@ export function EditorView(props: {
       const args = { key, char, ctrl: primary, alt: event.modifiers?.alt, shift, clipboard };
       const result = !primary && !event.modifiers?.alt && ["up", "down"].includes(key) ? editor.queueKey(args) : editor.call("key", args);
       if (result.hostAction === "close") props.onClose?.();
+      if (result.hostAction === "split-terminal") props.onSplitTerminal?.();
     }).catch(props.report);
   };
   let paintedRows: EditorPaintRow[] = [];

@@ -1,3 +1,4 @@
+import {HistoryUpdates} from "./agent/history-updates";
 import {mergeHistoryHead} from "./agent/merge-history";
 import { recoveredEditorState } from "./editor/recovery-state";
 import { profileStart, profileEnd } from "./profiling";
@@ -261,7 +262,8 @@ export class WorkspaceModel {
       else {this.presence.leaveWorkspace();this.epoch++;}
     }));
   }
-  dispose(preserveEditors = false) { this.collaboration.dispose(); this.presence.dispose(); this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
+  onDispose(cleanup:()=>void){this.cleanups.push(cleanup);}
+  dispose(preserveEditors = false) { this.historyUpdates.clear(); this.collaboration.dispose(); this.presence.dispose(); this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
   getLayout(workspaceId = this.state.activeWorkspace?.id): WorkspaceLayout {
     if (!workspaceId) throw new Error("Select a workspace first");
     let layout = this.layouts.get(workspaceId);
@@ -1379,6 +1381,7 @@ export class WorkspaceModel {
   };
   private agentFamilyWatermarks=new Map<string,unknown>();
   private catalogResetSeen=false;
+  private historyUpdates=new HistoryUpdates<HistoryMessage>();
   private incomingAgentEvents:WireEvent[]=[];
   private incomingAgentHead=0;
   private incomingAgentTimer?:ReturnType<typeof setTimeout>;
@@ -1407,6 +1410,7 @@ export class WorkspaceModel {
         this.receive(event);count++;
         if(performance.now()-started>=4)break;
       }
+      this.flushHistoryUpdates();
     });
     profileEnd("daemon.agentBatch",profileStarted);
     if(this.incomingAgentHead===this.incomingAgentEvents.length){this.incomingAgentEvents=[];this.incomingAgentHead=0;}
@@ -1445,6 +1449,7 @@ export class WorkspaceModel {
     const pair = variant(event.message);
     if (!pair || !isRecord(pair[1])) return;
     const [tag, body] = pair as [string, Record<string, unknown>];
+    if(tag!=="ContentDelta")this.flushHistoryUpdates();
     if(event.family==="Agent"){
       const current=this.state.ui,snapshot=isRecord(body.snapshot)?body.snapshot:{};
       const key=tag==="CatalogFamily"||tag==="RuntimeSnapshot"?`${String(snapshot.rootSessionId||body.session_id||"")}:${tag}`:undefined;
@@ -1549,10 +1554,12 @@ export class WorkspaceModel {
         this.upsertMessage(sessionId,message,confirmed);
       } else if (tag === "ContentDelta" && sessionId && typeof body.message_id === "string" && typeof body.text === "string") {
         const id = body.message_id;
-        const previous = this.state.history[sessionId]?.find((m) => m.id === id);
+        const previous = this.historyUpdates.get(sessionId,this.state.history[sessionId]||[],id);
         const tool = isRecord(body.kind) && isRecord(body.kind.Tool) && typeof body.kind.Tool.name === "string" ? body.kind.Tool.name : undefined;
         const kind = previous?.kind || (body.kind === "Thinking" || body.kind === "Reasoning" ? "Reasoning" : tool ? "Tool" : "Assistant");
-        this.upsertMessage(sessionId, { ...previous, id, role: "Assistant", kind, ...(tool ? { tool } : {}), text: (previous?.text || "") + body.text });
+        if(!this.state.history[sessionId])this.update({history:{...this.state.history,[sessionId]:[]}});
+        this.historyUpdates.stage(sessionId,this.state.history[sessionId], { ...previous, id, role: "Assistant", kind, ...(tool ? { tool } : {}), text: (previous?.text || "") + body.text });
+        if(!this.updateDepth)this.flushHistoryUpdates();
       } else if (tag === "ProviderState" && sessionId) {
         this.update({ providerStates: { ...this.state.providerStates, [sessionId]: Schema.decodeUnknownSync(ProviderStateSchema)(body) } });
       } else if (tag === "ThreadDeleted" && sessionId) {
@@ -1599,7 +1606,9 @@ export class WorkspaceModel {
       }
     } catch { this.update({ error: `Unsupported ${tag} payload from daemon` }); }
   };
+  private flushHistoryUpdates(){const history=this.historyUpdates.flush(this.state.history);if(history!==this.state.history)this.update({history});}
   private upsertMessage(sessionId: string, message: HistoryMessage, confirmed=false) {
+    this.flushHistoryUpdates();
     // Confirmed echoes follow server event order, not each client's local send
     // order. Otherwise simultaneous users retain different transcript orders.
     const list = (this.state.history[sessionId] || []).filter(row=>!confirmed||row.id!==message.id);

@@ -5,12 +5,12 @@ import {coreCall,type NativeEditor} from "../native-core";
 import {isRecord,type GitClientMessage} from "../daemon/protocol";
 import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
 import {sharePaintCommands} from "../editor/paint-command";
-import type {PaintCommand} from "../ui/PaintLayer";
+import type {PaintCommand,PreparedCanvas} from "../ui/PaintLayer";
 import type {GitController,GitRect,GitReviewAction} from "./GitController";
 import {readClipboard,writeClipboard} from "../clipboard";
 import {watchGitStatus} from "../daemon/git-status";
 export interface GitReviewDescriptor{mode:"working"|"commit"|"pull-request"|"pull-request-inbox"|"pull-request-create";root:string;path?:string;revision?:string;detail?:unknown}
-export interface GitReviewFrame{root:string;path:string;readOnly:boolean;split:boolean;effectiveSplit:boolean;scrollY:number;maxScrollY:number;horizontal:number[];maxHorizontal:number[];column:number|null;editingPath:string|null;documentPath:string|null;error?:string|null;dragging:boolean;loading:boolean;files:Array<{path:string;collapsed:boolean;loaded:boolean;additions:number;deletions:number;staged:boolean;rows:number}>;headers:Array<{path:string;rect:GitRect}>;loadingRects?:GitRect[];toolbar:Array<{id:string;rect:GitRect;enabled:boolean}>;fileActions:Array<{path:string;restore:boolean;rect:GitRect;enabled:boolean}>;sourceHits:Array<{path:string;line:number;rect:GitRect}>;editHits:Array<{path:string;line:number;rect:GitRect}>;commands:PaintCommand[];animating:boolean;actions:GitReviewAction[];copy?:string|null;edit?:{root:string;path:string;line:number;column:number}|null;cursorQuad?:number[][]|null;cursorToken?:number[];cursorShape?:string;dirty?:boolean;clipboard?:string|null;hostAction?:string|null;pointer:boolean;textPointer:boolean}
+export interface GitReviewFrame{canvas?:PreparedCanvas;root:string;path:string;readOnly:boolean;split:boolean;effectiveSplit:boolean;scrollY:number;maxScrollY:number;horizontal:number[];maxHorizontal:number[];column:number|null;editingPath:string|null;documentPath:string|null;error?:string|null;dragging:boolean;loading:boolean;files:Array<{path:string;collapsed:boolean;loaded:boolean;additions:number;deletions:number;staged:boolean;rows:number}>;headers:Array<{path:string;rect:GitRect}>;loadingRects?:GitRect[];toolbar:Array<{id:string;rect:GitRect;enabled:boolean}>;fileActions:Array<{path:string;restore:boolean;rect:GitRect;enabled:boolean}>;sourceHits:Array<{path:string;line:number;rect:GitRect}>;editHits:Array<{path:string;line:number;rect:GitRect}>;commands:PaintCommand[];animating:boolean;actions:GitReviewAction[];copy?:string|null;edit?:{root:string;path:string;line:number;column:number}|null;cursorQuad?:number[][]|null;cursorToken?:number[];cursorShape?:string;dirty?:boolean;clipboard?:string|null;hostAction?:string|null;pointer:boolean;textPointer:boolean}
 interface Options{model:WorkspaceModel;config:AppConfig;descriptor:GitReviewDescriptor;git:GitController;workspaceRoot?:string;loadEditor?:(root:string,path:string)=>Promise<NativeEditor>;onClose?:()=>void}
 /** The original GitDiffView owns review state, hit testing and projected edits.
  * Reviews share scoped status while retaining independent patch/read epochs. */
@@ -21,7 +21,7 @@ export class GitReviewController{
  private disposed=false;private revision=0;private configuration:string;private source?:NativeEditor;private releaseSource?:()=>void;private publishingSource=false;private attachSerial=0;private pending=new Set<string>();private unconnection:()=>void;private releaseWatch?:()=>void;private connection:string;private input=Promise.resolve();private workspaceRoot:string;private pointerDown?:{x:number;y:number};
  constructor(readonly options:Options){
   this.descriptor=options.descriptor;this.workspaceRoot=options.workspaceRoot||options.descriptor.root;this.configuration=this.signature(options.config);
-  this.id=coreCall<{id:number}>("gitreview.new",{...this.descriptor,fontFamily:options.config.fontFamily,fontWeight:options.config.fontWeight,fontSize:options.config.fontSize,theme:options.config.themeName}).id;
+  this.id=coreCall<{id:number}>("gitreview.new",{...this.descriptor,canvasPaint:true,fontFamily:options.config.fontFamily,fontWeight:options.config.fontWeight,fontSize:options.config.fontSize,theme:options.config.themeName}).id;
   this.frame=coreCall<GitReviewFrame>("gitreview.frame",{id:this.id});this.connection=options.model.client.state.phase;
   this.unconnection=options.model.client.subscribeStatus(state=>{if(state.phase===this.connection)return;this.connection=state.phase;if(state.phase==="connected"){this.watch();this.refresh();}});
   this.apply(this.frame);this.watch();this.refresh();

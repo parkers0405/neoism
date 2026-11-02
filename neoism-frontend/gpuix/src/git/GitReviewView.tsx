@@ -48,7 +48,7 @@ export function GitReviewView(props:{controller:GitReviewController;config:AppCo
   onMouseUp={event=>{flushScroll();flushPointer();controller.pointer("up",(event.x||0)-bounds().x,(event.y||0)-bounds().y);}}
   onMouseLeave={()=>{flushScroll();flushPointer();controller.pointer("leave",0,0);}}
   style={{flexGrow:1,minHeight:0,minWidth:0,position:"relative",overflow:"hidden",userSelect:"none",cursor:frame().pointer?"pointer":frame().textPointer?"text":"default"}}>
-  <PaintLayer commands={frame().commands} extra={extra()} config={config}/>
+  <PaintLayer prepared={frame().canvas} commands={frame().commands} extra={extra()} config={config}/>
   <For each={frame().loadingRects||[]}>{rect=><LoadingSkeleton config={config} kind="diff" immediate initialSize={{width:rect[2],height:rect[3]}} style={{left:rect[0],top:rect[1],right:undefined,bottom:undefined,width:rect[2],height:rect[3]}}/>}</For>
   <Show when={cursor()&&caretBounds()}>{rect=><div testId="git-review-caret" style={{position:"absolute",left:rect().x,top:rect().y,width:rect().width,height:rect().height,pointerEvents:"none"}}/>}</Show>
  </div>;

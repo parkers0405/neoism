@@ -99,7 +99,7 @@ export class WorkspaceLayout {
   }
   resize(path: number[], gap: number, ratio: number) { return this.call("resize", { path, gap, ratio }); }
   nudge(axis: SplitAxis, delta: number) { return this.call("nudge", { axis, delta }); }
-  dropPreview(x: number, y: number): DropPreview { return coreCall("layout.drop-preview", { id: this.id, x, y }); }
+  dropPreview(x: number, y: number, leaf?: number): DropPreview { return coreCall("layout.drop-preview", { id: this.id, x, y, leaf }); }
   drop(leaf: number, x: number, y: number) { return this.call("drop", { leaf, x, y }); }
   snapshot(): LayoutSnapshot {
     const used = new Set(this.frame.leaves.map((l) => l.externalId));

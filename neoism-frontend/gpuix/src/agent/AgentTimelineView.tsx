@@ -19,24 +19,43 @@ import {openExternalUrl} from "../menu-actions/web-frontend";
 import {timelineReceivesEvent} from "./timeline-event-routing";
 
 interface TimelineFrame { selecting?:boolean; preview?:{name:string;url:string}; canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; reason?:string; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
-interface Engine { id: number; dirty: Set<() => void>; dispose: () => void }
+interface Engine { touched:number; id: number; dirty: Set<() => void>; dispose: () => void }
 
 /** One original agent timeline engine per conversation (the shared Rust
  * `NeoismAgentPane`: cached layout, scroll-by-offset, stable-prefix
  * streaming, selection). It outlives tab switches like the desktop pane and
  * consumes the daemon's raw Agent events through the shared dispatcher. */
+const positions=new WeakMap<WorkspaceModel,Map<string,{sessionId:string;offset:number;follow:boolean}>>();
+const engineLimit=8;
+function pruneEngines(model:WorkspaceModel){
+ const entries=engines.get(model);if(!entries)return;
+ const roots=new Set(model.state.surfaces.filter(s=>s.kind==="agent"&&s.sessionId).map(s=>s.agentRootSessionId||model.agentFamily(s.sessionId!).root));
+ for(const root of positions.get(model)?.keys()||[])if(!roots.has(root))positions.get(model)?.delete(root);
+ for(const[root,engine]of entries)if(!roots.has(root)&&!engine.dirty.size){engine.dispose();positions.get(model)?.delete(root);}
+ for(const[root,engine]of [...entries].sort((a,b)=>a[1].touched-b[1].touched)){
+  if(entries.size<=engineLimit)break;if(engine.dirty.size)continue;
+  const saved=positions.get(model)!;saved.set(root,coreCall("agenttimeline.position",{id:engine.id}));engine.dispose();
+ }
+}
 const engines = new WeakMap<WorkspaceModel, Map<string, Engine>>();
 function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,rootSessionId=sessionId): Engine {
   let byModel = engines.get(model);
-  if (!byModel) { byModel = new Map(); engines.set(model, byModel); }
-  const existing = byModel.get(rootSessionId); if (existing) return existing;
+  if (!byModel) {
+    byModel = new Map(); engines.set(model, byModel);positions.set(model,new Map());
+    const off=model.subscribe(()=>pruneEngines(model));
+    model.onDispose(()=>{off();for(const engine of [...byModel!.values()])engine.dispose();engines.delete(model);positions.delete(model);});
+  }
+  const existing = byModel.get(rootSessionId); if (existing) {existing.touched=performance.now();return existing;}
   const { id } = coreCall<{ id: number }>("agenttimeline.new", { compactPaint: true, canvasPaint: true, sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
     fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight,localName:localPresenceIdentity(config).displayName });
   const family=model.agentFamily(sessionId);
-  coreCall("agenttimeline.family",{id,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});
+  coreCall("agenttimeline.family",{id,deferFrame:true,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});
   const dirty = new Set<() => void>();
   const event = (message: unknown, historyKind?: "head" | "older") => {
-    if(!timelineReceivesEvent(rootSessionId,model.state.ui,byModel!,message))return;
+    // An evicted open family is still a known root. Do not broadcast its
+    // transcript into every remaining engine just because it has no cache.
+    const knownRoots={has:(root:string)=>byModel!.has(root)||model.state.surfaces.some(surface=>surface.kind==="agent"&&!!surface.sessionId&&(surface.agentRootSessionId||model.agentFamily(surface.sessionId).root)===root)};
+    if(!timelineReceivesEvent(rootSessionId,model.state.ui,knownRoots,message))return;
     try { if(coreCall<{needsPaint?:boolean}>("agenttimeline.event", { id, message, historyKind }).needsPaint===false)return; } catch (error) { model.report(error); return; }
     for (const listener of dirty) listener();
   };
@@ -46,7 +65,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
     const streaming=model.state.streaming[selected];if(streaming&&streaming!=="Idle")event({StreamingState:{session_id:selected,state:streaming,label:null}});
   }
   const unsubscribe = model.subscribeAgentEvents(event);
-  const engine: Engine = { id, dirty, dispose: () => { unsubscribe(); byModel!.delete(rootSessionId); coreCall("agenttimeline.dispose", { id }); } };
+  const engine: Engine = { touched:performance.now(),id, dirty, dispose: () => { unsubscribe(); byModel!.delete(rootSessionId); coreCall("agenttimeline.dispose", { id }); } };
   byModel.set(rootSessionId, engine);
   return engine;
 }
@@ -106,28 +125,28 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   const flushPointer=()=>{const point=pointerPending;pointerPending=undefined;if(point)coreCall("agenttimeline.pointer",{id:engine.id,kind:"move",deferFrame:true,...point});};
   const call = (op: string, args: Record<string, unknown> = {}) => {
     startedAt = performance.now(); animation.cancel();
-    try { flushPointer();apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id,...(op==="layout"?{localName}:{}), ...args })); } catch (error) { props.report(error); }
+    try { flushFamily();flushPointer();apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id,...(op==="layout"?{localName}:{}), ...args })); } catch (error) { props.report(error); }
   };
   let layoutSignature = "";
   const familyArgs=()=>({rootSessionId:props.rootSessionId||props.sessionId,sessionId:props.sessionId,roster:props.familyRoster||[],rootTitle:props.model.state.threads.find(thread=>thread.session_id===(props.rootSessionId||props.sessionId))?.title||props.rootSessionId||props.sessionId});
   // Select the requested member in the mounting transaction. Solid effects
   // run later; waiting for one exposes the previously viewed child's frame.
   let pendingFamily:Record<string,unknown>|undefined=untrack(familyArgs);
-  const applyFamily=()=>{if(pendingFamily&&bounds.width>0&&bounds.height>0){const family=pendingFamily;pendingFamily=undefined;call("family",family);}};
+  const flushFamily=()=>{if(pendingFamily&&bounds.width>0&&bounds.height>0){const family=pendingFamily;pendingFamily=undefined;coreCall("agenttimeline.family",{id:engine.id,...family,deferFrame:true});}};
   const layout = (contentBottom = props.contentBottom ?? bounds.height) => {
     if (bounds.width <= 0 || bounds.height <= 0) return;
     const signature = `${bounds.width}:${bounds.height}:${contentBottom}`;
     if (signature === layoutSignature) return;
     layoutSignature = signature;
-    batch(()=>{call("layout", { width: bounds.width, height: bounds.height, contentBottom, scale: s, theme: config.themeName });applyFamily();});
+    batch(()=>{coreCall("agenttimeline.layout",{id:engine.id,width:bounds.width,height:bounds.height,contentBottom,scale:s,theme:config.themeName,localName,deferFrame:true});call("frame");});
   };
   // One paint per display frame however many events or animations arrive.
   const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame"); }, startedAt); };
   engine.dirty.add(schedule);
-  onCleanup(() => { disposed = true; engine.dirty.delete(schedule); animation.dispose(); if(provisional)engine.dispose(); });
+  onCleanup(() => { disposed = true; engine.dirty.delete(schedule); animation.dispose(); if(provisional)engine.dispose();else pruneEngines(props.model); });
   onMount(() => schedule());
-  let familySignature=JSON.stringify(pendingFamily);
-  createEffect(()=>{const family=familyArgs();const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>{pendingFamily=family;layout();applyFamily();});}});
+  let familySignature=JSON.stringify(pendingFamily),selectedSession=props.sessionId;
+  createEffect(()=>{const family=familyArgs();const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>{pendingFamily=family;if(selectedSession!==props.sessionId){selectedSession=props.sessionId;pointerPending=undefined;call("frame");}else schedule();});}});
   createEffect(() => { const bottom = props.contentBottom; untrack(() => layout(bottom ?? bounds.height)); });
   const local = (event: {x?:number;y?:number}) => {
     // Read the completed paint snapshot, including moves without resize events.
@@ -163,6 +182,9 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   // Seed paint at the restored pane size in the mounting transaction. Never
   // expose the engine's default/previous geometry while waiting for onLayout.
   layout();
+  const savedPosition=positions.get(props.model)?.get(props.rootSessionId||props.model.agentFamily(props.sessionId).root);
+  if(savedPosition&&savedPosition.sessionId===props.sessionId){coreCall("agenttimeline.restore-position",{id:engine.id,...savedPosition});positions.get(props.model)?.delete(props.rootSessionId||props.model.agentFamily(props.sessionId).root);call("frame");}
+  pruneEngines(props.model);
   return <div ref={host} testId="conversation" data-preserve-keyboard-focus={true} tabIndex={0} aria-label="Conversation history" onKeyDown={keyDown}
     onFocus={()=>{invalidateNativeFocus(renderer);props.onFocus?.();}}
     onBlur={()=>invalidateNativeFocus(renderer)}

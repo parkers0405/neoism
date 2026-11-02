@@ -186,3 +186,18 @@ test("double and triple pointer presses use the desktop Unicode word and source-
     expect(editor.frame.selection).toEqual(previous);
   } finally { editor.dispose(); }
 });
+
+test("Space H requests a terminal split from code Normal mode without changing the document",()=>{
+ const editor=new NativeEditor("split.rs","keep this code\n",true);
+ try{
+  editor.call("key",{key:"space",char:" "});
+  expect(editor.call("key",{key:"h",char:"h"}).hostAction).toBe("split-terminal");
+  expect(editor.text()).toBe("keep this code\n");
+  expect(editor.frame.pendingEmpty).toBe(true);
+  editor.call("key",{key:"space",char:" "});editor.call("key",{key:"escape"});
+  expect(editor.call("key",{key:"h",char:"h"}).hostAction).not.toBe("split-terminal");
+  press(editor,"i");editor.call("key",{key:"space",char:" "});
+  expect(editor.call("key",{key:"h",char:"h"}).hostAction).not.toBe("split-terminal");
+  expect(editor.text()).toContain(" h");
+ }finally{editor.dispose();}
+});

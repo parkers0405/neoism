@@ -30,6 +30,8 @@ use crate::widgets::stock_card::{
 };
 
 mod html_artifact;
+mod incremental;
+pub use incremental::{begin_preparation,end_preparation,preparation_pending};
 mod inline_style;
 pub(crate) use html_artifact::estimated_body_height as estimated_artifact_body_height;
 pub use html_artifact::{
@@ -667,12 +669,7 @@ fn flush_layout_table(
     if rows.is_empty() {
         return;
     }
-    let column_widths = table_column_widths(sugarloaf, rows, width, s, opts);
-    let rows = std::mem::take(rows)
-        .into_iter()
-        .map(|row| wrap_table_cells(sugarloaf, row, &column_widths, s, opts))
-        .collect();
-    blocks.push(laid_out_table_block(rows, column_widths));
+    blocks.push(incremental::table(sugarloaf,std::mem::take(rows),width,s,opts));
 }
 
 fn push_layout_prose_block(
@@ -1324,7 +1321,7 @@ pub fn layout_assistant_markdown_cached<P: AgentMarkdownPane>(
     let blocks = std::rc::Rc::new(layout_assistant_markdown_with_stable_prefix(
         sugarloaf, pane, text, width, theme, s,
     ));
-    pane.store_markdown_blocks_for(text, width, s, blocks.clone());
+    if !incremental::preparation_pending(){pane.store_markdown_blocks_for(text, width, s, blocks.clone());}
     blocks
 }
 
@@ -1372,7 +1369,7 @@ fn layout_assistant_markdown_with_stable_prefix<P: AgentMarkdownPane>(
             let laid_out = std::rc::Rc::new(layout_normalized_markdown_blocks(
                 sugarloaf, prefix, width, theme, s,
             ));
-            pane.store_markdown_blocks_for(&key, width, s, laid_out.clone());
+            if !incremental::preparation_pending(){pane.store_markdown_blocks_for(&key, width, s, laid_out.clone());}
             laid_out
         }
     };
@@ -1461,6 +1458,7 @@ fn layout_normalized_markdown_blocks(
     theme: &IdeTheme,
     s: f32,
 ) -> Vec<AssistantMarkdownBlock> {
+    if let Some(block)=incremental::fence(sugarloaf,text,s){return vec![block];}
     let paragraph_opts = DrawOpts {
         font_size: 13.5 * s,
         color: theme.u8(theme.fg),
@@ -2120,6 +2118,7 @@ fn markdown_code_or_stock_block_laid_out(
     lines: Vec<String>,
     s: f32,
 ) -> AssistantMarkdownBlock {
+    if let Some(block)=incremental::code_lines(sugarloaf,&lang,&lines,s){return block;}
     let mut block = markdown_code_or_stock_block(lang, lines);
     let AssistantMarkdownBlock::Code {
         lines,

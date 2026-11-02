@@ -336,7 +336,25 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             }
             "layout.drop-preview" | "layout.drop" => {
                 let solved=geometry::solve_with(tree,content,&opts);
-                let zone=geometry::drop_zone_at(&solved,number(v,"x",0.0),number(v,"y",0.0),0.25);
+                let source = if op == "layout.drop" || v["leaf"].is_number() {
+                    Some(leaf(v, "leaf")?)
+                } else {
+                    None
+                };
+                let zone = geometry::drop_zone_at(&solved, number(v,"x",0.0), number(v,"y",0.0), 0.25)
+                    .and_then(|mut zone| {
+                        if source == Some(zone.target) {
+                            // The selected tab is also the solved pane's leaf. Split it
+                            // against a surviving sibling, not against itself.
+                            if zone.placement == DropPlacement::Center { return None; }
+                            let path = tree.path_to_leaf(zone.target)?;
+                            let (_, parent) = path.split_last()?;
+                            let Some(SessionTreeNode::Tabbed { children, .. }) = tree.node_at(parent) else { return None; };
+                            zone.target = children.iter().filter_map(first_leaf)
+                                .find(|id| Some(*id) != source)?;
+                        }
+                        Some(zone)
+                    });
                 if op=="layout.drop-preview" {return Ok(json!({"target":zone.as_ref().map(|z|z.target.0),"placement":zone.as_ref().map(|z|format!("{:?}",z.placement).to_lowercase()),"rect":zone.map(|z|rect(z.highlight))}));}
                 if let Some(zone)=zone {
                     let source=leaf(v,"leaf")?;

@@ -241,3 +241,29 @@ test("scroll checkpoints reuse history until settling but edits and explicit rec
   const settled=app.captureSession(false).editors[surface.id] as {scrollY:number};
   expect(settled.scrollY).toBe(240);
 });
+
+test("worker recovery preserves large unsaved documents, undo and newer synchronous writes",async()=>{
+ const directory=mkdtempSync(join(tmpdir(),"neoism-worker-recovery-"));cleanups.push(()=>rmSync(directory,{recursive:true,force:true}));
+ const store=new SessionStore({endpoint:"ws://fixture/session"},{NEOISM_GPUIX_STATE_PATH:join(directory,"session.json")});
+ const app=model(),editor=app.getEditor(surface),before=editor.text();
+ editor.call("paste",{text:Array.from({length:15000},(_,i)=>`row ${i} 界 é inventory validation\n`).join("")});
+ const saved=app.captureSession();await store.writeAsync(saved);
+ const restored=model();restored.restoreSession(store.read()!);
+ expect(restored.getEditor(surface).text()).toBe(editor.text());expect(restored.getEditor(surface).frame.dirty).toBe(true);
+ restored.getEditor(surface).call("key",{key:"z",ctrl:true});expect(restored.getEditor(surface).text()).toBe(before);
+ const newer={...saved,composerDrafts:{home:{text:"newer synchronous draft"}}};store.write(newer);expect(store.read()?.composerDrafts.home.text).toBe("newer synchronous draft");
+ await store.writeAsync(saved);expect(store.read()?.composerDrafts).toEqual(saved.composerDrafts);
+});
+
+test("incremental worker checkpoints retain unchanged editors and replace or remove changed ones",async()=>{
+ const directory=mkdtempSync(join(tmpdir(),"neoism-incremental-recovery-"));cleanups.push(()=>rmSync(directory,{recursive:true,force:true}));
+ const store=new SessionStore({endpoint:"ws://fixture/session"},{NEOISM_GPUIX_STATE_PATH:join(directory,"session.json")});cleanups.push(()=>store.dispose());
+ const a={text:"unchanged document"},b={text:"old document"},saved={...model().captureSession(),editors:{a,b}};
+ await store.writeAsync(saved,{reuseEditors:true});
+ const changed={...saved,editors:{a,b:{text:"new unsaved document"}},composerDrafts:{home:{text:"new draft"}}};
+ await store.writeAsync(changed,{reuseEditors:true});expect(store.read()).toEqual(changed);
+ const removed={...changed,editors:{a}};await store.writeAsync(removed,{reuseEditors:true});expect(store.read()).toEqual(removed);
+ // Public callers may mutate their data; reuse is explicitly opt-in.
+ a.text="mutated external snapshot";await store.writeAsync(removed);expect(store.read()).toEqual(removed);
+ store.dispose();await store.writeAsync(removed,{reuseEditors:true});expect(store.read()).toEqual(removed);
+});

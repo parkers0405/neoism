@@ -57,7 +57,7 @@ export interface EditorFrame {
   mode: "Normal" | "Insert" | "Visual"; dirty: boolean; revision: number;
   totalLines: number; pendingKeys: string;
   scrollY: number; contentHeight: number; animating: boolean; scrollAnimating?: boolean; highlightAnimating?: boolean;
-  hostAction?: "save" | "save-close" | "close"; searchHits: { x: number; y: number; width: number; selection?: boolean }[];
+  hostAction?: "save" | "save-close" | "close" | "split-terminal"; searchHits: { x: number; y: number; width: number; selection?: boolean }[];
   extraCarets: { x: number; y: number; width: number; height: number }[];
   clipboard?: string | null; pendingEmpty: boolean;
   cursorQuad: number[][]; cursorHold: boolean;

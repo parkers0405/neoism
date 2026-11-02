@@ -45,7 +45,7 @@ export function installDisplayClock(renderer: DisplayRenderer, onError: (error: 
   const schedule: Schedule = (callback, delay, kind) => {
     const id = ++next;
     let timer: ReturnType<typeof setTimeout> | undefined, cancelled = false;
-    const enqueue = () => { if (timer !== undefined) delayed.delete(timer); if (!cancelled && active) { callbacks.set(id, callback); request(); } };
+    const enqueue = () => { if (timer !== undefined) delayed.delete(timer); if (!cancelled && active) { callbacks.set(id, () => { if (!cancelled) callback(); }); request(); } };
     // Real deadlines (e.g. a hover probe) may sleep; the animation interval
     // itself is replaced by the next native display frame, at any refresh rate.
     if (kind === "deadline" && delay > 0) { timer = setTimeout(enqueue, delay); delayed.add(timer); }

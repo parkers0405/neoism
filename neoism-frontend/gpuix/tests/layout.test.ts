@@ -85,3 +85,41 @@ test("unresolvable or invalid daemon restore leaves the current workspace intact
   expect(() => layout.restoreDaemon({ root: { kind: "leaf", pane_external_id: 20 } }, () => file("invalid"))).toThrow();
   expect(layout.snapshot()).toEqual(before);
 });
+
+for (const [placement, x, y, axis, before] of [
+  ["left", 10, 350, "horizontal", true],
+  ["right", 990, 350, "horizontal", false],
+  ["top", 500, 80, "vertical", true],
+  ["bottom", 500, 690, "vertical", false],
+] as const) {
+  test(`selected tab tears out of its own stack to the ${placement}`, () => {
+    const layout = make(); layout.open(file("one")); layout.open(file("two")); layout.open(file("three"));
+    const source = layout.frame.focusedLeaf!, ids = layout.frame.leaves.map(tab => tab.leaf).sort();
+    const preview = layout.dropPreview(x, y, source);
+    expect(preview.placement).toBe(placement);
+    expect(preview.target).not.toBe(source);
+    layout.drop(source, x, y);
+    expect(layout.frame.panes).toHaveLength(2);
+    expect(layout.frame.dividers[0].axis).toBe(axis);
+    expect(layout.frame.panes[before ? 0 : 1].leaf).toBe(source);
+    expect(layout.frame.panes[before ? 1 : 0].tabs.map(tab => tab.surfaceId)).toEqual(["one", "two"]);
+    expect(layout.frame.focusedLeaf).toBe(source);
+    expect(layout.frame.leaves.map(tab => tab.leaf).sort()).toEqual(ids);
+    expect(make(layout.snapshot()).frame.tree).toEqual(layout.frame.tree);
+  });
+}
+
+test("self center and single-tab edge drops have no preview and leave the tree intact", () => {
+  const layout = make(); layout.open(file("one"));
+  const source = layout.frame.focusedLeaf!, saved = layout.snapshot();
+  for (const [x, y] of [[10, 350], [990, 350], [500, 80], [500, 690], [500, 350]]) {
+    expect(layout.dropPreview(x, y, source).rect).toBeNull();
+    layout.drop(source, x, y);
+    expect(layout.snapshot()).toEqual(saved);
+  }
+  layout.open(file("two"));
+  const selected = layout.frame.focusedLeaf!, tabs = layout.snapshot();
+  expect(layout.dropPreview(500, 350, selected).rect).toBeNull();
+  layout.drop(selected, 500, 350);
+  expect(layout.snapshot()).toEqual(tabs);
+});

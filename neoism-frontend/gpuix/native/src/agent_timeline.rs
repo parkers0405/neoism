@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashMap};
 
 struct View {
+    preparing: bool,
     scroll_trace: Option<ScrollTrace>,
     compact_paint: bool,
     canvas_paint: bool,
@@ -101,6 +102,8 @@ fn now_seconds() -> f32 {
 }
 
 fn render_frame(view: &mut View) -> Value {
+    if view.preparing {view.pane.continue_timeline_preparation();}
+    neoism_ui::panels::agent_pane::view::markdown::begin_preparation();
     let s = view.scale;
     let theme = IdeTheme::by_name(&view.theme);
     let rect = [0.0, 0.0, view.width, view.height];
@@ -152,8 +155,10 @@ fn render_frame(view: &mut View) -> Value {
         let context=AgentProtocolMappingContext{active_session_id:Some(view.session_id.clone()),default_directory:None,default_agent:None,default_model:None,default_connection_id:None,default_thinking:None,local_author:view.pane.local_presence_name().map(str::to_owned)};
         view.pane.drain_pending_outbound().into_iter().filter(|command|!matches!(command,OutboundAgentCommand::SwitchSession{..})).flat_map(|command|match map_outbound_command(command,&context){AgentProtocolMapping::Messages(messages)=>messages.into_iter().filter_map(|message|serde_json::to_value(message).ok()).collect::<Vec<_>>(),_=>vec![]}).collect::<Vec<_>>()
     };
+    view.preparing=neoism_ui::panels::agent_pane::view::markdown::end_preparation();
     json!({
-        "animating": scrolling || view.pane.animation_reason().is_some(),
+        "preparing":view.preparing,
+        "animating": view.preparing || scrolling || view.pane.animation_reason().is_some(),
         "reason": view.pane.animation_reason(),
         "selecting": view.selecting,
         "pointer": pointer,
@@ -330,6 +335,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));
             pane.set_session_id(Some(v["rootSessionId"].as_str().unwrap_or(&session_id).to_owned()));
             store.views.insert(id, View {
+                preparing:false,
                 scroll_trace: std::env::var_os("NEOISM_GPUIX_SCROLL_TRACE").map(|_| {let now=std::time::Instant::now();ScrollTrace{origin:now,last:now,text_y:HashMap::new(),input_pixels:0.0,input_events:0,precise_events:0}}),
                 compact_paint: v["compactPaint"].as_bool().unwrap_or(false),
                 canvas_paint: v["canvasPaint"].as_bool().unwrap_or(false),
@@ -358,6 +364,11 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
         }
         let view = store.views.get_mut(&id).ok_or("Unknown agent timeline")?;
         match op {
+            "agenttimeline.position" => Ok(json!({"sessionId":view.session_id,"offset":view.pane.timeline_scroll_offset(),"follow":view.pane.timeline_follow_bottom(),"anchor":view.pane.timeline_view_anchor().map(|(key,y)|json!({"id":key.message_id(),"y":y}))})),
+            "agenttimeline.restore-position" => {
+                view.pane.restore_timeline_position(number(v,"offset",0.0),v["follow"].as_bool().unwrap_or(true),v["anchor"]["id"].as_str().map(|id|(id,number(&v["anchor"],"y",0.0))));
+                Ok(Value::Null)
+            }
             "agenttimeline.event" => {
                 let parsed: AgentServerMessage =
                     serde_json::from_value(v["message"].clone()).map_err(|error| error.to_string())?;
@@ -396,6 +407,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 view.pane.side_panel_mut().set_subagents(rows);
                 if !session.is_empty(){view.pane.switch_session(session.to_owned());view.session_id=session.to_owned();}
                 view.pane.drain_pending_outbound();
+                if v["deferFrame"].as_bool().unwrap_or(false){return Ok(Value::Null);}
                 Ok(frame(view))
             }
             "agenttimeline.layout" => {
@@ -407,6 +419,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 if let Some(theme) = v["theme"].as_str() {
                     view.theme = theme.to_owned();
                 }
+                if v["deferFrame"].as_bool().unwrap_or(false){return Ok(Value::Null);}
                 Ok(frame(view))
             }
             "agenttimeline.frame" => {

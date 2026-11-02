@@ -32,6 +32,45 @@ try {
   await app.mouse.up(target);
   const collapseDeadline = Date.now() + 3000;
   while (await app.getByTestId("pane-divider::0").count()) { if (Date.now() > collapseDeadline) throw new Error("Tab center drop did not adopt the source into the target pane"); await Bun.sleep(16); }
+  // Tear the selected tab back out of its own stack, then merge it again.
+  // Exercise the real pointer capture and preview for both split axes.
+  for (const edge of ["right", "bottom", "left", "top"] as const) {
+    stage = `self-stack split ${edge}`;
+    const bounds = await app.getByTestId("pane:2").bounds();
+    const destination = {
+      x: bounds.x + bounds.width * (edge === "left" ? .05 : edge === "right" ? .95 : .5),
+      y: bounds.y + bounds.height * (edge === "top" ? .12 : edge === "bottom" ? .95 : .5),
+    };
+    const start = await app.getByTestId("pane-tab:2").center();
+    await app.mouse.down(start);
+    await app.mouse.move({ x: start.x + 12, y: start.y }, { pressedButton: 0 });
+    await app.getByTestId("pane-drag-layer").waitFor();
+    await app.mouse.move(destination, { pressedButton: 0 });
+    await app.getByTestId("pane-divider::0").waitFor();
+    await Bun.sleep(180);
+    await app.mouse.up(destination);
+    await app.getByTestId("pane-divider::0").waitFor();
+    await app.getByTestId("surface:shell").waitFor();
+    await app.getByTestId("surface:b").waitFor();
+    const split = await app.getByTestId("pane:2").bounds();
+    if (edge === "left" || edge === "right") {
+      if (split.width >= bounds.width * .75) throw new Error("Tab did not split side by side");
+    } else if (split.height >= bounds.height * .75) throw new Error("Tab did not split top and bottom");
+    const tab = await app.getByTestId("pane-tab:2").center();
+    const center = await app.getByTestId("pane-tabs:3").center();
+    await app.mouse.down(tab);
+    await app.mouse.move({ x: tab.x + 12, y: tab.y }, { pressedButton: 0 });
+    await app.getByTestId("pane-drag-layer").waitFor();
+    await app.mouse.move(center, { pressedButton: 0 });
+    await Bun.sleep(180);
+    if(await app.getByTestId("pane-divider::0").count())throw new Error("Tab strip merge did not preview the collapsed layout");
+    await app.mouse.up(center);
+    const deadline = Date.now() + 3000;
+    while (await app.getByTestId("pane-divider::0").count()) {
+      if (Date.now() > deadline) throw new Error("Split tab did not merge back");
+      await Bun.sleep(16);
+    }
+  }
   stage="close second"; await app.getByTestId("pane-close:2").click();
   await app.getByTestId("surface:shell").waitFor();
   if (await app.getByTestId("pane-divider::0").count()) throw new Error("Last split divider survived pane close");

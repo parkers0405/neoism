@@ -137,7 +137,6 @@ impl ToolWrapCache {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ToolDiffCardViewKey {
     section_fingerprint: u64,
-    body_width_bits: u32,
     scale_bits: u32,
     expanded: bool,
 }

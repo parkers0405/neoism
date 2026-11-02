@@ -14,7 +14,7 @@ test("file tree native bridge preserves click threshold, folder and root drops, 
   begin();call("drag-update",{x:11,y:11,hovered:2,inside:true});expect(call("drag-end")).toEqual({kind:"click"});
   begin();expect(move(2).drag).toMatchObject({live:true,source:1,target:2,root:false});expect(call("drag-end")).toEqual({kind:"move",source:"/work/src/a.ts",directory:"/work/dest"});
   begin();expect(move(null).drag.root).toBe(true);expect(call("drag-end").directory).toBe("/work");
-  for(const [source,target,inside]of [[1,0,true],[0,3,true],[0,0,true],[1,2,false],[0,null,true]] as const){begin(source);move(target,inside);expect(call("drag-end").kind).toBe("cancel");}
+  for(const [source,target,inside]of [[1,1,true],[1,0,true],[0,3,true],[0,0,true],[1,2,false],[0,null,true]] as const){begin(source);move(target,inside);expect(call("drag-end").kind).toBe("cancel");}
   begin();move(2);call("drag-cancel");expect(move(2).drag).toBeNull();expect(call("drag-end").kind).toBe("cancel");
  }finally{dispose();}
 });

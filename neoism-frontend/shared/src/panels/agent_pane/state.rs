@@ -707,6 +707,7 @@ pub struct NeoismAgentPane {
     /// retains its `String` allocations across frames so per-frame "clear"
     /// is O(1) with no alloc/free churn.
     selectable_lines_len: usize,
+    selection_content_offset: Option<f32>,
     selection_history: BTreeMap<(i64, i64), SelectableLine>,
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
@@ -1110,6 +1111,7 @@ impl Default for NeoismAgentPane {
             hover_link_target: None,
             selectable_lines: Vec::new(),
             selectable_lines_len: 0,
+            selection_content_offset: None,
             selection_history: BTreeMap::new(),
             selection_anchor: None,
             selection_focus: None,

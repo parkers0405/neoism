@@ -10,13 +10,13 @@ import {launchNative} from '../tests/support/native-launch';
 const saved=JSON.parse(readFileSync(process.argv[2],'utf8')),kind=process.argv[3];
 if(!['markdown','terminal','editor','git','agent'].includes(kind)||!saved.project?.startsWith('/tmp/neoism-frame-workload-'))throw Error('Pass a disposable live workload and markdown|terminal|editor|git|agent');
 const config=loadConfig([],process.env),client=new DaemonConnection(config);
-let secondaryWorkspace:string|undefined;
+let secondaryWorkspace:string|undefined,gitWorkspace:string|undefined;
 let sessionId:string|undefined,app:Awaited<ReturnType<typeof launchNative>>|undefined;
 try {
  client.start();
  const deadline=Date.now()+10000;
  while(client.state.phase!=='connected'){if(Date.now()>deadline)throw Error('Daemon unavailable');await Bun.sleep(50);}
- const workspaceId=saved.activeWorkspaceId,rootDir=saved.project;
+ let workspaceId=saved.activeWorkspaceId;const rootDir=saved.project;
  let surface;
  if(kind==='agent'){
   surface=saved.surfaces.find((item:any)=>item.kind==='agent'&&item.sessionId);if(!surface)throw Error('No diagnostic Agent session');
@@ -25,14 +25,16 @@ try {
   sessionId=result.PtyCreated?.session_id;if(!sessionId)throw Error('PTY creation failed');
   surface={id:`terminal:${sessionId}`,kind:'terminal',title:'Frame diagnostic terminal',workspaceId,rootDir,sessionId};
  }else if(kind==='git'){
-  const repo=join(rootDir,'frame-diff-repo');
+  const lines=Number(process.env.LIVE_GIT_LINES||400);if(!Number.isInteger(lines)||lines<1||lines>50000)throw Error('Invalid Git fixture line count');
+  const repo=join(rootDir,lines===400?'frame-diff-repo':`frame-diff-repo-${lines}`);
   if(!existsSync(join(repo,'.git'))){
    mkdirSync(repo,{recursive:true});await Bun.$`git -C ${repo} init`.quiet();
-   for(let file=0;file<12;file++)writeFileSync(join(repo,`sample-${file}.ts`),Array.from({length:400},(_,i)=>`export const value${i} = {count: ${i}, name: "before ${file}"};`).join('\n'));
+   for(let file=0;file<12;file++)writeFileSync(join(repo,`sample-${file}.ts`),Array.from({length:lines},(_,i)=>`export const value${i} = {count: ${i}, name: "before ${file}"};`).join('\n'));
    await Bun.$`git -C ${repo} add .`.quiet();
    await Bun.$`git -C ${repo} -c user.name=Diagnostic -c user.email=diagnostic@example.invalid commit -m baseline`.quiet();
-   for(let file=0;file<12;file++)writeFileSync(join(repo,`sample-${file}.ts`),Array.from({length:400},(_,i)=>`export const value${i} = {count: ${i%3===0?i+1:i}, name: "${i%3===0?'after':'before'} ${file}"};`).join('\n'));
+   for(let file=0;file<12;file++)writeFileSync(join(repo,`sample-${file}.ts`),Array.from({length:lines},(_,i)=>`export const value${i} = {count: ${i%3===0?i+1:i}, name: "${i%3===0?'after':'before'} ${file}"};`).join('\n'));
   }
+  if(process.env.LIVE_GIT_PANEL){gitWorkspace=workspaceId=`neoism-fps-git-${crypto.randomUUID()}`;await Effect.runPromise(client.request('Workspace',{CreateWorkspace:{workspace_id:workspaceId,title:'Git frame diagnostic',root_dir:repo}}));}
   surface={id:`git:${workspaceId}:frame`,kind:'git',title:'Frame diagnostic diff',workspaceId,rootDir,git:{mode:'working',root:repo}};
  }else if(kind==='editor'){
   const path='frame-diagnostic.ts';
@@ -52,16 +54,16 @@ try {
   surfaces.push({id:`file:${secondaryWorkspace}:switch.md`,kind:'file',title:'switch.md',path:'switch.md',rootDir:root,workspaceId:secondaryWorkspace});workspaceIds.push(secondaryWorkspace);
  }
  const state=join(mkdtempSync(join(tmpdir(),'neoism-surface-profile-')),'session.json');
- writeFileSync(state,JSON.stringify({version:1,activeWorkspaceId:workspaceId,activeSurfaceId:surface.id,surfaces,editors:{},providerStates:{},drafts:{},composerDrafts:{},ui:{openWorkspaceIds:workspaceIds}}),{mode:0o600});
+ writeFileSync(state,JSON.stringify({version:1,activeWorkspaceId:workspaceId,activeSurfaceId:surface.id,surfaces,editors:{},providerStates:{},drafts:{},composerDrafts:{},ui:{openWorkspaceIds:workspaceIds,...(gitWorkspace?{gitPanels:{[gitWorkspace]:true}}:{})}}),{mode:0o600});
  app=await launchNative({command:process.env.LIVE_BINARY||join(process.cwd(),'dist/neoism'),args:[],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:state,NEOISM_GPUIX_PROFILE:'1'}});
  await Bun.sleep(4000);
  const info=await app.call('initialize',{protocolVersion:1,client:'surface-profile'});
- if(process.env.HYPRLAND_INSTANCE_SIGNATURE){const window=JSON.parse(await Bun.$`hyprctl activewindow -j`.text());if(window.pid===info.pid){if(!window.floating)await Bun.$`hyprctl dispatch ${'hl.dsp.window.float({action="toggle"})'}`.quiet();await Bun.$`hyprctl dispatch ${'hl.dsp.window.resize({x=1260,y=674,relative=false})'}`.quiet();}}
+ if(process.env.HYPRLAND_INSTANCE_SIGNATURE){const window=JSON.parse(await Bun.$`hyprctl activewindow -j`.text());if(window.pid===info.pid){if(!window.floating)await Bun.$`hyprctl dispatch ${'hl.dsp.window.float({action="toggle"})'}`.quiet();await Bun.$`hyprctl dispatch ${`hl.dsp.window.resize({x=${Number(process.env.LIVE_WINDOW_WIDTH)||1260},y=${Number(process.env.LIVE_WINDOW_HEIGHT)||674},relative=false})`}`.quiet();}}
  const flat=(nodes:any[]):any[]=>nodes.flatMap(n=>[n,...flat(n.children||[])]);
  const {tree}=await app.call('getTree',{});
  const tab=flat(tree?[tree]:[]).find(n=>/^pane-tab:\d+$/.test(n.testId||'')&&flat([n]).some(c=>c.text===surface.title));
  if(tab)await app.getByTestId(tab.testId).click();
- const view=app.getByTestId(kind==='agent'?'conversation':kind==='terminal'?'terminal':kind==='git'?'git-review':kind==='editor'?'code-editor':'rich-markdown-editor');await view.waitFor({timeoutMs:30000});
+ const view=app.getByTestId(kind==='agent'?'conversation':kind==='terminal'?'terminal':kind==='git'?'git-review':kind==='editor'?'code-editor':'rich-markdown-editor');await view.waitFor({timeoutMs:30000});if(gitWorkspace)await app.getByTestId('git-diff-panel').waitFor({timeoutMs:10000});
  if(sessionId){
   const command="python3 -c 'import time; [(print(\"\\033[3%dmrow %d 界 é \" % (i%7+1,i) + \"colored output \"*8 + \"\\033[0m\",flush=True),time.sleep(0.002 if i<1500 else 0.03)) for i in range(3000)]'\n";
   client.send('Pty',{PtyInput:{session_id:sessionId,bytes:[...new TextEncoder().encode(command)]}});
@@ -95,4 +97,4 @@ try {
  }
  console.error('SURFACE_PHASE settled',kind);await Bun.sleep(3000);
  if(process.env.LIVE_SCREENSHOT)await Bun.$`grim ${process.env.LIVE_SCREENSHOT}`.quiet();
-}finally{if(app)await app.close();if(sessionId)await Effect.runPromise(client.request('Pty',{ClosePty:{session_id:sessionId}})).catch(()=>{});if(secondaryWorkspace)await Effect.runPromise(client.request('Workspace',{CloseHostWorkspace:{workspace_id:secondaryWorkspace}})).catch(()=>{});client.stop();}
+}finally{if(app)await app.close();if(sessionId)await Effect.runPromise(client.request('Pty',{ClosePty:{session_id:sessionId}})).catch(()=>{});if(secondaryWorkspace)await Effect.runPromise(client.request('Workspace',{CloseHostWorkspace:{workspace_id:secondaryWorkspace}})).catch(()=>{});if(gitWorkspace)await Effect.runPromise(client.request('Workspace',{CloseHostWorkspace:{workspace_id:gitWorkspace}})).catch(()=>{});client.stop();}

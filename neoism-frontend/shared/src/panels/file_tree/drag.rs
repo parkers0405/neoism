@@ -203,6 +203,11 @@ impl FileTree {
         // aimed at a folder is never silently rerouted to the root.
         if let Some(entry) = hovered_row.and_then(|row| self.entries.get(row)) {
             if !entry.is_virtual() {
+                // A file dropped back on itself is a no-op, not blank tree
+                // space. Compare paths because spring-opening can reorder rows.
+                if entry.path.as_deref().map(normalize_path).as_deref() == Some(source_path) {
+                    return None;
+                }
                 if let NodeKind::Dir { open } = entry.kind {
                     let dir = normalize_path(entry.path.as_ref()?);
                     if dir.as_path() == source_path {
@@ -408,6 +413,27 @@ mod tests {
         let mut tree = sample();
         tree.root = Some(PathBuf::from("/w"));
         tree
+    }
+
+    #[test]
+    fn returning_to_source_file_cancels_even_after_rows_move() {
+        for reorder in [false, true] {
+            let mut tree = sample_rooted();
+            tree.begin_file_drag(1, 100.0, 100.0);
+            tree.update_file_drag(100.0, 160.0, Some(2), true);
+            assert!(tree.file_drag().unwrap().hovered_dir.is_some());
+            let source_index = if reorder {
+                let mut entries = tree.entries.clone();
+                entries.swap(1, 4);
+                tree.set_entries(entries);
+                4
+            } else { 1 };
+            tree.update_file_drag(100.0, 100.0, Some(source_index), true);
+            assert!(tree.is_file_dragging());
+            assert!(tree.file_drag().unwrap().hovered_dir.is_none());
+            assert!(!tree.is_root_drop_target());
+            assert!(matches!(tree.end_file_drag(), FileDropOutcome::Cancel));
+        }
     }
 
     #[test]

@@ -67,3 +67,13 @@ test("real deadlines sleep first and still deliver work only on a native frame",
     display.frame(); expect(fired).toBe(true);
   } finally { animation.dispose(); display.clock.dispose(); }
 });
+
+test("cancellation during a display batch skips captured work and preserves its replacement",async()=>{
+ const display=nativeDisplay(),input=new AnimationFrameScheduler(4),paint=new AnimationFrameScheduler(4);const ran:string[]=[];
+ try{
+  input.request(()=>{ran.push('input');paint.cancel();paint.request(()=>ran.push('replacement'));});
+  paint.request(()=>ran.push('stale'));await settle();display.frame();
+  expect(ran).toEqual(['input']);expect(paint.pending).toBe(true);
+  await settle();display.frame();expect(ran).toEqual(['input','replacement']);expect(paint.pending).toBe(false);
+ }finally{input.dispose();paint.dispose();display.clock.dispose();}
+});

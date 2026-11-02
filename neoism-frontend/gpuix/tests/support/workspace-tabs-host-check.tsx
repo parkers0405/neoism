@@ -86,7 +86,7 @@ async function drag(id:string,targetId:string,side:"before"|"after"){
  const before=membership(),expected=before.filter(value=>value!==id);expected.splice(expected.indexOf(targetId)+(side==="after"?1:0),0,id);
  const originalHosts=new Map([...registered].map(([id,host])=>[id,host])),ids=new Map(host.tabNodes().map(node=>[node.props.testId,node.id]));
  const tab=node(`workspace:${id}`),source=box(`workspace:${id}`),target=host.logicalBounds(node(`workspace:${targetId}`).id),x=Math.max(310,source.x+60),y=45,endX=target.x+(side==="before"?30:90),grab=x-source.x;
- dispatch(tab.id,"mouseDown",x,y);dispatch(tab.id,"mouseMove",x+(endX>=x?8:-8),y);await settle();
+ const previousActivations=activations;dispatch(tab.id,"mouseDown",x,y);assert.equal(activations,previousActivations+1,"workspace activates on press before any movement or release");dispatch(tab.id,"mouseMove",x+(endX>=x?8:-8),y);await settle();
  const layer=node("workspace-drag-layer");dispatch(layer.id,"mouseMove",endX,y);await settle();assert.ok(Math.abs(box(`workspace:${id}`).x+grab-endX)<.01,"dragged stable host follows actual pointer");
  assert.deepEqual(membership(),expected,"Neighbors must reorder while the mouse is still held, like buffer tabs");
  assert.equal(box("workspace-drag-preview").y,y-box("workspace-drag-preview").height/2,"Drag preview is centered on the pointer like buffer tabs");
@@ -129,12 +129,12 @@ try{
  assert.equal(server.workspaceRequests.length,requestsBefore,"dirty inactive X never activates/subscribes");
  await model.saveFile(dirtySurface);await closeWithNativeBubbling("b");assert.equal(closes,2);assert.equal(retargetedCloseClicks,1,"A release/click must actually land on the neighboring X after the first tab disappears");assert.equal(activations,0);assert.deepEqual(order(),["a","c"]);assert.equal(model.state.activeWorkspace!.id,"a");assert.equal(server.workspaces.length,3);
  assert.equal(server.workspaceRequests.length,requestsBefore,"clean inactive X only hides membership");
- await drag("a","c","after");assert.equal(activations,0);assert.equal(reorders,1);assert.equal(server.workspaceRequests.length,requestsBefore);
+ await drag("a","c","after");assert.equal(activations,1);assert.equal(reorders,1);assert.equal(server.workspaceRequests.length,requestsBefore);
  // Translate the painted hosts without onLayout, as horizontal scrolling
  // does in GPUIX. The component must query current bounds at final drop.
- host.setOffset(65);await drag("c","a","after");assert.equal(activations,0);assert.equal(reorders,2);
+ host.setOffset(65);await drag("c","a","after");assert.equal(activations,2);assert.equal(reorders,2);
  await Bun.sleep(300);await settle();
- const tab=node("workspace:a"),tabBox=box("workspace:a"),beforeCancel=membership();dispatch(tab.id,"mouseDown",tabBox.x+60,45);dispatch(tab.id,"mouseMove",tabBox.x+80,45);await settle();const layer=node("workspace-drag-layer");dispatch(layer.id,"mouseUp",tabBox.x+80,120);await settle();dispatch(tab.id,"click",tabBox.x+80,120);assert.deepEqual(membership(),beforeCancel);assert.equal(reorders,2);assert.equal(activations,0);
+ const tab=node("workspace:a"),tabBox=box("workspace:a"),beforeCancel=membership();dispatch(tab.id,"mouseDown",tabBox.x+60,45);dispatch(tab.id,"mouseMove",tabBox.x+80,45);await settle();const layer=node("workspace-drag-layer");dispatch(layer.id,"mouseUp",tabBox.x+80,120);await settle();dispatch(tab.id,"click",tabBox.x+80,120);assert.deepEqual(membership(),beforeCancel);assert.equal(reorders,2);assert.equal(activations,3);
  const plus=node("workspace-new"),plusBounds=box("workspace-new");dispatch(plus.id,"mouseDown",plusBounds.x+15,45);dispatch(plus.id,"click",plusBounds.x+15,45);const created=await createTask;await settle();assert.ok(created);assert.equal(creates,1);assert.equal(server.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length,1);assert.equal(model.state.activeSurfaceId,`welcome:${created.id}`);assert.deepEqual(order(),membership());
  // Full disk decoding plus a new model, never a window relaunch.
  const directory=mkdtempSync(join(tmpdir(),"neoism-workspace-tabs-host-"));

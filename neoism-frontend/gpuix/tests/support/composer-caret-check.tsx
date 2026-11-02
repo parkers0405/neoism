@@ -23,13 +23,25 @@ const quad=()=>JSON.parse(String(byTest("agent-composer-cursor-paint")!.props.co
 const center=()=>{const points=quad();return[points.filter((_,i)=>i%2===0).reduce((sum,n)=>sum+n,0)/4,points.filter((_,i)=>i%2===1).reduce((sum,n)=>sum+n,0)/4];};
 const report=(x:number,y:number,visible=true,offset=0,remainingWidth=100)=>root.dispatch({elementId:input!.id,eventType:"caretGeometry",x,y,width:2,height:22,value:JSON.stringify({visible,fontSize:16,remainingWidth,offset,selectionStart:offset,selectionEnd:offset})});
 const layouts:Array<{text:string;width:number;rows:number}>=[];
+// Exact 530ms phase boundaries are covered by cursor-blink.test.ts with a
+// controlled clock. Here observe the real consumer's transitions: a loaded
+// runner can resume a fixed sleep late, after the next visible phase began.
+async function waitForBlink(visible:boolean){
+ const deadline=performance.now()+2000;
+ for(;;){
+  root.flush();
+  if(!!byTest("agent-composer-cursor-paint")===visible)return;
+  assert.ok(performance.now()<deadline,`Agent must become ${visible?"visible":"hidden"} while idle without native animation frames`);
+  await Bun.sleep(8);
+ }
+}
 let stage="mount";
 try{
   root.render(()=><div><textarea ref={input} testId="actual-composer-input" theme={{caret:"transparent"}} value="界🙂é\nsecond line"/><ComposerCaret config={config} input={()=>input} onLayout={layout=>layouts.push(layout)}/></div>);
  assert.ok(input?.id);assert.ok(events.has(`${input.id}:caretGeometry`));assert.ok(!byTest("agent-composer-cursor-paint"));
  stage="first event";report(120,240,true,0);assert.equal(callbacks.size,1);flush();
  const first=byTest("agent-composer-cursor")!;assert.ok(first);assert.equal(JSON.parse(String(byTest("agent-composer-cursor-paint")!.props.commands))[0].c&255,255,"Agent block must preserve original opaque cursor ink");assert.ok(Math.abs(Number(first.style.width)-9.6)<.001);assert.equal(Number(first.style.height),20);assert.ok(Math.abs(center()[0]-124.8)<.001);assert.equal(center()[1],250);
- stage="idle blink";await Bun.sleep(550);root.flush();assert.ok(!byTest("agent-composer-cursor-paint"),"Agent must hide after the original530ms visible half-period without input or native animation frames");await Bun.sleep(530);root.flush();assert.ok(byTest("agent-composer-cursor-paint"),"Agent must resume its next visible half-period while idle");config.cursorBlink=false;
+ stage="idle blink";await waitForBlink(false);await waitForBlink(true);config.cursorBlink=false;
  stage="motion";const oldCenter=center();await Bun.sleep(85);report(160,262,true,3);report(220,284,true,11);assert.equal(callbacks.size,1,"Native repeat events must share one display callback");flush();
  assert.ok(Math.abs(center()[0]-oldCenter[0])<.001,"First motion after idle starts at the painted cursor");
  await Bun.sleep(6);flush();assert.ok(center()[0]>oldCenter[0]);assert.ok(center()[0]<224.8);

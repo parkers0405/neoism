@@ -5,7 +5,7 @@ import type { Attachment, ProviderState,Thread } from "./protocol";
 /** DTO projection only: concrete SDK ModelRef keeps the provider-qualified
  * identity used by the canonical Agent wire history/provider state. */
 export function sdkThread(session:{id:string;title:string;directory:string;agent?:string;model?:{providerId:string;id:string}}):Thread{
-  return{session_id:session.id,title:session.title,directory:session.directory,agent:session.agent,model:session.model?`${session.model.providerId}/${session.model.id}`:undefined};
+  return{session_id:session.id,title:session.title,directory:session.directory,...(session.agent?{agent:session.agent}:{}),...(session.model?{model:`${session.model.providerId}/${session.model.id}`}:{})};
 }
 
 export function sdkModel(selection: ProviderState): ModelRef | undefined {

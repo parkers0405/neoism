@@ -1,11 +1,12 @@
-//! Optional static web UI served from the daemon HTTP listener.
+//! Explicitly configured static web UI served from the daemon HTTP listener.
 //!
-//! GPUIX is the workspace client. Optional custom static assets and the
-//! standalone Agent GUI share the daemon origin.
+//! GPUIX is the workspace client. Only explicit NEOISM_WEB_ROOT and
+//! NEOISM_AGENT_GUI_ROOT overrides enable browser asset hosting. Never discover
+//! installed resources (web/app and web/native are native runtime files).
 //! Phone share serves the standalone Agent GUI from `/agent-gui/` so Vite
 //! absolute `/assets` paths can be rewritten to that prefix.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Directory that contains a built `index.html`, if one is installed.
 pub fn web_root() -> Option<PathBuf> {
@@ -29,21 +30,6 @@ pub fn candidate_agent_gui_roots() -> Vec<PathBuf> {
             out.push(PathBuf::from(trimmed));
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.extend(neoism_agent_server::gui::GuiRoot::installed_candidates(dir));
-        }
-    }
-    if let Some(data) = dirs::data_local_dir() {
-        out.push(data.join("neoism").join("web").join("agent-gui"));
-    }
-    if let Some(home) = dirs::home_dir() {
-        out.push(home.join(".local/share/neoism/web/agent-gui"));
-    }
-    out.push(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../neoism-agent/sdk/typescript/packages/gui/dist"),
-    );
     out
 }
 
@@ -54,23 +40,6 @@ pub fn candidate_web_roots() -> Vec<PathBuf> {
         if !trimmed.is_empty() {
             out.push(PathBuf::from(trimmed));
         }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.push(dir.join("web"));
-            if let Some(prefix) = dir.parent() {
-                // Standard macOS bundle layout: Contents/MacOS/<binary> and
-                // Contents/Resources/web/<assets>.
-                out.push(prefix.join("Resources/web"));
-                out.push(prefix.join("share/neoism/web"));
-            }
-        }
-    }
-    if let Some(data) = dirs::data_local_dir() {
-        out.push(data.join("neoism").join("web"));
-    }
-    if let Some(home) = dirs::home_dir() {
-        out.push(home.join(".local/share/neoism/web"));
     }
     out
 }

@@ -130,6 +130,7 @@ export interface NeoismClient {
     clearQueue(id: string): Promise<OperationResponse<"v2.sessions.queue.clear">>;
     popQueue(id: string): Promise<OperationResponse<"v2.sessions.queue.pop">>;
     command(id: string, command: string, options?: Omit<NonNullable<OperationInput<"v2.sessions.commands.execute">["body"]>, "command">): Promise<OperationResponse<"v2.sessions.commands.execute">>;
+    shell(id: string, command: string, options?: Omit<OperationInput<"v2.sessions.shell">["body"], "command">): Promise<OperationResponse<"v2.sessions.shell">>;
     undo(id: string): Promise<OperationResponse<"v2.sessions.undo">>;
     redo(id: string): Promise<OperationResponse<"v2.sessions.redo">>;
     summarize(id: string): Promise<OperationResponse<"v2.sessions.summarize">>;
@@ -365,6 +366,15 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
       clearQueue: (id) => operations.request("v2.sessions.queue.clear", { path: { session_id: id } }),
       popQueue: (id) => operations.request("v2.sessions.queue.pop", { path: { session_id: id } }),
       command: (id, command, options = {}) => operations.request("v2.sessions.commands.execute", { path: { session_id: id }, body: { ...options, command } }),
+      shell: async (id, command, options = {}) => {
+        // Older servers forwarded /shell to a model. Never silently use that
+        // behavior, including when a running daemon predates the new frontend.
+        const capability = await transport.request<{execution?:string}>({method:"GET",path:`v2/sessions/${encodeURIComponent(id)}/shell`}).catch(error=>{
+          throw new Error("Direct shell support could not be verified. Update/restart the daemon or check your session access.",{cause:error});
+        });
+        if(capability.execution!=="direct")throw new Error("Update or restart the Agent server to use direct shell commands.");
+        return operations.request("v2.sessions.shell", { path: { session_id: id }, body: { ...options, command } });
+      },
       undo: (id) => operations.request("v2.sessions.undo", { path: { session_id: id }, body: {} }),
       redo: (id) => operations.request("v2.sessions.redo", { path: { session_id: id }, body: {} }),
       summarize: (id) => operations.request("v2.sessions.summarize", { path: { session_id: id }, body: {} }),

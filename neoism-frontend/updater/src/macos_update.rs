@@ -321,7 +321,7 @@ fn replace_loose_with(
 
 /// Install the Linux loose stack using the same all-component transaction as
 /// macOS. Stage on the destination filesystem and retain recovery evidence on
-/// failure, including rollback failure. Old installs need not have an agent GUI.
+/// failure, including rollback failure. Browser assets are not required.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
     install_unix_loose_with(target, source, || Ok(()), || Ok(()))
@@ -336,8 +336,8 @@ pub fn install_unix_loose_with(
 ) -> Result<(), Error> {
     let parent = target.parent().ok_or("executable has no parent")?;
     let _lock = UpdateLock::acquire(&parent.join("neoism"))?;
-    if !source.join("web/agent-gui/index.html").is_file() {
-        return Err("update payload is missing web/agent-gui/index.html".into());
+    if !source.join("web/app/manifest.json").is_file() {
+        return Err("update payload is missing web/app/manifest.json".into());
     }
     let expected = loose_manifest(source, std::ffi::OsStr::new("neoism"))?;
     let work = tempfile::Builder::new()
@@ -1396,9 +1396,10 @@ mod tests {
             }
         }
         fs::write(root.join("web/index.html"), version).unwrap();
-        fs::create_dir_all(root.join("web/agent-gui/assets")).unwrap();
-        fs::write(root.join("web/agent-gui/index.html"), version).unwrap();
-        fs::write(root.join("web/agent-gui/assets/app.js"), version).unwrap();
+        fs::create_dir_all(root.join("web/app/assets")).unwrap();
+        fs::create_dir_all(root.join("web/native")).unwrap();
+        fs::write(root.join("web/app/manifest.json"), version).unwrap();
+        fs::write(root.join("web/app/assets/app.js"), version).unwrap();
         root.join("neoism")
     }
 
@@ -1491,7 +1492,7 @@ mod tests {
         });
         assert!(result.unwrap_err().to_string().contains("original components restored"));
         assert_eq!(fs::read_to_string(installed.join("web/index.html")).unwrap(), "0.7.102");
-        fs::remove_file(payload.join("web/agent-gui/index.html")).unwrap();
+        fs::remove_file(payload.join("web/app/manifest.json")).unwrap();
         assert!(install_unix_loose_with(&target, &payload,
             || panic!("invalid payload must never close the app"),
             || panic!("invalid payload must never launch the app")).is_err());
@@ -1499,25 +1500,26 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn linux_installer_validates_before_replacement_and_adds_gui_to_legacy_stack() {
+    fn linux_installer_validates_native_runtime_before_replacement() {
         let root = tempfile::tempdir().unwrap();
         let installed = root.path().join("installed");
         let target = loose_fixture(&installed, "0.7.102");
         fs::remove_file(installed.join("neoism-agent-lua-runner")).unwrap();
-        fs::remove_dir_all(installed.join("web/agent-gui")).unwrap();
+        fs::create_dir_all(installed.join("web/agent-gui")).unwrap();
         let staged = root.path().join("payload");
         loose_fixture(&staged, "0.7.103");
-        fs::remove_file(staged.join("web/agent-gui/index.html")).unwrap();
+        fs::remove_file(staged.join("web/app/manifest.json")).unwrap();
         assert!(install_unix_loose(&target, &staged).is_err());
         assert_eq!(
             fs::read_to_string(installed.join("web/index.html")).unwrap(),
             "0.7.102"
         );
-        fs::write(staged.join("web/agent-gui/index.html"), "GUI").unwrap();
+        fs::write(staged.join("web/app/manifest.json"), "native app").unwrap();
         install_unix_loose(&target, &staged).unwrap();
+        assert!(!installed.join("web/agent-gui").exists());
         assert!(installed.join("neoism-agent-lua-runner").is_file());
         assert_eq!(
-            fs::read_to_string(installed.join("web/agent-gui/assets/app.js")).unwrap(),
+            fs::read_to_string(installed.join("web/app/assets/app.js")).unwrap(),
             "0.7.103"
         );
         assert_eq!(
@@ -1527,11 +1529,11 @@ mod tests {
     }
 
     #[test]
-    fn loose_upgrade_adds_agent_gui_to_legacy_install_and_replaces_hashed_assets() {
+    fn loose_upgrade_removes_old_gui_and_replaces_native_hashed_assets() {
         let root = tempfile::tempdir().unwrap();
         let installed = root.path().join("installed");
         let target = loose_fixture(&installed, "0.7.102");
-        fs::remove_dir_all(installed.join("web/agent-gui")).unwrap();
+        fs::create_dir_all(installed.join("web/agent-gui")).unwrap();
         for version in ["0.7.103", "0.7.104"] {
             let staged = root.path().join(version);
             loose_fixture(&staged, version);
@@ -1544,12 +1546,13 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                fs::read_to_string(installed.join("web/agent-gui/assets/app.js"))
+                fs::read_to_string(installed.join("web/app/assets/app.js"))
                     .unwrap(),
                 version
             );
-            assert!(!installed.join("web/agent-gui/assets/old-hash.js").exists());
-            fs::write(installed.join("web/agent-gui/assets/old-hash.js"), "old").unwrap();
+            assert!(!installed.join("web/agent-gui").exists());
+            assert!(!installed.join("web/app/assets/old-hash.js").exists());
+            fs::write(installed.join("web/app/assets/old-hash.js"), "old").unwrap();
         }
     }
 

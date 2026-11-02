@@ -58,7 +58,7 @@ export async function ensureLocalDaemon(config:AppConfig,args:readonly string[]=
    const log=join(folder,"daemon.log"),fd=openSync(log,"a",0o600);
    try{
     const directory=startupDirectory(env);
-    const child=spawn(binary,["--workspace",directory],{env,cwd:directory,detached:true,stdio:["ignore",fd,fd],windowsHide:true});
+    const child=spawn(binary,["--workspace",directory],{env:{...env,NEOISM_WORKSPACE_ROOT:directory},cwd:directory,detached:true,stdio:["ignore",fd,fd],windowsHide:true});
     await new Promise<void>((resolve,reject)=>{child.once("spawn",resolve);child.once("error",reject);});child.once("exit",(code,signal)=>{startupExit=`The local workspace daemon exited during startup (${signal||code}). See the daemon.log in XDG_STATE_HOME/neoism or ~/.local/state/neoism.`;});child.unref();
    }finally{closeSync(fd);}
   },...overrides};

@@ -9,12 +9,12 @@ export interface ComposerFrame {
   cardColor: number[]; trayColor: number[]; inputRect: ComposerRect; logoRect: ComposerRect; cardRect: ComposerRect; trayRect: ComposerRect | null;
   joinRect:ComposerRect|null; cardRadius: number; trayRadius: number; footerVisible: boolean; visualRows: number; animating: boolean;
   controls: { visual_rect: ComposerRect; hit_rect: ComposerRect; chips_rect: ComposerRect; text_rect: ComposerRect; narrow: boolean; action: "Disabled" | "Send" | "Interrupt" };
-  commands: PaintCommand[]; cwdRects: ComposerRect[]; systemRects: ComposerRect[];
+  commands: PaintCommand[]; cwdRects: ComposerRect[]; systemRects: ComposerRect[]; contextRect:ComposerRect|null;
 }
 export interface ComposerInput {
   width: number; height: number; home: boolean; text: string; help: boolean; images: number;
   cwd?: string; branch?: string; system?: string; noProviders: boolean; busy: boolean; state: string;
-  visualRows?: number; textWidth?: number;
+  visualRows?: number; textWidth?: number; contextLabel?:string;
 }
 export class NativeComposer {
   readonly id: number;

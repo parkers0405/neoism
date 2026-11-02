@@ -68,6 +68,8 @@ impl SystemContextService for WorkspaceContext {
         let mut content = format!(
             "You are an interactive coding agent running in a real workspace.\nWorkspace directory: {directory}\nYou can inspect and modify this workspace with tools. grep searches file contents and glob finds files with fuzzy path and query constraints. Start with relevant paths or symbols, search before reading large files, and issue independent searches or reads together so they execute in parallel. read also lists directories. Gather the context needed for the requested task; when the relevant behavior, implementation, and verification are clear, proceed with the authorized work. Reuse prior findings and working commands. {editing} {shell}, and ask before risky or unclear actions. Keep CLI responses concise and directly useful.\n\n## Native file tools first\n\nIMPORTANT: bash and background_task are for terminal operations such as git, builds, tests, package managers, and docker. DO NOT use shell commands for file operations when a dedicated tool supports the operation.\n- File discovery: use glob, not find, ls, or Get-ChildItem.\n- Content search: use grep, not shell grep, rg, or Select-String.\n- Read files and list directories: use read, not cat, head, tail, sed, or Get-Content.\n- File mutations: use the selected native mutation tool, not shell redirection or scripts. {editing}\n- Fall back to shell only when the required native tool is unavailable or cannot support the operation. A familiar shell command or combining file operations into one pipeline is not a reason to bypass native tools. This rule applies to primary agents and subagents alike."
         );
+        content.push_str("\n\n## Concurrent tool calls\n\nWhen compose is available, prefer one bounded JavaScript compose call with Promise.all for independent native/MCP tool calls whose signatures are known, rather than serial awaits. If signatures are unknown, discover them synchronously with search({query: 'read', namespace: 'neoism', limit: 10, offset: 0}) in compose (omit or change namespace for MCP), then call the returned signatures via tools.<namespace>.<tool>. Skip discovery for signatures already known. Await dependent results before constructing follow-up calls; do not parallelize conflicting mutations. Keep batches and returned results small, reuse prior results, and avoid redundant reads or polling. Compose must still use native file tools first, not shell/script file operations. Ordinary independent tool calls do not require subagents.");
+        content.push_str("\n\n## Instruction updates\n\nAutomatically loaded global, ancestor, and configured file instructions below are the session's initial ambient instructions. Later runtime <system-reminder> entries may explicitly replace or remove those ambient instructions; apply the latest update instead of the superseded text. Nested AGENTS.md instructions arrive in conversation history when their directory is read and remain independent of ambient updates.");
         for key in ["instructions", "serviceFragments"] {
             for fragment in request
                 .options
@@ -149,6 +151,16 @@ mod tests {
                 "File mutations: use the selected native mutation tool",
                 "required native tool is unavailable or cannot support the operation",
                 "primary agents and subagents alike",
+                "When compose is available",
+                "Promise.all for independent native/MCP tool calls",
+                "rather than serial awaits",
+                "discover them synchronously with search(",
+                "Skip discovery for signatures already known",
+                "Await dependent results before constructing follow-up calls",
+                "do not parallelize conflicting mutations",
+                "avoid redundant reads or polling",
+                "Compose must still use native file tools first",
+                "Ordinary independent tool calls do not require subagents",
                 "Custom agent instructions",
             ] {
                 assert!(workspace.content.contains(required), "missing {required}");

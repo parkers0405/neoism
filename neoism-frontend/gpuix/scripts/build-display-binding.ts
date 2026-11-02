@@ -2,7 +2,9 @@ import {copyFileSync,existsSync,mkdirSync,readFileSync,readdirSync,renameSync,un
 import {dirname,join,resolve} from "node:path";
 import {frontendRoot as root,readDisplayPin,sha256,displayIdentity,displayStampPath,verifiedDisplayBinding,type DisplayStamp} from "../src/display-binding";
 
-const pin=readDisplayPin(),overlay=pin.devicePreview,capture=pin.deviceWindowCapture,source=join(root,overlay?"artifacts/gpuix-device-preview-source":"artifacts/gpuix-pacing-source"),patch=join(root,pin.patch);
+const pin=readDisplayPin(),overlay=pin.devicePreview,capture=pin.deviceWindowCapture;
+// Allow an isolated pinned checkout without replacing local renderer work.
+const source=resolve(root,process.env.NEOISM_GPUIX_DISPLAY_SOURCE||(overlay?"artifacts/gpuix-device-preview-source":"artifacts/gpuix-pacing-source")),patch=join(root,pin.patch);
 const toolchains=join(root,"artifacts/gpuix-rustup"),target=resolve(root,overlay?"../../target/gpuix-native-device-preview":"../../target/gpuix-native-vsync");
 const publishOnly=process.argv.includes("--publish-only"),checkOnly=process.argv.includes("--check"),prepareOnly=process.argv.includes("--prepare-only"),cargoCheckOnly=process.argv.includes("--check-only");
 const env:NodeJS.ProcessEnv={...process.env,RUSTUP_HOME:toolchains,RUSTUP_TOOLCHAIN:pin.toolchain,RUSTUP_NO_UPDATE_CHECK:"1",CARGO_TARGET_DIR:target,CARGO_BUILD_JOBS:String(pin.jobs)};

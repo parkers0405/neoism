@@ -8,7 +8,8 @@ export function startupDirectory(env:NodeJS.ProcessEnv=process.env,options:{plat
   const home=options.home??homedir();
   let cwd=options.cwd;
   if(cwd===undefined){try{cwd=process.cwd();}catch{cwd=home;}}
-  if(env.NEOISM_LAUNCH_DIRECTORY)return path.resolve(cwd,env.NEOISM_LAUNCH_DIRECTORY);
+  const explicit=env.NEOISM_LAUNCH_DIRECTORY||env.NEOISM_WORKSPACE_ROOT;
+  if(explicit)return path.resolve(cwd,explicit);
   const normalized=path.normalize(cwd),root=path.parse(normalized).root;
   const same=(a:string,b:string)=>platform==="win32"?path.resolve(a).toLowerCase()===path.resolve(b).toLowerCase():path.resolve(a)===path.resolve(b);
   if((platform==="darwin"||platform==="win32")&&same(normalized,root))return home;

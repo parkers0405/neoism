@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the actual download installer offline, including late rollback."""
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tarfile
@@ -17,11 +18,15 @@ class InstallerTests(unittest.TestCase):
             mock.mkdir()
             install = root / 'installed'
             payload = root / 'neoism-linux-x86_64'
-            gui = payload / 'web/agent-gui/assets'
+            gui = payload / 'web/app/assets'
             gui.mkdir(parents=True)
-            (payload / 'web/index.html').write_text('workspace')
-            (payload / 'web/agent-gui/index.html').write_text('agent GUI')
+            (payload / 'web/native').mkdir()
+            (payload / 'web/app/manifest.json').write_text('{}')
             (gui / 'app.js').write_text('new JS')
+            (payload / 'licenses').mkdir()
+            for name in ['libneoism_gpuix_core.so', 'libghostty-vt.so', 'LICENSE.ghostty', 'LICENSE', 'NOTICE']:
+                (payload / name).write_text(name)
+            shutil.copy2(SCRIPT.with_name('install-gpuix-bundle.sh'), payload / 'install-bundle.sh')
             for binary in ['neoism', 'neoism-agent', 'neoism-agent-lua-runner', 'neoism-workspace-daemon']:
                 path = payload / binary
                 path.write_text('#!/bin/sh\necho new\n')
@@ -44,17 +49,18 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
             pack()
             run(True)
-            self.assertEqual((install / 'web/agent-gui/assets/app.js').read_text(), 'new JS')
-            (install / 'web/agent-gui/assets/stale.js').write_text('stale')
+            self.assertEqual((install / 'web/app/assets/app.js').read_text(), 'new JS')
+            (install / 'web/agent-gui').mkdir()
+            (install / 'web/agent-gui/stale.js').write_text('stale')
             run(True)
-            self.assertFalse((install / 'web/agent-gui/assets/stale.js').exists())
+            self.assertFalse((install / 'web/agent-gui').exists())
             (install / 'neoism').write_text('#!/bin/sh\necho original\n')
             (install / 'unrelated').write_text('keep')
-            (install / 'web/agent-gui/assets/app.js').write_text('original JS')
+            (install / 'web/app/assets/app.js').write_text('original JS')
             run(False, FAIL_MOVE='1')
             self.assertIn('original', (install / 'neoism').read_text())
-            self.assertEqual((install / 'web/agent-gui/assets/app.js').read_text(), 'original JS')
-            (payload / 'web/agent-gui/index.html').unlink()
+            self.assertEqual((install / 'web/app/assets/app.js').read_text(), 'original JS')
+            (payload / 'web/app/manifest.json').unlink()
             pack()
             run(False)
             self.assertIn('original', (install / 'neoism').read_text())

@@ -1183,6 +1183,13 @@ pub struct HistoryMessage {
     /// Optional bounded MCP service presentation, independent of display titles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<serde_json::Value>,
+    /// Nested tool calls projected from a composition's authoritative audit record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composition_children: Vec<HistoryMessage>,
+    /// Explicit output projection, including an authoritative empty checklist.
+    /// Absent on older peers; receivers then infer it from todos/lang.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_kind: Option<HistoryOutputKind>,
     #[serde(default)]
     pub lang: String,
     #[serde(default)]
@@ -1205,6 +1212,13 @@ pub struct HistoryAttachment {
     pub filename: String,
     pub url: String,
     pub mime: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HistoryOutputKind {
+    Text,
+    Code,
+    Todos,
 }
 
 /// Discriminator for [`HistoryMessage`]. Mirrors the desktop pane's

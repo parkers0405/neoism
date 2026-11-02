@@ -1491,6 +1491,62 @@ mod agent_proxy_auth_tests {
     }
 
     #[tokio::test]
+    async fn native_daemon_does_not_auto_host_browser_uis() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _policy = AuthPolicyGuard::set(true);
+        let _token = DaemonTokenGuard::set("daemon-test-key");
+        let previous_web = std::env::var_os("NEOISM_WEB_ROOT");
+        let previous_gui = std::env::var_os("NEOISM_AGENT_GUI_ROOT");
+        std::env::remove_var("NEOISM_WEB_ROOT");
+        std::env::remove_var("NEOISM_AGENT_GUI_ROOT");
+        let temp = tempfile::tempdir().unwrap();
+        let app = router(test_state(AuthService::bootstrap(temp.path()).unwrap()));
+        for path in [
+            "/", "/index.html", "/assets/app.js", "/web/app/manifest.json",
+            "/agent-gui/", "/agent-gui/assets/app.js",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        assert!(crate::web::candidate_web_roots().is_empty());
+        assert!(crate::web::candidate_agent_gui_roots().is_empty());
+        // Health and authenticated proxy APIs still exist. A plain HTTP
+        // request to the WebSocket route is rejected as a bad upgrade, not 404.
+        for (path, expected) in [
+            ("/health", StatusCode::OK),
+            ("/agent/v2/sessions", StatusCode::UNAUTHORIZED),
+            ("/session", StatusCode::BAD_REQUEST),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{path}");
+        }
+        for (key, previous) in [
+            ("NEOISM_WEB_ROOT", previous_web),
+            ("NEOISM_AGENT_GUI_ROOT", previous_gui),
+        ] {
+            if let Some(value) = previous {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn every_agent_proxy_route_rejects_an_unauthenticated_request() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _policy = AuthPolicyGuard::set(true);

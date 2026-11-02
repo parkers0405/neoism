@@ -714,6 +714,7 @@ fn append_estimated_rows<P>(
                 source_end_exclusive,
                 message: group_message,
             } => {
+                let is_edit_tool = is_edit_tool_message(&group_message);
                 let height =
                     estimate_message_height_with_pane(pane, &group_message, width, s);
                 if height > 0.0 {
@@ -729,12 +730,12 @@ fn append_estimated_rows<P>(
                         display_message: Some(group_message),
                         markdown_blocks: None,
                         tool_diff_sections: None,
-                        is_edit_tool: false,
+                        is_edit_tool,
                     });
                     content_y += height;
                     appended_any = true;
                 }
-                previous_visible_was_edit_tool = false;
+                previous_visible_was_edit_tool = is_edit_tool;
                 source_index = source_end_exclusive;
             }
             NextTimelineItem::Message { message } => {
@@ -1118,6 +1119,7 @@ where
                 source_end_exclusive,
                 message: group_message,
             } => {
+                let is_edit_tool = is_edit_tool_message(&group_message);
                 let height = cached_message_height::<P, D>(
                     sugarloaf,
                     pane,
@@ -1151,11 +1153,11 @@ where
                         display_message: Some(group_message),
                         markdown_blocks,
                         tool_diff_sections,
-                        is_edit_tool: false,
+                        is_edit_tool,
                     });
                     content_y += height;
                 }
-                previous_visible_was_edit_tool = false;
+                previous_visible_was_edit_tool = is_edit_tool;
                 source_index = source_end_exclusive;
             }
             NextTimelineItem::Message { message } => {
@@ -1295,6 +1297,7 @@ where
                 source_end_exclusive,
                 message: group_message,
             } => {
+                let is_edit_tool = is_edit_tool_message(&group_message);
                 let height = cached_message_height::<P, D>(
                     sugarloaf,
                     pane,
@@ -1328,12 +1331,12 @@ where
                         display_message: Some(group_message),
                         markdown_blocks,
                         tool_diff_sections,
-                        is_edit_tool: false,
+                        is_edit_tool,
                     });
                     content_y += height;
                     appended_any = true;
                 }
-                previous_visible_was_edit_tool = false;
+                previous_visible_was_edit_tool = is_edit_tool;
                 source_index = source_end_exclusive;
             }
             NextTimelineItem::Message { message } => {
@@ -1405,6 +1408,11 @@ where
     if !timeline_message_visible(message, source_index, live_start) {
         return None;
     }
+    if let Some((source_end_exclusive, message)) =
+        super::patch_group::patch_tool_group_at(messages, source_index)
+    {
+        return Some(NextTimelineItem::Group { source_end_exclusive, message });
+    }
     if let Some((source_end_exclusive, group_message)) =
         read_tool_group_at(messages, source_index)
     {
@@ -1421,7 +1429,7 @@ where
 ///
 /// Settled turns (everything before `live_trace_start`; the whole transcript
 /// after a reload) show ONLY user prompts and assistant text — reasoning,
-/// tools, edits, subtasks, and compaction rows are hidden, exactly like the
+/// ordinary tools, edits, subtasks, and compaction rows are hidden, exactly like the
 /// original decluttered design. The live window shows everything as it
 /// streams (and stays revealed until the session is left).
 ///
@@ -1429,7 +1437,8 @@ where
 /// NEVER hidden, in any turn. The old rule kept only each turn's trailing
 /// text part — and hid even the final answer when a turn ended on a tool
 /// call — which wiped re-entered transcripts down to fragments. Answers must
-/// survive every reload and session switch.
+/// survive every reload and session switch. Nonempty task checklists also
+/// survive; empty task-clearing markers are state, never transcript content.
 #[cfg(test)]
 pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
     messages: &[M],
@@ -1456,6 +1465,11 @@ fn timeline_message_visible<M: AgentTimelineMessage>(
         || is_background_completion_result_card(message)
     {
         return false;
+    }
+    if message.kind() == AgentTimelineMessageKind::Tool
+        && message.output_kind() == AgentTimelineOutputKind::Todos
+    {
+        return !message.todos_empty();
     }
     match message.kind() {
         AgentTimelineMessageKind::System => message.tool() == "location_notice",

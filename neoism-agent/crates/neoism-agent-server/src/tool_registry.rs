@@ -626,6 +626,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composition_schema_guides_bounded_independent_native_and_mcp_calls() {
+        let tools = definitions(ToolOwner::Workspace);
+        let compose = tools.iter().find(|tool| tool.id == "compose").unwrap();
+        assert_eq!(compose.description, crate::tool_composition::DESCRIPTION);
+        assert_eq!(compose.parameters["required"], json!(["code"]));
+        for required in [
+            "small Promise.all batches",
+            "independent known native/MCP tool calls, not serial awaits",
+            "Discover unknown signatures synchronously with search(",
+            "skip discovery for known signatures",
+            "Await dependencies before follow-up calls",
+            "never parallelize conflicting mutations",
+            "avoid redundant reads or polling",
+            "Native file tools first still applies",
+            "No ambient filesystem, process or network",
+        ] {
+            assert!(compose.description.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
     fn shell_tools_advertise_native_file_tools_first() {
         let tools = definitions(ToolOwner::Workspace);
         let bash = tools.iter().find(|tool| tool.id == "bash").unwrap();

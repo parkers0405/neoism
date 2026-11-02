@@ -216,8 +216,10 @@ pub fn system_workflow_allows(method: &str, path: &str) -> bool {
             }
             "control" => matches!(method, "GET" | "POST" | "DELETE"),
             "queue" => matches!(method, "GET" | "DELETE"),
+            // GET negotiates direct execution before a client may submit POST.
+            "shell" => matches!(method, "GET" | "POST"),
             "fork" | "prompt" | "prompt-async" | "abort" | "compact" | "wait"
-            | "commands" | "shell" | "revert" | "unrevert" | "undo" | "redo"
+            | "commands" | "revert" | "unrevert" | "undo" | "redo"
             | "summarize" | "pin" => method == "POST",
             _ => false,
         },
@@ -325,6 +327,20 @@ mod tests {
             for method in ["GET", "POST", "PUT", "DELETE"] {
                 assert!(!system_workflow_allows(method, path), "{method} {path}");
             }
+        }
+    }
+
+    #[test]
+    fn direct_shell_probe_and_execution_are_allowed_without_a_prefix_grant() {
+        let path = "/v2/sessions/ses_test/shell";
+        assert!(system_workflow_allows("GET", path));
+        assert!(system_workflow_allows("POST", path));
+        for method in ["PUT", "PATCH", "DELETE", "HEAD"] {
+            assert!(!system_workflow_allows(method, path));
+        }
+        for path in ["/v2/sessions/ses_test/shell/extra", "/v2/sessions/../shell", "/v2/sessions/%2e%2e/shell"] {
+            assert!(!system_workflow_allows("GET", path));
+            assert!(!system_workflow_allows("POST", path));
         }
     }
 

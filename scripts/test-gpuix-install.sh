@@ -13,7 +13,9 @@ cleanup() {
 trap cleanup EXIT
 payload="$fixture/payload"
 prefix="$fixture/installed"
-mkdir -p "$payload/web/agent-gui" "$payload/licenses" "$prefix/bin"
+mkdir -p "$payload/web/app" "$payload/web/native" "$payload/web/agent-gui" "$payload/licenses" "$prefix/bin"
+printf '{}' > "$payload/web/app/manifest.json"
+printf 'native library' > "$payload/web/native/display.node"
 for binary in neoism neoism-workspace-daemon neoism-agent; do
   printf '#!/bin/sh\necho migrated-%s\n' "$binary" > "$payload/$binary"
   chmod +x "$payload/$binary"
@@ -29,8 +31,10 @@ if bash "$repo_root/scripts/install-gpuix-bundle.sh" "$payload" "$prefix" > /dev
 mv "$fixture/ghostty" "$payload/libghostty-vt.so"
 bash "$repo_root/scripts/install-gpuix-bundle.sh" "$payload" "$prefix"
 [[ "$("$prefix/bin/neoism")" == migrated-neoism ]]
-[[ -f "$prefix/bin/libneoism_gpuix_core.so" && -f "$prefix/bin/libghostty-vt.so" && -f "$prefix/bin/web/agent-gui/index.html" ]]
-# Installing another version replaces the complete GUI tree instead of retaining stale assets.
+[[ -f "$prefix/bin/libneoism_gpuix_core.so" && -f "$prefix/bin/libghostty-vt.so" && -f "$prefix/bin/web/app/manifest.json" && -f "$prefix/bin/web/native/display.node" ]]
+[[ ! -e "$prefix/bin/web/agent-gui" ]]
+# Even a dirty payload must not install either browser UI. Upgrades drop old assets.
+mkdir -p "$prefix/bin/web/agent-gui"
 printf stale > "$prefix/bin/web/agent-gui/stale.js"
 bash "$repo_root/scripts/install-gpuix-bundle.sh" "$payload" "$prefix"
 [[ ! -e "$prefix/bin/web/agent-gui/stale.js" ]]
@@ -70,7 +74,7 @@ done
 [[ -f "$fixture/ready" ]]
 bash "$repo_root/scripts/install-gpuix-bundle.sh" "$payload" "$prefix"
 previous_executable="$(readlink "/proc/$previous_pid/exe")"
-[[ -x "$previous_executable" && -f "$(dirname "$previous_executable")/web/agent-gui/index.html" ]]
+[[ -x "$previous_executable" && -f "$(dirname "$previous_executable")/web/app/manifest.json" ]]
 [[ "$("$prefix/bin/neoism")" == migrated-neoism ]]
 touch "$fixture/continue"
 wait "$previous_pid"

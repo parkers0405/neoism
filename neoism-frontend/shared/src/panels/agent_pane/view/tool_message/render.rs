@@ -1,7 +1,4 @@
 use super::super::draw::draw_text_revealed_clipped;
-use super::super::markdown::{
-    render_markdown_horizontal_scrollbar, sticky_markdown_horizontal_scrollbar_track,
-};
 use super::diff::{
     cached_diff_card_view, cached_edit_diff_sections, diag_footer_height,
     diag_footer_rows, diff_body_height, diff_link_target, tool_diff_card_width,
@@ -74,14 +71,6 @@ fn tool_header_indicator(tool: &str, title: &str, status: &str) -> ToolHeaderInd
     }
 }
 
-fn tool_header_is_toggleable(
-    tool: &str,
-    has_diff_sections: bool,
-    archived: bool,
-) -> bool {
-    !has_diff_sections || archived || !is_edit_tool_name(tool)
-}
-
 fn fixed_diff_viewport_height(preview_rows: usize, s: f32) -> f32 {
     diff_body_height(preview_rows, s)
 }
@@ -105,16 +94,33 @@ pub fn measure_tool_message_height(
         selected_group_child,
         None,
     )?;
-    for child in message.composition_children() {
+    for child in compact_composition_children(message.composition_children()) {
         height += prepare_composition_child(
             sugarloaf,
             pane,
-            child,
+            child.as_ref(),
             (width - 20.0 * s).max(1.0),
             s,
         ).0;
     }
     Some(height)
+}
+
+pub(super) fn compact_composition_children(children: &[NeoismAgentMessage]) -> Vec<Cow<'_, NeoismAgentMessage>> {
+    children.iter().map(|child| {
+        // Compact each call's output, not the calls themselves: every audit ID
+        // keeps its own header, icon and expansion state, including repeated reads.
+        if let Some((_, mut group)) = super::super::timeline::read_tool_group_at(std::slice::from_ref(child), 0) {
+            group.id = child.id.clone();
+            group.title = child.title.clone();
+            group.status = child.status.clone();
+            group.mcp = child.mcp.clone();
+            group.composition_child = true;
+            Cow::Owned(group)
+        } else {
+            Cow::Borrowed(child)
+        }
+    }).collect()
 }
 
 fn prepare_composition_child(
@@ -129,7 +135,8 @@ fn prepare_composition_child(
     let archived = pane.tool_archived(&child.id) || child.composition_child();
     let progress = pane.tool_expand_progress(&child.id).clamp(0.0, 1.0);
     let expanded = progress > 0.001 || pane.tool_expanded(&child.id);
-    let sections = if show_tool_diff_cards(child.tool(), child.status(), false, archived)
+    let sections = if is_edit_tool_name(child.tool())
+        || show_tool_diff_cards(child.tool(), child.status(), false, archived)
         || (expanded && show_tool_diff_cards(child.tool(), child.status(), true, archived))
     {
         cached_edit_diff_sections(child)
@@ -188,10 +195,10 @@ pub fn render_tool_message(
         return h;
     };
     let child_w = (w - 20.0 * s).max(1.0);
-    let children: Vec<_> = message
-        .composition_children()
+    let display_children = compact_composition_children(message.composition_children());
+    let children: Vec<_> = display_children
         .iter()
-        .map(|child| prepare_composition_child(sugarloaf, pane, child, child_w, s))
+        .map(|child| prepare_composition_child(sugarloaf, pane, child.as_ref(), child_w, s))
         .collect();
     let root_h = (h - children.iter().map(|(height, _)| height).sum::<f32>())
         .max(TOOL_HEADER_HEIGHT * s);
@@ -212,7 +219,7 @@ pub fn render_tool_message(
         mouse,
     );
     let mut child_y = y + root_h;
-    for (child, (child_h, sections)) in message.composition_children().iter().zip(children) {
+    for (child, (child_h, sections)) in display_children.iter().zip(children) {
         render_tool_message(
             sugarloaf,
             pane,
@@ -220,7 +227,7 @@ pub fn render_tool_message(
             child_y,
             child_w,
             child_h,
-            child,
+            child.as_ref(),
             theme,
             s,
             now_seconds,
@@ -245,6 +252,9 @@ fn measure_single_tool_message_height(
     prepared_diff_sections: Option<&[ToolDiffSection]>,
 ) -> Option<f32> {
     if message.is_todos_output() {
+        if message.todos().is_empty() {
+            return Some(0.0);
+        }
         let opts = DrawOpts {
             font_size: 14.0 * s,
             ..DrawOpts::default()
@@ -252,7 +262,6 @@ fn measure_single_tool_message_height(
         let rows = message
             .todos()
             .iter()
-            .take(12)
             .map(|todo| {
                 wrap_todo_text(
                     sugarloaf,
@@ -286,17 +295,21 @@ fn measure_single_tool_message_height(
                 let card_key = format!("{}:{section_index}", message.id());
                 let card_expanded =
                     message.tool() == "compose" || pane.tool_expanded(&card_key);
-                let view = cached_diff_card_view(section, card_w, s, card_expanded);
+                let max_line = section.lines.iter().flat_map(|line| [line.line_number, line.old_line_number, line.new_line_number]).flatten().max().unwrap_or(1);
+                let gutter = diff_card::measured_gutter_width(sugarloaf, max_line, s);
+                let body_w = diff_card::body_text_width_with_gutter(card_w, s, gutter);
+                let view = cached_diff_card_view(section, body_w, s, card_expanded);
+                debug_assert_eq!(view.max_line_number, max_line);
                 height += diff_card::HEADER_HEIGHT * s
-                    + fixed_diff_viewport_height(view.preview_visual_rows, s)
-                    + diag_footer_height(section, s)
+                    + if view.preview_visual_rows == 0 { 0.0 } else { fixed_diff_viewport_height(view.preview_visual_rows, s) }
+                    + if card_expanded { diag_footer_height(section, s) } else { 0.0 }
                     + 10.0 * s;
             }
             return Some(height);
         }
     }
     // Ordinary collapsed calls need no title shaping or output wrapping.
-    if !tool_expanded {
+    if !tool_expanded || message.defer_live_edit_diff() {
         return Some(TOOL_HEADER_HEIGHT * s);
     }
 
@@ -348,7 +361,7 @@ fn measure_tool_group_activity_height(
     let preview_w = (width - 96.0 * s).max(80.0 * s);
     let previews = tool_group_child_previews(message);
     let mut rows = 0usize;
-    for line in message.text().lines().take(TOOL_GROUP_PREVIEW_LINES) {
+    for line in message.text().lines() {
         rows += 1;
         let Some(child_key) = group_child_key(line) else {
             continue;
@@ -382,7 +395,7 @@ fn render_single_tool_message(
     prepared_diff_sections: Option<&[ToolDiffSection]>,
     mouse: Option<(f32, f32)>,
 ) -> f32 {
-    if h <= 0.0 {
+    if h <= 0.0 || (message.is_todos_output() && message.todos().is_empty()) {
         return 0.0;
     }
     let Some(message_clip) = intersect_rect([x, y, w, h], viewport_clip) else {
@@ -399,6 +412,19 @@ fn render_single_tool_message(
     let suppress_interactions =
         pane.suppress_tool_interactions() || motion.offset_y.abs() > 0.001;
     let accent = tool_message_accent(message.status(), theme);
+    let render_expanded = pane.tool_expanded(message.id())
+        || pane.tool_expand_progress(message.id()) > 0.01;
+    let edit_header = is_edit_tool_name(message.tool());
+    let archived = pane.tool_archived(message.id()) || message.composition_child();
+    let cached_diff_sections;
+    let diff_sections = if !edit_header && !show_tool_diff_cards(message.tool(), message.status(), render_expanded, archived) {
+        None
+    } else if let Some(sections) = prepared_diff_sections {
+        Some(sections)
+    } else {
+        cached_diff_sections = cached_edit_diff_sections(message);
+        cached_diff_sections.as_ref().map(|sections| sections.as_slice())
+    }.filter(|sections| !sections.is_empty());
     let (incoming_alpha, outgoing_alpha) =
         status_blend(motion.outgoing_status.is_some(), motion.status_progress);
     let mut indicator_visible = false;
@@ -574,10 +600,13 @@ fn render_single_tool_message(
             }
         }
     } else {
+        let symbol_tool = if message.composition_child() && message.tool() == "tool_group" {
+            message.title().split_once('(').map_or(message.tool(), |(tool, _)| tool)
+        } else { message.tool() };
         draw_tool_symbol(
             sugarloaf,
             [x + 20.0 * s, y, 18.0 * s, 22.0 * s],
-            message.tool(),
+            symbol_tool,
             &symbol_opts,
             occlusion_rects,
         );
@@ -612,9 +641,31 @@ fn render_single_tool_message(
     } else {
         incoming_w
     };
-    let title_avail_w = (w - 66.0 * s - status_w).max(0.0);
-    let title =
-        truncate_to_fit(&message.title_text(), title_avail_w, sugarloaf, &title_opts);
+    let disclosure = edit_header || message.composition_child() || message.tool() == "compose";
+    let disclosure_w = if disclosure { 18.0 * s } else { 0.0 };
+    let counts = diff_sections.filter(|_| edit_header).and_then(|sections| {
+        let additions: u64 = sections.iter().map(|section| u64::from(section.additions())).sum();
+        let deletions: u64 = sections.iter().map(|section| u64::from(section.deletions())).sum();
+        (additions > 0 || deletions > 0).then(|| (
+            if additions > 0 { format!("+{additions}") } else { String::new() },
+            if deletions > 0 { format!("-{deletions}") } else { String::new() },
+        ))
+    });
+    let mut count_opts = status_opts;
+    count_opts.font_size = 13.0 * s;
+    let counts_w = counts.as_ref().map_or(0.0, |(added, removed)| {
+        [added, removed].iter().filter(|label| !label.is_empty())
+            .map(|label| sugarloaf.text_mut().measure(label, &count_opts) + 12.0 * s).sum()
+    });
+    let available = (w - 66.0 * s - status_w - disclosure_w).max(0.0);
+    let show_counts = counts.is_some() && available >= counts_w + 36.0 * s;
+    let title_avail_w = available - if show_counts { counts_w } else { 0.0 };
+    let title_text = if is_streaming_patch_tool_name(message.tool()) {
+        "Apply patch".to_string()
+    } else {
+        message.title_text()
+    };
+    let title = truncate_to_fit(&title_text, title_avail_w, sugarloaf, &title_opts);
     let text_x = x + 42.0 * s;
     let line_y = y + 2.0 * s;
     if !suppress_interactions || pane.has_tool_selection() {
@@ -675,6 +726,21 @@ fn render_single_tool_message(
         &title_opts,
         occlusion_rects,
     );
+    if let Some((added, removed)) = counts.filter(|_| show_counts) {
+        let mut count_x = text_x + sugarloaf.text_mut().measure(&title, &title_opts) + 12.0 * s;
+        for (label, color) in [(added, theme.green), (removed, theme.red)] {
+            if label.is_empty() { continue; }
+            count_opts.color = theme.u8(color);
+            draw_text_clipped(sugarloaf, count_x, y + 4.0 * s, &label, &count_opts, occlusion_rects);
+            count_x += sugarloaf.text_mut().measure(&label, &count_opts) + 12.0 * s;
+        }
+    }
+    if disclosure {
+        let mut opts = status_opts;
+        opts.color = theme.u8(theme.muted);
+        draw_text_clipped(sugarloaf, x + w - 16.0 * s, y + 3.0 * s,
+            if pane.tool_expanded(message.id()) { "⌄" } else { "›" }, &opts, occlusion_rects);
+    }
     let mut motion_visible = indicator_visible
         || symbol_visible
         || active_glyphs(
@@ -698,7 +764,7 @@ fn render_single_tool_message(
         }
         let mut opts = status_opts;
         opts.color = theme.u8_alpha(color, blend);
-        let label_x = x + w - 24.0 * s - width + 12.0 * s;
+        let label_x = x + w - 24.0 * s - disclosure_w - width + 12.0 * s;
         let first_label = sugarloaf.text_mut().instances().len();
         draw_text_clipped(
             sugarloaf,
@@ -740,39 +806,15 @@ fn render_single_tool_message(
         return h;
     }
 
-    let render_expanded = pane.tool_expanded(message.id())
-        || pane.tool_expand_progress(message.id()) > 0.01;
-    let archived = pane.tool_archived(message.id()) || message.composition_child();
-    let cached_diff_sections;
-    let diff_sections = if !show_tool_diff_cards(
-        message.tool(),
-        message.status(),
-        render_expanded,
-        archived,
-    ) {
-        None
-    } else if let Some(sections) = prepared_diff_sections {
-        Some(sections)
-    } else {
-        cached_diff_sections = cached_edit_diff_sections(message);
-        cached_diff_sections
-            .as_ref()
-            .map(|sections| sections.as_slice())
-    };
-    let diff_sections = diff_sections.filter(|sections| !sections.is_empty());
-    // Only live edit cards replace the parent toggle with per-file toggles.
-    // Ordinary tools (e.g. Bash git diff) must retain the header target after
-    // expansion, including when their diff sections were prepared by the timeline.
-    if tool_header_is_toggleable(message.tool(), diff_sections.is_some(), archived)
-        && !suppress_interactions
-    {
+    // Parent disclosure stays clickable independently of its per-file accordions.
+    if !suppress_interactions {
         if let Some(header_clip) =
             intersect_rect([x, y, w, TOOL_HEADER_HEIGHT * s], message_clip)
         {
             pane.register_tool_hit_rect(message.id().to_string(), header_clip);
         }
     }
-    if !render_expanded && diff_sections.is_none() {
+    if !render_expanded || message.defer_live_edit_diff() {
         return h;
     }
     if let Some(sections) = diff_sections {
@@ -1062,11 +1104,15 @@ fn render_tool_group_activity(
     let selected_child = pane
         .selected_tool_group_child(message.id())
         .map(str::to_string);
-    for line in message.text().lines().take(TOOL_GROUP_PREVIEW_LINES) {
+    for line in message.text().lines() {
         if line_y >= row_bottom_limit {
             break;
         }
         let child_key = group_child_key(line);
+        if child_key.is_none() && line_y + row_h <= message_clip[1] {
+            line_y += row_h;
+            continue;
+        }
         let label = line.split_once('\t').map_or(line, |(_, label)| label);
         let child_rect = [
             body_x - 8.0 * s,
@@ -1228,7 +1274,7 @@ fn render_tool_diff_cards(
     suppress_interactions: bool,
     motion: ToolMotionSample,
     occlusion_rects: &[[f32; 4]],
-    mouse: Option<(f32, f32)>,
+    _mouse: Option<(f32, f32)>,
 ) {
     let card_x = x + 30.0 * s;
     let card_w = tool_diff_card_width(w, s);
@@ -1245,13 +1291,16 @@ fn render_tool_diff_cards(
         // every card in the patch.
         let card_key = format!("{}:{section_index}", message.id());
         let card_expanded = message.tool() == "compose" || pane.tool_expanded(&card_key);
-        let view = cached_diff_card_view(section, card_w, s, card_expanded);
+        let max_line = section.lines.iter().flat_map(|line| [line.line_number, line.old_line_number, line.new_line_number]).flatten().max().unwrap_or(1);
+        let gutter_width = diff_card::measured_gutter_width(sugarloaf, max_line, s);
+        let code_width = diff_card::body_text_width_with_gutter(card_w, s, gutter_width);
+        let view = cached_diff_card_view(section, code_width, s, card_expanded);
         let full_body_h = diff_body_height(view.visual_rows, s);
-        let body_h = fixed_diff_viewport_height(view.preview_visual_rows, s);
+        let body_h = if view.preview_visual_rows == 0 { 0.0 } else { fixed_diff_viewport_height(view.preview_visual_rows, s) };
         // Preserve the same sequence of height additions used after painting.
         // Leave a conservative ink/border margin, including diagnostics.
         let mut next_y = card_y + (diff_card::HEADER_HEIGHT * s + body_h.max(0.0));
-        next_y += diag_footer_height(section, s);
+        next_y += if card_expanded { diag_footer_height(section, s) } else { 0.0 };
         next_y += 10.0 * s;
         if next_y < clip_top - 16.0 * s {
             card_y = next_y;
@@ -1263,41 +1312,20 @@ fn render_tool_diff_cards(
         } else {
             0.0
         };
-        let gutter_width = diff_card::measured_gutter_width(sugarloaf, view.max_line_number, s);
-        let code_width = diff_card::body_text_width_with_gutter(card_w, s, gutter_width);
-        let font_generation = sugarloaf.text_mut().font_cache_generation();
-        let content_width = view.content_width.get()
-            .filter(|(generation, _)| *generation == font_generation)
-            .map(|(_, width)| width)
-            .unwrap_or_else(|| {
-            let width = diff_card::content_width(
-                sugarloaf,
-                view.rows.as_slice(),
-                s,
-                Lang::from_path(&section.path),
-            );
-            view.content_width.set(Some((font_generation, width)));
-            width
-        });
-        let max_horizontal_scroll = (content_width + 8.0 * s - code_width).max(0.0);
-        let horizontal_key = format!("diff:{card_key}");
-        let horizontal_scroll = pane.code_scroll_pane().map_or(0.0, |pane| {
-            pane.markdown_horizontal_scroll_offset(&horizontal_key, max_horizontal_scroll)
-        });
         let link_target = diff_link_target(&section.link_target);
         let link_hovered = !suppress_interactions
             && link_target.is_some_and(|target| pane.link_hovered(target));
         let spec = CardSpec {
             path: &section.path,
-            link_target,
-            link_hovered,
+            link_target: if section.link_target.is_empty() { link_target } else { None },
+            link_hovered: section.link_target.is_empty() && link_hovered,
             additions: section.additions,
             deletions: section.deletions,
             lang: Lang::from_path(&section.path),
             diff_lines: view.rows.as_slice(),
             visual_row_offsets: Some(view.visual_row_offsets.as_slice()),
             body_scroll,
-            horizontal_scroll: Some(horizontal_scroll),
+            horizontal_scroll: None,
         };
         let layout = diff_card::render_with_paint(
             sugarloaf,
@@ -1316,6 +1344,8 @@ fn render_tool_diff_cards(
                 opacity: theme.opacity,
                 clip: Some(viewport_clip),
                 gutter_width: Some(gutter_width),
+                accordion_expanded: (!section.link_target.is_empty()).then_some(card_expanded),
+                sticky_header: card_expanded && !section.link_target.is_empty(),
                 occlusion_rects,
                 ..diff_card::PaintParams::default()
             },
@@ -1323,7 +1353,7 @@ fn render_tool_diff_cards(
         if motion.deadline.is_some()
             && active_visible(
                 motion,
-                [card_x, card_y, card_w, layout.total_height],
+                [card_x, card_y.max(clip_top).min(card_y + body_h), card_w, diff_card::HEADER_HEIGHT * s],
                 viewport_clip,
                 occlusion_rects,
             )
@@ -1334,7 +1364,7 @@ fn render_tool_diff_cards(
         }
         if !suppress_interactions {
             if let Some(rect) = intersect_rect(
-                [card_x, card_y, card_w, layout.total_height],
+                [card_x, if section.link_target.is_empty() { card_y } else { card_y.max(clip_top).min(card_y + body_h) }, card_w, diff_card::HEADER_HEIGHT * s],
                 viewport_clip,
             ) {
                 pane.register_tool_hit_rect(card_key.clone(), rect);
@@ -1392,63 +1422,9 @@ fn render_tool_diff_cards(
                 );
             }
         }
-        if max_horizontal_scroll > 1.0 {
-            if let Some(scroll_pane) = pane.code_scroll_pane() {
-                let body_rect = [
-                    card_x,
-                    card_y + diff_card::HEADER_HEIGHT * s,
-                    card_w,
-                    body_h,
-                ];
-                if let Some(visible_body) = intersect_rect(body_rect, viewport_clip) {
-                    if !suppress_interactions {
-                        scroll_pane.register_markdown_horizontal_scroll_rect(
-                            horizontal_key.clone(),
-                            visible_body,
-                            max_horizontal_scroll,
-                        );
-                    }
-                    let track = sticky_markdown_horizontal_scrollbar_track(
-                        visible_body,
-                        card_x + gutter_width + diff_card::BODY_PAD_X * s,
-                        code_width,
-                        s,
-                    )
-                    .filter(|rect| {
-                        !occlusion_rects
-                            .iter()
-                            .any(|cut| intersect_rect(*rect, *cut).is_some())
-                    });
-                    let visible = scroll_pane
-                        .markdown_horizontal_scrollbar_visible(&horizontal_key)
-                        || mouse.is_some_and(|(mx, my)| {
-                            mx >= visible_body[0]
-                                && mx <= visible_body[0] + visible_body[2]
-                                && my >= visible_body[1]
-                                && my <= visible_body[1] + visible_body[3]
-                        });
-                    render_markdown_horizontal_scrollbar(
-                        sugarloaf,
-                        scroll_pane,
-                        &horizontal_key,
-                        track,
-                        code_width,
-                        code_width + max_horizontal_scroll,
-                        horizontal_scroll,
-                        mouse,
-                        visible,
-                        suppress_interactions,
-                        theme.theme,
-                        s,
-                        viewport_clip,
-                        theme.opacity,
-                    );
-                }
-            }
-        }
         card_y += layout.total_height;
         let first_diagnostics = sugarloaf.text_mut().instances().len();
-        card_y += render_diff_card_diagnostics(
+        card_y += if card_expanded { render_diff_card_diagnostics(
             sugarloaf,
             section,
             card_x,
@@ -1458,7 +1434,7 @@ fn render_tool_diff_cards(
             s,
             viewport_clip,
             occlusion_rects,
-        );
+        ) } else { 0.0 };
         if active_glyphs(
             motion,
             sugarloaf,
@@ -1526,7 +1502,6 @@ mod tests {
         }
         // The raw projected title is the discriminator, not title_text(), which
         // removes parentheses for paint. The normal task header target remains.
-        assert!(super::tool_header_is_toggleable("task", false, false));
     }
 
     #[test]
@@ -1575,23 +1550,6 @@ mod tests {
                 ToolHeaderIndicator::Spinner.owns_running(incoming),
                 incoming
             );
-        }
-    }
-
-    #[test]
-    fn bash_diff_parent_header_remains_toggleable_after_expansion() {
-        for archived in [false, true] {
-            for tool in ["bash", "read", "grep"] {
-                // The same decision applies to cached and prepared diff sections,
-                // and while an ordinary tool is closing or reversing its animation.
-                assert!(super::tool_header_is_toggleable(tool, false, archived));
-                assert!(super::tool_header_is_toggleable(tool, true, archived));
-            }
-        }
-        for tool in ["edit", "write", "apply_patch", "MultiEdit"] {
-            assert!(!super::tool_header_is_toggleable(tool, true, false));
-            assert!(super::tool_header_is_toggleable(tool, true, true));
-            assert!(super::tool_header_is_toggleable(tool, false, false));
         }
     }
 
@@ -1877,7 +1835,6 @@ fn render_tool_todos_painted<Todo: AgentToolTodo, P: AgentToolPane>(
     let mut line_y = y;
     let todo_rows = todos
         .iter()
-        .take(12)
         .map(|todo| {
             wrap_todo_text(
                 sugarloaf,
@@ -1936,7 +1893,7 @@ fn render_tool_todos_painted<Todo: AgentToolTodo, P: AgentToolPane>(
         }
         return;
     }
-    for todo in todos.iter().take(12) {
+    for todo in todos {
         let state = TodoVisualState::from_status(todo.status());
         if !occlusion_rects.iter().any(|cut| {
             intersect_rect([x + 16.0 * s, line_y - 1.0 * s, 16.0 * s, 16.0 * s], *cut)

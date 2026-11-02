@@ -2,7 +2,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -24,10 +24,6 @@ use super::draw::{
 use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
 
-const COLLAPSED_DIFF_ROWS: usize = 24;
-const EXPANDED_DIFF_ROWS: usize = 120;
-const MAX_STORED_DIFF_ROWS: usize = 160;
-const TOOL_GROUP_PREVIEW_LINES: usize = 5;
 const TOOL_WRAP_CACHE_LIMIT: usize = 2048;
 const TOOL_DIFF_CARD_VIEW_CACHE_LIMIT: usize = 2048;
 
@@ -66,13 +62,12 @@ pub(crate) fn is_unsettled_edit_tool(tool: &str, status: &str) -> bool {
 }
 
 pub(crate) fn show_tool_diff_cards(
-    tool: &str,
-    status: &str,
+    _tool: &str,
+    _status: &str,
     expanded: bool,
-    archived: bool,
+    _archived: bool,
 ) -> bool {
     expanded
-        || (!archived && is_edit_tool_name(tool) && !is_unsettled_edit_tool(tool, status))
 }
 
 pub(super) fn wrap_todo_text(
@@ -138,6 +133,7 @@ impl ToolWrapCache {
 struct ToolDiffCardViewKey {
     section_fingerprint: u64,
     scale_bits: u32,
+    width_bits: u32,
     expanded: bool,
 }
 
@@ -147,7 +143,6 @@ pub(crate) struct ToolDiffCardView {
     visual_rows: usize,
     preview_visual_rows: usize,
     max_line_number: u32,
-    content_width: Cell<Option<(u64, f32)>>,
 }
 
 struct ToolDiffCardViewCache {
@@ -786,6 +781,13 @@ fn cached_tool_wrapped_rows(
     limit: usize,
     preview: bool,
 ) -> Rc<Vec<ToolWrappedRow>> {
+    // Each source line produces at least one row. Hidden output cannot affect
+    // this preview, and must not be hashed again on every scroll/animation frame.
+    let body = if preview {
+        body
+    } else {
+        &body[..body.split_inclusive('\n').take(limit).map(str::len).sum()]
+    };
     let key = ToolWrapCacheKey {
         body_hash: hash_value(&body),
         body_len: body.len(),

@@ -18,6 +18,7 @@ futures.workspace = true
 flate2.workspace = true
 git2.workspace = true
 gethostname = "1.1"
+glob = "0.3"
 iana-time-zone = "0.1.65"
 libc.workspace = true
 neoism-agent-core.workspace = true

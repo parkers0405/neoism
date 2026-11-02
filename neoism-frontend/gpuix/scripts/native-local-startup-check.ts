@@ -4,6 +4,10 @@ import {join,resolve} from "node:path";
 import {tmpdir} from "node:os";
 import {launchNative} from "../tests/support/native-launch";
 import {reachable} from "../src/daemon/local-startup";
+import {loadConfig} from "../src/config";
+import {DaemonConnection} from "../src/daemon/client";
+import {AgentSdk} from "../src/daemon/sdk";
+import {Effect} from "effect";
 
 const directory=mkdtempSync(join(tmpdir(),"neoism-installed-startup-"));
 const binary=resolve(process.env.NEOISM_GPUIX_TEST_BINARY||"dist/neoism");
@@ -25,7 +29,9 @@ const env:NodeJS.ProcessEnv={...process.env,HOME:join(directory,"home"),
 // Keep the existing compositor address while isolating daemon runtime state.
 if(process.env.WAYLAND_DISPLAY&&!process.env.WAYLAND_DISPLAY.startsWith("/")&&process.env.XDG_RUNTIME_DIR)
  env.WAYLAND_DISPLAY=join(process.env.XDG_RUNTIME_DIR,process.env.WAYLAND_DISPLAY);
-for(const key of ["NEOISM_DAEMON_SOCKET","NEOISM_DAEMON_TOKEN","NEOISM_GPUIX_DAEMON_URL","NEOISM_PAIRING_TOKEN","NEOISM_AGENT_TOKEN","NEOISM_AGENT_AUTH_CONFIG"])delete env[key];
+ // launchNative merges the parent environment; undefined prevents credentials
+ // from the running desktop leaking back into this isolated daemon fixture.
+ for(const key of ["NEOISM_DAEMON_SOCKET","NEOISM_DAEMON_TOKEN","NEOISM_GPUIX_DAEMON_URL","NEOISM_PAIRING_TOKEN","NEOISM_AGENT_TOKEN","NEOISM_AGENT_AUTH_CONFIG","NEOISM_WEB_ROOT","NEOISM_AGENT_GUI_ROOT"])env[key]=undefined;
 const endpoint=`ws+unix://${env.XDG_RUNTIME_DIR}/neoism.sock:/session`;
 let app:Awaited<ReturnType<typeof launchNative>>|undefined,pid:number|undefined;
 try{
@@ -35,7 +41,26 @@ try{
  if(await app.getByTestId("app-notification").count())throw new Error("Fresh default startup reported a service error");
  if(existsSync(join(directory,"notes/Default")))throw new Error("Browsing eagerly created the notes vault");
  const health=await fetch(`${agentUrl}/v2/health`).then(response=>response.json()) as {healthy?:boolean};
- if(!health.healthy)throw new Error("The daemon's real embedded Agent is unavailable");
+  if(!health.healthy)throw new Error("The daemon's real embedded Agent is unavailable");
+ for(const path of ["/","/index.html","/agent-gui/"]){
+  const response=await fetch(`${agentUrl}${path}`,{signal:AbortSignal.timeout(5000)});
+  if(response.status!==404)throw new Error(`Native Agent listener exposed browser path ${path}: ${response.status}`);
+ }
+  const config=loadConfig([],env),connection=new DaemonConnection(config);
+  if(!config.authToken)throw new Error("Shell smoke did not discover the desktop daemon credential");
+ const sdk=new AgentSdk(config,((input,init)=>fetch(input,{...init,signal:AbortSignal.any([AbortSignal.timeout(15000),...(init?.signal?[init.signal]:[])])})) as typeof fetch);
+ try{
+  connection.start();const deadline=Date.now()+10000;
+  while(connection.state.phase!=="connected"&&Date.now()<deadline)await Bun.sleep(20);
+  if(connection.state.phase!=="connected")throw new Error("Shell smoke daemon handshake failed");
+  const reply=await Effect.runPromise(connection.request("Workspace",{ResolveInitialWorkspace:{preferred_host_id:connection.state.connectedHostId||null}}));
+   const workspace=(reply as {InitialWorkspaceResolved:{workspace:{id:string}}}).InitialWorkspaceResolved.workspace;
+   const session=await sdk.createSession(workspace.id,{directory:join(directory,"workspace"),permission:[{permission:"bash",pattern:"*",action:"allow"}]});
+  // Probe and execute through the same authenticated proxy as the composer.
+  // Direct Agent HTTP would miss daemon allowlist rejections of GET /shell.
+  const output=await sdk.forSession(workspace.id,session.id).sessions.shell(session.id,"echo neoism-direct-shell-check",{model:{providerId:"missing-provider",modelId:"not-a-model"}});
+  if(!output.parts?.some(part=>part.type==="tool"&&part.tool==="bash"&&part.state.status==="completed"&&part.state.output.includes("neoism-direct-shell-check")))throw new Error("Packaged shell did not produce a real completed command block through the daemon");
+ }finally{sdk.dispose();connection.stop();}
  pid=Number(readFileSync(pidPath,"utf8"));if(!Number.isSafeInteger(pid)||pid<=1)throw new Error("Missing owned daemon PID");
  if(!await reachable(endpoint))throw new Error("Default launch did not start its private daemon");
  await app.close();app=undefined;
@@ -44,7 +69,7 @@ try{
  if(Number(readFileSync(pidPath,"utf8"))!==pid)throw new Error("Relaunch replaced the running daemon");
  await app.close();app=undefined;
  if(!await reachable(endpoint))throw new Error("Relaunch lost daemon ownership");
- console.log(JSON.stringify({installedDefaultStartup:true,realEmbeddedAgent:true,daemonSurvivesWindow:true,relaunchReusesDaemon:true,uncreatedNotesStayEmpty:true}));
+ console.log(JSON.stringify({installedDefaultStartup:true,realEmbeddedAgent:true,directShell:true,browserUiDisabled:true,daemonSurvivesWindow:true,relaunchReusesDaemon:true,uncreatedNotesStayEmpty:true}));
 }finally{
  await app?.close();
  if(pid===undefined){try{pid=Number(readFileSync(pidPath,"utf8"));}catch{}}

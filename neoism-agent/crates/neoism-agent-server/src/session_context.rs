@@ -840,13 +840,19 @@ async fn stream_compaction_summary(
     state: &AppState,
     session_id: &str,
     provider: &Arc<dyn neoism_agent_plugin_api::ProviderService>,
-    request: ProviderGenerationRequest,
+    mut request: ProviderGenerationRequest,
     assistant_message: &mut MessageWithParts,
     cancel: &Arc<AtomicBool>,
     path: &'static str,
 ) -> StreamedSummary {
     if cancel.load(Ordering::SeqCst) {
         return StreamedSummary::Cancelled;
+    }
+    if crate::context_epoch::refresh_request(state, session_id, &mut request.messages)
+        .await
+        .is_err()
+    {
+        return StreamedSummary::Failed;
     }
     let started = std::time::Instant::now();
     let activity_segment =
@@ -1776,15 +1782,11 @@ pub(crate) fn provider_messages_for_session_with_plugins(
         .as_ref()
         .filter(|model| model.id == model_id)
         .map(|model| model.provider_id.as_str());
-    if let Some(provider_id) = current_provider {
-        provider_messages.extend(message_model::provider_messages_for_model(
-            &conversation,
-            provider_id,
-            model_id,
-        ));
-    } else {
-        provider_messages.extend(message_model::provider_messages(&conversation));
-    }
+    provider_messages.extend(message_model::provider_messages_with_updates(
+        &conversation,
+        current_provider.map(|provider_id| (provider_id, model_id)),
+        &crate::context_epoch::instruction_updates(info),
+    ));
     provider_messages
 }
 
@@ -1797,6 +1799,9 @@ fn context_epoch_update_message(info: &SessionInfo) -> Option<ProviderMessage> {
         .snapshot
         .sources
         .iter()
+        .filter(|(key, _)| {
+            !matches!(key.as_str(), "instructions" | "instructionState" | "instructionUpdates")
+        })
         .filter(|(key, value)| epoch.baseline.sources.get(*key) != Some(*value))
         .map(|(key, value)| format!("{key}: {value}"))
         .collect::<Vec<_>>();
@@ -1837,7 +1842,7 @@ fn plugin_system_messages(
     let mut service_fragments = Vec::new();
     if let Some(epoch) = crate::context_epoch::from_session(info) {
         if let Some(values) = epoch
-            .snapshot
+            .baseline
             .sources
             .get("instructions")
             .and_then(Value::as_array)
@@ -2406,6 +2411,37 @@ mod tests {
             .into_iter()
             .next()
             .expect("workspace context")
+    }
+
+    #[test]
+    fn instruction_updates_preserve_baseline_and_precede_pending_input() {
+        let mut info = test_session_info();
+        let first = text_user_message(&info, &default_user_model(), "earlier input");
+        let next = text_user_message(&info, &default_user_model(), "pending input");
+        let baseline = crate::context_epoch::ContextSnapshot {
+            sources: std::collections::BTreeMap::from([
+                ("instructions".into(), json!(["original ambient rules"])),
+            ]),
+        };
+        let mut snapshot = baseline.clone();
+        snapshot.sources.insert("instructions".into(), json!(["replacement ambient rules"]));
+        snapshot.sources.insert("instructionState".into(), json!({"private": "cache must not reach model"}));
+        snapshot.sources.insert("instructionUpdates".into(), json!([
+            {"afterMessageId": message_id(&first), "content": "replacement ambient rules"},
+        ]));
+        let epoch = crate::context_epoch::ContextEpoch {
+            baseline, snapshot, generation: 2, baseline_seq: 0, updated: 0,
+        };
+        info.extra.insert("contextEpoch".into(), serde_json::to_value(epoch).unwrap());
+        let replay = provider_messages_for_session_with_plugins(
+            &system_prompt_snapshot(), &info, &[first, next], "stub", None, false, None,
+        );
+        let position = |text: &str| replay.iter().position(|item| item.content.contains(text)).unwrap();
+        assert!(position("original ambient rules") < position("earlier input"));
+        assert!(position("earlier input") < position("replacement ambient rules"));
+        assert!(position("replacement ambient rules") < position("pending input"));
+        assert!(!replay.iter().any(|item| item.content.contains("cache must not reach model")));
+        assert_eq!(replay.iter().filter(|item| item.content.contains("replacement ambient rules")).count(), 1);
     }
 
     #[test]

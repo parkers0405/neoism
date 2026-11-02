@@ -990,7 +990,7 @@ async fn flush_pending_tool_calls(
     }
     let mut updated_parts = Vec::new();
     while let Some(result) = pending.next().await {
-        let parts = apply_queued_tool_result(ctx, result).await;
+        let parts = apply_queued_tool_result(ctx, result).await?;
         for part in parts {
             // Do not make a fast tool wait behind the slowest parallel call
             // before the UI can show its result. The authoritative message is
@@ -1056,10 +1056,43 @@ fn spawn_tool_call(
 async fn apply_queued_tool_result(
     ctx: &ProviderStreamEventContext<'_>,
     result: QueuedToolResult,
-) -> Vec<Part> {
+) -> Result<Vec<Part>, ApiError> {
     let mut message = ctx.live_message.lock().await;
-    match result.result {
-        Ok(tool_result) => {
+    let updated = match result.result {
+        Ok(mut tool_result) => {
+            if let Some(metadata) = tool_result
+                .metadata
+                .as_mut()
+                .filter(|metadata| metadata.get("instructionContext").is_some())
+            {
+                // Completion application is serial in flush_pending_tool_calls.
+                // Also hold the live-message lock across lookup/admission/update:
+                // stored history alone misses earlier parallel completions until
+                // persist_queued_tool_results writes the whole settled batch.
+                let mut history = ctx
+                    .state
+                    .inner
+                    .store
+                    .list_context_messages(ctx.session_id_text)
+                    .await?;
+                overlay_live_instruction_history(&mut history, &message);
+                if let Some(epoch) = ctx.state.inner.store
+                    .get_context_epoch(ctx.session_id_text).await? {
+                    let ambient_sources = epoch.snapshot.sources.get("instructionState")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<crate::instruction::InstructionState>(value).ok())
+                        .map(|state| state.source_names()).unwrap_or_default();
+                    if let Some(items) = metadata.get_mut("instructionContext").and_then(serde_json::Value::as_array_mut) {
+                        items.retain(|item| !item.get("filepath").and_then(serde_json::Value::as_str)
+                            .is_some_and(|path| ambient_sources.iter().any(|source| source == path)));
+                    }
+                }
+                crate::message_model::admit_instruction_context(
+                    &history,
+                    &result.call.name,
+                    metadata,
+                );
+            }
             let generated_files = tool_result
                 .metadata
                 .as_ref()
@@ -1102,6 +1135,22 @@ async fn apply_queued_tool_result(
                 .into_iter()
                 .collect()
         }
+    };
+    Ok(updated)
+}
+
+fn overlay_live_instruction_history(
+    history: &mut Vec<MessageWithParts>,
+    message: &MessageWithParts,
+) {
+    let id = crate::session_helpers::message_id_of(message);
+    if let Some(stored) = history
+        .iter_mut()
+        .find(|stored| crate::session_helpers::message_id_of(stored) == id)
+    {
+        *stored = message.clone();
+    } else {
+        history.push(message.clone());
     }
 }
 
@@ -1247,6 +1296,73 @@ mod tests {
                 raw: String::new(),
             },
         })
+    }
+
+    #[test]
+    fn queued_instruction_admission_overlays_unpersisted_parallel_results() {
+        use neoism_agent_core::{
+            AssistantMessage, AssistantPath, CompletedTime, Id, IdKind, MessageInfo,
+            MessageWithParts, Part, TokenUsage,
+        };
+        use serde_json::json;
+        let session = Id::ascending(IdKind::Session);
+        let message_id = Id::ascending(IdKind::Message);
+        let mut live = MessageWithParts {
+            info: MessageInfo::Assistant(AssistantMessage {
+                id: message_id.clone(), session_id: session.clone(),
+                parent_id: Id::ascending(IdKind::Message),
+                time: CompletedTime { created: 1, streamed: None, completed: None },
+                mode: "build".into(), agent: "build".into(),
+                path: AssistantPath { cwd: "/project".into(), root: "/project".into() },
+                cost: 0.0, tokens: TokenUsage::default(), model_id: "stub".into(),
+                provider_id: "neoism".into(), finish: None, error: None,
+                provider_replay: None,
+            }),
+            parts: vec![pending_part("first"), pending_part("second")],
+        };
+        let mut ids = Vec::new();
+        for (index, part) in live.parts.iter_mut().enumerate() {
+            let Part::Tool(tool) = part else { unreachable!() };
+            tool.session_id = session.clone();
+            tool.message_id = message_id.clone();
+            tool.tool = if index == 0 { "compose" } else { "read" }.into();
+            ids.push(tool.id.to_string());
+        }
+        // The first compose reads successfully, then fails. Its read effects
+        // remain admitted even though the outer part is persisted as Error.
+        let stored = live.clone();
+        for index in 0..2 {
+            let tool = if index == 0 { "compose" } else { "read" };
+            let mut metadata = json!({"instructionContext":[{
+                "filepath":"/project/src/AGENTS.md",
+                "content":if index == 0 { "first discovery" } else { "changed on disk" }
+            }], "isError":index == 0});
+            // Both completions start from the same stale persisted transcript.
+            let mut history = vec![stored.clone()];
+            super::overlay_live_instruction_history(&mut history, &live);
+            assert_eq!(history.len(), 1);
+            crate::message_model::admit_instruction_context(&history, tool, &mut metadata);
+            if index == 1 {
+                assert!(metadata.get("instructionContext").is_none());
+            }
+            crate::message_part_mutation::set_tool_execution_result(
+                &mut live.parts, &ids[index], crate::tool::ToolExecutionResult {
+                    title: tool.into(), output: "ordinary tool output".into(),
+                    metadata: Some(metadata),
+                },
+            ).unwrap();
+        }
+        let persisted: MessageWithParts =
+            serde_json::from_value(serde_json::to_value(live).unwrap()).unwrap();
+        let replay = crate::message_model::provider_messages(&[persisted]);
+        let reminders = replay.iter()
+            .filter(|message| message.content.starts_with("<system-reminder>"))
+            .map(|message| message.content.as_str()).collect::<Vec<_>>();
+        assert_eq!(reminders, ["<system-reminder>\nfirst discovery\n</system-reminder>"]);
+        assert!(!replay.iter().any(|message| message.content.contains("changed on disk")));
+        let mut missing_live = Vec::new();
+        super::overlay_live_instruction_history(&mut missing_live, &stored);
+        assert_eq!(missing_live.len(), 1);
     }
 
     #[test]

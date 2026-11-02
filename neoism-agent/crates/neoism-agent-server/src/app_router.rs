@@ -19,7 +19,7 @@ use crate::interaction::{
     permission_list, permission_reply, question_list, question_reject, question_reply,
 };
 use crate::openapi::canonical_openapi_doc;
-use crate::session_actions::{session_command, session_shell};
+use crate::session_actions::{session_command, session_shell, session_shell_capabilities};
 use crate::session_export_route::sessions_export;
 use crate::session_import_route::session_import;
 use crate::session_message_routes::{
@@ -180,7 +180,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             post(session_queue_pop),
         )
         .route("/v2/sessions/:session_id/commands", post(session_command))
-        .route("/v2/sessions/:session_id/shell", post(session_shell))
+        .route("/v2/sessions/:session_id/shell", post(session_shell).get(session_shell_capabilities))
         .route("/v2/sessions/:session_id/revert", post(session_revert))
         .route("/v2/sessions/:session_id/unrevert", post(session_unrevert))
         .route("/v2/sessions/:session_id/undo", post(session_undo))
@@ -197,6 +197,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .merge(management_routes(&state))
         .fallback(plugin_route_dispatch)
         .with_state(state)
+        .layer(middleware::from_fn(crate::client_projection::project_json_response))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {

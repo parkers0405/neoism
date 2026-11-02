@@ -839,10 +839,15 @@ pub fn map_history(
         NeoismAgentOutputKind, NeoismAgentTodo,
     };
     let kind = map_history_kind(m.kind);
-    let output_kind = match kind {
+    let output_kind = m.output_kind.map(|kind| match kind {
+        neoism_protocol::agent::HistoryOutputKind::Text => NeoismAgentOutputKind::Text,
+        neoism_protocol::agent::HistoryOutputKind::Code => NeoismAgentOutputKind::Code,
+        neoism_protocol::agent::HistoryOutputKind::Todos => NeoismAgentOutputKind::Todos,
+    }).unwrap_or_else(|| match kind {
+        NeoismAgentMessageKind::Tool if m.status != "error" && !m.todos.is_empty() => NeoismAgentOutputKind::Todos,
         NeoismAgentMessageKind::Tool if !m.lang.is_empty() => NeoismAgentOutputKind::Code,
         _ => NeoismAgentOutputKind::Text,
-    };
+    });
     NeoismAgentMessage {
         id: m.id,
         kind,
@@ -853,7 +858,15 @@ pub fn map_history(
         tool: m.tool,
         tool_batch_id: m.tool_batch_id,
         mcp: m.mcp.as_ref().and_then(crate::panels::agent_pane::mcp_icon::McpToolPresentation::from_wire),
-        composition_children: Vec::new(),
+        composition_children: m
+            .composition_children
+            .into_iter()
+            .map(|child| {
+                let mut child = map_history(child);
+                child.composition_child = true;
+                child
+            })
+            .collect(),
         composition_child: false,
         output_kind,
         lang: m.lang,

@@ -19,6 +19,7 @@ import {hostPaths} from "./workspaces/host-paths";
 import { closeTerminalSession, disposeTerminalSessions,onTerminalUnavailable,terminalSession } from "./terminal/sessions";
 import { absoluteTerminalDirectory,mainTerminalSurface,followsTerminalDirectory,terminalDirectoryFollowsWorkspace } from "./terminal/workspace";
 import {getWindowWorkspaces,includeWindowWorkspace,openWorkspaceIds,reorderWindowWorkspace} from "./workspaces/window-tabs";
+import {localWorkspaceSession} from "./workspaces/window-sessions";
 import { AgentSdk, sdkModel, sdkPrompt,sdkThread } from "./daemon/sdk";
 import {localPresenceIdentity} from "./agent/local-presence";
 import {catalogThread} from "./agent/catalog-session";
@@ -398,15 +399,25 @@ export class WorkspaceModel {
       const tree = Schema.decodeUnknownSync(TreeSchema)(expectVariant(await this.run(this.client.request("Workspace", "RequestHostWorkspaceTree")), "HostWorkspaceTree"));
       if (epoch !== this.epoch) return;
       this.update({ workspaces: tree.workspaces, workspaceTabs: tree.tabs });
+      const hostId=this.state.connection.connectedHostId;
+      const recoverLocal=!!hostId&&!this.config.workspaceId&&localWorkspaceSession({config:this.config,model:this});
+      const eligible=(workspace:Workspace)=>!recoverLocal||workspace.host_id===hostId;
+      // Remote tabs belong to separate connections. Old default selection could
+      // persist a foreign row in this local window; hide that membership only,
+      // retaining its catalog, layouts, editors and unsent drafts for recovery.
+      const remembered=openWorkspaceIds(this.state.ui);
+      if(recoverLocal&&remembered){
+        const ids=remembered.filter(id=>{const workspace=tree.workspaces.find(workspace=>workspace.id===id);return !workspace||eligible(workspace);});
+        if(ids.length!==remembered.length)this.setUI({openWorkspaceIds:ids});
+      }
       const preferred = this.state.activeWorkspace?.id || this.config.workspaceId || this.restoredWorkspaceId;
       const rememberedWindow=openWorkspaceIds(this.state.ui);
-      const opened=this.windowWorkspaces();
+      const opened=this.windowWorkspaces().filter(eligible);
       let workspace = !this.config.workspaceId&&rememberedWindow!==undefined
         ? opened.find(workspace=>workspace.id===preferred)||opened[0]
-        : tree.workspaces.find((w) => w.id === preferred);
+        : tree.workspaces.find((w) => w.id === preferred&&eligible(w));
       if (!workspace) {
-        const reply = expectVariant(await this.run(this.client.request("Workspace", { ResolveInitialWorkspace: { preferred_host_id: null } })), "InitialWorkspaceResolved");
-        if (isRecord(reply)) workspace = Schema.decodeUnknownSync(WorkspaceSchema)(reply.workspace);
+        workspace = await this.resolveHostWorkspace();
       }
       if (epoch !== this.epoch || !workspace) return;
       await this.activateWorkspace(workspace, true);
@@ -414,6 +425,15 @@ export class WorkspaceModel {
     finally { if (epoch === this.epoch) this.update({ loading: false }); }
   }
   windowWorkspaces=(state:Pick<AppState,"workspaces"|"ui">=this.state)=>getWindowWorkspaces(state);
+  /** Ask the daemon for its own host's default, never borrow another host's root. */
+  resolveHostWorkspace = async ():Promise<Workspace> => {
+    const hostId=this.state.connection.connectedHostId;
+    const reply=expectVariant(await this.run(this.client.request("Workspace",{ResolveInitialWorkspace:{preferred_host_id:hostId||null}})),"InitialWorkspaceResolved");
+    if(!isRecord(reply))throw new Error("Invalid default workspace reply");
+    const workspace=Schema.decodeUnknownSync(WorkspaceSchema)(reply.workspace);
+    if(hostId&&workspace.host_id!==hostId)throw new Error("The daemon returned a workspace on a different host; restart or update the local daemon");
+    return workspace;
+  };
   reorderWorkspace = (dragId:string,targetId:string,position:"before"|"after"="before"):boolean => {
     const visible=this.windowWorkspaces();if(!visible.some(workspace=>workspace.id===dragId)||!visible.some(workspace=>workspace.id===targetId))return false;
     const ids=reorderWindowWorkspace(this.state.ui,dragId,targetId,position),previous=openWorkspaceIds(this.state.ui)||[];
@@ -1291,6 +1311,24 @@ export class WorkspaceModel {
       await sdk.sessions.prompt(sessionId,request);
       return true;
     } catch (error) { this.rollbackPrompt(request.messageId!);this.reportSessionError(sessionId,error instanceof Error?error.message:"Agent request failed"); return false; }
+  };
+  /** Direct user shell submission: same authenticated workspace/session SDK as
+   * prompts; the server owns permissions, cwd, cancellation and transcript. */
+  submitShell = async (sessionId: string | undefined, command: string) => {
+    if (!command.trim()) return false;
+    let id = sessionId;
+    try {
+      if (!id) id = (await this.createThread(this.selection())).session_id;
+      this.clearSessionError(id);
+      const sdk = this.sdkForSession(id);
+      await this.selectionTasks.get(id);
+      await sdk.sessions.shell(id, command, {messageId:crypto.randomUUID()});
+      return true;
+    } catch (error) {
+      if (id) this.reportSessionError(id, error instanceof Error ? error.message : "Shell request failed");
+      else this.report(error);
+      return false;
+    }
   };
   submitNewPrompt = async (text: string, options: PromptOptions = {}) => {
     if(!text.trim()&&!options.attachments?.length)return false;

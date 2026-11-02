@@ -28,7 +28,32 @@ pub fn workspace_root() -> PathBuf {
             return PathBuf::from(root);
         }
     }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    desktop_default_root(cwd, dirs::home_dir(), cfg!(target_os = "macos"))
+}
+
+// Finder/launchd's cwd is launch machinery, not an explicit project choice.
+// An explicit NEOISM_WORKSPACE_ROOT above always wins, including `/`.
+fn desktop_default_root(cwd: PathBuf, home: Option<PathBuf>, macos: bool) -> PathBuf {
+    if macos && (cwd == Path::new("/") || cwd.to_string_lossy().to_ascii_lowercase().contains(".app/contents")) {
+        return home.unwrap_or(cwd);
+    }
+    cwd
+}
+
+#[cfg(test)]
+mod desktop_default_tests {
+    use super::*;
+    #[test]
+    fn finder_default_is_home_but_project_and_other_platform_roots_survive() {
+        let home = Some(PathBuf::from("/Users/person"));
+        for cwd in ["/", "/Applications/Neoism.app/Contents/MacOS"] {
+            assert_eq!(desktop_default_root(cwd.into(), home.clone(), true), PathBuf::from("/Users/person"));
+        }
+        assert_eq!(desktop_default_root("/project".into(), home.clone(), true), PathBuf::from("/project"));
+        assert_eq!(desktop_default_root("/".into(), home, false), PathBuf::from("/"));
+    }
 }
 
 /// Validate `path` is a safe workspace-relative path and return its

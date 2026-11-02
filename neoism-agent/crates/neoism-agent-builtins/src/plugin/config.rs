@@ -162,20 +162,31 @@ pub fn load(
 pub fn load_snapshot(
     snapshot: &ConfigSnapshot,
 ) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
+    load_snapshot_with_project_disabled(
+        snapshot,
+        std::env::var("NEOISM_DISABLE_PROJECT_CONFIG").as_deref() == Ok("1"),
+    )
+}
+
+fn load_snapshot_with_project_disabled(
+    snapshot: &ConfigSnapshot,
+    disabled: bool,
+) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
+    use neoism_agent_service_api::ConfigDiscoveryScope;
     let mut value = serde_json::json!({});
-    for layer in &snapshot.layers {
+    for layer in snapshot.layers.iter().filter(|layer| {
+        !disabled || layer.scope == ConfigDiscoveryScope::Installation
+    }) {
         merge(&mut value, layer.document.clone());
     }
-    for root in &snapshot.discovery_roots {
-        merge_markdown_entries(&mut value, &root.path)?;
+    let roots: Vec<_> = snapshot.discovery_roots.iter().filter(|root| {
+        !disabled || root.scope == ConfigDiscoveryScope::Installation
+    }).map(|root| root.path.clone()).collect();
+    for root in &roots {
+        merge_markdown_entries(&mut value, root)?;
     }
     let mut document = serde_json::from_value(value)?;
     normalize(&mut document);
-    let roots = snapshot
-        .discovery_roots
-        .iter()
-        .map(|root| root.path.clone())
-        .collect();
     Ok((document, roots))
 }
 
@@ -387,6 +398,44 @@ fn merge_unique_array(target: &mut Value, source: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_project_config_filters_layers_and_markdown_roots() {
+        use neoism_agent_service_api::{ConfigDiscoveryRoot, ConfigDiscoveryScope,
+            ConfigLayer, ConfigWritableTarget};
+        let root = std::env::temp_dir().join(format!("agent-builtins-disabled-{}", std::process::id()));
+        let global = root.join("global");
+        let project = root.join("project");
+        std::fs::create_dir_all(global.join("agents")).unwrap();
+        std::fs::create_dir_all(project.join("agents")).unwrap();
+        std::fs::write(global.join("agents/global.md"), "Global prompt").unwrap();
+        std::fs::write(project.join("agents/project.md"), "Project prompt").unwrap();
+        let snapshot = ConfigSnapshot {
+            identity: "disabled-test".into(), workspace: project.clone(),
+            layers: vec![
+                ConfigLayer { source_id: "global".into(), scope: ConfigDiscoveryScope::Installation,
+                    document: serde_json::json!({"model": "global/model", "instructions": ["global.md"]}), writable: false },
+                ConfigLayer { source_id: "project".into(), scope: ConfigDiscoveryScope::Workspace,
+                    document: serde_json::json!({"model": "project/model", "instructions": ["project.md"]}), writable: false },
+            ],
+            discovery_roots: vec![
+                ConfigDiscoveryRoot { source_id: "global".into(), scope: ConfigDiscoveryScope::Installation, path: global.clone() },
+                ConfigDiscoveryRoot { source_id: "project".into(), scope: ConfigDiscoveryScope::Workspace, path: project.clone() },
+            ],
+            writable_target: ConfigWritableTarget { source_id: "global".into(), label: "global".into() },
+        };
+        let (document, roots) = load_snapshot_with_project_disabled(&snapshot, true).unwrap();
+        assert_eq!(document.model.as_deref(), Some("global/model"));
+        assert_eq!(document.instructions, vec!["global.md"]);
+        assert_eq!(roots, vec![global]);
+        let value = serde_json::to_value(document).unwrap();
+        assert!(value["agent"]["global"].is_object());
+        assert!(value["agent"].get("project").is_none());
+        let (enabled, roots) = load_snapshot_with_project_disabled(&snapshot, false).unwrap();
+        assert_eq!(enabled.model.as_deref(), Some("project/model"));
+        assert_eq!(roots.len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn selection_defaults_exposes_only_safe_effective_choices() {

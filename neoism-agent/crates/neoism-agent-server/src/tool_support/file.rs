@@ -65,7 +65,10 @@ pub(super) fn read_tool(
         .unwrap_or(DEFAULT_READ_LIMIT)
         .max(1);
     let loaded = crate::instruction::nearby(&context.cwd, &path);
-    // Session reads admit instructions separately from file text. Standalone
+    // These are discovery candidates, not refreshed session instructions. The
+    // successful-result save path admits them against model-visible history via
+    // message_model::admit_instruction_context, before persisting metadata. Keep
+    // directory/media reads on the same path as ordinary text reads. Standalone
     // reads retain inline reminders for callers without a conversation renderer.
     let instruction_context = context.session_id.as_ref().map(|_| &loaded);
 

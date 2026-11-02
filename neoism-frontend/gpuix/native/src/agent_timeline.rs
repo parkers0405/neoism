@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashMap};
 
 struct View {
+    preparation_scope: u64,
     preparing: bool,
     scroll_trace: Option<ScrollTrace>,
     compact_paint: bool,
@@ -103,8 +104,11 @@ fn now_seconds() -> f32 {
 }
 
 fn render_frame(view: &mut View) -> Value {
+    // This standalone timeline bypasses the full-pane renderer's frame reset.
+    // Only images painted in this frame may retain preview click targets.
+    view.pane.composer_interactions.clear_rects();
     if view.preparing {view.pane.continue_timeline_preparation();}
-    neoism_ui::panels::agent_pane::view::markdown::begin_preparation();
+    neoism_ui::panels::agent_pane::view::markdown::begin_preparation_scoped(view.preparation_scope);
     let s = view.scale;
     let theme = IdeTheme::by_name(&view.theme);
     let rect = [0.0, 0.0, view.width, view.height];
@@ -284,6 +288,45 @@ fn pointer(view: &mut View, v: &Value) -> Value {
     json!({"copy": copy, "link": link,"preview":preview})
 }
 
+#[cfg(test)]
+mod image_hit_tests {
+    use super::*;
+    use neoism_ui::panels::agent_pane::{
+        composer_interactions::ImagePreviewHit, state::NeoismAgentImage,
+    };
+
+    #[test]
+    fn repaint_discards_image_targets_from_previous_scroll_positions() {
+        let created = dispatch(&json!({"op":"agenttimeline.new","sessionId":"images"}))
+            .unwrap().unwrap();
+        let id = created["id"].as_u64().unwrap() as u32;
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            let view = store.views.get_mut(&id).unwrap();
+            for y in [200.0, 300.0, 400.0] {
+                // Register the target from a previously visible thumbnail,
+                // without depending on asynchronous image decoding in this test.
+                view.pane.composer_interactions.image_previews.push(ImagePreviewHit {
+                    rect: [100.0, y, 50.0, 40.0],
+                    image: NeoismAgentImage {
+                        filename: "photo.png".into(), mime: "image/png".into(),
+                        url: "data:image/png;base64,test".into(),
+                    },
+                });
+                let click = json!({"kind":"down","x":110.0,"y":y + 10.0});
+                assert_eq!(pointer(view, &click)["preview"]["name"], "photo.png");
+                // The next viewport contains no image. Its old position must
+                // neither advertise a pointer nor reopen the previous preview.
+                let frame = render_frame(view);
+                assert_eq!(frame["pointer"], false);
+                assert!(view.pane.composer_interactions.image_previews.is_empty());
+                assert!(pointer(view, &click)["preview"].is_null());
+            }
+        });
+        dispatch(&json!({"op":"agenttimeline.dispose","id":id})).unwrap().unwrap();
+    }
+}
+
 pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
     let op = v["op"].as_str()?;
     if op == "agenttimeline.diagnostics" {
@@ -343,6 +386,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));
             pane.set_session_id(Some(v["rootSessionId"].as_str().unwrap_or(&session_id).to_owned()));
             store.views.insert(id, View {
+                preparation_scope:id as u64,
                 preparing:false,
                 scroll_trace: std::env::var_os("NEOISM_GPUIX_SCROLL_TRACE").map(|_| {let now=std::time::Instant::now();ScrollTrace{origin:now,last:now,text_y:HashMap::new(),input_pixels:0.0,input_events:0,precise_events:0}}),
                 compact_paint: v["compactPaint"].as_bool().unwrap_or(false),
@@ -368,7 +412,9 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
         }
         let id = v["id"].as_u64().unwrap_or(0) as u32;
         if op == "agenttimeline.dispose" {
-            store.views.remove(&id);
+            if let Some(view)=store.views.remove(&id){
+                neoism_ui::panels::agent_pane::view::markdown::release_preparation_scope(view.preparation_scope);
+            }
             return Ok(Value::Null);
         }
         let view = store.views.get_mut(&id).ok_or("Unknown agent timeline")?;
@@ -818,6 +864,9 @@ pub fn dispatch_panel(v: &Value) -> Option<Result<Value, String>> {
     let op = v["op"].as_str()?;
     if !op.starts_with("agentsidepanel.") {
         return None;
+    }
+    if op == "agentsidepanel.catalog-scope" {
+        return Some(Ok(json!(workspace_catalog_scope(v["directory"].as_str()))));
     }
     Some(PANELS.with(|panels| {
         let mut panels = panels.borrow_mut();

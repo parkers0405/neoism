@@ -2445,10 +2445,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_filesystem_targets_still_use_compact_paths() {
+    fn read_file_lists_keep_full_paths_without_changing_other_tool_titles() {
         let state = json!({ "input": { "path": "/repo/src/panels/agent.rs" } });
 
-        assert_eq!(tool_title("read", &state), "Read(panels/agent.rs)");
+        assert_eq!(tool_title("read", &state), "Read(/repo/src/panels/agent.rs)");
+        assert_eq!(tool_title("write", &state), "Write(panels/agent.rs)");
     }
 
     #[test]
@@ -3032,7 +3033,9 @@ fn ordinary_tool_block(tool: &str, state: &Value, metadata: Option<&Value>) -> N
     };
     let output = unwrap_tool_output(&raw_detail);
     let preview = tool_body(tool, display_status, state, &todos);
-    let output_kind = if !todos.is_empty() {
+    let explicit_todos = state.pointer("/metadata/todos").is_some_and(Value::is_array)
+        || state.pointer("/input/todos").is_some_and(Value::is_array);
+    let output_kind = if status != "error" && (!todos.is_empty() || (is_todo_tool(tool) && explicit_todos)) {
         NeoismAgentOutputKind::Todos
     } else {
         NeoismAgentOutputKind::Text
@@ -3463,6 +3466,11 @@ fn tool_title(tool: &str, state: &Value) -> String {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
     if let Some(path) = path {
+        // Read activity is presented as a file-list accordion. Keep the full
+        // identity so files with the same basename are not accidentally merged.
+        if matches!(tool.to_ascii_lowercase().as_str(), "read" | "read_file" | "readfile" | "view" | "cat") {
+            return format!("{name}({path})");
+        }
         return format!(
             "{name}({})",
             truncate_line(&short_path(path), TOOL_TITLE_TARGET_MAX_CHARS)

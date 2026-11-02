@@ -55,7 +55,7 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   if(path==="/session-projects")return Response.json({items:[],pinnedSessions:[...sessions.values()].filter(session=>session.pinned&&!session.parentId)});
   if(path==="/sessions"&&request.method==="GET"){
    if(failSessionPage){failSessionPage=false;return Response.json({message:"Session page unavailable"},{status:500});}
-   const roots=url.searchParams.get("roots")==="true",rows=[...sessions.values()].filter(session=>(workspace==="system"||session.directory===`/project/${workspace}`)&&(!roots||!session.parentId)).sort((a,b)=>b.time.updated-a.time.updated);
+    const roots=url.searchParams.get("roots")==="true",directory=url.searchParams.get("directory"),rows=[...sessions.values()].filter(session=>(workspace==="system"||session.directory===`/project/${workspace}`)&&(!directory||session.directory===directory)&&(!roots||!session.parentId)).sort((a,b)=>b.time.updated-a.time.updated);
    const start=Number(url.searchParams.get("cursor")||0),limit=Number(url.searchParams.get("limit")||50),items=rows.slice(start,start+limit),next=start+limit<rows.length?String(start+limit):null;
    return Response.json({items,cursor:{next,hasMore:!!next}});
   }

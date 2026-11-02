@@ -31,7 +31,7 @@ use crate::widgets::stock_card::{
 
 mod html_artifact;
 mod incremental;
-pub use incremental::{begin_preparation,end_preparation,preparation_pending};
+pub use incremental::{begin_preparation,begin_preparation_scoped,end_preparation,preparation_pending,release_preparation_scope};
 mod inline_style;
 pub(crate) use html_artifact::estimated_body_height as estimated_artifact_body_height;
 pub use html_artifact::{

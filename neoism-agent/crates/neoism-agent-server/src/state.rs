@@ -4053,6 +4053,19 @@ impl SessionStore {
         Ok(())
     }
 
+    pub(crate) async fn clear_context_epoch(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        self.db
+            .execute(
+                "DELETE FROM session_context_epochs WHERE session_id = ?",
+                vec![text(session_id)],
+            )
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn get_context_epoch(
         &self,
         session_id: &str,

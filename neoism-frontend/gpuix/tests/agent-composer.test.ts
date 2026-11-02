@@ -68,6 +68,33 @@ test("original footer paints actual checkout/connect hints and working interrupt
  const busy=actor.frame({...base,busy:true,state:"Working"});expect(busy.controls.action).toBe("Interrupt");expect(busy.animating).toBe(true);expect(texts(busy)).toContain("interrupt");expect(texts(busy)).toContain("esc");
  expect(actor.frame({...base,help:false,busy:true,state:"Working"}).animating).toBe(true);
 });
+test("context readout uses subtle footer ink, updates live and drops whole before narrow overlap",()=>{
+ const actor=composer();
+ for(const busy of [false,true]){
+  const frame=actor.frame({...base,contextLabel:"42.1k (33%)",busy,state:busy?"Working":"Idle"});
+  expect(texts(frame)).toContain("42.1k (33%)");expect(texts(frame)).toContain("/");
+  expect(frame.contextRect).not.toBeNull();
+  const [x,y,w,h]=frame.contextRect!,tray=frame.trayRect!;
+  expect(x).toBeGreaterThanOrEqual(tray[0]);expect(x+w).toBeLessThanOrEqual(tray[0]+tray[2]);
+  expect(y).toBe(tray[1]);expect(h).toBe(tray[3]);
+  for(const rect of frame.cwdRects)expect(rect[0]+rect[2]).toBeLessThanOrEqual(x);
+   const metric=frame.commands.find(command=>command.kind==="text"&&command.text==="42.1k (33%)");
+   const hint=frame.commands.find(command=>command.kind==="text"&&command.text==="commands");
+   const slash=frame.commands.find(command=>command.kind==="text"&&command.text==="/");
+   expect(slash?.kind==="text"&&slash.x).toBeGreaterThan(tray[0]+tray[2]/2);
+   const withoutContext=actor.frame({...base,busy,state:busy?"Working":"Idle"}).commands.find(command=>command.kind==="text"&&command.text==="/");
+    expect(withoutContext?.kind==="text"&&slash?.kind==="text"?withoutContext.x-slash.x:NaN).toBeCloseTo(0,3);
+    expect(hint?.kind==="text"&&hint.x).toBeGreaterThan(x+w);
+    expect(slash?.kind==="text"?slash.x-(x+w):NaN).toBeCloseTo(14,3);
+   for(const rect of frame.cwdRects)expect(rect[0]+rect[2]).toBeLessThan(slash?.kind==="text"?slash.x:0);
+   expect(metric?.kind==="text"&&metric.color).toEqual(hint?.kind==="text"&&hint.color);
+ }
+ expect(texts(actor.frame({...base,contextLabel:"51.0k (40%)"}))).toContain("51.0k (40%)");
+ for(const input of [{...base,width:310,contextLabel:"42.1k (33%)"},{...base,help:false,contextLabel:"42.1k (33%)"},{...base}]){
+  const frame=actor.frame(input);
+  expect(frame.contextRect).toBeNull();expect(texts(frame)).not.toContain("42.1k (33%)");
+ }
+});
 test("native shaped rows control card height and stale-width reports are ignored",()=>{
  const actor=composer();
  for(const home of [true,false]){

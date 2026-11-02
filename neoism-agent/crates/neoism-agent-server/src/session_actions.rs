@@ -3324,23 +3324,16 @@ pub(crate) async fn session_shell(
     Path(session_id): Path<String>,
     Json(request): Json<SessionShellRequest>,
 ) -> Result<Json<MessageWithParts>, ApiError> {
-    let response = append_prompt(
-        &state,
-        &session_id,
-        PromptRequest {
-            message_id: request.message_id,
-            model: request.model,
-            agent: request.agent,
-            no_reply: false,
-            system: None,
-            tools: None,
-            author: None,
-            parts: vec![PromptPart::Text {
-                text: format!("Run shell command: {}", request.command),
-            }],
-        },
-        true,
-    )
-    .await?;
-    Ok(Json(response))
+    shell::execute(state, session_id, request).await.map(Json)
 }
+
+pub(crate) async fn session_shell_capabilities(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    ensure_session(&state, &session_id).await?;
+    Ok(Json(json!({"execution":"direct"})))
+}
+
+#[path = "session_shell.rs"]
+mod shell;

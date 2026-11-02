@@ -202,6 +202,27 @@ impl NeoismAgentPane {
             *incoming = merge_part_message(existing.clone(), incoming.clone());
         }
 
+        // Unanchored ACP plans (including empty clears) are not persisted tool
+        // calls. A metadata/history refresh must not expose an older checklist.
+        // A new canonical call, however, owns its server-provided position.
+        if let Some(snapshot) = self.messages.iter().find(|m| m.id == "todos-snapshot") {
+            let canonical = server_messages.iter_mut().rfind(|m| is_todo_call(m));
+            if let Some(call) = canonical.filter(|call| {
+                !(call.status == "error" && snapshot.todos.is_empty())
+                    && (!self.messages.iter().any(|old| old.id == call.id)
+                        || (call.output_kind == NeoismAgentOutputKind::Todos && call.todos == snapshot.todos))
+            }) {
+                if call.status != "error" && call.todos.is_empty()
+                    && call.output_kind != NeoismAgentOutputKind::Todos
+                {
+                    call.todos = snapshot.todos.clone();
+                    call.output_kind = NeoismAgentOutputKind::Todos;
+                }
+            } else if !server_messages.iter().any(|m| m.id == snapshot.id) {
+                server_messages.push(snapshot.clone());
+            }
+        }
+
         server_messages
     }
 
@@ -426,6 +447,29 @@ impl NeoismAgentPane {
     }
 
     pub fn upsert_part_message(&mut self, mut message: NeoismAgentMessage) {
+        if is_todo_call(&message) {
+            let existing = self.messages.iter().position(|m| m.id == message.id);
+            let latest = self.messages.iter().rposition(is_todo_call);
+            // A late update to an old call must not steal a newer standalone
+            // plan. A new canonical call keeps its own arrival position, not
+            // the fallback's speculative position.
+            if let Some(index) = self.messages.iter().position(|m| m.id == "todos-snapshot") {
+                let owns_snapshot = existing.is_none() || (existing == latest
+                    && (existing.is_some_and(|i| matches!(self.messages[i].status.as_str(), "pending" | "running"))
+                        || (message.output_kind == NeoismAgentOutputKind::Todos
+                            && message.todos == self.messages[index].todos)));
+                if owns_snapshot && !(message.status == "error" && self.messages[index].todos.is_empty()) {
+                    let snapshot = self.messages.remove(index);
+                    if message.status != "error" && message.todos.is_empty()
+                        && message.output_kind != NeoismAgentOutputKind::Todos
+                    {
+                        message.todos = snapshot.todos;
+                        message.output_kind = NeoismAgentOutputKind::Todos;
+                    }
+                    self.invalidate_timeline_layout();
+                }
+            }
+        }
         // Task tool completion acknowledges launch; the tracked child owns
         // the card lifecycle. Normalize before recording animation changes.
         if message.kind == NeoismAgentMessageKind::Tool && message.tool == "task" {
@@ -704,6 +748,8 @@ impl NeoismAgentPane {
             .enumerate()
             .filter(|(_, existing)| {
                 existing.kind == NeoismAgentMessageKind::Tool
+                    && (!is_todo_call(message) || existing.id.is_empty() || message.id.is_empty()
+                        || existing.id == message.id)
                     && existing.status == "running"
                     && existing.tool == message.tool
                     && (message.title.is_empty()

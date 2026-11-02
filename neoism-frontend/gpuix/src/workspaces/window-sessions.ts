@@ -97,11 +97,10 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
   await waitForWorkspace(local.model);
   // The plus belongs to the window, never to the selected remote connection.
   const hostId=local.model.state.connection.connectedHostId;
-  const parent=hostId
+  const parent=(hostId
    ? local.model.state.workspaces.find(workspace=>workspace.id===local.model.state.activeWorkspace?.id&&workspace.host_id===hostId)
      ||local.model.state.workspaces.find(workspace=>workspace.host_id===hostId)
-   : local.model.state.activeWorkspace;
-  if(!parent)throw new Error("The local host has no available workspace");
+   : local.model.state.activeWorkspace)||await local.model.resolveHostWorkspace();
   const pending=local.model.newWorkspace(parent);this.select(local);return await pending;
  };
  close=async(discard=false,id=this.activeId())=>{

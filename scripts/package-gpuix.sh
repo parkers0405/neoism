@@ -21,9 +21,10 @@ cp "$frontend/node_modules/@gpuix/native/LICENSE" "$bundle/licenses/GPUIX-native
 cp "$frontend/node_modules/@gpuix/solid/LICENSE" "$bundle/licenses/GPUIX-solid.txt"
 cp "$repo_root/misc/neoism.desktop" "$bundle/neoism.desktop"
 cp "$repo_root/neoism-frontend/shared/assets/icons/neoism.png" "$bundle/neoism.png"
-# The standalone Agent web GUI remains a daemon resource, separate from the retired WASM frontend.
-[[ -f "$frontend/dist/web/agent-gui/index.html" ]] || { echo "Agent GUI is missing from the distribution." >&2; exit 1; }
-cp -a "$frontend/dist/web" "$bundle/web"
+# Never copy stale browser distributions from a previous native build.
+mkdir -p "$bundle/web"
+cp -a "$frontend/dist/web/app" "$frontend/dist/web/native" "$bundle/web/"
+printf '%s\n' '<!-- Neoism native runtime resources; no browser UI. -->' > "$bundle/web/index.html"
 cp "$repo_root/scripts/install-gpuix-bundle.sh" "$bundle/install-bundle.sh"
 tar -C "$staging" -czf "$out/neoism-linux-x86_64.tar.gz.next" neoism-linux-x86_64
 mv -f "$out/neoism-linux-x86_64.tar.gz.next" "$out/neoism-linux-x86_64.tar.gz"

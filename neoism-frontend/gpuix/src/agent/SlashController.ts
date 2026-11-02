@@ -139,11 +139,15 @@ export class SlashController{
   this.assertCurrent(scope);
  }
  private async sessionsPicker(scope:Scope){
-  // Match the sidebar's authorized catalog, including legacy/cross-project chats.
-  const catalog=this.options.model.agentSdk;
-  const [projects,page]=await Promise.all([catalog.catalogProjects(scope.workspaceId),catalog.catalogSessions(scope.workspaceId,{roots:true,limit:50})]);
+   // Scope follows the declared workspace, not the selected chat's execution cwd.
+   const catalog=this.options.model.agentSdk;
+   const root=this.options.model.state.activeWorkspace?.root_dir;
+   if(!root)throw new Error("The workspace directory is not ready yet");
+   const directory=coreCall<string|null>("agentsidepanel.catalog-scope",{directory:root})??undefined;
+   const inScope=(session:Session)=>!session.parentId&&(!directory||session.directory===directory);
+   const [projects,page]=await Promise.all([catalog.catalogProjects(scope.workspaceId),catalog.catalogSessions(scope.workspaceId,{roots:true,limit:50,directory})]);
   if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
-  const sessions=new Map([...projects.pinnedSessions,...page.items].filter(session=>!session.parentId).map(session=>[session.id,session]));
+   const sessions=new Map([...projects.pinnedSessions,...page.items].filter(inScope).map(session=>[session.id,session]));
   let cursor=page.cursor?.next,loading=false,error:string|undefined;
   const select=async(id:string)=>{
    this.assertCurrent(scope);scope.pickerCancelled=true;
@@ -153,10 +157,12 @@ export class SlashController{
    if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
    const sorted=[...sessions.values()].sort((a,b)=>b.time.updated-a.time.updated);
    const rows:SlashOption[]=[];
-   for(const pinned of [true,false]){
-    const group=sorted.filter(session=>!!session.pinned===pinned);if(!group.length)continue;
-    rows.push({...option(pinned?"Pinned":"Recent","","",""),header:true});
-    rows.push(...group.map(session=>({...option(session.title||"New conversation",session.directory,session.id,""),pinned:!!session.pinned,current:session.id===scope.sessionId})));
+    const groups=new Map<string,Session[]>();
+    for(const session of sorted){const key=session.directory||"Unknown directory";const group=groups.get(key)||[];group.push(session);groups.set(key,group);}
+    for(const [path,group] of groups){
+     rows.push({...option(path,"","",""),header:true,section:"directory"});
+     group.sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)||b.time.updated-a.time.updated);
+     rows.push(...group.map(session=>({...option(session.title||"New conversation",session.directory,session.id,""),section:path,pinned:!!session.pinned,current:session.id===scope.sessionId})));
    }
    if(loading||error)rows.push({...option(error||"Loading more sessions...","","",""),header:true});
    await this.options.hooks.picker(this.pickerRequest(scope,{kind:"sessions",title:"Sessions",options:rows,selected:scope.sessionId,loading,error,onSelect:select,onLoadMore:cursor?loadMore:undefined}));
@@ -165,9 +171,9 @@ export class SlashController{
    if(!cursor||loading||scope.pickerCancelled||this.disposed||!this.current(scope))return;
    const requested=cursor;loading=true;error=undefined;await publish();
    try{
-    const next=await catalog.catalogSessions(scope.workspaceId,{roots:true,limit:50,cursor:requested});
+     const next=await catalog.catalogSessions(scope.workspaceId,{roots:true,limit:50,cursor:requested,directory});
     if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
-    for(const session of next.items)if(!session.parentId)sessions.set(session.id,session);
+     for(const session of next.items)if(inScope(session))sessions.set(session.id,session);
     cursor=next.cursor?.next===requested?undefined:next.cursor?.next;
    }catch(cause){error=cause instanceof Error?cause.message:"Could not load older sessions. Scroll to retry.";}
    finally{loading=false;await publish();}

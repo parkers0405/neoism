@@ -13,6 +13,7 @@ pub(crate) struct SessionCoordinator {
     // need no retained tombstone to detect idle -> run -> idle snapshot ABA.
     ownership_generation: AtomicU64,
     prompt_admissions: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    context_reconciliations: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     #[cfg(test)]
     pub(crate) prompt_admission_started:
         Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
@@ -51,6 +52,28 @@ impl Default for Entry {
 }
 
 impl SessionCoordinator {
+    /// Independent of prompt admission: dispatch also refreshes instructions,
+    /// and must not race an admitted steering prompt's epoch read/modify/write.
+    pub(crate) async fn context_reconciliation_guard(
+        &self,
+        session_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let gate = {
+            let mut gates = self.context_reconciliations.lock().await;
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            let entry = gates.entry(session_id.to_owned()).or_default();
+            match entry.upgrade() {
+                Some(gate) => gate,
+                None => {
+                    let gate = Arc::new(Mutex::new(()));
+                    *entry = Arc::downgrade(&gate);
+                    gate
+                }
+            }
+        };
+        gate.lock_owned().await
+    }
+
     /// Serialize only prompt initialization, never model or tool execution.
     pub(crate) async fn prompt_admission_guard(
         &self,

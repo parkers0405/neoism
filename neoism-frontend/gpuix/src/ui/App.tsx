@@ -36,7 +36,7 @@ import { EditorView } from "../editor/EditorView";
 import { MarkdownView } from "../markdown/MarkdownView";
 import { PaneLayoutView } from "../layout/PaneLayoutView";
 import { AgentTimelineView,scrollAgentHalfPage,agentSelectedText,stopAgentTimeline } from "../agent/AgentTimelineView";
-import {contextUsage} from "../agent/context-usage";
+import {contextMetrics,compactTokenCount} from "../agent/context-usage";
 import {sessionTodos} from "../agent/session-todos";
 import { AgentSidePanelView } from "../agent/AgentSidePanelView";
 import { DirectoryBrowserView } from "../agent/DirectoryBrowserView";
@@ -45,6 +45,7 @@ import {AgentChipLabel} from "../agent/AgentChipLabel";
 import {AgentStars} from "../agent/AgentStars";
 import {ComposerCaret} from "../agent/ComposerCaret";
 import { NativeComposer, type ComposerFrame } from "../agent/NativeComposer";
+import {shellCommand, exitShellMode} from "../agent/shell-mode";
 import { SlashController, type SlashPickerRequest } from "../agent/SlashController";
 import { PaintLayer, type PaintCommand } from "./PaintLayer";
 import { FinderController } from "../finder/FinderController";
@@ -955,6 +956,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const promptHistory=new PromptHistory();
     let lastEscapeAt:number|undefined;
     const [draft, setDraft] = createSignal(initialDraft?.text||"");
+    const shellMode = () => shellCommand(draft()) !== undefined;
     const [submitting, setSubmitting] = createSignal(false);
     const [pasting,setPasting]=createSignal(false);
     const [attachments, setAttachments] = createSignal<Array<Attachment & { token: string; name: string }>>(initialDraft?.attachments||[]);
@@ -970,6 +972,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     });
     createEffect(() => { if (restoredDraftKey) model.setComposerDraft(restoredDraftKey, { text: draft(), attachments: attachments() }); });
     const selection = createMemo(() => { modelRevision(); return model.selection(props.sessionId); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+    const context=createMemo(()=>sessionContextMetrics(props.sessionId,selection().model||""));
     const cached=visuals.agentComposer(props.surfaceId,config),native=cached.native||(cached.native=new NativeComposer(config));
     const [frame, setFrame] = createSignal<ComposerFrame|undefined>(cached.frame);
     const [textLayout,setTextLayout]=createSignal<{width:number;rows:number}>();
@@ -1000,7 +1003,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       toggleHints:()=>{setHelp(value=>!value);model.setUI({agentHints:help()});},
       toggleSidebar:()=>{setDetails(value=>!value);},
       closeTab:()=>{const surface=state().surfaces.find(surface=>surface.id===props.surfaceId);if(surface)model.closeCurrentTab();},
-      notice:(title,value,sessionId)=>{const id=sessionId||props.sessionId;if(!id)return;const message:HistoryMessage={id:`ui:${Date.now()}:${Math.random()}`,role:"system",kind:"System",title,...(title==="Directory"?{tool:"location_notice"}:{}),text:typeof value==="string"?value:JSON.stringify(value,null,2)};model.update({history:{...model.state.history,[id]:[...(model.state.history[id]||[]),message]}});},
+      notice:(title,value,sessionId)=>{const id=sessionId||props.sessionId;if(!id)return;const message:HistoryMessage={id:`ui:${Date.now()}:${Math.random()}`,role:"System",kind:"System",title,...(title==="Directory"?{tool:"location_notice"}:{}),text:typeof value==="string"?value:JSON.stringify(value,null,2)};model.update({history:{...model.state.history,[id]:[...(model.state.history[id]||[]),message]}});},
       effect:kind=>{native.startEffect(kind);effectScope=`${state().activeWorkspace?.id}\0${state().activeSurfaceId||"home"}`;effectActive=true;sampleEffect();},
       openExternal:openExternalUrl,
       chooseDirectory,
@@ -1016,11 +1019,11 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       // Retain the last shaped height while typing; the textarea reports the
       // new row count after layout, rather than speculating with another font.
       const measured=textLayout();
-      const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),system:sessionError()?"Agent error":undefined,noProviders:noProviders(),busy:localBusy(),state:activityState(),visualRows:draft()?measured?.rows:1,textWidth:draft()?measured?.width:frame()?.controls.text_rect[2]});
+      const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),system:sessionError()?"Agent error":undefined,contextLabel:context().label,noProviders:noProviders()&&!shellMode(),busy:localBusy(),state:activityState(),visualRows:draft()?measured?.rows:1,textWidth:draft()?measured?.width:frame()?.controls.text_rect[2]});
       cached.frame=next;setFrame(next);props.onFrame(next);
       if(next.animating&&!config.reducedMotion)activityAnimation.request(sample,started);
     };
-    createEffect(()=>{props.viewport;props.home;draft();help();attachments();cwd();noProviders();activityState();sessionError();textLayout();untrack(sample);});
+    createEffect(()=>{props.viewport;props.home;draft();help();attachments();cwd();noProviders();activityState();sessionError();textLayout();context();untrack(sample);});
     const sampleEffect=()=>{if(disposed||!effectActive)return;if(effectScope!==`${state().activeWorkspace?.id}\0${state().activeSurfaceId||"home"}`){effectActive=false;setEffectCommands([]);return;}const started=performance.now(),next=native.effect({width:props.viewport.width,height:props.viewport.height,inputY:frame()?.inputRect[1]||0});setEffectCommands(next.commands);effectActive=next.animating;
       if(next.prompt){if(props.sessionId)void model.submitPrompt(props.sessionId,next.prompt);else void model.submitNewPrompt(next.prompt);}
       if(next.animating)effectsAnimation.request(sampleEffect,started);
@@ -1058,6 +1061,9 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     };
     const submit = async (delivery: "steer" | "queue" = "steer") => {
       if ((!draft().trim() && !attachments().length) || !draft().startsWith("/") && state().connection.phase !== "connected" || submitting() || pasting()) return;
+      const command = shellCommand(draft());
+      if (command !== undefined && (!command.trim() || localBusy())) return;
+      if (command !== undefined && attachments().length) { model.report(new Error("Remove attachments before running a shell command.")); return; }
       const submitted = draft(), submittedAttachments = attachments(), files = submittedAttachments.map(({ token, name, ...attachment }) => attachment);
       const prompt=!submitted.trimStart().startsWith("/");
       setSubmitting(true);
@@ -1065,7 +1071,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       if(prompt){setDraft("");setAttachments([]);setSlashDismissed(false);props.onPromptStart();}
       const restore=()=>{if(prompt){if(!draft()&&!attachments().length){setDraft(submitted);setAttachments(submittedAttachments);}props.onPromptFailed();}};
       try {
-        const accepted = prompt
+        const accepted = command !== undefined ? await model.submitShell(props.sessionId, command) : prompt
           ? await (props.sessionId ? model.submitPrompt(props.sessionId, submitted, { attachments: files, delivery }) : model.submitNewPrompt(submitted, { attachments: files, delivery }))
           : await slash.execute(submitted);
         if (accepted) { if(prompt){model.rememberComposerPrompt({text:submitted,attachments:submittedAttachments});promptHistory.reset();} if(!prompt&&draft()===submitted){setDraft("");setAttachments([]);setSlashDismissed(false);} }
@@ -1127,7 +1133,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       <Show when={!!frame()}><div testId="agent-composer-shell" data-home={props.home} style={{...absolute(frame()?.inputRect),height:(frame()?.inputRect[3]||0)+(frame()?.footerVisible?32*s:0)}}>
         <div ref={element=>{shell=element;composerShells.set(key(),element);}} onFileDrop={event=>{if(event.paths?.length)void attachPaths(event.paths);}}
           onLayout={event=>{anchor=[event.x||0,event.y||0,event.width||0,event.height||0];setComposerAnchors(current=>current[key()]?.every((n,i)=>n===anchor[i])?current:{...current,[key()]:anchor});}}
-          testId="agent-input-card" style={{...absolute(frame()?.cardRect),backgroundColor:frame()?.cardColor?rgba(frame()!.cardColor):c.bg,borderColor:c.border+"bf",borderWidth:Math.max(1,d.frameStroke*.5*s),borderRadius:frame()?.cardRadius}}>
+          testId="agent-input-card" style={{...absolute(frame()?.cardRect),backgroundColor:frame()?.cardColor?rgba(frame()!.cardColor):c.bg,borderColor:shellMode()?c.fg:c.border+"bf",borderWidth:Math.max(1,d.frameStroke*.5*s),borderRadius:frame()?.cardRadius}}>
           <Show when={config.agentStars!==false}><AgentStars config={config} composerId={native.id} width={frame()?.cardRect[2]||0} height={frame()?.cardRect[3]||0} radius={frame()?.cardRadius||0}/></Show>
           <Show when={attachments().length}><div testId="attachment-strip" style={{...row,position:"absolute",left:18*s,right:18*s,top:(props.home?15:11)*s,height:82*s,gap:6*s,overflowX:"scroll"}}><For each={attachments()}>{attachment=>{
             const image=attachment.kind.startsWith("image/")?{name:attachment.name,bytes:Uint8Array.from(attachment.bytes||[])}:undefined;
@@ -1136,10 +1142,12 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
               <div role="button" aria-label={`Remove ${attachment.name}`} data-preserve-keyboard-focus={true} onClick={()=>removeAttachment(attachment.token)} style={{cursor:"pointer"}}><Label size={11} color={c.muted}>×</Label></div>
             </div>;
           }}</For></div></Show>
-          <textarea ref={element=>{input=element;composerInputs.set(key(),element);queueMicrotask(()=>{if(!disposed)focus();});}} testId="composer" aria-label="Message" value={draft()} placeholder="Ask anything" minRows={1} maxRows={5} theme={{...nativeTheme,caret:"#00000000"}}
+          <textarea ref={element=>{input=element;composerInputs.set(key(),element);queueMicrotask(()=>{if(!disposed)focus();});}} testId="composer" aria-label={shellMode()?"Shell command":"Message"} value={draft()} placeholder={shellMode()?"Enter a shell command":"Ask anything"} minRows={1} maxRows={5} theme={{...nativeTheme,caret:"#00000000"}}
             onFocus={()=>{invalidateNativeFocus(renderer);noteContentFocus();}} onBlur={()=>invalidateNativeFocus(renderer)}
             onChange={event=>{lastEscapeAt=undefined;promptHistory.reset();setDraft(event.value||"");setSlashDismissed(false);}} onSubmit={()=>{if(slashOpen()&&!slashOptions().some(row=>row.value===draft())&&slashOptions().some(row=>row.value.startsWith(draft()))){slashAccept?.();return;}void submit();}}
             onKeyDown={event=>{
+              const exited = exitShellMode(draft(), event.key?.toLowerCase() || "");
+              if (exited !== undefined) { event.preventDefault();event.stopPropagation();setDraft(exited);promptHistory.reset();lastEscapeAt=undefined;return; }
               if(event.key?.toLowerCase()==="paste"||event.key?.toLowerCase()==="v"&&(event.modifiers?.ctrl||event.modifiers?.cmd)&&!event.modifiers?.alt
                 ||event.key?.toLowerCase()==="insert"&&event.modifiers?.shift&&!event.modifiers.ctrl&&!event.modifiers.cmd&&!event.modifiers.alt){
                 event.preventDefault();event.stopPropagation();
@@ -1189,6 +1197,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
             setTextLayout(previous=>previous?.width===layout.width&&previous.rows===layout.rows?previous:{width:layout.width,rows:layout.rows});
           }}/>
           <div testId="composer-chip-row" style={{...absolute(frame()?.controls.chips_rect),pointerEvents:"none"}}>
+            <Show when={shellMode()} fallback={<>
             <For each={["agent","model","thinking"] as const}>{(kind,index)=>{
               const geometry=()=>chipGeometry().chips[index()];
               return <div ref={element=>{pickerButtons.push(element);composerPickerButtons.add(element);}} role="button" testId={`select-${kind}`} aria-label={kind==="thinking"?"Select reasoning":`Select ${kind}`} onClick={()=>openPicker(kind,true)} style={{...absolute(geometry().rect),cursor:"pointer",overflow:"hidden",pointerEvents:"auto"}}>
@@ -1198,6 +1207,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
               </div>;
             }}</For>
             <div style={{...absolute(chipGeometry().attach_rect),pointerEvents:"auto"}}><IconButton glyph={"\uf0c6"} label="Attach files" testId="attach-files" onClick={()=>void attach()}/></div>
+            </>}><text testId="composer-shell-mode" style={{...text(12,c.fg),height:"100%"}}>Shell · Enter to run · Esc to exit</text></Show>
           </div>
           <div testId="send-prompt" role="button" aria-label={localBusy()?"Stop generation":"Send message"} onClick={()=>localBusy()&&props.sessionId?stop():void submit()}
             style={{...absolute(frame()?.controls.hit_rect),cursor:"pointer"}}><div style={{...row,justifyContent:"center",position:"absolute",left:(frame()?.controls.visual_rect[0]||0)-(frame()?.controls.hit_rect[0]||0),top:(frame()?.controls.visual_rect[1]||0)-(frame()?.controls.hit_rect[1]||0),width:frame()?.controls.visual_rect[2],height:frame()?.controls.visual_rect[3],borderRadius:8*s,backgroundColor:frame()?.controls.action==="Disabled"?c.fg+"8c":c.fg}}>
@@ -1206,6 +1216,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         </div>
         <Show when={frame()?.joinRect}>{rect=><div style={{...absolute(rect()),backgroundColor:frame()?.trayColor?rgba(frame()!.trayColor):c.surface,pointerEvents:"none"}}/>}</Show>
         <Show when={frame()?.trayRect}>{rect=><div testId="agent-composer-footer" style={{...absolute(rect()),pointerEvents:"none"}}/>}</Show>
+        <Show when={!sessionError()&&frame()?.contextRect}>{rect=><div testId="agent-composer-context" role="img" aria-label={context().accessibleLabel} style={{...absolute(rect()),pointerEvents:"none"}}/>}</Show>
         <div style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"none"}}><PaintLayer commands={sessionError()?[]:frame()?.commands||[]} config={config} pinImage={(source,raster)=>wordmarkHosts.pinPaintImage(renderer,source,raster)}/></div>
         <Show when={sessionError()&&frame()?.trayRect}>{_=>{const rect=()=>frame()!.trayRect!;return <div testId="agent-composer-error" role="alert" aria-label={sessionError()} style={{...absolute(rect()),...row,gap:8*s,paddingLeft:12*s,paddingRight:10*s,backgroundColor:rgba(frame()!.trayColor),borderColor:c.red,borderWidth:s,borderBottomLeftRadius:frame()?.trayRadius,borderBottomRightRadius:frame()?.trayRadius,overflow:"hidden"}}>
           <text style={{...text(12.5,c.red),flexGrow:1,minWidth:0,overflow:"hidden",whiteSpace:"nowrap"}}>{sessionError()?.replace(/\s+/g," ")}</text>
@@ -1244,6 +1255,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       const draft=model.state.composerDrafts[model.composerDraftKey(props.sessionId,props.surfaceId)];
       const native=cached.native||(cached.native=new NativeComposer(config));
       cached.frame=native.frame({...cached.viewport,home:home(),text:draft?.text||"",images:draft?.attachments?.length||0,help:model.state.ui.agentHints!==false,
+        contextLabel:sessionContextMetrics(props.sessionId,model.selection(props.sessionId).model||"").label,
         system:props.sessionId&&state().sessionErrors[props.sessionId]?"Agent error":undefined,
         cwd:state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined,
         noProviders:!state().catalogsLoading&&!state().catalogsError&&state().providers.length===0,busy:!!props.sessionId&&![undefined,"Idle"].includes(state().streaming[props.sessionId]),state:props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle"});
@@ -1262,19 +1274,20 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   }
   function Conversation(props: { surfaceId: string;initialViewport:{width:number;height:number} }) { const surface=()=>state().surfaces.find(surface=>surface.id===props.surfaceId);return <AgentSurface surfaceId={props.surfaceId} sessionId={surface()?.sessionId} initialViewport={props.initialViewport}/>; }
 
+  function sessionContextMetrics(sessionId:string|undefined,selectedModel:string) {
+    const id=sessionId||"";
+    return contextMetrics(state().history[id]||[],state().usage[id],state().providerStates[id],state().providers,selectedModel);
+  }
   function DetailRail() {
     // Fixed ink geometry avoids font bearings/baselines moving the checkmark.
     const checkmark=JSON.stringify([{k:"p",c:cssColor(c.green),p:[[3,7,5,9,11,2,12,3,5,12,2,8].map(n=>n*s)]}]);
     const session = () => active()?.sessionId || "";
-    const usage = createMemo(() => contextUsage(state().history[session()]||[],state().usage[session()]));
+    const context=createMemo(()=>sessionContextMetrics(session(),activeSelection().model||""));
+    const usage=()=>context().usage;
     const todos = createMemo(() => sessionTodos(state().history[session()]||[],state().todos[session()]));
-    const limit = () => {
-      const selected=activeSelection().model||"",slash=selected.indexOf("/");
-      const catalog=state().providers.find(provider=>provider.id===selected.slice(0,slash))?.models?.find(model=>model.id===selected.slice(slash+1));
-      return state().providerStates[session()]?.context_limit||catalog?.context_limit||usage()?.context_limit;
-    };
-    const count = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}m` : n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-    const total = () => usage()?.total ?? (usage()?.input || 0) + (usage()?.output || 0);
+    const limit=()=>context().limit;
+    const count=compactTokenCount;
+    const total=()=>context().total;
     const directory = () => {
       const path = state().activeWorkspace?.root_dir || "";
       const home = process.env.HOME;

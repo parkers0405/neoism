@@ -618,10 +618,12 @@ impl WorkspaceManager {
     pub fn declare_startup_workspace(&self, dir: &std::path::Path) -> WorkspaceSummary {
         let _ = std::fs::create_dir_all(dir);
         let resolved = crate::path::canonicalize_lossy(dir);
+        let host_id = machine_host_id();
         {
             let inner = self.inner.lock();
             if let Some(existing) = inner.host_workspaces.values().find(|workspace| {
-                workspace.root_dir.as_deref() == Some(resolved.as_path())
+                workspace.host_id == host_id
+                    && workspace.root_dir.as_deref() == Some(resolved.as_path())
             }) {
                 return existing.clone();
             }
@@ -630,7 +632,7 @@ impl WorkspaceManager {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
         let workspace =
-            self.create_host_workspace(machine_host_id(), None, title, Some(resolved));
+            self.create_host_workspace(host_id, None, title, Some(resolved));
         // `--workspace` EXISTS to serve this dir to other machines, so the
         // workspace is broadcast the moment the daemon binds. Declaring it
         // Shared is what lights the network badge on the owner's workspace
@@ -848,16 +850,21 @@ impl WorkspaceManager {
         let fallback_host_id = preferred_host_id.unwrap_or_else(machine_host_id);
         let mut inner = self.inner.lock();
 
+        // Snapshots also contain joined hosts (and old machine identities).
+        // A default must belong to the requested host at every fallback tier;
+        // another host's recency or identical filesystem path is not ownership.
         let selected = conn
             .active_workspace
             .as_ref()
             .and_then(|id| inner.host_workspaces.get(id).cloned())
+            .filter(|workspace| workspace.host_id == fallback_host_id)
             .map(|workspace| (workspace, InitialWorkspaceReason::ClientRemembered))
             .or_else(|| {
                 inner
                     .active_workspace_by_host
                     .get(&fallback_host_id)
                     .and_then(|id| inner.host_workspaces.get(id))
+                    .filter(|workspace| workspace.host_id == fallback_host_id)
                     .cloned()
                     .map(|workspace| (workspace, InitialWorkspaceReason::HostActive))
             })
@@ -865,6 +872,7 @@ impl WorkspaceManager {
                 inner
                     .host_workspaces
                     .values()
+                    .filter(|workspace| workspace.host_id == fallback_host_id)
                     .max_by_key(|workspace| workspace.last_active)
                     .cloned()
                     .map(|workspace| (workspace, InitialWorkspaceReason::MostRecent))
@@ -878,7 +886,7 @@ impl WorkspaceManager {
                 host_kind: Default::default(),
                 visibility: Default::default(),
                 main_session_id: None,
-                root_dir: std::env::current_dir().ok(),
+                root_dir: Some(crate::files::workspace_root()),
                 linked_vault_dir: None,
                 notes_vault_dir: None,
                 active_tab_id: None,

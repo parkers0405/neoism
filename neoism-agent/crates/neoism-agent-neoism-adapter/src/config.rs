@@ -281,7 +281,27 @@ impl ConfigSourceService for NeoismConfigSourceService {
         &self,
         request: &ConfigSnapshotRequest,
     ) -> Result<ConfigSnapshot, ServiceError> {
-        if request.installation {
+        self.snapshot_with_project_disabled(
+            request,
+            std::env::var("NEOISM_DISABLE_PROJECT_CONFIG").as_deref() == Ok("1"),
+        )
+    }
+
+    fn update<'a>(
+        &'a self,
+        request: &'a ConfigUpdateRequest,
+    ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+        self.update_config(request)
+    }
+}
+
+impl NeoismConfigSourceService {
+    fn snapshot_with_project_disabled(
+        &self,
+        request: &ConfigSnapshotRequest,
+        disabled: bool,
+    ) -> Result<ConfigSnapshot, ServiceError> {
+        if request.installation || disabled {
             let layers = vec![
                 ConfigLayer {
                     source_id: GUI_SOURCE.into(),
@@ -304,7 +324,11 @@ impl ConfigSourceService for NeoismConfigSourceService {
                     .map(|layer| format!("{}\0{}", layer.source_id, layer.document))
                     .collect::<Vec<_>>()
                     .join("\0"),
-                workspace: self.user_root(),
+                workspace: if request.installation {
+                    self.user_root()
+                } else {
+                    Self::workspace_root(&request.workspace)
+                },
                 layers,
                 discovery_roots: vec![ConfigDiscoveryRoot {
                     scope: neoism_agent_service_api::ConfigDiscoveryScope::Installation,
@@ -377,7 +401,7 @@ impl ConfigSourceService for NeoismConfigSourceService {
         })
     }
 
-    fn update<'a>(
+    fn update_config<'a>(
         &'a self,
         request: &'a ConfigUpdateRequest,
     ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
@@ -629,6 +653,34 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn disabled_project_config_skips_reads_migration_and_workspace_discovery() {
+        let fixture = MigrationFixture::new("disabled-project");
+        let global = fixture.0.join("user");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(fixture.0.join(".neoism")).unwrap();
+        std::fs::write(global.join("config.json"), r#"{"agent":{"model":"global/model"}}"#).unwrap();
+        std::fs::write(global.join("mcp.json"), r#"{"global":{"command":["global"]}}"#).unwrap();
+        // Invalid project files would fail a normal snapshot. A legacy file
+        // must not migrate (or trigger a Git probe) while disabled either.
+        std::fs::write(fixture.0.join(".neoism/config.json"), "invalid").unwrap();
+        std::fs::write(fixture.0.join(".neoism/mcp.json"), "invalid").unwrap();
+        fixture.legacy();
+        let before = GIT_ROOT_PROBES.with(|count| count.get());
+        let snapshot = fixture.service().snapshot_with_project_disabled(
+            &ConfigSnapshotRequest::new(&fixture.0), true,
+        ).unwrap();
+        assert_eq!(snapshot.workspace, fixture.0);
+        assert_eq!(snapshot.layers[0].document["model"], "global/model");
+        assert!(snapshot.layers[1].document["mcp"]["global"].is_object());
+        assert!(snapshot.layers.iter().all(|layer| layer.scope == ConfigDiscoveryScope::Installation));
+        assert_eq!(snapshot.discovery_roots.len(), 1);
+        assert_eq!(snapshot.discovery_roots[0].path, global);
+        assert_eq!(snapshot.writable_target.source_id, GUI_SOURCE);
+        assert_eq!(before, GIT_ROOT_PROBES.with(|count| count.get()));
+        assert!(fixture.0.join("neoism.json").exists());
     }
 
     #[test]

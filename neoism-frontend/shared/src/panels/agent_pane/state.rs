@@ -1564,36 +1564,48 @@ impl NeoismAgentPane {
         }
     }
 
-    /// Replace the todo-list snapshot the pane renders. Stored on a
-    /// dedicated `Tool` message of kind `Todos` so the timeline renderer
-    /// already knows how to paint it. Mirrors `TodoUpdate`.
+    /// Reconcile the unanchored plan event with its canonical tool call.
+    /// Standalone ACP plans have no call, so retain a completed fallback row.
     pub fn apply_todos(&mut self, todos: Vec<NeoismAgentTodo>) {
         let todos_id = "todos-snapshot";
-        let existing = self.messages.iter().position(|m| m.id == todos_id);
-        if todos.is_empty() {
-            if let Some(index) = existing {
-                self.messages.remove(index);
-                self.invalidate_timeline_layout();
-            }
+        // Only the newest call can own a live plan event. Never rewrite an
+        // older completed call merely because it also happens to be a todo.
+        let target = self.messages.iter().rposition(|m| is_todo_call(m));
+        let target_id = target.filter(|&index| {
+            let row = &self.messages[index];
+            row.status != "error" && ((!todos.is_empty()
+                && (row.todos == todos || (row.todos.is_empty()
+                    && row.output_kind != NeoismAgentOutputKind::Todos)))
+                || (todos.is_empty() && row.todos.is_empty()
+                    && row.output_kind == NeoismAgentOutputKind::Todos)
+                || matches!(row.status.as_str(), "pending" | "running"))
+        }).map(|index| self.messages[index].id.clone());
+        let had_snapshot = self.messages.iter().any(|m| m.id == todos_id);
+        self.messages.retain(|m| m.id != todos_id);
+        if had_snapshot {
+            self.invalidate_timeline_layout();
+        }
+        if let Some(id) = target_id {
+            let index = self.messages.iter().position(|m| m.id == id).unwrap();
+            self.messages[index].todos = todos;
+            self.messages[index].output_kind = NeoismAgentOutputKind::Todos;
+            self.mark_timeline_message_dirty_at(index);
             return;
         }
+        // Even an empty plan is authoritative. Keep the marker at the live
+        // tail so the sidebar masks historical checklists without erasing them.
         let mut row = NeoismAgentMessage::tool(
             "Todos",
             String::new(),
-            "running",
+            "completed",
             "todowrite",
             NeoismAgentOutputKind::Todos,
             "",
             todos,
         );
         row.id = todos_id.to_string();
-        if let Some(index) = existing {
-            self.messages[index] = row;
-            self.mark_timeline_message_dirty_at(index);
-        } else {
-            self.messages.push(row);
-            self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
-        }
+        self.messages.push(row);
+        self.mark_timeline_message_dirty_at(self.messages.len().saturating_sub(1));
     }
 
     /// Clear only this request’s local admission feedback, never real queued prompts.
@@ -2537,6 +2549,12 @@ fn merge_stream_part_message(
     merge_part_message(existing, incoming)
 }
 
+fn is_todo_call(message: &NeoismAgentMessage) -> bool {
+    message.kind == NeoismAgentMessageKind::Tool
+        && message.id != "todos-snapshot"
+        && matches!(message.tool.to_ascii_lowercase().as_str(), "todowrite" | "todo_write" | "todo")
+}
+
 fn merge_part_message(
     existing: NeoismAgentMessage,
     mut incoming: NeoismAgentMessage,
@@ -2593,11 +2611,17 @@ fn merge_part_message(
         if incoming.detail.trim().is_empty() && existing.status != "pending" {
             incoming.detail = existing.detail;
         }
-        if incoming.todos.is_empty() {
+        if incoming.todos.is_empty() && incoming.output_kind != NeoismAgentOutputKind::Todos
+            && incoming.status != "error"
+        {
             incoming.todos = existing.todos;
+            if !incoming.todos.is_empty() && existing.output_kind == NeoismAgentOutputKind::Todos {
+                incoming.output_kind = NeoismAgentOutputKind::Todos;
+            }
         }
         if incoming.output_kind == NeoismAgentOutputKind::Text
             && existing.output_kind != NeoismAgentOutputKind::Text
+            && incoming.status != "error"
         {
             incoming.output_kind = existing.output_kind;
         }

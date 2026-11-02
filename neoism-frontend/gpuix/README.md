@@ -19,8 +19,7 @@ npm start
 Blaze is the default Rust builder for the services, native bridge, tests, GitHub Actions,
 and Nix package. `scripts/blaze.sh` and `scripts/setup-blaze.mjs` install the exact
 published release and verify its SHA-256 against `native/blaze-pin.json`.
-Root `make build` builds the services, native bridge, application bundle, and
-standalone Agent web GUI; root `./install.sh` installs that bundle in
+Root `make build` builds the services, native bridge, and native application bundle only; root `./install.sh` installs that bundle in
 `~/.local/lib/neoism-gpuix/bin`, preserving the existing daily `neoism` launcher.
 Application builds never automatically fall back to another compiler.
 For an explicitly selected optimized native bridge, use
@@ -28,8 +27,11 @@ For an explicitly selected optimized native bridge, use
 then `bun scripts/build.ts --reuse-core` to package that verified library.
 This affects the bridge only; services and CI retain their existing compiler.
 The bridge's Cargo output is isolated in `target/gpuix-core-cargo`.
+Set `NEOISM_GPUIX_DISPLAY_SOURCE` to a separate checkout directory when building the pinned display renderer alongside local renderer edits. The build still verifies the revision, patches, and source hashes; it never resets a conflicting checkout.
 Windows CI bootstraps Blaze itself from the pinned
 source because upstream publishes no Windows archive; its application tests use Blaze.
+
+Native local and CI releases neither build nor package browser UIs. The legacy `web/app` directory contains the native application's JavaScript bytecode/assets, and `web/native` contains native libraries; both remain required. `web/index.html` is only an inert compatibility marker for old updaters. Staging excludes stale browser assets from older builds. Normal Agent listeners are API-only; standalone Agent `gui`/`web` commands and `npm --prefix neoism-agent/sdk/typescript run gui:build` from the repository root remain explicit opt-ins. The workspace daemon serves static UIs only when explicitly configured with `NEOISM_WEB_ROOT` or `NEOISM_AGENT_GUI_ROOT`; it no longer discovers installed or source-checkout browser assets. REST/WebSocket routes and authentication are unchanged.
 
 After building and testing the native bridge, `npm run build -- --reuse-core`
 packages that existing library after another FFI smoke check. The normal build

@@ -31,8 +31,9 @@ def main():
         for resource in ["LICENSE", "NOTICE", "licenses/Geist-OFL.txt",
                          "licenses/ICU4X.txt", "licenses/Tantivy.txt", "licenses/Tantivy-AUTHORS.txt", "licenses/Turso.txt",
                          "licenses/GPUIX-native.txt", "licenses/GPUIX-solid.txt",
-                         "web/agent-gui/index.html"]:
+                         "web/app/manifest.json"]:
             assert (prefix / "bin" / resource).is_file(), resource
+        assert {p.name for p in (prefix / 'bin/web').iterdir()} == {'app', 'native', 'index.html'}
         env = {**os.environ,
                "NEOISM_GPUIX_TEST_BINARY": str(binary),
                "NEOISM_GPUIX_WORKSPACE_DAEMON": str(prefix / "bin/neoism-workspace-daemon")}

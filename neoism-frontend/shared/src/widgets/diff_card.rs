@@ -349,6 +349,9 @@ pub struct PaintParams<'a> {
     pub hide_code_text: bool,
     pub link_line_numbers: bool,
     pub line_number_pointer: Option<(f32, f32)>,
+    /// Agent file accordions opt in; ordinary Git/review cards retain their header.
+    pub accordion_expanded: Option<bool>,
+    pub sticky_header: bool,
 }
 impl Default for PaintParams<'_> {
     fn default() -> Self {
@@ -362,6 +365,8 @@ impl Default for PaintParams<'_> {
             hide_code_text: false,
             link_line_numbers: false,
             line_number_pointer: None,
+            accordion_expanded: None,
+            sticky_header: false,
         }
     }
 }
@@ -476,6 +481,8 @@ pub fn render_with_paint(
             paint.hide_code_text,
             paint.link_line_numbers,
             paint.line_number_pointer,
+            paint.accordion_expanded,
+            if paint.sticky_header { y.max(clip_top).min(y + body_height.max(0.0)) } else { y },
             clip,
         );
         layout.header_link_rect = painted.header_link_rect.or(layout.header_link_rect);
@@ -536,6 +543,8 @@ fn render_painted_region(
     hide_code_text: bool,
     link_line_numbers: bool,
     line_number_pointer: Option<(f32, f32)>,
+    accordion_expanded: Option<bool>,
+    header_y: f32,
     region: [f32; 4],
 ) -> CardLayout {
     let clip_top = region[1];
@@ -599,8 +608,8 @@ fn render_painted_region(
         [radius, radius, 0.0, 0.0]
     };
 
-    let header_visible_y = y.max(clip_top);
-    let header_visible_bot = (y + header_h).min(clip_bottom);
+    let header_visible_y = header_y.max(clip_top);
+    let header_visible_bot = (header_y + header_h).min(clip_bottom);
     let header_visible_h = (header_visible_bot - header_visible_y).max(0.0);
     if header_visible_h > 0.0 {
         sugarloaf.quad(
@@ -623,13 +632,13 @@ fn render_painted_region(
     if header_visible_h > 0.0 {
         let header_clip = clip_text(clip_to_viewport(
             x,
-            y,
+            header_y,
             width,
             header_h,
             clip_top,
             clip_bottom,
         ));
-        let path_color = if spec.link_target.is_some() {
+        let path_color = if accordion_expanded.is_none() && spec.link_target.is_some() {
             theme.blue
         } else {
             theme.fg
@@ -657,15 +666,36 @@ fn render_painted_region(
         };
 
         let header_text_y =
-            snap_text_y(y + (header_h - HEADER_FONT_SIZE * scale) / 2.0 - 1.0 * scale);
-        let hx = x + HEADER_PAD_X * scale;
+            snap_text_y(header_y + (header_h - HEADER_FONT_SIZE * scale) / 2.0 - 1.0 * scale);
+        let mut hx = x + HEADER_PAD_X * scale;
+        let display_path = if accordion_expanded.is_some() {
+            spec.path.strip_prefix("A ").or_else(|| spec.path.strip_prefix("D "))
+                .or_else(|| spec.path.strip_prefix("M ")).or_else(|| spec.path.strip_prefix("R ")).unwrap_or(spec.path)
+        } else { spec.path };
+        if let Some(expanded) = accordion_expanded {
+            let muted = DrawOpts { color: theme.u8(theme.muted), bold: false, ..path_opts.clone() };
+            sugarloaf.text_mut().draw(hx, header_text_y, if expanded { "⌄" } else { "›" }, &muted);
+            hx += 16.0 * scale;
+            let basename = display_path.rsplit(['/', '\\']).next().unwrap_or(display_path);
+            let (icon, mut color) = crate::panels::file_tree::icons::icon_for_file(basename);
+            color[3] = (color[3] as f32 * theme.opacity) as u8;
+            let icon_opts = DrawOpts { color, bold: false, ..path_opts.clone() };
+            sugarloaf.text_mut().draw(hx, header_text_y, icon, &icon_opts);
+            hx += 20.0 * scale;
+        }
 
-        let add_text = if spec.additions > 0 {
+        let created = accordion_expanded.is_some() && spec.path.starts_with("A ");
+        let deleted = accordion_expanded.is_some() && spec.path.starts_with("D ");
+        let add_text = if created {
+            "Created".to_string()
+        } else if spec.additions > 0 && !deleted {
             format!("+{}", spec.additions)
         } else {
             String::new()
         };
-        let del_text = if spec.deletions > 0 {
+        let del_text = if deleted {
+            "Deleted".to_string()
+        } else if spec.deletions > 0 && !created {
             format!("-{}", spec.deletions)
         } else {
             String::new()
@@ -694,17 +724,25 @@ fn render_painted_region(
         let path_budget =
             (x + width - hx - HEADER_PAD_X * scale - badges_total - 12.0 * scale)
                 .max(0.0);
-        let path_fit = truncate_to_fit(spec.path, path_budget, sugarloaf, &path_opts);
-        let path_w = sugarloaf.text_mut().measure(path_fit.as_str(), &path_opts);
+        let (directory, basename) = display_path.rfind(['/', '\\']).map_or(("", display_path), |i| display_path.split_at(i + 1));
+        let path_fit = truncate_to_fit(if accordion_expanded.is_some() { basename } else { display_path }, path_budget, sugarloaf, &path_opts);
+        let basename_w = sugarloaf.text_mut().measure(path_fit.as_str(), &path_opts);
+        let dir_opts = DrawOpts { color: theme.u8(theme.muted), bold: false, ..path_opts.clone() };
+        let dir_fit = if accordion_expanded.is_some() { truncate_to_fit(directory, (path_budget - basename_w).max(0.0), sugarloaf, &dir_opts) } else { String::new() };
+        let dir_w = sugarloaf.text_mut().measure(&dir_fit, &dir_opts);
+        let path_w = basename_w + dir_w;
         if spec.link_target.is_some() && path_w > 0.0 {
             let hit_pad = 3.0 * scale;
             let hit_left = (hx - hit_pad).max(x);
             let hit_right = (hx + path_w + hit_pad).min(x + width);
-            layout.header_link_rect = Some([hit_left, y, hit_right - hit_left, header_h]);
+            layout.header_link_rect = Some([hit_left, header_y, hit_right - hit_left, header_h]);
         }
         sugarloaf
             .text_mut()
-            .draw(hx, header_text_y, path_fit.as_str(), &path_opts);
+            .draw(hx + dir_w, header_text_y, path_fit.as_str(), &path_opts);
+        if !dir_fit.is_empty() {
+            sugarloaf.text_mut().draw(hx, header_text_y, &dir_fit, &dir_opts);
+        }
         if spec.link_target.is_some() && spec.link_hovered && path_w > 0.0 {
             let underline_y = header_text_y + HEADER_FONT_SIZE * scale + 2.0 * scale;
             let underline_bottom =
@@ -726,7 +764,7 @@ fn render_painted_region(
         }
 
         let badge_y =
-            snap_text_y(y + (header_h - BADGE_FONT_SIZE * scale) / 2.0 - 1.0 * scale);
+            snap_text_y(header_y + (header_h - BADGE_FONT_SIZE * scale) / 2.0 - 1.0 * scale);
         let mut bx = x + width - HEADER_PAD_X * scale;
         if !del_text.is_empty() {
             bx -= del_w;
@@ -746,6 +784,9 @@ fn render_painted_region(
     }
 
     // ── Body ─────────────────────────────────────────────────────────
+    // Reserve pinned header pixels before clipping any body paint. This avoids
+    // code/background bleeding through it without relying on painter ordering.
+    let clip_top = clip_top.max(header_y + header_h);
     if spec.diff_lines.is_empty() {
         return layout;
     }
@@ -837,15 +878,16 @@ fn render_painted_region(
     };
     let mut hatch_runs: Vec<[f32; 4]> = Vec::new();
     for line in &spec.diff_lines[logical_start..] {
+        // Stop before hashing/copying/wrapping the next offscreen line. This
+        // matters especially for a very long line just below a split viewport.
+        if visual_row_ix > last_visible_visual || visual_row_ix > total_visual_rows {
+            break;
+        }
         let fragments = wrapped_fragments(&line.text, max_chars);
         if visual_row_ix + fragments.len() <= first_visible_visual {
             visual_row_ix += fragments.len();
             continue;
         }
-        if visual_row_ix > last_visible_visual || visual_row_ix > total_visual_rows {
-            break;
-        }
-
         for (fragment_ix, fragment) in fragments.iter().enumerate() {
             let row_y = body_top
                 + BODY_TOP_PAD * scale
@@ -1629,6 +1671,94 @@ fn clip_to_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_file_headers_pin_within_the_card_and_clip_body_below_them() {
+        use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+        for (path, expected, expanded, y, body_h, pinned_y) in [
+            ("A src/new.rs", "Created", false, 120.0, 0.0, 120.0),
+            ("D src/old.rs", "Deleted", false, 120.0, 0.0, 120.0),
+            ("M src/lib.rs", "+1", true, -200.0, 1000.0, 100.0),
+            // A following file pushes the sticky header off with its own card.
+            ("M src/lib.rs", "+1", true, -200.0, 280.0, 80.0),
+        ] {
+            let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+            let rows = vec![DiffLine { text: "+let value = 42;".into(), kind: DiffLineKind::Add,
+                line_number: Some(1), old_line_number: None, new_line_number: Some(1) }; 50];
+            let spec = CardSpec { path, link_target: Some("src/lib.rs"), link_hovered: false,
+                additions: 1, deletions: 1, lang: Lang::Rust,
+                diff_lines: if expanded { &rows } else { &[] }, visual_row_offsets: None,
+                body_scroll: 0.0, horizontal_scroll: None };
+            let layout = render_with_paint(&mut painter, 0.0, y, 600.0, body_h, &spec, 1.0,
+                &IdeTheme::by_name("dark"), 0.0, 20, 100.0, 500.0,
+                PaintParams { accordion_expanded: Some(expanded), sticky_header: expanded, ..PaintParams::default() });
+            assert_eq!(layout.total_height, HEADER_HEIGHT + body_h);
+            assert_eq!(layout.header_link_rect.unwrap()[1], pinned_y);
+            let commands = painter.commands();
+            assert!(commands.iter().any(|command| matches!(command, PaintCommand::Text { text, .. } if text == expected)));
+            assert!(commands.iter().any(|command| matches!(command, PaintCommand::Text { text, bold: false, .. } if text == "src/")));
+            assert!(commands.iter().any(|command| matches!(command, PaintCommand::Text { text, bold: true, .. } if text.ends_with(".rs"))));
+            for command in commands {
+                if let PaintCommand::Text { text, clip: Some(clip), .. } = command {
+                    if text.contains("value") && expanded {
+                        assert!(clip[1] >= (pinned_y + HEADER_HEIGHT).max(100.0));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nowrap_does_not_prepare_the_first_row_beyond_the_viewport_budget() {
+        let mut painter = crate::primitives::paint_record::RecordingPainter::new(
+            "monospace", 400, vec![],
+        );
+        let mut rows = vec![
+            DiffLine {
+                text: String::new(),
+                kind: DiffLineKind::Context,
+                line_number: None,
+                old_line_number: None,
+                new_line_number: None,
+            };
+            7
+        ];
+        rows[6].text = "offscreen sentinel\t".repeat(4096);
+        let key = DiffWrapKey {
+            text_hash: hash_text(&rows[6].text),
+            text_len: rows[6].text.len(),
+            max_chars: usize::MAX,
+        };
+        DIFF_WRAP_CACHE.with(|cache| *cache.borrow_mut() = DiffWrapCache::new());
+        let spec = CardSpec {
+            path: "a.rs",
+            link_target: None,
+            link_hovered: false,
+            additions: 0,
+            deletions: 0,
+            lang: Lang::Rust,
+            diff_lines: &rows,
+            visual_row_offsets: None,
+            body_scroll: 0.0,
+            horizontal_scroll: Some(0.0),
+        };
+        render_with_paint(
+            &mut painter,
+            0.0,
+            -HEADER_HEIGHT,
+            500.0,
+            rows.len() as f32 * LINE_HEIGHT + BODY_TOP_PAD + BODY_BOTTOM_PAD,
+            &spec,
+            1.0,
+            &IdeTheme::by_name("dark"),
+            0.0,
+            20,
+            0.0,
+            LINE_HEIGHT,
+            PaintParams { hide_code_text: true, ..PaintParams::default() },
+        );
+        assert!(DIFF_WRAP_CACHE.with(|cache| cache.borrow().get(&key).is_none()));
+    }
 
     #[test]
     fn review_hunk_rule_is_opt_in_thin_and_clipped_without_changing_row_spacing() {

@@ -1167,6 +1167,8 @@ export interface ThreadSummary {
   busy?: boolean;
 }
 
+export type HistoryOutputKind = "Text" | "Code" | "Todos";
+
 export interface HistoryMessage {
   id: string;
   role: Role;
@@ -1177,6 +1179,9 @@ export interface HistoryMessage {
   status?: string;
   tool?: string;
   tool_batch_id?: string | null;
+  composition_children?: HistoryMessage[];
+  /** Absent on older peers; Todos also represents an explicit empty checklist. */
+  output_kind?: HistoryOutputKind | null;
   lang?: string;
   line_offset?: number | null;
   detail?: string;

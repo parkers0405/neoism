@@ -78,11 +78,12 @@ export const UsageSchema = Schema.Struct({
   context_limit: Schema.optionalKey(Schema.NullOr(Schema.Number)),
 });
 export type Usage = typeof UsageSchema.Type;
-export const HistoryMessageSchema = Schema.Struct({
-  id: Schema.String, role: Schema.String, kind: Schema.String,
+const HistoryMessageFields = Schema.Struct({
+  id: Schema.String, role: Schema.Literals(["User", "Assistant", "System"]), kind: Schema.String,
   title: Schema.optionalKey(Schema.String), text: Schema.optionalKey(Schema.String),
   status: Schema.optionalKey(Schema.String), tool: Schema.optionalKey(Schema.String),
   detail: Schema.optionalKey(Schema.String), lang: Schema.optionalKey(Schema.String),
+  output_kind: Schema.optionalKey(Schema.NullOr(Schema.Literals(["Text", "Code", "Todos"]))),
   todos: Schema.optionalKey(Schema.Array(TodoSchema)),
   usage: Schema.optionalKey(Schema.NullOr(UsageSchema)),
   author: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -92,7 +93,11 @@ export const HistoryMessageSchema = Schema.Struct({
   tool_batch_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
   mcp: Schema.optionalKey(Schema.Unknown),
 });
-export type HistoryMessage = typeof HistoryMessageSchema.Type;
+export type HistoryMessage = typeof HistoryMessageFields.Type & {readonly composition_children?:readonly HistoryMessage[]};
+export const HistoryMessageSchema:Schema.Codec<HistoryMessage> = Schema.Struct({
+  ...HistoryMessageFields.fields,
+  composition_children:Schema.optionalKey(Schema.Array(Schema.suspend(()=>HistoryMessageSchema))),
+});
 
 export const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 export function variant(value: unknown): [string, unknown] | undefined {

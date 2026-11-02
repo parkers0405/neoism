@@ -11,7 +11,7 @@ pub(crate) fn read_tool_group_at<M: AgentTimelineMessage>(
     ))
 }
 
-/// Exclusive source boundary of one eligible live read batch, without building a group.
+/// One operation family per explicit batch, or adjacent unbatched activity.
 pub fn read_tool_group_end<M: AgentTimelineMessage>(
     messages: &[M],
     start_index: usize,
@@ -20,51 +20,65 @@ pub fn read_tool_group_end<M: AgentTimelineMessage>(
     if !is_live_groupable_read_tool(first) {
         return None;
     }
-    let batch_id = first.tool_batch_id().filter(|id| !id.trim().is_empty())?;
+    let batch_id = first.tool_batch_id().filter(|id| !id.trim().is_empty());
+    let family = read_tool_family(first.tool());
     let mut end = start_index;
     while messages.get(end).is_some_and(|message| {
-        is_live_groupable_read_tool(message) && message.tool_batch_id() == Some(batch_id)
+        is_live_groupable_read_tool(message)
+            && read_tool_family(message.tool()) == family
+            && message.tool_batch_id().filter(|id| !id.trim().is_empty()) == batch_id
     }) {
         end += 1;
-    }
-    if end.saturating_sub(start_index) < 2 {
-        return None;
     }
     Some(end)
 }
 
 fn live_read_tool_group_message<M: AgentTimelineMessage>(tools: &[M]) -> M {
-    let mut preview = String::new();
-    let mut preview_count = 0;
-    let mut detail = String::new();
-    for tool in tools.iter().take(4) {
-        let label = read_tool_activity_label(tool).replace(['\n', '\r', '\t'], " ");
-        if !preview.is_empty() {
-            preview.push('\n');
+    let family = read_tool_family(tools[0].tool()).unwrap_or("Search");
+    let mut labels = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut file_results = family == "Read";
+    for tool in tools {
+        if family == "Grep" {
+            // Native grep marks file headers separately from indented matches.
+            // Retain paths only, never matched source or context lines.
+            let mut native_output = false;
+            for line in tool.detail().lines() {
+                if line.starts_with("Grep:") {
+                    native_output = true;
+                    file_results = true;
+                } else if native_output && !line.starts_with(char::is_whitespace) {
+                    if let Some(path) = line.strip_suffix(':').filter(|path| !path.is_empty()) {
+                        if seen.insert(path.to_string()) {
+                            labels.push(path.replace(['\r', '\n', '\t'], " "));
+                        }
+                    }
+                }
+            }
         }
-        preview.push_str(tool.id());
-        preview.push('\t');
-        preview.push_str(&label);
-        preview_count += 1;
-
-        let source = if tool.detail().trim().is_empty() {
-            tool.text()
-        } else {
-            tool.detail()
-        };
-        if !detail.is_empty() {
-            detail.push('\n');
+        if family == "Glob" {
+            let mut lines = tool.detail().lines();
+            if lines.next().is_some_and(|line| line.starts_with("Glob ")) {
+                file_results = true;
+                for path in lines.filter(|line| !line.is_empty() && *line != "No files found") {
+                    if seen.insert(path.to_string()) {
+                        labels.push(path.replace(['\r', '\n', '\t'], " "));
+                    }
+                }
+            }
         }
-        detail.push_str(tool.id());
-        detail.push('\t');
-        detail.push_str(&bounded_tool_group_preview(source));
+        if !matches!(family, "Grep" | "Glob") {
+            let label = read_tool_label(tool);
+            if seen.insert(label.clone()) { labels.push(label); }
+        }
     }
-    if tools.len() > preview_count {
-        if !preview.is_empty() {
-            preview.push('\n');
-        }
-        preview.push_str(&format!("+{} more", tools.len() - preview_count));
+    if matches!(family, "Grep" | "Glob") && !file_results {
+        labels = tools.iter().map(read_tool_label).collect();
     }
+    let count = if file_results { labels.len() } else { tools.len() };
+    let unit = if file_results { "file" } else { "search" };
+    let title = format!("{family}: {count} {unit}{}", if count == 1 { "" } else { "s" });
+    if labels.is_empty() { labels.push("No matching files".to_string()); }
 
     let status = if tools.iter().any(|tool| {
         !matches!(
@@ -80,38 +94,20 @@ fn live_read_tool_group_message<M: AgentTimelineMessage>(tools: &[M]) -> M {
     // The first member owns the group identity even as the live run grows.
     M::tool_group_message(
         format!("{first_id}.."),
-        format!("Reading/searching {} items", tools.len()),
-        preview,
+        title,
+        labels.join("\n"),
         status.to_string(),
-        detail,
+        String::new(),
     )
-}
-
-fn bounded_tool_group_preview(text: &str) -> String {
-    let mut out = String::new();
-    for line in text
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
-        .take(4)
-    {
-        if !out.is_empty() {
-            out.push_str("  /  ");
-        }
-        out.push_str(line);
-    }
-    if out.is_empty() {
-        out = "No output".to_string();
-    }
-    truncate_chars(&out.replace('\t', " "), 420)
 }
 
 fn is_live_groupable_read_tool<M: AgentTimelineMessage>(message: &M) -> bool {
     message.kind() == AgentTimelineMessageKind::Tool
-        && message.output_kind() == AgentTimelineOutputKind::Text
+        && message.output_kind() != AgentTimelineOutputKind::Todos
         && message.todos_empty()
+        && message.images().is_empty()
         && is_groupable_tool_status(message.status())
-        && is_read_like_tool(message.tool())
+        && read_tool_family(message.tool()).is_some()
 }
 
 fn is_groupable_tool_status(status: &str) -> bool {
@@ -121,28 +117,20 @@ fn is_groupable_tool_status(status: &str) -> bool {
     )
 }
 
-fn is_read_like_tool(tool: &str) -> bool {
+fn read_tool_family(tool: &str) -> Option<&'static str> {
     let normalized = tool
         .chars()
         .filter(|ch| !matches!(ch, '_' | '-' | '.'))
         .flat_map(char::to_lowercase)
         .collect::<String>();
-    matches!(
-        normalized.as_str(),
-        "read"
-            | "readfile"
-            | "view"
-            | "cat"
-            | "grep"
-            | "ripgrep"
-            | "rg"
-            | "glob"
-            | "list"
-            | "ls"
-            | "find"
-            | "search"
-            | "multigrep"
-    )
+    match normalized.as_str() {
+        "read" | "readfile" | "view" | "cat" => Some("Read"),
+        "grep" | "ripgrep" | "rg" | "multigrep" => Some("Grep"),
+        "glob" | "find" | "ffffindfiles" => Some("Glob"),
+        "list" | "ls" => Some("List"),
+        "search" => Some("Search"),
+        _ => None,
+    }
 }
 
 fn read_tool_label<M: AgentTimelineMessage>(message: &M) -> String {
@@ -150,16 +138,9 @@ fn read_tool_label<M: AgentTimelineMessage>(message: &M) -> String {
     if title.is_empty() {
         message.tool().to_string()
     } else {
-        title.to_string()
+        title.split_once('(')
+            .and_then(|(_, target)| target.strip_suffix(')'))
+            .unwrap_or(title)
+            .replace(['\r', '\n', '\t'], " ")
     }
-}
-
-fn read_tool_activity_label<M: AgentTimelineMessage>(message: &M) -> String {
-    let status = match message.status().trim().to_ascii_lowercase().as_str() {
-        "completed" | "success" | "done" => "done",
-        "error" | "failed" | "stopped" | "aborted" => "error",
-        "" => "running",
-        _ => "running",
-    };
-    format!("{status}  {}", read_tool_label(message))
 }

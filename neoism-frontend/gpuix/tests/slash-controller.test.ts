@@ -165,22 +165,36 @@ test("connect nested Back actions return to provider/account stages without stor
  expect(f.server.requests.some(request=>request.path.includes("/connections")&&request.method!=="GET")).toBe(false);expect(f.server.connections.get("a")!.size).toBe(2);expect(f.model.state.providerStates).toEqual(before);
 });
 
-test("sessions uses the sidebar catalog capability, with old pins above recent roots from other directories",async()=>{
+test("root sessions uses the sidebar catalog with separate directory groups",async()=>{
  const f=await fixture();f.server.enableMasterCatalog();
+ f.model.update({activeWorkspace:{...f.model.state.activeWorkspace!,root_dir:"/"}});
  const base=f.server.sessions.get("one")!;f.server.sessions.clear();
  f.server.sessions.set("old-pin",{...base,id:"old-pin",title:"Pinned legacy chat",directory:"/legacy",pinned:true});
  f.server.sessions.set("recent",{...base,id:"recent",title:"Recent chat",directory:"/elsewhere",time:{created:1,updated:100}});
  f.server.sessions.set("child",{...base,id:"child",parentId:"recent",time:{created:1,updated:200}});
  expect(f.server.requests).toHaveLength(0);await f.controller.execute("/session");
  const ready=f.pickers.at(-1)!;expect(ready.kind).toBe("sessions");
- expect(ready.options.map(row=>row.title)).toEqual(["Pinned","Pinned legacy chat","Recent","Recent chat"]);
- expect(ready.options[1].pinned).toBe(true);expect(ready.onLoadMore).toBeUndefined();
+  expect(ready.options.map(row=>row.title)).toEqual(["/elsewhere","Recent chat","/legacy","Pinned legacy chat"]);
+  expect(ready.options[2]).toMatchObject({header:true,section:"directory"});
+  expect(ready.options[3].pinned).toBe(true);expect(ready.onLoadMore).toBeUndefined();
  const list=f.server.requests.find(request=>request.path==="/sessions")!;
  expect(list).toMatchObject({workspace:"system",directory:null,query:{roots:"true",limit:"50"}});
  expect(f.server.requests.some(request=>request.path.includes("events"))).toBe(false);
  await ready.onSelect!("recent");
  expect(f.server.requests.find(request=>request.path==="/sessions/recent")?.workspace).toBe("system");
  expect(f.model.state.surfaces.find(surface=>surface.id===f.model.state.activeSurfaceId)?.sessionId).toBe("recent");
+});
+
+test("project sessions excludes other directories and their pins even when the current chat runs elsewhere",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();const base=f.server.sessions.get("one")!;
+ f.server.sessions.set("outside",{...base,id:"outside",directory:"/elsewhere",pinned:true});
+ f.server.sessions.set("nested",{...base,id:"nested",directory:"/project/a/nested"});
+ f.model.update({threads:f.model.state.threads.map(thread=>({...thread,directory:"/elsewhere"}))});
+ await f.controller.execute("/sessions");
+ const picker=f.pickers.at(-1)!;
+ expect(picker.options.filter(row=>!row.header).map(row=>row.value)).toEqual(["one"]);
+ expect(picker.options[0]).toMatchObject({title:"/project/a",header:true,section:"directory"});
+ expect(f.server.requests.find(request=>request.path==="/sessions")?.directory).toBe("/project/a");
 });
 
 function seedSessionPages(f:Awaited<ReturnType<typeof fixture>>){
@@ -196,7 +210,8 @@ test("sessions pagination is bounded, single-flight and lazy, retaining its toke
  await first.onLoadMore!();expect(count()).toBe(2);expect(f.pickers.at(-1)?.loading).toBe(true);
  f.server.release("/sessions");await pending;
  const second=f.pickers.at(-1)!;expect(second.token).toBe(first.token);expect(second.options.filter(row=>!row.header)).toHaveLength(101);
- expect(f.server.requests.filter(request=>request.path==="/sessions").at(-1)?.query.cursor).toBe("50");
+  expect(f.server.requests.filter(request=>request.path==="/sessions").at(-1)?.query.cursor).toBe("50");
+  expect(f.server.requests.filter(request=>request.path==="/sessions").every(request=>request.directory==="/project/a")).toBe(true);
  await Bun.sleep(20);expect(count()).toBe(2);
  await second.onLoadMore!();const last=f.pickers.at(-1)!;
  expect(last.options.filter(row=>!row.header)).toHaveLength(105);expect(new Set(last.options.filter(row=>!row.header).map(row=>row.value)).size).toBe(105);

@@ -16,7 +16,7 @@ use std::sync::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
-pub(crate) const DESCRIPTION: &str = "Compose multiple tools with bounded JavaScript. Discover synchronously with search({query: 'read', namespace: 'neoism', limit: 10, offset: 0}) (fields optional), then await tools.neoism.read({filePath: ...}) for native tools or await tools.github.list_issues({...}) for MCP. Return only the selected value; console.log emits bounded logs. Supported bounded JavaScript subset: no template literals, destructuring, spread, new, or imports; throw a string rather than new Error(...). No ambient filesystem, process or network. Each call returns {title,output,metadata,isError}; output is formatted text, NOT JSON data. Only actual MCP metadata.mcp.result.structuredContent is also exposed as structuredContent/data. Tool errors are catchable; effects/media remain recorded even if the script fails. Excluded: compose, execute, task, task_result, stop_task, question, plan_enter, plan_exit, complete_goal, move_chat, background_task, background_task_result. These remain available as direct tools.";
+pub(crate) const DESCRIPTION: &str = "Compose multiple tools with bounded JavaScript. Prefer small Promise.all batches for independent known native/MCP tool calls, not serial awaits: return await Promise.all([tools.neoism.read({filePath: 'a.rs'}), tools.neoism.read({filePath: 'b.rs'})]); Discover unknown signatures synchronously with search({query: 'read', namespace: 'neoism', limit: 10, offset: 0}) (fields optional); skip discovery for known signatures. Then call tools.neoism.read({...}) for native tools or tools.github.list_issues({...}) for MCP. Await dependencies before follow-up calls; never parallelize conflicting mutations. Reuse results; avoid redundant reads or polling. Native file tools first still applies; do not replace them with shell/script file operations. Return only the selected value; console.log emits bounded logs. Supported bounded JavaScript subset: no template literals, destructuring, spread, new, or imports; throw a string rather than new Error(...). No ambient filesystem, process or network. Each call returns {title,output,metadata,isError}; output is formatted text, NOT JSON data. Only actual MCP metadata.mcp.result.structuredContent is also exposed as structuredContent/data. Tool errors are catchable; effects/media remain recorded even if the script fails. Excluded: compose, execute, task, task_result, stop_task, question, plan_enter, plan_exit, complete_goal, move_chat, background_task, background_task_result. These remain available as direct tools.";
 const EXCLUDED: &[&str] = &[
     "compose",
     "execute",
@@ -551,8 +551,15 @@ fn child_presentation(
 fn envelope(result: &ToolExecutionResult) -> Value {
     // The interpreter attaches aliases to its arena after one import. Keep one
     // canonical payload here rather than cloning structured MCP data three times.
+    // Private read effects are recorded before this projection. Never expose
+    // instruction candidates to JavaScript: returning/logging the metadata
+    // would otherwise copy raw instruction contents into public output/logs.
+    let mut metadata = result.metadata.clone();
+    if let Some(object) = metadata.as_mut().and_then(Value::as_object_mut) {
+        object.remove("instructionContext");
+    }
     json!({"title":result.title,"output":result.output,
-        "metadata":result.metadata,"isError":result.metadata.as_ref().is_some_and(|m| m["isError"] == true)})
+        "metadata":metadata,"isError":result.metadata.as_ref().is_some_and(|m| m["isError"] == true)})
 }
 // The effect ledger must never retain full MCP protocol bodies or unrelated
 // result metadata outside the interpreter's own data accounting.
@@ -575,7 +582,7 @@ fn retained_effect_metadata(tool: &str, metadata: &Value) -> Value {
     }
     // Only workspace reads may admit project instructions. Other tool output,
     // including MCP metadata, must not become system context through compose.
-    if tool == "read" {
+    if tool == "read" && metadata.get("isError") != Some(&Value::Bool(true)) {
         if let Some(instructions) = metadata.get("instructionContext") {
             effects.insert("instructionContext".into(), instructions.clone());
         }
@@ -1254,6 +1261,32 @@ mod tests {
             .unwrap()
             .contains("count limit"));
     }
+    #[test]
+    fn composition_instruction_effects_are_private_from_script_returns_and_logs() {
+        let result = ToolExecutionResult {
+            title: "Read source".into(),
+            output: "ordinary file text".into(),
+            metadata: Some(json!({"path":"src/lib.rs", "instructionContext":[{
+                "filepath":"/project/src/AGENTS.md", "content":"private nested rule"
+            }]})),
+        };
+        let projected = envelope(&result);
+        assert!(projected["metadata"].get("instructionContext").is_none());
+        assert_eq!(projected["metadata"]["path"], "src/lib.rs");
+        assert_eq!(projected["output"], "ordinary file text");
+        // JavaScript return values and console logs can only see the envelope.
+        assert!(!projected.to_string().contains("private nested rule"));
+        let metadata = result.metadata.as_ref().unwrap();
+        let retained = retained_effect_metadata("read", metadata);
+        assert_eq!(retained["instructionContext"][0]["content"], "private nested rule");
+        let presentation = child_presentation("read", &result, 32 * 1024).unwrap().0;
+        assert!(!presentation.to_string().contains("private nested rule"));
+        let mut failed_read = metadata.clone();
+        failed_read["isError"] = json!(true);
+        assert!(retained_effect_metadata("read", &failed_read)
+            .get("instructionContext").is_none());
+    }
+
     #[test]
     fn composition_envelope_does_not_invent_json_from_formatted_text() {
         let result = ToolExecutionResult {

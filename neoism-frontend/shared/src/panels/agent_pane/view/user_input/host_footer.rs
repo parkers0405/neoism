@@ -9,6 +9,7 @@ use neoism_paint::text::DrawOpts;
 pub struct FooterSnapshot {
     pub help_visible:bool,pub no_providers:bool,pub streaming:AgentStreamingStatus,
     pub system:Option<ComposerSystemControl>,pub interactions:ComposerInteractions,
+    pub context_label:Option<String>,pub context_rect:Option<[f32;4]>,
 }
 impl FooterSnapshot {
     fn input_help_visible(&self)->bool{self.help_visible}
@@ -46,6 +47,7 @@ pub(super) fn render_with_policy(
     occlusion_rects: &[[f32; 4]],
     checkout_context: Option<&AgentCheckoutContext>,
 ) {
+    pane.context_rect = None;
     let [x, y, w, h] = rect;
     if w <= 0.0 || h <= 0.0 {
         return;
@@ -82,7 +84,7 @@ pub(super) fn render_with_policy(
     };
     let baseline_y = y + (h - key_opts.font_size) * 0.5;
 
-    // Reserve the right-hand hints before deciding whether the branch fits.
+    // Right-aligned order: context usage, then / commands at the outer edge.
     let needs_connect = pane.no_providers_connected();
     let (slash, command_label) = if needs_connect {
         ("/connect", "to connect a provider")
@@ -92,19 +94,22 @@ pub(super) fn render_with_policy(
     let command_label_w = sugarloaf.text_mut().measure(command_label, &label_opts);
     let slash_w = sugarloaf.text_mut().measure(slash, &key_opts);
     let inner_gap = 7.0 * s;
-    let right_w = slash_w + inner_gap + command_label_w;
-    let right_x = x + (w - right_w).max(0.0);
-    let hint_left = if pane.input_help_visible() && policy.show_command_hint {
-        right_x
-    } else {
-        x + w
-    };
+    let command_w = slash_w + inner_gap + command_label_w;
+    let context_w = pane.context_label.as_deref().map(|label| sugarloaf.text_mut().measure(label, &label_opts));
+    // Never squeeze checkout/activity hints into the metrics. At narrow widths
+    // preserve the existing footer policy and drop this optional readout whole.
+    let context_w = context_w.filter(|width| pane.input_help_visible() && policy.show_command_hint
+        && command_w + 14.0*s + *width + (if policy.show_activity {180.0*s} else {60.0*s}) <= w);
+    let command_x = (x + w - command_w).max(x);
+    let group_x = command_x - context_w.map_or(0.0, |width| width + 14.0*s);
+    let hint_left = if pane.input_help_visible() && policy.show_command_hint { (group_x - 14.0*s).max(x) } else { x + w };
+    let content_rect = [x, y, (hint_left-x).max(0.0), h];
 
     // A settled conversation mirrors New Chat's checkout context. While a run
     // is active, the activity scanner and interrupt hint own this same slot.
     let visible_checkout = visible_footer_checkout_context(policy, checkout_context);
     let checkout_hint_left = hint_left;
-    let mut checkout_rect = rect;
+    let mut checkout_rect = content_rect;
     pane.composer_interactions().system_rects.clear();
     if !policy.show_activity {
         if let Some(system) = pane.composer_system() {
@@ -116,7 +121,7 @@ pub(super) fn render_with_policy(
             };
             let measured = sugarloaf.text_mut().measure(&label, &label_opts);
             let (system_rect, remaining) = composer_system_layout(
-                rect,
+                content_rect,
                 hint_left,
                 measured,
                 visible_checkout.is_some(),
@@ -175,6 +180,11 @@ pub(super) fn render_with_policy(
         return;
     }
     if policy.show_activity {
+        let activity_clip = content_rect;
+        let mut key_opts = key_opts.clone();
+        key_opts.clip_rect = Some(activity_clip);
+        let mut label_opts = label_opts.clone();
+        label_opts.clip_rect = Some(activity_clip);
         let activity_w = draw_opencode_activity_scanner(
             sugarloaf,
             activity_guard,
@@ -183,7 +193,7 @@ pub(super) fn render_with_policy(
             now_seconds,
             theme,
             pane.streaming_state(),
-            clip,
+            activity_clip,
             occlusion_rects,
         );
         activity_guard += activity_w + 10.0 * s;
@@ -212,7 +222,7 @@ pub(super) fn render_with_policy(
     if !policy.show_command_hint {
         return;
     }
-    let slash_x = right_x;
+    let slash_x = command_x;
     draw_text_clipped(
         sugarloaf,
         slash_x,
@@ -229,6 +239,11 @@ pub(super) fn render_with_policy(
         &label_opts,
         occlusion_rects,
     );
+    if let (Some(width), Some(label)) = (context_w, pane.context_label.as_deref()) {
+        let context_x = group_x;
+        draw_text_clipped(sugarloaf,context_x,baseline_y,label,&label_opts,occlusion_rects);
+        pane.context_rect = Some([context_x,y,width,h]);
+    }
 }
 
 fn render_checkout_context(

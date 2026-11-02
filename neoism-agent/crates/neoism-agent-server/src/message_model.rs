@@ -38,6 +38,7 @@ pub(crate) fn provider_messages(messages: &[MessageWithParts]) -> Vec<ProviderMe
             tool_output_max_chars: Some(NORMAL_TOOL_OUTPUT_MAX_CHARS),
             current_model: None,
         },
+        &[],
     )
 }
 
@@ -53,6 +54,7 @@ pub(crate) fn provider_messages_for_model(
             tool_output_max_chars: Some(NORMAL_TOOL_OUTPUT_MAX_CHARS),
             current_model: Some((provider_id.to_string(), model_id.to_string())),
         },
+        &[],
     )
 }
 
@@ -66,6 +68,7 @@ pub(crate) fn compaction_provider_messages(
             tool_output_max_chars: Some(COMPACTION_TOOL_OUTPUT_MAX_CHARS),
             current_model: None,
         },
+        &[],
     )
 }
 
@@ -81,6 +84,42 @@ pub(crate) fn compaction_provider_messages_for_model(
             tool_output_max_chars: Some(COMPACTION_TOOL_OUTPUT_MAX_CHARS),
             current_model: Some((provider_id.to_string(), model_id.to_string())),
         },
+        &[],
+    )
+}
+
+/// Ambient updates are anchored AFTER a persisted message, never inside a tool
+/// exchange. Missing/removed anchors and initial (`None`) updates precede the
+/// visible history, in their stored order. Initial prompt instructions remain
+/// the caller's responsibility and are not repeated here.
+pub(crate) fn provider_messages_with_updates(
+    messages: &[MessageWithParts],
+    current_model: Option<(&str, &str)>,
+    updates: &[(Option<String>, String)],
+) -> Vec<ProviderMessage> {
+    provider_messages_with_options(
+        messages,
+        MessageModelOptions {
+            include_attachments: true,
+            tool_output_max_chars: Some(NORMAL_TOOL_OUTPUT_MAX_CHARS),
+            current_model: current_model
+                .map(|(provider, model)| (provider.into(), model.into())),
+        },
+        updates,
+    )
+}
+
+fn history_message_id(message: &MessageWithParts) -> &str {
+    match &message.info {
+        MessageInfo::User(info) => info.id.as_str(),
+        MessageInfo::Assistant(info) => info.id.as_str(),
+    }
+}
+
+fn instruction_reminder(content: &str) -> ProviderMessage {
+    ProviderMessage::text(
+        ProviderRole::User,
+        format!("<system-reminder>\n{content}\n</system-reminder>"),
     )
 }
 
@@ -97,10 +136,12 @@ struct MessageModelOptions {
 fn provider_messages_with_options(
     messages: &[MessageWithParts],
     options: MessageModelOptions,
+    updates: &[(Option<String>, String)],
 ) -> Vec<ProviderMessage> {
+    let mut seen_instructions = std::collections::HashSet::new();
     let mut provider_messages = messages
         .iter()
-        .flat_map(|message| match &message.info {
+        .map(|message| match &message.info {
             MessageInfo::User(user) => {
                 let mut values = Vec::new();
                 if let Some(system) = user
@@ -143,8 +184,12 @@ fn provider_messages_with_options(
                             assistant.provider_id == *provider
                                 && assistant.model_id == *model
                         });
-                let mut replay =
-                    assistant_provider_messages(&message.parts, &options, same_model);
+                let mut replay = assistant_provider_messages(
+                    &message.parts,
+                    &options,
+                    same_model,
+                    &mut seen_instructions,
+                );
                 if same_model {
                     if let Some(first) = replay
                         .first_mut()
@@ -161,6 +206,14 @@ fn provider_messages_with_options(
                 replay
             }
         })
+        .zip(messages)
+        .flat_map(|(mut replay, message)| {
+            replay.extend(updates.iter().filter_map(|(anchor, content)| {
+                (anchor.as_deref() == Some(history_message_id(message)))
+                    .then(|| instruction_reminder(content))
+            }));
+            replay
+        })
         .filter(|message| {
             !message.content.trim().is_empty()
                 || !message.tool_calls.is_empty()
@@ -169,55 +222,101 @@ fn provider_messages_with_options(
                 || matches!(message.role, ProviderRole::Tool)
         })
         .collect::<Vec<_>>();
+    let visible_ids = messages
+        .iter()
+        .map(history_message_id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut prelude = updates
+        .iter()
+        .filter_map(|(anchor, content)| {
+            anchor
+                .as_deref()
+                .is_none_or(|id| !visible_ids.contains(id))
+                .then(|| instruction_reminder(content))
+        })
+        .collect::<Vec<_>>();
+    prelude.append(&mut provider_messages);
+    provider_messages = prelude;
     if options.include_attachments {
         bound_tool_media_replay(&mut provider_messages, NORMAL_TOOL_MEDIA_MAX_BYTES);
-    }
-    if let Some(instructions) = nearby_instruction_context(messages) {
-        provider_messages.insert(0, instructions);
     }
     provider_messages
 }
 
-fn nearby_instruction_context(messages: &[MessageWithParts]) -> Option<ProviderMessage> {
-    let mut loaded = std::collections::BTreeMap::new();
-    for message in messages {
-        for part in &message.parts {
-            let Part::Tool(tool) = part else { continue };
-            if !matches!(tool.tool.as_str(), "read" | "compose")
-                || tool_output_was_compacted(tool)
-            {
-                continue;
-            }
-            let Some(items) = tool_state_metadata(tool)
-                .and_then(|metadata| metadata.get("instructionContext"))
-                .and_then(Value::as_array)
-            else {
-                continue;
-            };
-            for item in items {
-                if let Ok(instruction) = serde_json::from_value::<
-                    crate::instruction::LoadedInstruction,
-                >(item.clone())
-                {
-                    loaded.insert(instruction.filepath, instruction.content);
-                }
-            }
+fn tool_instructions(tool: &ToolPart) -> Vec<crate::instruction::LoadedInstruction> {
+    if !matches!(tool.tool.as_str(), "read" | "compose")
+        // Failed compositions still carry successful read-leaf effects. A
+        // failed read itself never admits instructions.
+        || !(matches!(tool.state, ToolState::Completed { .. })
+            || (tool.tool == "compose" && matches!(tool.state, ToolState::Error { .. })))
+        || tool_output_was_compacted(tool)
+    {
+        return Vec::new();
+    }
+    tool_state_metadata(tool)
+        .and_then(|metadata| metadata.get("instructionContext"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| serde_json::from_value(item.clone()).ok())
+        .collect()
+}
+
+/// Admit successful read effects immediately before persisting a read/compose
+/// result, including successful leaves retained by a failed composition.
+/// `messages` must be the currently model-visible history, after compaction and
+/// revert filtering, not the complete stored transcript. No session-global set:
+/// removing the original entry must make a later discovery eligible again.
+/// Replay also deduplicates legacy records, but admission is essential: saving a
+/// duplicate would let its newer contents reappear when the first is pruned.
+pub(crate) fn admit_instruction_context(
+    messages: &[MessageWithParts],
+    tool: &str,
+    metadata: &mut Value,
+) {
+    if metadata.get("instructionContext").is_none() {
+        return;
+    }
+    if !matches!(tool, "read" | "compose") {
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove("instructionContext");
         }
+        return;
     }
-    if loaded.is_empty() {
-        return None;
+    let mut seen = messages
+        .iter()
+        .filter(|message| matches!(message.info, MessageInfo::Assistant(_)))
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            Part::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .flat_map(tool_instructions)
+        .map(|instruction| instruction.filepath)
+        .collect::<std::collections::HashSet<_>>();
+    let Some(object) = metadata.as_object_mut() else {
+        return;
+    };
+    let Some(items) = object.remove("instructionContext") else {
+        return;
+    };
+    let admitted = items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            serde_json::from_value::<crate::instruction::LoadedInstruction>(item.clone())
+                .ok()
+        })
+        .filter(|instruction| seen.insert(instruction.filepath.clone()))
+        .collect::<Vec<_>>();
+    object.insert(
+        "loaded".into(),
+        serde_json::json!(admitted.iter().map(|item| &item.filepath).collect::<Vec<_>>()),
+    );
+    if !admitted.is_empty() {
+        object.insert("instructionContext".into(), serde_json::json!(admitted));
     }
-    let mut loaded = loaded.into_iter().collect::<Vec<_>>();
-    // Broader rules precede more specific directory rules.
-    loaded.sort_by_key(|(path, _)| std::path::Path::new(path).components().count());
-    Some(ProviderMessage::text(
-        ProviderRole::System,
-        loaded
-            .into_iter()
-            .map(|(_, content)| content)
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-    ))
 }
 
 fn bound_tool_media_replay(messages: &mut [ProviderMessage], max_bytes: usize) {
@@ -275,6 +374,7 @@ fn assistant_provider_messages(
     parts: &[Part],
     options: &MessageModelOptions,
     replay_opaque_reasoning: bool,
+    seen_instructions: &mut std::collections::HashSet<String>,
 ) -> Vec<ProviderMessage> {
     let mut content = visible_part_text(parts);
     if !replay_opaque_reasoning {
@@ -349,6 +449,18 @@ fn assistant_provider_messages(
         }
     }
     messages.extend(media);
+    // Like runtime notifications, trusted instruction reminders must use a
+    // chronological User turn: System is hoisted by Anthropic/Responses. Keep
+    // all results together before reminders so parallel tool exchanges remain
+    // valid. The discovery order within/between reads is never path-sorted.
+    for part in parts {
+        let Part::Tool(tool) = part else { continue };
+        for instruction in tool_instructions(tool) {
+            if seen_instructions.insert(instruction.filepath) {
+                messages.push(instruction_reminder(&instruction.content));
+            }
+        }
+    }
     messages
 }
 
@@ -1157,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn nearby_instructions_are_deduplicated_updated_and_readmitted_after_pruning() {
+    fn nearby_instructions_keep_first_discovery_in_history_and_readmit_after_pruning() {
         let session = Id::ascending(IdKind::Session);
         let message = Id::ascending(IdKind::Message);
         let part = |name: &str, call: &str, content: &str| {
@@ -1186,12 +1298,18 @@ mod tests {
             info: assistant_info(message.clone(), session.clone()),
             parts: vec![
                 part("read", "first", "old directory rule"),
-                part("read", "second", "old directory rule"),
+                part("read", "second", "changed directory rule"),
             ],
         }];
         let replay = provider_messages(&history);
-        assert!(matches!(replay[0].role, ProviderRole::System));
-        assert_eq!(replay[0].content.matches("old directory rule").count(), 1);
+        assert!(matches!(replay[0].role, ProviderRole::Assistant));
+        assert!(matches!(replay[1].role, ProviderRole::Tool));
+        assert!(matches!(replay[2].role, ProviderRole::Tool));
+        assert!(matches!(replay[3].role, ProviderRole::User));
+        assert_eq!(
+            replay[3].content,
+            "<system-reminder>\nold directory rule\n</system-reminder>"
+        );
         assert_eq!(
             replay
                 .iter()
@@ -1202,14 +1320,20 @@ mod tests {
         history[0]
             .parts
             .push(part("compose", "composed", "updated directory rule"));
-        assert_eq!(
-            provider_messages(&history)[0].content,
-            "updated directory rule"
-        );
-        assert_eq!(
-            compaction_provider_messages(&history)[0].content,
-            "updated directory rule"
-        );
+        for replay in [
+            provider_messages(&history),
+            compaction_provider_messages(&history),
+        ] {
+            let reminders = replay
+                .iter()
+                .filter(|m| m.content.starts_with("<system-reminder>"))
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                reminders,
+                ["<system-reminder>\nold directory rule\n</system-reminder>"]
+            );
+        }
         for part in &mut history[0].parts {
             if let Part::Tool(ToolPart {
                 state: ToolState::Completed { metadata, .. },
@@ -1221,18 +1345,160 @@ mod tests {
         }
         assert!(!provider_messages(&history)
             .iter()
-            .any(|m| matches!(m.role, ProviderRole::System)));
+            .any(|m| m.content.starts_with("<system-reminder>")));
         history[0]
             .parts
             .push(part("read", "after-pruning", "updated directory rule"));
         assert_eq!(
-            provider_messages(&history)[0].content,
-            "updated directory rule"
+            provider_messages(&history).last().unwrap().content,
+            "<system-reminder>\nupdated directory rule\n</system-reminder>"
+        );
+        // Reverting/removing the old discoveries likewise admits the new read.
+        history[0].parts = vec![part("compose", "after-revert", "new discovery")];
+        assert_eq!(
+            provider_messages(&history).last().unwrap().content,
+            "<system-reminder>\nnew discovery\n</system-reminder>"
         );
         history[0].parts = vec![part("execute", "external-tool", "untrusted metadata")];
         assert!(!provider_messages(&history)
             .iter()
-            .any(|m| matches!(m.role, ProviderRole::System)));
+            .any(|m| m.content.starts_with("<system-reminder>")));
+    }
+
+    #[test]
+    fn nearby_instruction_admission_retains_nearest_first_and_drops_duplicates() {
+        let session = Id::ascending(IdKind::Session);
+        let message = Id::ascending(IdKind::Message);
+        let mut metadata = serde_json::json!({"instructionContext":[
+            {"filepath":"/project/src/deep/AGENTS.md", "content":"nearest first"},
+            {"filepath":"/project/src/AGENTS.md", "content":"parent second"},
+            {"filepath":"/project/src/deep/AGENTS.md", "content":"duplicate changed"}
+        ]});
+        admit_instruction_context(&[], "read", &mut metadata);
+        assert_eq!(metadata["instructionContext"].as_array().unwrap().len(), 2);
+        let mut history = vec![MessageWithParts {
+            info: assistant_info(message.clone(), session.clone()),
+            parts: vec![Part::Tool(ToolPart {
+                id: Id::ascending(IdKind::Part),
+                session_id: session,
+                message_id: message,
+                tool: "read".into(),
+                call_id: "read-dir".into(),
+                metadata: None,
+                state: ToolState::Completed {
+                    input: serde_json::json!({"filePath":"src/deep"}),
+                    output: "directory entries".into(),
+                    metadata: metadata.clone(),
+                    title: "Read directory".into(),
+                    time: PartTime {
+                        start: 1,
+                        end: Some(2),
+                    },
+                },
+            })],
+        }];
+        let replay = provider_messages(&history);
+        assert_eq!(replay.len(), 4);
+        assert!(matches!(replay[0].role, ProviderRole::Assistant));
+        assert!(matches!(replay[1].role, ProviderRole::Tool));
+        assert_eq!(
+            replay[2].content,
+            "<system-reminder>\nnearest first\n</system-reminder>"
+        );
+        assert_eq!(
+            replay[3].content,
+            "<system-reminder>\nparent second\n</system-reminder>"
+        );
+        let updates = vec![
+            (None, "initial update".into()),
+            (Some("removed-message".into()), "missing anchor update".into()),
+            (
+                Some(history_message_id(&history[0]).into()),
+                "after batch".into(),
+            ),
+            (
+                Some(history_message_id(&history[0]).into()),
+                "after batch second".into(),
+            ),
+        ];
+        for current_model in [None, Some(("neoism", "stub"))] {
+            let with_updates =
+                provider_messages_with_updates(&history, current_model, &updates);
+            assert_eq!(with_updates.len(), 8);
+            assert_eq!(
+                with_updates[0].content,
+                instruction_reminder("initial update").content
+            );
+            assert_eq!(
+                with_updates[1].content,
+                instruction_reminder("missing anchor update").content
+            );
+            assert!(matches!(with_updates[2].role, ProviderRole::Assistant));
+            assert!(matches!(with_updates[3].role, ProviderRole::Tool));
+            assert_eq!(with_updates[4].content, replay[2].content);
+            assert_eq!(with_updates[5].content, replay[3].content);
+            assert_eq!(
+                with_updates[6].content,
+                instruction_reminder("after batch").content
+            );
+            assert_eq!(
+                with_updates[7].content,
+                instruction_reminder("after batch second").content
+            );
+            assert!(with_updates
+                .iter()
+                .all(|item| !matches!(item.role, ProviderRole::System)));
+        }
+        let removed_anchor = provider_messages_with_updates(&[], None, &updates);
+        assert_eq!(removed_anchor.len(), 4);
+        assert_eq!(
+            removed_anchor[2].content,
+            instruction_reminder("after batch").content
+        );
+        assert_eq!(
+            removed_anchor[3].content,
+            instruction_reminder("after batch second").content
+        );
+        let candidate = serde_json::json!({"instructionContext":[
+            {"filepath":"/project/src/deep/AGENTS.md", "content":"edited on disk"}
+        ]});
+        let mut duplicate = candidate.clone();
+        admit_instruction_context(&history, "compose", &mut duplicate);
+        assert!(duplicate.get("instructionContext").is_none());
+        assert_eq!(duplicate["loaded"], serde_json::json!([]));
+        let mut repeated_read = history[0].parts[0].clone();
+        if let Part::Tool(tool) = &mut repeated_read {
+            tool.call_id = "repeated-read".into();
+            if let ToolState::Completed { metadata, .. } = &mut tool.state {
+                *metadata = duplicate;
+            }
+        }
+        history[0].parts.push(repeated_read);
+        // Prune only the first discovery. The skipped duplicate must not
+        // resurrect its edited contents without a fresh read.
+        if let Part::Tool(ToolPart {
+            state: ToolState::Completed { metadata, .. },
+            ..
+        }) = &mut history[0].parts[0]
+        {
+            metadata["compacted"] = serde_json::json!(123);
+        }
+        assert!(!provider_messages(&history)
+            .iter()
+            .any(|item| item.content.starts_with("<system-reminder>")));
+        let mut after_compaction = candidate.clone();
+        admit_instruction_context(&history, "read", &mut after_compaction);
+        assert_eq!(
+            after_compaction["instructionContext"][0]["content"],
+            "edited on disk"
+        );
+        history.clear();
+        let mut after_revert = candidate;
+        admit_instruction_context(&history, "compose", &mut after_revert);
+        assert_eq!(
+            after_revert["instructionContext"][0]["content"],
+            "edited on disk"
+        );
     }
 
     #[test]

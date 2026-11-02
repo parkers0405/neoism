@@ -1,12 +1,13 @@
 //! Original-row change runs and their review-only hover presentation.
 use super::*;
 use neoism_protocol::git::GitChangeBlock;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub(super) struct ChangeRun {
     pub first: usize,
     pub end: usize,
-    pub block: GitChangeBlock,
+    pub block: Arc<GitChangeBlock>,
 }
 
 /// Parse hunk anchors before alignment/wrapping. A zero-count range already is
@@ -57,22 +58,25 @@ pub(super) fn change_runs(lines: &[DiffLine]) -> Vec<ChangeRun> {
                 runs.push(ChangeRun {
                     first: row,
                     end: row + 1,
-                    block: GitChangeBlock {
+                    block: Arc::new(GitChangeBlock {
                         old_start: old,
                         new_start: new,
                         old_lines: Vec::new(),
                         new_lines: Vec::new(),
-                    },
+                    }),
                 });
             }
             let run = runs.last_mut().unwrap();
             run.end = row + 1;
+            // Payloads are uniquely owned while parsing; frame controls share
+            // them only after preparation completes.
+            let block = Arc::get_mut(&mut run.block).unwrap();
             let text = line.text.trim_end_matches(['\n', '\r']).to_owned();
             if line.kind == DiffLineKind::Remove {
-                run.block.old_lines.push(text);
+                block.old_lines.push(text);
                 old += 1;
             } else {
-                run.block.new_lines.push(text);
+                block.new_lines.push(text);
                 new += 1;
             }
             active = true;
@@ -97,7 +101,7 @@ fn action_available(sections: &[FileSection], path: &str, restore: bool) -> bool
 
 pub(super) struct BlockControl {
     pub path: String,
-    pub block: GitChangeBlock,
+    pub block: Arc<GitChangeBlock>,
     pub body: Rect,
     pub panel: Rect,
     pub stage: Rect,
@@ -113,13 +117,11 @@ pub(super) fn run_rows(
     split: bool,
 ) -> Option<(usize, usize)> {
     if split {
-        let first = origins
-            .iter()
-            .position(|r| *r >= run.first && *r < run.end)?;
-        let last = origins
-            .iter()
-            .rposition(|r| *r >= run.first && *r < run.end)?;
-        Some((first, last + 1))
+        // split_lines emits increasing original-row indices (a paired add is
+        // consumed with its remove). Never scan the entire file per change run.
+        let first = origins.partition_point(|r| *r < run.first);
+        let end = origins.partition_point(|r| *r < run.end);
+        (first < end).then_some((first, end))
     } else {
         Some((*offsets.get(run.first)?, *offsets.get(run.end)?))
     }
@@ -159,7 +161,7 @@ mod tests {
         let runs = change_runs(&rows);
         assert_eq!(runs.len(), 3);
         assert_eq!(
-            runs[0].block,
+            *runs[0].block,
             GitChangeBlock {
                 old_start: 1,
                 new_start: 1,
@@ -168,7 +170,7 @@ mod tests {
             }
         );
         assert_eq!(
-            runs[1].block,
+            *runs[1].block,
             GitChangeBlock {
                 old_start: 3,
                 new_start: 4,
@@ -184,6 +186,41 @@ mod tests {
                 assert!(*origin >= runs[index].first && *origin < runs[index].end);
             }
         }
+    }
+
+    #[test]
+    fn binary_run_lookup_matches_linear_reference_for_gaps_and_empty_ranges() {
+        let origins: Vec<_> = (0..10_000).filter(|i| i % 3 != 1).collect();
+        let block = Arc::new(GitChangeBlock {
+            old_start: 0,
+            new_start: 0,
+            old_lines: vec![],
+            new_lines: vec![],
+        });
+        for first in (0..10_010).step_by(7) {
+            for count in [0, 1, 2, 23, 10_000] {
+                let run = ChangeRun {
+                    first,
+                    end: first + count,
+                    block: block.clone(),
+                };
+                let reference = origins
+                    .iter()
+                    .position(|r| *r >= first && *r < run.end)
+                    .zip(origins.iter().rposition(|r| *r >= first && *r < run.end))
+                    .map(|(a, b)| (a, b + 1));
+                assert_eq!(run_rows(&run, &origins, &[], true), reference);
+            }
+        }
+    }
+
+    #[test]
+    fn frame_controls_share_block_payload_until_an_action_is_requested() {
+        let view = interactive_view();
+        assert!(Arc::ptr_eq(
+            &view.sections[0].runs[0].block,
+            &view.block_controls[0].block
+        ));
     }
 
     #[test]
@@ -287,7 +324,7 @@ mod tests {
             vec![GitDiffViewAction::ChangeBlock {
                 root: "/repo".into(),
                 path: "a.rs".into(),
-                block: block.clone(),
+                block: block.as_ref().clone(),
                 restore: false
             }]
         );
@@ -299,7 +336,7 @@ mod tests {
             vec![GitDiffViewAction::ChangeBlock {
                 root: "/repo".into(),
                 path: "a.rs".into(),
-                block,
+                block: block.as_ref().clone(),
                 restore: true
             }]
         );
@@ -368,7 +405,7 @@ mod tests {
             vec![GitDiffViewAction::ChangeBlock {
                 root: "/repo".into(),
                 path: "a.rs".into(),
-                block: expected,
+                block: expected.as_ref().clone(),
                 restore: true,
             }]
         );
@@ -491,7 +528,7 @@ impl GitDiffView {
             self.pending_actions.push(GitDiffViewAction::ChangeBlock {
                 root: self.root.clone(),
                 path: c.path.clone(),
-                block: c.block.clone(),
+                block: c.block.as_ref().clone(),
                 restore,
             });
         }

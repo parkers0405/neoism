@@ -756,7 +756,8 @@ fn event_matches_family(
     })
 }
 
-fn v2_live_sse_event(event: neoism_agent_core::EventPayload) -> Event {
+fn v2_live_sse_event(mut event: neoism_agent_core::EventPayload) -> Event {
+    crate::client_projection::project_client_event(&mut event);
     let session_id = event_session_id(&event).map(str::to_string);
     // The publish paths stamp every broadcast with the wire-monotone
     // sequence; durable rows persist the same value, so client cursors
@@ -785,7 +786,8 @@ fn v2_live_sse_event(event: neoism_agent_core::EventPayload) -> Event {
     }
 }
 
-fn persisted_event_envelope(event: crate::state::PersistedEvent) -> EventEnvelope<Value> {
+fn persisted_event_envelope(mut event: crate::state::PersistedEvent) -> EventEnvelope<Value> {
+    crate::client_projection::project_client_event(&mut event.payload);
     let session_id = event_session_id(&event.payload).map(str::to_string);
     let kind = event.payload.kind;
     EventEnvelope {
@@ -834,11 +836,55 @@ fn replay_expired_event(requested: u64, replay_floor: u64) -> EventEnvelope<Valu
     }
 }
 
-fn v2_sse_event(envelope: EventEnvelope<Value>) -> Event {
+fn v2_sse_event(mut envelope: EventEnvelope<Value>) -> Event {
+    crate::client_projection::project_event_data(&envelope.kind, &mut envelope.data);
     Event::default()
         .id(envelope.sequence.to_string())
         .event(envelope.kind.clone())
         .data(serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_string()))
+}
+
+#[cfg(test)]
+mod instruction_projection_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use serde_json::json;
+
+    async fn wire(event: Event) -> String {
+        let response = Sse::new(futures::stream::iter([Ok::<_, Infallible>(event)])).into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_and_durable_sse_strip_private_epochs_and_tool_metadata() {
+        for (kind, data) in [
+            (neoism_agent_core::event_type::SESSION_CONTEXT_UPDATED, json!({"sessionID":"ses_1","epoch":{
+                "generation":2,"baseline":{"sources":{"instructions":["SECRET"]}},
+                "snapshot":{"sources":{"instructions":["SECRET"]}}}})),
+            (neoism_agent_core::event_type::MESSAGE_PART_UPDATED, json!({"sessionID":"ses_1","part":{"state":{
+                "metadata":{"instructionContext":[{"filepath":"/repo/AGENTS.md","content":"SECRET"}]},
+                "output":"ordinary read output"}}})),
+        ] {
+            let event = neoism_agent_core::EventPayload::new(kind, data);
+            let live = wire(v2_live_sse_event(event.clone())).await;
+            let envelope = persisted_event_envelope(crate::state::PersistedEvent {
+                seq: 17, created: 42, payload: event.clone(),
+            });
+            assert_eq!(envelope.sequence, 17);
+            assert_eq!(envelope.timestamp, 42);
+            assert_eq!(envelope.kind, kind);
+            let replay = wire(v2_sse_event(envelope)).await;
+            assert!(event.properties.to_string().contains("SECRET"));
+            for client in [live, replay] {
+                assert!(!client.contains("SECRET"));
+                if kind == neoism_agent_core::event_type::MESSAGE_PART_UPDATED {
+                    assert!(client.contains("/repo/AGENTS.md"));
+                    assert!(client.contains("ordinary read output"));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

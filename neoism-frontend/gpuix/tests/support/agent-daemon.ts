@@ -141,7 +141,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
         if(family==="Git"){if(tag==="WatchStatus"){for(const[token,owner]of gitWatchers)if(owner===client)gitWatchers.delete(token);gitWatchers.set(String(payload.token),client);}else if(tag==="UnwatchStatus")gitWatchers.delete(String(payload.token));gitRequests.push({message:envelope.message,root:envelope.workspace_root});if(config.gitHandler)config.gitHandler(envelope.message,envelope.workspace_root,reply);else reply("Ack");return;}
         if (family === "Workspace") {
           workspaceRequests.push({ tag, body: payload });
-          if (tag === "Hello") reply({ HelloAck: { accepted: true } });
+          if (tag === "Hello") reply({ HelloAck: { accepted: true, connected_host_id: "host" } });
           if (tag === "RequestHostWorkspaceTree") reply({ HostWorkspaceTree: { hosts: [{ id: "host", label: "Host" }], workspaces, tabs: [] } });
           if (tag === "ResolveInitialWorkspace") reply({ InitialWorkspaceResolved: { workspace: workspaces[0], reason: "host_active" } });
           if(tag==="CreateWorkspace"){

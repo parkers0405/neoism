@@ -21,7 +21,7 @@ test("older pages retain order and cursor through head refresh",()=>{
  const config=loadConfig(["--config","/nonexistent/pagination-cache"],{});
  const client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
  let requestId=0;client.send=(()=>++requestId) as typeof client.send;
- const row=(id:string,text=id)=>({id,role:"user",kind:"User",text});
+ const row=(id:string,text=id)=>({id,role:"User",kind:"User",text});
  const delivered:Array<{message:any;kind?:string}>=[];model.subscribeAgentEvents((message,kind)=>delivered.push({message,kind}));
  const page=(messages:ReturnType<typeof row>[],cursor:string|null)=>{(model as any).receive({family:"Agent",requestId,message:{HistoryChunk:{session_id:"chat",messages,next_cursor:cursor}}});};
  try {

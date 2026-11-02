@@ -25,6 +25,35 @@ const run = (id: number, ms: number) => { let frame = coreCall<Frame>("agenttime
 // Bound elapsed time rather than assuming 300 sleeps take 2.4s on every OS.
 const settle = (id: number) => { coreCall<Frame>("agenttimeline.layout", { id, width: 900, height: 700 }); return run(id, 700); };
 
+test("scrolling an attachment out of view removes its preview click target", async () => {
+  const sessionId="image-preview-scroll";
+  const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId});
+  const user={id:"image",role:"User",kind:"User",text:"attached",attachments:[{
+    filename:"pixel.png",mime:"image/png",
+    url:"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  }]};
+  const history=(messages:unknown[])=>coreCall("agenttimeline.event",{id,message:{HistoryChunk:{session_id:sessionId,messages,next_cursor:null}}});
+  try {
+    history([user]);
+    coreCall("agenttimeline.layout",{id,width:900,height:700});
+    let image: {rect:[number,number,number,number]}|undefined;
+    const deadline=Date.now()+2000;
+    while(!image&&Date.now()<deadline){
+      await Bun.sleep(10);
+      image=coreCall<{commands:Array<{kind:string;rect:[number,number,number,number]}>}>("agenttimeline.frame",{id}).commands.find(command=>command.kind==="image");
+    }
+    expect(image).toBeDefined();
+    const [x,y,w,h]=image!.rect;
+    const click={id,kind:"down",x:x+w/2,y:y+h/2};
+    expect(coreCall<{preview:{name:string}}>("agenttimeline.pointer",click).preview.name).toBe("pixel.png");
+    history([user,{id:"answer",role:"Assistant",kind:"Assistant",text:Array.from({length:100},(_,i)=>`Paragraph ${i} with ordinary text.`).join("\n\n")}]);
+    coreCall("agenttimeline.scroll",{id,deltaY:-1e7,precise:true,deferFrame:true});
+    const frame=run(id,100);
+    expect(frame.commands.some(command=>command.kind==="image")).toBe(false);
+    expect(coreCall<{preview:unknown}>("agenttimeline.pointer",click).preview).toBeNull();
+  } finally {coreCall("agenttimeline.dispose",{id});}
+});
+
 test("background text stays cached without requesting a viewed transcript repaint",()=>{
   const id=engine();
   const event=(message:unknown)=>coreCall<{needsPaint:boolean}>("agenttimeline.event",{id,message});

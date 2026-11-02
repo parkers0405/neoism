@@ -299,6 +299,9 @@ async fn recv_marker_for_session(
             PtyServerMessage::SessionCwd {
                 session_id: got_id, ..
             }
+            | PtyServerMessage::SessionProgram {
+                session_id: got_id, ..
+            }
             | PtyServerMessage::TerminalDirectoryChanged {
                 session_id: got_id, ..
             }
@@ -307,7 +310,7 @@ async fn recv_marker_for_session(
             } => {
                 assert_eq!(
                     got_id, session_id,
-                    "terminal directory events must carry the same shared session id as PTY output"
+                    "terminal metadata events must carry the same shared session id as PTY output"
                 );
             }
             PtyServerMessage::Ack

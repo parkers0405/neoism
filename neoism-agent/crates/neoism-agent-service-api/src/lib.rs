@@ -1134,7 +1134,27 @@ impl ConfigSourceService for StandardConfigSourceService {
         &self,
         request: &ConfigSnapshotRequest,
     ) -> Result<ConfigSnapshot, ServiceError> {
-        if request.installation {
+        self.snapshot_with_project_disabled(
+            request,
+            env::var("NEOISM_DISABLE_PROJECT_CONFIG").as_deref() == Ok("1"),
+        )
+    }
+
+    fn update<'a>(
+        &'a self,
+        request: &'a ConfigUpdateRequest,
+    ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
+        self.update_config(request)
+    }
+}
+
+impl StandardConfigSourceService {
+    fn snapshot_with_project_disabled(
+        &self,
+        request: &ConfigSnapshotRequest,
+        disabled: bool,
+    ) -> Result<ConfigSnapshot, ServiceError> {
+        if request.installation || disabled {
             let mut layers = vec![ConfigLayer {
                 source_id: "standard:user".into(),
                 scope: ConfigDiscoveryScope::Installation,
@@ -1151,7 +1171,11 @@ impl ConfigSourceService for StandardConfigSourceService {
             }));
             return Ok(ConfigSnapshot {
                 identity: snapshot_identity(&layers),
-                workspace: self.user_root.clone(),
+                workspace: if request.installation {
+                    self.user_root.clone()
+                } else {
+                    absolute_workspace(&request.workspace)
+                },
                 layers,
                 discovery_roots: vec![ConfigDiscoveryRoot {
                     scope: ConfigDiscoveryScope::Installation,
@@ -1214,7 +1238,7 @@ impl ConfigSourceService for StandardConfigSourceService {
         })
     }
 
-    fn update<'a>(
+    fn update_config<'a>(
         &'a self,
         request: &'a ConfigUpdateRequest,
     ) -> ServiceFuture<'a, Result<ConfigSnapshot, ServiceError>> {
@@ -1305,6 +1329,29 @@ fn apply_config_update(
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn disabled_project_config_keeps_global_and_memory_without_reading_project() {
+        let root = env::temp_dir().join(format!("agent-source-disabled-{}", std::process::id()));
+        let user = root.join("user");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&user).unwrap();
+        fs::create_dir_all(workspace.join(STANDARD_AGENT_PROJECT_DIRECTORY)).unwrap();
+        fs::write(user.join(STANDARD_AGENT_CONFIG_FILENAME), r#"{"model":"global/model"}"#).unwrap();
+        fs::write(workspace.join(STANDARD_AGENT_PROJECT_DIRECTORY).join(STANDARD_AGENT_CONFIG_FILENAME), "invalid").unwrap();
+        let mut source = StandardConfigSourceService::new(&user);
+        source.memory_layers.push(("test:memory".into(), serde_json::json!({"instructions": ["memory.md"]})));
+        let snapshot = source.snapshot_with_project_disabled(&ConfigSnapshotRequest::new(&workspace), true).unwrap();
+        assert_eq!(snapshot.workspace, workspace);
+        assert_eq!(snapshot.layers.len(), 2);
+        assert_eq!(snapshot.layers[0].document["model"], "global/model");
+        assert_eq!(snapshot.layers[1].document["instructions"][0], "memory.md");
+        assert!(snapshot.layers.iter().all(|layer| layer.scope == ConfigDiscoveryScope::Installation));
+        assert_eq!(snapshot.discovery_roots.len(), 1);
+        assert_eq!(snapshot.discovery_roots[0].path, user);
+        assert_eq!(snapshot.writable_target.source_id, "standard:user");
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn standalone_uses_one_json_filename_and_project_root() {

@@ -35,9 +35,8 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     for name in ['neoism' + SUFFIX, 'neoism-workspace-daemon' + SUFFIX,
                  'neoism-agent' + SUFFIX, 'neoism-agent-lua-runner' + SUFFIX, *LIBRARIES, 'LICENSE.ghostty', 'LICENSE', 'NOTICE']:
         shutil.copy2(DIST / name, bundle / name)
-    for name in ['licenses', 'web']:
+    for name in ['licenses', 'web/app', 'web/native']:
         shutil.copytree(DIST / name, bundle / name)
-    assert (bundle / 'web/agent-gui/index.html').is_file()
     application = bundle / 'web/app'
     manifest = json.loads((application / 'manifest.json').read_text())
     assert manifest['entry'] in manifest['files']
@@ -67,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     for name in ['LICENSE', 'NOTICE', 'LICENSE.ghostty']:
         shutil.copy2(bundle / name, runtime / name)
     # Immutable old updaters require web/index.html and copy the whole tree.
-    (bundle / 'web/index.html').write_text('<!doctype html><meta http-equiv="refresh" content="0;url=agent-gui/">')
+    (bundle / 'web/index.html').write_text('<!-- Neoism native runtime resources; no browser UI. -->\n')
     run(bundle / ('neoism' + SUFFIX), '--neoism-verify-runtime')
     assert VERSION in run(bundle / ('neoism' + SUFFIX), '--version')
     if SYSTEM == 'linux':
@@ -111,6 +110,13 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
             '-ov', '-format', 'UDZO', OUT / f'{NAME}.dmg')
     archive = OUT / (NAME + ('.zip' if SYSTEM == 'windows' else '.tar.gz'))
     if SYSTEM == 'windows':
+        # MSI tooling consumes DIST directly. Never merge into a stale browser tree.
+        for child in (DIST / 'web').iterdir():
+            if child.name not in ('app', 'native'):
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
         shutil.copytree(bundle / 'web', DIST / 'web', dirs_exist_ok=True)
         (bundle / 'README.txt').write_text('Extract the entire folder, then run neoism.exe. Keep the DLLs, services, web and licenses beside it.\n')
         with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:

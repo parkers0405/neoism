@@ -1,5 +1,7 @@
 mod event_storage_replay;
 mod live_messages;
+#[path = "tests_shell.rs"]
+mod shell_tests;
 
 use super::*;
 use crate::state::{SessionStore, TenantQueryScope};
@@ -3614,8 +3616,81 @@ async fn context_epochs_survive_restart_and_advance_on_instruction_change() {
     assert_eq!(second.generation, 2);
     assert_eq!(second.baseline, first.baseline);
     assert_ne!(second.snapshot, first.snapshot);
+    let destination = root.join("destination");
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(destination.join("AGENTS.md"), "destination instructions").unwrap();
+    let moved = crate::session_move::move_session(
+        &state, session_id.as_str(), &destination.to_string_lossy(), false,
+    ).await.unwrap();
+    let moved_epoch = context_epoch::from_session(&moved).unwrap();
+    assert_eq!(moved_epoch.baseline, first.baseline);
+    assert!(moved_epoch.snapshot.sources["instructions"].to_string().contains("destination instructions"));
+    assert!(context_epoch::instruction_updates(&moved).last().unwrap().1.contains("destination instructions"));
     drop(state);
     cleanup_sqlite_files(&path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn instruction_epochs_refresh_at_dispatch_preserve_failures_and_reset_after_revert() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-instruction-lifecycle-{}", Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let rules = root.join("AGENTS.md");
+    std::fs::write(&rules, "initial private guidance").unwrap();
+    let state = AppState::open_database(root.join("agent.sqlite3")).await.unwrap();
+    let id = neoism_agent_core::new_session_id();
+    let mut info = store_test_session(&id, now_millis());
+    info.directory = root.to_string_lossy().into_owned();
+    state.inner.store.insert_session(&info).await.unwrap();
+    let initial = context_epoch::reconcile(&state, &mut info).await.unwrap();
+    assert!(context_epoch::instruction_updates(&info).is_empty());
+    let first = store_test_message(&id, now_millis(), "first input");
+    state.inner.store.append_message(id.as_str(), &first).await.unwrap();
+
+    std::fs::write(&rules, "updated private guidance").unwrap();
+    let mut dispatched = Vec::new();
+    context_epoch::refresh_request(&state, id.as_str(), &mut dispatched).await.unwrap();
+    assert_eq!(dispatched.len(), 1);
+    assert!(dispatched[0].content.contains("updated private guidance"));
+    context_epoch::reconcile(&state, &mut info).await.unwrap();
+    let updates = context_epoch::instruction_updates(&info);
+    assert_eq!(updates[0].0.as_deref(), Some(message_id_of(&first).as_str()));
+    context_epoch::refresh_request(&state, id.as_str(), &mut dispatched).await.unwrap();
+    assert_eq!(dispatched.len(), 1, "unchanged requests must not reinject updates");
+
+    // Concurrent prompt admission and dispatch must publish a change only once.
+    std::fs::write(&rules, "updated private guidance concurrently").unwrap();
+    let mut left = info.clone();
+    let mut right = info.clone();
+    let (left_epoch, right_epoch) = tokio::join!(
+        context_epoch::reconcile(&state, &mut left),
+        context_epoch::reconcile(&state, &mut right),
+    );
+    assert_eq!(left_epoch.unwrap().generation, right_epoch.unwrap().generation);
+    context_epoch::reconcile(&state, &mut info).await.unwrap();
+    assert_eq!(context_epoch::instruction_updates(&info).len(), 2);
+
+    // Invalid UTF-8 is a failed read, not a deletion.
+    std::fs::write(&rules, [0xff]).unwrap();
+    let failed = context_epoch::reconcile(&state, &mut info).await.unwrap();
+    assert!(failed.snapshot.sources["instructions"].to_string().contains("updated private guidance"));
+    assert_eq!(context_epoch::instruction_updates(&info).len(), 2);
+    assert!(!context_epoch::public_epoch(&failed).to_string().contains("private guidance"));
+
+    std::fs::remove_file(&rules).unwrap();
+    context_epoch::reconcile(&state, &mut info).await.unwrap();
+    assert!(context_epoch::instruction_updates(&info).last().unwrap().1.contains("no longer apply"));
+    std::fs::write(&rules, "new baseline after revert").unwrap();
+    context_epoch::reset(&state, &mut info).await.unwrap();
+    let reset = context_epoch::reconcile(&state, &mut info).await.unwrap();
+    assert_eq!(reset.generation, 1);
+    assert_ne!(reset.baseline, initial.baseline);
+    assert!(context_epoch::instruction_updates(&info).is_empty());
+    assert_eq!(state.inner.store.get_context_epoch(id.as_str()).await.unwrap().unwrap().baseline, reset.baseline);
+    state.inner.store.close().await;
+    drop(state);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -3629,6 +3704,15 @@ async fn public_api_is_v2_only() {
     cleanup_sqlite_files(&path);
     let state = AppState::open_database(path.clone()).await.unwrap();
     let app = app(state.clone());
+    // Standalone browser hosting must remain an explicit opt-in.
+    for path in ["/", "/index.html", "/assets/app.js", "/agent-gui/"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
     for (method, path) in [
         (Method::GET, "/v2/health"),
         (Method::GET, "/v2/config/defaults"),

@@ -11,7 +11,7 @@ binaries=(neoism neoism-workspace-daemon neoism-agent)
 resources=(libneoism_gpuix_core.so libghostty-vt.so LICENSE.ghostty LICENSE NOTICE)
 for name in "${binaries[@]}"; do [[ -f "$payload/$name" && -x "$payload/$name" ]] || { echo "Missing executable: $name" >&2; exit 1; }; done
 for name in "${resources[@]}"; do [[ -f "$payload/$name" ]] || { echo "Missing resource: $name" >&2; exit 1; }; done
-[[ -f "$payload/web/agent-gui/index.html" ]] || { echo 'Missing standalone Agent GUI.' >&2; exit 1; }
+[[ -f "$payload/web/app/manifest.json" && -d "$payload/web/native" ]] || { echo 'Missing native application runtime.' >&2; exit 1; }
 [[ -d "$payload/licenses" ]] || { echo 'Missing bundled font licenses.' >&2; exit 1; }
 mkdir -p "$install_bin"
 install_bin="$(cd -- "$install_bin" && pwd -P)"
@@ -64,7 +64,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 for name in "${binaries[@]}"; do install -m 0755 "$payload/$name" "$transaction/new/$name"; done
 for name in "${resources[@]}"; do install -m 0644 "$payload/$name" "$transaction/new/$name"; done
-cp -a "$payload/web" "$transaction/new/web"
+mkdir -p "$transaction/new/web"
+cp -a "$payload/web/app" "$payload/web/native" "$transaction/new/web/"
+printf '%s\n' '<!-- Neoism native runtime resources; no browser UI. -->' > "$transaction/new/web/index.html"
 cp -a "$payload/licenses" "$transaction/new/licenses"
 for component in "${components[@]}"; do
   moved+=("$component")

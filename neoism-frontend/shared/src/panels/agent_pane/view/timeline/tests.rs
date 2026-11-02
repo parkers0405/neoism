@@ -1387,7 +1387,7 @@ fn stale_live_boundary_past_the_transcript_is_safely_treated_as_settled() {
 }
 
 #[test]
-fn live_read_tools_group_only_with_a_shared_batch_identity() {
+fn read_summaries_keep_operation_families_separate() {
     let mut messages = vec![
         tool_message("read-a", "read", "Read(src/a.rs)", "completed"),
         tool_message("grep-b", "grep", "Grep(Thing)", "completed"),
@@ -1399,13 +1399,14 @@ fn live_read_tools_group_only_with_a_shared_batch_identity() {
 
     let (end, group) = read_tool_group_at(&messages, 0).expect("group");
 
-    assert_eq!(end, 3);
+    assert_eq!(end, 1);
     assert_eq!(group.id, "read-a..");
     assert_eq!(group.tool, "tool_group");
-    assert_eq!(group.status, "running");
-    assert!(group.text.contains("Read(src/a.rs)"));
-    assert!(group.detail.contains("Read(src/a.rs)"));
-    assert!(group.detail.contains("Read(src/a.rs) detail"));
+    assert_eq!(group.status, "completed");
+    assert_eq!(group.title, "Read: 1 file");
+    assert_eq!(group.text, "src/a.rs");
+    assert!(group.detail.is_empty());
+    assert_eq!(read_tool_group_at(&messages, 1).unwrap().0, 2);
 }
 
 #[test]
@@ -1430,18 +1431,12 @@ fn read_group_identity_survives_append_and_status_updates() {
     let (_, after) = read_tool_group_at(&messages, 0).unwrap();
     assert_eq!(before.id, after.id);
     assert_eq!(after.status, "completed");
-    for group in [&before, &after] {
-        assert!(group.text.lines().any(|line| line.starts_with("read-a\t")));
-        assert!(group.text.lines().any(|line| line.starts_with("read-b\t")));
-        assert!(group
-            .detail
-            .lines()
-            .any(|line| line.starts_with("read-a\t")));
-        assert!(group
-            .detail
-            .lines()
-            .any(|line| line.starts_with("read-b\t")));
-    }
+    assert_eq!(before.title, "Read: 2 files");
+    assert_eq!(after.title, "Read: 3 files");
+    assert_eq!(before.text, "src/same.rs\nsrc/c.rs");
+    assert_eq!(after.text, "src/same.rs\nsrc/c.rs\nsrc/d.rs");
+    assert!(after.detail.is_empty());
+    assert!(!messages[1].detail.is_empty(), "source tool results remain intact");
 }
 
 #[test]
@@ -1468,7 +1463,7 @@ fn read_group_animation_dirties_its_source_row_without_new_messages() {
 }
 
 #[test]
-fn adjacent_reads_without_batch_provenance_are_never_bundled() {
+fn adjacent_unbatched_reads_show_one_file_list_without_output() {
     let mut messages = (0..12)
         .map(|i| {
             tool_message(
@@ -1483,9 +1478,11 @@ fn adjacent_reads_without_batch_provenance_are_never_bundled() {
         for message in &mut messages {
             message.tool_batch_id = batch_id.clone();
         }
-        for index in 0..messages.len() {
-            assert!(read_tool_group_at(&messages, index).is_none());
-        }
+        let (end, group) = read_tool_group_at(&messages, 0).unwrap();
+        assert_eq!(end, messages.len());
+        assert_eq!(group.title, "Read: 1 file");
+        assert_eq!(group.text, "src/lib.rs");
+        assert!(group.detail.is_empty());
     }
 }
 
@@ -1511,16 +1508,16 @@ fn two_member_batches_bundle_without_merging_neighboring_batches() {
     assert_eq!(end, 4);
     assert_eq!(second.id, "read-2..");
     messages[1].tool_batch_id = None;
-    assert!(read_tool_group_at(&messages, 0).is_none());
+    assert_eq!(read_tool_group_at(&messages, 0).unwrap().0, 1);
 }
 
 #[test]
-fn live_grouping_keeps_short_or_failed_runs_separate() {
+fn compact_summaries_keep_failed_calls_and_other_tools_separate() {
     let short = vec![
         tool_message("read-a", "read", "Read(src/a.rs)", "completed"),
         tool_message("grep-b", "grep", "Grep(Thing)", "completed"),
     ];
-    assert!(read_tool_group_at(&short, 0).is_none());
+    assert_eq!(read_tool_group_at(&short, 0).unwrap().0, 1);
 
     let mut failed = vec![
         tool_message("read-a", "read", "Read(src/a.rs)", "completed"),
@@ -1530,10 +1527,47 @@ fn live_grouping_keeps_short_or_failed_runs_separate() {
     for message in &mut failed {
         message.tool_batch_id = Some("batch-a".to_string());
     }
-    assert!(read_tool_group_at(&failed, 0).is_none());
+    assert_eq!(read_tool_group_at(&failed, 0).unwrap().0, 1);
+    assert!(read_tool_group_at(&failed, 1).is_none());
     failed[1].tool = "tool_group".to_string();
     failed[1].status = "completed".to_string();
-    assert!(read_tool_group_at(&failed, 0).is_none());
+    assert_eq!(read_tool_group_at(&failed, 0).unwrap().0, 1);
+}
+
+#[test]
+fn grep_summary_lists_all_matching_files_without_source_snippets() {
+    let mut message = tool_message("grep", "grep", "Grep(needle)", "completed");
+    message.detail = format!("Grep: Found 8 matches in 8 files (this page)\n{}", (0..8).map(|i| format!("src/file-{i}.rs:\n  Line 2: secret source snippet\n")).collect::<String>());
+    let (_, group) = read_tool_group_at(&[message], 0).unwrap();
+    assert_eq!(group.title, "Grep: 8 files");
+    assert_eq!(group.text.lines().count(), 8);
+    assert!(group.text.ends_with("src/file-7.rs"));
+    assert!(!group.text.contains("secret"));
+    assert!(group.detail.is_empty());
+}
+
+#[test]
+fn glob_summary_lists_results_and_does_not_call_queries_files() {
+    let mut message = tool_message("glob", "glob", "Glob(*.rs)", "completed");
+    let (_, fallback) = read_tool_group_at(&[message.clone()], 0).unwrap();
+    assert_eq!(fallback.title, "Glob: 1 search");
+    message.detail = "Glob *.rs\nsrc/first.rs\nsrc/second.rs".into();
+    let (_, group) = read_tool_group_at(&[message.clone()], 0).unwrap();
+    assert_eq!(group.title, "Glob: 2 files");
+    assert_eq!(group.text, "src/first.rs\nsrc/second.rs");
+    message.detail = "Glob *.rs\nNo files found".into();
+    assert_eq!(read_tool_group_at(&[message], 0).unwrap().1.title, "Glob: 0 files");
+}
+
+#[test]
+fn code_reads_are_compact_but_image_reads_keep_their_original_preview() {
+    let mut message = tool_message("read", "read", "Read(src/a.rs)", "completed");
+    message.output_kind = crate::panels::agent_pane::state::NeoismAgentOutputKind::Code;
+    assert_eq!(read_tool_group_at(&[message.clone()], 0).unwrap().1.title, "Read: 1 file");
+    message.images.push(crate::panels::agent_pane::state::NeoismAgentImage {
+        filename: "screenshot.png".into(), mime: "image/png".into(), url: "data:image/png;base64,test".into(),
+    });
+    assert!(read_tool_group_at(&[message], 0).is_none());
 }
 
 #[test]

@@ -47,8 +47,6 @@ build_frontend() {
   done
   export NEOISM_GPUIX_WORKSPACE_DAEMON="$repo_root/target/activation/neoism-workspace-daemon"
   (cd "$frontend" && npm run build)
-  npm --prefix "$repo_root/neoism-agent/sdk/typescript" run gui:build
-  node "$repo_root/scripts/package-agent-gui.mjs" "$repo_root/neoism-agent/sdk/typescript/packages/gui/dist" "$frontend/dist/web/agent-gui"
   install -m 0755 "$repo_root/target/activation/neoism-agent" "$frontend/dist/neoism-agent"
   cp "$repo_root/LICENSE" "$repo_root/NOTICE" "$frontend/dist/"
   mkdir -p "$frontend/dist/licenses"
@@ -70,7 +68,6 @@ build_frontend() {
   cp "$frontend/dist/libneoism_gpuix_core.so" "$frontend/dist/libghostty-vt.so" "$frontend/dist/web/native/"
   cp -a "$frontend/dist/licenses" "$frontend/dist/web/native/"
   cp "$frontend/dist/LICENSE" "$frontend/dist/NOTICE" "$frontend/dist/LICENSE.ghostty" "$frontend/dist/web/native/"
-  printf '%s\n' '<!doctype html><meta http-equiv="refresh" content="0;url=agent-gui/">' > "$frontend/dist/web/index.html"
 
 }
 build() {

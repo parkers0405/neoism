@@ -656,6 +656,8 @@ pub(crate) fn history_from_agent_message(
     message: neoism_ui::panels::agent_pane::state::NeoismAgentMessage,
 ) -> HistoryMessage {
     use neoism_ui::panels::agent_pane::state::NeoismAgentMessageKind as PaneKind;
+    use neoism_ui::panels::agent_pane::state::NeoismAgentOutputKind as PaneOutput;
+    use neoism_protocol::agent::HistoryOutputKind;
     let (kind, role) = match message.kind {
         PaneKind::User => (HistoryMessageKind::User, Role::User),
         PaneKind::Assistant => (HistoryMessageKind::Assistant, Role::Assistant),
@@ -669,6 +671,11 @@ pub(crate) fn history_from_agent_message(
         id: message.id,
         role,
         kind,
+        output_kind: Some(match message.output_kind {
+            PaneOutput::Text => HistoryOutputKind::Text,
+            PaneOutput::Code => HistoryOutputKind::Code,
+            PaneOutput::Todos => HistoryOutputKind::Todos,
+        }),
         author: message.author,
         title: message.title,
         text: message.text,
@@ -676,6 +683,11 @@ pub(crate) fn history_from_agent_message(
         tool: message.tool,
         tool_batch_id: message.tool_batch_id,
         mcp: message.mcp.as_ref().map(|mcp| mcp.to_wire()),
+        composition_children: message
+            .composition_children
+            .into_iter()
+            .map(history_from_agent_message)
+            .collect(),
         lang: message.lang,
         line_offset: message.line_offset.map(|offset| offset as u32),
         detail: message.detail,
@@ -709,6 +721,14 @@ pub(crate) fn history_from_agent_message(
         created_at: 0,
     }
 }
+
+#[cfg(test)]
+#[path = "composition_transport_tests.rs"]
+mod composition_transport_tests;
+
+#[cfg(test)]
+#[path = "todo_transport_tests.rs"]
+mod todo_transport_tests;
 
 // -- Prompt / submission ----------------------------------------------------
 

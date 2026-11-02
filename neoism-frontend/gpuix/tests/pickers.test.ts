@@ -2,6 +2,17 @@ import { expect, test } from "bun:test";
 import { coreCall } from "../src/native-core";
 import type { PickerFrame } from "../src/ui/InlinePicker";
 const geometry = { anchor: [100, 700, 600, 120], scale: 1 };
+test("session directory headers paint folder icons above inset chats and stay grouped when searching",()=>{
+ const options=[{title:"/project/a",value:"",header:true,section:"directory"},{title:"Alpha chat",value:"a",section:"/project/a",description:"/project/a"},{title:"/project/b",value:"",header:true,section:"directory"},{title:"Beta chat",value:"b",section:"/project/b",description:"/project/b"}];
+ const {id}=coreCall<{id:number}>("picker.new",{kind:"sessions",title:"Sessions",options});
+ try{
+  const commands=coreCall<{commands:{kind:string;text?:string;x:number;y:number}[]}>("picker.paint",{id,...geometry,theme:"pastel_dark"}).commands.filter(command=>command.kind==="text");
+  const folder=commands.find(command=>command.text==="/project/a")!,chat=commands.find(command=>command.text==="Alpha chat")!;
+  expect(folder).toBeDefined();expect(chat.x-folder.x).toBeCloseTo(20,3);
+  expect(commands.some(command=>command.x<folder.x&&Math.abs(command.y-folder.y)<5&&command.text!=="/project/a")).toBe(true);
+  expect(coreCall<PickerFrame>("picker.query",{id,...geometry,query:"Beta"}).rows.map(row=>row.title)).toEqual(["/project/b","Beta chat"]);
+ }finally{coreCall("picker.dispose",{id});}
+});
 test("model picker preserves headers, selection, filtering, and refreshed catalogs", () => {
   const options = [
     { title: "OpenAI", value: "openai", header: true },

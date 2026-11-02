@@ -12,6 +12,11 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
     if message.defer_live_edit_diff() {
         return None;
     }
+    if let Ok(value) = serde_json::from_str::<Value>(message.detail()) {
+        if value["neoismToolDetail"] == "patchStack" {
+            return patch_stack_diff_sections(value["calls"].as_array()?);
+        }
+    }
     // Reuse the existing neutral structured cards and their per-section toggles.
     // Stable section slots preserve source expansion while live children change.
     if message.tool() == "compose" {
@@ -61,7 +66,15 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
     if let Ok(value) = serde_json::from_str::<Value>(message.detail()) {
         if value.get("neoismToolDetail").and_then(Value::as_str) == Some("edit") {
             let metadata = value.get("metadata").unwrap_or(&Value::Null);
-            sections = metadata_file_diff_sections(metadata);
+            // Verified before/after snapshots are the fullest available
+            // baseline; prefer them to a tool's potentially abbreviated patch.
+            // Partial snapshot coverage must not hide other files in the call.
+            sections = snapshot_diff_sections(metadata);
+            for section in metadata_file_diff_sections(metadata) {
+                if !sections.iter().any(|existing| existing.link_target == section.link_target) {
+                    sections.push(section);
+                }
+            }
             if sections.is_empty() {
                 sections = metadata
                     .get("acpDiffs")
@@ -75,9 +88,6 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
                         Some(snapshot_section_from_text(path.to_owned(), old, new))
                     })
                     .collect();
-            }
-            if sections.is_empty() {
-                sections = snapshot_diff_sections(metadata);
             }
             if sections.is_empty() {
                 let input = value.get("input").unwrap_or(&Value::Null);
@@ -112,8 +122,84 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
         }
     }
 
-    sections.retain(|section| !section.lines.is_empty());
+    sections.retain(|section| !section.lines.is_empty() || section.path.starts_with("A ") || section.path.starts_with("D "));
     (!sections.is_empty()).then_some(sections)
+}
+
+/// Only authoritative full-file snapshots can establish cumulative changes.
+/// A fragment-only call or a conflicting snapshot starts a new ordered card.
+fn patch_stack_diff_sections(calls: &[Value]) -> Option<Vec<ToolDiffSection>> {
+    let mut entries: Vec<(ToolDiffSection, Option<Value>)> = Vec::new();
+    for call in calls {
+        let part = ToolMessageParts {
+            id: call["id"].as_str().unwrap_or(""),
+            title: call["title"].as_str().unwrap_or(""),
+            text: call["text"].as_str().unwrap_or(""),
+            status: "completed",
+            tool: call["tool"].as_str().unwrap_or("edit"),
+            detail: call["detail"].as_str().unwrap_or(""),
+        };
+        let detail = serde_json::from_str::<Value>(part.detail).ok();
+        for section in edit_diff_sections(&part).unwrap_or_default() {
+            let snapshot = detail.as_ref()
+                .filter(|detail| detail["neoismToolDetail"] == "edit")
+                .and_then(|detail| complete_snapshot_for_path(&detail["metadata"], &section.link_target));
+            // The last card for this path is a barrier: never skip over a
+            // fragment/conflict to join an older, superficially matching state.
+            let previous = entries.iter().rposition(|(previous, _)| {
+                !section.link_target.is_empty() && previous.link_target == section.link_target
+            });
+            if let Some(index) = previous {
+                if let Some(merged) = entries[index].1.as_ref().zip(snapshot.as_ref())
+                    .and_then(|(previous, next)| contiguous_snapshot_chain(previous, next))
+                {
+                    if let Some(mut cumulative) = snapshot_diff_section(&merged) {
+                        // Diagnostics describe the latest file state, not the
+                        // superseded intermediate baseline.
+                        cumulative.diagnostics = section.diagnostics;
+                        entries[index] = (cumulative, Some(merged));
+                        continue;
+                    }
+                }
+            }
+            entries.push((section, snapshot));
+        }
+    }
+    let sections = entries.into_iter().map(|(section, _)| section).collect::<Vec<_>>();
+    (!sections.is_empty()).then_some(sections)
+}
+
+fn complete_snapshot_for_path(metadata: &Value, path: &str) -> Option<Value> {
+    if path.is_empty() {
+        return None;
+    }
+    let mut matching = metadata.get("snapshots")?.as_array()?.iter()
+        .filter(|snapshot| snapshot["path"].as_str() == Some(path));
+    let snapshot = matching.next()?;
+    // Duplicate snapshot identities are ambiguous even if their text matches.
+    if matching.next().is_some() {
+        return None;
+    }
+    snapshot_text(snapshot.get("before")?)?;
+    snapshot_text(snapshot.get("after")?)?;
+    Some(snapshot.clone())
+}
+
+fn contiguous_snapshot_chain(previous: &Value, next: &Value) -> Option<Value> {
+    if previous["path"].as_str()? != next["path"].as_str()?
+        || previous["absolute"].as_bool().unwrap_or(false) != next["absolute"].as_bool().unwrap_or(false)
+        // Do not flatten a delete/recreate boundary into an ordinary edit.
+        || !previous["after"]["exists"].as_bool()?
+        || !next["before"]["exists"].as_bool()?
+        // A creation followed by deletion must retain both lifecycle events.
+        || (!previous["before"]["exists"].as_bool()? && !next["after"]["exists"].as_bool()?)
+        || snapshot_text(&previous["after"])? != snapshot_text(&next["before"])?
+    {
+        return None;
+    }
+    let mut merged = previous.clone();
+    merged["after"] = next["after"].clone();
+    Some(merged)
 }
 
 thread_local! {
@@ -220,12 +306,22 @@ fn input_diff_sections(
         .or_else(|| metadata_path(metadata))
         .or(fallback_path)
         .unwrap_or("edit");
-    let old_text = string_field(input, &["oldString", "old", "oldText"]).unwrap_or("");
+    let old_text = string_field(input, &["oldString", "old", "oldText"]);
     let new_text =
         string_field(input, &["newString", "new", "newText", "content"]).unwrap_or("");
-    if old_text.is_empty() && new_text.is_empty() {
+    if old_text.unwrap_or("").is_empty() && new_text.is_empty() {
         return Vec::new();
     }
+    let Some(old_text) = old_text else {
+        // A write result without snapshots supplies new content, not proof that
+        // the file was empty/nonexistent. Do not invent an all-additions diff.
+        let mut rows = vec![ParsedDiffRow { kind: DiffLineKind::Hunk,
+            old_line: None, new_line: None, text: "New content · original baseline unavailable".into() }];
+        rows.extend(new_text.lines().map(|text| ParsedDiffRow {
+            kind: DiffLineKind::Context, old_line: None, new_line: None, text: text.to_owned(),
+        }));
+        return vec![section_from_rows(path.to_string(), rows)];
+    };
     vec![snapshot_section_from_text(
         path.to_string(),
         old_text,
@@ -255,15 +351,19 @@ fn metadata_file_diff_sections(metadata: &Value) -> Vec<ToolDiffSection> {
 }
 
 fn metadata_file_diff_section(file: &Value) -> Option<ToolDiffSection> {
-    let patch = file.get("patch").and_then(Value::as_str)?;
+    let patch = file.get("patch").and_then(Value::as_str).unwrap_or("");
     let raw_path = file
         .get("relativePath")
         .or_else(|| file.get("filePath"))
         .and_then(Value::as_str)
         .unwrap_or("patch");
-    let mut sections = unified_patch_sections(patch, raw_path);
-    let mut section = sections.pop()?;
     let status = file.get("type").and_then(Value::as_str).unwrap_or("update");
+    let mut sections = unified_patch_sections(patch, raw_path);
+    let mut section = match sections.pop() {
+        Some(section) => section,
+        None if matches!(status, "add" | "added" | "delete" | "deleted") => section_from_rows(raw_path.to_string(), Vec::new()),
+        None => return None,
+    };
     let label = match status {
         "add" | "added" => format!("A {raw_path}"),
         "delete" | "deleted" => format!("D {raw_path}"),
@@ -295,7 +395,14 @@ fn snapshot_diff_sections(metadata: &Value) -> Vec<ToolDiffSection> {
 }
 
 fn snapshot_diff_section(snapshot: &Value) -> Option<ToolDiffSection> {
-    let path = snapshot.get("path").and_then(Value::as_str)?.to_string();
+    let raw_path = snapshot.get("path").and_then(Value::as_str)?;
+    let path = if snapshot["before"]["exists"] == false {
+        format!("A {raw_path}")
+    } else if snapshot["after"]["exists"] == false {
+        format!("D {raw_path}")
+    } else {
+        raw_path.to_string()
+    };
     let before = snapshot_text(snapshot.get("before")?)?;
     let after = snapshot_text(snapshot.get("after")?)?;
     Some(snapshot_section_from_text(path, &before, &after))
@@ -305,7 +412,7 @@ fn snapshot_text(state: &Value) -> Option<String> {
     if !state
         .get("exists")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+        ?
     {
         return Some(String::new());
     }
@@ -490,7 +597,7 @@ fn v4a_patch_sections(patch: &str) -> Vec<ToolDiffSection> {
     while index < lines.len() {
         let line = lines[index];
         if let Some(rest) = line.strip_prefix("*** Add File:") {
-            let path = rest.trim().to_string();
+            let path = format!("A {}", rest.trim());
             index += 1;
             let mut rows = Vec::new();
             let mut new_line = 1usize;
@@ -511,12 +618,12 @@ fn v4a_patch_sections(patch: &str) -> Vec<ToolDiffSection> {
         }
         if let Some(rest) = line.strip_prefix("*** Delete File:") {
             sections.push(section_from_rows(
-                rest.trim().to_string(),
+                format!("D {}", rest.trim()),
                 vec![ParsedDiffRow {
-                    kind: DiffLineKind::Remove,
+                    kind: DiffLineKind::Hunk,
                     old_line: None,
                     new_line: None,
-                    text: "(deleted file)".to_string(),
+                    text: "Deleted file · original content unavailable".to_string(),
                 }],
             ));
             index += 1;
@@ -602,10 +709,11 @@ fn unified_patch_sections(patch: &str, fallback_path: &str) -> Vec<ToolDiffSecti
     let mut new_line = None;
     let mut rows = Vec::new();
     let mut path = fallback_path.to_string();
+    let mut created = false;
     let mut sections = Vec::new();
     for line in patch.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            if !rows.is_empty() {
+            if !rows.is_empty() || path.starts_with("A ") || path.starts_with("D ") {
                 sections.push(section_from_rows(
                     std::mem::take(&mut path),
                     pair_adjacent_change_runs(std::mem::take(&mut rows)),
@@ -618,18 +726,38 @@ fn unified_patch_sections(patch: &str, fallback_path: &str) -> Vec<ToolDiffSecti
             }
             old_line = None;
             new_line = None;
+            created = false;
             continue;
         }
         if line.starts_with("index ") {
             continue;
         }
+        if line.starts_with("new file mode ") {
+            created = true;
+            path = format!("A {}", clean_diff_link_target(&path));
+            continue;
+        }
+        if line.starts_with("deleted file mode ") {
+            path = format!("D {}", clean_diff_link_target(&path));
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("+++ ") {
             if rest != "/dev/null" {
-                path = trim_diff_path(rest).to_string();
+                path = if created { format!("A {}", trim_diff_path(rest)) } else { trim_diff_path(rest).to_string() };
+            } else {
+                path = format!("D {path}");
             }
             continue;
         }
-        if line.starts_with("--- ") {
+        if let Some(rest) = line.strip_prefix("--- ") {
+            created = rest == "/dev/null";
+            if !created { path = trim_diff_path(rest).to_string(); }
+            continue;
+        }
+        if line.starts_with("old mode ") || line.starts_with("new mode ")
+            || line.starts_with("similarity index ") || line.starts_with("rename from ")
+            || line.starts_with("rename to ")
+        {
             continue;
         }
         if line.starts_with("@@") {
@@ -679,7 +807,7 @@ fn unified_patch_sections(patch: &str, fallback_path: &str) -> Vec<ToolDiffSecti
             text: rest.to_string(),
         });
     }
-    if !rows.is_empty() {
+    if !rows.is_empty() || path.starts_with("A ") || path.starts_with("D ") {
         sections.push(section_from_rows(path, rows));
     }
     sections
@@ -699,21 +827,13 @@ fn section_from_rows(path: String, rows: Vec<ParsedDiffRow>) -> ToolDiffSection 
         .iter()
         .filter(|row| row.kind == DiffLineKind::Remove)
         .count() as u32;
-    let omitted = rows.len().saturating_sub(MAX_STORED_DIFF_ROWS);
-    let mut lines = rows
+    // Keep all available patch content. Viewport clipping, not source truncation,
+    // bounds painting work when a file accordion is expanded.
+    let omitted = 0;
+    let lines = rows
         .into_iter()
-        .take(MAX_STORED_DIFF_ROWS)
         .map(diff_line_from_row)
         .collect::<Vec<_>>();
-    if omitted > 0 {
-        lines.push(DiffLine {
-            text: format!("... +{omitted} lines omitted"),
-            kind: DiffLineKind::Hunk,
-            line_number: None,
-            old_line_number: None,
-            new_line_number: None,
-        });
-    }
     let fingerprint = diff_section_fingerprint(&lines, omitted);
     ToolDiffSection {
         path,
@@ -859,17 +979,17 @@ fn diff_line_from_row(row: ParsedDiffRow) -> DiffLine {
 }
 
 fn visible_diff_lines(section: &ToolDiffSection, expanded: bool) -> Cow<'_, [DiffLine]> {
-    let max_rows = if expanded {
-        EXPANDED_DIFF_ROWS
-    } else if section.link_target.is_empty() {
-        // Compact live viewports; expansion uses the existing card scrollbar.
-        match section.path.as_str() {
-            "Program source.js" => 2,
-            "Tool calls" => 6,
-            _ => 4,
-        }
-    } else {
-        COLLAPSED_DIFF_ROWS
+    if expanded {
+        return Cow::Borrowed(section.lines.as_slice());
+    }
+    if !section.link_target.is_empty() {
+        return Cow::Borrowed(&[]);
+    }
+    // Non-file composition source/result cards retain their compact viewport.
+    let max_rows = match section.path.as_str() {
+        "Program source.js" => 2,
+        "Tool calls" => 6,
+        _ => 4,
     };
     if section.lines.len() <= max_rows {
         return Cow::Borrowed(section.lines.as_slice());
@@ -882,11 +1002,7 @@ fn visible_diff_lines(section: &ToolDiffSection, expanded: bool) -> Cow<'_, [Dif
         .cloned()
         .collect::<Vec<_>>();
     rows.push(DiffLine {
-        text: if expanded {
-            format!("... +{hidden} lines")
-        } else {
-            format!("... +{hidden} lines (click to expand)")
-        },
+        text: format!("... +{hidden} lines (click to expand)"),
         kind: DiffLineKind::Hunk,
         line_number: None,
         old_line_number: None,
@@ -904,15 +1020,15 @@ fn visible_diff_lines_owned(section: &ToolDiffSection, expanded: bool) -> Vec<Di
 
 pub(crate) fn cached_diff_card_view(
     section: &ToolDiffSection,
-    _card_w: f32,
+    body_w: f32,
     s: f32,
     expanded: bool,
 ) -> Rc<ToolDiffCardView> {
-    // These rows do not wrap. Pane resizing changes clipping/scroll limits,
-    // not their text or measured content width; retain both across widths.
+    // Width participates in the key: wrapping changes timeline geometry.
     let key = ToolDiffCardViewKey {
         section_fingerprint: hash_value(&(section.fingerprint, &section.path)),
         scale_bits: s.to_bits(),
+        width_bits: body_w.to_bits(),
         expanded,
     };
     if let Some(hit) = TOOL_DIFF_CARD_VIEW_CACHE.with(|cache| cache.borrow().get(&key)) {
@@ -920,15 +1036,19 @@ pub(crate) fn cached_diff_card_view(
     }
 
     let preview_rows = visible_diff_lines_owned(section, false);
-    let preview_visual_rows = preview_rows.len().max(1);
+    let neutral_preview_rows = diff_card::visual_row_count(&preview_rows, body_w, s);
     let rows = if expanded {
         Rc::new(visible_diff_lines_owned(section, true))
     } else {
         Rc::new(preview_rows)
     };
-    // Timeline diffs keep one row per source line, independent of pane width.
-    let visual_row_offsets = Rc::new((0..=rows.len()).collect::<Vec<_>>());
-    let visual_rows = rows.len().max(1);
+    let visual_row_offsets = Rc::new(diff_card::visual_row_offsets(&rows, body_w, s));
+    let visual_rows = visual_row_offsets.last().copied().unwrap_or(0);
+    let preview_visual_rows = if section.link_target.is_empty() {
+        neutral_preview_rows
+    } else {
+        visual_rows
+    };
     let view = Rc::new(ToolDiffCardView {
         rows,
         visual_row_offsets,
@@ -942,7 +1062,6 @@ pub(crate) fn cached_diff_card_view(
             .flatten()
             .max()
             .unwrap_or(1),
-        content_width: Cell::new(None),
     });
     TOOL_DIFF_CARD_VIEW_CACHE.with(|cache| cache.borrow_mut().insert(key, view.clone()));
     view

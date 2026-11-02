@@ -8,7 +8,6 @@ use crate::panels::agent_pane::state::{
 };
 
 use super::assistant::ASSISTANT_TEXT_PAD_LEFT;
-use super::code_block::truncate_chars;
 use super::derivations::{self, ScrollFrameDerivations};
 use super::markdown::{
     layout_assistant_markdown_cached, AgentMarkdownPane, AssistantMarkdownBlock,
@@ -358,6 +357,7 @@ pub trait AgentTimelineMessage: Clone {
         status: String,
         detail: String,
     ) -> Self;
+    fn patch_stack_message(id: String, title: String, detail: String) -> Self;
 }
 
 /// Whether viewport-only timeline measurement is enabled, read once.
@@ -730,6 +730,12 @@ macro_rules! neoism_ui_impl_agent_timeline_message {
                     author: None,
                     images: Vec::new(),
                 }
+            }
+
+            fn patch_stack_message(id: String, title: String, detail: String) -> Self {
+                let mut message = Self::tool_group_message(id, title, String::new(), "completed".into(), detail);
+                message.tool = "apply_patch".into();
+                message
             }
         }
     };
@@ -1145,11 +1151,13 @@ mod footer_tests;
 mod impls;
 mod layout;
 mod read_group;
+mod patch_group;
 mod render;
 #[cfg(test)]
 mod tests;
 
 pub use read_group::read_tool_group_end;
+pub(crate) use read_group::read_tool_group_at;
 
 pub use render::{
     render_timeline_in_paint_viewport_with, render_timeline_scrollbar_with,

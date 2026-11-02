@@ -121,7 +121,9 @@ pub(crate) async fn append_prompt_admission(
     };
     let now = now_millis();
     info.time.updated = now;
-    info.extra.remove("revert");
+    if info.extra.remove("revert").is_some() {
+        crate::context_epoch::reset(state, &mut info).await?;
+    }
     crate::context_epoch::reconcile(state, &mut info).await?;
 
     let session_id = Id::parse(IdKind::Session, session_id.to_string())
@@ -630,6 +632,7 @@ pub(crate) async fn append_prompt_admission(
         .next()
         .cloned()
         .ok_or_else(|| ApiError::internal("no provider plugin is registered"))?;
+    crate::context_epoch::reconcile(state, &mut info).await?;
     let mut provider_messages = provider_messages_for_session_with_plugins(
         &plugin_snapshot,
         &info,
@@ -723,6 +726,7 @@ pub(crate) async fn append_prompt_admission(
         }
         step_number += 1;
         info = ensure_session(state, &session_id_text).await?;
+        crate::context_epoch::reconcile(state, &mut info).await?;
         let mut history = state
             .inner
             .store
@@ -2776,10 +2780,12 @@ async fn rebuilt_compaction_messages(
     goals_enabled: bool,
     max_steps_reached: bool,
 ) -> Result<Vec<ProviderMessage>, ApiError> {
+    let mut info = info.clone();
+    crate::context_epoch::reconcile(state, &mut info).await?;
     let history = state.inner.store.list_context_messages(session_id).await?;
     let mut messages = provider_messages_for_session_with_plugins(
         snapshot,
-        info,
+        &info,
         &history,
         &model.model_id,
         run_system,
@@ -3131,12 +3137,18 @@ fn provider_credential_scope(
 async fn run_provider_stream_step_with_retry(
     provider: &Arc<dyn neoism_agent_plugin_api::ProviderService>,
     ctx: &ProviderStreamEventContext<'_>,
-    request: ProviderGenerationRequest,
+    mut request: ProviderGenerationRequest,
     cancellation: &Arc<AtomicBool>,
 ) -> Result<MessageWithParts, ApiError> {
     let max_retries = session_retry::max_retries();
     let mut attempt = 0_u64;
     loop {
+        crate::context_epoch::refresh_request(
+            ctx.state,
+            ctx.session_id_text,
+            &mut request.messages,
+        )
+        .await?;
         let activity_segment = crate::execution_activity::begin_provider_segment(
             ctx.state,
             ctx.session_id_text,

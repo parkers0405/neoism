@@ -63,6 +63,18 @@ test("plus uses the connected local host even when its catalog has another host 
  Object.assign(local.model.state,{workspaces:[...local.model.state.workspaces,other],activeWorkspace:other});
  const created=await tabs.newWorkspace();expect(created?.host_id).toBe("same-host");tabs.dispose();
 });
+test("plus resolves a local default when only another host is in the restored catalog",async()=>{
+ const {tabs,local}=window();
+ const other={id:"stale-host-tab",host_id:"old-machine-name",title:"Home",root_dir:"/"} as Workspace;
+ Object.assign(local.model.state,{workspaces:[other],activeWorkspace:other});
+ let resolved=0;
+ local.model.resolveHostWorkspace=async()=>{resolved++;return {id:"default",host_id:"same-host",title:"Home",root_dir:"/Users/person"};};
+ const created=await tabs.newWorkspace();
+ expect(resolved).toBe(1);expect(created?.host_id).toBe("same-host");expect(created?.root_dir).toBe("/Users/person");
+ const context=tabs.context(tabs.activeId()!)!;
+ expect(cloudWorkspace(created,context.config,context.connectedHostId)).toBe(false);
+ expect(other.root_dir).toBe("/");tabs.dispose();
+});
 test("a window opened directly on SSH acquires one local connection for repeated plus presses",async()=>{
  const remote=session(true),local=session();let opened=0;
  remote.config={...remote.config,transportIdentity:"ssh:fixture"};

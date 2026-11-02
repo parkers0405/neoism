@@ -861,6 +861,7 @@ fn render_limited_content(
         crate::primitives::snap_to_device_px(view.list_scroll_offset * s, s);
     let cursor_offset_snapped =
         crate::primitives::snap_to_device_px(view.cursor_offset * s, s);
+    let grouped = view.rows.iter().zip(row_icons).any(|(row, icon)| row.is_header && icon.is_some());
     for absolute_ix in start..end {
         let row = &view.rows[absolute_ix];
         let visible_ix = absolute_ix as isize - first as isize;
@@ -878,12 +879,16 @@ fn render_limited_content(
             if row.title.is_empty() {
                 continue;
             }
-            let title_x = x + 22.0 * s;
+            let icon = row_icons.get(absolute_ix).copied().flatten();
+            let title_x = x + if icon.is_some() { 48.0 } else { 22.0 } * s;
+            if let Some(icon) = icon {
+                icon.draw(sugarloaf, [x + 22.0 * s, row_y + 14.0 * s, 18.0 * s, 18.0 * s], list_clip, theme.u8(theme.folder));
+            }
             let title_text = truncate_to_pixel_width(
                 sugarloaf,
                 row.title,
                 &header_opts,
-                width - 44.0 * s,
+                width - (title_x - x) - 22.0 * s,
             );
             sugarloaf.overlay_text_mut().draw(
                 title_x,
@@ -947,9 +952,10 @@ fn render_limited_content(
             }
         }
         let icon = row_icons.get(absolute_ix).copied().flatten();
-        let title_x = x + if icon.is_some() { 48.0 } else { 22.0 } * s;
+        let indent = if grouped { 20.0 * s } else { 0.0 };
+        let title_x = x + indent + if icon.is_some() { 48.0 } else { 22.0 } * s;
         if let Some(icon) = icon {
-            icon.draw(sugarloaf, [x + 22.0 * s, row_y + (ROW_H - 18.0) * 0.5 * s, 18.0 * s, 18.0 * s], list_clip, theme.u8(theme.fg));
+            icon.draw(sugarloaf, [x + indent + 22.0 * s, row_y + (ROW_H - 18.0) * 0.5 * s, 18.0 * s, 18.0 * s], list_clip, theme.u8(theme.fg));
         }
         let footer_w = if row.footer.is_empty() {
             0.0

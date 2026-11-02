@@ -6,6 +6,7 @@ import {resolve,basename,join} from "node:path";
 import {displayBindingLoader,verifiedDisplayBinding} from "../src/display-binding";
 import {createRequire} from "node:module";
 import {devicePreviewPlugin} from "./device-preview-build";
+import {pruneBrowserAssets} from "../../../scripts/native-runtime.mjs";
 createRequire(import.meta.url)("./patch-solid-host.cjs")();
 const display=Bun.spawn([process.execPath,"scripts/build-display-binding.ts"],{stdout:"inherit",stderr:"inherit"});
 if(await display.exited!==0)process.exit(1);
@@ -74,6 +75,9 @@ for(const destination of [`dist/${ghosttyLibrary}`,`dist/web/native/${ghosttyLib
 }
 copyFileSync("artifacts/ghostty/LICENSE", "dist/LICENSE.ghostty");
 packageWorkspaceDaemon(process.cwd());
+// Installed dist may still contain the retired browser clients. Preserve the
+// native bytecode/assets and libraries, never stale browser distributions.
+pruneBrowserAssets(resolve("dist/web"));
 // Preserve the executable inode used by an already running preview.
 renameSync(`dist/${pendingExecutable}`, `dist/${executable}`);
 console.log(`Built dist/neoism with ${library}, ${ghosttyLibrary}, and the standalone workspace daemon. Keep these files beside the executable.`);

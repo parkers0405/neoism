@@ -1,5 +1,154 @@
 use super::*;
 
+fn todo_items(status: &str) -> Vec<NeoismAgentTodo> {
+    vec![NeoismAgentTodo { status: status.into(), content: "Implement checklist".into() }]
+}
+
+fn todo_call(id: &str, status: &str, todos: Vec<NeoismAgentTodo>) -> NeoismAgentMessage {
+    let output = if todos.is_empty() { NeoismAgentOutputKind::Text } else { NeoismAgentOutputKind::Todos };
+    NeoismAgentMessage::tool("Todos", "", status, "todowrite", output, "", todos).with_id(id)
+}
+
+#[test]
+fn todos_event_before_call_uses_canonical_arrival_position() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_todos(todo_items("in_progress"));
+    pane.upsert_part_message(NeoismAgentMessage::assistant("intervening").with_id("text"));
+    pane.upsert_part_message(todo_call("call", "completed", vec![]));
+    assert_eq!(pane.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["text", "call"]);
+    assert_eq!(pane.messages[1].todos, todo_items("in_progress"));
+    assert_eq!(pane.messages[1].status, "completed");
+    assert_eq!(pane.messages[1].output_kind, NeoismAgentOutputKind::Todos);
+}
+
+#[test]
+fn todos_event_after_call_and_metadata_updates_keep_one_full_checklist() {
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(todo_call("call", "completed", vec![]));
+    pane.apply_todos(todo_items("completed"));
+    pane.upsert_part_message(todo_call("call", "completed", vec![]));
+    let mut code_metadata = todo_call("call", "completed", vec![]);
+    code_metadata.output_kind = NeoismAgentOutputKind::Code;
+    code_metadata.lang = "json".into();
+    pane.upsert_part_message(code_metadata);
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].todos, todo_items("completed"));
+    assert_eq!(pane.messages[0].output_kind, NeoismAgentOutputKind::Todos);
+    pane.apply_history(vec![todo_call("call", "completed", vec![])]);
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].todos, todo_items("completed"));
+}
+
+#[test]
+fn todos_standalone_plan_updates_follow_live_event_order() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_todos(todo_items("pending"));
+    pane.upsert_part_message(NeoismAgentMessage::assistant("progress").with_id("text"));
+    pane.apply_todos(todo_items("in_progress"));
+    assert_eq!(pane.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["text", "todos-snapshot"]);
+    assert_eq!(pane.messages[1].todos, todo_items("in_progress"));
+    assert_eq!(pane.messages[1].status, "completed");
+}
+
+#[test]
+fn todos_repeated_calls_preserve_history_and_do_not_steal_new_plan() {
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(todo_call("old", "completed", todo_items("pending")));
+    pane.upsert_part_message(NeoismAgentMessage::assistant("between").with_id("text"));
+    pane.apply_todos(todo_items("in_progress"));
+    pane.upsert_part_message(todo_call("new", "completed", todo_items("in_progress")));
+    pane.apply_todos(todo_items("in_progress"));
+    assert_eq!(pane.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["old", "text", "new"]);
+    assert_eq!(pane.messages[0].todos, todo_items("pending"));
+    pane.apply_todos(todo_items("completed"));
+    pane.upsert_part_message(todo_call("old", "completed", vec![]));
+    assert_eq!(pane.messages.last().unwrap().id, "todos-snapshot");
+    assert_eq!(pane.messages.last().unwrap().todos, todo_items("completed"));
+}
+
+#[test]
+fn todos_distinct_running_calls_keep_their_ids_and_positions() {
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(todo_call("old", "running", todo_items("pending")));
+    pane.upsert_part_message(todo_call("new", "completed", todo_items("completed")));
+    assert_eq!(pane.messages.len(), 2);
+    assert_eq!(pane.messages[0].id, "old");
+    assert_eq!(pane.messages[1].id, "new");
+}
+
+#[test]
+fn todos_late_completed_call_update_does_not_consume_standalone_plan() {
+    let mut pane = NeoismAgentPane::default();
+    pane.upsert_part_message(todo_call("old", "completed", todo_items("pending")));
+    pane.apply_todos(todo_items("in_progress"));
+    pane.upsert_part_message(todo_call("old", "completed", vec![]));
+    assert_eq!(pane.messages.len(), 2);
+    assert_eq!(pane.messages[0].todos, todo_items("pending"));
+    assert_eq!(pane.messages[1].id, "todos-snapshot");
+    assert_eq!(pane.messages[1].status, "completed");
+}
+
+#[test]
+fn todos_empty_plan_clears_fallback_and_active_call_without_resurrection() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_todos(todo_items("pending"));
+    pane.apply_todos(vec![]);
+    assert_eq!(pane.messages.len(), 1);
+    assert!(pane.messages[0].todos.is_empty());
+    assert_eq!(pane.messages[0].output_kind, NeoismAgentOutputKind::Todos);
+    pane.upsert_part_message(todo_call("call", "running", todo_items("pending")));
+    pane.apply_todos(vec![]);
+    pane.upsert_part_message(todo_call("call", "completed", vec![]));
+    assert!(pane.messages[0].todos.is_empty());
+    let mut explicit_clear = todo_call("call", "completed", vec![]);
+    explicit_clear.output_kind = NeoismAgentOutputKind::Todos;
+    pane.upsert_part_message(todo_call("call", "completed", todo_items("completed")));
+    pane.upsert_part_message(explicit_clear);
+    assert!(pane.messages[0].todos.is_empty());
+}
+
+#[test]
+fn todos_failed_tool_keeps_error_not_checklist_or_snapshot() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_todos(todo_items("pending"));
+    pane.upsert_part_message(todo_call("call", "running", vec![]));
+    let mut failed = todo_call("call", "error", vec![]);
+    failed.text = "Could not save plan".into();
+    failed.detail = "disk full".into();
+    pane.upsert_part_message(failed);
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].status, "error");
+    assert_eq!(pane.messages[0].detail, "disk full");
+    assert_eq!(pane.messages[0].output_kind, NeoismAgentOutputKind::Text);
+    assert!(pane.messages[0].todos.is_empty());
+}
+
+#[test]
+fn todos_wire_history_prefers_checklist_over_language_and_preserves_item_statuses() {
+    let wire = serde_json::json!({"id":"call", "role":"Assistant", "kind":"Tool",
+        "tool":"todowrite", "status":"completed", "lang":"json",
+        "todos":[{"status":"completed","content":"First"}, {"status":"in_progress","content":"Second"}]});
+    let mapped = crate::panels::agent_pane::server_events::map_history(serde_json::from_value(wire).unwrap());
+    assert_eq!(mapped.output_kind, NeoismAgentOutputKind::Todos);
+    assert_eq!(mapped.todos[0].status, "completed");
+    assert_eq!(mapped.todos[1].status, "in_progress");
+}
+
+#[test]
+fn todos_part_mapping_distinguishes_empty_clear_missing_list_and_failure() {
+    let map = |state| crate::panels::agent_pane::api_mapping::part_block(&serde_json::json!({
+        "id":"call", "type":"tool", "tool":"todowrite", "state":state,
+    })).unwrap();
+    let missing = map(serde_json::json!({"status":"completed"}));
+    let clear = map(serde_json::json!({"status":"completed", "input":{"todos":[]}}));
+    let failed = map(serde_json::json!({"status":"error", "error":"disk full",
+        "input":{"todos":[{"content":"First", "status":"pending"}]}}));
+    assert_eq!(missing.output_kind, NeoismAgentOutputKind::Text);
+    assert_eq!(clear.output_kind, NeoismAgentOutputKind::Todos);
+    assert_eq!(failed.output_kind, NeoismAgentOutputKind::Text);
+    assert!(failed.detail.contains("disk full"));
+}
+
 #[test]
 fn explicit_head_history_preserves_pending_older_request_and_reader_anchor() {
     use crate::panels::agent_pane::view::timeline::TimelineViewAnchorKey;
@@ -8089,18 +8238,18 @@ fn tool_motion_read_group_boundary_uses_shared_eligibility() {
     assert_eq!(read_tool_group_end(&rows, 0), Some(3));
     rows[2].tool_batch_id = Some("next".into());
     assert_eq!(read_tool_group_end(&rows, 0), Some(2));
-    assert_eq!(read_tool_group_end(&rows, 2), None);
+    assert_eq!(read_tool_group_end(&rows, 2), Some(3));
     rows[1].status = "error".into();
-    assert_eq!(read_tool_group_end(&rows, 0), None);
+    assert_eq!(read_tool_group_end(&rows, 0), Some(1));
     rows[1] = row("second");
     rows[1].tool = "edit".into();
-    assert_eq!(read_tool_group_end(&rows, 0), None);
+    assert_eq!(read_tool_group_end(&rows, 0), Some(1));
     rows[1] = row("second");
     rows[1].output_kind = NeoismAgentOutputKind::Code;
-    assert_eq!(read_tool_group_end(&rows, 0), None);
+    assert_eq!(read_tool_group_end(&rows, 0), Some(2));
     rows[1] = row("second");
     rows[0].tool_batch_id = Some(" ".into());
-    assert_eq!(read_tool_group_end(&rows, 0), None);
+    assert_eq!(read_tool_group_end(&rows, 0), Some(1));
     assert_eq!(read_tool_group_end(&rows, rows.len()), None);
 }
 

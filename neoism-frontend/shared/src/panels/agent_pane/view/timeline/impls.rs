@@ -92,6 +92,12 @@ impl AgentTimelineMessage for NeoismAgentMessage {
             images: Vec::new(),
         }
     }
+
+    fn patch_stack_message(id: String, title: String, detail: String) -> Self {
+        let mut message = Self::tool_group_message(id, title, String::new(), "completed".into(), detail);
+        message.tool = "apply_patch".into();
+        message
+    }
 }
 
 impl AgentTimelinePane for NeoismAgentPane {

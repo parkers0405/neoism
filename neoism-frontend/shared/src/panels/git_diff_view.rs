@@ -44,6 +44,7 @@ struct FileSection {
     max_line_number: u32,
     content_widths: [f32; 2],
     metrics_scale: f32,
+    metrics_font_generation: u64,
     base_text: Option<std::sync::Arc<str>>,
     base_revision: u64,
     live_owned: bool,
@@ -68,6 +69,7 @@ impl FileSection {
             max_line_number: 1,
             content_widths: [0.0; 2],
             metrics_scale: 0.0,
+            metrics_font_generation: 0,
             base_text: None,
             base_revision: 0,
             live_owned: false,
@@ -1382,6 +1384,7 @@ impl GitDiffView {
         let column_w = (viewport.w - 2.0 * scale) / 2.0;
         let code_width =
             diff_card::body_text_width_with_gutter(column_w, scale, self.gutter_width);
+        let font_generation = sugarloaf.text_mut().font_cache_generation();
         if split {
             for section in &mut self.sections {
                 let top = viewport.y + section.top - self.scroll_top;
@@ -1392,13 +1395,16 @@ impl GitDiffView {
                 {
                     continue;
                 }
-                if section.metrics_scale != scale {
+                if section.metrics_scale != scale
+                    || section.metrics_font_generation != font_generation
+                {
                     let lang = Lang::from_path(&section.change.path);
                     section.content_widths = [
                         diff_card::content_width(sugarloaf, &section.left, scale, lang),
                         diff_card::content_width(sugarloaf, &section.right, scale, lang),
                     ];
                     section.metrics_scale = scale;
+                    section.metrics_font_generation = font_generation;
                 }
             }
         }
@@ -1406,7 +1412,11 @@ impl GitDiffView {
             let content_width = self
                 .sections
                 .iter()
-                .filter(|section| section.metrics_scale == scale && !section.collapsed)
+                .filter(|section| {
+                    section.metrics_scale == scale
+                        && section.metrics_font_generation == font_generation
+                        && !section.collapsed
+                })
                 .map(|section| section.content_widths[column])
                 .fold(0.0_f32, f32::max);
             self.max_horizontal[column] = if split {
@@ -1804,7 +1814,10 @@ impl GitDiffView {
                     } else {
                         &section.right
                     };
-                    for (i, _) in rows.iter().enumerate() {
+                    for i in visible_review_rows(
+                        section, split, body_y, self.line_height, scale, body_clip,
+                    ) {
+                        debug_assert!(i < rows.len());
                         let first = if split {
                             i
                         } else {
@@ -1919,7 +1932,10 @@ impl GitDiffView {
                                 },
                             )
                             .max(1.0);
-                        for (row, line) in spec.diff_lines.iter().enumerate() {
+                        for row in visible_review_rows(
+                            section, split, body_y, self.line_height, scale, clip,
+                        ) {
+                            let line = &spec.diff_lines[row];
                             let Some(number) =
                                 line.new_line_number.filter(|number| *number > 0)
                             else {
@@ -2177,6 +2193,37 @@ fn intersection(a: Rect, b: Rect) -> Option<Rect> {
     (right > x && bottom > y).then_some(Rect::new(x, y, right - x, bottom - y))
 }
 
+/// Conservative viewport candidates; exact intersection remains at each hit.
+/// Include boundary rows to preserve the existing inclusive edge semantics.
+fn visible_review_rows(
+    section: &FileSection,
+    split: bool,
+    body_y: f32,
+    line_height: f32,
+    scale: f32,
+    clip: Rect,
+) -> std::ops::Range<usize> {
+    let origin = body_y + diff_card::BODY_TOP_PAD * scale;
+    let first = ((clip.y - origin) / line_height).floor().max(0.0) as usize;
+    let last = ((clip.y + clip.h - origin) / line_height).ceil().max(0.0) as usize;
+    let len = if split {
+        section.left.len()
+    } else {
+        section.lines.as_ref().map_or(0, Vec::len)
+    };
+    if split {
+        first.saturating_sub(1).min(len)..last.saturating_add(1).min(len)
+    } else {
+        let offsets = &section.wrapped_offsets;
+        let start = offsets
+            .partition_point(|row| *row < first)
+            .saturating_sub(1)
+            .min(len);
+        let end = offsets.partition_point(|row| *row <= last).min(len);
+        start..end.max(start)
+    }
+}
+
 fn same_lines(a: &[DiffLine], b: &[DiffLine]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(a, b)| {
@@ -2250,6 +2297,55 @@ mod tests {
             additions: 1,
             deletions: 1,
             staged: false,
+        }
+    }
+
+    #[test]
+    fn viewport_candidates_preserve_hits_without_visiting_the_whole_patch() {
+        let mut section = FileSection::new(file("a.rs"));
+        section.set_lines(
+            (0..10_000)
+                .map(|i| {
+                    line(DiffLineKind::Context, if i % 2 == 0 {
+                        "short"
+                    } else {
+                        "a long line with several wrapped fragments"
+                    })
+                })
+                .collect(),
+        );
+        let scale = 1.0;
+        let height = diff_card::LINE_HEIGHT;
+        section.measure_body(160.0, scale, false, diff_card::GUTTER_WIDTH);
+        for split in [false, true] {
+            let len = if split {
+                section.left.len()
+            } else {
+                section.lines.as_ref().unwrap().len()
+            };
+            for y in [0.0, 0.25, height, 5010.0 * height, 30_000.0 * height] {
+                let clip = Rect::new(0.0, y, 100.0, 17.0 * height);
+                let candidates =
+                    visible_review_rows(&section, split, 0.0, height, scale, clip);
+                assert!(candidates.len() <= 20, "{candidates:?}");
+                for i in 0..len {
+                    let (first, end) = if split {
+                        (i, i + 1)
+                    } else {
+                        (section.wrapped_offsets[i], section.wrapped_offsets[i + 1])
+                    };
+                    let source = Rect::new(
+                        0.0,
+                        diff_card::BODY_TOP_PAD + first as f32 * height,
+                        100.0,
+                        (end - first) as f32 * height,
+                    );
+                    if intersection(source, clip).is_some() {
+                        assert!(candidates.contains(&i),
+                            "missing row {i} at {y} split={split}");
+                    }
+                }
+            }
         }
     }
 

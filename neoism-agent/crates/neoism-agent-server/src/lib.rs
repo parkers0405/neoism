@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod agent_tool_registry;
 mod app_router;
+pub mod client_projection;
 mod artifact_routes;
 mod audit_routes;
 pub mod auth_cli;
@@ -291,20 +292,9 @@ pub async fn listen(
     options: ServerOptions,
     services: neoism_agent_service_api::AgentServices,
 ) -> anyhow::Result<SocketAddr> {
-    // Daemon-supervised agents expose installed GUI assets too, without a
-    // second backend or any change to API credentials/management policy.
-    let gui = if services.workspace_worker.is_some() {
-        None
-    } else {
-        match gui::GuiRoot::discover() {
-            Ok(root) => Some(root),
-            Err(error) if std::env::var_os("NEOISM_AGENT_GUI_ROOT").is_some() => {
-                return Err(error)
-            }
-            Err(_) => None,
-        }
-    };
-    listen_with_gui(options, services, gui).await
+    // Normal native/daemon listeners are API-only. Explicit `gui` / `web`
+    // commands opt in via listen_with_gui; installed assets never opt us in.
+    listen_with_gui(options, services, None).await
 }
 
 /// Serve the same API with an optional public standalone GUI dist.

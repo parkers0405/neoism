@@ -66,6 +66,53 @@ fn make_manager(td: &TempDir) -> WorkspaceManager {
 }
 
 #[test]
+fn startup_defaults_are_scoped_to_the_connected_machine() {
+    let td = TempDir::new().unwrap();
+    let manager = make_manager(&td);
+    let remote = manager.create_host_workspace("other-machine".into(), None, None, Some(td.path().into()));
+    let mut conn = ConnectionWorkspace { active_workspace: Some(remote.id.clone()), ..Default::default() };
+    let (local, reason) = manager.resolve_initial_workspace(&mut conn, None);
+    assert_eq!(local.host_id, machine_host_id());
+    assert_eq!(local.running_on_host_id.as_deref(), Some(machine_host_id().as_str()));
+    assert_ne!(local.id, remote.id);
+    assert!(matches!(reason, InitialWorkspaceReason::CreatedDefault));
+    assert_eq!(local.root_dir, Some(crate::files::workspace_root()));
+    assert_eq!(manager.inner.lock().host_workspaces[&remote.id].host_id, "other-machine");
+    let (again, _) = manager.resolve_initial_workspace(&mut conn, None);
+    assert_eq!(again.id, local.id);
+    // Explicit host selection still resolves that host, without reassigning it.
+    let (selected_remote, _) = manager.resolve_initial_workspace(&mut conn, Some("other-machine".into()));
+    assert_eq!(selected_remote.id, remote.id);
+}
+
+#[test]
+fn startup_declaration_deduplicates_by_host_and_directory_not_directory_alone() {
+    let td = TempDir::new().unwrap();
+    let manager = make_manager(&td);
+    let root = crate::path::canonicalize_lossy(td.path());
+    let remote = manager.create_host_workspace("other-machine".into(), None, None, Some(root.clone()));
+    let local = manager.declare_startup_workspace(&root);
+    assert_ne!(local.id, remote.id);
+    assert_eq!(local.host_id, machine_host_id());
+    assert_eq!(manager.declare_startup_workspace(&root).id, local.id);
+}
+
+#[test]
+fn startup_default_ignores_another_hosts_recency() {
+    let td = TempDir::new().unwrap();
+    let manager = make_manager(&td);
+    let local = manager.create_host_workspace(machine_host_id(), None, None, Some(td.path().into()));
+    let remote = manager.create_host_workspace("other-machine".into(), None, None, Some(td.path().into()));
+    {
+        let mut inner = manager.inner.lock();
+        inner.active_workspace_by_host.clear();
+        inner.host_workspaces.get_mut(&remote.id).unwrap().last_active = i64::MAX;
+    }
+    let (selected, _) = manager.resolve_initial_workspace(&mut ConnectionWorkspace::default(), None);
+    assert_eq!(selected.id, local.id);
+}
+
+#[test]
 fn late_local_endpoint_updates_host_and_notifies_only_on_change() {
     let td = TempDir::new().unwrap();
     let manager = make_manager(&td);

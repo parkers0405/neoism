@@ -1952,6 +1952,7 @@ fn render_input_help_strip(
         help_visible:pane.input_help_visible(), no_providers:pane.no_providers_connected(),
         streaming:pane.streaming_state(), system:pane.composer_system(),
         interactions:std::mem::take(pane.composer_interactions()),
+        context_label:None,context_rect:None,
     };
     host_footer::render_with_policy(sugarloaf,&mut snapshot,policy,rect,theme,s,now_seconds,occlusion_rects,checkout_context);
     *pane.composer_interactions()=snapshot.interactions;

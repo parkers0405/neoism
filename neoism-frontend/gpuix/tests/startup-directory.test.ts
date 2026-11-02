@@ -7,7 +7,10 @@ test("Finder launches start in the user's home, while project and explicit root 
   expect(startupDirectory({},{...options,cwd})).toBe(options.home);
  expect(startupDirectory({},{...options,cwd:"/Users/parkersettle/projects/work"})).toBe("/Users/parkersettle/projects/work");
  expect(startupDirectory({NEOISM_LAUNCH_DIRECTORY:"/"},{...options,cwd:"/"})).toBe("/");
- expect(startupDirectory({NEOISM_LAUNCH_DIRECTORY:"/work/project"},{...options,cwd:"/"})).toBe("/work/project");
+  expect(startupDirectory({NEOISM_LAUNCH_DIRECTORY:"/work/project"},{...options,cwd:"/"})).toBe("/work/project");
+  expect(startupDirectory({NEOISM_WORKSPACE_ROOT:"/"},{...options,cwd:"/"})).toBe("/");
+  expect(startupDirectory({NEOISM_WORKSPACE_ROOT:"/work/project"},{...options,cwd:"/"})).toBe("/work/project");
+  expect(startupDirectory({NEOISM_WORKSPACE_ROOT:"/work/project",NEOISM_LAUNCH_DIRECTORY:"/selected"},{...options,cwd:"/"})).toBe("/selected");
 });
 
 test("Windows shell launch directories use the user profile, respecting drive letters and case",()=>{

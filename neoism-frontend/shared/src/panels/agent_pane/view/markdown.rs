@@ -1366,9 +1366,28 @@ fn layout_assistant_markdown_with_stable_prefix<P: AgentMarkdownPane>(
     let prefix_blocks = match pane.cached_markdown_blocks_for(&key, width, s) {
         Some(hit) => hit,
         None => {
-            let laid_out = std::rc::Rc::new(layout_normalized_markdown_blocks(
-                sugarloaf, prefix, width, theme, s,
-            ));
+            // When another paragraph/table/fence completes, the stable prefix
+            // grows. Reuse its previous complete boundary instead of wrapping
+            // the entire answer again at every blank line. Bound the search
+            // for cold history; a live token batch usually crosses one seam.
+            let mut previous_end = prefix.len();
+            let mut previous = None;
+            for _ in 0..8 {
+                let Some(end) = stable_markdown_prefix_end(prefix[..previous_end].trim_end()) else { break; };
+                previous_end = end;
+                key.truncate(STABLE_PREFIX_KEY_TAG.len());
+                key.push_str(&prefix[..end]);
+                if let Some(hit) = pane.cached_markdown_blocks_for(&key, width, s) {
+                    previous = Some((end, hit));
+                    break;
+                }
+            }
+            let mut blocks = previous.as_ref().map_or_else(Vec::new, |(_, blocks)| blocks.as_ref().clone());
+            let suffix = &prefix[previous.as_ref().map_or(0, |(end, _)| *end)..];
+            append_markdown_blocks(&mut blocks, layout_normalized_markdown_blocks(sugarloaf, suffix, width, theme, s));
+            let laid_out = std::rc::Rc::new(blocks);
+            key.truncate(STABLE_PREFIX_KEY_TAG.len());
+            key.push_str(prefix);
             if !incremental::preparation_pending(){pane.store_markdown_blocks_for(&key, width, s, laid_out.clone());}
             laid_out
         }
@@ -1376,14 +1395,18 @@ fn layout_assistant_markdown_with_stable_prefix<P: AgentMarkdownPane>(
     let tail_blocks = layout_normalized_markdown_blocks(sugarloaf, tail, width, theme, s);
     let mut blocks = Vec::with_capacity(prefix_blocks.len() + tail_blocks.len());
     blocks.extend(prefix_blocks.iter().cloned());
+    append_markdown_blocks(&mut blocks, tail_blocks);
+    trim_outer_blank_blocks(&mut blocks);
+    blocks
+}
+
+fn append_markdown_blocks(blocks: &mut Vec<AssistantMarkdownBlock>, tail: Vec<AssistantMarkdownBlock>) {
     // A whole-text layout dedupes consecutive blank lines across the seam.
-    let mut tail_blocks = tail_blocks.into_iter().peekable();
+    let mut tail_blocks = tail.into_iter().peekable();
     if matches!(blocks.last(), Some(AssistantMarkdownBlock::Blank)) {
         while tail_blocks.next_if(|block| matches!(block, AssistantMarkdownBlock::Blank)).is_some() {}
     }
     blocks.extend(tail_blocks);
-    trim_outer_blank_blocks(&mut blocks);
-    blocks
 }
 
 /// Byte offset just past the last blank line that sits outside a code fence

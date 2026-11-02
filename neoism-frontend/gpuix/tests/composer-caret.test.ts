@@ -21,7 +21,7 @@ test("actual source geometry module preserves native wrapped/scrolled insertion 
   const build=Bun.spawn(["rustc","--edition=2021","--test",source,"-o",output],{stdout:"pipe",stderr:"pipe"});
   expect({status:await build.exited,stderr:await new Response(build.stderr).text()}).toEqual({status:0,stderr:""});
   const run=Bun.spawn([output],{stdout:"pipe",stderr:"pipe"});const [status,stdout]=await Promise.all([run.exited,new Response(run.stdout).text()]);
-  expect(status).toBe(0);expect(stdout).toContain("6 passed; 0 failed");
+   expect(status).toBe(0);expect(stdout).toContain("7 passed; 0 failed");
  }finally{rmSync(temporary,{recursive:true,force:true});}
 });
 test("composer uses original Rust block dimensions, true shaped coordinates and safe event parsing",()=>{

@@ -80,6 +80,20 @@ impl NeoismAgentPane {
         self.timeline_scroll_px
     }
 
+    /// Direct canvas hosts already window the measured timeline rows. They
+    /// don't consume the second virtual document, which otherwise clones and
+    /// hashes the complete transcript on every streamed token revision.
+    pub fn set_virtual_timeline_enabled(&mut self, enabled: bool) {
+        if self.virtual_timeline_enabled != enabled {
+            self.virtual_timeline_enabled = enabled;
+            self.virtual_timeline = NeoismAgentVirtualTimeline::default();
+        }
+    }
+
+    pub fn uses_virtual_timeline(&self) -> bool {
+        self.virtual_timeline_enabled
+    }
+
     pub fn sync_virtual_timeline(
         &mut self,
         viewport_rect: [f32; 4],
@@ -89,6 +103,7 @@ impl NeoismAgentPane {
         scale: f32,
         rows: &[TimelineVirtualRowMeasurement],
     ) {
+        if !self.virtual_timeline_enabled { return; }
         let session_id = self
             .session_id
             .as_deref()

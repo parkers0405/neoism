@@ -1351,20 +1351,28 @@ pub fn permission_request_from_event(properties: &Value) -> NeoismAgentPendingPe
 }
 
 pub fn session_error_message(properties: &Value) -> String {
-    properties
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or("session error")
-        .to_string()
+    let error = properties.get("error").unwrap_or(&Value::Null);
+    [
+        Some(error),
+        error.get("message"),
+        error.pointer("/data/message"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .map(str::trim)
+    .find(|text| !text.is_empty())
+    .unwrap_or("session error")
+    .to_string()
 }
 
 fn is_session_interruption(properties: &Value) -> bool {
     let error = properties.get("error").unwrap_or(properties);
-    error
-        .get("interrupted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    error.get("name").and_then(Value::as_str) == Some("MessageAbortedError")
+        || error
+            .get("interrupted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
         || error
             .get("message")
             .and_then(Value::as_str)
@@ -1514,6 +1522,49 @@ fn find_crlf(bytes: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_terminal_error_extracts_supported_shapes_and_empty_fallback() {
+        for error in [
+            json!("  OAuth refresh failed  "),
+            json!({"message": "  OAuth refresh failed  "}),
+            json!({"name": "ProviderAuthError", "data": {"message": "  OAuth refresh failed  "}}),
+            json!({"message": " ", "data": {"message": "OAuth refresh failed"}}),
+        ] {
+            let properties = json!({"sessionID": "root", "error": error});
+            assert_eq!(session_error_message(&properties), "OAuth refresh failed");
+            let updates = classify_session_event(
+                json!({"type": "session.error", "properties": properties}),
+                "root",
+                &mut SessionEventUpdateState::default(),
+            );
+            assert!(matches!(&updates[..], [SessionEventUpdate::System { body, .. }] if body == "OAuth refresh failed"));
+        }
+        for properties in [
+            json!({}),
+            json!({"error": " "}),
+            json!({"error": {"message": "", "data": {"message": " "}}}),
+        ] {
+            assert_eq!(session_error_message(&properties), "session error");
+        }
+        assert_eq!(
+            session_error_message(&json!({"error": {"message": "primary", "data": {"message": "secondary"}}})),
+            "primary"
+        );
+    }
+
+    #[test]
+    fn live_terminal_error_does_not_surface_named_cancellation() {
+        let updates = classify_session_event(
+            json!({"type": "session.error", "properties": {
+                "sessionID": "root",
+                "error": {"name": "MessageAbortedError", "data": {"message": "Aborted"}}
+            }}),
+            "root",
+            &mut SessionEventUpdateState::default(),
+        );
+        assert!(updates.is_empty());
+    }
+
     #[test]
     fn acp_message_updated_projects_live_usage_without_waiting_for_idle() {
         let updates = classify_session_event(

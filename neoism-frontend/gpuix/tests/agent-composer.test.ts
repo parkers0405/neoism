@@ -68,6 +68,22 @@ test("original footer paints actual checkout/connect hints and working interrupt
  const busy=actor.frame({...base,busy:true,state:"Working"});expect(busy.controls.action).toBe("Interrupt");expect(busy.animating).toBe(true);expect(texts(busy)).toContain("interrupt");expect(texts(busy)).toContain("esc");
  expect(actor.frame({...base,help:false,busy:true,state:"Working"}).animating).toBe(true);
 });
+test("native shaped rows control card height and stale-width reports are ignored",()=>{
+ const actor=composer();
+ for(const home of [true,false]){
+  const initial=actor.frame({...base,home,text:"look into the old neoism please see how the bottom change"});
+  const textWidth=initial.controls.text_rect[2];
+  const two=actor.frame({...base,home,text:"look into the old neoism please see how the bottom change",visualRows:2,textWidth});
+  const appended=actor.frame({...base,home,text:"look into the old neoism please see how the bottom changed",visualRows:2,textWidth});
+  expect(appended.inputRect).toEqual(two.inputRect);expect(appended.visualRows).toBe(2);
+  const three=actor.frame({...base,home,text:"changed",visualRows:3,textWidth});
+  expect(three.inputRect[3]-two.inputRect[3]).toBe(22);
+  const resized=actor.frame({...base,home,width:310,text:"changed",visualRows:3,textWidth});
+  expect(resized.visualRows).toBe(1);
+  const many=actor.frame({...base,home,visualRows:30,textWidth});
+  expect(many.visualRows).toBe(30);expect(many.controls.text_rect[3]).toBe(110);
+ }
+});
 test("all original screen effects render and emit exactly one canonical followup prompt",()=>{
  const actor=composer();
  for(const kind of ["piss","cuss","glitch","disco","gangfight","praise"]){

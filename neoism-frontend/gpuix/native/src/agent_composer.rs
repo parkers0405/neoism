@@ -37,6 +37,12 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
     let enabled=v["enabled"].as_bool().unwrap_or(true)&&width>0.0&&height>0.0;
     let reduced=v["reducedMotion"].as_bool().unwrap_or(false);
     if enabled{neoism_ui::primitives::surface_background::render_agent_stars(&mut host.effects,[0.0,0.0,width,height],n(v,"radius",16.0*scale),scale,if reduced{0.0}else{n(v,"seconds",0.0)},theme.f32(theme.fg));}
+    // The stars already consist of native paint primitives. Transfer their
+    // display list directly instead of allocating a JSON object per primitive,
+    // parsing it in JS, sorting it and encoding a second display list there.
+    if v["canvasPaint"].as_bool().unwrap_or(false) {
+     return Ok(json!({"commands":[],"canvas":crate::paint_canvas::encode(&host.effects.borrowed_commands(), "", 400),"animating":enabled&&!reduced}));
+    }
     return Ok(json!({"commands":host.effects.commands(),"animating":enabled&&!reduced}));
    }
    if op=="agentcomposer.chips-layout"{
@@ -68,7 +74,8 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
    let system=v["system"].as_str().filter(|s|!s.is_empty()).map(|label|neoism_ui::panels::agent_pane::composer_interactions::ComposerSystemControl{label:label.into(),selectable:v["systemSelectable"].as_bool().unwrap_or(false)});
    let footer_visible=help||cwd.is_some()||system.is_some();let images=v["images"].as_u64().unwrap_or(0)as usize;let input_text=text(v,"text");
    let card_width=if home{layout::home_input_width([0.0,0.0,width,height],scale)}else{layout::chat_column([0.0,0.0,width,height],scale).1};
-   let rows=user_input::measure_prompt_rows_for_host(&mut host.paint,input_text,card_width,scale).len();
+   let rows=v["visualRows"].as_u64().filter(|rows|*rows>0&&((card_width-36.0*scale).max(20.0*scale)-n(v,"textWidth",-1.0)).abs()<0.1)
+    .map(|rows|rows as usize).unwrap_or_else(||user_input::measure_prompt_rows_for_host(&mut host.paint,input_text,card_width,scale).len());
    let input=Input{text:input_text,help,footer:footer_visible,images,rows};let rect=if home{layout::home_input_rect(&input,[0.0,0.0,width,height],scale)}else{layout::chat_input_rect(&input,[0.0,0.0,width,height],scale)};
    let geometry=ComposerGeometry::new([0.0,0.0,rect[2],rect[3]],scale,n(v,"deviceScale",1.0),footer_visible);
    let mut snapshot=FooterSnapshot{help_visible:help,no_providers:v["noProviders"].as_bool().unwrap_or(false),streaming:status(text(v,"state")),system,interactions:Default::default()};

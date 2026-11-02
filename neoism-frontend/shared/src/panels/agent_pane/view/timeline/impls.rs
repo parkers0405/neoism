@@ -185,7 +185,7 @@ impl AgentTimelinePane for NeoismAgentPane {
     }
 
     fn uses_virtual_timeline(&self) -> bool {
-        true
+        NeoismAgentPane::uses_virtual_timeline(self)
     }
 
     fn virtual_timeline_needs_measurements(

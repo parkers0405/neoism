@@ -1,9 +1,9 @@
-import { createMemo, onCleanup, Show } from "solid-js";
+import { createMemo, onCleanup, Show, Index } from "solid-js";
 import { useGpuixRequired } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { CanvasImages, RecentCanvasImages, cssColor, paintColor as packPaintColor, RasterSource, type CanvasOp,type CanvasRaster } from "./canvas";
 export interface PaintRaster { id:number;ptr:number;len:number;width:number;height:number;scale?:number;dx:number;dy:number }
-export interface PreparedCanvas {commands:string;images:Array<{source:number;raster:CanvasRaster}>}
+export interface PreparedCanvas {commands:string;chunks?:string[];images:Array<{source:number;raster:CanvasRaster}>}
 export type PaintCommand =
  | {kind:"raster-text";rect:number[];raster:PaintRaster;layer:number;clip?:number[]|null}
  | {kind:"rect";rect:number[];color:number[];radii:number[];clip?:number[]|null;depth:number;order:number;layer:number}
@@ -57,13 +57,13 @@ export function PaintLayer(props:{commands:readonly PaintCommand[];prepared?:Pre
   if(ready){
    for(const image of ready.images)images.use(image.source,image.raster);
    images.commit();
-   return ready.commands;
+   return ready.chunks||[ready.commands];
   }
-  return JSON.stringify(paintOps(commands(),props.config,images));
+  return [JSON.stringify(paintOps(commands(),props.config,images))];
  });
  // Cursor/blink changes must not re-sort, re-encode or invalidate the retained
  // document display list. The overlay preserves the existing paint order.
  const overlay=createMemo(()=>JSON.stringify(props.extra||[]));
- return <><canvas testId="original-paint-layer" commands={source()} style={{position:"absolute",left:0,right:0,top:0,bottom:0,pointerEvents:"none"}}/>
+ return <><Index each={source()}>{commands=><canvas testId="original-paint-layer" commands={commands()} style={{position:"absolute",left:0,right:0,top:0,bottom:0,pointerEvents:"none"}}/>}</Index>
   <Show when={props.extra!==undefined}><canvas testId="original-paint-overlay" commands={overlay()} style={{position:"absolute",left:0,right:0,top:0,bottom:0,pointerEvents:"none"}}/></Show></>;
 }

@@ -1,7 +1,9 @@
 import {HistoryUpdates} from "./agent/history-updates";
+import {sessionErrorMessage} from "./agent/session-error";
 import {mergeHistoryHead} from "./agent/merge-history";
 import { recoveredEditorState } from "./editor/recovery-state";
 import { profileStart, profileEnd } from "./profiling";
+import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "./animation/frame-scheduler";
 import {DocumentController} from "./collaboration/DocumentController";
 import {PresenceController} from "./collaboration/PresenceController";
 import * as Effect from "effect/Effect";
@@ -64,6 +66,7 @@ export interface AppState {
   usage: Readonly<Record<string, Usage>>;
   todos: Readonly<Record<string, readonly Todo[]>>;
   streaming: Readonly<Record<string, string>>;
+  sessionErrors: Readonly<Record<string, string | undefined>>;
   permissions: readonly Permission[];
   questions: readonly PendingQuestion[];
   providers: readonly Provider[];
@@ -119,7 +122,7 @@ export class WorkspaceModel {
   state: AppState = {
     ui: {}, composerDrafts: {}, connection: { phase: "closed", attempt: 0 }, workspaces: [], workspaceTabs: [],
     surfaces: [], notesDirectories: {}, notesExpanded: new Set([""]), directories: {}, expanded: new Set([""]), files: {}, threads: [],
-    history: {}, pendingAgentSessions:{}, usage: {}, todos: {}, streaming: {}, permissions: [], questions: [], providers: [], agents: [], skills: [], providerStates: {}, drafts: {}, queues: {}, catalogsLoading: false, loading: false,
+    history: {}, pendingAgentSessions:{}, usage: {}, todos: {}, streaming: {}, sessionErrors: {}, permissions: [], questions: [], providers: [], agents: [], skills: [], providerStates: {}, drafts: {}, queues: {}, catalogsLoading: false, loading: false,
   };
   constructor(readonly client: DaemonConnection, readonly config: AppConfig, seed?: { state: AppState; editors: Map<string, NativeEditor>; recovery?: SavedSession }) {
     this.agentSdk = new AgentSdk(config);
@@ -263,7 +266,7 @@ export class WorkspaceModel {
     }));
   }
   onDispose(cleanup:()=>void){this.cleanups.push(cleanup);}
-  dispose(preserveEditors = false) { this.historyUpdates.clear(); this.collaboration.dispose(); this.presence.dispose(); this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
+  dispose(preserveEditors = false) { this.historyUpdates.clear(); this.collaboration.dispose(); this.presence.dispose(); this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; this.incomingAgentFrames.dispose(); clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
   getLayout(workspaceId = this.state.activeWorkspace?.id): WorkspaceLayout {
     if (!workspaceId) throw new Error("Select a workspace first");
     let layout = this.layouts.get(workspaceId);
@@ -370,6 +373,16 @@ export class WorkspaceModel {
     return frame.focusedSurfaceId!==undefined&&frame.focusedLeaf!==null?this.closePane(frame.focusedSurfaceId,frame.focusedLeaf,discard):false;
   };
   clearError = () => this.update({ error: undefined });
+  clearSessionError = (sessionId: string) => {
+    if(this.state.sessionErrors[sessionId])this.update({sessionErrors:{...this.state.sessionErrors,[sessionId]:undefined}});
+  };
+  private reportSessionError(sessionId: string, message: string, terminal = false) {
+    this.update({sessionErrors:{...this.state.sessionErrors,[sessionId]:message},...(terminal?{streaming:{...this.state.streaming,[sessionId]:"Idle"}}:{})});
+    this.report(new Error(message));
+    const row:HistoryMessage={id:`error:${Date.now()}:${crypto.randomUUID()}`,role:"System",kind:"System",title:"Agent error",text:message};
+    this.upsertMessage(sessionId,row);
+    for(const listener of this.agentEventListeners){try{listener({MessageUpdated:{session_id:sessionId,message:row}});}catch(error){this.report(error);}}
+  }
   report = (error: unknown) => {
     // Also to stderr: UI toasts vanish, and a field report needs the stack.
     if (process.env.NODE_ENV !== "test") console.error("[neoism-gpuix] reported:", error instanceof Error ? error.stack || error.message : error);
@@ -1264,6 +1277,7 @@ export class WorkspaceModel {
   submitPrompt = async (sessionId: string, text: string, options: PromptOptions = {}) => {
     const attachments = [...(options.attachments || [])];
     if (!text.trim() && !attachments.length) return false;
+    this.clearSessionError(sessionId);
     const selection=options.selection||this.selection(sessionId),request=sdkPrompt(text,attachments,selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
     if(options.messageId)request.messageId=options.messageId;
     // Admission can queue even a steer request while our local busy state is stale.
@@ -1273,7 +1287,7 @@ export class WorkspaceModel {
       await this.selectionTasks.get(sessionId);
       await sdk.sessions.prompt(sessionId,request);
       return true;
-    } catch (error) { this.rollbackPrompt(request.messageId!);this.report(error); return false; }
+    } catch (error) { this.rollbackPrompt(request.messageId!);this.reportSessionError(sessionId,error instanceof Error?error.message:"Agent request failed"); return false; }
   };
   submitNewPrompt = async (text: string, options: PromptOptions = {}) => {
     if(!text.trim()&&!options.attachments?.length)return false;
@@ -1385,6 +1399,7 @@ export class WorkspaceModel {
   private incomingAgentEvents:WireEvent[]=[];
   private incomingAgentHead=0;
   private incomingAgentTimer?:ReturnType<typeof setTimeout>;
+  private incomingAgentFrames=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   /** Socket request correlation stays synchronous in DaemonConnection. Agent
    * snapshots/deltas enter one FIFO here so a catalog baseline cannot run
    * hundreds of full Solid tree updates inside ws's message callback. */
@@ -1396,12 +1411,15 @@ export class WorkspaceModel {
   };
   private scheduleAgentEvents(){
     if(this.incomingAgentTimer!==undefined||this.disposed)return;
-    // A macrotask gives the socket/parser a chance to drain between batches.
-    // queueMicrotask would keep UI work ahead of the next network turn.
-    this.incomingAgentTimer=setTimeout(()=>this.flushAgentEvents(),0);
+    // Commit tokens with the other display work, avoiding a second full UI
+    // transaction between animation frames. A hidden/occluded window may not
+    // receive display callbacks; the deadline keeps its event FIFO draining.
+    this.incomingAgentTimer=setTimeout(()=>this.flushAgentEvents(),16);
+    this.incomingAgentFrames.request(()=>this.flushAgentEvents());
   }
   private flushAgentEvents(){
-    this.incomingAgentTimer=undefined;if(this.disposed)return;
+    clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;
+    this.incomingAgentFrames.cancel();if(this.disposed)return;
     const started=performance.now();let count=0;
     const profileStarted=profileStart();
     this.transaction(()=>{
@@ -1544,6 +1562,16 @@ export class WorkspaceModel {
         const retained = previous.map(message => updates.get(message.id) || message);
         const merged = older ? [...added, ...retained] : mergeHistoryHead(previous,history,initial);
         this.update({ history: { ...this.state.history, [sessionId]: merged } });
+        // Recover a terminal failure after reconnect/reopen, but never revive
+        // an older turn's error or a dismissed error on a later head refresh.
+        if(initial&&!older&&!(sessionId in this.state.sessionErrors)){
+          for(const message of [...merged].reverse()){
+            if(message.kind==="User")break;
+            if(message.kind==="System"&&message.title==="Agent error"&&message.text){
+              this.update({sessionErrors:{...this.state.sessionErrors,[sessionId]:message.text}});break;
+            }
+          }
+        }
         // Classify by the request that actually completed, not the pane's
         // loading flag: an older request can be queued behind a head refresh.
         const delivered = {HistoryChunk:{...body,messages:older ? history : merged,next_cursor:this.historyCursors.get(sessionId) ?? null}};
@@ -1568,12 +1596,8 @@ export class WorkspaceModel {
       } else if (tag === "ThreadUpdated" && sessionId) {
         if (typeof body.title === "string") this.updateAgentTitle(sessionId,body.title);
       } else if (tag === "SessionEvent" && body.kind === "session.error" && isRecord(body.properties)) {
-        const failure=isRecord(body.properties.error)?body.properties.error:body.properties;
-        const message=typeof failure.message==="string"?failure.message:"Agent session failed";
-        if(!failure.interrupted&&message.toLowerCase()!=="session aborted"){
-          this.report(new Error(message));
-          if(sessionId)this.upsertMessage(sessionId,{id:`error:${Date.now()}:${crypto.randomUUID()}`,role:"system",kind:"System",title:"Agent error",text:message});
-        }
+        const message=sessionErrorMessage(body.properties);
+        if(message){if(sessionId)this.reportSessionError(sessionId,message,true);else this.report(new Error(message));}
       } else if (tag === "SessionEvent" && body.kind === "session.updated" && isRecord(body.properties) && isRecord(body.properties.info)) {
         const info=body.properties.info,id=typeof info.id==="string"?info.id:sessionId;
         if(id&&typeof info.title==="string")this.updateAgentTitle(id,info.title);
@@ -1591,6 +1615,7 @@ export class WorkspaceModel {
       } else if (tag === "TodoUpdate" && sessionId) {
         this.update({ todos: { ...this.state.todos, [sessionId]: Schema.decodeUnknownSync(Schema.Array(TodoSchema))(body.todos) } });
       } else if (tag === "StreamingState" && sessionId && typeof body.state === "string") {
+        if(body.state!=="Idle"&&[undefined,"Idle"].includes(this.state.streaming[sessionId]))this.clearSessionError(sessionId);
         this.update({ streaming: { ...this.state.streaming, [sessionId]: body.state } });
       } else if (tag === "SessionIdle" && sessionId) {
         this.update({ streaming: { ...this.state.streaming, [sessionId]: "Idle" } });
@@ -1602,7 +1627,8 @@ export class WorkspaceModel {
       } else if (tag === "PermissionReplyFailed" && typeof body.request_id === "string") {
         this.update({ permissions: this.state.permissions.map((p) => p.requestId === body.request_id ? { ...p, responding: false, error: String(body.error || "Could not send decision") } : p) });
       } else if (tag === "Error" || tag === "ThreadListFailed") {
-        this.update({ error: String(body.message || body.error || "Agent request failed") });
+        const message=String(body.message || body.error || "Agent request failed");
+        if(tag==="Error"&&sessionId)this.reportSessionError(sessionId,message);else this.update({error:message});
       }
     } catch { this.update({ error: `Unsupported ${tag} payload from daemon` }); }
   };

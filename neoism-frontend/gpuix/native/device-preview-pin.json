@@ -1,6 +1,6 @@
 {
   "baseRevision": "a53b294401280014e94eb9bd98a7c7ed1929f92d",
-  "basePatchSha256": "c14d0c422ed56cb5c750a91d31ce91846b2f863e183c4f856698be2c7cbef9c3",
+  "basePatchSha256": "45b39be2e38fe49f303984bb681f3079bf39930cb63e908f57c54da8f6c52ebb",
   "patch": "native/patches/gpuix-device-preview.patch",
   "patchSha256": "be7a7deaeab19d55e06d9d2a839c8e6d6e2b5d570966891fc647ef2636410b45",
   "cargoLockSha256": "7bf9299930614da86a47d7cbc1ee71dc76435b934cc3a169a32900cf6f7712de",

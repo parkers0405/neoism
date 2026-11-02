@@ -1070,7 +1070,7 @@ index 7be2d25..e1b04b7 100644
      focus_handle: FocusHandle,
      content: String,
      placeholder: SharedString,
-@@ -685,6 +736,29 @@ struct TextEditorState {
+@@ -685,6 +736,31 @@ struct TextEditorState {
  }
 
  impl TextEditorState {
@@ -1085,6 +1085,7 @@ index 7be2d25..e1b04b7 100644
 +            [f32::from(point.x),f32::from(point.y)],[self.scroll_left,self.scroll_top],
 +            f32::from(self.line_height),f32::from(self.font_size),
 +            self.focus_handle.is_focused(window)&&window.is_window_active(),self.cursor_offset(),self.selected_range.clone(),
++            &self.content,self.content_height,
 +        );
 +        if self.last_caret_geometry.as_ref()==Some(&geometry) { return; }
 +        self.last_caret_geometry=Some(geometry.clone());
@@ -1093,14 +1094,15 @@ index 7be2d25..e1b04b7 100644
 +            payload.width=Some(f32::from(CARET_WIDTH) as f64);payload.height=Some(geometry.height as f64);
 +            payload.value=Some(serde_json::json!({"visible":geometry.visible,"fontSize":geometry.font_size,
 +                "remainingWidth":geometry.remaining_width,"offset":geometry.offset,
-+                "selectionStart":geometry.selection_start,"selectionEnd":geometry.selection_end}).to_string());
++                "selectionStart":geometry.selection_start,"selectionEnd":geometry.selection_end,
++                "text":geometry.text,"layoutWidth":geometry.layout_width,"visualRows":geometry.visual_rows}).to_string());
 +        });
 +    }
 +
      fn reset_blink(&mut self, cx: &Context<Self>) {
          self.blink_anchor = cx.background_executor().now();
      }
-@@ -933,13 +1007,31 @@ impl TextEditorState {
+@@ -933,13 +1009,31 @@ impl TextEditorState {
          self.move_to(offset, cx);
      }
 
@@ -1132,7 +1134,7 @@ index 7be2d25..e1b04b7 100644
          if let Some(offset) = self.vertical_target(1.0) {
              self.move_to(offset, cx);
          }
-@@ -1088,11 +1180,21 @@ impl TextEditorState {
+@@ -1088,11 +1182,21 @@ impl TextEditorState {
          self.replace_text_in_range(None, "", window, cx);
      }
 
@@ -1154,7 +1156,7 @@ index 7be2d25..e1b04b7 100644
          }
      }
 
-@@ -1110,6 +1212,10 @@ impl TextEditorState {
+@@ -1110,6 +1214,10 @@ impl TextEditorState {
              return;
          }
          let Some(text) = cx.read_from_clipboard().and_then(clipboard_text) else {
@@ -1165,7 +1167,7 @@ index 7be2d25..e1b04b7 100644
              cx.propagate();
              return;
          };
-@@ -1433,7 +1539,9 @@ impl TextEditorState {
+@@ -1433,7 +1541,9 @@ impl TextEditorState {
              .collect(),
              _ => vec![run(display.len(), false)],
          };
@@ -1176,7 +1178,7 @@ index 7be2d25..e1b04b7 100644
          let lines = window
              .text_system()
              .shape_text(display, font_size, &runs, wrap_width, None)
-@@ -1703,6 +1811,8 @@ impl gpui::Render for TextEditorState {
+@@ -1703,6 +1813,8 @@ impl gpui::Render for TextEditorState {
              .on_action(cx.listener(Self::delete_to_line_start))
              .on_action(cx.listener(Self::delete_to_line_end))
              .on_action(cx.listener(Self::copy))
@@ -1185,7 +1187,7 @@ index 7be2d25..e1b04b7 100644
              .on_action(cx.listener(Self::cut))
              .on_action(cx.listener(Self::paste))
              .on_action(cx.listener(Self::undo))
-@@ -1797,12 +1907,13 @@ impl gpui::Element for EditorTextElement {
+@@ -1797,12 +1909,13 @@ impl gpui::Element for EditorTextElement {
          _: Option<&gpui::InspectorElementId>,
          bounds: Bounds<Pixels>,
          _: &mut (),
@@ -1204,7 +1206,7 @@ diff --git i/packages/native/src/custom_elements/input_caret_geometry.rs w/packa
 new file mode 100644
 --- /dev/null
 +++ w/packages/native/src/custom_elements/input_caret_geometry.rs
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,110 @@
 +//! Data-only projection of the native editor's shaped insertion point. This
 +//! module has no window/backend dependencies so its real geometry contract can
 +//! also be verified with `rustc --test` on a headless builder.
@@ -1234,15 +1236,19 @@ new file mode 100644
 +    pub offset:usize,
 +    pub selection_start:usize,
 +    pub selection_end:usize,
++    pub text:String,
++    pub layout_width:f32,
++    pub visual_rows:usize,
 +}
 +impl CaretGeometry {
-+    pub(crate) fn from_shaped(bounds:[f32;4],insertion:[f32;2],scroll:[f32;2],line_height:f32,font_size:f32,focused:bool,offset:usize,selection:Range<usize>)->Self {
++    pub(crate) fn from_shaped(bounds:[f32;4],insertion:[f32;2],scroll:[f32;2],line_height:f32,font_size:f32,focused:bool,offset:usize,selection:Range<usize>,text:&str,content_height:f32)->Self {
 +        let [left,top,width,height]=bounds;
 +        let x=left+insertion[0]-scroll[0];
 +        let y=top+insertion[1]-scroll[1];
 +        Self{x,y,height:line_height,font_size,remaining_width:(left+width-x).max(0.0),
 +            visible:focused&&selection.is_empty()&&x>=left&&x<left+width&&y<top+height&&y+line_height>top,
-+            offset,selection_start:selection.start,selection_end:selection.end}
++            offset,selection_start:selection.start,selection_end:selection.end,
++            text:text.into(),layout_width:width,visual_rows:(content_height/line_height).round().max(1.0) as usize}
 +    }
 +}
 +
@@ -1260,14 +1266,14 @@ new file mode 100644
 +        for font in [8.0,14.0,16.0,24.0,42.0] {
 +            let width=300.0;
 +            let end=block_caret_wrap_width(width,font);
-+            let geometry=CaretGeometry::from_shaped([0.0,0.0,width,100.0],[end,0.0],[0.0,0.0],font*1.5,font,true,5,5..5);
++            let geometry=CaretGeometry::from_shaped([0.0,0.0,width,100.0],[end,0.0],[0.0,0.0],font*1.5,font,true,5,5..5,"hello",font*1.5);
 +            assert!(geometry.visible);
 +            assert!(geometry.remaining_width+0.0001 >= (font*0.6).max(2.0));
 +        }
 +        assert_eq!(block_caret_wrap_width(3.0,16.0),1.0);
 +    }
 +    fn project(point:[f32;2],scroll:[f32;2],focused:bool,selection:Range<usize>)->CaretGeometry {
-+        CaretGeometry::from_shaped([120.0,240.0,300.0,44.0],point,scroll,22.0,16.0,focused,selection.end,selection)
++        CaretGeometry::from_shaped([120.0,240.0,300.0,44.0],point,scroll,22.0,16.0,focused,selection.end,selection,"draft",44.0)
 +    }
 +    #[test]
 +    fn wrapped_and_scrolled_native_insertion_is_reported_in_window_coordinates(){
@@ -1299,6 +1305,16 @@ new file mode 100644
 +        let first=project([10.0,0.0],[0.0,0.0],true,1..1);
 +        assert_ne!(first,project([10.0,0.0],[0.0,0.0],true,2..2));
 +        assert_ne!(first,project([10.0,0.0],[0.0,0.0],true,1..2));
++    }
++    #[test]
++    fn layout_reports_all_shaped_rows_even_when_scrolled_or_unfocused(){
++        for scale in [0.6,0.8,1.0,1.2,1.67,2.0] {
++            for rows in [1,2,3,5,12] {
++                let line=22.0*scale;
++                let geometry=CaretGeometry::from_shaped([0.0,0.0,300.0*scale,5.0*line],[0.0,0.0],[0.0,line],line,16.0*scale,false,0,0..0,"changed",rows as f32*line);
++                assert_eq!(geometry.visual_rows,rows);assert_eq!(geometry.layout_width,300.0*scale);assert_eq!(geometry.text,"changed");
++            }
++        }
 +    }
 +}
 diff --git c/packages/native/src/custom_elements/mod.rs w/packages/native/src/custom_elements/mod.rs

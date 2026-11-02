@@ -21,7 +21,7 @@ export function composerCaretGeometry(event:Pick<EventPayload,"x"|"y"|"value">):
 }
 /** Original Agent block geometry and original TrailCursor on a native GPU
  * canvas. The textarea retains platform IME, selection and all text editing. */
-export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|undefined}){
+export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|undefined;onLayout?:(layout:{text:string;width:number;rows:number})=>void}){
  const renderer=useGpuixRequired(),id=coreCall<{id:number}>("keyboard.cursor.new").id,animation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
  const [geometry,setGeometry]=createSignal<ComposerCaretGeometry>(),[quad,setQuad]=createSignal<number[][]>([]),[moving,setMoving]=createSignal(false),[blink,setBlink]=createSignal(false),[color,setColor]=createSignal(props.config.cursorColor||props.config.theme.accent);
  const blinkClock=new CursorBlinkClock(setBlink,{scope:renderer});
@@ -35,6 +35,9 @@ export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|unde
  };
  const receive=(event:EventPayload)=>{
   const next=composerCaretGeometry(event);if(!next)return;setGeometry(next);
+  const layout=JSON.parse(event.value!);
+  if(typeof layout.text==="string"&&Number.isFinite(layout.layoutWidth)&&layout.layoutWidth>0&&Number.isSafeInteger(layout.visualRows)&&layout.visualRows>0)
+   props.onLayout?.({text:layout.text,width:layout.layoutWidth,rows:layout.visualRows});
   if(!next.visible){animation.cancel();setMoving(false);return;}
   rect=coreCall<number[]>("agentcomposer.caret-rect",{...next,scale:props.config.scale});
   if(rect[2]<=0||rect[3]<=0){animation.cancel();setQuad([]);return;}

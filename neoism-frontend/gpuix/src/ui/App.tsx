@@ -18,6 +18,7 @@ import { FileSchema, expectVariant, isRecord, type HistoryMessage, type Attachme
 import { TerminalView } from "../terminal/TerminalView";
 import { AnimatedWordmark as Wordmark } from "./AnimatedWordmark";
 import {AppVisualState} from "./AppVisualState";
+import {createModelSnapshot} from "./model-snapshot";
 import {initialWorkspaceSidebars,workspaceSidebar,withWorkspaceSidebar,type WorkspaceSidebar} from "./workspace-sidebar";
 import { SplashView } from "./SplashView";
 import { coreCall, type SearchHost } from "../native-core";
@@ -88,7 +89,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   const visuals=props.visuals||new AppVisualState();if(!props.visuals)onCleanup(()=>visuals.dispose());
   const wordmarkHosts=visuals.wordmarks;
   const tabChromeSpec = tabChrome(s);
-  const [state, setState] = createSignal(model.state);
+  const {state,update:setState,revision:modelRevision} = createModelSnapshot(model.state);
   onCleanup(model.subscribe(() => setState(model.state)));
   const trees = visuals.trees;
   const sidebar = createMemo(() => workspaceSidebar(state().ui,state().activeWorkspace?.id));
@@ -308,8 +309,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   const closeChoice = () => { const previous = choice(); setChoice(undefined); previous?.restore(); };
   const providerCatalog = createMemo(() => state().providers);
   const agentCatalog = createMemo(() => state().agents);
-  const activeSelection = createMemo(() => { state(); return model.selection(active()?.sessionId); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
-  const choiceSelection = createMemo(() => { state(); return model.selection(choice()?.sessionId); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  const activeSelection = createMemo(() => { modelRevision(); return model.selection(active()?.sessionId); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  const choiceSelection = createMemo(() => { modelRevision(); return model.selection(choice()?.sessionId); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const pickerOptions = createMemo<PickerOption[]>(() => {
     const request = choice(); if (!request) return [];
     const selected = choiceSelection();
@@ -968,9 +969,10 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       setDraft(saved?.text || ""); setAttachments(saved?.attachments || []);
     });
     createEffect(() => { if (restoredDraftKey) model.setComposerDraft(restoredDraftKey, { text: draft(), attachments: attachments() }); });
-    const selection = createMemo(() => { state(); return model.selection(props.sessionId); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+    const selection = createMemo(() => { modelRevision(); return model.selection(props.sessionId); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
     const cached=visuals.agentComposer(props.surfaceId,config),native=cached.native||(cached.native=new NativeComposer(config));
     const [frame, setFrame] = createSignal<ComposerFrame|undefined>(cached.frame);
+    const [textLayout,setTextLayout]=createSignal<{width:number;rows:number}>();
     const [effectCommands,setEffectCommands] = createSignal<PaintCommand[]>([]);
     const [help,setHelp] = createSignal(model.state.ui.agentHints !== false);
     const [slashRevision,setSlashRevision] = createSignal(0);
@@ -983,10 +985,11 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const effectsAnimation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
     const activityState=createMemo(()=>props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle");
     const localBusy=createMemo(()=>activityState()!=="Idle");
+    const sessionError=createMemo(()=>props.sessionId?state().sessionErrors[props.sessionId]:undefined);
     const stop=()=>{if(props.sessionId){try{stopAgentTimeline(model,props.sessionId);}catch(error){model.report(error);}model.cancelPrompt(props.sessionId);}};
     // A parent can be idle between turns while queued work or children are
     // still active. Escape must interrupt that execution as in the Rust pane.
-    const interruptible=createMemo(()=>localBusy()||!!props.sessionId&&((state().queues[props.sessionId]?.count||0)>0||model.agentFamily(props.sessionId).roster.some(row=>["running","active","busy","blocked","pending","outstanding"].includes(row.status))));
+    const interruptible=createMemo(()=>{state().ui;return localBusy()||!!props.sessionId&&((state().queues[props.sessionId]?.count||0)>0||model.agentFamily(props.sessionId).roster.some(row=>["running","active","busy","blocked","pending","outstanding"].includes(row.status)));});
     const noProviders=createMemo(()=>!state().catalogsLoading&&!state().catalogsError&&!modelAvailability().loading&&!modelAvailability().error&&providerCatalog().length===0);
     const cwd=createMemo(()=>state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined);
     const slash=new SlashController({model,config,sessionId:()=>props.sessionId,attachments,hooks:{
@@ -1010,11 +1013,14 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const sample=()=>{
       if(disposed)return;
       const started=performance.now();activityAnimation.cancel();
-      const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),noProviders:noProviders(),busy:localBusy(),state:activityState()});
+      // Retain the last shaped height while typing; the textarea reports the
+      // new row count after layout, rather than speculating with another font.
+      const measured=textLayout();
+      const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),system:sessionError()?"Agent error":undefined,noProviders:noProviders(),busy:localBusy(),state:activityState(),visualRows:draft()?measured?.rows:1,textWidth:draft()?measured?.width:frame()?.controls.text_rect[2]});
       cached.frame=next;setFrame(next);props.onFrame(next);
       if(next.animating&&!config.reducedMotion)activityAnimation.request(sample,started);
     };
-    createEffect(()=>{props.viewport;props.home;draft();help();attachments();cwd();noProviders();activityState();untrack(sample);});
+    createEffect(()=>{props.viewport;props.home;draft();help();attachments();cwd();noProviders();activityState();sessionError();textLayout();untrack(sample);});
     const sampleEffect=()=>{if(disposed||!effectActive)return;if(effectScope!==`${state().activeWorkspace?.id}\0${state().activeSurfaceId||"home"}`){effectActive=false;setEffectCommands([]);return;}const started=performance.now(),next=native.effect({width:props.viewport.width,height:props.viewport.height,inputY:frame()?.inputRect[1]||0});setEffectCommands(next.commands);effectActive=next.animating;
       if(next.prompt){if(props.sessionId)void model.submitPrompt(props.sessionId,next.prompt);else void model.submitNewPrompt(next.prompt);}
       if(next.animating)effectsAnimation.request(sampleEffect,started);
@@ -1104,6 +1110,15 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const attach = async () => { try { const paths = await renderer.promptForPaths?.({ files: true, directories: false, multiple: true }); if (paths) await attachPaths(paths); } catch (error) { model.report(error); } };
     const removeAttachment = (token: string) => { setAttachments((current) => current.filter((a) => a.token !== token)); setDraft((current) => current.replace(token, "")); };
     const acceptSlash=(value:string)=>{setSlashDismissed(true);setDraft(value);void submit();};
+    const showSessionError=()=>{
+      const message=sessionError(),sessionId=props.sessionId;if(!message||!sessionId)return;
+      setSlashDismissed(true);
+      setSlashPicker({kind:"connect-input",title:"Agent error",activity:{body:message,status:"Run failed"},options:[
+        {title:"Connect a provider",description:"Sign in again or update provider credentials",footer:"/connect",value:"connect"},
+        {title:"Copy error",description:"Copy the full error message",footer:"",value:"copy"},
+        {title:"Dismiss",description:"Clear this error from the composer",footer:"",value:"dismiss"},
+      ],onSelect:async value=>{if(value==="connect")await slash.execute("/connect");else if(value==="copy")await writeClipboard(message);else if(value==="dismiss")model.clearSessionError(sessionId);}});
+    };
     // A returning workspace already knows its pane size and draft. Emit the
     // complete input in its first transaction, before another layout event.
     sample();
@@ -1169,7 +1184,10 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
               if(event.key==="tab"&&!event.modifiers?.ctrl&&!event.modifiers?.alt){event.preventDefault();model.setSelection("agent",selection().agent==="plan"?"build":"plan",props.sessionId);}
               if(event.key==="enter"&&event.modifiers?.alt){event.preventDefault();event.stopPropagation();void submit("queue");}
             }} style={{...text(16),...absolute(frame()?.controls.text_rect),lineHeight:22*s,padding:0,backgroundColor:"transparent",borderWidth:0}}/>
-          <ComposerCaret config={config} input={()=>input}/>
+          <ComposerCaret config={config} input={()=>input} onLayout={layout=>{
+            if(layout.text!==draft()||Math.abs(layout.width-(frame()?.controls.text_rect[2]||0))>=0.1)return;
+            setTextLayout(previous=>previous?.width===layout.width&&previous.rows===layout.rows?previous:{width:layout.width,rows:layout.rows});
+          }}/>
           <div testId="composer-chip-row" style={{...absolute(frame()?.controls.chips_rect),pointerEvents:"none"}}>
             <For each={["agent","model","thinking"] as const}>{(kind,index)=>{
               const geometry=()=>chipGeometry().chips[index()];
@@ -1188,9 +1206,13 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         </div>
         <Show when={frame()?.joinRect}>{rect=><div style={{...absolute(rect()),backgroundColor:frame()?.trayColor?rgba(frame()!.trayColor):c.surface,pointerEvents:"none"}}/>}</Show>
         <Show when={frame()?.trayRect}>{rect=><div testId="agent-composer-footer" style={{...absolute(rect()),pointerEvents:"none"}}/>}</Show>
-        <div style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"none"}}><PaintLayer commands={frame()?.commands||[]} config={config} pinImage={(source,raster)=>wordmarkHosts.pinPaintImage(renderer,source,raster)}/></div>
-        <Show when={state().catalogsError}>{error=><text testId="agent-catalog-error" style={{position:"absolute",right:16*s,top:(frame()?.cardRect[3]||0)+8*s,...text(11,c.red)}}>Model settings unavailable: {error()}</text>}</Show>
-        <For each={frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>
+        <div style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",pointerEvents:"none"}}><PaintLayer commands={sessionError()?[]:frame()?.commands||[]} config={config} pinImage={(source,raster)=>wordmarkHosts.pinPaintImage(renderer,source,raster)}/></div>
+        <Show when={sessionError()&&frame()?.trayRect}>{_=>{const rect=()=>frame()!.trayRect!;return <div testId="agent-composer-error" role="alert" aria-label={sessionError()} style={{...absolute(rect()),...row,gap:8*s,paddingLeft:12*s,paddingRight:10*s,backgroundColor:rgba(frame()!.trayColor),borderColor:c.red,borderWidth:s,borderBottomLeftRadius:frame()?.trayRadius,borderBottomRightRadius:frame()?.trayRadius,overflow:"hidden"}}>
+          <text style={{...text(12.5,c.red),flexGrow:1,minWidth:0,overflow:"hidden",whiteSpace:"nowrap"}}>{sessionError()?.replace(/\s+/g," ")}</text>
+          <div testId="agent-error-details" role="button" tabIndex={0} aria-label="Show full agent error and recovery actions" onClick={showSessionError} onKeyDown={event=>{if(event.key?.toLowerCase()==="enter"||event.key===" "){event.preventDefault();event.stopPropagation();showSessionError();}}} style={{...row,flexShrink:0,height:"100%",cursor:"pointer"}}><Label size={12.5} color={c.red}>Details</Label></div>
+        </div>;}}</Show>
+        <Show when={!sessionError()&&state().catalogsError}>{error=><text testId="agent-catalog-error" style={{position:"absolute",right:16*s,top:(frame()?.cardRect[3]||0)+8*s,...text(11,c.red)}}>Model settings unavailable: {error()}</text>}</Show>
+        <For each={sessionError()?[]:frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>
       </div></Show>
       <Show when={slashOpen()}><InlinePicker config={config} kind="slash" title="Commands" options={slashOptions()} loading={slash.state.loading} error={slash.state.error} anchor={anchor} query={draft().replace(/^\/+/,"")} onKeyHandler={handler=>slashKey=handler} onAcceptHandler={handler=>slashAccept=handler} onSelect={acceptSlash} onClose={()=>{setSlashDismissed(true);focus();}}/></Show>
       <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue} placeholder={entry.request.placeholder} activity={entry.request.activity}
@@ -1222,6 +1244,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       const draft=model.state.composerDrafts[model.composerDraftKey(props.sessionId,props.surfaceId)];
       const native=cached.native||(cached.native=new NativeComposer(config));
       cached.frame=native.frame({...cached.viewport,home:home(),text:draft?.text||"",images:draft?.attachments?.length||0,help:model.state.ui.agentHints!==false,
+        system:props.sessionId&&state().sessionErrors[props.sessionId]?"Agent error":undefined,
         cwd:state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined,
         noProviders:!state().catalogsLoading&&!state().catalogsError&&state().providers.length===0,busy:!!props.sessionId&&![undefined,"Idle"].includes(state().streaming[props.sessionId]),state:props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle"});
     }
@@ -1386,7 +1409,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       </div>
     </div>
     <StatusLine editor={activeEditor()} onDiagnosticActivate={(editor,line,column)=>{if(activeEditor()!==editor)return;editor.call("goto",{line,col:column});focusChrome({zone:"content"});setEditorFocus(value=>value+1);}} config={config} info={nativeStatus()} client={model.client} root={state().activeWorkspace?.root_dir}
-      connected={state().connection.phase === "connected"} splitEnabled={false} splitHidden={false} activity={state()} editorActivity={editorState()} report={model.report}
+      connected={state().connection.phase === "connected"} splitEnabled={false} splitHidden={false} activity={modelRevision()} editorActivity={editorState()} report={model.report}
       onAction={(action) => {
         if (action.kind === "open_directory_palette") chooseStatusDirectory();
         else if (action.kind === "toggle_git_diff") toggleGit();

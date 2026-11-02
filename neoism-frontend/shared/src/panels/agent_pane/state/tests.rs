@@ -4492,6 +4492,36 @@ fn background_runtime_rejects_stale_revision_and_accepts_new_server_epoch() {
 }
 
 #[test]
+fn unrelated_background_events_cannot_replace_family_jobs_or_advance_revision() {
+    use neoism_protocol::agent::{AgentServerMessage, BackgroundJobRuntime};
+    use crate::panels::agent_pane::server_events::{apply_agent_event_to_pane, apply_agent_event_to_cache_inner};
+    for cached in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("root".into());
+        pane.side_panel.ensure_subagent_main_entry("root");
+        pane.side_panel.upsert_subagent("child", "Child", "explore");
+        pane.apply_running_background_tasks("server", 1, &[("own-job".into(), 100)]);
+        let mut send = |session: &str, revision, jobs: Vec<BackgroundJobRuntime>| {
+            let event = AgentServerMessage::BackgroundTasksUpdated {
+                session_id: session.into(), epoch: "server".into(), revision, tasks: jobs,
+            };
+            if cached { apply_agent_event_to_cache_inner(&mut pane, event); }
+            else { apply_agent_event_to_pane(&mut pane, event); }
+        };
+        send("unrelated", 99, vec![]);
+        send("unrelated", 100, vec![BackgroundJobRuntime { job_id: "foreign".into(), session_id: "unrelated".into(), started_at: 100 }]);
+        assert_eq!(pane.active_background_task_summaries(), vec!["own-job · running"]);
+        // The foreign revision must not prevent our own completion from landing.
+        let event = AgentServerMessage::BackgroundTasksUpdated {
+            session_id: "child".into(), epoch: "server".into(), revision: 2, tasks: vec![],
+        };
+        if cached { apply_agent_event_to_cache_inner(&mut pane, event); }
+        else { apply_agent_event_to_pane(&mut pane, event); }
+        assert_eq!(pane.running_background_task_count(), 0);
+    }
+}
+
+#[test]
 fn completed_background_task_tool_is_not_counted_as_running() {
     let mut pane = NeoismAgentPane::default();
     let mut task = NeoismAgentMessage::tool(

@@ -40,8 +40,21 @@ const pointerOwner=(kind:string,region:"logo"|"label"|"caret"|"padding")=>{
 try{
  model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading&&!model.state.catalogsLoading);model.newAgentHome();model.setSelection("model","openai/gpt-6.1-sol");model.setSelection("thinking","medium");
  root.render(()=><App model={model} config={config} visuals={visuals}/>);await host.pump(root);
- assert.equal(String(host.find("agent-input-card")!.style.backgroundColor).slice(-2),"d9","Composer material stays translucent while its foreground remains fully visible");
- root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"Keep my draft while resizing"});await host.pump(root);
+  assert.equal(String(host.find("agent-input-card")!.style.backgroundColor).slice(-2),"d9","Composer material stays translucent while its foreground remains fully visible");
+  stage="native shaped height follows visible rows, not an independent wrap estimate";
+  const reportRows=(text:string,rows:number,width=number("composer","width"))=>root.dispatch({elementId:host.find("composer")!.id,eventType:"caretGeometry",x:0,y:0,value:JSON.stringify({visible:false,fontSize:16*config.scale,remainingWidth:width,offset:0,selectionStart:0,selectionEnd:0,text,layoutWidth:width,visualRows:rows})});
+  const screenshot="look into the old neoism please see how the bottom change";
+  root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:screenshot});await host.pump(root);
+  reportRows(screenshot,2);await host.pump(root);
+  const twoRowHeight=number("agent-input-card","height");
+  root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:screenshot+"d"});await host.pump(root);
+  assert.equal(number("agent-input-card","height"),twoRowHeight,"Typing must retain the last native height until the new layout arrives");
+  reportRows(screenshot+"d",2);await host.pump(root);assert.equal(number("agent-input-card","height"),twoRowHeight);
+  reportRows(screenshot,3);reportRows(screenshot+"d",3,1);await host.pump(root);
+  assert.equal(number("agent-input-card","height"),twoRowHeight,"Stale text and width cannot grow the card");
+  reportRows(screenshot+"d",3);await host.pump(root);
+  assert.ok(Math.abs(number("agent-input-card","height")-twoRowHeight-22*config.scale)<.001,"A real third shaped row grows the card exactly once");
+  root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"Keep my draft while resizing"});await host.pump(root);
  const originalInput=host.find("composer")!.id;
  for(const logicalWidth of [240,310,360,440,800]){
   root.dispatch({elementId:host.find("agent-pane")!.id,eventType:"layout",x:0,y:0,width:logicalWidth*config.scale,height:600*config.scale});await host.pump(root);

@@ -1158,18 +1158,22 @@ fn display_response_duration(milliseconds: u64) -> String {
 
 /// Extract a human-readable message from an assistant `info.error`, tolerating
 /// the shapes it can take: a plain string, `{message}`, `{data:{message}}`, or
-/// `{name, data:{message}}`. Returns `None` for an absent/empty error.
+/// `{name, data:{message}}`. Returns `None` for an absent/empty error or cancellation.
 fn assistant_error_message(error: &Value) -> Option<String> {
-    if let Some(text) = error.as_str() {
-        let text = text.trim();
-        return (!text.is_empty()).then(|| text.to_string());
+    if error.get("name").and_then(Value::as_str) == Some("MessageAbortedError") {
+        return None;
     }
-    error
-        .get("message")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_string)
+    [
+        Some(error),
+        error.get("message"),
+        error.pointer("/data/message"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .map(str::trim)
+    .find(|text| !text.is_empty())
+    .map(str::to_string)
 }
 
 fn normalize_assistant_reasoning_order(blocks: &mut Vec<NeoismAgentMessage>) {
@@ -1206,6 +1210,64 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_error_message_shapes_and_empty_fallback() {
+        for error in [
+            json!("  provider failed  "),
+            json!({"message": "  provider failed  "}),
+            json!({"data": {"message": "  provider failed  "}}),
+            json!({"message": "  ", "data": {"message": "provider failed"}}),
+        ] {
+            assert_eq!(
+                assistant_error_message(&error).as_deref(),
+                Some("provider failed")
+            );
+        }
+        for error in [
+            Value::Null,
+            json!(" "),
+            json!({"message": "", "data": {"message": " "}}),
+        ] {
+            assert_eq!(assistant_error_message(&error), None);
+        }
+        assert_eq!(
+            assistant_error_message(&json!({"message": "primary", "data": {"message": "secondary"}})).as_deref(),
+            Some("primary")
+        );
+    }
+
+    #[test]
+    fn persisted_nested_terminal_error_survives_history_mapping() {
+        for (name, text) in [
+            ("APIError", "Provider rejected the request"),
+            ("ProviderAuthError", "OAuth refresh token expired; sign in again"),
+        ] {
+            let message = json!({
+                "info": canonical_assistant_info(json!({
+                    "id": "failed-assistant", "error": {"name": name, "data": {"message": text}}
+                })),
+                "parts": []
+            });
+            let blocks = message_blocks_from_response(&[message], true);
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0].kind, NeoismAgentMessageKind::System);
+            assert_eq!(blocks[0].title, "Agent error");
+            assert_eq!(blocks[0].text, text);
+        }
+    }
+
+    #[test]
+    fn persisted_terminal_error_does_not_surface_cancellation() {
+        let message = json!({
+            "info": canonical_assistant_info(json!({
+                "id": "aborted-assistant",
+                "error": {"name": "MessageAbortedError", "data": {"message": "Aborted"}}
+            })),
+            "parts": []
+        });
+        assert!(message_blocks_from_response(&[message], true).is_empty());
+    }
 
     #[test]
     fn mcp_timeline_identity_uses_routing_metadata_not_display_names() {

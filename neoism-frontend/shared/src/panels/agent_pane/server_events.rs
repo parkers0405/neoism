@@ -409,11 +409,14 @@ pub fn apply_agent_event_to_pane_with_history_kind(
             }
         }
         AgentServerMessage::BackgroundTasksUpdated {
+            session_id,
             epoch,
             revision,
             tasks,
-            ..
         } => {
+            if !pane.session_family_contains(&session_id) {
+                return;
+            }
             let tasks = tasks
                 .into_iter()
                 .map(|task| (task.job_id, task.started_at))
@@ -1092,11 +1095,14 @@ pub fn apply_agent_event_to_cache_with_history_kind(
             true
         }
         AgentServerMessage::BackgroundTasksUpdated {
+            session_id,
             epoch,
             revision,
             tasks,
-            ..
         } => {
+            if !pane.session_family_contains(&session_id) {
+                return true;
+            }
             let tasks = tasks
                 .into_iter()
                 .map(|task| (task.job_id, task.started_at))

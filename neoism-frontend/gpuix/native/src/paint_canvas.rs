@@ -8,7 +8,7 @@ use std::{cmp::Ordering, collections::HashSet};
 #[derive(Serialize)]
 pub struct CanvasImage { source: u8, raster: PaintRaster }
 #[derive(Serialize)]
-pub struct CanvasPacket { pub commands: String, pub images: Vec<CanvasImage> }
+pub struct CanvasPacket { pub commands: String, pub images: Vec<CanvasImage>, #[serde(skip_serializing_if="Option::is_none")] pub chunks: Option<Vec<String>> }
 #[derive(Serialize)]
 #[serde(tag="k")]
 enum Op<'a> {
@@ -34,6 +34,12 @@ fn image_key(source:u8,raster:&PaintRaster,seen:&mut HashSet<u64>,images:&mut Ve
     key
 }
 pub fn encode(commands:&[PaintCommand],font:&str,weight:u16)->CanvasPacket {
+    encode_inner(commands,font,weight,false)
+}
+pub fn encode_chunked(commands:&[PaintCommand],font:&str,weight:u16)->CanvasPacket {
+    encode_inner(commands,font,weight,true)
+}
+fn encode_inner(commands:&[PaintCommand],font:&str,weight:u16,chunked:bool)->CanvasPacket {
     let mut sorted:Vec<_>=commands.iter().collect();
     sorted.sort_by(|a,b| {
         let (al,ad,ao)=paint_order(a);let (bl,bd,bo)=paint_order(b);
@@ -58,5 +64,18 @@ pub fn encode(commands:&[PaintCommand],font:&str,weight:u16)->CanvasPacket {
         }
     }
     if clip.is_some(){ops.push(Op::Unclip);}
-    CanvasPacket{commands:serde_json::to_string(&ops).expect("finite canvas commands"),images}
+    if !chunked {return CanvasPacket{commands:serde_json::to_string(&ops).expect("finite canvas commands"),images,chunks:None};}
+    // Keep unchanged transcript sections as independent retained canvases.
+    // A pulsing activity word or appended token must not invalidate every
+    // image and table above it. Sort globally first; each chunk restores its
+    // inherited clip and closes it so canvases remain independently paintable.
+    let mut chunks=Vec::new();let mut active_clip=None;
+    for chunk in ops.chunks(64) {
+        let inherited=active_clip.map(|b|Op::Clip{b});
+        for op in chunk {match op {Op::Clip{b}=>active_clip=Some(*b),Op::Unclip=>active_clip=None,_=>{}}}
+        let close=active_clip.map(|_|Op::Unclip);
+        let framed:Vec<_>=inherited.iter().chain(chunk.iter()).chain(close.iter()).collect();
+        chunks.push(serde_json::to_string(&framed).expect("finite canvas commands"));
+    }
+    CanvasPacket{commands:String::new(),images,chunks:Some(chunks)}
 }

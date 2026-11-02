@@ -46,7 +46,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
     model.onDispose(()=>{off();for(const engine of [...byModel!.values()])engine.dispose();engines.delete(model);positions.delete(model);});
   }
   const existing = byModel.get(rootSessionId); if (existing) {existing.touched=performance.now();return existing;}
-  const { id } = coreCall<{ id: number }>("agenttimeline.new", { compactPaint: true, canvasPaint: true, sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
+  const { id } = coreCall<{ id: number }>("agenttimeline.new", { compactPaint: true, canvasPaint: true, chunkedPaint: true, sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
     fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight,localName:localPresenceIdentity(config).displayName });
   const family=model.agentFamily(sessionId);
   coreCall("agenttimeline.family",{id,deferFrame:true,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});

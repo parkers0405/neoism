@@ -774,6 +774,7 @@ pub struct NeoismAgentPane {
     /// pinned).
     session_cache: HashMap<String, session_cache::CachedAgentSession>,
     virtual_timeline: NeoismAgentVirtualTimeline,
+    virtual_timeline_enabled: bool,
     scrollbar_thumb_rect: Option<[f32; 4]>,
     timeline_question_targets: Option<crate::panels::agent_pane::question_rail::TimelineQuestionTargets>,
     timeline_question_targets_session: Option<String>,
@@ -1153,6 +1154,7 @@ impl Default for NeoismAgentPane {
             timeline_history: AgentTimelineHistoryState::default(),
             session_cache: HashMap::new(),
             virtual_timeline: NeoismAgentVirtualTimeline::default(),
+            virtual_timeline_enabled: true,
             scrollbar_thumb_rect: None,
             timeline_question_targets: None,
             timeline_question_targets_session: None,

@@ -61,11 +61,17 @@ const packagedBinding=resolve("dist/web/native",stamp.artifact);
 copyFileSync(binding,`${packagedBinding}.next`);
 renameSync(`${packagedBinding}.next`,packagedBinding);
 
-copyFileSync(`artifacts/${library}`, `dist/${library}.next`);
-renameSync(`dist/${library}.next`, `dist/${library}`);
+// native-core resolves web/native before the legacy sibling path. Updating
+// only dist/<library> silently ran an older engine in an existing bundle.
+for(const destination of [`dist/${library}`,`dist/web/native/${library}`]){
+  copyFileSync(`artifacts/${library}`, `${destination}.next`);
+  renameSync(`${destination}.next`, destination);
+}
 const ghosttyLibrary = process.platform === "win32" ? "ghostty-vt.dll" : process.platform === "darwin" ? "libghostty-vt.dylib" : "libghostty-vt.so";
-copyFileSync(`artifacts/${ghosttyLibrary}`, `dist/${ghosttyLibrary}.next`);
-renameSync(`dist/${ghosttyLibrary}.next`, `dist/${ghosttyLibrary}`);
+for(const destination of [`dist/${ghosttyLibrary}`,`dist/web/native/${ghosttyLibrary}`]){
+  copyFileSync(`artifacts/${ghosttyLibrary}`, `${destination}.next`);
+  renameSync(`${destination}.next`, destination);
+}
 copyFileSync("artifacts/ghostty/LICENSE", "dist/LICENSE.ghostty");
 packageWorkspaceDaemon(process.cwd());
 // Preserve the executable inode used by an already running preview.

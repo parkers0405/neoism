@@ -35,7 +35,7 @@ function panelFor(model: WorkspaceModel, workspace: string, directory: string, c
   if (existing) return existing;
   const { id } = coreCall<{ id: number }>("agentsidepanel.new", { directory, theme: config.themeName, scale: config.scale, fontFamily: config.fontFamily, fontWeight: config.fontWeight });
   const unsubscribe = model.subscribeAgentEvents((message) => {
-    try { coreCall("agentsidepanel.event", { id, message }); } catch (error) { report(error); return; }
+    try { if(coreCall<{needsPaint?:boolean}>("agentsidepanel.event", { id, message }).needsPaint===false)return; } catch (error) { report(error); return; }
     for (const listener of panel.dirty) listener();
   });
   const panel: CachedPanel = { id, workspace, style, directory, commands: [],viewport:{width:0,height:0},images:new Map(), dirty: new Set(),
@@ -105,7 +105,7 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
   const unsubscribe = panel
     ? (panel.dirty.add(schedule), () => { panel.dirty.delete(schedule); })
     : model.subscribeAgentEvents((message) => {
-      try { coreCall("agentsidepanel.event", { id, message }); } catch (error) { props.report(error); return; }
+      try { if(coreCall<{needsPaint?:boolean}>("agentsidepanel.event", { id, message }).needsPaint===false)return; } catch (error) { props.report(error); return; }
       schedule();
     });
   // The catalog pane requests its own pages (desktop semantics: a null

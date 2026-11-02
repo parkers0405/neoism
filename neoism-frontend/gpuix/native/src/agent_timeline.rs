@@ -29,6 +29,7 @@ struct View {
     scroll_trace: Option<ScrollTrace>,
     compact_paint: bool,
     canvas_paint: bool,
+    chunked_paint: bool,
     font_family: String,
     font_weight: u16,
     pane: NeoismAgentPane,
@@ -171,9 +172,14 @@ fn frame(view: &mut View) -> Value {
     let mut metadata = render_frame(view);
     if view.canvas_paint {
         metadata["commands"] = json!([]);
-        metadata["canvas"] = serde_json::to_value(crate::paint_canvas::encode(&view.painter.borrowed_commands(), &view.font_family, view.font_weight)).unwrap();
+        metadata["canvas"] = serde_json::to_value(canvas_packet(view)).unwrap();
     } else { metadata["commands"] = serde_json::to_value(view.painter.serializable_commands(view.compact_paint)).unwrap(); }
     metadata
+}
+
+fn canvas_packet(view: &View) -> crate::paint_canvas::CanvasPacket {
+    let encode=if view.chunked_paint {crate::paint_canvas::encode_chunked}else{crate::paint_canvas::encode};
+    encode(&view.painter.borrowed_commands(), &view.font_family, view.font_weight)
 }
 
 /// The animation hot path writes borrowed paint commands straight into the
@@ -198,7 +204,7 @@ pub fn serialized_frame(v: &Value) -> Option<Result<String, String>> {
         }
         #[derive(serde::Serialize)]
         struct Response<T: serde::Serialize> { ok: T }
-        let canvas = view.canvas_paint.then(|| crate::paint_canvas::encode(&view.painter.borrowed_commands(), &view.font_family, view.font_weight));
+        let canvas = view.canvas_paint.then(|| canvas_packet(view));
         if canvas.is_some() && !v["includeCommands"].as_bool().unwrap_or(false) {
             return serde_json::to_string(&Response {ok: Frame {metadata,commands:Vec::<u8>::new(),canvas}}).map_err(|error|error.to_string());
         }
@@ -304,6 +310,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 "scrollbar": view.pane.timeline_scrollbar_state().map(|(offset, content, viewport, _)| json!({"offset":offset,"content":content,"viewport":viewport})),
                 "visibleRange": view.pane.virtual_timeline_visible_source_range(),
                 "animation": view.pane.animation_reason(),
+                "backgroundTasks": view.pane.running_background_task_count(),
                 "commandsByKind": {"rect":counts[0],"ring":counts[1],"polygon":counts[2],"image":counts[3],"text":counts[4],"rasterText":counts[5],"unrasterizedText":counts[6],"blankText":counts[7]},
             })}).collect::<Vec<_>>())
         })));
@@ -332,6 +339,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             );
             let session_id = text(v, "sessionId").to_owned();
             let mut pane = NeoismAgentPane::new();
+            pane.set_virtual_timeline_enabled(v["virtualTimeline"].as_bool().unwrap_or(false));
             pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));
             pane.set_session_id(Some(v["rootSessionId"].as_str().unwrap_or(&session_id).to_owned()));
             store.views.insert(id, View {
@@ -339,6 +347,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 scroll_trace: std::env::var_os("NEOISM_GPUIX_SCROLL_TRACE").map(|_| {let now=std::time::Instant::now();ScrollTrace{origin:now,last:now,text_y:HashMap::new(),input_pixels:0.0,input_events:0,precise_events:0}}),
                 compact_paint: v["compactPaint"].as_bool().unwrap_or(false),
                 canvas_paint: v["canvasPaint"].as_bool().unwrap_or(false),
+                chunked_paint: v["chunkedPaint"].as_bool().unwrap_or(false),
                 font_family: if family.is_empty() {"Cascadia Code NF".to_owned()} else {family.to_owned()},
                 font_weight: v["fontWeight"].as_u64().unwrap_or(400) as u16,
                 pane,
@@ -372,6 +381,10 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             "agenttimeline.event" => {
                 let parsed: AgentServerMessage =
                     serde_json::from_value(v["message"].clone()).map_err(|error| error.to_string())?;
+                if matches!(&parsed, AgentServerMessage::BackgroundTasksUpdated { session_id, .. }
+                    if !view.pane.session_family_contains(session_id)) {
+                    return Ok(json!({"needsPaint":false}));
+                }
                 let history_older = match v["historyKind"].as_str() { Some("head") => Some(false), Some("older") => Some(true), _ => None };
                 let visible = agent_event_session_id(&parsed).is_none_or(|session| session == view.session_id);
                 // Cached text/history changes cannot change the viewed transcript.
@@ -849,10 +862,11 @@ pub fn dispatch_panel(v: &Value) -> Option<Result<Value, String>> {
             "agentsidepanel.event" => {
                 let parsed: AgentServerMessage =
                     serde_json::from_value(v["message"].clone()).map_err(|error| error.to_string())?;
-                if catalog_event(&parsed) && accept_catalog_reply(panel, &parsed) {
+                let needs_paint = catalog_event(&parsed) && accept_catalog_reply(panel, &parsed);
+                if needs_paint {
                     apply_agent_event_to_pane(&mut panel.pane, parsed);
                 }
-                Ok(Value::Null)
+                Ok(json!({"needsPaint":needs_paint}))
             }
             // The workspace directory changed (or became known): rescope like a
             // desktop workspace switch, dropping the old catalog and its replies.

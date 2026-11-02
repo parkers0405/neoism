@@ -22,9 +22,10 @@ const byTest=(id:string)=>[...nodes.values()].find(node=>node.props.testId===id)
 const quad=()=>JSON.parse(String(byTest("agent-composer-cursor-paint")!.props.commands))[0].p[0] as number[];
 const center=()=>{const points=quad();return[points.filter((_,i)=>i%2===0).reduce((sum,n)=>sum+n,0)/4,points.filter((_,i)=>i%2===1).reduce((sum,n)=>sum+n,0)/4];};
 const report=(x:number,y:number,visible=true,offset=0,remainingWidth=100)=>root.dispatch({elementId:input!.id,eventType:"caretGeometry",x,y,width:2,height:22,value:JSON.stringify({visible,fontSize:16,remainingWidth,offset,selectionStart:offset,selectionEnd:offset})});
+const layouts:Array<{text:string;width:number;rows:number}>=[];
 let stage="mount";
 try{
- root.render(()=><div><textarea ref={input} testId="actual-composer-input" theme={{caret:"transparent"}} value="界🙂é\nsecond line"/><ComposerCaret config={config} input={()=>input}/></div>);
+  root.render(()=><div><textarea ref={input} testId="actual-composer-input" theme={{caret:"transparent"}} value="界🙂é\nsecond line"/><ComposerCaret config={config} input={()=>input} onLayout={layout=>layouts.push(layout)}/></div>);
  assert.ok(input?.id);assert.ok(events.has(`${input.id}:caretGeometry`));assert.ok(!byTest("agent-composer-cursor-paint"));
  stage="first event";report(120,240,true,0);assert.equal(callbacks.size,1);flush();
  const first=byTest("agent-composer-cursor")!;assert.ok(first);assert.equal(JSON.parse(String(byTest("agent-composer-cursor-paint")!.props.commands))[0].c&255,255,"Agent block must preserve original opaque cursor ink");assert.ok(Math.abs(Number(first.style.width)-9.6)<.001);assert.equal(Number(first.style.height),20);assert.ok(Math.abs(center()[0]-124.8)<.001);assert.equal(center()[1],250);
@@ -37,7 +38,9 @@ try{
  stage="handoff";const handoff=surfaceCaret(renderer,input.id);assert.ok(handoff);assert.ok(Math.abs(handoff.bounds.x-220)<.1);
  root.flushSync(()=>suppressSurfaceCursor(renderer,true));assert.ok(!byTest("agent-composer-cursor-paint"));
  root.flushSync(()=>suppressSurfaceCursor(renderer,false));assert.ok(byTest("agent-composer-cursor-paint"));
- stage="hidden";report(220,284,false,11);assert.ok(!byTest("agent-composer-cursor-paint"));assert.equal(callbacks.size,0);
+  stage="hidden";report(220,284,false,11);assert.ok(!byTest("agent-composer-cursor-paint"));assert.equal(callbacks.size,0);
+  root.dispatch({elementId:input!.id,eventType:"caretGeometry",x:120,y:240,value:JSON.stringify({visible:false,fontSize:16,remainingWidth:100,offset:0,selectionStart:0,selectionEnd:0,text:"changed",layoutWidth:300,visualRows:2})});
+  assert.deepEqual(layouts,[{text:"changed",width:300,rows:2}],"Unfocused/selected inputs still report the full native shaped layout");
  stage="clipped";report(419,284,true,11,1);flush();const clipLimit=performance.now()+1000;while(callbacks.size){await Bun.sleep(6);flush();assert.ok(performance.now()<clipLimit,"Clipped cursor must settle");}const clipped=byTest("agent-composer-cursor")!;assert.ok(Number(clipped.style.width)<=1.001);
  console.log(JSON.stringify({nativeEventRegistered:true,sourceBlockWidth:9.6,sourceBlockHeight:20,burstFrames:1,visibleSpring:true,unicodeOffset:11,windowHandoff:true,selectionAndBlurHidden:true,cursorAlpha:255,idleBlinkRestored:true,nativeWindowsCreated:0}));
 }catch(error){console.error(JSON.stringify({stage,inputId:input?.id,inputMounted:input?.mounted,handoff:surfaceCaret(renderer,input?.id)?.bounds,cursor:byTest("agent-composer-cursor"),quad:byTest("agent-composer-cursor-paint")?quad():null,callbacks:callbacks.size}));throw error;}finally{root.unmount();reset();assert.equal(callbacks.size,0);assert.equal(surfaceCaret(renderer,input?.id),undefined);assert.ok(!events.has(`${input?.id}:caretGeometry`));}

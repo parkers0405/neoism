@@ -14,6 +14,7 @@ export interface ComposerFrame {
 export interface ComposerInput {
   width: number; height: number; home: boolean; text: string; help: boolean; images: number;
   cwd?: string; branch?: string; system?: string; noProviders: boolean; busy: boolean; state: string;
+  visualRows?: number; textWidth?: number;
 }
 export class NativeComposer {
   readonly id: number;

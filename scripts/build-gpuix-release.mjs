@@ -24,6 +24,10 @@ const bun=join(frontend,'node_modules/bun/bin/bun.exe');
 run('npm',['run','check:design'],frontend);
 run(bun,['scripts/build-sdk.ts'],frontend);
 run('python',['scripts/check-native-toolchain.py']);
+// Exercise shell argument forwarding and process ownership on the actual host
+// before the much larger service/frontend compilation.
+run('cargo',['test','--locked','--release','-p','teletypewriter','macos_exec_tests','--lib']);
+run('cargo',['test','--locked','--release','-p','neoism-terminal-pty','--test','process_lifecycle']);
 // Fail early on toolchain/network problems before compiling the Rust services.
 run(bun,['scripts/build-ghostty.ts'],frontend);
 run('cargo',['build','--locked','--release','-p','neoism-workspace-daemon','-p','neoism-agent','-p','neoism-update-helper']);

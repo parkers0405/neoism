@@ -131,9 +131,30 @@ impl TextDocumentSyncCapabilities {
 
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
+/// Never expose a reaped numeric identity to tree cleanup again, even if that
+/// PID is subsequently reused for another child of this process.
+struct OwnedLspChild {
+    child: Child,
+    reaped: bool,
+}
+
+impl OwnedLspChild {
+    fn new(child: Child) -> Self { Self { child, reaped: false } }
+    fn id(&self) -> u32 { self.child.id() }
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        if self.reaped {
+            return Err(io::Error::other("language server child already reaped"));
+        }
+        // Consume cleanup ownership exactly once, including wait errors. An
+        // already-lost child must not be waited/signalled by numeric ID again.
+        self.reaped = true;
+        self.child.wait()
+    }
+}
+
 enum LspTransportHandle {
     Stdio {
-        child: Child,
+        child: Option<OwnedLspChild>,
         stderr_tail: Arc<Mutex<VecDeque<String>>>,
     },
     Tcp {
@@ -222,6 +243,14 @@ fn build_lsp_command(
 }
 
 impl LspClient {
+    #[cfg(test)]
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        match &self.transport {
+            LspTransportHandle::Stdio { child, .. } => child.as_ref().map(OwnedLspChild::id),
+            LspTransportHandle::Tcp { .. } => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn spawn(root: &Path, command: &[String]) -> Result<Self> {
         Self::spawn_with_env(
@@ -321,7 +350,7 @@ impl LspClient {
             label,
             Box::new(BufReader::new(stdout)),
             Box::new(stdin),
-            LspTransportHandle::Stdio { child, stderr_tail },
+            LspTransportHandle::Stdio { child: Some(OwnedLspChild::new(child)), stderr_tail },
             service,
         )
     }
@@ -1099,16 +1128,18 @@ impl LspClient {
     }
 
     pub(crate) fn close_document(&mut self, file: &Path) -> Result<()> {
+        // Local ownership is over even if the server has already exited and
+        // didClose fails. Never retain an unsaved snapshot on the error path.
+        self.documents
+            .lock()
+            .map_err(|_| anyhow!("LSP document snapshot lock poisoned"))?
+            .remove(file);
         if self.text_document_sync.open_close {
             self.notify(
                 "textDocument/didClose",
                 json!({ "textDocument": { "uri": path_to_file_uri(file) } }),
             )?;
         }
-        self.documents
-            .lock()
-            .map_err(|_| anyhow!("LSP document snapshot lock poisoned"))?
-            .remove(file);
         Ok(())
     }
 
@@ -1282,6 +1313,31 @@ impl LspClient {
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<()> {
+        // Own the Child in the deadline worker, not merely its PID: a blocked
+        // pipe write (including a reader's server-request reply) must not stop
+        // retirement. Killing the tree at the deadline unblocks its pipes and
+        // the worker always waits/reaps, even if protocol shutdown fails.
+        let reaper = match &mut self.transport {
+            LspTransportHandle::Stdio { child, .. } => {
+                let Some(mut child) = child.take() else { return Ok(()) };
+                Some(std::thread::spawn(move || {
+                    let deadline = Instant::now() + SHUTDOWN_TIMEOUT * 2;
+                    while matches!(observe_lsp_child(&mut child), Ok(None)) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    reap_lsp_child(&mut child);
+                }))
+            }
+            LspTransportHandle::Tcp { .. } => None,
+        };
+        let result = self.shutdown_protocol();
+        if let Some(reaper) = reaper {
+            let _ = reaper.join();
+        }
+        result
+    }
+
+    fn shutdown_protocol(&mut self) -> Result<()> {
         let id = self.next_id;
         self.next_id += 1;
         self.write_message(&json!({
@@ -1293,16 +1349,7 @@ impl LspClient {
         let _ = wait_for_response(&self.responses, id, SHUTDOWN_TIMEOUT);
         let result = self.notify("exit", Value::Null);
         match &mut self.transport {
-            LspTransportHandle::Stdio { child, .. } => {
-                // Give the server a bounded opportunity to consume `exit` and
-                // terminate itself before Drop enforces process-group cleanup.
-                let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-                while child.try_wait().ok().flatten().is_none()
-                    && Instant::now() < deadline
-                {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            }
+            LspTransportHandle::Stdio { .. } => {}
             LspTransportHandle::Tcp { socket, .. } => {
                 let _ = socket.shutdown(Shutdown::Both);
             }
@@ -1313,7 +1360,8 @@ impl LspClient {
     pub(crate) fn exit_reason(&mut self) -> Option<String> {
         let transport_failure = self.transport_failure();
         match &mut self.transport {
-            LspTransportHandle::Stdio { child, stderr_tail } => match child.try_wait() {
+            LspTransportHandle::Stdio { child: None, .. } => Some("language server shut down".into()),
+            LspTransportHandle::Stdio { child: Some(child), stderr_tail } => match observe_lsp_child(child) {
                 Ok(None) => transport_failure,
                 Ok(Some(status)) => {
                     let stderr = stderr_tail
@@ -1375,18 +1423,8 @@ impl Drop for LspClient {
     fn drop(&mut self) {
         match &mut self.transport {
             LspTransportHandle::Stdio { child, .. } => {
-                if let Ok(None) = child.try_wait() {
-                    tracing::warn!(
-                        target: "neoism_agent::perf",
-                        lsp = %self.label,
-                        pid = child.id(),
-                        "lsp process still running on drop; killing"
-                    );
-                    // The child got its own process group/tree at spawn;
-                    // take the helper processes down with it.
-                    crate::tool::process::kill_process_group(Some(child.id()));
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if let Some(mut child) = child.take() {
+                    reap_lsp_child(&mut child);
                 }
             }
             LspTransportHandle::Tcp { socket, .. } => {
@@ -1394,6 +1432,78 @@ impl Drop for LspClient {
             }
         }
     }
+}
+
+fn reap_lsp_child(child: &mut OwnedLspChild) {
+    reap_lsp_child_with(child, |pid| crate::tool::process::kill_process_group(Some(pid)));
+}
+
+fn reap_lsp_child_with(child: &mut OwnedLspChild, kill_group: impl FnOnce(u32)) -> bool {
+    // On Unix WNOWAIT proves that the leader is still our unreaped child,
+    // reserving its PID even after exit. ECHILD (including an earlier external
+    // wait/try_wait) means numeric PID/PGID ownership is gone: NEVER signal it.
+    #[cfg(unix)]
+    let owned = observe_lsp_child(child).is_ok();
+    // Windows retains the Child's owned process handle. Preserve live-tree
+    // cleanup, but do not address a completed/reaped leader by numeric PID.
+    #[cfg(not(unix))]
+    let owned = matches!(observe_lsp_child(child), Ok(None));
+    if owned {
+        kill_group(child.id());
+        let _ = child.child.kill();
+    }
+    let _ = child.wait();
+    owned
+}
+
+#[cfg(unix)]
+fn observe_lsp_child(child: &mut OwnedLspChild) -> io::Result<Option<std::process::ExitStatus>> {
+    use std::os::unix::process::ExitStatusExt;
+
+    if child.reaped {
+        return Err(io::Error::from_raw_os_error(libc::ECHILD));
+    }
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                child.reaped = true;
+            }
+            return Err(error);
+        }
+        if unsafe { info.si_pid() } == 0 {
+            return Ok(None);
+        }
+        let status = unsafe { info.si_status() };
+        let raw = match info.si_code {
+            libc::CLD_EXITED => status << 8,
+            libc::CLD_DUMPED => status | 0x80,
+            _ => status,
+        };
+        return Ok(Some(std::process::ExitStatus::from_raw(raw)));
+    }
+}
+
+#[cfg(not(unix))]
+fn observe_lsp_child(child: &mut OwnedLspChild) -> io::Result<Option<std::process::ExitStatus>> {
+    if child.reaped {
+        return Err(io::Error::other("language server child already reaped"));
+    }
+    let status = child.child.try_wait()?;
+    if status.is_some() { child.reaped = true; }
+    Ok(status)
 }
 
 fn record_transport_failure(health: &TransportHealth, reason: String) {
@@ -1677,6 +1787,128 @@ pub(crate) fn read_lsp_message(reader: &mut impl BufRead) -> io::Result<Option<V
 #[cfg(test)]
 mod sync_capability_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_already_reaped_child_never_signals_numeric_identity_again() {
+        let mut client = LspClient::spawn(
+            &std::env::temp_dir(), &["sh".into(), "-c".into(), "exit 0".into()],
+        ).unwrap();
+        let child = match &mut client.transport {
+            LspTransportHandle::Stdio { child: Some(child), .. } => child,
+            _ => unreachable!(),
+        };
+        child.wait().unwrap(); // deliberately release PID/PGID ownership
+        assert_eq!(observe_lsp_child(child).unwrap_err().raw_os_error(), Some(libc::ECHILD));
+        for _ in 0..2 {
+            assert!(!reap_lsp_child_with(child, |_| panic!("signalled an already-reaped numeric identity")));
+        }
+        // Production shutdown/Drop must take the same no-signal path too.
+        let _ = client.shutdown();
+        drop(client);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_exited_unreaped_leader_still_cleans_live_helper_group() {
+        struct OwnedFixture(OwnedLspChild);
+        impl Drop for OwnedFixture {
+            fn drop(&mut self) { reap_lsp_child(&mut self.0); }
+        }
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 60 & echo $!; exit 0"])
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        crate::tool::process::set_new_process_group_std(&mut command);
+        let mut fixture = OwnedFixture(OwnedLspChild::new(command.spawn().unwrap()));
+        let mut output = BufReader::new(fixture.0.child.stdout.take().unwrap());
+        let mut helper = String::new();
+        output.read_line(&mut helper).unwrap();
+        let helper = helper.trim().parse::<libc::pid_t>().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while observe_lsp_child(&mut fixture.0).unwrap().is_none() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Repeated observation (also used by exit_reason and the deadline
+        // worker) must not reap the leader or release its numeric identity.
+        assert!(observe_lsp_child(&mut fixture.0).unwrap().unwrap().success());
+        assert_eq!(unsafe { libc::kill(helper, 0) }, 0, "owned helper exited before cleanup");
+        let mut signalled = false;
+        assert!(reap_lsp_child_with(&mut fixture.0, |pid| {
+            signalled = true;
+            crate::tool::process::kill_process_group(Some(pid));
+        }));
+        assert!(signalled);
+        assert_eq!(observe_lsp_child(&mut fixture.0).unwrap_err().raw_os_error(), Some(libc::ECHILD));
+        // The helper inherited stdout. EOF proves group cleanup terminated it,
+        // without attempting a wait or signal through a potentially reused PID.
+        let (eof, ended) = mpsc::sync_channel(1);
+        let reader = thread::spawn(move || {
+            let mut rest = String::new();
+            eof.send(std::io::Read::read_to_string(&mut output, &mut rest)).unwrap();
+        });
+        ended.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        reader.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_drop_reaps_running_and_already_exited_leaders() {
+        for command in ["exec sleep 60", "exit 0"] {
+            let client = LspClient::spawn(
+                &std::env::temp_dir(),
+                &["sh".into(), "-c".into(), command.into()],
+            ).unwrap();
+            let pid = match &client.transport {
+                LspTransportHandle::Stdio { child, .. } => child.as_ref().unwrap().id(),
+                _ => unreachable!(),
+            };
+            if command == "exit 0" {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                // EOF is observed by the reader without calling try_wait;
+                // the already-exited leader is still ours to reap on Drop.
+                while client.health.failure.lock().unwrap().is_none() {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            drop(client);
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) }, -1);
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD), "leader was not reaped");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_explicit_shutdown_reaps_without_waiting_for_drop() {
+        let mut client = LspClient::spawn(
+            &std::env::temp_dir(), &["sh".into(), "-c".into(), "exec sleep 60".into()],
+        ).unwrap();
+        let pid = match &client.transport {
+            LspTransportHandle::Stdio { child, .. } => child.as_ref().unwrap().id(),
+            _ => unreachable!(),
+        };
+        let writer = client.writer.clone();
+        let (started_write, writing) = mpsc::sync_channel(0);
+        let blocked_write = std::thread::spawn(move || {
+            let mut writer = writer.lock().unwrap();
+            started_write.send(()).unwrap();
+            // The peer never reads stdin. Saturate the pipe while holding the
+            // same writer mutex used by shutdown and server-request replies.
+            writer.write_all(&vec![b'x'; 4 * 1024 * 1024])
+        });
+        writing.recv_timeout(Duration::from_secs(2)).unwrap();
+        let started = Instant::now();
+        let _ = client.shutdown(); // deliberately unresponsive protocol peer
+        assert!(blocked_write.join().unwrap().is_err());
+        assert!(started.elapsed() < SHUTDOWN_TIMEOUT * 2 + Duration::from_secs(1));
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+        // A subsequent Drop must not signal a recycled process-group ID.
+        assert!(matches!(client.transport, LspTransportHandle::Stdio { child: None, .. }));
+    }
 
     #[test]
     fn initialization_and_connect_budgets_are_separate_and_waits_stay_bounded() {

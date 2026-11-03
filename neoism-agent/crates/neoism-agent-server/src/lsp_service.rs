@@ -36,6 +36,8 @@ pub(super) struct LspService {
         Mutex<HashMap<TypeScriptProjectCacheKey, TypeScriptProjectCacheEntry>>,
     self_weak: std::sync::Weak<LspService>,
     clients: Mutex<HashMap<LspClientKey, Arc<Mutex<PersistentLspClient>>>>,
+    document_pins: Mutex<HashMap<(PathBuf, PathBuf), usize>>,
+    pub(super) generation_leases: Mutex<Option<std::sync::Weak<std::sync::atomic::AtomicUsize>>>,
     /// Exact file selections published only by the blocking worker path. Never
     /// infer a nested project's owner by looking for an ancestor/live language.
     file_clients: Mutex<HashMap<(PathBuf, PathBuf, String), CachedFileClient>>,
@@ -80,6 +82,8 @@ impl LspService {
             typescript_projects: Default::default(),
             self_weak,
             clients: Mutex::new(HashMap::new()),
+            document_pins: Mutex::new(HashMap::new()),
+            generation_leases: Mutex::new(None),
             file_clients: Mutex::new(HashMap::new()),
             initialization_gates: Mutex::new(HashMap::new()),
             diagnostics: Mutex::new(HashMap::new()),
@@ -90,7 +94,16 @@ impl LspService {
     }
 }
 
+impl Drop for LspService {
+    fn drop(&mut self) {
+        // Unlike a strong_count check in LspRuntime::drop, this also covers
+        // the final temporary Weak upgrade held by a reader/retirement worker.
+        self.shutdown_all();
+    }
+}
+
 const LSP_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
+const LSP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
 struct BrokenClientState {
@@ -159,6 +172,7 @@ struct CachedFileClient {
 }
 
 struct PersistentLspClient {
+    last_used: Instant,
     service: std::sync::Weak<LspService>,
     client: LspClient,
     initialized: InitializeResult,
@@ -214,6 +228,82 @@ enum LspEndpoint {
 }
 
 impl LspService {
+    pub(super) fn pin_document(&self, root: &Path, file: &Path) {
+        *self.document_pins.lock().expect("lsp pins poisoned")
+            .entry((root.to_path_buf(), file.to_path_buf())).or_default() += 1;
+    }
+
+    pub(super) fn unpin_document(&self, root: &Path, file: &Path) {
+        let mut pins = self.document_pins.lock().expect("lsp pins poisoned");
+        let key = (root.to_path_buf(), file.to_path_buf());
+        if let Some(count) = pins.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 { pins.remove(&key); }
+        }
+    }
+
+    pub(super) fn start_idle_retirement(service: &Arc<Self>) {
+        let weak = Arc::downgrade(service);
+        std::thread::Builder::new().name("neoism-lsp-idle".into()).spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(5));
+                let Some(service) = weak.upgrade() else { break };
+                service.retire_idle_clients(LSP_IDLE_TIMEOUT);
+            }
+        }).expect("spawn LSP idle retirement");
+    }
+
+    fn retire_idle_clients(&self, timeout: Duration) {
+        // A running task's generation lease spans the gaps between LSP calls,
+        // including provider/tool waits. Cached generations alone do not pin.
+        if self.generation_leases.lock().unwrap().as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|count| count.load(std::sync::atomic::Ordering::Acquire) > 0)
+        {
+            return;
+        }
+        // Removal and lease admission are atomic under the map lock. Never
+        // terminate an Arc already handed to an operation, even if it has not
+        // acquired the client lock yet. Status polls are not consumer leases.
+        let retired = {
+            let pins = self.document_pins.lock().expect("lsp pins poisoned");
+            let mut clients = self.clients.lock().expect("lsp client map poisoned");
+            let keys = clients.iter().filter_map(|(key, client)| {
+                if Arc::strong_count(client) != 1 {
+                    return None;
+                }
+                let guard = client.try_lock().ok()?;
+                if guard.open_versions.keys().any(|file| pins.contains_key(&(key.root.clone(), file.clone()))) {
+                    return None;
+                }
+                (guard.last_used.elapsed() >= timeout).then(|| key.clone())
+            }).collect::<Vec<_>>();
+            keys.into_iter().filter_map(|key| {
+                let client = clients.remove(&key)?;
+                // Drop per-document state belonging to this transport while
+                // new client admission is excluded. Other adapters/projects
+                // keep their versions, diagnostics and unsaved authority.
+                let guard = client.lock().expect("lsp client poisoned");
+                let owns = |owner: &DiagnosticOwnerKey| {
+                    owner.root == key.root && owner.server_id == key.id
+                        && guard.open_versions.contains_key(&owner.file)
+                };
+                self.document_versions.lock().unwrap().retain(|owner, _| !owns(owner));
+                self.diagnostic_versions.lock().unwrap().retain(|owner, _| !owns(owner));
+                self.diagnostics.lock().unwrap().retain(|owner, _| !owns(owner));
+                self.file_clients.lock().unwrap().retain(|_, selected| selected.key != key);
+                drop(guard);
+                Some(client)
+            }).collect::<Vec<_>>()
+        };
+        // No shared map locks across protocol shutdown/process reaping.
+        for client in retired {
+            if let Ok(mut client) = client.lock() {
+                let _ = client.client.shutdown();
+            }
+        }
+    }
+
     fn runtime(&self) -> super::LspRuntime {
         super::LspRuntime {
             service: self
@@ -1101,6 +1191,8 @@ impl LspService {
     }
 
     fn clear_document_state(&self, root: &Path, file: &Path) {
+        self.file_clients.lock().expect("lsp file-client cache poisoned")
+            .retain(|(cached_root, cached_file, _), _| cached_root != root || cached_file != file);
         self.clear_diagnostics(root, file);
         self.document_versions
             .lock()
@@ -1507,6 +1599,7 @@ impl LspService {
             anyhow::bail!(reason);
         }
         let result = operation(&mut guard);
+        guard.last_used = Instant::now();
         // A valid JSON-RPC error (for example RequestFailed, ContentModified,
         // or a method-specific validation error) does not mean the transport
         // died. Only retire the client when the process/socket itself reports
@@ -1673,6 +1766,7 @@ impl LspService {
             }
         };
         let persistent = Arc::new(Mutex::new(PersistentLspClient {
+            last_used: Instant::now(),
             service: self.self_weak.clone(),
             client,
             initialized,

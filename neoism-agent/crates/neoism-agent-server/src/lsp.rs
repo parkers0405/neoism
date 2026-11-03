@@ -63,6 +63,7 @@ impl LspRuntime {
         let service = Arc::new_cyclic(|weak| {
             lsp_service::LspService::new(services, diagnostics_bus, weak.clone(), None)
         });
+        lsp_service::LspService::start_idle_retirement(&service);
         Self { service }
     }
 
@@ -79,6 +80,7 @@ impl LspRuntime {
                 Some(config),
             )
         });
+        lsp_service::LspService::start_idle_retirement(&service);
         Self { service }
     }
 
@@ -118,13 +120,30 @@ impl LspRuntime {
     pub fn instance_key(&self) -> usize {
         Arc::as_ptr(&self.service) as usize
     }
+
+    pub(crate) fn protect_generation(&self, leases: &Arc<std::sync::atomic::AtomicUsize>) {
+        *self.service.generation_leases.lock().unwrap() = Some(Arc::downgrade(leases));
+    }
+
+    /// Keep editor-owned unsaved documents (and their server) resident. Agent
+    /// operations instead hold a client Arc for the duration of each request.
+    pub fn lease_document(&self, root: &Path, file: &Path) -> LspDocumentLease {
+        let root = normalized_root(root);
+        let file = normalized_file(&root, file);
+        self.service.pin_document(&root, &file);
+        LspDocumentLease { runtime: self.clone(), root, file }
+    }
 }
 
-impl Drop for LspRuntime {
+pub struct LspDocumentLease {
+    runtime: LspRuntime,
+    root: PathBuf,
+    file: PathBuf,
+}
+
+impl Drop for LspDocumentLease {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.service) == 1 {
-            self.service.shutdown_all();
-        }
+        self.runtime.service.unpin_document(&self.root, &self.file);
     }
 }
 

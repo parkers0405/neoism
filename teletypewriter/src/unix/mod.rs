@@ -412,6 +412,50 @@ pub fn create_pty_with_spawn(
     create_pty_with_spawn_env(shell, args, working_directory, columns, rows, &[])
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_exec_args(shell: &str, args: &[String]) -> Vec<String> {
+    let name = shell.rsplit('/').next().unwrap_or(shell);
+    // Pass user arguments as positional parameters, never shell source. This
+    // also preserves empty arguments and executable paths containing spaces.
+    let mut command = vec![
+        "/bin/zsh".into(),
+        "-fc".into(),
+        "exec -a \"$0\" \"$@\"".into(),
+        format!("-{name}"),
+        shell.into(),
+    ];
+    command.extend_from_slice(args);
+    command
+}
+
+#[cfg(test)]
+mod macos_exec_tests {
+    use super::macos_exec_args;
+    use std::process::Command;
+
+    #[test]
+    fn login_command_preserves_argument_boundaries() {
+        let args = vec!["-c".into(), "printf '%s' \"$value\"; exit 7".into(), "".into()];
+        let command = macos_exec_args("/path with spaces/my's shell", &args);
+        assert_eq!(&command[..5], ["/bin/zsh", "-fc", "exec -a \"$0\" \"$@\"", "-my's shell", "/path with spaces/my's shell"]);
+        assert_eq!(&command[5..], args);
+    }
+
+    #[test]
+    fn intermediate_shell_passes_scripts_and_literals_without_expansion() {
+        let values = ["", "two words", "a'b", "$HOME", "$(printf injected)", "*", "semi;colon", "line\nbreak"];
+        let mut args = vec!["-c".into(), "printf '%s\\000' \"$@\"".into(), "script".into()];
+        args.extend(values.iter().map(|value| (*value).into()));
+        let command = macos_exec_args("/bin/sh", &args);
+        // Both shells support exec -a; macOS exercises its actual intermediary.
+        let shell = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
+        let output = Command::new(shell).args(&command[1..]).output().unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        let expected: Vec<u8> = values.iter().flat_map(|value| value.bytes().chain(std::iter::once(0))).collect();
+        assert_eq!(output.stdout, expected);
+    }
+}
+
 pub fn create_pty_with_spawn_env(
     shell: &str,
     args: Vec<String>,
@@ -471,7 +515,6 @@ pub fn create_pty_with_spawn_env(
         {
             // On macOS, use /usr/bin/login to ensure proper login shell environment
             // This ensures PATH includes directories like /usr/local/bin
-            let shell_name = shell_program.rsplit('/').next().unwrap_or(shell_program);
             let mut login_cmd = Command::new("/usr/bin/login");
 
             // Check for .hushlogin in home directory
@@ -488,20 +531,8 @@ pub fn create_pty_with_spawn_env(
             // -q: Act as if .hushlogin exists
             login_cmd.args([flags, &user.user]);
 
-            // Build the exec command to replace the intermediate shell with our target shell
-            let exec_cmd = if args.is_empty() {
-                format!("exec -a -{shell_name} {shell_program}")
-            } else {
-                format!(
-                    "exec -a -{} {} {}",
-                    shell_name,
-                    shell_program,
-                    args.join(" ")
-                )
-            };
-
             // Use /bin/zsh as intermediate shell because it supports 'exec -a'
-            login_cmd.args(["/bin/zsh", "-fc", &exec_cmd]);
+            login_cmd.args(macos_exec_args(shell_program, &args));
 
             login_cmd
         }
@@ -611,6 +642,7 @@ pub fn create_pty_with_spawn_env(
 
             let ptsname: String = tty_ptsname(main).unwrap_or_else(|_| "".to_string());
             let child_unix = Child {
+                lifecycle: std::sync::Mutex::new(ChildLifecycle::Running),
                 id: Arc::new(main),
                 ptsname,
                 pid: Arc::new(child_process.id().try_into().unwrap()),
@@ -692,6 +724,9 @@ pub fn create_pty_with_fork_with_working_dir(
 
     tracing::info!("fork {:?}", shell_program);
 
+    // Keep exit notification pending even if the child exits before the
+    // parent's PTY worker registers the signal pipe with its poller.
+    let signals = Signals::new([sigconsts::SIGCHLD])?;
     match unsafe {
         forkpty(
             &mut main as *mut _,
@@ -717,6 +752,7 @@ pub fn create_pty_with_fork_with_working_dir(
             // In the future add an option to check before release the method
             let ptsname: String = tty_ptsname(main).unwrap_or_else(|_| "".to_string());
             let child = Child {
+                lifecycle: std::sync::Mutex::new(ChildLifecycle::Running),
                 id: Arc::new(main),
                 ptsname,
                 pid: Arc::new(id),
@@ -727,8 +763,6 @@ pub fn create_pty_with_fork_with_working_dir(
                 set_nonblocking(main);
             }
 
-            let signals = Signals::new([sigconsts::SIGCHLD])
-                .expect("error preparing signal handling");
             Ok(Pty {
                 child_exit_status: None,
                 child,
@@ -772,12 +806,20 @@ unsafe fn set_nonblocking(fd: libc::c_int) {
 
 #[derive(Debug)]
 pub struct Child {
+    lifecycle: std::sync::Mutex<ChildLifecycle>,
     pub id: Arc<libc::c_int>,
     pub pid: Arc<libc::pid_t>,
     #[allow(dead_code)]
     ptsname: String,
     #[allow(dead_code)]
     process: Option<std::process::Child>,
+}
+
+#[derive(Debug)]
+enum ChildLifecycle {
+    Running,
+    Reaped(i32),
+    Gone,
 }
 
 impl Child {
@@ -809,6 +851,12 @@ impl Child {
     /// Return the child’s exit status if it has already exited. If the child is still running, return Ok(None).
     /// https://linux.die.net/man/2/waitpid
     pub fn waitpid(&self) -> Result<Option<i32>, String> {
+        let mut lifecycle = self.lifecycle.lock().unwrap();
+        match *lifecycle {
+            ChildLifecycle::Reaped(status) => return Ok(Some(status)),
+            ChildLifecycle::Gone => return Err("PTY child no longer owned".into()),
+            ChildLifecycle::Running => {}
+        }
         let mut status = 0 as libc::c_int;
         // If WNOHANG was specified in options and there were no children in a waitable state, then waitid() returns 0 immediately and the state of the siginfo_t structure pointed to by infop is unspecified. To distinguish this case from that where a child was in a waitable state, zero out the si_pid field before the call and check for a nonzero value in this field after the call returns.
         let res =
@@ -818,7 +866,11 @@ impl Child {
         }
 
         if res == -1 {
-            return Err(io::Error::last_os_error().to_string());
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                *lifecycle = ChildLifecycle::Gone;
+            }
+            return Err(error.to_string());
         }
 
         if res != *self.pid {
@@ -833,6 +885,7 @@ impl Child {
         }
 
         if libc::WIFEXITED(status) || libc::WIFSIGNALED(status) {
+            *lifecycle = ChildLifecycle::Reaped(status);
             Ok(Some(status))
         } else {
             tracing::warn!(
@@ -867,8 +920,61 @@ impl Deref for Child {
 
 impl Drop for Child {
     fn drop(&mut self) {
+        // Only our unreaped child can be signalled. A cached natural exit must
+        // never cause a signal to a PID that the OS may already have reused.
+        let _ = self.waitpid();
+        if !matches!(*self.lifecycle.get_mut().unwrap(), ChildLifecycle::Running) {
+            return;
+        }
+        let pid = *self.pid;
+        if pid <= 0 {
+            return;
+        }
+        // Preserve shell traps/cleanup on ordinary close. Target the owned
+        // leader only, never the daemon's/foreground process group.
         unsafe {
-            libc::kill(*self.pid, libc::SIGHUP);
+            libc::kill(pid, libc::SIGHUP);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        // Waiting is off the caller/UI thread, even if the kernel cannot
+        // immediately finish a killed child (e.g. uninterruptible I/O).
+        if let Err(error) = std::thread::Builder::new()
+            .name("neoism-pty-reap".into())
+            .spawn(move || reap_after_hangup(pid, deadline))
+        {
+            tracing::error!(pid, %error, "failed to start PTY child reaper");
+        }
+    }
+}
+
+fn reap_after_hangup(pid: libc::pid_t, deadline: std::time::Instant) {
+    let mut escalated = false;
+    loop {
+        let mut status = 0;
+        let options = if escalated { 0 } else { libc::WNOHANG };
+        let result = unsafe { libc::waitpid(pid, &mut status, options) };
+        if result == pid {
+            return;
+        }
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            // In particular, ECHILD relinquishes ownership: never signal a
+            // potentially reused PID after another waiter has reaped it.
+            if error.raw_os_error() != Some(libc::ECHILD) {
+                tracing::error!(pid, %error, "failed to reap PTY child");
+            }
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            // Only waitpid == 0 authorizes escalation. An unreaped child
+            // retains its PID even if it exits between this check and kill.
+            unsafe { libc::kill(pid, libc::SIGKILL); }
+            escalated = true;
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 }
@@ -891,23 +997,20 @@ pub fn command_per_pid(pid: libc::pid_t) -> String {
 impl EventedPty for Pty {
     #[inline]
     fn next_child_event(&mut self) -> Option<ChildEvent> {
-        self.signals.pending().next().and_then(|signal| {
-            if signal != sigconsts::SIGCHLD {
-                return None;
+        // Both spawn paths register before creating the child. The signal
+        // pipe retains readiness until drained, including before poll setup.
+        // Use the owned child's wait status rather than the coalesced signal.
+        self.signals.pending().for_each(drop);
+        if self.child_exit_status.is_some() {
+            return None;
+        }
+        match self.child.waitpid() {
+            Err(_) | Ok(None) => None,
+            Ok(Some(status)) => {
+                self.child_exit_status = Some(status);
+                Some(ChildEvent::Exited)
             }
-
-            match self.child.waitpid() {
-                Err(_e) => {
-                    // std::process::exit(1);
-                    None
-                }
-                Ok(None) => None,
-                Ok(Some(status)) => {
-                    self.child_exit_status = Some(status);
-                    Some(ChildEvent::Exited)
-                }
-            }
-        })
+        }
     }
 
     #[inline]

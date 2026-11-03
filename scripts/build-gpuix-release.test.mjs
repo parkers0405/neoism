@@ -58,3 +58,14 @@ test('non-Windows releases retain full tests without the Windows-only focused ch
   assert.ok(calls.some(({args})=>args[0]==='test'&&args[1]==='./tests'));
  }
 });
+
+test('every release validates PTY ownership and argument forwarding before service compilation',()=>{
+ for(const platform of ['linux','darwin','win32']){
+  const {calls,run}=release(platform);run();
+  const build=calls.findIndex(({program,args})=>program==='cargo'&&args[0]==='build');
+  for(const target of ['macos_exec_tests','process_lifecycle']){
+   const check=calls.findIndex(({program,args})=>program==='cargo'&&args[0]==='test'&&args.includes(target));
+   assert.ok(check>=0&&check<build,`${platform}: missing early ${target} gate`);
+  }
+ }
+});

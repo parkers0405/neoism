@@ -145,6 +145,10 @@ fn handle_inner(
             ])
         }
         WorkspaceClientMessage::CloseHostWorkspace { workspace_id } => {
+            // LSP is leased by editor surfaces and agent generations, not by
+            // this metadata row. The socket releases its closed surface leases;
+            // idle retirement handles cached agents after live tasks finish.
+            // Do not shutdown_root here: another window may still own it.
             DispatchOutcome::just(match manager.close_host_workspace(&workspace_id) {
                 Some(_) => {
                     manager.broadcast_tree_changed(Some(conn.client_id));

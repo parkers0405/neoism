@@ -1,9 +1,6 @@
 # Neoism GPUIX frontend
 
-The sole workspace frontend built by this branch, installed as a separate preview. SolidJS renders through
-GPUIX/GPUI; Effect manages the daemon connection and typed requests. The Neoism
-TypeScript SDK handles Agent APIs. The legacy desktop, WASM renderer, Rio emulator,
-and Lua execution hosts have been removed.
+Neoism's native workspace frontend. SolidJS renders through GPUIX/GPUI; Effect manages the daemon connection and typed requests, and the Neoism TypeScript SDK handles Agent APIs. Published releases target Linux x86_64, macOS Apple Silicon, and Windows x86_64; see the [main README](../../README.md#install) for installation and nightly updates.
 
 ## Run
 
@@ -16,29 +13,22 @@ npm run build:core
 npm start
 ```
 
-Blaze is the default Rust builder for the services, native bridge, tests, GitHub Actions,
-and Nix package. `scripts/blaze.sh` and `scripts/setup-blaze.mjs` install the exact
-published release and verify its SHA-256 against `native/blaze-pin.json`.
-Root `make build` builds the services, native bridge, and native application bundle only; root `./install.sh` installs that bundle in
-`~/.local/lib/neoism-gpuix/bin`, preserving the existing daily `neoism` launcher.
-Application builds never automatically fall back to another compiler.
-For an explicitly selected optimized native bridge, use
-`NEOISM_GPUIX_RUST_BUILDER=cargo NEOISM_GPUIX_BUILD_PROFILE=release bun scripts/build-core.ts`,
-then `bun scripts/build.ts --reuse-core` to package that verified library.
-This affects the bridge only; services and CI retain their existing compiler.
-The bridge's Cargo output is isolated in `target/gpuix-core-cargo`.
+Blaze is the default Rust builder for the local Makefile workflow, native bridge, workspace test runner, and Nix services package. Repository-root `scripts/blaze.sh` and `scripts/setup-blaze.mjs` install the exact published release and verify its SHA-256 against this frontend's `native/blaze-pin.json`.
+
+The root Makefile workflow is Linux-oriented: `make build` builds the services, native bridge, and native application bundle; `make run` builds services/core and runs from source, and `make dev` enables hot replacement. Root `./install.sh` installs the Linux bundle in `~/.local/lib/neoism-gpuix/bin`, preserving `~/.local/bin/neoism` and existing desktop shortcuts. An explicit `--prefix "$HOME/.local"` installs at the usual user prefix instead.
+
+Application builds never automatically fall back to another compiler. For an explicitly selected optimized native bridge, use `NEOISM_GPUIX_RUST_BUILDER=cargo NEOISM_GPUIX_BUILD_PROFILE=release npm run build:core`, then `npm run build -- --reuse-core` to package that verified library. This selects the bridge compiler only; root Makefile service builds still use Blaze. The bridge's Cargo output is isolated in `target/gpuix-core-cargo`.
+
+Published release CI uses Cargo for services, native bridge, and updater tests on all three platforms, through repository-root `node scripts/build-gpuix-release.mjs`. The script explicitly selects the Cargo bridge builder and release profile, validates and tests the native bundle, and invokes platform packaging. The release workflow additionally builds and validates the Windows MSI; Windows release CI does not bootstrap or test with Blaze.
+
 Set `NEOISM_GPUIX_DISPLAY_SOURCE` to a separate checkout directory when building the pinned display renderer alongside local renderer edits. The build still verifies the revision, patches, and source hashes; it never resets a conflicting checkout.
-Windows CI bootstraps Blaze itself from the pinned
-source because upstream publishes no Windows archive; its application tests use Blaze.
 
-Native local and CI releases neither build nor package browser UIs. The legacy `web/app` directory contains the native application's JavaScript bytecode/assets, and `web/native` contains native libraries; both remain required. `web/index.html` and `web/agent-gui/index.html` are comment-only compatibility markers required by already-installed old updaters, not browser entrypoints. Staging removes stale browser assets before recreating those markers; `web/agent-gui` must contain only its inert `index.html`, with no scripts, redirects, or assets. Normal Agent listeners are API-only; standalone Agent `gui`/`web` commands and `npm --prefix neoism-agent/sdk/typescript run gui:build` from the repository root remain explicit opt-ins. The workspace daemon serves static UIs only when explicitly configured with `NEOISM_WEB_ROOT` or `NEOISM_AGENT_GUI_ROOT`; it no longer discovers installed or source-checkout browser assets. REST/WebSocket routes and authentication are unchanged.
+Native local and CI releases neither build nor package browser UIs. The `web/app` directory contains the native application's JavaScript bytecode/assets, and `web/native` contains native libraries; both remain required. `web/index.html` and `web/agent-gui/index.html` are comment-only compatibility markers required by already-installed old updaters, not browser entrypoints. Staging removes stale browser assets before recreating those markers; `web/agent-gui` must contain only its inert `index.html`, with no scripts, redirects, or assets. Normal Agent listeners are API-only; standalone Agent `gui`/`web` commands and `npm --prefix neoism-agent/sdk/typescript run gui:build` from the repository root remain explicit opt-ins. The workspace daemon serves static UIs only when explicitly configured with `NEOISM_WEB_ROOT` or `NEOISM_AGENT_GUI_ROOT`; it does not discover installed or source-checkout browser assets. REST/WebSocket routes and authentication are unchanged.
 
-After building and testing the native bridge, `npm run build -- --reuse-core`
-packages that existing library after another FFI smoke check. The normal build
-compiles the bridge through the selected compiler (Blaze by default) before packaging.
-Windows uses upstream's documented `BLAZE_PROC_MACRO_SERVER=0` host macro mode
-because its matching native macro server is also unpublished.
-The compiler's [documented native macro host](https://github.com/indexable-inc/blaze/blob/8f144c2dae639fd093e4c489dace50132002fe0a/docs/cargo.md) handles SQLx and `enum-as-inner`.
+After building and testing the native bridge, `npm run build -- --reuse-core` packages that existing library after another FFI smoke check. The normal build compiles the bridge through the selected compiler (Blaze locally by default, Cargo in release CI) before packaging.
+
+For local Windows Blaze builds, upstream's documented `BLAZE_PROC_MACRO_SERVER=0` host macro mode is used because its matching native macro server is unpublished. The compiler's [documented native macro host](https://github.com/indexable-inc/blaze/blob/8f144c2dae639fd093e4c489dace50132002fe0a/docs/cargo.md) handles SQLx and `enum-as-inner`.
+
 `npm run benchmark:render` measures uncached sidebar rasterization, Markdown
 opening, and repeated Markdown hover rendering without opening a window or
 connecting to a daemon. Set `NEOISM_GPUIX_CORE` to compare native libraries in
@@ -98,9 +88,6 @@ On Linux the wrapper limits compiler pools to four permitted CPUs; Cargo's
 jobserver does not limit Blaze's whole-program pools. `NEOISM_BLAZE_CPUS` changes
 this limit (`0` removes it). Run `bash scripts/blaze.sh stop` before changing the
 limit so the next compiler daemon inherits the new affinity.
-GitHub-hosted Linux jobs reclaim unused SDK space and add 32 GiB of swap through
-`scripts/prepare-blaze-runner.sh`. This is limited to disposable hosted VMs;
-standard runners have [limited memory and disk](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 After services have built successfully, `bash scripts/gpuix.sh build-frontend`
 rebuilds the native bridge and frontend bundle using those service executables.
 The native bridge enables mimalloc's `local_dynamic_tls` mode because Bun loads
@@ -111,10 +98,7 @@ is not required.
 1.3.13, which supports Unix WebSockets. `setup:runtime` also works when npm blocks
 Bun's install script. Native libraries are replaced atomically.
 
-Packaged builds use Blaze's release profile. Standalone `build:core` defaults to
-the development profile; set `NEOISM_GPUIX_BUILD_PROFILE=release` for the packaged
-profile. Native outputs use `target/gpuix-core-blaze`, independently of the
-services' build directory. `NEOISM_GPUIX_TARGET_DIR` overrides that directory.
+Packaged builds use the selected compiler's release profile. Standalone `build:core` defaults to the development profile; set `NEOISM_GPUIX_BUILD_PROFILE=release` for the packaged profile. Blaze bridge outputs use `target/gpuix-core-blaze`, and Cargo bridge outputs use `target/gpuix-core-cargo`, independently of the services' build directory. `NEOISM_GPUIX_TARGET_DIR` overrides that directory.
 
 The app reads `~/.config/neoism/config.json` (JSONC), discovers the local daemon
 socket and token, or connects to `ws://127.0.0.1:7878/session`. It reuses the local daemon and starts a standalone local daemon if none is reachable.
@@ -171,11 +155,7 @@ credential. Local credential discovery applies only to the default endpoint.
 - Configured palettes, fonts, wallpaper/cached blur, original dimensions, and
   animation state are reused. Native clipboard operations use platform tools.
 
-GPUIX owns GPU painting, compositing, and the OS window. Reusable CPU font shaping,
-measurement, and glyph rasterization were migrated into `neoism-paint`; cached pixels
-become GPUI image textures. Shared UI entrypoints use the portable `Paint` interface.
-Neither the frontend nor daemon links Sugarloaf, the Rio terminal emulator, the old
-window host, or a Lua VM. `neoism-customization` retains only styling/contribution data.
+GPUIX owns GPU painting, compositing, and the OS window. CPU font shaping, measurement, and glyph rasterization live in `neoism-paint`; cached pixels become GPUI image textures. Shared UI entrypoints use the portable `Paint` interface. `neoism-customization` holds styling and contribution data.
 
 Shortcuts include Alt+E/C/N/H, Alt+S or Ctrl+P for Finder, Alt+P or Ctrl+Shift+P for commands,
 Alt+T or Ctrl+T for a terminal, Ctrl+S for save, and shared Vim motions/operators/registers/

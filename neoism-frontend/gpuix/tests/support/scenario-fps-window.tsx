@@ -36,6 +36,15 @@ const displayClock=installDisplayClock(renderer,console.error,{lookahead:process
 const loop=startFrameLoop(renderer);
 const root=render(()=><App model={model} config={config}/>,{renderer,keyboardFocusDim:false,onUncaughtError:error=>console.error("RENDER ERROR",error)});
 const app=new AutomationApp(new InProcessBackend(liveRendererAsTest(renderer)));
+let uploadCalls=0,uploadBytes=0,uploadMs=0,batchCalls=0,batchBytes=0,batchMs=0;
+const imageRenderer=renderer as unknown as {putPaintImage:(key:number,width:number,height:number,pixels:Buffer,format?:string)=>void};
+const putPaintImage=imageRenderer.putPaintImage.bind(renderer),applyBatch=renderer.applyBatch.bind(renderer);
+imageRenderer.putPaintImage=(...args:Parameters<typeof imageRenderer.putPaintImage>)=>{
+ const start=performance.now();try{return putPaintImage(...args);}finally{uploadCalls++;uploadBytes+=args[3].byteLength;uploadMs+=performance.now()-start;}
+};
+renderer.applyBatch=(json:string)=>{
+ const start=performance.now();try{return applyBatch(json);}finally{batchCalls++;batchBytes+=Buffer.byteLength(json);batchMs+=performance.now()-start;}
+};
 let samples:Array<[number,number]>=[];
 const tick=renderer.tick.bind(renderer);
 renderer.tick=()=>{const running=tick();const sample=(renderer as any).getRenderedFrameSample() as [number,number];if(sample[0]!==samples.at(-1)?.[0])samples.push(sample);return running;};
@@ -46,7 +55,7 @@ async function compositorFocus(){
  if(!process.env.HYPRLAND_INSTANCE_SIGNATURE)return undefined;
  try{const child=Bun.spawn(["hyprctl","activewindow","-j"],{stdout:"pipe",stderr:"ignore"});const active=await new Response(child.stdout).json() as {pid?:number};await child.exited;return active.pid===process.pid;}catch{return undefined;}
 }
-async function measure(label:string,drive:()=>void,ms=3000,period=scrollPeriod){
+async function measure(label:string,drive:()=>void,ms=3000,period=scrollPeriod,readScroll?:()=>number){
  label+=`-${scrollProfile}`;
  if(process.env.NEOISM_BENCH_TREE==="1"){
   const flatten=(nodes:any[]):any[]=>nodes.flatMap(node=>[node,...flatten(node.children||[])]);
@@ -56,12 +65,22 @@ async function measure(label:string,drive:()=>void,ms=3000,period=scrollPeriod){
  renderer.activateWindow();
  ms=Number(process.env.NEOISM_BENCH_MS)||ms;
  if(process.env.SHOT){console.log("READY",label);await Bun.sleep(2500);}
- const timer=setInterval(drive,period);await Bun.sleep(400);
+  let inputs=0,lastInput=0,inputGapMaxMs=0,scrollStart=readScroll?.(),scrollMin=scrollStart,scrollMax=scrollStart;
+  const timer=setInterval(()=>{
+   const now=performance.now();if(lastInput)inputGapMaxMs=Math.max(inputGapMaxMs,now-lastInput);lastInput=now;inputs++;
+   drive();const scroll=readScroll?.();if(scroll!==undefined){scrollMin=Math.min(scrollMin??scroll,scroll);scrollMax=Math.max(scrollMax??scroll,scroll);}
+  },period);await Bun.sleep(400);
  renderer.resetDebugFrameOverlayStats();await Bun.sleep(50);
  const focusedAtStart=await compositorFocus();
- samples=[];
- console.log("[neoism-measure-start]",label);
- const p0=presented(),f0=frames(),d0=renderer.getDebugFrameOverlayStats().frames,t0=performance.now();await Bun.sleep(ms);
+ const windowAtStart=renderer.getWindowSize();
+  samples=[];
+  uploadCalls=uploadBytes=uploadMs=batchCalls=batchBytes=batchMs=0;
+  inputs=lastInput=inputGapMaxMs=0;scrollStart=readScroll?.();scrollMin=scrollMax=scrollStart;
+  console.log("[neoism-measure-start]",label);
+  const p0=presented(),f0=frames(),d0=renderer.getDebugFrameOverlayStats().frames,t0=performance.now(),cpu0=process.cpuUsage();await Bun.sleep(ms);
+  const elapsedMs=performance.now()-t0,cpu=process.cpuUsage(cpu0),scrollEnd=readScroll?.();
+  const work={elapsedMs,cpuMs:(cpu.user+cpu.system)/1000,uploadCalls,uploadBytes,uploadMs,batchCalls,batchBytes,batchMs,inputs,inputGapMaxMs,
+   scroll:readScroll?{start:scrollStart,end:scrollEnd,min:scrollMin,max:scrollMax}:undefined};
  const p1=presented();
  console.log("[neoism-measure-end]",label);
  const stats=renderer.getDebugFrameOverlayStats(),fps=(frames()-f0)*1000/(performance.now()-t0);clearInterval(timer);
@@ -71,7 +90,11 @@ const percentile=(q:number)=>intervals.length?+intervals[Math.floor((intervals.l
 const sampleFirst=samples[0],sampleLast=samples.at(-1);
 const nativeClockFps=sampleFirst&&sampleLast&&sampleLast[1]>sampleFirst[1]?(sampleLast[0]-sampleFirst[0])*1000/(sampleLast[1]-sampleFirst[1]):0;
 const focusedAtEnd=await compositorFocus();
-console.log(JSON.stringify({label,focusedAtStart,focusedAtEnd,window:renderer.getWindowSize(),presentedFps:p0&&p1&&p1[1]>p0[1]?+((p1[0]-p0[0])*1000/(p1[1]-p0[1])).toFixed(3):null,nativeClockFps:+nativeClockFps.toFixed(3),sampledIntervals:intervals.length,intervalP50:percentile(.5),intervalP99:percentile(.99),intervalMax:percentile(1),intervalScope:"root draws, not physical presentation",fps:+fps.toFixed(1),drawFps:+((stats.frames-d0)*1000/(performance.now()-t0)).toFixed(1),drawP90:+stats.p90Ms!.toFixed(2),drawP99:+stats.p99Ms!.toFixed(2),drawMax:+stats.maxMs!.toFixed(2)}));
+const windowAtEnd=renderer.getWindowSize();
+const invalid=focusedAtStart===false||focusedAtEnd===false||windowAtStart.width!==windowAtEnd.width||windowAtStart.height!==windowAtEnd.height;
+const valid=invalid?false:focusedAtStart===undefined||focusedAtEnd===undefined?null:true;
+if(invalid)process.exitCode=1;
+console.log(JSON.stringify({label,valid,validityScope:"focus and size checked at measurement endpoints only",focusedAtStart,focusedAtEnd,windowAtStart,window:windowAtEnd,work,uploadScope:"bytes passed to native image API; call time excludes asynchronous GPU execution",presentedFps:p0&&p1&&p1[1]>p0[1]?+((p1[0]-p0[0])*1000/(p1[1]-p0[1])).toFixed(3):null,nativeClockFps:+nativeClockFps.toFixed(3),sampledIntervals:intervals.length,intervalP50:percentile(.5),intervalP99:percentile(.99),intervalMax:percentile(1),intervalScope:"root draws, not physical presentation",fps:+fps.toFixed(1),drawFps:+((stats.frames-d0)*1000/(performance.now()-t0)).toFixed(1),drawP90:+stats.p90Ms!.toFixed(2),drawP99:+stats.p99Ms!.toFixed(2),drawMax:+stats.maxMs!.toFixed(2)}));
  await Bun.sleep(300);
 }
 const until=async(test:()=>boolean|Promise<boolean>,what:string)=>{const limit=Date.now()+15000;while(!await test()){if(Date.now()>limit)throw new Error("timeout "+what);await Bun.sleep(20);}};
@@ -102,8 +125,8 @@ try{
    const b=await host.bounds();let dir=-1,n=0;
    const surface=model.state.surfaces.find(s=>s.id===model.state.activeSurfaceId)!;const mdv=model.getMarkdown(surface,model.getLayout().frame.focusedLeaf||undefined);
    for(const pass of [1,2]){
-    n=0;await measure(`markdown-60hz-pass${pass}`,()=>{n++;queueWheel(b.x+b.width/2,b.y+b.height/2,0,(Math.floor(n/60)%2?1:-1)*scrollDelta);});
-    n=0;await measure(`markdown-notch-8hz-pass${pass}`,()=>{if(++n%20===0)dir=-dir;mdv.call("scroll",{delta:dir*config.fontSize*3,deltaX:0,x:b.width/2,y:b.height/2});},3000,125);
+     n=0;await measure(`markdown-60hz-pass${pass}`,()=>{n++;queueWheel(b.x+b.width/2,b.y+b.height/2,0,(Math.floor(n/60)%2?1:-1)*scrollDelta);},3000,scrollPeriod,()=>mdv.frame.scrollY);
+     n=0;await measure(`markdown-notch-8hz-pass${pass}`,()=>{if(++n%20===0)dir=-dir;mdv.call("scroll",{delta:dir*config.fontSize*3,deltaX:0,x:b.width/2,y:b.height/2});},3000,125,()=>mdv.frame.scrollY);
    }
   }
   if(scenario==="tree"){
@@ -123,7 +146,12 @@ try{
   if(scenario==="code"){
    await model.openFile("code.rs");const host=app.getByTestId("code-editor");await host.waitFor({timeoutMs:8000});await host.click();
    const b=await host.bounds();let dir=-1,n=0;
-   await measure("code-scroll",()=>{if(++n%150===0)dir=-dir;queueWheel(b.x+b.width/2,b.y+b.height/2,0,dir*scrollDelta);});
+    const surface=model.state.surfaces.find(s=>s.id===model.state.activeSurfaceId)!;
+    const editor=model.getEditor(surface,model.getLayout().frame.focusedLeaf||undefined);
+    const nativeText=process.env.NEOISM_BENCH_NATIVE_CODE_TEXT==="1";
+    if(nativeText)editor.call("raster.configure",{enabled:false});
+    if(editor.frame.lines.some(line=>line.raster!==undefined)===nativeText)throw new Error("Unexpected code text rendering mode");
+    await measure(nativeText?"code-native-text-scroll":"code-raster-scroll",()=>{if(++n%150===0)dir=-dir;queueWheel(b.x+b.width/2,b.y+b.height/2,0,dir*scrollDelta);},3000,scrollPeriod,()=>editor.frame.scrollY);
   }
   if(scenario==="agent"){
    model.openThread(server.threads[0] as any);await Bun.sleep(800);
@@ -149,5 +177,5 @@ try{
    await measure("agent-stream",()=>{text+=` token${k++}`;if(k%25===0)text+="\n\n";server.push({MessageUpdated:{session_id:"one",message:{id:"stream",role:"Assistant",kind:"Assistant",text,status:"running"}}});},3000,16);
   }
  }
-}catch(error){console.error("SCENARIO ERROR",error instanceof Error?error.stack:error);}finally{root.unmount();model.dispose();client.stop();server.stop();loop.stop();displayClock.dispose();}
-process.exit(0);
+}catch(error){console.error("SCENARIO ERROR",error instanceof Error?error.stack:error);process.exitCode=1;}finally{root.unmount();model.dispose();client.stop();server.stop();loop.stop();displayClock.dispose();}
+process.exit(process.exitCode??0);

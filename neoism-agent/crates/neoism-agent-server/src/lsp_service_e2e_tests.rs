@@ -18,6 +18,74 @@ use super::super::{
 };
 
 #[test]
+fn lifecycle_idle_retirement_preserves_other_views_requests_and_live_tasks() {
+    let workspace = TestWorkspace::new("idle-leases");
+    let file = workspace.path.join("src/main.rs");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "broken_v1").unwrap();
+    let server = compile_fake_server(&workspace);
+    let log = workspace.path.join("server.log");
+    write_lsp_config(&workspace.path, &server, &log, "serve");
+    let runtime = &workspace.runtime;
+    let service = &runtime.service;
+    let spec = configured_test_spec(runtime, &workspace.path);
+    service.sync(&workspace.path, &file, Some("unsaved editor text"), &spec).unwrap();
+    let first_view = runtime.lease_document(&workspace.path, &file);
+    let second_view = runtime.lease_document(&workspace.path, &file);
+    drop(first_view);
+    service.retire_idle_clients(Duration::ZERO);
+    assert_eq!(service.clients.lock().unwrap().len(), 1, "another view still owns the server");
+    let agent_runtime = super::super::LspRuntime::new(crate::standard_services());
+    agent_runtime.service.sync(&workspace.path, &file, Some("agent disk snapshot"), &spec).unwrap();
+    agent_runtime.service.retire_idle_clients(Duration::ZERO);
+    assert!(agent_runtime.service.clients.lock().unwrap().is_empty());
+    assert_eq!(service.clients.lock().unwrap().len(), 1, "agent retirement must not touch the editor owner");
+    assert_eq!(
+        service.clients.lock().unwrap().values().next().unwrap().lock().unwrap().synced_hashes.get(&file),
+        Some(&text_hash("unsaved editor text")),
+        "separate agent ownership must not replace unsaved editor authority",
+    );
+    drop(second_view);
+
+    let active_request = service.clients.lock().unwrap().values().next().unwrap().clone();
+    let leader = active_request.lock().unwrap().client.process_id().unwrap();
+    let weak_client = Arc::downgrade(&active_request);
+    service.retire_idle_clients(Duration::ZERO);
+    assert_eq!(service.clients.lock().unwrap().len(), 1, "admitted request must survive");
+    drop(active_request);
+
+    let task_leases = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    runtime.protect_generation(&task_leases);
+    service.retire_idle_clients(Duration::ZERO);
+    assert_eq!(service.clients.lock().unwrap().len(), 1, "live task between LSP calls must survive");
+    task_leases.store(0, std::sync::atomic::Ordering::Release);
+    service.close_document(&workspace.path, &file).unwrap();
+    service.retire_idle_clients(Duration::ZERO);
+    assert!(service.clients.lock().unwrap().is_empty());
+    assert!(weak_client.upgrade().is_none(), "cache must release the transport Arc");
+    #[cfg(unix)]
+    {
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(leader as i32, &mut status, libc::WNOHANG) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD), "idle retirement left a zombie leader");
+    }
+    #[cfg(not(unix))]
+    let _ = leader;
+    assert_eq!(count_log_lines(&log, "shutdown"), 2);
+    assert!(service.document_versions.lock().unwrap().is_empty());
+    assert!(service.file_clients.lock().unwrap().is_empty());
+
+    // The cached workspace/runtime remains reusable after server retirement.
+    service.sync(&workspace.path, &file, Some("new task text"), &spec).unwrap();
+    assert_eq!(service.clients.lock().unwrap().len(), 1);
+    service.retire_idle_clients(Duration::ZERO);
+    assert!(service.clients.lock().unwrap().is_empty());
+    assert_eq!(count_log_lines(&log, "shutdown"), 3);
+    assert!(service.document_versions.lock().unwrap().is_empty(), "idle agent documents must release versions too");
+    assert!(service.file_clients.lock().unwrap().is_empty());
+}
+
+#[test]
 fn explicit_navigation_keeps_targets_when_another_adapter_fails() {
     use super::super::{query_navigation, LspNavigationQuery as Q};
     let workspace = TestWorkspace::new("navigation-partial-success");

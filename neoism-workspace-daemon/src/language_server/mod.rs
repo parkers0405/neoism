@@ -22,6 +22,7 @@ pub(crate) use active_buffer::{
     queue_buffer_sync, subscribe_diagnostics,
 };
 pub use live_sync::{flush_document_sync, save_document, sync_document};
+pub(crate) use live_sync::{lease_document, LiveDocumentLease};
 pub(crate) use native_queries::{
     apply_code_action_at, commit_structured_edit, finalize_structured_edit,
     prepare_structured_edit, query_at, read_query, scoped_file as native_lsp_file,

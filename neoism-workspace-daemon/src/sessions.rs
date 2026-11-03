@@ -496,6 +496,9 @@ impl SessionRegistry {
     }
 
     fn close(&self, session_id: String) -> Vec<ServerMessage> {
+        // Removal tells reader_loop to stop; its final Arc releases the PTY
+        // and queues worker shutdown. The PTY worker owns child teardown and
+        // reaping, so the daemon never waits for an OS process here.
         let removed = self.inner.remove(&session_id);
         match removed {
             Some((_, _)) => {
@@ -1013,11 +1016,12 @@ fn reader_loop(
             Ok(0) => {
                 let exited = pty.lock().exit_code();
                 if let Some(code) = exited {
-                    registry.publish(ServerMessage::PtyClosed {
-                        session_id: session_id.clone(),
-                        exit_code: Some(code),
-                    });
-                    registry.inner.remove(&session_id);
+                    if registry.inner.remove(&session_id).is_some() {
+                        registry.publish(ServerMessage::PtyClosed {
+                            session_id: session_id.clone(),
+                            exit_code: Some(code),
+                        });
+                    }
                     break;
                 }
                 std::thread::sleep(READER_IDLE_SLEEP);
@@ -1037,11 +1041,12 @@ fn reader_loop(
             }
             Err(err) => {
                 tracing::warn!(%session_id, error = %err, "pty read error");
-                registry.publish(ServerMessage::PtyClosed {
-                    session_id: session_id.clone(),
-                    exit_code: None,
-                });
-                registry.inner.remove(&session_id);
+                if registry.inner.remove(&session_id).is_some() {
+                    registry.publish(ServerMessage::PtyClosed {
+                        session_id: session_id.clone(),
+                        exit_code: None,
+                    });
+                }
                 break;
             }
         }
@@ -1077,6 +1082,77 @@ fn append_backlog(backlog: &Mutex<OutputBacklog>, bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    async fn lifecycle_wait_reaped(pid: u32) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if unsafe { libc::kill(pid as i32, 0) } == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("PTY leader remained alive or zombie");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_close_reaps_four_owned_ptys() {
+        let (reg, mut subscription) = SessionRegistry::new();
+        for _ in 0..4 {
+            let created = reg.create_with_presentation(None, 80, 24,
+                Some("/bin/sh".into()), None, Presentation::Grid,
+                Some(vec!["-c".into(), "trap '' HUP; while :; do :; done".into()]));
+            let ServerMessage::PtyCreated { session_id, .. } = &created[0] else { panic!("{created:?}"); };
+            let pid = reg.inner.get(session_id).unwrap().pty.lock().shell_pid();
+            let start = std::time::Instant::now();
+            let reply = reg.handle(ClientMessage::ClosePty { session_id: session_id.clone() });
+            assert!(matches!(&reply[..], [ServerMessage::PtyClosed { .. }]));
+            assert!(start.elapsed() < Duration::from_secs(1));
+            lifecycle_wait_reaped(pid).await;
+            assert!(!reg.inner.contains_key(session_id));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut closed = 0;
+        while let Ok(message) = subscription.rx.try_recv() {
+            if matches!(message, ServerMessage::PtyClosed { .. }) { closed += 1; }
+        }
+        assert_eq!(closed, 4, "one broadcast per closed session");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_natural_exit_preserves_output_and_exit_notification() {
+        let (reg, mut subscription) = SessionRegistry::new();
+        let created = reg.create_with_presentation(None, 80, 24,
+            Some("/bin/sh".into()), None, Presentation::Grid,
+            Some(vec!["-c".into(), "read line; printf final-output; exit 7".into()]));
+        let ServerMessage::PtyCreated { session_id, .. } = &created[0] else { panic!("{created:?}"); };
+        let (pid, backlog) = {
+            let entry = reg.inner.get(session_id).unwrap();
+            let pid = entry.pty.lock().shell_pid();
+            entry.pty.lock().write(b"go\n").unwrap();
+            (pid, entry.backlog.clone())
+        };
+        let mut output = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match subscription.recv().await.unwrap() {
+                    ServerMessage::PtyOutput { bytes, .. } => output.extend(bytes),
+                    ServerMessage::PtyClosed { exit_code, .. } => {
+                        assert_eq!(libc::WEXITSTATUS(exit_code.unwrap()), 7);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }).await.unwrap();
+        assert!(output.windows(12).any(|bytes| bytes == b"final-output"));
+        assert_eq!(backlog.lock().replay_from(None).1, output);
+        assert!(!reg.inner.contains_key(session_id));
+        lifecycle_wait_reaped(pid).await;
+        assert!(!matches!(subscription.rx.try_recv(), Ok(ServerMessage::PtyClosed { .. })));
+    }
 
     #[test]
     fn configured_shell_arguments_preserve_command_argv() {

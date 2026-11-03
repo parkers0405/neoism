@@ -232,7 +232,7 @@ pub(crate) async fn handle_socket(
         crate::language_server::subscribe_diagnostics(&lsp_runtime);
     let mut editor_documents: std::collections::HashMap<
         (std::path::PathBuf, std::path::PathBuf, Option<String>),
-        (),
+        crate::language_server::LiveDocumentLease,
     > = Default::default();
     // Opaque LSP action and mutation capabilities die with this websocket.
     let structured_edit_vault = std::sync::Arc::new(std::sync::Mutex::new(
@@ -1136,11 +1136,14 @@ pub(crate) async fn handle_socket(
                             };
                             // One live subscription per surface. Reopening a pane
                             // replaces its old document; socket close drops all.
+                            // Acquire first: replacing the same surface/document
+                            // must not momentarily release its last consumer.
+                            let lease = crate::language_server::lease_document(&lsp_runtime, &root, &file);
                             editor_documents
                                 .retain(|(_, _, surface), _| surface != &surface_id);
                             editor_documents.insert(
                                 (root.clone(), file.clone(), surface_id.clone()),
-                                (),
+                                lease,
                             );
                             // Non-blocking half inline (cache + FIFO queue,
                             // socket order = sync order); the flush barrier
@@ -1749,6 +1752,17 @@ pub(crate) async fn handle_socket(
                             continue;
                         }
                     }
+                    // Workspace removal erases the surface registry. Snapshot
+                    // only its exact surface IDs first; never release by root,
+                    // which can be shared by another workspace or window.
+                    let closing_surfaces = match &message {
+                        WorkspaceClientMessage::CloseHostWorkspace { workspace_id } => {
+                            workspace_manager.editor_surfaces_for_workspace(workspace_id)
+                                .into_iter().map(|surface| surface.surface_id)
+                                .collect::<std::collections::HashSet<_>>()
+                        }
+                        _ => Default::default(),
+                    };
                     let outcome = workspace_handler::handle_preauthenticated(
                         &workspace_manager,
                         &mut connection_workspace,
@@ -1757,6 +1771,11 @@ pub(crate) async fn handle_socket(
                         peer_ip.as_deref(),
                         message,
                     );
+                    if !closing_surfaces.is_empty() && outcome.replies.iter().any(|reply| matches!(reply, WorkspaceServerMessage::HostWorkspaceTree { .. })) {
+                        editor_documents.retain(|(_, _, surface), _| {
+                            !surface.as_ref().is_some_and(|id| closing_surfaces.contains(id))
+                        });
+                    }
                     for reply in outcome.replies {
                         let resp = ServiceServerMessage::WorkspaceReply {
                             request_id,

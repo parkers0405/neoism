@@ -240,6 +240,7 @@ pub(crate) struct PluginGeneration {
     root: PathBuf,
     installed: Arc<neoism_agent_plugin_api::InstalledPlugins>,
     lease_count: AtomicUsize,
+    lsp_lease_count: Arc<AtomicUsize>,
     lease_released: tokio::sync::Notify,
     retiring: AtomicBool,
     websocket_cancel: tokio::sync::watch::Sender<bool>,
@@ -266,9 +267,22 @@ impl<T> Deref for LeasedResource<T> {
 
 struct GenerationLeaseToken {
     generation: Arc<PluginGeneration>,
+    uses_lsp: std::sync::Once,
 }
+
+impl GenerationLeaseToken {
+    fn acquire_lsp(&self) {
+        self.uses_lsp.call_once(|| {
+            self.generation.lsp_lease_count.fetch_add(1, Ordering::AcqRel);
+        });
+    }
+}
+
 impl Drop for GenerationLeaseToken {
     fn drop(&mut self) {
+        if self.uses_lsp.is_completed() {
+            self.generation.lsp_lease_count.fetch_sub(1, Ordering::AcqRel);
+        }
         self.generation.lease_count.fetch_sub(1, Ordering::AcqRel);
         self.generation.lease_released.notify_waiters();
     }
@@ -314,6 +328,7 @@ impl PluginGenerationLease {
         }
         let token = Arc::new(GenerationLeaseToken {
             generation: inner.clone(),
+            uses_lsp: std::sync::Once::new(),
         });
         Some(Self {
             snapshot: inner.snapshot.clone(),
@@ -341,6 +356,7 @@ impl PluginGenerationLease {
         inner.lease_count.fetch_add(1, Ordering::AcqRel);
         let token = Arc::new(GenerationLeaseToken {
             generation: inner.clone(),
+            uses_lsp: std::sync::Once::new(),
         });
         Self {
             snapshot: inner.snapshot.clone(),
@@ -380,13 +396,19 @@ impl PluginGenerationLease {
                 "native LSP is unavailable for this runtime",
             ));
         }
+        // Promote this shared task token only on LSP use. General generation
+        // leases also belong to passive websocket/bus consumers and must not
+        // pin a cached server forever. Clones span the task's provider gaps.
+        self._token.acquire_lsp();
         Ok((*self.inner.state_with_shutdown(
             neoism_agent_builtins::plugin::lsp::ID,
             || {
-                crate::lsp::LspRuntime::new_with_config(
+                let runtime = crate::lsp::LspRuntime::new_with_config(
                     self.inner.services.clone(),
                     self.inner.config.clone(),
-                )
+                );
+                runtime.protect_generation(&self.inner.lsp_lease_count);
+                runtime
             },
             |runtime: Arc<crate::lsp::LspRuntime>, root| async move {
                 runtime.shutdown_root(&root);
@@ -657,6 +679,7 @@ impl PluginGeneration {
             root,
             installed,
             lease_count: AtomicUsize::new(0),
+            lsp_lease_count: Arc::new(AtomicUsize::new(0)),
             lease_released: tokio::sync::Notify::new(),
             retiring: AtomicBool::new(false),
             websocket_cancel: tokio::sync::watch::channel(false).0,
@@ -1187,15 +1210,18 @@ impl WorkspaceRuntime {
         let resource = generation.inner.state_with_shutdown(
             neoism_agent_builtins::plugin::lsp::ID,
             || {
-                crate::lsp::LspRuntime::new_with_config(
+                let runtime = crate::lsp::LspRuntime::new_with_config(
                     self.services.clone(),
                     generation.inner.config.clone(),
-                )
+                );
+                runtime.protect_generation(&generation.inner.lsp_lease_count);
+                runtime
             },
             |runtime: Arc<crate::lsp::LspRuntime>, root| async move {
                 runtime.shutdown_root(&root);
             },
         )?;
+        generation._token.acquire_lsp();
         Ok(LeasedResource {
             resource,
             _generation: generation,
@@ -2239,6 +2265,29 @@ mod tests {
         runtime.generation.drain_retirements().await.unwrap();
         state.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lifecycle_passive_generations_do_not_pin_lsp_but_task_clones_span_gaps() {
+        let generation = test_generation(1);
+        let passive = PluginGenerationLease::try_new(generation.clone()).unwrap();
+        let _bus = passive.websocket_cancellation();
+        let _passive_clone = passive.clone();
+        let task = PluginGenerationLease::try_new(generation.clone()).unwrap();
+        assert_eq!(generation.lease_count.load(Ordering::Acquire), 2);
+        assert_eq!(generation.lsp_lease_count.load(Ordering::Acquire), 0);
+        task._token.acquire_lsp();
+        let provider_gap = task.clone();
+        provider_gap._token.acquire_lsp();
+        assert_eq!(generation.lsp_lease_count.load(Ordering::Acquire), 1);
+        drop(task);
+        assert_eq!(generation.lsp_lease_count.load(Ordering::Acquire), 1);
+        drop(provider_gap);
+        assert_eq!(generation.lsp_lease_count.load(Ordering::Acquire), 0);
+        // The websocket and bus remain connected, and still protect plugin
+        // generation teardown, but no longer obstruct LSP idle retirement.
+        assert_eq!(generation.lease_count.load(Ordering::Acquire), 1);
+        assert!(!*passive.websocket_cancellation().borrow());
     }
 
     #[test]

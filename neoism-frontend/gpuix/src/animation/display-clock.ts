@@ -17,11 +17,12 @@ export function installDisplayClock(renderer: DisplayRenderer, onError: (error: 
   const setWake = renderer.setFrameWakeCallback?.bind(renderer);
   if (!setWake || !renderer.requestFrameWake) return { active: false, dispose() {} };
   const callbacks = new Map<number, () => void>(), delayed = new Set<ReturnType<typeof setTimeout>>();
-  let next = 0, active = false, queued = false, requested = false, disposed = false;
+  let next = 0, active = false, queued = false, requested = false, disposed = false, wakeStarted=0;
   let detachSchedule: (() => void) | undefined;
   const arm = () => {
     if (!active || requested || disposed) return;
     requested = true;
+    wakeStarted=profileStart();
     let accepted:boolean;
     try { accepted = renderer.requestFrameWake!(); }
     catch (error) { requested = false; onError(error); return; }
@@ -63,6 +64,7 @@ export function installDisplayClock(renderer: DisplayRenderer, onError: (error: 
     if (!callback) return setWake(null);
     const accepted = setWake(() => {
       if (!active || disposed) return;
+      if(requested)profileEnd(callbacks.size?"display.frameWakeWait":"display.reservedWakeWait",wakeStarted);
       requested = false;
       const batch = [...callbacks.values()]; callbacks.clear();
       // Reserve the following platform opportunity before preparing this frame.

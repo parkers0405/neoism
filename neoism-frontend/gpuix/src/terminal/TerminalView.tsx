@@ -13,6 +13,8 @@ import { cursorPaint, sameBounds } from "../editor/paint-frame";
 import { focusedNativeElement, focusNativeElement, invalidateNativeFocus } from "../native-focus";
 import {CursorBlinkClock} from "../ui/cursor-blink";
 import {terminalPaintOps} from "./paint";
+import {profileStart,profileEnd} from "../profiling";
+import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
 
 export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean; active?: boolean; focusToken?: number; onFocus?: () => void; sessionId: string; client: DaemonConnection; config: AppConfig; onSearch: (kind: "/" | "?", host: SearchHost) => void; report: (error: unknown) => void }) {
   const renderer = useGpuixRequired();
@@ -29,11 +31,12 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
   const [cursorColor, setCursorColor] = createSignal(props.config.cursorColor || props.config.theme.accent);
   const offset = createMemo(() => frame().offset);
   const ink=createMemo(()=>({lines:frame().lines,extra:frame().extra}),undefined,{equals:(a,b)=>a.lines===b.lines&&a.extra===b.extra});
-  const paint=createMemo(()=>JSON.stringify(terminalPaintOps(ink(),props.config,cellWidth(),lineHeight)));
+  const paint=createMemo(()=>{const started=profileStart();try{return JSON.stringify(terminalPaintOps(ink(),props.config,cellWidth(),lineHeight));}finally{profileEnd("terminal.paint",started);}});
   const caret = createMemo(() => cursorPaint(cursor().quad));
   let host: HostElement | undefined, selecting = false, disposed = false;
   const send = session.send;
   const cursorAnimation=new TerminalCursorAnimation(()=>buffer.cursor(cellWidth(),lineHeight),setCursor,focused);
+  const paintAnimation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   createEffect(()=>{const position=frame().cursor;blinkClock.update({active:focused(),enabled:props.config.cursorBlink,intervalMs:props.config.cursorBlinkInterval,animating:cursor().animating,mode:"terminal",activityToken:`${position.x}:${position.y}:${position.shape}:${cellWidth()}:${lineHeight}`});});
   const receiveFocus = (value: boolean) => {
     if (focused() === value) return;
@@ -41,7 +44,9 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
     if (value) { props.onFocus?.(); cursorAnimation.request(); }
     else { selecting = false; cursorAnimation.cancel(); }
   };
-  const cleanupBuffer = buffer.subscribe(() => {setFrame(buffer.frame());cursorAnimation.request();});
+  // Parse every packet immediately, but do not rebuild/upload a viewport for
+  // every packet in an output burst. Present the latest state once per frame.
+  const cleanupBuffer = buffer.subscribe(() => {paintAnimation.request(()=>{if(!disposed)setFrame(buffer.frame());});cursorAnimation.request();});
   createEffect(()=>{cellWidth();cursorAnimation.request();});
   const blinkTimer = setInterval(() => {
     const owner = focusedNativeElement(renderer);
@@ -61,7 +66,7 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
   let releaseCaret=()=>{};
   onMount(() => {if(host)releaseCaret=registerSurfaceCaret(renderer,host,()=>cursor().quad.map(point=>[point[0]+size().x,point[1]+size().y]));if (active() && host) focusNativeElement(renderer, host.id); });
   onCleanup(()=>releaseCaret());
-  onCleanup(() => { disposed = true; cursorAnimation.dispose(); blinkClock.dispose(); buffer.focus(false); cleanupBuffer(); clearInterval(blinkTimer); });
+  onCleanup(() => { disposed = true; paintAnimation.dispose(); cursorAnimation.dispose(); blinkClock.dispose(); buffer.focus(false); cleanupBuffer(); clearInterval(blinkTimer); });
   const intercepted = new Set<string>();
   const keyDown = (event: KeyEvent, released = false) => {
     const key = event.key?.toLowerCase() || "";

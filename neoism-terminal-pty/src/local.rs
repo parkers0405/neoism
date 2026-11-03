@@ -347,10 +347,9 @@ impl LocalPty {
 
     pub(crate) fn close(mut self) {
         let _ = self.cmd_tx.send(Command::Shutdown);
-        if let Some(handle) = self.worker.take() {
-            // Best effort — don't hang on a stuck worker thread.
-            let _ = handle.join();
-        }
+        // Detach: PTY destruction (notably ClosePseudoConsole on Windows)
+        // and child reaping must never hold up the caller/UI indefinitely.
+        self.worker.take();
     }
 
     pub(crate) fn worker_error(&self) -> Option<io::Error> {
@@ -533,20 +532,6 @@ fn reader_loop_impl<P: EventedPty>(
                 continue;
             }
 
-            if token == pty.child_event_token() {
-                if let Some(teletypewriter::ChildEvent::Exited) = pty.next_child_event() {
-                    let Some(status) = child_status(pty) else {
-                        break 'event_loop Err(io::Error::new(
-                            ErrorKind::Other,
-                            "child exited but its exit status is unavailable",
-                        ));
-                    };
-                    exit_status.store(status, Ordering::SeqCst);
-                    let _ = child_event_tx.send(status);
-                    break 'event_loop Ok(());
-                }
-            }
-
             if token == pty.read_token() || token == pty.write_token() {
                 #[cfg(unix)]
                 if UnixReady::from(event.readiness()).is_hup() {
@@ -600,6 +585,33 @@ fn reader_loop_impl<P: EventedPty>(
                     }
                 }
             }
+        }
+
+        // Read queued output before exposing exit, including data accompanied
+        // only by HUP. Both Unix spawn paths install SIGCHLD before spawning;
+        // their signal pipe covers exits before poll registration without an
+        // idle polling timer. Bound the drain since
+        // a descendant could still be writing after the leader exits.
+        if let Some(teletypewriter::ChildEvent::Exited) = pty.next_child_event() {
+            for _ in 0..16 {
+                match pty.reader().read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = byte_tx.send(buf[..n].to_vec());
+                    }
+                    Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            let Some(status) = child_status(pty) else {
+                break 'event_loop Err(io::Error::new(
+                    ErrorKind::Other,
+                    "child exited but its exit status is unavailable",
+                ));
+            };
+            exit_status.store(status, Ordering::SeqCst);
+            let _ = child_event_tx.send(status);
+            break 'event_loop Ok(());
         }
 
         // Reregister with appropriate interest.

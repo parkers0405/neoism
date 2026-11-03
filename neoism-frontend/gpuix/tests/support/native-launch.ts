@@ -3,7 +3,7 @@ import {mkdirSync,writeFileSync} from "node:fs";
 import {dirname,resolve} from "node:path";
 import type {SavedSession} from "../../src/session-store";
 import { connectStdio } from "@gpuix/solid/automation";
-export interface NativeLaunchOptions{command:string;args:string[];cwd:string;env?:NodeJS.ProcessEnv;openWorkspaceIds?:readonly string[]}
+export interface NativeLaunchOptions{command:string;args:string[];cwd:string;env?:NodeJS.ProcessEnv;openWorkspaceIds?:readonly string[];onStderr?:(chunk:string)=>void}
 /** Fixture-only membership is explicit and never overwrites a relaunch's
  * recovery file. Production workspace defaults remain in the real model. */
 export function seedNativeWorkspaceSession(options:NativeLaunchOptions):boolean{
@@ -21,10 +21,11 @@ export function seedNativeWorkspaceSession(options:NativeLaunchOptions):boolean{
 // Keep native stderr visible: otherwise assertion timeouts hide Rust/JS errors.
 export async function launchNative(options:NativeLaunchOptions) {
   seedNativeWorkspaceSession(options);
-  const child = spawn(options.command, options.args, { cwd: options.cwd, env: { ...process.env, ...options.env }, stdio: ["pipe", "pipe", "inherit"] });
+  const child = spawn(options.command, options.args, { cwd: options.cwd, env: { ...process.env, ...options.env }, stdio: ["pipe", "pipe", options.onStderr?"pipe":"inherit"] });
+  if(options.onStderr)child.stderr!.on("data",chunk=>options.onStderr!(chunk.toString("utf8")));
   return connectStdio({
-    write: (chunk) => { child.stdin.write(chunk); },
-    feed: (listener) => { child.stdout.on("data", (data) => listener(data.toString("utf8"))); },
+    write: (chunk) => { child.stdin!.write(chunk); },
+    feed: (listener) => { child.stdout!.on("data", (data) => listener(data.toString("utf8"))); },
     close: async () => {
       if (child.exitCode !== null || child.signalCode !== null) return;
       await new Promise<void>((resolve) => {

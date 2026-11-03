@@ -24,6 +24,9 @@ use neoism_ui::{
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashMap};
 
+#[path = "agent_timeline_animation.rs"]
+mod animation;
+
 struct View {
     preparation_scope: u64,
     preparing: bool,
@@ -104,6 +107,10 @@ fn now_seconds() -> f32 {
 }
 
 fn render_frame(view: &mut View) -> Value {
+    // Expansion geometry is sampled during paint. If cold preparation outlives
+    // its animation, post-paint wall-clock activity alone can strand that early
+    // geometry. Preserve this frame's initial activity for one final repaint.
+    let animation_before = view.pane.animation_reason();
     // This standalone timeline bypasses the full-pane renderer's frame reset.
     // Only images painted in this frame may retain preview click targets.
     view.pane.composer_interactions.clear_rects();
@@ -161,10 +168,13 @@ fn render_frame(view: &mut View) -> Value {
         view.pane.drain_pending_outbound().into_iter().filter(|command|!matches!(command,OutboundAgentCommand::SwitchSession{..})).flat_map(|command|match map_outbound_command(command,&context){AgentProtocolMapping::Messages(messages)=>messages.into_iter().filter_map(|message|serde_json::to_value(message).ok()).collect::<Vec<_>>(),_=>vec![]}).collect::<Vec<_>>()
     };
     view.preparing=neoism_ui::panels::agent_pane::view::markdown::end_preparation();
+    let (animating, reason) = animation::frame_animation(
+        animation_before, view.pane.animation_reason(), view.preparing, scrolling,
+    );
     json!({
         "preparing":view.preparing,
-        "animating": view.preparing || scrolling || view.pane.animation_reason().is_some(),
-        "reason": view.pane.animation_reason(),
+        "animating": animating,
+        "reason": reason,
         "selecting": view.selecting,
         "pointer": pointer,
         "hasConversation": view.pane.has_conversation(),

@@ -413,46 +413,69 @@ pub fn create_pty_with_spawn(
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_exec_args(shell: &str, args: &[String]) -> Vec<String> {
+fn macos_shell_command(shell: &str, args: &[String]) -> Command {
     let name = shell.rsplit('/').next().unwrap_or(shell);
-    // Pass user arguments as positional parameters, never shell source. This
-    // also preserves empty arguments and executable paths containing spaces.
-    let mut command = vec![
-        "/bin/zsh".into(),
-        "-fc".into(),
-        "exec -a \"$0\" \"$@\"".into(),
-        format!("-{name}"),
-        shell.into(),
-    ];
-    command.extend_from_slice(args);
+    // Own the shell itself, not /usr/bin/login's PAM monitor: login forks,
+    // discards the shell's wait status, and closes the terminal on SIGHUP.
+    // A leading '-' retains login-shell startup (/etc/zprofile's path_helper,
+    // user login profiles, etc.), including for the default interactive shell.
+    // Command passes literal argv directly, without an intermediate shell.
+    let mut command = Command::new(shell);
+    command.arg0(format!("-{name}")).args(args);
     command
 }
 
 #[cfg(test)]
 mod macos_exec_tests {
-    use super::macos_exec_args;
-    use std::process::Command;
+    use super::macos_shell_command;
 
     #[test]
     fn login_command_preserves_argument_boundaries() {
         let args = vec!["-c".into(), "printf '%s' \"$value\"; exit 7".into(), "".into()];
-        let command = macos_exec_args("/path with spaces/my's shell", &args);
-        assert_eq!(&command[..5], ["/bin/zsh", "-fc", "exec -a \"$0\" \"$@\"", "-my's shell", "/path with spaces/my's shell"]);
-        assert_eq!(&command[5..], args);
+        let command = macos_shell_command("/path with spaces/my's shell", &args);
+        assert_eq!(command.get_program(), "/path with spaces/my's shell");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>());
     }
 
     #[test]
-    fn intermediate_shell_passes_scripts_and_literals_without_expansion() {
+    fn owned_login_shell_preserves_pid_status_and_literal_arguments() {
         let values = ["", "two words", "a'b", "$HOME", "$(printf injected)", "*", "semi;colon", "line\nbreak"];
-        let mut args = vec!["-c".into(), "printf '%s\\000' \"$@\"".into(), "script".into()];
+        let mut args = vec!["-c".into(), "printf '%s\\000' \"$0\" \"$$\" \"$@\"; exit 7".into(), "script".into()];
         args.extend(values.iter().map(|value| (*value).into()));
-        let command = macos_exec_args("/bin/sh", &args);
-        // Both shells support exec -a; macOS exercises its actual intermediary.
-        let shell = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
-        let output = Command::new(shell).args(&command[1..]).output().unwrap();
-        assert!(output.status.success(), "{:?}", output);
-        let expected: Vec<u8> = values.iter().flat_map(|value| value.bytes().chain(std::iter::once(0))).collect();
+        // sh -c takes its first operand after the script as $0. Use that slot
+        // explicitly in the literals test; the no-operand case below tests arg0.
+        let child = macos_shell_command("/bin/sh", &args)
+            .stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let pid = child.id().to_string();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        let expected: Vec<u8> = ["script", pid.as_str()].into_iter().chain(values)
+            .flat_map(|value| value.bytes().chain(std::iter::once(0))).collect();
         assert_eq!(output.stdout, expected);
+
+        let output = macos_shell_command("/bin/sh", &["-c".into(), "printf '%s' \"$0\"".into()]).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"-sh");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_shell_loads_login_profiles_and_keeps_owned_pid() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("neoism-login-profile-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        // Use the actual default (no explicit argv) launch shape. ZDOTDIR
+        // isolates user startup files without skipping system login profiles.
+        std::fs::write(dir.join(".zprofile"), "export NEOISM_LOGIN_PROFILE=loaded\n").unwrap();
+        std::fs::write(dir.join(".zlogin"), "printf '%s:%s:%s' \"$NEOISM_LOGIN_PROFILE\" \"$0\" \"$$\"; exit 7\n").unwrap();
+        let child = macos_shell_command("/bin/zsh", &[]).env("ZDOTDIR", &dir)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let pid = child.id();
+        let output = child.wait_with_output().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, format!("loaded:-zsh:{pid}").as_bytes());
     }
 }
 
@@ -513,28 +536,7 @@ pub fn create_pty_with_spawn_env(
     let mut builder = {
         #[cfg(target_os = "macos")]
         {
-            // On macOS, use /usr/bin/login to ensure proper login shell environment
-            // This ensures PATH includes directories like /usr/local/bin
-            let mut login_cmd = Command::new("/usr/bin/login");
-
-            // Check for .hushlogin in home directory
-            let hushlogin_path = std::path::Path::new(&user.home).join(".hushlogin");
-            let flags = if hushlogin_path.exists() {
-                "-qflp"
-            } else {
-                "-flp"
-            };
-
-            // -f: Bypasses authentication for already-logged-in user
-            // -l: Skips changing directory to $HOME
-            // -p: Preserves environment
-            // -q: Act as if .hushlogin exists
-            login_cmd.args([flags, &user.user]);
-
-            // Use /bin/zsh as intermediate shell because it supports 'exec -a'
-            login_cmd.args(macos_exec_args(shell_program, &args));
-
-            login_cmd
+            macos_shell_command(shell_program, &args)
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -594,6 +596,11 @@ pub fn create_pty_with_spawn_env(
     builder.stderr(owned_child.try_clone()?);
     builder.stdout(owned_child);
 
+    // Retain login's identity environment while inheriting the caller's PATH;
+    // the login shell still runs system/user profiles (including path_helper).
+    // No PAM/login monitor is needed inside this already-authenticated app.
+    #[cfg(target_os = "macos")]
+    builder.env("LOGNAME", &user.user).env("SHELL", &user.shell);
     builder.env("USER", user.user);
     builder.env("HOME", user.home);
     builder.envs(env.iter().map(|(key, value)| (key, value)));

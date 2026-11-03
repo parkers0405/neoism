@@ -97,7 +97,7 @@ fn explicit_close_and_drop_reap_owned_leaders() {
 fn natural_exit_reaps_and_preserves_final_output_and_notification() {
     // Repeat immediate exits to cover exit-before-signal-registration races.
     for _ in 0..16 {
-        let mut session = spawn("printf final-output; exit 7");
+        let mut session = spawn("printf 'final-output:%s' \"$$\"; exit 7");
         let pid = session.shell_pid();
         let events = session.take_child_event_receiver().expect("child events");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -116,8 +116,9 @@ fn natural_exit_reaps_and_preserves_final_output_and_notification() {
         let status = session.exit_code().unwrap();
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 7);
-        // macOS's login intermediary may emit a last-login banner first.
-        assert!(output.ends_with(b"final-output"), "final output lost: {output:?}");
+        // Login profiles may print first, but the owned PID must be the shell
+        // itself, not a login monitor which discards status and intercepts HUP.
+        assert!(output.ends_with(format!("final-output:{pid}").as_bytes()), "final shell output/PID lost: {output:?}");
         assert_eq!(events.try_recv().unwrap(), status);
         assert!(events.try_recv().is_err(), "duplicate exit event");
         assert_reaped(pid);

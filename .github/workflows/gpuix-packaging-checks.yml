@@ -59,10 +59,11 @@ jobs:
         run: |
           python scripts/check-native-toolchain.py
           python scripts/test_restore_cached_source_times.py
-      - name: Install SDK and frontend dependencies
+      - name: Install SDK, shared client, and frontend dependencies
         shell: bash
         run: |
           npm --prefix neoism-agent/sdk/typescript ci
+          npm --prefix neoism-frontend/service-client ci
           npm --prefix neoism-frontend/gpuix ci
       # Catch host filesystem/transport assumptions before an expensive native
       # build. The release still runs its full suite against the native bridge.

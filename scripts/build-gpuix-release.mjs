@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {stageGpuixRelease} from './stage-gpuix-release.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url));
-const frontend=join(root,'neoism-frontend/gpuix'),sdk=join(root,'neoism-agent/sdk/typescript');
+const frontend=join(root,'neoism-frontend/gpuix'),sdk=join(root,'neoism-agent/sdk/typescript'),serviceClient=join(root,'neoism-frontend/service-client');
 const windows=process.platform==='win32',suffix=windows?'.exe':'';
 // Experimental device previews remain available to opt-in development builds.
 // Release packaging must exclude them even when the caller enabled the feature.
@@ -18,7 +18,7 @@ function run(program,args,cwd=root){
  if(result.error)throw result.error;
  if(result.status!==0)throw Error(`${program} ${args.join(' ')} failed (${result.status})`);
 }
-run('npm',['ci'],sdk);run('npm',['ci'],frontend);
+run('npm',['ci'],sdk);run('npm',['ci'],serviceClient);run('npm',['ci'],frontend);
 const bun=join(frontend,'node_modules/bun/bin/bun.exe');
 // Version/design drift must fail before the expensive native compilation.
 run('npm',['run','check:design'],frontend);

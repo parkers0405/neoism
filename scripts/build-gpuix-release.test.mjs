@@ -69,3 +69,12 @@ test('every release validates PTY ownership and argument forwarding before servi
   }
  }
 });
+
+test('every release installs shared service-client dependencies before bundling',()=>{
+ for(const platform of ['linux','darwin','win32']){
+  const {calls,run}=release(platform);run();
+  const install=calls.findIndex(({program,args,options})=>program==='npm'&&args[0]==='ci'&&options.cwd.endsWith(join('neoism-frontend','service-client')));
+  const build=calls.findIndex(({args})=>args[0]==='scripts/build.ts');
+  assert.ok(install>=0&&install<build,`${platform}: shared client imports need their own dependencies on clean runners`);
+ }
+});

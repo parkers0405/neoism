@@ -4,7 +4,7 @@ import{DaemonConnection}from"../src/daemon/client";
 import{WorkspaceModel}from"../src/model";
 import{createAgentDaemon}from"./support/agent-daemon";
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+3500;while(!predicate()){if(Date.now()>end)throw Error("Agent home defaults did not converge");await Bun.sleep(5);}};
-test("terminal cwd outside the workspace keeps saved model and reasoning without sending an unauthorized catalog directory",async()=>{
+test("a caller without desktop capability cannot silently load the old project's metadata for an outside cwd",async()=>{
  const f=fixture({agentConfigDefaults:{a:{defaultAgent:"build",model:"openai/advanced",variant:"high"}}});
  try{
   await until(()=>f.model.state.activeWorkspace?.id==="a"&&!f.model.state.agentDefaultsLoading);
@@ -14,13 +14,48 @@ test("terminal cwd outside the workspace keeps saved model and reasoning without
    await f.model.activateWorkspace(f.daemon.workspaces[0]);
    await until(()=>!f.model.state.catalogsLoading);
    expect(f.model.state.activeWorkspace?.root_dir).toBe(cwd);
-   expect(f.model.selection()).toMatchObject({model:"openai/advanced",thinking:"high"});
-   expect(f.model.state.catalogsError).toBeUndefined();
+   const inside=cwd==="/project/a/subdirectory";
+   if(inside){expect(f.model.selection()).toMatchObject({model:"openai/advanced",thinking:"high"});expect(f.model.state.catalogsError).toBeUndefined();}
+   else expect(f.model.state.catalogsError).toContain("not authorized");
    const reads=f.daemon.httpRequests.slice(before).filter(r=>/\/(config\/defaults|providers\/configured|agents|skills)$/.test(r.path));
    expect(reads).toHaveLength(4);
-   expect(reads.every(r=>r.directory===(cwd==="/project/a/subdirectory"?cwd:null))).toBe(true);
+   expect(reads.every(r=>r.directory===(r.path.endsWith("/providers/configured")&&!inside?null:cwd))).toBe(true);
   }
  }finally{f.close();}
+});
+test("desktop project metadata follows cwd while configured providers and paired clients retain workspace scope",async()=>{
+ for(const mode of ["desktop","paired","denied"]){
+  const requests:Array<{path:string;directory:string|null}>=[];
+  const server=Bun.serve({hostname:"127.0.0.1",port:0,fetch(request){
+   const url=new URL(request.url),path=url.pathname,directory=url.searchParams.get("directory");requests.push({path,directory});
+   if(path==="/agent/system/info")return mode==="desktop"?Response.json({systemId:"fixture",capabilityVersion:1}):new Response(null,{status:403});
+   if(path.startsWith("/agent/workspaces/a/")&&directory&&directory!=="/project/a"&&!directory.startsWith("/project/a/"))return Response.json({code:"forbidden",message:"The caller is not authorized for this directory",retryable:false,details:{}},{status:403});
+   if(path.endsWith("/providers/configured"))return Response.json({default:{},providers:[{id:"openai",name:"OpenAI",models:{base:{id:"base",name:"Base",limit:{context:128000}}}}]});
+   if(path.endsWith("/config/defaults"))return Response.json({defaultAgent:"plan",model:directory==="/project/b"?"openai/new-project":"openai/old-project",variant:"high"});
+   if(path.endsWith("/agents"))return Response.json([{name:"plan",description:directory}]);
+   if(path.endsWith("/skills"))return Response.json([{name:"review",description:directory}]);
+   return new Response(null,{status:404});
+  }});
+  const config={...loadConfig(["--config","/nonexistent/agent-directory-catalogs"],{}),endpoint:`ws://127.0.0.1:${server.port}/session`,authToken:"operator",pairingToken:mode==="paired"?"guest":undefined},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+  try{
+   const workspace={id:"a",host_id:"host",title:"A",root_dir:"/project/a"};model.update({workspaces:[workspace],activeWorkspace:{...workspace,root_dir:"/project/b"}});
+   await model.refreshCatalogs();
+   if(mode==="desktop"){
+    expect(model.state.catalogsError).toBeUndefined();expect(model.selection()).toMatchObject({agent:"plan",model:"openai/new-project",thinking:"high"});
+    expect(model.state.skills[0]?.description).toBe("/project/b");expect(model.state.agents[0]?.description).toBe("/project/b");
+   }else expect(model.state.catalogsError).toContain("not authorized");
+   const project=requests.filter(request=>/\/(config\/defaults|agents|skills)$/.test(request.path));
+   expect(project).toHaveLength(3);expect(project.every(request=>request.directory==="/project/b"&&request.path.startsWith(mode==="desktop"?"/agent/system/":"/agent/workspaces/a/"))).toBe(true);
+   expect(requests.filter(request=>request.path.endsWith("/providers/configured"))).toEqual([{path:"/agent/workspaces/a/v2/providers/configured",directory:null}]);
+   expect(requests.filter(request=>request.path==="/agent/system/info")).toHaveLength(mode==="paired"?0:1);
+   if(mode==="desktop"){
+    model.update({threads:[{session_id:"moved",title:"Moved",directory:"/project/c"}],surfaces:[{id:"agent:moved",kind:"agent",sessionId:"moved",title:"Moved",workspaceId:"a"}],activeSurfaceId:"agent:moved"});
+    await model.refreshCatalogs({maxAgeMs:30000});expect(model.state.agents[0]?.description).toBe("/project/c");expect(model.state.skills[0]?.description).toBe("/project/c");
+    model.update({activeSurfaceId:undefined});await model.refreshCatalogs({maxAgeMs:30000});
+    expect(model.state.agents[0]?.description).toBe("/project/b");expect(model.selection()).toMatchObject({model:"openai/new-project",thinking:"high"});
+   }
+  }finally{model.dispose();client.stop();server.stop(true);}
+ }
 });
 function fixture(options:Parameters<typeof createAgentDaemon>[0]){const daemon=createAgentDaemon(options),config={...loadConfig(["--config","/nonexistent/agent-home-defaults"],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);model.start();client.start();return{daemon,model,close(){model.dispose();client.stop();daemon.stop();}};}
 test("empty Agent home resolves configured agent/model/thinking through workspace SDK and explicit choice overrides defaults without changing conversation state",async()=>{

@@ -2,10 +2,68 @@ use super::*;
 
 // -- SSE event-stream proxy -------------------------------------------------
 
+#[derive(Default)]
+pub(crate) struct SessionStatusEvidence {
+    generations: Mutex<HashMap<String, u64>>,
+}
+
+impl SessionStatusEvidence {
+    /// Capture before issuing HTTP. A newer poll supersedes older polls even
+    /// when their responses arrive in reverse order.
+    pub(crate) fn begin_hydration(&self, session_id: &str) -> u64 {
+        let mut generations = self.generations.lock();
+        let generation = generations.entry(session_id.to_owned()).or_default();
+        *generation += 1;
+        *generation
+    }
+
+    pub(crate) fn publish_hydration(
+        &self,
+        tx: &AgentReplySender,
+        session_id: &str,
+        generation: u64,
+        messages: Vec<AgentServerMessage>,
+    ) {
+        let generations = self.generations.lock();
+        if generations.get(session_id) != Some(&generation) {
+            return;
+        }
+        // Keep validation AND publication atomic with live forwarding.
+        for message in messages {
+            let _ = tx.send(message);
+        }
+    }
+
+    pub(crate) fn forward(
+        &self,
+        tx: &AgentReplySender,
+        bound_session_id: &str,
+        event: Value,
+    ) {
+        let source_session = event_source_session(&event, bound_session_id);
+        let mut generations = self.generations.lock();
+        // Family streams carry children too: invalidate the source session's
+        // poll, not the bound root's. Include parts/queue edges as well as
+        // statuses; any newer live evidence conservatively wins over REST.
+        *generations.entry(source_session.to_owned()).or_default() += 1;
+        forward_agent_server_event(tx, bound_session_id, event);
+    }
+}
+
+fn event_source_session<'a>(event: &'a Value, bound_session_id: &'a str) -> &'a str {
+    let properties = event.get("properties").unwrap_or(&Value::Null);
+    properties
+        .get("sessionID")
+        .or_else(|| properties.get("sessionId"))
+        .and_then(Value::as_str)
+        .unwrap_or(bound_session_id)
+}
+
 pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
     // Idempotent: re-binding while a stream is already running is a
     // no-op (the existing handle keeps draining).
-    if inner.stream_handles.lock().contains_key(session_id) {
+    let mut handles = inner.stream_handles.lock();
+    if handles.contains_key(session_id) {
         return;
     }
     let inner_clone = inner.clone();
@@ -14,10 +72,7 @@ pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
         run_event_stream(inner_clone.clone(), key.clone()).await;
         inner_clone.stream_handles.lock().remove(&key);
     });
-    inner
-        .stream_handles
-        .lock()
-        .insert(session_id.to_string(), handle);
+    handles.insert(session_id.to_string(), handle);
 }
 
 pub(crate) fn start_catalog_event_stream(
@@ -191,7 +246,7 @@ async fn run_event_stream_inner(
                             if catalog {
                                 forward_catalog_event(&inner.tx, event);
                             } else {
-                                forward_agent_server_event(&inner.tx, &session_id, event);
+                                inner.status_evidence.forward(&inner.tx, &session_id, event);
                             }
                         }
                     }
@@ -290,12 +345,7 @@ pub(crate) fn forward_agent_server_event(
         .unwrap_or_default()
         .to_string();
     let properties = event.get("properties").cloned().unwrap_or(Value::Null);
-    let source_session = properties
-        .get("sessionID")
-        .or_else(|| properties.get("sessionId"))
-        .and_then(Value::as_str)
-        .unwrap_or(bound_session_id)
-        .to_string();
+    let source_session = event_source_session(&event, bound_session_id).to_string();
 
     match event_type.as_str() {
         "session.updated" => {

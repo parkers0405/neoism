@@ -29,6 +29,17 @@ impl Finder {
             .unwrap_or_default();
     }
     pub fn host_frame(&mut self, width: f32, height: f32) -> Value {
+        let mut frame = self.host_frame_with_rows(width, height, true);
+        // Legacy immediate hosts still paint their own blinking input caret.
+        let caret_tick = CARET_BLINK_MS - Instant::now()
+            .saturating_duration_since(self.caret_blink_start).as_millis() % CARET_BLINK_MS;
+        frame["nextTickMs"] = json!(frame["nextTickMs"].as_u64().unwrap_or(caret_tick as u64).min(caret_tick as u64));
+        frame
+    }
+
+    /// Compact host update: omitted rows mean retain the previous result set,
+    /// whereas an explicit empty array clears it. Geometry never needs rows JSON.
+    pub fn host_frame_with_rows(&mut self, width: f32, height: f32, include_rows: bool) -> Value {
         let scale = self.scale;
         let pad = FINDER_PADDING * scale;
         let input_h = INPUT_HEIGHT * scale;
@@ -71,7 +82,7 @@ impl Finder {
             * row_h
             + offset
             + cursor_offset;
-        let rows:Vec<Value>=self.results.iter().enumerate().map(|(index,(score,r))| {
+        let rows = include_rows.then(|| self.results.iter().enumerate().map(|(index,(score,r))| {
             let (text,marker,column,symbol)=match r {
                 Result_::File(_)=>("".to_owned(),"",None,None),
                 Result_::Grep(g)=>(g.text.clone(),"",Some(g.column),None),
@@ -80,12 +91,10 @@ impl Finder {
                 Result_::Symbol(s)=>(s.name.clone(),"",Some(s.column),Some(s.kind.as_str())),
             };
             json!({"index":index,"path":r.path(),"line":r.line(),"column":column,"text":text,"marker":marker,"symbol":symbol,"score":score})
-        }).collect();
-        let selected = rows.get(self.selected_index).cloned();
+        }).collect::<Vec<Value>>());
         let target=self.selected_open_target().map(|(path,line)|json!({"path":path.to_string_lossy(),"line":line,"column":self.selected_reference_target().map(|t|t.2).or_else(||self.selected_symbol_target().map(|t|t.1)),"mode":mode_name(self.mode),"query":self.query}));
-        let preview_path = selected
-            .as_ref()
-            .and_then(|r| r["path"].as_str())
+        let preview_path = self.results.get(self.selected_index)
+            .map(|(_, r)| r.path())
             .filter(|p| !p.is_empty())
             .map(ToString::to_string);
         let preview_x = inner_x + left_w + COLUMN_DIVIDER_WIDTH + PREVIEW_PADDING * scale;
@@ -144,8 +153,6 @@ impl Finder {
                 .saturating_sub(now.saturating_duration_since(dirty).as_millis())
                 + 1
         });
-        let caret_tick = CARET_BLINK_MS - now.saturating_duration_since(self.caret_blink_start).as_millis() % CARET_BLINK_MS;
-        let next_tick = Some(next_tick.unwrap_or(caret_tick).min(caret_tick));
         let pop_active = self.pop_on_open
             && now
                 .saturating_duration_since(self.open_pop_started)
@@ -187,11 +194,47 @@ impl Finder {
         } else {
             "No matches"
         };
-        json!({"enabled":self.enabled,"mode":mode_name(self.mode),"query":self.query,"rect":[x,y,w,h],"radius":FINDER_RADIUS*scale,"stroke":stroke,
+        let mut frame = json!({"enabled":self.enabled,"mode":mode_name(self.mode),"query":self.query,"rect":[x,y,w,h],"radius":FINDER_RADIUS*scale,"stroke":stroke,
             "inputRect":[inner_x,inner_y,left_w,input_h],"listRect":[inner_x,results_y,left_w,list_h],"previewRect":[preview_x,preview_y,preview_w,preview_h],
             "rowHeight":row_h,"inputFontSize":INPUT_FONT_SIZE*scale,"fontSize":RESULT_FONT_SIZE*scale,"previewFontSize":PREVIEW_FONT_SIZE*scale,"previewLineHeight":PREVIEW_LINE_HEIGHT*scale,
-            "selected":self.selected_index,"selectedY":selected_y,"offset":offset,"top":self.scroll_offset,"visibleRows":visible_rows,"rows":rows,"target":target,
+            "selected":self.selected_index,"selectedY":selected_y,"offset":offset,"top":self.scroll_offset,"visibleRows":visible_rows,"target":target,
             "badge":self.search_mode_label(),"matchTotal":self.buffer_match_total,"placeholder":placeholder,"empty":empty,"preview":preview_active,"previewPath":preview_path,
-            "previewRows":preview_rows,"previewUnreadable":self.preview_content_unreadable,"previewLoaded":self.preview_content_path==preview_path,"animating":animating,"nextTickMs":next_tick})
+            "previewRows":preview_rows,"previewUnreadable":self.preview_content_unreadable,"previewLoaded":self.preview_content_path==preview_path,"animating":animating,"nextTickMs":next_tick});
+        if let Some(rows) = rows { frame["rows"] = json!(rows); }
+        frame
+    }
+
+    /// Keep the original painter's measured caret geometry, but separate its
+    /// command so retained hosts can blink without rerunning Finder/render.
+    pub fn host_render(
+        &mut self,
+        paint: &mut crate::primitives::paint_record::RecordingPainter,
+        size: (f32, f32, f32),
+        theme: &crate::primitives::ide_theme::IdeTheme,
+        search: &dyn crate::services::SearchService,
+        files: &dyn crate::services::FilesService,
+    ) -> (Value, Value) {
+        let blink_start = self.caret_blink_start;
+        self.caret_blink_start = Instant::now();
+        // The host ticks before constructing metadata and deciding whether to
+        // send rows. Do not let render's legacy tick cross a debounce deadline
+        // and mutate results after that decision.
+        let query_dirty_at = self.query_dirty_at.take();
+        self.render(paint, size, theme, search, files);
+        self.query_dirty_at = query_dirty_at;
+        self.caret_blink_start = blink_start;
+        let mut commands = json!(paint.serializable_commands(false));
+        // The input caret is the only element-depth, square-cornered rect of
+        // this size. Use the shared constants, not a host-side geometry copy.
+        let index = commands.as_array().and_then(|commands| commands.iter().position(|c| {
+            c["kind"] == "rect"
+                && c["rect"][2] == json!(CARET_WIDTH * self.scale)
+                && c["rect"][3] == json!(INPUT_FONT_SIZE * self.scale + 4.0)
+                && c["depth"] == json!(DEPTH_ELEMENT)
+                && c["order"] == json!(ORDER)
+                && c["radii"] == json!([0.0, 0.0, 0.0, 0.0])
+        }));
+        let caret = index.map(|index| commands.as_array_mut().unwrap().remove(index)).unwrap_or(Value::Null);
+        (commands, caret)
     }
 }

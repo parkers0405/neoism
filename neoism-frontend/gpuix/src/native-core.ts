@@ -1,44 +1,10 @@
-import { dlopen, FFIType, ptr, CString, type Pointer } from "bun:ffi";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { callNativeCore } from "../../native-bridge";
 import { shareEditorPaint, shareLspFrame, unpackEditorPaint } from "./editor/paint-frame";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "./animation/frame-scheduler";
 import { profileStart, profileEnd } from "./profiling";
 
-let binding: ReturnType<typeof open> | undefined;
-function open() {
-  const name = process.platform === "win32" ? "neoism_gpuix_core.dll" : process.platform === "darwin" ? "libneoism_gpuix_core.dylib" : "libneoism_gpuix_core.so";
-  const paths = [process.env.NEOISM_GPUIX_CORE, join(dirname(process.execPath), "web/native", name), join(dirname(process.execPath), "../Resources/web/native", name), join(dirname(process.execPath), name), fileURLToPath(new URL(`../artifacts/${name}`, import.meta.url))].filter((path): path is string => !!path);
-  const path = paths.find(existsSync);
-  if (!path) throw new Error("Neoism's native engine is not built. Run npm run build:core in neoism-frontend/gpuix.");
-  return dlopen(path, {
-    neoism_core_call: { args: [FFIType.ptr, FFIType.u64], returns: FFIType.ptr },
-    neoism_core_free: { args: [FFIType.ptr], returns: FFIType.void },
-  });
-}
 export function coreCall<T = unknown>(op: string, args: Record<string, unknown> = {}): T {
-  const started=profileStart();
-  try {
-  binding ??= open();
-  const encodeStart=profileStart();
-  const bytes = new TextEncoder().encode(JSON.stringify({ op, ...args }));
-  profileEnd("core.encode",encodeStart,bytes.byteLength);
-  const nativeStart=profileStart();
-  const result = binding.symbols.neoism_core_call(ptr(bytes), bytes.byteLength) as Pointer;
-  profileEnd(`native.${op}`,nativeStart);
-  if (!result) throw new Error("Native engine returned no response");
-  try {
-    const decodeStart=profileStart(),json=new CString(result).toString();
-    profileEnd("core.readResponse",decodeStart,json.length);
-    const parseStart=profileStart();
-    const value: { ok?: T; error?: string } = JSON.parse(json);
-    profileEnd("core.parseResponse",parseStart);
-    profileEnd("core.decode",decodeStart,json.length);
-    if (value.error) throw new Error(value.error);
-    return value.ok as T;
-  } finally { binding.symbols.neoism_core_free(result); }
-  } finally { profileEnd(`core.${op}`,started); }
+  return callNativeCore<T>(op, args, { start: profileStart, end: profileEnd });
 }
 export interface EditorRun { text: string; x: number; width?: number; token: string; selected: boolean; severity?: string | null }
 export interface EditorSnapshot { version: 1; text: string; buffer: unknown; [key: string]: unknown }

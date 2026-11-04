@@ -6,8 +6,9 @@ import {sdkModel} from "../daemon/sdk";
 import {coreCall} from "../native-core";
 import {thinkingOptions} from "../design/generated";
 import {connectCatalog} from "./connect-catalog";
+import {hostPaths} from "../workspaces/host-paths";
 
-export interface SlashOption{title:string;description:string;footer:string;value:string;header?:boolean;section?:string;current?:boolean;pinned?:boolean;mcp?:unknown}
+export interface SlashOption{title:string;description:string;footer:string;value:string;header?:boolean;section?:string;current?:boolean;pinned?:boolean;keepOpen?:boolean;mcp?:unknown}
 export type SlashEffect="piss"|"cuss"|"glitch"|"disco"|"gangfight"|"praise";
 export interface SlashPickerRequest{token?:string;loading?:boolean;error?:string;usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;onLoadMore?:()=>void|Promise<void>;onCancel?:()=>void;onBack?:()=>void|Promise<void>;kind:string;title:string;options:SlashOption[];selected?:string;onSelect?:(value:string)=>void|Promise<void>;
  /** Original-card stage status (connect / OAuth / MCP authorization). */
@@ -67,19 +68,25 @@ export class SlashController{
    selection:{...model.selection(sessionId)},sdk:sessionId?model.agentSdk.forSession(workspace.id,sessionId):model.agentSdk.forWorkspace(workspace.id)};
  }
  private current(scope:Scope){
-  const state=this.options.model.state;if(state.activeWorkspace?.id!==scope.workspaceId)return false;
-  const session=state.surfaces.find(surface=>surface.id===state.activeSurfaceId)?.sessionId;
-  return scope.sessionId?session===scope.sessionId:state.activeSurfaceId===scope.surfaceId;
+   const state=this.options.model.state;if(state.activeWorkspace?.id!==scope.workspaceId)return false;
+   const session=state.surfaces.find(surface=>surface.id===state.activeSurfaceId)?.sessionId;
+   const directory=state.threads.find(thread=>thread.session_id===scope.sessionId)?.directory||state.activeWorkspace?.root_dir||"";
+   return directory===scope.directory&&(scope.sessionId?session===scope.sessionId:state.activeSurfaceId===scope.surfaceId);
  }
  private assertCurrent(scope:Scope){if(!this.current(scope))throw new Error("The conversation changed. Run the command again in the current conversation.");}
+ private async directorySdk(scope:Scope){
+  const sdk=await this.options.model.agentSdk.forDirectory(scope.workspaceId);this.assertCurrent(scope);return sdk;
+ }
  private notice(scope:Scope,title:string,value:unknown){if(!scope.pickerCancelled&&!this.disposed&&this.current(scope))this.options.hooks.notice(title,value,scope.sessionId);}
  async refresh(){
   const scope=this.scope(),generation=++this.generation,key=`${scope.workspaceId}\0${scope.directory}`;
   if(key!==this.catalogScope){this.capabilities=undefined;this.catalogScope=key;}
   this.update({loading:true,error:undefined});
   try{
-   const [commands,capabilities]=await Promise.allSettled([scope.sdk.catalog.commands.list(scope.directory),scope.sdk.capabilities.list(scope.directory)]);
-   if(this.disposed||generation!==this.generation||this.options.model.state.activeWorkspace?.id!==scope.workspaceId)return;
+   const sdk=await this.directorySdk(scope);
+   const [commands,capabilities]=await Promise.allSettled([sdk.catalog.commands.list(scope.directory),sdk.capabilities.list(scope.directory)]);
+   if(this.disposed||generation!==this.generation)return;
+   if(!this.current(scope)){this.update({loading:false});return;}
    if(capabilities.status==="fulfilled")this.capabilities=capabilities.value;
    const rows=this.builtins.filter(row=>this.supported(this.plan(row.value).kind)),seen=new Set(rows.map(row=>row.value));
    for(const command of commands.status==="fulfilled"?commands.value:[]){
@@ -89,21 +96,28 @@ export class SlashController{
     seen.add(value);rows.push(option(value,command.description||"Server command",value,"server"));
    }
    this.update({options:rows,loading:false,error:commands.status==="rejected"?(commands.reason instanceof Error?commands.reason.message:"Server commands unavailable"):undefined});
-  }catch(error){if(generation===this.generation)this.update({loading:false,error:error instanceof Error?error.message:"Command catalog unavailable"});}
+  }catch(error){if(generation===this.generation)this.update({loading:false,error:this.current(scope)?error instanceof Error?error.message:"Command catalog unavailable":undefined});}
  }
  execute(text:string):Promise<boolean>{
   if(!text.trim().startsWith("/"))return Promise.resolve(false);
   if(this.disposed)return Promise.reject(new Error("The command composer has closed"));
   if(this.options.attachments?.().length)return Promise.reject(new Error("Attachments belong to a chat message, not a slash command. Remove them before running this command."));
-  const scope=this.scope(),key=`${scope.workspaceId}\0${scope.sessionId||""}\0${text}`;
-  const existing=this.flights.get(key);if(existing)return existing;
-  const task=this.perform(scope,this.plan(text)).catch(async error=>{if(scope.pickerCancelled||this.disposed)return true;await this.pickerFailure(scope,error);throw error;}).finally(()=>{if(this.flights.get(key)===task)this.flights.delete(key);});
-  this.flights.set(key,task);return task;
+   const scope=this.scope(),key=`${scope.workspaceId}\0${scope.sessionId||""}\0${text}`,plan=this.plan(text);
+   const historyEdit=plan.kind==="UndoSession"||plan.kind==="RedoSession";
+   const existing=!historyEdit&&this.flights.get(key);if(existing)return existing;
+   const task=this.perform(scope,plan).catch(async error=>{if(scope.pickerCancelled||this.disposed)return true;await this.pickerFailure(scope,error);throw error;}).finally(()=>{if(this.flights.get(key)===task)this.flights.delete(key);});
+   if(!historyEdit)this.flights.set(key,task);return task;
  }
  private async ensureSession(scope:Scope){
   if(scope.sessionId)return scope.sessionId;
-  const session=await scope.sdk.sessions.create({directory:scope.directory||undefined,agent:scope.selection.agent||undefined,model:sdkModel(scope.selection)});
+  const session=await this.createSession(scope);
   this.assertCurrent(scope);this.openSession(scope,session,true);return session.id;
+ }
+ private createSession(scope:Scope){
+  const model=this.options.model,root=model.state.workspaces.find(workspace=>workspace.id===scope.workspaceId)?.root_dir;
+  const paths=hostPaths(root||""),relative=root&&scope.directory?paths.relative(root,scope.directory):undefined;
+  const outside=relative!==undefined&&(relative===".."||relative.startsWith(`..${paths.sep}`)||paths.isAbsolute(relative));
+  return model.agentSdk.createSession(scope.workspaceId,{directory:scope.directory||undefined,agent:scope.selection.agent||undefined,model:sdkModel(scope.selection)},outside);
  }
  private requireSession(scope:Scope){if(!scope.sessionId)throw new Error("Open a conversation first");return scope.sessionId;}
  private openSession(scope:Scope,session:Session,inheritSelection=false){
@@ -116,6 +130,7 @@ export class SlashController{
   if(session.parentId)parents[session.id]=session.parentId;else delete parents[session.id];
   model.setUI({agentParentSessions:parents});
   const surfaceId=model.openThread(thread);scope.sessionId=session.id;scope.surfaceId=surfaceId||`agent:${session.id}`;scope.directory=thread.directory||scope.directory;
+  scope.sdk=model.agentSdk.forSession(scope.workspaceId,session.id);
  }
  private pickerRequest(scope:Scope,request:SlashPickerRequest):SlashPickerRequest{
   return{...request,token:`${scope.pickerId??=crypto.randomUUID()}:${request.kind}`,onCancel:()=>{scope.pickerCancelled=true;}};
@@ -138,56 +153,59 @@ export class SlashController{
   await new Promise<void>(resolve=>{let stop=()=>{};const done=()=>{stop();this.abort.signal.removeEventListener("abort",done);resolve();};stop=this.options.model.subscribe(()=>{if(!this.options.model.state.catalogsLoading||!this.current(scope)||this.disposed)done();});this.abort.signal.addEventListener("abort",done,{once:true});});
   this.assertCurrent(scope);
  }
- private async sessionsPicker(scope:Scope){
+  private async sessionsPicker(scope:Scope){
    // Scope follows the declared workspace, not the selected chat's execution cwd.
-   const catalog=this.options.model.agentSdk;
-   const root=this.options.model.state.activeWorkspace?.root_dir;
+   const catalog=this.options.model.agentSdk,root=this.options.model.state.activeWorkspace?.root_dir;
    if(!root)throw new Error("The workspace directory is not ready yet");
    const directory=coreCall<string|null>("agentsidepanel.catalog-scope",{directory:root})??undefined;
-   const inScope=(session:Session)=>!session.parentId&&(!directory||session.directory===directory);
-   const [projects,page]=await Promise.all([catalog.catalogProjects(scope.workspaceId),catalog.catalogSessions(scope.workspaceId,{roots:true,limit:50,directory})]);
-  if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
-   const sessions=new Map([...projects.pinnedSessions,...page.items].filter(inScope).map(session=>[session.id,session]));
-  let cursor=page.cursor?.next,loading=false,error:string|undefined;
-  const select=async(id:string)=>{
-   this.assertCurrent(scope);scope.pickerCancelled=true;
-   this.openSession(scope,await this.options.model.agentSdk.forSession(scope.workspaceId,id).sessions.get(id));
-  };
-  const publish=async()=>{
-   if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
-   const sorted=[...sessions.values()].sort((a,b)=>b.time.updated-a.time.updated);
-   const rows:SlashOption[]=[];
-    const groups=new Map<string,Session[]>();
-    for(const session of sorted){const key=session.directory||"Unknown directory";const group=groups.get(key)||[];group.push(session);groups.set(key,group);}
-    for(const [path,group] of groups){
-     rows.push({...option(path,"","",""),header:true,section:"directory"});
-     group.sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)||b.time.updated-a.time.updated);
-     rows.push(...group.map(session=>({...option(session.title||"New conversation",session.directory,session.id,""),section:path,pinned:!!session.pinned,current:session.id===scope.sessionId})));
-   }
-   if(loading||error)rows.push({...option(error||"Loading more sessions...","","",""),header:true});
-   await this.options.hooks.picker(this.pickerRequest(scope,{kind:"sessions",title:"Sessions",options:rows,selected:scope.sessionId,loading,error,onSelect:select,onLoadMore:cursor?loadMore:undefined}));
-  };
-  const loadMore=async()=>{
-   if(!cursor||loading||scope.pickerCancelled||this.disposed||!this.current(scope))return;
-   const requested=cursor;loading=true;error=undefined;await publish();
-   try{
-     const next=await catalog.catalogSessions(scope.workspaceId,{roots:true,limit:50,cursor:requested,directory});
-    if(scope.pickerCancelled||this.disposed||!this.current(scope))return;
-     for(const session of next.items)if(inScope(session))sessions.set(session.id,session);
-    cursor=next.cursor?.next===requested?undefined:next.cursor?.next;
-   }catch(cause){error=cause instanceof Error?cause.message:"Could not load older sessions. Scroll to retry.";}
-   finally{loading=false;await publish();}
-  };
-  scope.pickerShell=undefined;await publish();
- }
+   const active=()=>!scope.pickerCancelled&&!this.disposed&&this.current(scope);
+   const projects=await catalog.catalogProjects(scope.workspaceId);
+   if(!active())return;
+   const pins=projects.pinnedSessions.filter(session=>!session.parentId&&session.pinned&&(!directory||session.directory===directory)).sort((a,b)=>b.time.updated-a.time.updated);
+   const paths=directory?[directory]:[...new Set([...projects.items.sort((a,b)=>b.updatedMs-a.updatedMs||a.directory.localeCompare(b.directory)).map(project=>project.directory),...pins.map(session=>session.directory)])];
+   const pages=paths.map(path=>({path,sessions:new Map<string,Session>(),cursor:undefined as string|undefined,loaded:false,loading:false,error:undefined as string|undefined}));
+   const publish=async()=>{
+    if(!active())return;
+    const rows:SlashOption[]=[];
+    const row=(session:Session):SlashOption=>({...option(session.title||"New conversation",session.directory,session.id,""),section:session.directory,pinned:!!session.pinned,current:session.id===scope.sessionId});
+    if(pins.length){rows.push({...option("Pinned","","",""),header:true});rows.push(...pins.map(row));}
+    for(const [index,page] of pages.entries()){
+     rows.push({...option(page.path,"","",""),header:true,section:"directory"});
+     rows.push(...[...page.sessions.values()].sort((a,b)=>b.time.updated-a.time.updated).map(row));
+     if(page.loading||!page.loaded&&!page.error)rows.push({...option("Loading sessions...","","",""),header:true});
+     else if(page.error||page.cursor)rows.push({...option(page.error?"Retry loading sessions":"Load more",page.error||page.path,`sessions:more:${index}`,""),keepOpen:true,section:page.path});
+    }
+    await this.options.hooks.picker(this.pickerRequest(scope,{kind:"sessions",title:"Sessions",options:rows,selected:scope.sessionId,onSelect:async id=>{
+     if(!active())return;
+     if(id.startsWith("sessions:more:")){const page=pages[Number(id.slice("sessions:more:".length))];if(page)await loadMore(page);return;}
+     this.assertCurrent(scope);scope.pickerCancelled=true;
+     this.openSession(scope,await catalog.forSession(scope.workspaceId,id).sessions.get(id));
+    }}));
+   };
+   const loadMore=async(page:typeof pages[number])=>{
+    if(!active()||page.loading||page.loaded&&!page.cursor)return;
+    const requested=page.cursor;page.loading=true;page.error=undefined;await publish();
+    try{
+     const next=await catalog.catalogSessions(scope.workspaceId,{roots:true,limit:5,cursor:requested,directory:page.path,exact_directory:true,exclude_pinned:true});
+     if(!active())return;
+     for(const session of next.items)if(!session.parentId&&!session.pinned&&session.directory===page.path)page.sessions.set(session.id,session);
+     page.cursor=next.cursor?.next===requested?undefined:next.cursor?.next;page.loaded=true;
+    }catch(cause){page.error=cause instanceof Error?cause.message:"Could not load sessions";}
+    finally{page.loading=false;await publish();}
+   };
+   scope.pickerShell=undefined;await publish();
+   // Bound initial project requests; continuation is explicit and per folder.
+   let next=0;
+   await Promise.all(Array.from({length:Math.min(4,pages.length)},async()=>{while(active()&&next<pages.length)await loadMore(pages[next++]);}));
+  }
  private async changeDirectory(scope:Scope,directory:string){
   const id=await this.ensureSession(scope);this.assertCurrent(scope);
   const session=await scope.sdk.sessions.update(id,{directory});this.assertCurrent(scope);scope.directory=session.directory||directory;
   const model=this.options.model;model.update({threads:model.state.threads.map(thread=>thread.session_id===id?{...thread,directory:scope.directory}:thread)});
   this.notice(scope,"Directory",`Switched location to ${scope.directory}`);
  }
- private async directoryPicker(scope:Scope,path=scope.directory){
-  const result=await scope.sdk.operations.request("v2.directories.list",{query:{path}});this.assertCurrent(scope);
+  private async directoryPicker(scope:Scope,path=scope.directory){
+   const result=await(await this.directorySdk(scope)).operations.request("v2.directories.list",{query:{path}});this.assertCurrent(scope);
   const rows=[option("Use this directory",result.path,`use:${result.path}`,"directory"),...(result.parent?[option("..",result.parent,`browse:${result.parent}`,"directory")]:[]),...result.entries.map(entry=>option(entry.name,entry.path,`browse:${entry.path}`,"directory"))];
   await this.picker(scope,"directory","Change directory",rows,async value=>{if(value.startsWith("use:"))await this.changeDirectory(scope,value.slice(4));else await this.directoryPicker(scope,value.slice(7));});
  }
@@ -218,7 +236,8 @@ export class SlashController{
   model.update({permissions:model.state.permissions.filter(permission=>permission.sessionId!==id)});this.notice(scope,"Permissions","Skipping permission prompts for this conversation");
  }
  private async mcpPicker(scope:Scope){
-  const client=await scope.sdk.plugins.use(mcp,{directory:scope.directory}),catalog=await client.catalog(scope.directory);this.assertCurrent(scope);
+  const sdk=await this.directorySdk(scope);
+  const client=await sdk.plugins.use(mcp,{directory:scope.directory}),catalog=await client.catalog(scope.directory);this.assertCurrent(scope);
   // Older daemons reported an unstarted runtime as a failure. Normalize only
   // that exact placeholder; real connection errors retain their red status.
   const status=(entry:{enabled:boolean;status:{status:string;error?:string}})=>{
@@ -260,12 +279,13 @@ export class SlashController{
   // Provider choices do not depend on authentication-method discovery.
   // Fetch methods only when an account flow needs them, so a slow plugin
   // cannot hold the initial /connect list behind an unrelated request.
-  const catalog=connectCatalog(await scope.sdk.catalog.providers.list(scope.directory));this.assertCurrent(scope);
+   // Account discovery belongs to the workspace, not a conversation's cwd.
+   const catalog=connectCatalog(await scope.sdk.catalog.providers.list());this.assertCurrent(scope);
   const rows=coreCall<SlashOption[]>("picker.connect-options",{catalog});
   await this.picker(scope,"connect","Connect a provider",rows,async providerId=>{
    const provider=catalog.all.find(provider=>provider.id===providerId);if(provider){
     await this.loadingPicker(scope,"connect-account","Choose an account");
-    const methods=await scope.sdk.catalog.providers.authMethods(scope.directory);this.assertCurrent(scope);
+     const methods=await scope.sdk.catalog.providers.authMethods();this.assertCurrent(scope);
     await this.connectAccounts(scope,provider,methods);
    }
   });
@@ -376,16 +396,16 @@ export class SlashController{
    case "OpenAgentPicker":await this.picker(scope,"agent","Agent",model.state.agents.map(a=>option(a.name,a.description||"",a.name)),value=>model.setSelection("agent",value,scope.sessionId),scope.selection.agent||undefined);break;
    case "ApplyThinking":model.setSelection("thinking",coreCall<string>("agentcomposer.normalize-thinking",{value:String(value)}),scope.sessionId);break;
    case "OpenThinkingPicker":await this.picker(scope,"thinking","Reasoning effort",thinkingOptions.filter(row=>!("modelIncludes"in row)||scope.selection.model?.toLowerCase().includes(row.modelIncludes)).map(row=>({...row})),value=>model.setSelection("thinking",value,scope.sessionId),scope.selection.thinking||undefined);break;
-   case "SwitchSession":this.openSession(scope,await scope.sdk.sessions.get(String(value)));break;
+    case "SwitchSession":this.openSession(scope,await model.agentSdk.forSession(scope.workspaceId,String(value)).sessions.get(String(value)));break;
    case "OpenSessionsPicker":await this.sessionsPicker(scope);break;
    case "ChangeDirectory":await this.changeDirectory(scope,String(value));break;
    case "OpenDirectoryPicker":{if(hooks.chooseDirectory){const path=await hooks.chooseDirectory(scope.directory);this.assertCurrent(scope);if(path)await this.changeDirectory(scope,path);}else await this.directoryPicker(scope);break;}
-   case "OpenSubagentPicker":{const client=await scope.sdk.plugins.use(subagents,{directory:scope.directory}),tasks=await client.list(this.requireSession(scope));await this.picker(scope,"subagents","Subagent sessions",tasks.map(task=>option(task.description||task.agent,task.status,task.childSessionId,task.agent)),async id=>this.openSession(scope,await scope.sdk.sessions.get(id)));break;}
-   case "ShowSkills":this.notice(scope,"Skills",await scope.sdk.catalog.skills.list(scope.directory));break;
-   case "ShowSkill":{const skills=await scope.sdk.catalog.skills.list(scope.directory),skill=skills.find(s=>s.name===String(value));if(!skill)throw new Error("Usage: /skill info <available skill name>");this.notice(scope,"Skill",skill);break;}
+    case "OpenSubagentPicker":{const client=await(await this.directorySdk(scope)).plugins.use(subagents,{directory:scope.directory}),tasks=await client.list(this.requireSession(scope));await this.picker(scope,"subagents","Subagent sessions",tasks.map(task=>option(task.description||task.agent,task.status,task.childSessionId,task.agent)),async id=>this.openSession(scope,await model.agentSdk.forSession(scope.workspaceId,id).sessions.get(id)));break;}
+    case "ShowSkills":this.notice(scope,"Skills",await(await this.directorySdk(scope)).catalog.skills.list(scope.directory));break;
+    case "ShowSkill":{const skills=await(await this.directorySdk(scope)).catalog.skills.list(scope.directory),skill=skills.find(s=>s.name===String(value));if(!skill)throw new Error("Usage: /skill info <available skill name>");this.notice(scope,"Skill",skill);break;}
    case "ShowSkillUsage":this.notice(scope,"Skill","Usage: /skill info <name>");break;
-   case "InsertSkillMentionByName":{const name=String(value),skills=await scope.sdk.catalog.skills.list(scope.directory);this.assertCurrent(scope);if(!skills.some(s=>s.name===name))throw new Error("Skill not found. Use /skills to choose");hooks.insert(`$${name} `);break;}
-   case "OpenSkillPicker":{const skills=await scope.sdk.catalog.skills.list(scope.directory);await this.picker(scope,"skills","Skills",skills.map(s=>option(s.name,s.description||"",s.name,"skill")),name=>hooks.insert(`$${name} `));break;}
+    case "InsertSkillMentionByName":{const name=String(value),skills=await(await this.directorySdk(scope)).catalog.skills.list(scope.directory);this.assertCurrent(scope);if(!skills.some(s=>s.name===name))throw new Error("Skill not found. Use /skills to choose");hooks.insert(`$${name} `);break;}
+    case "OpenSkillPicker":{const skills=await(await this.directorySdk(scope)).catalog.skills.list(scope.directory);await this.picker(scope,"skills","Skills",skills.map(s=>option(s.name,s.description||"",s.name,"skill")),name=>hooks.insert(`$${name} `));break;}
    case "HandleQueue":{const id=this.requireSession(scope),command=value==null?"":String(value);const result=command==="clear"?await scope.sdk.sessions.clearQueue(id):command==="pop"?await scope.sdk.sessions.popQueue(id):await scope.sdk.sessions.queue(id);this.notice(scope,"Queue",result);break;}
    case "ShowMcp":await this.mcpPicker(scope);break;
    case "ShowPermissions":this.notice(scope,"Permissions",await scope.sdk.interactions.permissions.list(this.requireSession(scope)));break;
@@ -396,10 +416,13 @@ export class SlashController{
     const id=this.requireSession(scope),text=String(value||"").trim();if(!text)throw new Error("Usage: /answer <text>");const questions=await scope.sdk.interactions.questions.list(id);this.assertCurrent(scope);const question=questions[0];if(!question)throw new Error("No pending questions");const answers=question.questions.length<=1?[[text]]:text.split(";").map(v=>[v.trim()]);if(answers.length!==question.questions.length)throw new Error(`Provide ${question.questions.length} answers separated by semicolons`);if(!await scope.sdk.interactions.questions.reply(question.id,answers))throw new Error("The answer was not accepted");model.update({questions:model.state.questions.filter(q=>q.sessionId!==id||q.requestId!==question.id)});this.notice(scope,"Question","Answer submitted");break;
    }
    case "CompactSession":this.notice(scope,"Compaction",await scope.sdk.sessions.summarize(this.requireSession(scope)));break;
-   case "UndoSession":this.notice(scope,"Undo",await scope.sdk.sessions.undo(this.requireSession(scope)));break;
-   case "RedoSession":this.notice(scope,"Redo",await scope.sdk.sessions.redo(this.requireSession(scope)));break;
+   case "UndoSession":case "RedoSession":{
+    const id=this.requireSession(scope),undo=action.kind==="UndoSession";
+    await model.editSessionHistory(id,undo?"undo":"redo",()=>undo?scope.sdk.sessions.undo(id):scope.sdk.sessions.redo(id));
+    this.notice(scope,undo?"Undo":"Redo","Session history updated.");break;
+   }
    case "ShowGoal":case "SetGoal":case "ClearGoal":case "PauseGoal":case "ResumeGoal":{
-    const id=action.kind==="SetGoal"?await this.ensureSession(scope):this.requireSession(scope),client=await scope.sdk.plugins.use(goals,{directory:scope.directory});this.assertCurrent(scope);
+     const id=action.kind==="SetGoal"?await this.ensureSession(scope):this.requireSession(scope),client=await(await this.directorySdk(scope)).plugins.use(goals,{directory:scope.directory});this.assertCurrent(scope);
     const result=action.kind==="ShowGoal"?await client.get(id):action.kind==="ClearGoal"?await client.clear(id):await client.set(id,action.kind==="SetGoal"?{text:String(value)}:{paused:action.kind==="PauseGoal"});
     this.notice(scope,"Goal",result);
     // Original /goal persists the goal, then starts its actual agent run.
@@ -409,7 +432,7 @@ export class SlashController{
    case "ToggleSidebar":await hooks.toggleSidebar();break;
    case "ToggleSkipPermissions":await this.skipPermissions(scope);break;
    case "AbortSession":this.notice(scope,"Abort",await scope.sdk.sessions.abort(this.requireSession(scope)));break;
-   case "CreateNewSession":{const session=await scope.sdk.sessions.create({directory:scope.directory,agent:scope.selection.agent||undefined,model:sdkModel(scope.selection)});this.openSession(scope,session,true);break;}
+    case "CreateNewSession":{const session=await this.createSession(scope);this.openSession(scope,session,true);break;}
    case "RequestCloseTab":await hooks.closeTab();break;
    case "RunServerCommand":{
     const {command,args}=value as {command:string;args:string},id=await this.ensureSession(scope);this.assertCurrent(scope);const selection=sdkModel(scope.selection);

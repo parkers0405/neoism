@@ -4,6 +4,8 @@ use neoism_protocol::workspace::{
 };
 use tempfile::TempDir;
 
+mod empty_lifecycle;
+
 static NOTES_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 struct NotesHomeGuard { previous: Option<std::ffi::OsString>, _lock: std::sync::MutexGuard<'static, ()> }
 impl NotesHomeGuard {
@@ -54,6 +56,8 @@ fn make_manager(td: &TempDir) -> WorkspaceManager {
             windows: HashMap::new(),
             preferences: HashMap::new(),
             client_states: HashMap::new(),
+            workspace_claims: HashMap::new(),
+            workspace_claim_history: HashMap::new(),
             session_pty_links: HashMap::new(),
             next_route_id: 1,
         })),
@@ -906,6 +910,8 @@ fn registry_persists_across_managers() {
             windows: HashMap::new(),
             preferences: HashMap::new(),
             client_states: HashMap::new(),
+            workspace_claims: HashMap::new(),
+            workspace_claim_history: HashMap::new(),
             session_pty_links: HashMap::new(),
             next_route_id: 1,
         })),
@@ -1294,6 +1300,8 @@ fn preferences_round_trip_through_disk() {
             windows: HashMap::new(),
             preferences: HashMap::new(),
             client_states: HashMap::new(),
+            workspace_claims: HashMap::new(),
+            workspace_claim_history: HashMap::new(),
             session_pty_links: HashMap::new(),
             next_route_id: 1,
         })),

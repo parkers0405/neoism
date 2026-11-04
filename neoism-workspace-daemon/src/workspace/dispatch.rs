@@ -58,6 +58,7 @@ fn handle_inner(
     peer_ip: Option<&str>,
     msg: WorkspaceClientMessage,
 ) -> DispatchOutcome {
+    manager.claim_active_workspace(conn);
     let outcome = match msg {
         WorkspaceClientMessage::OpenProjectRoot {
             path,
@@ -119,6 +120,8 @@ fn handle_inner(
             root_dir,
         } => {
             let workspace = manager.create_host_workspace(host_id.clone(), workspace_id, title, root_dir);
+            tracing::info!(workspace_id = %workspace.id, root = ?workspace.root_dir,
+                client = %conn.client_id, "workspace create requested");
             DispatchOutcome::just(vec![
                 WorkspaceServerMessage::HostWorkspaceUpserted {
                     workspace: workspace.clone(),
@@ -135,6 +138,8 @@ fn handle_inner(
         } => {
             let host_id = machine_host_id();
             let workspace = manager.create_host_workspace(host_id.clone(), workspace_id, title, root_dir);
+            tracing::info!(workspace_id = %workspace.id, root = ?workspace.root_dir,
+                client = %conn.client_id, "workspace create requested");
             DispatchOutcome::just(vec![
                 WorkspaceServerMessage::HostWorkspaceUpserted {
                     workspace: workspace.clone(),
@@ -163,7 +168,7 @@ fn handle_inner(
             })
         }
         WorkspaceClientMessage::SwitchHostWorkspace { workspace_id } => {
-            DispatchOutcome::just(match manager.switch_host_workspace(&workspace_id) {
+            DispatchOutcome::just(match manager.switch_host_workspace(&workspace_id, conn) {
                 Some(workspace) => vec![WorkspaceServerMessage::HostWorkspaceChanged {
                     host_id: workspace.host_id,
                     workspace_id: Some(workspace.id),
@@ -265,20 +270,18 @@ fn handle_inner(
             },
         ),
         WorkspaceClientMessage::SubscribeWorkspace { workspace_id } => DispatchOutcome::just({
-            conn.active_workspace = Some(workspace_id.clone());
             manager
-                .list_host_workspaces(None)
-                .into_iter()
-                .find(|workspace| workspace.id == workspace_id)
+                .subscribe_workspace(conn, &workspace_id)
                 .map(|workspace| vec![WorkspaceServerMessage::HostWorkspaceUpserted { workspace }])
                 .unwrap_or_else(|| vec![err(format!("no such host workspace: {workspace_id}"))])
         }),
         WorkspaceClientMessage::UnsubscribeWorkspace { workspace_id } => DispatchOutcome::just({
-            if conn.active_workspace.as_deref() == Some(workspace_id.as_str()) {
-                conn.active_workspace = None;
-            }
+            manager.unsubscribe_workspace(conn, &workspace_id);
             Vec::new()
         }),
+        WorkspaceClientMessage::SetWindowWorkspaces { workspace_ids, prune_empty } => {
+            DispatchOutcome::just(vec![manager.set_window_workspaces(conn, workspace_ids, prune_empty)])
+        }
         WorkspaceClientMessage::ControlWorkspace {
             workspace_id,
             controller_host_id,
@@ -578,6 +581,7 @@ fn handle_inner(
         }
     };
     if !outcome.disconnect {
+        manager.claim_active_workspace(conn);
         manager.remember_client_state(conn);
     }
     outcome
@@ -729,7 +733,7 @@ fn handle_hello(
                 client_id
             };
             conn.client_id = assigned_client_id;
-            if let Some(state) = manager.resume_client_state(assigned_client_id) {
+            if let Some(state) = manager.resume_client_state(conn) {
                 conn.active_workspace = state.active_workspace;
                 conn.active_session = state.active_session;
             }
@@ -757,6 +761,7 @@ fn handle_hello(
                 reason: Some(reason.to_string()),
                 peer_identity,
                 connected_host_id: Some(machine_host_id()),
+                workspace_lifecycle: true,
             }])
         }
         HandshakeOutcome::Rejected { reason } => {
@@ -773,6 +778,7 @@ fn handle_hello(
                     reason: Some(reason.to_string()),
                     peer_identity: None,
                     connected_host_id: None,
+                    workspace_lifecycle: false,
                 }],
                 disconnect: true,
             }

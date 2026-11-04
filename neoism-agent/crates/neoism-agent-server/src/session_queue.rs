@@ -19,6 +19,8 @@ pub(crate) struct SessionQueueInfo {
     running: bool,
     worker: bool,
     compaction_queued: bool,
+    #[serde(rename = "primaryMessageID")]
+    primary_message_id: Option<String>,
     preview: Option<String>,
     items: Vec<serde_json::Value>,
 }
@@ -179,11 +181,19 @@ pub(crate) async fn enqueue_prompt_request_with_delivery(
 async fn admit_prompt(
     state: &AppState,
     session_id: &str,
-    request: PromptRequest,
+    mut request: PromptRequest,
     delivery: &str,
 ) -> Result<(bool, usize), ApiError> {
     let _execution_admission =
         crate::execution_activity::admission_guard(state, session_id).await;
+    // Give even legacy admissions a stable identity before publishing them.
+    // The visible queue can identify its starting row before run claim without
+    // mutating or consuming the durable recovery token.
+    if request.message_id.is_none() {
+        request.message_id = Some(neoism_agent_core::Id::ascending(
+            neoism_agent_core::IdKind::Message,
+        ));
+    }
     if let Some(message_id) = request.message_id.as_ref() {
         let queued = state
             .inner
@@ -254,7 +264,12 @@ pub(crate) async fn queue_status_snapshot(
     session_id: &str,
 ) -> serde_json::Value {
     let info = session_queue_info(state, session_id).await;
-    json!({"count": info.count, "preview": info.preview, "compactionQueued": info.compaction_queued})
+    json!({
+        "count": info.count,
+        "preview": info.preview,
+        "compactionQueued": info.compaction_queued,
+        "primaryMessageID": info.primary_message_id,
+    })
 }
 
 pub(crate) async fn visible_prompt_queue(
@@ -269,8 +284,9 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
     // Never take admission locks here: publishers also call us while holding
     // them. Read ownership on both sides of I/O instead. The generation also
     // invalidates rows if a whole run starts and finishes between observations.
+    // Worker ownership also matters now: it selects the preclaim starting row.
     let (entries, identity, worker, compaction_queued) = loop {
-        let (before, _, before_generation) = state
+        let (before, before_worker, before_generation) = state
             .inner
             .session_coordinator
             .queue_identity(session_id)
@@ -303,17 +319,34 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
             .session_coordinator
             .queue_identity(session_id)
             .await;
-        if before_generation == after_generation && before == after {
+        if before_generation == after_generation && before == after && before_worker == worker {
             break (entries, after, worker, compaction_queued);
         }
     };
     let primary_message_id = identity.as_ref().and_then(|(_, primary)| primary.as_deref());
+    // An idle worker owns the next durable row even before it can claim a run
+    // (for example while prompt initialization is locked). That row is starting,
+    // not waiting. Do not consume it: it remains the crash-recovery token until
+    // handoff. Compact runs take precedence, and an internal continuation at the
+    // head must not hide the first *user* prompt behind it.
+    let starting = identity.is_none() && worker && !compaction_queued;
+    let primary_message_id = primary_message_id.map(ToOwned::to_owned).or_else(|| {
+        if starting {
+            entries.first().and_then(|(request, _)| {
+                request.message_id.as_ref().map(ToString::to_string)
+            })
+        } else {
+            None
+        }
+    });
     let items = entries.into_iter()
-        .filter_map(|(request, delivery)| {
-            let is_primary = primary_message_id.is_some_and(|primary| {
+        .enumerate()
+        .filter_map(|(index, (request, delivery))| {
+            let is_primary = primary_message_id.as_deref().is_some_and(|primary| {
                 request.message_id.as_ref().is_some_and(|id| id.as_str() == primary)
             });
-            (delivery != "continue" && !is_primary).then_some(request)
+            (delivery != "continue" && !is_primary && !(starting && index == 0))
+                .then_some(request)
         })
         .collect::<Vec<_>>();
     // Preview and count must describe the same rows, not a second store read.
@@ -340,6 +373,7 @@ async fn session_queue_info(state: &AppState, session_id: &str) -> SessionQueueI
         running,
         worker,
         compaction_queued,
+        primary_message_id,
         preview,
         items,
     }
@@ -618,6 +652,7 @@ async fn wait_until_session_not_running(state: &AppState, session_id: &str) {
 
 pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
     let mut prompt_failed = false;
+    let mut no_reply_completion = None;
     loop {
         wait_until_session_not_running(&state, &session_id).await;
         let compact = match state.inner.store.pending_compact_id(&session_id).await {
@@ -716,6 +751,7 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
             break;
         };
         let create_reply = !request.no_reply;
+        no_reply_completion = None;
         match crate::session_prompt::append_prompt_admission(
             &state,
             &session_id,
@@ -725,7 +761,12 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
         )
         .await
         {
-            Ok(_) => {
+            Ok(message) => {
+                if !create_reply {
+                    if let neoism_agent_core::MessageInfo::User(info) = message.info {
+                        no_reply_completion = Some(info.id);
+                    }
+                }
                 publish_prompt_queue_changed(
                     &state,
                     &session_id,
@@ -779,6 +820,13 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
                 break;
             }
         }
+    }
+    // An explicit no-reply admission can finish without an assistant message.
+    // The worker's successful return, not merely idle state, is the evidence.
+    if let Some(generation) = no_reply_completion {
+        crate::session_actions::publish_background_subtask_finished(
+            &state, &session_id, &generation, "completed", "",
+        ).await;
     }
     publish_idle_if_no_run(&state, &session_id).await;
     // The worker exiting with an empty queue is the reliable "truly idle"

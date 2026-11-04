@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Launch the complete local production stack without replacing a running chat.
-import {spawn} from 'node:child_process';
+import {spawn,spawnSync} from 'node:child_process';
 import {existsSync,mkdtempSync,openSync,closeSync} from 'node:fs';
 import {createServer} from 'node:net';
 import {tmpdir,homedir} from 'node:os';
@@ -11,7 +11,7 @@ const repository=fileURLToPath(new URL('..',import.meta.url));
 const userConfig=process.argv.includes('--user-config');
 const workspace=resolve(process.argv.slice(2).find(arg=>arg!=='--user-config')||repository);
 const suffix=process.platform==='win32'?'.exe':'';
-const binary=join(repository,`neoism-frontend/gpuix/dist/neoism${suffix}`);
+const binary=resolve(process.env.NEOISM_GPUIX_PREVIEW_BINARY||join(repository,`neoism-frontend/gpuix/dist/neoism${suffix}`));
 const daemon=join(dirname(binary),`neoism-workspace-daemon${suffix}`);
 if(!existsSync(binary)||!existsSync(daemon))throw new Error('Build and stage the production bundle first.');
 const freePort=()=>new Promise((resolve,reject)=>{
@@ -20,6 +20,15 @@ const freePort=()=>new Promise((resolve,reject)=>{
 });
 const profile=mkdtempSync(join(tmpdir(),'neoism-local-production-'));
 const env={...process.env};
+// Agent subprocesses may omit display variables even on a live desktop.
+if(process.platform==='linux'&&!env.WAYLAND_DISPLAY&&!env.DISPLAY){
+ const result=spawnSync('hyprctl',['instances','-j'],{encoding:'utf8',timeout:2000});
+ if(result.status===0){
+  const instances=JSON.parse(result.stdout);
+  if(instances.length===1){env.WAYLAND_DISPLAY=join(env.XDG_RUNTIME_DIR||`/run/user/${process.getuid()}`,instances[0].wl_socket);env.HYPRLAND_INSTANCE_SIGNATURE=instances[0].instance;}
+ }
+ if(!env.WAYLAND_DISPLAY)throw new Error('No desktop display selected; set WAYLAND_DISPLAY or DISPLAY before launching a preview.');
+}
 const userState=env.XDG_STATE_HOME||join(homedir(),'.local/state');
 const mcpAuth=env.NEOISM_AGENT_MCP_AUTH_PATH||join(env.NEOISM_AGENT_STATE_DIR||join(userState,'neoism'),'mcp-auth.json');
 for(const key of Object.keys(env))if(key.startsWith('NEOISM_GPUIX_NATIVE_CHECK')||key.startsWith('NEOISM_GPUIX_TEST_'))delete env[key];

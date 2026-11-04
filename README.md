@@ -1,6 +1,8 @@
 # Neoism
 
-A native workspace for code, Markdown, terminals, and agents.
+<!-- Sample edit: testing agent file changes without changing visible documentation. -->
+
+A native workspace for editing code, writing Markdown, running terminals, and working with agents.
 
 Neoism brings editing, shells, and Agent conversations into one window, with persistent workspaces and daemon-owned sessions that keep running when you close the frontend. The GPUIX frontend combines SolidJS with native GPUI rendering, shared Rust editor engines, and Ghostty terminal emulation.
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {createSignal} from "solid-js";
 import {createRoot,type HostElement,type NativeRenderer} from "@gpuix/solid";
 import {ComposerCaret} from "../../src/agent/ComposerCaret";
 import {loadConfig} from "../../src/config";
@@ -23,6 +24,8 @@ const quad=()=>JSON.parse(String(byTest("agent-composer-cursor-paint")!.props.co
 const center=()=>{const points=quad();return[points.filter((_,i)=>i%2===0).reduce((sum,n)=>sum+n,0)/4,points.filter((_,i)=>i%2===1).reduce((sum,n)=>sum+n,0)/4];};
 const report=(x:number,y:number,visible=true,offset=0,remainingWidth=100)=>root.dispatch({elementId:input!.id,eventType:"caretGeometry",x,y,width:2,height:22,value:JSON.stringify({visible,fontSize:16,remainingWidth,offset,selectionStart:offset,selectionEnd:offset})});
 const layouts:Array<{text:string;width:number;rows:number}>=[];
+const [home,setHome]=createSignal(true);
+const [resetToken,setResetToken]=createSignal(0);
 // Exact 530ms phase boundaries are covered by cursor-blink.test.ts with a
 // controlled clock. Here observe the real consumer's transitions: a loaded
 // runner can resume a fixed sleep late, after the next visible phase began.
@@ -37,7 +40,7 @@ async function waitForBlink(visible:boolean){
 }
 let stage="mount";
 try{
-  root.render(()=><div><textarea ref={input} testId="actual-composer-input" theme={{caret:"transparent"}} value="界🙂é\nsecond line"/><ComposerCaret config={config} input={()=>input} onLayout={layout=>layouts.push(layout)}/></div>);
+  root.render(()=><div><textarea ref={input} testId="actual-composer-input" theme={{caret:"transparent"}} value="界🙂é\nsecond line"/><ComposerCaret config={config} input={()=>input} home={home()} resetToken={resetToken()} onLayout={layout=>layouts.push(layout)}/></div>);
  assert.ok(input?.id);assert.ok(events.has(`${input.id}:caretGeometry`));assert.ok(!byTest("agent-composer-cursor-paint"));
  stage="first event";report(120,240,true,0);assert.equal(callbacks.size,1);flush();
  const first=byTest("agent-composer-cursor")!;assert.ok(first);assert.equal(JSON.parse(String(byTest("agent-composer-cursor-paint")!.props.commands))[0].c&255,255,"Agent block must preserve original opaque cursor ink");assert.ok(Math.abs(Number(first.style.width)-9.6)<.001);assert.equal(Number(first.style.height),20);assert.ok(Math.abs(center()[0]-124.8)<.001);assert.equal(center()[1],250);
@@ -49,7 +52,18 @@ try{
  assert.ok(Math.abs(center()[0]-224.8)<.1);assert.ok(Math.abs(center()[1]-294)<.1);
  stage="handoff";const handoff=surfaceCaret(renderer,input.id);assert.ok(handoff);assert.ok(Math.abs(handoff.bounds.x-220)<.1);
  root.flushSync(()=>suppressSurfaceCursor(renderer,true));assert.ok(!byTest("agent-composer-cursor-paint"));
- root.flushSync(()=>suppressSurfaceCursor(renderer,false));assert.ok(byTest("agent-composer-cursor-paint"));
+  root.flushSync(()=>suppressSurfaceCursor(renderer,false));assert.ok(byTest("agent-composer-cursor-paint"));
+  stage="Home→chat geometry";root.flushSync(()=>setHome(false));
+  assert.ok(!byTest("agent-composer-cursor-paint"),"the old centered quad cannot outlive its input layout");
+  assert.equal(callbacks.size,0);
+  report(120,600,true,0);root.flush();
+  assert.ok(Math.abs(center()[0]-124.8)<.1);assert.ok(Math.abs(center()[1]-610)<.1,"new chat geometry seeds without a trail across the blank page");
+  assert.equal(callbacks.size,0);
+  stage="in-chat submit clear";root.flushSync(()=>setResetToken(value=>value+1));
+  assert.ok(!byTest("agent-composer-cursor-paint"),"submit clear discards the old end-of-text quad even without changing Home mode");
+  report(20,600,true,0);root.flush();
+  assert.ok(Math.abs(center()[0]-24.8)<.1);assert.ok(Math.abs(center()[1]-610)<.1);
+  assert.equal(callbacks.size,0,"submit clear seeds the measured start, never a stretched trail");
   stage="hidden";report(220,284,false,11);assert.ok(!byTest("agent-composer-cursor-paint"));assert.equal(callbacks.size,0);
   root.dispatch({elementId:input!.id,eventType:"caretGeometry",x:120,y:240,value:JSON.stringify({visible:false,fontSize:16,remainingWidth:100,offset:0,selectionStart:0,selectionEnd:0,text:"changed",layoutWidth:300,visualRows:2})});
   assert.deepEqual(layouts,[{text:"changed",width:300,rows:2}],"Unfocused/selected inputs still report the full native shaped layout");

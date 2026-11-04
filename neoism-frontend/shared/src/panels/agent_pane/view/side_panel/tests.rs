@@ -130,6 +130,23 @@ fn catalog_branch_geometry_is_clipped_without_gaps_or_overlay_bleed() {
 }
 
 #[test]
+fn branch_elbow_recording_preserves_quarter_ring_clip() {
+    use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+    let geometry = draw::branch_connector_geometry(44.0, 96.0, 37.0, false, 1.0, 2.0);
+    let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+    geometry.paint(&mut painter, [1.0; 4], [0.0, 0.0, 200.0, 200.0], &[]);
+    let commands = painter.commands();
+    let rings: Vec<_> = commands.iter().filter_map(|command| match command {
+        PaintCommand::Ring { clip, .. } => Some(*clip),
+        _ => None,
+    }).collect();
+    assert_eq!(rings, [Some(geometry.curve_bounds)]);
+    let clip = rings[0].unwrap();
+    assert_eq!(clip[0] + clip[2], geometry.center[0]);
+    assert_eq!(clip[1], geometry.center[1]);
+}
+
+#[test]
 fn catalog_branch_stems_do_not_attach_to_an_unrelated_chat() {
     let mut child = NeoismAgentSessionEntry::new("child", "Child", "").with_depth(1);
     child.branch_root_id = Some("missing-root".into());

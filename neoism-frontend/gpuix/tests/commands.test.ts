@@ -69,6 +69,16 @@ test("mode-specific overrides retain the desktop conflict rule and multiple inte
   expect(bindings.match({ key: "k" }, { vi: false })).toEqual([{ kind: "action", action: "Paste" }]);
   expect(bindings.match({ key: "g" }, { vi: true, appcursor: true })).toEqual([{ kind: "action", action: "Copy" }, { kind: "action", action: "Paste" }]);
 });
+test("config bindings accept canonical host palette actions as well as legacy aliases", () => {
+  const bindings = new KeyboardBindings([
+    { key: "t", with: "alt", action: "OpenThemePicker" },
+    { key: "s", with: "control", action: "SaveDocument" },
+    { key: "n", action: "None" },
+  ]);
+  expect(bindings.match({ key: "t", modifiers: { alt: true } })).toEqual([{ kind: "action", action: "OpenThemePicker" }]);
+  expect(bindings.match({ key: "s", modifiers: { ctrl: true } })).toEqual([{ kind: "action", action: "SaveDocument" }]);
+  expect(bindings.match({ key: "n" })).toEqual([{ kind: "action", action: "None" }]);
+});
 test("JSONC binding configuration is read without rewriting it", () => {
   const directory = mkdtempSync(join(tmpdir(), "neoism-bindings-")), path = join(directory, "config.json");
   const original = '{ // user config\n "keybinds":{"keys":[{"key":"e","with":"alt","action":"OpenCommandPalette"},]},}';

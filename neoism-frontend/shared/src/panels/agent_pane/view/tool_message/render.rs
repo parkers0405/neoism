@@ -289,9 +289,10 @@ fn measure_single_tool_message_height(
             cached_sections.as_ref().map(|sections| sections.as_slice())
         };
         if let Some(sections) = sections.filter(|sections| !sections.is_empty()) {
-            let card_w = tool_diff_card_width(width, s);
             let mut height = TOOL_HEADER_HEIGHT * s;
             for (section_index, section) in sections.iter().enumerate() {
+                let indent = if section.link_target.is_empty() { 0.0 } else { 20.0 * s };
+                let card_w = tool_diff_card_width(width - indent, s);
                 let card_key = format!("{}:{section_index}", message.id());
                 let card_expanded =
                     message.tool() == "compose" || pane.tool_expanded(&card_key);
@@ -641,7 +642,10 @@ fn render_single_tool_message(
     } else {
         incoming_w
     };
-    let disclosure = edit_header || message.composition_child() || message.tool() == "compose";
+    let inline_files = edit_header && diff_sections.is_some()
+        && show_tool_diff_cards(message.tool(), message.status(), false, archived);
+    let disclosure = !inline_files
+        && (edit_header || message.composition_child() || message.tool() == "compose");
     let disclosure_w = if disclosure { 18.0 * s } else { 0.0 };
     let counts = diff_sections.filter(|_| edit_header).and_then(|sections| {
         let additions: u64 = sections.iter().map(|section| u64::from(section.additions())).sum();
@@ -806,15 +810,15 @@ fn render_single_tool_message(
         return h;
     }
 
-    // Parent disclosure stays clickable independently of its per-file accordions.
-    if !suppress_interactions {
+    // File rows own disclosure; the parent remains a status/title row.
+    if !suppress_interactions && !inline_files {
         if let Some(header_clip) =
             intersect_rect([x, y, w, TOOL_HEADER_HEIGHT * s], message_clip)
         {
             pane.register_tool_hit_rect(message.id().to_string(), header_clip);
         }
     }
-    if !render_expanded || message.defer_live_edit_diff() {
+    if (!render_expanded && !inline_files) || message.defer_live_edit_diff() {
         return h;
     }
     if let Some(sections) = diff_sections {
@@ -1276,15 +1280,15 @@ fn render_tool_diff_cards(
     occlusion_rects: &[[f32; 4]],
     _mouse: Option<(f32, f32)>,
 ) {
-    let card_x = x + 30.0 * s;
-    let card_w = tool_diff_card_width(w, s);
     let clip_top = viewport_clip[1];
     let clip_bottom = viewport_clip[1] + viewport_clip[3];
     let mut card_y = y;
+    let mut connector_top = y;
+    let last_file = sections.iter().rposition(|section| !section.link_target.is_empty());
     for (section_index, section) in sections.iter().enumerate() {
-        if card_y > clip_bottom + 16.0 * s {
-            break;
-        }
+        let indent = if section.link_target.is_empty() { 0.0 } else { 20.0 * s };
+        let card_x = x + 30.0 * s + indent;
+        let card_w = tool_diff_card_width(w - indent, s);
         // Each file in a multi-file patch carries its own expand/scroll state so
         // a click toggles only the card under the cursor. Previously every card
         // shared the message id, so clicking one expanded (and made scrollable)
@@ -1302,6 +1306,21 @@ fn render_tool_diff_cards(
         let mut next_y = card_y + (diff_card::HEADER_HEIGHT * s + body_h.max(0.0));
         next_y += if card_expanded { diag_footer_height(section, s) } else { 0.0 };
         next_y += 10.0 * s;
+        // Paint before culling: an offscreen sibling still owns the stem
+        // running alongside the preceding file's expanded code.
+        if !section.link_target.is_empty() {
+            let header_y = card_y.max(clip_top).min(card_y + body_h);
+            let elbow_y = header_y + (diff_card::HEADER_HEIGHT * 0.5 - 1.0) * s;
+            let geometry = super::super::draw::branch_connector_geometry(
+                card_x, elbow_y, connector_top, Some(section_index) != last_file,
+                s, sugarloaf.scale_factor(),
+            );
+            geometry.paint(sugarloaf, theme.f32(theme.muted), viewport_clip, occlusion_rects);
+            connector_top = elbow_y;
+        }
+        if card_y > clip_bottom + 16.0 * s {
+            break;
+        }
         if next_y < clip_top - 16.0 * s {
             card_y = next_y;
             continue;
@@ -1346,6 +1365,7 @@ fn render_tool_diff_cards(
                 gutter_width: Some(gutter_width),
                 accordion_expanded: (!section.link_target.is_empty()).then_some(card_expanded),
                 sticky_header: card_expanded && !section.link_target.is_empty(),
+                inline: !section.link_target.is_empty(),
                 occlusion_rects,
                 ..diff_card::PaintParams::default()
             },

@@ -1132,27 +1132,18 @@ impl AgentUserInputPane for NeoismAgentPane {
     }
 }
 
-/// Logical size (pre-scale) of the user-message presence orb — roughly
-/// one line height, matching the editor caret / top-chrome orb. The orb
-/// now sits INSIDE the message bubble's top-left, with the text inset past
-/// it (see `render_user_message`).
-const USER_ORB_SIZE: f32 = 18.0;
+const USER_ORB_SIZE: f32 = 28.0;
+pub(super) const USER_BUBBLE_PADDING_Y: f32 = 11.0;
+pub(super) const USER_BUBBLE_TAIL_HEIGHT: f32 = 8.0;
+const USER_BUBBLE_TAIL_STEPS: usize = 32;
 
-/// Resolved presence identity for one user message: the deterministic
-/// avatar `seed` (fed straight into `AvatarProfile::from_seed`) and the
-/// `label` shown in the hover tooltip.
+/// Resolved sender identity for the profile orb and its author tooltip.
 pub struct UserMessageOrbIdentity {
     pub seed: String,
     pub label: String,
 }
 
-/// THE choke point that turns a user message's optional `author` name
-/// into its presence orb + hover tooltip — the single, deliberately
-/// small "author name → orb" seam. A future integration only has to set
-/// [`NeoismAgentMessage::author`] (from the shared-session sender, a
-/// plugin, wherever) and both the orb seed and the hover label follow;
-/// nothing else decides either. Deterministic-from-name is the whole
-/// hook, so the author stays a plain name string.
+/// Resolve a user message's optional author into the bubble's hover label.
 ///
 /// `local_name` is the local peer's presence display name (the same seed
 /// the editor caret / top-chrome orb use). Only an explicit author matching
@@ -1188,7 +1179,7 @@ pub fn user_message_orb_identity(
 
 #[cfg(test)]
 mod orb_identity_tests {
-    use super::{user_message_line_x, user_message_orb_identity};
+    use super::user_message_orb_identity;
 
     #[test]
     fn explicit_local_author_is_you() {
@@ -1211,18 +1202,392 @@ mod orb_identity_tests {
         assert_eq!(identity.label, "Unknown user");
     }
 
-    #[test]
-    fn human_message_lines_align_to_the_right_edge_of_the_text_column() {
-        assert_eq!(user_message_line_x(20.0, 300.0, 80.0), 240.0);
-        assert_eq!(user_message_line_x(20.0, 300.0, 300.0), 20.0);
-        assert_eq!(user_message_line_x(20.0, 300.0, 340.0), 20.0);
+}
+
+/// Desktop bubbles retain a visible incoming-message gutter. On narrow panes,
+/// relax the percentage smoothly to avoid squeezing every word onto its own row.
+fn user_bubble_max_width(width: f32, scale: f32) -> f32 {
+    let width = width.max(0.0);
+    (width * 0.8).max((width - 8.0 * scale).max(0.0).min(320.0 * scale))
+        .min((width - user_avatar_lane(width, scale)).max(0.0))
+}
+
+fn user_avatar_lane(width: f32, scale: f32) -> f32 {
+    ((USER_ORB_SIZE + 16.0) * scale).min(width.max(0.0) * 0.4)
+}
+
+/// A closed Bezier patch replacing the capsule's lower-right quadrant.
+/// The outside leaves the vertical side tangentially; the underside leaves
+/// the horizontal bottom tangentially. Both meet at the short down/right tip.
+/// Unlike a scanline appendage, its 22px root spans the entire rounded corner.
+/// No background-colored cutout: wallpaper remains visible outside the path.
+fn user_bubble_tail_edges(right: f32, bottom: f32, scale: f32, t: f32) -> [(f32, f32); 2] {
+    let cubic = |p: [(f32, f32); 4]| {
+        let u = 1.0 - t;
+        let weights = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+        let (mut x, mut y) = (0.0, 0.0);
+        for i in 0..4 { x += p[i].0 * weights[i]; y += p[i].1 * weights[i]; }
+        (right + x * scale, bottom + y * scale)
+    };
+    let tip_height = 5.0;
+    [
+        cubic([(0.0, -22.0), (0.0, -6.0), (0.0, 1.5), (3.0, tip_height)]),
+        cubic([(-22.0, 0.0), (-10.0, 0.0), (-8.0, tip_height), (3.0, tip_height)]),
+    ]
+}
+
+pub(super) fn paint_user_bubble_tail(
+    painter: &mut dyn crate::primitives::paint::Paint,
+    right: f32, bottom: f32, scale: f32, color: [f32; 4], clip: [f32; 4],
+) {
+    // One closed native path, not independently antialiased triangles/rows:
+    // internal tessellation edges must never show through the blue fill.
+    let mut polygon = Vec::with_capacity(USER_BUBBLE_TAIL_STEPS * 2 + 1);
+    for i in 0..=USER_BUBBLE_TAIL_STEPS {
+        polygon.push(user_bubble_tail_edges(right, bottom, scale, i as f32 / USER_BUBBLE_TAIL_STEPS as f32)[0]);
     }
+    for i in (0..USER_BUBBLE_TAIL_STEPS).rev() {
+        polygon.push(user_bubble_tail_edges(right, bottom, scale, i as f32 / USER_BUBBLE_TAIL_STEPS as f32)[1]);
+    }
+    // Sutherland-Hodgman clip keeps the closed contour inside the transcript.
+    for (axis, bound, sign) in [(0, clip[0], 1.0), (0, clip[0] + clip[2], -1.0),
+        (1, clip[1], 1.0), (1, clip[1] + clip[3], -1.0)] {
+        let input = std::mem::take(&mut polygon);
+        if input.is_empty() { break; }
+        let coord = |p: (f32, f32)| if axis == 0 { p.0 } else { p.1 };
+        let mut a = *input.last().unwrap();
+        for b in input {
+            let da = (coord(a) - bound) * sign;
+            let db = (coord(b) - bound) * sign;
+            if (da >= 0.0) != (db >= 0.0) {
+                let t = da / (da - db);
+                polygon.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+            }
+            if db >= 0.0 { polygon.push(b); }
+            a = b;
+        }
+    }
+    if polygon.len() >= 3 { painter.polygon(&polygon, DEPTH, color); }
+}
+
+fn user_bubble_padding(width: f32, scale: f32) -> f32 {
+    (12.0 * scale).min(user_bubble_max_width(width, scale) * 0.2)
 }
 
 /// The same available column is used to measure and paint the user card.
 /// Never grow the bubble or text column past the caller's actual pane width.
 pub(super) fn user_message_text_width(width: f32, scale: f32) -> f32 {
-    (width.max(0.0) - (28.0 + USER_ORB_SIZE + 10.0) * scale).max(1.0)
+    (user_bubble_max_width(width, scale) - 2.0 * user_bubble_padding(width, scale)).max(1.0)
+}
+
+/// Fit the already-wrapped content, not the unwrapped prompt. Keep the same
+/// maximum column as measurement so fitting never adds a row or changes height.
+fn user_bubble_width(width: f32, content_width: f32, scale: f32) -> f32 {
+    (content_width.max(0.0) + 2.0 * user_bubble_padding(width, scale))
+        .min(user_bubble_max_width(width, scale))
+}
+
+/// A tiny, single overshoot using the existing 180ms arrival ledger. Its cubic
+/// eased opacity is inverted to recover time; no new clocks or idle animation.
+pub(super) fn user_message_arrival_offset(opacity: f32) -> f32 {
+    let t = 1.0 - (1.0 - opacity.clamp(0.0, 1.0)).cbrt();
+    let u = t - 1.0;
+    -5.0 * u * u * (2.4 * u + 1.4)
+}
+
+#[cfg(test)]
+mod user_bubble_tests {
+    use super::*;
+
+    #[test]
+    fn bubble_fits_short_content_and_never_exceeds_the_row() {
+        assert_eq!(user_bubble_width(600.0, 40.0, 1.0), 64.0);
+        for scale in [0.75, 1.0, 2.0] {
+            for width in [0.0, 24.0, 56.0, 120.0, 600.0] {
+                let fit = user_bubble_width(width, user_message_text_width(width, scale), scale);
+                assert!(fit >= 0.0 && fit <= width);
+                assert!((fit - user_bubble_max_width(width, scale)).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_cap_is_eighty_percent_and_narrow_columns_relax_safely() {
+        for scale in [0.75, 1.0, 2.0] {
+            for width in [400.0, 600.0, 960.0] {
+                let cap = user_bubble_max_width(width * scale, scale);
+                assert!((cap - width * scale * 0.8).abs() < 0.001);
+            }
+            assert!((user_bubble_max_width(300.0 * scale, scale) - 256.0 * scale).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn fitting_keeps_the_measured_wrap_rows_and_clipboard_boundaries() {
+        let text = "A short line\n\nhttps://example.test/a-long-unbroken-link and another paragraph";
+        for width in [32.0, 100.0, 300.0, 600.0, 960.0] {
+            for scale in [0.75, 1.0, 2.0] {
+                let measure = |s: &str| s.chars().count() as f32 * 7.0 * scale;
+                let max_text_w = user_message_text_width(width, scale);
+                let lines = wrap_user_message_with(text, max_text_w, 200, measure);
+                let content_w = lines.iter().map(|line| measure(line)).fold(0.0_f32, f32::max);
+                let bubble_w = user_bubble_width(width, content_w.min(max_text_w), scale);
+                let paint_text_w = (bubble_w - 2.0 * user_bubble_padding(width, scale)).max(1.0);
+                // An indivisible glyph may exceed a microscopic pane; otherwise
+                // fitting preserves every measured row without a second wrap.
+                assert!(content_w <= paint_text_w + 0.001 || max_text_w < measure("A"));
+                let copied = lines.iter().enumerate().map(|(i, line)| {
+                    format!("{}{}", if i == 0 { "" } else { line.separator }, line.text)
+                }).collect::<String>();
+                assert_eq!(copied, text);
+            }
+        }
+    }
+
+    #[test]
+    fn author_tooltip_targets_only_the_visible_bubble_not_the_left_gutter() {
+        let bubble = [320.0, 20.0, 80.0, 43.0];
+        let clip = [0.0, 0.0, 400.0, 100.0];
+        assert!(user_bubble_hovered(Some((350.0, 30.0)), bubble, clip, &[]));
+        assert!(!user_bubble_hovered(Some((100.0, 30.0)), bubble, clip, &[]));
+        assert!(!user_bubble_hovered(Some((350.0, 30.0)), bubble, clip, &[bubble]));
+        assert!(!user_bubble_hovered(Some((350.0, 30.0)), bubble, [0.0, 40.0, 400.0, 60.0], &[]));
+        assert!(!user_bubble_hovered(None, bubble, clip, &[]));
+    }
+
+    #[test]
+    fn tail_curls_below_the_capsule_without_protruding_into_the_profile() {
+        for scale in [0.75, 1.0, 2.0] {
+            let right = 400.0 * scale;
+            let bottom = 43.0 * scale;
+            for i in 0..=USER_BUBBLE_TAIL_STEPS {
+                let edges = user_bubble_tail_edges(right, bottom, scale, i as f32 / USER_BUBBLE_TAIL_STEPS as f32);
+                for p in edges {
+                    assert!(p.0 <= right + 6.0 * scale + 0.001);
+                    assert!(p.1 <= bottom + USER_BUBBLE_TAIL_HEIGHT * scale + 0.001);
+                }
+            }
+            let root = user_bubble_tail_edges(right, bottom, scale, 0.0);
+            assert_eq!(root, [(right, bottom - 22.0 * scale), (right - 22.0 * scale, bottom)]);
+            let tip = user_bubble_tail_edges(right, bottom, scale, 1.0);
+            assert_eq!(tip[0], tip[1]);
+            assert_eq!(tip[0], (right + 3.0 * scale, bottom + 5.0 * scale));
+            assert!(tip[0].0 < right + 16.0 * scale, "tail must not enter the profile orb");
+            assert_eq!(user_avatar_lane(600.0 * scale, scale), 44.0 * scale);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn single_tail_path_respects_the_transcript_clip() {
+        use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+        let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+        for clip in [[385.0, 40.0, 18.0, 7.0], [0.0, 0.0, 100.0, 10.0]] {
+            painter.begin_frame();
+            paint_user_bubble_tail(&mut painter, 400.0, 43.0, 1.0,
+                [0.0, 122.0 / 255.0, 1.0, 1.0], clip);
+            assert_eq!(painter.commands().len(), if clip[0] > 0.0 { 1 } else { 0 },
+                "the tail must be a single closed path, not separately antialiased strips");
+            for command in &painter.commands() {
+                if let PaintCommand::Polygon { points, .. } = command {
+                    for &(x, y) in points {
+                        assert!(x >= clip[0] - 0.001 && x <= clip[0] + clip[2] + 0.001);
+                        assert!(y >= clip[1] - 0.001 && y <= clip[1] + clip[3] + 0.001);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn painted_bubble_aligns_wrapped_rows_and_keeps_tail_and_profile_on_replay() {
+        use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+        let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+        for text in ["hey whats up I am check on you", "hey\nwhats up",
+            "jsut checking in, what is this project and what does it do"] {
+            let lines = wrap_user_message(&mut painter, text, user_message_text_width(600.0, 1.0),
+                &DrawOpts { font_size: 13.5, ..DrawOpts::default() }).len();
+            let height = 2.0 * USER_BUBBLE_PADDING_Y + lines as f32 * 19.0 + USER_BUBBLE_TAIL_HEIGHT;
+            for _ in 0..2 {
+                painter.begin_frame();
+                let mut pane = NeoismAgentPane::default();
+                render_user_message(&mut painter, &mut pane, 0.0, 20.0, 600.0, height,
+                    text, &[], "Parker", "You", None, &IdeTheme::default(), 1.0,
+                    [0.0, 0.0, 600.0, 300.0], &[]);
+                let commands = painter.commands();
+                let blue = [0.0, 122.0 / 255.0, 1.0, 1.0];
+                let body = commands.iter().find_map(|command| match command {
+                    PaintCommand::Rect { rect, color, radii, .. } if *color == blue && radii[0] > 0.0 => Some(*rect),
+                    _ => None,
+                }).unwrap();
+                assert!(commands.iter().any(|command| matches!(command,
+                    PaintCommand::Polygon { points, color, .. } if *color == blue && points.iter().any(|p| p.1 > body[1] + body[3] + 4.0 && p.0 > body[0] + body[2]))));
+                assert!(commands.iter().any(|command| match command {
+                    PaintCommand::Rect { rect, color, .. } => *color != blue && rect[0] >= 600.0 - USER_ORB_SIZE,
+                    PaintCommand::Image { rect, .. } => rect[0] >= 600.0 - USER_ORB_SIZE && rect[2] == USER_ORB_SIZE,
+                    _ => false,
+                }), "the sender profile must remain to the right of the bubble");
+                let mut row = 0;
+                for command in &commands {
+                    if let PaintCommand::Text { x, y, raster: Some(raster), .. } = command {
+                        let mut bounds = [f32::MAX, f32::MAX, 0.0_f32, 0.0_f32];
+                        for (index, pixel) in raster.pixels().chunks_exact(4).enumerate() {
+                            if pixel[3] == 0 { continue; }
+                            let px = (index % raster.width as usize) as f32;
+                            let py = (index / raster.width as usize) as f32;
+                            bounds[0] = bounds[0].min(px); bounds[1] = bounds[1].min(py);
+                            bounds[2] = bounds[2].max(px + 1.0); bounds[3] = bounds[3].max(py + 1.0);
+                        }
+                        let center_x = x + raster.dx + (bounds[0] + bounds[2]) * 0.5 / raster.scale;
+                        let center_y = y + raster.dy + (bounds[1] + bounds[3]) * 0.5 / raster.scale;
+                        if lines == 1 {
+                            assert!((center_x - (body[0] + body[2] * 0.5)).abs() <= 1.0);
+                        } else {
+                            assert!((x - (body[0] + user_bubble_padding(600.0, 1.0))).abs() <= 0.01,
+                                "every multiline row must share the same left text origin");
+                        }
+                        assert!((center_y - (20.0 + USER_BUBBLE_PADDING_Y + row as f32 * 19.0 + 9.5)).abs() <= 1.0);
+                        row += 1;
+                    }
+                }
+                assert_eq!(row, lines);
+            }
+        }
+    }
+
+    /// Rasterize the *recorded production geometry*, not a second mock path.
+    /// Set NEOISM_BUBBLE_SNAPSHOT=/tmp/bubble.png for a 2x image supersampled at 4x.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn recorded_silhouette_is_connected_broad_and_within_measured_footprint() {
+        use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+        let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+        let mut pane = NeoismAgentPane::default();
+        let mut image = image_rs::RgbaImage::from_pixel(2400, 1040, image_rs::Rgba([24, 24, 28, 255]));
+        let blue = [0.0, 122.0 / 255.0, 1.0, 1.0];
+        for (y, text, h) in [(20.0, "hey whats up I am check on you", 49.0),
+            (100.0, "hey\nwhats up", 68.0), (200.0, "Hi", 49.0)] {
+            painter.begin_frame();
+            render_user_message(&mut painter, &mut pane, 0.0, y, 600.0, h,
+                text, &[], "Parker", "You", None, &IdeTheme::default(), 1.0,
+                [0.0, 0.0, 600.0, 260.0], &[]);
+            let commands = painter.commands();
+            let mut mask = vec![false; 2400 * 1040];
+            for command in &commands {
+                let (bounds, inside): ([f32; 4], Box<dyn Fn(f32, f32) -> bool>) = match command {
+                    PaintCommand::Rect { rect, color, radii, .. } if *color == blue => {
+                        let [x, y, w, h] = *rect;
+                        let r = radii[0];
+                        (*rect, Box::new(move |px, py| {
+                            let dx = (px - (x + w * 0.5)).abs() - (w * 0.5 - r);
+                            let dy = (py - (y + h * 0.5)).abs() - (h * 0.5 - r);
+                            dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) <= r
+                        }))
+                    }
+                    PaintCommand::Polygon { points, color, .. } if *color == blue => {
+                        let p = points.clone();
+                        let min_x = p.iter().map(|v| v.0).fold(f32::INFINITY, f32::min);
+                        let min_y = p.iter().map(|v| v.1).fold(f32::INFINITY, f32::min);
+                        let max_x = p.iter().map(|v| v.0).fold(f32::NEG_INFINITY, f32::max);
+                        let max_y = p.iter().map(|v| v.1).fold(f32::NEG_INFINITY, f32::max);
+                        ([min_x, min_y, max_x - min_x, max_y - min_y], Box::new(move |x, y| {
+                            let mut inside = false;
+                            for i in 0..p.len() {
+                                let (a, b) = (p[i], p[(i + 1) % p.len()]);
+                                if (a.1 > y) != (b.1 > y) && x < a.0 + (b.0 - a.0) * (y - a.1) / (b.1 - a.1) {
+                                    inside = !inside;
+                                }
+                            }
+                            inside
+                        }))
+                    }
+                    _ => continue,
+                };
+                for py in (bounds[1] * 4.0).floor().max(0.0) as usize..((bounds[1] + bounds[3]) * 4.0).ceil().min(1040.0) as usize {
+                    for px in (bounds[0] * 4.0).floor().max(0.0) as usize..((bounds[0] + bounds[2]) * 4.0).ceil().min(2400.0) as usize {
+                        if inside((px as f32 + 0.5) / 4.0, (py as f32 + 0.5) / 4.0) { mask[py * 2400 + px] = true; }
+                    }
+                }
+            }
+            // One connected component: detached-looking tails cannot pass by
+            // merely having an arbitrary wide scanline somewhere below the body.
+            let seed = mask.iter().position(|p| *p).unwrap();
+            let expected = mask.iter().filter(|p| **p).count();
+            let mut visited = vec![false; mask.len()];
+            let mut stack = vec![seed]; let mut count = 0;
+            while let Some(i) = stack.pop() {
+                if visited[i] || !mask[i] { continue; }
+                visited[i] = true; count += 1;
+                for n in [i.wrapping_sub(1), i + 1, i.wrapping_sub(2400), i + 2400] {
+                    if n < mask.len() && !visited[n] && mask[n] { stack.push(n); }
+                }
+            }
+            assert_eq!(count, expected, "the complete silhouette must be connected");
+            let body_bottom = y + h - USER_BUBBLE_TAIL_HEIGHT;
+            let row = ((body_bottom + 2.0) * 4.0) as usize;
+            assert!(mask[row * 2400..(row + 1) * 2400].iter().filter(|v| **v).count() >= 28,
+                "the rasterized tail must have a broad shoulder below the body");
+            for (i, on) in mask.iter().enumerate() {
+                if *on {
+                    assert!((i / 2400) as f32 / 4.0 < y + h);
+                    image.put_pixel((i % 2400) as u32, (i / 2400) as u32, image_rs::Rgba([0, 122, 255, 255]));
+                }
+            }
+            for command in &commands {
+                if let PaintCommand::Rect { rect: [x, y, w, h], color, .. } = command {
+                    if *color != blue {
+                        // The production orb consists of device-snapped cells.
+                        for py in (y * 4.0).round().max(0.0) as u32..((y + h) * 4.0).round().min(1040.0) as u32 {
+                            for px in (x * 4.0).round().max(0.0) as u32..((x + w) * 4.0).round().min(2400.0) as u32 {
+                                let pixel = image.get_pixel_mut(px, py);
+                                for c in 0..3 {
+                                    pixel[c] = (color[c] * 255.0 * color[3] + pixel[c] as f32 * (1.0 - color[3])).round() as u8;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let PaintCommand::Text { x, y, raster: Some(raster), .. } = command {
+                    let ink = image_rs::RgbaImage::from_raw(raster.width, raster.height, raster.pixels().to_vec()).unwrap();
+                    let ink = image_rs::imageops::resize(&ink,
+                        (raster.width as f32 * 4.0 / raster.scale) as u32,
+                        (raster.height as f32 * 4.0 / raster.scale) as u32, image_rs::imageops::FilterType::Triangle);
+                    image_rs::imageops::overlay(&mut image, &ink,
+                        ((x + raster.dx) * 4.0) as i64, ((y + raster.dy) * 4.0) as i64);
+                }
+            }
+        }
+        if let Ok(path) = std::env::var("NEOISM_BUBBLE_SNAPSHOT") {
+            image_rs::imageops::resize(&image, 1200, 520, image_rs::imageops::FilterType::Triangle).save(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn arrival_has_one_subtle_overshoot_and_settles_exactly() {
+        assert!((user_message_arrival_offset(0.0) - 5.0).abs() < 0.001);
+        assert_eq!(user_message_arrival_offset(1.0), 0.0);
+        let offsets: Vec<_> = (0..=100).map(|i| {
+            let t = i as f32 / 100.0;
+            user_message_arrival_offset(1.0 - (1.0 - t).powi(3))
+        }).collect();
+        assert!(offsets.iter().any(|y| *y < -0.1));
+        assert!(offsets.iter().all(|y| *y >= -0.5 && *y <= 5.001));
+    }
+
+    #[test]
+    fn history_and_disabled_motion_are_stationary() {
+        use crate::panels::agent_pane::tool_motion::ToolMotionState;
+        let mut motion = ToolMotionState::default();
+        motion.scope(Some("session"));
+        assert_eq!(user_message_arrival_offset(motion.sample("history").opacity), 0.0);
+        motion.record("new-user", None, "");
+        assert!(user_message_arrival_offset(motion.sample("new-user").opacity) > 0.0);
+        motion.set_enabled(false);
+        assert_eq!(user_message_arrival_offset(motion.sample("new-user").opacity), 0.0);
+        motion.set_enabled(true);
+        assert_eq!(user_message_arrival_offset(motion.sample("new-user").opacity), 0.0);
+    }
 }
 
 /// Wrap user prompts at measured glyph widths, including URLs and other tokens
@@ -1353,8 +1718,8 @@ mod user_message_wrap_tests {
 
     #[test]
     fn width_and_limit_follow_the_card_at_resize() {
-        assert_eq!(user_message_text_width(300.0, 1.0), 244.0);
-        assert_eq!(user_message_text_width(100.0, 1.0), 44.0);
+        assert_eq!(user_message_text_width(300.0, 1.0), 232.0);
+        assert!((user_message_text_width(100.0, 1.0) - 36.0).abs() < 0.001);
         let text = "abcdefghij";
         assert_eq!(
             wrap_user_message_with(text, 4.0, 2, measure).iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
@@ -1386,67 +1751,71 @@ pub fn render_user_message<P: AgentMarkdownPane>(
     h: f32,
     text: &str,
     images: &[NeoismAgentImage],
-    // Presence identity resolved by `user_message_orb_identity` — the
-    // orb seed (a display name) and the hover-tooltip label.
     orb_seed: &str,
     orb_label: &str,
-    // Live cursor position, for the orb hover tooltip. `None` = no hover.
+    // Live cursor position, for the bubble author tooltip. `None` = no hover.
     mouse: Option<(f32, f32)>,
     theme: &IdeTheme,
     s: f32,
     viewport_clip: [f32; 4],
     occlusion_rects: &[[f32; 4]],
 ) -> f32 {
-    // The grey bubble spans the full row, with the human's text aligned back
-    // from the sender orb inside the right edge.
-    let bubble_x = x;
-    let bubble_w = w.max(0.0);
-    draw_rect_clipped(
+    let tooltip_clip = viewport_clip;
+    let Some(viewport_clip) = super::draw::intersect_rect(viewport_clip, [x, y, w, h]) else {
+        return h;
+    };
+    let text_opts = DrawOpts {
+        font_size: 13.5 * s,
+        color: [255, 255, 255, 255],
+        ..DrawOpts::default()
+    };
+    let max_text_w = user_message_text_width(w, s);
+    let lines = wrap_user_message(sugarloaf, text, max_text_w, &text_opts);
+    let mut content_w = lines.iter().map(|line| {
+        measure_text_cached(sugarloaf, line, &text_opts)
+    }).fold(0.0_f32, f32::max).min(max_text_w);
+    if !images.is_empty() {
+        let thumb = (super::image_preview::MESSAGE_THUMB_SIZE * s).min(max_text_w);
+        let gap = 10.0 * s;
+        let shown = images.len().min(((max_text_w + gap) / (thumb + gap)).floor() as usize);
+        content_w = content_w.max(shown as f32 * (thumb + gap) - gap);
+    }
+    let bubble_w = user_bubble_width(w, content_w, s);
+    let avatar_lane = user_avatar_lane(w, s);
+    let bubble_x = x + w.max(0.0) - avatar_lane - bubble_w;
+    let blue = [0.0, 122.0 / 255.0, 1.0, 1.0];
+    let body_h = (h - USER_BUBBLE_TAIL_HEIGHT * s).max(0.0);
+    let tail_scale = s.min(bubble_w / 44.0).min(body_h / 44.0);
+    paint_user_bubble_tail(sugarloaf, bubble_x + bubble_w, y + body_h,
+        tail_scale, blue, viewport_clip);
+    draw_rounded_rect_clipped(
         sugarloaf,
-        [bubble_x, y, bubble_w, h],
-        theme.f32(theme.surface),
+        [bubble_x, y, bubble_w, body_h],
+        blue, // Apple #007AFF
+        (22.0 * s).min(body_h * 0.5).min(bubble_w * 0.5),
         ORDER_PANEL,
         viewport_clip,
     );
-    // Sender presence orb inside the bubble, aligned to the first text line.
-    // Deterministic in `orb_seed` (a display name), so the same author
-    // always wears the same round pixel-plasma orb — the very generator the
-    // editor carets / top-chrome face-pile use. MUST feed the dedicated
-    // `presence_orb_now_seconds()` clock (a small wrapped value), NOT the
-    // render's raw epoch `now_seconds`: at ~1.75e9 an f32 can't resolve a
-    // 16ms frame step, so the plasma would animate then stall. The
-    // It advances on normal pane invalidations without forcing idle chats to
-    // repaint continuously.
-    let orb = USER_ORB_SIZE * s;
-    let pad_x = 14.0 * s;
-    let orb_x = bubble_x + bubble_w - pad_x - orb;
-    let orb_y = y + 12.0 * s;
+    let orb = (USER_ORB_SIZE * s).min(avatar_lane * 0.7);
+    let orb_rect = [x + w - orb, y + (body_h - orb) * 0.5, orb, orb];
     crate::editor::markdown::render::draw::draw_presence_orb_clipped(
-        sugarloaf,
-        viewport_clip,
-        orb_seed,
-        orb_x,
-        orb_y,
-        orb,
-        crate::editor::crdt::presence_orb_now_seconds(),
-        DEPTH,
-        ORDER_TEXT,
+        sugarloaf, viewport_clip, orb_seed, orb_rect[0], orb_rect[1], orb,
+        crate::editor::crdt::presence_orb_now_seconds(), DEPTH, ORDER_TEXT,
     );
+    let pad_x = user_bubble_padding(w, s);
     let Some(opts) = opts_with_clip(
-        DrawOpts {
-            font_size: 13.5 * s,
-            color: theme.u8(super::primary_text_color(theme)),
-            ..DrawOpts::default()
-        },
+        text_opts,
         viewport_clip,
     ) else {
         return h;
     };
     let text_x = bubble_x + pad_x;
-    let text_w = user_message_text_width(bubble_w, s);
-    let mut line_y = y + 12.0 * s;
+    // Do not apply the conversation-width cap again to the fitted bubble.
+    // These rows were wrapped at max_text_w, exactly as in message_card measure.
+    let text_w = (bubble_w - 2.0 * pad_x).max(1.0);
+    let mut line_y = y + USER_BUBBLE_PADDING_Y * s;
     if !images.is_empty() {
-        let thumb = super::image_preview::MESSAGE_THUMB_SIZE * s;
+        let thumb = (super::image_preview::MESSAGE_THUMB_SIZE * s).min(text_w);
         let gap = 10.0 * s;
         let shown = images
             .len()
@@ -1465,7 +1834,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
             strip_w,
             theme,
             s,
-            super::image_preview::MESSAGE_THUMB_SIZE,
+            thumb / s.max(0.001),
             viewport_clip,
             occlusion_rects,
         );
@@ -1477,9 +1846,22 @@ pub fn render_user_message<P: AgentMarkdownPane>(
         line_y += 164.0 * s;
     }
     let suppress_interactions = pane.suppress_markdown_interactions();
-    for line in wrap_user_message(sugarloaf, text, text_w, &opts) {
+    let center_text = lines.len() == 1;
+    for line in lines {
         let line_w = measure_text_cached(sugarloaf, &line, &opts).max(12.0);
-        let line_x = user_message_line_x(text_x, text_w, line_w);
+        let mut line_x = text_x + if center_text { (text_w - line_w).max(0.0) * 0.5 } else { 0.0 };
+        let first = sugarloaf.text_mut().instances().len();
+        draw_text_clipped(sugarloaf, line_x, line_y, &line, &opts, occlusion_rects);
+        let before = sugarloaf.text_mut().instances().get(first).map(|instance| instance.pos);
+        // Center single-line ink; wrapped rows share a stable left text origin.
+        sugarloaf.text_mut().center_instances_in_rect(
+            first, [text_x, line_y, text_w, 19.0 * s], center_text, true,
+        );
+        if let Some(before) = before {
+            if let Some(after) = sugarloaf.text_mut().instances().get(first).map(|instance| instance.pos) {
+                line_x += (after[0] - before[0]) / sugarloaf.scale_factor().max(f32::EPSILON);
+            }
+        }
         if !suppress_interactions || pane.has_selection() {
             // User bubbles belong to the same transcript selection surface as
             // assistant Markdown and tool output. Previously these rows were
@@ -1487,7 +1869,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
             // soon as it crossed the next user prompt.
             let line_index = pane.register_selectable_line(
                 &line,
-                [line_x, line_y - 3.0 * s, line_w, opts.font_size + 8.0 * s],
+                [line_x, line_y, line_w, 19.0 * s],
             );
             pane.set_selectable_line_separator(line_index, line.separator);
             if let Some((sel_left, sel_right)) =
@@ -1497,62 +1879,54 @@ pub fn render_user_message<P: AgentMarkdownPane>(
                     sugarloaf,
                     [
                         sel_left - 2.0,
-                        line_y - 3.0 * s,
+                        line_y,
                         (sel_right - sel_left + 4.0).max(2.0),
-                        opts.font_size + 8.0 * s,
+                        19.0 * s,
                     ],
-                    theme.f32_alpha(theme.accent, 0.22),
+                    [1.0, 1.0, 1.0, 0.28],
                     4.0,
                     ORDER_PANEL + 2,
                     viewport_clip,
                 );
             }
         }
-        draw_agent_prompt_text(
-            sugarloaf,
-            line_x,
-            line_y,
-            &line,
-            &opts,
-            theme,
-            occlusion_rects,
-        );
         line_y += 19.0 * s;
     }
-    // Hover tooltip: when the cursor is over the orb, name the sender —
-    // the same read as the top-chrome presence face-pile. Hit-test the
-    // live mouse against the orb rect (drawn this frame, so it can't go
-    // stale) and draw a small surface pill below it.
-    if let Some((mx, my)) = mouse {
-        if mx >= orb_x && mx <= orb_x + orb && my >= orb_y && my <= orb_y + orb {
-            draw_user_orb_tooltip(
-                sugarloaf,
-                orb_x,
-                orb_y,
-                orb,
-                orb_label,
-                theme,
-                s,
-                viewport_clip,
-            );
-        }
+    let bubble_rect = [bubble_x, y, bubble_w, h];
+    if user_bubble_hovered(mouse, bubble_rect, viewport_clip, occlusion_rects)
+        || user_bubble_hovered(mouse, orb_rect, viewport_clip, occlusion_rects) {
+        draw_user_author_tooltip(
+            sugarloaf,
+            bubble_rect,
+            orb_label,
+            theme,
+            s,
+            tooltip_clip,
+        );
     }
     h
 }
 
-fn user_message_line_x(text_x: f32, text_w: f32, line_w: f32) -> f32 {
-    text_x + (text_w - line_w).max(0.0)
+fn user_bubble_hovered(
+    mouse: Option<(f32, f32)>,
+    rect: [f32; 4],
+    clip: [f32; 4],
+    occlusions: &[[f32; 4]],
+) -> bool {
+    let Some((mx, my)) = mouse else { return false; };
+    let contains = |r: [f32; 4]| {
+        mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
+    };
+    contains(rect) && contains(clip) && !occlusions.iter().any(|r| contains(*r))
 }
 
-/// Small name pill under a hovered user-message orb. Mirrors the
+/// Small name pill under a hovered user-message bubble. Mirrors the
 /// top-chrome presence tooltip: a surface rounded-rect + label, clamped
 /// inside the timeline's viewport, painted above the message cards.
 #[allow(clippy::too_many_arguments)]
-fn draw_user_orb_tooltip(
+fn draw_user_author_tooltip(
     sugarloaf: &mut dyn crate::primitives::paint::Paint,
-    orb_x: f32,
-    orb_y: f32,
-    orb: f32,
+    bubble: [f32; 4],
     label: &str,
     theme: &IdeTheme,
     s: f32,
@@ -1570,8 +1944,13 @@ fn draw_user_orb_tooltip(
     let margin = 4.0 * s;
     let min_x = clip[0] + margin;
     let max_x = (clip[0] + clip[2] - tip_w - margin).max(min_x);
-    let tip_x = (orb_x + orb * 0.5 - tip_w * 0.5).clamp(min_x, max_x);
-    let tip_y = orb_y + orb + margin;
+    let tip_x = (bubble[0] + bubble[2] - tip_w).clamp(min_x, max_x);
+    let below = bubble[1] + bubble[3] + margin;
+    let tip_y = if below + tip_h <= clip[1] + clip[3] {
+        below
+    } else {
+        (bubble[1] - tip_h - margin).max(clip[1])
+    };
     draw_rounded_rect_clipped(
         sugarloaf,
         [tip_x, tip_y, tip_w, tip_h],

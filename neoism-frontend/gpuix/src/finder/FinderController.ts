@@ -10,7 +10,7 @@ export interface FinderRow { index: number; path: string; line: number | null; c
 type Rect = [number, number, number, number];
 interface Request { id: number; message: SearchClientMessage }
 export interface FinderFrame {
-  commands: PaintCommand[]; cursorQuad: number[][]; cursorHold?: boolean;
+  commands: PaintCommand[]; inputCaret?: Extract<PaintCommand, { kind: "rect" }> | null; cursorQuad: number[][]; cursorHold?: boolean;
   enabled: boolean; mode: FinderMode; query: string; rect: Rect; radius: number; stroke: number;
   inputRect: Rect; listRect: Rect; previewRect: Rect; rowHeight: number; inputFontSize: number; fontSize: number;
   previewFontSize: number; previewLineHeight: number; selected: number; selectedY: number; offset: number; top: number; visibleRows: number;
@@ -18,6 +18,8 @@ export interface FinderFrame {
   preview: boolean; previewPath: string | null; previewRows: Array<{ line: number; text: string; tokens: Array<{ token: string; text: string }>; y: number; selected: boolean }>;
   previewUnreadable: boolean; previewLoaded: boolean; animating: boolean; nextTickMs: number | null; requests: Request[]; loading: boolean; error?: string;
 }
+/** Native compact frames omit rows only when the result set is unchanged. */
+export type FinderFrameUpdate = Omit<FinderFrame, "rows"> & { rows?: FinderRow[] };
 export interface FinderOptions {
   cwd: string; mode?: FinderMode; scale?: number; top?: number; width?: number; height?: number;
   lines?: readonly string[]; references?: ReadonlyArray<{ path: string; line: number; column: number; text: string }>;
@@ -52,8 +54,8 @@ export class FinderController {
   private call(op: string, args: Record<string, unknown> = {}) {
     if (this.disposed) return this.frame;
     const started = performance.now(); this.animation.cancel();
-    const next = coreCall<FinderFrame>(`finder.${op}`, { id: this.id, ...args });
-    this.frame = { ...next, commands: sharePaintCommands(this.frame.commands || [], next.commands || []), error: this.error };
+    const next = coreCall<FinderFrameUpdate>(`finder.${op}`, { id: this.id, ...args });
+    this.frame = { ...next, rows: next.rows ?? this.frame.rows, commands: sharePaintCommands(this.frame.commands || [], next.commands || []), error: this.error };
     for (const listener of this.listeners) listener(this.frame);
     this.consume(started);
     return this.frame;

@@ -7,6 +7,8 @@ import {fileURLToPath} from "node:url";
 import {setTimeout as delay} from "node:timers/promises";
 import {loadConfig,type AppConfig} from "../config";
 import {startupDirectory} from "./startup-directory";
+import {daemonExecutable} from "../../../daemon-executable";
+export {daemonExecutable};
 
 export function explicitDaemon(args:readonly string[],env:NodeJS.ProcessEnv){
  return !!env.NEOISM_GPUIX_DAEMON_URL||args.some(arg=>arg==="--daemon"||arg.startsWith("--daemon="));
@@ -25,18 +27,6 @@ export function reachable(endpoint:string,timeout=300):Promise<boolean>{
   const finish=(ready:boolean)=>{if(settled)return;settled=true;socket.destroy();resolve(ready);};
   socket.setTimeout(timeout);socket.once("connect",()=>finish(true));socket.once("error",()=>finish(false));socket.once("timeout",()=>finish(false));
  });
-}
-export function daemonExecutable(env:NodeJS.ProcessEnv=process.env,executable=process.execPath){
- const suffix=process.platform==="win32"?".exe":"";
- const override=env.NEOISM_GPUIX_WORKSPACE_DAEMON;
- if(override){const path=resolve(override);if(!existsSync(path))throw new Error(`Configured workspace daemon is missing: ${path}`);return path;}
- const repo=fileURLToPath(new URL("../../../../",import.meta.url));
- const candidates=[join(dirname(executable),`neoism-workspace-daemon${suffix}`),
-  join(repo,"neoism-frontend/gpuix/artifacts",`neoism-workspace-daemon${suffix}`),
-  ...["activation","release","debug"].map(profile=>join(repo,"target",profile,`neoism-workspace-daemon${suffix}`))];
- const path=candidates.find(existsSync);
- if(!path)throw new Error("Workspace daemon is not built. Run make build from the repository root.");
- return path;
 }
 export interface LocalStartup {
  probe(endpoint:string):Promise<boolean>;

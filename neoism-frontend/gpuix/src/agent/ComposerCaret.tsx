@@ -21,12 +21,21 @@ export function composerCaretGeometry(event:Pick<EventPayload,"x"|"y"|"value">):
 }
 /** Original Agent block geometry and original TrailCursor on a native GPU
  * canvas. The textarea retains platform IME, selection and all text editing. */
-export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|undefined;onLayout?:(layout:{text:string;width:number;rows:number})=>void}){
+export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|undefined;home?:boolean;resetToken?:number;onLayout?:(layout:{text:string;width:number;rows:number})=>void}){
  const renderer=useGpuixRequired(),id=coreCall<{id:number}>("keyboard.cursor.new").id,animation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
  const [geometry,setGeometry]=createSignal<ComposerCaretGeometry>(),[quad,setQuad]=createSignal<number[][]>([]),[moving,setMoving]=createSignal(false),[blink,setBlink]=createSignal(false),[color,setColor]=createSignal(props.config.cursorColor||props.config.theme.accent);
  const blinkClock=new CursorBlinkClock(setBlink,{scope:renderer});
  createEffect(()=>{const target=geometry();blinkClock.update({active:!!target?.visible&&!surfaceCursorSuppressed(renderer),enabled:props.config.cursorBlink,intervalMs:props.config.cursorBlinkInterval,animating:moving(),activityToken:target?`${target.x}:${target.y}:${target.fontSize}:${target.remainingWidth}`:undefined});});
- let rect:number[]|undefined,disposed=false,detach=()=>{};
+  let rect:number[]|undefined,disposed=false,detach=()=>{};
+  let home=props.home,resetToken=props.resetToken,snap=false;
+  createEffect(()=>{
+   const next=props.home,token=props.resetToken;if(next===home&&token===resetToken)return;home=next;resetToken=token;snap=true;
+   // The window-anchored caret still describes the centered Home input until
+   // native layout measures its new position. Never paint/trail that old quad
+   // across the page while the composer itself has already moved to chat.
+   // Submission clearing is likewise a discontinuity, not a user caret move.
+   animation.cancel();rect=undefined;setGeometry(undefined);setQuad([]);setMoving(false);
+  });
  const tickCursor=()=>rect?coreCall<{quad:number[][];animating:boolean;hold:boolean}>("keyboard.cursor.frame",{id,kind:"rect",x:rect[0],y:rect[1],width:rect[2],height:rect[3],scale:props.config.scale}):undefined;
  const draw=()=>{
   if(disposed||!geometry()?.visible)return;const start=performance.now(),next=tickCursor();if(!next)return;
@@ -39,8 +48,9 @@ export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|unde
   if(typeof layout.text==="string"&&Number.isFinite(layout.layoutWidth)&&layout.layoutWidth>0&&Number.isSafeInteger(layout.visualRows)&&layout.visualRows>0)
    props.onLayout?.({text:layout.text,width:layout.layoutWidth,rows:layout.visualRows});
   if(!next.visible){animation.cancel();setMoving(false);return;}
-  rect=coreCall<number[]>("agentcomposer.caret-rect",{...next,scale:props.config.scale});
-  if(rect[2]<=0||rect[3]<=0){animation.cancel();setQuad([]);return;}
+   rect=coreCall<number[]>("agentcomposer.caret-rect",{...next,scale:props.config.scale});
+   if(rect[2]<=0||rect[3]<=0){animation.cancel();setQuad([]);return;}
+   if(snap||props.config.reducedMotion){snap=false;coreCall("keyboard.cursor.seed",{id,rect});draw();return;}
   animation.request(draw);
  };
  onMount(()=>{

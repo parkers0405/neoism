@@ -40,7 +40,7 @@
 //! owns the live `SessionRegistry` (the `/session` PTY socket task),
 //! using the recorded `cwd`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -63,6 +63,7 @@ mod clipboard;
 mod dispatch;
 mod handlers;
 mod management_bridge;
+mod membership;
 mod manager;
 mod shell_ops;
 
@@ -77,6 +78,7 @@ pub use clipboard::{
 };
 pub use dispatch::{handle, handle_preauthenticated};
 pub use management_bridge::DaemonWorkspaceManagementService;
+pub use membership::WorkspaceMembershipGuard;
 pub(crate) use shell_ops::{
     cleanup_local_docker_sandbox, export_workspace_snapshot, start_local_docker_sandbox,
 };
@@ -210,6 +212,11 @@ struct ManagerInner {
     /// durable daemon snapshot shape and currently does not include
     /// per-client ephemeral cursors.
     client_states: HashMap<Uuid, ClientResumeState>,
+    /// Ephemeral per-connection claims, NEVER keyed by stable client identity.
+    workspace_claims: HashMap<Uuid, HashSet<String>>,
+    /// Only newly created rows have provenance. A second transport permanently
+    /// disqualifies a row, even after disconnect (offline recovery may exist).
+    workspace_claim_history: HashMap<String, WorkspaceClaimHistory>,
     /// Link table from a workspace-registry session id (a logical tab)
     /// to the live PTY session id that currently backs it in
     /// [`crate::sessions::SessionRegistry`]. Maintained by
@@ -226,6 +233,12 @@ struct ManagerInner {
     /// keeps single-pane web clients identical to their pre-routing
     /// behaviour and avoids gaps the older daemon never produced.
     next_route_id: u64,
+}
+
+#[derive(Default)]
+struct WorkspaceClaimHistory {
+    first_connection: Option<Uuid>,
+    multiple_connections: bool,
 }
 
 /// One host = one MACHINE. The daemon and a desktop running on the
@@ -309,6 +322,8 @@ pub struct ConnectionWorkspace {
     pub active_workspace: Option<String>,
     pub active_session: Option<String>,
     pub clipboard_payload: Option<ClipboardPayload>,
+    /// Lazily bound to the manager; Drop releases only this socket's claims.
+    pub membership: Option<WorkspaceMembershipGuard>,
 }
 
 /// Outcome of a single `WorkspaceClientMessage` dispatch. Most arms

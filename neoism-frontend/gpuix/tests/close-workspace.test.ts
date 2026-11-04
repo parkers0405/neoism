@@ -9,7 +9,7 @@ async function fixture(options:Parameters<typeof createAgentDaemon>[0]={}){
  const daemon=createAgentDaemon(options);daemon.threads.splice(0);
  const config={...loadConfig(["--config","/nonexistent/close-workspace"],{}),endpoint:daemon.endpoint,authToken:undefined};
  const client=new DaemonConnection(config),model=new WorkspaceModel(client,config);model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);
- return {daemon,model,close:()=>{model.dispose();client.stop();daemon.stop();}};
+  return {daemon,model,config,client,close:()=>{model.dispose();client.stop();daemon.stop();}};
 }
 test("q closes exactly the focused split leaf and protects the last dirty owner until q!",async()=>{
  const {model,close}=await fixture();try{
@@ -57,19 +57,91 @@ test("workspace dirty guards reject unchanged; qall! discards only target docume
   expect(model.state.workspaces).toHaveLength(2);expect(daemon.ptyRequests).toEqual([]);
  }finally{close();}
 });
-test("closing the last workspace creates a fresh Welcome first, while creation failure preserves the old window",async()=>{
- const options={workspaceCreateError:"Cannot create replacement" as string|undefined};const {daemon,model,close}=await fixture(options);try{
-  const before=model.captureSession();expect(await model.closeWorkspace()).toBe(false);expect(model.captureSession()).toEqual(before);expect(model.state.activeWorkspace?.id).toBe("a");
-  options.workspaceCreateError=undefined;const published:string[][]=[];const unsubscribe=model.subscribe(()=>published.push(model.windowWorkspaces().map(workspace=>workspace.id)));
-  expect(await model.closeWorkspace()).toBe(true);unsubscribe();const replacement=model.state.activeWorkspace!;
-  expect(replacement.id).not.toBe("a");expect(model.windowWorkspaces().map(workspace=>workspace.id)).toEqual([replacement.id]);expect(published.every(ids=>ids.length>0)).toBe(true);
-  expect(model.state.activeSurfaceId).toBe(`welcome:${replacement.id}`);expect(model.state.workspaces.map(workspace=>workspace.id)).toEqual(["a","b",replacement.id]);
-  expect(model.state.surfaces.some(surface=>surface.workspaceId==="a")).toBe(true);expect(daemon.ptyRequests).toEqual([]);
+test("closing the last workspace leaves a local empty window without creating a replacement",async()=>{
+  const {daemon,model,close}=await fixture({workspaceCreateError:"Must not create replacement"});try{
+   expect(await model.closeWorkspace()).toBe(true);
+   expect(model.windowWorkspaces()).toEqual([]);expect(model.state.activeWorkspace).toBeUndefined();expect(model.state.activeSurfaceId).toBeUndefined();
+   expect(model.state.workspaces.map(workspace=>workspace.id)).toEqual(["a","b"]);
+   expect(model.state.surfaces.some(surface=>surface.workspaceId==="a")).toBe(true);expect(daemon.ptyRequests).toEqual([]);
+   expect(daemon.workspaceRequests.some(request=>request.tag==="CreateHostWorkspace")).toBe(false);
+   for(let i=0;i<5;i++)expect(await model.closeWorkspace()).toBe(false);
+   expect(daemon.workspaces).toHaveLength(2);
  }finally{close();}
+});
+test("repeated create and close of unused same-root workspaces does not grow the daemon catalog",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  for(let i=0;i<8;i++){
+   const created=await model.newWorkspace();expect(created?.root_dir).toBe("/project/a");expect(daemon.workspaces).toHaveLength(3);
+   expect(await model.closeWorkspace()).toBe(true);expect(model.state.activeWorkspace?.id).toBe("a");
+   expect(daemon.workspaces).toHaveLength(2);expect(model.state.surfaces.some(surface=>surface.workspaceId===created!.id)).toBe(false);
+   expect((model.captureSession().ui.layouts as Record<string,unknown>)[created!.id]).toBeUndefined();
+  }
+  const first=await model.newWorkspace(),second=await model.newWorkspace();
+  expect(first!.id).not.toBe(second!.id);expect(first!.root_dir).toBe(second!.root_dir);
+  expect(model.windowWorkspaces()).toHaveLength(3);
+ }finally{close();}
+});
+test("closing a newly-created last workspace prunes it without a replacement, then plus works",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  const created=await model.newWorkspace();await model.closeWorkspace(false,"a");
+  expect(await model.closeWorkspace()).toBe(true);expect(model.state.activeWorkspace).toBeUndefined();
+  expect(daemon.workspaces.some(workspace=>workspace.id===created!.id)).toBe(false);
+  const next=await model.newWorkspace();expect(next).toBeDefined();expect(model.windowWorkspaces()).toHaveLength(1);
+ }finally{close();}
+});
+test("empty-window recovery stays empty and does not resolve or recreate a workspace",async()=>{
+ const {daemon,model,config,close}=await fixture();let restored:WorkspaceModel|undefined,client:DaemonConnection|undefined;try{
+  await model.closeWorkspace();const recovery=model.captureSession(),before=daemon.workspaceRequests.length;
+  client=new DaemonConnection(config);restored=new WorkspaceModel(client,config);restored.restoreSession(recovery);restored.start();client.start();
+  await until(()=>restored!.state.connection.phase==="connected"&&!restored!.state.loading);
+  expect(restored.windowWorkspaces()).toEqual([]);expect(restored.state.activeWorkspace).toBeUndefined();
+  expect(daemon.workspaceRequests.slice(before).some(request=>["ResolveInitialWorkspace","CreateHostWorkspace"].includes(request.tag))).toBe(false);
+  expect(await restored.newWorkspace()).toBeDefined();
+ }finally{restored?.dispose();client?.stop();close();}
+});
+test("used workspaces and composer drafts are retained even after their content tabs close",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  const used=await model.newWorkspace();await model.openFile("README.md");model.closeCurrentTab();
+  expect(await model.closeWorkspace()).toBe(true);expect(daemon.workspaces.some(workspace=>workspace.id===used!.id)).toBe(true);
+  const draft=await model.newWorkspace();model.setComposerDraft(`home:${draft!.id}`,{text:"Keep unsent",attachments:[]});
+  expect(await model.closeWorkspace()).toBe(true);expect(daemon.workspaces.some(workspace=>workspace.id===draft!.id)).toBe(true);
+  expect(model.state.composerDrafts[`home:${draft!.id}`]?.text).toBe("Keep unsent");
+ }finally{close();}
+});
+test("another window protects an inactive open workspace from empty pruning",async()=>{
+ const {daemon,model,config,close}=await fixture();let second:WorkspaceModel|undefined,client:DaemonConnection|undefined;try{
+  const created=await model.newWorkspace();
+  client=new DaemonConnection(config);second=new WorkspaceModel(client,config);second.restoreSession(model.captureSession());second.start();client.start();
+  await until(()=>!!second!.state.activeWorkspace&&!second!.state.loading);
+  await second.activateWorkspace(daemon.workspaces[1]!);
+  expect(await model.closeWorkspace()).toBe(true);
+  expect(daemon.workspaces.some(workspace=>workspace.id===created!.id)).toBe(true);
+  expect(second.windowWorkspaces().some(workspace=>workspace.id===created!.id)).toBe(true);
+  expect(second.state.activeWorkspace?.id).toBe("b");
+ }finally{second?.dispose();client?.stop();close();}
 });
 test("workspace close queues behind creation and cannot remove or select its new neighbor out of order",async()=>{
  const {daemon,model,close}=await fixture({workspaceCreateDelayMs:25});try{
   const creation=model.newWorkspace(),closing=model.closeWorkspace(false,"a");const created=await creation;expect(await closing).toBe(true);
   expect(model.state.activeWorkspace?.id).toBe(created!.id);expect(model.windowWorkspaces().map(workspace=>workspace.id)).toEqual([created!.id]);expect(daemon.workspaces).toHaveLength(3);expect(daemon.ptyRequests).toEqual([]);
+ }finally{close();}
+});
+test("a legacy daemon still permits closing without sending unsupported lifecycle requests",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  model.state={...model.state,connection:{...model.state.connection,workspaceLifecycle:false}};
+  const before=daemon.workspaceRequests.length,created=await model.newWorkspace();
+  expect(await model.closeWorkspace()).toBe(true);
+  expect(daemon.workspaceRequests.slice(before).some(request=>request.tag==="SetWindowWorkspaces")).toBe(false);
+  expect(daemon.workspaces.some(workspace=>workspace.id===created!.id)).toBe(true);
+  expect(model.state.error).toContain("Update and restart the daemon");
+ }finally{close();}
+});
+test("plus from an empty catalog resolves exactly one default workspace",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  await model.closeWorkspace();daemon.workspaces.splice(0);model.state={...model.state,workspaces:[]};
+  const before=daemon.workspaceRequests.length,created=await model.newWorkspace();
+  expect(created).toBeDefined();expect(daemon.workspaces).toHaveLength(1);expect(model.windowWorkspaces()).toHaveLength(1);
+  expect(daemon.workspaceRequests.slice(before).filter(request=>request.tag==="ResolveInitialWorkspace")).toHaveLength(1);
+  expect(daemon.workspaceRequests.slice(before).some(request=>request.tag==="CreateHostWorkspace")).toBe(false);
  }finally{close();}
 });

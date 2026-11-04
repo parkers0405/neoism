@@ -68,6 +68,33 @@ test("real deadlines sleep first and still deliver work only on a native frame",
   } finally { animation.dispose(); display.clock.dispose(); }
 });
 
+test("over-budget 120fps work still yields before requesting its next native frame",async()=>{
+ const display=nativeDisplay(),animation=new AnimationFrameScheduler(1000/240);
+ let fired=false;
+ try{
+  animation.request(()=>{fired=true;},performance.now()-100,1000/120);
+  await settle();expect(display.requests).toBe(0);expect(fired).toBe(false);
+  await Bun.sleep(10);await settle();expect(display.requests).toBe(1);
+  display.frame();expect(fired).toBe(true);
+ }finally{animation.dispose();display.clock.dispose();}
+});
+
+test("yielding animation follows native frames without a fixed-rate deadline",async()=>{
+ const display=nativeDisplay(),animation=new AnimationFrameScheduler(1000/240);
+ const times:number[]=[];let time=0;
+ const advance=()=>{times.push(time);if(times.length<3)animation.request(advance,performance.now(),1000/240,"yield-frame");};
+ try{
+  animation.request(advance,performance.now(),1000/240,"yield-frame");
+  await settle();expect(display.requests).toBe(0);
+  for(const timestamp of [4.16,8.33,15.27]){
+   const before=times.length;
+   await Bun.sleep(5);await settle();expect(times).toHaveLength(before);
+   time=timestamp;display.frame();
+  }
+  expect(times).toEqual([4.16,8.33,15.27]);
+ }finally{animation.dispose();display.clock.dispose();}
+});
+
 test("cancellation during a display batch skips captured work and preserves its replacement",async()=>{
  const display=nativeDisplay(),input=new AnimationFrameScheduler(4),paint=new AnimationFrameScheduler(4);const ran:string[]=[];
  try{

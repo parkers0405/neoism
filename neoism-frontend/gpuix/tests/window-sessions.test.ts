@@ -16,8 +16,8 @@ function session(remote=false){
  const model={state,editors:new Map([["file",draft]]),subscribe:(fn:()=>void)=>{listeners.add(fn);return()=>listeners.delete(fn);},
   windowWorkspaces:()=>state.workspaces.filter(w=>state.ui.openWorkspaceIds.includes(w.id)),
   async activateWorkspace(w:Workspace){state.activeWorkspace=w;emit();},
-  async newWorkspace(parent=workspace){calls.new++;const w={...parent,id:`new-${calls.new}`};state.workspaces=[...state.workspaces,w];state.ui={openWorkspaceIds:[...state.ui.openWorkspaceIds,w.id]};state.activeWorkspace=w;emit();return w;},
-  async closeWorkspace(discard:boolean,id:string,keepOne=true){if(dirty&&!discard)return false;calls.closed++;state.ui={openWorkspaceIds:state.ui.openWorkspaceIds.filter(w=>w!==id)};if(keepOne&&!state.ui.openWorkspaceIds.length)await model.newWorkspace();emit();return true;},
+   async newWorkspace(parent?:Workspace){calls.new++;const w={...(parent||await model.resolveHostWorkspace()),id:`new-${calls.new}`};state.workspaces=[...state.workspaces,w];state.ui={openWorkspaceIds:[...state.ui.openWorkspaceIds,w.id]};state.activeWorkspace=w;emit();return w;},
+   async closeWorkspace(discard:boolean,id:string){if(dirty&&!discard)return false;calls.closed++;state.ui={openWorkspaceIds:state.ui.openWorkspaceIds.filter(w=>w!==id)};if(state.activeWorkspace?.id===id)Object.assign(state,{activeWorkspace:state.workspaces.find(w=>state.ui.openWorkspaceIds.includes(w.id))});emit();return true;},
  } as unknown as WorkspaceModel;
  return {config,model,calls,draft,emit,dirty:()=>{dirty=true;}};
 }

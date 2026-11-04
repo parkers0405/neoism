@@ -82,7 +82,12 @@ pub(super) fn body_paint_clip(
     status_h: f32,
 ) -> [f32; 4] {
     if following && status_h > 0.0 {
-        geometry.body_clip
+        // The gap is layout space, not a hard mask on a bubble's paint-only
+        // entrance. Allow motion into half of it without reaching status ink.
+        let mut clip = geometry.body_clip;
+        let gap = (geometry.status_rect[1] - (clip[1] + clip[3])).max(0.0);
+        clip[3] = (clip[3] + gap * 0.5).min(paint_rect[3]);
+        clip
     } else {
         [
             geometry.body_clip[0],
@@ -932,8 +937,7 @@ pub struct TimelineQuestionRailFrame {
 #[derive(Debug)]
 pub struct QuestionPreview {
     pub rect: [f32; 4],
-    pub user: String,
-    pub assistant: Vec<String>,
+    pub user: Vec<String>,
 }
 
 impl TimelineQuestionRailFrame {
@@ -1035,7 +1039,7 @@ pub(super) fn question_preview_rect(
     Some([right - width, top, width, height])
 }
 
-/// Width-measured compact lines, shared by the one-line question and answer.
+/// Width-measured compact lines for the user-message hover bubble.
 pub(super) fn question_preview_lines(
     text: &str,
     width: f32,
@@ -1096,7 +1100,7 @@ pub(super) fn question_user_preview(text: &str, has_images: bool) -> String {
     }
 }
 
-fn build_question_preview<M: AgentTimelineMessage>(
+pub(super) fn build_question_preview<M: AgentTimelineMessage>(
     sugarloaf: &mut dyn crate::primitives::paint::Paint,
     target: &TimelineQuestionTarget,
     messages: &[M],
@@ -1107,35 +1111,27 @@ fn build_question_preview<M: AgentTimelineMessage>(
 ) -> Option<QuestionPreview> {
     let user = messages.get(target.source_index)?;
     let text = question_user_preview(user.text(), !user.images().is_empty());
-    let answer = target
-        .assistant_source_index
-        .and_then(|i| messages.get(i))
-        .map(|m| compact_question_preview(m.text()))
-        .unwrap_or_default();
     let opts = DrawOpts {
         font_size: 12.0 * s,
         ..DrawOpts::default()
     };
     let provisional =
         question_preview_rect(pane_rect, frame.track, index, frame.tick_count, 84.0 * s, s)?;
-    let width = provisional[2] - 20.0 * s;
+    // Include the small tail in the bounds used to mask transcript paint/hits.
+    let width = provisional[2] - 24.0 * s;
     let mut measure = |text: &str| sugarloaf.overlay_text_mut().measure(text, &opts);
-    let user = question_preview_lines(&text, width, 1, &mut measure)
-        .pop()
-        .unwrap_or_default();
-    let available_lines = ((pane_rect[3] - 36.0 * s) / (16.0 * s)).floor().max(0.0) as usize;
-    let assistant = question_preview_lines(&answer, width, available_lines.min(3), &mut measure);
-    let height = 32.0 * s
-        + if assistant.is_empty() {
-            0.0
-        } else {
-            4.0 * s + 16.0 * s * assistant.len() as f32
-        };
-    let rect = question_preview_rect(pane_rect, frame.track, index, frame.tick_count, height, s)?;
+    let available_lines = ((pane_rect[3] - 22.0 * s) / (16.0 * s)).floor().max(0.0) as usize;
+    let user = question_preview_lines(&text, width, available_lines.min(4), &mut measure);
+    if user.is_empty() { return None; }
+    let fitted_width = (user.iter().map(|line| measure(line)).fold(0.0_f32, f32::max) + 24.0 * s)
+        .clamp(40.0 * s, provisional[2]);
+    let height = 22.0 * s + 16.0 * s * user.len() as f32;
+    let mut rect = question_preview_rect(pane_rect, frame.track, index, frame.tick_count, height, s)?;
+    rect[0] += rect[2] - fitted_width;
+    rect[2] = fitted_width;
     Some(QuestionPreview {
         rect,
         user,
-        assistant,
     })
 }
 
@@ -1170,32 +1166,28 @@ pub fn render_timeline_scrollbar_with<P: AgentTimelinePane>(
     }
     if let Some(preview) = &frame.preview {
         let [x, y, w, h] = preview.rect;
-        // Both surface and text use the dedicated overlay layer, after transcript
-        // occlusion holes have been restored by the timeline/chat renderers.
-        sugarloaf.overlay_rounded_rect(x, y, w, h, theme.f32(theme.border), DEPTH, 6.0 * s, 185);
-        sugarloaf.overlay_rounded_rect(
-            x + s,
-            y + s,
-            w - 2.0 * s,
-            h - 2.0 * s,
-            theme.f32(theme.surface),
-            DEPTH,
-            5.0 * s,
-            186,
+        let blue = [0.0, 122.0 / 255.0, 1.0, 1.0];
+        let body_w = w - 4.0 * s;
+        let body_h = h - 6.0 * s;
+        let tail_scale = (0.82 * s).min(body_w / 44.0).min(body_h / 44.0);
+        // Reuse the chat bubble silhouette, above transcript glyphs, with its
+        // entire tail inside the already-reserved overlay occlusion rectangle.
+        sugarloaf.set_late_overlay_mode(true);
+        super::super::user_input::paint_user_bubble_tail(
+            sugarloaf, x + body_w, y + body_h, tail_scale, blue, preview.rect,
         );
-        let mut opts = DrawOpts {
+        sugarloaf.set_late_overlay_mode(false);
+        sugarloaf.overlay_rounded_rect(x, y, body_w, body_h, blue, DEPTH, 22.0 * tail_scale, 186);
+        let opts = DrawOpts {
             font_size: 12.0 * s,
-            color: theme.u8(theme.fg),
+            color: [255; 4],
+            clip_rect: Some(preview.rect),
             ..DrawOpts::default()
         };
-        sugarloaf
-            .overlay_text_mut()
-            .draw(x + 10.0 * s, y + 8.0 * s, &preview.user, &opts);
-        opts.color = theme.u8(theme.muted);
-        for (i, line) in preview.assistant.iter().enumerate() {
+        for (i, line) in preview.user.iter().enumerate() {
             sugarloaf.overlay_text_mut().draw(
                 x + 10.0 * s,
-                y + 28.0 * s + i as f32 * 16.0 * s,
+                y + 8.0 * s + i as f32 * 16.0 * s,
                 line,
                 &opts,
             );

@@ -136,7 +136,7 @@ fn paint_picker(
             if option.is_header {
                 return (option.section == "directory").then(|| inline_picker::InlinePickerIcon::Glyph(neoism_ui::panels::file_tree::icons::folder_icon(true).0));
             }
-            return Some(inline_picker::InlinePickerIcon::Glyph("\u{f075}"));
+            return None;
         }
         if !mcp || option.is_header { return None; }
         Some(picker.mcp_icons.get(&option.title).cloned().unwrap_or_default().presentation(paint, theme.u8(theme.fg)))

@@ -129,14 +129,6 @@ pub(super) fn branch_connector_top(
     )
 }
 
-pub(super) struct BranchConnectorGeometry {
-    pub straight: [[f32; 4]; 2],
-    pub center: [f32; 2],
-    pub radius: f32,
-    pub stroke: f32,
-    pub curve_bounds: [f32; 4],
-}
-
 /// Shared straight-stroke tangents and an analytic bottom-left quarter-ring.
 pub(super) fn branch_connector_geometry(
     title_x: f32,
@@ -145,45 +137,11 @@ pub(super) fn branch_connector_geometry(
     continues: bool,
     scale: f32,
     device_scale: f32,
-) -> BranchConnectorGeometry {
-    let device_scale = device_scale.max(f32::EPSILON);
-    let stroke = (2.0 * scale * device_scale).round().max(2.0) / device_scale;
-    let radius = snap_to_device_px(5.0 * scale, device_scale).max(stroke);
-    let left = snap_to_device_px(title_x - 19.0 * scale - stroke * 0.5, device_scale);
-    let elbow_y =
-        snap_to_device_px(row_y + (23.0 + FONT_SIZE * 0.5) * scale, device_scale);
-    let center_x = left + stroke * 0.5 + radius;
-    let center_y = elbow_y - radius;
-    let top = snap_to_device_px(top, device_scale);
-    let bottom = if continues {
-        elbow_y + stroke * 0.5
-    } else {
-        center_y
-    };
-    let straight = [
-        [left, top, stroke, (bottom - top).max(0.0)],
-        [
-            center_x,
-            elbow_y - stroke * 0.5,
-            (title_x - 6.0 * scale - center_x).max(0.0),
-            stroke,
-        ],
-    ];
-    // Keep the AA fringe while clipping at the two tangent axes. The full
-    // circle's center/radius stay fixed under scrolling and overlay cutouts.
-    let padded_outer = radius + stroke * 0.5 + 0.5 / device_scale;
-    BranchConnectorGeometry {
-        straight,
-        center: [center_x, center_y],
-        radius,
-        stroke,
-        curve_bounds: [
-            center_x - padded_outer,
-            center_y,
-            padded_outer,
-            padded_outer,
-        ],
-    }
+) -> super::super::draw::BranchConnectorGeometry {
+    super::super::draw::branch_connector_geometry(
+        title_x, row_y + (23.0 + FONT_SIZE * 0.5) * scale,
+        top, continues, scale, device_scale,
+    )
 }
 
 pub(super) fn catalog_branch_status(entry: &NeoismAgentSessionEntry) -> BranchStatus {
@@ -578,6 +536,9 @@ pub(crate) fn render_sessions_list(
             (CatalogHeaderAction::Search, "Search", CatalogIcon::Search),
             (CatalogHeaderAction::Projects, label.as_str(), CatalogIcon::Folder),
         ] {
+            if !pane.side_panel().header_action_enabled(action) {
+                continue;
+            }
             let rect = [text_x, y, text_w.max(0.0), button_h];
             let ([icon_x, icon_y, _, _], [label_x, label_y]) =
                 catalog_action_layout(rect, s, label_size);
@@ -948,41 +909,7 @@ pub(crate) fn render_sessions_list(
                 s,
                 sugarloaf.scale_factor(),
             );
-            let color = theme.f32_alpha(theme.fg, 1.0);
-            for clip in crate::primitives::visible_rect_fragments(
-                geometry.curve_bounds,
-                list_rect,
-                occlusion_rects,
-            ) {
-                sugarloaf.ring_clipped(
-                    geometry.center,
-                    geometry.radius,
-                    geometry.stroke,
-                    color,
-                    DEPTH,
-                    ORDER_PANEL + 2,
-                    clip,
-                );
-            }
-            for rect in geometry.straight {
-                for [x, y, w, h] in crate::primitives::visible_rect_fragments(
-                    rect,
-                    list_rect,
-                    occlusion_rects,
-                ) {
-                    sugarloaf.quad(
-                        None,
-                        x,
-                        y,
-                        w,
-                        h,
-                        color,
-                        [0.0; 4],
-                        DEPTH,
-                        ORDER_PANEL + 2,
-                    );
-                }
-            }
+            geometry.paint(sugarloaf, theme.f32_alpha(theme.fg, 1.0), list_rect, occlusion_rects);
         }
         let visible_y = row_y.max(list_rect[1]);
         let visible_h = row_bottom.min(list_bottom) - visible_y;

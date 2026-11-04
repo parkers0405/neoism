@@ -98,16 +98,16 @@ test("a generated title arriving before the create response survives home adopti
  }finally{close();}
 });
 
-test("existing-chat prompts wait for server messages and failed ACKs preserve confirmed messages",async()=>{
+test("existing-chat prompts echo immediately and failed ACKs preserve only confirmed messages",async()=>{
  const {daemon,model,close}=await fixture({deferPrompts:true,promptError:"Delayed rejection"});try{
   model.openThread({session_id:"one",title:"One",directory:"/project/a"});await until(()=>model.state.history.one!==undefined);
   let removals=0;const off=model.subscribeAgentEvents((event:any)=>{if(event.PartRemoved)removals++;});
   const first=model.submitPrompt("one","same text"),second=model.submitPrompt("one","same text");
-  expect(model.state.history.one.filter(row=>row.text==="same text")).toHaveLength(0);
+  expect(model.state.history.one.filter(row=>row.text==="same text")).toHaveLength(2);
   await until(()=>daemon.prompts.length===2);
    const local=daemon.requests.filter(row=>row.tag==="SubmitPrompt").map(row=>({id:String(row.body.message_id),text:"same text",kind:"User",role:"User" as const}));expect(local[0].id).not.toBe(local[1].id);
   daemon.push({MessageUpdated:{session_id:"one",message:{...local[0],author:"canonical"}}});await until(()=>model.state.history.one.some(row=>row.author==="canonical"));
   daemon.prompts.splice(0).forEach(resolve=>resolve());expect(await first).toBe(false);expect(await second).toBe(false);
-  expect(model.state.history.one.filter(row=>row.text==="same text")).toEqual([{...local[0],author:"canonical"}]);expect(removals).toBe(0);off();
+  expect(model.state.history.one.filter(row=>row.text==="same text")).toEqual([{...local[0],author:"canonical"}]);expect(removals).toBe(1);off();
  }finally{close();}
 });

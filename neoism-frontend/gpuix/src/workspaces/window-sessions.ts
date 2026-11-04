@@ -100,14 +100,14 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
   const parent=(hostId
    ? local.model.state.workspaces.find(workspace=>workspace.id===local.model.state.activeWorkspace?.id&&workspace.host_id===hostId)
      ||local.model.state.workspaces.find(workspace=>workspace.host_id===hostId)
-   : local.model.state.activeWorkspace)||await local.model.resolveHostWorkspace();
+    : local.model.state.activeWorkspace);
   const pending=local.model.newWorkspace(parent);this.select(local);return await pending;
  };
  close=async(discard=false,id=this.activeId())=>{
   const owner=id&&this.owners.get(id);if(!owner)return false;
   const last=owner.session.model.windowWorkspaces().length===1;
   if(!last||localWorkspaceSession(owner.session))return owner.session.model.closeWorkspace(discard,owner.workspace.id);
-  if(!await owner.session.model.closeWorkspace(discard,owner.workspace.id,false))return false;
+   if(!await owner.session.model.closeWorkspace(discard,owner.workspace.id))return false;
   const key=this.key(owner.session)!;this.entries.get(key)!.unsubscribe();this.entries.delete(key);
   if(this.selected===owner.session)this.select(this.sessions()[0]||await this.local());else this.refresh();
   await this.hooks.dispose(owner.session);return true;
@@ -121,11 +121,12 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
 }
 
 export async function waitForWorkspace(model:WorkspaceModel,timeoutMs=10000){
- if(model.state.activeWorkspace)return;
+  const ready=()=>!!model.state.activeWorkspace||model.state.connection.phase==="connected"&&!model.state.loading&&Array.isArray(model.state.ui.openWorkspaceIds)&&model.state.ui.openWorkspaceIds.length===0;
+  if(ready())return;
  await new Promise<void>((resolve,reject)=>{
   let unsubscribe=()=>{};
   const timer=setTimeout(()=>{unsubscribe();reject(new Error("The local workspace did not finish opening"));},timeoutMs);
-  const check=()=>{if(model.state.activeWorkspace){clearTimeout(timer);unsubscribe();resolve();}};
+   const check=()=>{if(ready()){clearTimeout(timer);unsubscribe();resolve();}};
   unsubscribe=model.subscribe(check);check();
  });
 }

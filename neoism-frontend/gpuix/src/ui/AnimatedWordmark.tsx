@@ -100,14 +100,17 @@ export function AnimatedWordmark(props:{config:AppConfig;style?:StyleDesc;kind?:
  const [frame,setFrame]=createSignal<WordmarkFrame>({letters:[],commands:[],showOriginal:true,animating:false});
  const paintBounds=createMemo<WordmarkPaintBounds>(()=>props.paintBounds||[-size().width,-size().height*4,size().width*3,size().height*9]);
  let mouse:number[]|undefined,disposed=false,host:HostElement|undefined;
- const draw=()=>{
+  const draw=()=>{
+   const started=performance.now();
   if(disposed)return;const bounds=size();if(bounds.width<=0||bounds.height<=0)return;
   const painted=host&&paintedChromeBounds(renderer,host.id),origin=painted||bounds;
   const localMouse=mouse?[mouse[0]-origin.x,mouse[1]-origin.y]:undefined;
   const next=coreCall<WordmarkFrame>("wordmark.frame",{id,width:bounds.width,height:bounds.height,clip:paintBounds(),mouse:localMouse,fg:props.config.theme.fg,
    autoAnimate:!!props.config.splashAutoAnimate,reducedMotion:props.config.reducedMotion});
   if(next.image&&retained)retained.hosts.pinImage(retained.key,renderer,next.image);
-  setFrame(next);if(next.animating)animation.request(draw);
+   // Let input run between expensive polygon frames, then follow the next
+   // native display opportunity. There is no fixed replay FPS cap.
+   setFrame(next);if(next.animating)animation.request(draw,started,ANIMATION_FRAME_MS,next.clickAnimating?"yield-frame":"frame");
  };
  // Both splash and Agent already know the source-computed logo rectangle.
  // Paint it in the first mount batch rather than waiting another layout.

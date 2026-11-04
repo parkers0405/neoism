@@ -49,7 +49,13 @@ export function installDisplayClock(renderer: DisplayRenderer, onError: (error: 
     const enqueue = () => { if (timer !== undefined) delayed.delete(timer); if (!cancelled && active) { callbacks.set(id, () => { if (!cancelled) callback(); }); request(); } };
     // Real deadlines (e.g. a hover probe) may sleep; the animation interval
     // itself is replaced by the next native display frame, at any refresh rate.
-    if (kind === "deadline" && delay > 0) { timer = setTimeout(enqueue, delay); delayed.add(timer); }
+    // Even an overdue deadline must yield. Running it straight through the
+    // native wake queue can starve input when frame work exceeds its budget.
+    if (kind === "deadline" || kind === "yield-frame") {
+      // yield-frame imposes no FPS deadline: after letting input run, request
+      // the next native display opportunity rather than drawing on the timer.
+      timer = setTimeout(enqueue, kind === "yield-frame" ? 0 : Math.max(0,delay)); delayed.add(timer);
+    }
     else enqueue();
     return () => { cancelled = true; callbacks.delete(id); if (timer !== undefined) { clearTimeout(timer); delayed.delete(timer); } };
   };

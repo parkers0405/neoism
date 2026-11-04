@@ -953,7 +953,8 @@ fn render_limited_content(
         }
         let icon = row_icons.get(absolute_ix).copied().flatten();
         let indent = if grouped { 20.0 * s } else { 0.0 };
-        let title_x = x + indent + if icon.is_some() { 48.0 } else { 22.0 } * s;
+        // Keep folder children inset even when their message icon is omitted.
+        let title_x = x + indent + if icon.is_some() || grouped { 48.0 } else { 22.0 } * s;
         if let Some(icon) = icon {
             icon.draw(sugarloaf, [x + indent + 22.0 * s, row_y + (ROW_H - 18.0) * 0.5 * s, 18.0 * s, 18.0 * s], list_clip, theme.u8(theme.fg));
         }

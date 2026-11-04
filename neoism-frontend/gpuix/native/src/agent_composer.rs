@@ -72,7 +72,7 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
    if op!="agentcomposer.frame"{return Err(format!("Unknown Agent composer operation {op}"));}
    let home=v["home"].as_bool().unwrap_or(true);let help=v["help"].as_bool().unwrap_or(true);let cwd=v["cwd"].as_str().filter(|s|!s.is_empty()).map(str::to_owned);let branch=v["branch"].as_str().filter(|s|!s.is_empty()).map(str::to_owned);
    let system=v["system"].as_str().filter(|s|!s.is_empty()).map(|label|neoism_ui::panels::agent_pane::composer_interactions::ComposerSystemControl{label:label.into(),selectable:v["systemSelectable"].as_bool().unwrap_or(false)});
-   let footer_visible=help||cwd.is_some()||system.is_some();let images=v["images"].as_u64().unwrap_or(0)as usize;let input_text=text(v,"text");
+   let footer_visible=help||cwd.is_some()||system.is_some()||status(text(v,"state"))!=AgentStreamingStatus::Idle;let images=v["images"].as_u64().unwrap_or(0)as usize;let input_text=text(v,"text");
    let card_width=if home{layout::home_input_width([0.0,0.0,width,height],scale)}else{layout::chat_column([0.0,0.0,width,height],scale).1};
    let rows=v["visualRows"].as_u64().filter(|rows|*rows>0&&((card_width-36.0*scale).max(20.0*scale)-n(v,"textWidth",-1.0)).abs()<0.1)
     .map(|rows|rows as usize).unwrap_or_else(||user_input::measure_prompt_rows_for_host(&mut host.paint,input_text,card_width,scale).len());
@@ -96,4 +96,31 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
     Ok(json!({"inputRect":rect,"logoRect":logo,"cardRect":geometry.card,"cardColor":bytes(card_color),"trayColor":bytes(tray_color),"trayRect":geometry.tray,"cardRadius":geometry.card_radius,"joinRect":geometry.tray_join_rect((neoism_ui::panels::file_tree::FRAME_STROKE*0.5*scale).max(1.0)),"trayRadius":geometry.tray_radius,"footerVisible":footer_visible,"controls":controls,"visualRows":rows,"commands":commands,"animating":footer_visible&&snapshot.streaming!=AgentStreamingStatus::Idle,"cwdRects":snapshot.interactions.cwd_rects,"systemRects":snapshot.interactions.system_rects,"contextRect":snapshot.context_rect}))
   })
  })())
+}
+
+#[cfg(test)]
+mod activity_geometry_tests {
+ use super::*;
+
+ #[test]
+ fn crafting_reserves_the_same_footer_before_and_after_server_admission() {
+  for reduced in [false,true] {
+   let created=dispatch(&json!({"op":"agentcomposer.new"})).unwrap().unwrap();
+   let id=created["id"].as_u64().unwrap();
+   let frame=|state:&str| dispatch(&json!({"op":"agentcomposer.frame","id":id,
+    "width":800,"height":600,"home":false,"help":false,"state":state,
+    "busy":state!="Idle","reducedMotion":reduced})).unwrap().unwrap();
+   let idle=frame("Idle");
+   let local=frame("Generating");
+   let admitted=frame("Generating");
+   assert_eq!(idle["footerVisible"],false);
+   assert_eq!(local["footerVisible"],true);
+   assert_eq!(local["inputRect"],admitted["inputRect"]);
+   assert_eq!(local["cardRect"],admitted["cardRect"]);
+   assert_eq!(local["trayRect"],admitted["trayRect"]);
+   // Rejection/queue admission returns the real idle geometry, not a sticky reserve.
+   assert_eq!(idle["inputRect"],frame("Idle")["inputRect"]);
+   dispatch(&json!({"op":"agentcomposer.dispose","id":id})).unwrap().unwrap();
+  }
+ }
 }

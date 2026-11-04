@@ -22,6 +22,7 @@ test("file Finder uses the canonical compact geometry, scoped search, fuzzy/exac
   await until(() => finder.frame.rows.length === 40 && !finder.frame.animating);
   expect(finder.frame.rect[2]).toBeCloseTo(480); expect(finder.frame.preview).toBe(false);
   expect(requests.every((r) => r.body.cwd === "")).toBe(true);
+  expect(requests.some((r) => r.tag === "CollectFiles")).toBe(false);
   finder.move(20); expect(finder.frame.selected).toBe(20); expect(finder.frame.top).toBeGreaterThan(0); expect(finder.frame.animating).toBe(true);
   finder.query("main"); await until(() => finder.frame.rows[0]?.path === "src/main0.rs");
   finder.cycle(); await until(() => requests.some((r) => r.tag === "SearchFiles" && r.body.mode === "Exact"));

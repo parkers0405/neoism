@@ -1848,14 +1848,41 @@ pub(crate) async fn push_session_running_state(
     inner: Arc<AgentInner>,
     session_id: String,
 ) {
+    let generation = inner.status_evidence.begin_hydration(&session_id);
     let Some(value) = fetch_session_statuses(&inner).await else {
         return;
     };
-    // Idle sessions may be omitted from the status map. Still send an exact
-    // queue snapshot so reconnect reconciles local admission feedback, without
-    // inventing an Idle lifecycle edge over newer stream evidence.
-    let message = session_queue_hydration_message(session_id.clone(), value.get(&session_id));
-    let _ = inner.tx.send(message);
+    let Some(messages) = session_status_hydration_messages(&session_id, &value) else {
+        return;
+    };
+    inner.status_evidence.publish_hydration(&inner.tx, &session_id, generation, messages);
+}
+
+pub(super) fn session_status_hydration_messages(
+    session_id: &str,
+    statuses: &Value,
+) -> Option<Vec<AgentServerMessage>> {
+    // Only a successful status MAP can prove that an omitted session is idle.
+    // Null/arrays/unknown status shapes must not clear a live run.
+    let statuses = statuses.as_object()?;
+    if statuses.values().any(|status| {
+        status.get("type").and_then(Value::as_str).is_none()
+    }) {
+        return None;
+    }
+    let status = statuses.get(session_id);
+    let idle = match status {
+        None => true,
+        Some(status) if status.get("type").and_then(Value::as_str) == Some("idle") => true,
+        Some(status) if status_is_running(status) => false,
+        _ => return None,
+    };
+    let mut messages = Vec::new();
+    if idle {
+        messages.push(AgentServerMessage::SessionIdle { session_id: session_id.to_owned() });
+    }
+    messages.push(session_queue_hydration_message(session_id.to_owned(), status));
+    Some(messages)
 }
 
 fn session_queue_hydration_message(session_id: String, status: Option<&Value>) -> AgentServerMessage {
@@ -2575,21 +2602,21 @@ mod canonical_route_tests {
     }
 
     #[test]
-    fn idle_status_hydration_reconciles_queue_without_a_lifecycle_edge() {
-        assert!(matches!(
-            super::session_queue_hydration_message("origin".into(), None),
-            AgentServerMessage::QueueUpdate {
-                session_id, count: 0, preview: None, started_at: None,
-            } if session_id == "origin"
-        ));
-        assert!(matches!(
-            super::session_queue_hydration_message("origin".into(), Some(&json!({
-                "type": "idle", "queue": { "count": 2, "preview": "ordinary" }
-            }))),
-            AgentServerMessage::QueueUpdate {
-                count: 2, preview: Some(preview), started_at: None, ..
-            } if preview == "ordinary"
-        ));
+    fn idle_status_hydration_reconciles_lifecycle_and_queue() {
+        for statuses in [json!({}), json!({"origin": {"type": "idle"}})] {
+            let messages = super::session_status_hydration_messages("origin", &statuses).unwrap();
+            assert!(matches!(&messages[..], [
+                AgentServerMessage::SessionIdle { session_id },
+                AgentServerMessage::QueueUpdate { count: 0, preview: None, started_at: None, .. },
+            ] if session_id == "origin"));
+        }
+        let messages = super::session_status_hydration_messages("origin", &json!({
+            "origin": {"type": "idle", "queue": { "count": 2, "preview": "ordinary" }}
+        })).unwrap();
+        assert!(matches!(&messages[..], [
+            AgentServerMessage::SessionIdle { .. },
+            AgentServerMessage::QueueUpdate { count: 2, preview: Some(preview), started_at: None, .. },
+        ] if preview == "ordinary"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ import {cssColor,type CanvasOp} from "../ui/canvas";
 import {focusNativeElement,invalidateNativeFocus} from "../native-focus";
 import {registerSurfaceCaret,surfaceCursorSuppressed} from "../ui/cursor-handoff";
 import {CursorBlinkClock} from "../ui/cursor-blink";
-import {readingScrollY,wheelPixels} from "../ui/wheel";
+import {horizontalScrollEvent,readingScrollY,wheelCellPixels,wheelPixels} from "../ui/wheel";
 import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
 import {LoadingSkeleton} from "../ui/LoadingSkeleton";
 import type {GitReviewController} from "./GitReviewController";
@@ -41,7 +41,7 @@ export function GitReviewView(props:{controller:GitReviewController;config:AppCo
   onBlur={()=>{invalidateNativeFocus(renderer);setFocused(false);controller.call("focus",{focused:false});}}
   onKeyDown={keyDown}
   onLayout={event=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0},old=bounds();if(next.x!==old.x||next.y!==old.y||next.width!==old.width||next.height!==old.height)setBounds(next);if(next.width>0&&next.height>0&&(next.width!==old.width||next.height!==old.height))controller.layout(next.width,next.height);}}
-  onScroll={event=>{const wheel=wheelPixels({...event,deltaY:readingScrollY(event)},config.fontSize),shift=event.modifiers?.shift&&Math.abs(wheel.x)<.01;
+  onScroll={event=>{const shift=event.modifiers?.shift&&Math.abs((event.deltaX||0)*(event.precise?1:wheelCellPixels(event,config.fontSize)))<.01,wheel=wheelPixels(horizontalScrollEvent({...event,deltaY:readingScrollY(event)}),config.fontSize);
    pendingScroll={deltaY:(pendingScroll?.deltaY||0)+(shift?0:-wheel.y),deltaX:(pendingScroll?.deltaX||0)+(shift?-wheel.y:-wheel.x),x:(event.x||0)-bounds().x,y:(event.y||0)-bounds().y};scrollFrames.request(flushScroll);}}
   onMouseDown={event=>{if(event.button!==0)return;flushScroll();flushPointer();props.onFocus?.();if(host)focusNativeElement(renderer,host.id);controller.pointer("down",(event.x||0)-bounds().x,(event.y||0)-bounds().y);}}
   onMouseMove={event=>{pendingPointer={x:(event.x||0)-bounds().x,y:(event.y||0)-bounds().y};pointerFrames.request(flushPointer);}}

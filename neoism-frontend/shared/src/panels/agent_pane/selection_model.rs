@@ -23,9 +23,8 @@ impl From<&str> for WrappedSelectionLine {
     fn from(text: &str) -> Self { Self::new(text.into(), "\n") }
 }
 
-/// Immutable exact geometry; clones retain both allocations. Code rows use
-/// local stops plus a registration origin. Inline Markdown retains its historic
-/// screen-origin accumulation (registered with zero additional translation).
+/// Immutable local geometry; clones retain both allocations. Code and inline
+/// Markdown rows translate their cached stops with a registration origin.
 #[derive(Clone, Debug)]
 pub struct SelectionGeometry {
     pub text: Arc<str>,

@@ -62,12 +62,12 @@ pub(crate) fn is_unsettled_edit_tool(tool: &str, status: &str) -> bool {
 }
 
 pub(crate) fn show_tool_diff_cards(
-    _tool: &str,
-    _status: &str,
+    tool: &str,
+    status: &str,
     expanded: bool,
     _archived: bool,
 ) -> bool {
-    expanded
+    expanded || (is_edit_tool_name(tool) && !is_unsettled_edit_status(status))
 }
 
 pub(super) fn wrap_todo_text(

@@ -1007,9 +1007,11 @@ mod tests {
                 accepted,
                 reason,
                 connected_host_id,
+                workspace_lifecycle,
                 ..
             } => {
                 assert_eq!(*accepted, expect_accepted, "accepted flag mismatch");
+                assert_eq!(*workspace_lifecycle, expect_accepted, "lifecycle capability mismatch");
                 assert!(
                     reason.as_ref().map(|r| !r.is_empty()).unwrap_or(false),
                     "expected non-empty reason: {reason:?}"

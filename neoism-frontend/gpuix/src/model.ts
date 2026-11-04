@@ -1,6 +1,7 @@
 import {HistoryUpdates} from "./agent/history-updates";
 import {sessionErrorMessage} from "./agent/session-error";
 import {mergeHistoryHead} from "./agent/merge-history";
+import {stepHistoryEdit,type HistoryEdit,type EditableHistory} from "./agent/history-edit";
 import { recoveredEditorState } from "./editor/recovery-state";
 import { profileStart, profileEnd } from "./profiling";
 import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "./animation/frame-scheduler";
@@ -119,6 +120,8 @@ export class WorkspaceModel {
   private selectionTasks = new Map<string, Promise<void>>();
   private workspaceCreations: Promise<unknown> = Promise.resolve();
   private pendingWorkspaceCreations = new Set<string>();
+  // Only this window's never-used creations are eligible for automatic pruning.
+  private disposableWorkspaces = new Set<string>();
   private workspaceDirectoryChanges = new Set<string>();
   state: AppState = {
     ui: {}, composerDrafts: {}, connection: { phase: "closed", attempt: 0 }, workspaces: [], workspaceTabs: [],
@@ -176,6 +179,7 @@ export class WorkspaceModel {
     this.composerHistory.push(draft);if(this.composerHistory.length>100)this.composerHistory.shift();
   }
   setComposerDraft = (key: string, draft: ComposerDraft) => {
+    if(draft.text||draft.attachments.length)for(const id of this.disposableWorkspaces)if(key.includes(id))this.disposableWorkspaces.delete(id);
     if (JSON.stringify(this.state.composerDrafts[key]) === JSON.stringify(draft)) return;
     this.update({ composerDrafts: { ...this.state.composerDrafts, [key]: draft } });
   };
@@ -302,12 +306,18 @@ export class WorkspaceModel {
     const known = new Set(this.state.surfaces.map((s) => s.id));
     for (const leaf of [...layout.frame.leaves]) if (!leaf.surfaceId || !known.has(leaf.surfaceId)) layout.close(leaf.leaf);
     if (!layout.frame.leaves.length) for (const surface of this.state.surfaces.filter((s) => s.workspaceId === workspaceId && !s.hidden)) layout.open(surface);
-    this.cleanups.push(layout.subscribe((frame) => {
+    // The layout owns this listener and clears it on dispose.
+    layout.subscribe((frame) => {
       const layouts = isRecord(this.state.ui.layouts) ? this.state.ui.layouts : {};
       const patch: Partial<AppState> = { ui: { ...this.state.ui, layouts: { ...layouts, [workspaceId]: layout!.snapshot() } } };
       if (this.state.activeWorkspace?.id === workspaceId) patch.activeSurfaceId = frame.focusedSurfaceId;
+      const focused = patch.activeSurfaceId && patch.activeSurfaceId !== this.state.activeSurfaceId
+        ? this.state.surfaces.find(surface=>surface.id===patch.activeSurfaceId) : undefined;
       this.update(patch);
-    }));
+      // Layout-driven tab/pane navigation publishes focus before selectSurface.
+      // Reconcile warm chats here too, while the actual transition is known.
+      if(focused?.kind==="agent"&&focused.sessionId)this.resumeThread(focused.sessionId);
+    });
     return layout;
   }
   focusPane = (direction: FocusDirection) => { const frame = this.getLayout().focusDirection(direction); if (frame.focusedSurfaceId) this.selectSurface(frame.focusedSurfaceId, true); };
@@ -412,6 +422,11 @@ export class WorkspaceModel {
       }
       const preferred = this.state.activeWorkspace?.id || this.config.workspaceId || this.restoredWorkspaceId;
       const rememberedWindow=openWorkspaceIds(this.state.ui);
+      if(!this.config.workspaceId&&remembered?.length===0){
+        await this.syncWindowWorkspaces([]);
+        this.update({activeWorkspace:undefined,activeSurfaceId:undefined});
+        return;
+      }
       const opened=this.windowWorkspaces().filter(eligible);
       let workspace = !this.config.workspaceId&&rememberedWindow!==undefined
         ? opened.find(workspace=>workspace.id===preferred)||opened[0]
@@ -425,6 +440,15 @@ export class WorkspaceModel {
     finally { if (epoch === this.epoch) this.update({ loading: false }); }
   }
   windowWorkspaces=(state:Pick<AppState,"workspaces"|"ui">=this.state)=>getWindowWorkspaces(state);
+  private async syncWindowWorkspaces(ids=this.windowWorkspaces().map(workspace=>workspace.id),pruneEmpty?:string){
+    if(!this.state.connection.workspaceLifecycle){
+      if(pruneEmpty)this.report(new Error("Workspace hidden. Update and restart the daemon to enable unused-workspace cleanup."));
+      return {workspaces:this.state.workspaces,tabs:this.state.workspaceTabs};
+    }
+    return Schema.decodeUnknownSync(TreeSchema)(expectVariant(await this.run(this.client.request("Workspace",{
+      SetWindowWorkspaces:{workspace_ids:ids,prune_empty:pruneEmpty||null},
+    })),"HostWorkspaceTree"));
+  }
   /** Ask the daemon for its own host's default, never borrow another host's root. */
   resolveHostWorkspace = async ():Promise<Workspace> => {
     const hostId=this.state.connection.connectedHostId;
@@ -432,6 +456,7 @@ export class WorkspaceModel {
     if(!isRecord(reply))throw new Error("Invalid default workspace reply");
     const workspace=Schema.decodeUnknownSync(WorkspaceSchema)(reply.workspace);
     if(hostId&&workspace.host_id!==hostId)throw new Error("The daemon returned a workspace on a different host; restart or update the local daemon");
+    this.update({workspaces:this.state.workspaces.some(entry=>entry.id===workspace.id)?this.state.workspaces.map(entry=>entry.id===workspace.id?workspace:entry):[...this.state.workspaces,workspace]});
     return workspace;
   };
   reorderWorkspace = (dragId:string,targetId:string,position:"before"|"after"="before"):boolean => {
@@ -441,10 +466,19 @@ export class WorkspaceModel {
     this.setUI({openWorkspaceIds:ids});return true;
   };
   newWorkspace = (parent=this.state.activeWorkspace): Promise<Workspace | undefined> => {
-    if(!parent){this.report(new Error("Select a host workspace first"));return Promise.resolve(undefined);}
     const id=crypto.randomUUID();
     this.pendingWorkspaceCreations.add(id);this.update({creatingWorkspace:true});
-    const task=this.workspaceCreations.then(()=>this.createWorkspace(parent,id));
+    const task=this.workspaceCreations.then(async()=>{
+      if(this.disposed)return;
+      const hostId=this.state.connection.connectedHostId;
+      const source=parent||this.state.workspaces.find(workspace=>!hostId||workspace.host_id===hostId);
+      if(source)return this.createWorkspace(source,id);
+      // An empty daemon resolves one default; do not immediately create a second.
+      const workspace=await this.resolveHostWorkspace();
+      await this.activateWorkspace(workspace);return workspace;
+    }).catch(error=>{this.report(error);return undefined;}).finally(()=>{
+      this.pendingWorkspaceCreations.delete(id);this.update({creatingWorkspace:this.pendingWorkspaceCreations.size>0});
+    });
     this.workspaceCreations=task;
     return task;
   };
@@ -462,6 +496,7 @@ export class WorkspaceModel {
         const workspace=Schema.decodeUnknownSync(WorkspaceSchema)(body.workspace);
         if(workspace.id!==id||workspace.host_id!==parent.host_id)throw new Error("The daemon returned a different workspace");
         if(this.disposed)return;
+        this.disposableWorkspaces.add(workspace.id);
         // The + action starts in the same host/folder. Its known directory
         // listing can paint immediately while the new workspace refreshes it.
         // Expansion, selection, scroll and conversation state remain its own.
@@ -484,23 +519,39 @@ export class WorkspaceModel {
       }catch(error){this.report(error);return undefined;}
       finally{this.pendingWorkspaceCreations.delete(id);this.update({creatingWorkspace:this.pendingWorkspaceCreations.size>0});}
   }
-  closeWorkspace = (discard=false,workspaceId=this.state.activeWorkspace?.id,keepOne=true):Promise<boolean> => {
+  closeWorkspace = (discard=false,workspaceId=this.state.activeWorkspace?.id):Promise<boolean> => {
     const task=this.workspaceCreations.then(async()=>{
       if(this.disposed||!workspaceId)return false;
       const opened=this.windowWorkspaces(),index=opened.findIndex(workspace=>workspace.id===workspaceId),workspace=opened[index];
       if(!workspace)return false;
       const dirty=this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId&&this.surfaceDirty(surface.id));
       if(!discard&&dirty.length){this.report(new Error("Unsaved changes. Save this workspace or use :qall! to discard it."));return false;}
-      if(this.state.activeWorkspace?.id===workspaceId){
+      const wasActive=this.state.activeWorkspace?.id===workspaceId;
+      if(wasActive){
         const adjacent=opened[index+1]||opened[index-1];
         if(adjacent)await this.activateWorkspace(adjacent);
-        else if(keepOne&&!await this.createWorkspace(this.workspaceView(workspace)))return false;
       }
+      const remaining=opened.filter(entry=>entry.id!==workspaceId).map(entry=>entry.id);
+      const pristine=this.disposableWorkspaces.has(workspaceId)&&this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId).every(surface=>surface.kind==="welcome");
+      const tree=await this.syncWindowWorkspaces(remaining,pristine?workspaceId:undefined);
       if(this.disposed)return false;
       this.transaction(()=>{
         if(discard)for(const surface of dirty)this.closeSurface(surface.id,true);
-        this.setUI({openWorkspaceIds:(openWorkspaceIds(this.state.ui)||[]).filter(id=>id!==workspaceId)});
+        this.setUI({openWorkspaceIds:remaining});
+        if(wasActive&&!remaining.length){
+          ++this.epoch;this.presence.leaveWorkspace();
+          this.update({activeWorkspace:undefined,activeSurfaceId:undefined,directories:{},notesDirectories:{},threads:[],loading:false});
+        }
+        if(!tree.workspaces.some(entry=>entry.id===workspaceId)){
+          for(const surface of this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId))this.closeSurface(surface.id);
+          this.layouts.get(workspaceId)?.dispose();this.layouts.delete(workspaceId);
+          this.workspaceNavigation.delete(this.workspaceKey(workspace));
+          const layouts={...(isRecord(this.state.ui.layouts)?this.state.ui.layouts:{})};delete layouts[workspaceId];
+          const sidebars={...(isRecord(this.state.ui.workspaceSidebars)?this.state.ui.workspaceSidebars:{})};delete sidebars[workspaceId];
+          this.setUI({layouts,workspaceSidebars:sidebars});
+        }
       });
+      this.disposableWorkspaces.delete(workspaceId);
       return true;
     }).catch(error=>{this.report(error);return false;});
     this.workspaceCreations=task;
@@ -522,6 +573,7 @@ export class WorkspaceModel {
     if(!captured)throw new Error("Select a workspace first");
     if(!absoluteTerminalDirectory(path)||/[\x00-\x1f\x7f]/.test(path))throw new Error("Choose an absolute directory without control characters");
     if(this.workspaceDirectoryChanges.has(captured.id))throw new Error("This workspace is still waiting for its directory change");
+    this.disposableWorkspaces.delete(captured.id);
     this.workspaceDirectoryChanges.add(captured.id);
     try{
     const terminal=this.mainTerminalSurface(captured.id);
@@ -594,7 +646,7 @@ export class WorkspaceModel {
     if(this.requestedAgentCatalogScopes.has(workspace.id))this.ensureAgentCatalogStream(workspace.id,this.requestedAgentCatalogScopes.get(workspace.id));
     // File/directory operations carry explicit roots and need not wait for the
     // workspace subscription acknowledgement. Cached navigation stays visible.
-    const subscribed = this.run(this.client.request("Workspace", { SubscribeWorkspace: { workspace_id: workspace.id } }));
+    const subscribed = this.syncWindowWorkspaces().then(()=>this.run(this.client.request("Workspace", { SubscribeWorkspace: { workspace_id: workspace.id } })));
     const listing = this.listDirectory("", epoch);
     if (workspace.notes_vault_dir) void this.listDirectory("", epoch, true);
     for (const pane of this.getLayout(workspace.id).frame.panes) {
@@ -801,6 +853,7 @@ export class WorkspaceModel {
     this.fileLoads.set(id, task); return task;
   };
   private addSurface(surface: Surface, split?: SplitAxis) {
+    if(surface.kind!=="welcome")this.disposableWorkspaces.delete(surface.workspaceId);
     this.transaction(() => {
       this.update({ surfaces: this.state.surfaces.some((s) => s.id === surface.id) ? this.state.surfaces : [...this.state.surfaces, surface], ...(surface.workspaceId===this.state.activeWorkspace?.id?{activeSurfaceId:surface.id}:{}) });
       const layout = this.getLayout(surface.workspaceId);
@@ -1102,9 +1155,48 @@ export class WorkspaceModel {
     }})();return true;
   };
   readonly historyCursors = new Map<string, string | null>();
-  private historyRequests = new Map<string, { older: boolean; sentAt: number }>();
-  private queuedHistory = new Map<string, AgentClientMessage[]>();
-  sendAgent = (message: AgentClientMessage) => {
+  private historyRequests = new Map<string, { older: boolean; replace: boolean; revision: number; sentAt: number }>();
+  private queuedHistory = new Map<string, {message: AgentClientMessage; replace: boolean}[]>();
+  private historyRevisions = new Map<string,number>();
+  private historyEdits = new Map<string,{base:EditableHistory;pending:HistoryEdit[];tail:Promise<void>}>();
+  private publishHistoryEdit(sessionId:string,state:EditableHistory){
+    const pending=(this.state.history[sessionId]||[]).filter(row=>this.optimisticPrompts.get(row.id)===sessionId&&!state.messages.some(message=>message.id===row.id));
+    const messages=[...state.messages,...pending];
+    this.update({history:{...this.state.history,[sessionId]:messages}});
+    const message={HistoryChunk:{session_id:sessionId,messages,next_cursor:this.historyCursors.get(sessionId)??null}};
+    for(const listener of this.agentEventListeners){try{listener(message,"replace");}catch(error){this.report(error);}}
+  }
+  editSessionHistory = (sessionId:string,action:HistoryEdit,mutate:()=>Promise<unknown>):Promise<void> => {
+    this.flushHistoryUpdates();
+    let edit=this.historyEdits.get(sessionId);
+    if(!edit){edit={base:{messages:this.state.history[sessionId]||[],redo:[]},pending:[],tail:Promise.resolve()};this.historyEdits.set(sessionId,edit);}
+    if(!edit.pending.length)edit.base={...edit.base,messages:this.state.history[sessionId]||[]};
+    const current=edit;
+    current.pending.push(action);
+    this.historyRevisions.set(sessionId,(this.historyRevisions.get(sessionId)||0)+1);
+    this.queuedHistory.delete(sessionId);
+    this.publishHistoryEdit(sessionId,current.pending.reduce(stepHistoryEdit,current.base));
+    // Project every keystroke immediately, but preserve server mutation order.
+    const task=current.tail.catch(()=>{}).then(async()=>{
+      if(this.disposed)return;
+      try{await mutate();current.base=stepHistoryEdit(current.base,action);}
+      finally{
+        current.pending.shift();
+        if(!this.disposed){
+          this.publishHistoryEdit(sessionId,current.pending.reduce(stepHistoryEdit,current.base));
+          if(!current.pending.length)this.refreshSessionHistory(sessionId);
+        }
+      }
+    });
+    current.tail=task;return task;
+  };
+  refreshSessionHistory = (sessionId: string) => {
+    // Undo/redo invalidates both retained rows and queued pagination cursors.
+    // An in-flight read still drains before the authoritative replacement.
+    this.queuedHistory.delete(sessionId);
+    this.sendAgent({GetHistory:{session_id:sessionId,cursor:null,limit:200}}, true);
+  };
+  sendAgent = (message: AgentClientMessage, replaceHistory = false) => {
     if(this.catalogRead(message))return;
     // Legacy Agent envelopes carry the most recent request id, not the
     // request that produced a reply. Serialize history reads per session.
@@ -1113,14 +1205,14 @@ export class WorkspaceModel {
       const pending = this.historyRequests.get(history.session_id);
       if (pending && Date.now() - pending.sentAt < 30000) {
         const queue = this.queuedHistory.get(history.session_id) || [];
-        if (!queue.some(item => typeof item === "object" && "GetHistory" in item && item.GetHistory.cursor === history.cursor)) queue.push(message);
+        if (!queue.some(item => item.replace === replaceHistory && typeof item.message === "object" && "GetHistory" in item.message && item.message.GetHistory.cursor === history.cursor)) queue.push({message,replace:replaceHistory});
         this.queuedHistory.set(history.session_id, queue);
         return;
       }
     }
     try {
       this.client.send("Agent", message);
-      if (history) this.historyRequests.set(history.session_id, { older: !!history.cursor, sentAt: Date.now() });
+      if (history) this.historyRequests.set(history.session_id, { older: !!history.cursor, replace: replaceHistory, revision:this.historyRevisions.get(history.session_id)||0, sentAt: Date.now() });
     } catch (error) { this.report(error); }
   };
   selection = (sessionId?: string): ProviderState => {
@@ -1183,30 +1275,38 @@ export class WorkspaceModel {
   };
   private catalogFlights=new Map<string,Promise<void>>();
   private catalogFetchedAt=new Map<string,number>();
+  private catalogScope="";
+  private catalogGeneration=0;
+  private catalogDirectory(){
+    const sessionId=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.sessionId;
+    return this.state.threads.find(thread=>thread.session_id===sessionId)?.directory||this.state.activeWorkspace?.root_dir||undefined;
+  }
   refreshCatalogs = (options:{maxAgeMs?:number}={}) => {
     const workspace=this.state.activeWorkspace;if(!workspace)return Promise.resolve();
-    const key=JSON.stringify([this.epoch,workspace.id,workspace.root_dir]);
-    const pending=this.catalogFlights.get(key);if(pending)return pending;
-    if(options.maxAgeMs&&Date.now()-(this.catalogFetchedAt.get(key)||0)<options.maxAgeMs)return Promise.resolve();
-    const task=this.loadCatalogs().then(()=>{if(!this.state.catalogsError)this.catalogFetchedAt.set(key,Date.now());}).finally(()=>{if(this.catalogFlights.get(key)===task)this.catalogFlights.delete(key);});
+    const directory=this.catalogDirectory(),key=JSON.stringify([this.epoch,workspace.id,directory]);
+    const pending=this.catalogFlights.get(key);if(pending&&this.catalogScope===key)return pending;
+    if(this.catalogScope===key&&options.maxAgeMs&&Date.now()-(this.catalogFetchedAt.get(key)||0)<options.maxAgeMs)return Promise.resolve();
+    this.catalogScope=key;
+    const task=this.loadCatalogs(directory).then(current=>{if(current&&!this.state.catalogsError)this.catalogFetchedAt.set(key,Date.now());}).finally(()=>{if(this.catalogFlights.get(key)===task)this.catalogFlights.delete(key);});
     this.catalogFlights.set(key,task);return task;
   };
-  private loadCatalogs = async () => {
+  private loadCatalogs = async (directory:string|undefined) => {
     const epoch = this.epoch, workspace = this.state.activeWorkspace;
     if (!workspace) return;
+    const generation=++this.catalogGeneration,isCurrent=()=>epoch===this.epoch&&generation===this.catalogGeneration&&directory===this.catalogDirectory();
     const sdk = this.agentSdk.forWorkspace(workspace.id);
-    // Following a terminal's cwd changes the Explorer, not the daemon's
-    // authorized workspace. Resolve project config within that scope; an
-    // outside cwd must use the workspace endpoint's authoritative default.
+    // Provider accounts retain workspace scope. Project metadata follows the
+    // actual cwd through daemon-verified desktop access, never the old root.
     const root=this.state.workspaces.find(entry=>entry.id===workspace.id)?.root_dir;
     const paths=hostPaths(root||"");
-    const child=root&&workspace.root_dir?paths.relative(root,workspace.root_dir):undefined;
-    const directory=child!==undefined&&child!==".."&&!child.startsWith(`..${paths.sep}`)&&!paths.isAbsolute(child)?workspace.root_dir||undefined:undefined;
-    const key=JSON.stringify([workspace.id,workspace.root_dir||""]);
+    const child=root&&directory?paths.relative(root,directory):undefined;
+    const providerDirectory=child!==undefined&&child!==".."&&!child.startsWith(`..${paths.sep}`)&&!paths.isAbsolute(child)?directory:undefined;
+    const projectSdk=this.agentSdk.forDirectory(workspace.id);
+    const key=JSON.stringify([workspace.id,directory||""]);
     const hadReadyModel=!!this.state.agentDefaults?.[key]?.model;
     let config:unknown={},providers:unknown={},configReady=false,providersReady=false;
     const publishDefaults=()=>{
-      if(epoch!==this.epoch)return;
+      if(!isCurrent())return;
       // Config is authoritative and arrives on its own critical path. Provider
       // discovery only supplies the original fallback when no model is set.
       if(!configReady)return;
@@ -1219,23 +1319,24 @@ export class WorkspaceModel {
     const catalog = async (load: () => Promise<Partial<AppState>>,failed?:()=>void) => {
       try {
         const patch = await this.run(Effect.tryPromise({ try: load, catch: (error) => error }));
-        if (epoch === this.epoch) this.update(patch);
-      } catch (error) { if (epoch === this.epoch) {failed?.();this.update({ catalogsError: error instanceof Error ? error.message : "Catalog unavailable" });} }
+        if (isCurrent()) this.update(patch);
+      } catch (error) { if (isCurrent()) {failed?.();this.update({ catalogsError: error instanceof Error ? error.message : "Catalog unavailable" });} }
     };
     await Promise.all([
-      catalog(async()=>{config=await sdk.config.defaults(directory);configReady=true;publishDefaults();return{};}),
+      catalog(async()=>{config=await(await projectSdk).config.defaults(directory);configReady=true;publishDefaults();return{};}),
       catalog(async () => {
-        const result = await sdk.catalog.providers.configured(directory);
+        const result = await sdk.catalog.providers.configured(providerDirectory);
         providers=result;providersReady=true;publishDefaults();
         const catalog = result.providers.map((p) => ({ id: p.id, name: p.name || p.id,
           models: Object.entries(p.models).map(([key, model]) => ({ id: model.id || key, name: model.name || model.id || key,
             context_limit: isRecord(model.limit) && typeof model.limit.context === "number" && model.limit.context > 0 ? model.limit.context : undefined })) }));
         return { providers: Schema.decodeUnknownSync(Schema.Array(ProviderSchema))(catalog), providerCatalog: result };
       },()=>{providersReady=true;publishDefaults();}),
-      catalog(async () => ({ agents: Schema.decodeUnknownSync(Schema.Array(AgentSchema))((await sdk.catalog.agents.list(directory)).filter((a) => !a.hidden && a.mode !== "subagent").map((a) => ({ ...a, description: a.description || "" }))) })),
-      catalog(async () => ({ skills: Schema.decodeUnknownSync(Schema.Array(SkillSchema))((await sdk.catalog.skills.list(directory)).map((a) => ({ ...a, description: a.description || "" }))) })),
+      catalog(async () => ({ agents: Schema.decodeUnknownSync(Schema.Array(AgentSchema))((await(await projectSdk).catalog.agents.list(directory)).filter((a) => !a.hidden && a.mode !== "subagent").map((a) => ({ ...a, description: a.description || "" }))) })),
+      catalog(async () => ({ skills: Schema.decodeUnknownSync(Schema.Array(SkillSchema))((await(await projectSdk).catalog.skills.list(directory)).map((a) => ({ ...a, description: a.description || "" }))) })),
     ]);
-    if (epoch === this.epoch) this.update({ catalogsLoading: false,agentDefaultsLoading:false });
+    if (epoch===this.epoch&&generation===this.catalogGeneration) this.update({ catalogsLoading: false,agentDefaultsLoading:false });
+    return isCurrent();
   };
   private async createThread(selection: ProviderState, optimistic?:{sessionId:string;message:HistoryMessage}) {
     const workspace = this.state.activeWorkspace;
@@ -1270,9 +1371,16 @@ export class WorkspaceModel {
       this.transaction(()=>{
         const draft=homeDraftKey?this.state.composerDrafts[homeDraftKey]:undefined;
         const pendingAgentSessions={...this.state.pendingAgentSessions};delete pendingAgentSessions[home.id];
-        const history={...this.state.history};
-        if(optimistic){history[thread.session_id]=[optimistic.message,...(history[thread.session_id]||[]).filter(row=>row.id!==optimistic.message.id)];delete history[optimistic.sessionId];this.optimisticPrompts.set(optimistic.message.id,thread.session_id);}
-        this.update({pendingAgentSessions,history,surfaces:this.state.surfaces.map(surface=>surface.id===home.id?adopted:surface),
+        // This is a newly created session, so its empty history is already
+        // known (also for queue-only sends). Do not briefly show a cold chat.
+        const history={...this.state.history,[thread.session_id]:this.state.history[thread.session_id]||[]};
+        const streaming={...this.state.streaming};
+        if(optimistic){history[thread.session_id]=[optimistic.message,...(history[thread.session_id]||[]).filter(row=>row.id!==optimistic.message.id)];delete history[optimistic.sessionId];this.optimisticPrompts.set(optimistic.message.id,thread.session_id);
+          if(this.promptArrivals.get(optimistic.message.id)===optimistic.sessionId)this.promptArrivals.set(optimistic.message.id,thread.session_id);
+          for(const listener of this.agentEventListeners){try{listener({LocalSessionAdopted:{from:optimistic.sessionId,to:thread.session_id}});}catch(error){this.report(error);}}
+          if(this.promptRuntimeRoots.get(optimistic.sessionId)===optimistic.message.id){this.promptRuntimeRoots.delete(optimistic.sessionId);this.promptRuntimeRoots.set(thread.session_id,optimistic.message.id);}
+          if(this.promptActivity.get(optimistic.message.id)===optimistic.sessionId){this.promptActivity.set(optimistic.message.id,thread.session_id);streaming[thread.session_id]=streaming[optimistic.sessionId];delete streaming[optimistic.sessionId];}}
+        this.update({pendingAgentSessions,history,streaming,surfaces:this.state.surfaces.map(surface=>surface.id===home.id?adopted:surface),
           ...(draft?{composerDrafts:{...this.state.composerDrafts,[thread.session_id]:draft}}:{})});
         this.getLayout(workspace.id).rename(adopted);
       });
@@ -1282,12 +1390,93 @@ export class WorkspaceModel {
   }
   newThread = async () => { try { await this.createThread(this.selection()); } catch (error) { this.report(error); } };
   private optimisticPrompts=new Map<string,string>();
+  private promptArrivals=new Map<string,string>();
+  /** Only unpainted live echoes can seed arrival motion. Taking is one-shot
+   * across host remounts/engine eviction; ordinary history never enters here. */
+  takePromptArrivals(sessionId:string):HistoryMessage[]{
+    const messages=(this.state.history[sessionId]||[]).filter(message=>this.promptArrivals.get(message.id)===sessionId&&this.optimisticPrompts.get(message.id)===sessionId);
+    for(const message of messages)this.promptArrivals.delete(message.id);
+    return messages;
+  }
+  consumePromptArrival(messageId:string){this.promptArrivals.delete(messageId);}
+  // Separate from echo reconciliation: a canonical User message can arrive
+  // before the first streaming event. Keep its reserved row until that event.
+  private promptActivity=new Map<string,string>();
+  // A top-level turn started locally from Idle must not inherit a previous
+  // execution's finished runtime, even after its own live busy has arrived.
+  // Steers into existing busy runs deliberately never establish this fence.
+  private promptRuntimeRoots=new Map<string,string>();
+  // Attach hydration is ordered on the daemon socket, not against the HTTP
+  // prompt request. Until live busy, its Idle can describe the *previous* turn.
+  // Admission and HTTP busy reads prove acceptance, not that old WS hydration
+  // has drained. Only live busy or a fresh idle read hands off this guard.
+  private acceptedPromptRequests=new Set<string>();
+  private deferredPromptIdle=new Set<string>();
+  private promptStatusChecks=new Set<string>();
+  private forgetPromptActivity(messageId:string){
+    this.promptActivity.delete(messageId);
+    this.acceptedPromptRequests.delete(messageId);
+    this.deferredPromptIdle.delete(messageId);
+  }
+  private promptHydrationOwners(body:Record<string,unknown>):string[]{
+    const snapshot=isRecord(body.snapshot)?body.snapshot:{};
+    const branches=Array.isArray(snapshot.branches)?snapshot.branches:[];
+    return [...this.promptActivity].filter(([,session])=>
+      (body.session_id===session||snapshot.rootSessionId===session||branches.some(branch=>isRecord(branch)&&branch.sessionId===session))).map(([id])=>id);
+  }
+  private async reconcileDeferredPromptIdle(messageId:string,sessionId:string){
+    if(this.promptStatusChecks.has(messageId)||!this.acceptedPromptRequests.has(messageId)||!this.deferredPromptIdle.delete(messageId)||this.promptActivity.get(messageId)!==sessionId)return;
+    this.promptStatusChecks.add(messageId);
+    // Do not replay an old Idle after HTTP succeeds: read post-admission state.
+    // This also settles no-reply/instant completion when no busy edge was seen.
+    try{
+      const statuses=await this.sdkForSession(sessionId).sessions.status();
+      if(this.disposed||this.promptActivity.get(messageId)!==sessionId)return;
+      if(!statuses[sessionId]||statuses[sessionId].type==="idle")this.releasePromptActivity(messageId);
+      // Busy may precede the live busy event on an independent transport.
+      // Keep shielding against old WS snapshots until that lifecycle edge.
+    }catch(error){
+      if(this.disposed||this.promptActivity.get(messageId)!==sessionId)return;
+      // A failed read is not an authoritative Idle. Preserve the guard; a
+      // subsequent lifecycle edge/recheck or explicit session error settles it.
+      this.report(error);
+    }finally{
+      this.promptStatusChecks.delete(messageId);
+      // An Idle arriving while this read was in flight may be newer than its
+      // captured busy result. Coalesce those edges into one fresh recheck.
+      if(!this.disposed)void this.reconcileDeferredPromptIdle(messageId,sessionId);
+    }
+  }
+  private publishPromptActivity(sessionId:string,state:string){
+    this.update({streaming:{...this.state.streaming,[sessionId]:state}});
+    for(const listener of this.agentEventListeners){try{listener({StreamingState:{session_id:sessionId,state,label:null}});}catch(error){this.report(error);}}
+  }
+  private releasePromptActivity(messageId:string){
+    const sessionId=this.promptActivity.get(messageId);this.forgetPromptActivity(messageId);if(!sessionId)return;
+    if(this.promptRuntimeRoots.get(sessionId)===messageId)this.promptRuntimeRoots.delete(sessionId);
+    if(![...this.promptActivity.values()].includes(sessionId))this.publishPromptActivity(sessionId,"Idle");
+  }
   private showPrompt(sessionId:string,message:HistoryMessage){
+    // Adoption continues the original send, not a second user arrival.
+    if(this.optimisticPrompts.get(message.id)===sessionId)return;
+    if(!this.historyEdits.get(sessionId)?.pending.length)this.historyEdits.delete(sessionId);
+    // Reserve Crafting/follow-bottom geometry before the bubble's first paint,
+    // not on the later HTTP/SSE state. Existing busy turns remain server-owned.
+    if(!this.state.streaming[sessionId]||this.state.streaming[sessionId]==="Idle"||[...this.promptActivity.values()].includes(sessionId)){
+      if((!this.state.streaming[sessionId]||this.state.streaming[sessionId]==="Idle")&&this.agentFamily(sessionId).root===sessionId)this.promptRuntimeRoots.set(sessionId,message.id);
+      this.promptActivity.set(message.id,sessionId);
+      if(this.state.streaming[sessionId]!=="Generating")this.publishPromptActivity(sessionId,"Generating");
+    }
+    this.promptArrivals.set(message.id,sessionId);
     this.optimisticPrompts.set(message.id,sessionId);this.upsertMessage(sessionId,message);
-    const event={MessageUpdated:{session_id:sessionId,message}};
+    const event={MessageUpdated:{session_id:sessionId,message,local_echo:true}};
     for(const listener of this.agentEventListeners){try{listener(event);}catch(error){this.report(error);}}
   }
   private rollbackPrompt(messageId:string){
+    this.promptArrivals.delete(messageId);
+    const reservedSession=this.optimisticPrompts.get(messageId);
+    if(reservedSession&&this.promptRuntimeRoots.get(reservedSession)===messageId)this.promptRuntimeRoots.delete(reservedSession);
+    this.releasePromptActivity(messageId);
     const sessionId=this.optimisticPrompts.get(messageId);if(!sessionId)return;
     this.optimisticPrompts.delete(messageId);
     this.update({history:{...this.state.history,[sessionId]:(this.state.history[sessionId]||[]).filter(row=>row.id!==messageId)}});
@@ -1303,12 +1492,19 @@ export class WorkspaceModel {
     this.clearSessionError(sessionId);
     const selection=options.selection||this.selection(sessionId),request=sdkPrompt(text,attachments,selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
     if(options.messageId)request.messageId=options.messageId;
-    // Admission can queue even a steer request while our local busy state is stale.
-    // Only the server message event confirms that an existing-chat prompt belongs in history.
+    // Paint before any selection/auth/HTTP await. Admission later confirms the
+    // same identity or moves it to the queue without duplicating the bubble.
+    if(options.delivery!=="queue")this.transaction(()=>this.showPrompt(sessionId,this.promptMessage(request)));
     try {
       const sdk = this.sdkForSession(sessionId);
+      // A new turn follows any queued undo/redo on the server, while its local
+      // bubble is already visible above. Starting a turn invalidates redo.
+      await this.historyEdits.get(sessionId)?.tail.catch(()=>{});
+      this.historyEdits.delete(sessionId);
       await this.selectionTasks.get(sessionId);
       await sdk.sessions.prompt(sessionId,request);
+      if(this.promptActivity.has(request.messageId!))this.acceptedPromptRequests.add(request.messageId!);
+      void this.reconcileDeferredPromptIdle(request.messageId!,sessionId);
       return true;
     } catch (error) { this.rollbackPrompt(request.messageId!);this.reportSessionError(sessionId,error instanceof Error?error.message:"Agent request failed"); return false; }
   };
@@ -1475,7 +1671,7 @@ export class WorkspaceModel {
     if(this.incomingAgentHead===this.incomingAgentEvents.length){this.incomingAgentEvents=[];this.incomingAgentHead=0;}
     else{if(this.incomingAgentHead>=1024){this.incomingAgentEvents=this.incomingAgentEvents.slice(this.incomingAgentHead);this.incomingAgentHead=0;}this.scheduleAgentEvents();}
   }
-  private agentEventListeners = new Set<(message: unknown, historyKind?: "head" | "older") => void>();
+  private agentEventListeners = new Set<(message: unknown, historyKind?: "head" | "older" | "replace") => void>();
   async mutateSidebarSession(workspaceId:string,sessionId:string,mutation:{kind:"pin";pinned:boolean}|{kind:"rename";title:string}|{kind:"delete"}) {
     const sdk=this.agentSdk.forSession(workspaceId,sessionId);
     let message:unknown;
@@ -1500,7 +1696,7 @@ export class WorkspaceModel {
   }
   /** Agent events for shared engines. Head history includes retained older
    * pages; continuations stay page-sized and carry their actual request kind. */
-  subscribeAgentEvents = (listener: (message: unknown, historyKind?: "head" | "older") => void) => {
+  subscribeAgentEvents = (listener: (message: unknown, historyKind?: "head" | "older" | "replace") => void) => {
     this.agentEventListeners.add(listener);
     return () => { this.agentEventListeners.delete(listener); };
   };
@@ -1509,6 +1705,21 @@ export class WorkspaceModel {
     if (!pair || !isRecord(pair[1])) return;
     const [tag, body] = pair as [string, Record<string, unknown>];
     if(tag!=="ContentDelta")this.flushHistoryUpdates();
+    const runtime=tag==="RuntimeSnapshot"&&isRecord(body.snapshot)?body.snapshot:undefined;
+    const runtimeRoot=runtime&&typeof runtime.rootSessionId==="string"?runtime.rootSessionId:undefined;
+    const localRuntimeMessage=event.family==="Agent"&&runtimeRoot?this.promptRuntimeRoots.get(runtimeRoot):undefined;
+    const execution=runtime&&isRecord(runtime.execution)?runtime.execution:undefined;
+    const currentLocalRuntime=!!localRuntimeMessage&&execution?.rootMessageId===localRuntimeMessage;
+    const staleLocalRuntime=!!localRuntimeMessage&&!currentLocalRuntime;
+    const hydrationOwners=event.family==="Agent"&&(tag==="SessionIdle"||tag==="StreamingState"||tag==="RuntimeSnapshot")?this.promptHydrationOwners(body):[];
+    const deferredHydration=staleLocalRuntime||hydrationOwners.length>0&&(tag==="SessionIdle"||tag==="StreamingState"&&body.state==="Idle"||tag==="RuntimeSnapshot"&&!currentLocalRuntime);
+    if(deferredHydration){
+      for(const id of hydrationOwners){this.deferredPromptIdle.add(id);const sessionId=this.promptActivity.get(id);if(sessionId)void this.reconcileDeferredPromptIdle(id,sessionId);}
+      if(tag==="SessionIdle"||tag==="StreamingState")return;
+      // Family metadata still enters the model below. Its pre-admission runtime
+      // must not overwrite the timeline's local activity reservation.
+    }
+    if(event.family==="Agent"&&typeof body.session_id==="string"&&this.historyEdits.get(body.session_id)?.pending.length&&["MessageUpdated","ContentDelta","PartRemoved","MessageEnd"].includes(tag))return;
     if(event.family==="Agent"){
       const current=this.state.ui,snapshot=isRecord(body.snapshot)?body.snapshot:{};
       const key=tag==="CatalogFamily"||tag==="RuntimeSnapshot"?`${String(snapshot.rootSessionId||body.session_id||"")}:${tag}`:undefined;
@@ -1521,10 +1732,28 @@ export class WorkspaceModel {
         const changed=metadata.some(field=>ui[field]!==current[field]&&(current[field]!==undefined||isRecord(ui[field])&&Object.keys(ui[field]).length>0));
         if(changed){this.update({ui:{...current,agentParentSessions:ui.agentParentSessions,agentFamilyRoots:ui.agentFamilyRoots,agentFamilyRosters:ui.agentFamilyRosters}});for(const stopped of this.familyStreams.reconcile())this.sendAgent({StopStream:{session_id:stopped}});}
       }
-      const completed=this.completedTranscript.observe(event.message);if(completed)this.refreshCompletedHistory(completed);
+      const completed=!deferredHydration&&this.completedTranscript.observe(event.message);if(completed)this.refreshCompletedHistory(completed);
       if(tag==="ThreadSwitched"&&typeof body.session_id==="string")for(const stopped of this.familyStreams.switched(body.session_id))this.sendAgent({StopStream:{session_id:stopped}});
     }
-    if (event.family === "Agent" && tag !== "HistoryChunk") for (const listener of this.agentEventListeners) { try { listener(event.message); } catch (error) { this.report(error); } }
+    // Admission permits fresh status reconciliation, but is not a WS drain
+    // barrier. Live busy takes over the reservation, not its runtime identity.
+    if(event.family==="Agent"&&tag==="SessionEvent"&&body.kind==="session.prompt.admitted"&&isRecord(body.properties)){
+      const request=isRecord(body.properties.request)?body.properties.request:{};
+      if(typeof request.messageId==="string"&&this.promptActivity.get(request.messageId)===body.session_id){
+        this.acceptedPromptRequests.add(request.messageId);
+        void this.reconcileDeferredPromptIdle(request.messageId,body.session_id as string);
+      }
+    }
+    if(event.family==="Agent"&&typeof body.session_id==="string"&&(tag==="StreamingState"||tag==="SessionIdle"||tag==="QueueUpdate"&&typeof body.started_at==="number"||tag==="SessionEvent"&&body.kind==="session.error")){
+      for(const[id,session]of this.promptActivity)if(session===body.session_id)this.forgetPromptActivity(id);
+      if(tag==="SessionIdle"||tag==="StreamingState"&&body.state==="Idle"||tag==="SessionEvent"&&body.kind==="session.error")this.promptRuntimeRoots.delete(body.session_id);
+    }
+    if(currentLocalRuntime&&execution?.finished===true&&runtimeRoot){
+      for(const[id,session]of this.promptActivity)if(session===runtimeRoot)this.forgetPromptActivity(id);
+      this.promptRuntimeRoots.delete(runtimeRoot);
+      this.update({streaming:{...this.state.streaming,[runtimeRoot]:"Idle"}});
+    }
+    if (event.family === "Agent" && tag !== "HistoryChunk"&&!deferredHydration) for (const listener of this.agentEventListeners) { try { listener(event.message); } catch (error) { this.report(error); } }
     try {
       if (event.family === "Workspace") {
         if (tag === "HostWorkspaceTree") {
@@ -1586,9 +1815,11 @@ export class WorkspaceModel {
           if (this.disposed) return;
           const queue = this.queuedHistory.get(sessionId), next = queue?.shift();
           if (!queue?.length) this.queuedHistory.delete(sessionId);
-          if (next) this.sendAgent(next);
+          if (next) this.sendAgent(next.message, next.replace);
         });
-        for(const message of history)if(message.kind==="User")this.optimisticPrompts.delete(message.id);
+        const edit=this.historyEdits.get(sessionId);
+        if((request&&request.revision!==(this.historyRevisions.get(sessionId)||0))||edit?.pending.length)return;
+        for(const message of history)if(message.kind==="User"){this.optimisticPrompts.delete(message.id);this.promptArrivals.delete(message.id);}
         const previous = this.state.history[sessionId] || [];
         const older = request?.older ?? false;
         const nextCursor = request
@@ -1596,12 +1827,13 @@ export class WorkspaceModel {
           : typeof body.next_cursor === "string" ? body.next_cursor : null;
         const initial = !this.historyCursors.has(sessionId);
         // Head refreshes must not forget the oldest retained page's cursor.
-        if (older || initial) this.historyCursors.set(sessionId, nextCursor);
+        if (older || initial || request?.replace) this.historyCursors.set(sessionId, nextCursor);
         const updates = new Map(history.map(message => [message.id, message]));
         const existing = new Set(previous.map(message => message.id));
         const added = history.filter(message => !existing.has(message.id));
         const retained = previous.map(message => updates.get(message.id) || message);
-        const merged = older ? [...added, ...retained] : mergeHistoryHead(previous,history,initial);
+        const merged = request?.replace ? [...history,...previous.filter(row=>this.optimisticPrompts.get(row.id)===sessionId&&!updates.has(row.id))] : older ? [...added, ...retained] : mergeHistoryHead(previous,history,initial);
+        if(edit&&request?.replace)edit.base={...edit.base,messages:merged};
         this.update({ history: { ...this.state.history, [sessionId]: merged } });
         // Recover a terminal failure after reconnect/reopen, but never revive
         // an older turn's error or a dismissed error on a later head refresh.
@@ -1616,10 +1848,12 @@ export class WorkspaceModel {
         // Classify by the request that actually completed, not the pane's
         // loading flag: an older request can be queued behind a head refresh.
         const delivered = {HistoryChunk:{...body,messages:older ? history : merged,next_cursor:this.historyCursors.get(sessionId) ?? null}};
-        for (const listener of this.agentEventListeners) { try { listener(delivered, older ? "older" : "head"); } catch (error) { this.report(error); } }
+        for (const listener of this.agentEventListeners) { try { listener(delivered, request?.replace ? "replace" : older ? "older" : "head"); } catch (error) { this.report(error); } }
       } else if (tag === "MessageUpdated" && sessionId) {
         const message=Schema.decodeUnknownSync(HistoryMessageSchema)(body.message);
+        if(message.kind==="User"&&!this.state.history[sessionId]?.some(row=>row.id===message.id))this.historyEdits.delete(sessionId);
         const confirmed=message.kind==="User"&&this.optimisticPrompts.delete(message.id);
+        if(message.kind==="User")this.promptArrivals.delete(message.id);
         this.upsertMessage(sessionId,message,confirmed);
       } else if (tag === "ContentDelta" && sessionId && typeof body.message_id === "string" && typeof body.text === "string") {
         const id = body.message_id;
@@ -1636,6 +1870,11 @@ export class WorkspaceModel {
         this.update({threads:this.state.threads.filter(thread=>thread.session_id!==sessionId)});
       } else if (tag === "ThreadUpdated" && sessionId) {
         if (typeof body.title === "string") this.updateAgentTitle(sessionId,body.title);
+      } else if (tag === "SessionEvent" && sessionId && body.kind === "session.queue.updated" && isRecord(body.properties)) {
+        const properties=body.properties,queue=isRecord(properties.queue)?properties.queue:{};
+        if(typeof queue.count==="number")this.update({queues:{...this.state.queues,[sessionId]:{count:queue.count,preview:typeof queue.preview==="string"?queue.preview:undefined}}});
+        // A starting primary can coexist with real waiting work; the aggregate count is not its disposition.
+        if(properties.action==="enqueue"&&typeof properties.messageID==="string"&&queue.primaryMessageID!==properties.messageID&&typeof queue.count==="number"&&queue.count>0&&this.optimisticPrompts.get(properties.messageID)===sessionId)this.rollbackPrompt(properties.messageID);
       } else if (tag === "SessionEvent" && body.kind === "session.error" && isRecord(body.properties)) {
         const message=sessionErrorMessage(body.properties);
         if(message){if(sessionId)this.reportSessionError(sessionId,message,true);else this.report(new Error(message));}

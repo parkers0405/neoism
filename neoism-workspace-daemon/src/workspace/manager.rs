@@ -42,6 +42,8 @@ impl WorkspaceManager {
                 windows: HashMap::new(),
                 preferences: registry.preferences,
                 client_states: HashMap::new(),
+                workspace_claims: HashMap::new(),
+                workspace_claim_history: HashMap::new(),
                 session_pty_links: HashMap::new(),
                 next_route_id: 1,
             })),
@@ -148,6 +150,8 @@ impl WorkspaceManager {
             inner.hosts = bootstrap_hosts();
         }
         inner.host_workspaces.clear();
+        // Recovery never restores disposable/connection provenance.
+        inner.workspace_claim_history.clear();
         #[allow(unused_mut)]
         for mut workspace in snapshot.host_workspaces {
             #[cfg(windows)]
@@ -481,6 +485,7 @@ impl WorkspaceManager {
     ) -> Option<WorkspaceSummary> {
         let mut inner = self.inner.lock();
         let removed = inner.host_workspaces.remove(workspace_id)?;
+        inner.workspace_claim_history.remove(workspace_id);
         inner
             .workspace_tabs
             .retain(|_, tab| tab.workspace_id != workspace_id);
@@ -550,6 +555,9 @@ impl WorkspaceManager {
         let now = now_secs();
         let id = workspace_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut inner = self.inner.lock();
+        if !inner.host_workspaces.contains_key(&id) {
+            inner.workspace_claim_history.insert(id.clone(), WorkspaceClaimHistory::default());
+        }
         let mut workspace =
             inner
                 .host_workspaces
@@ -649,9 +657,12 @@ impl WorkspaceManager {
     pub(crate) fn switch_host_workspace(
         &self,
         workspace_id: &str,
+        conn: &mut ConnectionWorkspace,
     ) -> Option<WorkspaceSummary> {
+        let token = self.connection_token(conn);
         let mut inner = self.inner.lock();
         let mut workspace = inner.host_workspaces.get(workspace_id)?.clone();
+        membership::record_claim(&mut inner, token, workspace_id);
         workspace.last_active = now_secs();
         inner
             .active_workspace_by_host
@@ -846,6 +857,7 @@ impl WorkspaceManager {
         conn: &mut ConnectionWorkspace,
         preferred_host_id: Option<String>,
     ) -> (WorkspaceSummary, InitialWorkspaceReason) {
+        let token = self.connection_token(conn);
         let now = now_secs();
         let fallback_host_id = preferred_host_id.unwrap_or_else(machine_host_id);
         let mut inner = self.inner.lock();
@@ -895,6 +907,7 @@ impl WorkspaceManager {
                 layout_snapshot: None,
                 last_active: now,
             };
+            inner.workspace_claim_history.insert(workspace.id.clone(), WorkspaceClaimHistory::default());
             inner
                 .host_workspaces
                 .insert(workspace.id.clone(), workspace.clone());
@@ -928,6 +941,7 @@ impl WorkspaceManager {
 
         conn.active_workspace = Some(workspace.id.clone());
         conn.active_session = None;
+        membership::record_claim(&mut inner, token, &workspace.id);
         drop(inner);
         self.mark_dirty();
         (workspace, reason)
@@ -1215,12 +1229,23 @@ impl WorkspaceManager {
 
     pub(crate) fn resume_client_state(
         &self,
-        client_id: Uuid,
+        conn: &mut ConnectionWorkspace,
     ) -> Option<ClientResumeState> {
-        if client_id.is_nil() {
+        if conn.client_id.is_nil() {
             return None;
         }
-        self.inner.lock().client_states.get(&client_id).cloned()
+        let token = self.connection_token(conn);
+        let mut inner = self.inner.lock();
+        let mut state = inner.client_states.get(&conn.client_id)?.clone();
+        if let Some(id) = state.active_workspace.clone() {
+            if inner.host_workspaces.contains_key(&id) || inner.workspaces.contains_key(&id) {
+                membership::record_claim(&mut inner, token, &id);
+            } else {
+                state.active_workspace = None;
+                state.active_session = None;
+            }
+        }
+        Some(state)
     }
 
     pub(crate) fn upsert_editor_surface(&self, surface: EditorSurfaceSummary) {

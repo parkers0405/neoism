@@ -55,9 +55,9 @@ fn shared_esc_without_ordinary_queue_clears_all_activity_immediately() {
 #[test]
 fn shared_primary_sequence_has_no_waiting_frame_and_cold_history_has_no_reservation() {
     let (mut pane, id) = submitted();
-    pane.apply_queue_event("root", queue(&id, "enqueue", 1, false, Some("hello")));
+    pane.apply_queue_event("root", queue(&id, "enqueue", 0, false, None));
     assert_eq!(pane.queued_prompt_count(), 0);
-    pane.apply_queue(1, Some("hello".into()), None);
+    pane.apply_queue(0, None, None);
     assert_eq!(pane.queued_prompt_count(), 0);
     pane.apply_queue_event("root", queue(&id, "dequeue", 0, true, None));
     assert_eq!(pane.queued_prompt_count(), 0);
@@ -130,17 +130,17 @@ fn submitted() -> (NeoismAgentPane, String) {
 }
 
 #[test]
-fn shared_local_primary_projects_canonical_queue_and_preserves_followups_in_cache() {
+fn shared_local_primary_preserves_projected_queue_and_followups_in_cache() {
     for cached in [false, true] {
         let (mut pane, id) = submitted();
-        pane.apply_queue_event("root", queue(&id, "enqueue", 1, false, Some("hello")));
-        pane.apply_queue(1, Some("hello".into()), None);
+        pane.apply_queue_event("root", queue(&id, "enqueue", 0, false, None));
+        pane.apply_queue(0, None, None);
         assert_eq!(pane.queued_prompt_count(), 0);
         if cached {
             pane.cache_current_session();
             pane.session_id = Some("other".into());
         }
-        pane.apply_queue_event("root", queue(&id, "enqueue", 2, false, Some("hello")));
+        pane.apply_queue_event("root", queue(&id, "enqueue", 1, false, Some("next")));
         pane.apply_queue_event("root", queue(&id, "dequeue", 1, true, Some("next")));
         if cached {
             let runtime =
@@ -154,13 +154,13 @@ fn shared_local_primary_projects_canonical_queue_and_preserves_followups_in_cach
 }
 
 #[test]
-fn shared_running_snapshot_closes_reservation_and_compact_stays_visible() {
+fn shared_projected_snapshot_keeps_compact_visible_before_and_after_running() {
     let (mut pane, id) = submitted();
     pane.pending_compact = Some("compact".into());
     assert_eq!(pane.queued_prompt_count(), 1);
     pane.apply_queue_event(
         "root",
-        queue(&id, "enqueue", 2, false, Some("Compaction queued")),
+        queue(&id, "enqueue", 1, false, Some("Compaction queued")),
     );
     assert_eq!(pane.queued_prompt_count(), 1);
     pane.note_compaction_queued();

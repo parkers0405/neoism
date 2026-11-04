@@ -1,5 +1,137 @@
 use super::*;
 
+/// Hold initialization, not the provider: POST must finish while no run can be
+/// claimed, on both a fresh session and a session whose prior turn settled.
+#[tokio::test]
+async fn idle_starting_prompt_is_not_waiting_before_claim() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-idle-starting-{}.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(
+        app.clone().oneshot(request(Method::POST, "/v2/sessions", Some(json!({
+            "model": {"providerId": "neoism", "id": "stub"}
+        })))).await.unwrap(),
+    ).await;
+    let session_id = session.id.as_str();
+    let mut turns = 0;
+    for _ in 0..2 {
+        let startup = state.inner.session_coordinator.prompt_admission_guard(session_id).await;
+        let primary = Id::ascending(IdKind::Message).to_string();
+        let waiting = Id::ascending(IdKind::Message).to_string();
+        for (id, text, delivery) in [
+            (&primary, "starting", "queue"),
+            (&waiting, "really waiting", "queue"),
+        ] {
+            let mut admission_events = state.subscribe();
+            let response = tokio::time::timeout(Duration::from_secs(2),
+                app.clone().oneshot(request(Method::POST,
+                    &format!("/v2/sessions/{session_id}/prompt-async"),
+                    Some(json!({
+                        "messageId": id, "delivery": delivery,
+                        "model": {"providerId": "neoism", "modelId": "stub"},
+                        "parts": [{"type": "text", "text": text}]
+                    })),
+                )),
+            ).await.expect("admission must not wait for claim").unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            turns += 1;
+            let expected = usize::from(id == &waiting);
+            assert!(state.inner.session_coordinator.active_run(session_id).await.is_none());
+            assert_eq!(state.inner.store.queued_prompt_count(session_id).await.unwrap(), expected + 1,
+                "projection must retain every durable admission");
+            let queue: serde_json::Value = response_json(
+                app.clone().oneshot(request(Method::GET,
+                    &format!("/v2/sessions/{session_id}/queue"), None)).await.unwrap(),
+            ).await;
+            assert_eq!(queue["count"], expected);
+            assert_eq!(queue["primaryMessageID"], primary);
+            assert_eq!(queue["running"], false);
+            assert_eq!(queue["items"].as_array().unwrap().len(), expected);
+            let preview = if expected == 0 { serde_json::Value::Null } else { json!("really waiting") };
+            assert_eq!(queue["preview"], preview);
+            let snapshot = crate::session_queue::queue_status_snapshot(&state, session_id).await;
+            assert_eq!(snapshot["count"], expected);
+            assert_eq!(snapshot["primaryMessageID"], primary);
+            assert_eq!(snapshot["preview"], preview);
+            let mut saw_enqueue = false;
+            while let Ok(event) = admission_events.try_recv() {
+                if event.kind == event_type::SESSION_QUEUE_UPDATED
+                    && event.properties["action"] == "enqueue"
+                {
+                    assert_eq!(event.properties["queue"], queue);
+                    assert_eq!(event.properties["messageID"], *id);
+                    saw_enqueue = true;
+                }
+            }
+            assert!(saw_enqueue, "POST must publish the same primary-aware projection");
+            let statuses: serde_json::Value = response_json(
+                app.clone().oneshot(request(Method::GET, "/v2/sessions/status", None)).await.unwrap(),
+            ).await;
+            assert_eq!(statuses[session_id]["type"], "busy");
+            assert_eq!(statuses[session_id]["queue"], snapshot);
+            let mut events = state.subscribe();
+            crate::session_queue::publish_prompt_queue_status(&state, session_id, 0).await;
+            let status = events.try_recv().unwrap();
+            assert_eq!(status.kind, event_type::SESSION_STATUS);
+            assert_eq!(status.properties["status"]["queue"], snapshot);
+        }
+        drop(startup);
+        wait_for_stub_queue_settlement(&state, session_id, turns).await;
+    }
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn idle_projection_preserves_compaction_and_prompts_behind_internal_continuation() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-idle-controls-{}.db", Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session: SessionInfo = response_json(
+        app(state.clone()).oneshot(request(Method::POST, "/v2/sessions", Some(json!({}))))
+            .await.unwrap(),
+    ).await;
+    let session_id = session.id.as_str();
+    let mut ids = Vec::new();
+    for delivery in ["continue", "queue", "steer"] {
+        let id = Id::ascending(IdKind::Message).to_string();
+        let prompt = serde_json::from_value(json!({
+            "messageId": id, "parts": [{"type": "text", "text": delivery}]
+        })).unwrap();
+        state.inner.store.enqueue_prompt_with_delivery(session_id, &prompt, delivery).await.unwrap();
+        ids.push(id);
+    }
+    // Own the worker without spawning it, so control precedence is deterministic.
+    assert!(state.inner.session_coordinator.wake(session_id).await);
+    let snapshot = crate::session_queue::queue_status_snapshot(&state, session_id).await;
+    assert_eq!(snapshot["count"], 2);
+    assert_eq!(snapshot["preview"], "queue");
+    assert_eq!(snapshot["primaryMessageID"], ids[0]);
+    state.inner.store.enqueue_compact(session_id).await.unwrap();
+    let snapshot = crate::session_queue::queue_status_snapshot(&state, session_id).await;
+    assert_eq!(snapshot["count"], 3);
+    assert_eq!(snapshot["preview"], "Compaction queued");
+    assert!(snapshot["primaryMessageID"].is_null());
+    assert_eq!(state.inner.store.queued_prompt_count(session_id).await.unwrap(), 4);
+    state.inner.store.take_queued_compact(session_id).await.unwrap();
+    let (id, _, _, _) = state.inner.store.peek_prompt_admission(session_id, false).await.unwrap().unwrap();
+    state.inner.store.acknowledge_prompt_admission(&id).await.unwrap();
+    let snapshot = crate::session_queue::queue_status_snapshot(&state, session_id).await;
+    assert_eq!(snapshot["count"], 1);
+    assert_eq!(snapshot["preview"], "steer");
+    assert_eq!(snapshot["primaryMessageID"], ids[1]);
+    // Without a scheduled worker, dormant/recoverable work stays visibly queued.
+    assert!(!state.inner.session_coordinator.finish_worker_cycle(session_id).await);
+    let snapshot = crate::session_queue::queue_status_snapshot(&state, session_id).await;
+    assert_eq!(snapshot["count"], 2);
+    assert!(snapshot["primaryMessageID"].is_null());
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
 #[tokio::test]
 async fn queue_snapshot_retries_after_a_complete_idle_run_idle_cycle() {
     let path = std::env::temp_dir().join(format!(
@@ -105,8 +237,10 @@ async fn status_hydration_includes_admitted_work_before_worker_start() {
                 .await.unwrap(),
         ).await;
         assert_eq!(statuses[session_id]["type"], "busy");
-        assert_eq!(statuses[session_id]["queue"]["count"], 1);
-        assert_eq!(statuses[session_id]["queue"]["preview"], "admitted before startup");
+        assert_eq!(statuses[session_id]["queue"]["count"], 0);
+        assert!(statuses[session_id]["queue"]["preview"].is_null());
+        assert!(statuses[session_id]["queue"]["primaryMessageID"].is_string(),
+            "legacy admissions also need preclaim identity");
     }
     drop(startup);
     wait_for_stub_queue_settlement(&state, session_id, 1).await;
@@ -159,6 +293,7 @@ async fn queue_snapshot_excludes_only_the_claimed_primary_before_handoff() {
     assert_eq!(state.inner.store.queued_prompt_count(session_id).await.unwrap(), 1);
     let info = snapshot(&state, session_id).await;
     assert_eq!(info["running"], true);
+    assert_eq!(info["primaryMessageID"], primary.message_id.as_ref().unwrap().to_string());
     assert_eq!(info["count"], 0);
     assert!(info["preview"].is_null());
     while let Ok(event) = events.try_recv() {

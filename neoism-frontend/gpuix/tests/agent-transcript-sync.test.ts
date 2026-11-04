@@ -32,6 +32,31 @@ test("closing a family owner tombstones late switch replies without reviving old
  expect(owner.activate("parent")).toEqual([]);expect(owner.switched("parent")).toEqual([]);
 });
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+4000;while(!predicate()){if(Date.now()>end)throw Error("Agent stream fixture timed out");await Bun.sleep(5);}};
+test("returning through layout focus refreshes an already-loaded conversation exactly once",async()=>{
+ const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/tab-resume"],{}),endpoint:daemon.endpoint},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+ try{
+  model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);
+  const first=model.openThread(daemon.threads[0])!;
+  await until(()=>model.historyCursors.has("one"));
+  const second=model.openThread(daemon.threads[1])!;
+  await until(()=>model.historyCursors.has("two"));
+  const reads=()=>daemon.requests.filter(request=>request.tag==="GetHistory"&&request.body.session_id==="one").length;
+  const resumes=()=>daemon.requests.filter(request=>request.tag==="ResumeStream"&&request.body.session_id==="one").length;
+  const before=reads(),beforeResumes=resumes();
+  // Completion was missed while away. Returning must repair the retained
+  // transcript, not require closing the tab and discarding its engine.
+  daemon.history.set("one",[{id:"final",role:"Assistant",kind:"Assistant",text:"Finished while away"}]);
+  model.getLayout().focusSurface(first);
+  expect(model.state.activeSurfaceId).toBe(first);
+  model.selectSurface(first,true);
+  await until(()=>model.state.history.one?.some(message=>message.id==="final")===true);
+  expect(reads()).toBe(before+1);expect(resumes()).toBe(beforeResumes+1);
+  // Pointer focus within the same chat does not repeatedly rehydrate it.
+  model.getLayout().focusSurface(first);model.selectSurface(first,true);
+  await Bun.sleep(30);expect(reads()).toBe(before+1);expect(resumes()).toBe(beforeResumes+1);
+  expect(model.state.surfaces.some(surface=>surface.id===second)).toBe(true);
+ }finally{model.dispose();client.stop();daemon.stop();}
+});
 test("real daemon envelopes keep family deltas once, format partial Markdown before idle, then paint original completed metrics",async()=>{
  const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/gpuix-response-sync"],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
  const{id}=coreCall<{id:number}>("agenttimeline.new",{sessionId:"two",rootSessionId:"one",theme:config.themeName,scale:1,fontFamily:config.fontFamily});

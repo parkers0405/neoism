@@ -839,7 +839,7 @@ fn last_text_part(message: &MessageWithParts) -> Option<String> {
     })
 }
 
-fn last_assistant_error(message: &MessageWithParts) -> Option<String> {
+pub(crate) fn last_assistant_error(message: &MessageWithParts) -> Option<String> {
     let MessageInfo::Assistant(assistant) = &message.info else {
         return None;
     };
@@ -855,8 +855,12 @@ fn last_assistant_error(message: &MessageWithParts) -> Option<String> {
         .map(str::to_string)
 }
 
-fn last_assistant_text(message: &MessageWithParts) -> Option<String> {
-    if !matches!(message.info, MessageInfo::Assistant(_)) {
+pub(crate) fn last_assistant_text(message: &MessageWithParts) -> Option<String> {
+    let MessageInfo::Assistant(assistant) = &message.info else { return None; };
+    if assistant.time.completed.is_none()
+        || assistant.error.is_some()
+        || assistant.finish.as_deref() == Some("tool-calls")
+    {
         return None;
     }
     last_text_part(message)
@@ -1072,11 +1076,13 @@ pub(crate) async fn task_result_output_for_child(
         .list_messages(child.id.as_str())
         .await
         .map_err(|error| error.to_string())?;
+    // A resumed generation must never reuse an older generation's final reply.
+    let current = messages.iter().rev()
+        .take_while(|message| !matches!(message.info, MessageInfo::User(_)))
+        .find(|message| matches!(message.info, MessageInfo::Assistant(_)));
     if lifecycle.as_deref() == Some("failed") {
-        let error = messages
-            .iter()
-            .rev()
-            .find_map(last_assistant_error)
+        let error = current
+            .and_then(last_assistant_error)
             .unwrap_or_else(|| {
                 "Subagent task terminated before producing a result.".to_string()
             });
@@ -1093,7 +1099,9 @@ pub(crate) async fn task_result_output_for_child(
             .join("\n"),
         ));
     }
-    if let Some(error) = messages.iter().rev().find_map(last_assistant_error) {
+    if let Some(error) = current.and_then(last_assistant_error)
+        .filter(|_| lifecycle.as_deref() != Some("outstanding"))
+    {
         let output = [
             format!("task_id: {}", child.id),
             "status: error".to_string(),
@@ -1105,7 +1113,9 @@ pub(crate) async fn task_result_output_for_child(
         .join("\n");
         return Ok(("error".to_string(), output));
     }
-    if let Some(text) = messages.iter().rev().find_map(last_assistant_text) {
+    if let Some(text) = current.and_then(last_assistant_text)
+        .filter(|_| lifecycle.as_deref() != Some("outstanding"))
+    {
         return Ok((
             "completed".to_string(),
             task_result_output(child.id.as_str(), text),

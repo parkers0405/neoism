@@ -7,16 +7,15 @@ use super::grep::run_ripgrep;
 use super::modes::{FileSearchMode, FinderMode};
 use super::state::{Finder, SCROLL_OFF_ROWS};
 use super::types::{FileResult, GrepResult, Result_};
-use crate::services::{SearchFileMode, SearchGrepMode, SearchService};
+use crate::services::{IoError, SearchFileMode, SearchGrepMode, SearchService};
 use web_time::Instant;
 
 impl Finder {
     /// Pump per-frame work: re-run ripgrep when the query has settled
-    /// past the debounce window, populate the file cache on first
-    /// Files-mode access. Cheap when there's nothing to do.
-    pub fn tick(&mut self, search: &dyn SearchService) {
+    /// past the debounce window. Returns whether a dirty query was processed.
+    pub fn tick(&mut self, search: &dyn SearchService) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
         let due = self
             .query_dirty_at
@@ -26,16 +25,12 @@ impl Finder {
             })
             .unwrap_or(false);
         if !due {
-            return;
+            return false;
         }
 
         let search_key = self.effective_search_key();
         match self.mode {
             FinderMode::Files => {
-                if self.files.is_none() {
-                    self.files =
-                        Some(super::file_search::collect_files(search, &self.cwd));
-                }
                 // Opening the picker is a dirty tick too: an empty query
                 // must run even when the previous search key was empty.
                 self.last_executed_query = search_key;
@@ -98,12 +93,32 @@ impl Finder {
             self.scroll_offset = 0;
             self.reset_motion();
         }
+        true
     }
 
     pub(super) fn refresh_file_results(&mut self, search: &dyn SearchService) {
-        if let Some(results) = self.refresh_fff_file_results(search) {
-            self.results = results;
-            return;
+        match self.refresh_fff_file_results(search) {
+            Ok(results) => {
+                self.results = results;
+                return;
+            }
+            // Pending is not failure: scanning the fallback here duplicates the
+            // daemon's work and blocks input until every local path is scored.
+            Err(IoError::Pending(_)) => return,
+            Err(error) => {
+                tracing::warn!(target: "neoism::finder", ?error, "File search failed; using file-list fallback");
+            }
+        }
+        if self.files.is_none() {
+            match search.collect_files(&self.cwd) {
+                Ok(paths) => self.files = Some(paths),
+                Err(IoError::Pending(_)) => return,
+                Err(error) => {
+                    tracing::warn!(target: "neoism::finder", ?error, "File-list fallback failed");
+                    self.results.clear();
+                    return;
+                }
+            }
         }
 
         let Some(files) = self.files.as_ref() else {
@@ -274,7 +289,7 @@ impl Finder {
     pub(super) fn refresh_fff_file_results(
         &mut self,
         search: &dyn SearchService,
-    ) -> Option<Vec<(i32, Result_)>> {
+    ) -> Result<Vec<(i32, Result_)>, IoError> {
         let file_search_mode = self.file_search_mode;
         let query_text = self.query.clone();
         let service_mode: SearchFileMode = file_search_mode.as_service_mode();
@@ -293,16 +308,9 @@ impl Finder {
                     results =
                         exact_file_results(&query_text, paths.iter().map(String::as_str));
                 }
-                Some(results)
+                Ok(results)
             }
-            Err(error) => {
-                tracing::warn!(
-                    target: "neoism::finder",
-                    ?error,
-                    "SearchService::search_files failed; falling back to in-memory scan"
-                );
-                None
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -329,6 +337,7 @@ impl Finder {
                     })
                     .collect(),
             ),
+            Err(IoError::Pending(_)) => Some(Vec::new()),
             Err(error) => {
                 tracing::warn!(
                     target: "neoism::finder",
@@ -350,28 +359,38 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
+    #[derive(Default)]
     struct FileSearch {
         fallback: bool,
+        pending: bool,
+        pending_collect: bool,
+        collections: Mutex<usize>,
         queries: Mutex<Vec<String>>,
     }
 
     impl SearchService for FileSearch {
         fn collect_files(&self, _: &Path) -> Result<Vec<String>, IoError> {
+            *self.collections.lock().unwrap() += 1;
+            if self.pending_collect {
+                return Err(IoError::Pending(2));
+            }
             Ok(vec!["src/main.rs".into(), "README.md".into()])
         }
 
         fn search_files(
             &self,
-            cwd: &Path,
+            _: &Path,
             query: &str,
             _: SearchFileMode,
         ) -> Result<Vec<SearchFileHit>, IoError> {
             self.queries.lock().unwrap().push(query.into());
+            if self.pending {
+                return Err(IoError::Pending(1));
+            }
             if self.fallback {
                 return Err(IoError::Other("index unavailable".into()));
             }
-            Ok(self
-                .collect_files(cwd)?
+            Ok(["src/main.rs".to_string(), "README.md".to_string()]
                 .into_iter()
                 .filter(|path| path.contains(query))
                 .map(|path| SearchFileHit { score: 0, path })
@@ -410,7 +429,7 @@ mod tests {
             for mode in [FileSearchMode::Fuzzy, FileSearchMode::Exact] {
                 let search = FileSearch {
                     fallback,
-                    queries: Mutex::new(Vec::new()),
+                    ..Default::default()
                 };
                 let root = PathBuf::from("project");
                 let mut finder = Finder::new();
@@ -444,6 +463,7 @@ mod tests {
                 finder.tick(&search);
                 assert_eq!(finder.results.len(), 2);
                 assert_eq!(*search.queries.lock().unwrap(), ["", "", "main", "", ""]);
+                assert_eq!(*search.collections.lock().unwrap(), usize::from(fallback));
 
                 finder.open_grep(root);
                 finder.query_dirty_at =
@@ -452,6 +472,52 @@ mod tests {
                 assert!(finder.results.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn pending_index_search_never_collects_or_scans_fallback_paths() {
+        let search = FileSearch {
+            pending: true,
+            ..Default::default()
+        };
+        let mut finder = Finder::new();
+        finder.open_files(PathBuf::from("project"));
+        assert!(finder.tick(&search));
+        assert!(finder.files.is_none());
+        assert!(!finder.tick(&search));
+
+        finder.files = Some(vec!["fallback.rs".into()]);
+        finder.results = vec![(
+            42,
+            Result_::File(FileResult {
+                path: "indexed.rs".into(),
+            }),
+        )];
+        finder.refresh_file_results(&search);
+        assert_eq!(finder.results[0].1.path(), "indexed.rs");
+        assert_eq!(*search.collections.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn asynchronous_fallback_collection_is_not_cached_as_empty() {
+        let search = FileSearch {
+            fallback: true,
+            pending_collect: true,
+            ..Default::default()
+        };
+        let mut finder = Finder::new();
+        finder.open_files(PathBuf::from("project"));
+        finder.tick(&search);
+        assert!(finder.files.is_none());
+        assert!(finder.handle_service_reply(
+            2,
+            &serde_json::json!({
+                "CollectFilesResult": { "req_id": 2, "paths": ["later.rs"] }
+            }),
+            &search,
+        ));
+        assert_eq!(finder.results[0].1.path(), "later.rs");
+        assert_eq!(*search.collections.lock().unwrap(), 1);
     }
 }
 

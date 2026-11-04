@@ -128,8 +128,9 @@ try{
  await closeWithNativeBubbling("b");assert.equal(closes,1);assert.equal(activations,0);assert.equal(model.state.activeWorkspace!.id,activeBefore);assert.deepEqual(order(),["a","b","c"]);assert.ok(model.state.error?.includes(":qall!"));assert.equal(model.getEditor(dirtySurface).frame.dirty,true);
  assert.equal(server.workspaceRequests.length,requestsBefore,"dirty inactive X never activates/subscribes");
  await model.saveFile(dirtySurface);await closeWithNativeBubbling("b");assert.equal(closes,2);assert.equal(retargetedCloseClicks,1,"A release/click must actually land on the neighboring X after the first tab disappears");assert.equal(activations,0);assert.deepEqual(order(),["a","c"]);assert.equal(model.state.activeWorkspace!.id,"a");assert.equal(server.workspaces.length,3);
- assert.equal(server.workspaceRequests.length,requestsBefore,"clean inactive X only hides membership");
- await drag("a","c","after");assert.equal(activations,1);assert.equal(reorders,1);assert.equal(server.workspaceRequests.length,requestsBefore);
+  assert.equal(server.workspaceRequests.length,requestsBefore+1,"clean inactive X releases window membership without activating it");
+  assert.equal(server.workspaceRequests.at(-1)?.tag,"SetWindowWorkspaces");
+  await drag("a","c","after");assert.equal(activations,1);assert.equal(reorders,1);assert.equal(server.workspaceRequests.length,requestsBefore+1);
  // Translate the painted hosts without onLayout, as horizontal scrolling
  // does in GPUIX. The component must query current bounds at final drop.
  host.setOffset(65);await drag("c","a","after");assert.equal(activations,2);assert.equal(reorders,2);

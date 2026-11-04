@@ -328,7 +328,7 @@ fn composition_program_retains_full_source_and_child_edits_show_file_accordions(
     assert!(!show_tool_diff_cards("compose", "completed", pane.tool_expanded("p"), pane.tool_archived("p")));
     let child = &m.composition_children[0];
     assert!(cached_edit_diff_sections(child).is_some());
-    assert!(!show_tool_diff_cards(&child.tool, &child.status, false, pane.tool_archived(&child.id) || child.composition_child()));
+    assert!(show_tool_diff_cards(&child.tool, &child.status, false, pane.tool_archived(&child.id) || child.composition_child()));
     assert!(show_tool_diff_cards(&child.tool, &child.status, true, pane.tool_archived(&child.id) || child.composition_child()));
 }
 
@@ -394,7 +394,7 @@ fn expanded_tool_details_reserve_nested_indent_and_right_padding() {
 }
 
 #[test]
-fn edit_file_accordions_require_parent_disclosure() {
+fn edit_file_rows_are_visible_without_parent_disclosure() {
     for tool in [
         "edit",
         "Edit",
@@ -405,11 +405,11 @@ fn edit_file_accordions_require_parent_disclosure() {
         "patch",
     ] {
         assert!(
-            !show_tool_diff_cards(tool, "completed", false, false),
+            show_tool_diff_cards(tool, "completed", false, false),
             "{tool}"
         );
         assert!(
-            !show_tool_diff_cards(tool, "completed", false, true),
+            show_tool_diff_cards(tool, "completed", false, true),
             "{tool}"
         );
         assert!(
@@ -448,6 +448,93 @@ fn snapshot_diff_pairs_replacement_rows_by_line_number() {
     assert_eq!(rows[remove_one + 2].line_number, Some(3));
     assert_eq!(rows[remove_one + 3].kind, DiffLineKind::Add);
     assert_eq!(rows[remove_one + 3].line_number, Some(3));
+}
+
+#[test]
+fn patch_files_render_inline_and_expand_independently_without_parent_click() {
+    use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+    let message = apply_patch_message("completed", "*** Begin Patch\n*** Update File: src/first.rs\n@@\n-old_first\n+new_first\n*** Add File: src/second.rs\n+new_second\n*** End Patch");
+    for (width, scale) in [(260.0, 1.0), (900.0, 1.0), (900.0, 2.0)] {
+        let mut pane = NeoismAgentPane::default();
+        let theme = IdeTheme::by_name("dark");
+        let clip = [0.0, 0.0, width * scale, 1200.0 * scale];
+        let mut heights = Vec::new();
+        for expanded in [false, true, false] {
+            let mut paint = RecordingPainter::new("monospace", 400, vec![]);
+            pane.clear_tool_hit_rects();
+            let height = measure_tool_message_height(
+                &mut paint, &pane, &message, width * scale, scale, false, None,
+            ).unwrap();
+            heights.push(height);
+            render_tool_message(
+                &mut paint, &mut pane, 0.0, 0.0, width * scale, height,
+                &message, &theme, scale, 0.0, clip, &[], None, None,
+            );
+            let commands = paint.commands();
+            let arrows: Vec<_> = commands.iter().filter_map(|command| match command {
+                PaintCommand::Text { x, text, .. } if text == "›" || text == "⌄" => Some((*x, text.as_str())),
+                _ => None,
+            }).collect();
+            assert_eq!(arrows, [
+                ((width - 16.0) * scale, if expanded { "⌄" } else { "›" }),
+                ((width - 16.0) * scale, "›"),
+            ]);
+            for command in commands.iter() {
+                if let PaintCommand::Text { x, width: text_width, text, .. } = command {
+                    if text == "+1" || text == "-1" {
+                        assert!(x + text_width < arrows[0].0);
+                    }
+                }
+            }
+            let stems: Vec<_> = commands.iter().filter_map(|command| match command {
+                PaintCommand::Rect { rect, .. }
+                    if (rect[0] - 30.0 * scale).abs() < 0.01 && rect[2] == 2.0 * scale => Some(*rect),
+                _ => None,
+            }).collect();
+            assert_eq!(stems.len(), 2);
+            assert_eq!(stems[0][1], TOOL_HEADER_HEIGHT * scale);
+            assert!(stems[0][1] + stems[0][3] >= stems[1][1]);
+            if expanded {
+                assert!(stems[1][3] > stems[0][3]);
+            }
+            for filename in ["first.rs", "second.rs"] {
+                assert!(commands.iter().any(|command| matches!(command,
+                    PaintCommand::Text { text, .. } if text == filename)));
+            }
+            assert_eq!(commands.iter().any(|command| matches!(command,
+                PaintCommand::Text { text, .. } if text.contains("new_first"))), expanded);
+            assert!(!commands.iter().any(|command| matches!(command,
+                PaintCommand::Text { text, .. } if text.contains("new_second"))));
+            if expanded {
+                let mut clipped_paint = RecordingPainter::new("monospace", 400, vec![]);
+                let short_clip = [0.0, 0.0, width * scale, 80.0 * scale];
+                let cut = [30.0 * scale, 50.0 * scale, 2.0 * scale, 10.0 * scale];
+                render_tool_message(
+                    &mut clipped_paint, &mut pane, 0.0, 0.0, width * scale, height,
+                    &message, &theme, scale, 0.0, short_clip, &[cut], None, None,
+                );
+                let clipped_commands = clipped_paint.commands();
+                let stems: Vec<_> = clipped_commands.iter().filter_map(|command| match command {
+                    PaintCommand::Rect { rect, .. }
+                        if (rect[0] - 30.0 * scale).abs() < 0.01 && rect[2] == 2.0 * scale => Some(*rect),
+                    _ => None,
+                }).collect();
+                // The second file is below the viewport, but its stem must
+                // still reach the bottom alongside the first file's code.
+                assert!(stems.iter().any(|rect| rect[1] + rect[3] == short_clip[3]));
+                for rect in stems {
+                    assert!(intersect_rect(rect, cut).is_none());
+                    assert_eq!(intersect_rect(rect, short_clip), Some(rect));
+                }
+            }
+            assert!(!pane.tool_hit(80.0 * scale, 10.0 * scale));
+            assert!(pane.toggle_tool_at((width - 12.0) * scale, (TOOL_HEADER_HEIGHT + 10.0) * scale));
+            assert_eq!(pane.tool_expanded("tool-1:0"), !expanded);
+            assert!(!pane.tool_expanded("tool-1:1"));
+        }
+        assert!(heights[1] > heights[0]);
+        assert_eq!(heights[0], heights[2]);
+    }
 }
 
 fn apply_patch_message(status: &str, detail: &str) -> NeoismAgentMessage {

@@ -36,7 +36,7 @@
   "defaultFeatures": false,
   "jobs": 2,
   "zedPatch": "native/patches/gpui-wayland-vsync.patch",
-  "zedPatchSha256": "c1c7b10563396bc65649d0bdb75a35a1d392294ba74a6730331282f911aa58cf",
+  "zedPatchSha256": "607b497e4a10ddaca445b716c2f48809afd1d0754727bb460168fe0b724b5db8",
   "zedPatchedFiles": {
     "README.md": "7b3d348fc07873bcfa7b244fb2a2225a9f07f4eb3508822879196edc6bf333ea",
     "crates/gpui_linux/src/linux/wayland/window.rs": "97ac391a92fab08c54cbe78e7c0565e90f97ea8c3b0e8b66c7bf9f442c2f6e8b",
@@ -45,7 +45,7 @@
     "crates/gpui_platform/src/gpui_platform.rs": "960de49065415a8e882f62bb6eee595576cbacb2dd6e409d3fac8f414c4c2a95",
     "crates/gpui_wgpu/src/wgpu_renderer.rs": "4ce39e726902ad63c6c87c7fbe3e821e745ac9898619eec66cf3a4638814d842",
     "crates/gpui/src/view.rs": "3adc3b616bee0e4db3ae5340de31c9d79a5a3e1553b0c3227413356eaedc4a94",
-    "crates/gpui/src/elements/div.rs": "22d8ead3f88486925c9cce01a998116bd72a260b1e0a504ea06b48c131060ea1",
+    "crates/gpui/src/elements/div.rs": "fb8b863af9e16c7ae99f97ab856657eb754a05a6408cb024179714d8d748ddb0",
     "crates/gpui_wgpu/src/wgpu_context.rs": "ad5dd5b594d6336ed60d16a59b3073ce2036508b54dc8a7cab51f28db8bfd7bb",
     "crates/gpui_linux/src/linux/dispatcher.rs": "7a13d2205a21f81dbbe42b6b2262b912c01085c036c12b2da67b49f48b7a2e79",
     "crates/gpui_wgpu/Cargo.toml": "7c9d718bcd7cf157bed1289c4932845dd71a091576b0785d5aa4e78fcd6726b0",

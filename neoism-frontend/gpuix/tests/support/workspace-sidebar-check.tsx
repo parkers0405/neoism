@@ -60,6 +60,18 @@ try{
  await app.activate("a");store.write(app.model.captureSession());const saved=store.read()!;assert.deepEqual(saved.ui.workspaceSidebars,expected);
  app.dispose();app=mount(saved);await app.ready();
  for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view as "files"|"notes"|"conversations"|null);}
- assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.filter(request=>request.tag==="SubmitPrompt").length,0);
- console.log(JSON.stringify({actualApp:true,noWindow:true,workspacePlusNoEmptyFrame:true,independentFourStates:true,closedWorkspaceRetained:true,fontGenerationRetained:true,coldRecoveryRetained:true,noPtyOrPrompt:true}));
+  assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.filter(request=>request.tag==="SubmitPrompt").length,0);
+  const creates=daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length;
+  for(const workspace of app.model.windowWorkspaces())assert.equal(await app.model.closeWorkspace(false,workspace.id),true);
+  await app.host.pump(app.root);
+  assert.equal(app.model.state.activeWorkspace,undefined);assert.ok(app.host.find("welcome-page"),"Last close paints a window-local Welcome");
+  assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length,creates);
+  const terminal=app.host.find("splash-action:new-terminal");assert.ok(terminal,"Empty-window Welcome offers a usable terminal action");
+  app.root.dispatch({elementId:terminal.id,eventType:"click",button:0});
+  const emptyDeadline=Date.now()+5000;
+  while(!app.model.state.surfaces.some(surface=>surface.kind==="terminal"&&surface.workspaceId===app.model.state.activeWorkspace?.id)){
+    await app.host.pump(app.root);if(Date.now()>emptyDeadline)throw new Error("Empty-window terminal action did not settle");await Bun.sleep(3);
+  }
+  assert.equal(app.model.windowWorkspaces().length,1);assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length,creates+1);
+  console.log(JSON.stringify({actualApp:true,noWindow:true,workspacePlusNoEmptyFrame:true,independentFourStates:true,closedWorkspaceRetained:true,fontGenerationRetained:true,coldRecoveryRetained:true,noPtyOrPromptDuringSwitches:true,localWelcomeNoReplacement:true,emptyWelcomeAction:true}));
 }finally{app.dispose();daemon.stop();rmSync(directory,{recursive:true,force:true});}

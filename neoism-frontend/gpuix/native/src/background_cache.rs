@@ -32,7 +32,9 @@ pub fn prepare(request: &Value) -> Result<String, String> {
     let image = if image.width().max(image.height()) > 4096 { image.resize(4096, 4096, FilterType::Triangle) } else { image };
     let blurred = image.blur(blur as f32);
     let temporary = tempfile::NamedTempFile::new_in(&cache).map_err(|error| error.to_string())?;
-    blurred.save_with_format(temporary.path(), image::ImageFormat::Png).map_err(|error| error.to_string())?;
+    // The cache is always PNG; static dispatch also avoids the dynamic encoder
+    // vtable's by-value tracked caller, which Blaze cannot compile yet.
+    blurred.write_with_encoder(image::codecs::png::PngEncoder::new(temporary.as_file())).map_err(|error| error.to_string())?;
     temporary.persist(&output).map_err(|error| error.to_string())?;
     Ok(output.to_string_lossy().into_owned())
 }

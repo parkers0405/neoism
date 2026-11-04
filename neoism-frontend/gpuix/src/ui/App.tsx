@@ -8,10 +8,12 @@ import {cachedGitStatus,watchGitStatus,type GitStatusSnapshot} from "../daemon/g
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { createEffect, createMemo, createSignal, untrack, For, onCleanup, onMount, Show, Switch, Match, type Accessor, type JSX } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, untrack, For, onCleanup, onMount, Show, Switch, Match, type Accessor, type JSX } from "solid-js";
 import { createWindowSize, motion, useGpuixRequired, type GpuixTheme, type HostElement, type KeyEvent, type EventPayload, type StyleDesc } from "@gpuix/solid";
 import type { AppConfig } from "../config";
-import { dimensions as d, extensionIcons, namedIcons, thinkingOptions } from "../design/generated";
+import { dimensions as d, thinkingOptions } from "../design/generated";
+import { fileIcon } from "../design/file-icons";
+export { fileIcon } from "../design/file-icons";
 import { easeOutCubicBezier } from "../design/animation";
 import { WorkspaceModel, type AppState, type Surface } from "../model";
 import { FileSchema, expectVariant, isRecord, type HistoryMessage, type Attachment } from "../daemon/protocol";
@@ -79,9 +81,6 @@ import { localDaemon } from "../menu-actions/web-frontend";
 import { openExternalUrl } from "../menu-actions/web-frontend";
 import {devicePreviewEnabled,DevicePreviewSlot,DevicePreviewButton} from "../device/feature";
 
-export function fileIcon(name: string) {
-  return namedIcons[name.toLowerCase()] || extensionIcons[name.split(".").pop()?.toLowerCase() || ""] || { glyph: "\uf15b", color: "#c8c8c8" };
-}
 export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: (fontSizeOverride?:number,useConfiguredFontSize?:boolean) => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
   const config = props.config, model = props.model, c = config.theme, s = config.scale;
   let activeTreeEscape:((event:KeyEvent)=>boolean)|undefined;
@@ -378,7 +377,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
   const toggle = (view: typeof sidebar extends Accessor<infer T> ? T : never) => setSidebar(sidebar() === view ? undefined : view);
    const availableWidth = () => windowSize().width - (sidebar() ? d.sidebarWidth : 0) - (deviceVisible()?deviceWidth():0);
   const detailWidth = () => Math.min(d.detailRailWidth, Math.max(0, availableWidth() / s - d.detailMinChatWidth - d.detailGap)) * s;
-  const showDetails = () => details() && active()?.kind === "agent" && (!!(state().ui.agentParentSessions as Record<string,string>|undefined)?.[active()?.sessionId||""] || (state().history[active()?.sessionId||""]||[]).some(message=>message.kind!=="System")) && availableWidth() >= (d.detailMinChatWidth + d.detailMinRailWidth + d.detailGap) * s;
+   const detailSession = () => {const surface=active();return surface?.sessionId||state().pendingAgentSessions[surface?.id||""]||"";};
+   const showDetails = () => details() && active()?.kind === "agent" && (!!(state().ui.agentParentSessions as Record<string,string>|undefined)?.[detailSession()] || (state().history[detailSession()]||[]).some(message=>message.kind!=="System")) && availableWidth() >= (d.detailMinChatWidth + d.detailMinRailWidth + d.detailGap) * s;
   const chatWidth = () => availableWidth() - (showDetails() ? detailWidth() + d.detailGap * s : 0);
   const columnInset = () => chatWidth() < 520 * s ? 8 * s : 20 * s;
   createEffect(() => { const workspace = state().activeWorkspace; renderer.setWindowTitle?.(`${workspace ? workspaceLabel(workspace.title, workspace.root_dir) : "Neoism"} — Neoism GPUIX`); });
@@ -513,6 +513,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     if(index>=0&&target)reorderWindowWorkspace(id,target.id,previous?"before":"after");
   };
   const runCommand = async ({ action, argument }: CommandTarget) => {
+    if(!model.state.activeWorkspace&&["TabCreate","OpenNeoismAgent","OpenNeoismNotes"].includes(action)&&!await newWindowWorkspace())return;
     const surface = active(), editor = activeEditor(), terminal = activeTerminal(), layout = workspaceLayout();
     switch (action) {
       case "None": case "ReceiveChar": return;
@@ -951,11 +952,12 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         onAction={(action, detail) => { if (action === "new-chat") {model.newAgentHome();focusChrome({zone:"content"});} else if (action === "focus-content")focusChrome({zone:"content"});else if (action === "search") openFind("files"); else if (action === "projects") openProjectPicker(detail); else void chooseDirectory().then(commitWorkspaceRoot); }} />}</Show>
     </div>;
   }
-  function Composer(props: { surfaceId: string; sessionId?: string; home: boolean; viewport: {width:number;height:number}; onFrame: (frame: ComposerFrame) => void; onPromptStart:()=>void; onPromptFailed:()=>void }) {
+  function Composer(props: { surfaceId: string; sessionId?: string; home: boolean; viewport: {width:number;height:number}; onFrame: (read:()=>ComposerFrame|undefined) => void }) {
     const initialDraftKey=model.composerDraftKey(props.sessionId,props.surfaceId),initialDraft=model.state.composerDrafts[initialDraftKey];
     const promptHistory=new PromptHistory();
     let lastEscapeAt:number|undefined;
     const [draft, setDraft] = createSignal(initialDraft?.text||"");
+    const [caretReset,setCaretReset]=createSignal(0);
     const shellMode = () => shellCommand(draft()) !== undefined;
     const [submitting, setSubmitting] = createSignal(false);
     const [pasting,setPasting]=createSignal(false);
@@ -974,7 +976,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const selection = createMemo(() => { modelRevision(); return model.selection(props.sessionId); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
     const context=createMemo(()=>sessionContextMetrics(props.sessionId,selection().model||""));
     const cached=visuals.agentComposer(props.surfaceId,config),native=cached.native||(cached.native=new NativeComposer(config));
-    const [frame, setFrame] = createSignal<ComposerFrame|undefined>(cached.frame);
+    const [frameRevision,setFrameRevision]=createSignal(0);
     const [textLayout,setTextLayout]=createSignal<{width:number;rows:number}>();
     const [effectCommands,setEffectCommands] = createSignal<PaintCommand[]>([]);
     const [help,setHelp] = createSignal(model.state.ui.agentHints !== false);
@@ -986,7 +988,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     let effectActive=false, disposed=false, effectScope="";
     const activityAnimation = new AnimationFrameScheduler(1000/44);
     const effectsAnimation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
-    const activityState=createMemo(()=>props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle");
+    const activityState=createMemo(()=>{const sessionId=props.sessionId||state().pendingAgentSessions[props.surfaceId];return sessionId?state().streaming[sessionId]||"Idle":"Idle";});
     const localBusy=createMemo(()=>activityState()!=="Idle");
     const sessionError=createMemo(()=>props.sessionId?state().sessionErrors[props.sessionId]:undefined);
     const stop=()=>{if(props.sessionId){try{stopAgentTimeline(model,props.sessionId);}catch(error){model.report(error);}model.cancelPrompt(props.sessionId);}};
@@ -1013,17 +1015,18 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const slashOpen=()=>!slashDismissed()&&draft().startsWith("/")&&!/\s/.test(draft());
     let slashWasOpen=false;
     createEffect(()=>{const opened=slashOpen();if(opened&&!slashWasOpen)void slash.refresh().catch(model.report);slashWasOpen=opened;});
-    const sample=()=>{
-      if(disposed)return;
-      const started=performance.now();activityAnimation.cancel();
+    // Share derived geometry synchronously with the transcript. Publishing it
+    // from an effect let the first chat layout use the previous Home center.
+    const frame=createMemo(()=>{
+      frameRevision();
       // Retain the last shaped height while typing; the textarea reports the
       // new row count after layout, rather than speculating with another font.
       const measured=textLayout();
-      const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),system:sessionError()?"Agent error":undefined,contextLabel:context().label,noProviders:noProviders()&&!shellMode(),busy:localBusy(),state:activityState(),visualRows:draft()?measured?.rows:1,textWidth:draft()?measured?.width:frame()?.controls.text_rect[2]});
-      cached.frame=next;setFrame(next);props.onFrame(next);
-      if(next.animating&&!config.reducedMotion)activityAnimation.request(sample,started);
-    };
-    createEffect(()=>{props.viewport;props.home;draft();help();attachments();cwd();noProviders();activityState();sessionError();textLayout();context();untrack(sample);});
+      const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),system:sessionError()?"Agent error":undefined,contextLabel:context().label,noProviders:noProviders()&&!shellMode(),busy:localBusy(),state:activityState(),visualRows:draft()?measured?.rows:1,textWidth:draft()?measured?.width:cached.frame?.controls.text_rect[2]});
+      cached.frame=next;return next;
+    });
+    props.onFrame(frame);
+    createEffect(()=>{const next=frame();activityAnimation.cancel();if(next.animating&&!config.reducedMotion)activityAnimation.request(()=>{if(!disposed)setFrameRevision(value=>value+1);},performance.now());});
     const sampleEffect=()=>{if(disposed||!effectActive)return;if(effectScope!==`${state().activeWorkspace?.id}\0${state().activeSurfaceId||"home"}`){effectActive=false;setEffectCommands([]);return;}const started=performance.now(),next=native.effect({width:props.viewport.width,height:props.viewport.height,inputY:frame()?.inputRect[1]||0});setEffectCommands(next.commands);effectActive=next.animating;
       if(next.prompt){if(props.sessionId)void model.submitPrompt(props.sessionId,next.prompt);else void model.submitNewPrompt(next.prompt);}
       if(next.animating)effectsAnimation.request(sampleEffect,started);
@@ -1066,17 +1069,22 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
       if (command !== undefined && attachments().length) { model.report(new Error("Remove attachments before running a shell command.")); return; }
       const submitted = draft(), submittedAttachments = attachments(), files = submittedAttachments.map(({ token, name, ...attachment }) => attachment);
       const prompt=!submitted.trimStart().startsWith("/");
-      setSubmitting(true);
-      // Clear before starting network work; a later ACK must not erase new typing.
-      if(prompt){setDraft("");setAttachments([]);setSlashDismissed(false);props.onPromptStart();}
-      const restore=()=>{if(prompt){if(!draft()&&!attachments().length){setDraft(submitted);setAttachments(submittedAttachments);}props.onPromptFailed();}};
+      const historyEdit=!submittedAttachments.length&&/^\/(undo|redo)\s*$/.test(submitted.trim());
+      const restore=()=>{if(prompt){if(!draft()&&!attachments().length)batch(()=>{setCaretReset(value=>value+1);setDraft(submitted);setAttachments(submittedAttachments);});}};
       try {
-        const accepted = command !== undefined ? await model.submitShell(props.sessionId, command) : prompt
-          ? await (props.sessionId ? model.submitPrompt(props.sessionId, submitted, { attachments: files, delivery }) : model.submitNewPrompt(submitted, { attachments: files, delivery }))
-          : await slash.execute(submitted);
-        if (accepted) { if(prompt){model.rememberComposerPrompt({text:submitted,attachments:submittedAttachments});promptHistory.reset();} if(!prompt&&draft()===submitted){setDraft("");setAttachments([]);setSlashDismissed(false);} }
+        const accepted = await batch(()=>{
+          if(!historyEdit)setSubmitting(true);
+          // Clear before network work, but publish it with the synchronous echo
+          // and chat geometry. Otherwise an empty centered Home paints first.
+          if(prompt){setCaretReset(value=>value+1);setDraft("");setAttachments([]);setSlashDismissed(false);}
+          else if(historyEdit){setCaretReset(value=>value+1);setDraft("");setSlashDismissed(false);}
+          return command !== undefined ? model.submitShell(props.sessionId, command) : prompt
+            ? (props.sessionId ? model.submitPrompt(props.sessionId, submitted, { attachments: files, delivery }) : model.submitNewPrompt(submitted, { attachments: files, delivery }))
+            : slash.execute(submitted);
+        });
+        if (accepted) { if(prompt){model.rememberComposerPrompt({text:submitted,attachments:submittedAttachments});promptHistory.reset();} if(!prompt&&!historyEdit&&draft()===submitted)batch(()=>{setCaretReset(value=>value+1);setDraft("");setAttachments([]);setSlashDismissed(false);}); }
         else restore();
-      } catch(error) { restore();model.report(error); } finally { setSubmitting(false); }
+      } catch(error) { restore();model.report(error); } finally { if(!historyEdit)setSubmitting(false); }
     };
     const attachPaths = async (paths: readonly string[]) => {
       try {
@@ -1127,7 +1135,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     };
     // A returning workspace already knows its pane size and draft. Emit the
     // complete input in its first transaction, before another layout event.
-    sample();
+    frame();
     return <>
       <PaintLayer commands={effectCommands()} config={config}/>
       <Show when={!!frame()}><div testId="agent-composer-shell" data-home={props.home} style={{...absolute(frame()?.inputRect),height:(frame()?.inputRect[3]||0)+(frame()?.footerVisible?32*s:0)}}>
@@ -1192,7 +1200,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
               if(event.key==="tab"&&!event.modifiers?.ctrl&&!event.modifiers?.alt){event.preventDefault();model.setSelection("agent",selection().agent==="plan"?"build":"plan",props.sessionId);}
               if(event.key==="enter"&&event.modifiers?.alt){event.preventDefault();event.stopPropagation();void submit("queue");}
             }} style={{...text(16),...absolute(frame()?.controls.text_rect),lineHeight:22*s,padding:0,backgroundColor:"transparent",borderWidth:0}}/>
-          <ComposerCaret config={config} input={()=>input} onLayout={layout=>{
+          <ComposerCaret config={config} input={()=>input} home={props.home} resetToken={caretReset()} onLayout={layout=>{
             if(layout.text!==draft()||Math.abs(layout.width-(frame()?.controls.text_rect[2]||0))>=0.1)return;
             setTextLayout(previous=>previous?.width===layout.width&&previous.rows===layout.rows?previous:{width:layout.width,rows:layout.rows});
           }}/>
@@ -1230,7 +1238,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         onSelect={value=>{setSlashInput(undefined);entry.resolve(value);focus();}} onClose={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}/>}</Show>
       <Show when={slashPicker()?.token||slashPicker()} keyed>{_token=>{const initial=slashPicker()!;const request=()=>slashPicker()?.token===initial.token?slashPicker()!:initial;return <InlinePicker config={config} kind={request().kind} title={request().title} options={request().options} current={request().selected} anchor={anchor}
         loading={request().loading} error={request().error} usage={request().usage} onRefresh={request().onRefresh} onLoadMore={request().onLoadMore} activity={request().activity} mcpServer={request().mcpServer} mcpEntry={request().mcpEntry}
-        onSelect={value=>{const current=request();setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{const current=request();setSlashPicker(undefined);if(current.onBack)void Promise.resolve(current.onBack()).catch(model.report);else current.onCancel?.();focus();}}/>;}}</Show>
+        onSelect={value=>{const current=request();if(!current.options.find(option=>option.value===value)?.keepOpen)setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{const current=request();setSlashPicker(undefined);if(current.onBack)void Promise.resolve(current.onBack()).catch(model.report);else current.onCancel?.();focus();}}/>;}}</Show>
     </>;
   }
   function AgentSurface(props:{surfaceId:string;sessionId?:string;initialViewport:{width:number;height:number}}) {
@@ -1242,12 +1250,8 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     // A conversation is "home" only once its history is known to be empty:
     // before the first HistoryChunk an existing chat must not flash the
     // new-chat wordmark page.
-    const [startedPrompt,setStartedPrompt]=createSignal(false);
-    let promptSession=props.sessionId;
-    createEffect(()=>{const session=props.sessionId;if(promptSession!==undefined&&session!==promptSession)setStartedPrompt(false);promptSession=session;});
-    createEffect(()=>{if(messages().some(message=>message.kind!=="System"))setStartedPrompt(false);});
     const historyKnown=createMemo(()=>!props.sessionId||state().history[props.sessionId]!==undefined);
-    const home=createMemo(()=>!startedPrompt()&&!subagent()&&historyKnown()&&!messages().some(message=>message.kind!=="System"));
+    const home=createMemo(()=>!subagent()&&historyKnown()&&!messages().some(message=>message.kind!=="System"));
     // Wordmark mounts before Composer in the original paint order. Its first
     // frame must already have the native logo rectangle, rather than mounting
     // at 0px and waiting for Composer or another layout pass to supply it.
@@ -1261,15 +1265,16 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         noProviders:!state().catalogsLoading&&!state().catalogsError&&state().providers.length===0,busy:!!props.sessionId&&![undefined,"Idle"].includes(state().streaming[props.sessionId]),state:props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle"});
     }
     const [viewport,setViewport]=createSignal(cached.viewport);
-    const [frame,setFrame]=createSignal<ComposerFrame|undefined>(cached.frame);
+    const [readFrame,setReadFrame]=createSignal<()=>ComposerFrame|undefined>(()=>cached.frame);
+    const frame=()=>readFrame()();
     return <div testId="agent-pane" data-home={home()} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",minWidth:0,minHeight:0,overflow:"hidden"}}
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
-      <Show when={!home()&&timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><Show when={timelineSession()} keyed>{(sessionId)=><AgentTimelineView viewport={viewport()} pinImage={(source,raster)=>visuals.pinTimelineImage(renderer,source,raster)} onPreview={setImagePreview} sessionId={sessionId} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:sessionId} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
+      <Show when={!home()&&!!timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><AgentTimelineView viewport={viewport()} pinImage={(source,raster)=>visuals.pinTimelineImage(renderer,source,raster)} onPreview={setImagePreview} sessionId={timelineSession()!} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:timelineSession()!} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
         onFocus={()=>{++contentFocusSerial;contentFocusFrames.cancel();pendingContentFocus=false;noteContentFocus();setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}
         contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]??viewport().height)}
-        openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/>}</Show></div></Show>
-      <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={setFrame} onPromptStart={()=>setStartedPrompt(true)} onPromptFailed={()=>setStartedPrompt(false)}/></Show>
+        openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/></div></Show>
+      <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={read=>setReadFrame(()=>read)}/></Show>
     </div>;
   }
   function Conversation(props: { surfaceId: string;initialViewport:{width:number;height:number} }) { const surface=()=>state().surfaces.find(surface=>surface.id===props.surfaceId);return <AgentSurface surfaceId={props.surfaceId} sessionId={surface()?.sessionId} initialViewport={props.initialViewport}/>; }
@@ -1278,6 +1283,12 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const id=sessionId||"";
     return contextMetrics(state().history[id]||[],state().usage[id],state().providerStates[id],state().providers,selectedModel);
   }
+  const welcomeAction=async(action:string)=>{
+    closeChoice();if(palette())closePalette();if(commands())closeCommands();chromeActions.close();setMenu(false);
+    if(action==="open-command-palette"){openCommands();return;}
+    if(!model.state.activeWorkspace&&!await newWindowWorkspace())return;
+    switch(action){case "split-terminal":splitTerminalBelow();break;case "open-file-tree":toggle("files");break;case "open-notes":void onChromeAction("OpenNotes");break;case "open-agent":model.openAgentHome();break;case "open-agent-panel":toggle("conversations");break;case "search":openFind("files");break;case "open-command-palette":openCommands();break;case "new-terminal":void model.newTerminal();break;case "change-directory":chooseStatusDirectory();break;}
+  };
   function DetailRail() {
     // Fixed ink geometry avoids font bearings/baselines moving the checkmark.
     const checkmark=JSON.stringify([{k:"p",c:cssColor(c.green),p:[[3,7,5,9,11,2,12,3,5,12,2,8].map(n=>n*s)]}]);
@@ -1363,7 +1374,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
           registerHost={(id,host)=>{if(host)workspaceHosts.set(id,host);else workspaceHosts.delete(id);}}
           registerNewHost={host=>{workspaceNewHost=host;}} onBounds={updateChromeBounds} onScroll={refreshChromeTargetBounds}/>
         <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0 }}>
-          <Show when={workspaceLayout()} keyed>{(layout) => <PaneLayoutView controller={layout} config={config}
+          <Show when={workspaceLayout()} keyed fallback={<div style={{position:"relative",flexGrow:1,minWidth:0}}><Show when={!state().loading}><SplashView contextId="empty-window" config={config} wordmarkHosts={wordmarkHosts} active={chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={noteContentFocus} onAction={action=>void welcomeAction(action).catch(model.report)}/></Show></div>}>{(layout) => <PaneLayoutView controller={layout} config={config}
             keyboardTab={chromeFocus().zone==="buffers"?focusedPane()?.tabs[(chromeFocus() as {index:number}).index]?.leaf:undefined}
             keyboardNewPane={chromeFocus().zone==="buffers"&&(chromeFocus() as {index:number}).index>=(focusedPane()?.tabs.length||0)?focusedPane()?.leaf:undefined}
             registerTabHost={(leaf,host)=>{if(host)tabHosts.set(leaf,host);else tabHosts.delete(leaf);}}
@@ -1378,8 +1389,7 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
               const surface = found();
               return <Switch>
                 <Match when={surface.kind === "welcome"}><SplashView initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border-16*s),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border-16*s)};})()} config={config} contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onAction={action=>{
-                  closeChoice();if(palette())closePalette();if(commands())closeCommands();chromeActions.close();setMenu(false);
-                  switch(action){case "split-terminal":splitTerminalBelow();break;case "open-file-tree":toggle("files");break;case "open-notes":void onChromeAction("OpenNotes");break;case "open-agent":model.openAgentHome();break;case "open-agent-panel":toggle("conversations");break;case "search":openFind("files");break;case "open-command-palette":openCommands();break;case "new-terminal":void model.newTerminal();break;case "change-directory":chooseStatusDirectory();break;}
+                  void welcomeAction(action).catch(model.report);
                 }}/></Match>
                 <Match when={surface.kind === "page" && surface.page === "extensions"}><ChromeActionsView controller={chromeActions} config={config} pageMode active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} /></Match>

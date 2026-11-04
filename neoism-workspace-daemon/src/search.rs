@@ -10,7 +10,9 @@
 //!
 //! Each request carries a `req_id` from the protocol. The
 //! `CancelSearch` variant aborts the in-flight task associated with
-//! that id; we hold an `AbortHandle` per pending request.
+//! that id and marks queued blocking work obsolete. Already-running FFF
+//! calls cannot be interrupted, so shared admission stays held until they
+//! finish. Distinct request IDs are independent, not a global latest query.
 //!
 //! All paths flowing in/out of this module are workspace-relative —
 //! traversal protection is delegated to [`crate::files::resolve_path`].
@@ -18,7 +20,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use neoism_agent_service_api::{WorkspaceSearchRootPin, WorkspaceSearchService};
 use neoism_agent_workspace_search_fff::FffWorkspaceSearchService;
@@ -30,6 +34,7 @@ use parking_lot::Mutex;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Semaphore;
 use tokio::task::AbortHandle;
 use walkdir::WalkDir;
 
@@ -38,12 +43,60 @@ use crate::files::resolve_path;
 /// Maximum number of hits any single search reply will carry. Beyond
 /// this we truncate to keep the WebSocket frame bounded.
 const MAX_HITS: usize = 500;
+const MAX_FILE_WORKERS: usize = 2;
+const EXACT_CACHE_TTL: Duration = Duration::from_secs(1);
+
+// Process-wide, not per socket: cancelled FFF calls cannot be interrupted once
+// started. Their permits must live in the blocking closures until those exit.
+fn file_admission() -> Arc<Semaphore> {
+    static ADMISSION: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    ADMISSION
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_FILE_WORKERS)))
+        .clone()
+}
+
+struct PendingSearch {
+    handle: AbortHandle,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct CancelOnDrop(Arc<AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Async admission avoids filling Tokio's blocking queue. The second check
+/// skips work cancelled after admission but before a blocking thread starts.
+async fn file_work<T: Send + 'static>(
+    admission: Arc<Semaphore>,
+    cancelled: Arc<AtomicBool>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let permit = admission.acquire_owned().await.map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if cancelled.load(Ordering::Acquire) {
+            return Err("search cancelled".into());
+        }
+        Ok(work())
+    })
+    .await
+    .map_err(|e| format!("file search join error: {e}"))?
+}
+
+struct ExactCollection {
+    root: PathBuf,
+    collected: Instant,
+    paths: Arc<Vec<String>>,
+}
 
 /// Tracks in-flight tasks per request id so `CancelSearch` can abort
 /// them. Cheap to clone — the inner map is shared via `Arc<Mutex<_>>`.
 #[derive(Clone)]
 pub struct SearchRegistry {
-    inflight: Arc<Mutex<HashMap<RequestId, AbortHandle>>>,
+    inflight: Arc<Mutex<HashMap<RequestId, PendingSearch>>>,
     files: Arc<FffFileSearch>,
 }
 /// Pins warm FFF indices for this client; closing the socket releases watchers.
@@ -51,6 +104,10 @@ pub struct SearchRegistry {
 struct FffFileSearch {
     service: FffWorkspaceSearchService,
     roots: Mutex<VecDeque<(PathBuf, Arc<dyn WorkspaceSearchRootPin>)>>,
+    // Short-lived snapshots, not a filesystem index: creates/deletes and ignore
+    // edits become visible at expiry, or immediately on explicit CollectFiles.
+    // Holding this async lock through collection coalesces concurrent cold reads.
+    exact: tokio::sync::Mutex<VecDeque<ExactCollection>>,
 }
 impl Default for SearchRegistry {
     fn default() -> Self {
@@ -59,13 +116,14 @@ impl Default for SearchRegistry {
             files: Arc::new(FffFileSearch {
                 service: FffWorkspaceSearchService::new(),
                 roots: Mutex::new(VecDeque::new()),
+                exact: Default::default(),
             }),
         }
     }
 }
 impl FffFileSearch {
     fn search(&self, root: &Path, query: &str) -> Result<Vec<SearchFileHit>, String> {
-        {
+        let evicted = {
             let mut roots = self.roots.lock();
             if let Some(index) = roots.iter().position(|(path, _)| path == root) {
                 let entry = roots.remove(index).unwrap();
@@ -76,11 +134,15 @@ impl FffFileSearch {
                     .pin_root(root)
                     .map_err(|error| error.to_string())?;
                 roots.push_back((root.to_path_buf(), pin));
-                while roots.len() > 8 {
-                    roots.pop_front();
-                }
             }
-        }
+            if roots.len() > 8 {
+                roots.pop_front()
+            } else {
+                None
+            }
+        };
+        // Dropping a pin can stop/join a watcher. Never do that under roots.
+        drop(evicted);
         self.service
             .with_picker(root, |picker| {
                 let parser = fff_search::QueryParser::default();
@@ -109,6 +171,43 @@ impl FffFileSearch {
             })
             .map_err(|error| error.to_string())
     }
+
+    async fn exact_paths(
+        &self,
+        root: PathBuf,
+        refresh: bool,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Arc<Vec<String>>, String> {
+        let mut cache = self.exact.lock().await;
+        if let Some(index) = cache.iter().position(|entry| entry.root == root) {
+            let entry = cache.remove(index).unwrap();
+            if !refresh && entry.collected.elapsed() < EXACT_CACHE_TTL {
+                let paths = entry.paths.clone();
+                cache.push_back(entry);
+                return Ok(paths);
+            }
+        }
+        let paths = match run_rg_files(&root, cancelled.clone()).await {
+            Ok(paths) => paths,
+            Err(_) => {
+                let walk_root = root.clone();
+                file_work(file_admission(), cancelled, move || {
+                    walkdir_files(&walk_root)
+                })
+                .await?
+            }
+        };
+        let paths = Arc::new(paths);
+        cache.push_back(ExactCollection {
+            root: root.clone(),
+            collected: Instant::now(),
+            paths: paths.clone(),
+        });
+        while cache.len() > 8 {
+            cache.pop_front();
+        }
+        Ok(paths)
+    }
 }
 
 impl SearchRegistry {
@@ -116,19 +215,12 @@ impl SearchRegistry {
         Self::default()
     }
 
-    fn insert(&self, req_id: RequestId, handle: AbortHandle) {
-        self.inflight.lock().insert(req_id, handle);
-    }
-
-    fn remove(&self, req_id: RequestId) -> Option<AbortHandle> {
-        self.inflight.lock().remove(&req_id)
-    }
-
     /// Cancel `req_id` if still pending. Returns true iff a task was
     /// aborted.
     pub fn cancel(&self, req_id: RequestId) -> bool {
-        if let Some(handle) = self.remove(req_id) {
-            handle.abort();
+        if let Some(pending) = self.inflight.lock().remove(&req_id) {
+            pending.cancelled.store(true, Ordering::Release);
+            pending.handle.abort();
             true
         } else {
             false
@@ -177,8 +269,9 @@ pub fn dispatch(
             registry.cancel(req_id);
         }
         SearchClientMessage::CollectFiles { req_id, cwd } => {
-            spawn_task(registry, req_id, tx.clone(), async move {
-                collect_files(req_id, workspace_root, cwd).await
+            let files = registry.files.clone();
+            spawn_task(registry, req_id, tx.clone(), move |cancelled| async move {
+                collect_files(req_id, workspace_root, cwd, files, cancelled).await
             });
         }
         SearchClientMessage::SearchFiles {
@@ -188,12 +281,13 @@ pub fn dispatch(
             mode,
         } => {
             let files = registry.files.clone();
-            spawn_task(registry, req_id, tx.clone(), async move {
-                search_files(req_id, workspace_root, query, cwd, mode, files).await
+            spawn_task(registry, req_id, tx.clone(), move |cancelled| async move {
+                search_files(req_id, workspace_root, query, cwd, mode, files, cancelled)
+                    .await
             });
         }
         SearchClientMessage::SearchDirectories { req_id, query, cwd } => {
-            spawn_task(registry, req_id, tx.clone(), async move {
+            spawn_task(registry, req_id, tx.clone(), move |_| async move {
                 search_directories(req_id, workspace_root, query, cwd).await
             });
         }
@@ -205,7 +299,7 @@ pub fn dispatch(
             case_sensitive,
             file_patterns,
         } => {
-            spawn_task(registry, req_id, tx.clone(), async move {
+            spawn_task(registry, req_id, tx.clone(), move |_| async move {
                 search_grep(
                     req_id,
                     workspace_root,
@@ -219,12 +313,12 @@ pub fn dispatch(
             });
         }
         SearchClientMessage::SearchGitChanges { req_id, cwd } => {
-            spawn_task(registry, req_id, tx.clone(), async move {
+            spawn_task(registry, req_id, tx.clone(), move |_| async move {
                 search_git_changes(req_id, workspace_root, cwd).await
             });
         }
         SearchClientMessage::GitRepoRoot { req_id, cwd } => {
-            spawn_task(registry, req_id, tx.clone(), async move {
+            spawn_task(registry, req_id, tx.clone(), move |_| async move {
                 git_repo_root(req_id, workspace_root, cwd).await
             });
         }
@@ -239,17 +333,41 @@ fn spawn_task<F>(
     registry: &SearchRegistry,
     req_id: RequestId,
     tx: UnboundedSender<SearchServerMessage>,
-    fut: F,
+    make_future: impl FnOnce(Arc<AtomicBool>) -> F,
 ) where
     F: std::future::Future<Output = SearchServerMessage> + Send + 'static,
 {
+    // Register under the same lock used for completion, so even an immediately
+    // ready future cannot leave a stale entry behind. Reusing an ID replaces
+    // only that request; distinct IDs (even at the same root) remain independent.
+    let mut inflight = registry.inflight.lock();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_cancelled = cancelled.clone();
+    let guard = CancelOnDrop(cancelled.clone());
+    let fut = make_future(cancelled.clone());
     let registry_for_task = registry.clone();
     let handle = tokio::spawn(async move {
+        let _guard = guard;
         let reply = fut.await;
-        let _ = tx.send(reply);
-        registry_for_task.remove(req_id);
+        let mut inflight = registry_for_task.inflight.lock();
+        if inflight
+            .get(&req_id)
+            .is_some_and(|pending| Arc::ptr_eq(&pending.cancelled, &task_cancelled))
+        {
+            let _ = tx.send(reply);
+            inflight.remove(&req_id);
+        }
     });
-    registry.insert(req_id, handle.abort_handle());
+    if let Some(old) = inflight.insert(
+        req_id,
+        PendingSearch {
+            handle: handle.abort_handle(),
+            cancelled,
+        },
+    ) {
+        old.cancelled.store(true, Ordering::Release);
+        old.handle.abort();
+    }
 }
 
 /// Resolve a workspace-relative `cwd` to an absolute path or return
@@ -279,6 +397,8 @@ async fn collect_files(
     req_id: RequestId,
     workspace_root: PathBuf,
     cwd: String,
+    files: Arc<FffFileSearch>,
+    cancelled: Arc<AtomicBool>,
 ) -> SearchServerMessage {
     let cwd_abs = match resolve_cwd(req_id, workspace_root, &cwd) {
         Ok(p) => p,
@@ -286,16 +406,21 @@ async fn collect_files(
     };
     // Prefer `rg --files` (respects .gitignore + .ignore the same way
     // the desktop binary does). Fall back to walkdir if rg is missing.
-    match run_rg_files(&cwd_abs).await {
-        Ok(paths) => SearchServerMessage::CollectFilesResult { req_id, paths },
-        Err(_) => {
-            let paths = walkdir_files(&cwd_abs);
-            SearchServerMessage::CollectFilesResult { req_id, paths }
+    match files.exact_paths(cwd_abs, true, cancelled.clone()).await {
+        Ok(paths) => {
+            match file_work(file_admission(), cancelled, move || (*paths).clone()).await {
+                Ok(paths) => SearchServerMessage::CollectFilesResult { req_id, paths },
+                Err(message) => SearchServerMessage::SearchError { req_id, message },
+            }
         }
+        Err(message) => SearchServerMessage::SearchError { req_id, message },
     }
 }
 
-async fn run_rg_files(cwd: &Path) -> Result<Vec<String>, String> {
+async fn run_rg_files(
+    cwd: &Path,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Vec<String>, String> {
     if which("rg").is_none() {
         return Err("rg not on PATH".into());
     }
@@ -303,6 +428,7 @@ async fn run_rg_files(cwd: &Path) -> Result<Vec<String>, String> {
     #[cfg(windows)]
     crate::hide_tokio_command(&mut cmd);
     cmd.arg("--files")
+        .kill_on_drop(true)
         .arg("--no-messages")
         .arg("--hidden")
         .arg("--glob")
@@ -314,8 +440,13 @@ async fn run_rg_files(cwd: &Path) -> Result<Vec<String>, String> {
     if !output.status.success() && output.stdout.is_empty() {
         return Err(format!("rg exited with status {:?}", output.status.code()));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().map(|l| l.to_string()).collect())
+    file_work(file_admission(), cancelled, move || {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    })
+    .await
 }
 
 /// Walkdir fallback that skips obvious noise directories. Honours
@@ -445,6 +576,7 @@ async fn search_files(
     cwd: String,
     mode: SearchFileMode,
     files: Arc<FffFileSearch>,
+    cancelled: Arc<AtomicBool>,
 ) -> SearchServerMessage {
     let cwd_abs = match resolve_cwd(req_id, workspace_root.clone(), &cwd) {
         Ok(p) => p,
@@ -468,8 +600,10 @@ async fn search_files(
                 }
             }
         };
-        return match tokio::task::spawn_blocking(move || files.search(&cwd_abs, &query))
-            .await
+        return match file_work(file_admission(), cancelled, move || {
+            files.search(&cwd_abs, &query)
+        })
+        .await
         {
             Ok(Ok(hits)) => SearchServerMessage::SearchFilesResult { req_id, hits },
             Ok(Err(message)) => SearchServerMessage::SearchError { req_id, message },
@@ -479,28 +613,37 @@ async fn search_files(
             },
         };
     }
-    let paths = match run_rg_files(&cwd_abs).await {
-        Ok(p) => p,
-        Err(_) => walkdir_files(&cwd_abs),
+    let paths = match files.exact_paths(cwd_abs, false, cancelled.clone()).await {
+        Ok(paths) => paths,
+        Err(message) => return SearchServerMessage::SearchError { req_id, message },
     };
+    match file_work(file_admission(), cancelled, move || {
+        exact_hits(&paths, &query)
+    })
+    .await
+    {
+        Ok(hits) => SearchServerMessage::SearchFilesResult { req_id, hits },
+        Err(message) => SearchServerMessage::SearchError { req_id, message },
+    }
+}
+
+fn exact_hits(paths: &[String], query: &str) -> Vec<SearchFileHit> {
     let trimmed = query.trim();
     let hits: Vec<SearchFileHit> = if trimmed.is_empty() {
         paths
-            .into_iter()
+            .iter()
             .take(MAX_HITS)
-            .map(|path| SearchFileHit { score: 0, path })
+            .map(|path| SearchFileHit {
+                score: 0,
+                path: path.clone(),
+            })
             .collect()
     } else {
         let smart_case = trimmed.chars().any(|c| c.is_ascii_uppercase());
         let mut scored: Vec<SearchFileHit> = paths
             .iter()
             .filter_map(|path| {
-                let score = match mode {
-                    SearchFileMode::Exact => {
-                        exact_file_match_score(trimmed, path, smart_case)
-                    }
-                    SearchFileMode::Fuzzy => fuzzy_file_match_score(trimmed, path),
-                }?;
+                let score = exact_file_match_score(trimmed, path, smart_case)?;
                 Some(SearchFileHit {
                     score,
                     path: path.clone(),
@@ -511,7 +654,7 @@ async fn search_files(
         scored.truncate(MAX_HITS);
         scored
     };
-    SearchServerMessage::SearchFilesResult { req_id, hits }
+    hits
 }
 
 fn exact_file_match_score(query: &str, path: &str, smart_case: bool) -> Option<i32> {
@@ -624,7 +767,10 @@ async fn search_grep(
     let mut cmd = TokioCommand::new("rg");
     #[cfg(windows)]
     crate::hide_tokio_command(&mut cmd);
-    cmd.arg("--json").arg("--no-messages").arg("--hidden");
+    cmd.kill_on_drop(true)
+        .arg("--json")
+        .arg("--no-messages")
+        .arg("--hidden");
     cmd.arg("--glob").arg("!.git");
     // Mode flags. Fuzzy is a UI concept; rg has no fuzzy mode, so we
     // treat Fuzzy as "fixed strings, case-insensitive unless smart"
@@ -880,6 +1026,315 @@ fn which(bin: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    fn empty_reply(req_id: RequestId) -> SearchServerMessage {
+        SearchServerMessage::SearchFilesResult {
+            req_id,
+            hits: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn evicted_root_pin_is_dropped_outside_roots_lock() {
+        struct CheckedPin {
+            root: PathBuf,
+            files: std::sync::Weak<FffFileSearch>,
+            dropped: Arc<AtomicBool>,
+        }
+        impl WorkspaceSearchRootPin for CheckedPin {
+            fn root(&self) -> &Path {
+                &self.root
+            }
+        }
+        impl Drop for CheckedPin {
+            fn drop(&mut self) {
+                if let Some(files) = self.files.upgrade() {
+                    assert!(
+                        files.roots.try_lock().is_some(),
+                        "pin dropped under roots lock"
+                    );
+                    self.dropped.store(true, Ordering::Release);
+                }
+            }
+        }
+        let reg = SearchRegistry::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        for index in 0..8 {
+            let root = PathBuf::from(format!("unused-root-{index}"));
+            reg.files.roots.lock().push_back((
+                root.clone(),
+                Arc::new(CheckedPin {
+                    root,
+                    files: Arc::downgrade(&reg.files),
+                    dropped: dropped.clone(),
+                }),
+            ));
+        }
+        let root = tempfile::tempdir().unwrap();
+        git2::Repository::init(root.path()).unwrap();
+        std::fs::write(root.path().join("sample.rs"), "").unwrap();
+        reg.files.search(root.path(), "sample").unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(reg.files.roots.lock().len(), 8);
+    }
+
+    #[tokio::test]
+    async fn cancellation_keeps_running_permit_and_skips_waiting_work() {
+        let reg = SearchRegistry::new();
+        let admission = Arc::new(Semaphore::new(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_admission = admission.clone();
+        spawn_task(&reg, 1, tx.clone(), move |cancelled| async move {
+            file_work(first_admission, cancelled, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            })
+            .await
+            .unwrap();
+            empty_reply(1)
+        });
+        started_rx.await.unwrap();
+        assert!(reg.cancel(1));
+        tokio::task::yield_now().await;
+        assert_eq!(
+            admission.available_permits(),
+            0,
+            "abort must not release running work's permit"
+        );
+
+        let obsolete_ran = Arc::new(AtomicBool::new(false));
+        let obsolete_flag = obsolete_ran.clone();
+        let waiting_admission = admission.clone();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        spawn_task(&reg, 2, tx.clone(), move |cancelled| async move {
+            waiting_tx.send(()).unwrap();
+            file_work(waiting_admission, cancelled, move || {
+                obsolete_flag.store(true, Ordering::Release)
+            })
+            .await
+            .unwrap();
+            empty_reply(2)
+        });
+        waiting_rx.await.unwrap();
+        assert!(reg.cancel(2));
+
+        // Two unrelated request IDs both survive; there is no latest-global
+        // suppression, even when both wait on the same admission queue.
+        for id in [3, 4] {
+            let admission = admission.clone();
+            spawn_task(&reg, id, tx.clone(), move |cancelled| async move {
+                file_work(admission, cancelled, || ()).await.unwrap();
+                empty_reply(id)
+            });
+        }
+        release_tx.send(()).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            ids.push(response_id(
+                &tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            ));
+        }
+        ids.sort();
+        assert_eq!(ids, [3, 4]);
+        assert!(!obsolete_ran.load(Ordering::Acquire));
+        assert!(reg.inflight.lock().is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancelled_work_in_blocking_pool_queue_never_executes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            started_rx.await.unwrap();
+            let reg = SearchRegistry::new();
+            let admission = Arc::new(Semaphore::new(1));
+            let ran = Arc::new(AtomicBool::new(false));
+            let ran_work = ran.clone();
+            let work_admission = admission.clone();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            spawn_task(&reg, 1, tx, move |cancelled| async move {
+                let _ = file_work(work_admission, cancelled, move || {
+                    ran_work.store(true, Ordering::Release)
+                })
+                .await;
+                empty_reply(1)
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while admission.available_permits() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(admission.available_permits(), 0);
+            assert!(reg.cancel(1));
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            let _permit =
+                tokio::time::timeout(Duration::from_secs(5), admission.acquire())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(!ran.load(Ordering::Acquire));
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reused_ids_replace_only_their_request_and_ready_tasks_leave_no_entries() {
+        let reg = SearchRegistry::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        spawn_task(&reg, 1, tx.clone(), |_| {
+            std::future::pending::<SearchServerMessage>()
+        });
+        let old_cancelled = reg.inflight.lock().get(&1).unwrap().cancelled.clone();
+        spawn_task(&reg, 1, tx.clone(), |_| async { empty_reply(1) });
+        assert!(old_cancelled.load(Ordering::Acquire));
+        for id in 2..102 {
+            spawn_task(
+                &reg,
+                id,
+                tx.clone(),
+                move |_| async move { empty_reply(id) },
+            );
+        }
+        let mut ids = Vec::new();
+        for _ in 0..101 {
+            ids.push(response_id(
+                &tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            ));
+        }
+        ids.sort();
+        assert_eq!(ids, (1..102).collect::<Vec<_>>());
+        assert!(reg.inflight.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_collection_reuses_refreshes_expires_and_isolates_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("first.rs"), "").unwrap();
+        std::fs::write(other.path().join("other.rs"), "").unwrap();
+        let reg = SearchRegistry::new();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (first, coalesced) = tokio::join!(
+            reg.files
+                .exact_paths(root.path().into(), false, cancelled.clone()),
+            reg.files
+                .exact_paths(root.path().into(), false, cancelled.clone())
+        );
+        let first = first.unwrap();
+        assert!(Arc::ptr_eq(&first, &coalesced.unwrap()));
+        let (second, concurrent) = tokio::join!(
+            reg.files
+                .exact_paths(root.path().into(), false, cancelled.clone()),
+            reg.files
+                .exact_paths(root.path().into(), false, cancelled.clone())
+        );
+        assert!(Arc::ptr_eq(&first, &second.unwrap()));
+        assert!(Arc::ptr_eq(&first, &concurrent.unwrap()));
+        assert_eq!(exact_hits(&first, "first")[0].path, "first.rs");
+        std::fs::remove_file(root.path().join("first.rs")).unwrap();
+        std::fs::write(root.path().join("new.rs"), "").unwrap();
+        let refreshed = reg
+            .files
+            .exact_paths(root.path().into(), true, cancelled.clone())
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert!(refreshed.iter().any(|p| p == "new.rs"));
+        assert!(!refreshed.iter().any(|p| p == "first.rs"));
+        std::fs::write(root.path().join("later.rs"), "").unwrap();
+        // Age deterministically rather than sleeping through the TTL.
+        reg.files.exact.lock().await.front_mut().unwrap().collected =
+            Instant::now() - EXACT_CACHE_TTL;
+        let expired = reg
+            .files
+            .exact_paths(root.path().into(), false, cancelled.clone())
+            .await
+            .unwrap();
+        assert!(expired.iter().any(|p| p == "later.rs"));
+        let isolated = reg
+            .files
+            .exact_paths(other.path().into(), false, cancelled.clone())
+            .await
+            .unwrap();
+        assert_eq!(&**isolated, &["other.rs".to_string()]);
+        if which("rg").is_some() {
+            std::fs::write(root.path().join(".ignore"), "later.rs\n").unwrap();
+            // Exercise the public dispatch path: CollectFiles invalidates a
+            // still-warm snapshot, including changes to ignore rules.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            dispatch(
+                &reg,
+                root.path().into(),
+                SearchClientMessage::CollectFiles {
+                    req_id: 20,
+                    cwd: String::new(),
+                },
+                tx.clone(),
+            );
+            let reply = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let SearchServerMessage::CollectFilesResult { req_id, paths } = reply else {
+                panic!("collection failed: {reply:?}");
+            };
+            assert_eq!(req_id, 20);
+            assert!(!paths.iter().any(|p| p == "later.rs"));
+            for (req_id, query) in [(21, "later"), (22, "new")] {
+                dispatch(
+                    &reg,
+                    root.path().into(),
+                    SearchClientMessage::SearchFiles {
+                        req_id,
+                        query: query.into(),
+                        cwd: String::new(),
+                        mode: SearchFileMode::Exact,
+                    },
+                    tx.clone(),
+                );
+            }
+            let mut ids = Vec::new();
+            for _ in 0..2 {
+                let reply = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let SearchServerMessage::SearchFilesResult { req_id, hits } = reply
+                else {
+                    panic!("exact search failed: {reply:?}");
+                };
+                ids.push(req_id);
+                if req_id == 21 {
+                    assert!(hits.is_empty());
+                } else {
+                    assert_eq!(hits[0].path, "new.rs");
+                }
+            }
+            ids.sort();
+            assert_eq!(ids, [21, 22]);
+        }
+    }
+
     #[test]
     fn classify_xy_basic() {
         assert!(matches!(classify_xy("??"), SearchGitStatus::Untracked));
@@ -976,20 +1431,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn registry_cancel_removes_entry() {
+    #[tokio::test]
+    async fn registry_cancel_removes_entry() {
         let reg = SearchRegistry::new();
-        let handle = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let handle = tokio::spawn(async { std::future::pending::<()>().await });
-                let abort = handle.abort_handle();
-                drop(handle);
-                abort
-            });
-        reg.insert(1, handle);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        spawn_task(&reg, 1, tx, |_| {
+            std::future::pending::<SearchServerMessage>()
+        });
         assert!(reg.cancel(1));
         assert!(!reg.cancel(1));
     }

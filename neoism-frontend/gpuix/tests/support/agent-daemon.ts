@@ -10,11 +10,14 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
   const files = new Map([["README.md", "# Neoism\n" + Array.from({ length: 80 }, (_, i) => `Line ${i + 1}`).join("\n")]]);
   const fileRequests: Array<{ tag: string; body: Record<string, unknown> }> = [];
   const workspaceRequests: Array<{ tag: string; body: Record<string, unknown> }> = [];
+  const windowWorkspaces=new Map<object,Set<string>>();
   const gitRequests:Array<{message:unknown;root?:string}>=[];
   const searchRequests:Array<{tag:string;body:Record<string,unknown>}>=[];
   const ptyRequests:Array<{tag:string;body:Record<string,unknown>}>=[],socketWorkspaces=new WeakMap<object,string>(),ptyModes=new Map<string,unknown>();let nextPty=0;
   const creations: Array<() => void> = [];
   const prompts: Array<() => void> = [];
+  const statuses=new Map<string,{type:"idle"|"busy"|"retry"}>();
+  const statusRequests={defer:false,fail:false,count:0,pending:[] as Array<()=>void>};
   const workspaceSubscriptions:Array<{workspaceId:string;release:()=>void}>=[];
   const directoryChanges:Array<()=>void>=[];
   const httpRequests: Array<{ path: string; authorization: string | null; directory: string | null }> = [];
@@ -80,6 +83,12 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       };
       const payload = request.method === "POST" || request.method === "PATCH" ? await request.json().catch(() => ({})) : {};
       if(match[2]==="sessions"&&request.method==="GET")return Response.json({items:threads.filter(thread=>!url.searchParams.get("directory")||thread.directory===url.searchParams.get("directory")).map(thread=>{const selected=selections.get(thread.session_id)||thread,model=selected.model?.split("/");return{id:thread.session_id,title:thread.title,directory:thread.directory,agent:selected.agent,...(model&&model.length>1?{model:{providerId:model[0],id:model.slice(1).join("/")}}:{})};}),cursor:{}});
+      if(match[2]==="sessions/status"){
+        const snapshot=Object.fromEntries(statuses);statusRequests.count++;
+        if(statusRequests.defer)await new Promise<void>(resolve=>statusRequests.pending.push(resolve));
+        if(statusRequests.fail)return Response.json({code:"fixture.status",message:"Status unavailable",retryable:false,details:{}},{status:400});
+        return Response.json(snapshot);
+      }
       if (match[2] === "sessions" && request.method === "POST") {
         const complete = () => Response.json(session("created-a"));
         requests.push({ tag: "CreateThread", body: { directory: workspace.root_dir, ...payload } });
@@ -130,7 +139,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
     },
     websocket: {
       open(client) { sockets.add(client);socketAgentStreams.set(client,new Set()); },
-      close(client){sockets.delete(client);const streams=socketAgentStreams.get(client);socketAgentStreams.delete(client);for(const id of streams||[])if(!streamSubscribers(id))agentStreams.delete(id);for(const[token,owner]of gitWatchers)if(owner===client)gitWatchers.delete(token);},
+      close(client){sockets.delete(client);windowWorkspaces.delete(client);const streams=socketAgentStreams.get(client);socketAgentStreams.delete(client);for(const id of streams||[])if(!streamSubscribers(id))agentStreams.delete(id);for(const[token,owner]of gitWatchers)if(owner===client)gitWatchers.delete(token);},
       message(client, data) {
         const [family, envelope] = Object.entries(JSON.parse(String(data)))[0] as [string, { request_id: number; message: unknown;workspace_root?:string }];
         const reply = (message: unknown) => client.send(JSON.stringify({ [family + "Reply"]: { request_id: envelope.request_id, message } }));
@@ -141,9 +150,15 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
         if(family==="Git"){if(tag==="WatchStatus"){for(const[token,owner]of gitWatchers)if(owner===client)gitWatchers.delete(token);gitWatchers.set(String(payload.token),client);}else if(tag==="UnwatchStatus")gitWatchers.delete(String(payload.token));gitRequests.push({message:envelope.message,root:envelope.workspace_root});if(config.gitHandler)config.gitHandler(envelope.message,envelope.workspace_root,reply);else reply("Ack");return;}
         if (family === "Workspace") {
           workspaceRequests.push({ tag, body: payload });
-          if (tag === "Hello") reply({ HelloAck: { accepted: true, connected_host_id: "host" } });
+          if (tag === "Hello") reply({ HelloAck: { accepted: true, connected_host_id: "host", workspace_lifecycle: true } });
           if (tag === "RequestHostWorkspaceTree") reply({ HostWorkspaceTree: { hosts: [{ id: "host", label: "Host" }], workspaces, tabs: [] } });
-          if (tag === "ResolveInitialWorkspace") reply({ InitialWorkspaceResolved: { workspace: workspaces[0], reason: "host_active" } });
+          if (tag === "ResolveInitialWorkspace") {if(!workspaces.length)workspaces.push({id:crypto.randomUUID(),host_id:"host",title:"Home",root_dir:"/project"});reply({ InitialWorkspaceResolved: { workspace: workspaces[0], reason: "host_active" } });}
+          if(tag==="SetWindowWorkspaces"){
+            const previous=windowWorkspaces.get(client)||new Set<string>(),ids=new Set(payload.workspace_ids as string[]),prune=payload.prune_empty as string|undefined;
+            windowWorkspaces.set(client,ids);
+            if(prune&&previous.has(prune)&&![...windowWorkspaces.values()].some(opened=>opened.has(prune))){const index=workspaces.findIndex(workspace=>workspace.id===prune);if(index>=0)workspaces.splice(index,1);}
+            reply({HostWorkspaceTree:{hosts:[{id:"host",label:"Host"}],workspaces,tabs:[]}});
+          }
           if(tag==="CreateWorkspace"){
             const id=String(payload.workspace_id||crypto.randomUUID());
             let workspace=workspaces.find(entry=>entry.id===id);
@@ -255,6 +270,6 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       },
     },
   });
-  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,prompts,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
+  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,prompts,statuses,statusRequests,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
     mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);} };
 }

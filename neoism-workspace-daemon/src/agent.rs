@@ -315,6 +315,8 @@ pub(crate) struct AgentInner {
     /// `start_event_stream`, dropped on `stop_event_stream` /
     /// session-shutdown.
     stream_handles: Mutex<HashMap<String, JoinHandle<()>>>,
+    /// Orders status hydration against live evidence and overlapping polls.
+    status_evidence: events::SessionStatusEvidence,
     /// Per-session in-flight HTTP request handles (prompts, etc.).
     /// `CancelInflight` / `Cancel` aborts the matching entry so the
     /// request stops attempting retries.
@@ -373,6 +375,7 @@ impl AgentSession {
                     .ok()
                     .filter(|token| !token.trim().is_empty()),
                 stream_handles: Mutex::new(HashMap::new()),
+                status_evidence: events::SessionStatusEvidence::default(),
                 inflight: Mutex::new(HashMap::new()),
             }),
         }
@@ -540,3 +543,6 @@ mod readiness_tests {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod status_hydration_tests;

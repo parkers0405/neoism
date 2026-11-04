@@ -35,6 +35,8 @@ function panelFor(model: WorkspaceModel, workspace: string, directory: string, c
   if (existing) return existing;
   const { id } = coreCall<{ id: number }>("agentsidepanel.new", { directory, theme: config.themeName, scale: config.scale, fontFamily: config.fontFamily, fontWeight: config.fontWeight });
   const unsubscribe = model.subscribeAgentEvents((message) => {
+    // Timeline-local identity handoffs are not daemon protocol events.
+    if ((message as {LocalSessionAdopted?:unknown})?.LocalSessionAdopted) return;
     try { if(coreCall<{needsPaint?:boolean}>("agentsidepanel.event", { id, message }).needsPaint===false)return; } catch (error) { report(error); return; }
     for (const listener of panel.dirty) listener();
   });
@@ -105,6 +107,7 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
   const unsubscribe = panel
     ? (panel.dirty.add(schedule), () => { panel.dirty.delete(schedule); })
     : model.subscribeAgentEvents((message) => {
+      if ((message as {LocalSessionAdopted?:unknown})?.LocalSessionAdopted) return;
       try { if(coreCall<{needsPaint?:boolean}>("agentsidepanel.event", { id, message }).needsPaint===false)return; } catch (error) { props.report(error); return; }
       schedule();
     });

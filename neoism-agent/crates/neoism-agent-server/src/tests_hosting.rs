@@ -87,6 +87,17 @@ async fn system_workflow_machine_catalog_without_adoption_and_guest_isolation() 
     assert!(listed_text.contains(local.id.as_str()));
     assert!(listed_text.contains(foreign.id.as_str()));
     for path in [
+        "/v2/config/defaults",
+        "/v2/skills",
+        "/v2/plugins/dev.neoism.mcp/catalog",
+    ] {
+        let path = format!("{path}?directory={}", std::env::temp_dir().to_string_lossy());
+        let response = app.clone().oneshot(signed(&system, Method::GET, &path, None)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let denied = app.clone().oneshot(signed(&guest, Method::GET, &path, None)).await.unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    for path in [
         "/v2/providers",
         "/v2/providers/configured",
         "/v2/agents",
@@ -121,6 +132,8 @@ async fn system_workflow_machine_catalog_without_adoption_and_guest_isolation() 
         for path in [
             format!("/v2/sessions/{}", session.id),
             format!("/v2/sessions/{}/messages", session.id),
+            format!("/v2/plugins/dev.neoism.goals/{}", session.id),
+            format!("/v2/plugins/dev.neoism.subagents/sessions/{}/tasks", session.id),
         ] {
             assert_eq!(
                 app.clone()
@@ -173,7 +186,7 @@ async fn system_workflow_machine_catalog_without_adoption_and_guest_isolation() 
         (Method::POST, "/v2/hosting/associate"),
         (Method::GET, "/v2/providers/openai/auth"),
         (Method::POST, "/v2/providers/openai/oauth/authorize"),
-        (Method::GET, "/v2/plugins/dev.neoism.mcp/catalog"),
+        (Method::POST, "/v2/plugins/dev.neoism.mcp/catalog"),
         (
             Method::GET,
             "/v2/plugins/dev.neoism.mcp/test/auth/callback?state=spoof",

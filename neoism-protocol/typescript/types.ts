@@ -1837,6 +1837,7 @@ export type WorkspaceClientMessage =
   | { SendWorkspaceToDockerSandbox: { workspace_id: string } }
   | { SendWorkspaceToCloud: { workspace_id: string } }
   | { SubscribeWorkspace: { workspace_id: string } }
+  | { SetWindowWorkspaces: { workspace_ids: string[]; prune_empty?: string | null } }
   | { UnsubscribeWorkspace: { workspace_id: string } }
   | {
       ControlWorkspace: {
@@ -2068,6 +2069,7 @@ export type WorkspaceServerMessage =
         reason?: string | null;
         peer_identity?: string | null;
         connected_host_id?: string | null;
+        workspace_lifecycle?: boolean;
       };
     }
   | { Pong: { nonce: string } }

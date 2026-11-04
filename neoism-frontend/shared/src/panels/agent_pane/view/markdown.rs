@@ -3386,21 +3386,20 @@ fn draw_markdown_inline_line<P: AgentMarkdownPane>(
         // actually paint (per-segment advances below) and the copied string
         // carries no `**`/`` ` ``/`[]()` markers. `measure_markdown_inline_width`
         // sums the same per-segment widths the draw loop advances `x` by.
-        // Unlike the code-row helper, this existing algorithm accumulates from
-        // screen x. Retain its exact f32 rounding; an x change invalidates the
-        // inline entry instead of approximating it with a translated prefix sum.
+        // Keep stops local, as for code rows: fractional sideways scrolling
+        // translates the cached geometry instead of rebuilding every grapheme.
         let geometry = super::draw::cached_inline_selection_geometry(
-            sugarloaf, line, opts, x,
+            sugarloaf, line, opts,
             |sugarloaf| crate::panels::agent_pane::selection_model::SelectionGeometry {
                 text: rendered_inline_text(line).into(),
                 width: measure_markdown_inline_width(sugarloaf, line, opts),
-                stops: markdown_inline_caret_stops(sugarloaf, line, opts, theme, x).into(),
+                stops: markdown_inline_caret_stops(sugarloaf, line, opts, theme, 0.0).into(),
             },
         );
         let line_index = pane.register_selectable_geometry(
             &geometry,
             [x, y - 3.0, geometry.width.max(12.0), opts.font_size + 8.0],
-            0.0,
+            x,
         );
         pane.set_selectable_line_separator(line_index, separator);
         if let Some((sel_left, sel_right)) = pane.selectable_line_highlight(line_index) {

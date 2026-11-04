@@ -121,23 +121,62 @@ fn question_preview_is_plain_safe_compact_and_bounded_before_parsing() {
 }
 
 #[test]
-fn question_preview_measurement_limits_question_to_one_and_answer_to_three_lines() {
+fn question_preview_measurement_wraps_and_truncates_the_user_message() {
     use super::render::{question_preview_lines, question_user_preview};
     let measure = |text: &str| text.chars().count() as f32;
-    let text = "a compact answer with words that must wrap and eventually truncate";
+    let text = "a user message with words that must wrap and eventually truncate";
     let user = question_preview_lines(text, 12.0, 1, measure);
     assert_eq!(user.len(), 1);
     assert!(user[0].ends_with('…'));
-    let assistant = question_preview_lines(text, 12.0, 3, measure);
-    assert_eq!(assistant.len(), 3);
-    assert!(assistant.last().unwrap().ends_with('…'));
-    assert!(assistant.iter().all(|line| measure(line) <= 12.0));
+    let wrapped = question_preview_lines(text, 12.0, 4, measure);
+    assert_eq!(wrapped.len(), 4);
+    assert!(wrapped.last().unwrap().ends_with('…'));
+    assert!(wrapped.iter().all(|line| measure(line) <= 12.0));
     assert!(question_preview_lines(text, 12.0, 0, measure).is_empty());
     let unicode = question_preview_lines("界界界界界界界界界界", 4.0, 2, measure);
     assert_eq!(unicode, vec!["界界界界", "界界界…"]);
     assert_eq!(question_user_preview("", true), "Image attachment");
     assert_eq!(question_user_preview(" ", false), "User question");
     assert_eq!(question_user_preview("![diagram](file.png)", true), "diagram");
+}
+
+#[test]
+fn question_hover_is_a_fitted_blue_user_bubble_without_answer_text() {
+    use super::render::{build_question_preview, timeline_scroll_rail_geometry, render_timeline_scrollbar_with};
+    use crate::panels::agent_pane::question_rail::TimelineQuestionTarget;
+    use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+    let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+    let target = TimelineQuestionTarget { source_index: 0, message_id: "q".into(), top: 0.0, assistant_source_index: Some(1) };
+    let messages = vec![NeoismAgentMessage::user("Tell me a joke"), NeoismAgentMessage::assistant("ANSWER MUST NOT APPEAR")];
+    for s in [0.75, 1.0, 2.0] {
+        for width in [96.0, 320.0] {
+            painter.begin_frame();
+            let pane_rect = [0.0, 0.0, width * s, 100.0 * s];
+            let mut rail = timeline_scroll_rail_geometry([width * s, 0.0, 20.0 * s, 100.0 * s], s, 2).unwrap();
+            let preview = build_question_preview(&mut painter, &target, &messages, pane_rect, &rail, 0, s).unwrap();
+            assert_eq!(preview.user.join(" "), "Tell me a joke");
+            assert!(preview.rect[2] < pane_rect[2]);
+            let bounds = preview.rect;
+            rail.preview = Some(preview);
+            render_timeline_scrollbar_with(&mut painter, &mut NeoismAgentPane::default(), &IdeTheme::default(), s, Some(&rail));
+            let commands = painter.commands();
+            let blue = [0.0, 122.0 / 255.0, 1.0, 1.0];
+            assert!(commands.iter().any(|command| matches!(command, PaintCommand::Rect {color,radii,layer,..} if *color==blue && radii[0]>0.0 && *layer>=2)));
+            assert!(commands.iter().any(|command| matches!(command, PaintCommand::Polygon {color,layer,..} if *color==blue && *layer==3)));
+            for command in commands {
+                match command {
+                    PaintCommand::Text {text,color,layer,..} => {
+                        assert!(!text.contains("ANSWER"));assert_eq!(color,[255;4]);assert_eq!(layer,3);
+                    }
+                    PaintCommand::Polygon {points,..} => for (x,y) in points {
+                        assert!(x>=bounds[0] && x<=bounds[0]+bounds[2]);
+                        assert!(y>=bounds[1] && y<=bounds[1]+bounds[3]);
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -202,7 +241,7 @@ fn floating_paint_preserves_scroll_metrics_and_following_activity_reservation() 
             assert_eq!(geometry.status_rect, original_status);
             assert_eq!(body[..3], metrics[..3]);
             if following && status_h > 0.0 {
-                assert_eq!(body, geometry.body_clip);
+                assert!(body[3] >= geometry.body_clip[3] + 5.0);
                 assert!(body[1] + body[3] < geometry.status_rect[1]);
             } else {
                 assert_eq!(body[3], paint[3]);
@@ -1583,8 +1622,8 @@ diff --git a/src/lib.rs b/src/lib.rs
 "
     .to_string();
 
-    // Collapsed patch parents render only the summary; prepare file diffs on expand.
-    assert!(prepared_message_tool_diff_sections(&patch, false).is_none());
+    // File rows are prepared immediately, even without parent disclosure.
+    assert!(prepared_message_tool_diff_sections(&patch, false).is_some());
     let mut pending = patch.clone();
     pending.status = "running".to_string();
     assert!(prepared_message_tool_diff_sections(&pending, false).is_none());

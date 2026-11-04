@@ -713,6 +713,9 @@ impl NeoismAgentPane {
             } else {
                 self.active_subagent_ids.remove(&session_id);
                 self.active_subagent_started_at.remove(&session_id);
+                // Recovery can be the only completion seen while this child
+                // is parked. Settle its saved verb before a later tab restore.
+                self.cache_note_session_idle(&session_id);
                 if viewed_session_id.as_deref() == Some(session_id.as_str()) {
                     let had_activity = self.is_streaming();
                     self.note_streaming(NeoismAgentStreamingState::Idle, None);

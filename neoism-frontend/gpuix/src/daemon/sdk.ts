@@ -75,6 +75,10 @@ export class AgentSdk {
     const client=outsideWorkspace?await this.catalogReader(workspaceId):this.forWorkspace(workspaceId);
     return client.sessions.create(request);
   }
+  /** Directory tools must follow the conversation after /cd, not its original
+   * workspace root. Only daemon-confirmed desktop access may cross that root;
+   * paired and denied callers keep the workspace-scoped client. */
+  async forDirectory(workspaceId:string):Promise<NeoismClient>{return this.catalogReader(workspaceId);}
   /** Existing conversations use the same daemon-granted access as the catalog.
    * Local legacy/cross-workspace chats keep their stored scope on the server;
    * paired callers still use their authorized workspace. Never retry a mutation. */
@@ -87,7 +91,8 @@ export class AgentSdk {
       const path=url.pathname.slice(new URL(endpoint.baseUrl).pathname.length);
       const sessionPath=`v2/sessions/${encodeURIComponent(sessionId)}`;
       const existingSession=path===sessionPath||path.startsWith(sessionPath+"/");
-      const interaction=/^v2\/interactions\/(permissions|questions)\/[^/]+\/(reply|reject)$/.test(path);
+      const interaction=/^v2\/interactions\/(permissions|questions)\/[^/]+\/(reply|reject)$/.test(path)
+        ||(/^v2\/interactions\/(permissions|questions)$/.test(path)&&url.searchParams.get("sessionId")===sessionId);
       const target=existingSession||interaction?await this.catalogEndpoint(workspaceId):endpoint;
       url.pathname=new URL(target.baseUrl).pathname+path;
       return this.fetcher(url.toString(),{...init,signal:AbortSignal.any([signal,...(init?.signal?[init.signal]:[])]),...(target.socket?{unix:target.socket}:{})});
@@ -126,7 +131,7 @@ export class AgentSdk {
     return client;
   }
   async catalogProjects(workspaceId:string){return(await this.catalogReader(workspaceId)).operations.request("v2.sessions.projects",{});}
-  async catalogSessions(workspaceId:string,options:Parameters<NeoismClient["sessions"]["list"]>[0]){return(await this.catalogReader(workspaceId)).sessions.list(options);}
+  async catalogSessions(workspaceId:string,options:Parameters<NeoismClient["sessions"]["list"]>[0]&{exact_directory?:boolean;exclude_pinned?:boolean}){return(await this.catalogReader(workspaceId)).sessions.list(options);}
   async *catalogEvents(workspaceId:string,options:{directory?:string;signal?:AbortSignal;onReset?:()=>void}={}):ReturnType<NeoismClient["events"]["subscribe"]>{
     const endpoint=await this.catalogEndpoint(workspaceId);
     const signal=AbortSignal.any([this.abort.signal,...(options.signal?[options.signal]:[])]);

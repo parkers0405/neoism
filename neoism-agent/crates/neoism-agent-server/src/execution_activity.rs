@@ -554,6 +554,38 @@ async fn register_subtask_inner(
     Ok(true)
 }
 
+/// Explicit cancellation, with the family's admission guard held by the caller.
+/// A lost live run must not strand durable work; only this session's captured
+/// segments are closed, never its parent's or siblings' provider intervals.
+pub(crate) async fn cancel_session_activity_locked(
+    state: &AppState,
+    session_id: &str,
+) -> anyhow::Result<bool> {
+    let Some(session) = state.inner.store.get_session(session_id).await? else {
+        return Ok(false);
+    };
+    let root = root_session_id(state, &session).await;
+    // admission_guard already holds this root's keyed execution mutex.
+    let Some(snapshot) = state.inner.store.get_execution_activity(&root).await? else {
+        return Ok(false);
+    };
+    let mut changed = state.inner.store
+        .finish_execution_subtask(&snapshot.execution_id, session_id, "failed")
+        .await?;
+    if let Some(activity) = snapshot.session_activities.get(session_id) {
+        let ended_at = crate::now_millis();
+        for segment in activity.active_segments.keys() {
+            changed |= state.inner.store.finish_execution_segment(
+                &root, &snapshot.execution_id, segment, ended_at,
+            ).await?;
+        }
+    }
+    if changed {
+        publish_snapshot(state, &root).await;
+    }
+    Ok(changed)
+}
+
 pub(crate) async fn finish_subtask_for_child(
     state: &AppState,
     child_session_id: &str,

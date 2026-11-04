@@ -38,9 +38,28 @@ fn large_table_viewport_seeks_directly_to_visible_rows() {
 #[derive(Default)]
 struct TestPane {
     raw_mermaid: BTreeSet<u64>,
+    horizontal_scroll: f32,
+    selection: Vec<crate::panels::agent_pane::selection_model::SelectableLine>,
 }
 
 impl AgentMarkdownPane for TestPane {
+    fn markdown_horizontal_scroll_offset(&mut self, _key: &str, max_scroll: f32) -> f32 {
+        self.horizontal_scroll.clamp(0.0, max_scroll)
+    }
+
+    fn register_selectable_geometry(
+        &mut self,
+        geometry: &crate::panels::agent_pane::selection_model::SelectionGeometry,
+        rect: [f32; 4],
+        origin_x: f32,
+    ) -> usize {
+        let index = self.selection.len();
+        self.selection.push(crate::panels::agent_pane::selection_model::SelectableLine::from_geometry(
+            geometry, rect, rect[1], origin_x,
+        ));
+        index
+    }
+
     fn cached_markdown_blocks_for(
         &self,
         _text: &str,
@@ -75,6 +94,58 @@ impl AgentMarkdownPane for TestPane {
 
     fn mermaid_raw_mode(&self, key: u64) -> bool {
         self.raw_mermaid.contains(&key)
+    }
+}
+
+#[test]
+fn sideways_table_scroll_reuses_selection_geometry_and_translates_hit_testing() {
+    use crate::primitives::paint_record::RecordingPainter;
+    use std::sync::Arc;
+
+    let mut painter = RecordingPainter::new("monospace", 407, vec![]);
+    let theme = IdeTheme::by_name("catppuccin-mocha");
+    let rows = (0..12).map(|row| vec![
+        format!("row {row} **bold** and `code`"),
+        format!("[file {row}](src/main.rs) and e\u{301}\nsecond line"),
+        format!("last {row} *italic*"),
+    ]).collect();
+    let AssistantMarkdownBlock::Table { rows, column_widths, row_offsets } =
+        laid_out_table_block(rows, vec![320.0; 3]) else { unreachable!() };
+    let mut pane = TestPane::default();
+    let mut paint = |pane: &mut TestPane| {
+        painter.begin_frame();
+        pane.selection.clear();
+        render_markdown_table(&mut painter, pane, 20.0, 20.0, 400.0, 700.0,
+            &rows, &column_widths, &row_offsets, "table", &theme, 1.0, false,
+            None, [20.0, 20.0, 400.0, 700.0], &[]);
+    };
+    // Resolve style/fallback fonts before checking stable geometry identities.
+    paint(&mut pane);
+    paint(&mut pane);
+    let baseline = pane.selection.clone();
+    assert!(baseline.len() >= 36);
+    for step in 1..=60 {
+        pane.horizontal_scroll = step as f32 * 3.25;
+        paint(&mut pane);
+        assert_eq!(pane.selection.len(), baseline.len());
+        for (before, after) in baseline.iter().zip(&pane.selection) {
+            assert!(Arc::ptr_eq(&before.caret_stops, &after.caret_stops),
+                "sideways scroll must not rebuild per-grapheme geometry");
+            assert!(Arc::ptr_eq(&before.text, &after.text));
+            for stop in before.caret_stops.iter() {
+                let old_x = before.caret_for_offset(stop.byte_offset).x;
+                let new_x = after.caret_for_offset(stop.byte_offset).x;
+                assert!((new_x - (old_x - pane.horizontal_scroll)).abs() < 0.001);
+                assert_eq!(after.caret_at_x(new_x).byte_offset, stop.byte_offset);
+                assert!(after.text.is_char_boundary(stop.byte_offset));
+            }
+            // Glyph hit-testing addresses intervals, not the end-of-line caret.
+            for pair in after.caret_stops.windows(2) {
+                let middle_x = (pair[0].x + pair[1].x) * 0.5 + after.caret_origin_x;
+                assert_eq!(after.text_offset_at_x(middle_x), pair[0].byte_offset);
+            }
+            assert_eq!(after.slice_between(0, after.text.len()), before.text.as_ref());
+        }
     }
 }
 

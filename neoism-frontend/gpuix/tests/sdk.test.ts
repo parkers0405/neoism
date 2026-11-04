@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSdk, agentSdkEndpoint, sdkModel, sdkPrompt } from "../src/daemon/sdk";
+import {mcp} from "@neoism/sdk";
 const cleanups: Array<() => void> = [];
 afterEach(() => cleanups.splice(0).reverse().forEach((close) => close()));
 
@@ -108,14 +109,14 @@ test("reopened conversations send once through their catalog capability while cr
  })as typeof fetch;
  const sdk=new AgentSdk({endpoint:"ws://localhost:7878/session",authToken:"master"},fetcher);cleanups.push(()=>sdk.dispose());
  const session=sdk.forSession("current","old-session");
- await session.sessions.prompt("old-session",sdkPrompt("Continue",[],{model:"openai/base"},"steer"));
+  await session.sessions.prompt("old-session",sdkPrompt("Continue",[],{model:"openai/base"},"steer","Local participant"));
  await session.sessions.update("old-session",{agent:"plan"});
  await session.sessions.abort("old-session");
   await session.interactions.permissions.reply("permission-one","once");
   await session.interactions.questions.reply("question-one",[["yes"]]);
  await session.sessions.create({directory:"/current"});
  await session.transport.request({path:"v2/providers/configured"});
- expect(requests.filter(r=>r.path.endsWith("/prompt"))).toEqual([expect.objectContaining({path:"/agent/system/v2/sessions/old-session/prompt",method:"POST",body:expect.objectContaining({parts:[{type:"text",text:"Continue"}]})})]);
+  expect(requests.filter(r=>r.path.endsWith("/prompt"))).toEqual([expect.objectContaining({path:"/agent/system/v2/sessions/old-session/prompt",method:"POST",body:expect.objectContaining({author:"Local participant",parts:[{type:"text",text:"Continue"}]})})]);
  expect(requests.some(r=>r.path==="/agent/system/v2/sessions/old-session"&&r.method==="PATCH")).toBe(true);
  expect(requests.some(r=>r.path==="/agent/system/v2/sessions/old-session/abort")).toBe(true);
  expect(requests.some(r=>r.path==="/agent/system/v2/interactions/permissions/permission-one/reply")).toBe(true);
@@ -155,5 +156,49 @@ test("terminal-followed directory creation uses desktop capability once while pa
   expect(!!error).toBe(mode!=="desktop");
   expect(requests.map(request=>request.path)).toEqual([...(mode==="paired"?[]:["/agent/system/info"]),mode==="desktop"?"/agent/system/v2/sessions":"/agent/workspaces/original/v2/sessions"]);
   expect(requests.at(-1)?.directory).toBe("/sibling");
+ }
+});
+
+test("directory MCP access requires desktop capability and never elevates paired or denied callers",async()=>{
+ for(const mode of ["desktop","paired","denied"]){
+  const requests:Array<{path:string;directory:string|null;authorization:string|null}>=[];
+  const fetcher=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+   const url=new URL(String(input)),path=url.pathname;
+   requests.push({path,directory:url.searchParams.get("directory"),authorization:new Headers(init?.headers).get("authorization")});
+   if(path.endsWith("/info"))return mode==="desktop"?Response.json({systemId:"fixture",capabilityVersion:1}):new Response(null,{status:403});
+   if(path.startsWith("/agent/system/")){
+    if(path.endsWith("/capabilities"))return Response.json([{id:"neoism.mcp",enabled:true,version:"1.0.0",source:"plugin",disableable:true}]);
+    if(path.endsWith("/catalog"))return Response.json({});
+    return Response.json(true);
+   }
+   return Response.json({code:"forbidden",message:"The caller is not authorized for this directory",retryable:false,details:{}},{status:403});
+  })as typeof fetch;
+  const sdk=new AgentSdk({endpoint:"ws://localhost:7878/session",authToken:"operator",...(mode==="paired"?{pairingToken:"guest"}:{})},fetcher);cleanups.push(()=>sdk.dispose());
+  const client=await sdk.forDirectory("original"),plugin=client.plugins.use(mcp,{directory:"/sibling"});
+  if(mode==="desktop"){
+   const connected=await plugin;await connected.catalog("/sibling");await connected.connect("local","/sibling");
+   expect(requests.map(request=>request.path)).toEqual(["/agent/system/info","/agent/system/v2/capabilities","/agent/system/v2/plugins/dev.neoism.mcp/catalog","/agent/system/v2/plugins/dev.neoism.mcp/local/connect"]);
+  }else{
+   await expect(plugin).rejects.toThrow("not authorized");
+   expect(requests.map(request=>request.path)).toEqual([...(mode==="paired"?[]:["/agent/system/info"]),"/agent/workspaces/original/v2/capabilities"]);
+  }
+  expect(requests.filter(request=>!request.path.endsWith("/info")).every(request=>request.directory==="/sibling"&&request.authorization===`Bearer ${mode==="paired"?"guest":"operator"}`)).toBe(true);
+ }
+});
+
+test("session interaction reads share reply authorization without widening unfiltered or other-session reads",async()=>{
+ for(const mode of ["desktop","paired","denied"]){
+  const requests:string[]=[];
+  const fetcher=(async(input:Parameters<typeof fetch>[0])=>{
+   const url=new URL(String(input));requests.push(url.pathname+url.search);
+   if(url.pathname.endsWith("/info"))return mode==="desktop"?Response.json({systemId:"fixture",capabilityVersion:1}):new Response(null,{status:403});
+   return Response.json([]);
+  })as typeof fetch;
+  const sdk=new AgentSdk({endpoint:"ws://localhost:7878/session",authToken:"operator",...(mode==="paired"?{pairingToken:"guest"}:{})},fetcher);cleanups.push(()=>sdk.dispose());
+  const client=sdk.forSession("original","moved");
+  await client.interactions.permissions.list("moved");await client.interactions.questions.list("moved");
+  await client.interactions.permissions.list();await client.interactions.questions.list("other");
+  const prefix=mode==="desktop"?"/agent/system":"/agent/workspaces/original";
+  expect(requests).toEqual([...(mode==="paired"?[]:["/agent/system/info"]),`${prefix}/v2/interactions/permissions?sessionId=moved`,`${prefix}/v2/interactions/questions?sessionId=moved`,"/agent/workspaces/original/v2/interactions/permissions","/agent/workspaces/original/v2/interactions/questions?sessionId=other"]);
  }
 });

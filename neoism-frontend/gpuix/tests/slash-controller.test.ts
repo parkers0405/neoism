@@ -52,6 +52,32 @@ test("permissions/questions remain session scoped and skip-permission toggle res
  await f.controller.execute("/answer first; second");expect(f.server.requests.find(r=>r.path==="/interactions/questions/q-one/reply")?.body).toEqual({answers:[["first"],["second"]]});expect(f.model.state.questions.map(q=>q.sessionId)).toEqual(["two"]);
  const previous=f.server.sessions.get("one")!.permission;await f.controller.execute("/yolo");expect(f.server.sessions.get("one")?.permission?.at(-1)).toEqual({permission:"*",pattern:"*",action:"allow"});await f.controller.execute("/yolo");expect(f.server.sessions.get("one")?.permission).toEqual(previous);
 });
+test("undo and redo reconcile the captured conversation and recover failed mutations",async()=>{
+ const f=await fixture(),refreshes:string[]=[];
+ f.model.refreshSessionHistory=id=>{refreshes.push(id);};
+ f.server.defer("/sessions/one/undo");
+ const undo=f.controller.execute("/undo");
+ await until(()=>f.server.requests.some(request=>request.path==="/sessions/one/undo"));
+ expect(refreshes).toEqual([]);
+ f.model.update({activeSurfaceId:"agent:two"});
+ f.server.release("/sessions/one/undo");await undo;
+ expect(refreshes).toEqual(["one"]);expect(f.notices).toEqual([]);
+ await f.controller.execute("/redo");expect(refreshes).toEqual(["one","two"]);
+ expect(f.notices.at(-1)).toEqual({title:"Redo",value:"Session history updated.",sessionId:"two"});
+ f.server.failHistory();await expect(f.controller.execute("/undo")).rejects.toThrow("History mutation rejected");
+ expect(refreshes).toEqual(["one","two","two"]);
+});
+test("repeated undo commands are projected immediately rather than deduplicated behind a slow response",async()=>{
+ const f=await fixture();
+ f.model.update({history:{one:[{id:"a",kind:"User",role:"User",text:"first"},{id:"b",kind:"User",role:"User",text:"second"}]}});
+ f.server.defer("/sessions/one/undo");
+ const first=f.controller.execute("/undo");expect(f.model.state.history.one.map(row=>row.id)).toEqual(["a"]);
+ const second=f.controller.execute("/undo");expect(f.model.state.history.one).toEqual([]);
+ await until(()=>f.server.requests.some(request=>request.path==="/sessions/one/undo"));
+ expect(f.server.requests.filter(request=>request.path==="/sessions/one/undo")).toHaveLength(1);
+ f.server.release("/sessions/one/undo");await Promise.all([first,second]);
+ expect(f.server.requests.filter(request=>request.path==="/sessions/one/undo")).toHaveLength(2);
+});
 test("native picker/UI commands retain real hooks, skill insertion and inherited new-session selection",async()=>{
  const f=await fixture();await f.controller.execute("/think max");expect(f.model.selection("one").thinking).toBe("xhigh");await f.controller.execute("/skill review");expect(f.inserts).toEqual(["$review "]);
  for(const command of ["/hints","/sidebar","/exit","/disco"])await f.controller.execute(command);expect(f.toggles).toEqual({hints:1,sidebar:1,closed:1});expect(f.effects).toEqual(["disco"]);
@@ -73,6 +99,78 @@ test("MCP and subagent pickers execute plugin operations rather than send substi
  expect(f.pickers.at(-1)?.options.find(row=>row.value==="local")?.footer).toBe("connected");
  await f.controller.execute("/sub-agent");expect(f.pickers.at(-1)?.kind).toBe("subagents");expect(f.pickers.at(-1)?.options[0].value).toBe("two");await f.pickers.at(-1)?.onSelect?.("two");expect(f.model.state.activeSurfaceId).toBe("agent:one");expect(f.model.state.surfaces.find(surface=>surface.id==="agent:one")).toMatchObject({sessionId:"two",agentRootSessionId:"one"});expect(f.model.state.ui.agentParentSessions).toEqual({two:"one"});expect(f.model.selection("two").connection_id).toBe("account-b");
  expect(f.server.requests.some(r=>r.path.endsWith("/prompt"))).toBe(false);
+});
+test("MCP follows a directory switch outside the original workspace using verified desktop access",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();
+ await f.controller.execute("/cd /project/b");
+ expect(f.model.state.threads.find(thread=>thread.session_id==="one")?.directory).toBe("/project/b");
+ await f.controller.execute("/mcp");
+ expect(f.pickers.at(-1)?.kind).toBe("mcp");expect(f.pickers.at(-1)?.error).toBeUndefined();
+ await f.pickers.at(-1)?.onSelect?.("local");await f.pickers.at(-1)?.onSelect?.("connect");
+ expect(f.pickers.at(-1)?.options.find(row=>row.value==="local")?.footer).toBe("connected");
+ const requests=f.server.requests.filter(request=>request.path==="/capabilities"||request.path.startsWith("/plugins/dev.neoism.mcp/"));
+ expect(requests.length).toBeGreaterThan(2);
+ expect(requests.every(request=>request.workspace==="system"&&request.directory==="/project/b")).toBe(true);
+ expect(requests.filter(request=>request.method==="POST")).toHaveLength(1);
+});
+test("directory commands, skills, goals, interactions and new chats follow /cd outside the workspace",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();await f.controller.execute("/cd /project/b");
+ await f.controller.refresh();expect(f.controller.state.error).toBeUndefined();expect(f.controller.state.options.some(row=>row.value==="/review")).toBe(true);
+ await f.controller.execute("/skills");expect(f.pickers.at(-1)?.kind).toBe("skills");
+ await f.controller.execute("/skill info review");await f.controller.execute("/skill review");expect(f.inserts).toEqual(["$review "]);
+ await f.controller.execute("/cd");expect(f.pickers.at(-1)?.options[0]?.description).toBe("/project/b");
+ for(const command of ["/goal finish here","/goal","/goal pause","/goal resume","/goal clear","/permissions","/questions","/permit once p-one","/answer yes; no","/review src","/compact","/undo","/redo","/queue","/abort"])await f.controller.execute(command);
+ const projectReads=f.server.requests.filter(request=>["/commands","/capabilities","/skills"].includes(request.path));
+ expect(projectReads.length).toBeGreaterThan(3);expect(projectReads.every(request=>request.workspace==="system"&&request.directory==="/project/b")).toBe(true);
+ const interactions=f.server.requests.filter(request=>request.path.startsWith("/interactions/"));expect(interactions.length).toBeGreaterThan(2);expect(interactions.every(request=>request.workspace==="system")).toBe(true);
+ const goals=f.server.requests.filter(request=>request.path==="/plugins/dev.neoism.goals/one");expect(goals).toHaveLength(5);expect(goals.every(request=>request.workspace==="system")).toBe(true);
+ await f.controller.execute("/new");expect(f.model.state.threads.find(thread=>thread.session_id==="created-1")?.directory).toBe("/project/b");
+ expect(f.server.requests.filter(request=>request.path==="/sessions"&&request.method==="POST")).toEqual([expect.objectContaining({workspace:"system",directory:"/project/b"})]);
+ await f.controller.execute("/review newly-created");expect(f.server.requests.at(-1)).toMatchObject({workspace:"system",path:"/sessions/created-1/commands"});
+});
+test("subagent and explicit session switches resolve the target conversation scope",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();await f.controller.execute("/cd /project/b");
+ f.server.sessions.set("two",{...f.server.sessions.get("two")!,directory:"/project/b"});
+ await f.controller.execute("/sub-agent");await f.pickers.at(-1)?.onSelect?.("two");
+ expect(f.model.state.surfaces.find(surface=>surface.id===f.model.state.activeSurfaceId)?.sessionId).toBe("two");
+ expect(f.server.requests.find(request=>request.path==="/plugins/dev.neoism.subagents/sessions/one/tasks")?.workspace).toBe("system");
+ expect(f.server.requests.find(request=>request.path==="/sessions/two")?.workspace).toBe("system");
+ await f.controller.execute("/session one");expect(f.server.requests.at(-1)).toMatchObject({workspace:"system",path:"/sessions/one"});
+});
+test("a server command from a terminal-followed empty chat creates and uses the new session scope",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();
+ f.model.update({activeWorkspace:{...f.model.state.activeWorkspace!,root_dir:"/project/b"},surfaces:[],activeSurfaceId:undefined});
+ await f.controller.execute("/review from-home");
+ expect(f.server.requests.filter(request=>request.method==="POST")).toEqual([
+  expect.objectContaining({workspace:"system",path:"/sessions",directory:"/project/b"}),
+  expect.objectContaining({workspace:"system",path:"/sessions/created-1/commands"}),
+ ]);
+});
+test("connect and usage remain workspace scoped after /cd without forwarding the outside cwd",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();await f.controller.execute("/cd /project/b");
+ const foreign=structuredClone([...f.server.connections.get("b")!.values()]);
+ f.answers.push("Current workspace account","api-secret");
+ await f.controller.execute("/connect");await f.pickers.at(-1)?.onSelect?.("openai");
+ expect(f.pickers.at(-1)?.options.some(row=>row.value==="account-a")).toBe(true);
+ expect(f.pickers.at(-1)?.options.some(row=>row.value==="foreign")).toBe(false);
+ await f.pickers.at(-1)?.onSelect?.("__add_account__");await f.pickers.at(-1)?.onSelect?.("0");
+ await f.controller.execute("/usage");
+ const providers=f.server.requests.filter(request=>request.path.startsWith("/providers"));
+ expect(providers.length).toBeGreaterThan(3);
+ expect(providers.every(request=>request.workspace==="a"&&request.directory===null)).toBe(true);
+ expect(f.server.connections.get("a")?.get("added-1")?.label).toBe("Current workspace account");
+ expect([...f.server.connections.get("b")!.values()]).toEqual(foreign);
+});
+test("a second directory switch invalidates old MCP actions and late slash catalogs",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();await f.controller.execute("/cd /project/b");
+ await f.controller.execute("/mcp");await f.pickers.at(-1)?.onSelect?.("local");const old=f.pickers.at(-1)!;
+ f.server.defer("/commands");const refresh=f.controller.refresh();await until(()=>f.server.requests.some(request=>request.path==="/commands"));
+ await f.controller.execute("/cd /project/c");
+ await expect(old.onSelect!("connect")).rejects.toThrow("conversation changed");
+ f.server.release("/commands");await refresh;
+ expect(f.controller.state.loading).toBe(false);expect(f.controller.state.options.some(row=>row.value==="/review")).toBe(false);
+ expect(f.server.requests.some(request=>request.path.endsWith("/local/connect"))).toBe(false);
+ await f.controller.refresh();expect(f.controller.state.error).toBeUndefined();expect(f.controller.state.options.some(row=>row.value==="/review")).toBe(true);
 });
 test("attached drafts and a workspace switch during session creation cannot become commands in the wrong conversation",async()=>{
  const f=await fixture();f.setAttachments([{}]);await expect(f.controller.execute("/compact")).rejects.toThrow("Attachments");expect(f.server.requests).toHaveLength(0);f.setAttachments([]);
@@ -174,11 +272,11 @@ test("root sessions uses the sidebar catalog with separate directory groups",asy
  f.server.sessions.set("child",{...base,id:"child",parentId:"recent",time:{created:1,updated:200}});
  expect(f.server.requests).toHaveLength(0);await f.controller.execute("/session");
  const ready=f.pickers.at(-1)!;expect(ready.kind).toBe("sessions");
-  expect(ready.options.map(row=>row.title)).toEqual(["/elsewhere","Recent chat","/legacy","Pinned legacy chat"]);
+   expect(ready.options.map(row=>row.title)).toEqual(["Pinned","Pinned legacy chat","/elsewhere","Recent chat","/legacy"]);
   expect(ready.options[2]).toMatchObject({header:true,section:"directory"});
-  expect(ready.options[3].pinned).toBe(true);expect(ready.onLoadMore).toBeUndefined();
+   expect(ready.options[1].pinned).toBe(true);expect(ready.onLoadMore).toBeUndefined();
  const list=f.server.requests.find(request=>request.path==="/sessions")!;
- expect(list).toMatchObject({workspace:"system",directory:null,query:{roots:"true",limit:"50"}});
+  expect(list).toMatchObject({workspace:"system",directory:"/elsewhere",query:{roots:"true",limit:"5",exact_directory:"true",exclude_pinned:"true"}});
  expect(f.server.requests.some(request=>request.path.includes("events"))).toBe(false);
  await ready.onSelect!("recent");
  expect(f.server.requests.find(request=>request.path==="/sessions/recent")?.workspace).toBe("system");
@@ -188,48 +286,78 @@ test("root sessions uses the sidebar catalog with separate directory groups",asy
 test("project sessions excludes other directories and their pins even when the current chat runs elsewhere",async()=>{
  const f=await fixture();f.server.enableMasterCatalog();const base=f.server.sessions.get("one")!;
  f.server.sessions.set("outside",{...base,id:"outside",directory:"/elsewhere",pinned:true});
- f.server.sessions.set("nested",{...base,id:"nested",directory:"/project/a/nested"});
+  f.server.sessions.set("nested",{...base,id:"nested",directory:"/project/a/nested"});
+  f.server.sessions.set("local-pin",{...base,id:"local-pin",pinned:true});
  f.model.update({threads:f.model.state.threads.map(thread=>({...thread,directory:"/elsewhere"}))});
  await f.controller.execute("/sessions");
  const picker=f.pickers.at(-1)!;
- expect(picker.options.filter(row=>!row.header).map(row=>row.value)).toEqual(["one"]);
- expect(picker.options[0]).toMatchObject({title:"/project/a",header:true,section:"directory"});
+  expect(picker.options.filter(row=>!row.header).map(row=>row.value)).toEqual(["local-pin","one"]);
+  expect(picker.options[0]).toMatchObject({title:"Pinned",header:true});
+  expect(picker.options[2]).toMatchObject({title:"/project/a",header:true,section:"directory"});
+  expect(picker.options.find(row=>row.value==="one")?.current).toBe(true);
  expect(f.server.requests.find(request=>request.path==="/sessions")?.directory).toBe("/project/a");
 });
 
 function seedSessionPages(f:Awaited<ReturnType<typeof fixture>>){
  const base=f.server.sessions.get("one")!;f.server.sessions.clear();
- for(let n=0;n<105;n++)f.server.sessions.set(`chat-${n}`,{...base,id:`chat-${n}`,title:`Chat ${n}`,pinned:n===104,time:{created:1,updated:1000-n}});
+  for(let n=0;n<13;n++)f.server.sessions.set(`chat-${n}`,{...base,id:`chat-${n}`,title:`Chat ${n}`,pinned:n===12,time:{created:1,updated:1000-n}});
 }
+const sessionRows=(picker:SlashPickerRequest)=>picker.options.filter(row=>!row.header&&!row.keepOpen);
+const more=(picker:SlashPickerRequest)=>picker.onSelect!(picker.options.find(row=>row.keepOpen)!.value);
 test("sessions pagination is bounded, single-flight and lazy, retaining its token, current mark and pins",async()=>{
  const f=await fixture();seedSessionPages(f);await f.controller.execute("/sessions");
  const first=f.pickers.at(-1)!,count=()=>f.server.requests.filter(request=>request.path==="/sessions").length;
- expect(count()).toBe(1);expect(first.options.filter(row=>!row.header)).toHaveLength(51);
- expect(first.options[1]).toMatchObject({value:"chat-104",pinned:true});
- f.server.defer("/sessions");const pending=first.onLoadMore!();await until(()=>count()===2);
- await first.onLoadMore!();expect(count()).toBe(2);expect(f.pickers.at(-1)?.loading).toBe(true);
+  expect(count()).toBe(1);expect(sessionRows(first)).toHaveLength(6);
+  expect(first.options[1]).toMatchObject({value:"chat-12",pinned:true});
+  expect(first.onLoadMore).toBeUndefined();
+  f.server.defer("/sessions");const pending=more(first);await until(()=>count()===2);
+  await more(first);expect(count()).toBe(2);expect(f.pickers.at(-1)?.options.at(-1)?.title).toBe("Loading sessions...");
  f.server.release("/sessions");await pending;
- const second=f.pickers.at(-1)!;expect(second.token).toBe(first.token);expect(second.options.filter(row=>!row.header)).toHaveLength(101);
-  expect(f.server.requests.filter(request=>request.path==="/sessions").at(-1)?.query.cursor).toBe("50");
+  const second=f.pickers.at(-1)!;expect(second.token).toBe(first.token);expect(sessionRows(second)).toHaveLength(11);
+   expect(f.server.requests.filter(request=>request.path==="/sessions").at(-1)?.query.cursor).toBe("5");
   expect(f.server.requests.filter(request=>request.path==="/sessions").every(request=>request.directory==="/project/a")).toBe(true);
  await Bun.sleep(20);expect(count()).toBe(2);
- await second.onLoadMore!();const last=f.pickers.at(-1)!;
- expect(last.options.filter(row=>!row.header)).toHaveLength(105);expect(new Set(last.options.filter(row=>!row.header).map(row=>row.value)).size).toBe(105);
- expect(last.onLoadMore).toBeUndefined();expect(count()).toBe(3);
+  await more(second);const last=f.pickers.at(-1)!;
+  expect(sessionRows(last)).toHaveLength(13);expect(new Set(sessionRows(last).map(row=>row.value)).size).toBe(13);
+  expect(last.options.some(row=>row.keepOpen)).toBe(false);expect(count()).toBe(3);
 });
 test("a failed sessions continuation keeps rows and cursor for an explicit retry",async()=>{
  const f=await fixture();seedSessionPages(f);await f.controller.execute("/sessions");const first=f.pickers.at(-1)!;
- f.server.failSessionPage();await first.onLoadMore!();const failed=f.pickers.at(-1)!;
- expect(failed.error).toContain("Session page unavailable");expect(failed.options.filter(row=>!row.header)).toEqual(first.options.filter(row=>!row.header));
- await failed.onLoadMore!();expect(f.pickers.at(-1)?.error).toBeUndefined();
- expect(f.server.requests.filter(request=>request.path==="/sessions").map(request=>request.query.cursor??null)).toEqual([null,"50","50"]);
+  f.server.failSessionPage();await more(first);const failed=f.pickers.at(-1)!;
+  expect(failed.options.at(-1)?.description).toContain("Session page unavailable");expect(sessionRows(failed)).toEqual(sessionRows(first));
+  await more(failed);expect(f.pickers.at(-1)?.options.at(-1)?.title).toBe("Load more");
+  expect(f.server.requests.filter(request=>request.path==="/sessions").map(request=>request.query.cursor??null)).toEqual([null,"5","5"]);
 });
 test("cancelled or workspace-switched session pages never reopen the picker or fetch further pages",async()=>{
  for(const cancelled of [true,false]){
   const f=await fixture();seedSessionPages(f);await f.controller.execute("/sessions");const first=f.pickers.at(-1)!;
-  f.server.defer("/sessions");const pending=first.onLoadMore!();await until(()=>f.server.requests.filter(request=>request.path==="/sessions").length===2);
+   f.server.defer("/sessions");const pending=more(first);await until(()=>f.server.requests.filter(request=>request.path==="/sessions").length===2);
   if(cancelled)f.pickers.at(-1)!.onCancel!();else f.model.update({activeWorkspace:{id:"b",host_id:"host",title:"B",root_dir:"/project/b"}});
   const count=f.pickers.length;f.server.release("/sessions");await pending;expect(f.pickers).toHaveLength(count);
-  await first.onLoadMore!();expect(f.server.requests.filter(request=>request.path==="/sessions")).toHaveLength(2);
+   await more(first);expect(f.server.requests.filter(request=>request.path==="/sessions")).toHaveLength(2);
  }
+});
+
+test("root sessions pages each folder independently and keeps pins out of folder quotas",async()=>{
+ const f=await fixture();f.server.enableMasterCatalog();seedSessionPages(f);
+ const base=f.server.sessions.get("chat-0")!;
+ for(let n=0;n<7;n++)f.server.sessions.set(`other-${n}`,{...base,id:`other-${n}`,directory:"/other",pinned:n===0});
+ f.model.update({activeWorkspace:{...f.model.state.activeWorkspace!,root_dir:"/"}});
+ await f.controller.execute("/sessions");const first=f.pickers.at(-1)!;
+ expect(sessionRows(first).filter(row=>row.pinned)).toHaveLength(2);
+ for(const path of ["/project/a","/other"])expect(sessionRows(first).filter(row=>!row.pinned&&row.section===path)).toHaveLength(5);
+ const action=first.options.find(row=>row.keepOpen&&row.section==="/other")!;
+ await first.onSelect!(action.value);const second=f.pickers.at(-1)!;
+ expect(second.token).toBe(first.token);
+ expect(sessionRows(second).filter(row=>!row.pinned&&row.section==="/other")).toHaveLength(6);
+ expect(sessionRows(second).filter(row=>!row.pinned&&row.section==="/project/a")).toHaveLength(5);
+ expect(second.options.filter(row=>row.keepOpen).map(row=>row.section)).toEqual(["/project/a"]);
+ expect(f.server.requests.filter(request=>request.path==="/sessions").map(request=>[request.directory,request.query.cursor??null])).toEqual([["/other",null],["/project/a",null],["/other","5"]]);
+});
+
+test("an initial folder failure is retryable without discarding pins",async()=>{
+ const f=await fixture();seedSessionPages(f);f.server.failSessionPage();await f.controller.execute("/sessions");
+ const failed=f.pickers.at(-1)!;expect(sessionRows(failed).map(row=>row.value)).toEqual(["chat-12"]);
+ expect(failed.options.at(-1)?.title).toBe("Retry loading sessions");
+ await more(failed);expect(sessionRows(f.pickers.at(-1)!)).toHaveLength(6);
 });

@@ -10,7 +10,7 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   ])],
   ["b",new Map<string,ProviderConnectionSummary>([["foreign",{providerId:"openai",connectionId:"foreign",label:"Other workspace",scope:{tenantId:"fixture",workspaceId:"b"},authType:"api",isDefault:true}]])]
  ]);
- let connectionCounter=0,failConnectionMethod:string|undefined;
+ let connectionCounter=0,failConnectionMethod:string|undefined,failHistory=false;
  const oauthLabels=new Map<string,string>();
  const capabilities=new Set(["neoism.goals","neoism.mcp","neoism.subagents"]);
  const permissions=[{id:"p-one",sessionId:"one",messageId:"m",permission:"read",patterns:["*"],always:["*"],title:"Read file"},{id:"p-two",sessionId:"two",messageId:"m",permission:"read",patterns:["*"],always:["*"],title:"Read other file"}];
@@ -25,6 +25,9 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   const route=url.pathname.match(/^\/agent\/(?:workspaces\/([^/]+)|(system))\/v2(.*)$/);if(!route||route[2]&&!masterCatalog)return new Response("Not found",{status:404});
   const workspace=route[2]||decodeURIComponent(route[1]),path=route[3],body=await request.json().catch(()=>undefined);
   requests.push({workspace,path,method:request.method,body,directory:url.searchParams.get("directory"),authorization:request.headers.get("authorization"),query:Object.fromEntries(url.searchParams)});
+  const requestedSession=path.match(/^\/sessions\/([^/]+)/)?.[1]||path.match(/^\/plugins\/dev\.neoism\.goals\/([^/]+)/)?.[1]||path.match(/^\/plugins\/dev\.neoism\.subagents\/sessions\/([^/]+)/)?.[1]||url.searchParams.get("sessionId");
+  const directory=url.searchParams.get("directory")||(path==="/directories"?url.searchParams.get("path"):null)||(requestedSession?sessions.get(decodeURIComponent(requestedSession))?.directory:undefined),root=`/project/${workspace}`;
+  if(directory&&workspace!=="system"&&directory!==root&&!directory.startsWith(root+"/"))return Response.json({code:"forbidden",message:"The caller is not authorized for this directory",retryable:false,details:{}},{status:403});
   if(deferred.has(path))await new Promise<void>(resolve=>{const list=releases.get(path)||[];list.push(resolve);releases.set(path,list);});
   if(path==="/providers")return Response.json({all:[{id:"openai",name:"OpenAI",env:[],models:{},options:{},source:"builtin"}],connected:["openai"],default:{}});
   if(path==="/providers/auth-methods")return Response.json({openai:[{type:"api",label:"API key"},{type:"oauth",label:"Browser sign in",prompts:[{key:"region",message:"Region",type:"select",options:[{value:"us",label:"US"}]},{key:"tenant",message:"Tenant",type:"text",condition:{key:"region",op:"eq",value:"us"}}]}]});
@@ -52,10 +55,14 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   if(path==="/capabilities")return Response.json([...capabilities].map(id=>({id,enabled:true,version:"1.0.0",source:"plugin",disableable:true})));
   if(path==="/skills")return Response.json([{name:"review",description:"Repository review",path:"/project/a/.neoism/skills/review.md"}]);
   if(path==="/directories"){const directory=url.searchParams.get("path")||`/project/${workspace}`;return Response.json({path:directory,parent:"/project",entries:[{name:"sub",path:`${directory}/sub`}]});}
-  if(path==="/session-projects")return Response.json({items:[],pinnedSessions:[...sessions.values()].filter(session=>session.pinned&&!session.parentId)});
+   if(path==="/session-projects"){
+    const roots=[...sessions.values()].filter(session=>!session.parentId&&(workspace==="system"||session.directory===`/project/${workspace}`));
+    const directories=new Map<string,number>();for(const session of roots)directories.set(session.directory,Math.max(directories.get(session.directory)||0,session.time.updated));
+    return Response.json({items:[...directories].map(([directory,updatedMs])=>({directory,updatedMs})),pinnedSessions:roots.filter(session=>session.pinned)});
+   }
   if(path==="/sessions"&&request.method==="GET"){
    if(failSessionPage){failSessionPage=false;return Response.json({message:"Session page unavailable"},{status:500});}
-    const roots=url.searchParams.get("roots")==="true",directory=url.searchParams.get("directory"),rows=[...sessions.values()].filter(session=>(workspace==="system"||session.directory===`/project/${workspace}`)&&(!directory||session.directory===directory)&&(!roots||!session.parentId)).sort((a,b)=>b.time.updated-a.time.updated);
+     const roots=url.searchParams.get("roots")==="true",directory=url.searchParams.get("directory"),rows=[...sessions.values()].filter(session=>(workspace==="system"||session.directory===`/project/${workspace}`)&&(!directory||session.directory===directory)&&(!roots||!session.parentId)&&(url.searchParams.get("exclude_pinned")!=="true"||!session.pinned)).sort((a,b)=>b.time.updated-a.time.updated);
    const start=Number(url.searchParams.get("cursor")||0),limit=Number(url.searchParams.get("limit")||50),items=rows.slice(start,start+limit),next=start+limit<rows.length?String(start+limit):null;
    return Response.json({items,cursor:{next,hasMore:!!next}});
   }
@@ -70,7 +77,10 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
    if(suffix==="prompt")return new Response(null,{status:204});
    if(suffix==="queue")return Response.json(request.method==="DELETE"?{sessionId:id,removed:2,queue:{count:0,items:[]}}:{sessionId:id,count:2,items:[{index:0,text:"queued"}]});
    if(suffix==="queue/pop")return Response.json({sessionId:id,removed:1,queue:{count:1,items:[]}});
-   if(suffix==="undo"||suffix==="redo")return Response.json(current);
+    if(suffix==="undo"||suffix==="redo"){
+     if(failHistory){failHistory=false;return Response.json({message:"History mutation rejected"},{status:409});}
+     return Response.json(current);
+    }
    if(suffix==="summarize"||suffix==="abort")return Response.json(true);
   }
   if(path.startsWith("/plugins/dev.neoism.goals/")){
@@ -88,5 +98,5 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   if(path.startsWith("/plugins/dev.neoism.subagents/sessions/"))return Response.json([{id:"task",sessionId:"one",childSessionId:"two",agent:"plan",description:"Inspect source",status:"done",nested:false}]);
   return Response.json({message:`Unhandled fixture operation ${request.method} ${path}`},{status:404});
  },websocket:{message(socket,data){const [family,envelope]=Object.entries(JSON.parse(String(data)))[0]as[string,{request_id:number;message:any}];const reply=(message:unknown)=>socket.send(JSON.stringify({[family+"Reply"]:{request_id:envelope.request_id,message}}));if(envelope.message.Hello)reply({HelloAck:{accepted:true}});else if(envelope.message.GetHistory)reply({HistoryChunk:{session_id:envelope.message.GetHistory.session_id,messages:[]}});}}});
- return {defer:(path:string)=>{deferred.add(path);},release,endpoint:`ws://127.0.0.1:${server.port}/session`,requests,sessions,connections,capabilities,creations,enableMasterCatalog:()=>{masterCatalog=true;},failSessionPage:()=>{failSessionPage=true;},failConnection:(method:string)=>{failConnectionMethod=method;},setFailCommand:()=>{failCommand=true;},deferCreation:()=>{deferCreation=true;},stop:()=>{for(const path of deferred)release(path);server.stop(true);}};
+  return {defer:(path:string)=>{deferred.add(path);},release,endpoint:`ws://127.0.0.1:${server.port}/session`,requests,sessions,connections,capabilities,creations,enableMasterCatalog:()=>{masterCatalog=true;},failSessionPage:()=>{failSessionPage=true;},failHistory:()=>{failHistory=true;},failConnection:(method:string)=>{failConnectionMethod=method;},setFailCommand:()=>{failCommand=true;},deferCreation:()=>{deferCreation=true;},stop:()=>{for(const path of deferred)release(path);server.stop(true);}};
 }

@@ -1659,18 +1659,14 @@ impl NeoismAgentPane {
                 SessionEventUpdate::QueueSnapshot { count: Some(count), preview, running, action, .. } => {
                     if active {
                         self.pending_compact = None;
-                        self.queued_prompt_count = self.prompt_admission.project(
-                            count, running == Some(true), preview.as_deref(),
-                        );
-                        self.queued_prompt_preview = self.prompt_admission.project_preview(preview);
+                        self.queued_prompt_count = count;
+                        self.queued_prompt_preview = preview;
                         self.reconcile_queue_handoff(None, running == Some(true), action.as_deref());
                     } else {
                         let runtime = &mut self.cached_session_entry(session_id).runtime;
                         runtime.pending_compact = None;
-                        runtime.queued_prompt_count = runtime.prompt_admission.project(
-                            count, running == Some(true), preview.as_deref(),
-                        );
-                        runtime.queued_prompt_preview = runtime.prompt_admission.project_preview(preview);
+                        runtime.queued_prompt_count = count;
+                        runtime.queued_prompt_preview = preview;
                         runtime.reconcile_queue_handoff(None, running == Some(true), action.as_deref());
                     }
                 }
@@ -1687,12 +1683,8 @@ impl NeoismAgentPane {
         started_at: Option<u64>,
     ) {
         let decision = status_policy::queue_status_decision(
-            self.prompt_admission.project(
-                count as usize,
-                started_at.is_some(),
-                preview.as_deref(),
-            ),
-            self.prompt_admission.project_preview(preview),
+            count as usize,
+            preview,
             started_at,
             self.is_streaming(),
         );

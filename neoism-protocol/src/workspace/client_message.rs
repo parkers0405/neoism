@@ -425,6 +425,16 @@ pub enum WorkspaceClientMessage {
     UnsubscribeWorkspace {
         workspace_id: String,
     },
+    /// Atomically replace this socket's open-workspace claims (including
+    /// inactive tabs). Optionally prune ONE just-closed, previously held,
+    /// unclaimed empty private local workspace created in this daemon lifetime
+    /// and never claimed by another transport. Always replies with the
+    /// authoritative HostWorkspaceTree; disconnect never prunes workspaces.
+    SetWindowWorkspaces {
+        workspace_ids: Vec<String>,
+        #[serde(default)]
+        prune_empty: Option<String>,
+    },
     /// Attach this client/host as a controller for a workspace that may
     /// still be running on another host.
     ControlWorkspace {

@@ -206,17 +206,7 @@ pub trait Paint {
         depth: f32,
         order: u8,
         clip: [f32; 4],
-    ) {
-        let _ = clip;
-        let steps = 48;
-        let point = |r: f32, i: usize| {
-            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
-            (center[0] + r * a.cos(), center[1] + r * a.sin())
-        };
-        let outer: Vec<_> = (0..steps).map(|i| point(radius + stroke_width * 0.5, i)).collect();
-        let inner: Vec<_> = (0..steps).map(|i| point((radius - stroke_width * 0.5).max(0.0), i)).collect();
-        self.border_ring(&outer, &inner, depth, color, order);
-    }
+    );
     /// Retained image store (Sugarloaf `image_data`), keyed by image id.
     fn image_data_contains(&self, id: u32) -> bool {
         let _ = id;

@@ -2,6 +2,8 @@
 
 `gpuix/` is the native application and the default frontend. `launcher/` provides the Cargo development entrypoint. The old desktop and WASM hosts are retired.
 
+`tui/` is the SolidJS + OpenTUI terminal frontend. Run `bash scripts/tui.sh` from the repository root. It uses the same native Rust editor/Vim engine, daemon CRDT saves, LSP services, and JSONC configuration, with terminal-specific workspace/buffer tabs, breadcrumbs, status, search, and splash rendering. `service-client/` contains the TypeScript connection and schemas shared with GPUIX; `native-bridge.ts` shares the FFI transport. See [the TUI guide](tui/README.md) for shortcuts, prerequisites, verification, and remaining surfaces.
+
 `shared/` retains the useful editor, Markdown, session layout, panel state, animation, and input policies. Its rendering entrypoints accept the portable `Paint` interface. `RecordingPainter` produces commands and CPU text rasters for GPUIX; it owns no GPU context or window.
 
 CPU font discovery, shaping, rasterization, image data, and virtual document layout live in `../neoism-paint`. Styling data lives in `../neoism-customization`, without a scripting runtime. `../neoism-terminal-types` contains presentation/input data; Ghostty owns emulation in the client, and the daemon owns PTYs.

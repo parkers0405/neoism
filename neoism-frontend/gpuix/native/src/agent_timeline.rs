@@ -299,6 +299,84 @@ fn pointer(view: &mut View, v: &Value) -> Value {
 }
 
 #[cfg(test)]
+mod user_arrival_tests {
+    use super::*;
+
+    #[test]
+    fn local_send_first_frame_contains_the_whole_bubble_above_activity() {
+        let created = dispatch(&json!({"op":"agenttimeline.new","sessionId":"chat"})).unwrap().unwrap();
+        let id = created["id"].as_u64().unwrap() as u32;
+        dispatch(&json!({"op":"agenttimeline.event","id":id,"message":{"HistoryChunk":{
+            "session_id":"chat","messages":[{"id":"prior","kind":"Assistant","role":"Assistant",
+                "text":(0..30).map(|i|format!("Earlier paragraph {i} with enough history to fill the viewport.\n\n")).collect::<String>()}],
+            "next_cursor":null
+        }}})).unwrap().unwrap();
+        dispatch(&json!({"op":"agenttimeline.layout","id":id,"width":600,"height":500,"contentBottom":440})).unwrap().unwrap();
+        dispatch(&json!({"op":"agenttimeline.event","id":id,"message":{"StreamingState":{
+            "session_id":"chat","state":"Generating","label":null
+        }}})).unwrap().unwrap();
+        dispatch(&json!({"op":"agenttimeline.event","id":id,"message":{"MessageUpdated":{
+            "session_id":"chat","local_echo":true,
+            "message":{"id":"sent","kind":"User","role":"User","text":"Followup bubble"}
+        }}})).unwrap().unwrap();
+        let frame=dispatch(&json!({"op":"agenttimeline.frame","id":id})).unwrap().unwrap();
+        let commands=frame["commands"].as_array().unwrap();
+        let bubble=commands.iter().find(|command|command["kind"]=="rect"&&command["color"][2]==1.0&&command["color"][0]==0.0&&command["radii"][0].as_f64().unwrap_or(0.0)>0.0).expect("local bubble must exist in the first frame, not scroll up behind Crafting");
+        let y=bubble["rect"][1].as_f64().unwrap();
+        let bottom=y+bubble["rect"][3].as_f64().unwrap()+8.0;
+        let clip_y=bubble["clip"][1].as_f64().unwrap();
+        let clip_bottom=clip_y+bubble["clip"][3].as_f64().unwrap();
+        assert!(y>=clip_y&&bottom<=clip_bottom,"the full bubble and its tail must fit above activity on its first paint: {bubble}");
+        STORE.with(|store|assert_eq!(store.borrow().views[&id].pane.timeline_scroll_offset(),0.0));
+        dispatch(&json!({"op":"agenttimeline.dispose","id":id})).unwrap().unwrap();
+    }
+
+    #[test]
+    fn provisional_adoption_preserves_arrival_deadline_and_scroll() {
+        for reduced in [false,true] {
+            let created=dispatch(&json!({"op":"agenttimeline.new","sessionId":"pending:first","reducedMotion":reduced})).unwrap().unwrap();
+            let id=created["id"].as_u64().unwrap() as u32;
+            dispatch(&json!({"op":"agenttimeline.event","id":id,"message":{"MessageUpdated":{
+                "session_id":"pending:first","local_echo":true,
+                "message":{"id":"user","role":"User","kind":"User","text":"First send"}
+            }}})).unwrap().unwrap();
+            let before=STORE.with(|store|store.borrow_mut().views.get_mut(&id).unwrap().pane.tool_motion_sample("user"));
+            dispatch(&json!({"op":"agenttimeline.restore-position","id":id,"offset":37.0,"follow":false})).unwrap().unwrap();
+            dispatch(&json!({"op":"agenttimeline.adopt","id":id,"from":"pending:first","to":"canonical"})).unwrap().unwrap();
+            STORE.with(|store|{
+                let mut store=store.borrow_mut();let view=store.views.get_mut(&id).unwrap();
+                assert_eq!(view.pane.session_id_str(),Some("canonical"));
+                assert_eq!(view.pane.messages().len(),1);
+                assert_eq!(view.pane.tool_motion_sample("user").deadline,before.deadline);
+                assert_eq!(view.pane.tool_motion_state().has_active_motion(),!reduced);
+                assert_eq!(view.pane.timeline_scroll_offset(),37.0);
+                assert!(!view.pane.timeline_follow_bottom());
+            });
+            dispatch(&json!({"op":"agenttimeline.dispose","id":id})).unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn only_local_echo_starts_bubble_motion_and_reduced_motion_disables_it() {
+        for reduced in [false, true] {
+            let created = dispatch(&json!({"op":"agenttimeline.new","sessionId":"chat","reducedMotion":reduced})).unwrap().unwrap();
+            let id = created["id"].as_u64().unwrap() as u32;
+            let event = |local: bool| json!({"op":"agenttimeline.event","id":id,"message":{"MessageUpdated":{
+                "session_id":"chat","local_echo":local,
+                "message":{"id":"user","kind":"User","role":"User","text":"hello"}
+            }}});
+            dispatch(&event(false)).unwrap().unwrap();
+            STORE.with(|store| assert!(!store.borrow_mut().views.get_mut(&id).unwrap().pane.tool_motion_state().has_active_motion()));
+            dispatch(&event(true)).unwrap().unwrap();
+            STORE.with(|store| assert_eq!(store.borrow_mut().views.get_mut(&id).unwrap().pane.tool_motion_state().has_active_motion(), !reduced));
+            dispatch(&event(false)).unwrap().unwrap();
+            STORE.with(|store| assert_eq!(store.borrow_mut().views.get_mut(&id).unwrap().pane.messages().iter().filter(|row|row.id=="user").count(), 1));
+            dispatch(&json!({"op":"agenttimeline.dispose","id":id})).unwrap().unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
 mod image_hit_tests {
     use super::*;
     use neoism_ui::panels::agent_pane::{
@@ -392,6 +470,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             );
             let session_id = text(v, "sessionId").to_owned();
             let mut pane = NeoismAgentPane::new();
+            if let Some(reduced) = v["reducedMotion"].as_bool() { pane.set_text_reveal_enabled(!reduced); }
             pane.set_virtual_timeline_enabled(v["virtualTimeline"].as_bool().unwrap_or(false));
             pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));
             pane.set_session_id(Some(v["rootSessionId"].as_str().unwrap_or(&session_id).to_owned()));
@@ -429,6 +508,16 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
         }
         let view = store.views.get_mut(&id).ok_or("Unknown agent timeline")?;
         match op {
+            "agenttimeline.adopt" => {
+                let from=text(v,"from");let to=text(v,"to");
+                if !from.starts_with("pending:") || to.is_empty() || view.session_id!=from {
+                    return Err("Only the matching provisional timeline can be adopted".into());
+                }
+                view.pane.tool_motion_state().adopt_scope(to);
+                view.pane.set_session_id(Some(to.to_owned()));
+                view.session_id=to.to_owned();
+                Ok(Value::Null)
+            }
             "agenttimeline.position" => Ok(json!({"sessionId":view.session_id,"offset":view.pane.timeline_scroll_offset(),"follow":view.pane.timeline_follow_bottom(),"anchor":view.pane.timeline_view_anchor().map(|(key,y)|json!({"id":key.message_id(),"y":y}))})),
             "agenttimeline.restore-position" => {
                 view.pane.restore_timeline_position(number(v,"offset",0.0),v["follow"].as_bool().unwrap_or(true),v["anchor"]["id"].as_str().map(|id|(id,number(&v["anchor"],"y",0.0))));
@@ -443,6 +532,21 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 }
                 let history_older = match v["historyKind"].as_str() { Some("head") => Some(false), Some("older") => Some(true), _ => None };
                 let visible = agent_event_session_id(&parsed).is_none_or(|session| session == view.session_id);
+                let local_echo = match &parsed {
+                    AgentServerMessage::MessageUpdated { message, .. }
+                        if visible && v["message"]["MessageUpdated"]["local_echo"].as_bool() == Some(true) => Some(message.id.clone()),
+                    _ => None,
+                };
+                if v["historyKind"].as_str() == Some("replace") {
+                    if let AgentServerMessage::HistoryChunk { session_id, messages, next_cursor } = parsed {
+                        view.pane.replace_session_history(
+                            &session_id,
+                            messages.into_iter().map(neoism_ui::panels::agent_pane::server_events::map_history).collect(),
+                            next_cursor,
+                        );
+                        return Ok(json!({"needsPaint":visible}));
+                    }
+                }
                 // Cached text/history changes cannot change the viewed transcript.
                 // Keep lifecycle/roster events paintable: they may update family
                 // activity in the conversation header even for another session.
@@ -456,6 +560,10 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 if visible {
                     apply_agent_event_to_pane_with_history_kind(&mut view.pane, parsed, history_older);
                 }else{apply_agent_event_to_cache_with_history_kind(&mut view.pane,parsed,history_older);}
+                if let Some(id) = local_echo {
+                    view.pane.prepare_local_prompt_arrival();
+                    view.pane.tool_motion_state().record(&id, None, "");
+                }
                 // Events never publish paint; the host schedules a frame.
                 Ok(json!({"animating": view.pane.animation_reason().is_some(), "needsPaint": needs_paint}))
             }
@@ -480,6 +588,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 Ok(frame(view))
             }
             "agenttimeline.layout" => {
+                if let Some(reduced) = v["reducedMotion"].as_bool() { view.pane.set_text_reveal_enabled(!reduced); }
                 if v.get("localName").is_some(){view.pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));}
                 view.width = number(v, "width", view.width).max(1.0);
                 view.height = number(v, "height", view.height).max(1.0);
@@ -756,6 +865,8 @@ fn panel_frame(panel: &mut Panel) -> Value {
     use neoism_ui::panels::agent_pane::view::side_panel::{render_side_panel_with_icons, SharedAgentSidePanelIcons};
     let theme = IdeTheme::by_name(&panel.theme);
     panel.pane.side_panel_mut().set_navigation_header_enabled(true);
+    // Keep search implemented, but hide its row until we bring it back.
+    panel.pane.side_panel_mut().set_navigation_search_visible(false);
     let viewed = panel.viewed_session.clone();
     panel.pane.side_panel_mut().set_catalog_viewed_session(viewed.as_deref());
     panel.pane.side_panel_mut().set_catalog_viewed_root(viewed.as_deref());

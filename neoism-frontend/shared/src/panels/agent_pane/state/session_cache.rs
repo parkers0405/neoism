@@ -139,12 +139,8 @@ impl CachedAgentRuntime {
         started_at: Option<u64>,
     ) {
         let decision = status_policy::queue_status_decision(
-            self.prompt_admission.project(
-                count,
-                started_at.is_some(),
-                preview.as_deref(),
-            ),
-            self.prompt_admission.project_preview(preview),
+            count,
+            preview,
             started_at,
             self.is_streaming(),
         );
@@ -807,6 +803,35 @@ impl NeoismAgentPane {
     /// reconcile optimistic prompts, merge with live-streamed parts and
     /// mark the entry hydrated. Desktop: the `Messages` /
     /// `ChildMessages` cached arms.
+    /// Undo/redo replaces history, unlike reconnect snapshots which preserve
+    /// live rows. Apply to the selected chat or its parked cache, never both.
+    pub fn replace_session_history(
+        &mut self,
+        session_id: &str,
+        messages: Vec<NeoismAgentMessage>,
+        oldest_cursor: Option<String>,
+    ) {
+        if self.session_id.as_deref() == Some(session_id) {
+            self.messages.clear();
+            self.pending_user_prompts.clear();
+            self.prompt_echo_aliases.clear();
+            self.timeline_live_trace_start = None;
+            self.timeline_live_trace_anchor = None;
+            self.timeline_history = AgentTimelineHistoryState::default();
+            self.invalidate_timeline_layout();
+            self.apply_history_page_with_kind(messages, oldest_cursor, Some(false));
+        } else {
+            let cached = self.cached_session_entry(session_id);
+            cached.messages.clear();
+            cached.pending_user_prompts.clear();
+            cached.prompt_echo_aliases.clear();
+            cached.timeline_live_trace_start = None;
+            cached.timeline_live_trace_anchor = None;
+            cached.timeline_history = AgentTimelineHistoryState::default();
+            self.apply_history_to_cache_with_kind(session_id, messages, oldest_cursor, Some(false));
+        }
+    }
+
     pub fn apply_history_to_cache(
         &mut self,
         session_id: &str,

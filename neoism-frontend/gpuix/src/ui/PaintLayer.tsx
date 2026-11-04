@@ -7,13 +7,16 @@ export interface PreparedCanvas {commands:string;chunks?:string[];images:Array<{
 export type PaintCommand =
  | {kind:"raster-text";rect:number[];raster:PaintRaster;layer:number;clip?:number[]|null}
  | {kind:"rect";rect:number[];color:number[];radii:number[];clip?:number[]|null;depth:number;order:number;layer:number}
- | {kind:"ring";outer:number[][];inner:number[][];color:number[];depth:number;order:number;layer:number}
+ | {kind:"ring";outer:number[][];inner:number[][];color:number[];clip?:number[]|null;depth:number;order:number;layer:number}
  | {kind:"polygon";points:number[][];color:number[];depth:number;layer:number}
  | {kind:"text";x:number;y:number;text:string;size:number;width:number;color:number[];bold:boolean;italic:boolean;extrude:boolean;family?:string|null;clip?:number[]|null;layer:number;raster?:PaintRaster|null}
  | {kind:"image";rect:number[];source:number[];depth:number;layer:number;raster:PaintRaster};
 export const paintColor = (color:number[],bytes=false)=>`rgba(${color.slice(0,3).map(c=>Math.round(c*(bytes?1:255))).join(",")},${(color[3]??(bytes?255:1))/(bytes?255:1)})`;
 
-const order=(a:PaintCommand,b:PaintCommand)=>a.layer-b.layer||("depth" in a&&"depth" in b?a.depth-b.depth:0)||("order"in a&&"order"in b?a.order-b.order:0);
+// Keep a complete sort key, matching native paint_canvas.rs. Text finishes its layer.
+const textOrder=(command:PaintCommand)=>Number(command.kind==="text"||command.kind==="raster-text");
+const depthOrder=(command:PaintCommand)=>"depth" in command&&Number.isFinite(command.depth)?command.depth:0;
+const order=(a:PaintCommand,b:PaintCommand)=>a.layer-b.layer||textOrder(a)-textOrder(b)||depthOrder(a)-depthOrder(b)||("order" in a?a.order:0)-("order" in b?b.order:0);
 const sameClip=(a?:number[]|null,b?:number[]|null)=>a===b||!!a&&!!b&&a[0]===b[0]&&a[1]===b[1]&&a[2]===b[2]&&a[3]===b[3];
 const flat=(points:number[][])=>points.flatMap(point=>[point[0],point[1]]);
 

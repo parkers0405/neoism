@@ -81,6 +81,26 @@ mod navigation_header_tests {
     use super::*;
 
     #[test]
+    fn hidden_search_skips_hits_and_keyboard_navigation_and_can_be_restored() {
+        let mut panel = NeoismAgentSidePanel::default();
+        panel.set_navigation_header_enabled(true);
+        panel.set_header_action_rect(CatalogHeaderAction::Search, [0., 0., 80., 30.]);
+        panel.select_header_action(CatalogHeaderAction::Search);
+        panel.set_navigation_search_visible(false);
+        assert!(panel.new_chat_selected());
+        assert_eq!(panel.header_action_at(10., 10.), None);
+        panel.select_next();
+        assert!(panel.projects_selected());
+        panel.select_header_action(CatalogHeaderAction::Search);
+        assert!(panel.projects_selected());
+        panel.select_prev();
+        assert!(panel.new_chat_selected());
+        panel.set_navigation_search_visible(true);
+        panel.select_next();
+        assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
+    }
+
+    #[test]
     fn capability_gates_and_resets_typed_hits() {
         let mut panel = NeoismAgentSidePanel::default();
         assert!(!panel.navigation_header_enabled());
@@ -1412,6 +1432,7 @@ pub struct NeoismAgentSidePanel {
     content_scroll_max: f32,
     reveal_selected_branch: bool,
     navigation_header_enabled: bool,
+    navigation_search_visible: bool,
     header_rects: Vec<(CatalogHeaderAction, [f32; 4])>,
     new_chat_rect: Option<[f32; 4]>,
     new_chat_selected: bool,
@@ -1517,6 +1538,7 @@ impl Default for NeoismAgentSidePanel {
             content_scroll_max: 0.0,
             reveal_selected_branch: false,
             navigation_header_enabled: false,
+            navigation_search_visible: true,
             header_rects: Vec::new(),
             new_chat_rect: None,
             new_chat_selected: false,
@@ -1562,8 +1584,19 @@ impl NeoismAgentSidePanel {
         self.header_rects.clear();
     }
 
+    pub fn set_navigation_search_visible(&mut self, visible: bool) {
+        self.navigation_search_visible = visible;
+        if !visible {
+            self.header_rects.retain(|(action, _)| *action != CatalogHeaderAction::Search);
+            if self.selected_header == Some(CatalogHeaderAction::Search) {
+                self.select_new_chat();
+            }
+        }
+    }
+
     pub fn header_action_enabled(&self, action: CatalogHeaderAction) -> bool {
         self.navigation_header_enabled
+            && (action != CatalogHeaderAction::Search || self.navigation_search_visible)
             && (action != CatalogHeaderAction::AddWorkspace
                 || self.catalog_directory.is_none())
     }
@@ -1680,7 +1713,7 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_header_action(&mut self, action: CatalogHeaderAction) {
-        if self.navigation_header_enabled && matches!(self.mode, SidePanelMode::Sessions)
+        if self.header_action_enabled(action) && matches!(self.mode, SidePanelMode::Sessions)
             && matches!(action, CatalogHeaderAction::Search | CatalogHeaderAction::Projects)
         {
             self.new_chat_selected = false;
@@ -4548,7 +4581,11 @@ impl NeoismAgentSidePanel {
     pub fn select_next(&mut self) {
         let len = self.active_len();
         if self.new_chat_selected() && self.navigation_header_enabled {
-            self.select_header_action(CatalogHeaderAction::Search);
+            if self.header_action_enabled(CatalogHeaderAction::Search) {
+                self.select_header_action(CatalogHeaderAction::Search);
+            } else {
+                self.select_projects();
+            }
             return;
         }
         if self.selected_header_action() == Some(CatalogHeaderAction::Search) {
@@ -4585,7 +4622,11 @@ impl NeoismAgentSidePanel {
 
     pub fn select_prev(&mut self) {
         if self.projects_selected() {
-            self.select_header_action(CatalogHeaderAction::Search);
+            if self.header_action_enabled(CatalogHeaderAction::Search) {
+                self.select_header_action(CatalogHeaderAction::Search);
+            } else {
+                self.select_new_chat();
+            }
             return;
         }
         if self.selected_header_action() == Some(CatalogHeaderAction::Search) {

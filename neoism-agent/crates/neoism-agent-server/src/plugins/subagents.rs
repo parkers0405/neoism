@@ -529,21 +529,14 @@ async fn stop(
     let mut stopped = Vec::new();
     let mut cleared_prompts = 0;
     for child in candidates {
-        if crate::tool_runtime::session_is_running(state, child.id.as_str()).await {
-            crate::session_actions::abort_session_run(state, child.id.as_str()).await;
-            stopped.push(child.id.to_string());
-        }
+        // Abort also owns durable branch/timer cleanup when the live run vanished.
+        let aborted = crate::session_actions::abort_session_run(state, child.id.as_str()).await;
         let cleared =
             crate::session_queue::clear_session_prompt_queue(state, child.id.as_str())
                 .await;
         cleared_prompts += cleared;
-        if cleared > 0 {
-            let _ = crate::execution_activity::finish_subtask_for_child(
-                state,
-                child.id.as_str(),
-                "cancelled",
-            )
-            .await;
+        if aborted || cleared > 0 {
+            stopped.push(child.id.to_string());
         }
     }
     Ok(StopSubagentsResult {

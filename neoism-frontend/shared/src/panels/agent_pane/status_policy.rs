@@ -1,47 +1,21 @@
 //! Shared status/update policies for the agent pane.
 
-/// Only a locally submitted idle primary is already represented by optimistic
-/// activity. Never infer a reservation from history or a hydrated queue.
+/// A locally submitted primary already has an echo; its dequeue must not
+/// consume a different waiting prompt. Queue counts are projected by the server.
 #[derive(Clone, Debug, Default)]
 pub struct PromptAdmission {
-    primary: Option<(String, bool)>,
+    primary: Option<String>,
 }
 
 impl PromptAdmission {
     pub fn admit(&mut self, message_id: &str) {
-        self.primary = Some((message_id.to_owned(), true));
-    }
-
-    pub fn project(&mut self, count: usize, running: bool, preview: Option<&str>) -> usize {
-        if running {
-            if let Some((_, waiting)) = self.primary.as_mut() {
-                *waiting = false;
-            }
-        }
-        let reserved = self.primary.as_ref().is_some_and(|(_, waiting)| *waiting);
-        // A compact-only queue must remain visible even if its snapshot
-        // overtakes the primary's dequeue (or is a count-less notification).
-        count.saturating_sub(usize::from(reserved))
-            .max(usize::from(count > 0 && preview == Some("Compaction queued")))
-    }
-
-    /// The wire preview names the head, which may be the hidden primary.
-    /// Without second-item identity we must not label real waiting work with
-    /// that head. Compact previews are explicit control metadata, not a prompt.
-    pub fn project_preview(&self, preview: Option<String>) -> Option<String> {
-        if self.primary.as_ref().is_some_and(|(_, waiting)| *waiting)
-            && preview.as_deref() != Some("Compaction queued")
-        {
-            None
-        } else {
-            preview
-        }
+        self.primary = Some(message_id.to_owned());
     }
 
     /// Match before applying the post-dequeue snapshot. A late primary dequeue
     /// must not speculatively consume a real follow-up, even after running=true.
     pub fn dequeue(&mut self, message_id: Option<&str>) -> bool {
-        if self.primary.as_ref().is_some_and(|(id, _)| Some(id.as_str()) == message_id) {
+        if self.primary.is_some() && self.primary.as_deref() == message_id {
             self.primary = None;
             true
         } else {

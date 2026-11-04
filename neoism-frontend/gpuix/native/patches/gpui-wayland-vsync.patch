@@ -31,6 +31,23 @@ index 51379b8..c75e98b 100644
              },
          )
      }
+@@ -3303,6 +3308,16 @@ impl Interactivity {
+                         }
+                     }
+                     scroll_offset.y += delta_y;
++                    // Only native overflow owns this gain. Keep the event raw for
++                    // JS-owned scrolling, and choose the axis before acceleration.
++                    // Vertical-to-horizontal tab mapping is handled by JS instead.
++                    if event.delta.precise()
++                        && (event.modifiers.shift
++                            || delta.x.abs() > delta.y.abs())
++                    {
++                        delta_x *= 2.0;
++                    }
++
+                     scroll_offset.x += delta_x;
+                     if *scroll_offset != old_scroll_offset {
+                         cx.notify(current_view);
 diff --git c/crates/gpui/src/platform.rs w/crates/gpui/src/platform.rs
 index e37ab99..02d34b8 100644
 --- c/crates/gpui/src/platform.rs

@@ -10,7 +10,7 @@ export function translatePaintCommands(commands:readonly PaintCommand[],dx:numbe
    case "raster-text":case "rect":case "image":return{...command,...clip,rect:rect(command.rect)};
    case "text":return{...command,...clip,x:command.x+dx,y:command.y+dy};
    case "polygon":return{...command,points:points(command.points)};
-   case "ring":return{...command,outer:points(command.outer),inner:points(command.inner)};
+   case "ring":return{...command,...clip,outer:points(command.outer),inner:points(command.inner)};
   }
  });
 }

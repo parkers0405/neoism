@@ -787,12 +787,14 @@ fn server_hello_ack_roundtrip() {
         reason: None,
         peer_identity: Some("you@tailnet".into()),
         connected_host_id: Some("laptop-a".into()),
+        workspace_lifecycle: true,
     });
     roundtrip_server(&WorkspaceServerMessage::HelloAck {
         accepted: false,
         reason: Some("invalid pairing token".into()),
         peer_identity: None,
         connected_host_id: None,
+        workspace_lifecycle: false,
     });
     // Bare-minimum positive ack — both optional fields elided.
     roundtrip_server(&WorkspaceServerMessage::HelloAck {
@@ -800,7 +802,26 @@ fn server_hello_ack_roundtrip() {
         reason: None,
         peer_identity: None,
         connected_host_id: None,
+        workspace_lifecycle: false,
     });
+}
+
+#[test]
+fn window_workspace_lifecycle_wire_roundtrip() {
+    roundtrip_client(&WorkspaceClientMessage::SetWindowWorkspaces {
+        workspace_ids: vec!["open-a".into(), "inactive-b".into()],
+        prune_empty: Some("just-closed-c".into()),
+    });
+    roundtrip_client(&WorkspaceClientMessage::SetWindowWorkspaces {
+        workspace_ids: Vec::new(),
+        prune_empty: None,
+    });
+    let parsed: WorkspaceClientMessage = serde_json::from_str(
+        r#"{"SetWindowWorkspaces":{"workspace_ids":[]}}"#,
+    ).expect("prune_empty is optional on the wire");
+    assert!(matches!(parsed, WorkspaceClientMessage::SetWindowWorkspaces {
+        workspace_ids, prune_empty: None,
+    } if workspace_ids.is_empty()));
 }
 
 #[test]
@@ -839,11 +860,13 @@ fn hello_ack_missing_fields_deserialize_from_old_daemons() {
             reason,
             peer_identity,
             connected_host_id,
+            workspace_lifecycle,
         } => {
             assert!(accepted);
             assert!(reason.is_none());
             assert!(peer_identity.is_none());
             assert!(connected_host_id.is_none());
+            assert!(!workspace_lifecycle);
         }
         other => panic!("expected HelloAck, got {other:?}"),
     }

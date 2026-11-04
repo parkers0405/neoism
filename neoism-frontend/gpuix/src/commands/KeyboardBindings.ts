@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse, type ParseError } from "jsonc-parser";
-import { coreCall } from "../native-core";
+import { callNativeCore as coreCall } from "../../../native-bridge";
 export type KeyboardAction = { kind: "action"; action: string; argument?: number; program?: string; args?: string[] } | { kind: "escape"; text: string };
 export interface BindingState { vi?: boolean; appcursor?: boolean; appkeypad?: boolean; alt?: boolean; search?: boolean; disambiguate?: boolean; allKeysAsEsc?: boolean }
 export interface BindingKeyEvent { key?: string; keyChar?: string; modifiers?: { ctrl?: boolean; shift?: boolean; alt?: boolean; cmd?: boolean }; location?: "standard" | "numpad" }
@@ -13,6 +13,7 @@ const aliases: Record<string, string> = { home: "home", space: "space", delete: 
   up: "up", back: "backspace", down: "down", left: "left", right: "right", colon: ":", return: "enter", tab: "tab" };
 const numpad: Record<string, string> = { enter: "enter", add: "+", comma: ",", decimal: ".", divide: "/", equals: "=", subtract: "-", multiply: "*", ...Object.fromEntries(Array.from({ length: 10 }, (_, n) => [String(n), String(n)])) };
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+let paletteActions: Map<string, string> | undefined;
 function conflicts(a: Binding, b: Binding) {
   if (a.key !== b.key || a.location !== b.location || a.modifiers !== b.modifiers) return false;
   if (!((a.required || 127) & (b.required || 127))) return false;
@@ -42,8 +43,15 @@ export class KeyboardBindings {
         const bit = ["appcursor", "appkeypad", "alt", "vi"].includes(plain) ? modes[plain as keyof typeof modes] : 0;
         if (negate) excluded |= bit; else required |= bit;
       }
-      const action: KeyboardAction = typeof row.esc === "string" && row.esc.length > 0 ? { kind: "escape", text: row.esc }
+      let action: KeyboardAction = typeof row.esc === "string" && row.esc.length > 0 ? { kind: "escape", text: row.esc }
         : coreCall("commands.parse-action", { action: typeof row.action === "string" ? row.action : "" });
+      // Config can name the same host commands exposed by the palette, not
+      // only the terminal-era Action enum aliases.
+      if (action.kind === "action" && action.action === "None" && typeof row.action === "string" && row.action.toLowerCase() !== "none") {
+        paletteActions ??= new Map(coreCall<Array<{ action: string }>>("commands.catalog").map(command => [command.action.toLowerCase(), command.action]));
+        const canonical = paletteActions.get(row.action.toLowerCase());
+        if (canonical) action = { kind: "action", action: canonical };
+      }
       const binding: Binding = { key, location, modifiers: mods, required, excluded, action };
       this.bindings = this.bindings.filter((existing) => !conflicts(existing, binding));
       this.bindings.push(binding);

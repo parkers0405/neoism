@@ -80,6 +80,16 @@ impl NeoismAgentPane {
         self.timeline_scroll_px
     }
 
+    /// A locally sent prompt owns the first bottom-aligned frame. Do not spend
+    /// its arrival animation scrolling it up from behind the activity footer.
+    pub fn prepare_local_prompt_arrival(&mut self) {
+        self.restore_timeline_position(0.0, true, None);
+        self.pending_timeline_anchor = None;
+        self.pending_timeline_prepend_delta_px = None;
+        self.pending_timeline_prepend_height_px = None;
+        self.timeline_view_anchor = None;
+    }
+
     /// Direct canvas hosts already window the measured timeline rows. They
     /// don't consume the second virtual document, which otherwise clones and
     /// hashes the complete transcript on every streamed token revision.

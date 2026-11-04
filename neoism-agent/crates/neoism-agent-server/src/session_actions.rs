@@ -98,16 +98,7 @@ pub(crate) struct SessionShellRequest {
 }
 
 pub(crate) async fn abort_session_run(state: &AppState, session_id: &str) -> bool {
-    let aborted = abort_session_run_impl(state, session_id, true).await;
-    if aborted {
-        let _ = crate::execution_activity::finish_subtask_for_child(
-            state,
-            session_id,
-            "cancelled",
-        )
-        .await;
-    }
-    aborted
+    abort_session_run_impl(state, session_id, true).await
 }
 
 pub(crate) async fn clear_subtask_completion_for_teardown(
@@ -154,6 +145,19 @@ async fn abort_session_run_impl(
         )
         .await;
     }
+    // Do this before releasing admission or publishing idle. Otherwise a new
+    // continuation can be cancelled, or idle can fabricate successful completion.
+    let cancelled_activity = if admission.is_some() {
+        match crate::execution_activity::cancel_session_activity_locked(state, session_id).await {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::warn!(%error, session_id, "failed to cancel durable session activity");
+                false
+            }
+        }
+    } else {
+        false
+    };
     drop(admission);
     if removed_compact {
         crate::session_queue::publish_prompt_queue_status(state, session_id, 0).await;
@@ -214,7 +218,8 @@ async fn abort_session_run_impl(
         reconcile_parent_subtask_completions_for_child(state, session_id).await;
     }
 
-    cancelled.is_some() || was_busy
+    crate::execution_activity::finish_if_quiescent(state, session_id).await;
+    cancelled.is_some() || was_busy || cancelled_activity
 }
 
 pub(crate) async fn create_subtask_session(
@@ -846,12 +851,43 @@ pub(crate) async fn publish_deferred_subtask_completion_if_idle(
     if subtask_has_active_work(state, session_id).await {
         return false;
     }
-    let result = last_assistant_text(state, session_id).await;
+    let lifecycle = if let Some(execution) = child.extra
+        .get(crate::execution_activity::EXECUTION_ID_KEY).and_then(Value::as_str)
+    {
+        match state.inner.store.execution_subtask_status(execution, session_id).await {
+            Ok(status) => status,
+            Err(_) => return false,
+        }
+    } else {
+        None
+    };
+    let (status, result) = if lifecycle.as_deref() == Some("failed") {
+        ("error", "Subagent task was cancelled or terminated before producing a result.".to_string())
+    } else {
+        let Ok(messages) = state.inner.store.list_messages(session_id).await else {
+            return false;
+        };
+        let Some(message) = messages.iter().rev().find(|message| {
+            matches!(&message.info, MessageInfo::Assistant(info) if info.parent_id == generation)
+        }) else { return false; };
+        if let Some(error) = crate::tool_runtime::last_assistant_error(message) {
+            ("error", error)
+        } else if crate::tool_runtime::last_assistant_text(message).is_some() {
+            let text = message.parts.iter().filter_map(|part| match part {
+                Part::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }).collect::<Vec<_>>().join("\n");
+            ("completed", text)
+        } else {
+            // No live worker is not evidence that this generation finished.
+            return false;
+        }
+    };
     publish_background_subtask_finished(
         state,
         session_id,
         &generation,
-        "completed",
+        status,
         &result,
     )
     .await;
@@ -901,31 +937,6 @@ async fn subtask_has_active_work(state: &AppState, session_id: &str) -> bool {
         .await
         .unwrap_or(1)
         > 0
-}
-
-/// Last assistant text part in the child's transcript — the result the
-/// deferred completion carries (mirrors the spawn wrapper's
-/// `last_text_part` of the append result).
-async fn last_assistant_text(state: &AppState, session_id: &str) -> String {
-    let Ok(messages) = state.inner.store.list_messages(session_id).await else {
-        return String::new();
-    };
-    messages
-        .iter()
-        .rev()
-        .find(|message| matches!(message.info, MessageInfo::Assistant(_)))
-        .map(|message| {
-            message
-                .parts
-                .iter()
-                .filter_map(|part| match part {
-                    Part::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
 }
 
 /// Recheck the durable completion outbox for a session acting as PARENT.
@@ -1665,6 +1676,22 @@ mod tests {
             .await
             .unwrap();
         generation
+    }
+
+    async fn store_completed_reply(state: &AppState, child: &SessionInfo, generation: &MessageId) {
+        let id = Id::ascending(IdKind::Message);
+        let message: MessageWithParts = serde_json::from_value(json!({
+            "info": {
+                "role": "assistant", "id": id, "sessionId": child.id,
+                "time": {"created": 1, "completed": 2}, "parentId": generation,
+                "mode": "build", "agent": "general", "path": {"cwd": "/tmp", "root": "/tmp"},
+                "cost": 0, "tokens": neoism_agent_core::TokenUsage::default(),
+                "modelId": "test", "providerId": "test", "finish": "stop"
+            },
+            "parts": [{"type": "text", "id": Id::ascending(IdKind::Part),
+                "sessionId": child.id, "messageId": id, "text": "finished"}]
+        })).unwrap();
+        state.inner.store.append_message(child.id.as_str(), &message).await.unwrap();
     }
 
     #[tokio::test]
@@ -2633,7 +2660,8 @@ mod tests {
         insert_session(&state, &parent).await;
         insert_session(&state, &child).await;
         hold_parent_run(&state, &parent).await;
-        let _generation = owe_completion(&state, child.id.as_str()).await;
+        let generation = owe_completion(&state, child.id.as_str()).await;
+        store_completed_reply(&state, &child, &generation).await;
         let mut events = state.subscribe();
 
         reconcile_parent_subtask_completions_for_child(&state, child.id.as_str()).await;
@@ -3126,6 +3154,7 @@ mod tests {
         mark_subtask_notify_on_idle(&state, child.id.as_str(), &generation)
             .await
             .unwrap();
+        store_completed_reply(&state, &child, &generation).await;
 
         resume_pending_subtask_completions(&state).await;
 

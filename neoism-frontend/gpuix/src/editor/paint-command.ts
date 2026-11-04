@@ -25,7 +25,7 @@ function commandEqual(a: PaintCommand, b: PaintCommand): boolean {
       && numbersEqual(a.radii, b.radii) && numbersEqual(a.clip, b.clip);
   }
   if(a.kind==="ring"&&b.kind==="ring"){
-    return a.depth===b.depth&&a.order===b.order&&a.outer.length===b.outer.length&&a.inner.length===b.inner.length
+    return a.depth===b.depth&&a.order===b.order&&numbersEqual(a.clip,b.clip)&&a.outer.length===b.outer.length&&a.inner.length===b.inner.length
       &&a.outer.every((point,index)=>numbersEqual(point,b.outer[index]))&&a.inner.every((point,index)=>numbersEqual(point,b.inner[index]));
   }
   if (a.kind === "polygon" && b.kind === "polygon") {

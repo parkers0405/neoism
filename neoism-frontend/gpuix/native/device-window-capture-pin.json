@@ -1,7 +1,7 @@
 {
   "zedRevision": "f77e5cfe9dad04288566f00c66ecf3c58d6f84b3",
   "basePatch": "native/patches/gpui-wayland-vsync.patch",
-  "basePatchSha256": "c1c7b10563396bc65649d0bdb75a35a1d392294ba74a6730331282f911aa58cf",
+  "basePatchSha256": "607b497e4a10ddaca445b716c2f48809afd1d0754727bb460168fe0b724b5db8",
   "patch": "native/patches/gpui-device-window-capture.patch",
   "patchSha256": "cec1f38e44670c46d213f845f1cf37a56a5d4e1e3c97953e3dbb2d9cf26a2668",
   "patchedFiles": {

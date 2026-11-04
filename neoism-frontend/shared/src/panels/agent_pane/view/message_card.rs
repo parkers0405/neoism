@@ -24,8 +24,8 @@ use super::tool_message::{
     TODO_ROW_HEIGHT,
 };
 use super::user_input::{
-    render_user_message, user_message_orb_identity, user_message_text_width,
-    wrap_user_message,
+    render_user_message, user_message_arrival_offset, user_message_orb_identity,
+    user_message_text_width, wrap_user_message, USER_BUBBLE_PADDING_Y, USER_BUBBLE_TAIL_HEIGHT,
 };
 use super::{ORDER_PANEL, ORDER_TEXT};
 use crate::primitives::ide_theme::IdeTheme;
@@ -59,9 +59,8 @@ pub trait AgentMessageCardMessage: AgentToolMessage + AgentCodeMessage {
     fn output_kind(&self) -> AgentMessageCardOutputKind;
     fn card_todos(&self) -> &[Self::CardTodo];
     fn images(&self) -> &[NeoismAgentImage];
-    /// Display name of who sent this (user) message — seeds the presence
-    /// orb + hover tooltip. `None` = the local user (see
-    /// [`AgentMessageCardPane::local_author_name`]).
+    /// Display name of who sent this user message, shown on bubble hover.
+    /// Missing metadata is not assumed to identify the local user.
     fn author(&self) -> Option<&str> {
         None
     }
@@ -73,10 +72,8 @@ where
     M: AgentMessageCardMessage,
 {
     fn selected_tool_group_child(&self, group_id: &str) -> Option<&str>;
-    /// The local peer's presence display name — the fallback orb seed for
-    /// a user message with no explicit `author` (so the local user's own
-    /// messages wear their own presence orb). `None` on hosts that don't
-    /// publish presence.
+    /// The local peer's presence display name, used to label an explicit
+    /// matching author as "You". `None` on hosts that don't publish presence.
     fn local_author_name(&self) -> Option<&str> {
         None
     }
@@ -645,10 +642,21 @@ where
             return h;
         }
         AgentMessageCardKind::User => {
-            // Choke point: resolve who sent this into (orb seed, tooltip
-            // label). The message's own `author` wins; absent, the pane's
-            // local presence name stands in so the local user's message
-            // wears their own orb.
+            // Only mutation-time births enter this session-scoped ledger. Merely
+            // painting/reopening history must never start an arrival animation.
+            let sample = pane.tool_motion_sample(AgentToolMessage::id(message));
+            let paint_y = y + user_message_arrival_offset(sample.opacity) * s;
+            if super::tool_message::motion::active_visible(
+                sample,
+                [x, paint_y, w, h],
+                viewport_clip,
+                occlusion_rects,
+            ) {
+                if let Some(state) = pane.tool_motion_state() {
+                    state.mark_visible(sample);
+                }
+            }
+            // Share the sender identity between the right-side profile and tooltip.
             let identity = user_message_orb_identity(
                 AgentMessageCardMessage::author(message),
                 AgentMessageCardPane::local_author_name(pane),
@@ -661,7 +669,7 @@ where
                 sugarloaf,
                 pane,
                 x,
-                y,
+                paint_y,
                 w,
                 h,
                 &display_text,
@@ -997,9 +1005,9 @@ where
             42.0 * s + markdown_h
         }
         AgentMessageCardKind::User => {
-            // Match `render_user_message`: full-width bubble with the text
-            // inset past the in-bubble orb column (pad 14 + orb 18 + gap 10 +
-            // right pad 14 = 56s), so the measured height equals what's drawn.
+            // The content-fit bubble uses this exact responsive maximum wrap
+            // column (80% on desktop, with a separate right-side profile lane).
+            // Fitting and paint-only arrival motion never change row height.
             let mut user_opts = body_opts;
             user_opts.font_size = 13.5 * s;
             let display_text = user_message_display_text(
@@ -1017,7 +1025,7 @@ where
             } else {
                 164.0 * s
             };
-            24.0 * s + image_h + lines.len().max(1) as f32 * 19.0 * s
+            (2.0 * USER_BUBBLE_PADDING_Y + USER_BUBBLE_TAIL_HEIGHT) * s + image_h + lines.len().max(1) as f32 * 19.0 * s
         }
         AgentMessageCardKind::Tool
             if message.output_kind() == AgentMessageCardOutputKind::Todos =>

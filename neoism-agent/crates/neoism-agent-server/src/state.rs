@@ -5431,7 +5431,7 @@ impl SessionStore {
         let rows = self
             .db
             .fetch_all(
-                "SELECT request_json, delivery FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' ORDER BY position ASC, created ASC",
+                "SELECT request_json, delivery FROM prompt_queue WHERE session_id = ? AND kind = 'prompt' ORDER BY position ASC, created ASC, id ASC",
                 vec![text(session_id)],
             )
             .await?;

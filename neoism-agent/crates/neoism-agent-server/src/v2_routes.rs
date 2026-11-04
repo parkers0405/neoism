@@ -1147,9 +1147,13 @@ fn bind_authenticated_author(
     // legacy-token guest into `local-operator` and every paired guest into a
     // device UUID in the transcript.
     //
-    // Direct hosted API callers do not cross that trusted workspace proxy, so
-    // they retain the stricter subject-bound author behavior.
-    if claims.workspace_id.is_some() && claims.tenant_id.starts_with("workspace:") {
+    // Desktop catalog/session requests also cross the authenticated daemon,
+    // using its system-workflow capability to reach legacy conversations. That
+    // capability is an authorization principal, not the human prompt's author.
+    // Direct hosted API callers retain the stricter subject-bound behavior.
+    if claims.is_system_workflow()
+        || (claims.workspace_id.is_some() && claims.tenant_id.starts_with("workspace:"))
+    {
         request.author = request
             .author
             .take()
@@ -1166,6 +1170,74 @@ fn bind_authenticated_author(
 #[cfg(test)]
 mod authenticated_author_tests {
     use super::*;
+
+    #[test]
+    fn system_workflow_preserves_participant_author_through_prompt_conversion() {
+        let claims = crate::caller::CallerClaims {
+            subject: neoism_agent_service_api::daemon_credential::SYSTEM_WORKFLOW_SUBJECT.into(),
+            workspace_id: None,
+            tenant_id: "local".into(),
+            directory_prefixes: Vec::new(),
+            hosted: false,
+            max_sessions: None,
+            max_artifacts: None,
+            max_artifact_bytes: None,
+            artifact_retention_days: None,
+            requests_per_minute: None,
+            max_in_flight: None,
+            resolved: None,
+            worker: None,
+        };
+        assert!(claims.is_system_workflow());
+        // Do not substitute "You": a participant label must survive for remote
+        // viewers too. Missing labels still identify the genuine system actor.
+        for (supplied, expected) in [
+            (
+                Some("  Local person  ".to_string()),
+                "Local person".to_string(),
+            ),
+            (
+                Some("Remote collaborator".to_string()),
+                "Remote collaborator".to_string(),
+            ),
+            (Some("😀".repeat(40)), "😀".repeat(32)),
+            (None, claims.subject.clone()),
+            (Some("  ".to_string()), claims.subject.clone()),
+        ] {
+            let mut request: V2PromptRequest = serde_json::from_value(serde_json::json!({
+                "prompt": "hello", "author": supplied
+            }))
+            .unwrap();
+            bind_authenticated_author(&mut request, &claims);
+            assert_eq!(
+                request.into_prompt_request().unwrap().author,
+                Some(expected)
+            );
+        }
+        // System notices are classified by their marker, not by substituting a
+        // participant name. Author binding must leave that marker untouched.
+        let marker = "runtime notification: background subagent completion.";
+        let mut notice: V2PromptRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "task finished", "system": marker
+        }))
+        .unwrap();
+        bind_authenticated_author(&mut notice, &claims);
+        let notice = notice.into_prompt_request().unwrap();
+        assert_eq!(notice.author.as_deref(), Some(claims.subject.as_str()));
+        assert_eq!(notice.system.as_deref(), Some(marker));
+        assert!(crate::message_model::is_runtime_system_notification(
+            notice.system.as_deref().unwrap()
+        ));
+        // Merely asserting the reserved subject is not a daemon capability.
+        let mut hosted = claims;
+        hosted.hosted = true;
+        let mut request: V2PromptRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello", "author": "Forged person"
+        }))
+        .unwrap();
+        bind_authenticated_author(&mut request, &hosted);
+        assert_eq!(request.author, Some(hosted.subject));
+    }
 
     #[test]
     fn workspace_proxy_preserves_presence_label_separately_from_actor() {

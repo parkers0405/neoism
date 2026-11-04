@@ -11,7 +11,7 @@ import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-
 import { invalidateNativeFocus } from "../native-focus";
 import {profileStart,profileEnd} from "../profiling";
 import type {AgentFamilyRow} from "./family";
-import { readingScrollY, wheelCellPixels } from "../ui/wheel";
+import { horizontalScrollEvent, readingScrollY, wheelCellPixels } from "../ui/wheel";
 import {localPresenceIdentity} from "./local-presence";
 import {handleApplicationShortcut} from "../commands/application-shortcuts";
 import {paintedChromeBounds} from "../ui/chrome-target-bounds";
@@ -29,7 +29,7 @@ const positions=new WeakMap<WorkspaceModel,Map<string,{sessionId:string;offset:n
 const engineLimit=8;
 function pruneEngines(model:WorkspaceModel){
  const entries=engines.get(model);if(!entries)return;
- const roots=new Set(model.state.surfaces.filter(s=>s.kind==="agent"&&s.sessionId).map(s=>s.agentRootSessionId||model.agentFamily(s.sessionId!).root));
+ const roots=new Set(model.state.surfaces.filter(s=>s.kind==="agent").flatMap(s=>s.sessionId?[s.agentRootSessionId||model.agentFamily(s.sessionId).root]:model.state.pendingAgentSessions[s.id]?[model.state.pendingAgentSessions[s.id]]:[]));
  for(const root of positions.get(model)?.keys()||[])if(!roots.has(root))positions.get(model)?.delete(root);
  for(const[root,engine]of entries)if(!roots.has(root)&&!engine.dirty.size){engine.dispose();positions.get(model)?.delete(root);}
  for(const[root,engine]of [...entries].sort((a,b)=>a[1].touched-b[1].touched)){
@@ -47,15 +47,26 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   }
   const existing = byModel.get(rootSessionId); if (existing) {existing.touched=performance.now();return existing;}
   const { id } = coreCall<{ id: number }>("agenttimeline.new", { compactPaint: true, canvasPaint: true, chunkedPaint: true, sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
-    fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight,localName:localPresenceIdentity(config).displayName });
+    fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight,reducedMotion:config.reducedMotion,localName:localPresenceIdentity(config).displayName });
   const family=model.agentFamily(sessionId);
   coreCall("agenttimeline.family",{id,deferFrame:true,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});
   const dirty = new Set<() => void>();
-  const event = (message: unknown, historyKind?: "head" | "older") => {
+  const event = (message: unknown, historyKind?: "head" | "older" | "replace") => {
+    const adoption=(message as {LocalSessionAdopted?:{from:string;to:string}})?.LocalSessionAdopted;
+    if(adoption){
+      if(adoption.from===rootSessionId){
+        coreCall("agenttimeline.adopt",{id,from:adoption.from,to:adoption.to});
+        const engine=byModel!.get(rootSessionId);byModel!.delete(rootSessionId);rootSessionId=adoption.to;
+        if(engine)byModel!.set(rootSessionId,engine);
+      }
+      return;
+    }
     // An evicted open family is still a known root. Do not broadcast its
     // transcript into every remaining engine just because it has no cache.
     const knownRoots={has:(root:string)=>byModel!.has(root)||model.state.surfaces.some(surface=>surface.kind==="agent"&&!!surface.sessionId&&(surface.agentRootSessionId||model.agentFamily(surface.sessionId).root)===root)};
     if(!timelineReceivesEvent(rootSessionId,model.state.ui,knownRoots,message))return;
+    const echo=(message as {MessageUpdated?:{session_id:string;local_echo?:boolean;message:{id:string}}})?.MessageUpdated;
+    if(echo?.local_echo&&model.agentFamily(echo.session_id).root===rootSessionId)model.consumePromptArrival(echo.message.id);
     try { if(coreCall<{needsPaint?:boolean}>("agenttimeline.event", { id, message, historyKind }).needsPaint===false)return; } catch (error) { model.report(error); return; }
     for (const listener of dirty) listener();
   };
@@ -63,6 +74,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   for(const selected of new Set([rootSessionId,sessionId,...family.roster.map(row=>row.id)])){
     const history=model.state.history[selected];if(history?.length)event({HistoryChunk:{session_id:selected,messages:history,next_cursor:model.historyCursors.get(selected)??null}},"head");
     const streaming=model.state.streaming[selected];if(streaming&&streaming!=="Idle")event({StreamingState:{session_id:selected,state:streaming,label:null}});
+    for(const message of model.takePromptArrivals(selected))event({MessageUpdated:{session_id:selected,message,local_echo:true}});
   }
   const unsubscribe = model.subscribeAgentEvents(event);
   const engine: Engine = { touched:performance.now(),id, dirty, dispose: () => { unsubscribe(); byModel!.delete(rootSessionId); coreCall("agenttimeline.dispose", { id }); } };
@@ -94,7 +106,6 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   /** Composer top: scroll metrics and sticky controls stop here; body paint continues behind the floating card. */
   viewport?:{width:number;height:number};pinImage?:(source:number,raster:CanvasRaster)=>void;onPreview?:(image:ImagePreview)=>void;provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void;onFocus?:()=>void }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
-  const provisional=!!props.provisional;
   const localName=localPresenceIdentity(config).displayName;
   const engine = untrack(() => engineFor(props.model, props.sessionId, config,props.rootSessionId||props.sessionId));
   const [commands, setCommands] = createSignal<readonly PaintCommand[]>([]);
@@ -107,7 +118,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   const apply = (next: TimelineFrame) => {
     if(next.animating)profileEnd(`agent.animation.${next.reason||"scroll"}`,profileStart());
     batch(() => {setCommands(next.commands);setCanvas(next.canvas);setPointer(!!next.pointer);setSelecting(!!next.selecting);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
-    if(!provisional)for(const message of next.send||[])props.model.sendAgent(message as never);
+    if(!props.provisional)for(const message of next.send||[])props.model.sendAgent(message as never);
     if(next.preview){
       const match=/^data:image\/[^;,]+;base64,(.*)$/s.exec(next.preview.url);
       if(match)props.onPreview?.({name:next.preview.name,bytes:Buffer.from(match[1],"base64")});
@@ -135,15 +146,15 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   const flushFamily=()=>{if(pendingFamily&&bounds.width>0&&bounds.height>0){const family=pendingFamily;pendingFamily=undefined;coreCall("agenttimeline.family",{id:engine.id,...family,deferFrame:true});}};
   const layout = (contentBottom = props.contentBottom ?? bounds.height) => {
     if (bounds.width <= 0 || bounds.height <= 0) return;
-    const signature = `${bounds.width}:${bounds.height}:${contentBottom}`;
+    const signature = `${bounds.width}:${bounds.height}:${contentBottom}:${config.reducedMotion}`;
     if (signature === layoutSignature) return;
     layoutSignature = signature;
-    batch(()=>{coreCall("agenttimeline.layout",{id:engine.id,width:bounds.width,height:bounds.height,contentBottom,scale:s,theme:config.themeName,localName,deferFrame:true});call("frame");});
+    batch(()=>{coreCall("agenttimeline.layout",{id:engine.id,width:bounds.width,height:bounds.height,contentBottom,scale:s,theme:config.themeName,reducedMotion:config.reducedMotion,localName,deferFrame:true});call("frame");});
   };
   // One paint per display frame however many events or animations arrive.
   const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame"); }, startedAt); };
   engine.dirty.add(schedule);
-  onCleanup(() => { disposed = true; engine.dirty.delete(schedule); animation.dispose(); if(provisional)engine.dispose();else pruneEngines(props.model); });
+  onCleanup(() => { disposed = true; engine.dirty.delete(schedule); animation.dispose(); pruneEngines(props.model); });
   onMount(() => schedule());
   let familySignature=JSON.stringify(pendingFamily),selectedSession=props.sessionId;
   createEffect(()=>{const family=familyArgs();const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>{pendingFamily=family;if(selectedSession!==props.sessionId){selectedSession=props.sessionId;pointerPending=undefined;call("frame");}else schedule();});}});
@@ -194,7 +205,8 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
       if (resized) layout();
     }}
     onScroll={(event) => {
-      try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: event.deltaX || 0, deltaY: readingScrollY(event), precise: !!event.precise, ...(typeof event.x==="number"&&typeof event.y==="number"?local(event):{}), shift:!!event.modifiers?.shift, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
+      const wheel = horizontalScrollEvent(event);
+      try { coreCall("agenttimeline.scroll", { id: engine.id, deferFrame: true, deltaX: wheel.deltaX || 0, deltaY: readingScrollY(wheel), precise: !!event.precise, ...(typeof event.x==="number"&&typeof event.y==="number"?local(event):{}), shift:!!event.modifiers?.shift, lineHeight: wheelCellPixels(event, config.fontSize) }); } catch (error) { props.report(error); }
       schedule();
     }}
     onMouseDown={(event) => { const point=local(event);if (event.button === 0) call("pointer", { kind: "down", ...point }); }}

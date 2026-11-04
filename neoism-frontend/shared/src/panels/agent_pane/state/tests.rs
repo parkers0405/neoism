@@ -1250,6 +1250,85 @@ fn terminal_runtime_snapshot_settles_shared_task_footer_and_viewed_child() {
 }
 
 #[test]
+fn terminal_snapshot_settles_parked_child_without_stopping_live_family() {
+    for terminal in ["completed", "stopped"] {
+        let mut pane = NeoismAgentPane::default();
+        pane.session_id = Some("root".into());
+        pane.side_panel.ensure_subagent_main_entry("root");
+        let snapshot = |pane: &mut NeoismAgentPane, revision, status: &str| {
+            pane.apply_runtime_lifecycle_snapshot(
+                Some(ExecutionActivityState {
+                    execution_id: "execution-a".into(),
+                    root_session_id: "root".into(),
+                    revision,
+                    finished: false,
+                    ..Default::default()
+                }),
+                "root".into(),
+                revision,
+                [
+                    ("child".into(), status.into(), Some(10)),
+                    ("sibling".into(), "outstanding".into(), Some(20)),
+                ],
+            )
+        };
+        assert!(snapshot(&mut pane, 2, "outstanding"));
+        pane.switch_session("child".into());
+        pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+        pane.switch_session("root".into());
+        pane.note_streaming(NeoismAgentStreamingState::Generating, None);
+        pane.cache_note_streaming("sibling", NeoismAgentStreamingState::Thinking, None);
+
+        // An old completion must not stop a newer running child.
+        assert!(!snapshot(&mut pane, 1, terminal));
+        assert!(pane.session_cache["child"].runtime.is_streaming());
+        // No individual SubagentUpdate/SessionIdle was seen while away.
+        assert!(snapshot(&mut pane, 3, terminal));
+        assert!(!pane.session_cache["child"].runtime.is_streaming());
+        assert!(pane.session_cache["sibling"].runtime.is_streaming());
+        assert_eq!(pane.streaming_label(), "Crafting");
+        assert_eq!(pane.active_subagent_count(), 1);
+
+        pane.switch_session("child".into());
+        assert!(!pane.is_streaming());
+        assert_eq!(pane.streaming_label(), "");
+        // Completion does not permanently suppress a genuine continuation.
+        assert!(snapshot(&mut pane, 4, "outstanding"));
+        pane.note_remote_streaming(NeoismAgentStreamingState::Generating, None);
+        assert_eq!(pane.streaming_label(), "Crafting");
+    }
+}
+
+#[test]
+fn undo_redo_history_replacement_clears_visible_and_parked_transcripts() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("chat".into());
+    let row = |id: &str| {
+        let mut message = NeoismAgentMessage::user(id);
+        message.id = id.into();
+        message
+    };
+    pane.apply_history(vec![row("a"), row("b")]);
+    pane.messages[0].text = "longer text from before undo".into();
+    pane.replace_session_history("chat", vec![row("a")], None);
+    assert_eq!(pane.messages.len(), 1);
+    assert_eq!(pane.messages[0].id, "a");
+    assert_eq!(pane.messages[0].text, "a");
+    pane.replace_session_history("chat", vec![], None);
+    assert!(pane.messages.is_empty());
+    pane.replace_session_history("chat", vec![row("a"), row("b")], Some("older".into()));
+    assert_eq!(pane.messages.len(), 2);
+    assert!(pane.timeline_history.has_older);
+    pane.switch_session("other".into());
+    pane.apply_history(vec![row("untouched")]);
+    pane.replace_session_history("chat", vec![], None);
+    assert_eq!(pane.messages[0].id, "untouched");
+    pane.switch_session("chat".into());
+    assert!(pane.messages.is_empty());
+    assert!(!pane.timeline_history.has_older);
+}
+
+#[test]
 fn final_subagent_completion_clears_stale_crafting_only_after_last_child() {
     let mut pane = NeoismAgentPane::default();
     pane.session_id = Some("root".to_string());

@@ -199,9 +199,10 @@ pub fn system_workflow_allows(method: &str, path: &str) -> bool {
     }
     match parts.as_slice() {
         ["v2", "health" | "meta" | "capabilities" | "providers" | "agents"
-        | "commands" | "tools" | "session-projects" | "directories" | "events"] => {
+        | "commands" | "skills" | "tools" | "session-projects" | "directories" | "events"] => {
             method == "GET"
         }
+        ["v2", "config", "defaults"] => method == "GET",
         ["v2", "providers", "configured"] => method == "GET",
         ["v2", "session-catalog", "events"] => method == "GET",
         ["v2", "sessions"] => matches!(method, "GET" | "POST"),
@@ -244,6 +245,20 @@ pub fn system_workflow_allows(method: &str, path: &str) -> bool {
         ["v2", "artifacts"] => matches!(method, "GET" | "POST"),
         ["v2", "artifacts", id] if workflow_id(id) => matches!(method, "GET" | "DELETE"),
         ["v2", "artifacts", id, "content"] if workflow_id(id) => method == "GET",
+        // Desktop directory/session menus follow /cd and reopened conversations.
+        // Keep these concrete operations, not a grant for arbitrary plugins.
+        ["v2", "plugins", "dev.neoism.goals", id] if workflow_id(id) => {
+            matches!(method, "GET" | "POST" | "DELETE")
+        }
+        ["v2", "plugins", "dev.neoism.subagents", "sessions", id, "tasks"]
+            if workflow_id(id) => method == "GET",
+        ["v2", "plugins", "dev.neoism.mcp", "catalog"] => method == "GET",
+        ["v2", "plugins", "dev.neoism.mcp", _, action] => match *action {
+            "tools" | "resources" | "prompts" => method == "GET",
+            "connect" | "disconnect" | "auth" => method == "POST",
+            "config" => method == "PATCH",
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -306,6 +321,9 @@ mod tests {
             "/v2/providers/configured",
             "/v2/agents",
             "/v2/commands",
+            "/v2/skills",
+            "/v2/config/defaults",
+            "/v2/plugins/dev.neoism.mcp/catalog",
             "/v2/sessions/ses_test/messages",
         ] {
             assert!(system_workflow_allows("GET", path), "{path}");
@@ -313,18 +331,53 @@ mod tests {
         }
         for path in [
             "/v2/config",
-            "/v2/config/defaults",
             "/v2/management/agents",
             "/v2/hosting/associate",
             "/v2/providers/openai/auth",
             "/v2/providers/openai/oauth/authorize",
             "/v2/providers/openai/connections",
-            "/v2/plugins/dev.neoism.mcp/catalog",
             "/v2/sessions/../config",
             "/v2/sessions/%2e%2e",
             "/v2/sessions/import",
         ] {
             for method in ["GET", "POST", "PUT", "DELETE"] {
+                assert!(!system_workflow_allows(method, path), "{method} {path}");
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_directory_menus_have_exact_method_and_route_grants() {
+        for (path, allowed) in [
+            ("/v2/config/defaults", &["GET"][..]),
+            ("/v2/skills", &["GET"][..]),
+            ("/v2/plugins/dev.neoism.mcp/catalog", &["GET"][..]),
+            ("/v2/plugins/dev.neoism.mcp/browser.tools/tools", &["GET"][..]),
+            ("/v2/plugins/dev.neoism.mcp/local/resources", &["GET"][..]),
+            ("/v2/plugins/dev.neoism.mcp/local/prompts", &["GET"][..]),
+            ("/v2/plugins/dev.neoism.mcp/local/connect", &["POST"][..]),
+            ("/v2/plugins/dev.neoism.mcp/local/disconnect", &["POST"][..]),
+            ("/v2/plugins/dev.neoism.mcp/local/auth", &["POST"][..]),
+            ("/v2/plugins/dev.neoism.mcp/local/config", &["PATCH"][..]),
+            ("/v2/plugins/dev.neoism.goals/ses_test", &["GET", "POST", "DELETE"][..]),
+            ("/v2/plugins/dev.neoism.subagents/sessions/ses_test/tasks", &["GET"][..]),
+        ] {
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] {
+                assert_eq!(system_workflow_allows(method, path), allowed.contains(&method), "{method} {path}");
+            }
+        }
+        for path in [
+            "/v2/config", "/v2/skills/install", "/v2/plugins/dev.neoism.mcp",
+            "/v2/plugins/dev.neoism.mcp/local/tools/execute",
+            "/v2/plugins/dev.neoism.mcp/local/config/extra",
+            "/v2/plugins/dev.neoism.mcp/../config",
+            "/v2/plugins/dev.neoism.mcp/%2e%2e/config",
+            "/v2/plugins/unknown/ses_test",
+            "/v2/plugins/dev.neoism.goals/ses_test/research",
+            "/v2/plugins/dev.neoism.subagents/sessions/ses_test/tasks/stop",
+            "/v2/providers/openai/connections", "/v2/providers/openai/oauth/authorize",
+        ] {
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
                 assert!(!system_workflow_allows(method, path), "{method} {path}");
             }
         }

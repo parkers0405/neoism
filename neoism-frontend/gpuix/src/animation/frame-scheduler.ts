@@ -6,9 +6,10 @@ export function animationDelay(startedAt: number, intervalMs: number, now = perf
   return Math.max(0, intervalMs - Math.max(0, now - startedAt));
 }
 
-export type Schedule = (callback: () => void, delay: number, kind?: "frame" | "deadline") => () => void;
-const scheduleTimeout: Schedule = (callback, delay) => {
-  const timer = setTimeout(callback, delay);
+export type ScheduleKind = "frame" | "deadline" | "yield-frame";
+export type Schedule = (callback: () => void, delay: number, kind?: ScheduleKind) => () => void;
+const scheduleTimeout: Schedule = (callback, delay, kind) => {
+  const timer = setTimeout(callback, kind==="yield-frame"?0:delay);
   return () => clearTimeout(timer);
 };
 let presentationSchedule: Schedule | undefined;
@@ -23,12 +24,12 @@ export class AnimationFrameScheduler {
   private disposed = false;
   constructor(readonly intervalMs: number, private readonly now = () => performance.now(), private readonly schedule: Schedule = scheduleFrame) {}
   get pending() { return this.cancelTimer !== undefined; }
-  request(callback: () => void, startedAt = this.now(), intervalMs = this.intervalMs) {
+  request(callback: () => void, startedAt = this.now(), intervalMs = this.intervalMs, kind?: ScheduleKind) {
     if (this.disposed || this.pending) return;
     this.cancelTimer = this.schedule(() => {
       this.cancelTimer = undefined;
       if (!this.disposed) callback();
-    }, animationDelay(startedAt, intervalMs, this.now()), intervalMs > this.intervalMs ? "deadline" : "frame");
+    }, animationDelay(startedAt, intervalMs, this.now()), kind ?? (intervalMs > this.intervalMs ? "deadline" : "frame"));
   }
   cancel() { this.cancelTimer?.(); this.cancelTimer = undefined; }
   dispose() { this.disposed = true; this.cancel(); }

@@ -1,27 +1,6 @@
-// File-mode helpers: SearchService fallback for `rg --files`,
-// exact-match scoring + sorting.
-
-use std::path::Path;
+// File-mode helpers: exact-match scoring + sorting.
 
 use super::types::{FileResult, Result_};
-use crate::services::SearchService;
-
-/// Fallback wrapper around `SearchService::collect_files` (which on
-/// native runs `rg --files`). Returns relative paths when the service
-/// cannot return them.
-pub(super) fn collect_files(search: &dyn SearchService, cwd: &Path) -> Vec<String> {
-    match search.collect_files(cwd) {
-        Ok(paths) => paths,
-        Err(error) => {
-            tracing::warn!(
-                target: "neoism::finder",
-                ?error,
-                "SearchService::collect_files failed"
-            );
-            Vec::new()
-        }
-    }
-}
 
 pub(super) fn exact_file_results<'a, I>(query: &str, paths: I) -> Vec<(i32, Result_)>
 where

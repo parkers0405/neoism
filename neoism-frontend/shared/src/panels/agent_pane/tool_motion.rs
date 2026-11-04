@@ -88,6 +88,11 @@ impl ToolMotionState {
             self.session = session.map(str::to_owned);
         }
     }
+    /// A newly created session replaces its local provisional identity without
+    /// restarting any arrival clocks. This is not navigation to another chat.
+    pub fn adopt_scope(&mut self, session: &str) {
+        self.session = Some(session.to_owned());
+    }
     pub fn begin_frame(&mut self) {
         self.visible_until = None;
         self.prune(Instant::now());

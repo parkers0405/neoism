@@ -11,6 +11,71 @@ use crate::panels::agent_pane::selection_model::{
 };
 use crate::primitives::draw_text_with_occlusion;
 
+pub(super) struct BranchConnectorGeometry {
+    pub straight: [[f32; 4]; 2],
+    pub center: [f32; 2],
+    pub radius: f32,
+    pub stroke: f32,
+    pub curve_bounds: [f32; 4],
+}
+
+impl BranchConnectorGeometry {
+    pub fn paint(
+        &self,
+        painter: &mut dyn crate::primitives::paint::Paint,
+        color: [f32; 4],
+        clip: [f32; 4],
+        occlusions: &[[f32; 4]],
+    ) {
+        for fragment in crate::primitives::visible_rect_fragments(self.curve_bounds, clip, occlusions) {
+            painter.ring_clipped(
+                self.center, self.radius, self.stroke, color,
+                DEPTH, super::ORDER_PANEL + 2, fragment,
+            );
+        }
+        for rect in self.straight {
+            for [x, y, w, h] in crate::primitives::visible_rect_fragments(rect, clip, occlusions) {
+                painter.quad(None, x, y, w, h, color, [0.0; 4], DEPTH, super::ORDER_PANEL + 2);
+            }
+        }
+    }
+}
+
+/// Shared sidebar/timeline strokes and an analytic bottom-left quarter-ring.
+pub(super) fn branch_connector_geometry(
+    title_x: f32,
+    elbow_y: f32,
+    top: f32,
+    continues: bool,
+    scale: f32,
+    device_scale: f32,
+) -> BranchConnectorGeometry {
+    use crate::primitives::snap_to_device_px;
+    let device_scale = device_scale.max(f32::EPSILON);
+    let stroke = (2.0 * scale * device_scale).round().max(2.0) / device_scale;
+    let radius = snap_to_device_px(5.0 * scale, device_scale).max(stroke);
+    let left = snap_to_device_px(title_x - 19.0 * scale - stroke * 0.5, device_scale);
+    let elbow_y = snap_to_device_px(elbow_y, device_scale);
+    let center_x = left + stroke * 0.5 + radius;
+    let center_y = elbow_y - radius;
+    let top = snap_to_device_px(top, device_scale);
+    let bottom = if continues { elbow_y + stroke * 0.5 } else { center_y };
+    let straight = [
+        [left, top, stroke, (bottom - top).max(0.0)],
+        [center_x, elbow_y - stroke * 0.5, (title_x - 6.0 * scale - center_x).max(0.0), stroke],
+    ];
+    // Keep the AA fringe while clipping at the two tangent axes. The full
+    // circle's center/radius stay fixed under scrolling and overlay cutouts.
+    let padded_outer = radius + stroke * 0.5 + 0.5 / device_scale;
+    BranchConnectorGeometry {
+        straight,
+        center: [center_x, center_y],
+        radius,
+        stroke,
+        curve_bounds: [center_x - padded_outer, center_y, padded_outer, padded_outer],
+    }
+}
+
 /// Shared running indicator geometry: eight stepped stops, four white squares.
 pub(crate) use crate::render_policy::{running_square_position, RUNNING_SQUARE_ALPHAS};
 
@@ -43,9 +108,6 @@ struct TextMeasureStyle {
     font_id: Option<usize>,
     scale_factor_bits: u32,
     font_generation: u64,
-    // Inline Markdown historically accumulates f32 advances from screen x.
-    // Keep that exact rounding, and invalidate those entries when x changes.
-    inline_origin_bits: u32,
 }
 
 struct TextMeasureCache {
@@ -228,7 +290,6 @@ fn text_measure_style(opts: &DrawOpts, scale_factor: f32) -> TextMeasureStyle {
         font_id: opts.font_id,
         scale_factor_bits: scale_factor.to_bits(),
         font_generation: 0,
-        inline_origin_bits: 0,
     }
 }
 
@@ -397,7 +458,7 @@ mod measure_tests {
         assert!(cache.get(&query, &changed).is_none());
         assert!(cache.get("different source", &style).is_none());
         changed = style;
-        changed.inline_origin_bits = 17.5f32.to_bits();
+        changed.font_size_bits = 17.5f32.to_bits();
         assert!(cache.get(&query, &changed).is_none());
         // Rendered text is not source identity: different Markdown styles can
         // paint the same text with different exact caret advances.
@@ -435,8 +496,8 @@ mod measure_tests {
         let geometry = tiny_selection_geometry();
         let source = format!("[x]({})", "u".repeat(super::CARET_STOP_CACHE_BYTES_LIMIT));
         // Only two stops, but raw Markdown (not its visible label) is charged.
-        for origin in 0..3 {
-            style.inline_origin_bits = (origin as f32).to_bits();
+        for generation in 0..3 {
+            style.font_generation = generation;
             cache.insert(style, &source, geometry.clone());
             assert!(cache.get(&source, &style).is_none());
             assert!(cache.values.is_empty());
@@ -456,7 +517,7 @@ mod measure_tests {
     }
 
     #[test]
-    fn caret_cache_bounds_origin_copies_and_shares_fifo_source() {
+    fn caret_cache_bounds_style_copies_and_shares_fifo_source() {
         use std::sync::Arc;
         let mut cache = super::CaretStopCache::new();
         let mut style = super::text_measure_style(&DrawOpts::default(), 1.0);
@@ -465,10 +526,10 @@ mod measure_tests {
             "[x]({})",
             "u".repeat(super::CARET_STOP_CACHE_BYTES_LIMIT / 2)
         );
-        for origin in 0..3 {
-            style.inline_origin_bits = (origin as f32).to_bits();
+        for generation in 0..3 {
+            style.font_generation = generation;
             cache.insert(style, &source, geometry.clone());
-            // Two independently keyed origins would exceed the byte budget.
+            // Two independently keyed styles would exceed the byte budget.
             assert_eq!(cache.order.len(), 1);
             assert_eq!(cache.values.len(), 1);
             assert_eq!(
@@ -501,7 +562,7 @@ mod measure_tests {
         }
         let old_style = style;
         let plain = tiny_selection_geometry();
-        style.inline_origin_bits = 99.0f32.to_bits();
+        style.font_generation = 99;
         cache.insert(style, "x", plain.clone());
         let (source, _) = cache
             .values
@@ -591,12 +652,10 @@ pub(super) fn cached_inline_selection_geometry(
     sugarloaf: &mut dyn crate::primitives::paint::Paint,
     source: &str,
     opts: &DrawOpts,
-    origin_x: f32,
     build: impl FnOnce(&mut dyn crate::primitives::paint::Paint) -> SelectionGeometry,
 ) -> SelectionGeometry {
     let mut style = text_measure_style(opts, sugarloaf.scale_factor());
     style.font_generation = sugarloaf.text_mut().font_cache_generation();
-    style.inline_origin_bits = origin_x.to_bits();
     if let Some(hit) =
         INLINE_SELECTION_CACHE.with(|cache| cache.borrow().get(source, &style))
     {

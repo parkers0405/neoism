@@ -138,6 +138,7 @@ struct HostFinder {
     theme: String,
     cursor: TrailCursor,
     cursor_frame: Instant,
+    rows_dirty: bool,
 }
 /// Preview bytes are installed by the owning daemon's Files capability. The
 /// shared renderer must never read a similarly named file on this UI host.
@@ -150,11 +151,13 @@ impl FilesService for RemotePreview {
 }
 impl HostFinder {
     fn frame(&mut self) -> Value {
-        self.finder.tick(&self.search);
-        let mut frame = self.finder.host_frame(self.width, self.height);
+        self.rows_dirty |= self.finder.tick(&self.search);
+        let mut frame = self.finder.host_frame_with_rows(self.width, self.height, self.rows_dirty);
+        self.rows_dirty = false;
         self.paint.begin_frame();
-        self.finder.render(&mut self.paint,(self.width,self.height,1.0),&IdeTheme::by_name(&self.theme),&self.search,&RemotePreview);
-        frame["commands"] = json!(self.paint.commands());
+        let (commands, caret) = self.finder.host_render(&mut self.paint,(self.width,self.height,1.0),&IdeTheme::by_name(&self.theme),&self.search,&RemotePreview);
+        frame["commands"] = commands;
+        frame["inputCaret"] = caret;
         if let Some(rect)=self.finder.selected_cursor_rect(){
             let was_moving=self.cursor.is_animating();let now=Instant::now();
             self.cursor.set_cursor_shape(neoism_terminal_types::ansi::CursorShape::Block);
@@ -257,6 +260,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 theme: v["theme"].as_str().unwrap_or("pastel_dark").into(),
                 cursor: TrailCursor::new(),
                 cursor_frame: Instant::now(),
+                rows_dirty: true,
             };
             let frame = host.frame();
             store.finders.insert(id, host);
@@ -279,12 +283,13 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 host.finder.set_query(text(v, "query").into());
             }
             "finder.cycle" => {
+                host.rows_dirty = true;
                 host.search.clear_pending();
                 host.finder.cycle_search_mode();
             }
             "finder.move" => {
                 let delta = v["delta"].as_i64().unwrap_or(1);
-                let visible = host.finder.host_frame(host.width, host.height)
+                let visible = host.finder.host_frame_with_rows(host.width, host.height, false)
                     ["visibleRows"]
                     .as_u64()
                     .unwrap_or(8) as usize;
@@ -310,6 +315,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             "finder.reply" => {
                 let request = v["requestId"].as_u64().unwrap_or(0);
                 if host.search.reply(request, &v["message"]) {
+                    host.rows_dirty = true;
                     host.finder.handle_service_reply(
                         request,
                         &v["message"],
@@ -322,6 +328,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 v["text"].as_str().map(ToString::to_string),
             ),
             "finder.symbols" => {
+                host.rows_dirty = true;
                 host.finder.set_symbol_rows(symbols(v));
                 host.finder
                     .set_symbols_loading(v["loading"].as_bool().unwrap_or(false));
@@ -330,4 +337,84 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
         }
         Ok(host.frame())
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(op: &str, id: &Value, args: Value) -> Value {
+        let mut args = args;
+        args["op"] = json!(format!("finder.{op}"));
+        args["id"] = id.clone();
+        dispatch(&args).unwrap().unwrap()
+    }
+
+    #[test]
+    fn compact_frames_omit_rows_but_result_mutations_publish_them() {
+        let rows: Vec<_> = (0..500).map(|n| json!({"kind":"Function","name":format!("symbol_{n}"),"line":n+1,"column":0})).collect();
+        let new = call("new", &Value::Null, json!({"mode":"symbols","symbols":rows}));
+        let id = &new["id"];
+        assert_eq!(new["frame"]["rows"].as_array().unwrap().len(), 500);
+        for (op, args) in [
+            ("frame", json!({})), ("move", json!({"delta":20})),
+            ("select", json!({"index":30})), ("layout", json!({"width":1000,"height":700})),
+            ("scroll", json!({"delta":40})), ("preview", json!({"path":"","text":"preview"})),
+        ] {
+            let frame = call(op, id, args);
+            assert!(frame.get("rows").is_none(), "{op} serialized unchanged rows");
+            assert!(frame["nextTickMs"].is_null());
+            assert!(frame["inputCaret"].is_object(), "missing measured input caret on {op}");
+            assert!(!frame["commands"].as_array().unwrap().contains(&frame["inputCaret"]));
+        }
+        let cleared = call("symbols", id, json!({"symbols":[],"loading":true}));
+        assert_eq!(cleared["rows"], json!([]));
+        assert!(call("frame", id, json!({})).get("rows").is_none());
+        assert!(call("query", id, json!({"query":"missing"}))["rows"].is_array());
+        assert!(call("cycle", id, json!({}))["rows"].is_array());
+        call("dispose", id, json!({}));
+    }
+
+    #[test]
+    fn compact_preview_target_does_not_depend_on_rows_serialization() {
+        let mut finder = Finder::new();
+        finder.open_references(PathBuf::from("/project"), vec![ReferenceRow {
+            path: "a.rs".into(), line: 12, column: 3, text: "reference".into(),
+        }]);
+        finder.host_set_preview("a.rs".into(), Some("fn test() {}".into()));
+        let full = finder.host_frame(1200.0, 800.0);
+        let compact = finder.host_frame_with_rows(1200.0, 800.0, false);
+        assert!(compact.get("rows").is_none());
+        assert_eq!(full["target"], compact["target"]);
+        assert_eq!(full["previewPath"], compact["previewPath"]);
+        assert_eq!(full["previewLoaded"], compact["previewLoaded"]);
+    }
+
+    #[test]
+    fn replies_publish_rows_and_stale_replies_do_not() {
+        let new = call("new", &Value::Null, json!({"mode":"files"}));
+        let id = &new["id"];
+        assert_eq!(new["frame"]["requests"].as_array().unwrap().len(), 1);
+        let request = new["frame"]["requests"].as_array().unwrap().iter()
+            .find(|request| request["message"].get("SearchFiles").is_some()).unwrap();
+        let request_id = request["id"].clone();
+        let reply = json!({"requestId":request_id,"message":{"SearchFilesResult":{"req_id":request_id,"hits":[{"score":10,"path":"a.rs"}]}}});
+        let frame = call("reply", id, reply.clone());
+        assert_eq!(frame["rows"][0]["path"], "a.rs");
+        assert_eq!(frame["loading"], false);
+        assert!(call("reply", id, reply).get("rows").is_none());
+        let frame = call("query", id, json!({"query":"next"}));
+        assert!(frame["nextTickMs"].as_u64().is_some());
+        assert!(frame.get("rows").is_none());
+        // Clearing the query has zero debounce; tick must publish cached rows
+        // even though this ordinary frame began with no pending row mutation.
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            let host = store.finders.get_mut(&(id.as_u64().unwrap() as u32)).unwrap();
+            host.finder.set_query(String::new());
+            host.rows_dirty = false;
+        });
+        assert_eq!(call("frame", id, json!({}))["rows"][0]["path"], "a.rs");
+        call("dispose", id, json!({}));
+    }
 }

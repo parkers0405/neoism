@@ -13,7 +13,7 @@ import { readClipboard,writeClipboard } from "../clipboard";
 import { ANIMATION_FRAME_MS,AnimationFrameScheduler } from "../animation/frame-scheduler";
 import { focusedNativeElement,focusNativeElement,invalidateNativeFocus } from "../native-focus";
 import {registerSurfaceCaret,surfaceCursorSuppressed} from "../ui/cursor-handoff";
-import {wheelPixels} from "../ui/wheel";
+import {horizontalScrollEvent,wheelPixels} from "../ui/wheel";
 import {CursorBlinkClock} from "../ui/cursor-blink";
 export function MarkdownView(props:{markdown:NativeMarkdown;config:AppConfig;active?:boolean;focusToken:number;onFocus?:()=>void;onClose?:()=>void;onCustomKey?:(event:KeyEvent)=>boolean;save:()=>Promise<void>;report:(error:unknown)=>void;onState:(state:{mode:string;line:number;col:number;dirty:boolean})=>void;openLocation:(path:string,line?:number,col?:number)=>void|Promise<void>;prompt:(kind:"/"|"?"|":")=>void;onSearch?:(kind:"/"|"?",host:SearchHost)=>void}){
  const renderer=useGpuixRequired(),markdown=props.markdown,config=props.config;
@@ -79,7 +79,7 @@ export function MarkdownView(props:{markdown:NativeMarkdown;config:AppConfig;act
   onMouseMove={event=>{const dragging=markdown.frame.dragging||event.pressedButton===0;queueMotion(()=>{if(dragging)pointer("move",event);else markdown.call("hover",{x:(event.x||0)-bounds().x,y:(event.y||0)-bounds().y});});}}
   onMouseLeave={()=>queueMotion(()=>markdown.call("hover"))}
   onMouseUp={event=>{motion.flush();pointer("up",event);}}
-  onScroll={event=>{const wheel=wheelPixels(event,config.fontSize);wheelY+=wheel.y;wheelX+=wheel.x;wheelPoint={x:(event.x||0)-bounds().x,y:(event.y||0)-bounds().y};schedule();}}
+   onScroll={event=>{const wheel=wheelPixels(horizontalScrollEvent(event),config.fontSize);wheelY+=wheel.y;wheelX+=wheel.x;wheelPoint={x:(event.x||0)-bounds().x,y:(event.y||0)-bounds().y};schedule();}}
   style={{position:"relative",flexGrow:1,minHeight:0,minWidth:0,overflow:"hidden",userSelect:"none",cursor:"text"}}>
   <PaintLayer commands={frame().commands} prepared={frame().canvas||undefined} config={config} extra={caretOps()}/>
   <MarkdownCover markdown={markdown} cover={frame().cover}/>

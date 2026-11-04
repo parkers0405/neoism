@@ -75,3 +75,27 @@ test("legacy cursorless pages append older history and terminate without restart
   expect(model.state.history.chat.map(row=>row.id)).toEqual(["prt_old","msg_new","prt_new"]);
  }finally{model.dispose();client.stop();}
 });
+
+test("undo replacement drains an in-flight page, discards stale queued cursors, and permits an empty transcript",async()=>{
+ const config=loadConfig(["--config","/nonexistent/history-replace"],{}),client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+ const sent:any[]=[];client.send=((_family,body)=>{sent.push(body);return sent.length;}) as typeof client.send;
+ const delivered:Array<{message:any;kind?:string}>=[];model.subscribeAgentEvents((message,kind)=>delivered.push({message,kind}));
+ const page=(ids:string[],cursor:string|null)=>(model as any).receive({family:"Agent",requestId:99,message:{HistoryChunk:{session_id:"chat",messages:ids.map(id=>({id,role:"User",kind:"User",text:id})),next_cursor:cursor}}});
+ try{
+  model.sendAgent({GetHistory:{session_id:"chat",cursor:null,limit:2}});page(["b","c"],"before-b");
+  model.sendAgent({GetHistory:{session_id:"chat",cursor:"before-b",limit:2}});
+  model.sendAgent({GetHistory:{session_id:"chat",cursor:"stale-cursor",limit:2}});
+  model.refreshSessionHistory("chat");expect(sent).toHaveLength(2);
+  page(["a"],null);await Promise.resolve();expect(sent).toHaveLength(3);
+  expect(sent[2].GetHistory.cursor).toBeNull();
+  page(["a","b"],null);
+  expect(model.state.history.chat.map(row=>row.id)).toEqual(["a","b"]);
+  expect(delivered.at(-1)?.kind).toBe("replace");
+  model.refreshSessionHistory("chat");page([],null);
+  expect(model.state.history.chat).toEqual([]);expect(model.historyCursors.get("chat")).toBeNull();
+  expect(delivered.at(-1)?.message.HistoryChunk.messages).toEqual([]);
+  model.refreshSessionHistory("chat");page(["a","b","c"],"before-a");
+  expect(model.state.history.chat.map(row=>row.id)).toEqual(["a","b","c"]);
+  expect(model.historyCursors.get("chat")).toBe("before-a");
+ }finally{model.dispose();client.stop();}
+});

@@ -51,7 +51,7 @@ fn old_start_empty_busy_is_ambiguous_for_active_and_cached_status_or_snapshot() 
 }
 
 #[test]
-fn real_primary_head_preview_is_cleared_but_followup_count_and_post_dequeue_preview_survive(
+fn projected_followup_count_and_preview_survive_before_primary_dequeue(
 ) {
     for cached in [false, true] {
         for canonical in [false, true] {
@@ -63,22 +63,22 @@ fn real_primary_head_preview_is_cleared_but_followup_count_and_post_dequeue_prev
             if canonical {
                 pane.apply_queue_event(
                     "root",
-                    queue(&id, "enqueue", 2, false, Some("hello")),
+                    queue(&id, "enqueue", 1, false, Some("B")),
                 );
             } else if cached {
-                pane.cache_apply_queue("root", 2, Some("hello".into()), None);
+                pane.cache_apply_queue("root", 1, Some("B".into()), None);
             } else {
-                pane.apply_queue(2, Some("hello".into()), None);
+                pane.apply_queue(1, Some("B".into()), None);
             }
             if cached {
                 assert_eq!(pane.session_cache["root"].runtime.queued_prompt_count, 1);
                 assert_eq!(
                     pane.session_cache["root"].runtime.queued_prompt_preview,
-                    None
+                    Some("B".into())
                 );
             } else {
                 assert_eq!(pane.queued_prompt_count(), 1);
-                assert_eq!(pane.queued_prompt_preview(), None);
+                assert_eq!(pane.queued_prompt_preview(), Some("B"));
             }
             pane.apply_queue_event("root", queue(&id, "dequeue", 1, true, Some("B")));
             if cached {
@@ -91,7 +91,7 @@ fn real_primary_head_preview_is_cleared_but_followup_count_and_post_dequeue_prev
     let (mut pane, id) = submitted();
     pane.apply_queue_event(
         "root",
-        queue(&id, "enqueue", 2, false, Some("Compaction queued")),
+        queue(&id, "enqueue", 1, false, Some("Compaction queued")),
     );
     assert_eq!(pane.queued_prompt_count(), 1);
     assert_eq!(pane.queued_prompt_preview(), Some("Compaction queued"));

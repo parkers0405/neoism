@@ -4,7 +4,7 @@ import { createWindowSize, useGpuixRequired, type HostElement, type KeyEvent } f
 import type { AppConfig } from "../config";
 import { FinderController, type FinderFrame, type FinderTarget } from "./FinderController";
 import { PaintLayer } from "../ui/PaintLayer";
-import { cssColor, type CanvasOp } from "../ui/canvas";
+import { cssColor, paintColor, type CanvasOp } from "../ui/canvas";
 import { dialogOverlayOffset, useDialogViewport } from "../ui/overlay-viewport";
 import { coreCall } from "../native-core";
 import {CursorBlinkClock} from "../ui/cursor-blink";
@@ -16,9 +16,12 @@ export function FinderView(props: { controller: FinderController; config: AppCon
   const [frame, setFrame] = createSignal<FinderFrame>(props.controller.frame);
   const [blink,setBlink]=createSignal(false),[rainbow,setRainbow]=createSignal<number[]>([]);
   const blinkClock=new CursorBlinkClock(setBlink,{scope:renderer});
+  const [inputBlink,setInputBlink]=createSignal(true);
+  const inputBlinkClock=new CursorBlinkClock(setInputBlink,{scope:renderer});
+  createEffect(()=>{const current=frame();inputBlinkClock.update({active:current.enabled&&!!current.inputCaret,enabled:true,intervalMs:500,activityToken:`${current.mode}:${current.badge}:${current.query}`,mode:"terminal"});});
   createEffect(()=>{const current=frame(),row=current.rows[current.selected];blinkClock.update({active:current.enabled&&!!current.cursorQuad?.length,enabled:config.cursorBlink,intervalMs:config.cursorBlinkInterval,animating:current.animating,activityToken:`${current.mode}:${current.selected}:${row?.path}:${current.selectedY}:${current.top}:${current.offset}`});});
   const colorTimer=config.cursorStyle==="rainbow"?setInterval(()=>setRainbow(coreCall<{rainbow:number[]}>("cursor",{seconds:performance.now()/1000}).rainbow),1000/60):undefined;
-  onCleanup(()=>{blinkClock.dispose();if(colorTimer!==undefined)clearInterval(colorTimer);});
+  onCleanup(()=>{blinkClock.dispose();inputBlinkClock.dispose();if(colorTimer!==undefined)clearInterval(colorTimer);});
   createEffect(() => { const controller=props.controller;setFrame(controller.frame);onCleanup(controller.subscribe(setFrame)); });
   createEffect(() => { props.controller.appearance(config); });
   createEffect(() => { const bounds=viewport();props.controller.layout(bounds.width,bounds.height); });
@@ -39,10 +42,11 @@ export function FinderView(props: { controller: FinderController; config: AppCon
   const rows=()=>frame().rows.slice(Math.max(0,frame().top-3),frame().top+frame().visibleRows+4);
   const offset=createMemo(()=>dialogOverlayOffset(viewport(),frame().rect));
   const cursor=createMemo(():CanvasOp[]=>{
-    const points=frame().cursorQuad||[];if(!points.length)return [];
-    if(!blink())return [];
+    const caret=frame().inputCaret;
+    const ops:CanvasOp[]=caret&&inputBlink()?[{k:"r",b:caret.rect,c:paintColor(caret.color),r:caret.radii}]:[];
+    const points=frame().cursorQuad||[];if(!points.length||!blink())return ops;
     const color=config.cursorStyle==="rainbow"&&rainbow().length?`#${rainbow().slice(0,3).map(value=>value.toString(16).padStart(2,"0")).join("")}`:config.cursorColor||config.theme.accent;
-    return [{k:"p",c:cssColor(color),p:[points.flatMap(point=>[point[0]!,point[1]!])]}];
+    return [...ops,{k:"p",c:cssColor(color),p:[points.flatMap(point=>[point[0]!,point[1]!])]}];
   });
   return <anchored fill="window" deferred priority={2} occlude={false} style={{backgroundColor:"transparent",pointerEvents:"none"}}>
     <div testId="finder-viewport" style={{position:"absolute",left:viewport().x,top:viewport().y,width:viewport().width,height:viewport().height,overflow:"hidden",pointerEvents:"none"}}>

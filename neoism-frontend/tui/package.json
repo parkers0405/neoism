@@ -1,0 +1,30 @@
+{
+  "name": "@neoism/tui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "bun": ">=1.4.1" },
+  "scripts": {
+    "start": "bun src/main.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test ./tests"
+  },
+  "dependencies": {
+    "@neoism/service-client": "file:../service-client",
+    "@opentui/core": "0.8.2",
+    "@opentui/solid": "0.8.2",
+    "effect": "4.0.6",
+    "jsonc-parser": "3.3.1",
+    "pngjs": "7.0.0",
+    "solid-js": "1.9.17"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.1",
+    "@types/pngjs": "6.0.5",
+    "@types/ws": "8.18.1",
+    "bun": "1.4.1",
+    "typescript": "5.9.3",
+    "yjs": "13.6.31"
+  },
+  "trustedDependencies": ["bun"]
+}

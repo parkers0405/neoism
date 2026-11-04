@@ -154,6 +154,11 @@ pub enum WorkspaceServerMessage {
         peer_identity: Option<String>,
         #[serde(default)]
         connected_host_id: Option<String>,
+        /// Safe socket-local workspace membership/pruning is supported. Older
+        /// daemons omit this field; clients must not send SetWindowWorkspaces
+        /// unless this capability is true.
+        #[serde(default)]
+        workspace_lifecycle: bool,
     },
     /// Reply to [`WorkspaceClientMessage::GetWorkplacePreferences`].
     /// `prefs` is the daemon's persisted value (or the default empty

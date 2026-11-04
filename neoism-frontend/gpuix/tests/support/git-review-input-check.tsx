@@ -26,7 +26,24 @@ try{
  }
  assert.equal(moves.length,0);assert.equal(scrolls.length,0);
  for(const frame of [...frames]){frames.delete(frame);frame();}root.flush();
- assert.equal(moves.length,1);assert.equal(moves[0].x,109);assert.equal(scrolls.length,1);assert.equal(scrolls[0].deltaY,50,"All fractional trackpad movement survives coalescing");
+  assert.equal(moves.length,1);assert.equal(moves[0].x,109);assert.equal(scrolls.length,1);assert.equal(scrolls[0].deltaY,50,"All fractional trackpad movement survives coalescing");
+  const scrollBurst=(event:Record<string,unknown>,count=100)=>{
+   const before=scrolls.length;
+   for(let i=0;i<count;i++)root.dispatch({elementId:view.id,eventType:"scroll",x:320,y:120,...event});
+   assert.equal(scrolls.length,before,"Wheel events wait for the display frame");
+   for(const frame of [...frames]){frames.delete(frame);frame();}root.flush();
+   assert.equal(scrolls.length,before+1,"A horizontal burst also produces one update");
+   return scrolls.at(-1)!;
+  };
+  const horizontal=scrollBurst({deltaX:-.125,deltaY:-.0625,precise:true});
+  assert.equal(horizontal.deltaX,25,"Horizontal trackpad travel receives exactly 2x gain");
+  assert.equal(horizontal.deltaY,12.5,"Diagonal input retains its dominance and direction");
+  const shifted=scrollBurst({deltaX:.006,deltaY:-.125,precise:true,modifiers:{shift:true}});
+  assert.equal(shifted.deltaX,25,"Shift routing tests raw X before the gain crosses .01");
+  assert.equal(shifted.deltaY,0,"Shift still routes Y exclusively to horizontal travel");
+  const wheel=scrollBurst({deltaX:-1,deltaY:0,precise:false},1);
+  assert.equal(wheel.deltaX,Math.round(config.fontSize*1.3),"Mouse-wheel cell units are unchanged");
+  assert.equal(wheel.deltaY,0);
  root.dispatch({elementId:view.id,eventType:"mouseMove",x:315,y:95});
  root.dispatch({elementId:view.id,eventType:"mouseUp",button:0,x:315,y:95});
  assert.equal(moves.length,2,"Release flushes the last selection movement immediately");

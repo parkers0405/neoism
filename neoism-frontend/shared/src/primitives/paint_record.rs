@@ -46,7 +46,7 @@ pub enum PaintCommand {
         order: u8,
         layer: u8,
     },
-    Ring { outer:Vec<(f32,f32)>,inner:Vec<(f32,f32)>,color:[f32;4],depth:f32,order:u8,layer:u8 },
+    Ring { outer:Vec<(f32,f32)>,inner:Vec<(f32,f32)>,color:[f32;4],clip:Option<[f32;4]>,depth:f32,order:u8,layer:u8 },
     Polygon {
         points: Vec<(f32, f32)>,
         color: [f32; 4],
@@ -541,7 +541,25 @@ impl Paint for RecordingPainter {
         self.polygon(&[(x1, y1), (x2, y2), (x3, y3)], d, c)
     }
     fn border_ring(&mut self,outer:&[(f32,f32)],inner:&[(f32,f32)],depth:f32,color:[f32;4],order:u8){
-        self.commands.borrow_mut().push(PaintCommand::Ring{outer:outer.to_vec(),inner:inner.to_vec(),color,depth,order,layer:if self.late_overlay {3} else {0}});
+        self.commands.borrow_mut().push(PaintCommand::Ring{outer:outer.to_vec(),inner:inner.to_vec(),color,clip:None,depth,order,layer:if self.late_overlay {3} else {0}});
+    }
+    fn ring_clipped(
+        &mut self, center: [f32; 2], radius: f32, stroke_width: f32,
+        color: [f32; 4], depth: f32, order: u8, clip: [f32; 4],
+    ) {
+        let steps = 48;
+        let point = |r: f32, i: usize| {
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            (center[0] + r * a.cos(), center[1] + r * a.sin())
+        };
+        let outer = (0..steps).map(|i| point(radius + stroke_width * 0.5, i)).collect();
+        let inner = (0..steps).map(|i| point((radius - stroke_width * 0.5).max(0.0), i)).collect();
+        // Keep the original contour and its clip together through both GUI
+        // encoders; dropping this clip turns connector elbows into full loops.
+        self.commands.borrow_mut().push(PaintCommand::Ring {
+            outer, inner, color, clip: Some(clip), depth, order,
+            layer: if self.late_overlay { 3 } else { 0 },
+        });
     }
     fn polygon(&mut self, p: &[(f32, f32)], d: f32, c: [f32; 4]) {
         self.commands.borrow_mut().push(PaintCommand::Polygon {

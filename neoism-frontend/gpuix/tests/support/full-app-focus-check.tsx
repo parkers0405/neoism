@@ -130,7 +130,8 @@ try {
   await command("qall"); await until(() => model.state.activeWorkspace?.id === "a" && !model.windowWorkspaces().some(workspace => workspace.id === createdId) && !!host.find("composer"));
   assert.equal(host.nativeRoot, shell); assert.deepEqual(agents().map(surface => surface.id), [first.id, second.id]);
   assert.equal(model.state.composerDrafts[firstKey]?.text, "first actual App draft"); assert.equal(model.state.composerDrafts[secondKey]?.text, "second actual App draft");
-  assert.ok(model.state.workspaces.some(workspace => workspace.id === createdId));
+  assert.ok(!model.state.workspaces.some(workspace => workspace.id === createdId),"unused newly-created workspace is pruned on close");
+  assert.ok(daemon.workspaceRequests.some(request=>request.tag==="SetWindowWorkspaces"&&request.body.prune_empty===createdId));
   assert.equal(daemon.workspaceRequests.filter(request => request.tag === "SubscribeWorkspace" && request.body.workspace_id === "b").length, 0);
   assert.equal(daemon.workspaceRequests.filter(request => /^(Close|Remove|Delete)/.test(request.tag)).length, 0);
   assert.equal(daemon.requests.filter(request => ["CreateThread", "SubmitPrompt"].includes(request.tag)).length, 0); assert.equal(daemon.ptyRequests.length, 0);

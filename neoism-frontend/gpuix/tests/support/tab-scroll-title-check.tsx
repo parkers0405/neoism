@@ -28,7 +28,7 @@ try{
  for(const id of["workspace-tab-scroll",`pane-tab-scroll:${pane.leaf}`]){
   const node=find(id);await dispatch(id,"scroll",{deltaX:0,deltaY:-1,precise:false});assert.equal(offsets.get(node.id),-60,"Vertical wheel uses canonical60px notch in delivered direction");
   const calls=scrolls.length;await dispatch(id,"scroll",{deltaX:-20,deltaY:0,precise:true});assert.equal(scrolls.length,calls,"Horizontal gestures retain native scrolling instead of being applied twice");offsets.set(node.id,-80);await dispatch(id,"scrollChange",{scrollX:-80});
-  await dispatch(id,"scroll",{deltaX:0,deltaY:-13.5,precise:true});assert.equal(offsets.get(node.id),-93.5);await dispatch(id,"scroll",{deltaX:0,deltaY:10,precise:true});assert.equal(offsets.get(node.id),-83.5,"Natural scrolling sign is never inverted");
+   await dispatch(id,"scroll",{deltaX:0,deltaY:-13.5,precise:true});assert.equal(offsets.get(node.id),-107,"Precise gestures use the shared 2x trackpad gain");await dispatch(id,"scroll",{deltaX:0,deltaY:10,precise:true});assert.equal(offsets.get(node.id),-87,"Natural scrolling sign is never inverted");
   await dispatch(id,"scroll",{deltaX:0,deltaY:-10000,precise:true});const end=offsets.get(node.id)!;assert.ok(end<0&&end>-10000,"Overflow clamps at measured content extent");const clampedCalls=scrolls.length;await dispatch(id,"scroll",{deltaX:0,deltaY:-10000,precise:true});assert.equal(scrolls.length,clampedCalls,"Clamped input requests no redundant redraw");await dispatch(id,"scroll",{deltaX:0,deltaY:10000,precise:true});assert.equal(offsets.get(node.id),0);
  }
  const cases=[{tab:"workspace:0",text:"workspace-title:0",close:"workspace-close:0"},{tab:`pane-tab:${pane.tabs[0].leaf}`,text:undefined,close:`pane-close:${pane.tabs[0].leaf}`}];

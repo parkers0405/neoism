@@ -24,7 +24,7 @@ function fixture(options: Partial<FinderOptions> = {}) {
 test("500 rows are retained by identity across motion and omitted from native updates", async () => {
   const finder = fixture(), rows = finder.frame.rows;
   expect(rows).toHaveLength(500);
-  for (const operation of [() => finder.move(20), () => finder.select(30), () => finder.scroll(100), () => finder.layout(1100, 750)]) {
+  for (const operation of [() => finder.move(20), () => {finder.select(30);expect(finder.selectedTarget()?.line).toBe(31);}, () => finder.scroll(100), () => finder.layout(1100, 750)]) {
     operation(); expect(finder.frame.rows).toBe(rows);
   }
   const compact = coreCall<FinderFrameUpdate>("finder.frame", { id: finder.id });
@@ -34,7 +34,11 @@ test("500 rows are retained by identity across motion and omitted from native up
   expect(compact.nextTickMs).toBeNull();
   await until(() => !finder.frame.animating);
   expect(finder.frame.rows).toBe(rows);
-  expect(finder.selectedTarget()?.line).toBe(31);
+  // Wheel scrolling clamps selection to its visible rows; compact targets must
+  // follow that selection without replacing the retained results array.
+  expect(finder.frame.selected).toBeGreaterThanOrEqual(finder.frame.top);
+  expect(finder.frame.selected).toBeLessThan(finder.frame.top+finder.frame.visibleRows);
+  expect(finder.selectedTarget()?.line).toBe(rows[finder.frame.selected]!.line);
   finder.symbols([], true);
   expect(finder.frame.rows).toEqual([]);
   expect(finder.frame.rows).not.toBe(rows);

@@ -4,7 +4,7 @@ import {coreCall} from "../src/native-core";
 type Text={kind:string;text?:string;x:number;y:number};
 type Frame={commands:Text[]};
 
-test("patch totals disclose file cards before individual diffs",async()=>{
+test("completed patch shows file cards with independently disclosed diffs",async()=>{
  const sessionId="patch-disclosure";
  const {id}=coreCall<{id:number}>("agenttimeline.new",{sessionId});
  const frame=()=>coreCall<Frame>("agenttimeline.frame",{id});
@@ -27,19 +27,21 @@ test("patch totals disclose file cards before individual diffs",async()=>{
   expect(text(current)).toContain("Apply patch");
   expect(text(current)).toContain("+3");
   expect(text(current)).toContain("-2");
-  expect(text(current)).not.toContain("alpha.txt");
-  expect(text(current)).not.toContain("AFTER_ALPHA");
-  click(current,"+3");current=await settle();
-  expect(text(current)).toContain("alpha.txt");
+   expect(text(current)).toContain("alpha.txt");
   expect(text(current)).toContain("beta.txt");
   expect(text(current)).not.toContain("AFTER_ALPHA");
   click(current,"alpha.txt");current=await settle();
   expect(text(current)).toContain("AFTER_ALPHA");
   expect(text(current)).not.toContain("NEW_BETA");
-  click(current,"Apply patch");current=await settle();
-  expect(text(current)).not.toContain("alpha.txt");
-  expect(text(current)).not.toContain("AFTER_ALPHA");
-  click(current,"Apply patch");current=await settle();
-  expect(text(current)).toContain("AFTER_ALPHA");
+   click(current,"beta.txt");current=await settle();
+   expect(text(current)).toContain("NEW_BETA");
+   expect(text(current)).toContain("AFTER_ALPHA");
+   click(current,"alpha.txt");current=await settle();
+   expect(text(current)).toContain("alpha.txt");
+   expect(text(current)).not.toContain("AFTER_ALPHA");
+   expect(text(current)).toContain("NEW_BETA");
+   click(current,"beta.txt");current=await settle();
+   expect(text(current)).not.toContain("NEW_BETA");
+   expect(text(current)).toContain("beta.txt");
  }finally{coreCall("agenttimeline.dispose",{id});}
 });

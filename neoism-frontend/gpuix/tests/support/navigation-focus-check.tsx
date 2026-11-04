@@ -55,9 +55,9 @@ try{
  const beforeClick=model.state.surfaces.filter(surface=>surface.kind==="agent").length;
  await event("conversation-list","mouseDown",{button:0,x:newChatX,y:newChatY});
  await until(()=>model.state.surfaces.filter(surface=>surface.kind==="agent").length===beforeClick+1&&host.focused===host.find("composer")?.id);
- stage="directory dropdown and Search are original keyboard activation paths";await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);for(let i=0;i<8&&panelFocus()!=="new-chat";i++)await press("up");await pulse();await press("down");assert.equal(panelFocus(),"search");await press("down");assert.equal(panelFocus(),"projects");await press("enter");await until(()=>!!host.find("conversation-navigator"));await press("escape");await until(()=>!host.find("conversation-navigator"));
- await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);await press("up");assert.equal(panelFocus(),"search");await press("enter");await until(()=>!!host.find("finder"));await press("escape");await until(()=>!host.find("finder"));
- stage="chat rows can be traversed and activated without creating a backend thread";await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);await press("down");await press("down");assert.match(panelFocus(),/^row:/);
+  stage="directory dropdown remains keyboard-accessible while hidden Search is skipped";await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);for(let i=0;i<8&&panelFocus()!=="new-chat";i++)await press("up");await pulse();await press("down");assert.equal(panelFocus(),"projects");await press("enter");await until(()=>!!host.find("conversation-navigator"));await press("escape");await until(()=>!host.find("conversation-navigator"));
+  await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);await press("up");assert.equal(panelFocus(),"new-chat");
+  stage="chat rows can be traversed and activated without creating a backend thread";await press("down");await press("down");assert.match(panelFocus(),/^row:/);
  stage="agent wheel preserves selection and hides offscreen cursor";
  const wheelSelection=panelFocus();await event("conversation-list","scroll",{deltaY:-1600,precise:true});
  await until(()=>!host.find("chrome-focus-cursor:sidebar"));assert.equal(panelFocus(),wheelSelection);

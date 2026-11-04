@@ -1393,22 +1393,29 @@ fn subagent_runtime_notification_never_paints_during_role_races() {
 }
 
 #[test]
-fn subtasks_and_compaction_are_visible_live_and_hidden_after_reload() {
+fn compaction_keeps_its_divider_but_hides_reasoning_live_and_after_reload() {
+    let mut reasoning = text_message("compact-reasoning", NeoismAgentMessageKind::Reasoning, "reviewing context");
+    reasoning.tool = "compaction_reasoning".into();
     let messages = vec![
         text_message("u1", NeoismAgentMessageKind::User, "work"),
         text_message("subtask", NeoismAgentMessageKind::Subtask, "exploring"),
         text_message("compact", NeoismAgentMessageKind::Compaction, "summary"),
+        reasoning,
         text_message("answer", NeoismAgentMessageKind::Assistant, "Done."),
     ];
 
     assert_eq!(
         timeline_message_visibility(&messages, Some(1)),
-        vec![true, true, true, true]
+        vec![true, true, true, false, true]
     );
     assert_eq!(
         timeline_message_visibility(&messages, None),
-        vec![true, false, false, true]
+        vec![true, false, true, false, true]
     );
+    let divider = super::render::display_timeline_message(&messages[2], false).unwrap();
+    assert_eq!(divider.kind, NeoismAgentMessageKind::Compaction);
+    assert!(divider.text.is_empty());
+    assert_eq!(messages[2].text, "summary", "stored summary is unchanged");
 }
 
 #[test]

@@ -43,14 +43,17 @@ export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|unde
   if(next.animating)animation.request(draw,start);
  };
  const receive=(event:EventPayload)=>{
-  const next=composerCaretGeometry(event);if(!next)return;setGeometry(next);
+   const next=composerCaretGeometry(event);if(!next)return;const previous=geometry();setGeometry(next);
   const layout=JSON.parse(event.value!);
   if(typeof layout.text==="string"&&Number.isFinite(layout.layoutWidth)&&layout.layoutWidth>0&&Number.isSafeInteger(layout.visualRows)&&layout.visualRows>0)
    props.onLayout?.({text:layout.text,width:layout.layoutWidth,rows:layout.visualRows});
-  if(!next.visible){animation.cancel();setMoving(false);return;}
+   if(!next.visible){animation.cancel();rect=undefined;setQuad([]);setMoving(false);snap=true;return;}
    rect=coreCall<number[]>("agentcomposer.caret-rect",{...next,scale:props.config.scale});
    if(rect[2]<=0||rect[3]<=0){animation.cancel();setQuad([]);return;}
-   if(snap||props.config.reducedMotion){snap=false;coreCall("keyboard.cursor.seed",{id,rect});draw();return;}
+    // Window coordinates can change on workspace return or layout settling
+    // without a text-caret move. Never trail from the old input's location.
+    const relocated=previous?.offset===next.offset&&(previous.x!==next.x||previous.y!==next.y||previous.fontSize!==next.fontSize||previous.remainingWidth!==next.remainingWidth);
+    if(snap||!previous?.visible||relocated||props.config.reducedMotion){snap=false;animation.cancel();coreCall("keyboard.cursor.seed",{id,rect});draw();return;}
   animation.request(draw);
  };
  onMount(()=>{

@@ -1,6 +1,64 @@
 use super::*;
 use neoism_protocol::agent::AgentServerMessage;
 
+#[test]
+fn transport_created_at_live_tool_retains_original_start() {
+    for status in ["running", "completed"] {
+        let part = json!({"id":"tool", "type":"tool", "tool":"bash",
+            "state":{"status":status, "input":{"command":"pwd"}, "output":"/workspace",
+                "time":{"start":1200, "end":9000, "updated":9500}}});
+        assert_eq!(history_from_part(&part).unwrap().created_at, 1200);
+    }
+    let text = json!({"id":"text", "type":"text", "text":"hello",
+        "time":{"start":1300, "end":8000}, "state":{"time":{"start":1400}}});
+    assert_eq!(history_from_part(&text).unwrap().created_at, 1300);
+    let no_start = json!({"id":"text", "type":"text", "text":"hello",
+        "time":{"end":8000, "updated":9000}});
+    assert_eq!(history_from_part(&no_start).unwrap().created_at, 0);
+}
+
+#[test]
+fn transport_created_at_history_preserves_user_tool_and_canonical_order() {
+    let items = vec![
+        json!({"info":{"id":"assistant", "role":"assistant", "sessionID":"session",
+            "parentID":"user", "time":{"created":1100,"completed":9000,"updated":9500},
+            "mode":"build", "agent":"build", "path":{"cwd":"/workspace","root":"/workspace"},
+            "cost":0, "tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},
+            "modelID":"test", "providerID":"test"},
+            "parts":[
+                {"id":"answer", "type":"text", "text":"done", "time":{"start":1600,"end":9000}},
+                {"id":"reason", "type":"reasoning", "text":"thinking", "time":{"start":1150}},
+                {"id":"tool", "type":"tool", "tool":"bash", "state":{"status":"completed",
+                    "input":{"command":"pwd"}, "output":"/workspace", "time":{"start":1200,"end":8000}}},
+                {"id":"fallback", "type":"text", "text":"no start", "time":{"end":9000,"updated":9500}}
+            ]}),
+        json!({"info":{"id":"user", "role":"user", "sessionID":"session", "time":{"created":1000,"updated":9500},
+            "agent":"build", "model":{"providerID":"test","modelID":"test"}},
+            "parts":[{"id":"user-part", "type":"text", "text":"hello", "time":{"start":1050}}]})
+    ];
+    let canonical =
+        neoism_ui::panels::agent_pane::api_mapping::message_blocks_from_response(&items, true);
+    let history = history_messages_from_response(&items);
+    assert_eq!(
+        history.iter().map(|m| &m.id).collect::<Vec<_>>(),
+        canonical.iter().map(|m| &m.id).collect::<Vec<_>>()
+    );
+    assert_eq!(history.first().unwrap().id, "user");
+    for (id, expected) in [
+        ("user", 1000),
+        ("tool", 1200),
+        ("answer", 1600),
+        ("reason", 1150),
+        ("fallback", 1100),
+    ] {
+        assert_eq!(
+            history.iter().find(|m| m.id == id).unwrap().created_at,
+            expected,
+            "{id}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn spawn_without_key_emits_disabled() {
     let (tx, mut rx) = reply_queue::channel();

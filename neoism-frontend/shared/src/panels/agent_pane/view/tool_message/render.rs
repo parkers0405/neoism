@@ -304,7 +304,7 @@ fn measure_single_tool_message_height(
                 height += diff_card::HEADER_HEIGHT * s
                     + if view.preview_visual_rows == 0 { 0.0 } else { fixed_diff_viewport_height(view.preview_visual_rows, s) }
                     + if card_expanded { diag_footer_height(section, s) } else { 0.0 }
-                    + 10.0 * s;
+                    + if section.link_target.is_empty() { 10.0 * s } else { 0.0 };
             }
             return Some(height);
         }
@@ -1305,7 +1305,7 @@ fn render_tool_diff_cards(
         // Leave a conservative ink/border margin, including diagnostics.
         let mut next_y = card_y + (diff_card::HEADER_HEIGHT * s + body_h.max(0.0));
         next_y += if card_expanded { diag_footer_height(section, s) } else { 0.0 };
-        next_y += 10.0 * s;
+        next_y += if section.link_target.is_empty() { 10.0 * s } else { 0.0 };
         // Paint before culling: an offscreen sibling still owns the stem
         // running alongside the preceding file's expanded code.
         if !section.link_target.is_empty() {
@@ -1466,7 +1466,7 @@ fn render_tool_diff_cards(
                 state.mark_visible(motion);
             }
         }
-        card_y += 10.0 * s;
+        card_y += if section.link_target.is_empty() { 10.0 * s } else { 0.0 };
     }
 }
 

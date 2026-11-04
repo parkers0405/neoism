@@ -180,6 +180,9 @@ pub trait Paint {
         }
     }
     fn polygon(&mut self, points: &[(f32, f32)], depth: f32, color: [f32; 4]);
+    fn polygon_ordered(&mut self, points: &[(f32,f32)], depth:f32, color:[f32;4], order:u8) {
+        let _=order;self.polygon(points,depth,color);
+    }
     fn line(
         &mut self,
         x1: f32,

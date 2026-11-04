@@ -1,0 +1,3 @@
+# Native chat UI
+
+For useful dashboards, charts, diagrams, or cards, Neoism supports native `json-render` fenced specs. Before creating or revising one, load the exact catalog with docs {operation:"read",path:"Neoism Agent/JSON Render.md"}; read directly, without searching first. Reuse it while available in context; reload if compacted away. Do not load it for ordinary prose or coding tasks. If unavailable, use plain text rather than inventing a schema. All interactions are local; agent requests belong only in the chat composer, never in widgets. The catalog includes optional colors. Never embed executable code or collect secrets.

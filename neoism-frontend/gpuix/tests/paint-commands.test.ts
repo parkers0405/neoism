@@ -8,7 +8,7 @@ import type { CanvasImages } from "../src/ui/canvas";
 
 const sample: PaintCommand[] = [
   {kind:"rect",rect:[1,2,3,4],color:[1,.5,0,1],radii:[1,2,3,4],clip:[2,3,40,50],depth:2,order:3,layer:1},
-  {kind:"polygon",points:[[1,2],[3,4],[5,6]],color:[.2,.3,.4,1],depth:4,layer:2},
+  {kind:"polygon",points:[[1,2],[3,4],[5,6]],color:[.2,.3,.4,1],depth:4,order:0,layer:2},
   {kind:"text",x:3,y:4,text:"Original glyphs",size:14,width:105,color:[230,220,210,255],bold:true,italic:false,extrude:true,family:"Monocraft",clip:[0,0,500,400],layer:0,raster:{id:7,ptr:500,len:256,width:8,height:8,scale:2,dx:-1,dy:2}},
 ];
 const clone = () => structuredClone(sample);
@@ -26,6 +26,16 @@ test("mixed shape and text sort keys produce the same order for every input perm
   expect(ops.map(op=>op.k)).toEqual(["p","r","r","t"]);
   expect(ops[1]).toMatchObject({b:[10,0,1,1]});expect(ops[2]).toMatchObject({b:[20,0,1,1]});
  }
+});
+
+test("ordered dashboard polygons remain above their card surface",()=>{
+ const commands:PaintCommand[]=[
+  {kind:"rect",rect:[0,0,100,100],color:[0,0,0,1],radii:[12,12,12,12],depth:0,order:32,layer:0},
+  {kind:"polygon",points:[[10,10],[90,10],[50,90]],color:[1,1,1,1],depth:0,order:32,layer:0},
+ ];
+ expect(paintOps(commands,{} as AppConfig,{commit(){}} as CanvasImages).map(op=>op.k)).toEqual(["r","p"]);
+ const changed=structuredClone(commands);if(changed[1].kind==="polygon")changed[1].order=33;
+ expect(sharePaintCommands(commands,changed)[1]).not.toBe(commands[1]);
 });
 
 test("equal native paint retains command and array identities without serializing", () => {

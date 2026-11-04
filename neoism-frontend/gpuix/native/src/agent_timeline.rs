@@ -26,8 +26,12 @@ use std::{cell::RefCell, collections::HashMap};
 
 #[path = "agent_timeline_animation.rs"]
 mod animation;
+#[cfg(test)]
+#[path = "agent_timeline_json_ui_tests.rs"]
+mod json_ui_tests;
 
 struct View {
+    visible: bool,
     preparation_scope: u64,
     preparing: bool,
     scroll_trace: Option<ScrollTrace>,
@@ -107,10 +111,25 @@ fn now_seconds() -> f32 {
 }
 
 fn render_frame(view: &mut View) -> Value {
+    render_frame_with_outbound(view,true)
+}
+
+// Input validation may need fresh geometry without consuming commands that
+// belong to the next host-visible frame (or to an unrelated native gesture).
+fn render_frame_with_outbound(view: &mut View, drain_outbound:bool) -> Value {
+    if !view.visible {
+        view.mouse=None;view.selecting=false;view.scrollbar_drag=false;view.horizontal_drag=false;
+        view.painter.begin_frame();view.pane.composer_interactions.clear_rects();
+        view.pane.json_ui.borrow_mut().begin_frame(&view.session_id,[0.0;4]);
+        return json!({"preparing":false,"animating":false,"reason":null,"selecting":false,"pointer":false,"hasConversation":view.pane.has_conversation(),"send":[],"header":[],"sessionId":view.session_id,"jsonUi":view.pane.json_ui.borrow().metadata()});
+    }
     // Expansion geometry is sampled during paint. If cold preparation outlives
     // its animation, post-paint wall-clock activity alone can strand that early
     // geometry. Preserve this frame's initial activity for one final repaint.
     let animation_before = view.pane.animation_reason();
+    // The status row is culled while browsing older messages. Do not retain
+    // its previous hit rectangles or let offscreen activity drive frames.
+    view.pane.clear_activity_status_rects();
     // This standalone timeline bypasses the full-pane renderer's frame reset.
     // Only images painted in this frame may retain preview click targets.
     view.pane.composer_interactions.clear_rects();
@@ -132,6 +151,8 @@ fn render_frame(view: &mut View) -> Value {
     let painter: &mut dyn Paint = &mut view.painter;
     let top=neoism_ui::panels::agent_pane::view::chat::render_conversation_header(painter,&mut view.pane,rect,&theme,view.mouse,s,&[]);
     let metrics=[content_x,top,content_w,(bottom-top).max(0.0)];
+    let switched=view.pane.json_ui.borrow_mut().begin_frame(&view.session_id,[0.0,top,view.width,(bottom-top).max(0.0)]);
+    if switched {view.mouse=None;view.selecting=false;view.scrollbar_drag=false;view.horizontal_drag=false;}
     // The composer floats over the transcript. Scroll metrics still stop at
     // its top, but content paints behind its rounded corners and material.
     // Markdown controls use the metrics viewport independently of this clip.
@@ -160,16 +181,18 @@ fn render_frame(view: &mut View) -> Value {
             || view.pane.tool_hit(x, y)
             || view.pane.activity_status_contains(x, y)
             || view.pane.wordmark_hit(x, y)
+            || view.pane.json_ui.borrow().pointer_hint(x,y)
     });
     trace_scroll(view);
-    let send={
+    let send=if drain_outbound {
         use neoism_ui::panels::agent_pane::{protocol_mapping::{map_outbound_command,AgentProtocolMapping,AgentProtocolMappingContext},outbound::OutboundAgentCommand};
         let context=AgentProtocolMappingContext{active_session_id:Some(view.session_id.clone()),default_directory:None,default_agent:None,default_model:None,default_connection_id:None,default_thinking:None,local_author:view.pane.local_presence_name().map(str::to_owned)};
         view.pane.drain_pending_outbound().into_iter().filter(|command|!matches!(command,OutboundAgentCommand::SwitchSession{..})).flat_map(|command|match map_outbound_command(command,&context){AgentProtocolMapping::Messages(messages)=>messages.into_iter().filter_map(|message|serde_json::to_value(message).ok()).collect::<Vec<_>>(),_=>vec![]}).collect::<Vec<_>>()
-    };
+    } else {vec![]};
     view.preparing=neoism_ui::panels::agent_pane::view::markdown::end_preparation();
     let (animating, reason) = animation::frame_animation(
         animation_before, view.pane.animation_reason(), view.preparing, scrolling,
+        view.pane.has_visible_activity_status(),
     );
     json!({
         "preparing":view.preparing,
@@ -179,6 +202,7 @@ fn render_frame(view: &mut View) -> Value {
         "pointer": pointer,
         "hasConversation": view.pane.has_conversation(),
         "send":send,"header":header,"subagent":view.pane.is_subagent_session(),"sessionId":view.session_id,
+        "jsonUi":view.pane.json_ui.borrow().metadata(),
     })
 }
 
@@ -230,8 +254,13 @@ pub fn serialized_frame(v: &Value) -> Option<Result<String, String>> {
 }
 
 fn pointer(view: &mut View, v: &Value) -> Value {
+    if !view.visible {return json!({});}
     let (x, y) = (number(v, "x", 0.0), number(v, "y", 0.0));
     view.mouse = Some((x, y));
+    if text(v,"kind")=="down" {
+        let activated=view.pane.json_ui.borrow_mut().pointer_activate(x,y);
+        if activated {view.pane.invalidate_json_ui_layout();render_frame_with_outbound(view,false);return json!({"jsonUi":view.pane.json_ui.borrow().metadata()});}
+    }
     let pane = &mut view.pane;
     let mut preview = None;
     let mut copy = None;
@@ -296,6 +325,14 @@ fn pointer(view: &mut View, v: &Value) -> Value {
         _ => {}
     }
     json!({"copy": copy, "link": link,"preview":preview})
+}
+
+/// Local widget events must target controls in the current visible frame.
+fn json_ui_event(view:&mut View,v:&Value)->Value {
+    render_frame_with_outbound(view,false);
+    let accepted=view.pane.json_ui.borrow_mut().event(text(v,"control"),text(v,"kind"),v.get("value")).is_ok();
+    if accepted {view.pane.invalidate_json_ui_layout();}
+    let mut out=frame(view);out["jsonUiAccepted"]=json!(accepted);out
 }
 
 #[cfg(test)]
@@ -475,6 +512,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));
             pane.set_session_id(Some(v["rootSessionId"].as_str().unwrap_or(&session_id).to_owned()));
             store.views.insert(id, View {
+                visible:v["visible"].as_bool().unwrap_or(true),
                 preparation_scope:id as u64,
                 preparing:false,
                 scroll_trace: std::env::var_os("NEOISM_GPUIX_SCROLL_TRACE").map(|_| {let now=std::time::Instant::now();ScrollTrace{origin:now,last:now,text_y:HashMap::new(),input_pixels:0.0,input_events:0,precise_events:0}}),
@@ -506,8 +544,14 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             }
             return Ok(Value::Null);
         }
+        if op=="agenttimeline.json-ui" && !store.views.contains_key(&id) {
+            return Ok(json!({"jsonUiAccepted":false,"jsonUi":{"controls":[]}}));
+        }
         let view = store.views.get_mut(&id).ok_or("Unknown agent timeline")?;
         match op {
+            "agenttimeline.json-ui" => {
+                Ok(json_ui_event(view,v))
+            }
             "agenttimeline.adopt" => {
                 let from=text(v,"from");let to=text(v,"to");
                 if !from.starts_with("pending:") || to.is_empty() || view.session_id!=from {
@@ -526,6 +570,14 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             "agenttimeline.event" => {
                 let parsed: AgentServerMessage =
                     serde_json::from_value(v["message"].clone()).map_err(|error| error.to_string())?;
+                match &parsed {
+                    AgentServerMessage::MessageUpdated {session_id,message,..} => view.pane.json_ui.borrow_mut().observe_source(session_id,&message.id,&message.text),
+                    AgentServerMessage::HistoryChunk {session_id,messages,..} => {
+                        for message in messages {view.pane.json_ui.borrow_mut().observe_source(session_id,&message.id,&message.text);}
+                    }
+                    AgentServerMessage::PartRemoved {session_id,part_id} => view.pane.json_ui.borrow_mut().observe_source(session_id,part_id,""),
+                    _=>{}
+                }
                 if matches!(&parsed, AgentServerMessage::BackgroundTasksUpdated { session_id, .. }
                     if !view.pane.session_family_contains(session_id)) {
                     return Ok(json!({"needsPaint":false}));
@@ -539,6 +591,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 };
                 if v["historyKind"].as_str() == Some("replace") {
                     if let AgentServerMessage::HistoryChunk { session_id, messages, next_cursor } = parsed {
+                        view.pane.json_ui.borrow_mut().retain_messages(&session_id,&messages.iter().map(|m|m.id.clone()).collect());
                         view.pane.replace_session_history(
                             &session_id,
                             messages.into_iter().map(neoism_ui::panels::agent_pane::server_events::map_history).collect(),
@@ -588,6 +641,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 Ok(frame(view))
             }
             "agenttimeline.layout" => {
+                if let Some(visible)=v["visible"].as_bool() {view.visible=visible;}
                 if let Some(reduced) = v["reducedMotion"].as_bool() { view.pane.set_text_reveal_enabled(!reduced); }
                 if v.get("localName").is_some(){view.pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));}
                 view.width = number(v, "width", view.width).max(1.0);
@@ -642,9 +696,15 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 Ok(frame(view))
             }
             "agenttimeline.pointer" => {
+                // Deferred scroll/layout/events can make last-frame targets
+                // stale. Refresh at the public input boundary, not in the
+                // original pointer chain used by native conversation paths.
+                if text(v,"kind")=="down" {render_frame_with_outbound(view,false);}
                 let result = pointer(view, v);
                 // Hover/drag moves coalesce: the host paints once per display frame.
                 if v["deferFrame"].as_bool().unwrap_or(false) {
+                    let mut result=result;
+                    result["jsonUi"]=view.pane.json_ui.borrow().metadata();
                     return Ok(result);
                 }
                 let mut out = frame(view);

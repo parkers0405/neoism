@@ -1386,6 +1386,12 @@ fn safe_system_metadata(value: serde_json::Value) -> serde_json::Value {
                 .into_iter()
                 .filter_map(|(key, value)| {
                     let value = match key.as_str() {
+                        // Capability consumers require these flags to distinguish
+                        // available plugins from explicitly disabled ones.
+                        "enabled" | "disableable" => match value {
+                            Value::Bool(_) => value,
+                            _ => return None,
+                        },
                         "models" | "variants" | "default" => match value {
                             Value::Object(map) => Value::Object(
                                 map.into_iter()
@@ -1417,6 +1423,35 @@ fn safe_system_metadata(value: serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod system_metadata_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn workflow_capabilities_preserve_enabled_and_disabled_flags() {
+        let capabilities = vec![
+            neoism_agent_core::CapabilityInfo {
+                id: "neoism.mcp".into(), version: "1.0.0".into(),
+                enabled: true, disableable: true, source: "internal-plugin".into(),
+                plugin_id: None, api_prefix: None, reason: None,
+            },
+            neoism_agent_core::CapabilityInfo {
+                id: "neoism.goals".into(), version: "1.0.0".into(),
+                enabled: false, disableable: false, source: "internal-plugin".into(),
+                plugin_id: None, api_prefix: None, reason: None,
+            },
+        ];
+        let response = redact_system_metadata_response(axum::Json(&capabilities).into_response()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let projected: Vec<neoism_agent_core::CapabilityInfo> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(projected, capabilities);
+    }
+
+    #[test]
+    fn capability_flags_cannot_smuggle_configuration_through_redaction() {
+        assert_eq!(safe_system_metadata(serde_json::json!({
+            "id":"neoism.mcp", "enabled":{"key":"secret"},
+            "disableable":"secret", "options":{"token":"secret"}
+        })), serde_json::json!({"id":"neoism.mcp"}));
+    }
 
     #[test]
     fn workflow_catalog_projection_drops_secrets_and_executable_configuration() {

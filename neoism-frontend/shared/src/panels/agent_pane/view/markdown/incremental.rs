@@ -72,7 +72,7 @@ pub(super) fn fence(paint:&mut dyn crate::primitives::paint::Paint,text:&str,s:f
     let trimmed=body.trim_end_matches(['\n','\r']);
     let body=if let Some((prefix,last))=trimmed.rsplit_once('\n'){if delimiter.closes(last){&body[..prefix.len()+1]}else{body}}else{body};
     // These fences have completion-dependent semantics beyond code layout.
-    if matches!(lang.trim().to_ascii_lowercase().as_str(),"mermaid"|"stock"|"neoism-html"){return None;}
+    if matches!(lang.trim().to_ascii_lowercase().as_str(),"mermaid"|"stock"|"neoism-html"|"json-render"){return None;}
     if text.len()<2048{return None;}
     // The full-message layout probes this fast path before parsing its blocks.
     // Reject multiple fences BEFORE taking a matching job out of the cache:

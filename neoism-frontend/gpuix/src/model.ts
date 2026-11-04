@@ -1492,9 +1492,11 @@ export class WorkspaceModel {
     this.clearSessionError(sessionId);
     const selection=options.selection||this.selection(sessionId),request=sdkPrompt(text,attachments,selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
     if(options.messageId)request.messageId=options.messageId;
-    // Paint before any selection/auth/HTTP await. Admission later confirms the
-    // same identity or moves it to the queue without duplicating the bubble.
-    if(options.delivery!=="queue")this.transaction(()=>this.showPrompt(sessionId,this.promptMessage(request)));
+    // Idle sends still paint before any await. A busy session may queue or
+    // steer this prompt: wait for its canonical message instead of flashing
+    // an optimistic bubble that queue admission would immediately remove.
+    if(options.delivery!=="queue"&&(!this.state.streaming[sessionId]||this.state.streaming[sessionId]==="Idle"))
+      this.transaction(()=>this.showPrompt(sessionId,this.promptMessage(request)));
     try {
       const sdk = this.sdkForSession(sessionId);
       // A new turn follows any queued undo/redo on the server, while its local
@@ -1720,6 +1722,28 @@ export class WorkspaceModel {
       // must not overwrite the timeline's local activity reservation.
     }
     if(event.family==="Agent"&&typeof body.session_id==="string"&&this.historyEdits.get(body.session_id)?.pending.length&&["MessageUpdated","ContentDelta","PartRemoved","MessageEnd"].includes(tag))return;
+    if(event.family==="Agent"&&tag==="MessageUpdated"&&typeof body.session_id==="string"&&isRecord(body.message)&&body.message.kind!=="User"&&body.message.kind!=="System"){
+      const sessionId=body.session_id,list=this.state.history[sessionId]||[],incoming=body.message;
+      const index=list.findIndex(row=>row.id===incoming.id),lastUser=list.findLastIndex(row=>row.kind==="User");
+      const created=typeof incoming.created_at==="number"&&incoming.created_at>0?incoming.created_at:list[index]?.created_at||0;
+      const historical=index>=0&&index<lastUser;
+      const boundary=lastUser>=0?list.slice(0,lastUser+1).findLast(row=>(row.created_at||0)>0)?.created_at:list.find(row=>(row.created_at||0)>0)?.created_at;
+      const unanchored=index<0&&(created>0?created<(boundary||0):incoming.kind==="Tool"||incoming.kind==="Reasoning"||incoming.kind==="Subtask");
+      if(historical||unanchored){
+        // A snapshot is not a new execution. Missing old parts must get their
+        // position from canonical history, not from their late arrival time.
+        if(index<0)this.refreshCompletedHistory(sessionId);
+        else{
+          try{
+            const message=Schema.decodeUnknownSync(HistoryMessageSchema)(incoming),messages=list.map((row,i)=>i===index?{...message,created_at:created}:row);
+            this.update({history:{...this.state.history,[sessionId]:messages}});
+            const snapshot={HistoryChunk:{session_id:sessionId,messages,next_cursor:this.historyCursors.get(sessionId)??null}};
+            for(const listener of this.agentEventListeners){try{listener(snapshot,"head");}catch(error){this.report(error);}}
+          }catch(error){this.report(error);}
+        }
+        return;
+      }
+    }
     if(event.family==="Agent"){
       const current=this.state.ui,snapshot=isRecord(body.snapshot)?body.snapshot:{};
       const key=tag==="CatalogFamily"||tag==="RuntimeSnapshot"?`${String(snapshot.rootSessionId||body.session_id||"")}:${tag}`:undefined;

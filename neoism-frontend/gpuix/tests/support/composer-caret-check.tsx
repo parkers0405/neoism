@@ -42,7 +42,7 @@ let stage="mount";
 try{
   root.render(()=><div><textarea ref={input} testId="actual-composer-input" theme={{caret:"transparent"}} value="界🙂é\nsecond line"/><ComposerCaret config={config} input={()=>input} home={home()} resetToken={resetToken()} onLayout={layout=>layouts.push(layout)}/></div>);
  assert.ok(input?.id);assert.ok(events.has(`${input.id}:caretGeometry`));assert.ok(!byTest("agent-composer-cursor-paint"));
- stage="first event";report(120,240,true,0);assert.equal(callbacks.size,1);flush();
+  stage="first event";report(120,240,true,0);assert.equal(callbacks.size,0);flush();
  const first=byTest("agent-composer-cursor")!;assert.ok(first);assert.equal(JSON.parse(String(byTest("agent-composer-cursor-paint")!.props.commands))[0].c&255,255,"Agent block must preserve original opaque cursor ink");assert.ok(Math.abs(Number(first.style.width)-9.6)<.001);assert.equal(Number(first.style.height),20);assert.ok(Math.abs(center()[0]-124.8)<.001);assert.equal(center()[1],250);
  stage="idle blink";await waitForBlink(false);await waitForBlink(true);config.cursorBlink=false;
  stage="motion";const oldCenter=center();await Bun.sleep(85);report(160,262,true,3);report(220,284,true,11);assert.equal(callbacks.size,1,"Native repeat events must share one display callback");flush();
@@ -64,7 +64,14 @@ try{
   report(20,600,true,0);root.flush();
   assert.ok(Math.abs(center()[0]-24.8)<.1);assert.ok(Math.abs(center()[1]-610)<.1);
   assert.equal(callbacks.size,0,"submit clear seeds the measured start, never a stretched trail");
-  stage="hidden";report(220,284,false,11);assert.ok(!byTest("agent-composer-cursor-paint"));assert.equal(callbacks.size,0);
+   stage="hidden";report(220,284,false,11);assert.ok(!byTest("agent-composer-cursor-paint"));assert.equal(callbacks.size,0);
+   assert.equal(surfaceCaret(renderer,input.id),undefined,"An unfocused composer must not offer a stale window position to focus handoff");
+   stage="workspace return";report(320,480,true,11);root.flush();
+   assert.ok(Math.abs(center()[0]-324.8)<.1);assert.ok(Math.abs(center()[1]-490)<.1,"Refocus must paint inside the current input immediately, without travelling from the previous workspace layout");
+   assert.equal(callbacks.size,0);
+   stage="workspace layout settles";report(420,580,true,11);root.flush();
+   assert.ok(Math.abs(center()[0]-424.8)<.1);assert.ok(Math.abs(center()[1]-590)<.1,"Layout-only moves must follow the input rather than animate a text-navigation trail outside it");
+   assert.equal(callbacks.size,0);
   root.dispatch({elementId:input!.id,eventType:"caretGeometry",x:120,y:240,value:JSON.stringify({visible:false,fontSize:16,remainingWidth:100,offset:0,selectionStart:0,selectionEnd:0,text:"changed",layoutWidth:300,visualRows:2})});
   assert.deepEqual(layouts,[{text:"changed",width:300,rows:2}],"Unfocused/selected inputs still report the full native shaped layout");
  stage="clipped";report(419,284,true,11,1);flush();const clipLimit=performance.now()+1000;while(callbacks.size){await Bun.sleep(6);flush();assert.ok(performance.now()<clipLimit,"Clipped cursor must settle");}const clipped=byTest("agent-composer-cursor")!;assert.ok(Number(clipped.style.width)<=1.001);

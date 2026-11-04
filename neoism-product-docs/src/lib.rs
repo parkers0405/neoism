@@ -48,6 +48,7 @@ pub static BUNDLED_DOCS: &[BundledDoc] = docs![
     "Neoism Agent/Compaction.md",
     "Neoism Agent/Tools and Background Tasks.md",
     "Neoism Agent/Tool Composition.md",
+    "Neoism Agent/JSON Render.md",
     "Neoism Agent/Memory.md",
     "Neoism Agent/Formatters, LSP, and References.md",
     "Neoism Agent/Troubleshooting.md",

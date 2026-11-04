@@ -135,7 +135,20 @@ try {
   assert.equal(daemon.workspaceRequests.filter(request => request.tag === "SubscribeWorkspace" && request.body.workspace_id === "b").length, 0);
   assert.equal(daemon.workspaceRequests.filter(request => /^(Close|Remove|Delete)/.test(request.tag)).length, 0);
   assert.equal(daemon.requests.filter(request => ["CreateThread", "SubmitPrompt"].includes(request.tag)).length, 0); assert.equal(daemon.ptyRequests.length, 0);
-  stage="notifications stay within content bounds below all chrome and tab strips";
+   stage="Alt-number workspace round trip restores the real composer focus and caret";
+   model.setUI({openWorkspaceIds:["a","b"]});await host.pump(root);
+   await press("2",host.focused,true);await until(()=>model.state.activeWorkspace?.id==="b"&&!model.state.loading);
+   await press("a",host.focused,true);await until(()=>!!host.find("composer"));
+   const otherComposer=host.find("composer")!;
+   root.dispatch({elementId:otherComposer.id,eventType:"caretGeometry",x:220,y:260,value:JSON.stringify(caret)});await host.pump(root);
+   await press("1",otherComposer.id,true);await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading&&!!host.find("composer"));
+   const returnedComposer=host.find("composer")!;
+   assert.equal(host.focused,returnedComposer.id,"Alt+1 must restore keyboard input to the Agent composer");
+   assert.equal(returnedComposer.props.value,"second actual App draft");
+   root.dispatch({elementId:returnedComposer.id,eventType:"caretGeometry",x:460,y:620,value:JSON.stringify(caret)});await host.pump(root);
+   const returnedCaret=host.find("agent-composer-cursor")!;
+   assert.ok(returnedCaret);assert.ok(Math.abs(Number(returnedCaret.style.left)-460)<.001);assert.equal(Number(returnedCaret.style.top),620);
+   stage="notifications stay within content bounds below all chrome and tab strips";
   for(const viewport of [{x:300,y:128,width:640,height:480},{x:100,y:260,width:360,height:150}]){
     setOverlayViewport(host.renderer,viewport);model.report(new Error("headless notification bounds check"));await host.pump(root);
     const notice=host.find("app-notification")!;assert.ok(notice);const container=[...host.nodes.values()].find(node=>node.children.includes(notice.id))!;

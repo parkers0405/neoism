@@ -590,16 +590,7 @@ pub(crate) async fn handle_get_history(
                 .cloned()
                 .unwrap_or_default();
             let next_cursor = history_next_cursor(&items, take as usize);
-            let messages = if items.is_empty() {
-                Vec::new()
-            } else {
-                neoism_ui::panels::agent_pane::api_mapping::message_blocks_from_response(
-                    &items, true,
-                )
-                .into_iter()
-                .map(history_from_agent_message)
-                .collect::<Vec<_>>()
-            };
+            let messages = history_messages_from_response(&items);
             let _ = inner.tx.send(AgentServerMessage::HistoryChunk {
                 session_id,
                 messages,
@@ -608,6 +599,46 @@ pub(crate) async fn handle_get_history(
         }
         Err(err) => emit_error(&inner.tx, err),
     }
+}
+
+/// Creation is the original start, never a completion or last-update time.
+pub(crate) fn part_created_at(part: &Value) -> Option<u64> {
+    part.pointer("/time/start")
+        .and_then(Value::as_u64)
+        .or_else(|| part.pointer("/state/time/start").and_then(Value::as_u64))
+}
+
+pub(crate) fn history_messages_from_response(items: &[Value]) -> Vec<HistoryMessage> {
+    // Pane blocks do not retain timestamps. Recover them by identity without
+    // changing the shared, whole-response ordering/turn normalization below.
+    let mut created_by_id = HashMap::new();
+    for item in items {
+        let created = item
+            .pointer("/info/time/created")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if let Some(id) = item.pointer("/info/id").and_then(Value::as_str) {
+            created_by_id.insert(id, created);
+        }
+        if let Some(parts) = item.get("parts").and_then(Value::as_array) {
+            for part in parts {
+                if let Some(id) = part.get("id").and_then(Value::as_str) {
+                    created_by_id.insert(id, part_created_at(part).unwrap_or(created));
+                }
+            }
+        }
+    }
+    neoism_ui::panels::agent_pane::api_mapping::message_blocks_from_response(items, true)
+        .into_iter()
+        .map(|block| {
+            let mut message = history_from_agent_message(block);
+            message.created_at = created_by_id
+                .get(message.id.as_str())
+                .copied()
+                .unwrap_or(0);
+            message
+        })
+        .collect()
 }
 
 fn history_next_cursor(items: &[Value], take: usize) -> Option<String> {
@@ -650,8 +681,9 @@ mod history_pagination_tests {
 
 /// Lower a shared-pane timeline block into the wire `HistoryMessage`.
 /// The two structs mirror each other field-for-field (the protocol
-/// struct was modelled on `NeoismAgentMessage`); only the role needs
-/// deriving since the pane block doesn't carry one.
+/// struct was modelled on `NeoismAgentMessage`), except role and creation
+/// time. Derive the role here; callers restore creation time from the raw
+/// part/envelope because the pane block does not retain it.
 pub(crate) fn history_from_agent_message(
     message: neoism_ui::panels::agent_pane::state::NeoismAgentMessage,
 ) -> HistoryMessage {

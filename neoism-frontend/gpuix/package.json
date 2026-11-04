@@ -61,10 +61,12 @@
   "dependencies": {
     "@gpuix/native": "0.11.0",
     "@gpuix/solid": "0.11.0",
+    "@json-render/core": "0.21.4",
     "effect": "4.0.6",
     "jsonc-parser": "3.3.1",
     "solid-js": "1.9.17",
     "ws": "8.22.0",
+    "zod": "4.6.7",
     "@neoism/sdk-core": "file:../../neoism-agent/sdk/typescript/packages/core",
     "@neoism/sdk-http": "file:../../neoism-agent/sdk/typescript/packages/http",
     "@neoism/sdk-plugin-builtins": "file:../../neoism-agent/sdk/typescript/packages/plugin-builtins",

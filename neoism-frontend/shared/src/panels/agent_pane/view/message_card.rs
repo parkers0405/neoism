@@ -268,7 +268,7 @@ where
         s: f32,
         namespace: &str,
     ) -> f32 {
-        if !text.contains("neoism-html") {
+        if !super::markdown::requires_namespaced_markdown_height(text) {
             return Self::measure_markdown_text(sugarloaf, pane, text, width, theme, s);
         }
         let blocks =
@@ -1186,6 +1186,30 @@ mod tests {
             "[image1] what is this?"
         );
     }
+
+    #[test]
+    fn compaction_divider_paints_only_compaction_not_summary_or_status() {
+        use super::*;
+        use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+        let mut pane = NeoismAgentPane::default();
+        let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+        let mut stored = NeoismAgentMessage::assistant("Full summary must stay hidden");
+        stored.kind = NeoismAgentMessageKind::Compaction;
+        stored.status = "summary".into();
+        // The timeline projects compaction rows to empty-body dividers.
+        let mut display = stored.clone();
+        display.text.clear();
+        render_compaction_message_with::<_, _, SharedMessageCardDelegate>(
+            &mut painter, 0.0, 0.0, 440.0, 34.0, &display, None,
+            &mut pane, &IdeTheme::default(), 1.0, [0.0, 0.0, 440.0, 100.0], &[],
+        );
+        let texts = painter.commands().into_iter().filter_map(|command| match command {
+            PaintCommand::Text { text, .. } => Some(text),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(texts, vec![" Compaction "]);
+        assert_eq!(stored.text, "Full summary must stay hidden");
+    }
 }
 
 pub fn message_title(message: &impl AgentMessageCardMessage) -> String {
@@ -1241,11 +1265,7 @@ where
     M: AgentMessageCardMessage,
     D: AgentMessageCardDelegate<P, M>,
 {
-    let label = if message.status().trim().is_empty() {
-        " Compaction ".to_string()
-    } else {
-        format!(" Compaction · {} ", message.status())
-    };
+    let label = " Compaction ";
     let Some(label_opts) = opts_with_clip(
         DrawOpts {
             font_size: 12.0 * s,
@@ -1258,7 +1278,7 @@ where
         return h;
     };
     let line_y = y + 15.0 * s;
-    let label_w = sugarloaf.text_mut().measure(&label, &label_opts).max(1.0);
+    let label_w = sugarloaf.text_mut().measure(label, &label_opts).max(1.0);
     let label_x = x + ((w - label_w) * 0.5).max(0.0);
     let gap = 10.0 * s;
     let left_w = (label_x - x - gap).max(0.0);
@@ -1282,7 +1302,7 @@ where
         sugarloaf,
         label_x,
         y + 6.0 * s,
-        &label,
+        label,
         &label_opts,
         occlusion_rects,
     );

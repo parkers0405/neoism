@@ -99,6 +99,65 @@ test("queue admission removes only the unconfirmed local echo and canonical mess
  }finally{off();}
 });
 
+for(const state of ["Generating","Thinking"])for(const queued of [false,true])test(`busy ${state} send never flashes a local bubble before ${queued?"queue admission":"direct steering consumption"}`,async()=>{
+ const {model,requests,push,prompts}=await fixture({deferPrompts:true});
+ await until(()=>model.state.history.one!==undefined);
+ push({StreamingState:{session_id:"one",state,label:null}});
+ await until(()=>model.state.streaming.one===state);
+ const events:any[]=[];const off=model.subscribeAgentEvents(event=>events.push(event));
+ try{
+  const before=model.state.history.one;
+  const submitted=model.submitPrompt("one","Follow up while talking");
+  expect(model.state.history.one).toBe(before);
+  expect(events.some(event=>event.MessageUpdated)).toBe(false);
+  expect(model.state.streaming.one).toBe(state);
+  await until(()=>prompts.length===1);
+  const request=requests.find(request=>request.tag==="SubmitPrompt")!.body;
+  const id=String(request.message_id);
+  expect(request.delivery).toBe("steer");
+  if(queued){
+   push({SessionEvent:{session_id:"one",kind:"session.queue.updated",properties:{action:"enqueue",messageID:id,queue:{count:1,preview:"Follow up while talking",primaryMessageID:"active-turn"}}}});
+   await until(()=>model.state.queues.one?.count===1);
+   expect(model.state.history.one).toBe(before);
+   expect(events.some(event=>event.MessageUpdated||event.PartRemoved)).toBe(false);
+   expect(model.state.streaming.one).toBe(state);
+  }
+  prompts.shift()!();expect(await submitted).toBe(true);
+  expect(model.state.history.one).toBe(before);
+  // Only actual consumption adds a bubble. Also cover a turn finishing
+  // between the local busy check and server admission.
+  if(!queued&&state==="Generating"){
+   push({SessionIdle:{session_id:"one"}});
+   await until(()=>model.state.streaming.one==="Idle");
+   expect(model.state.history.one).toBe(before);
+  }
+  if(queued)push({QueueUpdate:{session_id:"one",count:0}});
+  const message={id,role:"User",kind:"User",text:"Follow up while talking"};
+  push({MessageUpdated:{session_id:"one",message}});
+  await until(()=>model.state.history.one.some(row=>row.id===id));
+  push({MessageUpdated:{session_id:"one",message}});
+  push({ProviderState:{session_id:"one",agent:"consumed-barrier"}});
+  await until(()=>model.selection("one").agent==="consumed-barrier");
+  expect(model.state.history.one.filter(row=>row.id===id)).toHaveLength(1);
+  expect(events.some(event=>event.MessageUpdated?.local_echo||event.PartRemoved)).toBe(false);
+ }finally{off();}
+});
+
+test("a rejected busy send reports its error without flashing a bubble or stopping the active response",async()=>{
+ const {model,prompts,push}=await fixture({deferPrompts:true,promptError:"Rejected busy send"});
+ await until(()=>model.state.history.one!==undefined);
+ push({StreamingState:{session_id:"one",state:"Thinking",label:null}});
+ await until(()=>model.state.streaming.one==="Thinking");
+ const before=model.state.history.one;
+ const submitted=model.submitPrompt("one","Do not flash on rejection");
+ expect(model.state.history.one).toBe(before);
+ await until(()=>prompts.length===1);
+  prompts.shift()!();expect(await submitted).toBe(false);
+ expect(model.state.history.one.filter(row=>row.kind!=="System")).toEqual([...before]);
+ expect(model.state.history.one.at(-1)?.text).toBe("Rejected busy send");
+ expect(model.state.streaming.one).toBe("Thinking");
+});
+
 for(const echoFirst of [false,true])for(const count of [0,1])test(`idle prompt admission keeps its bubble and activity ${echoFirst?"after":"before"} canonical echo with ${count} waiting`,async()=>{
  const {model,requests,push,prompts}=await fixture({deferPrompts:true});
  await until(()=>model.state.history.one!==undefined);

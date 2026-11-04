@@ -104,6 +104,25 @@ mod tests {
     }
 
     #[test]
+    fn json_render_catalog_is_available_on_demand_without_workspace_files() {
+        let service = NeoismDocumentationService;
+        let path = "Neoism Agent/JSON Render.md";
+        let hint = include_str!("../../neoism-agent-builtins/src/plugin/system_prompt/json_render_hint.md");
+        assert!(hint.contains(path));
+        assert!(service.list().unwrap().iter().any(|page| page.path == path));
+        assert!(service.search("json-render", 1).unwrap().iter().any(|hit| hit.path == path));
+        let page = service.read(path).unwrap();
+        assert!(page.content.contains("- Diagram:"));
+        assert!(page.content.contains("Structured graph data, NOT Mermaid syntax"));
+        for expected in ["```json-render", "Stack:", "Card:", "Text:", "Metric:", "Badge:", "Progress:", "LineGraph:", "Separator:", "Tabs:", "Collapsible:", "Filter:", "Input:", "Select:", "Checkbox:", "changeType?", "2 to 32", "finite numbers", "Team performance", "Sample data", "Weekly revenue", "$12,400", "+18%", "Deals closed", "Retention", "32768", "64 elements", "tree depth 8", "no state bindings", "Agent requests belong in the chat composer, NEVER inside generated UI", "Form and Button are not supported", "Local field values are not sent anywhere", "six-digit RGB hex", "#60A5FA"] {
+            assert!(page.content.contains(expected), "missing {expected}");
+        }
+        assert!(hint.len() * 10 < page.content.len());
+        assert!(!page.content.contains("- Form:"));
+        assert!(!page.content.contains("- Button:"));
+    }
+
+    #[test]
     fn skill_authoring_query_finds_complete_instructions() {
         let service = NeoismDocumentationService;
         let hit = service

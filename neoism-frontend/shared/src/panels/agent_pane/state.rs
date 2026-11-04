@@ -738,6 +738,7 @@ pub struct NeoismAgentPane {
     /// Per-gesture inertia tuning for precision trackpad input.
     timeline_scroll_decay_tau: f32,
     timeline_scroll_stop_px_s: f32,
+    pub json_ui: RefCell<super::view::markdown::json_render::Runtime>,
     timeline_measure_cache: RefCell<HashMap<TimelineMeasureKey, f32>>,
     markdown_blocks_cache:
         RefCell<HashMap<MarkdownBlocksKey, (CachedMarkdownBlocks, u64)>>,
@@ -1137,6 +1138,7 @@ impl Default for NeoismAgentPane {
             timeline_trace_reveal_pending: false,
             timeline_scroll_decay_tau: Self::TIMELINE_TRACKPAD_DECAY_TAU,
             timeline_scroll_stop_px_s: Self::TIMELINE_TRACKPAD_STOP_PX_S,
+            json_ui: RefCell::new(Default::default()),
             timeline_measure_cache: RefCell::new(HashMap::new()),
             text_reveal: Default::default(),
             footer_growth: Default::default(),
@@ -1312,6 +1314,16 @@ impl ExecutionTimerAnchor {
 impl NeoismAgentPane {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Local JSON UI state changes do not alter message text, so invalidate
+    /// both message-height memoization and the assembled timeline geometry.
+    /// Keep the shaped Markdown/tree cache: reflow needs no new measurements.
+    pub fn invalidate_json_ui_layout(&mut self) {
+        self.timeline_measure_cache.borrow_mut().clear();
+        self.text_reveal.invalidate_projections();
+        self.invalidate_timeline_layout();
+        self.continue_timeline_preparation();
     }
 
     /// Push the local peer's presence display name (the same seed the
@@ -2167,6 +2179,8 @@ impl NeoismAgentPane {
                 let kind = reason.unwrap_or_else(|| "done".to_string());
                 self.finish_compaction_message(&summary, &kind);
                 if self.streaming_state == NeoismAgentStreamingState::Compacting {
+                    // This semantic boundary is final, not a transient idle gap.
+                    self.side_panel.clear_status_display_hold();
                     self.note_streaming(
                         if run_continues == Some(true) {
                             NeoismAgentStreamingState::Generating

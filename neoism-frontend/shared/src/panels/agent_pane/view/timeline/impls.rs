@@ -136,6 +136,10 @@ impl AgentTimelinePane for NeoismAgentPane {
         NeoismAgentPane::streaming_label(self)
     }
 
+    fn compaction_active(&self) -> bool {
+        self.streaming_state() == crate::panels::agent_pane::state::NeoismAgentStreamingState::Compacting
+    }
+
     fn timeline_live_trace_start(&self) -> Option<usize> {
         NeoismAgentPane::timeline_live_trace_start(self)
     }

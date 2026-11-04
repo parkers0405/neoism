@@ -198,7 +198,12 @@ where
             pane.queued_prompt_count(),
             pane.running_background_task_count(),
         );
-        STREAMING_STATUS_LINE_H * s * lines as f32
+        let hint_lines = if pane.compaction_active() {
+            1 + compaction_hint_lines(sugarloaf, w, s).len()
+        } else {
+            0
+        };
+        STREAMING_STATUS_LINE_H * s * (lines + hint_lines) as f32
     } else {
         0.0
     };
@@ -777,6 +782,10 @@ pub(crate) fn display_timeline_message<M: AgentTimelineMessage>(
         return None;
     }
     let mut display_message = message.clone();
+    if message.kind() == AgentTimelineMessageKind::Compaction {
+        // Preserve the compaction boundary without painting or measuring its summary.
+        return Some(message.with_text(String::new()));
+    }
     if matches!(
         message.kind(),
         AgentTimelineMessageKind::Assistant | AgentTimelineMessageKind::Reasoning

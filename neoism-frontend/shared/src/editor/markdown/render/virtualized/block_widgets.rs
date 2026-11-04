@@ -399,8 +399,16 @@ fn draw_code_block(
     // drawn — the header already names the block, matching the git-diff card.
     // Long lines wrap (terminal-style, breaking after whitespace when one
     // fits the row) instead of running off the card.
+    let row_counts = code_block_row_counts(
+        sugarloaf.text_mut(), pane, item.text_hash, &local_lines, width, &opts,
+    );
     let mut row = 0usize;
     for (local_ix, line) in local_lines.iter().enumerate() {
+        // Height measurement already accounts for the whole block. Painting
+        // must not reshape its remaining lines below the viewport each frame.
+        if block_y + header_h + top_pad + row as f32 * line_h > clip_bottom {
+            break;
+        }
         let source_line = item.first_line + local_ix;
         if line.trim_start().starts_with("```") {
             if local_ix == 0 {
@@ -460,15 +468,15 @@ fn draw_code_block(
             );
             continue;
         }
-        let stops = measured_stops_for_text(sugarloaf, line, &opts);
-        let chars: Vec<char> = line.chars().collect();
-        let ranges = code_wrap_ranges(&stops, &chars, width);
-        let row_count = ranges.len().max(1);
+        let row_count = row_counts[local_ix];
         let line_y = block_y + header_h + top_pad + row as f32 * line_h;
         row += row_count;
         if line_y + row_count as f32 * line_h < clip_top || line_y > clip_bottom {
             continue;
         }
+        let stops = measured_stops_for_text(sugarloaf, line, &opts);
+        let chars: Vec<char> = line.chars().collect();
+        let ranges = code_wrap_ranges(&stops, &chars, width);
         // Every inner code line gets its own block rect + per-row measured
         // stops so a click lands the caret ON that visual row (identity-mapped
         // — code text is never markdown-cleaned). Without these the whole
@@ -541,11 +549,18 @@ fn draw_code_block(
             clip_bottom,
         );
         for (row_ix, &(start, end)) in ranges.iter().enumerate() {
+            let row_y = line_y + row_ix as f32 * line_h;
+            if row_y > clip_bottom {
+                break;
+            }
+            if row_y + line_h < clip_top {
+                continue;
+            }
             let segment: String = chars[start..end].iter().collect();
             draw_virtualized_code_line(
                 sugarloaf,
                 x,
-                line_y + row_ix as f32 * line_h,
+                row_y,
                 &segment,
                 lang,
                 &opts,
@@ -1278,6 +1293,93 @@ fn register_code_row_geometry(
             stops: measured_stops_for_text(sugarloaf, line, opts),
         }],
     );
+}
+
+/// Reuse block layout while scrolling; only visible lines need hit-test stops.
+fn code_block_row_counts(
+    text: &mut dyn crate::primitives::paint::TextPaint,
+    pane: &MarkdownPane,
+    text_hash: u64,
+    lines: &[String],
+    width: f32,
+    opts: &DrawOpts,
+) -> std::sync::Arc<Vec<usize>> {
+    let mut key = (text_hash, width.to_bits(), opts.font_size.to_bits(), text.font_cache_generation());
+    if let Some(rows) = pane.virtual_render.code_row_cache.borrow_mut().get(&key) {
+        return rows.clone();
+    }
+    let rows = std::sync::Arc::new(lines.iter().map(|line| {
+        if line.trim_start().starts_with("```") { return 0; }
+        // Most code rows fit. Their height needs one full-line measure, not
+        // every caret stop; exact stops are only needed for wrapping/hit tests.
+        if text.measure(line, opts) <= width.max(24.0) { return 1; }
+        let stops = text.measure_char_prefixes(line, opts);
+        let chars: Vec<char> = line.chars().collect();
+        code_wrap_ranges(&stops, &chars, width).len()
+    }).collect());
+    // Lazy fallback discovery can change the generation during measurement.
+    key.3 = text.font_cache_generation();
+    pane.virtual_render.code_row_cache.borrow_mut().put(key, std::sync::Arc::clone(&rows));
+    rows
+}
+
+#[cfg(test)]
+mod code_row_cache_tests {
+    use super::*;
+    use crate::primitives::paint::TextPaint;
+
+    #[derive(Default)]
+    struct CountingText { calls: usize, measures: usize, generation: u64 }
+    impl TextPaint for CountingText {
+        fn measure(&mut self, text: &str, _: &DrawOpts) -> f32 {
+            self.measures += 1;
+            text.chars().count() as f32
+        }
+        fn measure_char_prefixes(&mut self, text: &str, _: &DrawOpts) -> Vec<f32> {
+            self.calls += 1;
+            (0..=text.chars().count()).map(|i| i as f32).collect()
+        }
+        fn draw(&mut self, _: f32, _: f32, _: &str, _: &DrawOpts) -> f32 { panic!("unexpected draw") }
+        fn draw_scaled(&mut self, _: f32, _: f32, _: &str, _: &DrawOpts, _: f32) -> f32 { panic!("unexpected draw") }
+        fn instances(&self) -> &[neoism_paint::text::TextInstance] { &[] }
+        fn center_instances_in_rect(&mut self, _: usize, _: [f32; 4], _: bool, _: bool) -> bool { false }
+        fn font_cache_generation(&mut self) -> u64 { self.generation }
+    }
+
+    #[test]
+    fn scrolling_reuses_counts_but_content_width_and_fonts_invalidate() {
+        let mut pane = MarkdownPane::from_source("code.md".into(), "```text\ncode\n```");
+        let lines = vec!["```text".into(), "x".repeat(60), String::new(), "```".into()];
+        let mut text = CountingText::default();
+        let mut opts = DrawOpts::default();
+        let rows = code_block_row_counts(&mut text, &pane, 1, &lines, 24.0, &opts);
+        assert_eq!(*rows, vec![0, 3, 1, 0]);
+        assert_eq!(text.calls, 1, "only wrapped lines need exact stops during layout");
+        assert_eq!(text.measures, 2);
+        for line in 0..200 {
+            pane.cursor_line = line;
+            pane.scroll_y = line as f32 * 20.0;
+            assert!(std::sync::Arc::ptr_eq(&rows, &code_block_row_counts(&mut text, &pane, 1, &lines, 24.0, &opts)));
+        }
+        assert_eq!(text.calls, 1, "scroll and caret motion must not remeasure the block");
+        assert_eq!(text.measures, 2);
+        assert_eq!(*code_block_row_counts(&mut text, &pane, 1, &lines, 60.0, &opts), vec![0, 1, 1, 0]);
+        assert_eq!(text.measures, 4);
+        opts.font_size += 1.0;
+        code_block_row_counts(&mut text, &pane, 1, &lines, 60.0, &opts);
+        assert_eq!(text.measures, 6);
+        text.generation += 1;
+        code_block_row_counts(&mut text, &pane, 1, &lines, 60.0, &opts);
+        assert_eq!(text.measures, 8);
+        let changed = vec!["```text".into(), "x".repeat(120), String::new(), "```".into()];
+        assert_eq!(*code_block_row_counts(&mut text, &pane, 2, &changed, 60.0, &opts), vec![0, 2, 1, 0]);
+        assert_eq!(text.measures, 10);
+        assert_eq!(text.calls, 2);
+        for hash in 3..30 {
+            code_block_row_counts(&mut text, &pane, hash, &lines, 60.0, &opts);
+        }
+        assert_eq!(pane.virtual_render.code_row_cache.borrow().len(), 16);
+    }
 }
 
 /// Terminal-style wrap for one code line: ranges of char indices per visual

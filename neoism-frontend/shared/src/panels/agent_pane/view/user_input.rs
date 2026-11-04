@@ -1404,7 +1404,7 @@ mod user_bubble_tests {
     fn painted_bubble_aligns_wrapped_rows_and_keeps_tail_and_profile_on_replay() {
         use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
         let mut painter = RecordingPainter::new("monospace", 400, vec![]);
-        for text in ["hey whats up I am check on you", "hey\nwhats up",
+        for text in ["hey whats up I am check on you", "hey\nwhats up", "one\ntwo\nthree",
             "jsut checking in, what is this project and what does it do"] {
             let lines = wrap_user_message(&mut painter, text, user_message_text_width(600.0, 1.0),
                 &DrawOpts { font_size: 13.5, ..DrawOpts::default() }).len();
@@ -1428,6 +1428,16 @@ mod user_bubble_tests {
                     PaintCommand::Image { rect, .. } => rect[0] >= 600.0 - USER_ORB_SIZE && rect[2] == USER_ORB_SIZE,
                     _ => false,
                 }), "the sender profile must remain to the right of the bubble");
+                for command in &commands {
+                    if let PaintCommand::Rect { rect, color, .. } = command {
+                        if *color != blue && rect[0] >= 600.0 - USER_ORB_SIZE {
+                            let bottom = body[1] + body[3];
+                            assert!(rect[1] >= bottom - USER_ORB_SIZE - 0.5,
+                                "profile cells must sit beside the tail, not midway up the bubble");
+                            assert!(rect[1] + rect[3] <= bottom + 0.5);
+                        }
+                    }
+                }
                 let mut row = 0;
                 for command in &commands {
                     if let PaintCommand::Text { x, y, raster: Some(raster), .. } = command {
@@ -1797,7 +1807,7 @@ pub fn render_user_message<P: AgentMarkdownPane>(
         viewport_clip,
     );
     let orb = (USER_ORB_SIZE * s).min(avatar_lane * 0.7);
-    let orb_rect = [x + w - orb, y + (body_h - orb) * 0.5, orb, orb];
+    let orb_rect = [x + w - orb, y + (body_h - orb).max(0.0), orb, orb];
     crate::editor::markdown::render::draw::draw_presence_orb_clipped(
         sugarloaf, viewport_clip, orb_seed, orb_rect[0], orb_rect[1], orb,
         crate::editor::crdt::presence_orb_now_seconds(), DEPTH, ORDER_TEXT,
@@ -2416,6 +2426,93 @@ fn draw_opencode_activity_scanner(sugarloaf:&mut dyn crate::primitives::paint::P
     host_footer::draw_opencode_activity_scanner(sugarloaf,x,y,font_size,now_seconds,theme,state,clip,occlusions)
 }
 
+fn compaction_bar_intensity(index: usize, cells: usize, time: f32) -> f32 {
+    // A soft scanning highlight indicates activity, not a fabricated percentage.
+    let head = (time * 0.65).rem_euclid(1.0) * (cells as f32 + 5.0) - 2.5;
+    let glow = (1.0 - (index as f32 - head).abs() / 2.5).max(0.0);
+    0.16 + 0.84 * glow * glow
+}
+
+pub(super) fn compaction_hint_lines(
+    painter: &mut dyn crate::primitives::paint::Paint,
+    width: f32,
+    s: f32,
+) -> Vec<String> {
+    super::draw::wrap_input_text(painter, "This will just take a few moments.",
+        (width - 6.0 * s).max(1.0), &DrawOpts { font_size: 13.0 * s, ..DrawOpts::default() })
+}
+
+#[cfg(test)]
+mod compaction_progress_tests {
+    use super::*;
+
+    #[test]
+    fn segmented_bar_scans_smoothly_without_claiming_a_percentage() {
+        assert_ne!(compaction_bar_intensity(3, 14, 0.3), compaction_bar_intensity(3, 14, 0.6));
+        for index in 0..14 {
+            for time in [0.0, 0.25, 0.75, 9999.0] {
+                assert!((0.16..=1.0).contains(&compaction_bar_intensity(index, 14, time)));
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_keeps_animated_label_adds_segments_and_clears_when_finished() {
+        use crate::panels::agent_pane::state::CompactionPhase;
+        use crate::primitives::paint_record::{PaintCommand, RecordingPainter};
+        let mut pane = NeoismAgentPane::default();
+        let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+        let rect = [0.0, 0.0, 440.0, 78.0];
+        pane.note_compaction(CompactionPhase::Started, None, None);
+        render_streaming_status_row(&mut painter, &mut pane, rect, &IdeTheme::default(), 1.0, 2.0, rect, &[]);
+        let commands = painter.commands();
+        let text = commands.iter().filter_map(|command| match command {
+            PaintCommand::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        // The original label paints animated glyphs and their depth echoes.
+        assert!(text.len() > 10);
+        assert!(text.iter().any(|glyph| *glyph == "."));
+        assert!(!text.iter().any(|text| text.contains("[====")));
+        assert!(text.iter().any(|text| text.contains("elapsed")));
+        assert!(text.contains(&"This will just take a few moments."));
+        let timer_y = commands.iter().find_map(|command| match command {
+            PaintCommand::Text { text, y, .. } if text.contains("elapsed") => Some(*y),
+            _ => None,
+        }).unwrap();
+        let hint_y = commands.iter().find_map(|command| match command {
+            PaintCommand::Text { text, y, .. } if text == "This will just take a few moments." => Some(*y),
+            _ => None,
+        }).unwrap();
+        assert!(hint_y > timer_y);
+        let bar_y = commands.iter().find_map(|command| match command {
+            PaintCommand::Rect { rect, .. } if rect[3] == 6.0 => Some(rect[1]),
+            _ => None,
+        }).unwrap();
+        assert!(bar_y > timer_y + 13.0, "bar sits below the label and timer");
+        assert!(bar_y + 6.0 < hint_y, "hint sits below the bar");
+        assert!(hint_y + 13.0 <= rect[3]);
+        assert_eq!(commands.iter().filter(|command| matches!(command,
+            PaintCommand::Rect { rect, .. } if rect[3] == 6.0)).count(), 14);
+        assert!(pane.has_visible_activity_status());
+        painter.begin_frame();
+        pane.note_compaction(CompactionPhase::Ended, None, None);
+        render_streaming_status_row(&mut painter, &mut pane, rect, &IdeTheme::default(), 1.0, 1.0, rect, &[]);
+        assert!(painter.commands().is_empty());
+        assert!(!pane.has_visible_activity_status());
+    }
+
+    #[test]
+    fn compaction_hint_reserves_wrapped_lines_at_each_scale() {
+        use crate::primitives::paint_record::RecordingPainter;
+        let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+        for s in [0.75, 1.0, 2.0] {
+            assert_eq!(compaction_hint_lines(&mut painter, 440.0 * s, s).len(), 1);
+            assert!(compaction_hint_lines(&mut painter, 120.0 * s, s).len() > 1);
+        }
+    }
+}
+
 /// Activity block at the timeline tail, pinned above the composer only while
 /// following. The caller supplies both its row geometry and hard viewport clip.
 #[allow(clippy::too_many_arguments)]
@@ -2447,8 +2544,13 @@ pub fn render_streaming_status_row(
         return;
     }
     let state = pane.streaming_state();
+    let compacting = state == AgentStreamingStatus::Compacting;
     let accent = streaming_status_accent(theme, state);
-    let elapsed = pane.streaming_elapsed_seconds().unwrap_or(0.0);
+    let elapsed = if compacting {
+        pane.streaming_state_changed_elapsed().unwrap_or(0.0)
+    } else {
+        pane.streaming_elapsed_seconds().unwrap_or(0.0)
+    };
     let transition = pane.streaming_state_changed_elapsed().unwrap_or(2.0);
     let live_phase = now_seconds;
     let queued_count = pane.queued_prompt_count();
@@ -2495,8 +2597,7 @@ pub fn render_streaming_status_row(
         ..DrawOpts::default()
     };
     let activity_frame = pixel_font.and_then(|_| pane.activity_animation_frame());
-    let label_lines =
-        wrap_streaming_status_label(sugarloaf, &display_label, bar_w, s, &word_opts);
+    let label_lines = wrap_streaming_status_label(sugarloaf, &display_label, bar_w, s, &word_opts);
     // The status row sits immediately above the composer. Anchor the final
     // wrapped line here and grow earlier lines upward through the timeline's
     // reserved status rows; growing downward puts line two behind the island.
@@ -2651,7 +2752,9 @@ pub fn render_streaming_status_row(
         AgentStreamingStatus::Retrying => "backoff",
         AgentStreamingStatus::Idle => "idle",
     };
-    let time_label = if matches!(state, AgentStreamingStatus::Generating) {
+    let time_label = if compacting {
+        format!("· {} elapsed", format_elapsed(elapsed))
+    } else if matches!(state, AgentStreamingStatus::Generating) {
         format!("· {} model", format_elapsed(elapsed))
     } else {
         format!("· {} model · {detail}", format_elapsed(elapsed))
@@ -2663,9 +2766,27 @@ pub fn render_streaming_status_row(
         clip_rect: Some(text_clip),
         ..DrawOpts::default()
     };
+    if compacting {
+        let width = (bar_w - 6.6 * s).min(112.0 * s);
+        if width >= 32.0 * s {
+            let cells = 14;
+            let gap = (2.5 * s).min(width / (cells * 3) as f32);
+            let cell_w = (width - gap * (cells - 1) as f32) / cells as f32;
+            let y = bar_y + status_line_h * label_lines.len() as f32
+                + (status_line_h - 6.0 * s) * 0.5;
+            for index in 0..cells {
+                let mut color = theme.f32(accent);
+                color[3] = compaction_bar_intensity(index, cells, live_phase);
+                let cell = [bar_x + 3.3 * s + index as f32 * (cell_w + gap), y, cell_w, 6.0 * s];
+                for fragment in crate::primitives::geom::visible_rect_fragments(cell, text_clip, occlusion_rects) {
+                    draw_rounded_rect_clipped(sugarloaf, fragment, color, 1.25 * s, ORDER_TEXT, text_clip);
+                }
+            }
+        }
+    }
     let time_baseline = sugarloaf.text_mut().baseline_offset(&time_opts);
     let time_y = last_line_y + word_baseline - time_baseline;
-    if elapsed > 0.0 {
+    if elapsed > 0.0 || compacting {
         draw_text_clipped(
             sugarloaf,
             cursor_x,
@@ -2674,6 +2795,20 @@ pub fn render_streaming_status_row(
             &time_opts,
             occlusion_rects,
         );
+    }
+
+    let hint_lines = if compacting { compaction_hint_lines(sugarloaf, bar_w, s) } else { Vec::new() };
+    let progress_lines = usize::from(compacting);
+    let hint_opts = DrawOpts {
+        font_size: 13.0 * s,
+        color: theme.u8(theme.muted),
+        clip_rect: Some(text_clip),
+        ..DrawOpts::default()
+    };
+    for (index, line) in hint_lines.iter().enumerate() {
+        let hint_y = bar_y + status_line_h * (label_lines.len() + progress_lines + index) as f32
+            + (status_line_h - hint_opts.font_size) * 0.5;
+        draw_text_clipped(sugarloaf, bar_x + 3.3 * s, hint_y, line, &hint_opts, occlusion_rects);
     }
 
     if queued_count > 0 {
@@ -2707,7 +2842,7 @@ pub fn render_streaming_status_row(
             ..DrawOpts::default()
         };
         let queue_y = bar_y
-            + status_line_h * label_lines.len() as f32
+            + status_line_h * (label_lines.len() + progress_lines + hint_lines.len()) as f32
             + (status_line_h - queue_opts.font_size) * 0.5
             - 1.0 * s;
         draw_text_clipped(
@@ -2734,7 +2869,7 @@ pub fn render_streaming_status_row(
             ..DrawOpts::default()
         };
         let bg_y = bar_y
-            + status_line_h * label_lines.len() as f32
+            + status_line_h * (label_lines.len() + progress_lines + hint_lines.len()) as f32
             + if queued_count > 0 { status_line_h } else { 0.0 }
             + (status_line_h - bg_opts.font_size) * 0.5
             - 1.0 * s;

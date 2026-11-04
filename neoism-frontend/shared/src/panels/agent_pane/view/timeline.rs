@@ -17,6 +17,7 @@ use super::tool_message::{
     cached_edit_diff_sections_for_parts, CachedToolDiffSections, ToolDiffSection,
 };
 use super::user_input::{
+    compaction_hint_lines,
     render_streaming_status_row, streaming_status_line_count,
     streaming_status_primary_line_count,
 };
@@ -409,6 +410,7 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     fn set_selection_content_offset(&mut self, _offset: Option<f32>) {}
     fn has_status_activity(&self) -> bool;
     fn streaming_label(&self) -> String;
+    fn compaction_active(&self) -> bool { false }
     /// First source row observed live during this visit to the session. `None`
     /// means the transcript is a reloaded, settled history projection.
     fn timeline_live_trace_start(&self) -> Option<usize>;

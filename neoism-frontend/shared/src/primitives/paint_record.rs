@@ -51,6 +51,7 @@ pub enum PaintCommand {
         points: Vec<(f32, f32)>,
         color: [f32; 4],
         depth: f32,
+        order: u8,
         layer: u8,
     },
     Text {
@@ -540,6 +541,12 @@ impl Paint for RecordingPainter {
     ) {
         self.polygon(&[(x1, y1), (x2, y2), (x3, y3)], d, c)
     }
+    fn triangle_ordered(&mut self,x1:f32,y1:f32,x2:f32,y2:f32,x3:f32,y3:f32,depth:f32,color:[f32;4],order:u8) {
+        self.commands.borrow_mut().push(PaintCommand::Polygon {
+            points:vec![(x1,y1),(x2,y2),(x3,y3)],color,depth,order,
+            layer:if self.late_overlay {3} else {0},
+        });
+    }
     fn border_ring(&mut self,outer:&[(f32,f32)],inner:&[(f32,f32)],depth:f32,color:[f32;4],order:u8){
         self.commands.borrow_mut().push(PaintCommand::Ring{outer:outer.to_vec(),inner:inner.to_vec(),color,clip:None,depth,order,layer:if self.late_overlay {3} else {0}});
     }
@@ -562,10 +569,14 @@ impl Paint for RecordingPainter {
         });
     }
     fn polygon(&mut self, p: &[(f32, f32)], d: f32, c: [f32; 4]) {
+        self.polygon_ordered(p,d,c,0);
+    }
+    fn polygon_ordered(&mut self, p:&[(f32,f32)], d:f32, c:[f32;4], order:u8) {
         self.commands.borrow_mut().push(PaintCommand::Polygon {
             points: p.to_vec(),
             color: c,
             depth: d,
+            order,
             layer: if self.late_overlay {3} else {0},
         });
     }

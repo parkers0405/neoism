@@ -101,19 +101,14 @@ fn measure_item(
                     }
                 }
             }
-            let mut inner_rows = 0usize;
-            let mut fence_reveal_rows = 0usize;
-            for (local_ix, line) in local_lines.iter().enumerate() {
-                if line.trim_start().starts_with("```") {
-                    if local_ix > 0 && cursor_line == Some(item.first_line + local_ix) {
-                        fence_reveal_rows = 1;
-                    }
-                    continue;
-                }
-                let stops = measured_stops_for_text(sugarloaf, line, &opts);
-                let chars: Vec<char> = line.chars().collect();
-                inner_rows += code_wrap_ranges(&stops, &chars, width).len();
-            }
+            let row_counts = code_block_row_counts(
+                sugarloaf.text_mut(), pane, item.text_hash, &local_lines, width, &opts,
+            );
+            let inner_rows: usize = row_counts.iter().sum();
+            let fence_reveal_rows = local_lines.iter().enumerate().any(|(local_ix, line)| {
+                local_ix > 0 && cursor_line == Some(item.first_line + local_ix)
+                    && line.trim_start().starts_with("```")
+            }) as usize;
             let rows = inner_rows.max(1) + fence_reveal_rows;
             let height = CODE_BLOCK_HEADER_H
                 + CODE_BLOCK_BODY_PAD * 2.0

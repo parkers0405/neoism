@@ -94,3 +94,21 @@ test("cold rich restore uses the actual viewport and original virtual scroll anc
   expect(restored.frame.cursor.rect).not.toBeNull();expect(Math.abs(restored.frame.cursor.rect![1]-markdown.frame.cursor.rect![1])).toBeLessThan(40);
  }finally{restored?.dispose();restoredEditor?.dispose();markdown.dispose();editor.dispose();}
 },10000);
+
+test("large fenced blocks retain wrapped text and reveal a caret beyond the painted rows",async()=>{
+ const lines=["```text","abcdefgh".repeat(1024),...Array.from({length:200},(_,i)=>`code row ${i}`),"final_sentinel","```"];
+ const editor=new NativeEditor("large.md",lines.join("\n"),true),markdown=new NativeMarkdown(editor,config,"/project/large.md");
+ try{
+  markdown.call("layout",{width:600,height:400});
+  expect(texts(markdown.frame.commands).some(run=>run.text.includes("abcdefgh"))).toBe(true);
+  expect(texts(markdown.frame.commands).some(run=>run.text.includes("final_sentinel"))).toBe(false);
+  markdown.call("goto",{line:202,col:5});
+  for(let i=0;i<180;i++){await Bun.sleep(8);markdown.call("frame");if(!markdown.frame.animating)break;}
+  expect(markdown.frame.cursor.line).toBe(202);
+  expect(markdown.frame.cursor.col).toBe(5);
+  expect(markdown.frame.cursor.rect).not.toBeNull();
+  expect(texts(markdown.frame.commands).some(run=>run.text.includes("final_sentinel"))).toBe(true);
+  expect(markdown.text()).toBe(lines.join("\n"));
+  expect(editor.frame.dirty).toBe(false);
+ }finally{markdown.dispose();editor.dispose();}
+},10000);

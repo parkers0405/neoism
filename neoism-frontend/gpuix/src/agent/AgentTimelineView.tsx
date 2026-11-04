@@ -8,7 +8,8 @@ import { coreCall } from "../native-core";
 import { writeClipboard } from "../clipboard";
 import { PaintLayer, type PaintCommand, type PreparedCanvas } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
-import { invalidateNativeFocus } from "../native-focus";
+import { focusNativeElement,invalidateNativeFocus } from "../native-focus";
+import {JsonRenderControls,type JsonUiFrame,type JsonUiEvent,type JsonUiEventResult} from "./JsonRenderControls";
 import {profileStart,profileEnd} from "../profiling";
 import type {AgentFamilyRow} from "./family";
 import { horizontalScrollEvent, readingScrollY, wheelCellPixels } from "../ui/wheel";
@@ -19,6 +20,7 @@ import {openExternalUrl} from "../menu-actions/web-frontend";
 import {timelineReceivesEvent} from "./timeline-event-routing";
 
 interface TimelineFrame { selecting?:boolean; preview?:{name:string;url:string}; canvas?: PreparedCanvas; commands: PaintCommand[]; animating: boolean; reason?:string; pointer?:boolean; copy?: string | null; link?: string | null;navigate?:string;send?:unknown[];header?:Array<{direction:string;target:string;rects:number[][]}> }
+interface TimelineFrame {jsonUi?:JsonUiFrame;jsonUiAccepted?:boolean}
 interface Engine { touched:number; id: number; dirty: Set<() => void>; dispose: () => void }
 
 /** One original agent timeline engine per conversation (the shared Rust
@@ -113,11 +115,12 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   const [header,setHeader]=createSignal<NonNullable<TimelineFrame["header"]>>([]);
   const [pointer,setPointer]=createSignal(false);
   const [selecting,setSelecting]=createSignal(false);
+  const [jsonUi,setJsonUi]=createSignal<JsonUiFrame>();
   let bounds = { x: 0, y: 0, width: props.viewport?.width||0, height: props.viewport?.height||0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const apply = (next: TimelineFrame) => {
     if(next.animating)profileEnd(`agent.animation.${next.reason||"scroll"}`,profileStart());
-    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setPointer(!!next.pointer);setSelecting(!!next.selecting);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
+    batch(() => {setCommands(next.commands);setCanvas(next.canvas);setJsonUi(next.jsonUi);setPointer(!!next.pointer);setSelecting(!!next.selecting);setHeader(previous=>JSON.stringify(previous)===JSON.stringify(next.header||[])?previous:next.header||[]);});
     if(!props.provisional)for(const message of next.send||[])props.model.sendAgent(message as never);
     if(next.preview){
       const match=/^data:image\/[^;,]+;base64,(.*)$/s.exec(next.preview.url);
@@ -139,6 +142,15 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     try { flushFamily();flushPointer();apply(coreCall<TimelineFrame>(`agenttimeline.${op}`, { id: engine.id,...(op==="layout"?{localName}:{}), ...args })); } catch (error) { props.report(error); }
   };
   let layoutSignature = "";
+  const widgetEvent=(event:JsonUiEvent):JsonUiEventResult=>{
+    try {
+      flushFamily();flushPointer();
+      const next=coreCall<TimelineFrame>("agenttimeline.json-ui",{id:engine.id,...event});
+      if(!disposed)apply(next);
+      if(next.jsonUiAccepted)for(const listener of engine.dirty)if(listener!==schedule)listener();
+      return {accepted:next.jsonUiAccepted===true,frame:next.jsonUi};
+    }catch(error){if(!disposed)props.report(error);return {accepted:false};}
+  };
   const familyArgs=()=>({rootSessionId:props.rootSessionId||props.sessionId,sessionId:props.sessionId,roster:props.familyRoster||[],rootTitle:props.model.state.threads.find(thread=>thread.session_id===(props.rootSessionId||props.sessionId))?.title||props.rootSessionId||props.sessionId});
   // Select the requested member in the mounting transaction. Solid effects
   // run later; waiting for one exposes the previously viewed child's frame.
@@ -149,12 +161,16 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
     const signature = `${bounds.width}:${bounds.height}:${contentBottom}:${config.reducedMotion}`;
     if (signature === layoutSignature) return;
     layoutSignature = signature;
-    batch(()=>{coreCall("agenttimeline.layout",{id:engine.id,width:bounds.width,height:bounds.height,contentBottom,scale:s,theme:config.themeName,reducedMotion:config.reducedMotion,localName,deferFrame:true});call("frame");});
+    batch(()=>{coreCall("agenttimeline.layout",{id:engine.id,visible:true,width:bounds.width,height:bounds.height,contentBottom,scale:s,theme:config.themeName,reducedMotion:config.reducedMotion,localName,deferFrame:true});call("frame");});
   };
   // One paint per display frame however many events or animations arrive.
   const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame"); }, startedAt); };
   engine.dirty.add(schedule);
-  onCleanup(() => { disposed = true; engine.dirty.delete(schedule); animation.dispose(); pruneEngines(props.model); });
+  onCleanup(() => {
+    disposed=true;engine.dirty.delete(schedule);animation.dispose();
+    if(!engine.dirty.size)try{coreCall("agenttimeline.layout",{id:engine.id,visible:false,contentBottom:props.contentBottom??bounds.height,deferFrame:true});}catch{}
+    pruneEngines(props.model);
+  });
   onMount(() => schedule());
   let familySignature=JSON.stringify(pendingFamily),selectedSession=props.sessionId;
   createEffect(()=>{const family=familyArgs();const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>{pendingFamily=family;if(selectedSession!==props.sessionId){selectedSession=props.sessionId;pointerPending=undefined;call("frame");}else schedule();});}});
@@ -221,6 +237,9 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
         style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",cursor:"text",pointerEvents:"auto"}}/>
     </anchored></Show>
     <PaintLayer commands={commands()} prepared={canvas()} config={config} pinImage={props.pinImage} cacheImageBytes={props.pinImage?undefined:16 * 1024 * 1024} />
+    <JsonRenderControls frame={jsonUi()} config={config} onEvent={widgetEvent}
+      onChartPointer={(kind,event)=>{if(kind==="move")movePointer(event);else if(kind==="up")releasePointer(event);else call("pointer",{kind,...local(event)});}}
+      onExit={()=>{if(host)focusNativeElement(renderer,host.id);}}/>
     <For each={header()}>{link=><For each={link.rects}>{rect=><div testId={`agent-family-navigation:${link.direction}`} aria-label={link.direction==="next"?"Next conversation":"Previous conversation"} style={{position:"absolute",left:rect[0],top:rect[1],width:rect[2],height:rect[3],pointerEvents:"none"}}/>}</For>}</For>
   </div>;
 }

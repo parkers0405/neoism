@@ -383,6 +383,11 @@ pub(super) struct MarkdownVirtualRenderState {
     pub(super) outline_click: Option<(usize, Instant)>,
     pub(super) measurement_cache:
         HashMap<MarkdownVirtualMeasureKey, MarkdownVirtualMeasurement>,
+    /// Wrapped row counts per code block, keyed by content, width, font size,
+    /// and text-renderer generation. Retain counts, not whole-block glyph data.
+    pub(super) code_row_cache: RefCell<lru::LruCache<
+        (u64, u32, u32, u64), std::sync::Arc<Vec<usize>>,
+    >>,
     pub(super) measurement_cache_hits: u64,
     pub(super) measurement_cache_misses: u64,
 }
@@ -413,6 +418,7 @@ impl Default for MarkdownVirtualRenderState {
             outline_panel_rect: None,
             outline_click: None,
             measurement_cache: HashMap::new(),
+            code_row_cache: RefCell::new(lru::LruCache::new(std::num::NonZeroUsize::new(16).unwrap())),
             measurement_cache_hits: 0,
             measurement_cache_misses: 0,
         }

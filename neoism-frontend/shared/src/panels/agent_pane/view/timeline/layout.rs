@@ -795,7 +795,7 @@ pub(super) fn estimate_message_height_with_pane<
     s: f32,
 ) -> f32 {
     let text = message.text();
-    if text.contains("neoism-html")
+    if super::super::markdown::requires_namespaced_markdown_height(text)
         && matches!(
             message.kind(),
             AgentTimelineMessageKind::Assistant
@@ -1429,9 +1429,10 @@ where
 ///
 /// Settled turns (everything before `live_trace_start`; the whole transcript
 /// after a reload) show ONLY user prompts and assistant text — reasoning,
-/// ordinary tools, edits, subtasks, and compaction rows are hidden, exactly like the
+/// ordinary tools, edits, and subtasks are hidden, exactly like the
 /// original decluttered design. The live window shows everything as it
-/// streams (and stays revealed until the session is left).
+/// streams (and stays revealed until the session is left), except compaction:
+/// reasoning stays hidden and summaries become persistent divider lines.
 ///
 /// The one deliberate difference from the original mask: assistant text is
 /// NEVER hidden, in any turn. The old rule kept only each turn's trailing
@@ -1463,6 +1464,7 @@ fn timeline_message_visible<M: AgentTimelineMessage>(
 ) -> bool {
     if is_subagent_runtime_notification(message)
         || is_background_completion_result_card(message)
+        || message.tool() == "compaction_reasoning"
     {
         return false;
     }
@@ -1472,11 +1474,11 @@ fn timeline_message_visible<M: AgentTimelineMessage>(
         return !message.todos_empty();
     }
     match message.kind() {
+        AgentTimelineMessageKind::Compaction => true,
         AgentTimelineMessageKind::System => message.tool() == "location_notice",
         AgentTimelineMessageKind::Reasoning
         | AgentTimelineMessageKind::Tool
-        | AgentTimelineMessageKind::Subtask
-        | AgentTimelineMessageKind::Compaction => index >= live_start,
+        | AgentTimelineMessageKind::Subtask => index >= live_start,
         AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant => true,
     }
 }

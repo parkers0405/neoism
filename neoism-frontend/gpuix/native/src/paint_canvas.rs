@@ -22,7 +22,8 @@ enum Op<'a> {
 fn paint_order(command:&PaintCommand)->(u8,bool,f32,u8) {
     let (layer,depth,order)=match command {
         PaintCommand::Rect{layer,depth,order,..}|PaintCommand::Ring{layer,depth,order,..}=>(*layer,*depth,*order),
-        PaintCommand::Polygon{layer,depth,..}|PaintCommand::Image{layer,depth,..}=>(*layer,*depth,0),
+        PaintCommand::Polygon{layer,depth,order,..}=>(*layer,*depth,*order),
+        PaintCommand::Image{layer,depth,..}=>(*layer,*depth,0),
         PaintCommand::Text{layer,..}=>(*layer,0.0,0),
     };
     // Missing keys cannot compare equal to every value: that breaks transitivity.
@@ -96,7 +97,7 @@ mod tests {
     fn mixed_primitives_have_consistent_order_for_every_input_permutation() {
         let commands=[
             rect(20.0,1.0,20,3),
-            PaintCommand::Polygon { points:vec![(0.0,0.0),(1.0,1.0),(0.0,1.0)],color:[1.0;4],depth:1.0,layer:3 },
+            PaintCommand::Polygon { points:vec![(0.0,0.0),(1.0,1.0),(0.0,1.0)],color:[1.0;4],depth:1.0,order:0,layer:3 },
             rect(10.0,1.0,10,3),
             PaintCommand::Text { x:99.0,y:0.0,text:"overlay".into(),size:12.0,width:40.0,color:[255;4],bold:false,italic:false,extrude:false,family:None,clip:None,layer:3,raster:None },
         ];
@@ -116,9 +117,23 @@ mod tests {
     }
 
     #[test]
+    fn ordered_chart_triangles_remain_above_the_card_surface() {
+        let mut painter=RecordingPainter::new("monospace",400,vec![]);
+        painter.rect(None,0.0,0.0,100.0,100.0,[0.0,0.0,0.0,1.0],0.0,32);
+        painter.triangle_ordered(10.0,10.0,90.0,10.0,50.0,90.0,0.0,[1.0;4],32);
+        for chunked in [false,true] {
+            let packet=encode_inner(&painter.commands(),"monospace",400,chunked);
+            let encoded=if chunked {&packet.chunks.as_ref().unwrap()[0]} else {&packet.commands};
+            let ops:serde_json::Value=serde_json::from_str(encoded).unwrap();
+            assert_eq!(ops[0]["k"],"r");
+            assert_eq!(ops[1]["k"],"p");
+        }
+    }
+
+    #[test]
     fn paint_order_is_transitive_and_equal_keys_keep_recording_order() {
         let mut commands=vec![
-            PaintCommand::Polygon { points:vec![],color:[1.0;4],depth:0.0,layer:3 },
+            PaintCommand::Polygon { points:vec![],color:[1.0;4],depth:0.0,order:0,layer:3 },
             PaintCommand::Text { x:0.0,y:0.0,text:"text".into(),size:12.0,width:20.0,color:[255;4],bold:false,italic:false,extrude:false,family:None,clip:None,layer:3,raster:None },
         ];
         for depth in [-1.0,-0.0,0.0,1.0,f32::NAN,f32::INFINITY,f32::NEG_INFINITY] {

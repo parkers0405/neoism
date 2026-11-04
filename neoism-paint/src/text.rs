@@ -411,10 +411,10 @@ pub struct Text {
     /// re-locked and reparsed the face for every character on every frame.
     font_coverage: FxHashMap<(u32, char), bool>,
 
-    /// `font_id → (should_embolden, should_italicize)` from
+    /// `font_id → (should_embolden, should_italicize, regular_weight)` from
     /// `FontData` load-time synthesis flags (parallel to the rich-text
     /// rasterizer's use of the same fields).
-    synthesis_cache: FxHashMap<u32, (bool, bool)>,
+    synthesis_cache: FxHashMap<u32, (bool, bool, bool)>,
 
     /// `(font_id, size_bucket) → baseline_px`. Secondary/fallback fonts use
     /// the primary face's cell metrics, keeping mixed icon/text runs on one
@@ -797,12 +797,20 @@ impl Text {
             .unwrap_or(0.0)
     }
 
-    /// Exact logical advances for every Unicode-scalar prefix, including the
-    /// empty prefix. Markdown uses these for source-accurate hit testing.
-    /// Keep the existing prefix-shaping semantics: summing isolated character
-    /// widths would change kerning, ligatures and fallback-font geometry.
+    /// Logical advances for every Unicode-scalar prefix, including the empty
+    /// prefix. Short text retains exact independent-prefix shaping. Long text
+    /// uses one complete shape plus O(bytes + glyphs) stop mapping, with
+    /// interpolated stops inside multi-scalar clusters (not isolated-char widths).
+    /// These stops follow the rendered line's kerning, ligatures and fallback;
+    /// they need not equal the width of an independently reshaped substring.
     pub fn measure_char_prefixes(&mut self, text: &str, opts: &DrawOpts) -> Vec<f32> {
         self.observe_font_changes();
+        if text.len() > PREFIX_MEASURE_MAX_BYTES {
+            return match self.shape_for(text, opts) {
+                Some(runs) => cluster_prefix_stops(text, &runs, self.scale_factor),
+                None => vec![0.0; text.chars().count() + 1],
+            };
+        }
         let key = (text.len() <= PREFIX_MEASURE_MAX_BYTES).then(|| PrefixMeasureKey {
             text: text.to_owned(),
             font_size: opts.font_size.to_bits(),
@@ -1066,15 +1074,18 @@ impl Text {
             self.shape_misses += 1;
         }
 
-        let (synthetic_bold, synthetic_italic) = match self.synthesis_cache.entry(font_id)
+        let (synthetic_bold, synthetic_italic, regular_weight) = match self.synthesis_cache.entry(font_id)
         {
             std::collections::hash_map::Entry::Occupied(e) => *e.get(),
             std::collections::hash_map::Entry::Vacant(e) => {
                 let lib = self.font_library.inner.read();
                 let fd = lib.get(&(font_id as usize));
-                *e.insert((fd.should_embolden, fd.should_italicize))
+                *e.insert((fd.should_embolden, fd.should_italicize, fd.weight.0 < 700))
             }
         };
+        // Explicit UI faces bypass family/style selection. Honor a requested
+        // bold heading without switching it back to the primary terminal font.
+        let synthetic_bold = synthetic_bold || (style_flags & 1 != 0 && regular_weight);
 
         #[cfg(target_os = "macos")]
         let glyphs = {
@@ -1598,6 +1609,45 @@ fn shaped_text_width(runs: &[ShapedRun]) -> f32 {
     runs.iter().map(shaped_width).sum()
 }
 
+/// Map source-global UTF-8 clusters to scalar stops in linear time, even when
+/// many glyphs share a cluster or the backend emits clusters out of source order.
+/// A difference array avoids walking each cluster's interior once per glyph.
+/// Backends do not expose ligature caret tables here, so interior stops split a
+/// cluster's shaped advance evenly. This is logical advance geometry, matching
+/// the existing API, not visual bidi caret ordering.
+fn cluster_prefix_stops(text: &str, runs: &[ShapedRun], scale: f32) -> Vec<f32> {
+    let mut scalar_at_byte = vec![0; text.len() + 1];
+    let mut count = 0;
+    for (byte, _) in text.char_indices() {
+        scalar_at_byte[byte] = count;
+        count += 1;
+    }
+    scalar_at_byte[text.len()] = count;
+    let mut slopes = vec![0.0f64; count + 1];
+    for glyph in runs.iter().flat_map(ShapedRun::source_glyphs) {
+        let start = scalar_at_byte[glyph.cluster as usize];
+        let end = scalar_at_byte[glyph.cluster_end as usize];
+        if end > start {
+            let step = glyph.advance as f64 / (end - start) as f64;
+            slopes[start] += step;
+            slopes[end] -= step;
+        }
+    }
+    let mut stops = Vec::with_capacity(count + 1);
+    stops.push(0.0);
+    let (mut step, mut advance) = (0.0, 0.0);
+    for delta in slopes.into_iter().take(count) {
+        step += delta;
+        advance += step;
+        stops.push((advance / scale as f64) as f32);
+    }
+    // Match measure()'s run-wise f32 accumulation exactly at the final stop.
+    if count > 0 {
+        stops[count] = shaped_text_width(runs) / scale;
+    }
+    stops
+}
+
 #[inline]
 fn snap_px(value: f32) -> f32 {
     value.round()
@@ -1954,6 +2004,20 @@ mod tests {
     };
     use crate::font::{fonts::FontConfig, FontLibrary};
     use std::sync::Arc;
+
+    #[test]
+    fn explicit_proportional_face_honors_bold_without_changing_family() {
+        let (library, _) = FontLibrary::new(FontConfig::default());
+        let font_id=library.ensure_static_font(crate::font::constants::FONT_UI_PROSE).unwrap();
+        let mut text=Text::new(&library);
+        let regular=DrawOpts{font_id:Some(font_id),font_size:26.0,..DrawOpts::default()};
+        let bold=DrawOpts{bold:true,..regular};
+        let regular_runs=text.segment_and_shape("$12,400",&regular).unwrap();
+        let bold_runs=text.segment_and_shape("$12,400",&bold).unwrap();
+        assert!(regular_runs.iter().all(|run|run.font_id==font_id as u32&&!run.synthetic_bold));
+        assert!(bold_runs.iter().all(|run|run.font_id==font_id as u32&&run.synthetic_bold));
+        assert!(text.segment_and_shape("$12,400",&regular).unwrap().iter().all(|run|!run.synthetic_bold));
+    }
 
     #[test]
     fn replay_host_instances_preserves_geometry_and_current_clipping() {
@@ -2655,6 +2719,107 @@ mod tests {
         // Font replacement must also invalidate cached logical advances.
         text.set_font_library(&library);
         assert!(text.prefix_measure_cache.is_empty());
+    }
+
+    #[test]
+    fn markdown_long_prefix_clusters_interpolate_in_source_order() {
+        // Reordered glyphs, a repeated combining cluster, a ligature, and an
+        // offset fallback run. No dependency on the host's installed fonts.
+        let glyph = |start, end, advance| ShapedGlyph {
+            cluster: start,
+            cluster_end: end,
+            advance,
+            ..source_glyph(start)
+        };
+        let first = source_run(vec![
+            glyph(3, 5, 12.0), // fi
+            glyph(0, 3, 8.0),  // a + combining acute
+            glyph(0, 3, 2.0),
+        ]);
+        let fallback = super::offset_run_clusters(source_run(vec![glyph(0, 3, 18.0)]), 5);
+        assert_eq!(
+            super::cluster_prefix_stops("a\u{301}fi界", &[first, fallback], 2.0),
+            vec![0.0, 2.5, 5.0, 8.0, 11.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn markdown_long_prefix_measurements_shape_only_one_complete_line() {
+        let (library, _errors) = FontLibrary::new(FontConfig::default());
+        let mut text = Text::new(&library);
+        for source in [
+            "AVoffice".repeat(1024),
+            "let_value=1234567890;".repeat(1024),
+            "café a\u{301} fi 界 🙂 ".repeat(512),
+        ] {
+            for font_id in [None, Some(0)] {
+                let opts = DrawOpts {
+                    font_id,
+                    ..DrawOpts::default()
+                };
+                text.set_scale_factor(1.5);
+                text.full_text_cache.clear();
+                text.shape_cache.clear();
+                let before = text.segmentation_chars;
+                let stops = text.measure_char_prefixes(&source, &opts);
+                // Deterministic complexity assertion, independent of wall time:
+                // the old loop visited n*(n+1)/2 scalars on a cold call.
+                assert_eq!(text.segmentation_chars - before, source.chars().count());
+                assert_eq!(stops.len(), source.chars().count() + 1);
+                assert_eq!(stops[0], 0.0);
+                assert!(stops.iter().all(|stop| stop.is_finite()));
+                assert!(stops.windows(2).all(|pair| pair[0] <= pair[1]));
+                assert_eq!(*stops.last().unwrap(), text.measure(&source, &opts));
+                let before = text.segmentation_chars;
+                assert_eq!(text.measure_char_prefixes(&source, &opts), stops);
+                // The byte-bounded shape cache may bypass oversized lines;
+                // even an uncached redraw must segment at most one full line.
+                assert!(text.segmentation_chars - before <= source.chars().count());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual CPU-only long-line scaling and legacy comparison"]
+    fn markdown_long_prefix_measurement_benchmark() {
+        let (library, _errors) = FontLibrary::new(FontConfig::default());
+        let mut text = Text::new(&library);
+        let opts = DrawOpts::default();
+        for len in [2048, 4096, 8192, 32768, 131072, 524288, 1048576] {
+            let source = "AVoffice".repeat(len / 8);
+            text.full_text_cache.clear();
+            text.shape_cache.clear();
+            let before = text.segmentation_chars;
+            let start = std::time::Instant::now();
+            std::hint::black_box(text.measure_char_prefixes(&source, &opts));
+            let cold = start.elapsed();
+            let visited = text.segmentation_chars - before;
+            assert_eq!(visited, len, "cold work must visit each scalar only once");
+            let start = std::time::Instant::now();
+            for _ in 0..20 {
+                std::hint::black_box(text.measure_char_prefixes(&source, &opts));
+            }
+            eprintln!(
+                "{len} bytes: cold {cold:?}, warm {:?}/call, segmented {visited}",
+                start.elapsed() / 20
+            );
+            if len <= 8192 {
+                text.full_text_cache.clear();
+                text.shape_cache.clear();
+                let before = text.segmentation_chars;
+                let start = std::time::Instant::now();
+                for (offset, ch) in source.char_indices() {
+                    std::hint::black_box(
+                        text.measure(&source[..offset + ch.len_utf8()], &opts),
+                    );
+                }
+                eprintln!(
+                    "{len} bytes: legacy {:?}, segmented {}",
+                    start.elapsed(),
+                    text.segmentation_chars - before
+                );
+            }
+        }
     }
 
     #[test]

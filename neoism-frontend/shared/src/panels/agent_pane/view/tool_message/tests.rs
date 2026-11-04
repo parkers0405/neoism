@@ -501,6 +501,13 @@ fn patch_files_render_inline_and_expand_independently_without_parent_click() {
                 assert!(commands.iter().any(|command| matches!(command,
                     PaintCommand::Text { text, .. } if text == filename)));
             }
+            if !expanded {
+                let rows: Vec<_> = commands.iter().filter_map(|command| match command {
+                    PaintCommand::Text { y, text, .. } if text == "first.rs" || text == "second.rs" => Some(*y),
+                    _ => None,
+                }).collect();
+                assert_eq!(rows[1] - rows[0], TOOL_HEADER_HEIGHT * scale);
+            }
             assert_eq!(commands.iter().any(|command| matches!(command,
                 PaintCommand::Text { text, .. } if text.contains("new_first"))), expanded);
             assert!(!commands.iter().any(|command| matches!(command,
@@ -534,6 +541,9 @@ fn patch_files_render_inline_and_expand_independently_without_parent_click() {
         }
         assert!(heights[1] > heights[0]);
         assert_eq!(heights[0], heights[2]);
+        // Match the composition parent + two compact child tool rows, without
+        // the old diff-card gap between files or after the last file.
+        assert_eq!(heights[0], 3.0 * TOOL_HEADER_HEIGHT * scale);
     }
 }
 

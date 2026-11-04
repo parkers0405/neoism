@@ -115,6 +115,12 @@ impl SystemContextService for WorkspaceContext {
                 content: include_str!("html_artifacts.md").into(),
             });
         }
+        // Keep the catalog on demand so ordinary turns only pay for discovery.
+        sections.push(SystemContextSection {
+            id: "json-render".into(),
+            title: None,
+            content: include_str!("json_render_hint.md").into(),
+        });
         Ok(sections)
     }
 }
@@ -171,6 +177,31 @@ mod tests {
                 "Use edit for targeted replacements and write only for brand-new files or intentional full replacements."
             };
             assert!(workspace.content.contains(mutation_rule));
+        }
+    }
+
+    #[test]
+    fn native_json_render_hint_is_small_and_available_without_html_opt_in() {
+        let request = ServiceRequest {
+            workspace_id: None,
+            directory: None,
+            options: Default::default(),
+        };
+        let sections = WorkspaceContext.sections(&request).unwrap();
+        let guidance = &sections.iter().find(|section| section.id == "json-render").unwrap().content;
+        assert!(!sections.iter().any(|section| section.id == "html-artifacts"));
+        assert!(guidance.len() <= 700, "keep the always-on hint small");
+        for expected in [
+            "`json-render`", "Before creating or revising", "operation:\"read\"",
+            "Neoism Agent/JSON Render.md", "Reuse it while available in context",
+            "reload if compacted away", "Do not load it for ordinary",
+            "use plain text rather than inventing a schema", "All interactions are local",
+            "agent requests belong only in the chat composer", "Never embed executable code or collect secrets",
+        ] {
+            assert!(guidance.contains(expected), "missing {expected}");
+        }
+        for excluded in ["Available components", "Stack:", "Team performance", "\"elements\""] {
+            assert!(!guidance.contains(excluded), "catalog leaked into always-on hint");
         }
     }
 

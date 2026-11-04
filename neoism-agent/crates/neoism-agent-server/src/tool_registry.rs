@@ -217,7 +217,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Documentation, owner,
             "docs",
-            "Search and read Neoism's bundled product documentation. This is the first-class documentation tool, not a Skill. Use search for a topic, then read the returned path.",
+            "Search and read Neoism's bundled product documentation. This is the first-class documentation tool, not a Skill. Read a known page path directly; otherwise search for a topic, then read the returned path.",
             json!({
                 "type": "object",
                 "properties": {

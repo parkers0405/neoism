@@ -4350,6 +4350,7 @@ fn compaction_reasoning_deltas_never_enter_the_summary_card() {
             Some("reasoning".into()),
             "**Reviewing context**",
         );
+        assert_eq!(pane.streaming_state, NeoismAgentStreamingState::Compacting);
         pane.ingest_live_part_delta(
             Some("summary-message".into()),
             Some("summary-text".into()),
@@ -4372,6 +4373,7 @@ fn compaction_reasoning_deltas_never_enter_the_summary_card() {
         assert_eq!(summary.text, "## Goal\nContinue work");
         assert_eq!(reasoning.text, "**Reviewing context**");
         assert_eq!(reasoning.id, "reasoning-part");
+        assert_eq!(reasoning.tool, "compaction_reasoning");
     }
 }
 

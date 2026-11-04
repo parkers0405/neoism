@@ -947,12 +947,16 @@ fn message_blocks_with_start(
 
     if role == "assistant" && is_compaction_summary_message(parts) {
         // Keep normal reasoning part identities on snapshot/reconnect. The
-        // summary remains one message-keyed card, after the reasoning trace;
-        // only text parts contribute to its body.
+        // summary remains one message-keyed row after the reasoning trace.
+        // The timeline hides reasoning and presents the summary as a divider.
         let mut blocks = parts
             .iter()
             .filter(|part| part.get("type").and_then(Value::as_str) == Some("reasoning"))
             .filter_map(part_block)
+            .map(|mut block| {
+                block.tool = "compaction_reasoning".to_string();
+                block
+            })
             .collect::<Vec<_>>();
         let text = parts
             .iter()
@@ -2546,6 +2550,7 @@ mod tests {
         for block in &blocks[..2] {
             assert_eq!(block.kind, NeoismAgentMessageKind::Reasoning);
             assert_eq!(block.title, "Thinking");
+            assert_eq!(block.tool, "compaction_reasoning");
         }
         assert_eq!(blocks[0].text, "Identify the current goal");
         assert_eq!(blocks[1].text, "Preserve the remaining work");
@@ -2561,10 +2566,13 @@ mod tests {
         assert_eq!(blocks[2].id, "msg-summary");
         assert_eq!(blocks[2].kind, NeoismAgentMessageKind::Compaction);
         assert!(blocks[2].text.is_empty());
-        // Snapshot and live mapping use exactly the same reasoning identities
-        // and body, even with parent identity and opaque provider metadata.
-        assert_eq!(blocks[0], part_block(&message["parts"][1]).unwrap());
-        assert_eq!(blocks[1], part_block(&message["parts"][2]).unwrap());
+        // Snapshot mapping retains the live identities and bodies, adding only
+        // a presentation tag so compaction reasoning never paints as a reply.
+        for (block, part) in blocks[..2].iter().zip(&message["parts"].as_array().unwrap()[1..3]) {
+            let mut expected = part_block(part).unwrap();
+            expected.tool = "compaction_reasoning".into();
+            assert_eq!(*block, expected);
+        }
     }
 
     #[test]

@@ -98,9 +98,12 @@ fn frame(view: &mut View) -> Value {
     let reveal=view.pane.scroll_cursor_into_view(0.0,view.height);
     let elapsed=view.last_frame.elapsed().as_secs_f32();view.last_frame=std::time::Instant::now();
     if let Some(rect)=view.pane.cursor_rect{let was_animating=view.trail.is_animating();view.trail.set_cursor_shape(view.pane.cursor_shape());
-      // The original Markdown overlay follows the rendered caret each frame.
-      view.trail.set_destination(rect[0],rect[1],rect[2],rect[3]);
-      view.last_cursor=(view.pane.cursor_line,view.pane.cursor_col);
+      let cursor=(view.pane.cursor_line,view.pane.cursor_col);
+      // Scrolling moves the rendered caret, not its logical position. Keep
+      // the existing corner springs instead of re-ranking on every frame.
+      if cursor!=view.last_cursor{view.trail.set_destination(rect[0],rect[1],rect[2],rect[3]);}
+      else{view.trail.set_destination_no_jump(rect[0],rect[1],rect[2],rect[3]);}
+      view.last_cursor=cursor;
       view.trail.animate(rect[2],rect[3],if was_animating{elapsed}else{0.0});
     }
     let menu=if view.menu.is_visible(){if view.menu_painter.is_none(){view.menu_painter=Some(RecordingPainter::from_fonts(view.painter.font_library().clone()));}
@@ -259,6 +262,59 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
   },
   "markdown.frame"=>{},_=>return Err(format!("Unknown Markdown operation {op}"))
  }
- Ok(frame(view))
- }))
+  Ok(frame(view))
+  }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neoism_ui::panels::trail_cursor::TrailCursor;
+
+    #[test]
+    fn scrolling_follows_the_caret_without_restarting_its_jump() {
+        let source = (0..80).map(|i| format!("Paragraph {i}\n\n")).collect::<String>();
+        let id = dispatch(&json!({"op":"markdown.new","path":"scroll.md","text":source,"vim":true}))
+            .unwrap().unwrap()["id"].as_u64().unwrap() as u32;
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            let view = store.views.get_mut(&id).unwrap();
+            view.height = 400.0;
+            view.pane.jump_to_line(5);
+            let mut expected = TrailCursor::new();
+            let mut previous = (usize::MAX, usize::MAX);
+            let mut last_y = None;
+            let mut scrolled = false;
+            for step in 0..12 {
+                if step == 1 {
+                    view.pane.jump_to_line(7);
+                } else if step > 1 {
+                    view.pane.scroll_touch_pixels(if step < 7 { 8.0 } else { -8.0 }, view.height);
+                }
+                // A deterministic, clamped animation step, independent of CPU speed.
+                view.last_frame = std::time::Instant::now() - std::time::Duration::from_secs(1);
+                let actual = frame(view);
+                let rect = view.pane.cursor_rect.unwrap();
+                let cursor = (view.pane.cursor_line, view.pane.cursor_col);
+                let was_animating = expected.is_animating();
+                expected.set_cursor_shape(view.pane.cursor_shape());
+                if cursor != previous {
+                    expected.set_destination(rect[0], rect[1], rect[2], rect[3]);
+                } else {
+                    expected.set_destination_no_jump(rect[0], rect[1], rect[2], rect[3]);
+                    scrolled |= last_y.is_some_and(|y: f32| (y - rect[1]).abs() > 1.0);
+                }
+                expected.animate(rect[2], rect[3], if was_animating { 0.05 } else { 0.0 });
+                let quad: Vec<[f32; 2]> = serde_json::from_value(actual["cursorQuad"].clone()).unwrap();
+                for (actual, expected) in quad.iter().zip(expected.quad_points()) {
+                    assert!((actual[0] - expected[0]).abs() < 0.001);
+                    assert!((actual[1] - expected[1]).abs() < 0.001, "scroll step {step}");
+                }
+                previous = cursor;
+                last_y = Some(rect[1]);
+            }
+            assert!(scrolled, "exercise scrolling with an unchanged source caret");
+            store.views.remove(&id);
+        });
+    }
 }

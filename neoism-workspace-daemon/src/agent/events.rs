@@ -1189,7 +1189,11 @@ pub(crate) fn history_from_part(part: &Value) -> Option<HistoryMessage> {
     // bare output string, so the web timeline streams with desktop
     // fidelity.
     neoism_ui::panels::agent_pane::api_mapping::part_block(part)
-        .map(history_from_agent_message)
+        .map(|block| {
+            let mut message = history_from_agent_message(block);
+            message.created_at = part_created_at(part).unwrap_or(0);
+            message
+        })
 }
 
 pub(crate) fn usage_from_value(value: Option<&Value>) -> Option<Usage> {

@@ -10,9 +10,17 @@ impl NeoismAgentPane {
 
     pub fn ingest_live_part_message_with_parent(
         &mut self,
-        message: NeoismAgentMessage,
+        mut message: NeoismAgentMessage,
         parent_message_id: Option<&str>,
     ) {
+        let compaction_reasoning = message.kind == NeoismAgentMessageKind::Reasoning
+            && (message.tool == "compaction_reasoning"
+                || self.streaming_state == NeoismAgentStreamingState::Compacting
+                || parent_message_id.is_some_and(|parent| self.messages.iter().any(|row|
+                    row.id == parent && row.kind == NeoismAgentMessageKind::Compaction)));
+        if compaction_reasoning {
+            message.tool = "compaction_reasoning".to_string();
+        }
         let kind = message.kind;
         let title = message.title.clone();
         let can_drive = !matches!(kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System)
@@ -23,7 +31,11 @@ impl NeoismAgentPane {
         let drives_activity = part_update_drives_activity(&self.messages, &message);
         self.upsert_part_message(message);
         if can_drive && drives_activity {
-            self.note_streaming_from_part(kind, &title);
+            if compaction_reasoning {
+                self.note_streaming(NeoismAgentStreamingState::Compacting, None);
+            } else {
+                self.note_streaming_from_part(kind, &title);
+            }
         }
     }
 
@@ -47,6 +59,12 @@ impl NeoismAgentPane {
             matches!(kind.as_deref(), Some("reasoning" | "thinking"))
                 .then(|| message_id.clone().zip(part_id.clone()))
                 .flatten();
+        let mut is_compaction_reasoning = compaction_reasoning.as_ref().is_some_and(|(parent, part)| {
+            self.streaming_state == NeoismAgentStreamingState::Compacting
+                || self.messages.iter().any(|row|
+                    (row.id == *parent && row.kind == NeoismAgentMessageKind::Compaction)
+                        || (row.id == *part && row.tool == "compaction_reasoning"))
+        });
         self.apply_part_delta(message_id, part_id, kind.clone(), delta);
         if let Some((parent, part)) = compaction_reasoning {
             let card = self.messages.iter().position(|message| {
@@ -55,6 +73,15 @@ impl NeoismAgentPane {
             let reasoning = self.messages.iter().position(|message| {
                 message.id == part && message.kind == NeoismAgentMessageKind::Reasoning
             });
+            is_compaction_reasoning |= card.is_some();
+            if is_compaction_reasoning {
+                if let Some(index) = reasoning {
+                    if self.messages[index].tool != "compaction_reasoning" {
+                        self.messages[index].tool = "compaction_reasoning".to_string();
+                        self.invalidate_timeline_layout();
+                    }
+                }
+            }
             if let (Some(card), Some(reasoning)) = (card, reasoning) {
                 if card < reasoning
                     && !self.messages[card + 1..reasoning]
@@ -68,6 +95,10 @@ impl NeoismAgentPane {
             }
         }
         if self.suppress_streaming_after_abort() {
+            return;
+        }
+        if is_compaction_reasoning {
+            self.note_streaming(NeoismAgentStreamingState::Compacting, None);
             return;
         }
         match kind.as_deref() {

@@ -29,7 +29,7 @@ function commandEqual(a: PaintCommand, b: PaintCommand): boolean {
       &&a.outer.every((point,index)=>numbersEqual(point,b.outer[index]))&&a.inner.every((point,index)=>numbersEqual(point,b.inner[index]));
   }
   if (a.kind === "polygon" && b.kind === "polygon") {
-    if (a.depth !== b.depth || a.points.length !== b.points.length) return false;
+    if (a.depth !== b.depth || a.order !== b.order || a.points.length !== b.points.length) return false;
     for (let i = 0; i < a.points.length; i++) if (!numbersEqual(a.points[i], b.points[i])) return false;
     return true;
   }

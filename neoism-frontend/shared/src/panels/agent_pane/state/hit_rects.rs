@@ -6,6 +6,10 @@ impl NeoismAgentPane {
         self.activity_status_rects.clear();
     }
 
+    pub fn has_visible_activity_status(&self) -> bool {
+        !self.activity_status_rects.is_empty()
+    }
+
     pub fn register_activity_status_rect(&mut self, rect: [f32; 4]) {
         if self.activity_session_id != self.session_id {
             self.activity_animation.cancel();

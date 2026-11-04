@@ -18,9 +18,12 @@ async function fixture(mcpCatalog?:Record<string,unknown>){
 }
 test("slash catalog merges actual SDK commands without replacing native builtins or aliases",async()=>{
  const f=await fixture();await f.controller.refresh();const rows=f.controller.state.options;
+ for(const command of ["/mcp","/goal","/sub-agent"])expect(rows.some(row=>row.value===command)).toBe(true);
  expect(rows.filter(row=>row.value==="/compact")).toHaveLength(1);expect(rows.some(row=>row.value==="/models")).toBe(false);expect(rows.find(row=>row.value==="/review")?.description).toBe("Review this repository");
  const request=f.server.requests.find(r=>r.path==="/commands")!;expect(request.directory).toBe("/project/a");expect(request.authorization).toBe("Bearer fixture-token");
  f.server.capabilities.delete("neoism.goals");await f.controller.refresh();expect(f.controller.state.options.some(row=>row.value==="/goal")).toBe(false);
+ f.server.capabilities.delete("neoism.mcp");await f.controller.refresh();expect(f.controller.state.options.some(row=>row.value==="/mcp")).toBe(false);
+ f.server.capabilities.add("neoism.mcp");await f.controller.refresh();expect(f.controller.state.options.some(row=>row.value==="/mcp")).toBe(true);
 });
 test("connect provider choices open before auth method discovery",async()=>{
  const f=await fixture();await f.controller.execute("/connect");

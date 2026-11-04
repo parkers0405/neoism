@@ -30,6 +30,14 @@ use crate::widgets::stock_card::{
 };
 
 mod html_artifact;
+pub mod json_render;
+
+/// Stateful block heights must use the same message namespace during exact
+/// measurement, lazy estimation, and paint. Fence recognition itself remains
+/// strict in the parser; this only selects the namespaced measurement path.
+pub(crate) fn requires_namespaced_markdown_height(text: &str) -> bool {
+    text.contains("neoism-html") || text.contains("json-render")
+}
 mod incremental;
 pub use incremental::{begin_preparation,begin_preparation_scoped,end_preparation,preparation_pending,release_preparation_scope};
 mod inline_style;
@@ -267,10 +275,12 @@ pub enum AssistantMarkdownBlock {
         copy_target: String,
     },
     Stock(StockCardSpec),
+    JsonRender(json_render::NativeLayout),
     Blank,
 }
 
 pub trait AgentMarkdownPane {
+    fn json_ui_runtime(&self) -> Option<&std::cell::RefCell<json_render::Runtime>> { None }
     /// Optional strong owner for the allocation used as paint-layout identity.
     fn retain_reveal_markdown_layout(
         &self,
@@ -431,6 +441,7 @@ pub trait AgentMarkdownPane {
 }
 
 impl AgentMarkdownPane for NeoismAgentPane {
+    fn json_ui_runtime(&self) -> Option<&std::cell::RefCell<json_render::Runtime>> { Some(&self.json_ui) }
     fn retain_reveal_markdown_layout(
         &self,
         blocks: &[AssistantMarkdownBlock],
@@ -1512,7 +1523,8 @@ fn layout_normalized_markdown_blocks(
             let (_, lang, lines) = code.take().expect("matching fence has open code");
             // EOF deliberately does not take this promotion path.
             blocks.push(
-                html_artifact::completed_fence(&lang, &lines).unwrap_or_else(|| {
+                json_render::completed_fence(sugarloaf, &lang, &lines, width, s)
+                .or_else(|| html_artifact::completed_fence(&lang, &lines)).unwrap_or_else(|| {
                     markdown_code_or_stock_block_laid_out(sugarloaf, lang, lines, s)
                 }),
             );
@@ -2319,6 +2331,7 @@ pub fn markdown_block_height_namespaced<P: AgentMarkdownPane>(
             )
         }
         AssistantMarkdownBlock::Stock(spec) => measure_stock_card(spec, 0.0, s),
+        AssistantMarkdownBlock::JsonRender(layout) => json_render::height(layout, pane.json_ui_runtime(), namespace, block_index),
         AssistantMarkdownBlock::Blank => 8.0 * s,
     }
 }
@@ -2388,6 +2401,7 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
 ) {
     let _reveal_scope =
         prepare_text_reveal(sugarloaf, pane, blocks, scroll_namespace, w, theme, s);
+    if let Some(runtime)=pane.json_ui_runtime() { runtime.borrow_mut().observe_blocks(scroll_namespace,blocks); }
     let mut cursor_y = y + 6.0 * s;
     // Cull blocks outside the viewport so a huge message only pays text
     // shaping for what's actually on screen, while still advancing the cursor
@@ -2798,6 +2812,10 @@ pub fn render_markdown_blocks<P: AgentMarkdownPane>(
                     intersect_rect(viewport_clip, [x, y, w, max_h]).unwrap_or([0.0; 4]),
                     occlusion_rects,
                 );
+            }
+            AssistantMarkdownBlock::JsonRender(layout) => {
+                json_render::render_interactive(sugarloaf, layout, pane.json_ui_runtime(), scroll_namespace, block_index,
+                    text_x, cursor_y, theme, s, intersect_rect(viewport_clip, [x, y, w, max_h]).unwrap_or([0.0; 4]), occlusion_rects, mouse);
             }
             AssistantMarkdownBlock::Stock(spec) => {
                 render_stock_card(

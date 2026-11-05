@@ -62,16 +62,18 @@ test("direct Git canvas preserves clipped diff geometry, colors and glyph identi
  const {loadConfig}=await import("../src/config"),{paintOps}=await import("../src/ui/PaintLayer"),{CanvasImages}=await import("../src/ui/canvas");
  const config=loadConfig(["--config","/nonexistent/git-canvas"],{}),images=new CanvasImages({putPaintImage(){},dropPaintImage(){}});
  const r=review({fontFamily:config.fontFamily,fontWeight:config.fontWeight});
- const normalized=(value:unknown):unknown=>typeof value==="number"?Math.round(value*100)/100:Array.isArray(value)?value.map(normalized):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,normalized(v)])):value;
+  const normalized=(value:unknown):unknown=>typeof value==="number"&&!Number.isInteger(value)?expect.closeTo(value,3):Array.isArray(value)?value.map(normalized):value&&typeof value==="object"?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,normalized(v)])):value;
  try{
   load(r);await Bun.sleep(100);
   const raw=r.call("frame"),expected=paintOps(raw.commands,config,images);
   const prepared=r.call("canvas-paint");
   expect(prepared.commands).toEqual([]);expect(prepared.canvas!.images.length).toBeGreaterThan(0);
   // The native and JS stable sorts can interleave non-overlapping primitives
-  // differently. Compare every painted primitive with its effective clip.
-  const painted=(ops:any[])=>{let clip:unknown;return ops.flatMap(op=>{if(op.k==="cl"){clip=op.b;return [];}if(op.k==="u"){clip=undefined;return [];}return [JSON.stringify(normalized({op,clip}))];}).sort();};
-  expect(painted(JSON.parse(prepared.canvas!.commands))).toEqual(painted(expected));
+   // differently. Compare every painted primitive with its effective clip.
+   // f32/f64 coordinates can straddle a decimal rounding boundary on macOS;
+   // compare fractional values within 0.0005 rather than rounding to strings.
+   const painted=(ops:any[])=>{let clip:unknown;return ops.flatMap(op=>{if(op.k==="cl"){clip=op.b;return [];}if(op.k==="u"){clip=undefined;return [];}return [JSON.stringify({op,clip})];}).sort().map(value=>JSON.parse(value));};
+   expect(painted(JSON.parse(prepared.canvas!.commands))).toEqual(painted(expected).map(normalized));
   expect(prepared.editHits).toEqual(raw.editHits);expect(prepared.sourceHits).toEqual(raw.sourceHits);
   expect(JSON.stringify(prepared).length).toBeLessThan(JSON.stringify(raw).length);
  }finally{images.dispose();r.dispose();}

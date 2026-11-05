@@ -6,7 +6,8 @@ import {DaemonConnection} from "../../src/daemon/client";
 import {loadConfig} from "../../src/config";
 import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
-const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/presence-app"],{}),endpoint:daemon.endpoint,collaborative:true,reducedMotion:true,agentStars:false,cursorBlink:false};
+// Peer presence must work without any terminal session in passive Welcome mode.
+const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/presence-app"],{}),terminalBlockUi:false,endpoint:daemon.endpoint,collaborative:true,reducedMotion:true,agentStars:false,cursorBlink:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
 const until=async(check:()=>boolean)=>{const end=Date.now()+4000;while(!check()){await host.pump(root);if(Date.now()>end)throw new Error("App presence did not converge");await Bun.sleep(5);}await host.pump(root);};
 const peer={buffer_id:"file:///project/a/README.md",peer_id:"remote@windows",display_name:"Remote",client_os:"windows",color:{r:60,g:90,b:120},cursor:{line:1,column:2},selection:null,insert:false,rainbow:false,updated_at_ms:Date.now()};

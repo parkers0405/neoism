@@ -6,7 +6,7 @@ import {terminalSession,disposeTerminalSessions} from "../../src/terminal/sessio
 import type {DaemonConnection} from "../../src/daemon/client";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
 import {usePresentationScheduler} from "../../src/animation/frame-scheduler";
-const config={...loadConfig(["--config","/nonexistent/terminal-paint"],{}),cursorBlink:false};
+const config={...loadConfig(["--config","/nonexistent/terminal-paint"],{}),cursorBlink:false,terminalBlockUi:false};
 const client={send:()=>1,subscribe:()=>()=>{},subscribeStatus:()=>()=>{}} as unknown as DaemonConnection;
 const host=createRecordingAppRenderer(),root=createRoot(host.renderer),report=(error:unknown)=>{throw error;};
 const session=terminalSession(client,"paint",config.theme,report),buffer=session.buffer;

@@ -12,7 +12,8 @@ const options={deferCreations:false,rejectSessionUpdates:true,deferWorkspaceSubs
 const daemon=createAgentDaemon(options);
 daemon.history.set("one",[{id:"msg_recoveredOne",role:"Assistant",kind:"Assistant",text:"# Recovered first conversation\n\nExisting transcript, without a scroll event."}]);
 daemon.history.set("two",[{id:"msg_recoveredTwo",role:"Assistant",kind:"Assistant",text:"Second existing conversation"}]);
-const config={...loadConfig(["--config","/nonexistent/agent-recovery-mode"],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
+// Recovery of Agent tabs is shell-free with passive Welcome configured.
+const config={...loadConfig(["--config","/nonexistent/agent-recovery-mode"],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
 let client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
 const visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
 const until=async(predicate:()=>boolean,message:string)=>{const end=Date.now()+5000;while(!predicate()){await host.pump(root);if(Date.now()>end)throw new Error(message+"; model error="+model.state.error);await Bun.sleep(3);}await host.pump(root);};

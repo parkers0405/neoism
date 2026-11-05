@@ -35,11 +35,14 @@ const event=async(testId:string,eventType:string,args:Record<string,unknown>={})
 try {
   model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);
   root.render(()=><App model={model} config={config} visuals={visuals}/>);await recording.pump(root);
+  await until(()=>!!model.mainTerminalSurface()&&daemon.ptyRequests.some(request=>request.tag==="AttachPty"));
+  const shellRequests=()=>daemon.ptyRequests.filter(request=>request.tag==="CreatePty"||request.tag==="AttachPty").length;
+  const initialShells=shellRequests();
   assert.equal(!!recording.find("device-preview-toggle"),process.env.NEOISM_GPUIX_DEVICE_PREVIEW==="1");
   assert.equal(recording.find("device-preview-panel"),undefined);assert.equal(created,0);
   if(process.env.NEOISM_GPUIX_DEVICE_PREVIEW==="1"){
     await event("app-content","keyDown",{key:"d",modifiers:{alt:true,shift:true}});await until(()=>!!recording.find("device-preview-panel")&&created===1);
-    assert.equal(live.size,1);assert.ok(updated>0);assert.equal(daemon.ptyRequests.length,0);
+    assert.equal(live.size,1);assert.ok(updated>0);assert.equal(shellRequests(),initialShells,"Opening the device panel must not create or attach another shell");
     assert.equal(uploaded,0,"Opening the panel never starts device tools or a stream");
     assert.equal(recording.find("device-viewport")!==undefined,true);
     assert.ok(recording.find("device-controls-rail"));
@@ -110,5 +113,6 @@ try {
     await event("device-preview-close","click");await until(()=>(!hub||socketClosed)&&!recording.find("device-preview-panel"));
     assert.equal(live.size,0);assert.equal(dropped,2);
   }
+  assert.equal(shellRequests(),initialShells,"Device panel lifecycle must not create or attach PTYs");
   console.log(JSON.stringify({defaultOff:process.env.NEOISM_GPUIX_DEVICE_PREVIEW!=="1",created,dropped,uploaded,codecTested:uploaded>0,noPty:true}));
 } finally {root.unmount();hub?.stop(true);restore();visuals.dispose();model.dispose();client.stop();daemon.stop();assert.equal(live.size,0);}

@@ -17,7 +17,8 @@ const directory=mkdtempSync(join(tmpdir(),"neoism-navigation-focus-")),path=join
 const configuration={appearance:{fonts:{family:"Cascadia Code NF",size:14}},editor:{"vim-mode":true}};writeFileSync(path,JSON.stringify(configuration));process.argv.push("--config",path);
 const daemon=createAgentDaemon({configuration,deferCreations:false,fileReadDelayMs:25});daemon.files.set("code.rs","pub fn code() {}\n");daemon.files.set("second.rs","fn second() { let needle = 1; }\n");
 daemon.threads.push(...Array.from({length:100},(_,i)=>({...daemon.threads[0],session_id:`older-${i}`,title:`Older ${i}`})));
-const config={...loadConfig(["--config",path],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false,agentStars:false};
+// Isolate file/Agent focus and assert no implicit shells in passive Welcome mode.
+const config={...loadConfig(["--config",path],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false,agentStars:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState();model.setUI({openWorkspaceIds:["a"],sidebar:"files"});
 const host=createRecordingAppRenderer(),keys=createWindowKeyRouter(),root=createRoot(host.renderer,{onKeyDown:keys.dispatch,keyboardFocusDim:false});
 const callbacks=new Set<()=>void>(),restoreSchedule=usePresentationScheduler(callback=>{callbacks.add(callback);return()=>callbacks.delete(callback);});

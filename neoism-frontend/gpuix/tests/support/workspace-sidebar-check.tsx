@@ -15,7 +15,8 @@ import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
 const daemon=createAgentDaemon({deferCreations:false});
 daemon.workspaces.push({id:"c",host_id:"host",title:"C",root_dir:"/project/c"},{id:"d",host_id:"host",title:"D",root_dir:"/project/d"});
-const config={...loadConfig(["--config","/nonexistent/workspace-sidebar"],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
+// This scenario exercises passive Welcome actions and forbids shell allocation.
+const config={...loadConfig(["--config","/nonexistent/workspace-sidebar"],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
 const directory=mkdtempSync(join(tmpdir(),"neoism-sidebar-"));
 const store=new SessionStore(config,{NEOISM_GPUIX_STATE_PATH:join(directory,"recovery.json")});
 function mount(saved?:SavedSession){

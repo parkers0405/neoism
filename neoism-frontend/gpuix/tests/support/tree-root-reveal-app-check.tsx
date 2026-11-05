@@ -10,7 +10,8 @@ import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
 
 const daemon=createAgentDaemon({deferCreations:false});
-const config={...loadConfig(["--config","/nonexistent/tree-root-app-check"],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:false,cursorBlink:false,splashAutoAnimate:false};
+// The scheduler below owns tree animation only, not a live Home terminal.
+const config={...loadConfig(["--config","/nonexistent/tree-root-app-check"],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:false,cursorBlink:false,splashAutoAnimate:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState();
 const host=createRecordingAppRenderer(),root=createRoot(host.renderer),callbacks=new Set<()=>void>();
 const restore=usePresentationScheduler(callback=>{callbacks.add(callback);return()=>{callbacks.delete(callback);};});

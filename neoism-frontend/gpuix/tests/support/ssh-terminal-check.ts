@@ -34,7 +34,8 @@ try{
  coreCall("ssh.systems.set-enabled",{systemId:saved.id,enabled:true});assert.equal(coreCall<{system:{enabled:boolean}}>("ssh.systems.get",{systemId:saved.id}).system.enabled,true);
  assert.throws(()=>coreCall("ssh.systems.add",{name:"Unsafe",target:"host",args:["-o","ProxyCommand=anything"]}));
  attachment=await attachSsh({systemId:saved.id});assert.ok(attachment.alive());
- const config={...loadConfig(["--config","/nonexistent/ssh-terminal"],{}),endpoint:attachment.endpoint,authToken:attachment.authToken,pairingToken:undefined,workspaceId:attachment.workspaceId,remote:true,serverId:attachment.identity,transportIdentity:attachment.identity};
+ // This transport scenario explicitly validates the grid/Ghostty presentation.
+ const config={...loadConfig(["--config","/nonexistent/ssh-terminal"],{}),terminalBlockUi:false,endpoint:attachment.endpoint,authToken:attachment.authToken,pairingToken:undefined,workspaceId:attachment.workspaceId,remote:true,serverId:attachment.identity,transportIdentity:attachment.identity};
  client=new DaemonConnection(config,undefined,()=>{});
  const workspace=await prepareSshWorkspace(client,attachment);assert.equal(workspace.root_dir,"/home/fixture-remote");
  model=new WorkspaceModel(client,config);model.start();await until(()=>model!.state.activeWorkspace?.id===attachment!.workspaceId&&!model!.state.loading);

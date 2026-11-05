@@ -16,7 +16,8 @@ import {createRecordingAppRenderer} from "./full-app-recording-renderer";
 const temporary=canonicalPath(mkdtempSync(join(tmpdir(),"neoism-status-directory-"))),start=join(temporary,"start"),selected=join(start,"selected"),other=join(temporary,"other"),configPath=join(temporary,"config.json");
 mkdirSync(selected,{recursive:true});mkdirSync(other);writeFileSync(configPath,"{}");
 const daemon=createAgentDaemon({deferCreations:false});daemon.threads.splice(0);daemon.workspaces[0]!.root_dir=start;daemon.workspaces[1]!.root_dir=other;
-const config={...loadConfig(["--config",configPath],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
+// Test folder selection without a Home shell becoming directory authority.
+const config={...loadConfig(["--config",configPath],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+3000;while(!predicate()){await host.pump(root);if(Date.now()>end)throw new Error("Status directory actual App did not settle");await Bun.sleep(2);}await host.pump(root);};
 const key=async(key:string,char=key.length===1?key:"")=>{root.dispatch({elementId:host.find("directory-browser")!.id,eventType:"keyDown",key,keyChar:char,modifiers:{shift:false,ctrl:false,alt:false,cmd:false}});await host.pump(root);};

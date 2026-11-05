@@ -14,7 +14,8 @@ import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
 const directory=mkdtempSync(join(tmpdir(),"neoism-buffer-shortcuts-")),path=join(directory,"config.json");writeFileSync(path,"{}");process.argv.push("--config",path);
 const daemon=createAgentDaemon({deferCreations:false});daemon.history.set("one",[{id:"existing",role:"Assistant",kind:"Assistant",text:"Existing conversation history"}]);daemon.files.set("code.rs","fn retained() {}\nsecond\nthird\n");
-const config={...loadConfig(["--config",path],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false,agentStars:false};
+// Keep Welcome and grid Terminal distinct: both are asserted native focus hosts.
+const config={...loadConfig(["--config",path],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false,agentStars:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),keys=createWindowKeyRouter(),root=createRoot(host.renderer,{onKeyDown:keys.dispatch,keyboardFocusDim:false});
 let sequence=0,stage="startup";
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+4000;while(!predicate()){await host.pump(root);if(Date.now()>end)throw new Error("Buffer shortcut App did not settle");await Bun.sleep(3);}await host.pump(root);};

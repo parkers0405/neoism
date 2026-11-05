@@ -9,7 +9,8 @@ import {coreCall} from "../../src/native-core";
 import {tabChrome} from "../../src/layout/tab-chrome";
 import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer,type RecordedAppNode} from "./full-app-recording-renderer";
-const daemon=createAgentDaemon({deferCreations:false}),config={...loadConfig(["--config","/nonexistent/agent-workspace-paint"],{}),endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
+// Measure retained Agent paint with passive Welcome, without shell startup.
+const daemon=createAgentDaemon({deferCreations:false}),config={...loadConfig(["--config","/nonexistent/agent-workspace-paint"],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer((node,box)=>{
  // Agent content lives below the buffer strip. Give this fixture the same
  // geometry as the native pane instead of sizing both parent and child alike.

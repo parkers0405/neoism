@@ -21,8 +21,11 @@ let stage="startup";
 const until=async(check:()=>boolean)=>{const deadline=Date.now()+5000;while(!check()){await host.pump(root);if(Date.now()>deadline)throw new Error(`Workspace cwd label did not settle: ${stage}; root=${model.state.activeWorkspace?.root_dir}; label=${tab(workspaceId)?.props["aria-label"]}`);await Bun.sleep(4);}await host.pump(root);};
 const label=(id:string)=>tab(id)?.props["aria-label"];
 try{
- model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);await model.newTerminal();
- stage="initial home";root.render(()=><App model={model} config={config} visuals={visuals} workspaceNavigation={tabs}/>);await until(()=>label(workspaceId)==="~");
+ model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);
+ // Default Home now owns the first terminal. Do not allocate a second, unused
+ // shell before mounting; exercise the real default directory authority.
+ stage="initial home";root.render(()=><App model={model} config={config} visuals={visuals} workspaceNavigation={tabs}/>);await until(()=>label(workspaceId)==="~"&&!!model.mainTerminalSurface()?.sessionId);
+ assert.ok(host.find("home-terminal"));assert.equal(model.mainTerminalSurface()!.kind,"welcome");
  const tabId=tab(workspaceId)!.id,main=model.mainTerminalSurface()!;
  stage="observed terminal cwd";server.pushPty({SessionCwd:{session_id:main.sessionId,cwd:`${home}/projects/neoism`}});
  await until(()=>model.state.activeWorkspace?.root_dir===`${home}/projects/neoism`&&label(workspaceId)==="neoism");
@@ -33,6 +36,9 @@ try{
  assert.equal(server.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot"),false);
  stage="manual folder change";await model.changeWorkspaceDirectory(`${home}/manual-choice`);await until(()=>label(workspaceId)==="manual-choice");
  assert.equal(model.state.activeWorkspace?.root_dir,`${home}/manual-choice`,"Explicit roots invalidate a previous terminal override");
- assert.equal(server.workspaceRequests.filter(request=>request.tag==="SetWorkspaceRoot").length,1,"Only the explicit folder choice may publish a shared root");assert.equal(server.ptyRequests.filter(request=>request.tag==="CreatePty").length,1);
+ assert.equal(server.workspaceRequests.filter(request=>request.tag==="SetWorkspaceRoot").length,1,"Only the explicit folder choice may publish a shared root");
+ const creates=server.ptyRequests.filter(request=>request.tag==="CreatePty");
+ assert.deepEqual(creates.map(request=>request.body.cwd).sort(),[home,server.workspaces[1]!.root_dir].sort(),"One Home shell per visited workspace; returning to A must reuse its shell");
+ assert.ok(creates.every(request=>request.body.presentation==="blocks"),"Default Home requests block presentation on local and SSH routes");
  console.log(JSON.stringify({actualApp:true,noWindow:true,confirmedTerminalCwdLabelsExistingTab:true,inactiveWorkspaceRetained:true,manualRootWins:true,noSharedRootMutation:true}));
 }finally{root.unmount();tabs?.dispose();visuals.dispose();model.dispose();client.stop();server.stop();}

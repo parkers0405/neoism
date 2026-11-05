@@ -30,6 +30,7 @@ mod lsp_query;
 mod lsp_scan;
 #[path = "lsp_service.rs"]
 mod lsp_service;
+pub(crate) use lsp_service::LspTaskConsumer;
 #[path = "lsp_uri.rs"]
 mod lsp_uri;
 use lsp_adapters::{
@@ -55,6 +56,42 @@ use lsp_uri::path_to_file_uri;
 #[derive(Clone)]
 pub struct LspRuntime {
     service: Arc<lsp_service::LspService>,
+    consumer: Option<Arc<LspTaskConsumer>>,
+}
+
+/// Scoped to one tenant's canonical workspace runtime, never process-global.
+/// Weak entries retain neither generations nor idle transports. The entire
+/// service is shared: readers, documents, diagnostics and initialization gates
+/// must have the same owner as the child process.
+#[derive(Default)]
+pub(crate) struct LspRuntimeStore {
+    entries: std::sync::Mutex<
+        std::collections::HashMap<Vec<u8>, std::sync::Weak<lsp_service::LspService>>,
+    >,
+}
+
+impl LspRuntimeStore {
+    pub(crate) fn acquire(
+        &self,
+        services: neoism_agent_service_api::AgentServices,
+        config: Arc<neoism_agent_core::AgentConfigDocument>,
+    ) -> LspRuntime {
+        // Only LSP configuration affects adapter resolution. Model, permission,
+        // MCP and other plugin changes must not create another analyzer.
+        // Runtime authority is fixed by the workspace-scoped store, not config.
+        let key = serde_json::to_vec(&config.lsp).expect("serializable LSP config");
+        let mut entries = self.entries.lock().expect("LSP runtime store poisoned");
+        entries.retain(|_, service| service.strong_count() > 0);
+        if let Some(service) = entries.get(&key).and_then(std::sync::Weak::upgrade) {
+            return LspRuntime {
+                service,
+                consumer: None,
+            };
+        }
+        let runtime = LspRuntime::new_with_config(services, config);
+        entries.insert(key, Arc::downgrade(&runtime.service));
+        runtime
+    }
 }
 
 impl LspRuntime {
@@ -64,7 +101,10 @@ impl LspRuntime {
             lsp_service::LspService::new(services, diagnostics_bus, weak.clone(), None)
         });
         lsp_service::LspService::start_idle_retirement(&service);
-        Self { service }
+        Self {
+            service,
+            consumer: None,
+        }
     }
 
     pub(crate) fn new_with_config(
@@ -81,11 +121,23 @@ impl LspRuntime {
             )
         });
         lsp_service::LspService::start_idle_retirement(&service);
-        Self { service }
+        Self {
+            service,
+            consumer: None,
+        }
     }
 
     pub fn services(&self) -> &neoism_agent_service_api::AgentServices {
         &self.service.services
+    }
+
+    pub(crate) fn with_consumer(mut self, consumer: Arc<LspTaskConsumer>) -> Self {
+        self.consumer = Some(consumer);
+        self
+    }
+
+    fn consumer_scope(&self) -> lsp_service::LspConsumerScope {
+        LspTaskConsumer::enter(self.consumer.clone())
     }
 
     fn adapters_for_root(&self, root: &Path) -> Vec<LanguageAdapter> {
@@ -121,17 +173,17 @@ impl LspRuntime {
         Arc::as_ptr(&self.service) as usize
     }
 
-    pub(crate) fn protect_generation(&self, leases: &Arc<std::sync::atomic::AtomicUsize>) {
-        *self.service.generation_leases.lock().unwrap() = Some(Arc::downgrade(leases));
-    }
-
     /// Keep editor-owned unsaved documents (and their server) resident. Agent
-    /// operations instead hold a client Arc for the duration of each request.
+    /// operations hold a client Arc during each request; consuming tasks also
+    /// retain only their selected clients across provider/tool gaps.
     pub fn lease_document(&self, root: &Path, file: &Path) -> LspDocumentLease {
         let root = normalized_root(root);
         let file = normalized_file(&root, file);
         self.service.pin_document(&root, &file);
-        LspDocumentLease { runtime: self.clone(), root, file }
+        // A document owns only its own file, not every transport previously
+        // used by whichever task happened to open it.
+        let runtime = Self { service: self.service.clone(), consumer: None };
+        LspDocumentLease { runtime, root, file }
     }
 }
 
@@ -978,6 +1030,7 @@ pub fn workspace_symbols(
     directory: impl AsRef<Path>,
     query: &str,
 ) -> Vec<WorkspaceSymbol> {
+    let _consumer = runtime.consumer_scope();
     let query = query.trim();
     if query.is_empty() {
         return Vec::new();
@@ -1036,6 +1089,7 @@ pub fn hover(
     line: u32,
     character: u32,
 ) -> Vec<LspHover> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1079,6 +1133,7 @@ pub fn signature_help(
     line: u32,
     character: u32,
 ) -> Vec<LspSignatureHelp> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1121,6 +1176,7 @@ pub fn inlay_hints(
     start_line: u32,
     end_line: u32,
 ) -> Vec<LspInlayHint> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1167,6 +1223,7 @@ pub fn document_highlights(
     line: u32,
     character: u32,
 ) -> Vec<LspDocumentHighlight> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1225,6 +1282,7 @@ pub fn completion_with_trigger(
     text: Option<&str>,
     trigger_character: Option<&str>,
 ) -> Vec<LspCompletionItem> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion) {
@@ -1258,6 +1316,7 @@ pub fn resolve_completion(
     server_id: &str,
     item: Value,
 ) -> Option<Value> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion)
@@ -1289,6 +1348,7 @@ pub fn execute_completion_command(
     server_id: &str,
     command: Value,
 ) -> Option<Value> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion)
@@ -1321,6 +1381,7 @@ pub fn completion_trigger_characters(
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<String> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     for spec in file_query_specs(runtime, &root, &file, LspOperation::Completion) {
@@ -1410,6 +1471,7 @@ pub fn query_navigation(
     text: Option<&str>,
     query: LspNavigationQuery,
 ) -> Result<Option<Vec<LspLocation>>, String> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let operation = match query {
@@ -1561,6 +1623,7 @@ pub fn implementations(
     line: u32,
     character: u32,
 ) -> Vec<LspLocation> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1603,6 +1666,7 @@ pub fn prepare_call_hierarchy(
     line: u32,
     character: u32,
 ) -> Vec<LspCallHierarchyItem> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1666,6 +1730,7 @@ fn call_hierarchy_calls(
     character: u32,
     incoming: bool,
 ) -> Vec<LspCallHierarchyCall> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1711,6 +1776,7 @@ pub fn diagnostics(
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<LspDiagnostic> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1795,6 +1861,7 @@ pub fn document_symbols(
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<LspDocumentSymbol> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1827,6 +1894,7 @@ pub fn formatting(
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<Value> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1859,6 +1927,7 @@ pub fn code_actions(
     line: u32,
     character: u32,
 ) -> Vec<Value> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -1894,6 +1963,7 @@ pub fn resolve_code_action(
     server_id: &str,
     action: Value,
 ) -> Option<Value> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
 
@@ -1927,6 +1997,7 @@ pub fn execute_command(
     server_id: &str,
     command: Value,
 ) -> Option<Value> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
 
@@ -1961,6 +2032,7 @@ pub fn rename(
     character: u32,
     new_name: &str,
 ) -> Vec<Value> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -2017,6 +2089,7 @@ pub fn touch_document_diagnostics(
     file: impl AsRef<Path>,
     text: Option<&str>,
 ) -> Vec<(String, PathBuf, Vec<LspDiagnostic>)> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut results = Vec::new();
@@ -2050,6 +2123,7 @@ pub fn sync_document(
     file: impl AsRef<Path>,
     text: Option<&str>,
 ) -> Vec<String> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut synced = Vec::new();
@@ -2078,6 +2152,7 @@ pub fn save_document(
     directory: impl AsRef<Path>,
     file: impl AsRef<Path>,
 ) -> Vec<String> {
+    let _consumer = runtime.consumer_scope();
     let root = normalized_root(directory.as_ref());
     let file = normalized_file(&root, file.as_ref());
     let mut saved = Vec::new();
@@ -2121,6 +2196,7 @@ fn lsp_tool_blocking(
     arguments: Value,
 ) -> anyhow::Result<ToolExecutionResult> {
     let runtime = context.lsp_runtime()?;
+    let _consumer = runtime.consumer_scope();
     let operation = string_arg(&arguments, "operation")
         .ok_or_else(|| anyhow::anyhow!("tool argument operation is required"))?;
     match operation.as_str() {

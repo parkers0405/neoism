@@ -27,6 +27,7 @@ import {SelectedSshReconnect,preserveReconnectFocus} from "./daemon/ssh-reconnec
 import type {SshAttachment} from "./daemon/ssh-transport";
 import type {ServerSelection} from "./menu-actions/ChromeActionsController";
 import {localDaemon} from "./menu-actions/web-frontend";
+import {startDiscordPresence} from "./discord-presence";
 import type { WindowBootstrap } from "./window-bootstrap";
 
 export type {ServerSelection} from "./menu-actions/ChromeActionsController";
@@ -153,7 +154,10 @@ let root: ReturnType<typeof render> | undefined;
 // Each App generation gets its own config snapshot: reloads update the
 // session config in place, and the outgoing generation stays on screen until
 // its replacement has settled (AppGeneration), so it must keep its own values.
-const generationOf = () => ({ model: session.model, config: { ...session.config }, visuals:session.visuals });
+// Connection reactivation is a visual workspace switch even when its cached
+// model/visuals still point at the same root. Config/font generations are not.
+let workspaceActivation = 0;
+const generationOf = () => ({ model: session.model, config: { ...session.config }, visuals:session.visuals, workspaceActivation });
 const [appGeneration, setAppGeneration] = createSignal(generationOf());
 function resolveLocalConfig(){
   return localServerConfig.resolve(()=>{
@@ -164,6 +168,7 @@ function resolveLocalConfig(){
 }
 const windowSessions=new WindowWorkspaceSessions(session,{
   activate(next){
+    workspaceActivation++;
     session=next;sshAttachment=next.ssh;localServerConfig.observe(next.config);
     sshReconnect.select(next.server,next.ssh);
     root?.flushSync(()=>setAppGeneration(generationOf()));
@@ -171,7 +176,9 @@ const windowSessions=new WindowWorkspaceSessions(session,{
   local:async()=>createSession(await ensureLocalDaemon(resolveLocalConfig())),
   dispose:async previous=>{await previous.dispose();previous.ssh?.dispose();},
 });
+let stopDiscordPresence=()=>{};
 host.shutdown = async () => {
+  stopDiscordPresence();
   sshReconnect.dispose();releaseReconnectFocus?.();windowSessions.dispose();
   try{await Promise.all(windowSessions.sessions().map(async current=>{try{await current.dispose();}finally{current.ssh?.dispose();}}));}
   finally{try{coreCall("ssh.shutdown");}finally{coreCall("server.shutdown");}}
@@ -252,7 +259,7 @@ async function connectServer(server: ServerSelection,reconnecting=false) {
 const windowKeys=createWindowKeyRouter();
 function mount() {
   setAppGeneration(generationOf());
-  root = render(() => <AppGeneration value={appGeneration()} background={appGeneration().config.background} backgroundColor={appGeneration().config.theme.bg}>{current => <App model={current.model} config={current.config} visuals={current.visuals} workspaceNavigation={windowSessions} registerWindowKeys={windowKeys.register} reloadConfig={reloadConfig} onZoomFont={delta=>fontZoom.change(delta)} onConnectServer={connectServer} />}</AppGeneration>, {
+  root = render(() => <AppGeneration value={appGeneration()} background={appGeneration().config.background} backgroundColor={appGeneration().config.theme.bg}>{current => <App model={current.model} config={current.config} visuals={current.visuals} workspaceActivation={current.workspaceActivation} workspaceNavigation={windowSessions} registerWindowKeys={windowKeys.register} reloadConfig={reloadConfig} onZoomFont={delta=>fontZoom.change(delta)} onConnectServer={connectServer} />}</AppGeneration>, {
     renderer: host!.renderer,
     keyboardFocusDim: false,
     onKeyDown:windowKeys.dispatch,
@@ -265,6 +272,7 @@ root?.flushSync(()=>{});
 if(process.platform!=="darwin")(host.renderer as GpuixRenderer & {setStartupRenderingReady(ready:boolean):void}).setStartupRenderingReady(true);
 profileStartup("app-mounted");
 await windowReady;
+stopDiscordPresence=startDiscordPresence();
 let stopping = false;
 const stop = () => { if (stopping) return; stopping = true; root?.unmount(); host!.loop.stop(); host!.displayClock?.dispose(); void host!.shutdown!().finally(() => process.exit(0)); };
 process.once("SIGINT", stop); process.once("SIGTERM", stop);
@@ -289,6 +297,7 @@ process.on("SIGUSR2", () => {
   void Bun.write(`/tmp/neoism-gpuix-state-${process.pid}.json`, JSON.stringify(dump, null, 2));
 });
 if (import.meta.hot) import.meta.hot.dispose(() => {
+  stopDiscordPresence();
   process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
   stateGlobals[stateKey] = { ssh:sshAttachment,state: session.model.state, editors: session.model.editors, config: session.config, recovery: session.model.captureSession() };
   windowSessions.dispose();sshReconnect.dispose();releaseReconnectFocus?.();

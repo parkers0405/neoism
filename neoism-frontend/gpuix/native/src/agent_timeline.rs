@@ -737,6 +737,8 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
 struct Panel {
     pane: NeoismAgentPane,
     painter: RecordingPainter,
+    font_family: String,
+    font_weight: u16,
     directory: Option<String>,
     width: f32,
     height: f32,
@@ -877,6 +879,10 @@ static NEXT_PANEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::
 /// Transcript content belongs to conversation panes; the catalog pane only
 /// takes catalog, activity and runtime events (desktop `catalog_accepts_family`).
 fn catalog_event(message: &AgentServerMessage) -> bool {
+    if matches!(message, AgentServerMessage::SessionEvent { kind, properties, .. }
+        if kind == "message.part.delta" && properties["field"] == "raw" && properties["partType"] == "tool") {
+        return false;
+    }
     !matches!(
         message,
         AgentServerMessage::HistoryChunk { .. }
@@ -921,7 +927,7 @@ fn outbound(panel: &mut Panel) -> Vec<Value> {
     out
 }
 
-fn panel_frame(panel: &mut Panel) -> Value {
+fn render_panel_metadata(panel: &mut Panel) -> Value {
     use neoism_ui::panels::agent_pane::view::side_panel::{render_side_panel_with_icons, SharedAgentSidePanelIcons};
     let theme = IdeTheme::by_name(&panel.theme);
     panel.pane.side_panel_mut().set_navigation_header_enabled(true);
@@ -945,7 +951,6 @@ fn panel_frame(panel: &mut Panel) -> Value {
     let side=panel.pane.side_panel();
     let selected=if side.new_chat_selected(){"new-chat".to_owned()}else if let Some(action)=side.selected_header_action(){format!("{:?}",action).to_lowercase()}else{side.selected_row().map(|row|format!("row:{}",row.id)).unwrap_or_default()};
     json!({
-        "commands": &*panel.painter.borrowed_commands(),
         // This pane owns only the catalog. Its empty conversation would keep
         // the unrelated home wordmark animation alive forever.
         "animating": panel.pane.side_panel().is_animating(),
@@ -954,6 +959,48 @@ fn panel_frame(panel: &mut Panel) -> Value {
         "focused": panel.pane.side_panel().is_focused(),
         "selected": selected,
     })
+}
+
+fn panel_frame(panel: &mut Panel) -> Value {
+    let mut frame = render_panel_metadata(panel);
+    frame["commands"] = serde_json::to_value(&*panel.painter.borrowed_commands()).unwrap();
+    frame
+}
+
+/// Avoid a Value/map per primitive and a second JS parse/sort/encode pass on
+/// every frame of the continuously animated conversations catalog.
+pub fn serialized_panel_frame(v: &Value) -> Option<Result<String, String>> {
+    if v["op"].as_str()? != "agentsidepanel.frame" { return None; }
+    Some(PANELS.with(|panels| {
+        let mut panels = panels.borrow_mut();
+        let id = v["id"].as_u64().unwrap_or(0) as u32;
+        let panel = panels.get_mut(&id).ok_or("Unknown conversations panel")?;
+        configure_panel_frame(panel, v);
+        let metadata = render_panel_metadata(panel);
+        let commands = panel.painter.borrowed_commands();
+        let canvas_paint = v["canvasPaint"].as_bool().unwrap_or(false);
+        let canvas = canvas_paint.then(|| crate::paint_canvas::encode(&commands, &panel.font_family, panel.font_weight));
+        #[derive(serde::Serialize)]
+        struct Frame<'a> {
+            #[serde(flatten)] metadata: Value,
+            commands: &'a [neoism_ui::primitives::paint_record::PaintCommand],
+            #[serde(skip_serializing_if = "Option::is_none")] canvas: Option<crate::paint_canvas::CanvasPacket>,
+        }
+        #[derive(serde::Serialize)]
+        struct Response<T> { ok: T }
+        serde_json::to_string(&Response { ok: Frame {
+            metadata,
+            commands: if canvas_paint && !v["includeCommands"].as_bool().unwrap_or(false) { &[] } else { &commands },
+            canvas,
+        }}).map_err(|error| error.to_string())
+    }))
+}
+
+fn configure_panel_frame(panel: &mut Panel, v: &Value) {
+    if let Some(width) = v["width"].as_f64() { panel.width = (width as f32).max(1.0); }
+    if let Some(height) = v["height"].as_f64() { panel.height = (height as f32).max(1.0); }
+    if let Some(theme) = v["theme"].as_str() { panel.theme = theme.to_owned(); }
+    if v.get("viewedSession").is_some() { panel.viewed_session = v["viewedSession"].as_str().map(str::to_owned); }
 }
 
 fn panel_activate(panel:&mut Panel)->Value{
@@ -1067,6 +1114,8 @@ pub fn dispatch_panel(v: &Value) -> Option<Result<Value, String>> {
                     v["fontWeight"].as_u64().unwrap_or(400) as u16,
                     vec![],
                 ),
+                font_family: if family.is_empty() { "Cascadia Code NF" } else { family }.to_owned(),
+                font_weight: v["fontWeight"].as_u64().unwrap_or(400) as u16,
                 directory,
                 width: 300.0,
                 height: 600.0,
@@ -1118,12 +1167,7 @@ pub fn dispatch_panel(v: &Value) -> Option<Result<Value, String>> {
                 Ok(panel_frame(panel))
             }
             "agentsidepanel.frame" => {
-                if let Some(width) = v["width"].as_f64() { panel.width = (width as f32).max(1.0); }
-                if let Some(height) = v["height"].as_f64() { panel.height = (height as f32).max(1.0); }
-                if let Some(theme) = v["theme"].as_str() { panel.theme = theme.to_owned(); }
-                if !v["viewedSession"].is_null() || v.get("viewedSession").is_some() {
-                    panel.viewed_session = v["viewedSession"].as_str().map(str::to_owned);
-                }
+                configure_panel_frame(panel, v);
                 Ok(panel_frame(panel))
             }
             "agentsidepanel.scroll" => {
@@ -1165,6 +1209,7 @@ pub fn dispatch_panel(v: &Value) -> Option<Result<Value, String>> {
             }
             "agentsidepanel.pointer" => {
                 let result = panel_pointer(panel, v);
+                if text(v, "kind") == "move" && v["deferFrame"].as_bool().unwrap_or(false) { return Ok(result); }
                 let mut out = panel_frame(panel);
                 out["result"] = result;
                 Ok(out)

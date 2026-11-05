@@ -8,7 +8,7 @@ import {cachedGitStatus,watchGitStatus,type GitStatusSnapshot} from "../daemon/g
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { batch, createEffect, createMemo, createSignal, untrack, For, onCleanup, onMount, Show, Switch, Match, type Accessor, type JSX } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, useContext, untrack, For, onCleanup, onMount, Show, Switch, Match, type Accessor, type JSX } from "solid-js";
 import { createWindowSize, motion, useGpuixRequired, type GpuixTheme, type HostElement, type KeyEvent, type EventPayload, type StyleDesc } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { dimensions as d, thinkingOptions } from "../design/generated";
@@ -18,11 +18,13 @@ import { easeOutCubicBezier } from "../design/animation";
 import { WorkspaceModel, type AppState, type Surface } from "../model";
 import { FileSchema, expectVariant, isRecord, type HistoryMessage, type Attachment } from "../daemon/protocol";
 import { TerminalView } from "../terminal/TerminalView";
+import {terminalBlockContext,saveTerminalCommand,workspaceSavedCommands} from "../terminal/block-actions";
 import { AnimatedWordmark as Wordmark } from "./AnimatedWordmark";
 import {AppVisualState} from "./AppVisualState";
 import {createModelSnapshot} from "./model-snapshot";
 import {initialWorkspaceSidebars,workspaceSidebar,withWorkspaceSidebar,type WorkspaceSidebar} from "./workspace-sidebar";
 import { SplashView } from "./SplashView";
+import { HomeTerminalView } from "./HomeTerminalView";
 import { coreCall, type SearchHost } from "../native-core";
 import { InlinePicker, type Anchor, type PickerOption } from "./InlinePicker";
 import { LoadingSkeleton } from "./LoadingSkeleton";
@@ -70,6 +72,8 @@ import {WorkspaceTabs} from "./WorkspaceTabs";
 import { StatusLine } from "./StatusLine";
 import { workspaceLabel } from "../layout/tab-chrome";
 import {TreeRowGlyphs} from "./TreeRowGlyphs";
+import {createTreeRootReveal} from "./create-tree-root-reveal";
+import {GenerationPresented} from "./AppGeneration";
 import { statusInfo } from "../chrome/status-info";
 import { workspaceShortcut,bufferTabShortcut,navigateChrome,type ChromeFocus } from "../commands/chrome-keyboard";
 import { ChromeFocusCursor,type ChromeCursorTarget } from "./ChromeFocusCursor";
@@ -81,8 +85,10 @@ import { localDaemon } from "../menu-actions/web-frontend";
 import { openExternalUrl } from "../menu-actions/web-frontend";
 import {devicePreviewEnabled,DevicePreviewSlot,DevicePreviewButton} from "../device/feature";
 
-export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: (fontSizeOverride?:number,useConfiguredFontSize?:boolean) => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
+export function App(props: { workspaceActivation?:number; workspaceNavigation?:WorkspaceNavigation; model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: (fontSizeOverride?:number,useConfiguredFontSize?:boolean) => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
   const config = props.config, model = props.model, c = config.theme, s = config.scale;
+  const generationPresented=useContext(GenerationPresented);
+  const workspaceActivation=props.workspaceActivation??0;
   let activeTreeEscape:((event:KeyEvent)=>boolean)|undefined;
   const [presencePeers,setPresencePeers]=createSignal(model.presence.topBarPeers());
   const stopPresence=model.presence.subscribe(()=>setPresencePeers(model.presence.topBarPeers()));onCleanup(stopPresence);
@@ -387,14 +393,23 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     if (commandFocus !== undefined) { focusNativeElement(renderer,commandFocus); commandFocus = undefined; }
     else if (active()?.kind === "agent") focusComposer(); else setEditorFocus((n) => n + 1);
   };
-  const activeTerminal = () => { const surface = active(); return surface?.kind === "terminal" && surface.sessionId ? terminalSession(model.client, surface.sessionId, c, model.report) : undefined; };
+  const homeTerminalId = (surface:Surface) => {
+    const owners=state().ui.homeTerminalSessions;
+    return isRecord(owners)&&owners[surface.id]===surface.sessionId&&!state().surfaces.some(other=>other.id!==surface.id&&other.sessionId===surface.sessionId)?surface.sessionId:undefined;
+  };
+  const isDirectoryAuthority = (surface:Surface) => {
+    // Role, lifecycle and host updates all affect the model's eligible main shell.
+    state().ui;state().surfaces;state().workspaces;
+    return model.mainTerminalSurface(surface.workspaceId)?.id===surface.id;
+  };
+  const activeTerminal = () => { const surface = active(),sessionId=surface?.kind==="welcome"&&config.terminalBlockUi?homeTerminalId(surface):surface?.kind==="terminal"?surface.sessionId:undefined;return sessionId?terminalSession(model.client,sessionId,c,model.report):undefined; };
   const openFind = (mode: FinderMode = "files") => {
     if (commands()) closeCommands(); setFinderMode(mode); setPaletteMode("find"); setQuery(""); setMenu(false); setPalette(true);
   };
   const supportedCommands = () => ["TabCreate", "TabClose", "TabCloseUnfocused", "SelectNextTab", "SelectPrevTab", "SplitRight", "SplitDown", "SelectNextSplit", "SelectPrevSplit", "CloseCurrentSplitOrTab",
     "Copy", "Paste", "SearchFiles", "SearchWords", "SearchGitChanges", "ToggleGitDiffPanel", "OpenNeoismAgent", "OpenNeoismNotes", "ToggleFullscreen", "Quit", "CloseTab", "CloseWorkspace", "OpenSettings", "ConfigEditor", "OpenThemePicker", "ListBackgrounds", "ShowServers", "ShowSystems", "AddServer", "CreateServer", "LeaveWorkspace", "ShowWorkplaces",
     ...(active()?.kind === "file" ? ["SaveDocument", "GoToLine", "ToggleWordWrap", "ToggleViMode", "ReplaceInFile", "SearchForward", "SearchBackward", "LspHover", "LspCodeAction", "LspFormat", "LspDefinition", "LspReferences", "LspRename"] : []),
-    ...(active()?.kind === "terminal" ? ["ToggleViMode", "ClearHistory", "SearchForward", "SearchBackward"] : [])];
+    ...(activeTerminal() ? ["ToggleViMode", "ClearHistory", "SearchForward", "SearchBackward"] : [])];
   const openCommands = (prefill = "") => {
     if (palette()) closePalette(); setChoice(undefined); setMenu(false);
     if (!commands()) commandFocus = focusedNativeElement(renderer) ?? undefined;
@@ -807,6 +822,16 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const visibleRange = createMemo(() => { const frame = view(); return visibleTreeRange(rows().length, height(), d.treeRowHeight * s, frame.top, frame.offset); }, undefined,
       {equals:(before,next)=>before[0]===next[0]&&before[1]===next[1]});
     const visibleRows = createMemo(() => rows().slice(...visibleRange()));
+    // The native presentation loop parks occluded windows; JS has no OS
+    // activity/occlusion observer. Gate on actual panel/workspace visibility,
+    // never keyboard focus. Wall-clock elapsed settles an overdue sweep on
+    // the first display frame after reactivation, without replay or polling.
+    const rootReveal=createTreeRootReveal(visuals,props.notes?"notes":"files",()=>({
+      key:JSON.stringify([workspaceActivation,scope()]),ready:generationPresented()&&!!directories()[""],total:rows().length,height:height(),
+      rowHeight:d.treeRowHeight*s,top:view().top,offset:view().offset,
+      reducedMotion:config.reducedMotion||!!props.notes,
+      active:!props.notes&&sidebar()==="files"&&!!state().activeWorkspace?.id,
+    }),()=>s);
     createEffect(() => {
       scope(); height();
       const base=root()||"",paths=/^[a-z]:[\\/]/i.test(base)||base.startsWith("\\\\")?win32:posix;
@@ -916,12 +941,12 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
         const selected = () => active()?.path === entry.path && active()?.rootDir === root();
         const git=()=>gitDecorations().get(entry.path);
         const glyphKey=JSON.stringify([state().activeWorkspace?.id,!!props.notes,root(),entry.path]);
-        return <div data-reveal-opacity={1} data-reveal-start={entry.revealStart} role="treeitem" aria-label={entry.name} aria-description={git()?`Git ${git()!.status}: ${git()!.marker}`:undefined} aria-expanded={entry.dir ? expanded().has(entry.path) : undefined} aria-selected={selected()}
+        return <div data-reveal-opacity={rootReveal(index()).opacity} data-reveal-start={entry.revealStart} role="treeitem" aria-label={entry.name} aria-description={git()?`Git ${git()!.status}: ${git()!.marker}`:undefined} aria-expanded={entry.dir ? expanded().has(entry.path) : undefined} aria-selected={selected()}
           testId={`${props.notes ? "note" : "file"}:${entry.path}`} onMouseDown={event=>pressRow(entry,index(),event)} onMouseMove={moveDrag} onMouseUp={finishDrag} onClick={event => { if(event.button!==undefined&&event.button!==0)return;if(pressed){pressed=false;return;}update("select", { index: index() });focusChrome({zone:"sidebar"});open(entry); }}
           style={{ ...row, position: "absolute", left: 0, right: 0, top: index() * d.treeRowHeight * s, height: d.treeRowHeight * s, flexShrink: 0, paddingLeft: (d.treePadding + entry.depth * d.treeIndent) * s,
             paddingRight: 8 * s, gap: 8 * s, cursor: "pointer",opacity:drag()?.live&&drag()?.source===index()? .35:1,backgroundColor:drag()?.live&&drag()?.target===index()?c.accent+"38":selected()?c.surface:undefined,
             hover: { backgroundColor: c.hover }, focusVisible: { outlineColor: c.accent, outlineWidth: 1 } }}>
-          <TreeRowGlyphs offsetX={drag()?.live&&drag()?.target===index()&&!config.reducedMotion?drag()!.wiggle:0} host={glyphs} config={config} initialWidth={visuals.treeWidths.get(glyphKey)||Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-(d.frameStroke+d.treePadding+entry.depth*d.treeIndent+8)*s)} onWidth={width=>visuals.treeWidths.set(glyphKey,width)} pinImage={raster=>visuals.pinTreeRaster(renderer,glyphKey,raster)} trailingWidth={peerPaint()?.width} name={entry.name} chevron={entry.dir?(expanded().has(entry.path)?"\uf078":"\uf054"):""}
+          <TreeRowGlyphs opacity={rootReveal(index()).opacity} offsetX={rootReveal(index()).offsetX+(drag()?.live&&drag()?.target===index()&&!config.reducedMotion?drag()!.wiggle:0)} host={glyphs} config={config} initialWidth={visuals.treeWidths.get(glyphKey)||Math.max(1,Math.min(d.sidebarWidth,windowSize().width*.42)-(d.frameStroke+d.treePadding+entry.depth*d.treeIndent+8)*s)} onWidth={width=>visuals.treeWidths.set(glyphKey,width)} pinImage={raster=>visuals.pinTreeRaster(renderer,glyphKey,raster)} trailingWidth={peerPaint()?.width} name={entry.name} chevron={entry.dir?(expanded().has(entry.path)?"\uf078":"\uf054"):""}
             icon={icon().glyph} iconColor={icon().color} labelColor={selected()?c.fg:c.dim} chevronColor={c.muted} gitStatus={git()?.status} directory={entry.dir}/>
           <Show when={peerPaint()}>{paint=><div testId={`tree-presence:${entry.path}`} aria-label={model.presence.filePeers(peerBuffer()).map(peer=>peer.display_name).join(", ")} style={{position:"absolute",right:8*s+(git()?.trailingWidth||0),top:0,width:256,height:paint().height,pointerEvents:"none"}}><PaintLayer config={config} commands={paint().commands}/></div>}</Show>
         </div>;
@@ -1283,6 +1308,25 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
     const id=sessionId||"";
     return contextMetrics(state().history[id]||[],state().usage[id],state().providerStates[id],state().providers,selectedModel);
   }
+  const openTerminalPath=(surface:Surface,path:string,isDirectory:boolean)=>{
+    // File/tree actions must stay in the workspace that owns this shell.
+    const workspace=model.state.activeWorkspace;
+    if(!workspace||workspace.id!==surface.workspaceId||!workspace.root_dir){model.report(new Error("Select the terminal's workspace before opening this path"));return;}
+    const paths=/^[a-z]:[\\/]/i.test(workspace.root_dir)?win32:posix;
+    if(!paths.isAbsolute(path)||/[\x00-\x1f\x7f]/.test(path))return;
+    const absolute=paths.normalize(path),relative=paths.relative(workspace.root_dir,absolute);
+    const inside=relative!==".."&&!relative.startsWith(".."+paths.sep)&&!paths.isAbsolute(relative);
+    if(!isDirectory){void focusOpenedFile(()=>model.openFile(inside?relative.replaceAll("\\","/"):paths.basename(absolute),inside?workspace.root_dir!:paths.dirname(absolute)));return;}
+    if(!inside){model.report(new Error("This directory is outside the workspace; open it explicitly as a workspace to browse it. The current root was not changed."));return;}
+    setSidebar("files");
+    let parent="";
+    if(!model.state.expanded.has(parent))model.toggleDirectory(parent);
+    for(const part of relative.split(paths.sep).filter(Boolean)){
+      parent=parent?parent+"/"+part:part;
+      if(!model.state.expanded.has(parent))model.toggleDirectory(parent);
+    }
+    void model.listDirectory(parent);
+  };
   const welcomeAction=async(action:string)=>{
     closeChoice();if(palette())closePalette();if(commands())closeCommands();chromeActions.close();setMenu(false);
     if(action==="open-command-palette"){openCommands();return;}
@@ -1388,9 +1432,16 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
               return <Show when={state().surfaces.find((s) => s.id === id)} fallback={<div style={{ position: "relative", flexGrow: 1 }}><LoadingSkeleton config={config} kind="document" /></div>}>{(found) => {
               const surface = found();
               return <Switch>
-                <Match when={surface.kind === "welcome"}><SplashView initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border-16*s),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border-16*s)};})()} config={config} contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onAction={action=>{
+                <Match when={surface.kind === "welcome"}><Show when={config.terminalBlockUi} fallback={<SplashView initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border-80*s),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border-16*s)};})()} config={config} contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onAction={action=>{
                   void welcomeAction(action).catch(model.report);
-                }}/></Match>
+                }}/>}>
+                  <HomeTerminalView sessionId={homeTerminalId(found())} ensureSession={()=>model.ensureHomeTerminal(surface.id)} client={model.client} config={config}
+                    directoryAuthority={isDirectoryAuthority(found())} onMakeDirectoryAuthority={()=>model.setMainTerminal(surface.id)}
+                    contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()}
+                    onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onSearch={openTerminalSearch} report={model.report}
+                    onAction={action=>void welcomeAction(action).catch(model.report)} onOpenPath={(path,isDirectory)=>openTerminalPath(surface,path,isDirectory)}
+                    savedCommands={workspaceSavedCommands(state().ui.savedTerminalCommands,surface.workspaceId)}/>
+                </Show></Match>
                 <Match when={surface.kind === "page" && surface.page === "extensions"}><ChromeActionsView controller={chromeActions} config={config} pageMode active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} /></Match>
                 <Match when={surface.kind === "git"&&surface.git}><GitReviewView controller={visuals.gitReview(surface,model,config,()=>{layout.focus(leaf);model.selectSurface(id,true);closeFocusedTab();},leaf)} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
@@ -1413,8 +1464,17 @@ export function App(props: { workspaceNavigation?:WorkspaceNavigation; model: Wo
                     </Show>
                   </Show>
                 </div></Match>
-                <Match when={surface.kind === "terminal"}><div style={{ ...column, position:"relative", flexGrow: 1, paddingLeft: 8 * s, paddingRight: 8 * s }}>
-                  <TerminalView onCustomKey={handleSurfaceKey} sessionId={surface.sessionId!} client={model.client} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} onSearch={openTerminalSearch} report={model.report} />
+                <Match when={surface.kind === "terminal"}><div style={{ ...column, position:"relative", flexGrow: 1, paddingLeft: config.terminalBlockUi ? 0 : 8 * s, paddingRight: config.terminalBlockUi ? 0 : 8 * s }}>
+                  <TerminalView onCustomKey={handleSurfaceKey} sessionId={surface.sessionId!} client={model.client} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} onSearch={openTerminalSearch} report={model.report}
+                    directoryAuthority={isDirectoryAuthority(found())} onMakeDirectoryAuthority={()=>model.setMainTerminal(surface.id)}
+                    onOpenPath={(path,isDirectory)=>openTerminalPath(surface,path,isDirectory)}
+                    onAttachBlock={block=>{
+                      const home=model.newAgentHome();if(!home)return;
+                      model.setComposerDraft(model.composerDraftKey(undefined,home.id),{text:terminalBlockContext(block),attachments:[]});
+                      focusChrome({zone:"content"});
+                    }}
+                    onSaveCommand={(command,directory)=>model.setUI({savedTerminalCommands:saveTerminalCommand(model.state.ui.savedTerminalCommands,command,directory,surface.workspaceId)})}
+                    savedCommands={workspaceSavedCommands(state().ui.savedTerminalCommands,surface.workspaceId)} />
 
                 </div></Match>
               </Switch>;

@@ -30,6 +30,8 @@ export interface AppConfig {
   presenceDisplayName?: string;
   terminalScrollMultiplier?: number;
   terminalScrollDivider?: number;
+  terminalBlockUi?: boolean;
+  terminalInputPosition?: "bottom" | "top" | "flow";
   shell?: {program?:string;args?:string[]};
   scale: number;
   composerOpacity?: number;
@@ -63,6 +65,7 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
     if (errors.length) { warnings.push("Neoism config contains invalid JSONC; using appearance defaults."); raw = {}; }
   }
   const appearance = object(raw.appearance);
+  const inputPosition = object(raw.terminal)["input-position"];
   // Match the backend's TerminalConfig, including Config service snapshots.
   // Keep the former top-level spelling as a fallback for older frontend configs.
   const shell=object(object(raw.terminal).shell ?? raw.shell);
@@ -108,6 +111,8 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
     presenceDisplayName: typeof object(raw.presence)["display-name"] === "string" ? object(raw.presence)["display-name"] as string : undefined,
     terminalScrollMultiplier: Math.max(0, number(object(object(raw.terminal).scroll).multiplier, 3)),
     terminalScrollDivider: Math.max(0.01, number(object(object(raw.terminal).scroll).divider, 1)),
+    terminalBlockUi: object(raw.terminal)["block-ui"] !== false,
+    terminalInputPosition: inputPosition === "top" || inputPosition === "flow" ? inputPosition : "bottom",
     shell:shellProgram!==undefined||shellArgs!==undefined?{program:shellProgram,args:shellArgs}:undefined,
     fontWeight: number(fonts.weight, 400), scale: Math.max(0.5, Math.min(3, fontSize / 14)),
     composerOpacity: Math.max(0, Math.min(1, composerOpacity)),

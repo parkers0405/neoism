@@ -319,6 +319,19 @@ mod tests {
     }
 
     #[test]
+    fn terminal_completion_stays_on_execution_plane_and_keeps_correlation() {
+        // Fast collaborators already have shell execution. Input text is data,
+        // not a Files path; the daemon still enforces attachment and PTY grants.
+        let project = tempfile::tempdir().unwrap();
+        let frame = serde_json::json!({"Pty":{"request_id":91,"message":{"CompleteTerminal":{
+            "session_id":"host-pty", "line":"git switch feature/", "cursor":19
+        }}}});
+        let filtered = filter_frame(&frame.to_string(), project.path(), "master").unwrap();
+        let filtered: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+        assert_eq!(filtered, frame);
+    }
+
+    #[test]
     fn traversal_and_absolute_escape_are_denied() {
         let root = std::env::temp_dir().canonicalize().unwrap();
         for path in ["../secret", "/etc/passwd", "a/../../secret"] {

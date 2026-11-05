@@ -48,6 +48,7 @@ export interface AttachPtyArgs {
 export type ClientMessage =
   | { CreatePty: CreatePtyArgs }
   | { ChangeTerminalDirectory: { session_id: string; directory: string; request_id: string } }
+  | { CompleteTerminal: { session_id: string; line: string; cursor: number } }
   | { PtyInput: PtyInputArgs }
   | { Resize: ResizeArgs }
   | { ClosePty: ClosePtyArgs }
@@ -2384,6 +2385,7 @@ export type PtyClientMessage =
   | { CreatePty: { cwd: string | null; cols: number; rows: number; shell?: string; presentation?: "grid" | "blocks" } }
   | { AttachPty: { session_id: string; cursor?: number } }
   | { ChangeTerminalDirectory: { session_id: string; directory: string; request_id: string } }
+  | { CompleteTerminal: { session_id: string; line: string; cursor: number } }
   | { PtyInput: { session_id: string; bytes: number[] } }
   | { Resize: { session_id: string; cols: number; rows: number } }
   | { ClosePty: { session_id: string } };

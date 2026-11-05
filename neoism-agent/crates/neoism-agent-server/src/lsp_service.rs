@@ -37,7 +37,6 @@ pub(super) struct LspService {
     self_weak: std::sync::Weak<LspService>,
     clients: Mutex<HashMap<LspClientKey, Arc<Mutex<PersistentLspClient>>>>,
     document_pins: Mutex<HashMap<(PathBuf, PathBuf), usize>>,
-    pub(super) generation_leases: Mutex<Option<std::sync::Weak<std::sync::atomic::AtomicUsize>>>,
     /// Exact file selections published only by the blocking worker path. Never
     /// infer a nested project's owner by looking for an ancestor/live language.
     file_clients: Mutex<HashMap<(PathBuf, PathBuf, String), CachedFileClient>>,
@@ -52,6 +51,38 @@ pub(super) struct LspService {
     /// Latest versioned publishDiagnostics payload accepted per document/server.
     diagnostic_versions: Mutex<HashMap<DiagnosticOwnerKey, i32>>,
     broken: Mutex<HashMap<LspClientKey, BrokenClientState>>,
+}
+
+/// One logical task's actual transport consumers, retained across provider gaps.
+/// Keys include service identity: incompatible generations must remain isolated.
+#[derive(Default)]
+pub(crate) struct LspTaskConsumer {
+    clients: Mutex<HashMap<(usize, LspClientKey), Arc<Mutex<PersistentLspClient>>>>,
+}
+
+thread_local! {
+    static ACTIVE_CONSUMER: std::cell::RefCell<Option<Arc<LspTaskConsumer>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct LspConsumerScope {
+    previous: Option<Arc<LspTaskConsumer>>,
+    // Scopes are synchronous and must be dropped on the originating worker.
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl LspTaskConsumer {
+    pub(crate) fn enter(consumer: Option<Arc<Self>>) -> LspConsumerScope {
+        LspConsumerScope {
+            previous: ACTIVE_CONSUMER.with(|active| active.replace(consumer)),
+            _not_send: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for LspConsumerScope {
+    fn drop(&mut self) {
+        ACTIVE_CONSUMER.with(|active| active.replace(self.previous.take()));
+    }
 }
 
 impl Default for LspService {
@@ -83,7 +114,6 @@ impl LspService {
             self_weak,
             clients: Mutex::new(HashMap::new()),
             document_pins: Mutex::new(HashMap::new()),
-            generation_leases: Mutex::new(None),
             file_clients: Mutex::new(HashMap::new()),
             initialization_gates: Mutex::new(HashMap::new()),
             diagnostics: Mutex::new(HashMap::new()),
@@ -254,14 +284,6 @@ impl LspService {
     }
 
     fn retire_idle_clients(&self, timeout: Duration) {
-        // A running task's generation lease spans the gaps between LSP calls,
-        // including provider/tool waits. Cached generations alone do not pin.
-        if self.generation_leases.lock().unwrap().as_ref()
-            .and_then(std::sync::Weak::upgrade)
-            .is_some_and(|count| count.load(std::sync::atomic::Ordering::Acquire) > 0)
-        {
-            return;
-        }
         // Removal and lease admission are atomic under the map lock. Never
         // terminate an Arc already handed to an operation, even if it has not
         // acquired the client lock yet. Status polls are not consumer leases.
@@ -310,6 +332,7 @@ impl LspService {
                 .self_weak
                 .upgrade()
                 .expect("LSP service must be owned by an LspRuntime"),
+            consumer: None,
         }
     }
 
@@ -1591,6 +1614,12 @@ impl LspService {
         // not record its backoff sentinel here: resetting `retry_after` on
         // every UI poll can otherwise postpone reconnect forever.
         let client = self.client(workspace_root, project_root, &key, &launch)?;
+        ACTIVE_CONSUMER.with(|active| {
+            if let Some(consumer) = active.borrow().as_ref() {
+                consumer.clients.lock().expect("LSP task consumers poisoned")
+                    .insert((self as *const Self as usize, key.clone()), client.clone());
+            }
+        });
         let mut guard = client.lock().expect("lsp client lock poisoned");
         if let Some(reason) = guard.client.exit_reason() {
             drop(guard);

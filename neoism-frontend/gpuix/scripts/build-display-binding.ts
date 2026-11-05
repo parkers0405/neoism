@@ -3,6 +3,10 @@ import {dirname,join,resolve} from "node:path";
 import {frontendRoot as root,readDisplayPin,sha256,displayIdentity,displayStampPath,verifiedDisplayBinding,type DisplayStamp} from "../src/display-binding";
 
 const pin=readDisplayPin(),overlay=pin.devicePreview,capture=pin.deviceWindowCapture;
+const debug=process.argv.includes("--debug")||process.env.NEOISM_GPUIX_DISPLAY_DEBUG==="1";
+// Debug artifacts have independent identities/stamps and never replace release.
+if(debug)process.env.NEOISM_GPUIX_DISPLAY_DEBUG="1";
+const profile=debug?"debug":"release";
 // Allow an isolated pinned checkout without replacing local renderer work.
 const source=resolve(root,process.env.NEOISM_GPUIX_DISPLAY_SOURCE||(overlay?"artifacts/gpuix-device-preview-source":"artifacts/gpuix-pacing-source")),patch=join(root,pin.patch);
 const toolchains=join(root,"artifacts/gpuix-rustup"),target=resolve(root,overlay?"../../target/gpuix-native-device-preview":"../../target/gpuix-native-vsync");
@@ -108,19 +112,20 @@ if(cargoCheckOnly){
 }
 if(!publishOnly){
  if(pin.profile!=="release"||pin.defaultFeatures||!pin.lto)throw new Error("The GPUIX pin requires another production build configuration");
- console.log(`Building pinned GPUIX ${pin.revision.slice(0,12)} with native display frames (${pin.jobs} jobs)…`);
- await run([join(dirname(rustc),process.platform==="win32"?"cargo.exe":"cargo"),"build","--release","--locked","--no-default-features",...(overlay?["--features","device-preview"]:[]),"--manifest-path","packages/native/Cargo.toml"],source);
+ console.log(`Building pinned GPUIX ${pin.revision.slice(0,12)} ${profile} with native display frames (${pin.jobs} jobs)…`);
+ await run([join(dirname(rustc),process.platform==="win32"?"cargo.exe":"cargo"),"build",...(debug?[]:["--release"]),"--locked","--no-default-features",...(overlay?["--features","device-preview"]:[]),"--manifest-path","packages/native/Cargo.toml"],source);
 }
 const library=process.platform==="win32"?"gpuix_native.dll":process.platform==="darwin"?"libgpuix_native.dylib":"libgpuix_native.so";
-const candidate=join(target,"release",library);
-if(!existsSync(candidate))throw new Error(`The release candidate is absent: ${candidate}. Wait for the build before --publish-only.`);
-const digest=sha256(readFileSync(candidate)),artifact=`gpuix-display-${process.platform}-${process.arch}-${digest.slice(0,16)}.node`;
+const candidate=join(target,profile,library);
+if(!existsSync(candidate))throw new Error(`The ${profile} candidate is absent: ${candidate}. Wait for the build before --publish-only.`);
+const digest=sha256(readFileSync(candidate)),artifact=`gpuix-display-${process.platform}-${process.arch}-${debug?"debug-":""}${digest.slice(0,16)}.node`;
 const staged=join(root,"artifacts",`gpuix-display-stage-${process.pid}.node`),output=join(root,"artifacts",artifact);
 copyFileSync(candidate,staged);
 await run([process.execPath,"scripts/verify-display-binding.ts",staged]);
 if(overlay)await run([process.execPath,"-e",`const binding=require(${JSON.stringify(staged)});if(typeof binding.devicePreviewSupported!=="function"||binding.devicePreviewSupported()!==${process.platform==="linux"||process.platform==="freebsd"}||!["createDeviceViewport","updateDeviceViewport","putDeviceFrame","clearDeviceFrame","dropDeviceViewport","hitDeviceViewport","facingDeviceViewport","captureScreenshot"].every(name=>typeof binding.GpuixRenderer.prototype[name]==="function"))throw new Error("The candidate addon lacks the device-preview API");`]);
 if(existsSync(output)&&sha256(readFileSync(output))===digest)unlinkSync(staged);else renameSync(staged,output);
 const stamp:DisplayStamp={version:1,identity:displayIdentity(pin),artifact,sha256:digest,platform:process.platform,arch:process.arch,revision:pin.revision,patchSha256:pin.patchSha256,rustcVersion:pin.rustcVersion};
+if(debug)stamp.profile="debug";
 if(overlay)stamp.devicePreview=true;
 const destination=displayStampPath(),pending=`${destination}.${process.pid}.next`;
 writeFileSync(pending,JSON.stringify(stamp));renameSync(pending,destination);

@@ -8,6 +8,9 @@ pub enum Presentation { #[default] Blocks, Grid }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ClientMessage {
+    /// Host completion; cursor is a UTF-8 byte offset, not a character index.
+    /// Requires an existing attachment and PTY execution authorization.
+    CompleteTerminal { session_id: String, line: String, cursor: u32 },
     CreatePty {
         cwd: Option<String>,
         cols: u16,
@@ -64,6 +67,13 @@ pub enum ClientMessage {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ServerMessage {
+    TerminalCompletions {
+        session_id: String,
+        line: String,
+        cursor: u32,
+        entries: Vec<TerminalCompletion>,
+        provider: String,
+    },
     /// Correlated control acknowledgment. This is carried inside a
     /// `PtyReply` service envelope; the envelope's request id identifies the
     /// operation. It keeps successful input/resize requests from lingering in
@@ -125,6 +135,17 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
+}
+
+/// `value` replaces the FULL input line (including its preserved suffix).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TerminalCompletion {
+    pub value: String,
+    pub label: String,
+    #[serde(default)]
+    pub detail: String,
+    /// command/directory/file/option/argument/branch/remote/script/alias/function/variable
+    pub kind: String,
 }
 
 #[cfg(test)]

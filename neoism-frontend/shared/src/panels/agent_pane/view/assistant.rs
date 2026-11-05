@@ -265,6 +265,8 @@ where
         viewport_clip,
     );
 
+    let panel_theme = theme.panel_text_theme();
+    let theme = &panel_theme;
     let title = message_title(message);
     let Some(label_opts) = opts_with_clip(
         DrawOpts {

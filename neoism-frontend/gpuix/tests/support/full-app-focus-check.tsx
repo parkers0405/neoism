@@ -16,7 +16,7 @@ import { createAgentDaemon } from "./agent-daemon";
 import { createRecordingAppRenderer } from "./full-app-recording-renderer";
 
 const directory = mkdtempSync(join(tmpdir(), "neoism-headless-full-app-")), path = join(directory, "config.json");
-const configuration = { appearance: { fonts: { family: "Cascadia Code NF", size: 14 } }, editor: { "vim-mode": true } };
+const configuration = { appearance: { fonts: { family: "Cascadia Code NF", size: 14 } }, editor: { "vim-mode": true }, terminal: { "block-ui": false } };
 writeFileSync(path, JSON.stringify(configuration)); process.argv.push("--config", path);
 const daemon = createAgentDaemon({ configuration, deferCreations: false });
 daemon.files.set("code.rs", "pub fn clean() {}\n");

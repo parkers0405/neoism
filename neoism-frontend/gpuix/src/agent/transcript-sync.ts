@@ -14,10 +14,17 @@ export class FamilyStreamOwnership {
 /** Desktop refreshes completed transcript metadata outside its SSE reader.
  * Part snapshots lack the response-level model/timing/throughput provenance. */
 export class CompletedTranscriptRefresh {
- private dirty=new Set<string>();private completions=new Map<string,string>();
+ private dirty=new Set<string>();private completions=new Map<string,string>();private compacted=new Set<string>();
  observe(message:unknown):string|undefined{
   const pair=variant(message);if(!pair||!isRecord(pair[1]))return;const[tag,body]=pair;
   const id=typeof body.session_id==="string"?body.session_id:undefined;if(!id)return;
+  if(tag==="Compaction"){
+   if(body.phase==="Started")this.compacted.delete(id);
+   if(body.phase!=="Ended"||this.compacted.has(id))return;
+   // Compaction can finish without any content parts, including in an unseen
+   // tab. Recover canonical history; legacy session.compacted may echo Ended.
+   this.compacted.add(id);this.dirty.delete(id);return id;
+  }
   if(["ContentDelta","MessageUpdated","MessageStart"].includes(tag)){this.dirty.add(id);return;}
   if(tag==="SessionIdle"||tag==="StreamingState"&&body.state==="Idle"){if(this.dirty.delete(id))return id;return;}
   if(tag!=="SessionEvent"||body.kind!=="message.updated"||!isRecord(body.properties)||!isRecord(body.properties.info))return;

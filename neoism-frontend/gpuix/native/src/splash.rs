@@ -17,10 +17,10 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
   host.paint.begin_frame();
   let Some((padding,layout))=terminal_splash::splash_bytes(cols,rows)else{return Ok(json!({"commands":[],"rows":[],"wordmark":[0,0,0,0],"padding":[]}));};
   let injection=SplashInjection{wordmark_row:layout.wordmark_row(),wordmark_cells_h:layout.wordmark_rows,gap_cells_h:layout.gap_rows,menu_cells_h:layout.menu_rows};
-  let band_top=injection.wordmark_row as f32*cell_h;let band_h=injection.wordmark_cells_h as f32*cell_h;let logo_w=(band_h*0.96*terminal_splash::WORDMARK_ASPECT).min(width*0.60);let logo_h=logo_w/terminal_splash::WORDMARK_ASPECT;let logo=[(width-logo_w)*0.5,band_top+(band_h-logo_h)*0.5,logo_w,logo_h];
+   let band_top=injection.wordmark_row as f32*cell_h;let band_h=injection.wordmark_cells_h as f32*cell_h;let logo_w=(band_h*0.96*terminal_splash::WORDMARK_ASPECT).min((width-32.0*n(v,"scale",1.0)).max(0.0));let logo_h=logo_w/terminal_splash::WORDMARK_ASPECT;let logo=[(width-logo_w)*0.5,band_top+(band_h-logo_h)*0.5,logo_w,logo_h];
   host.overlay.set_mouse(if v["pointer"].as_bool().unwrap_or(false){Some((n(v,"x",-1.0),n(v,"y",-1.0)))}else{None});
   let elapsed=n(v,"dismissedMs",0.0);let t=(elapsed/420.0).clamp(0.0,1.0);let eased=t*t*(3.0-2.0*t);let scale=1.0-(1.0-0.84)*eased;
-  if t<1.0{host.overlay.render_menu_host(&mut host.paint,&injection,(0.0,0.0),(width,height),cell_h,&IdeTheme::by_name(v["theme"].as_str().unwrap_or("pastel_dark")),n(v,"scale",1.0),logo_w*scale,t,eased,1.0-eased,&[]);}
+   if t<1.0{host.overlay.render_menu_host(&mut host.paint,&injection,(0.0,0.0),(width,height),cell_h,&IdeTheme::by_name(v["theme"].as_str().unwrap_or("pastel_dark")),n(v,"scale",1.0),logo_w*scale,t,eased,1.0-eased,&[],true);}
   Ok(json!({"commands":host.paint.commands(),"rows":if t<1.0{host.overlay.host_menu_rows().into_iter().map(|(action,label,key,rect)|json!({"action":action,"label":label,"key":key,"rect":rect})).collect::<Vec<_>>()}else{vec![]},"wordmark":[logo[0]+logo[2]*(1.0-scale)*0.5,logo[1]+logo[3]*(1.0-scale)*0.5-band_h*0.35*eased,logo[2]*scale,logo[3]*scale],"alpha":1.0-eased,"animating":t>0.0&&t<1.0,"padding":padding.as_bytes()}))
  }))
 }

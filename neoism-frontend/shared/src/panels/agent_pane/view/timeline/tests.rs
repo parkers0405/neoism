@@ -1394,28 +1394,69 @@ fn subagent_runtime_notification_never_paints_during_role_races() {
 
 #[test]
 fn compaction_keeps_its_divider_but_hides_reasoning_live_and_after_reload() {
+    let boundary = crate::panels::agent_pane::api_mapping::part_block(&serde_json::json!({
+        "id": "start-part", "messageID": "start-message", "type": "compaction", "summary": false
+    })).unwrap();
+    let summary = crate::panels::agent_pane::api_mapping::part_block(&serde_json::json!({
+        "id": "summary-part", "messageID": "summary-message", "type": "text",
+        "compactionSummary": true, "text": "full summary"
+    })).unwrap();
     let mut reasoning = text_message("compact-reasoning", NeoismAgentMessageKind::Reasoning, "reviewing context");
     reasoning.tool = "compaction_reasoning".into();
     let messages = vec![
         text_message("u1", NeoismAgentMessageKind::User, "work"),
         text_message("subtask", NeoismAgentMessageKind::Subtask, "exploring"),
-        text_message("compact", NeoismAgentMessageKind::Compaction, "summary"),
+        boundary,
         reasoning,
+        summary,
         text_message("answer", NeoismAgentMessageKind::Assistant, "Done."),
     ];
 
     assert_eq!(
         timeline_message_visibility(&messages, Some(1)),
-        vec![true, true, true, false, true]
+        vec![true, true, true, false, false, true]
     );
     assert_eq!(
         timeline_message_visibility(&messages, None),
-        vec![true, false, true, false, true]
+        vec![true, false, true, false, false, true]
     );
     let divider = super::render::display_timeline_message(&messages[2], false).unwrap();
     assert_eq!(divider.kind, NeoismAgentMessageKind::Compaction);
     assert!(divider.text.is_empty());
-    assert_eq!(messages[2].text, "summary", "stored summary is unchanged");
+    assert_eq!(messages[4].text, "full summary", "stored summary is unchanged");
+}
+
+#[test]
+fn compaction_divider_arrives_in_parked_session_before_completion_without_reload() {
+    use crate::panels::agent_pane::state::CompactionPhase;
+    for finishes_while_parked in [false, true] {
+        let mut pane = NeoismAgentPane::default();
+        pane.set_session_id(Some("root".into()));
+        pane.apply_history_to_cache("parked", vec![text_message("u1", NeoismAgentMessageKind::User, "work")], None);
+        let boundary = crate::panels::agent_pane::api_mapping::part_block(&serde_json::json!({
+            "id": "start-part", "messageID": "start-message", "type": "compaction", "summary": false
+        })).unwrap();
+        pane.cache_upsert_part_message("parked", boundary);
+        pane.cache_note_streaming("parked", crate::panels::agent_pane::state::NeoismAgentStreamingState::Compacting, None);
+        if finishes_while_parked {
+            pane.cache_apply_part_delta_with_parent("parked", Some("summary-message"), Some("reasoning-part"), Some("reasoning"), "private reasoning");
+            pane.cache_apply_part_delta_with_parent("parked", Some("summary-message"), Some("summary-message"), Some("compaction"), "full summary");
+            pane.cache_note_compaction_ended("parked", Some(false));
+        }
+        pane.switch_session("parked".into());
+        if finishes_while_parked {
+            assert_eq!(timeline_message_visibility(pane.messages(), Some(0)), vec![true, true, false, false]);
+            assert_eq!(pane.messages()[1].id, "start-message");
+            continue;
+        }
+        assert_eq!(timeline_message_visibility(pane.messages(), None), vec![true, true]);
+        // No history fetch or summary is needed to show the divider on return.
+        pane.ingest_live_part_delta(Some("summary-message".into()), Some("summary-part".into()), Some("compaction".into()), "full summary");
+        assert_eq!(timeline_message_visibility(pane.messages(), None), vec![true, true, false]);
+        pane.note_compaction(CompactionPhase::Ended, None, None);
+        assert_eq!(timeline_message_visibility(pane.messages(), None), vec![true, true, false]);
+        assert_eq!(pane.messages()[1].id, "start-message");
+    }
 }
 
 #[test]

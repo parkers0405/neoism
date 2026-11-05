@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useGpuixRequired, type HostElement, type KeyEvent, type EventPayload } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import type { DaemonConnection } from "../daemon/client";
@@ -7,7 +7,6 @@ import {TerminalCursorAnimation} from "./cursor-animation";
 import {registerSurfaceCaret,surfaceCursorSuppressed} from "../ui/cursor-handoff";
 import type {TerminalCursorFrame} from "./buffer";
 import {cssColor} from "../ui/canvas";
-import { readClipboard, writeClipboard } from "../clipboard";
 import { coreCall, type SearchHost } from "../native-core";
 import { cursorPaint, sameBounds } from "../editor/paint-frame";
 import { focusedNativeElement, focusNativeElement, invalidateNativeFocus } from "../native-focus";
@@ -15,8 +14,27 @@ import {CursorBlinkClock} from "../ui/cursor-blink";
 import {terminalPaintOps} from "./paint";
 import {profileStart,profileEnd} from "../profiling";
 import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-scheduler";
+import { BlockTerminalView } from "./BlockTerminalView";
+import { terminalInput } from "./input";
 
-export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean; active?: boolean; focusToken?: number; onFocus?: () => void; sessionId: string; client: DaemonConnection; config: AppConfig; onSearch: (kind: "/" | "?", host: SearchHost) => void; report: (error: unknown) => void }) {
+export interface TerminalViewProps { onCustomKey?: (event: KeyEvent) => boolean; active?: boolean; focusToken?: number; onFocus?: () => void; sessionId: string; client: DaemonConnection; config: AppConfig; onSearch: (kind: "/" | "?", host: SearchHost) => void; report: (error: unknown) => void;
+  onAttachBlock?: (block: { command: string; directory: string; output: string }) => void;
+  onSaveCommand?: (command: string, directory: string) => void;
+  savedCommands?: readonly string[];
+  onOpenPath?: (path: string, isDirectory: boolean) => void;
+  directoryAuthority?: boolean;
+  onMakeDirectoryAuthority?: () => void;
+  /** Home content participates in scrollback above a bottom-anchored composer. */
+  historyHeader?: (viewport: { width: number; height: number }) => JSX.Element;
+}
+
+export function TerminalView(props: TerminalViewProps) {
+  return <Show when={props.historyHeader || props.config.terminalBlockUi} fallback={<TerminalGridView {...props}/>}>
+    <BlockTerminalView {...props} grid={() => <TerminalGridView {...props}/>}/>
+  </Show>;
+}
+
+function TerminalGridView(props: TerminalViewProps) {
   const renderer = useGpuixRequired();
   const session = terminalSession(props.client, props.sessionId, props.config.theme, props.report), buffer = session.buffer;
   const [frame, setFrame] = createSignal(buffer.frame());
@@ -67,58 +85,8 @@ export function TerminalView(props: { onCustomKey?: (event: KeyEvent) => boolean
   onMount(() => {if(host)releaseCaret=registerSurfaceCaret(renderer,host,()=>cursor().quad.map(point=>[point[0]+size().x,point[1]+size().y]));if (active() && host) focusNativeElement(renderer, host.id); });
   onCleanup(()=>releaseCaret());
   onCleanup(() => { disposed = true; paintAnimation.dispose(); cursorAnimation.dispose(); blinkClock.dispose(); buffer.focus(false); cleanupBuffer(); clearInterval(blinkTimer); });
-  const intercepted = new Set<string>();
-  const keyDown = (event: KeyEvent, released = false) => {
-    const key = event.key?.toLowerCase() || "";
-    if (released && intercepted.delete(key)) { event.preventDefault(); event.stopPropagation(); return; }
-    const mods=event.modifiers||{ctrl:false,cmd:false,shift:false,alt:false},primary = mods.ctrl || mods.cmd;
-    // Configured bindings (including None) override terminal defaults too.
-    if (!released && props.onCustomKey?.(event)) { intercepted.add(key); event.preventDefault(); event.stopPropagation(); return; }
-    // Unbound Ctrl+C interrupts even when terminal output is selected.
-    if(key==="c"&&mods.ctrl&&!mods.shift&&!mods.alt&&!mods.cmd){
-      event.preventDefault(); event.stopPropagation();
-      const input={key:"c",char:"c",ctrl:true,repeat:event.isHeld,released};
-      const wasVi=buffer.viMode;
-      let bytes=buffer.key(input);
-      // Leave terminal scrollback/Vim mode and interrupt on the same press.
-      if(!released&&wasVi&&!buffer.viMode)bytes=buffer.key(input);
-      if(bytes.length)send(bytes);
-      if(!released){blinkClock.activity();buffer.scrollToBottom();}
-      return;
-    }
-    const clipboardChord=!mods.alt&&((mods.cmd&&!mods.ctrl)||(mods.ctrl&&mods.shift&&!mods.cmd));
-    // Compositor "universal paste" shortcuts commonly arrive as Shift+Insert.
-    const shiftInsert=key==="insert"&&mods.shift&&!mods.ctrl&&!mods.alt&&!mods.cmd;
-    if(clipboardChord&&(key==="c"||key==="v")||shiftInsert){
-      event.preventDefault(); event.stopPropagation();
-      if(!released){
-        intercepted.add(key);
-        if(key==="c"){const selected=buffer.selectedText;if(selected)void writeClipboard(selected).catch(props.report);}
-        else void readClipboard().then(text=>{if(disposed)return;const bytes=buffer.paste(text);if(bytes.length){blinkClock.activity();send(bytes);buffer.scrollToBottom();}}).catch(props.report);
-      }
-      return;
-    }
-    // Leave application shortcuts to the parent.
-    if (event.modifiers?.ctrl && (key === "tab" || event.modifiers.shift && ["r", "d", "[", "]", "left", "right", "up", "down", "w"].includes(key))) return;
-    if (event.modifiers?.alt && ["e", "n", "c", "h"].includes(key)) return;
-    if (event.modifiers?.ctrl && ["`", "p", "t"].includes(key)) return;
-    const char = event.keyChar || (key.length === 1 ? key : "");
-    if (buffer.viMode && !primary && ["/", "?"].includes(char)) {
-      event.preventDefault(); event.stopPropagation();
-      if (!released) {
-        buffer.search("start", { forward: char === "/" });
-        props.onSearch(char as "/" | "?", {
-          preview: (pattern) => buffer.search("preview", { pattern }), commit: () => buffer.search("commit"), cancel: () => buffer.search("cancel"),
-          focus: () => { if (host) focusNativeElement(renderer, host.id); },
-        });
-      }
-      return;
-    }
-    const bytes = buffer.key({ key, char: event.keyChar || (key.length === 1 ? key : ""), ...event.modifiers, repeat: event.isHeld, released });
-    if (buffer.pendingClipboard !== undefined) { void writeClipboard(buffer.pendingClipboard).catch(props.report); buffer.pendingClipboard = undefined; }
-    if (buffer.lastKeyHandled) { event.preventDefault(); event.stopPropagation(); if(!released)blinkClock.activity(); }
-    if (bytes.length) { event.preventDefault(); event.stopPropagation(); send(bytes); if (!released) {blinkClock.activity();buffer.scrollToBottom();} }
-  };
+  const keyDown = terminalInput({ buffer, send, report: props.report, custom: props.onCustomKey, search: props.onSearch,
+    focus: () => { if (host) focusNativeElement(renderer, host.id); }, activity: () => blinkClock.activity(), disposed: () => disposed });
   const select = (x: number, y: number, start: boolean, clicks = 1) => {
     const left = size().x, top = size().y;
     const col = Math.max(0, Math.min(buffer.cols - 1, Math.floor((x - left) / cellWidth())));

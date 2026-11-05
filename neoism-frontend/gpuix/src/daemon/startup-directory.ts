@@ -21,3 +21,11 @@ export function startupDirectory(env:NodeJS.ProcessEnv=process.env,options:{plat
   }
   return normalized;
 }
+
+/** Old Finder defaults can survive in daemon and window recovery snapshots. */
+export function recoveredStartupDirectory(root:string|undefined|null,env:NodeJS.ProcessEnv=process.env,options:Parameters<typeof startupDirectory>[1]={}) {
+  if((options.platform??process.platform)!=="darwin"||env.NEOISM_LAUNCH_DIRECTORY||env.NEOISM_WORKSPACE_ROOT)return;
+  if(root!=="/"&&!(root&&/\.app\/Contents(?:\/|$)/i.test(root)))return;
+  const home=options.home??homedir();
+  if(startupDirectory(env,options)===home)return home;
+}

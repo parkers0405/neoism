@@ -41,6 +41,7 @@ pub(super) struct DirectoryControl {
     alternate: bool,
     queued: Option<Request>,
     active: Option<Request>,
+    revision: u64,
 }
 impl DirectoryControl {
     pub(super) fn new(token: Option<String>, executable: Option<PathBuf>) -> Self {
@@ -55,10 +56,27 @@ impl DirectoryControl {
             alternate: false,
             queued: None,
             active: None,
+            revision: 0,
         }
     }
     pub(super) fn blocks_input(&self) -> bool {
         self.queued.is_some() || self.active.is_some()
+    }
+
+    pub(super) fn completion_revision(&self) -> u64 { self.revision }
+
+    pub(super) fn completion_ready(&self, pty: &PtySession) -> bool {
+        #[cfg(target_os = "linux")]
+        let foreground = self.foreground_shell(pty);
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let foreground = unsafe { libc::tcgetpgrp(*pty.main_fd()) == pty.shell_pid() as libc::pid_t };
+        #[cfg(not(unix))]
+        let foreground = { let _ = pty; false };
+        // A private snapshot remains valid while Readline/ZLE edits a partial
+        // line. Unlike directory control, completion never writes to that line.
+        // Submitted/running commands and a changed foreground shell still fail.
+        self.token.is_some() && (self.prompt || self.partial) && !self.running && self.submitted == 0
+            && !self.alternate && !self.blocks_input() && foreground
     }
 
     /// Called under the same lock as the actual input write. A previously observed
@@ -67,6 +85,7 @@ impl DirectoryControl {
         if bytes.is_empty() {
             return;
         }
+        self.revision = self.revision.wrapping_add(1);
         self.prompt = false;
         let mut previous_cr = false;
         for byte in bytes {
@@ -118,6 +137,7 @@ impl DirectoryControl {
                 if let Some(token) = &self.token {
                     let prefix = format!("777;neoism-control;{token};");
                     if let Some(mark) = payload.strip_prefix(&prefix) {
+                        self.revision = self.revision.wrapping_add(1);
                         match mark {
                             "C" => {
                                 self.running = true;

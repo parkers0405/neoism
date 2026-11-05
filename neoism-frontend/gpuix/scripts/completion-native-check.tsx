@@ -1,0 +1,122 @@
+import assert from "node:assert/strict";
+import { createRoot } from "@gpuix/solid";
+import { createSignal } from "solid-js";
+import { Effect } from "effect";
+import { loadConfig } from "../src/config";
+import { TerminalCommandInput } from "../src/terminal/TerminalCommandInput";
+import { TerminalSuggestions, type TerminalSuggestion } from "../src/terminal/suggestions";
+import type { DaemonConnection } from "../src/daemon/client";
+import { createRecordingAppRenderer } from "../tests/support/full-app-recording-renderer";
+
+// Production Solid component and native event boundary, without a GUI/window,
+// shell, user config, or session. This does not claim native layout coverage.
+const host = createRecordingAppRenderer(), root = createRoot(host.renderer);
+const config = loadConfig(["--config", "/nonexistent/completion-check"], {});
+const source = new TerminalSuggestions({ request: () => Effect.succeed({ ShellHistory: { entries: [] } }) } as unknown as Pick<DaemonConnection, "request">);
+const queries: string[] = [], completed = source.complete.bind(source);
+source.complete = (query, directory, recent) => { queries.push(query); return completed(query, directory, recent); };
+const [draft, setDraft] = createSignal("ca"), [below, setBelow] = createSignal(false);
+const submitted: string[] = [], forwarded: string[] = [];
+const recent = [...Array.from({ length: 30 }, (_, index) => `printf entry${index}`), "echo hello"];
+const input = () => { const node = host.find("terminal-command"); assert.ok(node); return node; };
+const pump = () => host.pump(root);
+const dispatch = async (eventType: string, payload: Record<string, unknown> = {}) => {
+  root.dispatch({ elementId: input().id, eventType, ...payload }); await pump();
+};
+const key = (key: string, shift = false) => dispatch("keyDown", { key, modifiers: { shift, ctrl: false, alt: false, cmd: false } });
+const wait = async () => { await Bun.sleep(90); await pump(); };
+try {
+  root.render(() => <div style={{ width: 260, height: 400 }}><TerminalCommandInput config={config} source={source} command={draft()} recent={recent} saved={["echo hello"]} directory="/project"
+    rows={1} disabled={false} menuBelow={below()} menuSpace={160} composerHeight={80} onChange={setDraft} onSubmit={() => { submitted.push(draft()); setDraft(""); }}
+    onFocus={() => {}} onBlur={() => {}} onHost={() => {}} onKeyDown={event => forwarded.push(event.key || "")}/></div>);
+  await pump(); await key("tab"); await wait();
+  assert.equal(draft(), "cat "); assert.deepEqual(queries, ["ca"]); assert.deepEqual(submitted, []);
+  assert.equal(input().props.value, "cat ", "preview writes the actual native textarea value");
+  assert.equal(host.find("terminal-suggestions")!.style.bottom, 80);
+   assert.equal(host.find("terminal-suggestion:0")!.style.backgroundColor, config.theme.hover);
+  await key("tab"); assert.equal(draft(), "cargo ");
+  await key("tab"); assert.equal(draft(), "cat ", "Tab wraps without requery");
+  await key("tab", true); assert.equal(draft(), "cargo ");
+  await key("up"); assert.equal(draft(), "cat ");
+  await key("down"); assert.equal(draft(), "cargo ");
+  await wait(); assert.deepEqual(queries, ["ca"]);
+  await key("composer-escape"); assert.equal(draft(), "ca"); assert.equal(host.find("terminal-suggestions"), undefined);
+  setBelow(true); await key("tab", true); await wait(); assert.equal(draft(), "cargo ", "ShiftTab opens on final candidate");
+  assert.equal(host.find("terminal-suggestions")!.style.top, 80);
+  await dispatch("change", { value: "git st" }); await wait(); assert.equal(draft(), "git st", "real typing rebases without unsolicited preview");
+  assert.deepEqual(queries, ["ca", "ca", "git st"]);
+  await key("down"); assert.equal(draft(), "git stash ");
+  await key("composer-escape"); assert.equal(draft(), "git st", "Escape restores the rebased draft");
+  await dispatch("change", { value: "ca" }); await key("tab"); await wait();
+  await key("tab"); assert.equal(draft(), "cargo ");
+  await dispatch("submit"); assert.deepEqual(submitted, ["cargo "]); assert.equal(host.find("terminal-suggestions"), undefined);
+  assert.equal(draft(), "");
+  await key("composer-interrupt"); assert.equal(forwarded.at(-1), "c");
+  // History intentionally remains insert-only: first Enter inserts, second submits.
+  await dispatch("change", { value: "echo" }); await key("up"); assert.equal(draft(), "echo");
+  await dispatch("submit"); assert.equal(draft(), "echo hello"); assert.deepEqual(submitted, ["cargo "]);
+  await dispatch("submit"); assert.deepEqual(submitted, ["cargo ", "echo hello"]);
+  await dispatch("change", { value: "echo" });
+  await dispatch("caretGeometry", { x: 40, y: 20, value: JSON.stringify({ text: "echo", offset: 4, selectionStart: 4, selectionEnd: 4, fontSize: 14, remainingWidth: 180, visible: true }) });
+   assert.ok(host.find("terminal-ghost-text"));
+   assert.equal((input().props.theme as {caret:string}).caret, "transparent", "The native skinny caret is replaced by the shared block caret");
+   assert.ok(host.find("terminal-composer-cursor"), "The thick app caret uses the same native insertion geometry as ghost text");
+   assert.ok(Number(host.find("terminal-composer-cursor")!.style.width) > 4, "The caret is a block, not a one-pixel beam");
+  await key("right"); assert.equal(draft(), "echo hello"); assert.deepEqual(submitted, ["cargo ", "echo hello"]);
+  await key("right"); assert.equal(forwarded.at(-1), "right", "non-ghost native boundary still forwards");
+  for (const menuBelow of [true, false]) {
+    setBelow(menuBelow); await dispatch("change", { value: "" }); await key("up");
+    const menu = host.find("terminal-suggestions")!;
+    assert.equal(menu.style.backgroundColor, config.theme.bg);
+    assert.ok(host.find("terminal-suggestions-scrollbar"));
+    const start = Number(host.find("terminal-suggestion:0")!.style.top);
+    const delta = menuBelow ? -7.25 : 7.25;
+    root.dispatch({ elementId: menu.id, eventType: "scroll", deltaY: delta, precise: true }); await pump();
+    assert.equal(Number(host.find("terminal-suggestion:0")!.style.top), start + delta, "Trackpad preserves fractional pixel travel in both orientations");
+    assert.equal(draft(), "", "Scrolling never previews a different command");
+    assert.equal(host.find("terminal-suggestion:0")!.props["aria-selected"], true, "Wheel does not move keyboard selection");
+    root.dispatch({ elementId: menu.id, eventType: "scroll", deltaY: menuBelow ? -1 : 1, precise: false });
+    await Bun.sleep(140); await pump();
+    assert.equal(host.find("terminal-suggestion:0"), undefined, "Wheel moves the viewport past the selected row");
+    assert.equal(draft(), "");
+    await key(menuBelow ? "down" : "up"); await Bun.sleep(140); await pump();
+    const selected = host.find("terminal-suggestion:1")!;
+    assert.ok(selected); assert.equal(selected.props["aria-selected"], true);
+    assert.ok(Number(selected.style.top) >= 0 && Number(selected.style.top) <= 120, "Keyboard navigation reveals its selected row after wheel scrolling");
+    await dispatch("change", { value: "echo" });
+    assert.equal(host.find("terminal-suggestions-scrollbar"), undefined, "Filtering clamps the viewport to the shorter list");
+    assert.equal(host.find("terminal-suggestion:0")!.style.top, 0);
+    await key("composer-escape");
+  }
+  await dispatch("change", { value: "echo" }); await key("up");
+  assert.equal(host.find("terminal-suggestions")!.props["aria-label"], "Command history");
+  await key("tab"); await wait();
+  assert.equal(host.find("terminal-suggestions")!.props["aria-label"], "Command completions", "Tab leaves history mode for actual completions");
+  assert.equal(draft(), "echo ", "The command candidate comes before history");
+  await key("composer-escape");
+  const unmatched = "zz-no-such-command";
+  await dispatch("change", { value: unmatched });
+  await dispatch("caretGeometry", { x: 40, y: 20, value: JSON.stringify({ text: unmatched, offset: unmatched.length, selectionStart: unmatched.length, selectionEnd: unmatched.length, fontSize: 14, remainingWidth: 180, visible: true }) });
+  await key("tab");
+  assert.equal(host.find("terminal-suggestions"), undefined, "No empty loading popup");
+  await wait();
+  assert.equal(host.find("terminal-suggestions"), undefined, "No empty-results popup");
+  assert.ok(host.find("terminal-no-match-feedback"), "An unmatched Tab gives brief visual feedback");
+  assert.equal(draft(), unmatched); assert.deepEqual(submitted, ["cargo ", "echo hello"]);
+  await Bun.sleep(300); await pump();
+  assert.equal(host.find("terminal-no-match-feedback"), undefined, "No-match feedback clears without leaving an error state");
+  const replies = new Map<string, (items: TerminalSuggestion[]) => void>();
+  source.complete = query => new Promise(resolve => replies.set(query, resolve));
+  await dispatch("change", { value: "alpha" });
+  await dispatch("caretGeometry", { x: 40, y: 20, value: JSON.stringify({ text: "alpha", offset: 5, selectionStart: 5, selectionEnd: 5, fontSize: 14, remainingWidth: 180, visible: true }) });
+  await key("tab"); await wait();
+  await dispatch("change", { value: "beta" }); await wait();
+  replies.get("alpha")!([{ value: "alpha-old ", label: "alpha-old", kind: "alias", detail: "" }]); await pump();
+  assert.equal(draft(), "beta"); assert.equal(host.find("terminal-suggestions"), undefined, "A late host reply cannot reopen stale suggestions");
+  replies.get("beta")!([{ value: "beta-current ", label: "beta-current", kind: "function", detail: "" }]); await pump();
+  assert.equal(draft(), "beta", "Editing while the host responds never unsolicitedly previews a command");
+  await key("tab"); assert.equal(draft(), "beta-current ");
+  await key("composer-escape"); assert.equal(draft(), "beta");
+  assert.deepEqual(submitted, ["cargo ", "echo hello"]);
+  console.log("completion input checks passed (noWindow, stable query, native event boundary, top/bottom, single submit, pixel scrolling, no-match feedback)");
+} finally { root.unmount(); }

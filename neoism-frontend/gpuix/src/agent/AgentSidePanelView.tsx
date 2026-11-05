@@ -4,14 +4,23 @@ import { useGpuixRequired, type HostElement,type KeyEvent } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import type { WorkspaceModel } from "../model";
 import { coreCall } from "../native-core";
-import { PaintLayer, type PaintCommand } from "../ui/PaintLayer";
+import { PaintLayer, type PaintCommand, type PreparedCanvas } from "../ui/PaintLayer";
 import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-scheduler";
 import { focusNativeElement,invalidateNativeFocus } from "../native-focus";
 import {paintedChromeBounds,type ChromeBounds} from "../ui/chrome-target-bounds";
 import {CanvasImages,RasterSource} from "../ui/canvas";
 
 interface ChatTarget {id:string;title:string;pinned:boolean;directory?:string}
-interface PanelFrame { commands: PaintCommand[]; animating: boolean; send: unknown[];cursor?:number[]|null;focused?:boolean;selected?:string; result?: { context?:ChatTarget; action?: string; anchor?: number[] | null; projects?: string[]; root?: boolean; open?: { id: string; title: string; directory?: string | null;familyRootId?:string|null;pointer?:boolean } } | null }
+interface PanelFrame { commands: PaintCommand[]; canvas?:PreparedCanvas; animating: boolean; send: unknown[];cursor?:number[]|null;focused?:boolean;selected?:string; result?: { context?:ChatTarget; action?: string; anchor?: number[] | null; projects?: string[]; root?: boolean; open?: { id: string; title: string; directory?: string | null;familyRootId?:string|null;pointer?:boolean } } | null }
+
+// Match native catalog_event before encoding payloads the catalog discards.
+// History/tool snapshots can be large, and hidden cached panels subscribe too.
+function catalogEvent(message:unknown):boolean {
+  if(!message||typeof message!=="object")return false;
+  const event=(message as {SessionEvent?:{kind?:string;properties?:{field?:string;partType?:string}}}).SessionEvent;
+  if(event?.kind==="message.part.delta"&&event.properties?.field==="raw"&&event.properties.partType==="tool")return false;
+  return !["LocalSessionAdopted","HistoryChunk","MessageUpdated","PartRemoved","ContentDelta","ToolUseRequest","ToolUseResult"].some(key=>key in message);
+}
 
 /** The original desktop conversations sidebar (shared `render_side_panel_with_icons`
  * over a catalog pane): project groups, running / sub-agent / background
@@ -21,7 +30,7 @@ interface PanelFrame { commands: PaintCommand[]; animating: boolean; send: unkno
  * the desktop's `workspace_conversations_panes`: switching back repaints its
  * last frame at once and keeps its loaded pages instead of reloading. It stays
  * subscribed while hidden so its catalog is current when shown again. */
-interface CachedPanel { id: number; workspace: string; style: string; directory: string; commands: readonly PaintCommand[]; viewport:{width:number;height:number};images:Map<object,CanvasImages>; dirty: Set<() => void>; release: () => void }
+interface CachedPanel { id: number; workspace: string; style: string; directory: string; commands: readonly PaintCommand[]; canvas?:PreparedCanvas; viewport:{width:number;height:number};images:Map<object,CanvasImages>; dirty: Set<() => void>; release: () => void }
 const panels = new WeakMap<WorkspaceModel, Map<string, CachedPanel>>();
 function panelFor(model: WorkspaceModel, workspace: string, directory: string, config: AppConfig, report: (error: unknown) => void): CachedPanel {
   let byModel = panels.get(model);
@@ -36,7 +45,7 @@ function panelFor(model: WorkspaceModel, workspace: string, directory: string, c
   const { id } = coreCall<{ id: number }>("agentsidepanel.new", { directory, theme: config.themeName, scale: config.scale, fontFamily: config.fontFamily, fontWeight: config.fontWeight });
   const unsubscribe = model.subscribeAgentEvents((message) => {
     // Timeline-local identity handoffs are not daemon protocol events.
-    if ((message as {LocalSessionAdopted?:unknown})?.LocalSessionAdopted) return;
+    if (!catalogEvent(message)) return;
     try { if(coreCall<{needsPaint?:boolean}>("agentsidepanel.event", { id, message }).needsPaint===false)return; } catch (error) { report(error); return; }
     for (const listener of panel.dirty) listener();
   });
@@ -63,6 +72,7 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
     : undefined);
   const id = panel?.id ?? untrack(() => coreCall<{ id: number }>("agentsidepanel.new", { directory: props.directory || "", theme: config.themeName, scale: config.scale, fontFamily: config.fontFamily, fontWeight: config.fontWeight }).id);
   const [commands, setCommands] = createSignal<readonly PaintCommand[]>(panel?.commands ?? []);
+  const [canvas,setCanvas]=createSignal<PreparedCanvas|undefined>(panel?.canvas);
   const [selected,setSelected]=createSignal("");
   const [context,setContext]=createSignal<SidebarContextSpec>();
   let contextPoint={x:0,y:0};
@@ -81,8 +91,8 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
   let actualFocused=false;
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const apply = (next: PanelFrame) => {
-    if(panel){let images=panel.images.get(renderer);if(!images){images=new CanvasImages(renderer);panel.images.set(renderer,images);}for(const command of next.commands){if(command.kind==="text"&&command.raster)images.use(RasterSource.painter,command.raster);else if(command.kind==="image")images.use(RasterSource.paintImage,command.raster);}images.commit();}
-    setCommands(next.commands); if (panel) panel.commands = next.commands;
+    if(panel){let images=panel.images.get(renderer);if(!images){images=new CanvasImages(renderer);panel.images.set(renderer,images);}if(next.canvas){for(const image of next.canvas.images)images.use(image.source,image.raster);}else for(const command of next.commands){if(command.kind==="text"&&command.raster)images.use(RasterSource.painter,command.raster);else if(command.kind==="image")images.use(RasterSource.paintImage,command.raster);}images.commit();}
+    setCommands(next.commands);setCanvas(next.canvas);if(panel){panel.commands=next.commands;panel.canvas=next.canvas;}
     setSelected(next.selected||"");
     if(host){const painted=paintedChromeBounds(renderer,host.id);if(painted)bounds={...bounds,x:painted.x,y:painted.y};const rect=next.cursor;props.onCursor?.(rect?{x:bounds.x+rect[0]!,y:bounds.y+rect[1]!,width:rect[2]!,height:rect[3]!}:undefined,host,bounds);}
     for (const message of next.send || []) model.sendAgent(message as never);
@@ -101,13 +111,13 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
   };
   const call = (op: string, args: Record<string, unknown> = {}) => {
     startedAt = performance.now(); animation.cancel();
-    try { apply(coreCall<PanelFrame>(`agentsidepanel.${op}`, { id, ...args })); } catch (error) { props.report(error); }
+    try { apply(coreCall<PanelFrame>(`agentsidepanel.${op}`, { id, ...args,canvasPaint:op==="frame" })); } catch (error) { props.report(error); }
   };
   const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame", { viewedSession: props.viewedSession ?? null }); }, startedAt); };
   const unsubscribe = panel
     ? (panel.dirty.add(schedule), () => { panel.dirty.delete(schedule); })
     : model.subscribeAgentEvents((message) => {
-      if ((message as {LocalSessionAdopted?:unknown})?.LocalSessionAdopted) return;
+      if (!catalogEvent(message)) return;
       try { if(coreCall<{needsPaint?:boolean}>("agentsidepanel.event", { id, message }).needsPaint===false)return; } catch (error) { props.report(error); return; }
       schedule();
     });
@@ -132,10 +142,10 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
     }}
     onScroll={(event) => call("scroll", { deltaY: event.deltaY || 0, precise: !!event.precise })}
     onMouseDown={(event) => { if (host) focusNativeElement(renderer, host.id); if(event.button===2){const painted=host&&paintedChromeBounds(renderer,host.id);if(painted)bounds={...bounds,x:painted.x,y:painted.y};contextPoint={x:event.x||0,y:event.y||0};call("pointer",{kind:"context",...local(event)});}else if (event.button === 0) call("pointer", { kind: "down", ...local(event) }); }}
-    onMouseMove={(event) => { try { coreCall("agentsidepanel.pointer", { id, kind: "move", ...local(event) }); } catch {} schedule(); }}
+    onMouseMove={(event) => { try { coreCall("agentsidepanel.pointer", { id, kind: "move", deferFrame:true, ...local(event) }); } catch {} schedule(); }}
     onMouseLeave={() => call("pointer", { kind: "leave" })}
     style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", userSelect: "none", cursor: "pointer" }}>
-    <PaintLayer commands={commands()} config={config} />
+    <PaintLayer commands={commands()} prepared={canvas()} config={config} />
     <Show when={context()} keyed>{spec=><SidebarContext config={config} spec={spec} onClose={()=>setContext(undefined)}/>}</Show>
   </div>;
 }

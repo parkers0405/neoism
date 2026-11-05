@@ -4,6 +4,8 @@ import { ghosttyLibraryPath } from "../native-libraries";
 
 type Color = "Default" | { Named: number } | { Indexed: number } | { Spec: { r: number; g: number; b: number } };
 interface Cell { c: string; fg: Color; bg: Color; flags: string }
+export type PackedTerminalRun = [string, number, number, number, number, number, number];
+export interface TerminalPosition { row: number; col: number; history: number; rows: number; cols: number; alt: boolean }
 interface NativeFrame {
   paintRows?: Array<Array<[string, number, number, number, number, number, number]>>;
   /** Row just past the viewport on the side a sub-row wheel residual uncovers. */
@@ -38,6 +40,7 @@ export class TerminalBuffer {
   private metrics = { cellWidth: 10, rowHeight: 20 };
   private painted?: TerminalFrame;
   private paintedReply?: NativeFrame;
+  private outputObserver?: { feed: (bytes: Uint8Array, write: (bytes: Uint8Array) => void) => void; reset: () => void };
   pendingClipboard?: string;
   lastKeyHandled = false;
   get viMode() { return this.reply.viMode; }
@@ -60,6 +63,17 @@ export class TerminalBuffer {
   get selectedText() { return this.reply.selection || ""; }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   onPtyWrite(listener: (bytes: Uint8Array) => void) { this.writeListeners.add(listener); return () => { this.writeListeners.delete(listener); }; }
+  position(): TerminalPosition { return coreCall(this.op("position"), { id: this.id }); }
+  mark() { return coreCall<{mark: number}>(this.op("mark"), { id: this.id }).mark; }
+  unmark(mark: number) { if (!this.disposed) coreCall(this.op("unmark"), { id: this.id, mark }); }
+  capture(start: number, end: number, mark?: number) {
+    const result = coreCall<{paintRows: PackedTerminalRun[][]; start: number; end: number; truncated: boolean}>(this.op("capture"), { id: this.id, start, end, ...(mark === undefined ? {} : { mark }) });
+    return { ...result, lines: result.paintRows.map(row => row.map(run => this.packedRun(run))) };
+  }
+  observeOutput(observer: NonNullable<TerminalBuffer["outputObserver"]>) {
+    this.outputObserver = observer;
+    return () => { if (this.outputObserver === observer) this.outputObserver = undefined; };
+  }
   private call(op: string, args: Record<string, unknown> = {}) {
     if (this.disposed) return;
     this.reply = coreCall(this.op(op), { id: this.id, ...args });
@@ -71,10 +85,14 @@ export class TerminalBuffer {
     let data = bytes;
     if (offset !== undefined) {
       if (this.offset !== undefined && offset < this.offset) data = bytes.subarray(Math.min(bytes.length, this.offset - offset));
-      if (this.offset !== undefined && offset > this.offset) this.call("reset", { palette: this.palette, foreground: this.theme.fg, background: this.theme.bg });
+      if (this.offset !== undefined && offset > this.offset) {
+        this.outputObserver?.reset();
+        this.call("reset", { palette: this.palette, foreground: this.theme.fg, background: this.theme.bg });
+      }
       this.offset = Math.max(this.offset ?? 0, offset + bytes.length);
     }
-    this.call("feed", { bytes: [...data] });
+    if (this.outputObserver) this.outputObserver.feed(data, bytes => this.call("feed", { bytes: [...bytes] }));
+    else this.call("feed", { bytes: [...data] });
   }
   resize(cols: number, rows: number, cellWidth = 10, rowHeight = 20) {
     if (this.disposed) return false;
@@ -122,17 +140,17 @@ export class TerminalBuffer {
     const n = value - 16, cube = (index: number) => index === 0 ? 0 : 55 + 40 * index;
     return "#" + [cube(Math.floor(n / 36)), cube(Math.floor(n / 6) % 6), cube(n % 6)].map((n) => n.toString(16).padStart(2, "0")).join("");
   }
-  frame(): TerminalFrame {
-    if (this.paintedReply === this.reply && this.painted) return this.painted;
-    const snapshot = this.reply.snapshot;
+  private packedRun = ([text,column,width,foreground,background,flags,mark]: PackedTerminalRun): CellRun => {
     const packedColor = (color: number, background: boolean) => color === 0 ? background ? undefined : this.theme.fg
       : color & 0x2000000 ? this.color({ Indexed: color & 255 }, background) : "#" + (color & 0xffffff).toString(16).padStart(6, "0");
-    const packedRun = ([text,column,width,foreground,background,flags,mark]: [string, number, number, number, number, number, number]): CellRun => {
       let fg = packedColor(foreground, false) || this.theme.fg, bg = packedColor(background, true);
       if (flags & 8) [fg, bg] = [bg || this.theme.bg, fg];
       if (mark) bg = mark === 2 ? this.theme.blue + "66" : this.theme.yellow + "4d";
       return { text, column, width, fg, bg, bold: !!(flags & 1), italic: !!(flags & 2), underline: !!(flags & 4) };
-    };
+  };
+  frame(): TerminalFrame {
+    if (this.paintedReply === this.reply && this.painted) return this.painted;
+    const snapshot = this.reply.snapshot, packedRun = this.packedRun;
     const extraRow = this.reply.extraRow;
     let extra: TerminalFrame["extra"] = extraRow ? { above: extraRow.above, line: extraRow.runs.map(packedRun) } : undefined;
     let lines = this.reply.paintRows ? this.reply.paintRows.map(line => line.map(packedRun)) : snapshot.viewport.map((line, y) => {
@@ -190,6 +208,7 @@ export class TerminalBuffer {
   dispose() {
     if (this.disposed) return;
     this.disposed = true; this.pendingClipboard = undefined; this.lastKeyHandled = false;
+    this.outputObserver = undefined;
     this.listeners.clear(); this.writeListeners.clear(); coreCall("dispose", { id: this.id });
   }
 }

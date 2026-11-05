@@ -18,7 +18,7 @@ export function createTreeGlyphHost(config:AppConfig){
 }
 /** Native row interaction/reveal stays on its parent. This one image contains
  * the original FileTree icon ink centers, shaped label and truncation. */
-export function TreeRowGlyphs(props:{host:ReturnType<typeof createTreeGlyphHost>;config:AppConfig;name:string;chevron:string;icon:string;labelColor:string;iconColor:string;chevronColor:string;gitStatus?:string;directory?:boolean;initialWidth?:number;offsetX?:number;trailingWidth?:number;onWidth?:(width:number)=>void;pinImage?:(raster:CanvasRaster)=>void}){
+export function TreeRowGlyphs(props:{host:ReturnType<typeof createTreeGlyphHost>;config:AppConfig;name:string;chevron:string;icon:string;labelColor:string;iconColor:string;chevronColor:string;gitStatus?:string;directory?:boolean;initialWidth?:number;offsetX?:number;opacity?:number;trailingWidth?:number;onWidth?:(width:number)=>void;pinImage?:(raster:CanvasRaster)=>void}){
  const initialWidth=props.initialWidth||0;
  const [width,setWidth]=createSignal(Number.isFinite(initialWidth)&&initialWidth>0?initialWidth:0);
  const images=new CanvasImages(useGpuixRequired());
@@ -32,7 +32,7 @@ export function TreeRowGlyphs(props:{host:ReturnType<typeof createTreeGlyphHost>
   images.commit();
   return JSON.stringify(ops);
  });
- return <div onLayout={event=>{const next=Number.isFinite(event.width)?Math.max(0,event.width||0):0;setWidth(next);if(next>0)props.onWidth?.(next);}} aria-label={props.name} style={{position:"relative",left:props.offsetX||0,flexGrow:1,minWidth:0,height:26*props.config.scale,pointerEvents:"none"}}>
+  return <div onLayout={event=>{const next=Number.isFinite(event.width)?Math.max(0,event.width||0):0;setWidth(next);if(next>0)props.onWidth?.(next);}} aria-label={props.name} style={{position:"relative",left:props.offsetX||0,opacity:props.opacity??1,flexGrow:1,minWidth:0,height:26*props.config.scale,pointerEvents:"none"}}>
   <canvas commands={commands()} style={{position:"absolute",left:0,top:0,right:0,bottom:0,pointerEvents:"none"}}/>
  </div>;
 }

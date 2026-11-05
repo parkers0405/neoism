@@ -552,6 +552,28 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
+            "terminal.block-ui",
+            "Block terminal",
+            "Use command blocks and a pinned input area. Turn off for the classic terminal; applies to new sessions.",
+            Kind::Boolean,
+            json!(true),
+            &[],
+            false,
+            C::Terminal,
+            Control::Toggle,
+        ),
+        d(
+            "terminal.input-position",
+            "Terminal input position",
+            "Position the terminal input at the bottom, at the top, or flowing with output. Only applies to the block terminal layout.",
+            Kind::String,
+            json!("bottom"),
+            &["bottom", "top", "flow"],
+            false,
+            C::Terminal,
+            Control::Select,
+        ),
+        d(
             "terminal.shell.args",
             "Shell arguments",
             "Arguments passed to the terminal shell.",
@@ -1498,6 +1520,52 @@ fn installed_agents() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_block_ui_is_a_visible_default_on_toggle() {
+        let rows = config_descriptors();
+        let row = rows
+            .iter()
+            .find(|row| row.path == "terminal.block-ui")
+            .unwrap();
+        assert_eq!(row.label, "Block terminal");
+        assert_eq!(
+            row.description,
+            "Use command blocks and a pinned input area. Turn off for the classic terminal; applies to new sessions."
+        );
+        assert_eq!(row.value_kind, Kind::Boolean);
+        assert_eq!(row.default, json!(true));
+        assert_eq!(row.category, C::Terminal);
+        assert_eq!(row.control, Control::Toggle);
+        assert!(row.settings_visible);
+        assert!(!row.extensible);
+    }
+
+    #[test]
+    fn terminal_input_position_is_a_visible_closed_select() {
+        let rows = config_descriptors();
+        let row = rows
+            .iter()
+            .find(|row| row.path == "terminal.input-position")
+            .unwrap();
+        assert_eq!(row.label, "Terminal input position");
+        assert!(row
+            .description
+            .contains("Only applies to the block terminal layout"));
+        assert_eq!(row.value_kind, Kind::String);
+        assert_eq!(row.default, json!("bottom"));
+        assert_eq!(row.category, C::Terminal);
+        assert_eq!(row.control, Control::Select);
+        assert!(row.settings_visible);
+        assert!(!row.extensible);
+        assert_eq!(
+            row.options
+                .iter()
+                .map(|option| option.value.clone())
+                .collect::<Vec<_>>(),
+            vec![json!("bottom"), json!("top"), json!("flow")]
+        );
+    }
 
     #[test]
     fn background_fit_and_position_descriptors_are_explicit_for_all_platforms() {

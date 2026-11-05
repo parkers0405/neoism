@@ -216,7 +216,7 @@ impl Finder {
             frame_stroke,
             FINDER_RADIUS * scale,
             theme.f32(theme.surface),
-            theme.f32(theme.panel_bg()),
+            theme.f32(theme.bg),
             DEPTH_BG,
             ORDER,
         );

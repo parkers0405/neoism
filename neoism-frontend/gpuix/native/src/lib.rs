@@ -1147,6 +1147,7 @@ pub unsafe extern "C" fn neoism_core_call(bytes: *const u8, len: usize) -> *mut 
         let input = std::slice::from_raw_parts(bytes, len);
         let value: Value = serde_json::from_slice(input).map_err(|e| e.to_string())?;
         if let Some(response) = agent_timeline::serialized_frame(&value) { return response; }
+        if let Some(response) = agent_timeline::serialized_panel_frame(&value) { return response; }
         ENGINES.with(|engines| dispatch(value, &mut engines.borrow_mut()))
             .map(|value| json!({"ok": value}).to_string())
     }));

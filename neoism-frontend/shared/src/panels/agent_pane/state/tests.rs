@@ -40,6 +40,21 @@ fn todos_event_after_call_and_metadata_updates_keep_one_full_checklist() {
 }
 
 #[test]
+fn todos_replayed_snapshot_does_not_move_below_streamed_text() {
+    let mut pane = NeoismAgentPane::default();
+    pane.apply_todos(todo_items("in_progress"));
+    pane.upsert_part_message(NeoismAgentMessage::assistant("streamed reply").with_id("text"));
+    for _ in 0..3 {
+        pane.apply_todos(todo_items("in_progress"));
+    }
+    assert_eq!(pane.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["todos-snapshot", "text"]);
+    assert_eq!(pane.messages[0].todos, todo_items("in_progress"));
+    // The canonical call still owns its actual arrival position.
+    pane.upsert_part_message(todo_call("call", "completed", todo_items("in_progress")));
+    assert_eq!(pane.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["text", "call"]);
+}
+
+#[test]
 fn todos_standalone_plan_updates_follow_live_event_order() {
     let mut pane = NeoismAgentPane::default();
     pane.apply_todos(todo_items("pending"));

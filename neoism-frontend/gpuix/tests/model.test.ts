@@ -39,7 +39,7 @@ test("workspace switches discard stale replies; notes keep their own vault for r
             reply({EditorSurfaceChanged:{surface:{...bound,workspace_id:activeWorkspaceId,route_id:ptySequence}}});
           }
         } else if(family==="Pty"){
-          if(message.CreatePty)reply({PtyCreated:{session_id:`fixture-main-${++ptySequence}`,presentation:"grid",shell:"/bin/bash"}});
+          if(message.CreatePty)reply({PtyCreated:{session_id:`fixture-main-${++ptySequence}`,presentation:(message.CreatePty as {presentation?:string}).presentation||"grid",shell:"/bin/bash"}});
           else reply("Ack");
         } else if (family === "Files") {
           if (message.ReadFile) { reply({ FileContent: { path: "note.md", bytes: [...new TextEncoder().encode("vault note")] } }); return; }

@@ -605,7 +605,7 @@ impl CommandPalette {
             frame_stroke,
             radius,
             theme.f32(theme.surface),
-            theme.f32(theme.panel_bg()),
+            theme.f32(theme.bg),
             DEPTH_BG,
             ORDER,
         );

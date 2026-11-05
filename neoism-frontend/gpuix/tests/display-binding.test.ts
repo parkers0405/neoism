@@ -2,7 +2,7 @@ import {afterEach,expect,test} from "bun:test";
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync} from "node:fs";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
-import {readDisplayPin,frontendRoot,sha256,displayIdentity,displayStampPath,verifiedDisplayBinding,type DisplayStamp} from "../src/display-binding";
+import {readDisplayPin,frontendRoot,sha256,displayIdentity,displayStampPath,verifiedDisplayBinding,displayBindingLoader,type DisplayStamp} from "../src/display-binding";
 const temporary:string[]=[];afterEach(()=>temporary.splice(0).forEach(path=>rmSync(path,{recursive:true,force:true})));
 function fixture(){
  const root=mkdtempSync(join(tmpdir(),"neoism-display-pin-"));temporary.push(root);
@@ -12,6 +12,7 @@ function fixture(){
  const artifact=`gpuix-display-${process.platform}-${process.arch}-test.node`,bytes=Buffer.from("integrity fixture, not an addon");
  writeFileSync(join(root,"artifacts",artifact),bytes);
  const stamp:DisplayStamp={version:1,identity:displayIdentity(pin),artifact,sha256:sha256(bytes),platform:process.platform,arch:process.arch,revision:pin.revision,patchSha256:pin.patchSha256,rustcVersion:pin.rustcVersion};
+ if(process.env.NEOISM_GPUIX_DISPLAY_DEBUG==="1")stamp.profile="debug";
  writeFileSync(displayStampPath(root),JSON.stringify(stamp));return {root,pin,stamp};
 }
 test("native display selection rejects stale source pins and modified artifact bytes",()=>{
@@ -27,4 +28,19 @@ test("native display selection rejects a modified GPUI platform patch",()=>{
  const {root,pin}=fixture();expect(pin.zedPatch).toBeDefined();
  writeFileSync(join(root,pin.zedPatch!),"modified platform source");
  expect(()=>readDisplayPin(root)).toThrow("Wayland patch checksum");
+});
+test("debug display selection is isolated from release and cannot be packaged as production",()=>{
+ const {root,pin,stamp}=fixture();
+ const release:DisplayStamp={...stamp,profile:"release",identity:displayIdentity(pin,process.platform,process.arch,false)};
+ writeFileSync(displayStampPath(root,false),JSON.stringify(release));
+ const debug:DisplayStamp={...stamp,profile:"debug",identity:displayIdentity(pin,process.platform,process.arch,true)};
+ writeFileSync(displayStampPath(root,true),JSON.stringify(debug));
+ expect(verifiedDisplayBinding(root,false).stamp.identity).toBe(release.identity);
+ const selected=verifiedDisplayBinding(root,true);
+ expect(selected.stamp.profile).toBe("debug");
+ expect(selected.stamp.identity).not.toBe(release.identity);
+ expect(()=>displayBindingLoader(selected.binding,selected.stamp,true)).toThrow("cannot be packaged");
+ expect(()=>displayBindingLoader(selected.binding,selected.stamp,false)).not.toThrow();
+ writeFileSync(displayStampPath(root,true),JSON.stringify({...debug,profile:"release"}));
+ expect(()=>verifiedDisplayBinding(root,true)).toThrow("another build profile");
 });

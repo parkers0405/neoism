@@ -8,6 +8,14 @@
 )]
 mod ffi {
     include!("ghostty_bindings.rs");
+
+    impl GhosttyApi {
+        // Exported by the pinned library, but not in the generated subset.
+        pub unsafe fn grid_style_reader(&self) -> Result<unsafe extern "C" fn(*const GhosttyGridRef, *mut GhosttyStyle) -> GhosttyResult, String> {
+            self.__library.get(b"ghostty_grid_ref_style\0")
+                .map(|symbol| *symbol).map_err(|error| error.to_string())
+        }
+    }
 }
 use ffi::*;
 use neoism_ui::{
@@ -171,11 +179,15 @@ struct Terminal {
     search_cache: RefCell<Option<(u64, String, Vec<SearchMatch>)>>,
     cell_cache: RefCell<Option<(u64, Rc<Vec<Option<char>>>)>>,
     compact: bool,
+    capture_marks: HashMap<u64, (GhosttyTrackedGridRef, GhosttyTerminalScreen)>,
 }
 impl Drop for Terminal {
     fn drop(&mut self) {
         unsafe {
             let a = &self.api;
+            for (_, (reference, _)) in self.capture_marks.drain() {
+                a.ghostty_tracked_grid_ref_free(reference);
+            }
             a.ghostty_tracked_grid_ref_free(self.selection_anchor);
             a.ghostty_search_free(self.search);
             a.ghostty_mouse_event_free(self.mouse_event);
@@ -224,6 +236,7 @@ impl Terminal {
             search_cache: RefCell::new(None),
             cell_cache: RefCell::new(None),
             compact: false,
+            capture_marks: HashMap::new(),
         };
         let a = &t.api;
         check(a.ghostty_terminal_new(ptr::null(), &mut t.inner, cols, rows))?;
@@ -930,6 +943,126 @@ impl Terminal {
             "selectionBlock":selection.map(|s|s.rectangle).unwrap_or(false),"appCursor":self.mode(1),"bracketedPaste":self.mode(2004),
             "graphemes":{},"selection":self.selected_text()}))
     }
+    /// Coordinates are relative to the currently retained grid, not lifetime
+    /// output counters. Use a tracked mark across writes, pruning or reflow.
+    unsafe fn position(&self) -> Value {
+        let history: u64 = self.get(GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS);
+        json!({"row":history + self.get::<u16>(GHOSTTY_TERMINAL_DATA_CURSOR_Y) as u64,
+            "col":self.get::<u16>(GHOSTTY_TERMINAL_DATA_CURSOR_X), "history":history,
+            "rows":self.get::<u16>(GHOSTTY_TERMINAL_DATA_ROWS),
+            "cols":self.get::<u16>(GHOSTTY_TERMINAL_DATA_COLS),
+            "alt":self.get::<GhosttyTerminalScreen>(GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)==GHOSTTY_TERMINAL_SCREEN_ALTERNATE})
+    }
+
+    unsafe fn mark(&mut self) -> Result<Value, String> {
+        // Never reuse a handle, even when a terminal is reset or disposed.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mark = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut reference = ptr::null_mut();
+        check(self.api.ghostty_terminal_grid_ref_track(self.inner, GhosttyPoint {
+            tag: GHOSTTY_POINT_TAG_ACTIVE,
+            value: GhosttyPointValue { coordinate: GhosttyPointCoordinate {
+                x: self.get(GHOSTTY_TERMINAL_DATA_CURSOR_X),
+                y: self.get::<u16>(GHOSTTY_TERMINAL_DATA_CURSOR_Y) as u32,
+            }},
+        }, &mut reference))?;
+        self.capture_marks.insert(mark, (reference, self.get(GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)));
+        Ok(json!({"mark":mark}))
+    }
+
+    /// Read the grid directly: no render update, viewport movement, selection
+    /// changes, parser replay, or draining of pending PTY replies.
+    unsafe fn capture(&self, v: &Value) -> Result<Value, String> {
+        let requested_end = v["end"].as_u64().ok_or("capture requires a nonnegative integer end")?;
+        let total = self.scrollbar().total;
+        let mut truncated = false;
+        let requested_start = if let Some(mark) = v.get("mark") {
+            let mark = mark.as_u64().ok_or("Invalid capture mark")?;
+            let mut point = GhosttyPointCoordinate::default();
+            let resolved = self.capture_marks.get(&mark).is_some_and(|(reference, screen)| {
+                *screen == self.get::<GhosttyTerminalScreen>(GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)
+                    && self.api.ghostty_tracked_grid_ref_point(*reference, GHOSTTY_POINT_TAG_SCREEN, &mut point) == GHOSTTY_SUCCESS
+            });
+            if !resolved {
+                // The tracked-ref API reports NO_VALUE for both a garbage pin
+                // (pruning) and a changed screen generation (reset). Same-screen
+                // identity alone cannot distinguish them. Falling back to row
+                // zero could therefore capture output after a reset instead.
+                let end = requested_end.min(total);
+                return Ok(json!({"paintRows":[],"start":end,"end":end,"truncated":true}));
+            }
+            point.y as u64
+        } else {
+            v["start"].as_u64().ok_or("capture requires a nonnegative integer start or mark")?
+        };
+        let (start, end, clipped) = capture_bounds(requested_start, requested_end, total);
+        truncated |= clipped;
+        let cols: u16 = self.get(GHOSTTY_TERMINAL_DATA_COLS);
+        let style_reader = self.api.grid_style_reader()?;
+        let mut palette = [GhosttyColorRgb::default(); 256];
+        check(self.api.ghostty_terminal_get(self.inner, GHOSTTY_TERMINAL_DATA_COLOR_PALETTE, palette.as_mut_ptr().cast()))?;
+        let default_color = |key, base| {
+            let c: GhosttyColorRgb = self.get(key);
+            let b: GhosttyColorRgb = self.get(base);
+            if (c.r,c.g,c.b)==(b.r,b.g,b.b) { 0 } else { paint_pack(c) }
+        };
+        let fg = default_color(GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND, GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND_DEFAULT);
+        let bg = default_color(GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND, GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND_DEFAULT);
+        let color = |c: GhosttyStyleColor, fallback| match c.tag {
+            GHOSTTY_STYLE_COLOR_RGB => paint_pack(c.value.rgb),
+            GHOSTTY_STYLE_COLOR_PALETTE => paint_pack(palette[c.value.palette as usize]),
+            _ => fallback,
+        };
+        let mut rows = Vec::with_capacity((end-start) as usize);
+        for y in start..end {
+            let mut line = Vec::new();
+            let mut run: Option<PaintRun> = None;
+            for x in 0..cols {
+                let reference = self.point(GHOSTTY_POINT_TAG_SCREEN, x, y as u32)?;
+                let mut raw = 0;
+                check(self.api.ghostty_grid_ref_cell(&reference, &mut raw))?;
+                let mut wide = GHOSTTY_CELL_WIDE_NARROW;
+                check(self.api.ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, (&mut wide as *mut GhosttyCellWide).cast()))?;
+                if wide == GHOSTTY_CELL_WIDE_SPACER_HEAD || wide == GHOSTTY_CELL_WIDE_SPACER_TAIL { continue; }
+                let mut style = sized::<GhosttyStyle>();
+                check(style_reader(&reference, &mut style))?;
+                let mut background = color(style.bg_color, bg);
+                let mut tag = GHOSTTY_CELL_CONTENT_CODEPOINT;
+                check(self.api.ghostty_cell_get(raw, GHOSTTY_CELL_DATA_CONTENT_TAG, (&mut tag as *mut GhosttyCellContentTag).cast()))?;
+                if tag == GHOSTTY_CELL_CONTENT_BG_COLOR_RGB {
+                    let mut c = GhosttyColorRgb::default();
+                    check(self.api.ghostty_cell_get(raw, GHOSTTY_CELL_DATA_COLOR_RGB, (&mut c as *mut GhosttyColorRgb).cast()))?;
+                    background = paint_pack(c);
+                } else if tag == GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE {
+                    let mut index = 0u8;
+                    check(self.api.ghostty_cell_get(raw, GHOSTTY_CELL_DATA_COLOR_PALETTE, (&mut index as *mut u8).cast()))?;
+                    background = paint_pack(palette[index as usize]);
+                }
+                // Captures intentionally exclude transient selection/search marks.
+                let key = [color(style.fg_color, fg), background,
+                    u32::from(style.bold) | (u32::from(style.italic)<<1)
+                        | (u32::from(style.underline!=0)<<2) | (u32::from(style.inverse)<<3), 0];
+                if run.as_ref().is_some_and(|r| r.style != key) { line.push(run.take().unwrap().value()); }
+                let current = run.get_or_insert_with(|| PaintRun {text:String::new(),col:x as usize,width:0,style:key});
+                current.width += if wide == GHOSTTY_CELL_WIDE_WIDE {2} else {1};
+                let mut stack = [0u32;32];
+                let mut len = 0;
+                let result = self.api.ghostty_grid_ref_graphemes(&reference, stack.as_mut_ptr(), stack.len(), &mut len);
+                let mut spill = Vec::new();
+                let points = if result == GHOSTTY_OUT_OF_SPACE {
+                    spill.resize(len, 0);
+                    check(self.api.ghostty_grid_ref_graphemes(&reference, spill.as_mut_ptr(), spill.len(), &mut len))?;
+                    &spill[..len]
+                } else { check(result)?; &stack[..len] };
+                if style.invisible || points.is_empty() { current.text.push(' '); }
+                else { for p in points { if let Some(c) = char::from_u32(*p) { current.text.push(if c=='\0' {' '} else {c}); } } }
+            }
+            if let Some(run) = run { line.push(run.value()); }
+            rows.push(line);
+        }
+        Ok(json!({"paintRows":rows,"start":start,"end":end,"truncated":truncated}))
+    }
+
     unsafe fn text_lines(&self) -> Result<Vec<String>, String> {
         let mut options = sized::<GhosttyFormatterTerminalOptions>();
         options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
@@ -1902,6 +2035,132 @@ impl PaintRun {
 fn paint_pack(c: GhosttyColorRgb) -> u32 {
     0x1000000 | ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32
 }
+fn capture_bounds(start: u64, end: u64, total: u64) -> (u64, u64, bool) {
+    let hi = end.min(total);
+    let lo = start.min(hi).max(hi.saturating_sub(2000));
+    (lo, hi, lo != start || hi != end || end < start)
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    unsafe fn terminal(cols: u16, rows: u16) -> Terminal {
+        let path = std::env::var("NEOISM_TEST_VT_LIBRARY").unwrap_or_else(|_| {
+            format!("{}/../artifacts/{}ghostty-vt{}", env!("CARGO_MANIFEST_DIR"),
+                std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX)
+        });
+        Terminal::new(Rc::new(GhosttyApi::new(path).expect("pinned VT library required")), cols, rows).unwrap()
+    }
+
+    unsafe fn write(t: &Terminal, bytes: &[u8]) {
+        t.api.ghostty_terminal_vt_write(t.inner, bytes.as_ptr(), bytes.len());
+    }
+
+    fn lines(capture: &Value) -> Vec<String> {
+        capture["paintRows"].as_array().unwrap().iter().map(|row| {
+            row.as_array().unwrap().iter().map(|run| run[0].as_str().unwrap()).collect::<String>()
+        }).collect()
+    }
+
+    #[test]
+    fn bounds_keep_requested_tail_only() {
+        assert_eq!(capture_bounds(0, 3000, 4000), (1000, 3000, true));
+        assert_eq!(capture_bounds(5, 7, 20), (5, 7, false));
+        assert_eq!(capture_bounds(5, 99, 10), (5, 10, true));
+        assert_eq!(capture_bounds(20, 10, 30), (10, 10, true));
+        assert_eq!(capture_bounds(40, 50, 30), (30, 30, true));
+    }
+
+    #[test]
+    fn capture_preserves_live_state_and_matches_compact_runs() {
+        unsafe {
+            let mut t = terminal(12, 3);
+            t.compact = true;
+            write(&t, "old\r\n\x1b[31;1m红e\u{301}\x1b[0m\r\nthird\r\ntail".as_bytes());
+            let position = t.position();
+            assert_eq!(position["row"], 3);
+            assert_eq!(position["history"], 1);
+            t.scroll_rows(-1);
+            let mut selection = sized::<GhosttySelection>();
+            selection.start = t.point(GHOSTTY_POINT_TAG_SCREEN, 0, 1).unwrap();
+            selection.end = t.point(GHOSTTY_POINT_TAG_SCREEN, 2, 1).unwrap();
+            t.set_selection(Some(&selection));
+            write(&t, b"\x1b[6n\x1b[3"); // Pending reply plus an incomplete parser sequence.
+            let writes = t.effects.writes.clone();
+            let selected = t.selected_text();
+            let offset = t.scrollbar().offset;
+            let capture = t.capture(&json!({"start":1,"end":4})).unwrap();
+            assert_eq!(capture["paintRows"].as_array().unwrap().len(), 3);
+            assert_eq!(lines(&capture)[2].trim_end(), "tail");
+            assert_eq!(t.position(), position);
+            assert_eq!(t.scrollbar().offset, offset);
+            assert_eq!(t.selected_text(), selected);
+            assert_eq!(t.effects.writes, writes);
+            t.set_selection(None);
+            t.bottom();
+            let frame = t.paint_frame().unwrap();
+            assert_eq!(capture["paintRows"], frame["paintRows"]);
+            write(&t, b"2mZ"); // Capture did not disturb the incomplete SGR.
+            let tail = t.capture(&json!({"start":3,"end":4})).unwrap();
+            assert!(lines(&tail)[0].starts_with("tailZ"));
+            assert_eq!(t.capture(&json!({"start":3,"end":3})).unwrap()["paintRows"], json!([]));
+        }
+    }
+
+    #[test]
+    fn tracked_capture_survives_reflow_and_reports_pruning_and_screen_changes() {
+        unsafe {
+            let mut t = terminal(12, 3);
+            write(&t, b"prior\r\n");
+            let mark = t.mark().unwrap()["mark"].as_u64().unwrap();
+            write(&t, b"abcdefghijklmnopqrstuvwx\r\nend");
+            check(t.api.ghostty_terminal_resize(t.inner, 6, 3, 10, 20)).unwrap();
+            let end = t.position()["row"].as_u64().unwrap() + 1;
+            let capture = t.capture(&json!({"mark":mark,"end":end})).unwrap();
+            assert_eq!(capture["truncated"], false);
+            let content = lines(&capture).join("");
+            assert!(content.contains("abcdefghijklmnopqrstuvwx"));
+            assert!(!content.contains("prior"));
+            write(&t, b"\x1b[?1049hALT");
+            assert_eq!(t.position()["alt"], true);
+            assert_eq!(t.position()["history"], 0);
+            let unavailable = t.capture(&json!({"mark":mark,"end":3})).unwrap();
+            assert_eq!(unavailable["truncated"], true);
+            assert_eq!(unavailable["paintRows"], json!([]));
+            write(&t, b"\x1b[?1049l");
+            // Retention is page-granular; at six columns a page can hold far
+            // more than the configured line limit. Force actual page eviction.
+            write(&t, &b"output\r\n".repeat(30000));
+            let mut point = GhosttyPointCoordinate::default();
+            assert_eq!(t.api.ghostty_tracked_grid_ref_point(
+                t.capture_marks[&mark].0, GHOSTTY_POINT_TAG_SCREEN, &mut point), GHOSTTY_NO_VALUE);
+            let pruned = t.capture(&json!({"mark":mark,"end":t.scrollbar().total})).unwrap();
+            assert_eq!(pruned["truncated"], true);
+            assert_eq!(pruned["paintRows"], json!([]));
+            let bounded = t.capture(&json!({"start":0,"end":t.scrollbar().total})).unwrap();
+            assert!(bounded["paintRows"].as_array().unwrap().len() <= 2000);
+        }
+    }
+
+    #[test]
+    fn reset_and_unknown_marks_never_capture_unrelated_output() {
+        unsafe {
+            let mut t = terminal(12, 3);
+            write(&t, b"before");
+            let mark = t.mark().unwrap()["mark"].as_u64().unwrap();
+            // Exercise an engine reset, not adapter replacement: the handle
+            // remains in our map but the native screen generation has changed.
+            t.api.ghostty_terminal_reset(t.inner);
+            write(&t, b"unrelated");
+            for mark in [mark, u64::MAX] {
+                let capture = t.capture(&json!({"mark":mark,"end":3})).unwrap();
+                assert_eq!(capture["truncated"], true);
+                assert_eq!(capture["paintRows"], json!([]));
+            }
+        }
+    }
+}
 pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
     let op = text(v, "op");
     let id = v["id"].as_u64().unwrap_or(0) as u32;
@@ -1916,6 +2175,10 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
    if op=="dispose"{store.terminals.remove(&id);return Ok(Value::Null);}
    let t=store.terminals.get_mut(&id).ok_or("Unknown Ghostty terminal")?;
    match op{
+    "ghostty.position"=>return Ok(t.position()),
+    "ghostty.mark"=>return t.mark(),
+    "ghostty.unmark"=>{let mark=v["mark"].as_u64().ok_or("Invalid capture mark")?;if let Some((reference,_))=t.capture_marks.remove(&mark){t.api.ghostty_tracked_grid_ref_free(reference);}return Ok(Value::Null);},
+    "ghostty.capture"=>return t.capture(v),
     "ghostty.feed"=>{let bytes:Vec<u8>=v["bytes"].as_array().into_iter().flatten().filter_map(|b|b.as_u64().map(|b|b as u8)).collect();let before=t.get::<GhosttyTerminalScreen>(GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN);t.api.ghostty_terminal_vt_write(t.inner,bytes.as_ptr(),bytes.len());t.revision=t.revision.wrapping_add(1);
       if before!=t.get::<GhosttyTerminalScreen>(GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN){t.api.ghostty_tracked_grid_ref_free(t.selection_anchor);t.selection_anchor=ptr::null_mut();t.selection_kind=0;t.vi=None;}},
     "ghostty.resize"=>{check(t.api.ghostty_terminal_resize(t.inner,n(v,"cols",100.0).clamp(2.0,500.0)as u16,n(v,"rows",30.0).clamp(1.0,200.0)as u16,n(v,"cellWidth",10.0).max(1.0).round()as u32,n(v,"rowHeight",20.0).max(1.0).round()as u32))?;t.revision=t.revision.wrapping_add(1);},

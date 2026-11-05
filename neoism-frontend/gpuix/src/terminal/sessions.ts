@@ -3,6 +3,8 @@ import { isRecord, variant } from "../daemon/protocol";
 import type { Palette } from "../design/generated";
 import { TerminalBuffer } from "./buffer";
 import {TerminalDirectoryControl} from "./directory-control";
+import { TerminalBlocks } from "./blocks";
+import { TerminalSuggestions } from "./suggestions";
 
 const sessions = new WeakMap<DaemonConnection, Map<string, TerminalSession>>();
 const unavailable = new WeakMap<DaemonConnection,Set<(id:string)=>void>>();
@@ -15,11 +17,14 @@ function terminalUnavailable(client:DaemonConnection,id:string){for(const listen
 export class TerminalSession {
   readonly buffer: TerminalBuffer;
   readonly directoryControl:TerminalDirectoryControl;
+  blocks?: TerminalBlocks;
+  suggestions?: TerminalSuggestions;
   private cleanups: Array<() => void> = [];
   private attachRequest?: number;
   constructor(readonly client: DaemonConnection, readonly id: string, theme: Palette,
-    private report: (error: unknown) => void) {
+    private report: (error: unknown) => void, blockUi = false) {
     this.buffer = new TerminalBuffer(theme);
+    if (blockUi) this.enableBlocks();
     this.directoryControl=new TerminalDirectoryControl(client,id,()=>this.buffer.nextOffset);
     // VT status replies remain live while only user input is paused.
     this.cleanups.push(this.buffer.onPtyWrite(this.sendRaw));
@@ -46,26 +51,35 @@ export class TerminalSession {
     this.cleanups.push(client.subscribeStatus((state) => { if (state.phase === "connected") this.attach(); }));
   }
   private sendRaw = (bytes: Uint8Array) => {
-    try { this.client.send("Pty", { PtyInput: { session_id: this.id, bytes: [...bytes] } }); }
-    catch (error) { this.report(error); }
+    try { this.client.send("Pty", { PtyInput: { session_id: this.id, bytes: [...bytes] } }); return true; }
+    catch (error) { this.report(error); return false; }
   };
   send = (bytes:Uint8Array)=>{
-    if(bytes.length&&this.directoryControl.blocked){this.report(new Error("This terminal is waiting for its directory change; input was not sent"));return;}
-    this.sendRaw(bytes);
+    if(bytes.length&&this.directoryControl.blocked){this.report(new Error("This terminal is waiting for its directory change; input was not sent"));return false;}
+    return this.sendRaw(bytes);
   };
+  enableBlocks() { this.suggestions ??= new TerminalSuggestions(this.client, this.id); return this.blocks ??= new TerminalBlocks(this.buffer); }
+  submitBlock(command: string) {
+    if (this.directoryControl.blocked || !this.blocks?.prepare(command)) return false;
+    const paste = this.buffer.paste(command), enter = this.buffer.key({ key: "enter" });
+    const bytes = new Uint8Array(paste.length + enter.length); bytes.set(paste); bytes.set(enter, paste.length);
+    if (!this.send(bytes)) { this.blocks.cancelSubmission(); return false; }
+    this.buffer.scrollToBottom(); return true;
+  }
   changeDirectory=(directory:string)=>this.directoryControl.request(directory);
   private attach() {
     try { this.attachRequest = this.client.send("Pty", { AttachPty: { session_id: this.id,
       ...(this.buffer.nextOffset === undefined ? {} : { cursor: this.buffer.nextOffset }) } }); }
     catch (error) { this.report(error); }
   }
-  dispose() { this.directoryControl.dispose();for (const cleanup of this.cleanups.splice(0)) cleanup(); this.buffer.dispose(); }
+  dispose() { this.suggestions?.cancelCompletion();this.directoryControl.dispose();for (const cleanup of this.cleanups.splice(0)) cleanup(); this.blocks?.dispose(); this.buffer.dispose(); }
 }
-export function terminalSession(client: DaemonConnection, id: string, theme: Palette, report: (error: unknown) => void) {
+export function terminalSession(client: DaemonConnection, id: string, theme: Palette, report: (error: unknown) => void, blockUi = false) {
   let cache = sessions.get(client);
   if (!cache) { cache = new Map(); sessions.set(client, cache); }
   let session = cache.get(id);
-  if (!session) { session = new TerminalSession(client, id, theme, report); cache.set(id, session); }
+  if (!session) { session = new TerminalSession(client, id, theme, report, blockUi); cache.set(id, session); }
+  else if (blockUi) session.enableBlocks();
   return session;
 }
 export function closeTerminalSession(client: DaemonConnection, id: string) {

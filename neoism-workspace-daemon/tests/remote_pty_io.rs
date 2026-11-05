@@ -299,6 +299,9 @@ async fn recv_marker_for_session(
             PtyServerMessage::SessionCwd {
                 session_id: got_id, ..
             }
+            | PtyServerMessage::TerminalCompletions {
+                session_id: got_id, ..
+            }
             | PtyServerMessage::SessionProgram {
                 session_id: got_id, ..
             }
@@ -403,6 +406,111 @@ impl Drop for Daemon {
 // ---------------------------------------------------------------------
 // The tests
 // ---------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn slow_terminal_completion_never_blocks_socket_input_close_or_disconnect() {
+    // The full router starts long-lived spawn_blocking notes/file watchers.
+    // Bound only runtime shutdown, not the test assertions or worker cleanup.
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(async {
+    let _g = EnvGuard::new(&[
+        ("NEOISM_REQUIRE_AUTH", None), ("NEOISM_DAEMON_TOKEN", None),
+        ("NEOISM_CONFIG_DIR", None), ("NEOISM_DAEMON_DATA_DIR", None),
+        ("NEOISM_WORKSPACE_REGISTRY", None),
+    ]);
+    let daemon = Daemon::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let pid_file = root.path().join("socket-worker-pid");
+    struct Cleanup(Vec<String>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for session_id in &self.0 {
+                neoism_workspace_daemon::sessions::SessionRegistry::shared().handle(PtyClientMessage::ClosePty { session_id: session_id.clone() });
+            }
+        }
+    }
+    async fn prompt(ws: &mut WsClient, id: &str) -> String {
+        let mut output = String::new();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(PtyServerMessage::PtyOutput { session_id, bytes, .. }) = recv_pty_timeout(ws, Duration::from_secs(8)).await {
+                    assert_eq!(session_id,id); output.push_str(&String::from_utf8_lossy(&bytes));
+                    if output.contains("neoism-control;") && output.contains(";B\x07") { break; }
+                }
+            }
+        }).await.unwrap_or_else(|_|panic!("missing host prompt: {output:?}"));
+        while let Some(PtyServerMessage::PtyOutput { bytes, .. }) = recv_pty_timeout(ws, Duration::from_millis(30)).await {
+            output.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        output
+    }
+    async fn worker_pid(path: &std::path::Path) -> i32 {
+        tokio::time::timeout(Duration::from_millis(1000), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(path).await {
+                    if let Ok(pid) = text.trim().parse() { break pid; }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("real slow native completer must have started")
+    }
+    async fn reaped(pid: i32) {
+        tokio::time::timeout(Duration::from_millis(1000), async {
+            loop {
+                if unsafe { libc::kill(pid, 0) } == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("cancelled/disconnected native worker must be killed and reaped");
+    }
+    let mut cleanup = Cleanup(vec![]);
+    let mut client = connect_client(daemon.addr).await;
+    let create = PtyClientMessage::CreatePty { cwd: Some(root.path().to_string_lossy().into_owned()), cols: 100, rows: 24, shell: Some("/bin/bash".into()), shell_args: None, presentation: None };
+    let setup = "stty -echo; _neo_socket_slow() { printf '%s\\n' \"$$\" > socket-worker-pid; sleep 30; }; complete -F _neo_socket_slow neosocketslow\n";
+    let slow = |id: &str| PtyClientMessage::CompleteTerminal { session_id: id.into(), line: "neosocketslow ".into(), cursor: 14 };
+    send_correlated_pty(&mut client, 9900, &create).await;
+    let id = match recv_correlated_pty_reply(&mut client, 9900, Duration::from_secs(5)).await.unwrap() {
+        PtyServerMessage::PtyCreated { session_id, .. } => session_id, other => panic!("{other:?}"),
+    };
+    cleanup.0.push(id.clone()); prompt(&mut client,&id).await;
+    send_pty(&mut client,&PtyClientMessage::PtyInput { session_id:id.clone(), bytes:setup.as_bytes().to_vec() }).await;
+    prompt(&mut client,&id).await;
+    send_correlated_pty(&mut client, 9901, &slow(&id)).await;
+    let pid = worker_pid(&pid_file).await;
+    // Multiple edits must supersede, not queue seconds of work on stream.next.
+    for request in 9910..9922 { send_correlated_pty(&mut client, request, &slow(&id)).await; }
+    let start = tokio::time::Instant::now();
+    send_correlated_pty(&mut client, 9930, &PtyClientMessage::PtyInput { session_id:id.clone(), bytes:b"printf 'SOCKET_FAST_INPUT\\n'\n".to_vec() }).await;
+    assert!(matches!(recv_correlated_pty_reply(&mut client, 9930, Duration::from_millis(500)).await, Some(PtyServerMessage::Ack)), "PtyInput blocked behind native completion");
+    assert!(start.elapsed() < Duration::from_millis(500));
+    eprintln!("completion flood: input acknowledged in {:?}", start.elapsed());
+    assert!(prompt(&mut client,&id).await.contains("SOCKET_FAST_INPUT"));
+    reaped(pid).await;
+    let _ = std::fs::remove_file(&pid_file);
+    // Exercise the legacy bare receive branch as well as correlated requests.
+    send_pty(&mut client,&slow(&id)).await;
+    let pid = worker_pid(&pid_file).await;
+    send_correlated_pty(&mut client, 9940, &PtyClientMessage::ClosePty { session_id:id.clone() }).await;
+    assert!(matches!(recv_correlated_pty_reply(&mut client, 9940, Duration::from_millis(500)).await, Some(PtyServerMessage::PtyClosed { .. })), "ClosePty blocked behind bare native completion");
+    eprintln!("bare completion: close acknowledged without waiting for worker");
+    reaped(pid).await;
+    let _ = std::fs::remove_file(&pid_file);
+    send_correlated_pty(&mut client, 9950, &create).await;
+    let id = match recv_correlated_pty_reply(&mut client, 9950, Duration::from_secs(5)).await.unwrap() {
+        PtyServerMessage::PtyCreated { session_id, .. } => session_id, other => panic!("{other:?}"),
+    };
+    cleanup.0.push(id.clone()); prompt(&mut client,&id).await;
+    send_pty(&mut client,&PtyClientMessage::PtyInput { session_id:id.clone(), bytes:setup.as_bytes().to_vec() }).await;
+    prompt(&mut client,&id).await;
+    send_correlated_pty(&mut client, 9960, &slow(&id)).await;
+    let pid = worker_pid(&pid_file).await;
+    drop(client); // EOF must abort the JoinSet without waiting for 1.2s timeout.
+    reaped(pid).await;
+    eprintln!("disconnected completion worker killed and reaped");
+    })));
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+}
 
 /// Creating a PTY is a requester-owned transaction. Before request ids were
 /// carried across the wire, `PtyCreated` was broadcast globally and desktop

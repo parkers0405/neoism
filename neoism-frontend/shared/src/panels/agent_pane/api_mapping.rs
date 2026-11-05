@@ -889,7 +889,16 @@ fn message_blocks_with_start(
             .iter()
             .any(|part| part.get("type").and_then(Value::as_str) == Some("compaction"))
         {
-            return Vec::new();
+            return parts.iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("compaction"))
+                .filter_map(part_block)
+                .map(|mut marker| {
+                    if let Some(MessageInfo::User(user)) = info {
+                        marker.id = user.id.to_string();
+                    }
+                    marker
+                })
+                .collect();
         }
         let Some(MessageInfo::User(user)) = info else {
             return Vec::new();
@@ -948,7 +957,7 @@ fn message_blocks_with_start(
     if role == "assistant" && is_compaction_summary_message(parts) {
         // Keep normal reasoning part identities on snapshot/reconnect. The
         // summary remains one message-keyed row after the reasoning trace.
-        // The timeline hides reasoning and presents the summary as a divider.
+        // The start marker owns the divider; summary and reasoning stay hidden.
         let mut blocks = parts
             .iter()
             .filter(|part| part.get("type").and_then(Value::as_str) == Some("reasoning"))
@@ -2503,6 +2512,24 @@ mod tests {
     }
 
     #[test]
+    fn compaction_start_marker_survives_live_mapping_and_history_reload() {
+        let part = json!({
+            "id": "start-part", "type": "compaction", "summary": false,
+            "messageID": "start-message", "reason": "auto"
+        });
+        let live = part_block(&part).expect("start marker must be visible before summary exists");
+        assert_eq!(live.id, "start-message");
+        assert_eq!(live.kind, NeoismAgentMessageKind::Compaction);
+        assert_eq!(live.tool, "compaction_boundary");
+        assert!(live.text.is_empty());
+        let history = message_blocks(&json!({
+            "info": canonical_user_info(json!({"id": "start-message"})),
+            "parts": [part]
+        }));
+        assert_eq!(history, vec![live]);
+    }
+
+    #[test]
     fn assistant_compaction_summary_renders_as_compaction_card() {
         let message = json!({
             "info": canonical_assistant_info(json!({ "id": "msg-summary" })),
@@ -2524,6 +2551,7 @@ mod tests {
         assert_eq!(blocks[0].id, "msg-summary");
         assert_eq!(blocks[0].kind, NeoismAgentMessageKind::Compaction);
         assert_eq!(blocks[0].text, "## Goal\n- Preserve state");
+        assert_eq!(blocks[0].tool, "compaction_summary");
     }
 
     fn compaction_with_reasoning_fixture(overrides: Value) -> Value {
@@ -2852,7 +2880,11 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
                     .unwrap_or("summary"),
             ))
         }
-        "compaction" => None,
+        "compaction" => {
+            let mut marker = NeoismAgentMessage::compaction(String::new(), "");
+            marker.tool = "compaction_boundary".into();
+            Some(marker)
+        }
         "agent" => part.get("name").and_then(Value::as_str).map(|name| {
             agent_message_subtask(format!("Agent({name})"), format!("@{name}"))
         }),

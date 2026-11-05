@@ -559,6 +559,44 @@ impl IdeTheme {
         }
     }
 
+    /// Text palette for panels whose brightness differs from the page.
+    /// Keep the panel background, but adapt ink (including syntax) to it.
+    pub fn panel_text_theme(&self) -> Self {
+        let bg = self.panel_bg();
+        let mut panel = Self { bg, ..*self };
+        if panel.is_dark() == self.is_dark() {
+            return *self;
+        }
+        let bg_l = Self::relative_luminance(bg);
+        let readable = |mut color: u32| {
+            for _ in 0..32 {
+                let l = Self::relative_luminance(color);
+                if (l.max(bg_l) + 0.05) / (l.min(bg_l) + 0.05) >= 4.5 {
+                    break;
+                }
+                let channel = |v: u32| {
+                    let v = v & 0xff;
+                    if bg_l < 0.179 { v + (255 - v).div_ceil(5) } else { v * 4 / 5 }
+                };
+                color = (channel(color >> 16) << 16) | (channel(color >> 8) << 8) | channel(color);
+            }
+            color
+        };
+        macro_rules! adapt {
+            ($($field:ident),* $(,)?) => { $(panel.$field = readable(self.$field);)* };
+        }
+        adapt!(fg, muted, dim, accent, folder, red, green, yellow, blue, magenta, cyan,
+            syn_comment, syn_string, syn_number, syn_keyword, syn_statement, syn_func,
+            syn_type, syn_property, syn_constructor, syn_special);
+        if panel.is_dark() {
+            panel.black = bg;
+            panel.white = panel.fg;
+        } else {
+            panel.white = bg;
+        }
+        panel
+    }
+
     pub fn f32(self, color: u32) -> [f32; 4] {
         let r = ((color >> 16) & 0xff) as f32 / 255.0;
         let g = ((color >> 8) & 0xff) as f32 / 255.0;
@@ -633,6 +671,22 @@ mod custom_theme_tests {
         assert_eq!(parse_theme_hex(" #000080 "), Some(0x000080));
         assert_eq!(parse_theme_hex("#33ff6"), None);
         assert_eq!(parse_theme_hex("nope"), None);
+    }
+
+    #[test]
+    fn light_page_dark_panels_keep_readable_ink() {
+        let theme = IdeTheme { bg: 0xfafafa, fg: 0x24292e, white: 0x24292e,
+            ..IdeTheme::pastel_dark() };
+        let panel = theme.panel_text_theme();
+        assert_eq!(panel.panel_bg(), theme.panel_bg());
+        assert!(panel.is_dark());
+        let bg_l = IdeTheme::relative_luminance(panel.panel_bg());
+        for color in [panel.fg, panel.white, panel.muted, panel.dim, panel.syn_keyword, panel.syn_string] {
+            let l = IdeTheme::relative_luminance(color);
+            assert!((l.max(bg_l) + 0.05) / (l.min(bg_l) + 0.05) >= 4.5);
+        }
+        let dark = IdeTheme::pastel_dark();
+        assert_eq!(dark.panel_text_theme().fg, dark.fg);
     }
 
     #[test]

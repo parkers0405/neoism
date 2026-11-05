@@ -3037,6 +3037,9 @@ pub(super) fn render_markdown_code_block(
         }
     }
 
+    let panel_theme = theme.panel_text_theme();
+    let theme = &panel_theme;
+
     // Line numbers — synthetic for fenced markdown blocks (no real source
     // offset). Width tracks how many digits the line count needs so wide
     // blocks don't waste space.

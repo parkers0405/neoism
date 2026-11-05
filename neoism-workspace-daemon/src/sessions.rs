@@ -75,9 +75,12 @@ impl OutputBacklog {
 
 #[path = "directory_control.rs"]
 mod directory_control;
+#[path = "terminal_completion.rs"]
+mod terminal_completion;
 use directory_control::DirectoryControl;
 
 struct SessionEntry {
+    completion: Option<Arc<terminal_completion::Snapshot>>,
     presentation: Presentation,
     control: Arc<Mutex<DirectoryControl>>,
     pty: Arc<Mutex<PtySession>>,
@@ -98,6 +101,31 @@ pub struct SessionRegistry {
     inner: Arc<DashMap<String, SessionEntry>>,
     subscribers: Arc<DashMap<u64, Arc<SessionSubscriber>>>,
     next_subscriber_id: Arc<AtomicU64>,
+}
+
+/// An owned, prevalidated completion job. No PTY/subscription/registry lock is
+/// retained, so the websocket can dispatch it without blocking its receive pump.
+pub(crate) struct TerminalCompletionJob {
+    pub(crate) session_id: String,
+    pub(crate) revision: u64,
+    registry: SessionRegistry,
+    snapshot: Arc<terminal_completion::Snapshot>,
+    line: String,
+    cursor: u32,
+}
+impl TerminalCompletionJob {
+    pub(crate) async fn run(self) -> ServerMessage {
+        let result = async {
+            let (entries, provider) = tokio::time::timeout(std::time::Duration::from_secs(2),
+                terminal_completion::complete(&self.snapshot, &self.line, self.cursor)).await
+                .map_err(|_| "Host completion exceeded its request deadline".to_owned())??;
+            if !self.registry.completion_is_current(&self.session_id, self.revision) {
+                return Err("Host shell changed during completion".to_owned());
+            }
+            Ok(ServerMessage::TerminalCompletions { session_id: self.session_id, line: self.line, cursor: self.cursor, entries, provider })
+        }.await;
+        result.unwrap_or_else(|message| ServerMessage::Error { message })
+    }
 }
 
 struct SessionSubscriber {
@@ -272,12 +300,52 @@ impl SessionRegistry {
         self.handle_subscribed(msg, None)
     }
 
+    /// Completion has its own isolated worker; never hold registry/control/PTY
+    /// locks across its await and never put completion text on the PTY input.
+    pub async fn handle_subscribed_async(&self, msg: ClientMessage, subscription: Option<&SessionOutputSubscription>) -> Vec<ServerMessage> {
+        if !matches!(msg, ClientMessage::CompleteTerminal { .. }) {
+            return self.handle_subscribed(msg, subscription);
+        }
+        vec![match self.prepare_terminal_completion(msg, subscription) {
+            Ok(job) => job.run().await,
+            Err(message) => ServerMessage::Error { message },
+        }]
+    }
+
+    /// Called synchronously by the authenticated socket BEFORE spawning a task.
+    pub(crate) fn prepare_terminal_completion(&self, msg: ClientMessage, subscription: Option<&SessionOutputSubscription>) -> Result<TerminalCompletionJob, String> {
+        let ClientMessage::CompleteTerminal { session_id, line, cursor } = msg else {
+            return Err("Not a terminal completion request".into());
+        };
+        terminal_completion::validate(&line, cursor)?;
+        let subscription = subscription.ok_or("Completion requires an attached terminal")?;
+        if !subscription.subscriber.sessions.read().contains(&session_id) {
+            return Err("Completion requires an attached terminal".into());
+        }
+        let (snapshot, revision) = {
+            let entry = self.inner.get(&session_id).ok_or("Unknown host terminal session")?;
+            let control = entry.control.lock();
+            if !control.completion_ready(&entry.pty.lock()) {
+                return Err("Host shell is busy or has no fresh prompt snapshot".into());
+            }
+            (entry.completion.clone().ok_or("This shell has no safe completion integration")?, control.completion_revision())
+        };
+        Ok(TerminalCompletionJob { session_id, revision, registry: self.clone(), snapshot, line, cursor })
+    }
+
+    pub(crate) fn completion_is_current(&self, session_id: &str, revision: u64) -> bool {
+        let Some(entry) = self.inner.get(session_id) else { return false; };
+        let control = entry.control.lock();
+        control.completion_revision() == revision && control.completion_ready(&entry.pty.lock())
+    }
+
     pub fn handle_subscribed(
         &self,
         msg: ClientMessage,
         subscription: Option<&SessionOutputSubscription>,
     ) -> Vec<ServerMessage> {
         match msg {
+            ClientMessage::CompleteTerminal { .. } => vec![ServerMessage::Error { message: "Completion requires the asynchronous attached request route".into() }],
             ClientMessage::CreatePty {
                 cwd,
                 cols,
@@ -377,6 +445,7 @@ impl SessionRegistry {
             _ => None,
         };
         let actual_shell = integrated_program.clone().or_else(|| shell.clone());
+        let completion = integrated_program.as_ref().and_then(|program| terminal_completion::Snapshot::new(program).ok()).map(Arc::new);
         let executable = integrated_program.and_then(|s| {
             let program = if Path::new(&s).is_absolute() { s } else { command_in_path(&s)? };
             fs::canonicalize(program).ok()
@@ -384,6 +453,8 @@ impl SessionRegistry {
         let control_token = executable.as_ref().map(|_| Uuid::new_v4().to_string());
         let control = Arc::new(Mutex::new(DirectoryControl::new(control_token.clone(), executable)));
         let mut env: Vec<(String, String)> = std::env::vars().collect();
+        env.retain(|(key, _)| key != "NEOISM_COMPLETION_DIR");
+        if let Some(snapshot) = &completion { env.push(("NEOISM_COMPLETION_DIR".into(), snapshot.directory().to_string_lossy().into_owned())); }
         env.retain(|(key, _)| key != "NEOISM_DIRECTORY_CONTROL_TOKEN");
         if let Some(token) = control_token { env.push(("NEOISM_DIRECTORY_CONTROL_TOKEN".into(), token)); }
         // Headless daemons (containers, systemd units) often run with no
@@ -423,6 +494,7 @@ impl SessionRegistry {
         let backlog = Arc::new(Mutex::new(OutputBacklog::default()));
         let workspace_root = Some(workspace_root_label());
         let entry = SessionEntry {
+            completion,
             presentation,
             control: control.clone(),
             pty: Arc::new(Mutex::new(pty)),
@@ -762,7 +834,7 @@ fn integrated_bash_for_spawn(shell: &str,presentation:Presentation) -> Option<(S
     ));
     fs::create_dir_all(&dir).ok()?;
     let bash_rc = dir.join("bashrc");
-    let script = if presentation==Presentation::Grid {grid_bash_script()}else{block_bash_script().to_owned()};
+    let script = format!("{}\n{}", if presentation==Presentation::Grid {grid_bash_script()}else{block_bash_script().to_owned()}, terminal_completion::BASH_HOOK);
     fs::write(&bash_rc, script).ok()?;
     Some((
         shell.to_string(),
@@ -810,6 +882,7 @@ __neoism_prompt_command() {
     eval "$__neoism_saved_command"
   done
   PS1="$__neoism_hidden_ps1"
+  __neoism_completion_snapshot >/dev/null 2>&1
   printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD"
   printf '\033]133;D;%d\007' "$__neoism_status"
   printf '\033]777;neoism-control;%s;D\007' "${NEOISM_DIRECTORY_CONTROL_TOKEN:-}"
@@ -864,7 +937,7 @@ fn integrated_zsh_for_spawn(shell: &str,presentation:Presentation) -> Option<(St
         fs::write(zsh_rc_dir.join(".zprofile"),format!("ZDOTDIR=$__neoism_user_zdotdir\nif [ -r \"$ZDOTDIR/.zprofile\" ]; then source \"$ZDOTDIR/.zprofile\"; fi\n__neoism_user_zdotdir=$ZDOTDIR\nZDOTDIR={}\n",quote(&zsh_rc_dir))).ok()?;
         grid_zsh_script(&zsh_rc_dir)
     }else{block_zsh_script(&zsh_rc_dir)};
-    fs::write(&zsh_rc, script).ok()?;
+    fs::write(&zsh_rc, format!("{}\n{}", script, terminal_completion::ZSH_HOOK)).ok()?;
     Some((
         "env".to_string(),
         vec![
@@ -895,6 +968,7 @@ neoism() {{
 }}
 __neoism_precmd() {{
   local __neoism_status=$?
+  __neoism_completion_snapshot >/dev/null 2>&1
   printf '\033]7;file://%s%s\007' "$HOST" "$PWD"
   printf '\033]133;D;%d\007' "$__neoism_status"
   printf '\033]777;neoism-control;%s;D\007' "${{NEOISM_DIRECTORY_CONTROL_TOKEN:-}}"
@@ -1055,6 +1129,7 @@ fn reader_loop(
 
 fn server_message_session_id(message: &ServerMessage) -> Option<&str> {
     match message {
+        ServerMessage::TerminalCompletions { session_id, .. } => Some(session_id),
         ServerMessage::PtyCreated { session_id, .. }
         | ServerMessage::PtyOutput { session_id, .. }
         | ServerMessage::PtyClosed { session_id, .. }

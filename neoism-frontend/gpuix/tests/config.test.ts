@@ -101,3 +101,71 @@ test("terminal shell config preserves program paths and literal argv including e
  const invalid=loadConfig([],{}, {terminal:{shell:{program,args:["--login",4]}}});
  expect(invalid.shell).toEqual({program,args:undefined});expect(invalid.warnings).toContain("Shell arguments must be an array of strings; using default shell arguments.");
 });
+
+test("block terminal defaults on and preserves an explicit boolean opt out", () => {
+  expect(loadConfig([], {}, {}).terminalBlockUi).toBe(true);
+  expect(loadConfig([], {}, {terminal:{}}).terminalBlockUi).toBe(true);
+  expect(loadConfig([], {}, {terminal:{"block-ui":false}}).terminalBlockUi).toBe(false);
+  for (const value of [true, "false", 1, null]) {
+    expect(loadConfig([], {}, {terminal:{"block-ui":value}}).terminalBlockUi).toBe(true);
+  }
+  const snapshot = JSON.parse(JSON.stringify({
+    terminal:{"block-ui":true,shell:{program:"/bin/sh",args:["-l"]},scroll:{multiplier:4,divider:2}},
+    appearance:{theme:"tokyo_night",fonts:{family:"Geist Mono",size:18}},
+  }));
+  const config = loadConfig([], {}, snapshot);
+  expect(config.terminalBlockUi).toBe(true);
+  expect(config.shell).toEqual({program:"/bin/sh",args:["-l"]});
+  expect(config.terminalScrollMultiplier).toBe(4);
+  expect(config.terminalScrollDivider).toBe(2);
+  expect(config.themeName).toBe("tokyo_night");
+  expect(config.fontFamily).toBe("Geist Mono");
+  expect(config.fontSize).toBe(18);
+});
+
+test("block terminal reads the grouped JSONC key with comments and trailing commas", () => {
+  const dir = mkdtempSync(join(tmpdir(), "neoism-block-ui-config-")); dirs.push(dir);
+  const path = join(dir, "config.json");
+  writeFileSync(path, `{
+    // New sessions use the chosen presentation.
+    "terminal": {"block-ui": true,},
+  }`);
+  expect(loadConfig(["--config", path], {}).terminalBlockUi).toBe(true);
+});
+
+test("terminal input position defaults to bottom with blocks enabled", () => {
+  for (const snapshot of [{}, {terminal:{}}]) {
+    const config = loadConfig([], {}, snapshot);
+    expect(config.terminalInputPosition).toBe("bottom");
+    expect(config.terminalBlockUi).toBe(true);
+  }
+});
+
+test("terminal input positions survive config snapshots independently of block opt in", () => {
+  for (const position of ["bottom", "top", "flow"] as const) {
+    for (const enabled of [false, true]) {
+      const snapshot = JSON.parse(JSON.stringify({terminal:{"input-position":position,"block-ui":enabled}}));
+      const config = loadConfig([], {}, snapshot);
+      expect(config.terminalInputPosition).toBe(position);
+      expect(config.terminalBlockUi).toBe(enabled);
+    }
+  }
+});
+
+test("invalid terminal input positions fall back to bottom", () => {
+  for (const position of ["left", "TOP", "", 1, true, null, [], {}]) {
+    expect(loadConfig([], {}, {terminal:{"input-position":position}}).terminalInputPosition).toBe("bottom");
+  }
+});
+
+test("terminal input position reads grouped JSONC with comments and trailing commas", () => {
+  const dir = mkdtempSync(join(tmpdir(), "neoism-input-position-config-")); dirs.push(dir);
+  const path = join(dir, "config.json");
+  writeFileSync(path, `{
+    // Input placement only affects the block layout.
+    "terminal": {"input-position": "flow",},
+  }`);
+  const config = loadConfig(["--config", path], {});
+  expect(config.terminalInputPosition).toBe("flow");
+  expect(config.terminalBlockUi).toBe(true);
+});

@@ -36,6 +36,16 @@ test("busy or unsupported terminal never changes workspace metadata",async()=>{
   await f.model.newTerminal();await assert.rejects(f.model.changeWorkspaceDirectory("/requested","a"));expect(f.model.state.activeWorkspace?.root_dir).toBe("/project/a");expect(f.daemon.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot")).toBe(false);expect(f.daemon.ptyRequests.some(request=>request.tag==="PtyInput")).toBe(false);
  }finally{f.close();}}
 });
+test("folder selection changes the first Home shell through the controlled directory channel",async()=>{
+  const f=await fixture({terminalDirectoryResult:"/home/actual"});try{
+    const home=f.model.ensureWelcome()!;await f.model.ensureHomeTerminal(home.id);
+    const main=f.model.mainTerminalSurface()!;await f.model.newTerminal();
+    await f.model.changeWorkspaceDirectory("/requested","a");
+    expect(f.model.state.activeWorkspace?.root_dir).toBe("/home/actual");
+    expect(f.daemon.ptyRequests.filter(request=>request.tag==="ChangeTerminalDirectory").map(request=>request.body.session_id)).toEqual([main.sessionId]);
+    expect(f.daemon.ptyRequests.some(request=>request.tag==="PtyInput")).toBe(false);
+  }finally{f.close();}
+});
 test("a delayed first-terminal confirmation updates only captured A while B remains active",async()=>{
  const f=await fixture({terminalDirectoryChange:"defer"});try{
   await f.model.newTerminal();const change=f.model.changeWorkspaceDirectory("/captured/a","a");await until(()=>f.daemon.directoryChanges.length===1);await f.model.activateWorkspace(f.model.state.workspaces.find(workspace=>workspace.id==="b")!);

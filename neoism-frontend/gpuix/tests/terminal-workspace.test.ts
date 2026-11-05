@@ -6,7 +6,7 @@ import { createAgentDaemon } from "./support/agent-daemon";
 import { absoluteTerminalDirectory,followsTerminalDirectory,terminalDirectoryFollowsWorkspace } from "../src/terminal/workspace";
 
 async function until(predicate:()=>boolean){const deadline=Date.now()+2500;while(!predicate()){if(Date.now()>deadline)throw new Error("Terminal workspace did not converge");await Bun.sleep(5);}}
-async function fixture(options:Parameters<typeof createAgentDaemon>[0]={},createTerminal=true,values?:Record<string,unknown>){
+async function fixture(options:Parameters<typeof createAgentDaemon>[0]={},createTerminal=true,values:Record<string,unknown>={terminal:{"block-ui":false}}){
  const daemon=createAgentDaemon(options);daemon.threads.splice(0);
  const config={...loadConfig(["--config","/nonexistent/terminal-workspace-test"],{},values),endpoint:daemon.endpoint,authToken:undefined};
  const client=new DaemonConnection(config),model=new WorkspaceModel(client,config);model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);
@@ -42,6 +42,109 @@ test("secondary terminal cwd stays local and root follows its observed cwd only 
   const canonical=model.state.workspaces[0];await model.activateWorkspace(model.state.workspaces[1]);await model.activateWorkspace(canonical);
   expect(model.state.activeWorkspace?.root_dir).toBe("/project/a/next");expect(model.state.workspaces[0].root_dir).toBe("/project/a");
  }finally{close();}
+});
+test("first Home controls local working directory while later Home and terminal shells stay independent",async()=>{
+  const {daemon,model,close}=await fixture({},false,{terminal:{"block-ui":true}});
+  try{
+    const home=model.ensureWelcome()!;await model.ensureHomeTerminal(home.id);
+    const main=model.mainTerminalSurface()!;expect(main.id).toBe(home.id);
+    daemon.pushPty({SessionCwd:{session_id:main.sessionId,cwd:"/project/a/home-cwd"}});
+    await until(()=>model.state.activeWorkspace?.root_dir==="/project/a/home-cwd"&&!model.state.loading);
+    const second=model.newWelcome()!;await model.ensureHomeTerminal(second.id);
+    const secondId=model.state.surfaces.find(surface=>surface.id===second.id)!.sessionId;
+    daemon.pushPty({SessionCwd:{session_id:secondId,cwd:"/tmp/second-home"}});
+    await model.newTerminal();const terminal=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!;
+    expect(daemon.ptyRequests.filter(request=>request.tag==="CreatePty").at(-1)?.body.cwd).toBe("/project/a/home-cwd");
+    daemon.pushPty({SessionCwd:{session_id:terminal.sessionId,cwd:"/tmp/secondary"}});
+    daemon.pushPty({SessionCwd:{session_id:main.sessionId,cwd:"/project/a/next"}});await Bun.sleep(25);
+    expect(model.state.activeWorkspace?.root_dir).toBe("/project/a/home-cwd");
+    expect(model.mainTerminalSurface()?.id).toBe(home.id);
+    model.selectSurface(home.id);await until(()=>model.state.activeWorkspace?.root_dir==="/project/a/next"&&!model.state.loading);
+    expect(model.state.workspaces.find(workspace=>workspace.id==="a")?.root_dir).toBe("/project/a");
+    expect(daemon.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot")).toBe(false);
+    expect(daemon.ptyRequests.some(request=>request.tag==="PtyInput")).toBe(false);
+  }finally{close();}
+});
+test("turning blocks off restores classic first-terminal authority without killing Home's shell",async()=>{
+  const {daemon,model,close}=await fixture({},false,{terminal:{"block-ui":true}});
+  try{
+    const home=model.ensureWelcome()!;await model.ensureHomeTerminal(home.id);
+    const homeSession=model.mainTerminalSurface()!.sessionId;
+    model.config.terminalBlockUi=false;
+    expect(model.mainTerminalSurface()).toBeUndefined();
+    await model.newTerminal();
+    const terminal=model.mainTerminalSurface()!;
+    expect(terminal.id).toBe(model.state.activeSurfaceId!);
+    expect(daemon.ptyRequests.filter(request=>request.tag==="CreatePty").at(-1)?.body.presentation).toBe("grid");
+    model.selectSurface(home.id);
+    daemon.pushPty({SessionCwd:{session_id:homeSession,cwd:"/tmp/hidden-home"}});await Bun.sleep(25);
+    expect(model.state.activeWorkspace?.root_dir).toBe("/project/a");
+    expect(model.mainTerminalSurface()?.id).toBe(terminal.id);
+    expect(daemon.ptyRequests.some(request=>request.tag==="ClosePty"&&request.body.session_id===homeSession)).toBe(false);
+  }finally{close();}
+});
+test("Home does not steal an existing first terminal's directory role",async()=>{
+  const {model,close}=await fixture();
+  try{
+    const first=model.mainTerminalSurface()!;const home=model.ensureWelcome()!;
+    await model.ensureHomeTerminal(home.id);
+    expect(model.mainTerminalSurface()?.id).toBe(first.id);
+  }finally{close();}
+});
+test("choosing another directory authority transfers cwd follow without sending shell commands or creating tabs",async()=>{
+  const {daemon,model,close}=await fixture({},false,{terminal:{"block-ui":true}});
+  try{
+    const home=model.ensureWelcome()!;await model.ensureHomeTerminal(home.id);
+    const homeSession=model.mainTerminalSurface()!.sessionId;
+    await model.newTerminal();const terminal=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!;
+    daemon.pushPty({SessionCwd:{session_id:terminal.sessionId,cwd:"/tmp/chosen"}});await Bun.sleep(25);
+    expect(model.state.activeWorkspace?.root_dir).toBe("/project/a");
+    model.setMainTerminal(terminal.id);
+    await until(()=>model.state.activeWorkspace?.root_dir==="/tmp/chosen"&&!model.state.loading);
+    expect(model.mainTerminalSurface()?.id).toBe(terminal.id);
+    expect(model.captureSession().ui.mainTerminals).toEqual({a:terminal.sessionId});
+    model.selectSurface(home.id);
+    daemon.pushPty({SessionCwd:{session_id:homeSession,cwd:"/tmp/home"}});await Bun.sleep(25);
+    expect(model.state.activeWorkspace?.root_dir).toBe("/tmp/chosen");
+    model.setMainTerminal(home.id);
+    await until(()=>model.state.activeWorkspace?.root_dir==="/tmp/home"&&!model.state.loading);
+    expect(model.mainTerminalSurface()?.id).toBe(home.id);
+    model.setMainTerminal(home.id);expect(model.mainTerminalSurface()?.id).toBe(home.id);
+    expect(model.state.surfaces.map(surface=>surface.id)).toEqual([home.id,terminal.id]);
+    expect(daemon.ptyRequests.filter(request=>request.tag==="CreatePty")).toHaveLength(2);
+    expect(daemon.ptyRequests.some(request=>request.tag==="PtyInput"||request.tag==="ChangeTerminalDirectory")).toBe(false);
+    expect(daemon.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot")).toBe(false);
+  }finally{close();}
+});
+test("cwd refresh reuses a surviving Home instead of recreating the closed startup Home",async()=>{
+  const {daemon,model,close}=await fixture({},false,{terminal:{"block-ui":true}});
+  try{
+    const startup=model.ensureWelcome()!,home=model.newWelcome()!;
+    model.closeSurface(startup.id);await model.ensureHomeTerminal(home.id);
+    expect(model.ensureWelcome({select:false})?.id).toBe(home.id);
+    const sessionId=model.mainTerminalSurface()!.sessionId;
+    const leaves=model.getLayout().frame.leaves.map(leaf=>leaf.leaf);
+    for(const cwd of ["/project/a/sub","/project/a"]){
+      daemon.pushPty({SessionCwd:{session_id:sessionId,cwd}});
+      await until(()=>model.state.activeWorkspace?.root_dir===cwd&&!model.state.loading);
+      expect(model.state.surfaces.filter(surface=>surface.kind==="welcome").map(surface=>surface.id)).toEqual([home.id]);
+      expect(model.state.activeSurfaceId).toBe(home.id);
+      expect(model.getLayout().frame.leaves.map(leaf=>leaf.leaf)).toEqual(leaves);
+      expect(model.mainTerminalSurface()?.sessionId).toBe(sessionId);
+    }
+    expect(daemon.ptyRequests.filter(request=>request.tag==="CreatePty")).toHaveLength(1);
+  }finally{close();}
+});
+test("directory refresh does not reopen Home after the user closes it",async()=>{
+  const {daemon,model,close}=await fixture();
+  try{
+    const terminal=model.mainTerminalSurface()!;
+    model.closeSurface("welcome:a");
+    daemon.pushPty({SessionCwd:{session_id:terminal.sessionId,cwd:"/project/a/sub"}});
+    await until(()=>model.state.activeWorkspace?.root_dir==="/project/a/sub"&&!model.state.loading);
+    expect(model.state.surfaces.map(surface=>surface.id)).toEqual([terminal.id]);
+    expect(model.getLayout().frame.leaves.map(leaf=>leaf.surfaceId)).toEqual([terminal.id]);
+  }finally{close();}
 });
 test("root terminal cd opens a same-named file as a separate scoped buffer and preserves prior dirty bytes",async()=>{
  const {daemon,model,close}=await fixture({scopedFiles:{"/project/a":{"same.rs":"alpha"},"/project/b":{"same.rs":"beta"}}});
@@ -115,7 +218,7 @@ test("SSH tunnel identity permits private home cwd follow without treating other
 
 test("new terminals forward configured shell and arguments; defaults remain host selected",async()=>{
  for(const shell of [undefined,{program:"/custom path/zsh",args:["--login"]},{program:"pwsh.exe",args:["-NoLogo"]},{program:"/bin/fish",args:[]}]){
-  const {daemon,model,close}=await fixture({},false,{terminal:{shell}});
+   const {daemon,model,close}=await fixture({},false,{terminal:{shell,"block-ui":false}});
   try{
    await model.newTerminal();const request=daemon.ptyRequests.find(row=>row.tag==="CreatePty")!.body;
    expect(request.shell).toBe(shell?.program);expect(request.shell_args).toEqual(shell?.args);

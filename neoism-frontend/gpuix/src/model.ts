@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { AppConfig } from "./config";
 import { DaemonConnection } from "./daemon/client";
+import {recoveredStartupDirectory} from "./daemon/startup-directory";
 import { NativeEditor, coreCall, type EditorSnapshot } from "./native-core";
 import { NativeMarkdown } from "./markdown/NativeMarkdown";
 import type { SavedSession } from "./session-store";
@@ -402,6 +403,86 @@ export class WorkspaceModel {
   private async run<A, E>(effect: Effect.Effect<A, E>): Promise<A> {
     return Effect.runPromise(effect, { signal: this.abort.signal });
   }
+  private homeTerminalRequests = new Map<string, Promise<void>>();
+  private homeTerminalOwners() {
+    return isRecord(this.state.ui.homeTerminalSessions) ? this.state.ui.homeTerminalSessions : {};
+  }
+  private closeHomePty(sessionId:string) {
+    closeTerminalSession(this.client,sessionId);
+    // Cleanup must outlive the model's abort signal (including create replies
+    // arriving after dispose). Never use this for an attached foreign session.
+    return Effect.runPromise(this.client.request("Pty",{ClosePty:{session_id:sessionId}})).then(()=>{},this.report);
+  }
+  private releaseHomeTerminal(surfaceId:string, close=true) {
+    this.homeTerminalRequests.delete(surfaceId);
+    const owners={...this.homeTerminalOwners()},sessionId=owners[surfaceId];delete owners[surfaceId];
+    const pending={...(isRecord(this.state.ui.pendingTerminalBindings)?this.state.ui.pendingTerminalBindings:{})};delete pending[surfaceId];
+    if(typeof sessionId==="string"){
+      if(close)void this.closeHomePty(sessionId);else closeTerminalSession(this.client,sessionId);
+      const main={...(isRecord(this.state.ui.mainTerminals)?this.state.ui.mainTerminals:{})};
+      const cwds={...(isRecord(this.state.ui.terminalCwds)?this.state.ui.terminalCwds:{})};
+      for(const [workspace,id]of Object.entries(main))if(id===sessionId)delete main[workspace];
+      delete cwds[sessionId];
+      this.setUI({mainTerminals:main,terminalCwds:cwds});
+      this.update({surfaces:this.state.surfaces.map(surface=>surface.id===surfaceId&&surface.sessionId===sessionId?{...surface,sessionId:undefined}:surface)});
+    }
+    this.setUI({homeTerminalSessions:owners,pendingTerminalBindings:pending});
+  }
+  /** Allocate a shell for an existing Home without selecting/creating a tab.
+   * The first shell owns cwd follow; UI unmount is not closure. */
+  ensureHomeTerminal = (surfaceId:string):Promise<void> => {
+    const pending=this.homeTerminalRequests.get(surfaceId);if(pending)return pending;
+    if(this.disposed)return Promise.resolve();
+    const surface=this.state.surfaces.find(surface=>surface.id===surfaceId&&surface.kind==="welcome");
+    if(!surface)return Promise.resolve();
+    if(surface.sessionId){
+      if(this.homeTerminalOwners()[surfaceId]!==surface.sessionId||this.state.surfaces.some(other=>other.id!==surfaceId&&other.sessionId===surface.sessionId))
+        this.report(new Error("Home cannot take ownership of an attached terminal session"));
+      return Promise.resolve();
+    }
+    // Use this surface's declared workspace, never whichever workspace happens
+    // to be active when an asynchronous create finishes.
+    const declared=this.state.workspaces.find(workspace=>workspace.id===surface.workspaceId);
+    const workspace=declared&&this.workspaceView(declared);
+    if(!workspace?.root_dir){this.report(new Error("Home terminal requires a declared workspace directory"));return Promise.resolve();}
+    let task!:Promise<void>;
+    const valid=()=>!this.disposed&&this.homeTerminalRequests.get(surfaceId)===task
+      &&this.state.surfaces.some(current=>current.id===surfaceId&&current.kind==="welcome"&&current.workspaceId===workspace.id&&!current.sessionId)
+      &&this.state.workspaces.some(current=>current.id===workspace.id&&this.workspaceView(current).root_dir===workspace.root_dir);
+    task=Promise.resolve().then(async()=>{
+      let fresh:string|undefined;
+      const available=()=>!isRecord(this.state.ui.unavailableTerminals)||!this.state.ui.unavailableTerminals[fresh!];
+      try{
+        if(!valid())return;
+        // Do not abort create on dispose: we must observe its fresh session ID
+        // and close it, rather than orphaning a daemon PTY.
+        const result=expectVariant(await Effect.runPromise(this.client.request("Pty",{CreatePty:{cwd:workspace.root_dir!,cols:100,rows:30,presentation:"blocks",
+          ...(this.config.shell?.program?{shell:this.config.shell.program}:{}),...(this.config.shell?.args!==undefined?{shell_args:this.config.shell.args}:{})}})),"PtyCreated");
+        if(!isRecord(result)||typeof result.session_id!=="string")throw new Error("Invalid terminal session");
+        fresh=result.session_id;
+        if(result.presentation!=="blocks")throw new Error("The running daemon is too old for this terminal. Update or restart the workspace daemon, then reconnect.");
+        if(!valid()||!available())return;
+        if(this.state.activeWorkspace?.id===workspace.id)
+          await Effect.runPromise(this.client.request("Workspace",{BindEditorSurface:{surface_id:surfaceId,session_id:fresh,path:null}}));
+        if(!valid()||!available())return;
+        const sessionId=fresh;
+        this.transaction(()=>{
+          if(!this.mainTerminalSurface(workspace.id)){const main=isRecord(this.state.ui.mainTerminals)?this.state.ui.mainTerminals:{};this.setUI({mainTerminals:{...main,[workspace.id]:sessionId}});}
+          // Queue if selection changed while create or bind was in flight.
+          if(this.state.activeWorkspace?.id!==workspace.id){
+            const bindings=isRecord(this.state.ui.pendingTerminalBindings)?this.state.ui.pendingTerminalBindings:{};
+            this.setUI({pendingTerminalBindings:{...bindings,[surfaceId]:{workspaceId:workspace.id,sessionId}}});
+          }
+          this.setUI({homeTerminalSessions:{...this.homeTerminalOwners(),[surfaceId]:sessionId}});
+          this.update({surfaces:this.state.surfaces.map(current=>current.id===surfaceId?{...current,sessionId,rootDir:workspace.root_dir!}:current)});
+        });
+        fresh=undefined;
+        this.followMainTerminal();
+      }catch(error){this.report(error);}
+      finally{if(fresh)await this.closeHomePty(fresh);}
+    }).finally(()=>{if(this.homeTerminalRequests.get(surfaceId)===task)this.homeTerminalRequests.delete(surfaceId);});
+    this.homeTerminalRequests.set(surfaceId,task);return task;
+  };
   private async hydrate() {
     const epoch = ++this.epoch;
     this.update({ loading: true, error: undefined });
@@ -435,6 +516,21 @@ export class WorkspaceModel {
         workspace = await this.resolveHostWorkspace();
       }
       if (epoch !== this.epoch || !workspace) return;
+      const explicitRoots=isRecord(this.state.ui.explicitWorkspaceRoots)?this.state.ui.explicitWorkspaceRoots:{};
+      const home=this.startupWelcomePending&&recoverLocal&&(!workspace.host_kind||workspace.host_kind==="local")&&explicitRoots[workspace.id]!==workspace.root_dir
+        ? recoveredStartupDirectory(this.workspaceView(workspace).root_dir) : undefined;
+      if(home){
+        // Keep the old workspace and all its shells/dirty recovery data intact.
+        // Only replace this window's mistaken startup membership with a fresh Home.
+        const previous=workspace.id;
+        const recovered=await this.createWorkspace({...workspace,root_dir:home});
+        if(recovered){
+          const ids=openWorkspaceIds(this.state.ui)||[];
+          if(ids.includes(previous))this.setUI({openWorkspaceIds:ids.filter(id=>id!==recovered.id).map(id=>id===previous?recovered.id:id)});
+          await this.syncWindowWorkspaces();
+        }
+        return;
+      }
       await this.activateWorkspace(workspace, true);
     } catch (error) { if (epoch === this.epoch) this.report(error); }
     finally { if (epoch === this.epoch) this.update({ loading: false }); }
@@ -465,14 +561,18 @@ export class WorkspaceModel {
     if(ids.every((id,index)=>id===previous[index]))return false;
     this.setUI({openWorkspaceIds:ids});return true;
   };
-  newWorkspace = (parent=this.state.activeWorkspace): Promise<Workspace | undefined> => {
+  newWorkspace = (parent?:Workspace): Promise<Workspace | undefined> => {
     const id=crypto.randomUUID();
+    const hostId=this.state.connection.connectedHostId;
+    const eligible=(workspace:Workspace|undefined)=>workspace&&(!hostId||workspace.host_id===hostId)?workspace:undefined;
+    const source=parent||eligible(this.state.activeWorkspace)||this.state.workspaces.find(workspace=>!hostId||workspace.host_id===hostId);
+    const inherited=source&&this.workspaceView(source);
     this.pendingWorkspaceCreations.add(id);this.update({creatingWorkspace:true});
     const task=this.workspaceCreations.then(async()=>{
       if(this.disposed)return;
-      const hostId=this.state.connection.connectedHostId;
-      const source=parent||this.state.workspaces.find(workspace=>!hostId||workspace.host_id===hostId);
-      if(source)return this.createWorkspace(source,id);
+      if(inherited)return this.createWorkspace(inherited,id);
+      const current=eligible(this.state.activeWorkspace)||this.state.workspaces.find(workspace=>!hostId||workspace.host_id===hostId);
+      if(current)return this.createWorkspace(this.workspaceView(current),id);
       // An empty daemon resolves one default; do not immediately create a second.
       const workspace=await this.resolveHostWorkspace();
       await this.activateWorkspace(workspace);return workspace;
@@ -538,6 +638,7 @@ export class WorkspaceModel {
       this.transaction(()=>{
         if(discard)for(const surface of dirty)this.closeSurface(surface.id,true);
         this.setUI({openWorkspaceIds:remaining});
+        for(const surface of this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId&&surface.kind==="welcome"))this.releaseHomeTerminal(surface.id);
         if(wasActive&&!remaining.length){
           ++this.epoch;this.presence.leaveWorkspace();
           this.update({activeWorkspace:undefined,activeSurfaceId:undefined,directories:{},notesDirectories:{},threads:[],loading:false});
@@ -564,7 +665,18 @@ export class WorkspaceModel {
     const workspace=this.state.workspaces.find(workspace=>workspace.id===workspaceId)||this.state.activeWorkspace;
     const remembered=isRecord(this.state.ui.mainTerminals)?this.state.ui.mainTerminals[workspaceId||""]:undefined;
     const ended=isRecord(this.state.ui.unavailableTerminals)?this.state.ui.unavailableTerminals:{};
-    return mainTerminalSurface(workspace,this.state.surfaces.filter(surface=>!ended[surface.sessionId||""]),remembered);
+    const homes=this.homeTerminalOwners();
+    return mainTerminalSurface(workspace,this.state.surfaces.filter(surface=>!ended[surface.sessionId||""]&&(surface.kind!=="welcome"||this.config.terminalBlockUi&&homes[surface.id]===surface.sessionId)),remembered);
+  };
+  setMainTerminal=(surfaceId:string)=>{
+    const surface=this.state.surfaces.find(surface=>surface.id===surfaceId);
+    if(this.disposed||!surface?.sessionId||surface.workspaceId!==this.state.activeWorkspace?.id)return;
+    if(surface.kind!=="terminal"&&(surface.kind!=="welcome"||!this.config.terminalBlockUi||this.homeTerminalOwners()[surface.id]!==surface.sessionId))return;
+    if(isRecord(this.state.ui.unavailableTerminals)&&this.state.ui.unavailableTerminals[surface.sessionId])return;
+    if(this.workspaceDirectoryChanges.has(surface.workspaceId))return;
+    const main=isRecord(this.state.ui.mainTerminals)?this.state.ui.mainTerminals:{};
+    this.setUI({mainTerminals:{...main,[surface.workspaceId]:surface.sessionId}});
+    this.followMainTerminal();
   };
   /** Explicit folder selection: change the existing first shell through the
    * host's controlled channel, then publish only its confirmed actual cwd. */
@@ -585,6 +697,8 @@ export class WorkspaceModel {
     if(workspace.id!==captured.id)throw new Error("The host returned a different workspace directory");
     this.transaction(()=>{
       this.update({workspaces:this.state.workspaces.map(entry=>entry.id===workspace.id?workspace:entry)});
+      const roots=isRecord(this.state.ui.explicitWorkspaceRoots)?this.state.ui.explicitWorkspaceRoots:{};
+      this.setUI({explicitWorkspaceRoots:{...roots,[workspace.id]:workspace.root_dir}});
       if(terminal?.sessionId){const cwds=isRecord(this.state.ui.terminalCwds)?this.state.ui.terminalCwds:{};this.setUI({terminalCwds:{...cwds,[terminal.sessionId]:actual}});}
     });
     if(this.state.activeWorkspace?.id===captured.id)await this.activateWorkspace(workspace);
@@ -663,7 +777,7 @@ export class WorkspaceModel {
       }
       await this.bindPendingTerminals(workspace.id);
       if(epoch!==this.epoch)return;
-      this.ensureWelcome({select:!this.state.activeSurfaceId});
+      if(!this.state.activeSurfaceId)this.ensureWelcome();
       await listing;
       this.followMainTerminal();
     } catch (error) { if (epoch === this.epoch) this.report(error); }
@@ -880,7 +994,7 @@ export class WorkspaceModel {
       if (changed || needsHistory) this.resumeThread(surface.sessionId);
     }
     if (surface.kind === "file" && this.state.files[id] === undefined) void this.loadFile(surface);
-    if(surface.kind==="terminal")this.followMainTerminal();
+    if(surface.kind==="terminal"||surface.kind==="welcome")this.followMainTerminal();
   };
   retireTerminal=(sessionId:string)=>{
     if(this.disposed)return;
@@ -891,6 +1005,7 @@ export class WorkspaceModel {
       for(const [workspace,id] of Object.entries(main))if(id===sessionId)delete main[workspace];
       delete cwds[sessionId];
       this.setUI({unavailableTerminals:{...ended,[sessionId]:true},mainTerminals:main,terminalCwds:cwds});
+      for(const [surfaceId,owned]of Object.entries(this.homeTerminalOwners()))if(owned===sessionId)this.releaseHomeTerminal(surfaceId,false);
       for(const surface of this.state.surfaces.filter(surface=>surface.kind==="terminal"&&surface.sessionId===sessionId))this.closeSurface(surface.id);
     });
   };
@@ -904,6 +1019,7 @@ export class WorkspaceModel {
     const editor = this.editors.get(id);
     if (!discard&&this.surfaceDirty(id)) { this.update({ error: "Save this file before closing it (Ctrl+S)." }); return; }
     const closing = this.state.surfaces.find(surface => surface.id === id);
+    if(closing?.kind==="welcome")this.releaseHomeTerminal(id);
     if (closing?.kind === "git") for (const ownerId of closing.gitEditorIds || []) {
       const owner = this.state.surfaces.find(surface => surface.id === ownerId);
       const usedByAnotherReview = this.state.surfaces.some(surface => surface.id !== id && surface.gitEditorIds?.includes(ownerId));
@@ -1579,8 +1695,10 @@ export class WorkspaceModel {
   }
   ensureWelcome = (options:{select?:boolean}={}) => {
     const workspace=this.state.activeWorkspace;if(!workspace)return;
-    const id=`welcome:${workspace.id}`,layout=this.getLayout(workspace.id),prior=layout.frame.focusedLeaf;
-    const existing=this.state.surfaces.find(surface=>surface.id===id&&surface.kind==="welcome");
+    const layout=this.getLayout(workspace.id),prior=layout.frame.focusedLeaf;
+    const existing=this.state.surfaces.find(surface=>surface.id===`welcome:${workspace.id}`&&surface.kind==="welcome")
+      ||this.state.surfaces.find(surface=>surface.workspaceId===workspace.id&&surface.kind==="welcome");
+    const id=existing?.id||`welcome:${workspace.id}`;
     const select=options.select!==false;
     this.transaction(()=>{
       if(!existing)this.addSurface({id,kind:"welcome",title:"Home",workspaceId:workspace.id});
@@ -1600,7 +1718,13 @@ export class WorkspaceModel {
     for(const[surfaceId,value]of Object.entries(pending)){
       if(!isRecord(value)||value.workspaceId!==workspaceId||typeof value.sessionId!=="string")continue;
       if(this.state.activeWorkspace?.id!==workspaceId)return;
-      await this.run(this.client.request("Workspace",{BindEditorSurface:{surface_id:surfaceId,session_id:value.sessionId,path:null}}));
+      if(this.disposed||!this.state.surfaces.some(surface=>surface.id===surfaceId&&surface.workspaceId===workspaceId&&surface.sessionId===value.sessionId))continue;
+      try{
+        await this.run(this.client.request("Workspace",{BindEditorSurface:{surface_id:surfaceId,session_id:value.sessionId,path:null}}));
+      }catch(error){
+        if(this.homeTerminalOwners()[surfaceId]===value.sessionId)this.releaseHomeTerminal(surfaceId);
+        throw error;
+      }
       const current=isRecord(this.state.ui.pendingTerminalBindings)?this.state.ui.pendingTerminalBindings:{};const next={...current};delete next[surfaceId];this.setUI({pendingTerminalBindings:next});
     }
   };
@@ -1608,10 +1732,11 @@ export class WorkspaceModel {
     const workspace = this.state.activeWorkspace;
     if (!workspace) return;
     try {
-      const result = expectVariant(await this.run(this.client.request("Pty", { CreatePty: { cwd: workspace.root_dir ?? null, cols: 100, rows: 30,presentation:"grid",
+      const presentation = this.config.terminalBlockUi ? "blocks" : "grid";
+      const result = expectVariant(await this.run(this.client.request("Pty", { CreatePty: { cwd: workspace.root_dir ?? null, cols: 100, rows: 30,presentation,
         ...(this.config.shell?.program?{shell:this.config.shell.program}:{}),...(this.config.shell?.args!==undefined?{shell_args:this.config.shell.args}:{}) } })), "PtyCreated");
       if (!isRecord(result) || typeof result.session_id !== "string") throw new Error("Invalid terminal session");
-      if(result.presentation!=="grid"){
+      if(result.presentation!==presentation){
         // Only the fresh session returned to this create request is ours to
         // close. Existing attached shells are never changed or restarted.
         await this.run(this.client.request("Pty",{ClosePty:{session_id:result.session_id}}));

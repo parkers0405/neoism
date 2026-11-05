@@ -21,7 +21,7 @@ export function composerCaretGeometry(event:Pick<EventPayload,"x"|"y"|"value">):
 }
 /** Original Agent block geometry and original TrailCursor on a native GPU
  * canvas. The textarea retains platform IME, selection and all text editing. */
-export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|undefined;home?:boolean;resetToken?:number;onLayout?:(layout:{text:string;width:number;rows:number})=>void}){
+export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|undefined;home?:boolean;resetToken?:number;testId?:string;onGeometry?:(event:EventPayload,geometry:ComposerCaretGeometry)=>void;onLayout?:(layout:{text:string;width:number;rows:number})=>void}){
  const renderer=useGpuixRequired(),id=coreCall<{id:number}>("keyboard.cursor.new").id,animation=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
  const [geometry,setGeometry]=createSignal<ComposerCaretGeometry>(),[quad,setQuad]=createSignal<number[][]>([]),[moving,setMoving]=createSignal(false),[blink,setBlink]=createSignal(false),[color,setColor]=createSignal(props.config.cursorColor||props.config.theme.accent);
  const blinkClock=new CursorBlinkClock(setBlink,{scope:renderer});
@@ -43,7 +43,8 @@ export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|unde
   if(next.animating)animation.request(draw,start);
  };
  const receive=(event:EventPayload)=>{
-   const next=composerCaretGeometry(event);if(!next)return;const previous=geometry();setGeometry(next);
+    const next=composerCaretGeometry(event);if(!next)return;const previous=geometry();setGeometry(next);
+   props.onGeometry?.(event,next);
   const layout=JSON.parse(event.value!);
   if(typeof layout.text==="string"&&Number.isFinite(layout.layoutWidth)&&layout.layoutWidth>0&&Number.isSafeInteger(layout.visualRows)&&layout.visualRows>0)
    props.onLayout?.({text:layout.text,width:layout.layoutWidth,rows:layout.visualRows});
@@ -73,7 +74,7 @@ export function ComposerCaret(props:{config:AppConfig;input:()=>HostElement|unde
  const commands=createMemo(()=>JSON.stringify([{k:"p",c:cssColor(color()),p:[quad().flat()]}] satisfies CanvasOp[]));
  const bounds=createMemo(()=>{const points=quad(),xs=points.map(point=>point[0]),ys=points.map(point=>point[1]);return points.length?{left:Math.min(...xs),top:Math.min(...ys),width:Math.max(...xs)-Math.min(...xs),height:Math.max(...ys)-Math.min(...ys)}:{left:0,top:0,width:0,height:0};});
  return <Show when={shown()}><anchored fill="window" deferred priority={4} occlude={false} style={{pointerEvents:"none",backgroundColor:"transparent"}}>
-  <canvas testId="agent-composer-cursor-paint" commands={commands()} style={{position:"absolute",left:0,top:0,right:0,bottom:0,pointerEvents:"none"}}/>
-  <div testId="agent-composer-cursor" style={{position:"absolute",...bounds(),pointerEvents:"none"}}/>
+   <canvas testId={`${props.testId||"agent-composer-cursor"}-paint`} commands={commands()} style={{position:"absolute",left:0,top:0,right:0,bottom:0,pointerEvents:"none"}}/>
+   <div testId={props.testId||"agent-composer-cursor"} style={{position:"absolute",...bounds(),pointerEvents:"none"}}/>
  </anchored></Show>;
 }

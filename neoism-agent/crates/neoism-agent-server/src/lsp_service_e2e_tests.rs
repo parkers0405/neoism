@@ -54,11 +54,6 @@ fn lifecycle_idle_retirement_preserves_other_views_requests_and_live_tasks() {
     assert_eq!(service.clients.lock().unwrap().len(), 1, "admitted request must survive");
     drop(active_request);
 
-    let task_leases = Arc::new(std::sync::atomic::AtomicUsize::new(1));
-    runtime.protect_generation(&task_leases);
-    service.retire_idle_clients(Duration::ZERO);
-    assert_eq!(service.clients.lock().unwrap().len(), 1, "live task between LSP calls must survive");
-    task_leases.store(0, std::sync::atomic::Ordering::Release);
     service.close_document(&workspace.path, &file).unwrap();
     service.retire_idle_clients(Duration::ZERO);
     assert!(service.clients.lock().unwrap().is_empty());
@@ -83,6 +78,163 @@ fn lifecycle_idle_retirement_preserves_other_views_requests_and_live_tasks() {
     assert_eq!(count_log_lines(&log, "shutdown"), 3);
     assert!(service.document_versions.lock().unwrap().is_empty(), "idle agent documents must release versions too");
     assert!(service.file_clients.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn lifecycle_config_reload_reuses_complete_service_across_live_turns() {
+    let workspace = TestWorkspace::new("generation-reuse");
+    let root = &workspace.path;
+    let file = root.join("src/main.rs");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "broken_v1").unwrap();
+    let server = compile_fake_server(&workspace);
+    let log = root.join("generation.log");
+    write_lsp_config(root, &server, &log, "serve");
+    let state = crate::state::AppState::open_database(root.join("state.sqlite3")).await.unwrap();
+    let owner = state.workspace_runtime(&root.to_string_lossy()).await.unwrap();
+    let old_turn = owner.published_snapshot();
+    let old = old_turn.lsp().unwrap();
+    let spec = configured_test_spec(&old, root);
+    old.service.sync(root, &file, Some("unsaved editor text"), &spec).unwrap();
+    let document = old.lease_document(root, &file);
+    assert!(!super::super::hover(&old, root, &file, 0, 0).is_empty());
+    assert_eq!(count_log_lines(&log, "initialize:valid=true"), 1);
+
+    let path = root.join(".agent/agent.json");
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["dangerouslySkipPermissions"] = json!(true);
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert!(crate::workspace_runtime::refresh_plugins(&owner, &state).await.unwrap());
+    let new_turn = owner.published_snapshot();
+    assert_ne!(old_turn.generation, new_turn.generation);
+    let new = new_turn.lsp().unwrap();
+    assert_eq!(old.instance_key(), new.instance_key());
+    assert_eq!(owner.lsp().unwrap().instance_key(), old.instance_key(), "both entry points share");
+    for runtime in [&old, &new] {
+        runtime.service.hover(root, &file, 0, 0, &spec).unwrap();
+    }
+    assert_eq!(count_log_lines(&log, "initialize:valid=true"), 1);
+    assert_eq!(new.service.clients.lock().unwrap().values().next().unwrap().lock().unwrap().synced_hashes[&file], text_hash("unsaved editor text"));
+
+    // Drain the old generation deterministically, not just a scheduling delay.
+    drop(old_turn);
+    owner.drain_lsp_test_retirements().await;
+    drop(old);
+    assert_eq!(count_log_lines(&log, "shutdown"), 0);
+    new.service.hover(root, &file, 0, 0, &spec).unwrap();
+    new.service.retire_idle_clients(Duration::ZERO);
+    assert_eq!(new.service.clients.lock().unwrap().len(), 1, "open document still owns server");
+    drop(document);
+    // A still-live turn which used LSP is NOT a blanket idle-server pin.
+    new.service.retire_idle_clients(Duration::ZERO);
+    assert!(new.service.clients.lock().unwrap().is_empty());
+
+    // Concurrent cold starts through separate generation entry points still
+    // share the same service's initialization gate, not merely its client map.
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for runtime in [new_turn.lsp().unwrap(), owner.snapshot().lsp().unwrap()] {
+        let root = root.clone();
+        let file = file.clone();
+        let spec = spec.clone();
+        let barrier = barrier.clone();
+        workers.push(thread::spawn(move || {
+            barrier.wait();
+            runtime.service.sync(&root, &file, None, &spec).unwrap();
+            runtime.service.hover(&root, &file, 0, 0, &spec).unwrap();
+        }));
+    }
+    barrier.wait();
+    for worker in workers { worker.join().unwrap(); }
+    assert_eq!(count_log_lines(&log, "initialize:valid=true"), 2);
+
+    // Actual task use pins precisely this client across provider/tool gaps.
+    super::super::hover(&new, root, &file, 0, 0);
+    let gap_observer = super::super::LspRuntime { service: new.service.clone(), consumer: None };
+    let provider_gap = new_turn.clone();
+    drop(new);
+    drop(new_turn);
+    let mut unrelated = spec.clone();
+    unrelated.id = "unrelated-server".into();
+    gap_observer.service.sync(root, &file, None, &unrelated).unwrap();
+    gap_observer.service.hover(root, &file, 0, 0, &unrelated).unwrap();
+    assert_eq!(gap_observer.service.clients.lock().unwrap().len(), 2);
+    gap_observer.service.retire_idle_clients(Duration::ZERO);
+    assert_eq!(gap_observer.service.clients.lock().unwrap().len(), 1, "task clone pins only its used server throughout a provider gap, without an LSP runtime handle");
+    assert_eq!(count_log_lines(&log, "initialize:valid=true"), 3);
+    let new_turn = provider_gap;
+    let new = new_turn.lsp().unwrap();
+
+    // A true LSP startup change remains isolated while the old turn is live.
+    config["lsp"]["protocol-test"]["env"] = json!({"NEOISM_LSP_FIXTURE": "different"});
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert!(crate::workspace_runtime::refresh_plugins(&owner, &state).await.unwrap());
+    let incompatible_turn = owner.published_snapshot();
+    let incompatible = incompatible_turn.lsp().unwrap();
+    assert_ne!(new.instance_key(), incompatible.instance_key());
+    let changed_spec = configured_test_spec(&incompatible, root);
+    incompatible.service.sync(root, &file, None, &changed_spec).unwrap();
+    incompatible.service.hover(root, &file, 0, 0, &changed_spec).unwrap();
+    new.service.hover(root, &file, 0, 0, &spec).unwrap();
+    assert_eq!(count_log_lines(&log, "initialize:valid=true"), 4);
+
+    // Same project and config in another authority never share a transport.
+    let (other_owner, _) = state.inner.workspace_runtimes
+        .acquire_for_tenant("other-authority", &root.to_string_lossy(), &state).await.unwrap();
+    let other = other_owner.lsp().unwrap();
+    assert_ne!(other.instance_key(), incompatible.instance_key());
+    other.service.sync(root, &file, None, &changed_spec).unwrap();
+    other.service.hover(root, &file, 0, 0, &changed_spec).unwrap();
+    assert_eq!(count_log_lines(&log, "initialize:valid=true"), 5);
+    drop(other);
+
+    let idle_observer = super::super::LspRuntime { service: new.service.clone(), consumer: None };
+    drop(incompatible_turn);
+    drop(new_turn);
+    drop(new);
+    owner.drain_lsp_test_retirements().await;
+    idle_observer.service.retire_idle_clients(Duration::ZERO);
+    assert!(idle_observer.service.clients.lock().unwrap().is_empty(), "last consuming task release permits retirement");
+    drop(incompatible);
+    state.shutdown().await.unwrap();
+}
+
+#[test]
+fn lifecycle_concurrent_generation_consumers_share_startup() {
+    let workspace = TestWorkspace::new("concurrent-generations");
+    let root = &workspace.path;
+    let file = root.join("src/main.rs");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "broken_v1").unwrap();
+    let server = compile_fake_server(&workspace);
+    let log = root.join("concurrent.log");
+    write_lsp_config(root, &server, &log, "serve");
+    let services = crate::standard_services();
+    let (first, _) = neoism_agent_builtins::plugin::config::load(&services, &root.to_string_lossy()).unwrap();
+    let mut second = first.clone();
+    second.dangerously_skip_permissions = true;
+    let store = Arc::new(super::super::LspRuntimeStore::default());
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for config in [first, second] {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        let root = root.clone();
+        let file = file.clone();
+        let services = services.clone();
+        workers.push(thread::spawn(move || {
+            barrier.wait();
+            let runtime = store.acquire(services, Arc::new(config));
+            let spec = configured_test_spec(&runtime, &root);
+            runtime.service.sync(&root, &file, None, &spec).unwrap();
+            runtime.service.hover(&root, &file, 0, 0, &spec).unwrap();
+            runtime
+        }));
+    }
+    barrier.wait();
+    let runtimes = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
+    assert_eq!(runtimes[0].instance_key(), runtimes[1].instance_key());
+    assert_eq!(count_log_lines(&log, "initialize:valid=true"), 1);
 }
 
 #[test]

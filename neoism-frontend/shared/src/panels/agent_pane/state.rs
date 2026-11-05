@@ -422,6 +422,7 @@ impl NeoismAgentMessage {
         let mut message = Self::new(NeoismAgentMessageKind::Compaction, text);
         message.title = "Compaction".to_string();
         message.status = reason.into();
+        message.tool = "compaction_summary".into();
         message
     }
 
@@ -1592,6 +1593,11 @@ impl NeoismAgentPane {
                     && row.output_kind == NeoismAgentOutputKind::Todos)
                 || matches!(row.status.as_str(), "pending" | "running"))
         }).map(|index| self.messages[index].id.clone());
+        // Replayed state is not a new timeline event. Keep the fallback ahead
+        // of text that has streamed since the original plan arrived.
+        if target_id.is_none() && self.messages.iter().any(|m| m.id == todos_id && m.todos == todos) {
+            return;
+        }
         let had_snapshot = self.messages.iter().any(|m| m.id == todos_id);
         self.messages.retain(|m| m.id != todos_id);
         if had_snapshot {

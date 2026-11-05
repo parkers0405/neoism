@@ -31,6 +31,25 @@ test("closing a family owner tombstones late switch replies without reviving old
  owner.deactivate("child");expect(owner.switched("child")).toEqual(["child"]);
  expect(owner.activate("parent")).toEqual([]);expect(owner.switched("parent")).toEqual([]);
 });
+test("compaction completion refreshes unseen sessions without content and deduplicates legacy ended echoes",()=>{
+ const sync=new CompletedTranscriptRefresh(),compaction=(session_id:string,phase:string)=>({Compaction:{session_id,phase}});
+ // No engine, tab selection, content delta, or Started event is required.
+ expect(sync.observe(compaction("inactive","Ended"))).toBe("inactive");
+ expect(sync.observe(compaction("inactive","Ended"))).toBeUndefined();
+ expect(sync.observe(compaction("other","Delta"))).toBeUndefined();
+ expect(sync.observe(compaction("other","Started"))).toBeUndefined();
+ expect(sync.observe(compaction("other","Ended"))).toBe("other");
+ expect(sync.observe(compaction("inactive","Ended"))).toBeUndefined();
+ // A new lifecycle resets only its own session; idle must not repeat the read.
+ expect(sync.observe(compaction("inactive","Started"))).toBeUndefined();
+ expect(sync.observe(compaction("inactive","Delta"))).toBeUndefined();
+ sync.observe({ContentDelta:{session_id:"inactive",text:"summary"}});
+ sync.observe({ContentDelta:{session_id:"streaming",text:"answer"}});
+ expect(sync.observe(compaction("inactive","Ended"))).toBe("inactive");
+ expect(sync.observe({SessionIdle:{session_id:"inactive"}})).toBeUndefined();
+ expect(sync.observe(compaction("other","Ended"))).toBeUndefined();
+ expect(sync.observe({SessionIdle:{session_id:"streaming"}})).toBe("streaming");
+});
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+4000;while(!predicate()){if(Date.now()>end)throw Error("Agent stream fixture timed out");await Bun.sleep(5);}};
 test("returning through layout focus refreshes an already-loaded conversation exactly once",async()=>{
  const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/tab-resume"],{}),endpoint:daemon.endpoint},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);

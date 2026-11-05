@@ -698,7 +698,7 @@ impl SplashOverlay {
         }
         let _ = click_alpha_extra;
 
-        self.render_menu_host(sugarloaf,injection,pane_origin,pane_size,cell_h,theme,chrome_scale,scaled_w,dismiss_t,dismiss_eased,dismiss_alpha,occlusion_rects);
+        self.render_menu_host(sugarloaf,injection,pane_origin,pane_size,cell_h,theme,chrome_scale,scaled_w,dismiss_t,dismiss_eased,dismiss_alpha,occlusion_rects,false);
 
         // Click fidget — small burst at the click point clipped
         // to the wordmark rect so it never spills past the
@@ -782,7 +782,7 @@ impl SplashOverlay {
       &mut self, sugarloaf:&mut P, injection:&SplashInjection,
       pane_origin:(f32,f32),pane_size:(f32,f32),cell_h:f32,
       theme:&IdeTheme,chrome_scale:f32,scaled_w:f32,
-      dismiss_t:f32,dismiss_eased:f32,dismiss_alpha:f32,occlusion_rects:&[[f32;4]],
+      dismiss_t:f32,dismiss_eased:f32,dismiss_alpha:f32,occlusion_rects:&[[f32;4]],fill_width:bool,
     ) {
       let band_top=pane_origin.1+injection.wordmark_row as f32*cell_h;
       let wordmark_h=injection.wordmark_cells_h as f32*cell_h;
@@ -793,7 +793,7 @@ impl SplashOverlay {
         // measured text plus padding so the bg always covers the labels.
         let menu_band_h = injection.menu_cells_h as f32 * cell_h;
         let menu_side_pad =
-            (24.0 * chrome_scale.max(0.1)).min((pane_size.0 * 0.08).max(0.0));
+            ((if fill_width {16.0} else {24.0}) * chrome_scale.max(0.1)).min((pane_size.0 * 0.08).max(0.0));
         let max_menu_w = (pane_size.0 - menu_side_pad * 2.0).max(1.0);
 
         let mut s = chrome_scale.max(0.1) * layout_scale;
@@ -881,9 +881,14 @@ impl SplashOverlay {
         let widest_text = widest_text_at_scale(s, sugarloaf);
         let menu_column_gap = (MENU_COLUMN_GAP * s).min(max_menu_w / columns as f32);
         let total_column_gap = (columns - 1) as f32 * menu_column_gap;
-        let menu_btn_w = (scaled_w / columns as f32 * fit)
-            .max(widest_text)
-            .min((max_menu_w - total_column_gap) / columns as f32);
+        // Home can use the horizontal room even when height constrains text size.
+        let menu_btn_w = if fill_width {
+            (max_menu_w - total_column_gap) / columns as f32
+        } else {
+            (scaled_w / columns as f32 * fit)
+                .max(widest_text)
+                .min((max_menu_w - total_column_gap) / columns as f32)
+        };
         let total_menu_w = columns as f32 * menu_btn_w + total_column_gap;
         let total_menu_h = rows as f32 * menu_btn_h + (rows - 1) as f32 * menu_btn_gap;
         // Menu buttons drift up alongside the wordmark during

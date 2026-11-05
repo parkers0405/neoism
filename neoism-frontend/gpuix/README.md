@@ -113,6 +113,8 @@ npm start -- --help
 `NEOISM_DAEMON_TOKEN` is the upgrade credential; `NEOISM_PAIRING_TOKEN` is the Hello
 credential. Local credential discovery applies only to the default endpoint.
 
+Discord Rich Presence connects to the local Discord desktop client automatically and reconnects if Discord starts later or restarts. It shows only "Building in Neoism", a generic workspace description, and elapsed time; workspace names, paths, and file contents are never sent. Set `NEOISM_DISCORD_PRESENCE=0` to disable it. `NEOISM_DISCORD_APP_ID` and `NEOISM_DISCORD_ASSET_KEY` retain the original desktop integration's optional overrides. Linux IPC discovery includes native, Flatpak, and Snap locations; macOS uses runtime/temp sockets and Windows uses Discord's named pipes. Presence closes with the native window and is not run by the daemon.
+
 ## Working paths
 
 - Shared Rust CodeBuffer, Vim resolver, syntax, wrap/hit testing, viewport springs,
@@ -304,6 +306,20 @@ NEOISM_GPUIX_DEVICE_PREVIEW=1 bun scripts/capture-device-panel.ts
 ```
 
 The transport tests include real H.264/ffmpeg decoding against a local HTTP/WebSocket test hub. The application test opens the actual panel using a recording native boundary, performs discovery and streaming, checks RGBA uploads, continuous orbiting, keyboard isolation, touch forwarding, and cleanup. Native validation separately exercises the 3D renderer. `capture-device-panel.ts` opens the production component in an actual native window and captures the complete client scene, including typography, icon rail, menus, and model, instead of treating a custom-pass render as proof of the panel's appearance. These checks do not substitute for live simulator or integrated-GPU performance validation.
+
+## Block-terminal completion
+
+The block-terminal UI is enabled by default. Turn off **Block terminal** in Settings, or set `"terminal": { "block-ui": false }`, to return to the classic terminal and standalone Home splash. Terminal presentation applies to new sessions; existing running shells are not restarted.
+
+With `terminal.block-ui` enabled, Home and terminal tabs use a session-bound completion service. Tab previews candidates without submitting; Shift+Tab cycles backward, Escape restores the original query, and Enter submits once. Up/Ctrl+R remain history navigation. Empty results produce a short input highlight rather than an empty popup.
+
+An updated daemon and a freshly started integrated shell provide host PATH commands, live aliases/functions/variable names, quoted paths, Git branches/remotes/changed files, and package scripts. Bash also uses registered `-F` completion functions, literal `-W` lists, and filename/directory registrations. Small built-in command hints supplement hosts without completion plugins. Native candidates precede history, and requests use the terminal's host-side cwd rather than the Explorer's directory.
+
+This is not universal shell-completion compatibility: zsh currently supplies explicitly identified live-name and host-data fallback, not native ZLE/compdef completion. Readline-dependent and `-C` Bash completers, compound shell programs, and command substitutions are not supported. Older daemons and unsupported shells retain the bounded app-side fallback.
+
+Completion uses private prompt-state snapshots and isolated, time/output/concurrency-bounded workers. It never evaluates the query or writes it to the live PTY. Because installed completion functions can run helper programs, requests require terminal-execution permission, attachment, and workspace authorization; file-read permission alone is insufficient. Workers run outside the websocket receive loop and are cancelled on superseding requests, input, close, or disconnect.
+
+The Files panel retains the original workspace reveal: a 320 ms cubic fade/slide with a 12 ms stagger per visible row. Only glyphs move; hit targets and selection backgrounds remain fixed. Cached connection returns replay it, while same-root refreshes and font/theme rebuilds do not. Reduced motion disables it.
 
 ## Validate and package
 

@@ -2,6 +2,81 @@ use super::*;
 
 pub(crate) use neoism_agent_service_api::service_envelope::ServiceClientMessage;
 
+struct CompletedTerminal {
+    generation: u64,
+    request_id: Option<u64>,
+    session_id: String,
+    revision: u64,
+    message: ServerMessage,
+}
+struct PendingTerminalCompletion {
+    generation: u64,
+    request_id: Option<u64>,
+    revision: u64,
+    abort: tokio::task::AbortHandle,
+}
+#[derive(Default)]
+struct TerminalCompletionJobs {
+    // JoinSet aborts every owned future on Drop, on ALL socket exit paths.
+    tasks: tokio::task::JoinSet<CompletedTerminal>,
+    pending: std::collections::HashMap<String, PendingTerminalCompletion>,
+    generation: u64,
+}
+impl TerminalCompletionJobs {
+    fn cancel(&mut self, session_id: &str) -> Vec<(Option<u64>, ServerMessage)> {
+        if let Some(old) = self.pending.remove(session_id) {
+            old.abort.abort();
+            vec![(old.request_id, ServerMessage::Error { message: "Terminal completion superseded or cancelled by terminal input/close".into() })]
+        } else { vec![] }
+    }
+    fn cancel_for_message(&mut self, message: &ClientMessage) -> Vec<(Option<u64>, ServerMessage)> {
+        match message {
+            ClientMessage::PtyInput { session_id, .. } | ClientMessage::ClosePty { session_id } => self.cancel(session_id),
+            _ => vec![],
+        }
+    }
+    fn queue(&mut self, job: crate::sessions::TerminalCompletionJob, request_id: Option<u64>) -> Vec<(Option<u64>, ServerMessage)> {
+        let session_id = job.session_id.clone();
+        let mut immediate = self.cancel(&session_id);
+        // Include cancelled tasks awaiting reap in the bound: a keystroke flood
+        // can never create an unbounded queue of not-yet-polled Tokio futures.
+        if self.pending.len() >= 4 || self.tasks.len() >= 8 {
+            immediate.push((request_id, ServerMessage::Error { message: "Terminal completion connection is busy".into() }));
+            return immediate;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        let revision = job.revision;
+        let completed_session = session_id.clone();
+        let abort = self.tasks.spawn(async move {
+            CompletedTerminal { generation, request_id, session_id: completed_session, revision, message: job.run().await }
+        });
+        self.pending.insert(session_id, PendingTerminalCompletion { generation, request_id, revision, abort });
+        immediate
+    }
+    fn finish(&mut self, result: Result<CompletedTerminal, tokio::task::JoinError>) -> Option<CompletedTerminal> {
+        match result {
+            Ok(reply) => {
+                if self.pending.get(&reply.session_id).is_some_and(|p| p.generation == reply.generation) {
+                    self.pending.remove(&reply.session_id);
+                    Some(reply)
+                } else { None } // Superseded result, even if it raced abort().
+            }
+            Err(error) => {
+                let session = self.pending.iter().find(|(_,p)| p.abort.id() == error.id()).map(|(s,_)|s.clone())?;
+                let pending = self.pending.remove(&session)?;
+                Some(CompletedTerminal { generation: pending.generation, request_id: pending.request_id, session_id: session,
+                    revision: pending.revision, message: ServerMessage::Error { message: "Terminal completion task ended".into() } })
+            }
+        }
+    }
+}
+fn completion_reply_json(request_id: Option<u64>, message: ServerMessage) -> serde_json::Value {
+    if let Some(request_id) = request_id {
+        serde_json::json!({"PtyReply": {"request_id": request_id, "message": message}})
+    } else { serde_json::json!(message) }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) enum ServiceServerMessage {
     FilesReply {
@@ -266,6 +341,7 @@ pub(crate) async fn handle_socket(
     // request from reaching the daemon.
     let (files_tx, mut files_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, FilesServerMessage)>();
+    let mut completion_jobs = TerminalCompletionJobs::default();
 
     // Workspace dispatch: per-connection cwd / session pointer. The
     // cross-connection registry lives on `workspace_manager`.
@@ -320,6 +396,21 @@ pub(crate) async fn handle_socket(
         // receiver could starve `stream.next()` indefinitely, leaving a
         // joined workspace's ListDir request waiting unread on the socket.
         let frame = tokio::select! {
+            Some(result) = completion_jobs.tasks.join_next(), if !completion_jobs.tasks.is_empty() => {
+                if let Some(mut reply) = completion_jobs.finish(result) {
+                    // Recheck ownership and shell revision at delivery, not just
+                    // at worker exit: input/close/rehome may have raced this join.
+                    let addressed = ClientMessage::CompleteTerminal { session_id: reply.session_id.clone(), line: String::new(), cursor: 0 };
+                    if let Some(denial) = directory_permission_denial(&addressed, &device, &workspace_manager) {
+                        reply.message = denial;
+                    } else if matches!(reply.message, ServerMessage::TerminalCompletions { .. })
+                        && (!pty_subscriptions.contains(&reply.session_id) || !registry.completion_is_current(&reply.session_id, reply.revision)) {
+                        reply.message = ServerMessage::Error { message: "Host terminal changed before completion delivery".into() };
+                    }
+                    if send_json(&mut sink, &completion_reply_json(reply.request_id, reply.message)).await.is_err() { return; }
+                }
+                continue;
+            }
             out = output_rx.recv() => {
                 match out {
                     Ok(out) => {
@@ -694,6 +785,19 @@ pub(crate) async fn handle_socket(
                     continue;
                 }
             }
+            if matches!(msg, ClientMessage::CompleteTerminal { .. }) {
+                let replies = match registry.prepare_terminal_completion(msg, Some(&output_rx)) {
+                    Ok(job) => completion_jobs.queue(job, None),
+                    Err(message) => vec![(None, ServerMessage::Error { message })],
+                };
+                for (route, reply) in replies {
+                    if send_json(&mut sink, &completion_reply_json(route, reply)).await.is_err() { return; }
+                }
+                continue;
+            }
+            for (route, reply) in completion_jobs.cancel_for_message(&msg) {
+                if send_json(&mut sink, &completion_reply_json(route, reply)).await.is_err() { return; }
+            }
             let addressed_session = pty_client_session_id(&msg).map(str::to_owned);
             // Subscribe before writing input: a fast shell can emit its echo,
             // output and prompt marks from `registry.handle` before we send
@@ -753,6 +857,19 @@ pub(crate) async fn handle_socket(
                             .await;
                             continue;
                         }
+                    }
+                    if matches!(message, ClientMessage::CompleteTerminal { .. }) {
+                        let replies = match registry.prepare_terminal_completion(message, Some(&output_rx)) {
+                            Ok(job) => completion_jobs.queue(job, Some(request_id)),
+                            Err(message) => vec![(Some(request_id), ServerMessage::Error { message })],
+                        };
+                        for (route, reply) in replies {
+                            if send_json(&mut sink, &completion_reply_json(route, reply)).await.is_err() { return; }
+                        }
+                        continue;
+                    }
+                    for (route, reply) in completion_jobs.cancel_for_message(&message) {
+                        if send_json(&mut sink, &completion_reply_json(route, reply)).await.is_err() { return; }
                     }
                     let addressed_session =
                         pty_client_session_id(&message).map(str::to_owned);
@@ -2041,6 +2158,18 @@ fn directory_permission_denial(
     device: &Option<crate::auth::DeviceRecord>,
     manager: &WorkspaceManager,
 ) -> Option<ServerMessage> {
+    if let ClientMessage::CompleteTerminal { session_id, .. } = message {
+        if let Err(denial) = check_permission(device, Permission::PtyCreate) {
+            return Some(denial);
+        }
+        if let Some(scope) = device.as_ref().and_then(|d| d.workspace_id.as_deref()) {
+            if !manager.workspace_sessions(scope).iter()
+                .any(|tab| manager.pty_session_for(&tab.id).as_ref() == Some(session_id)) {
+                return Some(ServerMessage::Error { message: "Terminal is outside this device's authorized workspace scope".into() });
+            }
+        }
+        return None;
+    }
     let ClientMessage::ChangeTerminalDirectory {
         session_id,
         request_id,
@@ -2080,6 +2209,21 @@ fn directory_permission_denial(
 #[cfg(test)]
 mod directory_authorization_tests {
     use super::*;
+    #[test]
+    fn completion_requires_execution_not_files_and_honors_workspace_scope() {
+        let manager = WorkspaceManager::bootstrap();
+        let msg = ClientMessage::CompleteTerminal { session_id: "host".into(), line: "git ".into(), cursor: 4 };
+        let mut device = crate::auth::DeviceRecord {
+            device_id: "reader".into(), device_label: "reader".into(), token_hash: String::new(),
+            created_at: 0, last_seen: 0, granted_permissions: [Permission::ReadFiles].into(), workspace_id: None,
+        };
+        assert!(matches!(directory_permission_denial(&msg, &Some(device.clone()), &manager), Some(ServerMessage::Error { .. })));
+        device.granted_permissions.insert(Permission::PtyCreate);
+        assert!(directory_permission_denial(&msg, &Some(device.clone()), &manager).is_none());
+        device.workspace_id = Some("another-workspace".into());
+        assert!(matches!(directory_permission_denial(&msg, &Some(device), &manager), Some(ServerMessage::Error { message }) if message.contains("scope")));
+        assert_eq!(pty_client_session_id(&msg), None, "completion cannot attach itself");
+    }
     #[test]
     fn directory_write_capability_and_workspace_scope_are_correlated() {
         let manager = WorkspaceManager::bootstrap();
@@ -2122,7 +2266,7 @@ fn pty_client_session_id(message: &ClientMessage) -> Option<&str> {
         | ClientMessage::ClosePty { session_id }
         | ClientMessage::AttachPty { session_id, .. } => Some(session_id),
         // Directory requests must not establish their own authorization/subscription.
-        ClientMessage::ChangeTerminalDirectory { .. } => None,
+        ClientMessage::ChangeTerminalDirectory { .. } | ClientMessage::CompleteTerminal { .. } => None,
         ClientMessage::CreatePty { .. } => None,
     }
 }
@@ -2130,6 +2274,7 @@ fn pty_client_session_id(message: &ClientMessage) -> Option<&str> {
 fn pty_message_session_id(message: &ServerMessage) -> Option<&str> {
     match message {
         ServerMessage::PtyCreated { session_id, .. }
+        | ServerMessage::TerminalCompletions { session_id, .. }
         | ServerMessage::PtyOutput { session_id, .. }
         | ServerMessage::PtyClosed { session_id, .. }
         | ServerMessage::TerminalDirectoryChanged { session_id, .. }

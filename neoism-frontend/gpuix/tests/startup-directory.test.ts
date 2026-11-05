@@ -1,5 +1,5 @@
 import {expect,test} from "bun:test";
-import {startupDirectory} from "../src/daemon/startup-directory";
+import {startupDirectory,recoveredStartupDirectory} from "../src/daemon/startup-directory";
 
 test("Finder launches start in the user's home, while project and explicit root launches keep their directory",()=>{
  const options={platform:"darwin",home:"/Users/parkersettle",executable:"/Applications/Neoism.app/Contents/MacOS/neoism"};
@@ -24,4 +24,16 @@ test("Windows shell launch directories use the user profile, respecting drive le
 test("Linux and explicit launch directories retain their existing behavior",()=>{
  expect(startupDirectory({},{platform:"linux",cwd:"/",home:"/home/parker"})).toBe("/");
  expect(startupDirectory({NEOISM_LAUNCH_DIRECTORY:"child"},{platform:"linux",cwd:"/project",home:"/home/parker"})).toBe("/project/child");
+});
+
+test("only implicit macOS home launches recover old root and app-bundle defaults",()=>{
+ const options={platform:"darwin",cwd:"/",home:"/Users/person"};
+ for(const root of ["/","/Applications/Neoism.app/Contents/MacOS"])
+  expect(recoveredStartupDirectory(root,{},options)).toBe(options.home);
+ expect(recoveredStartupDirectory("/",{},{...options,cwd:options.home})).toBe(options.home);
+ expect(recoveredStartupDirectory("/project",{},options)).toBeUndefined();
+ expect(recoveredStartupDirectory("/",{NEOISM_LAUNCH_DIRECTORY:"/"},options)).toBeUndefined();
+ expect(recoveredStartupDirectory("/",{NEOISM_WORKSPACE_ROOT:"/"},options)).toBeUndefined();
+ expect(recoveredStartupDirectory("/",{},{...options,cwd:"/project"})).toBeUndefined();
+ expect(recoveredStartupDirectory("/",{},{...options,platform:"linux"})).toBeUndefined();
 });

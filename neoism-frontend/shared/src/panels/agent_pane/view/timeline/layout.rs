@@ -1465,6 +1465,7 @@ fn timeline_message_visible<M: AgentTimelineMessage>(
     if is_subagent_runtime_notification(message)
         || is_background_completion_result_card(message)
         || message.tool() == "compaction_reasoning"
+        || message.tool() == "compaction_summary"
     {
         return false;
     }

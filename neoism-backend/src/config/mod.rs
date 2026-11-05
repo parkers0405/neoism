@@ -222,9 +222,25 @@ impl Default for MarkdownEditorConfig {
     }
 }
 
+/// Input placement within the block terminal layout.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalInputPosition {
+    #[default]
+    Bottom,
+    Top,
+    Flow,
+}
+
 /// `[terminal]` — the terminal emulator (Rio heritage).
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct TerminalConfig {
+    /// Use command blocks and a pinned input area for new terminal sessions.
+    #[serde(default = "default_bool_true", rename = "block-ui")]
+    pub block_ui: bool,
+    /// Input placement; only applies to the block terminal layout.
+    #[serde(default, rename = "input-position")]
+    pub input_position: TerminalInputPosition,
     #[serde(default = "default_shell")]
     pub shell: Shell,
     #[serde(default)]
@@ -266,6 +282,8 @@ pub struct TerminalConfig {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
+            block_ui: true,
+            input_position: TerminalInputPosition::default(),
             shell: default_shell(),
             cursor: CursorConfig::default(),
             scroll: Scroll::default(),
@@ -1784,6 +1802,42 @@ mod tests {
     }
 
     #[test]
+    fn terminal_block_ui_defaults_on_and_roundtrips_config_snapshots() {
+        assert!(Config::default().terminal.block_ui);
+        assert!(parse("{}").terminal.block_ui);
+        assert!(parse(r#"{"terminal":{}}"#).terminal.block_ui);
+        for enabled in [false, true] {
+            let config = parse(&format!(
+                r#"{{
+                    // Presentation applies only to new sessions.
+                    "terminal": {{"block-ui": {enabled}, "shell": {{"program": "/bin/sh", "args": ["-l"]}},}},
+                    "appearance": {{"theme": "tokyo_night", "fonts": {{"size": 18}}}},
+                }}"#
+            ));
+            assert_eq!(config.terminal.block_ui, enabled);
+            let snapshot = serde_json::to_value(&config).unwrap();
+            assert_eq!(snapshot["terminal"]["block-ui"], enabled);
+            assert_eq!(snapshot["terminal"]["shell"]["program"], "/bin/sh");
+            assert_eq!(
+                snapshot["terminal"]["shell"]["args"],
+                serde_json::json!(["-l"])
+            );
+            assert_eq!(snapshot["appearance"]["theme"], "tokyo_night");
+            assert_eq!(snapshot["appearance"]["fonts"]["size"].as_f64(), Some(18.0));
+            let restored: Config = serde_json::from_value(snapshot).unwrap();
+            assert_eq!(restored.terminal, config.terminal);
+            assert_eq!(restored.appearance.theme, config.appearance.theme);
+        }
+        assert!(
+            parse_config_content::<Config>(
+                Path::new("config.json"),
+                r#"{"terminal":{"block-ui":"true"}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn renderer_and_cursor_sections_parse() {
         let config = parse(
             r#"{
@@ -1793,6 +1847,56 @@ mod tests {
         );
         assert_eq!(config.terminal.cursor.shape, CursorShape::Underline);
         assert_eq!(config.renderer.backend, renderer::Backend::Vulkan);
+    }
+
+    #[test]
+    fn terminal_input_position_defaults_and_roundtrips() {
+        assert_eq!(
+            Config::default().terminal.input_position,
+            TerminalInputPosition::Bottom
+        );
+        for source in ["{}", r#"{"terminal":{}}"#] {
+            let config = parse(source);
+            assert_eq!(
+                config.terminal.input_position,
+                TerminalInputPosition::Bottom
+            );
+            assert!(config.terminal.block_ui);
+        }
+        for (value, expected) in [
+            ("bottom", TerminalInputPosition::Bottom),
+            ("top", TerminalInputPosition::Top),
+            ("flow", TerminalInputPosition::Flow),
+        ] {
+            for enabled in [false, true] {
+                let config = parse(&format!(
+                    r#"{{"terminal":{{"block-ui":{enabled},"input-position":"{value}",}},}}"#
+                ));
+                assert_eq!(config.terminal.input_position, expected);
+                assert_eq!(config.terminal.block_ui, enabled);
+                let snapshot = serde_json::to_value(&config).unwrap();
+                assert_eq!(snapshot["terminal"]["input-position"], value);
+                let restored: Config = serde_json::from_value(snapshot).unwrap();
+                assert_eq!(restored.terminal, config.terminal);
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_input_position_rejects_invalid_values() {
+        use serde_json::json;
+
+        for value in [
+            json!("left"),
+            json!("TOP"),
+            json!(""),
+            json!(1),
+            json!(true),
+            json!(null),
+        ] {
+            let source = json!({"terminal": {"input-position": value}}).to_string();
+            assert!(parse_config_content::<Config>(Path::new("config.json"), &source).is_err());
+        }
     }
 
     #[test]

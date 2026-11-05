@@ -6,6 +6,11 @@ import { useGpuix } from "@gpuix/solid";
  * re-reading geometry the replacement computes at its own scale. */
 export const GenerationRetiring = createContext<Accessor<boolean>>(() => false);
 
+/** Incoming content is mounted for layout before it is visible. Entrance
+ * reveals must wait for promotion rather than spending their clock hidden.
+ * Outside AppGeneration a standalone view is already presented. */
+export const GenerationPresented = createContext<Accessor<boolean>>(() => true);
+
 /** Keep the native window root installed while rebuilding scale-dependent
  * components. A replacement generation mounts invisibly beneath the current
  * one and is swapped in only once its layout has settled: entrance motion,
@@ -63,7 +68,7 @@ export function AppGeneration<T extends object>(props: {
       return <div testId={pending() ? "app-generation-pending" : "app-generation"} style={{
         position: "absolute", left: 0, top: 0, width: "100%", height: "100%", display: "flex", flexDirection: "column",
         minWidth: 0, minHeight: 0, opacity: pending() ? 0 : 1, pointerEvents: pending() ? "none" : undefined,
-      }}><GenerationRetiring.Provider value={retiring}>{props.children(value)}</GenerationRetiring.Provider></div>;
+      }}><GenerationPresented.Provider value={()=>!pending()}><GenerationRetiring.Provider value={retiring}>{props.children(value)}</GenerationRetiring.Provider></GenerationPresented.Provider></div>;
     }}</For></div>;
 }
 

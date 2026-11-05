@@ -114,6 +114,9 @@ impl CachedAgentRuntime {
             return;
         }
         let (state, tool) = match tail.kind {
+            NeoismAgentMessageKind::Reasoning if tail.tool == "compaction_reasoning" => {
+                (NeoismAgentStreamingState::Compacting, None)
+            }
             NeoismAgentMessageKind::Reasoning => {
                 (NeoismAgentStreamingState::Thinking, None)
             }
@@ -439,6 +442,8 @@ pub(in crate::panels::agent_pane::state) fn apply_cached_part_delta(
             Some("reasoning" | "thinking") => {
                 NeoismAgentMessage::reasoning(delta).with_id(part_id.to_string())
             }
+            Some("compaction") => NeoismAgentMessage::compaction(delta, "summary")
+                .with_id(part_id.to_string()),
             _ => NeoismAgentMessage::assistant(delta).with_id(part_id.to_string()),
         };
         messages.push(message);
@@ -454,6 +459,7 @@ pub(in crate::panels::agent_pane::state) fn apply_cached_part_delta(
     }
     messages.push(match message_kind {
         NeoismAgentMessageKind::Reasoning => NeoismAgentMessage::reasoning(delta),
+        NeoismAgentMessageKind::Compaction => NeoismAgentMessage::compaction(delta, "summary"),
         _ => NeoismAgentMessage::assistant(delta),
     });
 }
@@ -914,10 +920,18 @@ impl NeoismAgentPane {
     pub fn cache_upsert_part_message_with_parent(
         &mut self,
         session_id: &str,
-        message: NeoismAgentMessage,
+        mut message: NeoismAgentMessage,
         parent_message_id: Option<&str>,
     ) {
         let cached = self.cached_session_entry(session_id);
+        if message.kind == NeoismAgentMessageKind::Reasoning
+            && (cached.runtime.streaming_state == NeoismAgentStreamingState::Compacting
+                || cached.messages.iter().any(|row|
+                    parent_message_id == Some(row.id.as_str()) && row.kind == NeoismAgentMessageKind::Compaction
+                        || row.id == message.id && row.tool == "compaction_reasoning"))
+        {
+            message.tool = "compaction_reasoning".into();
+        }
         let can_drive = !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System)
             && cached.runtime.queue_handoff.stopped_parts.observe(&message.id, parent_message_id);
         if !can_drive && !matches!(message.kind, NeoismAgentMessageKind::User | NeoismAgentMessageKind::System) {
@@ -962,7 +976,19 @@ impl NeoismAgentPane {
         if !can_drive {
             return;
         }
+        let compaction_reasoning = matches!(kind, Some("reasoning" | "thinking"))
+            && (cached.runtime.streaming_state == NeoismAgentStreamingState::Compacting
+                || cached.messages.iter().any(|row|
+                    parent_message_id == Some(row.id.as_str()) && row.kind == NeoismAgentMessageKind::Compaction
+                        || part_id == Some(row.id.as_str()) && row.tool == "compaction_reasoning"));
         apply_cached_part_delta(&mut cached.messages, part_id, kind, delta);
+        if compaction_reasoning {
+            if let Some(row) = cached.messages.iter_mut().rev().find(|row|
+                row.kind == NeoismAgentMessageKind::Reasoning && part_id.is_none_or(|id| row.id == id))
+            {
+                row.tool = "compaction_reasoning".into();
+            }
+        }
         cached.runtime.refresh_streaming_from_tail(&cached.messages);
         cached.invalidate_timeline_layout();
         self.trim_session_cache();

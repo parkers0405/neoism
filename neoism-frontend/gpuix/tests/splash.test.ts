@@ -12,15 +12,17 @@ function splash(){const {id}=coreCall<{id:number}>("splash.new",{fontFamily:"Cas
 test("original splash paints all eight source menu actions and exact hit geometry",()=>{
  const host=splash(),frame=host.frame();
  expect(frame.rows.map((row:any)=>row.label)).toEqual(["Change Directory","Notes","Open file tree","Neoism Agent","Search","Agent panel","Command palette","New Terminal"]);
- expect(frame.wordmark[2]).toBeLessThanOrEqual(720);expect(frame.wordmark[0]+frame.wordmark[2]/2).toBeCloseTo(600);
+  expect(frame.wordmark[2]).toBeLessThanOrEqual(1168);expect(frame.wordmark[0]+frame.wordmark[2]/2).toBeCloseTo(600);
  expect(frame.rows[0].rect[1]).toBe(frame.rows[1].rect[1]);expect(frame.rows[0].rect[0]).toBeLessThan(frame.rows[1].rect[0]);
  for(const row of frame.rows){const [x,y,w,h]=row.rect;expect(coreCall<any>("splash.hit",{id:host.id,x:x+w/2,y:y+h/2}).action).toBe(row.action);expect(x).toBeGreaterThanOrEqual(0);expect(x+w).toBeLessThanOrEqual(1200);}
  const row=frame.rows[0];expect(host.frame({pointer:true,x:row.rect[0]+1,y:row.rect[1]+1}).commands.some((command:any)=>command.kind==="rect")).toBe(true);
- const narrow=host.frame({width:300,height:500,cols:30,rows:27});expect(narrow.rows.every((row:any)=>row.rect[0]===narrow.rows[0].rect[0])).toBe(true);
+  const narrow=host.frame({width:300,height:500,cols:30,rows:27});expect(narrow.rows.every((row:any)=>row.rect[0]===narrow.rows[0].rect[0])).toBe(true);
+  expect(narrow.wordmark[2]).toBeGreaterThan(255);
+  for(const row of narrow.rows){expect(row.rect[0]).toBeCloseTo(16);expect(row.rect[0]+row.rect[2]).toBeCloseTo(284);}
  expect(host.frame({dismissedMs:420}).rows).toEqual([]);
 });
 async function fixture(restore?:boolean){
- const daemon=createAgentDaemon({deferCreations:false});const config={...loadConfig(["--config","/nonexistent/splash"],{}),endpoint:daemon.endpoint,authToken:undefined};const client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+ const daemon=createAgentDaemon({deferCreations:false});const config={...loadConfig(["--config","/nonexistent/splash"],{},{terminal:{"block-ui":false}}),endpoint:daemon.endpoint,authToken:undefined};const client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
  cleanups.push(()=>{model.dispose();client.stop();daemon.stop();});
  if(restore){const editor=new NativeEditor("README.md","saved",true);editor.call("paste",{text:"dirty "});const snapshot=editor.snapshot();editor.dispose();model.restoreSession({version:1,activeWorkspaceId:"a",activeSurfaceId:"file:a:README.md",surfaces:[{id:"file:a:README.md",workspaceId:"a",kind:"file",title:"README.md",path:"README.md",rootDir:"/project/a"}],editors:{"file:a:README.md":snapshot},providerStates:{},drafts:{},composerDrafts:{},ui:{terminalSplash:{legacy:true}}});}
  model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);return{daemon,model,client};

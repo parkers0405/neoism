@@ -1,3 +1,13 @@
+diff --git c/.changeset/neoism-composer-right.md w/.changeset/neoism-composer-right.md
+new file mode 100644
+--- /dev/null
++++ w/.changeset/neoism-composer-right.md
+@@ -0,0 +1,5 @@
++---
++"@gpuix/native": patch
++---
++
++Forward Right at the unselected end of a submit composer to its host key handler, allowing inline suggestions to be accepted without executing. Preserve native middle-of-text, selection, and active IME navigation.
 diff --git c/.changeset/neoism-display-frame.md w/.changeset/neoism-display-frame.md
 new file mode 100644
 index 0000000..512cf66
@@ -70,7 +80,7 @@ diff --git c/README.md w/README.md
 index 4459e7b..079dbbf 100644
 --- c/README.md
 +++ w/README.md
-@@ -1,5 +1,68 @@
+@@ -1,5 +1,70 @@
  # GPUIX
  
 +`GpuixRenderer.initAsync(options)` returns a promise for native window readiness.
@@ -79,6 +89,8 @@ index 4459e7b..079dbbf 100644
 +concurrent/repeated initialization is rejected. macOS keeps initialization on
 +the main thread. The synchronous `init` method remains available. Hosts using
 +stdio automation must call the runtime's `enableAutomation(renderer)` afterward.
++
++Submit textareas with a `keyDown` listener delegate Right at an unselected end-of-text insertion point to that listener, so hosts can accept inline suggestions without submitting. Native middle-of-text movement, selection collapse, and active IME composition are unchanged.
 +
 +Plain adapter text runs use GPUI's text element directly, retaining selection,
 +search, and painted text bounds without a redundant stateful container. Empty
@@ -1102,7 +1114,23 @@ index 7be2d25..e1b04b7 100644
      fn reset_blink(&mut self, cx: &Context<Self>) {
          self.blink_anchor = cx.background_executor().now();
      }
-@@ -933,13 +1009,31 @@ impl TextEditorState {
+@@ -925,6 +1001,15 @@ impl TextEditorState {
+     fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
++        // GPUI consumes native Right actions before the host key handler. At
++        // the composer boundary there is no native movement left to perform.
++        if self.multiline && self.emits_submit && self.emits_key_down
++            && self.selected_range.is_empty() && self.cursor_offset() == self.content.len()
++            && self.marked_range.is_none()
++        {
++            self.emit_composer_key("right");
++            return;
++        }
+         let offset = if self.selected_range.is_empty() {
+             self.next_boundary(self.cursor_offset())
+         } else {
+             self.selected_range.end
+         };
+@@ -933,13 +1018,31 @@ impl TextEditorState {
          self.move_to(offset, cx);
      }
 

@@ -5,7 +5,8 @@ import {fileURLToPath} from "node:url";
 export interface DevicePreviewPin {baseRevision:string;basePatchSha256:string;patch:string;patchSha256:string;cargoLockSha256:string;patchedFiles:Record<string,string>}
 export interface DeviceWindowCapturePin {zedRevision:string;basePatch:string;basePatchSha256:string;patch:string;patchSha256:string;patchedFiles:Record<string,string>}
 export interface DisplayPin {repository:string;revision:string;zedRevision:string;zedPatch?:string;zedPatchSha256?:string;zedPatchedFiles?:Record<string,string>;toolchain:string;rustcVersion:string;patch:string;patchSha256:string;cargoLockSha256:string;patchedFiles:Record<string,string>;profile:"release";lto:boolean;defaultFeatures:boolean;jobs:number;devicePreview?:DevicePreviewPin;deviceWindowCapture?:DeviceWindowCapturePin}
-export interface DisplayStamp {version:1;identity:string;artifact:string;sha256:string;platform:string;arch:string;revision:string;patchSha256:string;rustcVersion:string;devicePreview?:boolean}
+export interface DisplayStamp {version:1;identity:string;artifact:string;sha256:string;platform:string;arch:string;revision:string;patchSha256:string;rustcVersion:string;devicePreview?:boolean;profile?:"debug"|"release"}
+export const displayDebugBuildEnabled=()=>process.env.NEOISM_GPUIX_DISPLAY_DEBUG==="1";
 export const devicePreviewBuildEnabled=()=>process.env.NEOISM_GPUIX_DEVICE_PREVIEW==="1";
 export const frontendRoot=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 export const sha256=(bytes:string|Uint8Array)=>createHash("sha256").update(bytes).digest("hex");
@@ -25,13 +26,14 @@ export function readDisplayPin(root=frontendRoot):DisplayPin{
  }
  return pin;
 }
-export const displayIdentity=(pin:DisplayPin,platform=process.platform,arch=process.arch)=>sha256(JSON.stringify({pin,platform,arch}));
-export const displayStampPath=(root=frontendRoot)=>join(root,"artifacts",`gpuix-display-${process.platform}-${process.arch}${devicePreviewBuildEnabled()?"-device-preview":""}.json`);
-export function verifiedDisplayBinding(root=frontendRoot){
- const pin=readDisplayPin(root),path=displayStampPath(root);
+export const displayIdentity=(pin:DisplayPin,platform=process.platform,arch=process.arch,debug=displayDebugBuildEnabled())=>sha256(JSON.stringify(debug?{pin,platform,arch,profile:"debug"}:{pin,platform,arch}));
+export const displayStampPath=(root=frontendRoot,debug=displayDebugBuildEnabled())=>join(root,"artifacts",`gpuix-display-${process.platform}-${process.arch}${devicePreviewBuildEnabled()?"-device-preview":""}${debug?"-debug":""}.json`);
+export function verifiedDisplayBinding(root=frontendRoot,debug=displayDebugBuildEnabled()){
+ const pin=readDisplayPin(root),path=displayStampPath(root,debug);
  if(!existsSync(path))throw new Error("The native display binding is not built. Run npm run build:display.");
  const stamp=JSON.parse(readFileSync(path,"utf8")) as DisplayStamp;
- if(stamp.version!==1||stamp.identity!==displayIdentity(pin)||stamp.platform!==process.platform||stamp.arch!==process.arch||stamp.revision!==pin.revision||stamp.patchSha256!==pin.patchSha256)throw new Error("The native display binding has another source pin. Run npm run build:display.");
+ if(stamp.version!==1||stamp.identity!==displayIdentity(pin,process.platform,process.arch,debug)||stamp.platform!==process.platform||stamp.arch!==process.arch||stamp.revision!==pin.revision||stamp.patchSha256!==pin.patchSha256)throw new Error("The native display binding has another source pin. Run npm run build:display.");
+ if((stamp.profile||"release")!==(debug?"debug":"release"))throw new Error("The native display binding has another build profile");
  if(!!stamp.devicePreview!==!!pin.devicePreview)throw new Error("The native display binding has another device-preview build configuration");
  if(basename(stamp.artifact)!==stamp.artifact||!/^gpuix-display-[a-z0-9-]+\.node$/.test(stamp.artifact))throw new Error("Invalid native display binding artifact name");
  const binding=join(root,"artifacts",stamp.artifact);
@@ -41,6 +43,7 @@ export function verifiedDisplayBinding(root=frontendRoot){
 /** Replace only @gpuix/native's ESM entry point. Generic NAPI_RS environment
  * overrides remain untouched and cannot redirect another addon to GPUIX. */
 export function displayBindingLoader(binding:string,stamp:DisplayStamp,packaged=false){
+ if(packaged&&stamp.profile==="debug")throw new Error("Debug display bindings cannot be packaged as production artifacts");
  return `import {createRequire} from "node:module";
 ${packaged?`import {existsSync} from "node:fs";
 import {dirname,join} from "node:path";

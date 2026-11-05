@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { connect } from "node:net";
@@ -90,15 +90,32 @@ test("rejects symlinks to outside files and directories", () => {
 test("root lookup uses installed resources before developer fallback, with actionable missing error", async () => {
   const { root } = await fixture();
   const executable = join(root, "neoism"); writeFileSync(executable, "");
-  expect(docsRoot(executable, root)).toBe(root);
+  // docsRoot returns canonical paths (on macOS /tmp can resolve to /private/tmp).
+  expect(docsRoot(executable, root)).toBe(realpathSync(root));
   mkdirSync(join(root, "resources/docs/api/docs"), { recursive: true });
   writeFileSync(join(root, "resources/docs/api/docs/index.html"), "installed");
-  expect(docsRoot(executable, "/missing")).toBe(join(root, "resources/docs"));
+  expect(docsRoot(executable, root)).toBe(realpathSync(join(root, "resources/docs")));
   rmSync(join(root, "resources"), { recursive: true });
   mkdirSync(join(root, "resources/docs"), { recursive: true });
   writeFileSync(join(root, "resources/docs/index.html"), "old speculative layout");
-  expect(docsRoot(executable, root)).toBe(root);
+  expect(docsRoot(executable, root)).toBe(realpathSync(root));
   expect(() => docsRoot(executable, "/missing")).toThrow("npm run build");
+});
+test("root lookup canonicalizes symlinked developer paths and macOS bundle executables", async () => {
+  if (process.platform === "win32") return; // Requires symlink privileges on Windows.
+  const { root } = await fixture();
+  const alias = join(root, "developer-docs");
+  symlinkSync(root, alias);
+  const executable = join(root, "Neoism.app/Contents/MacOS/neoism");
+  mkdirSync(join(root, "Neoism.app/Contents/MacOS"), { recursive: true });
+  writeFileSync(executable, "");
+  const launcher = join(root, "neoism");
+  symlinkSync(executable, launcher);
+  expect(docsRoot(launcher, alias)).toBe(realpathSync(root));
+  const installed = join(root, "Neoism.app/Contents/Resources/resources/docs");
+  mkdirSync(join(installed, "api/docs"), { recursive: true });
+  writeFileSync(join(installed, "api/docs/index.html"), "installed bundle");
+  expect(docsRoot(launcher, alias)).toBe(realpathSync(installed));
 });
 test("docs routing is first-argument only, without consuming legacy options", async () => {
   expect(docsArguments(["docs"])).toEqual([]);

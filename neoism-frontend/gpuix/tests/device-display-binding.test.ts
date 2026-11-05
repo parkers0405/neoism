@@ -19,7 +19,8 @@ function fixture(){
  for(const path of [normal.patch,normal.zedPatch!,"native/device-preview-pin.json","native/patches/gpuix-device-preview.patch","native/device-window-capture-pin.json","native/patches/gpui-device-window-capture.patch"])writeFileSync(join(root,path),readFileSync(join(frontendRoot,path)));
  const bytes=Buffer.from("fixture, not a native addon"),artifact="gpuix-display-test.node";
  writeFileSync(join(root,"artifacts",artifact),bytes);
- const stamp:DisplayStamp={version:1,identity:displayIdentity(normal),artifact,sha256:sha256(bytes),platform:process.platform,arch:process.arch,revision:normal.revision,patchSha256:normal.patchSha256,rustcVersion:normal.rustcVersion};
+  const stamp:DisplayStamp={version:1,identity:displayIdentity(normal),artifact,sha256:sha256(bytes),platform:process.platform,arch:process.arch,revision:normal.revision,patchSha256:normal.patchSha256,rustcVersion:normal.rustcVersion};
+  if(process.env.NEOISM_GPUIX_DISPLAY_DEBUG==="1")stamp.profile="debug";
  writeFileSync(displayStampPath(root),JSON.stringify(stamp));
  return {root,normal,stamp};
 }

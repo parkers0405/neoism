@@ -1,12 +1,12 @@
 {
   "baseRevision": "a53b294401280014e94eb9bd98a7c7ed1929f92d",
-  "basePatchSha256": "5d3a5bcf463772c1572e4fb52f96339cd985ac90fbd493c82332e947508b4c4c",
+  "basePatchSha256": "e6b09ac8762ed244b2a1b4eac833b13b6da832ddca9caf44b8f912c33fb3d675",
   "patch": "native/patches/gpuix-device-preview.patch",
   "patchSha256": "be7a7deaeab19d55e06d9d2a839c8e6d6e2b5d570966891fc647ef2636410b45",
   "cargoLockSha256": "7bf9299930614da86a47d7cbc1ee71dc76435b934cc3a169a32900cf6f7712de",
   "patchedFiles": {
     ".changeset/neoism-device-preview.md": "427a5f741880fc81af8c48725122eba0750e25cc9603ce4ebe6f67534f6a75d9",
-    "README.md": "f387179e7171fa61eb5d6d318cfaa538e71ed77bab991ffdd20a6d6d1109330c",
+    "README.md": "1f1ce3877482ff02dd2439e841a05eabf260691cd060cdd8c85bfe43adf6622c",
     "packages/native/Cargo.toml": "5bfbc4ee13e3af60facb76e68e032976684e7dc17e8194851f6fd0b6273437e1",
     "packages/native/Cargo.lock": "7bf9299930614da86a47d7cbc1ee71dc76435b934cc3a169a32900cf6f7712de",
     "packages/native/src/custom_elements/mod.rs": "fba8f41d67e245c180c03588297c380c75ea820b190e7b064ada0e6adafc63f9",

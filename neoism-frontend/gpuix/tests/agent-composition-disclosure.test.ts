@@ -72,8 +72,9 @@ let view:Awaited<ReturnType<typeof fixture>>|undefined;
 // Initial paint + first native read-detail preparation is fixture work, not
 // part of the parent/collapse/update interaction budget. Capture actual frames
 // from actual clicks; each test receives an independent timeline. Windows CI
-// measured 3910ms in that first read frame alone. Keep the test bodies at 5s.
-beforeEach(async()=>{view=await fixture();},10000);
+// measured 18.5s in that first synchronous read frame on a cold runner; later
+// fixtures take milliseconds. Keep convergence at 1s and test bodies at 5s.
+beforeEach(async()=>{view=await fixture();},30000);
 afterEach(()=>{view?.dispose();view=undefined;});
 
 test("composition calls stay inset with independent child disclosures",()=>{

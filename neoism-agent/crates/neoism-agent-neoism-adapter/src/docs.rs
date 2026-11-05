@@ -6,6 +6,10 @@ use neoism_agent_service_api::{
 pub(crate) struct NeoismDocumentationService;
 
 impl DocumentationService for NeoismDocumentationService {
+    fn version(&self) -> Option<&str> {
+        Some(neoism_product_docs::DOCS_VERSION)
+    }
+
     fn list(&self) -> Result<Vec<DocumentationPageSummary>, ServiceError> {
         Ok(neoism_product_docs::BUNDLED_DOCS
             .iter()
@@ -101,6 +105,25 @@ mod tests {
             .unwrap()
             .iter()
             .any(|hit| hit.path == "Neoism/Appearance.md"));
+    }
+
+    #[test]
+    fn shared_bundle_exposes_version_and_searchable_api_reference() {
+        let service = NeoismDocumentationService;
+        assert_eq!(service.version(), Some(neoism_product_docs::DOCS_VERSION));
+        let page = service
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|page| page.path.starts_with("API/"))
+            .expect("generated API reference is bundled with guides");
+        let body = service.read(&page.path).unwrap();
+        assert!(!body.content.is_empty());
+        assert!(service
+            .search(&page.title, 20)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.path == page.path));
     }
 
     #[test]

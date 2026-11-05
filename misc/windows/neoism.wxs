@@ -25,6 +25,7 @@
       <ComponentRef Id="AgentExe" />
       <ComponentRef Id="AgentLuaRunnerExe" />
       <ComponentGroupRef Id="WebFiles" />
+      <ComponentGroupRef Id="DocsFiles" />
       <ComponentRef Id="InstallRegistration" />
       <ComponentRef Id="UserPath" />
       <ComponentRef Id="StartMenuShortcut" />
@@ -35,6 +36,9 @@
       <Directory Id="LocalProgramsFolder" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="Neoism">
           <Directory Id="WebFolder" Name="web" />
+          <Directory Id="ResourcesFolder" Name="resources">
+            <Directory Id="DocsFolder" Name="docs" />
+          </Directory>
         </Directory>
       </Directory>
     </StandardDirectory>
@@ -149,6 +153,9 @@
 
     <ComponentGroup Id="WebFiles" Directory="WebFolder">
       <Files Include="$(var.BinaryDir)\web\**" />
+    </ComponentGroup>
+    <ComponentGroup Id="DocsFiles" Directory="DocsFolder">
+      <Files Include="$(var.BinaryDir)\resources\docs\**" />
     </ComponentGroup>
 
     <DirectoryRef Id="NeoismProgramMenu">

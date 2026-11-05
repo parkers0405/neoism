@@ -11,24 +11,13 @@ const WORKSPACE_FILE_LEGACY: &str = "workspace.toml";
 pub const CURRENT_WORKSPACE_CONFIG_VERSION: u32 = 6;
 pub const DEFAULT_NOTES_WORKSPACE: &str = "Default";
 pub const DEFAULT_NOTES_VAULTS_DIR: &str = "Neoism/Vaults";
-pub const DEFAULT_NOTES_INDEX: &str = "Start Here.md";
-pub const WELCOME_DIR: &str = "Welcome";
+pub const DEFAULT_NOTES_INDEX: &str = "Welcome.md";
 pub const PROJECT_METADATA_FILE: &str = "project.json";
 /// Pre-JSON vault metadata file, read once to upgrade in place.
 const PROJECT_METADATA_FILE_LEGACY: &str = "project.toml";
 pub(crate) const DEFAULT_NOTES_WORKSPACE_ID: &str = "neoism-notes-default-v1";
-const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-v11";
-
-const REPLACED_WELCOME_PATHS: &[&str] = &[
-    "Getting Started.md",
-    "The Terminal.md",
-    "The Neoism Agent.md",
-    "Notes and Drawings.md",
-    "Multiplayer.md",
-    "Keybindings.md",
-    "Editor",
-    "Configuration",
-];
+const WELCOME_SEEDED_MARKER: &str = ".neoism-welcome-seeded-short-v1";
+const WELCOME_NOTE: &str = include_str!("welcome_note.md");
 
 #[derive(Debug, Clone)]
 pub struct NeoismWorkspace {
@@ -1040,67 +1029,68 @@ fn ensure_note_root_dirs(workspace: &NeoismWorkspace) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Bundled Zed-style "Welcome" getting-started docs, seeded into the DEFAULT
-/// vault so users have a built-in guide (the start-screen "Notes" button and
-/// Alt+N open onto this folder). Pages are real Markdown files under
-/// `src/welcome/`.
-/// Seed the `Welcome/` getting-started folder into the vault once. A marker
-/// records that the initial bundle was installed so later user edits and
-/// deletions remain authoritative.
+/// Seed one short welcome note into the default vault. The handbook lives in
+/// the documentation browser, not Notes. Existing notes are always user-owned.
 fn ensure_welcome_docs(workspace: &NeoismWorkspace) -> std::io::Result<()> {
     if !workspace.config.notes.enabled {
         return Ok(());
     }
-    // The bundled getting-started docs always live in the DEFAULT vault,
+    // The welcome note always lives in the DEFAULT vault,
     // not per-project/linked vaults, so there is one canonical home for
     // them regardless of which workspace is open.
     seed_welcome_docs(&default_notes_workspace().notes_vault_dir())
 }
 
 fn seed_welcome_docs(default_vault: &Path) -> std::io::Result<()> {
-    let marker = default_vault.join(WELCOME_SEEDED_MARKER);
-    if marker.is_file() {
-        return Ok(());
-    }
+    use std::io::Write;
 
-    let welcome = default_vault.join(WELCOME_DIR);
-    // Version bumps replace the old managed handbook. Remove only paths Neoism shipped;
-    // unrelated notes in Welcome remain user-owned.
-    for replaced in REPLACED_WELCOME_PATHS {
-        let path = welcome.join(replaced);
-        if path.is_dir() {
-            let _ = fs::remove_dir_all(path);
-        } else {
-            let _ = fs::remove_file(path);
+    // Never traverse a pre-existing symlink when creating seed directories.
+    // A symlinked vault must not redirect writes. Reject non-directory ancestors.
+    let welcome = default_vault;
+    for ancestor in welcome.ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
         }
-    }
-    // A marker bump is a one-time managed-doc migration: replaced paths are
-    // removed, every current bundled page is installed/refreshed, and unrelated
-    // user notes remain untouched. Once the current marker exists this function
-    // returns early, so later user edits and deletions are honored.
-    for doc in neoism_product_docs::BUNDLED_DOCS {
-        let page = welcome.join(doc.path);
-        if let Some(parent) = page.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(page, doc.body)?;
-    }
-
-    fs::create_dir_all(default_vault)?;
-    // Drop stale `.neoism-welcome-seeded-v*` markers from earlier versions
-    // so the vault root isn't littered with one per release.
-    if let Ok(entries) = default_vault.read_dir() {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(".neoism-welcome-seeded-")
-                && name != WELCOME_SEEDED_MARKER
-            {
-                let _ = fs::remove_file(entry.path());
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                return Ok(());
             }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
-    fs::write(marker, b"seeded\n")?;
+    let marker = default_vault.join(WELCOME_SEEDED_MARKER);
+    match fs::symlink_metadata(&marker) {
+        // Any occupied marker path is authoritative; do not follow links.
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    fs::create_dir_all(&welcome)?;
+    // create_new also refuses dangling symlinks and concurrent seed attempts.
+    // An existing note (or any other occupied path) is never overwritten.
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(welcome.join(DEFAULT_NOTES_INDEX))
+    {
+        Ok(mut file) => file.write_all(WELCOME_NOTE.as_bytes())?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    // Keep all previous markers and handbook copies, including edited pages.
+    // Only record this seed after the note was written (or already occupied).
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+    {
+        Ok(mut file) => file.write_all(b"seeded\n")?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 
@@ -1253,10 +1243,25 @@ mod tests {
     }
 
     #[test]
+    fn welcome_seed_installs_exactly_one_note() {
+        let root = temp_root("welcome-single");
+        seed_welcome_docs(&root).unwrap();
+        seed_welcome_docs(&root).unwrap();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        assert_eq!(
+            fs::read_to_string(root.join(DEFAULT_NOTES_INDEX)).unwrap(),
+            WELCOME_NOTE
+        );
+        assert!(!root.join("Welcome").exists());
+        assert!(!root.join("Welcomes").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn welcome_seed_respects_deleted_pages() {
         let root = temp_root("welcome-delete");
         seed_welcome_docs(&root).unwrap();
-        let getting_started = root.join(WELCOME_DIR).join(DEFAULT_NOTES_INDEX);
+        let getting_started = root.join(DEFAULT_NOTES_INDEX);
         assert!(getting_started.is_file());
 
         fs::remove_file(&getting_started).unwrap();
@@ -1267,33 +1272,109 @@ mod tests {
     }
 
     #[test]
-    fn welcome_seed_refreshes_shipped_pages_on_version_bump() {
+    fn welcome_seed_preserves_shipped_pages_on_version_bump() {
         let root = temp_root("welcome-refresh");
-        let welcome = root.join(WELCOME_DIR);
+        let welcome = root.join("Welcome");
         fs::create_dir_all(&welcome).unwrap();
         // A previous handbook marker exists: one current managed page holds
         // stale content, an old shipped path remains, and a user note exists.
-        let shipped = welcome.join(DEFAULT_NOTES_INDEX);
+        let shipped = welcome.join("Start Here.md");
         fs::create_dir_all(shipped.parent().unwrap()).unwrap();
         fs::write(&shipped, "STALE DOC").unwrap();
         let replaced = welcome.join("Getting Started.md");
         fs::write(&replaced, "REPLACED DOC").unwrap();
+        let nested = welcome.join("Editor").join("My edited page.md");
+        fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        fs::write(&nested, "edited handbook").unwrap();
         fs::write(root.join(".neoism-welcome-seeded-v2"), b"seeded\n").unwrap();
+        fs::write(root.join(".neoism-welcome-seeded-v11"), b"seeded\n").unwrap();
         let user_note = welcome.join("My Note.md");
         fs::write(&user_note, "keep me").unwrap();
 
         seed_welcome_docs(&root).unwrap();
 
-        // Managed page refreshed; replaced path and previous marker removed;
-        // the current marker written; the user's own note left untouched.
-        let refreshed = fs::read_to_string(&shipped).unwrap();
-        assert!(refreshed.contains("# Welcome to Neoism"));
-        assert!(!replaced.exists());
-        assert!(!root.join(".neoism-welcome-seeded-v2").exists());
+        assert_eq!(fs::read_to_string(&shipped).unwrap(), "STALE DOC");
+        assert_eq!(fs::read_to_string(&replaced).unwrap(), "REPLACED DOC");
+        assert_eq!(fs::read_to_string(&nested).unwrap(), "edited handbook");
+        assert!(root.join(".neoism-welcome-seeded-v2").is_file());
+        assert!(root.join(".neoism-welcome-seeded-v11").is_file());
         assert!(root.join(WELCOME_SEEDED_MARKER).is_file());
+        assert_eq!(
+            fs::read_to_string(root.join(DEFAULT_NOTES_INDEX)).unwrap(),
+            WELCOME_NOTE
+        );
         assert_eq!(fs::read_to_string(&user_note).unwrap(), "keep me");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn welcome_seed_preserves_existing_destination() {
+        let root = temp_root("welcome-collision");
+        fs::create_dir_all(&root).unwrap();
+        let note = root.join(DEFAULT_NOTES_INDEX);
+        fs::write(&note, "my note").unwrap();
+        seed_welcome_docs(&root).unwrap();
+        assert_eq!(fs::read_to_string(&note).unwrap(), "my note");
+        fs::remove_file(note).unwrap();
+        seed_welcome_docs(&root).unwrap();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn welcome_seed_leaves_directory_conflicts_untouched() {
+        let root = temp_root("welcome-directory-conflict");
+        fs::write(&root, "not a directory").unwrap();
+        seed_welcome_docs(&root).unwrap();
+        assert_eq!(fs::read_to_string(&root).unwrap(), "not a directory");
+        assert!(!root.join(WELCOME_SEEDED_MARKER).exists());
+        fs::remove_file(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn welcome_seed_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("welcome-symlinks");
+        let outside = temp_root("welcome-outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("vault-link")).unwrap();
+        seed_welcome_docs(&root.join("vault-link").join("nested-vault")).unwrap();
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert!(!root.join(WELCOME_SEEDED_MARKER).exists());
+
+        let target = outside.join("missing.md");
+        symlink(&target, root.join(DEFAULT_NOTES_INDEX)).unwrap();
+        seed_welcome_docs(&root).unwrap();
+        assert!(!target.exists());
+        assert!(root.join(WELCOME_SEEDED_MARKER).is_file());
+
+        fs::remove_file(root.join(WELCOME_SEEDED_MARKER)).unwrap();
+        symlink(
+            outside.join("missing-marker"),
+            root.join(WELCOME_SEEDED_MARKER),
+        )
+        .unwrap();
+        seed_welcome_docs(&root).unwrap();
+        assert!(!outside.join("missing-marker").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn welcome_seed_preserves_the_previous_short_welcome() {
+        let root = temp_root("welcome-previous-short");
+        let previous = root.join("Welcomes/Welcome.md");
+        fs::create_dir_all(previous.parent().unwrap()).unwrap();
+        fs::write(&previous, "my checked-off welcome").unwrap();
+        fs::write(root.join(WELCOME_SEEDED_MARKER), "seeded\n").unwrap();
+        seed_welcome_docs(&root).unwrap();
+        assert_eq!(fs::read_to_string(previous).unwrap(), "my checked-off welcome");
+        assert!(!root.join(DEFAULT_NOTES_INDEX).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

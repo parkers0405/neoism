@@ -85,6 +85,42 @@ test("a window opened directly on SSH acquires one local connection for repeated
 });
 
 
+test("icon typography stays window-owned across host switches, local reloads and SSH reconnects",async()=>{
+ const {tabs,local}=window(),remote=session(true);
+ const initial=local.config.iconFontFamily;
+ remote.config.iconFontFamily="Different remote symbols";
+ tabs.add(remote);
+ try{
+  expect(remote.config.iconFontFamily).toBe(initial);
+  tabs.select(remote);
+  tabs.setIconFontFamily("Updated local symbols");
+  const replacement=session(true);replacement.config.iconFontFamily="Reconnected remote symbols";
+  tabs.replace(remote,replacement);
+  for(const workspace of [...tabs.workspaces(),...tabs.workspaces()]){
+   await tabs.activate(workspace);
+   expect(tabs.context(workspace.id)!.config.iconFontFamily).toBe("Updated local symbols");
+  }
+  expect(local.config.iconFontFamily).toBe(tabs.iconFontFamily);
+ }finally{tabs.dispose();}
+});
+test("local theme stays visible across joined hosts, reconnects and newly opened connections",async()=>{
+ const {tabs,local}=window(),remote=session(true);
+ remote.config.themeName="remote-theme";tabs.add(remote);
+ try{
+  expect(remote.config.themeName).toBe(local.config.themeName);
+  tabs.select(remote);
+  const selected=loadConfig(["--config","/nonexistent/theme-test","--theme","tokyo_night"],{});
+  tabs.setTheme(selected);
+  const replacement=session(true);replacement.config.themeName="reconnected-remote-theme";tabs.replace(remote,replacement);
+  const added=session(true);added.config.themeName="new-remote-theme";tabs.add(added);
+  for(const workspace of tabs.workspaces()){
+   await tabs.activate(workspace);
+   const config=tabs.context(workspace.id)!.config;
+   expect(config.themeName).toBe("tokyo_night");expect(config.theme).toEqual(selected.theme);
+  }
+ }finally{tabs.dispose();}
+});
+
 test("font zoom follows the window across local, SSH, new and reconnected workspaces",async()=>{
  const {tabs,local}=window(),remote=session(true);
  remote.config.fontSize=27;remote.config.scale=27/14;

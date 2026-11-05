@@ -1,11 +1,39 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../src/config";
+import { daemonTokenPath, loadConfig, parseLocalServiceEndpoint } from "../src/config";
 import { easeOutCubic, revealProgress } from "../src/design/animation";
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
+test("service discovery accepts only versioned, concrete loopback endpoints",()=>{
+ const record=(address:string)=>JSON.stringify({protocol:1,pid:123,nonce:"owner",address});
+ expect(parseLocalServiceEndpoint(record("127.0.0.1:54321"))).toBe("ws://127.0.0.1:54321/session");
+ expect(parseLocalServiceEndpoint(record("[::1]:54321"))).toBe("ws://[::1]:54321/session");
+ for(const address of ["0.0.0.0:54321","example.com:54321","127.0.0.1:0","127.0.0.1:65536","127.0.0.1:1234?token=secret"])
+  expect(parseLocalServiceEndpoint(record(address))).toBeUndefined();
+ expect(parseLocalServiceEndpoint("{}")).toBeUndefined();
+ expect(parseLocalServiceEndpoint("not json")).toBeUndefined();
+});
+test("local discovery survives config loads, ignores dead owners and preserves explicit endpoints",async()=>{
+ if(process.platform==="win32")return;
+ const dir=mkdtempSync(join(tmpdir(),"neoism-service-discovery-"));dirs.push(dir);mkdirSync(join(dir,"neoism"));
+ writeFileSync(join(dir,"neoism","daemon-endpoint.json"),JSON.stringify({protocol:1,pid:process.pid,nonce:"owner",address:"127.0.0.1:54321"}));
+ const env={XDG_RUNTIME_DIR:dir};
+ expect(loadConfig([],env,{}).endpoint).toBe("ws://127.0.0.1:54321/session");
+ expect(loadConfig([],{...env,NEOISM_DAEMON_ADDR:"127.0.0.1:9000"},{}).endpoint).toBe("ws://127.0.0.1:9000/session");
+ expect(loadConfig(["--daemon","wss://remote.test/session"],env,{}).endpoint).toBe("wss://remote.test/session");
+ const exited=Bun.spawn([process.execPath,"-e","process.exit(0)"],{stdout:"ignore",stderr:"ignore"});await exited.exited;
+ writeFileSync(join(dir,"neoism","daemon-endpoint.json"),JSON.stringify({protocol:1,pid:exited.pid,nonce:"old-owner",address:"127.0.0.1:54321"}));
+ expect(loadConfig([],env,{}).endpoint).toBe("ws://127.0.0.1:7878/session");
+});
+test("local credentials use the daemon's platform-specific token location",()=>{
+  const temp=tmpdir();
+  expect(daemonTokenPath({USERNAME:"chand"},"win32",temp)).toBe(join(temp,"neoism-chand","daemon-token"));
+  expect(daemonTokenPath({USERNAME:"A B_é😀",XDG_RUNTIME_DIR:"ignored"},"win32",temp)).toBe(join(temp,"neoism-A-B---","daemon-token"));
+  expect(daemonTokenPath({},"win32",temp)).toBe(join(temp,"neoism-default","daemon-token"));
+  expect(daemonTokenPath({XDG_RUNTIME_DIR:"/runtime"},"linux",temp)).toBe(join("/runtime","neoism","daemon-token"));
+});
 test("reads actual Neoism JSONC appearance and ui.window paths without writing config", () => {
   const dir = mkdtempSync(join(tmpdir(), "neoism-gpuix-config-")); dirs.push(dir);
   const path = join(dir, "config.json");

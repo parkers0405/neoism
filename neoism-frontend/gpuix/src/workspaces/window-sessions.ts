@@ -30,16 +30,29 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
  private selected:S;
  private localPending?:Promise<S>;
  private windowFontSize:number;
+ private windowIconFontFamily:string;
+ private windowTheme:Pick<AppConfig,"theme"|"themeName">;
  constructor(initial:S,private hooks:{activate:(session:S)=>void;local:()=>Promise<S>;dispose:(session:S)=>Promise<void>}){
-  this.windowFontSize=initial.config.fontSize;this.selected=initial;this.add(initial);
+  this.windowFontSize=initial.config.fontSize;this.windowIconFontFamily=initial.config.iconFontFamily;this.windowTheme={theme:initial.config.theme,themeName:initial.config.themeName};this.selected=initial;this.add(initial);
  }
  get fontSize(){return this.windowFontSize;}
+ get iconFontFamily(){return this.windowIconFontFamily;}
+ get theme(){return this.windowTheme;}
+ setTheme(config:Pick<AppConfig,"theme"|"themeName">){
+  this.windowTheme={theme:config.theme,themeName:config.themeName};
+  for(const session of this.sessions())this.applyWindowFonts(session);
+ }
+ /** Tab glyph metrics belong to this client window, not the selected daemon. */
+ setIconFontFamily(family:string){
+  this.windowIconFontFamily=family;
+  for(const session of this.sessions())this.applyWindowFonts(session);
+ }
  /** Zoom belongs to the window, including inactive and newly joined hosts. */
  setFontSize(size:number){
   this.windowFontSize=Math.max(7,Math.min(42,size));
-  for(const session of this.sessions())this.applyFontSize(session);
+  for(const session of this.sessions())this.applyWindowFonts(session);
  }
- private applyFontSize(session:S){Object.assign(session.config,{fontSize:this.windowFontSize,scale:this.windowFontSize/14});}
+ private applyWindowFonts(session:S){Object.assign(session.config,{fontSize:this.windowFontSize,scale:this.windowFontSize/14,iconFontFamily:this.windowIconFontFamily},this.windowTheme);}
  sessions=()=>[...this.entries.values()].map(entry=>entry.session);
  subscribe=(listener:()=>void)=>{this.listeners.add(listener);return()=>{this.listeners.delete(listener);};};
  workspaces=()=>this.rows;
@@ -54,13 +67,13 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
  add(session:S,key=localWorkspaceSession(session)?"local":crypto.randomUUID()){
   if(this.key(session))return;
   if(this.entries.has(key))throw new Error("This window already owns that connection");
-  this.applyFontSize(session);
+  this.applyWindowFonts(session);
   this.entries.set(key,{session,unsubscribe:session.model.subscribe(()=>this.refresh())});this.refresh();
  }
  replace(previous:S,next:S){
   const key=this.key(previous);if(!key)throw new Error("The connection is no longer open");
   this.entries.get(key)!.unsubscribe();
-  this.applyFontSize(next);
+  this.applyWindowFonts(next);
   this.entries.set(key,{session:next,unsubscribe:next.model.subscribe(()=>this.refresh())});
   if(this.selected===previous)this.select(next);else this.refresh();
  }
@@ -87,7 +100,7 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
   const owner=this.owners.get(workspace.id);if(!owner)return;
   const pending=owner.session.model.activateWorkspace(owner.workspace);this.select(owner.session);await pending;
  };
- private async local(){
+ async local(){
   const existing=this.sessions().find(localWorkspaceSession);if(existing)return existing;
   if(!this.localPending)this.localPending=this.hooks.local().then(session=>{this.add(session);return session;}).finally(()=>{this.localPending=undefined;});
   return this.localPending;
@@ -120,7 +133,7 @@ export class WindowWorkspaceSessions<S extends WorkspaceSession> implements Work
  dispose(){for(const entry of this.entries.values())entry.unsubscribe();this.listeners.clear();}
 }
 
-export async function waitForWorkspace(model:WorkspaceModel,timeoutMs=10000){
+export async function waitForWorkspace(model:WorkspaceModel,timeoutMs=process.platform==="win32"?300000:150000){
   const ready=()=>!!model.state.activeWorkspace||model.state.connection.phase==="connected"&&!model.state.loading&&Array.isArray(model.state.ui.openWorkspaceIds)&&model.state.ui.openWorkspaceIds.length===0;
   if(ready())return;
  await new Promise<void>((resolve,reject)=>{

@@ -1,5 +1,5 @@
 import {isRecord} from "../daemon/protocol";
-export interface AgentFamilyRow{id:string;parent:string;title:string;agent?:string;status:string;depth:number;startedAt?:number}
+export interface AgentFamilyRow{id:string;parent:string;title:string;agent?:string;externalProvider?:string;status:string;depth:number;startedAt?:number}
 export interface AgentFamily{root:string;roster:AgentFamilyRow[]}
 const records=(value:unknown):Record<string,unknown>=>isRecord(value)?value:{};
 export function agentFamilyRoot(ui:Record<string,unknown>,session:string):string{
@@ -50,9 +50,13 @@ export function noteAgentFamily(ui:Record<string,unknown>,message:unknown):Recor
   if(parents[id]!==parent){if(parents===originalParents)parents={...parents};parents[id]=parent;}
   if(roots[id]!==root){if(roots===originalRoots)roots={...roots};roots[id]=root;}
   const old=previousById.get(id),reported=String(raw.status||old?.status||"running").toLowerCase();
+  // Preserve provider identity separately from task text and model selection.
+  const external=records(raw.externalAgent??records(raw.extra).externalAgent);
+  const provider=external.provider??raw.externalProvider??raw.external_provider;
   const status=reported==="outstanding"?(raw.permissionPending===true?"blocked":"running"):reported;
   const row:AgentFamilyRow={id,parent,title:typeof raw.title==="string"&&raw.title?raw.title:old?.title||id,status,
    agent:typeof raw.agent==="string"?raw.agent:old?.agent,depth:typeof raw.depth==="number"?raw.depth:old?.depth||1,
+   externalProvider:typeof provider==="string"?provider:old?.externalProvider,
    startedAt:typeof raw.startedAt==="number"?raw.startedAt:typeof raw.started_at==="number"?raw.started_at:old?.startedAt};
   if(authoritative)rows.push(row);else if(old)rows[rows.findIndex(entry=>entry.id===id)]=row;else if(tag!=="SubagentMetadata")rows.push(row);
  }
@@ -64,7 +68,7 @@ export function noteAgentFamily(ui:Record<string,unknown>,message:unknown):Recor
  // Compare only this family's rows. A catalog baseline can contain thousands
  // of unrelated roots; cloning/stringifying the complete maps for each one
  // stalls rendering and prevents the socket from draining its bounded queue.
- const fields=(row:AgentFamilyRow)=>[row.id,row.parent,row.title,row.agent,row.status,row.depth,row.startedAt];
+ const fields=(row:AgentFamilyRow)=>[row.id,row.parent,row.title,row.agent,row.externalProvider,row.status,row.depth,row.startedAt];
  const unchanged=rows.length===previous.length&&rows.every((row,index)=>fields(row).every((value,key)=>value===fields(previous[index])[key]));
  if(!unchanged){rosters={...rosters,[root]:rows};}
  const patch:Record<string,unknown>={};

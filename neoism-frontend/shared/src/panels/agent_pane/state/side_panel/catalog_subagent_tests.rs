@@ -42,6 +42,75 @@ fn has(panel: &NeoismAgentSidePanel, id: &str) -> bool {
 }
 
 #[test]
+fn external_child_identity_uses_canonical_agents_not_task_text() {
+    for (agent, expected) in [
+        ("opencode", Some(AgentKind::OpenCode)),
+        ("claude", Some(AgentKind::Claude)),
+        ("claude-code-subagent", Some(AgentKind::Claude)),
+        ("codex-subagent", Some(AgentKind::Codex)),
+        ("neoism", Some(AgentKind::Neoism)),
+        ("neoism-agent", Some(AgentKind::Neoism)),
+        ("explore", None),
+        ("review-claude-migration", None),
+        ("antigravity", None),
+    ] {
+        let mut panel = catalog();
+        let mut feed = snapshot(1, &[("child", "outstanding")]);
+        feed.branches[0].agent = Some(agent.into());
+        feed.branches[0].title = "Compare Claude Code, Codex and OpenCode models".into();
+        assert!(panel.apply_catalog_family_snapshot("root", feed));
+        let child = &panel.sessions()[index(&panel, "child")];
+        assert_eq!(child.agent_kind, expected, "{agent}");
+        if let Some(kind) = child.agent_kind {
+            use crate::panels::agent_pane::icon::{CLAUDE_IMAGE_ID, CODEX_IMAGE_ID, OPENCODE_IMAGE_ID, NEOISM_IMAGE_ID};
+            let image = match agent {
+                "opencode" => OPENCODE_IMAGE_ID,
+                "claude" | "claude-code-subagent" => CLAUDE_IMAGE_ID,
+                "codex-subagent" => CODEX_IMAGE_ID,
+                "neoism" | "neoism-agent" => NEOISM_IMAGE_ID,
+                _ => unreachable!(),
+            };
+            assert_eq!(kind.image_id(), image);
+        }
+        assert_eq!(child.title, "Compare Claude Code, Codex and OpenCode models");
+        assert_eq!(child.branch_status, Some(BranchStatus::Active));
+        assert_eq!(child.branch_root_id.as_deref(), Some("root"));
+        panel.set_selected(index(&panel, "root"));
+        panel.select_next();
+        assert_eq!(panel.selected_session().unwrap().id, "child");
+    }
+}
+
+#[test]
+fn external_child_identity_survives_metadata_projection_and_unknown_providers_stay_generic() {
+    use crate::panels::agent_pane::{server_events::apply_agent_event_to_pane, state::NeoismAgentPane};
+    use neoism_protocol::agent::AgentServerMessage;
+    for (metadata, expected) in [
+        (serde_json::json!({"externalAgent":{"provider":"opencode"}}), Some(AgentKind::OpenCode)),
+        (serde_json::json!({"extra":{"externalAgent":{"provider":"claude"}}}), Some(AgentKind::Claude)),
+        (serde_json::json!({"externalProvider":"codex"}), Some(AgentKind::Codex)),
+        (serde_json::json!({"externalAgent":{"provider":"antigravity"}}), Some(AgentKind::Neoism)),
+        (serde_json::json!({"model":"anthropic/claude", "title":"Codex task", "agent":"explore"}), None),
+    ] {
+        let mut pane = NeoismAgentPane::new();
+        *pane.side_panel_mut() = catalog();
+        // A later snapshot must not inherit the child's earlier provider icon.
+        let mut prior = snapshot(0, &[("child", "outstanding")]);
+        prior.branches[0].agent = Some("codex".into());
+        pane.side_panel_mut().apply_catalog_family_snapshot("root", prior);
+        let mut raw = serde_json::to_value(snapshot(1, &[("child", "outstanding")])).unwrap();
+        raw["branches"][0]["agent"] = serde_json::json!("codex");
+        raw["branches"][0].as_object_mut().unwrap().extend(metadata.as_object().unwrap().clone());
+        apply_agent_event_to_pane(&mut pane, AgentServerMessage::CatalogFamily { session_id: "root".into(), snapshot: raw });
+        let panel = pane.side_panel();
+        let child = &panel.sessions()[index(panel, "child")];
+        assert_eq!(child.agent_kind, expected);
+        assert_eq!(child.branch_status, Some(BranchStatus::Active));
+        assert_eq!(child.depth, 1);
+    }
+}
+
+#[test]
 fn feed_children_are_keyboard_stops_and_pointer_targets() {
     let mut panel = catalog();
     assert!(panel.apply_catalog_family_snapshot("root", snapshot(1, &[

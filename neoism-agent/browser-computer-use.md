@@ -28,7 +28,7 @@ tool-permission paths.
 
 ## Built-in native browser attachment
 
-User-facing attachment instructions are also bundled in [Computer Use](../neoism-workspace-index/src/welcome/Neoism%20Agent/Computer%20Use.md), available through the Docs tool at `Neoism Agent/Computer Use.md`. Models can call `computer.capabilities` for self-contained Firefox/Chromium setup instructions before permission approval, without connecting to a browser.
+User-facing attachment instructions are maintained in the [shared handbook](https://neoism.ai/api/docs/guides/neoism-agent/computer-use/) and bundled for offline use, available through the Docs tool at `Neoism Agent/Computer Use.md`. Models can call `computer.capabilities` for self-contained Firefox/Chromium setup instructions before permission approval, without connecting to a browser.
 
 The built-in `computer` MCP includes optional Chromium (CDP) and Firefox (WebDriver BiDi) page control alongside native input. The normal flow is `computer.windows` then `computer.browser_attach({target})`: it attaches an explicitly selected, already-debuggable active browser in memory without restarting Neoism, launching a profile, or changing environment. If it returns `domAvailable:false`, use screenshot/input on that target unless the user explicitly asks for DOM setup.
 

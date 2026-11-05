@@ -31,7 +31,8 @@ def main():
         for resource in ["LICENSE", "NOTICE", "licenses/Geist-OFL.txt",
                          "licenses/ICU4X.txt", "licenses/Tantivy.txt", "licenses/Tantivy-AUTHORS.txt", "licenses/Turso.txt",
                          "licenses/GPUIX-native.txt", "licenses/GPUIX-solid.txt",
-                         "web/app/manifest.json"]:
+                         "web/app/manifest.json", "resources/docs/content.json",
+                         "resources/docs/api/docs/index.html", "resources/docs/api/docs/reference/index.html"]:
             assert (prefix / "bin" / resource).is_file(), resource
         assert {p.name for p in (prefix / 'bin/web').iterdir()} == {'agent-gui', 'app', 'native', 'index.html'}
         for web in [payload / 'web', prefix / 'bin/web']:

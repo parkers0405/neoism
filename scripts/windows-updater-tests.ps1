@@ -18,6 +18,31 @@ function Assert-Throws([scriptblock]$Action, [string]$Match) {
     throw "Expected failure containing: $Match"
 }
 
+# Exercise the real identity and shutdown functions with inert process objects.
+# No real process enumeration or termination is allowed in these tests.
+& {
+    $script:FakeProcess = [pscustomobject]@{ Id = 101; Path = 'C:\fixture\web\native\neoism-update-helper.exe'; Handle = 1 }
+    function Get-Process { param($Id) return $script:FakeProcess }
+    Assert ((Get-TrackedProcess 101 $script:FakeProcess.Path).Id -eq 101) 'Standalone helper identity must be accepted'
+    Assert-Throws { Get-TrackedProcess 101 'C:\fixture\neoism.exe' } 'is not'
+}
+& {
+    $script:FakeProcesses = @()
+    foreach ($name in $script:BinaryNames) {
+        $process = [pscustomobject]@{ Path = "C:\isolated-updater-fixture\$name"; HasExited = $false; Killed = $false; Id = 123 }
+        $process | Add-Member ScriptMethod Kill { $this.Killed = $true; $this.HasExited = $true }
+        $process | Add-Member ScriptMethod WaitForExit { param($timeout) return $this.HasExited }
+        $script:FakeProcesses += $process
+    }
+    $other = [pscustomobject]@{ Path = 'C:\another-install\neoism-agent.exe'; HasExited = $false }
+    $script:FakeProcesses += $other
+    function Get-Process { param($Name, $ErrorAction) return @($script:FakeProcesses | Where-Object { -not $_.HasExited }) }
+    function Test-Path { param($LiteralPath) return $false }
+    Stop-TargetStack 'C:\isolated-updater-fixture'
+    foreach ($process in $script:FakeProcesses[0..3]) { Assert $process.Killed 'Every exact-target GUI/daemon/agent/compatibility helper must stop' }
+    Assert (-not $other.HasExited) 'Another installation must remain running'
+}
+
 $managed = 'C:\Users\Tester\AppData\Local\Programs\Neoism'
 $t = Resolve-UpdateTarget "$managed\neoism.exe" ($managed.ToUpperInvariant() + '\')
 Assert ($t.mode -eq 'managed') 'Registered invoking path must be managed, case insensitive'
@@ -77,7 +102,14 @@ New-Item -ItemType Directory -Path $root | Out-Null
 # Production orchestration with explicit fakes for ALL external side effects.
 function Get-RegisteredInstallDir { return $script:Registration }
 function Test-MsiProductInstalled { return $script:SameProduct }
-function Get-TrackedProcess { return $null }
+function Get-TrackedProcess([int]$ProcessId, [string]$Exe) {
+    if ($ProcessId -eq 101) {
+        Assert ($Exe -eq $script:UpdaterExe) 'Updater PID must be checked against the standalone helper, not neoism.exe'
+    } elseif ($ProcessId -eq 102) {
+        Assert ($Exe -eq $script:InvokingExe) 'CLI parent PID must be checked against the invoking neoism.exe'
+    } else { throw "Unexpected owner PID: $ProcessId" }
+    return $null
+}
 function Wait-UpdateOwner {
     $receipt = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
     Assert ($receipt.state -eq 'handed_off' -and -not $receipt.installation_verified) 'Handoff must be durable and not success before owner exit'
@@ -98,7 +130,13 @@ function Move-Item {
     if ($script:FailPortableMove -and $LiteralPath -like '*\.neoism-update-*\neoism-agent.exe') {
         throw 'fixture interrupted portable replacement'
     }
+    if ($script:FailResourceMove -and $LiteralPath -like '*\.neoism-update-*\resources') {
+        throw 'fixture interrupted docs replacement'
+    }
     Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination
+    if ($script:CorruptDocs -and $LiteralPath -like '*\.neoism-update-*\resources') {
+        [IO.File]::WriteAllText((Join-Path $Destination 'docs\api\docs\index.html'), 'corrupted docs')
+    }
 }
 function Invoke-Msi([string[]]$Arguments) {
     $script:MsiCalls += ,$Arguments
@@ -148,6 +186,10 @@ function New-Fixture([string]$Mode) {
     New-Item -ItemType Directory -Path (Join-Path $script:FixturePayload 'web'), (Join-Path $script:FixtureInstall 'web') | Out-Null
     [IO.File]::WriteAllText((Join-Path $script:FixturePayload 'web\index.html'), 'new web')
     [IO.File]::WriteAllText((Join-Path $script:FixtureInstall 'web\index.html'), 'old web')
+    New-Item -ItemType Directory -Path (Join-Path $script:FixturePayload 'resources\docs\api\docs\reference') -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $script:FixturePayload 'resources\docs\api\docs\index.html'), 'new docs')
+    [IO.File]::WriteAllText((Join-Path $script:FixturePayload 'resources\docs\api\docs\reference\index.html'), 'new reference')
+    [IO.File]::WriteAllText((Join-Path $script:FixturePayload 'resources\docs\content.json'), '{}')
     foreach ($dir in @($script:FixturePayload, $script:FixtureInstall)) {
         New-Item -ItemType Directory -Path (Join-Path $dir 'web\agent-gui\assets') -Force | Out-Null
         $label = if ($dir -eq $script:FixturePayload) { 'new GUI' } else { 'old GUI' }
@@ -158,11 +200,14 @@ function New-Fixture([string]$Mode) {
     $script:MsiPath = Join-Path $TempDir 'fixture.msi'
     [IO.File]::WriteAllText($MsiPath, 'not a real MSI; Invoke-Msi is mocked')
     $script:InvokingExe = Join-Path $script:FixtureInstall 'neoism.exe'
+    $script:UpdaterExe = Join-Path $script:FixtureInstall 'web\native\neoism-update-helper.exe'
+    $script:UpdaterPid = 101; $script:GuiPid = 102
     $script:Registration = if ($Mode -eq 'managed') { $script:FixtureInstall } else { Join-Path $case 'different managed copy' }
     $script:Relaunch = 1; $script:InstallCode = 0; $script:Launches = 0; $script:SameProduct = $false
     $script:RepairCode = $null; $script:NormalInstallNoOp = $false
     $script:MissingInstalled = $false; $script:CorruptInstalled = $false; $script:Locked = $false
     $script:FailPortableMove = $false; $script:SawHandoff = $false; $script:MsiCalls = @()
+    $script:FailResourceMove = $false; $script:CorruptDocs = $false
 }
 function Read-Receipt { return (Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json) }
 try {
@@ -193,6 +238,7 @@ try {
         Assert ($receipt.state -eq 'succeeded' -and $receipt.installation_verified) "$mode verified completion"
         Assert ($script:SawHandoff -and $script:Launches -eq 1) "$mode handoff before one verified relaunch"
         Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall 'unrelated.txt'))) -eq 'preserve me') 'Must preserve unrelated files'
+        Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall 'resources\docs\api\docs\index.html'))) -eq 'new docs') 'Legacy installations must gain complete docs'
         Assert (Test-Path -LiteralPath $receipt.log) 'Durable log survives download cleanup'
         Assert (-not (Test-Path -LiteralPath $TempDir)) 'Verified success may clean extraction, not result'
         if ($mode -eq 'portable') {
@@ -200,6 +246,40 @@ try {
             Assert (Test-Path -LiteralPath (Join-Path $receipt.rollback_directory 'neoism.exe')) 'Portable rollback originals retained'
         }
     }
+    # Docs must participate in portable rollback, including legacy installations
+    # that never had a resources directory.
+    foreach ($existingDocs in @($false, $true)) {
+        foreach ($failure in @('move', 'hash')) {
+            New-Fixture 'portable'
+            if ($existingDocs) {
+                Copy-Item -LiteralPath (Join-Path $script:FixturePayload 'resources') -Destination (Join-Path $script:FixtureInstall 'resources') -Recurse
+                [IO.File]::WriteAllText((Join-Path $script:FixtureInstall 'resources\docs\api\docs\index.html'), 'old docs')
+            }
+            if ($failure -eq 'move') { $script:FailResourceMove = $true } else { $script:CorruptDocs = $true }
+            Assert ((Invoke-WindowsUpdate) -eq 1) 'Docs failure must roll back entire portable stack'
+            foreach ($name in $script:BinaryNames) {
+                Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall $name))) -like '*0.1.0') 'Late docs failure must restore old binaries'
+            }
+            Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall 'web\index.html'))) -eq 'old web') 'Late docs failure must restore web'
+            Assert ((Test-Path -LiteralPath (Join-Path $script:FixtureInstall 'resources')) -eq $existingDocs) 'Rollback must restore old resources presence/absence'
+            if ($existingDocs) {
+                Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall 'resources\docs\api\docs\index.html'))) -eq 'old docs') 'Rollback must restore exact old docs'
+            }
+            Assert ($script:Launches -eq 0) 'Docs verification failure must not relaunch'
+        }
+    }
+    New-Fixture 'portable'
+    Remove-Item -LiteralPath (Join-Path $script:FixturePayload 'resources\docs\content.json')
+    Assert ((Invoke-WindowsUpdate) -eq 1 -and -not $script:SawHandoff) 'Incomplete docs must fail before closing GUI'
+    New-Fixture 'portable'
+    Remove-Item -LiteralPath (Join-Path $script:FixturePayload 'resources') -Recurse
+    Assert ((Invoke-WindowsUpdate) -eq 0) 'Legacy payload without resources remains supported'
+    New-Fixture 'portable'
+    Copy-Item -LiteralPath (Join-Path $script:FixturePayload 'resources') -Destination (Join-Path $script:FixtureInstall 'resources') -Recurse
+    Remove-Item -LiteralPath (Join-Path $script:FixtureInstall 'web') -Recurse
+    Remove-Item -LiteralPath (Join-Path $script:FixtureInstall 'neoism-agent.exe')
+    Assert ((Invoke-WindowsUpdate) -eq 1 -and -not $script:SawHandoff) 'Unowned resources collision must fail before closing GUI'
+    Assert (([IO.File]::ReadAllText((Join-Path $script:FixtureInstall 'resources\docs\api\docs\index.html'))) -eq 'new docs') 'Unowned resources must not be replaced'
     # Reproduce the field failure: the preflight query says the candidate is
     # installed, but MSI considers it absent and performs a major upgrade.
     New-Fixture 'managed'; $script:SameProduct = $true

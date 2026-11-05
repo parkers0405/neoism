@@ -20,6 +20,8 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
   const statusRequests={defer:false,fail:false,count:0,pending:[] as Array<()=>void>};
   const workspaceSubscriptions:Array<{workspaceId:string;release:()=>void}>=[];
   const directoryChanges:Array<()=>void>=[];
+  const workspaceClose={error:undefined as string|undefined};
+  const ptyCreations={defer:false,pending:[] as Array<()=>void>};
   const httpRequests: Array<{ path: string; authorization: string | null; directory: string | null }> = [];
   const configRequests: Array<{ tag: string; body: Record<string, unknown> }> = [];
   let configContent = JSON.stringify(config.configuration || { appearance: { theme: "pastel_dark", fonts: { family: "Cascadia Code NF", size: 14 } }, editor: { "vim-mode": true } }, null, 2), configRevision = 1;
@@ -159,6 +161,14 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
             if(prune&&previous.has(prune)&&![...windowWorkspaces.values()].some(opened=>opened.has(prune))){const index=workspaces.findIndex(workspace=>workspace.id===prune);if(index>=0)workspaces.splice(index,1);}
             reply({HostWorkspaceTree:{hosts:[{id:"host",label:"Host"}],workspaces,tabs:[]}});
           }
+          if(tag==="CloseWindowWorkspace"){
+            if(workspaceClose.error){reply({Error:{message:workspaceClose.error}});return;}
+            const id=String(payload.workspace_id),opened=windowWorkspaces.get(client);
+            if(!opened?.has(id)){reply({Error:{message:"Workspace is not open in this window"}});return;}
+            opened.delete(id);
+            if(![...windowWorkspaces.values()].some(ids=>ids.has(id))){const index=workspaces.findIndex(workspace=>workspace.id===id);if(index>=0)workspaces.splice(index,1);}
+            reply({HostWorkspaceTree:{hosts:[{id:"host",label:"Host"}],workspaces,tabs:[]}});
+          }
           if(tag==="CreateWorkspace"){
             const id=String(payload.workspace_id||crypto.randomUUID());
             let workspace=workspaces.find(entry=>entry.id===id);
@@ -208,7 +218,8 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
           if (tag === "CreatePty" || tag === "AttachPty") {
             const id=tag==="CreatePty"?(++nextPty===1?"fixture-pty":`fixture-pty-${nextPty}`):String(payload.session_id);
             if(tag==="CreatePty")ptyModes.set(id,payload.presentation||"blocks");
-            reply({ PtyCreated: { session_id:id, shell: "/bin/sh",...(config.gridPresentation===false?{}:{presentation:ptyModes.get(id)||"grid"}) } });
+            const complete=()=>reply({ PtyCreated: { session_id:id, shell: "/bin/sh",...(config.gridPresentation===false?{}:{presentation:ptyModes.get(id)||"grid"}) } });
+            if(tag==="CreatePty"&&ptyCreations.defer)ptyCreations.pending.push(complete);else complete();
             if (tag === "AttachPty") reply({ PtyOutput: { session_id:id, offset: 0, bytes: [36, 32] } });
           } else reply("Ack");
         }
@@ -271,5 +282,5 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
     },
   });
   return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,prompts,statuses,statusRequests,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
-    mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);} };
+    workspaceClose,ptyCreations,mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);} };
 }

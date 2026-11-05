@@ -217,6 +217,9 @@ struct ManagerInner {
     /// Only newly created rows have provenance. A second transport permanently
     /// disqualifies a row, even after disconnect (offline recovery may exist).
     workspace_claim_history: HashMap<String, WorkspaceClaimHistory>,
+    /// Runtime tombstones reject late writes/registrations from in-flight
+    /// operations without changing legacy adoption of previously unknown IDs.
+    retired_workspaces: HashSet<String>,
     /// Link table from a workspace-registry session id (a logical tab)
     /// to the live PTY session id that currently backs it in
     /// [`crate::sessions::SessionRegistry`]. Maintained by
@@ -333,6 +336,7 @@ pub struct ConnectionWorkspace {
 #[derive(Debug, Default)]
 pub struct DispatchOutcome {
     pub replies: Vec<WorkspaceServerMessage>,
+    pub retirement: WorkspaceRetirement,
     /// When `true` the websocket task should drain `replies` to the
     /// client and then close the socket. Today only set by a rejected
     /// `Hello` handshake.
@@ -344,6 +348,31 @@ impl DispatchOutcome {
         Self {
             replies,
             disconnect: false,
+            retirement: WorkspaceRetirement::default(),
+        }
+    }
+}
+
+/// Exact identities captured under the membership/metadata lock. Execute PTY
+/// teardown outside that lock; agent runtime and document contents are untouched.
+#[derive(Debug, Default)]
+pub struct WorkspaceRetirement {
+    pub session_ids: HashSet<String>,
+    pub pty_ids: HashSet<String>,
+    pub surface_ids: HashSet<String>,
+}
+
+impl WorkspaceRetirement {
+    pub fn close_ptys(&self, registry: &crate::sessions::SessionRegistry) {
+        let mut ids = self.pty_ids.clone();
+        for id in &self.session_ids {
+            // Transport-created tabs commonly use the real PTY id directly.
+            // Do not resolve logical links here: a new owner may have linked
+            // a different PTY since the atomic retirement snapshot.
+            ids.insert(id.clone());
+        }
+        for session_id in ids {
+            registry.handle(neoism_protocol::pty::ClientMessage::ClosePty { session_id });
         }
     }
 }

@@ -79,6 +79,7 @@ impl AgentTimelineMessage for NeoismAgentMessage {
             status,
             tool: "tool_group".to_string(),
             tool_batch_id: None,
+            agent_kind: None,
             mcp: None,
             composition_children: Vec::new(),
             composition_child: false,

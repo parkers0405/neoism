@@ -67,9 +67,17 @@ export class AppVisualState {
  treeGlyphHost(config:AppConfig){const key=JSON.stringify([config.fontFamily,config.fontWeight,config.iconFontFamily]);let host=this.glyphHosts.get(key);if(!host){host=createTreeGlyphHost(config);this.glyphHosts.set(key,host);}return host;}
  pinTreeRaster(renderer:object,key:string,raster:CanvasRaster){let images=this.rasterPins.get(key);if(!images)images=new CanvasImages(renderer);this.rasterPins.delete(key);this.rasterPins.set(key,images);images.use(RasterSource.tree,raster);images.commit();while(this.rasterPins.size>512){const oldest=this.rasterPins.keys().next().value!;this.rasterPins.get(oldest)!.dispose();this.rasterPins.delete(oldest);}}
  private reveals=new Map<string,Map<string,number>>();
- treeReveals(workspaceId:string,notes:boolean,root:string|undefined){
+  treeReveals(workspaceId:string,notes:boolean,root:string|undefined){
   const key=JSON.stringify([workspaceId,notes,root]);let value=this.reveals.get(key);
-  if(!value){value=new Map();this.reveals.set(key,value);}return value;
- }
+   if(!value){value=new Map();this.reveals.set(key,value);}return value;
+  }
+  closeWorkspace(workspaceId:string){
+   this.workspaceFocus.delete(workspaceId);
+   this.gitPanels.get(workspaceId)?.dispose();this.gitPanels.delete(workspaceId);
+   const owned=(key:string)=>JSON.parse(key)[0]===workspaceId;
+   for(const[key,id]of this.trees)if(owned(key)){coreCall("dispose",{id});this.trees.delete(key);}
+   for(const cache of [this.treeViewports,this.treeWidths,this.reveals])for(const key of cache.keys())if(owned(key))cache.delete(key);
+   for(const[key,images]of this.rasterPins)if(owned(key)){images.dispose();this.rasterPins.delete(key);}
+  }
  dispose(){this.workspaceFocus.clear();for(const images of this.timelineImages.values())images.dispose();this.timelineImages.clear();if(this.notificationsId!==undefined)coreCall("notifications.dispose",{id:this.notificationsId});this.agentChips.dispose();for(const entry of this.agentComposers.values())entry.state.native?.dispose();this.agentComposers.clear();for(const entry of this.gitReviews.values())entry.controller.dispose();this.gitReviews.clear();for(const controller of this.gitPanels.values())controller.dispose();this.gitPanels.clear();this.wordmarks.dispose();for(const id of this.trees.values())coreCall("dispose",{id});this.trees.clear();this.treeViewports.clear();this.reveals.clear();this.treeWidths.clear();for(const images of this.rasterPins.values())images.dispose();this.rasterPins.clear();for(const host of this.glyphHosts.values())host.dispose();this.glyphHosts.clear();}
 }

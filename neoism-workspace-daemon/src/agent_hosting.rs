@@ -32,51 +32,92 @@ pub async fn associate(workspace: &str, root: &Path) -> anyhow::Result<()> {
     );
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(3))
+        .retry(reqwest::retry::never())
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let mut last_error = String::new();
-    for _ in 0..30 {
-        let credential = crate::server::mint_agent_credential(
-            "neoism:host-chat-association".into(),
-            workspace,
-            &root,
-        )
-        .map_err(|_| anyhow::anyhow!("cannot sign chat hosting association"))?;
-        let result = client
-            .post(format!("{base}/v2/hosting/associate"))
-            .bearer_auth(credential)
-            .header("x-neoism-directory", root.to_string_lossy().as_ref())
-            .send()
-            .await;
-        match result {
-            Ok(response) if response.status().is_success() => {
-                let body: serde_json::Value = response.json().await?;
-                let namespace = body
-                    .get("workspaceId")
-                    .and_then(|v| v.as_str())
-                    .filter(|id| !id.is_empty())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Agent returned no hosting namespace")
-                    })?;
-                NAMESPACES
-                    .get_or_init(Default::default)
-                    .lock()
-                    .unwrap()
-                    .insert(workspace.into(), (root, namespace.into()));
-                return Ok(());
-            }
-            Ok(response) => {
-                let status = response.status();
-                last_error = response.text().await.unwrap_or_else(|_| status.to_string());
-                if status.is_client_error() {
-                    anyhow::bail!(
-                        "chat hosting association rejected ({status}): {last_error}"
-                    );
-                }
-            }
-            Err(error) => last_error = error.to_string(),
+    // Retry only the read-only readiness probe, using elapsed time rather than
+    // an attempt count (Windows can refuse connections immediately while cold).
+    crate::agent::wait_for_agent_health(
+        &client,
+        &base,
+        crate::agent::AGENT_SERVER_READY_TIMEOUT,
+    )
+    .await?;
+    let credential = crate::server::mint_agent_credential(
+        "neoism:host-chat-association".into(),
+        workspace,
+        &root,
+    )
+    .map_err(|_| anyhow::anyhow!("cannot sign chat hosting association"))?;
+    let namespace = send_association(&client, &base, &credential, &root).await?;
+    NAMESPACES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(workspace.into(), (root, namespace));
+    Ok(())
+}
+
+async fn send_association(
+    client: &reqwest::Client,
+    base: &str,
+    credential: &str,
+    root: &Path,
+) -> anyhow::Result<String> {
+    let result = client
+        .post(format!("{base}/v2/hosting/associate"))
+        .bearer_auth(credential)
+        .header("x-neoism-directory", root.to_string_lossy().as_ref())
+        .send()
+        .await;
+    // Once sent, association may have committed even if its response was
+    // lost or timed out. Never replay this mutation automatically.
+    match result {
+        Ok(response) if response.status().is_success() => {
+            let body: serde_json::Value = response.json().await?;
+            let namespace = body
+                .get("workspaceId")
+                .and_then(|v| v.as_str())
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Agent returned no hosting namespace"))?;
+            Ok(namespace.into())
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        Ok(response) => {
+            let status = response.status();
+            anyhow::bail!("chat hosting association rejected ({status})");
+        }
+        Err(error) => anyhow::bail!(
+            "chat hosting association failed (not replayed): {}",
+            error.without_url()
+        ),
     }
-    anyhow::bail!("chat hosting association failed: {last_error}")
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn association_does_not_replay_server_error_or_lost_response() {
+        for reply in [Some("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), None] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                let n = stream.read(&mut bytes).await.unwrap();
+                assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("POST /v2/hosting/associate "));
+                if let Some(reply) = reply {
+                    stream.write_all(reply.as_bytes()).await.unwrap();
+                }
+                drop(stream);
+                assert!(tokio::time::timeout(std::time::Duration::from_millis(350), listener.accept()).await.is_err());
+            });
+            let client = reqwest::Client::builder().no_proxy().retry(reqwest::retry::never()).build().unwrap();
+            assert!(send_association(&client, &base, "test", Path::new(".")).await.is_err());
+            server.await.unwrap();
+        }
+    }
 }

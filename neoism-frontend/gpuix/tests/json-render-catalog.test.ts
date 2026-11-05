@@ -12,7 +12,7 @@ test("native chat catalog uses json-render core and keeps the on-demand bundled 
   expect(jsonRenderCatalog.componentNames).toEqual(["Stack","Card","Text","Metric","Badge","Progress","LineGraph","Diagram","Separator","Tabs","Collapsible","Filter","Input","Select","Checkbox"]);
   expect(jsonRenderCatalog.actionNames).toEqual([]);
   expect(jsonRenderCatalog.validate(jsonRenderExample).success).toBe(true);
-  const prompt=readFileSync(new URL("../../../neoism-workspace-index/src/welcome/Neoism Agent/JSON Render.md",import.meta.url),"utf8");
+  const prompt=readFileSync(new URL("../../../vendor/neoism-docs/content/Neoism Agent/JSON Render.md",import.meta.url),"utf8");
   expect(prompt.trimEnd()).toBe(jsonRenderPrompt().trimEnd());
   const example=JSON.parse(prompt.split("```json-render\n")[1]!.split("\n```")[0]!);
   expect(example).toEqual(jsonRenderExample);

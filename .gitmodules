@@ -1,0 +1,3 @@
+[submodule "vendor/neoism-docs"]
+	path = vendor/neoism-docs
+	url = https://github.com/parkers0405/neoism-docs.git

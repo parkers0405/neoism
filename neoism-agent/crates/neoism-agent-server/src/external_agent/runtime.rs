@@ -29,7 +29,7 @@ impl ExternalRuntime {
         match self {
             Self::OpenCode => "OpenCode",
             Self::Codex => "Codex",
-            Self::Claude => "Claude",
+            Self::Claude => "Claude Code",
         }
     }
 

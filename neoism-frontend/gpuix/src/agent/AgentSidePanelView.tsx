@@ -9,6 +9,7 @@ import { ANIMATION_FRAME_MS, AnimationFrameScheduler } from "../animation/frame-
 import { focusNativeElement,invalidateNativeFocus } from "../native-focus";
 import {paintedChromeBounds,type ChromeBounds} from "../ui/chrome-target-bounds";
 import {CanvasImages,RasterSource} from "../ui/canvas";
+import {NativeViewLifetime} from "./native-view-lifetime";
 
 interface ChatTarget {id:string;title:string;pinned:boolean;directory?:string}
 interface PanelFrame { commands: PaintCommand[]; canvas?:PreparedCanvas; animating: boolean; send: unknown[];cursor?:number[]|null;focused?:boolean;selected?:string; result?: { context?:ChatTarget; action?: string; anchor?: number[] | null; projects?: string[]; root?: boolean; open?: { id: string; title: string; directory?: string | null;familyRootId?:string|null;pointer?:boolean } } | null }
@@ -30,11 +31,17 @@ function catalogEvent(message:unknown):boolean {
  * the desktop's `workspace_conversations_panes`: switching back repaints its
  * last frame at once and keeps its loaded pages instead of reloading. It stays
  * subscribed while hidden so its catalog is current when shown again. */
-interface CachedPanel { id: number; workspace: string; style: string; directory: string; commands: readonly PaintCommand[]; canvas?:PreparedCanvas; viewport:{width:number;height:number};images:Map<object,CanvasImages>; dirty: Set<() => void>; release: () => void }
+interface CachedPanel { id: number; workspace: string; style: string; directory: string; commands: readonly PaintCommand[]; canvas?:PreparedCanvas; viewport:{width:number;height:number};images:Map<object,CanvasImages>; dirty: Set<() => void>; lifetime:NativeViewLifetime; retirement?:ReturnType<typeof setTimeout>; release: () => void }
 const panels = new WeakMap<WorkspaceModel, Map<string, CachedPanel>>();
 function panelFor(model: WorkspaceModel, workspace: string, directory: string, config: AppConfig, report: (error: unknown) => void): CachedPanel {
   let byModel = panels.get(model);
-  if (!byModel) { byModel = new Map(); panels.set(model, byModel); }
+  if (!byModel) {
+    byModel = new Map(); panels.set(model, byModel);
+    const off=model.onWorkspaceClosed((workspaceId:string)=>{
+      for(const panel of [...byModel!.values()])if(panel.workspace===workspaceId)panel.release();
+    });
+    model.onDispose(()=>{off();for(const panel of [...byModel!.values()])panel.release();panels.delete(model);});
+  }
   // The native panel paints at a fixed scale/theme/font, so the cache key
   // includes them. A zoom builds a new one while the outgoing generation
   // still shows the old; that one is released once nothing displays it.
@@ -45,19 +52,24 @@ function panelFor(model: WorkspaceModel, workspace: string, directory: string, c
   const { id } = coreCall<{ id: number }>("agentsidepanel.new", { directory, theme: config.themeName, scale: config.scale, fontFamily: config.fontFamily, fontWeight: config.fontWeight });
   const unsubscribe = model.subscribeAgentEvents((message) => {
     // Timeline-local identity handoffs are not daemon protocol events.
-    if (!catalogEvent(message)) return;
+    if (panel.lifetime.closed || !catalogEvent(message)) return;
     try { if(coreCall<{needsPaint?:boolean}>("agentsidepanel.event", { id, message }).needsPaint===false)return; } catch (error) { report(error); return; }
     for (const listener of panel.dirty) listener();
   });
-  const panel: CachedPanel = { id, workspace, style, directory, commands: [],viewport:{width:0,height:0},images:new Map(), dirty: new Set(),
-    release: () => { unsubscribe();for(const images of panel.images.values())images.dispose();panel.images.clear(); byModel!.delete(key); coreCall("agentsidepanel.dispose", { id }); } };
+  const lifetime=new NativeViewLifetime(()=>{
+    unsubscribe();clearTimeout(panel.retirement);
+    if(byModel!.get(key)===panel)byModel!.delete(key);
+  },()=>{for(const images of panel.images.values())images.dispose();panel.images.clear();panel.commands=[];panel.canvas=undefined;coreCall("agentsidepanel.dispose",{id});});
+  const panel: CachedPanel = { id, workspace, style, directory, commands: [],viewport:{width:0,height:0},images:new Map(), dirty: new Set(),lifetime,
+    release: () => lifetime.close() };
   byModel.set(key, panel);
   for (const other of byModel.values()) if (other.workspace === workspace && other !== panel) retireWhenHidden(other);
   return panel;
 }
 function retireWhenHidden(panel: CachedPanel) {
-  const check = () => { if (panel.dirty.size) setTimeout(check, 1000); else panel.release(); };
-  setTimeout(check, 1000);
+  if(panel.retirement||panel.lifetime.closed)return;
+  const check = () => { panel.retirement=undefined;if(panel.lifetime.closed)return;if (panel.dirty.size) panel.retirement=setTimeout(check, 1000); else panel.release(); };
+  panel.retirement=setTimeout(check, 1000);
 }
 
 export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppConfig; directory?: string | null; viewedSession?: string;
@@ -110,10 +122,12 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
     if (next.animating) schedule();
   };
   const call = (op: string, args: Record<string, unknown> = {}) => {
+    if(disposed||panel?.lifetime.closed)return;
     startedAt = performance.now(); animation.cancel();
     try { apply(coreCall<PanelFrame>(`agentsidepanel.${op}`, { id, ...args,canvasPaint:op==="frame" })); } catch (error) { props.report(error); }
   };
-  const schedule = () => { if (!disposed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame", { viewedSession: props.viewedSession ?? null }); }, startedAt); };
+  const schedule = () => { if (!disposed&&!panel?.lifetime.closed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame", { viewedSession: props.viewedSession ?? null }); }, startedAt); };
+  const detach=panel?.lifetime.attach(()=>animation.dispose());
   const unsubscribe = panel
     ? (panel.dirty.add(schedule), () => { panel.dirty.delete(schedule); })
     : model.subscribeAgentEvents((message) => {
@@ -128,7 +142,7 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
   // Follow the workspace directory: unknown at mount, or changed in place.
   let scoped = panel?.directory ?? (props.directory || "");
   createEffect(() => { const directory = props.directory || ""; if (directory !== scoped) { scoped = directory; if (panel) panel.directory = directory; call("scope", { directory });if(actualFocused)call("focus",{focused:true}); } });
-  onCleanup(() => { disposed = true;props.onHost?.(undefined); unsubscribe(); animation.dispose(); if (!panel) coreCall("agentsidepanel.dispose", { id });else if(actualFocused)coreCall("agentsidepanel.focus",{id,focused:false}); });
+  onCleanup(() => { disposed = true;props.onHost?.(undefined); unsubscribe(); animation.dispose(); if (!panel) coreCall("agentsidepanel.dispose", { id });else if(actualFocused&&!panel.lifetime.closed)coreCall("agentsidepanel.focus",{id,focused:false});detach?.(); });
   const local = (event: { x?: number; y?: number }) => ({ x: (event.x || 0) - bounds.x, y: (event.y || 0) - bounds.y });
   return <div ref={value=>{host=value;props.onHost?.(value);}} tabIndex={0} testId="conversation-list" aria-label="Conversations" aria-description={selectionDescription()}
     onFocus={()=>{invalidateNativeFocus(renderer);actualFocused=true;call("focus",{focused:true});props.onFocus?.();}}
@@ -142,7 +156,7 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
     }}
     onScroll={(event) => call("scroll", { deltaY: event.deltaY || 0, precise: !!event.precise })}
     onMouseDown={(event) => { if (host) focusNativeElement(renderer, host.id); if(event.button===2){const painted=host&&paintedChromeBounds(renderer,host.id);if(painted)bounds={...bounds,x:painted.x,y:painted.y};contextPoint={x:event.x||0,y:event.y||0};call("pointer",{kind:"context",...local(event)});}else if (event.button === 0) call("pointer", { kind: "down", ...local(event) }); }}
-    onMouseMove={(event) => { try { coreCall("agentsidepanel.pointer", { id, kind: "move", deferFrame:true, ...local(event) }); } catch {} schedule(); }}
+    onMouseMove={(event) => { if(panel?.lifetime.closed)return;try { coreCall("agentsidepanel.pointer", { id, kind: "move", deferFrame:true, ...local(event) }); } catch {} schedule(); }}
     onMouseLeave={() => call("pointer", { kind: "leave" })}
     style={{ flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", userSelect: "none", cursor: "pointer" }}>
     <PaintLayer commands={commands()} prepared={canvas()} config={config} />

@@ -1,156 +1,35 @@
-# Documentation notebooks
+# Shared documentation and the welcome note
 
-A documentation notebook is a folder with a `notebook.json` manifest. Its pages
-remain ordinary Markdown files. On desktop, the collection opens in one buffer
-tab; the active page is rendered and edited by the existing Markdown editor.
-This is separate from executable `.ipynb` notebooks.
+Product documentation is authored in [neoism-docs](https://github.com/parkers0405/neoism-docs), included at `vendor/neoism-docs` as a pinned Git submodule in both the application and website repositories. Its manifest supplies stable page paths and ordered navigation; its OpenAPI snapshot comes from the application's API contract. Published API reference content is generated rather than maintained by hand.
 
-## Creation temporarily disabled
+## One build, two hosting locations
 
-Notebook creation and folder-conversion entries are currently hidden from the
-Notes sidebar, file explorer, and command palette. The Notes MCP server no longer
-advertises or accepts `notebookCreate`. Existing notebook files, opening/navigation,
-and existing-page management remain available. The creation implementation is
-retained for a later design pass.
+The shared repository builds a self-contained static site with handbook pages, search, and a Scalar API reference. The website publishes that site alongside its landing page and art gallery. Application packaging stages the same artifact at `resources/docs`; macOS places it under the bundle's Resources directory.
 
-The sections below describe the retained implementation; creation instructions
-are not currently exposed in the UI.
+**Open Documentation** starts a process-scoped, loopback-only server and opens the local site in the default browser. `neoism docs` provides the same site as a standalone foreground command, without starting graphics or the workspace daemon. All required fonts, scripts, styles, and reference data ship locally. Serving the documentation does not expose agent routes or credentials; Scalar is configured as a read-only reference.
 
-## Create or open
+The local routes preserve `/api/docs/`, `/api/docs/guides/.../`, and `/api/docs/reference/`. There is no runtime HTML scraping, mandatory website connection, or user-specific documentation export.
 
-- Use the command palette's **Create Documentation Notebook from Folder** action.
-  Supply an existing folder to collect its Markdown files, or a new folder to
-  start with an `overview.md` page.
-- In the file explorer, right-click a folder and choose **Turn Folder into
-  Notebook**. The action never moves or replaces existing Markdown files.
-- In the Notes sidebar, right-click the Add control, a note, or a folder and choose
-  **New Notebook**. This immediately creates and opens `Untitled Notebook` inside
-  the clicked folder (or the displayed vault when clicking empty panel space),
-  with no path modal. Existing names get a numbered suffix.
-- Right-click an existing Notes folder and choose **Turn Folder into Notebook**
-  or **Open Notebook**. Clicking a notebook folder (or pressing Enter on it) opens
-  the collection; horizontal tree navigation still expands its files.
-- Use **Open Documentation Notebook**, open `notebook.json`, or activate the
-  notebook folder in the explorer to open the collection.
-- Nested folders become named sections. Hidden files, symlinks, and nested
-  notebooks are not imported. Large directory imports are bounded; choose a
-  documentation folder rather than an entire dependency/build tree.
+## The agent's documentation tool
 
-## Reading and editing
+The shared repository generates `bundle/content.json` from its manifest, Markdown sources, and OpenAPI contract. This is a checked-in generated resource, not a second authored source. The site's `content.json` is byte-identical. API operations and schemas are split into bounded, searchable pages alongside the handbook.
 
-The left rail lists ordered pages and collapsible sections. The center uses the
-normal Markdown renderer, including editing and vim modes. The existing heading
-outline occupies the right gutter when there is sufficient space.
+`neoism-product-docs` embeds that bundle at build time. Its build script verifies guide bodies, titles, version, and the API digest against the pinned sources, and checks that the reference matches the application's OpenAPI contract. Stale generated documentation or an incompatible API snapshot fails clearly. Cargo builds do not need Node or a website build. `NeoismDocumentationService` provides the existing `list`, `search`, and `read` operations, and tool results identify the documentation version. Existing paths such as `Neoism Agent/JSON Render.md` remain stable.
 
-Previous/Next follows page order. Back/Forward follows navigation history.
-Notebook-member links navigate inside the same tab. Following a link outside the
-collection uses the normal file-opening behavior.
+The tool reads the same centrally authored snapshot even when the website is unavailable or Notes are disabled. It does not read editable user notes or silently switch to documentation for a newer runtime. Updates arrive through reviewed shared-repository revisions and consuming-project pin updates.
 
-Visited pages retain their live document buffers, undo history, caret, and scroll
-position. An asterisk marks edited pages. The notebook tab remains modified while
-any of its visited pages is dirty, and closing it is blocked until those pages
-are saved. Save works on the current page, not implicitly on every page.
-The last visited page is remembered locally under Neoism's configuration directory
-and restored when the notebook is reopened. Per-page caret and scroll positions
-are retained during the open session, not serialized by the notebook feature.
+## A small, user-owned welcome
 
-The rail includes **Add page**, **Link existing file**, and **Move up/down**.
-Existing files outside the folder or vault are referenced, not copied. Missing
-pages produce a notification instead of silently creating a replacement.
-File/folder moves through Neoism update references in open notebooks. External
-filesystem changes are not automatically repaired.
+Fresh Notes vaults get exactly one root-level file: `Welcome.md`. Its checklist introduces workspaces, the terminal, files, and agents, with shortcut instructions beneath each task. It also covers Notes, Alt+arrow focus navigation, and local documentation access. The full handbook is no longer seeded into the vault.
 
-## Manifest
+Seeding uses create-only writes and a one-time marker. Existing files, earlier handbook copies, edited notes, and manually deleted welcomes remain user-owned. The migration does not recursively remove the old `Welcome/` tree or overwrite user content. Symlinked destination directories are skipped rather than followed.
 
-```json
-{
-  "title": "Agent Architecture",
-  "pages": [
-    "overview.md",
-    {
-      "path": "internals/prompt-admission.md",
-      "title": "Prompt admission and API",
-      "section": "Internals"
-    },
-    "../reference/security.md"
-  ]
-}
-```
+## Updating documentation
 
-Relative references start at the notebook folder. Absolute paths are accepted but
-are machine-specific. The manifest must have a nonempty title and at least one
-Markdown page. Duplicate normalized references are rejected. The name
-`notebook.json` is reserved for this collection manifest when opening files via
-the normal desktop file-opening path.
+1. Edit the canonical content in `vendor/neoism-docs`, or in a separate clone of the shared repository.
+2. Regenerate and check `bundle/content.json` with that repository's dependency-light generator. Export API updates from the application contract rather than editing schemas independently.
+3. Run the shared site's checks and build; commit and publish the shared change.
+4. Update the application and website submodule pins to the reviewed commit.
+5. Build and package the consumers. CI checks out pinned submodules recursively; release builds stage the generated site, not raw Markdown or Notes.
 
-Page-list changes are staged beside the manifest and renamed into place. If the
-manifest has been edited by another process since it was loaded, Neoism refuses
-to overwrite it; close and reopen the notebook before changing its page list.
-
-## Links to files outside vaults
-
-Use **Link to Markdown File** from the command palette while editing an ordinary
-Markdown page or a notebook page. Enter an existing absolute path, a `~/` path,
-a file URL, or a path relative to the source document. Neoism inserts a standard
-Markdown link at the cursor. It uses relative links within the source folder and
-file URLs for other locations; file URLs are machine-specific.
-
-You can also write links directly:
-
-```md
-[Prompt admission and API](#prompt-admission-and-api)
-[Project notes](../../projects/my-app/docs/overview.md)
-[Architecture](file:///home/user/projects/my-app/docs/architecture.md)
-[[../../projects/my-app/docs/architecture.md|Architecture]]
-```
-
-Same-page heading links resolve against the open document, including unsaved
-headings. File paths and heading fragments support percent-encoded characters.
-Cross-file heading lookup still reads the destination from disk.
-
-## Agent Notes MCP
-
-The desktop-provided `notes` MCP server exposes the same notebook format and
-creation implementation as the UI:
-
-- `notebookList`: discover notebooks in the linked vault.
-- `notebookCreate`: create a new folder notebook or convert an existing folder.
-- `notebookRead`: read its title and ordered page references.
-- `notebookAddPage`: create a Markdown page or reference an existing vault file.
-- `notebookMovePage`: move a one-based page position up/down without moving files.
-
-Example tool arguments:
-
-```json
-{"path":"Architecture","title":"Agent Architecture"}
-```
-
-Pass that to `notebookCreate`, then call `notebookAddPage` with:
-
-```json
-{"notebook":"Architecture","title":"API","content":"# API\n\nAPI notes here.\n"}
-```
-
-MCP paths are relative to the workspace's linked Notes vault. An `existing_path`
-for `notebookAddPage` is vault-relative, not notebook-relative; this can reference
-a file outside the notebook folder, but not outside the vault. Symlink escapes
-are rejected. The desktop's explicit file-linking UI still supports outside-vault
-files. Notebook discovery/read are allowed in agent plan mode; notebook mutations
-are denied there, just like other Notes writes.
-
-Agent edits to the manifest of an already-open notebook are protected from being
-overwritten by the UI; reopen the notebook to reload that page list.
-
-## Initial scope
-
-This first integration is desktop/local-workspace only. The manifest and
-navigation renderer live in the shared crate, but joined-workspace transport and
-web hosting are not wired yet. Their palette actions are hidden on web.
-
-Page ordering currently uses Move up/down, not drag-to-reorder. Moving the whole
-notebook tab between splits/windows is disabled until all of its live page
-contexts can travel as one group. A page already open in another notebook is
-rejected rather than creating a second independent editable buffer.
-
-Notebook-wide search, a graphical file chooser, explicit standalone-page views,
-and special notebook folder icons in the notes sidebar remain follow-up work.
+`make docs-init`, `make docs`, and `make docs-check` cover local initialization, building/staging, and artifact validation. See [build-docs.md](../scripts/build-docs.md) and the shared repository's `CONTRACT.md` for exact artifact paths and schema details.

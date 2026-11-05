@@ -510,6 +510,21 @@ pub fn tailscale_whois_blocking(ip: &str) -> Option<String> {
     if ip.is_empty() || ip.contains(char::is_whitespace) {
         return None;
     }
+    // Local desktop clients have no tailnet identity. Do not make their
+    // handshake depend on a Tailscale service/CLI round trip.
+    if ip
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .is_some_and(|ip| match ip {
+            std::net::IpAddr::V4(ip) => ip.is_loopback(),
+            std::net::IpAddr::V6(ip) => {
+                ip.is_loopback()
+                    || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback())
+            }
+        })
+    {
+        return None;
+    }
     let mut cmd = Command::new("tailscale");
     #[cfg(windows)]
     crate::hide_std_command(&mut cmd);

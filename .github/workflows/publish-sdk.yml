@@ -19,6 +19,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v5
         with:
           node-version: 22

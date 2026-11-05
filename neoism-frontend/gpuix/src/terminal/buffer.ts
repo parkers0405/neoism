@@ -17,7 +17,9 @@ interface NativeFrame {
   selectionRows?: { row: number; start: number; end: number }[];
   selection?: string; selectionRange?: { start: number[]; end: number[] };
 }
-export interface CellRun { text: string; column: number; width: number; fg: string; bg?: string; bold: boolean; italic: boolean; underline: boolean }
+export interface CellRun { text: string; column: number; width: number; fg: string; bg?: string; bold: boolean; italic: boolean; underline: boolean; fgTheme?: "fg" | "bg"; bgTheme?: "fg" }
+const terminalPalette = (theme: Palette) => [theme.black, theme.red, theme.green, theme.yellow, theme.blue, theme.magenta, theme.cyan, theme.white,
+  theme.muted, theme.red, theme.green, theme.yellow, theme.blue, theme.magenta, theme.cyan, theme.fg];
 export interface TerminalCursorFrame {quad:number[][];hold:boolean;animating:boolean}
 export interface TerminalFrame {
   lines: readonly (readonly CellRun[])[];
@@ -46,14 +48,20 @@ export class TerminalBuffer {
   get viMode() { return this.reply.viMode; }
   get bindingState() { return { vi: this.reply.viMode, appcursor: this.reply.appCursor, alt: !!this.reply.snapshot.alt_screen }; }
   readonly backend = "ghostty";
-  constructor(readonly theme: Palette, cols = 100, rows = 30, encoding: "runs" | "cells" = "runs") {
-    this.palette = [theme.black, theme.red, theme.green, theme.yellow, theme.blue, theme.magenta, theme.cyan, theme.white,
-      theme.muted, theme.red, theme.green, theme.yellow, theme.blue, theme.magenta, theme.cyan, theme.fg];
+  constructor(public theme: Palette, cols = 100, rows = 30, encoding: "runs" | "cells" = "runs") {
+    this.palette = terminalPalette(theme);
     coreCall("ghostty.load", { path: ghosttyLibraryPath() });
     this.id = coreCall<{ id: number }>(this.op("new"), { cols, rows, palette: this.palette, foreground: theme.fg, background: theme.bg, compact: encoding === "runs" }).id;
     this.reply = coreCall(this.op("frame"), { id: this.id });
   }
   private op(name: string) { return `ghostty.${name}`; }
+  setTheme(theme: Palette) {
+    const palette = terminalPalette(theme);
+    if (this.disposed || theme.fg === this.theme.fg && theme.bg === this.theme.bg && palette.every((color, index) => color === this.palette[index])) return false;
+    this.theme = theme; this.palette = palette; this.paintedReply = undefined;
+    this.call("colors", { palette, foreground: theme.fg, background: theme.bg });
+    return true;
+  }
   cursor(cellWidth: number, rowHeight: number): TerminalCursorFrame {
     if (this.disposed) return { quad: [], hold: false, animating: false };
     return coreCall<TerminalCursorFrame>(this.op("cursor"), { id: this.id, cellWidth, rowHeight });
@@ -146,7 +154,10 @@ export class TerminalBuffer {
       let fg = packedColor(foreground, false) || this.theme.fg, bg = packedColor(background, true);
       if (flags & 8) [fg, bg] = [bg || this.theme.bg, fg];
       if (mark) bg = mark === 2 ? this.theme.blue + "66" : this.theme.yellow + "4d";
-      return { text, column, width, fg, bg, bold: !!(flags & 1), italic: !!(flags & 2), underline: !!(flags & 4) };
+      // Preserve default-color provenance for archived blocks across theme changes.
+      const fgTheme = flags & 8 ? background === 0 ? "bg" : undefined : foreground === 0 ? "fg" : undefined;
+      const bgTheme = flags & 8 && foreground === 0 && !mark ? "fg" : undefined;
+      return { text, column, width, fg, bg, bold: !!(flags & 1), italic: !!(flags & 2), underline: !!(flags & 4), fgTheme, bgTheme };
   };
   frame(): TerminalFrame {
     if (this.paintedReply === this.reply && this.painted) return this.painted;
@@ -169,11 +180,13 @@ export class TerminalBuffer {
           && (!this.reply.selectionBlock || x >= selection.start[1] && x <= selection.end[1])) bg = this.theme.blue + "66";
         if (this.reply.selectionRows?.some((r) => r.row === y && x >= r.start && x <= r.end)) bg = this.theme.blue + "66";
         const bold = flags.has("BOLD"), italic = flags.has("ITALIC"), underline = flags.has("UNDERLINE");
+        const fgTheme = flags.has("REVERSE") ? cell.bg === "Default" ? "bg" : undefined : cell.fg === "Default" ? "fg" : undefined;
+        const bgTheme = flags.has("REVERSE") && cell.fg === "Default" && bg === this.theme.fg ? "fg" : undefined;
         const text = flags.has("HIDDEN") || cell.c === "\0" ? " " : this.reply.graphemes[`${y}:${x}`] || cell.c || " ";
         const width = flags.has("WIDE_CHAR") ? 2 : 1;
-        if (last && last.fg === fg && last.bg === bg && last.bold === bold && last.italic === italic && last.underline === underline) {
+        if (last && last.fg === fg && last.bg === bg && last.bold === bold && last.italic === italic && last.underline === underline && last.fgTheme === fgTheme && last.bgTheme === bgTheme) {
           last.text += text; last.width += width;
-        } else { last = { text, column: x, width, fg, bg, bold, italic, underline }; runs.push(last); }
+        } else { last = { text, column: x, width, fg, bg, bold, italic, underline, fgTheme, bgTheme }; runs.push(last); }
       }
       return runs;
     });
@@ -187,7 +200,7 @@ export class TerminalBuffer {
         for (let x = 0; x < line.length; x++) {
           const a = old[x], b = line[x];
           if (a.text === b.text && a.column === b.column && a.width === b.width && a.fg === b.fg && a.bg === b.bg
-            && a.bold === b.bold && a.italic === b.italic && a.underline === b.underline) line[x] = a;
+            && a.bold === b.bold && a.italic === b.italic && a.underline === b.underline && a.fgTheme === b.fgTheme && a.bgTheme === b.bgTheme) line[x] = a;
           else same = false;
         }
         return same ? old as CellRun[] : line;

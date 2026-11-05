@@ -60,6 +60,7 @@ pub enum PaletteAction {
     SelectPrevSplit,
     ConfigEditor,
     OpenSettings,
+    OpenDocumentation,
     WindowCreateNew,
     IncreaseFontSize,
     DecreaseFontSize,
@@ -877,6 +878,7 @@ pub(crate) fn command_visible_for_surface(
         | PaletteAction::SelectPrevSplit
         | PaletteAction::ConfigEditor
         | PaletteAction::OpenSettings
+        | PaletteAction::OpenDocumentation
         | PaletteAction::WindowCreateNew
         | PaletteAction::IncreaseFontSize
         | PaletteAction::DecreaseFontSize

@@ -3,7 +3,7 @@ import { useGpuixRequired, type HostElement, type KeyEvent, type StyleDesc } fro
 import type { TerminalViewProps } from "./TerminalView";
 import { terminalSession } from "./sessions";
 import { terminalLinesText, type CommandBlock } from "./blocks";
-import { terminalPaintOps } from "./paint";
+import { blockOutputForeground, terminalPaintOps } from "./paint";
 import { cssColor, type CanvasOp } from "../ui/canvas";
 import { focusNativeElement, invalidateNativeFocus } from "../native-focus";
 import { writeClipboard } from "../clipboard";
@@ -26,6 +26,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   const config = props.config, c = config.theme, s = config.scale, row = config.fontSize * 1.3, inset = 16 * s;
   const renderer = useGpuixRequired(), session = terminalSession(props.client, props.sessionId, c, props.report, true);
   const blocks = session.blocks!, buffer = session.buffer;
+  const outputForeground = blockOutputForeground(c.bg);
   const paths = new TerminalOutputLinks(props.client);
   const linkCache = new Map<number, { block: CommandBlock; links: OutputLink[] }>();
   const [home, setHome] = createSignal<string>(), [linksRevision, refreshLinks] = createSignal(0), [hoveredLink, setHoveredLink] = createSignal<HoveredOutputLink>();
@@ -123,6 +124,22 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   });
   const origin = () => (position() === "bottom" ? Math.max(0, viewportHeight() - total()) : 0) - scroll();
   const visible = createMemo(() => layout().filter(item => item.top + item.height + origin() >= 0 && item.top + origin() < viewportHeight()));
+  const horizontalMaximum = createMemo(() => {
+    let columns = 0;
+    for (const item of visible()) {
+      for (const command of item.command) columns = Math.max(columns, Bun.stringWidth(command.trimEnd()));
+      if (collapsed().has(item.block.id)) continue;
+      for (const line of item.lines) for (const run of line) {
+        // Native rows can include blank padding out to the old terminal width.
+        const text = run.text.trimEnd();
+        if (text) columns = Math.max(columns, run.column + Bun.stringWidth(text));
+      }
+    }
+    return Math.max(0, columns * cell() - Math.max(0, size().width - inset * 2));
+  });
+  createEffect(() => {
+    if (size().width > 0) { const max = horizontalMaximum(); setHorizontal(value => Math.max(0, Math.min(max, value))); }
+  });
   const textRows = createMemo(() => layout().flatMap(item => {
     const rows: BlockTextRow[] = item.command.map((text, index) => ({ id: `${item.block.id}:command:${index}`, text, top: item.top + row * (1.1 + .9 + .19 + index) }));
     if (!collapsed().has(item.block.id)) item.lines.forEach((runs, index) => rows.push({ id: `${item.block.id}:output:${index}`, runs, top: item.top + item.output + index * row }));
@@ -255,7 +272,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
       if (collapsed().has(block.id)) label(`${block.lines.length} output lines hidden`, inset, y + item.output, c.muted, config.fontSize * .9);
       else {
         const first = Math.max(0, Math.floor((-y - item.output) / row)), end = Math.min(item.lines.length, Math.ceil((viewportHeight() - y - item.output) / row));
-        const ink = terminalPaintOps({ lines: item.lines.slice(first, end) }, config, cell(), row);
+        const ink = terminalPaintOps({ lines: item.lines.slice(first, end) }, config, cell(), row, outputForeground);
         const dy = y + item.output + first * row - row, dx = inset - horizontal();
         for (const op of ink) {
           if (op.k === "t") ops.push({ ...op, x: op.x + dx, y: op.y + dy });
@@ -340,7 +357,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
         onScroll={event => {
           const delta = -(event.deltaY || 0) * (event.precise ? 1 : row) * (config.terminalScrollMultiplier ?? 3) / (config.terminalScrollDivider ?? 1);
           const next = Math.max(0, Math.min(maximum(), scroll() + delta)); setFollow(topInput() ? next === 0 : next >= maximum()); setScroll(next);
-          if (event.deltaX) setHorizontal(value => Math.max(0, value - event.deltaX! * (event.precise ? 1 : cell())));
+          if (event.deltaX) setHorizontal(value => Math.max(0, Math.min(horizontalMaximum(), value - event.deltaX! * (event.precise ? 1 : cell()))));
         }} style={{ position: "absolute", left: 0, right: 0, top: historyTop(), height: viewportHeight(), overflow: "hidden", userSelect: "none", cursor: hoveredLink() ? "pointer" : "text" }}>
         <canvas testId="terminal-block-ink" commands={paint()} style={{ position: "absolute", left: 0, top: 0, width: "100%", height: "100%", pointerEvents: "none" }}/>
         <Show when={props.historyHeader}><div testId="terminal-history-header" style={{ position: "absolute", left: 0, right: 0, top: origin(), height: headerHeight(), overflow: "hidden" }}>
@@ -366,7 +383,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
         <Show when={!follow() && maximum() > 0}><div style={{ position: "absolute", ...(topInput() ? {top: 10 * s} : {bottom: 10 * s}), right: 16 * s, backgroundColor: c.surface, borderRadius: 4 * s }}><TerminalAction config={config} label="Jump to latest output" icon={topInput() ? "up" : "down"} testId="block-jump-latest" action={() => setFollow(true)}/></div></Show>
       </div>
       <Show when={!longRunning() || props.historyHeader}>
-      <div testId="terminal-block-input" onClick={focus} style={{ position: "absolute", left: 0, right: 0, top: composerTop(), height: composerHeight(), ...(topInput() ? {borderBottomWidth: 1} : {borderTopWidth: 1}), borderColor: c.fg + "1a", backgroundColor: config.background ? "transparent" : c.bg, opacity: busy() ? .6 : 1 }}>
+      <div testId="terminal-block-input" onClick={focus} style={{ position: "absolute", left: 0, right: 0, ...(position() === "bottom" ? { bottom: 0 } : { top: composerTop() }), height: composerHeight(), ...(topInput() ? {borderBottomWidth: 1} : {borderTopWidth: 1}), borderColor: c.fg + "1a", backgroundColor: config.background ? "transparent" : c.bg, opacity: busy() ? .6 : 1 }}>
         <text style={{ ...text(c.dim, config.fontSize * .9), position: "absolute", left: inset, right: 60 * s, top: 13 * s, height: row }}>{(revision(), terminalDirectoryLabel(blocks.directory, home()))}</text>
         <Show when={showDirectInputButton}><div style={{ position: "absolute", right: 12 * s, top: 9 * s }}><TerminalAction config={config} label="Direct shell input" icon="terminal" testId="block-direct-input" action={() => openDirect()}/></div></Show>
         <Show when={props.onMakeDirectoryAuthority}><div style={{ position: "absolute", right: (showDirectInputButton ? 42 : 12) * s, top: 9 * s }}>

@@ -86,6 +86,7 @@ pub fn apply_agent_event_to_pane_with_history_kind(
                 text: String::new(),
                 status: String::new(),
                 tool: String::new(),
+                agent_kind: None,
                 tool_batch_id: None,
                 mcp: None,
                 composition_children: Vec::new(),
@@ -561,8 +562,27 @@ pub fn apply_agent_event_to_pane_with_history_kind(
         }
         AgentServerMessage::CatalogFamily {
             session_id,
-            snapshot,
+            mut snapshot,
         } => {
+            // Keep explicit external identity when decoding the typed roster,
+            // whose compatibility schema only carries the canonical agent.
+            if let Some(branches) = snapshot
+                .get_mut("branches")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for branch in branches {
+                    if branch.pointer("/externalAgent/provider").is_some()
+                        || branch.pointer("/extra/externalAgent/provider").is_some()
+                        || branch.get("externalProvider").is_some()
+                        || branch.get("external_provider").is_some()
+                    {
+                        let kind = crate::panels::agent_pane::icon::AgentKind::from_external_metadata(branch);
+                        branch["agent"] = serde_json::Value::String(
+                            kind.map(|kind| kind.id()).unwrap_or_default().to_owned(),
+                        );
+                    }
+                }
+            }
             if let Ok(snapshot) =
                 serde_json::from_value::<neoism_agent_core::CatalogFamilySnapshot>(snapshot)
             {
@@ -856,6 +876,9 @@ pub fn map_history(
         text: m.text,
         status: m.status,
         tool: m.tool,
+        agent_kind: m.agent_kind.as_deref().and_then(
+            crate::panels::agent_pane::icon::AgentKind::from_canonical_agent,
+        ),
         tool_batch_id: m.tool_batch_id,
         mcp: m.mcp.as_ref().and_then(crate::panels::agent_pane::mcp_icon::McpToolPresentation::from_wire),
         composition_children: m
@@ -974,6 +997,7 @@ pub fn apply_agent_event_to_cache_with_history_kind(
                 text: String::new(),
                 status: String::new(),
                 tool: String::new(),
+                agent_kind: None,
                 tool_batch_id: None,
                 mcp: None,
                 composition_children: Vec::new(),

@@ -303,6 +303,33 @@ pub async fn listen_with_gui(
     services: neoism_agent_service_api::AgentServices,
     gui: Option<gui::GuiRoot>,
 ) -> anyhow::Result<SocketAddr> {
+    listen_impl(options, services, gui, None).await
+}
+
+/// Serve the API using an already-bound socket without releasing its reservation.
+/// The options must describe the actual listener, including its resolved port.
+pub async fn listen_with_listener(
+    options: ServerOptions,
+    services: neoism_agent_service_api::AgentServices,
+    listener: TcpListener,
+) -> anyhow::Result<SocketAddr> {
+    listen_impl(options, services, None, Some(listener)).await
+}
+
+fn validate_listener_address(actual: SocketAddr, expected: SocketAddr) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        actual == expected,
+        "reserved agent listener {actual} does not match configured address {expected}"
+    );
+    Ok(())
+}
+
+async fn listen_impl(
+    options: ServerOptions,
+    services: neoism_agent_service_api::AgentServices,
+    gui: Option<gui::GuiRoot>,
+    listener: Option<TcpListener>,
+) -> anyhow::Result<SocketAddr> {
     if services.workspace_worker.is_some() && gui.is_some() {
         anyhow::bail!(
             "workspace workers expose only the Agent API, not standalone GUI assets"
@@ -339,9 +366,15 @@ pub async fn listen_with_gui(
         "server listen starting"
     );
     let bind_started = crate::perf::now();
-    let listener = TcpListener::bind(address)
-        .await
-        .with_context(|| format!("failed to bind agent listener {address}"))?;
+    let listener = match listener {
+        Some(listener) => {
+            validate_listener_address(listener.local_addr()?, address)?;
+            listener
+        }
+        None => TcpListener::bind(address)
+            .await
+            .with_context(|| format!("failed to bind agent listener {address}"))?,
+    };
     let actual = listener.local_addr()?;
     tracing::info!(
         target: "neoism_agent::perf",
@@ -397,3 +430,35 @@ pub async fn listen_with_gui(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod reserved_listener_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reservation_requires_exact_address_and_resolved_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let actual = listener.local_addr().unwrap();
+        assert!(validate_listener_address(actual, actual).is_ok());
+        assert!(validate_listener_address(actual, SocketAddr::new(actual.ip(), 0)).is_err());
+        assert!(validate_listener_address(
+            actual,
+            SocketAddr::new("0.0.0.0".parse().unwrap(), actual.port())
+        ).is_err());
+        // Validation must not release or replace the caller's bound socket.
+        assert!(TcpListener::bind(actual).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reserved_listener_api_rejects_mismatch_before_state_initialization() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ServerOptions {
+            port: 0,
+            ..ServerOptions::default()
+        };
+        let error = listen_with_listener(options, standard_services(), listener)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match configured address"));
+    }
+}

@@ -86,6 +86,17 @@ export class TerminalBlocks {
     } });
   }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  refreshTheme() {
+    const theme = this.buffer.theme;
+    const recolor = (block: CommandBlock): CommandBlock => ({ ...block, lines: block.lines.map(line => line.map(run =>
+      run.fgTheme || run.bgTheme ? { ...run, fg: run.fgTheme ? theme[run.fgTheme] : run.fg, bg: run.bgTheme ? theme[run.bgTheme] : run.bg } : run)) });
+    this.blocks = this.blocks.map(recolor);
+    for (const live of [this.running, this.background]) if (live) {
+      if (live.captured) live.captured = recolor(live.captured);
+      live.frame = undefined;
+    }
+    this.snapshotFrame = undefined; this.changed();
+  }
   private changed() { for (const listener of this.listeners) listener(); }
   prepare(command: string) {
     if (!this.ready || this.pending || this.running || !command.trim()) return false;

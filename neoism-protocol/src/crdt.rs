@@ -168,6 +168,26 @@ pub struct CrdtCompactionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrdtClientMessage {
+    /// A message from an explicitly leased editor binding. Untagged legacy
+    /// consumers remain pinned even when multiplexed on a leased UI socket.
+    Owned {
+        owner_id: String,
+        message: Box<CrdtClientMessage>,
+    },
+    /// Opt-in explicit editor ownership. `owner_id` is unique per local
+    /// document binding, shared by its cloned views. The transport scopes it
+    /// to the connection; legacy OpenBuffer consumers remain conservatively pinned.
+    AcquireBuffer {
+        buffer_id: CrdtBufferId,
+        owner_id: String,
+        #[serde(default)]
+        initial_text: String,
+    },
+    /// Flush pending updates on this connection first. Disconnect is NOT close.
+    CloseBuffer {
+        buffer_id: CrdtBufferId,
+        owner_id: String,
+    },
     /// Wave 7B: open (or join) a shared document directly from a
     /// client-side editor surface — e.g. the markdown pane, which has
     /// no nvim session to trigger the daemon-side seed. Idempotent on
@@ -230,6 +250,10 @@ pub enum CrdtClientMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrdtServerMessage {
+    BufferClosed {
+        buffer_id: CrdtBufferId,
+        evicted: bool,
+    },
     Snapshot {
         buffer_id: CrdtBufferId,
         update_v1: Vec<u8>,
@@ -289,6 +313,26 @@ mod tests {
 
     #[test]
     fn crdt_sync_messages_roundtrip() {
+        roundtrip_client(&CrdtClientMessage::AcquireBuffer {
+            buffer_id: "file:///notes/a.md".into(),
+            owner_id: "editor-binding".into(),
+            initial_text: "seed".into(),
+        });
+        roundtrip_client(&CrdtClientMessage::CloseBuffer {
+            buffer_id: "file:///notes/a.md".into(),
+            owner_id: "editor-binding".into(),
+        });
+        roundtrip_client(&CrdtClientMessage::Owned {
+            owner_id: "editor-binding".into(),
+            message: Box::new(CrdtClientMessage::RequestSnapshot {
+                buffer_id: "file:///notes/a.md".into(),
+                state_vector_v1: vec![],
+            }),
+        });
+        roundtrip_server(&CrdtServerMessage::BufferClosed {
+            buffer_id: "file:///notes/a.md".into(),
+            evicted: false,
+        });
         let update = CrdtBufferUpdate {
             buffer_id: "buf:///notes/a.md".into(),
             origin_client_id: 42,

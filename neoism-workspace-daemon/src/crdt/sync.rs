@@ -12,12 +12,18 @@ use super::{CrdtBufferRegistry, CrdtDaemonError};
 
 const CRDT_BROADCAST_CAPACITY: usize = 512;
 
+#[cfg(test)]
+#[path = "close_tests.rs"]
+mod close_tests;
+
 #[derive(Clone)]
 pub struct CrdtSyncHub {
     buffers: CrdtBufferRegistry,
     /// Serializes document mutations and their disk baselines. Never reacquire
     /// from a `_while_guarded` helper or a guarded filesystem callback.
     operation: Arc<Mutex<()>>,
+    leases: Arc<Mutex<HashMap<CrdtBufferId, HashSet<(u64, String)>>>>,
+    unknown_owners: Arc<Mutex<HashSet<CrdtBufferId>>>,
     /// Last text observed on disk for every file-backed CRDT buffer.
     ///
     /// Agent tools and other external processes write files directly,
@@ -53,6 +59,8 @@ impl CrdtSyncHub {
         Self {
             buffers,
             operation: Arc::new(Mutex::new(())),
+            leases: Arc::new(Mutex::new(HashMap::new())),
+            unknown_owners: Arc::new(Mutex::new(HashSet::new())),
             disk_texts: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(HashMap::new())),
             peer_state_vectors: Arc::new(Mutex::new(HashMap::new())),
@@ -62,8 +70,10 @@ impl CrdtSyncHub {
         }
     }
 
-    /// Registry access for snapshots/inspection. Production mutations must use
-    /// hub methods so they participate in the document/disk operation gate.
+    /// Registry access for snapshots/inspection. Public registry snapshots pin
+    /// the document conservatively: their caller may retain Yrs clocks without
+    /// a socket lease. Production mutations must use hub methods so they
+    /// participate in the document/disk operation gate.
     pub fn buffers(&self) -> &CrdtBufferRegistry {
         &self.buffers
     }
@@ -87,13 +97,22 @@ impl CrdtSyncHub {
     ) -> CrdtServerMessage {
         let _guard = self.operation.lock();
         let buffer_id = buffer_id.into();
+        self.unknown_owners.lock().insert(buffer_id.clone());
+        self.open_buffer_while_guarded(buffer_id, initial_text.as_ref())
+    }
+
+    fn open_buffer_while_guarded(
+        &self,
+        buffer_id: String,
+        initial_text: &str,
+    ) -> CrdtServerMessage {
         // The file itself is fresher than a pane/cache used to compose
         // OpenBuffer. This also establishes the disk baseline on first open.
         let disk_text = read_file_backing(&buffer_id);
         let seed = disk_text
             .as_deref()
             .unwrap_or_else(|| initial_text.as_ref());
-        self.buffers.open_buffer(buffer_id.clone(), seed);
+        self.buffers.open_buffer_with_ownership(buffer_id.clone(), seed, false);
 
         if let Some(disk_text) = disk_text {
             self.reconcile_buffer_while_guarded(&buffer_id, &disk_text);
@@ -101,7 +120,7 @@ impl CrdtSyncHub {
 
         let snapshot = self
             .buffers
-            .snapshot_for(&buffer_id, &[])
+            .snapshot_for_managed(&buffer_id, &[])
             .expect("buffer was opened immediately above");
         let _ = self.refresh_compaction_for(&snapshot.buffer_id);
         CrdtServerMessage::Snapshot {
@@ -115,6 +134,164 @@ impl CrdtSyncHub {
         &self,
         message: CrdtClientMessage,
     ) -> Vec<CrdtServerMessage> {
+        // Non-socket callers (plugins/model integrations) have no explicit
+        // release contract. Keep their documents until such a contract exists.
+        self.handle_message(None, message)
+    }
+
+    pub fn handle_socket_message(
+        &self,
+        connection: u64,
+        message: CrdtClientMessage,
+    ) -> Vec<CrdtServerMessage> {
+        self.handle_message(Some(connection), message)
+    }
+
+    /// Establish the initial snapshot and broadcast cursor under the same
+    /// mutation gate. A newly created replica must not receive queued updates
+    /// from a previously explicitly closed incarnation of this buffer id.
+    /// Other documents' queued messages are returned intact to the transport.
+    pub fn handle_socket_message_draining(
+        &self,
+        connection: u64,
+        message: CrdtClientMessage,
+        receiver: &mut tokio::sync::broadcast::Receiver<CrdtServerMessage>,
+    ) -> (Vec<CrdtServerMessage>, Vec<CrdtServerMessage>) {
+        if let CrdtClientMessage::AcquireBuffer {
+            buffer_id,
+            owner_id,
+            initial_text,
+        } = message {
+            let _guard = self.operation.lock();
+            let mut pending = Vec::new();
+            // Bounded by the receiver's current queue; presence can publish
+            // without the document mutation gate and must not starve an open.
+            for _ in 0..receiver.len().saturating_add(1) {
+                match receiver.try_recv() {
+                    Ok(event) => {
+                        let obsolete = match &event {
+                            CrdtServerMessage::Sync { envelope } => {
+                                envelope.buffer_id == buffer_id
+                            }
+                            CrdtServerMessage::Update { update } => {
+                                update.buffer_id == buffer_id
+                            }
+                            CrdtServerMessage::Saved { buffer_id: id, .. } => {
+                                id == &buffer_id
+                            }
+                            _ => false,
+                        };
+                        if !obsolete {
+                            pending.push(event);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            self.leases
+                .lock()
+                .entry(buffer_id.clone())
+                .or_default()
+                .insert((connection, owner_id));
+            let reply = self.open_buffer_while_guarded(buffer_id, &initial_text);
+            (vec![reply], pending)
+        } else {
+            (self.handle_socket_message(connection, message), Vec::new())
+        }
+    }
+
+    fn handle_message(
+        &self,
+        connection: Option<u64>,
+        message: CrdtClientMessage,
+    ) -> Vec<CrdtServerMessage> {
+        if let CrdtClientMessage::Owned { owner_id, message } = message {
+            return self.handle_owned_message(connection, *message, Some(&owner_id));
+        }
+        self.handle_owned_message(connection, message, None)
+    }
+
+    fn handle_owned_message(
+        &self,
+        connection: Option<u64>,
+        message: CrdtClientMessage,
+        owner_id: Option<&str>,
+    ) -> Vec<CrdtServerMessage> {
+        if matches!(&message, CrdtClientMessage::Owned { .. })
+            || (owner_id.is_some()
+                && matches!(
+                    &message,
+                    CrdtClientMessage::AcquireBuffer { .. }
+                        | CrdtClientMessage::CloseBuffer { .. }
+                        | CrdtClientMessage::OpenBuffer { .. }
+                ))
+        {
+            return vec![CrdtServerMessage::Error {
+                buffer_id: None,
+                message: "invalid nested CRDT ownership message".into(),
+            }];
+        }
+        match &message {
+            CrdtClientMessage::AcquireBuffer {
+                buffer_id,
+                owner_id,
+                initial_text,
+            } => {
+                let _guard = self.operation.lock();
+                if let Some(connection) = connection {
+                    self.leases
+                        .lock()
+                        .entry(buffer_id.clone())
+                        .or_default()
+                        .insert((connection, owner_id.clone()));
+                } else {
+                    self.unknown_owners.lock().insert(buffer_id.clone());
+                }
+                return vec![self.open_buffer_while_guarded(
+                    buffer_id.clone(),
+                    initial_text,
+                )];
+            }
+            CrdtClientMessage::CloseBuffer { buffer_id, owner_id } => {
+                let evicted = connection.is_some_and(|connection| {
+                    self.close_buffer(connection, buffer_id, owner_id)
+                });
+                return vec![CrdtServerMessage::BufferClosed {
+                    buffer_id: buffer_id.clone(),
+                    evicted,
+                }];
+            }
+            _ => {}
+        }
+        // Snapshot/update users without a lease may hold Yrs clocks offline.
+        // Permanently pin rather than assume a socket disappearing releases them.
+        let consumer = match &message {
+            CrdtClientMessage::RequestSnapshot { buffer_id, .. } => Some(buffer_id),
+            CrdtClientMessage::AcknowledgeStateVector { buffer_id, .. }
+            | CrdtClientMessage::RequestCompactionStatus { buffer_id } => Some(buffer_id),
+            CrdtClientMessage::ApplyUpdate { update } => Some(&update.buffer_id),
+            CrdtClientMessage::ApplySync { envelope } => Some(&envelope.buffer_id),
+            CrdtClientMessage::ApplyEdits { transaction } => Some(&transaction.buffer_id),
+            _ => None,
+        };
+        if let Some(id) = consumer {
+            let _guard = self.operation.lock();
+            let owned = connection.zip(owner_id).is_some_and(|(connection, owner)| {
+                self.leases.lock().get(id).is_some_and(|owners| {
+                    owners.contains(&(connection, owner.to_string()))
+                })
+            });
+            if owner_id.is_some() && !owned {
+                return vec![CrdtServerMessage::Error {
+                    buffer_id: Some(id.clone()),
+                    message: "unknown CRDT document owner".into(),
+                }];
+            }
+            if !owned || matches!(&message, CrdtClientMessage::ApplyEdits { .. }) {
+                self.unknown_owners.lock().insert(id.clone());
+            }
+        }
         // Document-plane arrivals at INFO under one target: the silent
         // failure mode this hub has produced twice now is "presence
         // works, text doesn't", and at default log levels the doc plane
@@ -168,6 +345,9 @@ impl CrdtSyncHub {
             _ => {}
         }
         match message {
+            CrdtClientMessage::Owned { .. }
+            | CrdtClientMessage::AcquireBuffer { .. }
+            | CrdtClientMessage::CloseBuffer { .. } => unreachable!(),
             CrdtClientMessage::OpenBuffer {
                 buffer_id,
                 initial_text,
@@ -228,6 +408,37 @@ impl CrdtSyncHub {
                 vec![self.save_buffer(&buffer_id)]
             }
         }
+    }
+
+    fn close_buffer(&self, connection: u64, id: &str, owner: &str) -> bool {
+        let _guard = self.operation.lock();
+        {
+            let mut leases = self.leases.lock();
+            let Some(owners) = leases.get_mut(id) else {
+                return false;
+            };
+            if !owners.remove(&(connection, owner.to_string())) || !owners.is_empty() {
+                return false;
+            }
+            leases.remove(id);
+        }
+        if self.unknown_owners.lock().contains(id) {
+            return false;
+        }
+        let Some(baseline) = self.disk_texts.lock().get(id).cloned() else {
+            return false;
+        };
+        if read_file_backing(id).as_deref() != Some(baseline.as_str()) {
+            return false;
+        }
+        if !self.buffers.remove_if_clean(id, &baseline) {
+            return false;
+        }
+        self.disk_texts.lock().remove(id);
+        self.presence.lock().remove(id);
+        self.peer_state_vectors.lock().remove(id);
+        self.compaction.lock().remove(id);
+        true
     }
 
     fn apply_edit_transaction(
@@ -713,6 +924,17 @@ impl CrdtSyncHub {
         &self,
         buffer_id: &str,
     ) -> Result<CrdtCompactionStatus, CrdtDaemonError> {
+        let _guard = self.operation.lock();
+        // This public API exports a full retained snapshot to an unleased
+        // integration. The socket path uses the managed helper below.
+        self.unknown_owners.lock().insert(buffer_id.to_string());
+        self.compaction_status_while_guarded(buffer_id)
+    }
+
+    fn compaction_status_while_guarded(
+        &self,
+        buffer_id: &str,
+    ) -> Result<CrdtCompactionStatus, CrdtDaemonError> {
         self.refresh_compaction_for(buffer_id)?;
         let current_state_vector = self.buffers.state_vector_v1(buffer_id)?;
         let record = self.compaction_record(buffer_id);
@@ -748,13 +970,24 @@ impl CrdtSyncHub {
         peer_id: impl Into<CrdtPresencePeerId>,
         state_vector_v1: Vec<u8>,
     ) -> Result<CrdtCompactionStatus, String> {
+        let _guard = self.operation.lock();
+        self.unknown_owners.lock().insert(buffer_id.to_string());
+        self.acknowledge_state_vector_while_guarded(buffer_id, peer_id.into(), state_vector_v1)
+    }
+
+    fn acknowledge_state_vector_while_guarded(
+        &self,
+        buffer_id: &str,
+        peer_id: CrdtPresencePeerId,
+        state_vector_v1: Vec<u8>,
+    ) -> Result<CrdtCompactionStatus, String> {
         self.validate_state_vector(buffer_id, &state_vector_v1)?;
         self.peer_state_vectors
             .lock()
             .entry(buffer_id.to_string())
             .or_default()
-            .insert(peer_id.into(), state_vector_v1);
-        self.compaction_status(buffer_id)
+            .insert(peer_id, state_vector_v1);
+        self.compaction_status_while_guarded(buffer_id)
             .map_err(|err| err.to_string())
     }
 
@@ -882,7 +1115,12 @@ impl CrdtSyncHub {
         }
 
         self.buffers
-            .snapshot_message(buffer_id, state_vector_v1)
+            .snapshot_for_managed(buffer_id, state_vector_v1)
+            .map(|snapshot| CrdtServerMessage::Snapshot {
+                buffer_id: snapshot.buffer_id,
+                update_v1: snapshot.update_v1,
+                state_vector_v1: snapshot.state_vector_v1,
+            })
             .unwrap_or_else(|err| CrdtServerMessage::Error {
                 buffer_id: Some(buffer_id.to_string()),
                 message: err.to_string(),
@@ -890,7 +1128,8 @@ impl CrdtSyncHub {
     }
 
     fn compaction_status_reply(&self, buffer_id: &str) -> CrdtServerMessage {
-        self.compaction_status(buffer_id)
+        let _guard = self.operation.lock();
+        self.compaction_status_while_guarded(buffer_id)
             .map(CrdtServerMessage::CompactionStatus)
             .unwrap_or_else(|err| CrdtServerMessage::Error {
                 buffer_id: Some(buffer_id.to_string()),
@@ -904,7 +1143,8 @@ impl CrdtSyncHub {
         peer_id: CrdtPresencePeerId,
         state_vector_v1: Vec<u8>,
     ) -> CrdtServerMessage {
-        self.acknowledge_state_vector(buffer_id, peer_id, state_vector_v1)
+        let _guard = self.operation.lock();
+        self.acknowledge_state_vector_while_guarded(buffer_id, peer_id, state_vector_v1)
             .map(CrdtServerMessage::CompactionStatus)
             .unwrap_or_else(|message| CrdtServerMessage::Error {
                 buffer_id: Some(buffer_id.to_string()),
@@ -915,7 +1155,7 @@ impl CrdtSyncHub {
     fn snapshot_fallback_reply(&self, buffer_id: &str) -> CrdtServerMessage {
         let record = self.compaction_record(buffer_id);
         self.buffers
-            .snapshot_for(buffer_id, &[])
+            .snapshot_for_managed(buffer_id, &[])
             .map(|snapshot| CrdtServerMessage::SnapshotFallback {
                 buffer_id: snapshot.buffer_id,
                 update_v1: snapshot.update_v1,
@@ -962,7 +1202,7 @@ impl CrdtSyncHub {
         let mut compaction = self.compaction.lock();
         let record = compaction.entry(buffer_id.to_string()).or_default();
         if record.retained_snapshot_update_v1.is_empty() || can_advance {
-            let snapshot = self.buffers.snapshot_for(buffer_id, &[])?;
+            let snapshot = self.buffers.snapshot_for_managed(buffer_id, &[])?;
             record.retained_snapshot_update_v1 = snapshot.update_v1;
         }
         if can_advance {

@@ -311,18 +311,27 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let exe = root.path().join("neoism");
         // A separate copy gives /proc/exe the same identity as a real installed app.
-        fs::copy("/bin/sleep", &exe).unwrap();
-        let mut gui = Command::new(&exe).arg("60").spawn().unwrap();
-        let mut unrelated = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let mut stack = Vec::new();
+        for name in ["neoism", "neoism-workspace-daemon", "neoism-agent", "neoism-agent-lua-runner"] {
+            let path = root.path().join(name);
+            fs::copy("/bin/sleep", &path).unwrap();
+            stack.push(Command::new(&path).arg("60").spawn().unwrap());
+        }
+        let other = tempfile::tempdir().unwrap();
+        let other_agent = other.path().join("neoism-agent");
+        fs::copy("/bin/sleep", &other_agent).unwrap();
+        let mut unrelated = Command::new(&other_agent).arg("60").spawn().unwrap();
         let result = stop_stack(&exe, None, Duration::from_secs(3));
-        let gui_exited = gui.try_wait().unwrap().is_some();
+        let stack_exited = stack.iter_mut().all(|child| child.try_wait().unwrap().is_some());
         let unrelated_running = unrelated.try_wait().unwrap().is_none();
-        let _ = gui.kill();
-        let _ = gui.wait();
+        for child in &mut stack {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         let _ = unrelated.kill();
         let _ = unrelated.wait();
         result.unwrap();
-        assert!(gui_exited);
+        assert!(stack_exited);
         assert!(unrelated_running);
         use std::os::unix::fs::PermissionsExt;
         let marker = root.path().join("launched");

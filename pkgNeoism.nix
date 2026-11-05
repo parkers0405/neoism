@@ -19,6 +19,9 @@ in rustPlatform.buildRustPackage {
     fileset = lib.fileset.unions ([ ./Cargo.lock ./Cargo.toml ./README.md
       ./.cargo/config.toml
       ./vendor/blaze-compat
+      # Rust's offline product reference embeds content from the pinned submodule.
+      ./vendor/neoism-docs
+      ./neoism-agent/openapi/v2.json
       ./neoism-frontend/interactive-artifacts
       ./scripts/blaze.sh
       ./scripts/test-workspace.mjs

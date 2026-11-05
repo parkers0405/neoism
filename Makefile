@@ -1,5 +1,11 @@
 .DEFAULT_GOAL := build
-.PHONY: build run dev install check test
+.PHONY: build run dev install check test docs docs-init docs-check
+docs-init:
+	git submodule update --init --recursive vendor/neoism-docs
+docs:
+	node scripts/build-docs.mjs
+docs-check:
+	node --test scripts/build-docs.test.mjs
 build:
 	bash scripts/gpuix.sh build
 run:

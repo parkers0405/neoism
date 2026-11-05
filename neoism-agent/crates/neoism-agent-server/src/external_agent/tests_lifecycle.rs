@@ -184,6 +184,201 @@ done
     (script, log)
 }
 
+async fn orchestrate(
+    state: &AppState,
+    parent: &SessionInfo,
+    provider: &str,
+    task_id: Option<&str>,
+    prompt: &str,
+    background: bool,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<tool::ToolExecutionResult, String> {
+    let snapshot = state
+        .plugin_snapshot_for_session(&parent.directory, parent.id.as_str())
+        .await;
+    crate::plugins::subagents::start_task_tool(
+        state,
+        snapshot,
+        &parent.id,
+        json!({
+            "subagent_type": provider,
+            "task_id": task_id,
+            "description": "Review code",
+            "prompt": prompt,
+            "background": background,
+        }),
+        cancel,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn external_orchestration_continues_same_provider_and_delivers_background_results() {
+    for provider in ["opencode", "claude", "codex"] {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-orchestration-{provider}-{}",
+            Id::ascending(IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, log) = mock_adapter(&root, provider);
+        let mut services = crate::standard_services();
+        services.executables = Arc::new(
+            crate::executable::test_support::FakeExecutableService::with(
+                if provider == "opencode" { "opencode" } else { "npx" },
+                script,
+            ),
+        );
+        let state = AppState::open_database_with_services(root.join("agent.sqlite3"), services)
+            .await
+            .unwrap();
+        let app = crate::app(state.clone());
+        // The native parent must never use a real API while completion delivery
+        // is exercised. Its deliberately unconfigured model fails locally.
+        let parent: SessionInfo = json_response(app.clone().oneshot(http(
+            Method::POST,
+            &format!("/v2/sessions?directory={}", root.display()),
+            Some(json!({"model":{"providerId":"orchestration-test","id":"none"}})),
+        )).await.unwrap()).await;
+        let result = orchestrate(&state, &parent, provider, None, "Review workspace", false, None)
+            .await
+            .unwrap();
+        let metadata = result.metadata.unwrap();
+        assert_eq!(metadata["provider"], provider);
+        assert_eq!(metadata["status"], "completed");
+        assert!(result.output.contains("Continued answer"));
+        let child_id = metadata["sessionId"].as_str().unwrap();
+        let child = state.inner.store.get_session(child_id).await.unwrap().unwrap();
+        assert_eq!(child.parent_id.as_ref(), Some(&parent.id));
+        assert_eq!(child.directory, parent.directory);
+        assert_eq!(child.extra["externalAgent"]["externalSessionId"], format!("native-{provider}"));
+
+        orchestrate(&state, &parent, provider, Some(child_id), "Continue review", false, None)
+            .await
+            .unwrap();
+        assert!(std::fs::read_to_string(&log).unwrap().contains("session/load"));
+        let other = if provider == "codex" { "claude" } else { "codex" };
+        let error = orchestrate(&state, &parent, other, Some(child_id), "Wrong provider", true, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("original subagent_type"));
+        let error = orchestrate(&state, &parent, "general", Some(child_id), "Wrong runtime", false, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("original external subagent_type"));
+        let error = orchestrate(&state, &parent, provider, Some("missing-task"), "Missing child", false, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("not found"));
+        assert_eq!(state.inner.store.list_child_sessions(parent.id.as_str()).await.unwrap().len(), 1);
+        assert_eq!(state.inner.store.get_session(child_id).await.unwrap().unwrap().extra["externalAgent"]["provider"], provider);
+
+        let mut events = state.subscribe();
+        orchestrate(&state, &parent, provider, Some(child_id), "Background review", true, None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.kind == event_type::SESSION_SUBTASK_COMPLETED
+                    && event.properties["childSessionID"] == child_id
+                {
+                    assert_eq!(event.properties["status"], "completed");
+                    assert!(event.properties["result"].as_str().unwrap().contains("Continued answer"));
+                    break;
+                }
+            }
+        }).await.expect("external child completion was not delivered to its parent");
+        let snapshot = state.plugin_snapshot_for_session(&parent.directory, parent.id.as_str()).await;
+        let result = crate::plugins::subagents::task_result_tool(
+            &state, &snapshot, &parent.id, json!({"task_id":child_id}),
+        ).await.unwrap();
+        assert_eq!(result.metadata.unwrap()["status"], "completed");
+        drop(snapshot);
+
+        let mut nested = state.inner.store.get_session(child_id).await.unwrap().unwrap();
+        nested.extra.get_mut("externalAgent").unwrap()["nested"] = json!(true);
+        state.inner.store.update_session(&nested).await.unwrap();
+        let error = orchestrate(&state, &parent, provider, Some(child_id), "Cannot control native child", false, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Provider-native nested tasks"));
+        drop(events);
+        drop(app);
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[tokio::test]
+async fn external_orchestration_stop_cancels_foreground_child_without_cancelling_parent() {
+    for provider in ["opencode", "claude", "codex"] {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-orchestration-stop-{provider}-{}",
+            Id::ascending(IdKind::Event)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (script, log) = mock_adapter(&root, provider);
+        let mut services = crate::standard_services();
+        services.executables = Arc::new(
+            crate::executable::test_support::FakeExecutableService::with(
+                if provider == "opencode" { "opencode" } else { "npx" },
+                script,
+            ),
+        );
+        let state = AppState::open_database_with_services(root.join("agent.sqlite3"), services)
+            .await
+            .unwrap();
+        let app = crate::app(state.clone());
+        let parent: SessionInfo = json_response(app.clone().oneshot(http(
+            Method::POST,
+            &format!("/v2/sessions?directory={}", root.display()),
+            Some(json!({"model":{"providerId":"orchestration-test","id":"none"}})),
+        )).await.unwrap()).await;
+        let parent_cancel = Arc::new(AtomicBool::new(false));
+        let task_state = state.clone();
+        let task_parent = parent.clone();
+        let task_cancel = parent_cancel.clone();
+        let running = tokio::spawn(async move {
+            orchestrate(&task_state, &task_parent, provider, None, "abort me", false, Some(task_cancel)).await
+        });
+        let child = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if std::fs::read_to_string(&log).unwrap_or_default().contains("session/prompt") {
+                    if let Some(child) = state.inner.store.list_child_sessions(parent.id.as_str()).await.unwrap().into_iter().next() {
+                        if session_is_running(&state, child.id.as_str()).await {
+                            break child;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("external child never started");
+        let error = orchestrate(&state, &parent, provider, Some(child.id.as_str()), "Do not drop this", true, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("follow-up prompt was not submitted"));
+        let snapshot = state.plugin_snapshot_for_session(&parent.directory, parent.id.as_str()).await;
+        crate::plugins::subagents::stop_task_tool(&state, &snapshot, &parent.id, json!({"task_id":child.id}))
+            .await
+            .unwrap();
+        drop(snapshot);
+        let error = tokio::time::timeout(Duration::from_secs(4), running)
+            .await
+            .expect("stopping foreground child did not cancel its ACP turn")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("Session aborted"));
+        assert!(!parent_cancel.load(Ordering::SeqCst));
+        let requests = std::fs::read_to_string(&log).unwrap();
+        assert!(requests.contains("session/cancel"));
+        assert!(!requests.contains("Do not drop this"));
+        assert!(!session_is_running(&state, child.id.as_str()).await);
+        drop(app);
+        state.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 #[tokio::test]
 async fn three_provider_roots_run_via_real_http_queue_and_reload() {
     for provider in ["opencode", "codex", "claude"] {

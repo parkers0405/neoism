@@ -16,6 +16,10 @@ prefix="$fixture/installed"
 mkdir -p "$payload/web/app" "$payload/web/native" "$payload/web/agent-gui/assets" "$payload/licenses" "$prefix/bin"
 printf '{}' > "$payload/web/app/manifest.json"
 printf 'native library' > "$payload/web/native/display.node"
+mkdir -p "$payload/resources/docs/api/docs/reference"
+printf '{}' > "$payload/resources/docs/content.json"
+printf '<html>Docs</html>' > "$payload/resources/docs/api/docs/index.html"
+printf '<html>Reference</html>' > "$payload/resources/docs/api/docs/reference/index.html"
 for binary in neoism neoism-workspace-daemon neoism-agent; do
   printf '#!/bin/sh\necho migrated-%s\n' "$binary" > "$payload/$binary"
   chmod +x "$payload/$binary"
@@ -42,6 +46,12 @@ assert_markers() {
   [[ "$(printf '%s\n' "$prefix/bin/web/agent-gui/"*)" == "$prefix/bin/web/agent-gui/index.html" ]]
 }
 assert_markers
+[[ -s "$prefix/bin/resources/docs/api/docs/reference/index.html" ]]
+# Missing docs must fail before replacing any installed component.
+mv "$payload/resources/docs/content.json" "$fixture/content.json"
+if bash "$repo_root/scripts/install-gpuix-bundle.sh" "$payload" "$prefix" > /dev/null 2>&1; then echo 'Missing docs were accepted' >&2; exit 1; fi
+[[ -s "$prefix/bin/resources/docs/content.json" ]]
+mv "$fixture/content.json" "$payload/resources/docs/content.json"
 # Even a dirty payload must not install either browser UI. Upgrades drop old assets.
 mkdir -p "$prefix/bin/web/agent-gui"
 printf stale > "$prefix/bin/web/agent-gui/stale.js"
@@ -85,6 +95,7 @@ done
 bash "$repo_root/scripts/install-gpuix-bundle.sh" "$payload" "$prefix"
 previous_executable="$(readlink "/proc/$previous_pid/exe")"
 [[ -x "$previous_executable" && -f "$(dirname "$previous_executable")/web/app/manifest.json" ]]
+[[ -s "$(dirname "$previous_executable")/resources/docs/content.json" ]]
 [[ "$("$prefix/bin/neoism")" == migrated-neoism ]]
 touch "$fixture/continue"
 wait "$previous_pid"

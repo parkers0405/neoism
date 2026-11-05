@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parse, type ParseError } from "jsonc-parser";
 import { palettes, type Palette } from "./design/generated";
 import { cursorBlinkInterval, DEFAULT_CURSOR_BLINK_INTERVAL_MS } from "./ui/cursor-blink";
@@ -48,7 +48,33 @@ const number = (value: unknown, fallback: number) => typeof value === "number" &
 const string = (value: unknown, fallback: string) => typeof value === "string" && value.trim() ? value : fallback;
 const readOptional = (path: string) => { try { return readFileSync(path, "utf8").trim() || undefined; } catch { return undefined; } };
 
-export function loadConfig(args = process.argv.slice(2), env = process.env, values?: Record<string, unknown>): AppConfig {
+export function daemonTokenPath(env:NodeJS.ProcessEnv=process.env,platform:NodeJS.Platform=process.platform,temporaryDirectory=tmpdir()):string {
+  // Match workspace-daemon's daemon_token_path, including Windows usernames.
+  if(platform==="win32")return join(temporaryDirectory,`neoism-${(env.USERNAME||"default").replace(/[^a-zA-Z0-9]/gu,"-")}`,"daemon-token");
+  return env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR,"neoism","daemon-token") : join(temporaryDirectory,`neoism-${process.getuid?.() ?? "user"}`,"daemon-token");
+}
+
+export function parseLocalServiceEndpoint(contents:string):string|undefined {
+  try{
+    if(contents.length>4096)return;
+    const record=JSON.parse(contents);
+    if(record.protocol!==1||!Number.isSafeInteger(record.pid)||record.pid<=0||typeof record.nonce!=="string"||!record.nonce)return;
+    const address=typeof record.address==="string"&&/^(127\.0\.0\.1|\[::1\]):([0-9]+)$/.exec(record.address);
+    if(!address||Number(address[2])<1||Number(address[2])>65535)return;
+    return `ws://${record.address}/session`;
+  }catch{return;}
+}
+export function discoveredLocalDaemon(env:NodeJS.ProcessEnv=process.env):string|undefined {
+  if(env.NEOISM_DAEMON_ADDR||env.NEOISM_DAEMON_SOCKET||env.NEOISM_GPUIX_DAEMON_URL)return;
+  const contents=readOptional(join(dirname(daemonTokenPath(env)),"daemon-endpoint.json"));
+  if(!contents)return;
+  const endpoint=parseLocalServiceEndpoint(contents);if(!endpoint)return;
+  // Forced exits/updates cannot run the publication guard's cleanup.
+  try{process.kill(JSON.parse(contents).pid,0);}catch(error){if((error as NodeJS.ErrnoException).code!=="EPERM")return;}
+  return endpoint;
+}
+
+export function loadConfig(args:readonly string[] = process.argv.slice(2), env = process.env, values?: Record<string, unknown>): AppConfig {
   const value = (flag: string) => {
     const argument = args.findIndex(arg => arg === flag || arg.startsWith(flag + "="));
     if (argument < 0) return undefined;
@@ -84,9 +110,9 @@ export function loadConfig(args = process.argv.slice(2), env = process.env, valu
   const socketPath = env.NEOISM_DAEMON_SOCKET || (env.XDG_RUNTIME_DIR ? join(runtimeDir, "neoism.sock") : join(tmpdir(), `neoism-${process.getuid?.() ?? "user"}.sock`));
   const explicit = value("--daemon") || env.NEOISM_GPUIX_DAEMON_URL;
   const endpoint = explicit || (process.platform !== "win32" && existsSync(socketPath)
-    ? `ws+unix://${socketPath}:/session` : `ws://${env.NEOISM_DAEMON_ADDR || "127.0.0.1:7878"}/session`);
+     ? `ws+unix://${socketPath}:/session` : discoveredLocalDaemon(env)||`ws://${env.NEOISM_DAEMON_ADDR || "127.0.0.1:7878"}/session`);
   // Only discover local upgrade credentials for our own default endpoint.
-  const authToken = env.NEOISM_DAEMON_TOKEN || (!explicit ? readOptional(env.XDG_RUNTIME_DIR ? join(runtimeDir, "neoism", "daemon-token") : join(runtimeDir, "daemon-token")) : undefined);
+   const authToken = env.NEOISM_DAEMON_TOKEN || (!explicit ? readOptional(daemonTokenPath(env)) : undefined);
   if (!palettes[themeName as keyof typeof palettes]) warnings.push(`Theme '${themeName}' is not bundled; using pastel_dark.`);
   let backgroundPath = typeof image.path === "string" ? resolve(image.path.replace(/^~(?=\/)/, homedir())) : undefined;
   const blur = Math.max(0, number(image.blur, 0));

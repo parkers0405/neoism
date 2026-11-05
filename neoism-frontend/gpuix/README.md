@@ -1,6 +1,8 @@
 # Neoism GPUIX frontend
 
-Neoism's native workspace frontend. SolidJS renders through GPUIX/GPUI; Effect manages the daemon connection and typed requests, and the Neoism TypeScript SDK handles Agent APIs. Published releases target Linux x86_64, macOS Apple Silicon, and Windows x86_64; see the [main README](../../README.md#install) for installation and nightly updates.
+The native desktop frontend for Neoism, a local-first, open-source agentic IDE. It brings the block terminal, full code editor, rich Markdown, and Neoism's own agent platform into one persistent workspace. Start with the [workspace guide](../../docs/README.md) or [terminal guide](../../docs/terminal.md) for everyday use; this page covers frontend development, implementation details, and compatibility.
+
+SolidJS renders through GPUIX/GPUI; Effect manages the daemon connection and typed requests, and the Neoism TypeScript SDK handles Agent APIs. Published releases target Linux x86_64, macOS Apple Silicon, and Windows x86_64; see the [main README](../../README.md#install) for installation and nightly updates.
 
 ## Run
 
@@ -100,9 +102,9 @@ Bun's install script. Native libraries are replaced atomically.
 
 Packaged builds use the selected compiler's release profile. Standalone `build:core` defaults to the development profile; set `NEOISM_GPUIX_BUILD_PROFILE=release` for the packaged profile. Blaze bridge outputs use `target/gpuix-core-blaze`, and Cargo bridge outputs use `target/gpuix-core-cargo`, independently of the services' build directory. `NEOISM_GPUIX_TARGET_DIR` overrides that directory.
 
-The app reads `~/.config/neoism/config.json` (JSONC), discovers the local daemon
-socket and token, or connects to `ws://127.0.0.1:7878/session`. It reuses the local daemon and starts a standalone local daemon if none is reachable.
-An explicit `--daemon` endpoint never starts a local service.
+The app reads `~/.config/neoism/config.json` (JSONC), discovers the local daemon socket and token, or connects to `ws://127.0.0.1:7878/session`. It reuses a daemon only after a successful application handshake and automatically starts/retries a missing local service. An explicit `--daemon` endpoint never starts a local service.
+
+Automatically managed shared services prefer daemon port 7878 and Agent port 4096. If an unrelated listener occupies a preferred port, the service reserves a free loopback port and publishes its actual address beside the local daemon token as `daemon-endpoint.json` or `agent-endpoint.json`; discovery is not itself a readiness signal. OS-held ownership locks prevent competing managed owners and release on process exit. Explicit daemon addresses/sockets, explicit Agent URLs, remote connections, and private/Fast previews do not silently change ports, and unrelated processes are never killed to reclaim a port.
 
 ```sh
 npm start -- --workspace WORKSPACE_ID
@@ -116,6 +118,8 @@ credential. Local credential discovery applies only to the default endpoint.
 Discord Rich Presence connects to the local Discord desktop client automatically and reconnects if Discord starts later or restarts. It shows only "Building in Neoism", a generic workspace description, and elapsed time; workspace names, paths, and file contents are never sent. Set `NEOISM_DISCORD_PRESENCE=0` to disable it. `NEOISM_DISCORD_APP_ID` and `NEOISM_DISCORD_ASSET_KEY` retain the original desktop integration's optional overrides. Linux IPC discovery includes native, Flatpak, and Snap locations; macOS uses runtime/temp sockets and Windows uses Discord's named pipes. Presence closes with the native window and is not run by the daemon.
 
 ## Working paths
+
+- **Open Documentation** in the command palette opens the bundled handbook and Scalar API reference in the browser, served on a loopback-only ephemeral port. `neoism docs` serves the same site without starting graphics or the daemon; Ctrl+C stops its foreground server. Assets live in `resources/docs` and work offline. New Notes vaults receive only a root-level `Welcome.md` checklist, with earlier handbook copies preserved. See [documentation access](../../docs/README.md) and [the shared-source architecture](../../docs/documentation-notebooks.md).
 
 - Shared Rust CodeBuffer, Vim resolver, syntax, wrap/hit testing, viewport springs,
   and TrailCursor drive the code editor. Independent split views preserve their
@@ -142,18 +146,8 @@ Discord Rich Presence connects to the local Discord desktop client automatically
   geometry; the original Rust footer paints checkout, command/connect hints,
   and activity. Slash commands merge the canonical catalog with SDK commands
   and execute real session/provider actions. Child sessions hide the composer.
-- Cold startup selects an independent Home tab showing the original
-  splash and eight source menu actions. Welcome creates no PTY and never
-  captures terminal input. The `+` immediately after the buffer tabs opens another Home tab
-  without creating a PTY. The first explicitly opened Terminal owns local cwd
-  navigation; every terminal tab can close. Recovered dirty documents stay
-  open while Welcome is selected on startup. Original wordmark click effects
-  paint across the pane and use a persistent per-surface shuffle bag;
-  automatic playback follows
-  `appearance.splash-auto-animate` (default false).
-- libghostty is the terminal engine inside the existing Terminal tab. Keyboard
-  input goes directly to daemon PTYs. Hidden tabs continue parsing output, and
-  closing the frontend leaves daemon shells alive. There is no shell composer.
+- Home integrates the splash with a block terminal by default. The `+` after the buffer tabs opens another Home tab. With Block terminal disabled, Home is a standalone splash and the first explicitly opened Terminal owns local cwd navigation; hidden Home shells do not take that role. Recovered dirty documents stay open while Home is selected. Wordmark click effects use a persistent per-surface shuffle bag; automatic playback follows `appearance.splash-auto-animate` (default false).
+- libghostty is the terminal engine for both block and classic presentation. The block terminal adds an editable command bar, completion and history previews, and selectable command/output blocks. Full-screen applications use the native grid. Hidden tabs continue parsing output, and closing the frontend leaves daemon shells alive.
 - Configured palettes, fonts, wallpaper/cached blur, original dimensions, and
   animation state are reused. Native clipboard operations use platform tools.
 
@@ -311,11 +305,11 @@ The transport tests include real H.264/ffmpeg decoding against a local HTTP/WebS
 
 The block-terminal UI is enabled by default. Turn off **Block terminal** in Settings, or set `"terminal": { "block-ui": false }`, to return to the classic terminal and standalone Home splash. Terminal presentation applies to new sessions; existing running shells are not restarted.
 
-With `terminal.block-ui` enabled, Home and terminal tabs use a session-bound completion service. Tab previews candidates without submitting; Shift+Tab cycles backward, Escape restores the original query, and Enter submits once. Up/Ctrl+R remain history navigation. Empty results produce a short input highlight rather than an empty popup.
+With `terminal.block-ui` enabled, Home and terminal tabs use a session-bound completion service. Tab previews candidates without submitting; Shift+Tab cycles backward, Escape restores the original query, and Enter submits once. Up/Ctrl+R open history, where navigation previews entries directly in the input bar; Enter accepts a history preview without executing it. Typing refreshes completion results while retaining the visible menu, with stale candidates blocked from overwriting the draft. Empty results produce a short input highlight rather than an empty popup. See the [terminal guide](../../docs/terminal.md) for everyday controls.
 
 An updated daemon and a freshly started integrated shell provide host PATH commands, live aliases/functions/variable names, quoted paths, Git branches/remotes/changed files, and package scripts. Bash also uses registered `-F` completion functions, literal `-W` lists, and filename/directory registrations. Small built-in command hints supplement hosts without completion plugins. Native candidates precede history, and requests use the terminal's host-side cwd rather than the Explorer's directory.
 
-This is not universal shell-completion compatibility: zsh currently supplies explicitly identified live-name and host-data fallback, not native ZLE/compdef completion. Readline-dependent and `-C` Bash completers, compound shell programs, and command substitutions are not supported. Older daemons and unsupported shells retain the bounded app-side fallback.
+Shell compatibility has specific limits: zsh currently supplies explicitly identified live-name and host-data fallback rather than native ZLE/compdef completion. Readline-dependent and `-C` Bash completers, compound shell programs, and command substitutions are not supported. Older daemons and unsupported shells retain the bounded app-side fallback.
 
 Completion uses private prompt-state snapshots and isolated, time/output/concurrency-bounded workers. It never evaluates the query or writes it to the live PTY. Because installed completion functions can run helper programs, requests require terminal-execution permission, attachment, and workspace authorization; file-read permission alone is insufficient. Workers run outside the websocket receive loop and are cancelled on superseding requests, input, close, or disconnect.
 

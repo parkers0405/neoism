@@ -24,6 +24,9 @@ cp "$repo_root/neoism-frontend/shared/assets/icons/neoism.png" "$bundle/neoism.p
 # Never copy stale browser distributions from a previous native build.
 mkdir -p "$bundle/web"
 cp -a "$frontend/dist/web/app" "$frontend/dist/web/native" "$bundle/web/"
+node "$repo_root/scripts/build-docs.mjs" --verify "$frontend/dist/resources/docs"
+mkdir -p "$bundle/resources"
+cp -a "$frontend/dist/resources/docs" "$bundle/resources/docs"
 mkdir -p "$bundle/web/agent-gui"
 for marker in index.html agent-gui/index.html; do
   printf '%s\n' '<!-- Neoism native runtime resources; no browser UI. -->' > "$bundle/web/$marker"

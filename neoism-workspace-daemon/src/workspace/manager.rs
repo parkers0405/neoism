@@ -44,6 +44,7 @@ impl WorkspaceManager {
                 client_states: HashMap::new(),
                 workspace_claims: HashMap::new(),
                 workspace_claim_history: HashMap::new(),
+                retired_workspaces: HashSet::new(),
                 session_pty_links: HashMap::new(),
                 next_route_id: 1,
             })),
@@ -375,6 +376,7 @@ impl WorkspaceManager {
     pub fn set_preferences(&self, workspace_id: String, prefs: WorkplacePreferences) {
         {
             let mut inner = self.inner.lock();
+            if inner.retired_workspaces.contains(&workspace_id) { return; }
             inner
                 .preferences
                 .insert(workspace_id.clone(), prefs.clone());
@@ -482,24 +484,12 @@ impl WorkspaceManager {
     pub(crate) fn close_host_workspace(
         &self,
         workspace_id: &str,
-    ) -> Option<WorkspaceSummary> {
+    ) -> Option<WorkspaceRetirement> {
         let mut inner = self.inner.lock();
-        let removed = inner.host_workspaces.remove(workspace_id)?;
-        inner.workspace_claim_history.remove(workspace_id);
-        inner
-            .workspace_tabs
-            .retain(|_, tab| tab.workspace_id != workspace_id);
-        inner
-            .sessions
-            .retain(|_, session| session.workspace_id != workspace_id);
-        inner
-            .editor_surfaces
-            .retain(|_, surface| surface.workspace_id != workspace_id);
-        inner
-            .active_workspace_by_host
-            .retain(|_, id| id != workspace_id);
-        inner.pane_layouts.remove(workspace_id);
+        if !inner.host_workspaces.contains_key(workspace_id) { return None; }
+        let removed = super::membership::retire_workspace(&mut inner, workspace_id);
         drop(inner);
+        self.persist();
         self.mark_dirty();
         Some(removed)
     }
@@ -553,8 +543,9 @@ impl WorkspaceManager {
         root_dir: Option<PathBuf>,
     ) -> WorkspaceSummary {
         let now = now_secs();
-        let id = workspace_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let mut id = workspace_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut inner = self.inner.lock();
+        if inner.retired_workspaces.contains(&id) { id = Uuid::new_v4().to_string(); }
         if !inner.host_workspaces.contains_key(&id) {
             inner.workspace_claim_history.insert(id.clone(), WorkspaceClaimHistory::default());
         }
@@ -1038,6 +1029,7 @@ impl WorkspaceManager {
         tabs: Vec<WorkspaceTabSummary>,
     ) {
         let mut inner = self.inner.lock();
+        if inner.retired_workspaces.contains(workspace_id) { return; }
         inner
             .workspace_tabs
             .retain(|_, tab| tab.workspace_id != workspace_id);
@@ -1198,7 +1190,10 @@ impl WorkspaceManager {
     }
 
     pub(crate) fn insert_window(&self, window: WorkspaceWindowSummary) {
-        self.inner.lock().windows.insert(window.id.clone(), window);
+        let mut inner = self.inner.lock();
+        if window.workspace_id.as_ref().is_some_and(|id| inner.retired_workspaces.contains(id)) { return; }
+        inner.windows.insert(window.id.clone(), window);
+        drop(inner);
         self.mark_dirty();
     }
 
@@ -1218,11 +1213,14 @@ impl WorkspaceManager {
         if conn.client_id.is_nil() {
             return;
         }
-        self.inner.lock().client_states.insert(
+        let mut inner = self.inner.lock();
+        let active_workspace = conn.active_workspace.clone().filter(|id| !inner.retired_workspaces.contains(id));
+        let active_session = if active_workspace.is_some() { conn.active_session.clone() } else { None };
+        inner.client_states.insert(
             conn.client_id,
             ClientResumeState {
-                active_workspace: conn.active_workspace.clone(),
-                active_session: conn.active_session.clone(),
+                active_workspace,
+                active_session,
             },
         );
     }
@@ -1250,6 +1248,7 @@ impl WorkspaceManager {
 
     pub(crate) fn upsert_editor_surface(&self, surface: EditorSurfaceSummary) {
         let mut inner = self.inner.lock();
+        if inner.retired_workspaces.contains(&surface.workspace_id) { return; }
         inner
             .editor_surfaces
             .insert(surface.surface_id.clone(), surface.clone());
@@ -1307,10 +1306,10 @@ impl WorkspaceManager {
     }
 
     pub(crate) fn insert_session(&self, session: SessionSummary) {
-        self.inner
-            .lock()
-            .sessions
-            .insert(session.id.clone(), session);
+        let mut inner = self.inner.lock();
+        if inner.retired_workspaces.contains(&session.workspace_id) { return; }
+        inner.sessions.insert(session.id.clone(), session);
+        drop(inner);
         self.mark_dirty();
     }
 
@@ -1568,6 +1567,7 @@ impl WorkspaceManager {
         {
             let mut inner = self.inner.lock();
             for session in sessions {
+                if inner.retired_workspaces.contains(&session.workspace_id) { continue; }
                 inner.sessions.insert(session.id.clone(), session);
             }
         }

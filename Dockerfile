@@ -18,6 +18,9 @@ RUN apt-get update \
 
 WORKDIR /src
 COPY . .
+# Initialize submodules on the host before docker build; .git is not in context.
+# Fail clearly rather than fetching an unpinned latest docs revision in the image.
+RUN test -f vendor/neoism-docs/manifest.json || (echo 'Run git submodule update --init --recursive vendor/neoism-docs before docker build' >&2; exit 1)
 # Blaze installs the pinned, checksum-verified compiler and its toolchain.
 # Docker already isolates the build; nested user namespaces are unavailable
 # under the default BuildKit seccomp policy.

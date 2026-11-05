@@ -85,7 +85,7 @@ import { localDaemon } from "../menu-actions/web-frontend";
 import { openExternalUrl } from "../menu-actions/web-frontend";
 import {devicePreviewEnabled,DevicePreviewSlot,DevicePreviewButton} from "../device/feature";
 
-export function App(props: { workspaceActivation?:number; workspaceNavigation?:WorkspaceNavigation; model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: (fontSizeOverride?:number,useConfiguredFontSize?:boolean) => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
+export function App(props: { workspaceActivation?:number; workspaceNavigation?:WorkspaceNavigation; model: WorkspaceModel; config: AppConfig; visuals?:AppVisualState; registerWindowKeys?:(handler:(event:KeyEvent)=>void)=>(()=>void); reloadConfig?: (fontSizeOverride?:number,useConfiguredFontSize?:boolean) => void | Promise<void>;onZoomFont?:(delta:1|-1)=>void|Promise<void>; onSetTheme?:(name:string)=>Promise<void>; onConnectServer?: (server: ServerSelection) => void | Promise<void> }) {
   const config = props.config, model = props.model, c = config.theme, s = config.scale;
   const generationPresented=useContext(GenerationPresented);
   const workspaceActivation=props.workspaceActivation??0;
@@ -97,6 +97,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   const tabChromeSpec = tabChrome(s);
   const {state,update:setState,revision:modelRevision} = createModelSnapshot(model.state);
   onCleanup(model.subscribe(() => setState(model.state)));
+  onCleanup(model.onWorkspaceClosed(id=>visuals.closeWorkspace(id)));
   const trees = visuals.trees;
   const sidebar = createMemo(() => workspaceSidebar(state().ui,state().activeWorkspace?.id));
   const setSidebar = (value:WorkspaceSidebar|undefined) => { const id=model.state.activeWorkspace?.id;if(id)model.setUI({workspaceSidebars:withWorkspaceSidebar(model.state.ui,id,value)}); };
@@ -175,7 +176,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   onCleanup(()=>chromeMeasurements.dispose());
   const chromeLayoutRevision=createMemo(()=>state().ui.layouts);
   createEffect(()=>{windowSize();sidebar();chromeLayoutRevision();refreshChromeTargetBounds();});
-  const chromeActions = new ChromeActionsController({ model, config, reload: size => props.reloadConfig?.(size), onConnectServer: props.onConnectServer, onRunAction: (action) => onChromeAction(action), supportedActions: () => supportedCommands() });
+  const chromeActions = new ChromeActionsController({ model, config, reload: size => props.reloadConfig?.(size), onSetTheme:props.onSetTheme, onConnectServer: props.onConnectServer, onRunAction: (action) => onChromeAction(action), supportedActions: () => supportedCommands() });
   const [chromeFrame, setChromeFrame] = createSignal(chromeActions.frame);
   onCleanup(chromeActions.subscribe(() => setChromeFrame(chromeActions.frame)));
   onCleanup(() => chromeActions.dispose());
@@ -407,6 +408,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     if (commands()) closeCommands(); setFinderMode(mode); setPaletteMode("find"); setQuery(""); setMenu(false); setPalette(true);
   };
   const supportedCommands = () => ["TabCreate", "TabClose", "TabCloseUnfocused", "SelectNextTab", "SelectPrevTab", "SplitRight", "SplitDown", "SelectNextSplit", "SelectPrevSplit", "CloseCurrentSplitOrTab",
+    "OpenDocumentation",
     "Copy", "Paste", "SearchFiles", "SearchWords", "SearchGitChanges", "ToggleGitDiffPanel", "OpenNeoismAgent", "OpenNeoismNotes", "ToggleFullscreen", "Quit", "CloseTab", "CloseWorkspace", "OpenSettings", "ConfigEditor", "OpenThemePicker", "ListBackgrounds", "ShowServers", "ShowSystems", "AddServer", "CreateServer", "LeaveWorkspace", "ShowWorkplaces",
     ...(active()?.kind === "file" ? ["SaveDocument", "GoToLine", "ToggleWordWrap", "ToggleViMode", "ReplaceInFile", "SearchForward", "SearchBackward", "LspHover", "LspCodeAction", "LspFormat", "LspDefinition", "LspReferences", "LspRename"] : []),
     ...(activeTerminal() ? ["ToggleViMode", "ClearHistory", "SearchForward", "SearchBackward"] : [])];
@@ -551,6 +553,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       case "SearchFiles": openFind("files"); return; case "SearchWords": openFind("grep"); return; case "SearchGitChanges": openFind("git"); return;
       case "ToggleGitDiffPanel": toggleGit(); return;
       case "OpenCommandPalette": openCommands(); return;
+      case "OpenDocumentation": await openExternalUrl("neoism://docs"); return;
       case "ShowWorkplaces": await chromeActions.open("OpenWorkspaces"); return;
       case "OpenSettings": case "ConfigEditor": case "OpenThemePicker": case "ListBackgrounds": case "ShowServers": case "ShowSystems": case "AddServer": case "CreateServer": case "LeaveWorkspace": await chromeActions.open(action); return;
       case "SaveDocument": if (surface?.kind === "file") await saveSurface(surface); return;
@@ -1295,7 +1298,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     return <div testId="agent-pane" data-home={home()} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",minWidth:0,minHeight:0,overflow:"hidden"}}
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
-      <Show when={!home()&&!!timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><AgentTimelineView viewport={viewport()} pinImage={(source,raster)=>visuals.pinTimelineImage(renderer,source,raster)} onPreview={setImagePreview} sessionId={timelineSession()!} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:timelineSession()!} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
+      <Show when={!home()&&!!timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><AgentTimelineView surfaceId={props.surfaceId} viewport={viewport()} onPreview={setImagePreview} sessionId={timelineSession()!} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:timelineSession()!} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
         onFocus={()=>{++contentFocusSerial;contentFocusFrames.cancel();pendingContentFocus=false;noteContentFocus();setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}
         contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]??viewport().height)}
         openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/></div></Show>

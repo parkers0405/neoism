@@ -250,20 +250,6 @@ pub(crate) async fn handle_socket(
     let mut pty_subscriptions = std::collections::HashSet::<String>::new();
     tracing::debug!("websocket connection established");
 
-    // Unsolicited status snapshot: the chrome status line wants a real
-    // branch on first paint without having to query. We send a `GitReply`
-    // tagged with the reserved `request_id = 0` (clients never allocate
-    // 0; their counter starts at 1) so the JS side knows it's a push.
-    let initial_branch = git_handler::current_branch_snapshot().await;
-    let snapshot = ServiceServerMessage::GitReply {
-        request_id: 0,
-        message: initial_branch.clone(),
-    };
-    if let Err(err) = send_json(&mut sink, &snapshot).await {
-        tracing::warn!(error = %err, "websocket send error on branch snapshot");
-        return;
-    }
-
     // Poll the workspace every 2 seconds and re-push any field whose
     // value has changed since the last tick. We send through a local
     // mpsc so the polling task doesn't have to share the sink with the
@@ -294,11 +280,22 @@ pub(crate) async fn handle_socket(
     // task may finish enqueuing while a newer task starts on another thread.
     // Never let that late WatchStatus replace the selected workspace's watch.
     let mut git_watch_request_id = 0;
-    let poll_task = tokio::spawn(status_poll_loop(
-        push_tx,
-        initial_branch_name(&initial_branch),
-        git_watch_rx,
-    ));
+    // Repository discovery can stall on slow Windows/network filesystems.
+    // Never put it ahead of reading Hello and returning the handshake.
+    let poll_task = tokio::spawn(async move {
+        let initial_branch = git_handler::current_branch_snapshot().await;
+        let branch_name = initial_branch_name(&initial_branch);
+        if push_tx
+            .send(ServiceServerMessage::GitReply {
+                request_id: 0,
+                message: initial_branch,
+            })
+            .is_err()
+        {
+            return;
+        }
+        status_poll_loop(push_tx, branch_name, git_watch_rx).await;
+    });
 
     // Real-time `publishDiagnostics` bus (event-driven — no polling). The
     // engine pushes here the instant a language server publishes; we forward
@@ -386,6 +383,10 @@ pub(crate) async fn handle_socket(
     // peers whose connection is technically alive but stopped
     // heartbeating (~TTL); pruning is idempotent across sockets.
     let mut presence_guard = SocketPresenceGuard::new(crdt.clone());
+    // Deliberately no Drop release: a disconnected replica may reconnect with
+    // old Yrs clocks and offline edits. Only explicit CloseBuffer releases it.
+    static NEXT_CRDT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let crdt_connection = NEXT_CRDT_CONNECTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let presence_ttl = presence_ttl_ms();
     let mut presence_ttl_tick =
         tokio::time::interval(presence_sweep_interval(presence_ttl));
@@ -1869,17 +1870,24 @@ pub(crate) async fn handle_socket(
                             continue;
                         }
                     }
-                    // Workspace removal erases the surface registry. Snapshot
-                    // only its exact surface IDs first; never release by root,
-                    // which can be shared by another workspace or window.
-                    let closing_surfaces = match &message {
-                        WorkspaceClientMessage::CloseHostWorkspace { workspace_id } => {
-                            workspace_manager.editor_surfaces_for_workspace(workspace_id)
-                                .into_iter().map(|surface| surface.surface_id)
-                                .collect::<std::collections::HashSet<_>>()
+                    if let WorkspaceClientMessage::CloseWindowWorkspace { workspace_id }
+                        | WorkspaceClientMessage::CloseHostWorkspace { workspace_id } = &message
+                    {
+                        if let Err(denial) = check_permission(&device, Permission::PtyCreate) {
+                            let _ = send_json(&mut sink, &denial).await;
+                            continue;
                         }
-                        _ => Default::default(),
-                    };
+                        if device.as_ref().and_then(|device| device.workspace_id.as_deref())
+                            .is_some_and(|scope| scope != workspace_id)
+                        {
+                            let _ = send_json(&mut sink, &ServerMessage::Error {
+                                message: "Workspace is outside this device's authorized scope".into(),
+                            }).await;
+                            continue;
+                        }
+                    }
+                    // Dispatch captures exact resource IDs atomically with
+                    // membership retirement. Never release by shared root.
                     let outcome = workspace_handler::handle_preauthenticated(
                         &workspace_manager,
                         &mut connection_workspace,
@@ -1888,7 +1896,9 @@ pub(crate) async fn handle_socket(
                         peer_ip.as_deref(),
                         message,
                     );
-                    if !closing_surfaces.is_empty() && outcome.replies.iter().any(|reply| matches!(reply, WorkspaceServerMessage::HostWorkspaceTree { .. })) {
+                    outcome.retirement.close_ptys(&registry);
+                    let closing_surfaces = &outcome.retirement.surface_ids;
+                    if !closing_surfaces.is_empty() {
                         editor_documents.retain(|(_, _, surface), _| {
                             !surface.as_ref().is_some_and(|id| closing_surfaces.contains(id))
                         });
@@ -1966,6 +1976,17 @@ pub(crate) async fn handle_socket(
                     // suppress echoes and Drop can clean up on
                     // disconnect.
                     let message = match message {
+                        CrdtClientMessage::AcquireBuffer { ref buffer_id, .. } => {
+                            if let Some(path) = crate::crdt::crdt_path_for_buffer_id(buffer_id) {
+                                if let Some(parent) = std::path::Path::new(path).parent() {
+                                    let parent = parent.to_path_buf();
+                                    tokio::task::spawn_blocking(move || {
+                                        crate::fs_watch::hub().ensure_watched(&parent);
+                                    });
+                                }
+                            }
+                            message
+                        }
                         CrdtClientMessage::OpenBuffer {
                             buffer_id,
                             initial_text,
@@ -2002,12 +2023,22 @@ pub(crate) async fn handle_socket(
                         other => other,
                     };
                     let hub = crdt.clone();
+                    let mut receiver = std::mem::replace(&mut crdt_rx, crdt.subscribe());
                     let replies = match tokio::task::spawn_blocking(move || {
-                        hub.handle_client_message(message)
+                        let (replies, pending) = hub.handle_socket_message_draining(crdt_connection, message, &mut receiver);
+                        (replies, pending, receiver)
                     })
                     .await
                     {
-                        Ok(replies) => replies,
+                        Ok((replies, pending, receiver)) => {
+                            crdt_rx = receiver;
+                            for message in pending {
+                                if presence_guard.is_own_presence_broadcast(&message) { continue; }
+                                let response = ServiceServerMessage::CrdtReply { request_id: 0, message };
+                                if send_json(&mut sink, &response).await.is_err() { return; }
+                            }
+                            replies
+                        },
                         Err(error) => {
                             vec![neoism_protocol::crdt::CrdtServerMessage::Error {
                                 buffer_id: None,
@@ -2398,8 +2429,7 @@ pub(crate) async fn status_poll_loop(
     let mut last_branch = seed_branch;
     let mut last_changes: Option<(u64, u64)> = None;
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
-    // Skip the first immediate tick — we just sent the initial snapshot
-    // synchronously from the caller.
+    // Skip the first immediate tick — the caller just queued the initial snapshot.
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await;
     loop {

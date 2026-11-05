@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install native prerequisites
         run: |
           sudo apt-get update

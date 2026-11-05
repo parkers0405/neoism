@@ -4,6 +4,18 @@ on:
     branches: [fix/gpuix-chat-performance]
     paths:
       - .github/workflows/gpuix-packaging-checks.yml
+      - scripts/build-docs*
+      - scripts/package-gpuix*
+      - scripts/test-native-packaging.py
+      - scripts/test-gpuix-install.sh
+      - scripts/test-install.py
+      - scripts/install-gpuix-bundle.sh
+      - scripts/windows-msi-validation.ps1
+      - vendor/neoism-docs
+      - .gitmodules
+      - misc/windows/neoism.wxs
+      - scripts/build-gpuix-msi.ps1
+      - neoism-frontend/gpuix/scripts/build.ts
       - scripts/windows-updater-tests.ps1
       - scripts/check-native-toolchain.py
       - scripts/restore-cached-source-times.py
@@ -11,6 +23,7 @@ on:
       - neoism-frontend/gpuix/native/Cargo.toml
       - neoism-frontend/gpuix/native/Cargo.lock
       - neoism-frontend/updater/src/windows_update.ps1
+      - neoism-frontend/updater/src/macos_update.rs
       - neoism-frontend/gpuix/tests/update-cli.test.ts
       - neoism-frontend/gpuix/tests/packaged-daemon.test.ts
       - neoism-frontend/gpuix/tests/sdk.test.ts
@@ -31,6 +44,27 @@ on:
 permissions:
   contents: read
 jobs:
+  docs:
+    name: Shared docs site and Linux packaging fixtures
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.92'
+      - name: Test portable resource manifest, staging and rollback
+        run: cargo test --locked -p neoism-update-helper --bin neoism-update-helper macos_update::tests
+      - run: node --test scripts/build-docs.test.mjs
+      - name: Build the pinned shared site into isolated staging
+        run: node scripts/build-docs.mjs --out "${{ runner.temp }}/docs-package/resources/docs"
+      - run: python3 scripts/test-native-packaging.py
+      - run: bash scripts/test-gpuix-install.sh
+      - run: python3 scripts/test-install.py
   check:
     name: ${{ matrix.os }} packaging checks
     strategy:
@@ -45,9 +79,13 @@ jobs:
           git config --global core.autocrlf false
           git config --global core.longpaths true
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check shared docs staging without changing frontend dist
+        run: node --test scripts/build-docs.test.mjs
       - name: Check Windows updater policies and rollback in both PowerShell hosts
         if: runner.os == 'Windows'
         shell: pwsh

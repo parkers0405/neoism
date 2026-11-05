@@ -667,6 +667,7 @@ fn agent_message_new(
         status: String::new(),
         tool: String::new(),
         tool_batch_id: None,
+        agent_kind: None,
         mcp: None,
             composition_children: Vec::new(),
             composition_child: false,
@@ -1484,6 +1485,37 @@ mod tests {
             "status": "pending", "input": {"task_id": requested,
                 "subagent_type": "explore", "description": "Check parser"}
         }})
+    }
+
+    #[test]
+    fn task_provider_identity_survives_live_and_reconstructed_history() {
+        use crate::panels::agent_pane::icon::AgentKind;
+        for (agent, kind) in [
+            ("opencode", AgentKind::OpenCode),
+            ("claude", AgentKind::Claude),
+            ("codex", AgentKind::Codex),
+            ("general", AgentKind::Neoism),
+            ("explore", AgentKind::Neoism),
+        ] {
+            for status in ["pending", "running", "completed", "error"] {
+                let mut part = task_projection_part("provider-task", None);
+                part["state"]["input"]["subagent_type"] = json!(agent);
+                part["state"]["input"]["description"] = json!("Compare Claude Code and Codex");
+                part["state"]["status"] = json!(status);
+                let live = part_block(&part).unwrap();
+                assert_eq!(live.agent_kind, Some(kind));
+                let history = message_blocks(&json!({
+                    "info": canonical_assistant_info(json!({})), "parts": [part]
+                }));
+                assert_eq!(history.iter().find(|row| row.id == live.id).unwrap().agent_kind, Some(kind));
+            }
+        }
+        let mut part = task_projection_part("provider-task", None);
+        part["state"]["input"]["subagent_type"] = json!("claude");
+        part["state"]["metadata"] = json!({"provider":"codex", "agent":"claude"});
+        assert_eq!(part_block(&part).unwrap().agent_kind, Some(AgentKind::Codex));
+        part["state"]["metadata"]["provider"] = json!("unknown-provider");
+        assert_eq!(part_block(&part).unwrap().agent_kind, Some(AgentKind::Neoism));
     }
 
     #[test]
@@ -3121,6 +3153,9 @@ fn ordinary_tool_block(tool: &str, state: &Value, metadata: Option<&Value>) -> N
         edit_tool_detail(tool, state).unwrap_or(output.content)
     };
     message.line_offset = output.line_offset;
+    if tool == "task" {
+        message.agent_kind = Some(task_agent_kind(state, metadata));
+    }
     message.mcp = mcp_tool_presentation(tool, state, metadata);
     // Only native provider batch provenance is authoritative. Broad external
     // message/turn IDs do not describe a model-response tool-call batch.
@@ -3130,6 +3165,25 @@ fn ordinary_tool_block(tool: &str, state: &Value, metadata: Option<&Value>) -> N
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned);
     message
+}
+
+fn task_agent_kind(
+    state: &Value,
+    part_metadata: Option<&Value>,
+) -> crate::panels::agent_pane::icon::AgentKind {
+    use crate::panels::agent_pane::icon::AgentKind;
+    for metadata in [state.get("metadata"), part_metadata].into_iter().flatten() {
+        if let Some(provider) = metadata.get("provider") {
+            return provider.as_str().and_then(AgentKind::from_external_agent)
+                .unwrap_or(AgentKind::Neoism);
+        }
+        if let Some(agent) = metadata.get("agent") {
+            return agent.as_str().and_then(AgentKind::from_canonical_agent)
+                .unwrap_or(AgentKind::Neoism);
+        }
+    }
+    state.pointer("/input/subagent_type").and_then(Value::as_str)
+        .and_then(AgentKind::from_canonical_agent).unwrap_or(AgentKind::Neoism)
 }
 
 fn task_runtime_status<'a>(tool: &str, state: &'a Value) -> Option<&'a str> {

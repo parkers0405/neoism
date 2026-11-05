@@ -24,6 +24,10 @@ class InstallerTests(unittest.TestCase):
             (payload / 'web/app/manifest.json').write_text('{}')
             (gui / 'app.js').write_text('new JS')
             (payload / 'licenses').mkdir()
+            for name in ['api/docs/index.html', 'api/docs/reference/index.html', 'content.json']:
+                path = payload / 'resources/docs' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{}' if name.endswith('.json') else '<html>Docs</html>')
             for name in ['libneoism_gpuix_core.so', 'libghostty-vt.so', 'LICENSE.ghostty', 'LICENSE', 'NOTICE']:
                 (payload / name).write_text(name)
             shutil.copy2(SCRIPT.with_name('install-gpuix-bundle.sh'), payload / 'install-bundle.sh')
@@ -50,6 +54,7 @@ class InstallerTests(unittest.TestCase):
             pack()
             run(True)
             self.assertEqual((install / 'web/app/assets/app.js').read_text(), 'new JS')
+            self.assertTrue((install / 'resources/docs/api/docs/reference/index.html').is_file())
             marker = '<!-- Neoism native runtime resources; no browser UI. -->\n'
             self.assertEqual((install / 'web/agent-gui/index.html').read_text(), marker)
             (install / 'web/agent-gui/stale.js').write_text('stale')

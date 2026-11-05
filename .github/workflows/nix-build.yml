@@ -20,6 +20,8 @@ on:
       - 'scripts/prepare-blaze-runner.sh'
       - '.cargo/**'
       - 'vendor/blaze-compat/**'
+      - 'vendor/neoism-docs'
+      - '.gitmodules'
       - 'misc/**'
       - '.github/workflows/nix-build.yml'
 
@@ -29,6 +31,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Provision compiler memory
         run: bash scripts/prepare-blaze-runner.sh
       - uses: DeterminateSystems/nix-installer-action@main

@@ -627,6 +627,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 if let Some(roster)=v["roster"].as_array(){for row in roster{
                     let id=text(row,"id");if id.is_empty()||id==root{continue;}
                     rows.push(NeoismAgentSessionEntry::new(id,text(row,"title"),text(row,"agent"))
+                        .with_agent_kind(neoism_ui::panels::agent_pane::icon::AgentKind::from_external_metadata(row))
                         .with_depth(row["depth"].as_u64().unwrap_or(1)as usize)
                         .with_runtime_status(Some(text(row,"status").to_owned())));
                 }}

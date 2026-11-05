@@ -64,8 +64,14 @@ function dispatch(testId: string, event: Omit<EventPayload, "elementId">) {
   const node = host.find(testId); assert.ok(node, `Missing ${testId}`);
   root.dispatch({ ...event, elementId: node.id }); root.flush();
 }
-async function mount(position: "bottom" | "top" | "flow" = "bottom", background = false, home = false) {
-  root.render(() => <TerminalView config={{...config, terminalInputPosition: position, background: background ? { path: "/fixture/background.png", opacity: .4, blur: 0 } : undefined}} sessionId={session.id} client={client} active onSearch={() => {}} report={report} onAttachBlock={block => attached.push(block)} onSaveCommand={(command, directory) => saved.push({ command, directory })} onOpenPath={(path, isDirectory) => opened.push({ path, isDirectory })} historyHeader={home ? () => <div testId="home-splash-fixture"/> : undefined} directoryAuthority={directoryAuthority()} onMakeDirectoryAuthority={() => setDirectoryAuthority(true)}/>);
+async function mount(position: "bottom" | "top" | "flow" = "bottom", background = false, home = false, theme = config.theme) {
+  root.render(() => <TerminalView config={{...config, theme, terminalInputPosition: position, background: background ? { path: "/fixture/background.png", opacity: .4, blur: 0 } : undefined}} sessionId={session.id} client={client} active onSearch={() => {}} report={report} onAttachBlock={block => attached.push(block)} onSaveCommand={(command, directory) => saved.push({ command, directory })} onOpenPath={(path, isDirectory) => opened.push({ path, isDirectory })} historyHeader={home ? () => <div testId="home-splash-fixture"/> : undefined} directoryAuthority={directoryAuthority()} onMakeDirectoryAuthority={() => setDirectoryAuthority(true)}/>);
+  root.flush();
+  const composer = host.find("terminal-block-input");
+  if (composer && (home || position === "bottom")) {
+    assert.equal(composer.style.bottom, 0, "Bottom input is anchored before the first layout measurement on remount");
+    assert.equal(composer.style.top, undefined, "An unmeasured viewport must not place bottom input at the top");
+  }
   await present();
 }
 const osc = (payload: string) => `\x1b]${payload}\x07`;
@@ -121,6 +127,24 @@ try {
   assert.ok(ink().some(op => op.k === "t" && op.t.includes("exit 7")), "Failed command status is rendered");
   assert.ok(host.find("terminal-command"), "D followed by B restores the composer");
 
+  const commandX = () => ink().find(op => op.k === "t" && op.t === command).x;
+  dispatch("terminal-block-history", { eventType: "scroll", deltaX: -100000, precise: true }); await present();
+  assert.equal(commandX(), 16, "Text that fits cannot scroll sideways into blank space");
+  dispatch("block-terminal", { eventType: "layout", x: 300, y: 90, width: 128, height: 680 }); await present();
+  const overflow = Bun.stringWidth(command) * 8 - (128 - 32);
+  assert.ok(overflow > 0);
+  for (const precise of [true, false]) {
+    dispatch("terminal-block-history", { eventType: "scroll", deltaX: -100000, precise }); await present();
+    assert.equal(commandX(), 16 - overflow, "Horizontal scrolling stops at the actual text's right edge");
+    dispatch("terminal-block-history", { eventType: "scroll", deltaX: -100000, precise }); await present();
+    assert.equal(commandX(), 16 - overflow, "Further horizontal input cannot overscroll");
+    dispatch("terminal-block-history", { eventType: "scroll", deltaX: 100000, precise }); await present();
+    assert.equal(commandX(), 16, "Reverse scrolling stops at the left edge");
+  }
+  dispatch("terminal-block-history", { eventType: "scroll", deltaX: -100000, precise: true }); await present();
+  dispatch("block-terminal", { eventType: "layout", x: 300, y: 90, width: 960, height: 680 }); await present();
+  assert.equal(commandX(), 16, "Widening the pane clamps the existing offset back to zero");
+
   const selectionColor = cssColor(config.theme.accent, .3);
   const redInk = ink().find(op => op.k === "t" && op.t.includes("red output"));
   const plainInk = ink().find(op => op.k === "t" && op.t.includes("plain output"));
@@ -147,6 +171,19 @@ try {
   assert.deepEqual(blocks.blocks, [block], "Replayed PTY offsets must not duplicate command metadata");
   await mount();
   assert.strictEqual(blocks.blocks[0], block);
+  const engineId = buffer.id, beforeThemeInput = inputPackets().length, beforeThemeText = terminalLinesText(blocks.blocks[0].lines);
+  for (const theme of [{ ...config.theme, bg: "#f5f5f5", fg: "#171717" }, config.theme]) {
+    root.render(() => null); await present(); await mount("bottom", false, false, theme);
+    assert.equal(buffer.id, engineId, "Theme switches keep the running terminal engine");
+    assert.equal(ink().find(op => op.k === "t" && op.t.includes("plain output")).c, cssColor(theme.fg), "Archived default output follows the current light/dark foreground");
+    assert.equal(ink().find(op => op.k === "t" && op.t.includes("red output")).c, cssColor("#ff0000"), "Explicit output colors survive theme changes");
+    assert.equal(terminalLinesText(blocks.blocks[0].lines), beforeThemeText);
+  }
+  assert.equal(inputPackets().length, beforeThemeInput, "Re-theming never sends input to the shell");
+  root.render(() => null); await present(); await mount("bottom", false, false, { ...config.theme, bg: "#000000", fg: "#383838" });
+  assert.notEqual(ink().find(op => op.k === "t" && op.t.includes("plain output")).c, cssColor("#383838"), "Dark block output lifts an unreadable foreground");
+  assert.equal(blocks.blocks[0].lines.flat().find(run => run.text.includes("plain output"))?.fg, "#383838", "Contrast adjustment changes painting, not the captured transcript");
+  root.render(() => null); await present(); await mount();
   assert.ok(ink().some(op => op.k === "t" && op.t === command));
   assert.equal(host.find("terminal-block-actions"), undefined, "Actions are not permanent block chrome");
   const directoryInk = ink().find(op => op.k === "t" && op.t === block.directory);
@@ -351,7 +388,7 @@ try {
   const header = () => host.find("terminal-history-header")!;
   assert.equal(header().style.top, 0);
   assert.equal(header().style.height, host.find("terminal-block-history")!.style.height);
-  assert.ok(Number(host.find("terminal-block-input")!.style.top) > 0, "Home anchors the composer at the bottom independently of standalone terminal placement");
+  assert.equal(host.find("terminal-block-input")!.style.bottom, 0, "Home anchors the composer at the bottom independently of standalone terminal placement");
   dispatch("terminal-command", { eventType: "change", value: "printf home" });
   dispatch("terminal-command", { eventType: "submit" });
   await output("printf home\r\n" + osc("133;C") + "HOME_OUTPUT\r\n");

@@ -18,6 +18,6 @@ export class DaemonConnection extends SharedDaemonConnection {
     onFailure?: (failure: ConnectionFailure) => void,
     hooks: DaemonConnectionHooks = { profileStart, profileEnd, batch },
   ) {
-    super(config, createSocket, onFailure, hooks);
+    super(config, createSocket, onFailure, {...hooks, batch:hooks.batch??batch});
   }
 }

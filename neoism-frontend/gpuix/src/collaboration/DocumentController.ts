@@ -4,7 +4,7 @@ import type {DaemonConnection} from "../daemon/client";
 import {isRecord,type CrdtClientMessage,type CrdtPeerPresence,type Workspace} from "../daemon/protocol";
 import {coreCall,NativeEditor} from "../native-core";
 import {collaborativeWorkspace,type PresenceController} from "./PresenceController";
-interface Binding {editor:NativeEditor;id:string;path:string;seeded:boolean;error?:string;views:Set<NativeEditor>;release:()=>void}
+interface Binding {editor:NativeEditor;id:string;path:string;ownerId:string;attached:boolean;recovery?:boolean;seeded:boolean;error?:string;views:Set<NativeEditor>;release:()=>void}
 interface Drain {send:CrdtClientMessage[];seeded:boolean;bufferId:string}
 /** Native Yrs owns edit/history semantics. This controller only routes opaque
  * updates to the authenticated daemon and keeps split views on one owner. */
@@ -22,17 +22,20 @@ export class DocumentController {
    if(!isRecord(body))return;
    const payload=isRecord(body.envelope)?body.envelope:isRecord(body.update)?body.update:body;
    const id=payload.buffer_id;
-   if(typeof id!=="string"||["Presence","PresenceSnapshot","CompactionStatus"].includes(kind))return;
-   for(const binding of this.bindings.values())if(binding.id===id){
+   if(typeof id!=="string"||["Presence","PresenceSnapshot","CompactionStatus","BufferClosed"].includes(kind))return;
+    for(const binding of this.bindings.values())if(binding.id===id){
+     // The AcquireBuffer snapshot is the ordering boundary for a fresh native
+     // replica. Ignore broadcasts already in flight from its prior incarnation.
+     if(!binding.seeded&&["Sync","Update","Saved"].includes(kind))continue;
     if(kind==="Error"&&typeof body.message==="string"&&!body.message.includes("unknown CRDT buffer")){binding.error=body.message;this.report(new Error(body.message));continue;}
     if(kind==="Snapshot"||kind==="SnapshotFallback")binding.error=undefined;
-    try{binding.editor.call("crdt.event",{message:event.message});this.flush(binding);}
-    catch(error){this.report(error);try{this.client.send("Crdt",{RequestSnapshot:{buffer_id:id}});}catch{}}
+     try{binding.editor.call("crdt.event",{message:event.message});this.flush(binding);if(!binding.attached&&binding.views.size===0)this.close(binding);}
+     catch(error){this.report(error);try{this.sendOwned(binding,{RequestSnapshot:{buffer_id:id}});}catch{}}
    }
   });
   const status=client.subscribeStatus(state=>{
    const connected=state.phase==="connected";if(this.connected===connected)return;this.connected=connected;
-   if(connected)for(const binding of this.bindings.values())try{this.ship(binding,coreCall<Drain>("editor.crdt.reconnect",{id:binding.editor.id}));}catch(error){this.report(error);}
+   if(connected)for(const binding of this.bindings.values())try{this.ship(binding,coreCall<Drain>("editor.crdt.reconnect",{id:binding.editor.id}));if(!binding.attached&&binding.views.size===0&&binding.seeded)this.close(binding);}catch(error){this.report(error);}
   });
   const peers=presence.subscribe(()=>{for(const binding of this.bindings.values())this.paintPeers(binding);});
   this.cleanup=()=>{events();status();peers();};
@@ -43,7 +46,7 @@ export class DocumentController {
   if(this.disposed||this.bindings.has(editor)||!collaborativeWorkspace(this.config,workspace))return;
   try{
    const drain=coreCall<Drain>("editor.crdt.bind",{id:editor.id,path,clientId:++this.clientId});
-   const binding:Binding={editor,id:drain.bufferId,path,seeded:drain.seeded,views:new Set(),release:()=>{}};
+    const binding:Binding={editor,id:drain.bufferId,path,ownerId:crypto.randomUUID(),attached:true,seeded:drain.seeded,views:new Set(),release:()=>{}};
    this.bindings.set(editor,binding);binding.release=editor.subscribe(()=>this.flush(binding));this.ship(binding,drain);this.paintPeers(binding);
   }catch(error){this.report(error);}
  }
@@ -51,7 +54,9 @@ export class DocumentController {
  rebind(editor:NativeEditor,path:string,workspace?:Workspace){
   this.detach(editor);editor.call("path",{path});this.attach(editor,path,workspace);
  }
- private ship(binding:Binding,drain:Drain){binding.seeded=drain.seeded;if(!this.connected)return;for(const message of drain.send)try{this.client.send("Crdt",message);}catch(error){this.report(error);break;}}
+ private acquire(binding:Binding,initialText=""){this.client.send("Crdt",{AcquireBuffer:{buffer_id:binding.id,owner_id:binding.ownerId,initial_text:initialText}});}
+ private sendOwned(binding:Binding,message:CrdtClientMessage){this.client.send("Crdt",{Owned:{owner_id:binding.ownerId,message}});}
+ private ship(binding:Binding,drain:Drain){binding.seeded=drain.seeded;if(!this.connected)return;for(const message of drain.send)try{if("OpenBuffer" in message)this.acquire(binding,message.OpenBuffer.initial_text);else this.sendOwned(binding,message);}catch(error){this.report(error);break;}}
  private flush(binding:Binding){if(this.disposed)return;try{this.ship(binding,coreCall<Drain>("editor.crdt.flush",{id:binding.editor.id}));}catch(error){this.report(error);}}
  private paintPeers(binding:Binding){
   const peers=this.presence.filePeers(binding.id) as CrdtPeerPresence[];
@@ -64,13 +69,37 @@ export class DocumentController {
   while(!binding.seeded){if(binding.error)throw new Error(binding.error);if(!this.connected)throw new Error("Reconnect to the server before saving this shared document");if(this.disposed||!this.bindings.has(binding.editor))throw new Error("Shared document was closed");if(Date.now()>deadline)throw new Error("Shared document has not synchronized yet");await new Promise(resolve=>setTimeout(resolve,20));}
   this.flush(binding);
   if(!this.connected)throw new Error("Reconnect to the server before saving this shared document");
-  const reply=await Effect.runPromise(this.client.request("Crdt",{SaveBuffer:{buffer_id:binding.id}}));
+   const reply=await Effect.runPromise(this.client.request("Crdt",{Owned:{owner_id:binding.ownerId,message:{SaveBuffer:{buffer_id:binding.id}}}}));
   if(!isRecord(reply)||!isRecord(reply.Saved))throw new Error(isRecord(reply)&&isRecord(reply.Error)?String(reply.Error.message):"Shared document save failed");
   return true;
  }
- detach(editor:NativeEditor){
-  const owner=this.owners.get(editor);if(owner){this.bindings.get(owner)?.views.delete(editor);this.owners.delete(editor);return;}
-  const binding=this.bindings.get(editor);if(!binding)return;binding.release();for(const view of binding.views)this.owners.delete(view);this.bindings.delete(editor);
- }
- dispose(){if(this.disposed)return;this.disposed=true;this.cleanup();for(const binding of this.bindings.values())binding.release();this.bindings.clear();this.owners.clear();}
+  detach(editor:NativeEditor){
+   const owner=this.owners.get(editor);if(owner){const binding=this.bindings.get(owner);binding?.views.delete(editor);this.owners.delete(editor);if(binding&&!binding.attached&&binding.views.size===0)this.close(binding);return;}
+   const binding=this.bindings.get(editor);if(!binding)return;binding.attached=false;if(binding.views.size===0)this.close(binding);
+  }
+  private close(binding:Binding){
+   // Never authorize eviction after a failed flush or while offline. The
+   // daemon retains that lease/recovery document instead of losing local work.
+   // Reconnect's drain also replays unacknowledged native transactions: an
+   // earlier send may have failed after taking them out of the outbound queue.
+   // Yrs updates are idempotent. An unseeded/offline replica is not releasable.
+   if(!this.connected||!binding.seeded){this.retain(binding);return;}
+   try{const drain=coreCall<Drain>("editor.crdt.reconnect",{id:binding.editor.id});for(const message of drain.send){if("OpenBuffer" in message)this.acquire(binding,message.OpenBuffer.initial_text);else this.sendOwned(binding,message);}this.client.send("Crdt",{CloseBuffer:{buffer_id:binding.id,owner_id:binding.ownerId}});}
+   catch(error){this.report(error);this.retain(binding);return;}
+   binding.release();this.bindings.delete(binding.editor);if(binding.recovery)binding.editor.dispose();
+  }
+  private retain(binding:Binding){
+   if(binding.recovery)return;
+   // closeSurface disposes its native owner immediately after detach. Keep an
+   // independent recovery owner while offline, awaiting the initial snapshot,
+   // or retrying a failed send; otherwise those pending local bytes disappear.
+   const previous=binding.editor;
+   let recovery:NativeEditor|undefined;
+   try{const snapshot=previous.snapshot();recovery=new NativeEditor(binding.path,"",false);recovery.restore(snapshot);}
+   catch(error){recovery?.dispose();this.report(error);return;}
+   binding.release();this.bindings.delete(previous);binding.editor=recovery;binding.recovery=true;
+   this.bindings.set(recovery,binding);binding.release=recovery.subscribe(()=>this.flush(binding));
+   if(this.connected)try{this.ship(binding,coreCall<Drain>("editor.crdt.reconnect",{id:recovery.id}));}catch(error){this.report(error);}
+  }
+ dispose(){if(this.disposed)return;this.disposed=true;this.cleanup();for(const binding of this.bindings.values()){binding.release();if(binding.recovery)binding.editor.dispose();}this.bindings.clear();this.owners.clear();}
 }

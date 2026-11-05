@@ -176,6 +176,7 @@ pub struct NeoismAgentMessage {
     pub tool: String,
     /// Server-issued identity of one model response's tool-call batch.
     pub tool_batch_id: Option<String>,
+    pub agent_kind: Option<super::icon::AgentKind>,
     pub mcp: Option<super::mcp_icon::McpToolPresentation>,
     /// UI-only executed calls; never authoritative provider parts.
     pub composition_children: Vec<NeoismAgentMessage>,
@@ -435,6 +436,7 @@ impl NeoismAgentMessage {
             status: String::new(),
             tool: String::new(),
             tool_batch_id: None,
+            agent_kind: None,
             mcp: None,
             composition_children: Vec::new(),
             composition_child: false,
@@ -2616,6 +2618,7 @@ fn merge_part_message(
     if incoming.kind == NeoismAgentMessageKind::Tool
         && existing.kind == NeoismAgentMessageKind::Tool
     {
+        incoming.agent_kind = incoming.agent_kind.or(existing.agent_kind);
         if incoming.text.trim().is_empty() {
             incoming.text = existing.text;
         }

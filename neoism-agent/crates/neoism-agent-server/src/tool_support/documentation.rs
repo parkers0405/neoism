@@ -16,12 +16,18 @@ pub(super) fn documentation_tool(
     let operation = optional_string(&arguments, "operation")
         .ok_or_else(|| anyhow::anyhow!("docs operation is required"))?;
 
-    match operation.as_str() {
+    let mut result = match operation.as_str() {
         "list" => list(service.as_ref()),
         "search" => search(service.as_ref(), &arguments),
         "read" => read(service.as_ref(), &arguments),
         other => anyhow::bail!("unknown docs operation {other}"),
+    }?;
+    if let (Some(version), Some(Value::Object(metadata))) =
+        (service.version(), result.metadata.as_mut())
+    {
+        metadata.insert("documentationVersion".into(), json!(version));
     }
+    Ok(result)
 }
 
 fn list(service: &dyn DocumentationService) -> anyhow::Result<ToolExecutionResult> {

@@ -344,9 +344,17 @@ pub enum WorkspaceClientMessage {
         #[serde(default)]
         root_dir: Option<PathBuf>,
     },
-    /// Close/remove a top-level host workspace from this daemon. This is the
-    /// destructive local-owner close path; remote/cloud subscriptions should
-    /// use `UnsubscribeWorkspace` instead.
+    /// Close this window's claim; retire private local resources only when
+    /// no other connection owns them. Shared, foreign and persistent workspaces
+    /// are detached only. Agent work and document contents are untouched.
+    /// Ack: HostWorkspaceTree. Older daemons reject this distinct variant;
+    /// clients must not fall back to CloseHostWorkspace.
+    CloseWindowWorkspace {
+        workspace_id: String,
+    },
+    /// Explicit daemon-global removal, unlike window-local close. Other
+    /// connections' claims do not prevent resource retirement. Agent work,
+    /// project registrations and user files remain intact.
     CloseHostWorkspace {
         workspace_id: String,
     },

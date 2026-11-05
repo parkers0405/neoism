@@ -5,6 +5,17 @@ import {DaemonConnection} from "../src/daemon/client";
 import {WorkspaceModel} from "../src/model";
 import {createAgentDaemon} from "./support/agent-daemon";
 const until=async(predicate:()=>boolean)=>{const deadline=Date.now()+2500;while(!predicate()){if(Date.now()>deadline)throw Error("Family state did not converge");await Bun.sleep(5);}};
+test("external child provider metadata survives persisted family routing without title or model inference",()=>{
+ for(const provider of ["opencode","claude","codex","antigravity"]){
+  let ui=noteAgentFamily({}, {CatalogFamily:{session_id:"root",snapshot:{branches:[{sessionId:"child",parentSessionId:"root",title:"Implement parser",agent:"general",extra:{externalAgent:{provider}},status:"outstanding"}]}}})!;
+  expect(agentFamily(ui,"child").roster[0]).toMatchObject({title:"Implement parser",agent:"general",externalProvider:provider,status:"running",depth:1});
+  ui=JSON.parse(JSON.stringify(ui));
+  ui=noteAgentFamily(ui,{SubagentMetadata:{session_id:"child",title:"Review Codex and Claude models",model:"opencode/model"}})!;
+  expect(agentFamily(ui,"child").roster[0].externalProvider).toBe(provider);
+ }
+ const ui=noteAgentFamily({}, {CatalogFamily:{session_id:"root",snapshot:{branches:[{sessionId:"child",title:"Claude Code",model:"openai/codex",agent:"explore"}]}}})!;
+ expect(agentFamily(ui,"child").roster[0].externalProvider).toBeUndefined();
+});
 test("unrelated empty catalog families retain routing identities and revision authority without filling the UI with empty rosters",()=>{
  const parents=Object.freeze({child:"root"}),roots=Object.freeze({child:"root"});
  const row=Object.freeze({id:"child",parent:"root",title:"Child",status:"running",depth:1});

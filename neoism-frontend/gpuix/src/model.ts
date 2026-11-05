@@ -94,6 +94,11 @@ export class WorkspaceModel {
   readonly collaboration:DocumentController;
   readonly presence:PresenceController;
   private listeners = new Set<() => void>();
+  private surfaceClosedListeners = new Set<(surface:Surface)=>void>();
+  private workspaceClosedListeners = new Set<(workspaceId:string)=>void>();
+  private closingWorkspaces = new Set<string>();
+  private workspaceCloseEpochs = new Map<string,number>();
+  private closedTranscriptRoots = new Set<string>();
   private cleanups: Array<() => void> = [];
   private abort = new AbortController();
   private epoch = 0;
@@ -272,6 +277,8 @@ export class WorkspaceModel {
     }));
   }
   onDispose(cleanup:()=>void){this.cleanups.push(cleanup);}
+  onSurfaceClosed(listener:(surface:Surface)=>void){this.surfaceClosedListeners.add(listener);return()=>{this.surfaceClosedListeners.delete(listener);};}
+  onWorkspaceClosed(listener:(workspaceId:string)=>void){this.workspaceClosedListeners.add(listener);return()=>{this.workspaceClosedListeners.delete(listener);};}
   dispose(preserveEditors = false) { this.historyUpdates.clear(); this.collaboration.dispose(); this.presence.dispose(); this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; this.incomingAgentFrames.dispose(); clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
   getLayout(workspaceId = this.state.activeWorkspace?.id): WorkspaceLayout {
     if (!workspaceId) throw new Error("Select a workspace first");
@@ -407,7 +414,7 @@ export class WorkspaceModel {
   private homeTerminalOwners() {
     return isRecord(this.state.ui.homeTerminalSessions) ? this.state.ui.homeTerminalSessions : {};
   }
-  private closeHomePty(sessionId:string) {
+  private closeOwnedPty(sessionId:string) {
     closeTerminalSession(this.client,sessionId);
     // Cleanup must outlive the model's abort signal (including create replies
     // arriving after dispose). Never use this for an attached foreign session.
@@ -418,7 +425,7 @@ export class WorkspaceModel {
     const owners={...this.homeTerminalOwners()},sessionId=owners[surfaceId];delete owners[surfaceId];
     const pending={...(isRecord(this.state.ui.pendingTerminalBindings)?this.state.ui.pendingTerminalBindings:{})};delete pending[surfaceId];
     if(typeof sessionId==="string"){
-      if(close)void this.closeHomePty(sessionId);else closeTerminalSession(this.client,sessionId);
+      if(close)void this.closeOwnedPty(sessionId);else closeTerminalSession(this.client,sessionId);
       const main={...(isRecord(this.state.ui.mainTerminals)?this.state.ui.mainTerminals:{})};
       const cwds={...(isRecord(this.state.ui.terminalCwds)?this.state.ui.terminalCwds:{})};
       for(const [workspace,id]of Object.entries(main))if(id===sessionId)delete main[workspace];
@@ -479,7 +486,7 @@ export class WorkspaceModel {
         fresh=undefined;
         this.followMainTerminal();
       }catch(error){this.report(error);}
-      finally{if(fresh)await this.closeHomePty(fresh);}
+      finally{if(fresh)await this.closeOwnedPty(fresh);}
     }).finally(()=>{if(this.homeTerminalRequests.get(surfaceId)===task)this.homeTerminalRequests.delete(surfaceId);});
     this.homeTerminalRequests.set(surfaceId,task);return task;
   };
@@ -624,36 +631,56 @@ export class WorkspaceModel {
       if(this.disposed||!workspaceId)return false;
       const opened=this.windowWorkspaces(),index=opened.findIndex(workspace=>workspace.id===workspaceId),workspace=opened[index];
       if(!workspace)return false;
-      const dirty=this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId&&this.surfaceDirty(surface.id));
-      if(!discard&&dirty.length){this.report(new Error("Unsaved changes. Save this workspace or use :qall! to discard it."));return false;}
+      const localSurfaces=()=>this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId);
+      const draftKeys=new Set([`home:${workspaceId}`,...localSurfaces().filter(surface=>!surface.sessionId).map(surface=>this.composerDraftKey(undefined,surface.id))]);
+      const hasUnsaved=()=>localSurfaces().some(surface=>this.surfaceDirty(surface.id))||[...draftKeys].some(key=>{const draft=this.state.composerDrafts[key];return !!draft&&(!!draft.text||draft.attachments.length>0);});
+      if(!discard&&hasUnsaved()){this.report(new Error("Unsaved changes or unsent drafts. Save this workspace or use :qall! to discard it."));return false;}
+      if(!this.state.connection.workspaceLifecycle){this.report(new Error("Update and restart the daemon to close this workspace and its resources safely."));return false;}
       const wasActive=this.state.activeWorkspace?.id===workspaceId;
-      if(wasActive){
-        const adjacent=opened[index+1]||opened[index-1];
-        if(adjacent)await this.activateWorkspace(adjacent);
-      }
+      const adjacent=opened[index+1]||opened[index-1];
       const remaining=opened.filter(entry=>entry.id!==workspaceId).map(entry=>entry.id);
-      const pristine=this.disposableWorkspaces.has(workspaceId)&&this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId).every(surface=>surface.kind==="welcome");
-      const tree=await this.syncWindowWorkspaces(remaining,pristine?workspaceId:undefined);
-      if(this.disposed)return false;
-      this.transaction(()=>{
-        if(discard)for(const surface of dirty)this.closeSurface(surface.id,true);
-        this.setUI({openWorkspaceIds:remaining});
-        for(const surface of this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId&&surface.kind==="welcome"))this.releaseHomeTerminal(surface.id);
-        if(wasActive&&!remaining.length){
-          ++this.epoch;this.presence.leaveWorkspace();
-          this.update({activeWorkspace:undefined,activeSurfaceId:undefined,directories:{},notesDirectories:{},threads:[],loading:false});
+      this.closingWorkspaces.add(workspaceId);
+      this.workspaceCloseEpochs.set(workspaceId,(this.workspaceCloseEpochs.get(workspaceId)||0)+1);
+      try{
+        // Unmount this workspace's inputs before awaiting host teardown. A failed
+        // close restores the view without disposing its documents or tabs.
+        if(wasActive){
+          if(adjacent)await this.activateWorkspace(adjacent);
+          else{++this.epoch;this.presence.leaveWorkspace();this.update({activeWorkspace:undefined,activeSurfaceId:undefined,loading:false});}
         }
-        if(!tree.workspaces.some(entry=>entry.id===workspaceId)){
-          for(const surface of this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId))this.closeSurface(surface.id);
+        if(!discard&&hasUnsaved())throw new Error("Unsaved changes or unsent drafts. Save this workspace or use :qall! to discard it.");
+        const tree=Schema.decodeUnknownSync(TreeSchema)(expectVariant(await this.run(this.client.request("Workspace",{CloseWindowWorkspace:{workspace_id:workspaceId}})),"HostWorkspaceTree"));
+        if(this.disposed)return false;
+        this.transaction(()=>{
+          this.update({workspaces:tree.workspaces,workspaceTabs:tree.tabs});
+          this.setUI({openWorkspaceIds:remaining.filter(id=>tree.workspaces.some(entry=>entry.id===id))});
+          for(const surface of localSurfaces()){
+            // The host decides whether a shell is still owned by another window.
+            // Locally release its view; never kill a shared shell as a side effect.
+            if(surface.kind==="welcome")this.releaseHomeTerminal(surface.id,false);
+            this.closeSurface(surface.id,true);
+          }
           this.layouts.get(workspaceId)?.dispose();this.layouts.delete(workspaceId);
-          this.workspaceNavigation.delete(this.workspaceKey(workspace));
-          const layouts={...(isRecord(this.state.ui.layouts)?this.state.ui.layouts:{})};delete layouts[workspaceId];
-          const sidebars={...(isRecord(this.state.ui.workspaceSidebars)?this.state.ui.workspaceSidebars:{})};delete sidebars[workspaceId];
-          this.setUI({layouts,workspaceSidebars:sidebars});
-        }
-      });
-      this.disposableWorkspaces.delete(workspaceId);
-      return true;
+          for(const key of this.workspaceNavigation.keys())if(JSON.parse(key)[0]===workspaceId)this.workspaceNavigation.delete(key);
+          this.seededWorkspaces.delete(workspaceId);
+          const ui:Record<string,unknown>={};
+          for(const key of ["layouts","workspaceSidebars","mainTerminals","terminalWorkspaceRoots","explicitWorkspaceRoots"]){
+            if(isRecord(this.state.ui[key])){const map={...this.state.ui[key]};delete map[workspaceId];ui[key]=map;}
+          }
+          this.setUI(ui);
+          const composerDrafts={...this.state.composerDrafts};for(const key of draftKeys)delete composerDrafts[key];
+          this.update({composerDrafts,...(!this.state.activeWorkspace?{directories:{},notesDirectories:{},threads:[],loading:false}:{})});
+        });
+        this.requestedAgentCatalogScopes.delete(workspaceId);
+        if(this.agentCatalogStream?.workspaceId===workspaceId){this.agentCatalogStream.abort.abort();this.agentCatalogStream=undefined;}
+        this.disposableWorkspaces.delete(workspaceId);
+        for(const listener of this.workspaceClosedListeners){try{listener(workspaceId);}catch(error){this.report(error);}}
+        return true;
+      }catch(error){
+        this.closingWorkspaces.delete(workspaceId);
+        if(!this.disposed&&wasActive&&(!this.state.activeWorkspace||this.state.activeWorkspace.id===adjacent?.id))await this.activateWorkspace(workspace);
+        this.report(error);return false;
+      }finally{this.closingWorkspaces.delete(workspaceId);}
     }).catch(error=>{this.report(error);return false;});
     this.workspaceCreations=task;
     return task;
@@ -721,6 +748,7 @@ export class WorkspaceModel {
     void this.activateWorkspace(declared);
   }
   activateWorkspace = async (workspace: Workspace, force = false) => {
+    if(this.closingWorkspaces.has(workspace.id))return;
     workspace=this.workspaceView(this.state.workspaces.find(entry=>entry.id===workspace.id)||workspace);
     const previous = this.state.activeWorkspace, key = this.workspaceKey(workspace);
     if (!force && previous && this.workspaceKey(previous) === key) {
@@ -870,7 +898,7 @@ export class WorkspaceModel {
   openFile = async (path: string, rootOverride?: string) => {
     const workspace = this.state.activeWorkspace;
     const root = rootOverride || workspace?.root_dir;
-    if (!workspace || !root) return;
+    if (!workspace || !root || this.closingWorkspaces.has(workspace.id)) return;
     const declaredRoot=this.state.workspaces.find(entry=>entry.id===workspace.id)?.root_dir||workspace.root_dir;
     const existing=this.state.surfaces.find(surface=>surface.kind==="file"&&!surface.document&&surface.workspaceId===workspace.id&&surface.path===path&&(surface.rootDir||declaredRoot)===root);
     const baseId=`file:${workspace.id}:${root !== declaredRoot ? root + ":" : ""}${path}`;
@@ -950,23 +978,25 @@ export class WorkspaceModel {
     const { id, path, rootDir: root } = surface;
     if (!path || !root || this.state.files[id] !== undefined) return Promise.resolve();
     const pending = this.fileLoads.get(id); if (pending) return pending;
-    const task = (async () => {
+    const closeEpoch=this.workspaceCloseEpochs.get(surface.workspaceId)||0;
+    const task = Promise.resolve().then(async () => {
       try {
         const reply = await this.run(this.client.request("Files", { ReadFile: { path } }, root));
         const file = Schema.decodeUnknownSync(FileSchema)(expectVariant(reply, "FileContent"));
         // The surface's immutable workspace/root scopes this read. A tab switch
         // must not discard useful bytes, nor may a closed file be resurrected.
-        if (this.disposed || !this.state.surfaces.some((s) => s.id === id && s.rootDir === root && s.path === path) || this.state.files[id] !== undefined) return;
+        if (this.disposed || closeEpoch!==(this.workspaceCloseEpochs.get(surface.workspaceId)||0) || !this.state.surfaces.some((s) => s.id === id && s.rootDir === root && s.path === path) || this.state.files[id] !== undefined) return;
         if (file.bytes.length > 2 * 1024 * 1024) throw new Error("The GPUIX editor currently supports files up to 2 MB.");
         const bytes = Uint8Array.from(file.bytes);
         if (bytes.subarray(0, 8192).includes(0)) throw new Error("This file is binary; the GPUIX binary viewer is not ported yet.");
         this.update({ files: { ...this.state.files, [id]: new TextDecoder().decode(bytes) } });
       } catch (error) { if (this.state.activeWorkspace?.id === surface.workspaceId) this.report(error); }
-      finally { this.fileLoads.delete(id); }
-    })();
+      finally { if(this.fileLoads.get(id)===task)this.fileLoads.delete(id); }
+    });
     this.fileLoads.set(id, task); return task;
   };
   private addSurface(surface: Surface, split?: SplitAxis) {
+    if(this.closingWorkspaces.has(surface.workspaceId))return;
     if(surface.kind!=="welcome")this.disposableWorkspaces.delete(surface.workspaceId);
     this.transaction(() => {
       this.update({ surfaces: this.state.surfaces.some((s) => s.id === surface.id) ? this.state.surfaces : [...this.state.surfaces, surface], ...(surface.workspaceId===this.state.activeWorkspace?.id?{activeSurfaceId:surface.id}:{}) });
@@ -1027,14 +1057,15 @@ export class WorkspaceModel {
       if (owner?.hidden && !usedByAnotherReview && !visible) this.closeSurface(ownerId, discard);
     }
     const targetLayout = closing?.workspaceId;
-    if (targetLayout) this.getLayout(targetLayout).closeSurface(id);
+    if (targetLayout&&!this.closingWorkspaces.has(targetLayout)) this.getLayout(targetLayout).closeSurface(id);
     for (const [key, view] of this.markdownViews) if (view.surfaceId === id) { view.markdown.dispose(); this.markdownViews.delete(key); delete this.recoveredMarkdownViews[key]; }
     for (const [key, view] of this.editorViews) if (view.surfaceId === id) { this.collaboration.detach(view.editor);view.editor.dispose(); this.editorViews.delete(key); }
     if(editor)this.collaboration.detach(editor);
     delete this.recoveredViews[id];
     for(const key of Object.keys(this.recoveredViews))if(key.startsWith(`view:${id}@`))delete this.recoveredViews[key];
     for(const key of Object.keys(this.recoveredMarkdownViews))if(key.startsWith(`${id}@`))delete this.recoveredMarkdownViews[key];
-    if(discard){const files={...this.state.files};delete files[id];this.update({files});}
+    if(this.state.files[id]!==undefined){const files={...this.state.files};delete files[id];this.update({files});}
+    this.fileLoads.delete(id);
     editor?.dispose(); this.editors.delete(id);
     const target = this.state.surfaces.find((s) => s.id === id);
     if (target?.kind === "terminal") {
@@ -1050,8 +1081,23 @@ export class WorkspaceModel {
     // Closing a UI tab never kills a daemon-owned shell or deletes a chat.
     const surfaces = this.state.surfaces.filter((s) => s.id !== id);
     this.update({ surfaces, activeSurfaceId: this.state.activeSurfaceId === id ? surfaces.findLast((s) => s.workspaceId === this.state.activeWorkspace?.id && !s.hidden)?.id : this.state.activeSurfaceId });
+    if(target?.kind==="agent"&&target.sessionId){
+      const root=target.agentRootSessionId||agentFamilyRoot(this.state.ui,target.sessionId);
+      if(!surfaces.some(surface=>surface.kind==="agent"&&surface.sessionId&&(surface.agentRootSessionId||agentFamilyRoot(this.state.ui,surface.sessionId))===root)){
+        this.closedTranscriptRoots.add(root);
+        const history={...this.state.history};
+        for(const session of new Set([root,target.sessionId,...Object.keys(history),...this.historyRequests.keys()])){
+          if(session!==target.sessionId&&agentFamilyRoot(this.state.ui,session)!==root)continue;
+          delete history[session];this.historyUpdates.forget(session);this.queuedHistory.delete(session);this.historyCursors.delete(session);this.completedHistory.delete(session);this.historyEdits.delete(session);
+          // Drain an old in-flight read, but never publish it into a reopened tab.
+          this.historyRevisions.set(session,(this.historyRevisions.get(session)||0)+1);
+        }
+        this.update({history});
+      }
+    }
     if (this.state.activeSurfaceId) this.selectSurface(this.state.activeSurfaceId);
-    if(targetLayout===this.state.activeWorkspace?.id&&!surfaces.some(surface=>surface.workspaceId===targetLayout&&!surface.hidden))this.ensureWelcome();
+    if(targetLayout&&!this.closingWorkspaces.has(targetLayout)&&targetLayout===this.state.activeWorkspace?.id&&!surfaces.some(surface=>surface.workspaceId===targetLayout&&!surface.hidden))this.ensureWelcome();
+    if(closing)for(const listener of this.surfaceClosedListeners){try{listener(closing);}catch(error){this.report(error);}}
   };
   private observeEditor(surfaceId: string, editor: NativeEditor) {
     if (this.observedEditors.has(editor)) return;
@@ -1222,6 +1268,7 @@ export class WorkspaceModel {
   };
   agentFamily = (sessionId:string) => agentFamily(this.state.ui,sessionId);
   private resumeThread(sessionId: string) {
+    this.closedTranscriptRoots.delete(agentFamilyRoot(this.state.ui,sessionId));
     for(const stopped of this.familyStreams.activate(sessionId))this.sendAgent({StopStream:{session_id:stopped}});
     this.sendAgent({ SwitchThread: { session_id: sessionId } });
     this.sendAgent({ GetHistory: { session_id: sessionId, cursor: null, limit: 200 } });
@@ -1232,8 +1279,9 @@ export class WorkspaceModel {
   private completedHistory=new Set<string>();
   private completedHistoryTimer:ReturnType<typeof setTimeout>|undefined;
   private refreshCompletedHistory(sessionId:string){
+    if(this.closedTranscriptRoots.has(agentFamilyRoot(this.state.ui,sessionId)))return;
     this.completedHistory.add(sessionId);if(this.completedHistoryTimer!==undefined)return;
-    this.completedHistoryTimer=setTimeout(()=>{this.completedHistoryTimer=undefined;const sessions=[...this.completedHistory];this.completedHistory.clear();if(!this.disposed&&this.client.state.phase==="connected")for(const session_id of sessions)this.sendAgent({GetHistory:{session_id,cursor:null,limit:200}});},0);
+    this.completedHistoryTimer=setTimeout(()=>{this.completedHistoryTimer=undefined;const sessions=[...this.completedHistory];this.completedHistory.clear();if(!this.disposed&&this.client.state.phase==="connected")for(const session_id of sessions)if(!this.closedTranscriptRoots.has(agentFamilyRoot(this.state.ui,session_id)))this.sendAgent({GetHistory:{session_id,cursor:null,limit:200}});},0);
   }
   private requestedAgentCatalogScopes=new Map<string,string|undefined>();
   private agentCatalogStream?:{workspaceId:string;directory?:string;abort:AbortController};
@@ -1730,12 +1778,15 @@ export class WorkspaceModel {
   };
   newTerminal = async (split?: SplitAxis) => {
     const workspace = this.state.activeWorkspace;
-    if (!workspace) return;
+    if (!workspace || this.closingWorkspaces.has(workspace.id)) return;
+    const closeEpoch=this.workspaceCloseEpochs.get(workspace.id)||0;
+    const closed=()=>this.disposed||this.closingWorkspaces.has(workspace.id)||closeEpoch!==(this.workspaceCloseEpochs.get(workspace.id)||0)||!this.windowWorkspaces().some(entry=>entry.id===workspace.id);
     try {
       const presentation = this.config.terminalBlockUi ? "blocks" : "grid";
       const result = expectVariant(await this.run(this.client.request("Pty", { CreatePty: { cwd: workspace.root_dir ?? null, cols: 100, rows: 30,presentation,
         ...(this.config.shell?.program?{shell:this.config.shell.program}:{}),...(this.config.shell?.args!==undefined?{shell_args:this.config.shell.args}:{}) } })), "PtyCreated");
       if (!isRecord(result) || typeof result.session_id !== "string") throw new Error("Invalid terminal session");
+      if(closed()){await this.closeOwnedPty(result.session_id);return;}
       if(result.presentation!==presentation){
         // Only the fresh session returned to this create request is ours to
         // close. Existing attached shells are never changed or restarted.
@@ -1749,6 +1800,7 @@ export class WorkspaceModel {
         const pending=isRecord(this.state.ui.pendingTerminalBindings)?this.state.ui.pendingTerminalBindings:{};
         this.setUI({pendingTerminalBindings:{...pending,[surface.id]:{workspaceId:workspace.id,sessionId:result.session_id}}});
       }
+      if(closed()){await this.closeOwnedPty(result.session_id);return;}
       if(!this.mainTerminalSurface(workspace.id)){const main=isRecord(this.state.ui.mainTerminals)?this.state.ui.mainTerminals:{};this.setUI({mainTerminals:{...main,[workspace.id]:result.session_id}});}
       this.addSurface(surface,split);
       this.followMainTerminal();
@@ -1831,6 +1883,7 @@ export class WorkspaceModel {
     const pair = variant(event.message);
     if (!pair || !isRecord(pair[1])) return;
     const [tag, body] = pair as [string, Record<string, unknown>];
+    if(event.family==="Agent"&&typeof body.session_id==="string"&&this.closedTranscriptRoots.has(agentFamilyRoot(this.state.ui,body.session_id))&&["MessageUpdated","ContentDelta","PartRemoved","ToolUseRequest","ToolUseResult"].includes(tag))return;
     if(tag!=="ContentDelta")this.flushHistoryUpdates();
     const runtime=tag==="RuntimeSnapshot"&&isRecord(body.snapshot)?body.snapshot:undefined;
     const runtimeRoot=runtime&&typeof runtime.rootSessionId==="string"?runtime.rootSessionId:undefined;
@@ -1957,7 +2010,6 @@ export class WorkspaceModel {
         const thread = Schema.decodeUnknownSync(ThreadSchema)({ ...body, title: body.title || "New conversation" });
         if (thread.directory === this.state.activeWorkspace?.root_dir) this.update({ threads: [thread, ...this.state.threads.filter((t) => t.session_id !== sessionId)] });
       } else if (tag === "HistoryChunk" && sessionId) {
-        const history = Schema.decodeUnknownSync(Schema.Array(HistoryMessageSchema))(body.messages);
         const request = this.historyRequests.get(sessionId);
         this.historyRequests.delete(sessionId);
         queueMicrotask(() => {
@@ -1967,7 +2019,8 @@ export class WorkspaceModel {
           if (next) this.sendAgent(next.message, next.replace);
         });
         const edit=this.historyEdits.get(sessionId);
-        if((request&&request.revision!==(this.historyRevisions.get(sessionId)||0))||edit?.pending.length)return;
+        if(this.closedTranscriptRoots.has(agentFamilyRoot(this.state.ui,sessionId))||(request&&request.revision!==(this.historyRevisions.get(sessionId)||0))||edit?.pending.length)return;
+        const history = Schema.decodeUnknownSync(Schema.Array(HistoryMessageSchema))(body.messages);
         for(const message of history)if(message.kind==="User"){this.optimisticPrompts.delete(message.id);this.promptArrivals.delete(message.id);}
         const previous = this.state.history[sessionId] || [];
         const older = request?.older ?? false;

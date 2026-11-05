@@ -3,6 +3,7 @@ import type {ServerSelection} from "../menu-actions/ChromeActionsController";
 import {DaemonConnection} from "./client";
 import {localDaemon} from "../menu-actions/web-frontend";
 import {attachSsh,prepareSshWorkspace,type SshAttachment} from "./ssh-transport";
+import {recoverLocalDaemon} from "./local-startup";
 
 export type ServerHandshakePhase="waiting"|"timeout"|"auth-rejected"|"cancelled";
 export class ServerHandshakeError extends Error{
@@ -37,8 +38,8 @@ export async function prepareServerConnection(server:ServerSelection,current:App
   if(server.ssh)ssh=await attachSsh(server.ssh,{signal});
   const config:AppConfig=localConfig?{...localConfig,serverId:"local",collaborative:false,transportIdentity:undefined}:
    {...current,endpoint:ssh?.endpoint||server.endpoint,authToken:ssh?.authToken||server.authToken,pairingToken:ssh?undefined:server.pairingToken??server.token,workspaceId:ssh?.workspaceId||server.workspaceId,serverId:server.id,collaborative:true,transportIdentity:ssh?.identity};
-  const probe=new DaemonConnection(config);
-  try{await waitForConnection(probe,10000,signal);if(ssh)await prepareSshWorkspace(probe,ssh,{signal});if(signal?.aborted)throw cancellation(signal);}finally{probe.stop();}
+   const probe=new DaemonConnection(config,undefined,undefined,localConfig?{profileStart:()=>0,profileEnd:()=>{},prepareConnection:signal=>recoverLocalDaemon(config,signal)}:undefined);
+   try{await waitForConnection(probe,localConfig?(process.platform==="win32"?300000:150000):10000,signal);if(ssh)await prepareSshWorkspace(probe,ssh,{signal});if(signal?.aborted)throw cancellation(signal);}finally{probe.stop();}
   return {config,ssh};
  }catch(error){ssh?.dispose();if(signal?.aborted)throw cancellation(signal);throw error;}
 }

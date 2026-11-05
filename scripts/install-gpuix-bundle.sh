@@ -13,6 +13,9 @@ for name in "${binaries[@]}"; do [[ -f "$payload/$name" && -x "$payload/$name" ]
 for name in "${resources[@]}"; do [[ -f "$payload/$name" ]] || { echo "Missing resource: $name" >&2; exit 1; }; done
 [[ -f "$payload/web/app/manifest.json" && -d "$payload/web/native" ]] || { echo 'Missing native application runtime.' >&2; exit 1; }
 [[ -d "$payload/licenses" ]] || { echo 'Missing bundled font licenses.' >&2; exit 1; }
+for name in api/docs/index.html api/docs/reference/index.html content.json; do
+  [[ -s "$payload/resources/docs/$name" ]] || { echo "Missing bundled docs resource: $name" >&2; exit 1; }
+done
 mkdir -p "$install_bin"
 install_bin="$(cd -- "$install_bin" && pwd -P)"
 bundle_in_use() {
@@ -33,7 +36,7 @@ for previous in "$install_bin"/.neoism-install.*; do
 done
 transaction="$(mktemp -d "$install_bin/.neoism-install.XXXXXX")"
 mkdir "$transaction/new" "$transaction/old"
-components=("${binaries[@]}" "${resources[@]}" web licenses)
+components=("${binaries[@]}" "${resources[@]}" web licenses resources)
 moved=()
 committed=0
 cleanup() {
@@ -72,6 +75,8 @@ for marker in index.html agent-gui/index.html; do
   printf '%s\n' '<!-- Neoism native runtime resources; no browser UI. -->' > "$transaction/new/web/$marker"
 done
 cp -a "$payload/licenses" "$transaction/new/licenses"
+mkdir -p "$transaction/new/resources"
+cp -a "$payload/resources/docs" "$transaction/new/resources/docs"
 for component in "${components[@]}"; do
   moved+=("$component")
   if [[ -e "$install_bin/$component" || -L "$install_bin/$component" ]]; then mv "$install_bin/$component" "$transaction/old/$component"; fi

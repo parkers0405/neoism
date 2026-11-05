@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
       - name: Enable magic Nix cache
@@ -24,4 +26,3 @@ jobs:
             dependencies
             automated
           pr-assignees: TornaxO7 RaySlash
-

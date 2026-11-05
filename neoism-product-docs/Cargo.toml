@@ -1,9 +1,13 @@
 [package]
 name = "neoism-product-docs"
-description = "Immutable product documentation bundled with Neoism."
+description = "Versioned Neoism documentation shared by the application, agent, and website."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+
+[build-dependencies]
+serde_json.workspace = true
+sha2.workspace = true

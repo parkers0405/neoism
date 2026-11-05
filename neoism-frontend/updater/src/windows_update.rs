@@ -39,6 +39,8 @@ fn spawn_helper(
         .arg(helper)
         .arg("-UpdaterPid")
         .arg(std::process::id().to_string())
+        .arg("-UpdaterExe")
+        .arg(std::env::current_exe()?)
         .arg("-GuiPid")
         .arg(gui_pid.unwrap_or_default().to_string())
         .arg("-MsiPath")
@@ -115,9 +117,10 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let script = directory.join("spawn-test.ps1");
         let result = directory.join("result.json");
-        std::fs::write(&script, r#"param([int]$UpdaterPid, [int]$GuiPid, [string]$MsiPath, [string]$TempDir, [string]$InvokingExe, [string]$ExpectedVersion, [string]$ResultPath, [int]$Relaunch)
+        std::fs::write(&script, r#"param([int]$UpdaterPid, [string]$UpdaterExe, [int]$GuiPid, [string]$MsiPath, [string]$TempDir, [string]$InvokingExe, [string]$ExpectedVersion, [string]$ResultPath, [int]$Relaunch)
 try {
     $owner = [Diagnostics.Process]::GetProcessById($UpdaterPid)
+    if ($owner.MainModule.FileName.Replace('\\?\', '') -ine $UpdaterExe.Replace('\\?\', '')) { throw 'Wrong updater identity' }
     try { $owner.WaitForExit() } finally { $owner.Dispose() }
 } catch [ArgumentException] {
     # The spawner already exited before PowerShell opened its process handle.

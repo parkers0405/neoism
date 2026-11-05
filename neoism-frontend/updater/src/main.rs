@@ -157,10 +157,13 @@ fn wait_for_process_exit(pid:u32,timeout:Duration)->Result<(),Error>{let end=Ins
         std::fs::write(&executable,"old installation").unwrap();
         std::fs::write(target.path().join("unrelated-note"),"keep me").unwrap();
         macos_update::install_unix_loose(&executable,Path::new(&payload)).unwrap();
-        // This is the deployed old installer's four-executables-plus-web
-        // transaction. It deliberately does not copy root-level GPUIX libs.
+        // The owned-stack transaction copies web and shared docs, but deliberately
+        // does not copy root-level GPUIX libs.
         assert!(!target.path().join("libneoism_gpuix_core.so").exists());
         assert!(target.path().join("web/native/libneoism_gpuix_core.so").is_file());
+        for required in ["resources/docs/api/docs/index.html", "resources/docs/api/docs/reference/index.html", "resources/docs/content.json"] {
+            assert!(target.path().join(required).is_file(), "portable update must transport {required}");
+        }
         for args in [vec!["--neoism-verify-runtime"],vec!["update","--help"],vec!["--update","nightly","--help"]] {
             let output=std::process::Command::new(&executable).args(args).output().unwrap();
             assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));

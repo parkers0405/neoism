@@ -558,7 +558,23 @@ fn render_single_tool_message(
     let mcp = message.mcp().or(fallback_mcp.as_ref());
     let symbol_rect = service_symbol_rect(x, y, s);
     let mut image_symbol_visible = false;
-    if let Some(mcp) = mcp {
+    if message.tool() == "task" {
+        use crate::panels::agent_pane::icon::{self, AgentKind};
+        let kind = message.agent_kind().unwrap_or(AgentKind::Neoism);
+        icon::register_agent_icons(sugarloaf);
+        image_symbol_visible = active_visible(motion, symbol_rect, message_clip, occlusion_rects);
+        if symbol_opts.color[3] > 0 {
+            if let Some((rect, source_rect)) = crate::widgets::inline_picker::clip_icon_image(
+                symbol_rect, [0.0, 0.0, 1.0, 1.0], message_clip,
+            ) {
+                let scale = sugarloaf.scale_factor();
+                super::super::draw::push_image_overlay_clipped(
+                    sugarloaf, icon::ICON_PANEL_ID, kind.image_id(), rect, source_rect,
+                    1, scale, occlusion_rects,
+                );
+            }
+        }
+    } else if let Some(mcp) = mcp {
         use crate::widgets::inline_picker::{clip_icon_image, InlinePickerIcon};
         match mcp.icon.presentation(sugarloaf, symbol_opts.color) {
             InlinePickerIcon::Glyph(glyph) => {

@@ -71,6 +71,45 @@ impl AgentKind {
         }
     }
 
+    /// External child identity comes only from persisted metadata or a canonical
+    /// agent value, never a task title, model name, or substring of a label.
+    pub fn from_external_agent(agent: &str) -> Option<Self> {
+        let agent = agent.trim().to_ascii_lowercase();
+        let agent = agent.strip_suffix("-subagent").unwrap_or(&agent);
+        match agent {
+            "opencode" | "open-code" => Some(Self::OpenCode),
+            "claude" | "claude-code" | "claude-agent" => Some(Self::Claude),
+            "codex" | "openai-codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub fn from_canonical_agent(agent: &str) -> Option<Self> {
+        match agent.trim().to_ascii_lowercase().as_str() {
+            "neoism" | "neoism-agent" => Some(Self::Neoism),
+            _ => Self::from_external_agent(agent),
+        }
+    }
+
+    pub fn from_external_metadata(value: &serde_json::Value) -> Option<Self> {
+        // An explicit (even unknown) provider wins over a conflicting agent.
+        let provider = value
+            .pointer("/externalAgent/provider")
+            .or_else(|| value.pointer("/extra/externalAgent/provider"))
+            .or_else(|| value.get("externalProvider"))
+            .or_else(|| value.get("external_provider"));
+        if let Some(provider) = provider {
+            // Unknown explicit identity must actively reset a previously known
+            // provider, rather than letting partial-metadata merging revive it.
+            return Some(
+                provider.as_str().and_then(Self::from_external_agent).unwrap_or(Self::Neoism),
+            );
+        }
+        value.get("agent")
+            .and_then(serde_json::Value::as_str)
+            .and_then(Self::from_canonical_agent)
+    }
+
     pub fn from_label(label: &str) -> Option<Self> {
         let lower = label.trim().to_ascii_lowercase();
         let normalized = lower

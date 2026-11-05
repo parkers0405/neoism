@@ -2,6 +2,7 @@ use super::history_from_agent_message;
 use crate::agent::events::history_from_part;
 use neoism_protocol::agent::{HistoryMessage, HistoryOutputKind};
 use neoism_ui::panels::agent_pane::{
+    icon::AgentKind,
     server_events::map_history,
     state::{NeoismAgentMessage, NeoismAgentOutputKind, NeoismAgentPane},
 };
@@ -84,4 +85,55 @@ fn todos_transport_recursive_output_kind_and_legacy_inference() {
     assert_eq!(legacy.output_kind, None);
     assert!(serde_json::to_value(&legacy).unwrap().get("output_kind").is_none());
     assert_eq!(roundtrip(legacy).output_kind, NeoismAgentOutputKind::Todos);
+}
+
+#[test]
+fn task_agent_identity_survives_reconstruction_and_recursive_history_transport() {
+    let mut messages = Vec::new();
+    for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::OpenCode, AgentKind::Neoism] {
+        let message = history_from_part(&json!({
+            "id": kind.id(), "type": "tool", "tool": "task",
+            "state": {
+                "status": "completed",
+                "metadata": {"agent": kind.id()},
+                "input": {"description": "Unbranded task", "subagent_type": "explore"}
+            }
+        })).unwrap();
+        assert_eq!(message.agent_kind.as_deref(), Some(kind.id()));
+        assert_eq!(serde_json::to_value(&message).unwrap()["agent_kind"], kind.id());
+        let mapped = roundtrip(message);
+        assert_eq!(mapped.agent_kind, Some(kind));
+        let mut pane = NeoismAgentPane::new();
+        pane.apply_history(vec![mapped]);
+        assert_eq!(pane.messages()[0].agent_kind, Some(kind));
+        messages.push(history_from_agent_message(pane.messages()[0].clone()));
+    }
+
+    let mut parent = messages.remove(0);
+    parent.composition_children = messages;
+    let mapped = roundtrip(parent.clone());
+    assert_eq!(mapped.agent_kind, Some(AgentKind::Claude));
+    assert_eq!(mapped.composition_children.iter().map(|child| child.agent_kind).collect::<Vec<_>>(),
+        vec![Some(AgentKind::Codex), Some(AgentKind::OpenCode), Some(AgentKind::Neoism)]);
+    assert_eq!(history_from_agent_message(mapped), parent);
+}
+
+#[test]
+fn task_agent_history_absence_and_unknown_identity_do_not_infer_from_labels() {
+    let legacy = json!({
+        "id": "legacy-task", "role": "Assistant", "kind": "Tool", "tool": "task",
+        "title": "Claude Codex OpenCode", "text": "openai/codex"
+    });
+    let message: HistoryMessage = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(message.agent_kind, None);
+    assert!(serde_json::to_value(&message).unwrap().get("agent_kind").is_none());
+    let mapped = roundtrip(message);
+    assert_eq!(mapped.agent_kind, None);
+    assert!(serde_json::to_value(history_from_agent_message(mapped)).unwrap().get("agent_kind").is_none());
+
+    for identity in [serde_json::Value::Null, json!("unknown"), json!("ask Claude"), json!("openai/codex")] {
+        let mut wire = legacy.clone();
+        wire["agent_kind"] = identity;
+        assert_eq!(roundtrip(serde_json::from_value(wire).unwrap()).agent_kind, None);
+    }
 }

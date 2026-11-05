@@ -18,6 +18,12 @@ struct Cli {
     /// Address for the daemon HTTP/WebSocket server.
     #[arg(long, env = "NEOISM_DAEMON_ADDR", default_value = "127.0.0.1:7878")]
     addr: SocketAddr,
+    /// Managed local startup: reserve a free loopback port if this one is occupied.
+    #[arg(long)]
+    auto_port: bool,
+    /// Allow the managed local Agent to discover/reserve an alternate loopback port.
+    #[arg(long)]
+    auto_agent_port: bool,
     /// Detach and continue running in the background.
     #[arg(long)]
     background: bool,
@@ -270,7 +276,7 @@ where
                 .is_some_and(|arg| arg.starts_with("--unix-socket="))
     });
     let cli = Cli::try_parse_from(args)?;
-    if hosted && (nonce.is_some() || cli.ephemeral || cli.temporary_parent_pid.is_some() || cli.background) {
+    if hosted && (nonce.is_some() || cli.ephemeral || cli.temporary_parent_pid.is_some() || cli.background || cli.auto_port || cli.auto_agent_port) {
         return Err(clap::Error::raw(clap::error::ErrorKind::ArgumentConflict,
             "Persistent hosted startup forbids Fast readiness, ephemeral state, a parent-death leash and --background"));
     }
@@ -286,6 +292,8 @@ where
             || !cli.no_unix_socket
             || explicit_unix_socket
             || cli.background
+            || cli.auto_port
+            || cli.auto_agent_port
         {
             return Err(invalid("Fast startup requires loopback TCP, --no-unix-socket, no --unix-socket and no --background"));
         }
@@ -387,6 +395,28 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
         "daemon token ready (read the secret from this file; never logged)",
     );
 
+    let _managed_owner = if cli.auto_port {
+        if !cli.addr.ip().is_loopback() {
+            return Err("automatic ports require a loopback daemon address".into());
+        }
+        match crate::local_service::lock("daemon") {
+            Ok(lock) => Some(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                tracing::info!("managed daemon already starting/running; use its published endpoint");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else { None };
+    // Publish the location before slow initialization, but clients must still
+    // require HelloAck. Keep both the listener and ownership guard alive.
+    let mut early_listener = if cli.auto_port || nonce.is_some() || hosted_nonce.is_some() {
+        Some(crate::local_service::bind(cli.addr, cli.auto_port).await?)
+    } else { None };
+    let _endpoint = if cli.auto_port {
+        Some(crate::local_service::Publication::publish("daemon", early_listener.as_ref().unwrap().local_addr()?)?)
+    } else { None };
+
     let _pidfile_guard = match cli.pidfile {
         Some(path) => {
             let guard = persistence::PidfileGuard::create(path)?;
@@ -406,7 +436,11 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
     // child borrows the home owner's existing local Agent and shared history;
     // if that owner disappears, association retries/fails without taking over.
     if owns_agent_server(nonce.as_deref()) {
-        crate::agent::ensure_agent_server_started(workspaces.clone());
+        if cli.auto_agent_port {
+            crate::agent::ensure_managed_agent_server_started(workspaces.clone()).await?;
+        } else {
+            crate::agent::ensure_agent_server_started(workspaces.clone());
+        }
     }
     tracing::info!(
         state_dir = %state_dir.display(),
@@ -446,13 +480,6 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
             );
             crate::hosts::PairedHostStore::in_memory()
         });
-    // Reserve the TCP endpoint before slow agent association. Nothing serves
-    // requests and no readiness is emitted until the declared namespace is ready.
-    let early_listener = if nonce.is_some() || hosted_nonce.is_some() {
-        Some(tokio::net::TcpListener::bind(cli.addr).await?)
-    } else {
-        None
-    };
     for dir in &cli.workspace {
         let workspace = workspaces.declare_startup_workspace(dir);
         if let Some(root) = workspace.root_dir.as_deref() {
@@ -490,8 +517,6 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
         paired_hosts,
     });
 
-    tracing::info!(addr = %cli.addr, "neoism-workspace-daemon listening");
-
     // Serve the same router on the desktop's default unix socket so a
     // plain `neoism` launch (which probes that socket before spawning
     // an embedded daemon) lands on THIS daemon and shares one
@@ -508,11 +533,12 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
     };
 
     let shutdown_writer = workspaces.snapshot_writer().clone();
-    let listener = match early_listener {
+    let listener = match early_listener.take() {
         Some(listener) => listener,
         None => tokio::net::TcpListener::bind(cli.addr).await?,
     };
     let actual_addr = listener.local_addr()?;
+    tracing::info!(addr = %actual_addr, "neoism-workspace-daemon listening");
     let readiness = nonce.map(|n| (FAST_READINESS_PROTOCOL, n))
         .or_else(|| hosted_nonce.map(|n| (HOSTED_READINESS_PROTOCOL, n)));
     if let Some((protocol, nonce)) = readiness {

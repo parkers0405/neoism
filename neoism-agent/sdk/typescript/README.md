@@ -1,8 +1,8 @@
 # Neoism TypeScript SDK
 
-Frontend-neutral clients for the Neoism Agent `/v2` API.
+Build agent-powered applications on the same runtime that powers Neoism's local-first IDE. The TypeScript SDK provides frontend-neutral clients for the Neoism Agent `/v2` API: connect to a server, manage sessions, consume streaming events, and access the runtime's available capabilities.
 
-This package contains two distinct surfaces: `@neoism/sdk` is the generated HTTP client, while `@neoism/plugin` authors supervised `neoism-plugin/2` processes. The complete package, Agent Lua, process-wire, native-plugin, trust, capability, scope, lifecycle, limit and remote-resource reference is [`docs/agent-plugins.md`](../../../docs/agent-plugins.md); shared package architecture is in [`docs/plugins.md`](../../../docs/plugins.md). Do not infer the process author API from generated OpenAPI client types.
+Use `@neoism/sdk` to connect applications to the Agent API and `@neoism/plugin` to author supervised `neoism-plugin/2` process plugins. These are distinct contracts: the generated HTTP client describes server requests, while the plugin authoring API defines extensions hosted by the runtime. Start with the [agent framework guide](../../README.md), [plugin authoring](../../../docs/plugins.md), or the [complete Agent reference](../../../docs/agent-plugins.md) for trust, capabilities, scope, lifecycle, limits, and remote resources.
 
 ```sh
 npm install @neoism/sdk

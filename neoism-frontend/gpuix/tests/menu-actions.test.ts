@@ -10,7 +10,7 @@ import { loadConfig } from "../src/config";
 import { DaemonConnection } from "../src/daemon/client";
 import { WorkspaceModel } from "../src/model";
 import { decodeSession } from "../src/session-store";
-import { editConfigDocument, themeUpdates } from "../src/menu-actions/config-document";
+import { editConfigDocument, themeUpdates, saveTheme } from "../src/menu-actions/config-document";
 import { localDaemon } from "../src/menu-actions/web-frontend";
 import { ChromeActionsController, type MenuFrame } from "../src/menu-actions/ChromeActionsController";
 const cleanups: Array<() => void> = [];
@@ -82,6 +82,32 @@ test("theme/background transactions retain JSONC comments and optimistic revisio
   expect(parse(update.content).appearance["mashup-baseline"]).toEqual({ theme: "tokyo_night", "font-family": "Mono" });
   expect(parse(update.content).editor["vim-mode"]).toBe(true);
   expect(localDaemon("wss://remote.example/session")).toBe(false); expect(localDaemon("ws+unix:///run/test.sock:/session")).toBe(true);
+});
+test("theme picker saves locally while attached to SSH or a joined server",async()=>{
+ for(const transportIdentity of [undefined,"ssh:fixture"]){
+  const localConfig=loadConfig(["--config","/nonexistent/local-theme-test"],{}),local=new DaemonConnection(localConfig);
+  const config={...localConfig,endpoint:"wss://remote.example/session",collaborative:true,transportIdentity},remote=new DaemonConnection(config);
+  const document={content:'{\n// local preferences\n"appearance":{"theme":"pastel_dark","mashup-pack":"local-pack"}}',display_path:"/local/config.json",revision:"local-r1",writable:true};
+  let saved="",remoteRequests=0,finished=false;const errors:unknown[]=[];
+  local.request=((family:string,message:any)=>Effect.sync(()=>{
+   expect(family).toBe("Config");
+   if(message==="EnsureConfigDocument")return {ConfigDocument:{document}};
+   expect(message.SaveConfigDocument.expected_revision).toBe("local-r1");
+   saved=message.SaveConfigDocument.content;
+   return {ConfigDocumentSaved:{document:{...document,content:saved,revision:"local-r2"}}};
+  })) as typeof local.request;
+  remote.request=(()=>Effect.sync(()=>{remoteRequests++;throw new Error("Theme must not use the remote config");})) as typeof remote.request;
+  const model=new WorkspaceModel(remote,config);model.report=error=>{errors.push(error);};
+  const controller=new ChromeActionsController({model,config,reload:()=>{throw new Error("Theme must not reload remote settings");},onSetTheme:async name=>{await saveTheme(local,name);finished=true;}});
+  try{
+   await controller.open("OpenThemes");controller.call("query",{query:"tokyo_night"});controller.call("key",{key:"enter"});
+   const deadline=performance.now()+2000;
+   while(!finished&&!errors.length&&performance.now()<deadline)await Bun.sleep(1);
+   expect(errors).toEqual([]);expect(finished).toBe(true);expect(remoteRequests).toBe(0);
+   expect(saved).toContain("// local preferences");expect(parse(saved).appearance.theme).toBe("tokyo_night");
+   expect(parse(saved).appearance["mashup-baseline"].theme).toBe("tokyo_night");
+  }finally{controller.dispose();model.dispose();}
+ }
 });
 test("config editor uses revision-checked Config transport and preserves dirty text on conflict", async () => {
   const config = loadConfig(["--config", "/nonexistent"], {}), client = new DaemonConnection(config);

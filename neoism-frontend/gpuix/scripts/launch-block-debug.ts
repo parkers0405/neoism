@@ -16,8 +16,8 @@ if ((display.stamp.profile || "release") !== (production ? "release" : "debug"))
 const repository = resolve(frontendRoot, "../.."), workspace = resolve(process.argv.slice(2).find(arg => arg !== "--production") || repository);
 const suffix = process.platform === "win32" ? ".exe" : "";
 const executable = production ? join(frontendRoot, "dist", `neoism${suffix}`) : process.execPath;
-const daemon = production ? join(frontendRoot, "dist", `neoism-workspace-daemon${suffix}`) : join(repository, `target/debug/neoism-workspace-daemon${suffix}`);
-const core = join(frontendRoot, production ? "dist/web/native" : "native/target/debug", process.platform === "darwin" ? "libneoism_gpuix_core.dylib" : process.platform === "win32" ? "neoism_gpuix_core.dll" : "libneoism_gpuix_core.so");
+const daemon = resolve(process.env.NEOISM_GPUIX_WORKSPACE_DAEMON || (production ? join(frontendRoot, "dist", `neoism-workspace-daemon${suffix}`) : join(repository, `target/debug/neoism-workspace-daemon${suffix}`)));
+const core = resolve(process.env.NEOISM_GPUIX_CORE || join(frontendRoot, production ? "dist/web/native" : "native/target/debug", process.platform === "darwin" ? "libneoism_gpuix_core.dylib" : process.platform === "win32" ? "neoism_gpuix_core.dll" : "libneoism_gpuix_core.so"));
 if (!existsSync(executable) || !existsSync(daemon) || !existsSync(core)) throw new Error(`Build the ${production ? "production bundle" : "debug workspace daemon and native core"} before launching.`);
 if (production && !existsSync(join(frontendRoot, "dist", `neoism-agent${suffix}`))) throw new Error("Stage the production services before launching.");
 const profile = mkdtempSync(join(tmpdir(), production ? "neoism-local-production-" : "neoism-block-debug-"));
@@ -53,7 +53,9 @@ for (const key of Object.keys(env)) if (key.startsWith("NEOISM_GPUIX_NATIVE_CHEC
 for (const key of ["NEOISM_GPUIX_DAEMON_URL", "NEOISM_DAEMON_TOKEN", "NEOISM_PAIRING_TOKEN", "NEOISM_AGENT_TOKEN", "NEOISM_AGENT_AUTH_CONFIG", "NEOISM_WEB_ROOT", "NEOISM_AGENT_GUI_ROOT"]) delete env[key];
 Object.assign(env, {
   RUST_MIN_STACK: "67108864", NEOISM_GPUIX_DISPLAY_DEBUG: production ? "0" : "1", NEOISM_GPUIX_CORE: core,
-  XDG_RUNTIME_DIR: profile, XDG_STATE_HOME: join(profile, "state"), NEOISM_CONFIG_HOME: profile, NEOISM_CONFIG_DIR: profile,
+  XDG_RUNTIME_DIR: profile, XDG_STATE_HOME: join(profile, "state"), XDG_DATA_HOME: join(profile, "data"), NEOISM_CONFIG_HOME: profile, NEOISM_CONFIG_DIR: profile,
+  NEOISM_NOTES_HOME: join(profile, "notes"),
+  NEOISM_GPUIX_PRIVATE_DAEMON: "1",
   NEOISM_STATE_DIR: join(profile, "state"), NEOISM_GPUIX_STATE_PATH: join(profile, "session.json"),
   NEOISM_DAEMON_DATA_DIR: join(profile, "daemon"), NEOISM_AGENT_STATE_DIR: join(profile, "agent"),
   NEOISM_WORKSPACE_REGISTRY: join(profile, "registry.json"), NEOISM_DAEMON_SOCKET: join(profile, "neoism.sock"),

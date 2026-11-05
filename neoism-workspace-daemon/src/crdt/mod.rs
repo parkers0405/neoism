@@ -83,7 +83,15 @@ impl CrdtBufferRegistry {
         buffer_id: impl Into<CrdtBufferId>,
         initial_text: impl AsRef<str>,
     ) -> CrdtBufferSnapshot {
-        let buffer_id = buffer_id.into();
+        self.open_buffer_with_ownership(buffer_id.into(), initial_text.as_ref(), true)
+    }
+
+    pub(super) fn open_buffer_with_ownership(
+        &self,
+        buffer_id: CrdtBufferId,
+        initial_text: &str,
+        unknown_owner: bool,
+    ) -> CrdtBufferSnapshot {
         let mut inner = self.inner.lock();
         let entry = inner.entry(buffer_id.clone()).or_insert_with(|| {
             AuthoritativeCrdtBuffer::new(
@@ -92,7 +100,21 @@ impl CrdtBufferRegistry {
                 initial_text.as_ref(),
             )
         });
+        entry.unknown_owner |= unknown_owner;
         entry.snapshot_full()
+    }
+
+    /// Called only under the hub operation gate, after verifying all leases
+    /// and the disk baseline. Legacy registry users cannot be silently evicted.
+    pub(super) fn remove_if_clean(&self, id: &str, baseline: &str) -> bool {
+        let mut inner = self.inner.lock();
+        if !inner.get(id).is_some_and(|buffer| {
+            !buffer.unknown_owner && buffer.replica.text() == baseline
+        }) {
+            return false;
+        }
+        inner.remove(id);
+        true
     }
 
     pub fn has_buffer(&self, buffer_id: &str) -> bool {
@@ -126,13 +148,33 @@ impl CrdtBufferRegistry {
         buffer_id: &str,
         remote_state_vector_v1: &[u8],
     ) -> Result<CrdtBufferSnapshot, CrdtDaemonError> {
-        let inner = self.inner.lock();
+        self.snapshot_for_with_ownership(buffer_id, remote_state_vector_v1, true)
+    }
+
+    pub(super) fn snapshot_for_managed(
+        &self,
+        buffer_id: &str,
+        remote_state_vector_v1: &[u8],
+    ) -> Result<CrdtBufferSnapshot, CrdtDaemonError> {
+        self.snapshot_for_with_ownership(buffer_id, remote_state_vector_v1, false)
+    }
+
+    fn snapshot_for_with_ownership(
+        &self,
+        buffer_id: &str,
+        remote_state_vector_v1: &[u8],
+        unknown_owner: bool,
+    ) -> Result<CrdtBufferSnapshot, CrdtDaemonError> {
+        let mut inner = self.inner.lock();
         let buffer =
             inner
-                .get(buffer_id)
+                .get_mut(buffer_id)
                 .ok_or_else(|| CrdtDaemonError::UnknownBuffer {
                     buffer_id: buffer_id.to_string(),
                 })?;
+        // Public snapshot callers can retain the Yrs clocks independently of
+        // the socket lifecycle. Only the hub has a managed release contract.
+        buffer.unknown_owner |= unknown_owner;
         let update_v1 = if remote_state_vector_v1.is_empty() {
             buffer.replica.encode_full_update_v1()
         } else {
@@ -238,6 +280,7 @@ impl CrdtBufferRegistry {
 struct AuthoritativeCrdtBuffer {
     id: CrdtBufferId,
     replica: CrdtTextBuffer,
+    unknown_owner: bool,
 }
 
 impl AuthoritativeCrdtBuffer {
@@ -245,6 +288,7 @@ impl AuthoritativeCrdtBuffer {
         Self {
             id,
             replica: CrdtTextBuffer::with_text(daemon_client_id, initial_text),
+            unknown_owner: false,
         }
     }
 

@@ -3168,6 +3168,7 @@ mod tests {
                 status: String::new(),
                 tool: String::new(),
                 tool_batch_id: None,
+                agent_kind: None,
                 mcp: None,
                 composition_children: Vec::new(),
                 composition_child: false,

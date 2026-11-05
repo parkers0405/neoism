@@ -38,6 +38,54 @@ test("standalone transport keeps the legacy constructor and supports the TUI ide
   socket.reply("Workspace", 0, { HelloAck: { accepted: true, connected_host_id: "host-a" } });
   expect(client.state).toMatchObject({ phase: "connected", connectedHostId: "host-a" });
 });
+test("automatic reconnect refreshes the endpoint and upgrade credential after a failed startup",async()=>{
+ let attempts=0;
+ const dials:{endpoint:string;token?:string}[]=[];
+ const socket=new FakeSocket();
+ const client=new DaemonConnection({endpoint:"ws://old/session",authToken:"old"},(endpoint,token)=>{
+  dials.push({endpoint,token});
+  queueMicrotask(()=>{socket.emit("open");socket.reply("Workspace",0,{HelloAck:{accepted:true}});});
+  return socket as unknown as WebSocket;
+ },()=>{},{profileStart:()=>0,profileEnd:()=>{},prepareConnection:async()=>{
+  if(++attempts===1)throw new Error("service still starting");
+  return {endpoint:"ws://recovered/session",authToken:"fresh"};
+ }});
+ clients.push(client);
+ await new Promise<void>((resolve,reject)=>{
+  const timer=setTimeout(()=>reject(new Error("automatic recovery did not connect")),2000);
+  client.subscribeStatus(state=>{if(state.phase==="connected"){clearTimeout(timer);resolve();}});
+  client.start();
+ });
+ expect(attempts).toBe(2);expect(dials).toEqual([{endpoint:"ws://recovered/session",token:"fresh"}]);
+});
+test("stopping during service recovery cancels it and ignores a late completion",async()=>{
+ let finish!:(config:{endpoint:string})=>void,signal!:AbortSignal,dials=0;
+ const client=new DaemonConnection({endpoint:"ws://original/session"},()=>{dials++;return new FakeSocket() as unknown as WebSocket;},()=>{},
+  {profileStart:()=>0,profileEnd:()=>{},prepareConnection:async input=>{signal=input;return new Promise(resolve=>{finish=resolve;});}});
+ clients.push(client);client.start();await new Promise(resolve=>setTimeout(resolve,0));
+ client.stop();expect(signal.aborted).toBe(true);finish({endpoint:"ws://late/session"});
+ await new Promise(resolve=>setTimeout(resolve,0));
+ expect(dials).toBe(0);expect(client.config.endpoint).toBe("ws://original/session");expect(client.state.phase).toBe("closed");
+});
+test("a lost connected daemon is prepared again without replaying pending mutations",async()=>{
+ let preparations=0;const sockets:FakeSocket[]=[];
+ const client=new DaemonConnection({endpoint:"ws://local/session"},()=>{
+  const socket=new FakeSocket();sockets.push(socket);
+  queueMicrotask(()=>{socket.emit("open");socket.reply("Workspace",0,{HelloAck:{accepted:true}});});
+  return socket as unknown as WebSocket;
+ },()=>{},{profileStart:()=>0,profileEnd:()=>{},prepareConnection:async()=>({authToken:`credential-${++preparations}`})});
+ clients.push(client);
+ const connected=()=>new Promise<void>((resolve,reject)=>{
+  let unsubscribe=()=>{};
+  const timer=setTimeout(()=>{unsubscribe();reject(new Error("did not reconnect"));},2000);
+  unsubscribe=client.subscribeStatus(state=>{if(state.phase==="connected"){clearTimeout(timer);unsubscribe();resolve();}});
+ });
+ const initial=connected();client.start();await initial;
+ const mutation=Effect.runPromise(client.request("Config",{SetSetting:{key:"appearance.fonts.size",value:19}})).catch(error=>error);
+ sockets[0].close();await connected();
+ expect(await mutation).toBeInstanceOf(DaemonError);expect(preparations).toBe(2);expect(client.config.authToken).toBe("credential-2");
+ expect(sockets[1].sent).toHaveLength(1);expect(sockets[1].sent[0].Workspace.message).toHaveProperty("Hello");
+});
 
 test("profiling and host batching wrap receives, including invalid JSON", () => {
   const order: string[] = [], metrics: unknown[] = [];

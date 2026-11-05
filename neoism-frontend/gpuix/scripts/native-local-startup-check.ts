@@ -1,4 +1,5 @@
-// Exercise the installed application's default startup and daemon lifetime.
+// Private fixture by default; --shared-lifetime explicitly tests installed
+// persistence across window closure and retains responsibility for cleanup.
 import {existsSync,mkdtempSync,mkdirSync,readFileSync,writeFileSync,rmSync} from "node:fs";
 import {join,resolve} from "node:path";
 import {tmpdir} from "node:os";
@@ -10,6 +11,7 @@ import {AgentSdk} from "../src/daemon/sdk";
 import {Effect} from "effect";
 
 const directory=mkdtempSync(join(tmpdir(),"neoism-installed-startup-"));
+const sharedLifetime=process.argv.includes("--shared-lifetime")||process.platform==="win32";
 const binary=resolve(process.env.NEOISM_GPUIX_TEST_BINARY||"dist/neoism");
 const daemon=resolve(process.env.NEOISM_GPUIX_WORKSPACE_DAEMON||"dist/neoism-workspace-daemon");
 const wrapper=join(directory,"daemon"),pidPath=join(directory,"daemon.pid");
@@ -19,6 +21,7 @@ for(const path of paths)mkdirSync(join(directory,path),{recursive:true});
 const port=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>new Response()});
 const agentUrl=port.url.origin;port.stop(true);
 const env:NodeJS.ProcessEnv={...process.env,HOME:join(directory,"home"),
+ NEOISM_GPUIX_PRIVATE_DAEMON:sharedLifetime?undefined:"1",
  XDG_RUNTIME_DIR:join(directory,"runtime"),TMPDIR:join(directory,"temporary"),
  XDG_STATE_HOME:join(directory,"state-home"),XDG_DATA_HOME:join(directory,"data-home"),XDG_CONFIG_HOME:join(directory,"config-home"),
  NEOISM_STATE_DIR:join(directory,"state"),NEOISM_CONFIG_HOME:join(directory,"config"),NEOISM_CONFIG_DIR:join(directory,"config"),
@@ -63,20 +66,35 @@ try{
  }finally{sdk.dispose();connection.stop();}
  pid=Number(readFileSync(pidPath,"utf8"));if(!Number.isSafeInteger(pid)||pid<=1)throw new Error("Missing owned daemon PID");
  if(!await reachable(endpoint))throw new Error("Default launch did not start its private daemon");
- await app.close();app=undefined;
- if(!await reachable(endpoint))throw new Error("Closing the frontend stopped the daemon");
- app=await launch();await app.getByTestId("splash-wordmark").waitFor({timeoutMs:30000});
- if(Number(readFileSync(pidPath,"utf8"))!==pid)throw new Error("Relaunch replaced the running daemon");
- await app.close();app=undefined;
- if(!await reachable(endpoint))throw new Error("Relaunch lost daemon ownership");
- console.log(JSON.stringify({installedDefaultStartup:true,realEmbeddedAgent:true,directShell:true,browserUiDisabled:true,daemonSurvivesWindow:true,relaunchReusesDaemon:true,uncreatedNotesStayEmpty:true}));
+  await app.close();app=undefined;
+  const awaitPrivateExit=async()=>{
+   const deadline=Date.now()+5000;
+   while(await reachable(endpoint)&&Date.now()<deadline)await Bun.sleep(50);
+   if(await reachable(endpoint))throw new Error("Private daemon survived its frontend owner");
+  };
+  if(sharedLifetime){if(!await reachable(endpoint))throw new Error("Closing the frontend stopped the shared daemon");}
+  else await awaitPrivateExit();
+  const priorPid=pid;
+  app=await launch();await app.getByTestId("splash-wordmark").waitFor({timeoutMs:30000});
+  pid=Number(readFileSync(pidPath,"utf8"));if(!Number.isSafeInteger(pid)||pid<=1)throw new Error("Missing relaunched daemon PID");
+  if(sharedLifetime&&pid!==priorPid)throw new Error("Relaunch replaced the running shared daemon");
+  await app.close();app=undefined;
+  if(sharedLifetime){if(!await reachable(endpoint))throw new Error("Relaunch lost shared daemon ownership");}
+  else {await awaitPrivateExit();pid=undefined;}
+  console.log(JSON.stringify({installedDefaultStartup:true,realEmbeddedAgent:true,directShell:true,browserUiDisabled:true,daemonSurvivesWindow:sharedLifetime,relaunchReusesDaemon:sharedLifetime,privateOwnerExit:!sharedLifetime,uncreatedNotesStayEmpty:true}));
 }finally{
  await app?.close();
- if(pid===undefined){try{pid=Number(readFileSync(pidPath,"utf8"));}catch{}}
- if(pid&&Number.isSafeInteger(pid)&&pid>1){
+  // Private ownership is enforced inside the daemon. Do not signal an exited
+  // private daemon's numeric PID (it may already have been reused).
+  if(sharedLifetime&&pid===undefined){try{pid=Number(readFileSync(pidPath,"utf8"));}catch{}}
+  if(sharedLifetime&&pid&&Number.isSafeInteger(pid)&&pid>1){
   try{process.kill(pid,"SIGTERM");}catch{}
   const deadline=Date.now()+5000;while(await reachable(endpoint)&&Date.now()<deadline)await Bun.sleep(50);
-  try{process.kill(-pid,"SIGKILL");}catch{}
- }
+   try{process.kill(-pid,"SIGKILL");}catch{}
+  }
+  if(!sharedLifetime){
+   const deadline=Date.now()+5000;while(await reachable(endpoint)&&Date.now()<deadline)await Bun.sleep(50);
+   if(await reachable(endpoint))throw new Error(`Private daemon has not exited; preserving fixture state at ${directory}`);
+  }
  rmSync(directory,{recursive:true,force:true});
 }

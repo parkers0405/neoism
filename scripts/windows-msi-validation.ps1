@@ -43,6 +43,8 @@ foreach ($marker in @('web\index.html', 'web\agent-gui\index.html')) {
     if ($content -cne "<!-- Neoism native runtime resources; no browser UI. -->`n") { throw "Invalid native runtime compatibility marker: $marker" }
 }
 if (-not (Test-Path (Join-Path $installDir "web\app\manifest.json"))) { throw "native application runtime was not installed" }
+node "$PSScriptRoot/build-docs.mjs" --verify (Join-Path $installDir 'resources/docs')
+if ($LASTEXITCODE -ne 0) { throw 'Shared docs site was not installed correctly by MSI' }
 $guiFiles = @(Get-ChildItem (Join-Path $installDir 'web\agent-gui') -Force)
 if ($guiFiles.Count -ne 1 -or $guiFiles[0].Name -ne 'index.html' -or $guiFiles[0].PSIsContainer) { throw "browser GUI assets were installed instead of only the inert marker" }
 Invoke-CheckedProcess (Join-Path $installDir 'neoism.exe') '--version' "$evidence/version" 30

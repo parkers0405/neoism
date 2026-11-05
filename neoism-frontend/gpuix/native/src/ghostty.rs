@@ -2183,6 +2183,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
       if before!=t.get::<GhosttyTerminalScreen>(GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN){t.api.ghostty_tracked_grid_ref_free(t.selection_anchor);t.selection_anchor=ptr::null_mut();t.selection_kind=0;t.vi=None;}},
     "ghostty.resize"=>{check(t.api.ghostty_terminal_resize(t.inner,n(v,"cols",100.0).clamp(2.0,500.0)as u16,n(v,"rows",30.0).clamp(1.0,200.0)as u16,n(v,"cellWidth",10.0).max(1.0).round()as u32,n(v,"rowHeight",20.0).max(1.0).round()as u32))?;t.revision=t.revision.wrapping_add(1);},
     "ghostty.reset"=>{let cols=t.get(GHOSTTY_TERMINAL_DATA_COLS);let rows=t.get(GHOSTTY_TERMINAL_DATA_ROWS);let compact=t.compact;*t=Terminal::new(t.api.clone(),cols,rows)?;t.compact=compact;t.configure_colors(v);},
+    "ghostty.colors"=>{t.configure_colors(v);t.revision=t.revision.wrapping_add(1);},
     "ghostty.bottom"=>t.bottom(),
     "ghostty.scroll"=>{
       // Desktop `terminal_edge_rejected`: input into a hard edge never builds a

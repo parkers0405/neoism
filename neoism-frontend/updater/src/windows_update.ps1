@@ -1,7 +1,7 @@
 # Windows PowerShell 5.1 compatible. Dot-source with -LibraryOnly for isolated tests.
 # No PATH rewriting, App Paths redirection, service autostart, or global image kills.
 param(
-    [int]$UpdaterPid, [int]$GuiPid,
+    [int]$UpdaterPid, [int]$GuiPid, [string]$UpdaterExe,
     [string]$MsiPath, [string]$TempDir, [string]$InvokingExe,
     [string]$ExpectedVersion, [string]$ResultPath,
     [int]$Relaunch = 0, [switch]$LibraryOnly
@@ -111,12 +111,25 @@ function Get-PayloadManifest([string]$Directory) {
     foreach ($name in $script:BinaryNames) {
         $manifest[$name] = Get-UpdateFileHash (Join-Path $Directory $name)
     }
-    $web = Join-Path $Directory 'web'
-    if (-not (Test-Path -LiteralPath $web -PathType Container)) { throw 'MSI payload is missing web assets' }
-    foreach ($file in Get-ChildItem -LiteralPath $web -File -Recurse -Force) {
-        Assert-NoReparsePoint $file.FullName
-        $relative = $file.FullName.Substring($Directory.TrimEnd('\').Length + 1)
-        $manifest[$relative] = Get-UpdateFileHash $file.FullName
+    foreach ($tree in @('web', 'resources')) {
+        $folder = Join-Path $Directory $tree
+        Assert-NoReparsePoint $folder
+        if ($tree -eq 'resources' -and -not (Test-Path -LiteralPath $folder)) { continue } # legacy payload
+        if (-not (Test-Path -LiteralPath $folder -PathType Container)) { throw "MSI payload is missing $tree assets" }
+        if ($tree -eq 'resources') {
+            foreach ($name in @('docs/api/docs/index.html', 'docs/api/docs/reference/index.html', 'docs/content.json')) {
+                $required = Join-Path $folder $name
+                Assert-NoReparsePoint $required
+                if (-not (Test-Path -LiteralPath $required -PathType Leaf) -or (Get-Item -LiteralPath $required).Length -eq 0) { throw "Missing docs resource: $name" }
+            }
+            $null = [IO.File]::ReadAllText((Join-Path $folder 'docs/content.json')) | ConvertFrom-Json
+        }
+        foreach ($item in Get-ChildItem -LiteralPath $folder -Recurse -Force) {
+            Assert-NoReparsePoint $item.FullName
+            if ($item.PSIsContainer) { continue }
+            $relative = $item.FullName.Substring($Directory.TrimEnd('\').Length + 1)
+            $manifest[$relative] = Get-UpdateFileHash $item.FullName
+        }
     }
     return $manifest
 }
@@ -277,6 +290,7 @@ function Install-PortablePayload([string]$Payload, [string]$Directory, [hashtabl
     $stage = Join-Path $Directory ".neoism-update-$id"
     $script:BackupDir = Join-Path $Directory ".neoism-rollback-$id"
     $names = @($script:BinaryNames) + @('web')
+    if (Test-Path -LiteralPath (Join-Path $Payload 'resources')) { $names += 'resources' }
     $moved = @(); $installed = @()
     New-Item -ItemType Directory -Path $stage, $script:BackupDir | Out-Null
     try {
@@ -329,7 +343,10 @@ function Invoke-WindowsUpdate {
     $script:MsiRepairLogPath = Join-Path (Split-Path $ResultPath) 'repair-msi.log'
     $lock = $null; $updater = $null; $gui = $null
     try {
-        $updater = Get-TrackedProcess $UpdaterPid $InvokingExe
+        # GPUIX runs a separate web/native update helper. Only the CLI parent
+        # runs InvokingExe; validating both PIDs against it rejects every update.
+        $updaterPath = if ($UpdaterExe) { $UpdaterExe } else { $InvokingExe }
+        $updater = Get-TrackedProcess $UpdaterPid $updaterPath
         $gui = Get-TrackedProcess $GuiPid $InvokingExe
         $updatesDirectory = [IO.Directory]::CreateDirectory((Join-Path $env:LOCALAPPDATA 'Neoism\updates'))
         $lockPath = Join-Path $updatesDirectory.FullName 'update.lock'
@@ -342,10 +359,13 @@ function Invoke-WindowsUpdate {
         $script:Target = Resolve-UpdateTarget $InvokingExe (Get-RegisteredInstallDir)
         Assert-NoReparsePoint $script:Target.directory
         Assert-NoReparsePoint $InvokingExe
-        if ($script:Target.mode -eq 'portable' -and (Test-Path -LiteralPath (Join-Path $script:Target.directory 'web'))) {
-            foreach ($name in $script:BinaryNames) {
-                if (-not (Test-Path -LiteralPath (Join-Path $script:Target.directory $name) -PathType Leaf)) {
-                    throw 'Loose executable shares a directory with an unowned web folder. Move neoism.exe to its own portable folder and retry; no files were replaced.'
+        if ($script:Target.mode -eq 'portable') {
+            foreach ($tree in @('web', 'resources')) {
+                if (-not (Test-Path -LiteralPath (Join-Path $script:Target.directory $tree))) { continue }
+                foreach ($name in $script:BinaryNames) {
+                    if (-not (Test-Path -LiteralPath (Join-Path $script:Target.directory $name) -PathType Leaf)) {
+                        throw "Loose executable shares a directory with an unowned $tree folder. Move neoism.exe to its own portable folder and retry; no files were replaced."
+                    }
                 }
             }
         }

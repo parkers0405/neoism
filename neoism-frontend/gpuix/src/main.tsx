@@ -7,8 +7,9 @@ import { startFrameLoop, enableAutomation, type FrameLoop } from "@gpuix/native/
 import type { GpuixRenderer } from "@gpuix/native";
 import {prepareBundledFonts} from "./bundled-fonts";
 import { loadConfig, type AppConfig } from "./config";
-import {appVersion} from "./design/generated";
-import {ensureLocalDaemon} from "./daemon/local-startup";
+import {appVersion,palettes} from "./design/generated";
+import {saveTheme} from "./menu-actions/config-document";
+import {explicitDaemon,recoverLocalDaemon} from "./daemon/local-startup";
 import {createWindowKeyRouter} from "./commands/window-key-router";
 import {FontZoomController} from "./commands/font-zoom";
 import { expectVariant, isRecord } from "./daemon/protocol";
@@ -46,6 +47,7 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log(`Neoism — native workspace client\n\nUsage: neoism [options]\n       neoism update [--nightly] [--force]\n\n  --daemon URL       ws://host:7878/session or ws+unix:///path/neoism.sock:/session\n  --workspace ID     Open a particular existing daemon workspace\n  --config PATH      Read appearance from a Neoism JSONC config\n  --theme NAME       Override the configured theme\n  --font-size SIZE   Override the configured font size\n  --maximized        Start with a maximized window\n  --reduced-motion  Disable transitions\n\nCredentials: NEOISM_DAEMON_TOKEN (upgrade), NEOISM_PAIRING_TOKEN (Hello).\nDefault: reuse the local daemon or start one when missing.\nShortcuts: Alt+E files, Alt+C conversations, Alt+H details, Ctrl+P find, Alt+T terminal.`);
+  console.log("\nDocumentation: neoism docs — opens the local handbook/API reference in your browser.\nKeep the foreground helper running while reading; Ctrl+C stops it.\nOnline (explicit opt-in): https://neoism.ai/api/docs/");
   process.exit(0);
 }
 
@@ -58,11 +60,11 @@ const stateGlobals = globalThis as typeof globalThis & { [stateKey]?: HotState }
 const hotState = stateGlobals[stateKey]; delete stateGlobals[stateKey];
 sshAttachment=hotState?.ssh;
 
-async function createSession(config: AppConfig, seed?: HotState, singleWorkspace=false) {
+async function createSession(config: AppConfig, seed?: HotState, singleWorkspace=false, managedLocal=false) {
   coreCall("paint.prewarm",{fontFamily:config.fontFamily,fontWeight:config.fontWeight,markdownFontFamily:config.markdownFontFamily,iconFontFamily:config.iconFontFamily});
   profileStartup("fonts-started");
   for (const warning of config.warnings) console.error(`[neoism-gpuix] ${warning}`);
-  const client = new DaemonConnection(config), model = new WorkspaceModel(client, config, seed),visuals=new AppVisualState();
+  const client = new DaemonConnection(config,undefined,undefined,managedLocal?{profileStart,profileEnd,prepareConnection:signal=>recoverLocalDaemon(config,signal)}:undefined), model = new WorkspaceModel(client, config, seed),visuals=new AppVisualState();
   profileStartup("model-created");
   const store = new SessionStore(config);
   if (!seed) { const recovery = store.read(); if (recovery) model.restoreSession(singleWorkspace?connectionRecovery(recovery,config.workspaceId):recovery); }
@@ -98,9 +100,9 @@ async function createSession(config: AppConfig, seed?: HotState, singleWorkspace
     })();
   } };
 }
-const initialConfig = hotState?.config || await (bootstrap?.config || ensureLocalDaemon(loadConfig()));
+const initialConfig = hotState?.config || await (bootstrap?.config || Promise.resolve(loadConfig()));
 profileStartup("config-ready");
-let session = await createSession(initialConfig, hotState);
+let session = await createSession(initialConfig, hotState, false, !initialConfig.collaborative&&!initialConfig.transportIdentity&&!explicitDaemon(process.argv,process.env));
 session.ssh=sshAttachment;
 profileStartup("session-created");
 const localServerConfig=new LocalServerConfig(session.config);
@@ -173,7 +175,7 @@ const windowSessions=new WindowWorkspaceSessions(session,{
     sshReconnect.select(next.server,next.ssh);
     root?.flushSync(()=>setAppGeneration(generationOf()));
   },
-  local:async()=>createSession(await ensureLocalDaemon(resolveLocalConfig())),
+  local:async()=>createSession(resolveLocalConfig(),undefined,false,true),
   dispose:async previous=>{await previous.dispose();previous.ssh?.dispose();},
 });
 let stopDiscordPresence=()=>{};
@@ -193,11 +195,14 @@ async function reloadConfig(fontSizeOverride?:number,useConfiguredFontSize=false
     const reply = expectVariant(await Effect.runPromise(session.client.request("Config", "GetConfig")), "Config");
     if (!isRecord(reply) || !isRecord(reply.value)) throw new Error("Invalid config reply");
     const next = loadConfig(process.argv.slice(2), process.env, reply.value);
-    windowSessions.setFontSize(fontSizeOverride??(useConfiguredFontSize?next.fontSize:windowSessions.fontSize));
-    next.fontSize=windowSessions.fontSize;next.scale=next.fontSize/14;
+     windowSessions.setFontSize(fontSizeOverride??(useConfiguredFontSize?next.fontSize:windowSessions.fontSize));
+     next.fontSize=windowSessions.fontSize;next.scale=next.fontSize/14;
+     if(localWorkspaceSession(session)){windowSessions.setIconFontFamily(next.iconFontFamily);windowSessions.setTheme(next);}
+     next.iconFontFamily=windowSessions.iconFontFamily;
+     Object.assign(next,windowSessions.theme);
     const previous = session.config;
     const beforeVim = previous.vim;
-    // Other appearance follows the selected host; font zoom belongs to the window.
+     // Theme, zoom and icon metrics belong to the client window.
     // Transport identity remains
     // scoped to the server the user explicitly selected.
     Object.assign(previous, next, { endpoint: previous.endpoint, authToken: previous.authToken, pairingToken: previous.pairingToken, workspaceId: previous.workspaceId,
@@ -219,6 +224,16 @@ const fontZoom=new FontZoomController(()=>windowSessions.fontSize,async size=>{
   windowSessions.setFontSize(size);
   return update(async()=>{root?.flushSync(()=>setAppGeneration(generationOf()));});
 });
+async function changeTheme(name:string){
+  return update(async()=>{
+    if(!Object.hasOwn(palettes,name))throw new Error(`Unknown theme: ${name}`);
+    const local=await windowSessions.local();
+    await saveTheme(local.client,name);
+    windowSessions.setTheme({themeName:name,theme:{...palettes[name as keyof typeof palettes]}});
+    localServerConfig.observe(local.config);
+    root?.flushSync(()=>setAppGeneration(generationOf()));
+  });
+}
 async function connectServer(server: ServerSelection,reconnecting=false) {
   const resume=reconnecting?()=>{}:sshReconnect.pause();
   try{return await update(async () => {
@@ -241,7 +256,7 @@ async function connectServer(server: ServerSelection,reconnecting=false) {
       if(prepared.config.transportIdentity===previous.config.transportIdentity)prepared.config.workspaceId=focus.workspaceId;
     }
     let next:typeof session;
-    try{next=await createSession(prepared.config,undefined,!reconnecting&&server.id!=="local");}catch(error){prepared.ssh?.dispose();throw error;}
+    try{next=await createSession(prepared.config,undefined,!reconnecting&&server.id!=="local",server.id==="local");}catch(error){prepared.ssh?.dispose();throw error;}
     next.ssh=prepared.ssh;next.server={...server,signal:undefined};
     if(server.signal?.aborted){await next.dispose();next.ssh?.dispose();return;}
     if(reconnecting){
@@ -259,7 +274,7 @@ async function connectServer(server: ServerSelection,reconnecting=false) {
 const windowKeys=createWindowKeyRouter();
 function mount() {
   setAppGeneration(generationOf());
-  root = render(() => <AppGeneration value={appGeneration()} background={appGeneration().config.background} backgroundColor={appGeneration().config.theme.bg}>{current => <App model={current.model} config={current.config} visuals={current.visuals} workspaceActivation={current.workspaceActivation} workspaceNavigation={windowSessions} registerWindowKeys={windowKeys.register} reloadConfig={reloadConfig} onZoomFont={delta=>fontZoom.change(delta)} onConnectServer={connectServer} />}</AppGeneration>, {
+  root = render(() => <AppGeneration value={appGeneration()} background={appGeneration().config.background} backgroundColor={appGeneration().config.theme.bg}>{current => <App model={current.model} config={current.config} visuals={current.visuals} workspaceActivation={current.workspaceActivation} workspaceNavigation={windowSessions} registerWindowKeys={windowKeys.register} reloadConfig={reloadConfig} onZoomFont={delta=>fontZoom.change(delta)} onSetTheme={changeTheme} onConnectServer={connectServer} />}</AppGeneration>, {
     renderer: host!.renderer,
     keyboardFocusDim: false,
     onKeyDown:windowKeys.dispatch,

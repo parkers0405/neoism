@@ -1,5 +1,7 @@
 {
   description = "Neoism | A hardware-accelerated terminal-first editor workspace";
+  # Include the pinned product docs used by Rust include_str! offline references.
+  inputs.self.submodules = true;
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

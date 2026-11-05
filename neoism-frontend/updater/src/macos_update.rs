@@ -184,7 +184,7 @@ fn hash_path(path: &Path, key: &Path, result: &mut Manifest) -> Result<(), Error
     Ok(())
 }
 
-/// Only the four owned loose components; never hash/copy the installation's
+/// Only the owned loose components; never hash/copy the installation's
 /// unrelated files or the tarball's separate Neoism.app.
 fn loose_manifest(root: &Path, gui_name: &std::ffi::OsStr) -> Result<Manifest, Error> {
     let mut hashes = Manifest::new();
@@ -214,7 +214,39 @@ fn loose_manifest(root: &Path, gui_name: &std::ffi::OsStr) -> Result<Manifest, E
         return Err("update payload is missing web/index.html".into());
     }
     hash_path(&root.join("web"), Path::new("web"), &mut hashes)?;
+    // Legacy releases had no resources directory. Its presence in the incoming
+    // payload opts into the docs contract; the old installation need not have it.
+    match fs::symlink_metadata(root.join("resources")) {
+        Ok(_) => {
+            hash_path(&root.join("resources"), Path::new("resources"), &mut hashes)?;
+            verify_docs_resources(&root.join("resources"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(hashes)
+}
+
+fn verify_docs_resources(resources: &Path) -> Result<(), Error> {
+    for name in [
+        "docs/api/docs/index.html",
+        "docs/api/docs/reference/index.html",
+        "docs/content.json",
+    ] {
+        let path = resources.join(name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(format!(
+                "update payload is missing docs resource: {}",
+                path.display()
+            )
+            .into());
+        }
+    }
+    serde_json::from_slice::<serde_json::Value>(&fs::read(
+        resources.join("docs/content.json"),
+    )?)?;
+    Ok(())
 }
 
 fn loose_components(target: &Path) -> Result<Vec<(&'static str, PathBuf)>, Error> {
@@ -224,6 +256,7 @@ fn loose_components(target: &Path) -> Result<Vec<(&'static str, PathBuf)>, Error
         "neoism-agent",
         "neoism-agent-lua-runner",
         "web",
+        "resources",
     ]
     .iter()
     .any(|name| target.file_name().is_some_and(|file| file == *name))
@@ -242,7 +275,18 @@ fn loose_components(target: &Path) -> Result<Vec<(&'static str, PathBuf)>, Error
             parent.join("neoism-agent-lua-runner"),
         ),
         ("web", parent.join("web")),
+        ("resources", parent.join("resources")),
     ])
+}
+
+// Used by macOS ditto staging; keep its payload allowlist testable on Linux too.
+#[cfg(any(target_os = "macos", test))]
+fn loose_payload_components(
+    manifest: &Manifest,
+) -> impl Iterator<Item = &'static str> + '_ {
+    BINS.into_iter().chain(["web", "resources"]).filter(|name| {
+        *name != "resources" || manifest.contains_key(Path::new("resources"))
+    })
 }
 
 /// All files are staged/verified before entering. Roll back every completed
@@ -255,7 +299,10 @@ fn replace_loose_with(
     mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
     verify_and_launch: impl FnOnce() -> Result<(), Error>,
 ) -> Result<(), Error> {
-    let components = loose_components(target)?;
+    let components = loose_components(target)?
+        .into_iter()
+        .filter(|(name, _)| *name != "resources" || staged.join("resources").exists())
+        .collect::<Vec<_>>();
     // A missing late component must never result in an early GUI replacement.
     loose_manifest(staged, std::ffi::OsStr::new("neoism"))?;
     fs::create_dir(backup)?;
@@ -327,6 +374,18 @@ pub fn install_unix_loose(target: &Path, source: &Path) -> Result<(), Error> {
     install_unix_loose_with(target, source, || Ok(()), || Ok(()))
 }
 
+#[cfg(target_os = "linux")]
+fn backup_in_use(backup: &Path) -> bool {
+    // Keep executable-relative web AND docs for any process still mapped from
+    // the moved tree (including an updater parent excluded from stop_stack).
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return true;
+    };
+    processes.flatten().any(|entry| {
+        fs::read_link(entry.path().join("exe")).is_ok_and(|exe| exe.starts_with(backup))
+    })
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn install_unix_loose_with(
     target: &Path,
@@ -381,6 +440,12 @@ pub fn install_unix_loose_with(
     );
     match result {
         Ok(()) => {
+            #[cfg(target_os = "linux")]
+            if backup_in_use(&recovery.join("backup")) {
+                // Do not unlink the old tree while a running process needs it.
+                // Failure transactions are already retained by the error branch.
+                return Ok(());
+            }
             fs::remove_dir_all(recovery)?;
             Ok(())
         }
@@ -400,6 +465,10 @@ fn manifest(root: &Path) -> Result<Manifest, Error> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         hash_path(&entry.path(), Path::new(&entry.file_name()), &mut result)?;
+    }
+    let resources = root.join("Contents/Resources/resources");
+    if resources.exists() {
+        verify_docs_resources(&resources)?;
     }
     for required in BINS
         .iter()
@@ -898,7 +967,7 @@ mod native {
         });
         if loose {
             fs::create_dir(&staged)?;
-            for component in BINS.into_iter().chain(["web"]) {
+            for component in loose_payload_components(&hashes) {
                 checked(
                     Command::new("/usr/bin/ditto")
                         .arg(source.join(component))
@@ -1400,7 +1469,248 @@ mod tests {
         fs::create_dir_all(root.join("web/native")).unwrap();
         fs::write(root.join("web/app/manifest.json"), version).unwrap();
         fs::write(root.join("web/app/assets/app.js"), version).unwrap();
+        docs_fixture(&root.join("resources"), version);
         root.join("neoism")
+    }
+
+    fn docs_fixture(resources: &Path, version: &str) {
+        fs::create_dir_all(resources.join("docs/api/docs/reference")).unwrap();
+        fs::write(resources.join("docs/api/docs/index.html"), version).unwrap();
+        fs::write(
+            resources.join("docs/api/docs/reference/index.html"),
+            version,
+        )
+        .unwrap();
+        fs::write(
+            resources.join("docs/content.json"),
+            format!("{{\"version\":\"{version}\"}}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn loose_docs_upgrade_from_legacy_retains_backup_and_hashes_every_resource() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let target = loose_fixture(&installed, "old");
+        fs::remove_dir_all(installed.join("resources")).unwrap();
+        let staged = root.path().join("staged");
+        loose_fixture(&staged, "new");
+        let expected = loose_manifest(&staged, std::ffi::OsStr::new("neoism")).unwrap();
+        assert!(expected.contains_key(Path::new("resources/docs/content.json")));
+        assert!(loose_payload_components(&expected).any(|name| name == "resources"));
+        let backup = root.path().join("backup");
+        replace_loose_with(
+            &target,
+            &staged,
+            &backup,
+            |a, b| fs::rename(a, b),
+            || {
+                assert_eq!(
+                    loose_manifest(&installed, std::ffi::OsStr::new("neoism"))?,
+                    expected
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!backup.join("resources").exists());
+        assert!(backup.join("neoism").is_file());
+        assert_eq!(
+            fs::read_to_string(installed.join("resources/docs/api/docs/index.html"))
+                .unwrap(),
+            "new"
+        );
+        fs::write(
+            installed.join("resources/docs/api/docs/index.html"),
+            "tampered",
+        )
+        .unwrap();
+        assert_ne!(
+            loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn loose_docs_rollback_restores_existing_or_absent_resources_after_late_failure() {
+        for legacy in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let installed = root.path().join("installed");
+            let target = loose_fixture(&installed, "old");
+            if legacy {
+                fs::remove_dir_all(installed.join("resources")).unwrap();
+            }
+            let original =
+                loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap();
+            let staged = root.path().join("staged");
+            loose_fixture(&staged, "new");
+            let error = replace_loose_with(
+                &target,
+                &staged,
+                &root.path().join("backup"),
+                |a, b| fs::rename(a, b),
+                || Err("fixture rejected launch".into()),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("original components restored"));
+            assert_eq!(
+                loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap(),
+                original
+            );
+            assert_eq!(installed.join("resources").exists(), !legacy);
+        }
+    }
+
+    #[test]
+    fn loose_docs_late_move_failure_and_invalid_payload_leave_old_tree_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let target = loose_fixture(&installed, "old");
+        let original =
+            loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap();
+        let staged = root.path().join("staged");
+        loose_fixture(&staged, "new");
+        replace_loose_with(
+            &target,
+            &staged,
+            &root.path().join("backup"),
+            |a, b| {
+                if a == staged.join("resources") {
+                    return Err(std::io::Error::other("fixture late resources move"));
+                }
+                fs::rename(a, b)
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap(),
+            original
+        );
+        fs::remove_file(staged.join("resources/docs/api/docs/reference/index.html"))
+            .unwrap();
+        assert!(loose_manifest(&staged, std::ffi::OsStr::new("neoism")).is_err());
+        assert_eq!(
+            loose_manifest(&installed, std::ffi::OsStr::new("neoism")).unwrap(),
+            original
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn unix_docs_manifest_drives_staging_for_legacy_installation() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let target = loose_fixture(&installed, "old");
+        fs::remove_dir_all(installed.join("resources")).unwrap();
+        let source = root.path().join("source");
+        loose_fixture(&source, "new");
+        install_unix_loose(&target, &source).unwrap();
+        assert_eq!(
+            fs::read_to_string(
+                installed.join("resources/docs/api/docs/reference/index.html")
+            )
+            .unwrap(),
+            "new"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_docs_survive_for_process_still_mapped_from_old_backup() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let target = loose_fixture(&installed, "old");
+        fs::copy("/bin/sleep", &target).unwrap();
+        let child = Child(
+            std::process::Command::new(&target)
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        let source = root.path().join("source");
+        loose_fixture(&source, "new");
+        install_unix_loose(&target, &source).unwrap();
+        let mapped = fs::read_link(format!("/proc/{}/exe", child.0.id())).unwrap();
+        let backup = mapped.parent().unwrap();
+        assert!(mapped.is_file(), "running executable must not be unlinked");
+        assert!(backup_in_use(backup));
+        assert_eq!(
+            fs::read_to_string(backup.join("resources/docs/api/docs/index.html"))
+                .unwrap(),
+            "old"
+        );
+        assert_eq!(
+            fs::read_to_string(installed.join("resources/docs/api/docs/index.html"))
+                .unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn mac_bundle_manifest_covers_docs_and_rejects_incomplete_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let app = bundle(root.path(), "Neoism.app");
+        let resources = app.join("Contents/Resources/resources");
+        docs_fixture(&resources, "new");
+        let hashes = manifest(&app).unwrap();
+        assert!(hashes
+            .contains_key(Path::new("Contents/Resources/resources/docs/content.json")));
+        fs::remove_file(resources.join("docs/content.json")).unwrap();
+        assert!(manifest(&app).is_err());
+        fs::remove_dir_all(resources).unwrap();
+        assert!(manifest(&app).is_ok()); // old installed bundles remain valid
+    }
+
+    #[test]
+    fn mac_loose_staging_allowlist_accepts_legacy_and_includes_new_docs() {
+        let root = tempfile::tempdir().unwrap();
+        loose_fixture(root.path(), "new");
+        let hashes = loose_manifest(root.path(), std::ffi::OsStr::new("neoism")).unwrap();
+        assert_eq!(
+            loose_payload_components(&hashes).collect::<Vec<_>>(),
+            BINS.into_iter()
+                .chain(["web", "resources"])
+                .collect::<Vec<_>>()
+        );
+        fs::remove_dir_all(root.path().join("resources")).unwrap();
+        let hashes = loose_manifest(root.path(), std::ffi::OsStr::new("neoism")).unwrap();
+        assert_eq!(
+            loose_payload_components(&hashes).collect::<Vec<_>>(),
+            BINS.into_iter().chain(["web"]).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mac_bundle_docs_upgrade_from_legacy_rolls_back_then_retains_old_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let target = bundle(root.path(), "installed.app");
+        let staged = bundle(root.path(), "replacement.app");
+        docs_fixture(&staged.join("Contents/Resources/resources"), "new");
+        let original = manifest(&target).unwrap();
+        let expected = manifest(&staged).unwrap();
+        let backup = root.path().join("previous.app");
+        replace_bundle(&target, &staged, &backup, |installed| {
+            verify_manifest(installed, &expected)?;
+            Err("fixture relaunch failure".into())
+        })
+        .unwrap_err();
+        assert_eq!(manifest(&target).unwrap(), original);
+        assert!(!target.join("Contents/Resources/resources").exists());
+        replace_bundle(&target, &staged, &backup, |installed| {
+            verify_manifest(installed, &expected)
+        })
+        .unwrap();
+        assert_eq!(manifest(&target).unwrap(), expected);
+        assert_eq!(manifest(&backup).unwrap(), original);
     }
 
     #[test]

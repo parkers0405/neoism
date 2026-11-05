@@ -35,7 +35,8 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     for name in ['neoism' + SUFFIX, 'neoism-workspace-daemon' + SUFFIX,
                  'neoism-agent' + SUFFIX, 'neoism-agent-lua-runner' + SUFFIX, *LIBRARIES, 'LICENSE.ghostty', 'LICENSE', 'NOTICE']:
         shutil.copy2(DIST / name, bundle / name)
-    for name in ['licenses', 'web/app', 'web/native']:
+    run('node', ROOT / 'scripts/build-docs.mjs', '--verify', DIST / 'resources/docs')
+    for name in ['licenses', 'web/app', 'web/native', 'resources/docs']:
         shutil.copytree(DIST / name, bundle / name)
     application = bundle / 'web/app'
     manifest = json.loads((application / 'manifest.json').read_text())
@@ -94,6 +95,7 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
         resources = contents / 'Resources'
         resources.mkdir()
         shutil.copytree(bundle / 'web', resources / 'web')
+        shutil.copytree(bundle / 'resources/docs', resources / 'resources/docs')
         shutil.copy2(ROOT / 'misc/macos/neoism.icns', resources / 'neoism.icns')
         plist = (ROOT / 'misc/macos/Info.plist').read_text()
         (contents / 'Info.plist').write_text(plist.replace('{{RELEASE_VERSION}}', VERSION).replace('{{VERSION}}', VERSION.split('-')[0]))
@@ -121,7 +123,7 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
                 else:
                     child.unlink()
         shutil.copytree(bundle / 'web', DIST / 'web', dirs_exist_ok=True)
-        (bundle / 'README.txt').write_text('Extract the entire folder, then run neoism.exe. Keep the DLLs, services, web and licenses beside it.\n')
+        (bundle / 'README.txt').write_text('Extract the entire folder, then run neoism.exe. Keep the DLLs, services, web, resources and licenses beside it.\n')
         with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:
             for path in bundle.rglob('*'):
                 if path.is_file():
@@ -140,6 +142,8 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
         with tarfile.open(archive) as source:
             source.extractall(extracted, filter='data')
     installed = extracted / NAME / 'Neoism.app/Contents/MacOS' if SYSTEM == 'darwin' else extracted / NAME
+    docs = installed.parent / 'Resources/resources/docs' if SYSTEM == 'darwin' else installed / 'resources/docs'
+    run('node', ROOT / 'scripts/build-docs.mjs', '--verify', docs)
     assert VERSION in run(installed / ('neoism' + SUFFIX), '--version')
     run(installed / ('neoism' + SUFFIX), '--help')
     run(installed / ('neoism' + SUFFIX), '--neoism-verify-runtime')

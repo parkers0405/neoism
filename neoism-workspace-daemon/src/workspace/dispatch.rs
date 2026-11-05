@@ -149,23 +149,36 @@ fn handle_inner(
                 },
             ])
         }
+        WorkspaceClientMessage::CloseWindowWorkspace { workspace_id } => {
+            let retirement = manager.close_window_workspace(conn, &workspace_id);
+            let (hosts, workspaces, tabs) = manager.host_workspace_tree();
+            DispatchOutcome {
+                replies: vec![WorkspaceServerMessage::HostWorkspaceTree { hosts, workspaces, tabs }],
+                retirement,
+                disconnect: false,
+            }
+        }
         WorkspaceClientMessage::CloseHostWorkspace { workspace_id } => {
             // LSP is leased by editor surfaces and agent generations, not by
             // this metadata row. The socket releases its closed surface leases;
             // idle retirement handles cached agents after live tasks finish.
             // Do not shutdown_root here: another window may still own it.
-            DispatchOutcome::just(match manager.close_host_workspace(&workspace_id) {
-                Some(_) => {
+            match manager.close_host_workspace(&workspace_id) {
+                Some(retirement) => {
+                    if conn.active_workspace.as_deref() == Some(&workspace_id) {
+                        conn.active_workspace = None;
+                        conn.active_session = None;
+                    }
                     manager.broadcast_tree_changed(Some(conn.client_id));
                     let (hosts, workspaces, tabs) = manager.host_workspace_tree();
-                    vec![WorkspaceServerMessage::HostWorkspaceTree {
+                    DispatchOutcome { replies: vec![WorkspaceServerMessage::HostWorkspaceTree {
                         hosts,
                         workspaces,
                         tabs,
-                    }]
+                    }], retirement, disconnect: false }
                 }
-                None => vec![err(format!("no such host workspace: {workspace_id}"))],
-            })
+                None => DispatchOutcome::just(vec![err(format!("no such host workspace: {workspace_id}"))]),
+            }
         }
         WorkspaceClientMessage::SwitchHostWorkspace { workspace_id } => {
             DispatchOutcome::just(match manager.switch_host_workspace(&workspace_id, conn) {
@@ -781,6 +794,7 @@ fn handle_hello(
                     workspace_lifecycle: false,
                 }],
                 disconnect: true,
+                retirement: WorkspaceRetirement::default(),
             }
         }
     }

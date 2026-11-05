@@ -31,12 +31,14 @@ class NativePackagingTests(unittest.TestCase):
                         path.chmod(0o755)
                     return path
 
-                for script in [packager, 'install-gpuix-bundle.sh']:
+                for script in [packager, 'install-gpuix-bundle.sh', 'build-docs.mjs']:
                     destination = root / 'scripts' / script
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(SCRIPTS / script, destination)
                 write('Cargo.toml', '[workspace.package]\nversion = "0.0.1"\n')
                 dist = 'neoism-frontend/gpuix/dist/'
+                for resource in ['api/docs/index.html', 'api/docs/reference/index.html', 'content.json']:
+                    write(dist + 'resources/docs/' + resource, '{}' if resource.endswith('.json') else '<html>Docs</html>')
                 for binary in ['neoism', 'neoism-agent', 'neoism-workspace-daemon', 'neoism-agent-lua-runner']:
                     write(dist + binary, '#!/bin/sh\necho neoism 0.0.1\n', True)
                 write('target/activation/neoism-agent', '#!/bin/sh\nexit 0\n', True)
@@ -74,6 +76,8 @@ class NativePackagingTests(unittest.TestCase):
                     self.assertFalse(any(name.startswith(prefix + 'assets/') for name in names))
                     self.assertIn(prefix + 'app/manifest.json', names)
                     self.assertIn(prefix + 'native/' + display, names)
+                    for resource in ['api/docs/index.html', 'api/docs/reference/index.html', 'content.json']:
+                        self.assertIn('neoism-linux-x86_64/resources/docs/' + resource, names)
 
 
 if __name__ == '__main__':

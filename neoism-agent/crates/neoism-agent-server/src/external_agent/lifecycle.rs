@@ -60,26 +60,25 @@ pub(crate) async fn execute_external_task(
     let continuing = task_id.is_some();
     let child = match task_id.as_deref() {
         Some(task_id) => {
-            if let Some(child) = state
+            let child = state
                 .inner
                 .store
                 .get_session(task_id)
                 .await
                 .map_err(|error| error.to_string())?
-            {
-                ensure_child_task_belongs_to_parent(parent, &child)?;
-                child
-            } else {
-                create_external_subtask_session(
-                    state,
-                    parent,
-                    command,
-                    description,
-                    runtime,
-                )
-                .await
-                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("task_id {task_id} not found"))?;
+            ensure_child_task_belongs_to_parent(parent, &child)?;
+            if !child.extra.get("externalAgent").is_some_and(|external| {
+                external["runtime"] == "acp"
+                    && external["provider"] == runtime.provider_id()
+                    && external["nested"] != true
+            }) {
+                return Err(format!(
+                    "task_id {task_id} is not a Neoism-managed {} task; continue it with its original subagent_type. Provider-native nested tasks cannot be independently resumed.",
+                    runtime.display_name()
+                ));
             }
+            child
         }
         None => {
             create_external_subtask_session(state, parent, command, description, runtime)
@@ -88,16 +87,10 @@ pub(crate) async fn execute_external_task(
         }
     };
     if session_is_running(state, child.id.as_str()).await {
-        return Ok(tool::ToolExecutionResult {
-            title: description.to_string(),
-            output: task_running_output(child.id.as_str()),
-            metadata: Some(task_metadata(
-                child.id.as_str(),
-                runtime,
-                "running",
-                background,
-            )),
-        });
+        return Err(format!(
+            "task_id {} is still running; the follow-up prompt was not submitted. Wait for completion or stop_task before continuing the same external session.",
+            child.id
+        ));
     }
 
     if background {
@@ -509,7 +502,15 @@ async fn run_external_subtask_prompt_with_cancel(
         run_id: Some(run.id.clone()),
     };
     let result = async {
-        let cancellation = cancel.unwrap_or_else(|| run.cancel.clone());
+        // Parent cancellation stops a foreground child; stopping that child must
+        // also work without cancelling its parent.
+        let cancellation_bridge = crate::tool_composition::CancellationBridge::new(
+            Some(run.cancel.clone()),
+            cancel,
+        );
+        let cancellation = cancellation_bridge
+            .flag()
+            .unwrap_or_else(|| run.cancel.clone());
         let model = external_model(runtime);
         let user_message = append_external_user_message(
             state, &child, generation, prompt, runtime, &model, author,

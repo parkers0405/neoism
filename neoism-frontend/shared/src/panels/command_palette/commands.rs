@@ -208,6 +208,12 @@ pub(crate) const COMMANDS: &[Command] = &[
         service: CommandService::Neoism,
     },
     Command {
+        title: "Open Documentation",
+        shortcut: "",
+        action: PaletteAction::OpenDocumentation,
+        service: CommandService::Neoism,
+    },
+    Command {
         title: "New Window",
         shortcut: "Cmd+N",
         action: PaletteAction::WindowCreateNew,

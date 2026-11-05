@@ -3,6 +3,31 @@ import { TerminalBuffer } from "../../src/terminal/buffer";
 import { palettes } from "../../src/design/generated";
 const bytes = (text: string) => new TextEncoder().encode(text);
 export function terminalContract() {
+test("Ghostty: light/dark palette updates preserve terminal contents, selection and explicit colors", async () => {
+  const dark = palettes.pastel_dark, light = { ...dark, bg: "#f5f5f5", fg: "#171717", red: "#a02020" };
+  for (const encoding of ["runs", "cells"] as const) {
+    const buffer = new TerminalBuffer(dark, 60, 4, encoding);
+    try {
+      await buffer.write(bytes("plain\x1b[31m red\x1b[0;7m reverse\x1b[0;38;2;232;232;232m fixed\x1b[0m"));
+      buffer.select(0, 0, true); buffer.select(0, 2, false);
+      const position = buffer.position(), selection = buffer.selectedText;
+      for (const theme of [light, dark]) {
+        expect(buffer.setTheme(theme)).toBe(true);
+        const line = buffer.frame().lines[0];
+        expect(line.find(run => run.text.startsWith("pla"))?.fg).toBe(theme.fg);
+        expect(line.find(run => run.text.includes("red"))?.fg).toBe(theme.red);
+        const reverse = line.find(run => run.text.includes("reverse"));
+        expect(reverse?.fg).toBe(theme.bg); expect(reverse?.bg).toBe(theme.fg);
+        expect(line.find(run => run.text.includes("fixed"))?.fg).toBe("#e8e8e8");
+        expect(buffer.position()).toEqual(position); expect(buffer.selectedText).toBe(selection);
+        expect(buffer.setTheme({ ...theme })).toBe(false);
+      }
+    } finally { buffer.dispose(); }
+    const fresh = new TerminalBuffer(light, 20, 2, encoding);
+    try { await fresh.write(bytes("light startup")); expect(fresh.frame().lines[0][0].fg).toBe(light.fg); }
+    finally { fresh.dispose(); }
+  }
+});
 test("Ghostty: " + "ANSI colors, wide Unicode, and alternate screens survive native rendering", async () => {
   const buffer = new TerminalBuffer(palettes.pastel_dark, 20, 4);
   try {

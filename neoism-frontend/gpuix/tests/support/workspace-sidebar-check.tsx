@@ -50,19 +50,24 @@ try{
  await app.activate("b");await app.pick("notes");app.expectView("notes");
  await app.activate("c");await app.pick("conversations");app.expectView("conversations");
  await app.activate("d");await app.pick("files");app.expectView(null);
- const expected={a:"files",b:"notes",c:"conversations",d:null};
+   let expected:Record<string,"files"|"notes"|"conversations"|null>={a:"files",b:"notes",c:"conversations",d:null};
  assert.deepEqual(app.model.state.ui.workspaceSidebars,expected);
  for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view as "files"|"notes"|"conversations"|null);}
- // Closing a workspace hides membership, not its own sidebar preference.
+  // Explicit close releases only this workspace's cached sidebar preference.
  assert.equal(await app.model.closeWorkspace(false,"b"),true);assert.ok(!app.model.windowWorkspaces().some(workspace=>workspace.id==="b"));
- await app.activate("b");app.expectView("notes");
- await app.zoom();app.expectView("notes");
+  assert.ok(!app.model.state.workspaces.some(workspace=>workspace.id==="b"));
+  assert.ok([...app.visuals.trees.keys()].every(key=>JSON.parse(key)[0]!=="b"));
+  assert.ok([...app.visuals.treeViewports.keys()].every(key=>JSON.parse(key)[0]!=="b"));
+  expected={a:"files",c:"conversations",d:null};
+  await app.activate("a");app.expectView("files");
+  await app.zoom();app.expectView("files");
  for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view as "files"|"notes"|"conversations"|null);}
  await app.activate("a");store.write(app.model.captureSession());const saved=store.read()!;assert.deepEqual(saved.ui.workspaceSidebars,expected);
  app.dispose();app=mount(saved);await app.ready();
  for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view as "files"|"notes"|"conversations"|null);}
   assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.filter(request=>request.tag==="SubmitPrompt").length,0);
-  const creates=daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length;
+   const creates=daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length;
+   const resolves=daemon.workspaceRequests.filter(request=>request.tag==="ResolveInitialWorkspace").length;
   for(const workspace of app.model.windowWorkspaces())assert.equal(await app.model.closeWorkspace(false,workspace.id),true);
   await app.host.pump(app.root);
   assert.equal(app.model.state.activeWorkspace,undefined);assert.ok(app.host.find("welcome-page"),"Last close paints a window-local Welcome");
@@ -73,6 +78,7 @@ try{
   while(!app.model.state.surfaces.some(surface=>surface.kind==="terminal"&&surface.workspaceId===app.model.state.activeWorkspace?.id)){
     await app.host.pump(app.root);if(Date.now()>emptyDeadline)throw new Error("Empty-window terminal action did not settle");await Bun.sleep(3);
   }
-  assert.equal(app.model.windowWorkspaces().length,1);assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length,creates+1);
-  console.log(JSON.stringify({actualApp:true,noWindow:true,workspacePlusNoEmptyFrame:true,independentFourStates:true,closedWorkspaceRetained:true,fontGenerationRetained:true,coldRecoveryRetained:true,noPtyOrPromptDuringSwitches:true,localWelcomeNoReplacement:true,emptyWelcomeAction:true}));
+   assert.equal(app.model.windowWorkspaces().length,1);assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length,creates);
+   assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="ResolveInitialWorkspace").length,resolves+1);
+   console.log(JSON.stringify({actualApp:true,noWindow:true,workspacePlusNoEmptyFrame:true,independentFourStates:true,closedWorkspaceReleased:true,fontGenerationRetained:true,coldRecoveryRetained:true,noPtyOrPromptDuringSwitches:true,localWelcomeNoReplacement:true,emptyWelcomeAction:true}));
 }finally{app.dispose();daemon.stop();rmSync(directory,{recursive:true,force:true});}

@@ -79,7 +79,10 @@ export function terminalSession(client: DaemonConnection, id: string, theme: Pal
   if (!cache) { cache = new Map(); sessions.set(client, cache); }
   let session = cache.get(id);
   if (!session) { session = new TerminalSession(client, id, theme, report, blockUi); cache.set(id, session); }
-  else if (blockUi) session.enableBlocks();
+  else {
+    if (session.buffer.setTheme(theme)) session.blocks?.refreshTheme();
+    if (blockUi) session.enableBlocks();
+  }
   return session;
 }
 export function closeTerminalSession(client: DaemonConnection, id: string) {

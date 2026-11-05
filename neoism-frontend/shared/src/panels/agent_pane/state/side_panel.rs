@@ -2365,7 +2365,7 @@ impl NeoismAgentSidePanel {
             .with_directory(Some(snapshot.directory.clone()))
             .with_depth(branch.depth)
             .with_runtime_status(Some(activity.status.runtime_status().to_owned()));
-            row.agent_kind = AgentKind::from_label(&row.time_label);
+            row.agent_kind = AgentKind::from_canonical_agent(&row.time_label);
             row.branch_root_id = Some(root.to_owned());
             row.branch_status = Some(activity.status);
             family.rows.push(row);
@@ -4020,7 +4020,7 @@ impl NeoismAgentSidePanel {
             {
                 entry.time_label = time_label;
                 entry.agent_kind =
-                    AgentKind::from_label(&entry.time_label).or(entry.agent_kind);
+                    AgentKind::from_canonical_agent(&entry.time_label).or(entry.agent_kind);
             }
             return false;
         }
@@ -4039,7 +4039,7 @@ impl NeoismAgentSidePanel {
             time_label.clone(),
         )
         .with_depth(1)
-        .with_agent_kind(AgentKind::from_label(&time_label));
+        .with_agent_kind(AgentKind::from_canonical_agent(&time_label));
         self.subagents.push(entry);
         self.subagents_loaded = true;
         true

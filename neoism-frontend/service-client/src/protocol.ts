@@ -83,6 +83,7 @@ const HistoryMessageFields = Schema.Struct({
   id: Schema.String, role: Schema.Literals(["User", "Assistant", "System"]), kind: Schema.String,
   title: Schema.optionalKey(Schema.String), text: Schema.optionalKey(Schema.String),
   status: Schema.optionalKey(Schema.String), tool: Schema.optionalKey(Schema.String),
+  agent_kind: Schema.optionalKey(Schema.NullOr(Schema.String)),
   detail: Schema.optionalKey(Schema.String), lang: Schema.optionalKey(Schema.String),
   output_kind: Schema.optionalKey(Schema.NullOr(Schema.Literals(["Text", "Code", "Todos"]))),
   todos: Schema.optionalKey(Schema.Array(TodoSchema)),

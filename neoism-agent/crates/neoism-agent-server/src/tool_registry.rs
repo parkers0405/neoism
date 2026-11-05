@@ -454,11 +454,11 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                     },
                     "subagent_type": {
                         "type": "string",
-                        "description": "Configured subagent name. Use \"general\" for independent implementation or multi-step work, \"explore\" for self-contained read-only discovery, and \"opencode\", \"codex\", or \"claude\" only when the user explicitly asks to delegate to that external ACP-backed agent. Use direct tools for ordinary implementation context. Do not invent names like \"research\" unless the user configured that agent."
+                        "description": "Configured subagent name. Use \"general\" for independent implementation or multi-step work, \"explore\" for self-contained read-only discovery, and \"opencode\" (OpenCode), \"codex\" (Codex), or \"claude\" (Claude Code) when the user requests that provider or authorizes external-agent delegation. Neoism remains the orchestrator; external children use their own tools, models, and host credentials. Use direct tools for ordinary implementation context. Do not invent names like \"research\" unless the user configured that agent."
                     },
                     "task_id": {
                         "type": "string",
-                        "description": "Only set this to resume a previous task_id in the same child session."
+                        "description": "Only set this to resume a previous task_id in the same child session and with the same subagent_type. External children must finish or be stopped before accepting a follow-up; a running external task rejects the new prompt rather than dropping it."
                     },
                     "background": {
                         "type": "boolean",

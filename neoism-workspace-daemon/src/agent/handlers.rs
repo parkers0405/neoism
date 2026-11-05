@@ -713,6 +713,7 @@ pub(crate) fn history_from_agent_message(
         text: message.text,
         status: message.status,
         tool: message.tool,
+        agent_kind: message.agent_kind.map(|kind| kind.id().to_owned()),
         tool_batch_id: message.tool_batch_id,
         mcp: message.mcp.as_ref().map(|mcp| mcp.to_wire()),
         composition_children: message

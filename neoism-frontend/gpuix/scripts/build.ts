@@ -7,6 +7,9 @@ import {displayBindingLoader,verifiedDisplayBinding} from "../src/display-bindin
 import {createRequire} from "node:module";
 import {devicePreviewPlugin} from "./device-preview-build";
 import {pruneBrowserAssets} from "../../../scripts/native-runtime.mjs";
+import {buildDocs} from "../../../scripts/build-docs.mjs";
+// Release builds always build the shared pinned site; never package raw source/Notes.
+buildDocs();
 createRequire(import.meta.url)("./patch-solid-host.cjs")();
 const display=Bun.spawn([process.execPath,"scripts/build-display-binding.ts"],{stdout:"inherit",stderr:"inherit"});
 if(await display.exited!==0)process.exit(1);

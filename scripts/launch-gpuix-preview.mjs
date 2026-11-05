@@ -47,7 +47,10 @@ Object.assign(env,{
  NEOISM_DAEMON_DATA_DIR:join(profile,'daemon'),
  NEOISM_AGENT_STATE_DIR:join(profile,'agent'),NEOISM_DAEMON_SOCKET:join(profile,'neoism.sock'),
  NEOISM_DAEMON_ADDR:`127.0.0.1:${process.platform==='win32'?await freePort():0}`,
- NEOISM_AGENT_SERVER:`http://127.0.0.1:${await freePort()}`,
+  NEOISM_AGENT_SERVER:`http://127.0.0.1:${await freePort()}`,
+  // This backend has private state/socket/Agent, not the installed shared host.
+  // Its actual frontend (not this short-lived launcher) owns its lifetime.
+  NEOISM_GPUIX_PRIVATE_DAEMON:'1',
  NEOISM_GPUIX_WORKSPACE_DAEMON:daemon,NEOISM_LAUNCH_DIRECTORY:workspace,NEOISM_WORKSPACE_ROOT:workspace,
 });
 const log=join(profile,'app.log'),fd=openSync(log,'a',0o600);

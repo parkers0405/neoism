@@ -43,6 +43,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@1.92.0
       - uses: ./.github/actions/setup-blaze
       - name: Check the built-in runtime

@@ -13,6 +13,9 @@ on:
       - 'scripts/test-workspace*'
       - '.cargo/**'
       - 'vendor/blaze-compat/**'
+      - 'vendor/neoism-docs'
+      - '.gitmodules'
+      - 'scripts/build-docs*'
       - 'Makefile'
       - 'install.sh'
       - 'LICENSE'
@@ -29,6 +32,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.92'

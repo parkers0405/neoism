@@ -119,6 +119,27 @@ test("implicit macOS recovery replaces only the mistaken root tab and preserves 
  }finally{f.close();policy.mockRestore();}
 });
 
+test("Windows launcher recovery declares USERPROFILE and passes it to the first Home PTY",async()=>{
+ const recover=startupDirectory.recoveredStartupDirectory;
+ const env={USERPROFILE:"E:\\Users\\Parker Settle",SystemRoot:"D:\\Windows"};
+ const options={platform:"win32",cwd:"D:\\Windows\\System32",executable:"F:\\Apps\\Neoism\\neoism.exe"};
+ const policy=spyOn(startupDirectory,"recoveredStartupDirectory").mockImplementation(root=>recover(root,env,options));
+ const recovery:SavedSession={version:1,activeWorkspaceId:"a",surfaces:[{id:"old-home",kind:"welcome",title:"Home",workspaceId:"a",sessionId:"old-pty",rootDir:options.cwd}],editors:{},providerStates:{},drafts:{},composerDrafts:{"home:a":{text:"unsent",attachments:[]}},ui:{openWorkspaceIds:["a"]}};
+ const f=await fixture({},recovery,[{id:"a",host_id:"host",title:"Home",root_dir:options.cwd}]);
+ try{
+  expect(f.model.state.activeWorkspace?.id).not.toBe("a");
+  expect(f.model.state.activeWorkspace?.root_dir).toBe(env.USERPROFILE);
+  expect(f.daemon.workspaceRequests.find(request=>request.tag==="CreateHostWorkspace")?.body.root_dir).toBe(env.USERPROFILE);
+  const home=f.model.ensureWelcome()!;await f.model.ensureHomeTerminal(home.id);
+  expect(f.daemon.ptyRequests.filter(request=>request.tag==="CreatePty").at(-1)?.body.cwd).toBe(env.USERPROFILE);
+  expect(f.model.state.workspaces.find(workspace=>workspace.id==="a")?.root_dir).toBe(options.cwd);
+  expect(f.model.state.surfaces).toContainEqual(recovery.surfaces[0]);
+  expect(f.model.state.composerDrafts["home:a"]?.text).toBe("unsent");
+  expect(f.daemon.ptyRequests.some(request=>["ClosePty","PtyInput","ChangeTerminalDirectory"].includes(request.tag))).toBe(false);
+  expect(f.daemon.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot")).toBe(false);
+ }finally{f.close();policy.mockRestore();}
+});
+
 for(const protection of ["explicit workspace","explicit folder","remote connection","followed directory"]){
  test(`startup recovery preserves an ${protection}`,async()=>{
   const policy=spyOn(startupDirectory,"recoveredStartupDirectory").mockImplementation(root=>root==="/"?"/Users/person":undefined);

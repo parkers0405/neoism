@@ -173,6 +173,11 @@ pub(crate) async fn start_task_tool(
                 state, &parent, &child,
             )
             .await?;
+            if child.extra.contains_key("externalAgent") {
+                return Err(format!(
+                    "task_id {task_id} belongs to an external agent; continue it with its original external subagent_type, not {agent_name}"
+                ));
+            }
             child.id.to_string()
         } else {
             create_child(

@@ -18,6 +18,7 @@ function connection(remote=false){
  return {daemon,client,model,config,visuals};
 }
 const local=connection(),remote=connection(true),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
+remote.config.iconFontFamily="Different SSH symbols";remote.config.fontWeight=700;
 const [selected,setSelected]=createSignal(local);
 const tabs=new WindowWorkspaceSessions(local,{activate:setSelected,local:async()=>local,dispose:async()=>{}});
 async function until(predicate:()=>boolean){
@@ -26,6 +27,15 @@ async function until(predicate:()=>boolean){
  await host.pump(root);
 }
 const click=async(id:string)=>{const node=host.find(id);assert.ok(node,`Missing ${id}`);root.dispatch({elementId:node.id,eventType:"click",button:0});await host.pump(root);};
+const checkIconTypography=()=>{
+ const icons=[...host.nodes.values()].filter(node=>node.type==="text"&&/^(workspace-icon:|pane-tab-icon:)/.test(String(node.props.testId)));
+ assert.ok(icons.length>=3,"Both workspace and buffer icons are mounted");
+ for(const icon of icons){
+  assert.equal(icon.style.fontFamily,tabs.iconFontFamily);
+  assert.equal(icon.style.fontWeight,400,"Tab glyphs must not inherit the selected host's text weight");
+  assert.equal(icon.style.fontSize,12*local.config.scale);
+ }
+};
 try{
  await until(()=>!!local.model.state.activeWorkspace&&!local.model.state.loading&&!!remote.model.state.activeWorkspace&&!remote.model.state.loading);
  await local.model.openFile("README.md");
@@ -51,6 +61,7 @@ try{
  local.model.newAgentHome();await until(()=>!!host.find("composer")&&host.focused===host.find("composer")?.id);
  for(const [tab,owner] of [[remoteTab,remote],[localTab,local],[remoteTab,remote]] as const){
   await click(`workspace:${tab.id}`);await until(()=>selected()===owner&&!!host.find("composer")&&host.focused===host.find("composer")?.id);
+  checkIconTypography();
  }
  console.log("Actual App host switching, retained dirty editor, remote tab selection, and local plus routing passed.");
 }finally{

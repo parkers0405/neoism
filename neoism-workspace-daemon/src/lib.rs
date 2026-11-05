@@ -23,6 +23,7 @@ mod git_snapshot;
 pub mod handshake;
 pub mod hosts;
 pub mod language_server;
+mod local_service;
 pub mod pairing;
 mod path;
 pub mod permissions;

@@ -17,7 +17,8 @@ const restore=usePresentationScheduler(callback=>{callbacks.add(callback);return
 try{
  for(const cacheKey of [undefined,"workspace"]){
   const listeners=new Set<(message:unknown)=>void>(),errors:unknown[]=[];
-  const model={state:{threads:[],activeWorkspace:{id:"workspace"}},subscribeAgentEvents(listener:(message:unknown)=>void){listeners.add(listener);return()=>listeners.delete(listener);},sendAgent(){}} as unknown as WorkspaceModel;
+  const disposal=new Set<()=>void>();
+  const model={state:{threads:[],activeWorkspace:{id:"workspace"}},subscribeAgentEvents(listener:(message:unknown)=>void){listeners.add(listener);return()=>listeners.delete(listener);},onWorkspaceClosed(){return()=>{};},onDispose(listener:()=>void){disposal.add(listener);return()=>disposal.delete(listener);},sendAgent(){}} as unknown as WorkspaceModel;
   const host=createRecordingAppRenderer((_,box)=>({...box,width:300,height:600})),root=createRoot(host.renderer,{keyboardFocusDim:false});
   try{
    root.render(()=><AgentSidePanelView model={model} config={loadConfig([],{})} directory="/proj/app" cacheKey={cacheKey} report={error=>errors.push(error)} onAction={()=>{}}/>);
@@ -47,6 +48,7 @@ try{
    for(const listener of listeners)listener({StreamingState:{session_id:"chat",state:"Generating",label:null}});
    assert.equal(calls.filter(call=>call.op==="agentsidepanel.event").length,1);assert.equal(callbacks.size,0);
   }
+  for(const dispose of disposal)dispose();assert.equal(listeners.size,0);
  }
  console.log("sidebar traffic and frame coalescing passed");
 }finally{restore();}

@@ -10,6 +10,25 @@ const panel = (directory: string) => coreCall<{ id: number }>("agentsidepanel.ne
 const frame = (id: number) => coreCall<{ send: Record<string, any>[] }>("agentsidepanel.frame", { id, width: 300, height: 600, viewedSession: null });
 const debug = (id: number) => coreCall<{ sessions: number; scrollTop: number; nextCursor: string | null }>("agentsidepanel.debug", { id });
 
+test("external children keep saved provider logos and names alongside task descriptions in the left catalog",()=>{
+ const id=panel("/proj/app");
+ try{
+  frame(id);
+  coreCall("agentsidepanel.event",{id,message:{ThreadList:{threads:[thread("root","/proj/app",2)],requested_cursor:null,next_cursor:null}}});
+  coreCall("agentsidepanel.event",{id,message:{CatalogFamily:{session_id:"root",snapshot:{directory:"/proj/app",executionId:"run",familyRevision:1,branches:[
+   {sessionId:"oc",parentSessionId:"root",agent:"opencode",title:"Implement parser",status:"outstanding",depth:1},
+   {sessionId:"cc",parentSessionId:"root",agent:"claude",title:"Review parser",status:"outstanding",depth:1},
+   {sessionId:"cx",parentSessionId:"root",agent:"codex",title:"Test parser",status:"outstanding",depth:1},
+  ]}}}});
+  const result=coreCall<{commands:PaintCommand[]}>("agentsidepanel.frame",{id,width:300,height:600});
+  const labels=result.commands.filter(c=>c.kind==="text").map(c=>c.text);
+  for(const label of ["OpenCode","Claude Code","Codex","Implement parser","Review parser","Test parser"])expect(labels).toContain(label);
+  const images=result.commands.filter(c=>c.kind==="image").map(c=>c.raster.id);
+  // Paint export assigns cache-local raster IDs: root plus three distinct saved logos.
+  expect(images).toHaveLength(4);expect(new Set(images).size).toBe(4);
+ }finally{coreCall("agentsidepanel.dispose",{id});}
+});
+
 test("a settled catalog does not animate the pane's invisible home wordmark", () => {
   const id = panel("/proj/app");
   try {

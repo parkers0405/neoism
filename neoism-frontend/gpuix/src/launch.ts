@@ -5,7 +5,6 @@ import { createRendererState } from "@gpuix/native/host";
 import {prepareBundledFonts} from "./bundled-fonts";
 import { loadConfig } from "./config";
 import {coreCall} from "./native-core";
-import { ensureLocalDaemon } from "./daemon/local-startup";
 import { notifyFrameActivity } from "./chrome/frame-meter";
 import { profileInput, profileStartup } from "./profiling";
 import type { WindowBootstrap } from "./window-bootstrap";
@@ -36,7 +35,8 @@ if (!process.argv.some(arg => ["--help", "-h", "--version", "-V"].includes(arg))
   // Waiting until App construction makes its first chrome paint join these
   // font loaders synchronously, especially when several windows start at once.
   coreCall("paint.prewarm",{fontFamily:initialConfig.fontFamily,fontWeight:initialConfig.fontWeight,markdownFontFamily:initialConfig.markdownFontFamily,iconFontFamily:initialConfig.iconFontFamily});
-  const config = ensureLocalDaemon(initialConfig);
+   // Service startup belongs to the connection retry loop, not window creation.
+   const config = Promise.resolve(initialConfig);
   void config.catch(() => {});
   (globalThis as typeof globalThis & { __neoismWindowBootstrap?: WindowBootstrap }).__neoismWindowBootstrap = bootstrap = { config, renderer, ready };
 }

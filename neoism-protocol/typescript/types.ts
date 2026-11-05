@@ -924,6 +924,9 @@ export type CrdtPresenceUpdate =
   | { Remove: { buffer_id: string; peer_id: string } };
 
 type BaseCrdtClientMessage =
+  | { AcquireBuffer: { buffer_id: string; owner_id: string; initial_text?: string } }
+  | { Owned: { owner_id: string; message: CrdtClientMessage } }
+  | { CloseBuffer: { buffer_id: string; owner_id: string } }
   | { OpenBuffer: { buffer_id: string; initial_text?: string } }
   | { RequestSnapshot: { buffer_id: string; state_vector_v1?: number[] } }
   | { ApplyUpdate: { update: CrdtBufferUpdate } }
@@ -940,6 +943,7 @@ type BaseCrdtClientMessage =
   | { SaveBuffer: { buffer_id: string } };
 
 export type CrdtServerMessage =
+  | { BufferClosed: { buffer_id: string; evicted: boolean } }
   | { Snapshot: { buffer_id: string; update_v1: number[]; state_vector_v1: number[] } }
   | {
       SnapshotFallback: {
@@ -1828,6 +1832,7 @@ export type WorkspaceClientMessage =
       };
     }
   | { CloseHostWorkspace: { workspace_id: string } }
+  | { CloseWindowWorkspace: { workspace_id: string } }
   | { SwitchHostWorkspace: { workspace_id: string } }
   | { SetWorkspaceRoot: { workspace_id: string; root_dir: string } }
   | { CreateWorkspaceVault: { workspace_id: string } }

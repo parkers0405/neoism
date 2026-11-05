@@ -50,7 +50,12 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Default agent-server base URL when `NEOISM_AGENT_SERVER` is unset.
 const DEFAULT_AGENT_SERVER: &str = "http://127.0.0.1:4096";
 const AGENT_SERVER_HEALTH_PATH: &str = "/v2/health";
-const AGENT_SERVER_READY_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const AGENT_SERVER_READY_TIMEOUT: Duration =
+    Duration::from_secs(if cfg!(windows) { 180 } else { 120 });
+const AGENT_HEALTH_PROBE_TIMEOUT: Duration =
+    Duration::from_millis(if cfg!(windows) { 2000 } else { 500 });
+const AGENT_UNHEALTHY_TIMEOUT: Duration =
+    Duration::from_secs(if cfg!(windows) { 90 } else { 30 });
 const AGENT_SERVER_READY_POLL: Duration = Duration::from_millis(100);
 const AGENT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -58,6 +63,89 @@ const AGENT_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// One-shot guard that boots the embedded agent-server exactly once
 /// per process. Mirrors `frontends/neoism/src/agent_server.rs::ensure_started`.
 static AGENT_SERVER_STARTED: OnceLock<()> = OnceLock::new();
+
+/// Resolve automatic loopback fallback before any AgentInner captures its URL.
+/// Explicit upstreams always retain the regular startup policy.
+pub(crate) async fn ensure_managed_agent_server_started(
+    workspaces: crate::workspace::WorkspaceManager,
+) -> anyhow::Result<()> {
+    static STARTUP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _startup = STARTUP.lock().await;
+    if AGENT_SERVER_STARTED.get().is_some() {
+        return Ok(());
+    }
+    if std::env::var_os("NEOISM_AGENT_SERVER").is_some()
+        || std::env::var_os("NEOISM_SERVER").is_some()
+    {
+        ensure_agent_server_started(workspaces);
+        return Ok(());
+    }
+    let probe = reqwest::Client::builder()
+        .timeout(AGENT_HEALTH_PROBE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()?;
+    let published = published_agent_server();
+    for server in published
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(DEFAULT_AGENT_SERVER))
+    {
+        if agent_health_ready(&probe, &format!("{server}{AGENT_SERVER_HEALTH_PATH}")).await {
+            if AGENT_SERVER_STARTED.set(()).is_err() {
+                return Ok(());
+            }
+            std::env::set_var("NEOISM_AGENT_SERVER", server);
+            std::env::set_var("NEOISM_SERVER", server);
+            // Both candidates are validated loopback URLs. Keep supervising an
+            // external owner without acquiring its publication or changing ports.
+            let (hostname, port) = local_bind_target(server)
+                .expect("managed agent candidates are concrete loopback endpoints");
+            spawn_agent_server_supervisor(
+                workspaces,
+                neoism_agent_neoism_adapter::neoism_services(),
+                server.to_owned(),
+                hostname,
+                port,
+                None,
+                AgentServerOwnership::ManagedBorrowed,
+            );
+            return Ok(());
+        }
+    }
+    // Serialize ownership independently of the daemon listener: fixed-address
+    // daemons may also opt into automatic Agent ports. Do not open a second
+    // Agent database or claim a new URL when another owner is still starting.
+    // Preserve WouldBlock as a retryable I/O error for the caller.
+    let ownership = crate::local_service::lock("agent")?;
+    let preferred = "127.0.0.1:4096".parse()?;
+    let listener = crate::local_service::bind(preferred, true).await?;
+    let address = listener.local_addr()?;
+    if AGENT_SERVER_STARTED.get().is_some() {
+        return Ok(());
+    }
+    let publication = crate::local_service::Publication::publish("agent", address)?;
+    let server = format!("http://{address}");
+    // Do not change URLs after a synchronous caller has captured the target.
+    if AGENT_SERVER_STARTED.set(()).is_err() {
+        return Ok(());
+    }
+    std::env::set_var("NEOISM_AGENT_SERVER", &server);
+    std::env::set_var("NEOISM_SERVER", &server);
+    spawn_agent_server_supervisor(
+        workspaces,
+        neoism_agent_neoism_adapter::neoism_services(),
+        server,
+        address.ip().to_string(),
+        address.port(),
+        Some(listener),
+        AgentServerOwnership::ManagedOwned {
+            _publication: publication,
+            _lock: ownership,
+        },
+    );
+    Ok(())
+}
 
 /// Spawn the embedded `neoism-agent-server` on `127.0.0.1:4096` if
 /// `NEOISM_AGENT_SERVER` points at a local host and the daemon hasn't
@@ -94,6 +182,61 @@ pub fn ensure_agent_server_started_with_services(
     if AGENT_SERVER_STARTED.set(()).is_err() {
         return;
     }
+    spawn_agent_server_supervisor(
+        workspaces,
+        services,
+        server,
+        hostname,
+        port,
+        None,
+        AgentServerOwnership::Legacy,
+    );
+}
+
+enum AgentServerOwnership {
+    Legacy,
+    ManagedBorrowed,
+    ManagedOwned {
+        _publication: crate::local_service::Publication,
+        _lock: std::fs::File,
+    },
+}
+
+impl AgentServerOwnership {
+    /// Managed servers always reserve the already-selected address. Taking over
+    /// a borrowed endpoint additionally requires independent database ownership.
+    async fn reserve(
+        &mut self,
+        address: std::net::SocketAddr,
+    ) -> std::io::Result<Option<tokio::net::TcpListener>> {
+        match self {
+            Self::Legacy => Ok(None),
+            Self::ManagedBorrowed => {
+                let ownership = crate::local_service::lock("agent")?;
+                let listener = crate::local_service::bind(address, false).await?;
+                let publication = crate::local_service::Publication::publish("agent", address)?;
+                *self = Self::ManagedOwned {
+                    _publication: publication,
+                    _lock: ownership,
+                };
+                Ok(Some(listener))
+            }
+            Self::ManagedOwned { .. } => {
+                crate::local_service::bind(address, false).await.map(Some)
+            }
+        }
+    }
+}
+
+fn spawn_agent_server_supervisor(
+    workspaces: crate::workspace::WorkspaceManager,
+    services: neoism_agent_service_api::AgentServices,
+    server: String,
+    hostname: String,
+    port: u16,
+    mut reserved_listener: Option<tokio::net::TcpListener>,
+    mut ownership: AgentServerOwnership,
+) {
     let services = services.with_workspace_management(Arc::new(
         crate::workspace::DaemonWorkspaceManagementService::new(workspaces),
     ));
@@ -110,57 +253,85 @@ pub fn ensure_agent_server_started_with_services(
     // bypasses `NeoismConfigSourceService` and makes release builds ignore
     // the GUI-owned `~/.config/neoism/config.json` while debug builds work.
     tokio::spawn(async move {
+        // Managed ownership retains publication and the independent Agent lock
+        // for the entire supervisor lifetime, including server restarts.
         tracing::info!(target: "neoism_workspace_daemon::agent", "using linked Neoism Agent server with product config services");
         let health_url = format!("{server}{AGENT_SERVER_HEALTH_PATH}");
         let probe = reqwest::Client::builder()
-            .timeout(Duration::from_millis(500))
+            .timeout(AGENT_HEALTH_PROBE_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
             .ok();
         loop {
-            let healthy = match &probe {
-                Some(client) => agent_health_ready(client, &health_url).await,
-                None => false,
+            let healthy = if reserved_listener.is_some() {
+                // Our reservation cannot serve health until handed to listen.
+                false
+            } else {
+                match &probe {
+                    Some(client) => agent_health_ready(client, &health_url).await,
+                    None => false,
+                }
             };
             if !healthy {
+                if reserved_listener.is_none() {
+                    // Never let a managed borrowed endpoint fall through to
+                    // legacy listen: another daemon may already own the DB.
+                    let address = std::net::SocketAddr::new(
+                        hostname.parse().expect("validated local Agent listen IP"),
+                        port,
+                    );
+                    match ownership.reserve(address).await {
+                        Ok(listener) => reserved_listener = listener,
+                        Err(error) => {
+                            tracing::debug!(target: "neoism_workspace_daemon::agent", %address, %error, "managed Agent ownership or selected port unavailable; retrying");
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    }
+                }
                 let options = neoism_agent_server::ServerOptions {
                     hostname: hostname.clone(),
                     port,
                     cors: Vec::new(),
                 };
                 // Isolate a listen-task panic from this process-local supervisor.
-                // Only INITIAL readiness has a deadline; never timeout a healthy
-                // long-running server. Allow cold hosted association (up to 96s).
+                // Monitor only the task we own. A healthy external listener is
+                // left alone; a bind failure cannot give us ownership of it.
                 let services = services.clone();
+                let listener = reserved_listener.take();
                 let mut task = tokio::spawn(async move {
-                    neoism_agent_server::listen(options, services).await
+                    match listener {
+                        Some(listener) => {
+                            neoism_agent_server::listen_with_listener(options, services, listener).await
+                        }
+                        None => neoism_agent_server::listen(options, services).await,
+                    }
                 });
-                let boot = async {
+                let monitor = async {
+                    let mut health = AgentHealthDeadline::new(tokio::time::Instant::now());
                     loop {
                         tokio::select! {
                             result = &mut task => return Some(result),
                             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
                         }
-                        if let Some(client) = &probe {
-                            if agent_health_ready(client, &health_url).await {
-                                return None;
-                            }
+                        let ready = match &probe {
+                            Some(client) => agent_health_ready(client, &health_url).await,
+                            None => false,
+                        };
+                        if health.expired(tokio::time::Instant::now(), ready) {
+                            return None;
                         }
                     }
                 };
-                match tokio::time::timeout(Duration::from_secs(120), boot).await {
-                    Ok(Some(result)) => {
-                        log_agent_server_exit("startup", result);
+                match monitor.await {
+                    Some(result) => {
+                        log_agent_server_exit("supervision", result);
                     }
-                    Ok(None) => {
-                        tracing::info!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent ready");
-                        log_agent_server_exit("serving", task.await);
-                    }
-                    Err(_) => {
+                    None => {
                         task.abort();
                         let _ = task.await;
-                        tracing::warn!(target: "neoism_workspace_daemon::agent", "embedded Neoism Agent startup exceeded 120 seconds; retrying");
+                        tracing::warn!(target: "neoism_workspace_daemon::agent", "owned embedded Neoism Agent health deadline exceeded; retrying");
                     }
                 }
             }
@@ -169,8 +340,158 @@ pub fn ensure_agent_server_started_with_services(
     });
 }
 
+#[cfg(test)]
+mod startup_recovery_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn discovery_accepts_only_concrete_loopback_endpoints() {
+        assert_eq!(
+            published_agent_url("127.0.0.1:43210".parse().unwrap()).as_deref(),
+            Some("http://127.0.0.1:43210")
+        );
+        assert_eq!(
+            published_agent_url("[::1]:43210".parse().unwrap()).as_deref(),
+            Some("http://[::1]:43210")
+        );
+        for address in [
+            "127.0.0.1:0",
+            "0.0.0.0:4096",
+            "192.0.2.1:4096",
+            "[::]:4096",
+        ] {
+            assert!(published_agent_url(address.parse().unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn health_deadline_distinguishes_cold_start_and_sustained_failure() {
+        let now = tokio::time::Instant::now();
+        let mut health = AgentHealthDeadline::new(now);
+        let cold_deadline = now + AGENT_SERVER_READY_TIMEOUT;
+        let epsilon = Duration::from_millis(1);
+        assert!(!health.expired(cold_deadline - epsilon, false));
+        assert!(health.expired(cold_deadline, false));
+        let ready_at = cold_deadline + epsilon;
+        assert!(!health.expired(ready_at, true));
+        let recovered_at = ready_at + AGENT_UNHEALTHY_TIMEOUT - epsilon;
+        assert!(!health.expired(recovered_at, false));
+        // A transient failure must not trigger restart after health recovers.
+        assert!(!health.expired(recovered_at, true));
+        let recovery_deadline = recovered_at + AGENT_UNHEALTHY_TIMEOUT;
+        assert!(!health.expired(recovery_deadline - epsilon, false));
+        assert!(health.expired(recovery_deadline, false));
+        // Healthy servers can run indefinitely, even beyond the cold budget.
+        assert!(!health.expired(recovery_deadline + AGENT_SERVER_READY_TIMEOUT, true));
+    }
+
+    #[tokio::test]
+    async fn readiness_retries_fast_failures_past_thirty_attempts() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for attempt in 0..=32 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                let n = stream.read(&mut request).await.unwrap();
+                assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /v2/health "));
+                let (status, body) = if attempt < 32 {
+                    ("503 Service Unavailable", "{}")
+                } else {
+                    ("200 OK", r#"{"healthy":true,"version":"test","provider_credential_store":"test"}"#)
+                };
+                let response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        wait_for_agent_health(&client, &base, Duration::from_secs(10)).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fast_connection_refusal_uses_elapsed_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(wait_for_agent_health(&client, &base, Duration::from_millis(350)).await.is_err());
+        assert!(started.elapsed() >= Duration::from_millis(350));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn readiness_deadline_caps_stalled_response_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(wait_for_agent_health(&client, &base, Duration::from_millis(150)).await.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        server.abort();
+        let _ = server.await;
+    }
+}
+
 type AgentServerExit =
     Result<anyhow::Result<std::net::SocketAddr>, tokio::task::JoinError>;
+
+/// Cold startup has its own budget; after readiness, require a continuous
+/// unhealthy interval before restarting. Never apply this policy to external owners.
+struct AgentHealthDeadline {
+    deadline: tokio::time::Instant,
+}
+
+impl AgentHealthDeadline {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            deadline: now + AGENT_SERVER_READY_TIMEOUT,
+        }
+    }
+
+    fn expired(&mut self, now: tokio::time::Instant, ready: bool) -> bool {
+        if ready {
+            self.deadline = now + AGENT_UNHEALTHY_TIMEOUT;
+            false
+        } else {
+            now >= self.deadline
+        }
+    }
+}
+
+pub(crate) async fn wait_for_agent_health(
+    client: &reqwest::Client,
+    base: &str,
+    budget: Duration,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let url = format!("{base}{AGENT_SERVER_HEALTH_PATH}");
+    loop {
+        // Includes body reads and caps the last probe to the remaining budget.
+        match tokio::time::timeout_at(deadline, agent_health_ready(client, &url)).await {
+            Ok(true) => return Ok(()),
+            Err(_) => anyhow::bail!("Agent health readiness deadline exceeded"),
+            Ok(false) => {}
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + AGENT_SERVER_READY_POLL).min(deadline),
+        )
+        .await;
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "Agent health readiness deadline exceeded"
+        );
+    }
+}
 
 fn agent_server_exit_detail(result: AgentServerExit) -> String {
     match result {
@@ -192,7 +513,7 @@ fn log_agent_server_exit(phase: &str, result: AgentServerExit) {
 }
 
 async fn agent_health_ready(client: &reqwest::Client, url: &str) -> bool {
-    tokio::time::timeout(Duration::from_millis(500), async {
+    tokio::time::timeout(AGENT_HEALTH_PROBE_TIMEOUT, async {
         let Ok(mut response) = client.get(url).send().await else {
             return false;
         };
@@ -229,7 +550,27 @@ pub(crate) fn configured_agent_server() -> String {
         .or_else(|| std::env::var("NEOISM_SERVER").ok())
         .map(|server| server.trim().trim_end_matches('/').to_string())
         .filter(|server| !server.is_empty())
+        .or_else(|| {
+            if std::env::var_os("NEOISM_AGENT_SERVER").is_none()
+                && std::env::var_os("NEOISM_SERVER").is_none()
+            {
+                published_agent_server()
+            } else {
+                None
+            }
+        })
         .unwrap_or_else(|| DEFAULT_AGENT_SERVER.to_string())
+}
+
+fn published_agent_server() -> Option<String> {
+    let address = crate::local_service::read("agent")?;
+    published_agent_url(address)
+}
+
+fn published_agent_url(address: std::net::SocketAddr) -> Option<String> {
+    // Runtime files are discovery hints, never authority to contact a remote host.
+    (address.ip().is_loopback() && address.port() != 0)
+        .then(|| format!("http://{address}"))
 }
 
 pub(crate) fn agent_http_client(base: &str) -> Result<&'static reqwest::Client, ()> {

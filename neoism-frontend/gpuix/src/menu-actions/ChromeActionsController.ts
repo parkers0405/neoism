@@ -27,6 +27,7 @@ export interface MenuFrame {
 export interface ChromeActionsOptions {
   model: WorkspaceModel; config: AppConfig; reload: (fontSizeOverride?:number) => void | Promise<void>;
   onConnectServer?: (server: ServerSelection) => void | Promise<void>;
+  onSetTheme?: (name:string) => Promise<void>;
   onRunAction?: (action: string) => void | Promise<void>;
   supportedActions?: () => readonly string[];
   openUrl?: (url: string) => Promise<void>;
@@ -248,6 +249,10 @@ export class ChromeActionsController {
       if(!paths.isAbsolute(target.path)&&/^~(?:[\\/]|$)/.test(target.path))throw new Error("Select a home directory result resolved by the host");
       await this.options.model.changeWorkspaceDirectory(paths.resolve(captured.root,target.path), captured.id);
       this.close(); return;
+    }
+    if(target.kind==="theme"){
+      if(this.options.onSetTheme){await this.options.onSetTheme(target.name);this.close();return;}
+      if(this.options.config.collaborative||!localDaemon(this.options.config.endpoint))throw new Error("Local theme settings are unavailable in this window");
     }
     const document = await this.configDocument(true); if (!document.writable) throw new Error("This daemon config document is read-only");
     const updates = target.kind === "theme" ? themeUpdates(document, target.name) : target.kind === "background" ? [

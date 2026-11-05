@@ -288,17 +288,6 @@ pub(crate) fn task_started_output(child_session_id: &str) -> String {
     .join("\n")
 }
 
-pub(crate) fn task_running_output(child_session_id: &str) -> String {
-    [
-        format!("task_id: {child_session_id}"),
-        "status: running".to_string(),
-        String::new(),
-        "The external subagent is still running. Keep working in the main session or call task_result later."
-            .to_string(),
-    ]
-    .join("\n")
-}
-
 pub(crate) fn task_result_output(child_session_id: &str, text: String) -> String {
     [
         format!(

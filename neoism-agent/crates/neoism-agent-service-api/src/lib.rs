@@ -603,6 +603,10 @@ pub struct DocumentationSearchHit {
 }
 
 pub trait DocumentationService: Send + Sync {
+    /// Version of the shared documentation snapshot, when supplied by the host.
+    fn version(&self) -> Option<&str> {
+        None
+    }
     fn list(&self) -> Result<Vec<DocumentationPageSummary>, ServiceError>;
     fn search(
         &self,

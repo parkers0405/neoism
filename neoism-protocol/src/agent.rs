@@ -1177,6 +1177,9 @@ pub struct HistoryMessage {
     /// Tool name (for `Tool` / `Subtask` kinds).
     #[serde(default)]
     pub tool: String,
+    /// Canonical task agent identity, independent of display titles and models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
     /// Server-issued identity of one model response's tool-call batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_batch_id: Option<String>,

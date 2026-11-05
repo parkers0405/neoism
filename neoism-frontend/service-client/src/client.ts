@@ -18,12 +18,15 @@ export interface DaemonConnectionConfig {
   authToken?: string;
   pairingToken?: string;
   clientName?: string;
+  handshakeTimeoutMs?: number;
 }
 export interface DaemonConnectionHooks {
   profileStart: () => number;
   profileEnd: (name: string, started: number, bytes: number) => void;
   /** Use the host's Solid instance when the host installs its own renderer runtime. */
   batch?: (run: () => void) => void;
+  /** Refresh/start an owned local service before each dial; never replay requests. */
+  prepareConnection?: (signal: AbortSignal) => Promise<Partial<DaemonConnectionConfig>>;
 }
 const noProfiling: DaemonConnectionHooks = { profileStart: () => 0, profileEnd: () => {} };
 
@@ -38,6 +41,7 @@ export class DaemonConnection {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private deadline?: ReturnType<typeof setTimeout>;
   private heartbeat?: ReturnType<typeof setInterval>;
+  private preparation?: AbortController;
   private lastMessageAt = 0;
   private lastMessage?:ConnectionFailure["lastMessage"];
   private lastFailureLog?:{reason:string;at:number};
@@ -76,6 +80,7 @@ export class DaemonConnection {
     this.rejectPending("Disconnected"); this.setState("closed");
   }
   private clearTimers() {
+    this.preparation?.abort(); this.preparation = undefined;
     clearTimeout(this.reconnectTimer); clearTimeout(this.deadline); clearInterval(this.heartbeat);
     this.reconnectTimer = undefined; this.deadline = undefined; this.heartbeat = undefined;
   }
@@ -87,14 +92,29 @@ export class DaemonConnection {
     const generation = ++this.generation;
     this.lastMessageAt=0;this.lastMessage=undefined;
     this.setState("connecting");
+    if (this.hooks.prepareConnection) {
+      const controller = this.preparation = new AbortController();
+      void Promise.resolve().then(() => this.hooks.prepareConnection!(controller.signal)).then(config => {
+        if (!this.desired || generation !== this.generation) return;
+        this.preparation = undefined;
+        Object.assign(this.config, config);
+        this.openSocket(generation);
+      }).catch(error => this.failed(generation, error instanceof Error ? error.message : "Local daemon recovery failed"));
+    } else this.openSocket(generation);
+  }
+  private openSocket(generation: number) {
+    if (!this.desired || generation !== this.generation) return;
     let socket: WebSocket;
     try { socket = this.createSocket(this.config.endpoint, this.config.authToken); }
     catch { this.failed(generation, "Could not open daemon connection"); return; }
     this.socket = socket;
     const current = () => this.desired && generation === this.generation;
-    this.deadline = setTimeout(() => this.failed(generation, "Daemon handshake timed out"), 8000);
+    const timeout = this.config.handshakeTimeoutMs ?? (process.platform === "win32" ? 60_000 : 8000);
+    this.deadline = setTimeout(() => this.failed(generation, "Daemon WebSocket upgrade timed out"), timeout);
     socket.on("open", () => {
       if (!current()) return;
+      clearTimeout(this.deadline);
+      this.deadline = setTimeout(() => this.failed(generation, "Daemon handshake timed out"), timeout);
       this.setState("authenticating");
       socket.send(JSON.stringify({ Workspace: { request_id: 0, message: { Hello: {
         token: this.config.pairingToken ?? null, client_name: this.config.clientName ?? "neoism-gpuix",

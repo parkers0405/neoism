@@ -230,7 +230,7 @@ export function PaneLayoutView(props: {
           style={{ position: "absolute", left: 0, right: 0, top: 0, height: chrome.height, borderTopLeftRadius: 3 * s, borderTopRightRadius: 3 * s, backgroundColor: c.hover + "b8", pointerEvents: "none" }} />
         <text onLayout={(event) => { if (event.width) setTitleWidth(event.width); }} style={{ ...text, position: "absolute", opacity: 0, left: 0, top: 0 }}>{tab().title}</text>
         <Show when={tab().kind === "agent"||tab().kind==="terminal"&&!!terminalAgentIcons[tab().title]} fallback={<text testId={`pane-tab-icon:${t.leaf}`} onLayout={(event) => { if (event.width) setIconWidth(Math.max(chrome.iconSize, event.width)); }}
-          style={{ ...text, position: "absolute", left: chrome.padding, top: 0, lineHeight: chrome.height, fontFamily: config.iconFontFamily, fontSize: chrome.iconSize, color: selected() ? icon().color : inactiveTabIcon(icon().color) }}>{icon().glyph}</text>}>
+          style={{ ...text, position: "absolute", left: chrome.padding, top: 0, lineHeight: chrome.height, fontFamily: config.iconFontFamily, fontWeight: 400, fontSize: chrome.iconSize, color: selected() ? icon().color : inactiveTabIcon(icon().color) }}>{icon().glyph}</text>}>
           <img ref={host=>{image=host;queueMicrotask(()=>{if(!host.mounted)return;host.root?.mutations.flushMutations();const path=terminalAgentIcons[tab().title];host.setImage(path?(cachedTerminalAgentIcons.get(path)??readFileSync(path)):(cachedNeoismIcon ||= readFileSync(neoismIcon)));});}} testId={`pane-tab-icon:${t.leaf}`} objectFit="contain" alt={tab().kind==="agent"?"Neoism":tab().title} style={{ position: "absolute", left: chrome.padding, top: (chrome.height - chrome.iconSize) / 2, width: chrome.iconSize, height: chrome.iconSize, pointerEvents: "none" }} />
         </Show>
         <div style={{position:"absolute",left:chrome.padding+geometry().iconWidth+chrome.iconGap,top:0,pointerEvents:"none"}}><HoverTabTitle label={tab().title} width={geometry().titleWidth} naturalWidth={titleWidth()} height={chrome.height} scale={s} hovered={hovered()} reducedMotion={config.reducedMotion} style={{...text,lineHeight:chrome.height,color:selected()?c.fg:c.muted}}/></div>
@@ -276,7 +276,7 @@ export function PaneLayoutView(props: {
           <Show when={props.onNewWelcome}><div ref={host=>{newTabHost=host;}} tabIndex={0} role="button" testId={testId(`pane-new-welcome:${pane().leaf}`)} aria-label="New Home" data-keyboard-focused={props.keyboardNewPane===pane().leaf} onClick={() => { focus(pane().leaf); props.onNewWelcome?.(pane().leaf); }}
             onLayout={event=>!previewOnly&&props.onNewLayout?.(pane().leaf,{x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0})}
             style={{ ...row, justifyContent: "center", width: chrome.newWidth, height: chrome.height, flexShrink: 0, cursor: "pointer",backgroundColor:props.keyboardNewPane===pane().leaf?c.accent+"1a":undefined, hover: { backgroundColor: c.accent + "0f" } }}>
-            <text style={{ ...text, fontFamily: config.iconFontFamily, fontSize: chrome.iconSize, color: c.muted }}>{chrome.newIcon}</text>
+            <text style={{ ...text, fontFamily: config.iconFontFamily, fontWeight: 400, fontSize: chrome.iconSize, color: c.muted }}>{chrome.newIcon}</text>
           </div></Show>
         </div>
       </div>
@@ -291,7 +291,7 @@ export function PaneLayoutView(props: {
     let image:HostElement|undefined;
     onMount(()=>queueMicrotask(()=>{if(!image?.mounted)return;image.root?.mutations.flushMutations();image.setImage(cachedNeoismIcon ||= readFileSync(neoismIcon));}));
     return <div testId="buffer-tab-drag-ghost" style={{position:"absolute",left:dragPoint().x-active().grab,top:dragPoint().y-chrome.height/2,width:geometry().width,height:chrome.height,backgroundColor:c.bg,borderTopLeftRadius:3*s,borderTopRightRadius:3*s,pointerEvents:"none",overflow:"hidden"}}>
-      <Show when={tab().kind==="agent"} fallback={<text style={{...text,position:"absolute",left:chrome.padding,top:0,lineHeight:chrome.height,fontFamily:config.iconFontFamily,fontSize:chrome.iconSize,color:tabIcon(tab()).color}}>{tabIcon(tab()).glyph}</text>}>
+      <Show when={tab().kind==="agent"} fallback={<text style={{...text,position:"absolute",left:chrome.padding,top:0,lineHeight:chrome.height,fontFamily:config.iconFontFamily,fontWeight:400,fontSize:chrome.iconSize,color:tabIcon(tab()).color}}>{tabIcon(tab()).glyph}</text>}>
         <img ref={image} objectFit="contain" alt="Neoism" style={{position:"absolute",left:chrome.padding,top:(chrome.height-chrome.iconSize)/2,width:chrome.iconSize,height:chrome.iconSize,pointerEvents:"none"}}/>
       </Show>
       <text style={{...text,position:"absolute",left:chrome.padding+geometry().iconWidth+chrome.iconGap,top:0,lineHeight:chrome.height,width:geometry().titleWidth,textOverflow:"ellipsis"}}>{tab().title}</text>

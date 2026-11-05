@@ -1,0 +1,1 @@
+export type * from "../../../../neoism-protocol/typescript/database";

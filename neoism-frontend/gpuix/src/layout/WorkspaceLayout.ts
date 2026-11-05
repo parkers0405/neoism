@@ -3,8 +3,8 @@ import { coreCall } from "../native-core";
 export type SplitAxis = "horizontal" | "vertical";
 export type FocusDirection = "left" | "right" | "up" | "down" | "next" | "previous" | "first" | "last";
 export type LayoutRect = [number, number, number, number];
-export interface LayoutSurface { id: string; title: string; kind: "file" | "agent" | "terminal" | "page" | "welcome" | "git" }
-export interface LayoutTab { leaf: number; externalId: number | null; surfaceId?: string; title: string; kind: LayoutSurface["kind"] }
+export interface LayoutSurface { id: string; title: string; kind: "file" | "agent" | "terminal" | "page" | "welcome" | "git"; page?: "extensions" | "database" }
+export interface LayoutTab { leaf: number; externalId: number | null; surfaceId?: string; title: string; kind: LayoutSurface["kind"]; page?: LayoutSurface["page"] }
 export interface LayoutPane {
   leaf: number; externalId: number | null; surfaceId?: string; rect: LayoutRect; focused: boolean; path: number[]; tabs: LayoutTab[];
 }
@@ -40,7 +40,7 @@ export class WorkspaceLayout {
   private decorate(frame: LayoutFrame): LayoutFrame {
     const tab = (value: LayoutTab): LayoutTab => {
       const surface = value.externalId == null ? undefined : this.routes.get(value.externalId);
-      return { ...value, surfaceId: surface?.id, title: surface?.title || value.title || "Untitled", kind: surface?.kind || value.kind };
+      return { ...value, surfaceId: surface?.id, title: surface?.title || value.title || "Untitled", kind: surface?.kind || value.kind, page: surface?.page };
     };
     return { ...frame, focusedSurfaceId: frame.focusedExternalId == null ? undefined : this.routes.get(frame.focusedExternalId)?.id,
       panes: frame.panes.map((p) => ({ ...p, surfaceId: p.externalId == null ? undefined : this.routes.get(p.externalId)?.id, tabs: p.tabs.map(tab) })), leaves: frame.leaves.map(tab) };

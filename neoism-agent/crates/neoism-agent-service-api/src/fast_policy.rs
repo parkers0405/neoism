@@ -105,6 +105,14 @@ pub fn filter_frame(
                 )?;
             }
         }
+        ServiceClientMessage::Database { workspace_root, message, .. } => {
+            scope_root(workspace_root, root)?;
+            check_path(message.path(), root)?;
+            // Row records may legitimately contain columns named path/cwd/to.
+            // They are bound SQL data, not host paths; do not run the generic
+            // recursive field-name scanner over them.
+            return serde_json::to_string(&envelope).map_err(|e| e.to_string());
+        }
         ServiceClientMessage::Git { workspace_root, .. }
         | ServiceClientMessage::Search { workspace_root, .. } => {
             scope_root(workspace_root, root)?
@@ -243,6 +251,25 @@ fn canonicalize(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn database_scopes_only_host_path_not_row_data() {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path().canonicalize().unwrap();
+        let frame = serde_json::json!({"Database":{"request_id":4,"message":{"Apply":{
+            "path":"local.sqlite", "table":"items", "changes":[{"kind":"insert","values":{
+                "path":{"kind":"text","value":"/a/legitimate/database/value"}
+            }}]
+        }}}});
+        let filtered = filter_frame(&frame.to_string(), &root, "master").unwrap();
+        let parsed: Value = serde_json::from_str(&filtered).unwrap();
+        assert_eq!(parsed["Database"]["workspace_root"], root.to_string_lossy().as_ref());
+        for path in ["../escape.sqlite", "/outside.sqlite"] {
+            let frame = serde_json::json!({"Database":{"request_id":4,"message":{"Schema":{"path":path}}}});
+            assert!(filter_frame(&frame.to_string(), &root, "master").is_err());
+        }
+        let frame = serde_json::json!({"Database":{"request_id":4,"workspace_root":"/elsewhere","message":{"Schema":{"path":"local.sqlite"}}}});
+        assert!(filter_frame(&frame.to_string(), &root, "master").is_err());
+    }
     #[test]
     fn policy_is_fail_closed_and_rewrites_hello() {
         let root = std::env::temp_dir().canonicalize().unwrap();

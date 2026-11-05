@@ -31,9 +31,10 @@ export async function performTreeContext(model:WorkspaceModel,target:TreeContext
   if(target.path===undefined)return;
   await model.moveTreePath(target.path,parent(target.path),target.notes,name(value||""));return;
  }
- if(action==="delete"){
-  if(target.path===undefined)return;
-  await request({Delete:{path:target.path}},"Deleted");
+  if(action==="delete"){
+   if(target.path===undefined)return;
+   if(model.state.surfaces.some(surface=>surface.page==="database"&&surface.workspaceId===target.workspaceId&&surface.rootDir===target.root&&surface.path&&(surface.path===target.path||surface.path.startsWith(target.path+"/"))))throw new Error("Close the database tab before deleting its file.");
+   await request({Delete:{path:target.path}},"Deleted");
   const under=(path:string)=>path===target.path||path.startsWith(target.path+"/");
   const copied=clipboard.get(model);if(copied?.root===target.root&&under(copied.path))clipboard.delete(model);
   for(const surface of model.state.surfaces.filter(surface=>surface.kind==="file"&&!surface.document&&surface.workspaceId===target.workspaceId&&surface.rootDir===target.root&&surface.path&&under(surface.path)))model.closeSurface(surface.id,true);

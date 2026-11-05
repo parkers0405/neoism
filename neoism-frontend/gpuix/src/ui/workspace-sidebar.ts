@@ -1,7 +1,7 @@
-export type WorkspaceSidebar = "files" | "conversations" | "notes";
+export type WorkspaceSidebar = "files" | "conversations" | "notes" | "databases";
 export type WorkspaceSidebars = Record<string, WorkspaceSidebar | null>;
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
-const choice = (value: unknown): WorkspaceSidebar | null | undefined => value === null || value === "files" || value === "conversations" || value === "notes" ? value : undefined;
+const choice = (value: unknown): WorkspaceSidebar | null | undefined => value === null || value === "files" || value === "conversations" || value === "notes" || value === "databases" ? value : undefined;
 
 /** The legacy window-wide setting belongs only to the first restored workspace.
  * Once a map exists, an unseen workspace gets its own Files default. */

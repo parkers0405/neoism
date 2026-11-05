@@ -3,6 +3,12 @@ use serde::{Deserialize,Serialize};
 use neoism_protocol::{agent::AgentClientMessage,config::ConfigClientMessage,crdt::CrdtClientMessage,cursor::CursorOverlayClientMessage,diagnostics::DiagnosticsClientMessage,editor::EditorClientMessage,files::FilesClientMessage,git::GitClientMessage,pty::ClientMessage,search::SearchClientMessage,workspace::WorkspaceClientMessage};
 #[derive(Debug, Deserialize, Serialize)]
 pub enum ServiceClientMessage {
+    Database {
+        request_id: u64,
+        #[serde(default)]
+        workspace_root: Option<String>,
+        message: neoism_protocol::database::DatabaseRequest,
+    },
     Files {
         request_id: u64,
         #[serde(default)]

@@ -54,6 +54,7 @@ const HAMBURGER_GLYPH: &str = "\u{f0c9}"; // FA bars
 const SEARCH_GLYPH: &str = "\u{f002}"; // FA magnifying-glass — opens the finder
 const CONVERSATIONS_GLYPH: &str = "\u{f0674}"; // Nerd Font Material creation sparkle
 const NOTES_GLYPH: &str = "\u{f15c}"; // Same glyph as Markdown files in the tree
+const DATABASES_GLYPH: &str = "\u{f1c0}"; // FA database cylinder
 const AGENT_PANEL_GLYPH: &str = "\u{eb56}"; // codicon split-horizontal / side panel
 
 const ICON_FONT_SIZE: f32 = 13.0;
@@ -96,6 +97,7 @@ pub enum TopBarAction {
     /// Explicit chat creation/opening action used outside the top agent controls.
     OpenAgent,
     OpenNotes,
+    OpenDatabases,
     /// Switch the left Conversations sidebar without creating, replacing, or
     /// activating a main-pane chat tab.
     ToggleConversations,
@@ -227,6 +229,8 @@ pub struct ChromeTopBar {
     /// glyph in the accent color. Hosts push these every frame.
     panel_open: bool,
     notes_open: bool,
+    databases_available: bool,
+    databases_open: bool,
     conversations_open: bool,
     search_open: bool,
     right_panel_open: bool,
@@ -240,6 +244,7 @@ pub struct ChromeTopBar {
     panel_btn_rect: Rect,
     menu_btn_rect: Rect,
     notes_btn_rect: Rect,
+    databases_btn_rect: Rect,
     conversations_btn_rect: Rect,
     search_btn_rect: Rect,
     server_btn_rect: Rect,
@@ -250,6 +255,7 @@ pub struct ChromeTopBar {
     hover_panel_btn: bool,
     hover_menu_btn: bool,
     hover_notes_btn: bool,
+    hover_databases_btn: bool,
     hover_conversations_btn: bool,
     hover_search_btn: bool,
     hover_server_btn: bool,
@@ -280,6 +286,8 @@ impl ChromeTopBar {
             mobile_agent_panel_button_visible: false,
             panel_open: false,
             notes_open: false,
+            databases_available: false,
+            databases_open: false,
             conversations_open: false,
             search_open: false,
             right_panel_open: false,
@@ -289,6 +297,7 @@ impl ChromeTopBar {
             panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             notes_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
+            databases_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             conversations_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             search_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             server_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -299,6 +308,7 @@ impl ChromeTopBar {
             hover_panel_btn: false,
             hover_menu_btn: false,
             hover_notes_btn: false,
+            hover_databases_btn: false,
             hover_conversations_btn: false,
             hover_search_btn: false,
             hover_server_btn: false,
@@ -372,6 +382,20 @@ impl ChromeTopBar {
 
     pub fn set_notes_open(&mut self, open: bool) {
         self.notes_open = open;
+    }
+
+    /// Opt in only when the host can handle the Databases sidebar action.
+    /// Legacy renderers leave this disabled, with no painted or live target.
+    pub fn set_databases_available(&mut self, available: bool) {
+        self.databases_available = available;
+        if !available {
+            self.databases_btn_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
+            self.hover_databases_btn = false;
+        }
+    }
+
+    pub fn set_databases_open(&mut self, open: bool) {
+        self.databases_open = open;
     }
 
     pub fn set_conversations_open(&mut self, open: bool) {
@@ -529,10 +553,16 @@ impl ChromeTopBar {
         self.panel_btn_rect = snap_square(Rect::new(left_x + btn + gap, cy, btn, btn));
         self.notes_btn_rect =
             snap_square(Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn));
+        let databases_slots = if self.databases_available { 1.0 } else { 0.0 };
+        self.databases_btn_rect = if self.databases_available {
+            snap_square(Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn))
+        } else {
+            Rect::new(0.0, 0.0, 0.0, 0.0)
+        };
         self.conversations_btn_rect =
-            snap_square(Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn));
+            snap_square(Rect::new(left_x + (btn + gap) * (3.0 + databases_slots), cy, btn, btn));
         self.search_btn_rect =
-            snap_square(Rect::new(left_x + (btn + gap) * 4.0, cy, btn, btn));
+            snap_square(Rect::new(left_x + (btn + gap) * (4.0 + databases_slots), cy, btn, btn));
         self.server_btn_rect = snap_square(Rect::new(
             strip.x + strip.w - edge - self.right_safe_inset * scale - btn,
             cy,
@@ -633,6 +663,8 @@ impl ChromeTopBar {
         self.menu_btn_rect = icon_rect(CHROME_MENU_ITEM);
         self.panel_btn_rect = icon_rect(CHROME_EXPLORER_ITEM);
         self.notes_btn_rect = icon_rect(CHROME_NOTES_ITEM);
+        // The legacy resolved-surface registry has no Databases slot.
+        self.databases_btn_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
         self.conversations_btn_rect = icon_rect(CHROME_NEW_AGENT_ITEM);
         self.search_btn_rect = icon_rect(CHROME_SEARCH_ITEM);
         if dock == DockEdge::Top && self.left_safe_inset > 0.0 {
@@ -723,6 +755,7 @@ impl ChromeTopBar {
                 || self.hover_menu_btn
                 || self.hover_search_btn
                 || self.hover_notes_btn
+                || self.hover_databases_btn
                 || self.hover_conversations_btn
                 || self.hover_server_btn
                 || self.hover_right_btn
@@ -741,6 +774,7 @@ impl ChromeTopBar {
             || self.menu_btn_rect.contains(x, y)
             || self.search_btn_rect.contains(x, y)
             || self.notes_btn_rect.contains(x, y)
+            || (self.databases_available && self.databases_btn_rect.contains(x, y))
             || self.conversations_btn_rect.contains(x, y)
             || self.server_btn_rect.contains(x, y)
             || (self.right_button_visible && self.right_btn_rect.contains(x, y))
@@ -758,6 +792,8 @@ impl ChromeTopBar {
         self.hover_menu_btn = self.menu_btn_rect.contains(x, y);
         self.hover_search_btn = self.search_btn_rect.contains(x, y);
         self.hover_notes_btn = self.notes_btn_rect.contains(x, y);
+        self.hover_databases_btn =
+            self.databases_available && self.databases_btn_rect.contains(x, y);
         self.hover_conversations_btn = self.conversations_btn_rect.contains(x, y);
         self.hover_server_btn = self.server_btn_rect.contains(x, y);
         self.hover_right_btn =
@@ -780,6 +816,7 @@ impl ChromeTopBar {
         self.hover_menu_btn = false;
         self.hover_search_btn = false;
         self.hover_notes_btn = false;
+        self.hover_databases_btn = false;
         self.hover_conversations_btn = false;
         self.hover_server_btn = false;
         self.hover_right_btn = false;
@@ -810,6 +847,11 @@ impl ChromeTopBar {
         }
         if self.notes_btn_rect.contains(x, y) {
             self.pending_action = Some(TopBarAction::OpenNotes);
+            self.menu_open = false;
+            return true;
+        }
+        if self.databases_available && self.databases_btn_rect.contains(x, y) {
+            self.pending_action = Some(TopBarAction::OpenDatabases);
             self.menu_open = false;
             return true;
         }
@@ -971,6 +1013,17 @@ impl ChromeTopBar {
             theme,
             style,
         );
+        if self.databases_available && self.databases_btn_rect.w > 0.0 {
+            self.draw_icon_button(
+                sugarloaf,
+                self.databases_btn_rect,
+                DATABASES_GLYPH,
+                self.hover_databases_btn,
+                self.databases_open,
+                theme,
+                style,
+            );
+        }
         self.draw_icon_button(
             sugarloaf,
             self.conversations_btn_rect,
@@ -1537,6 +1590,48 @@ mod tests {
         // Skip sugarloaf — only refresh hit rects, which is the part
         // the tests exercise.
         bar.refresh_rects(strip, 1.0);
+    }
+
+    #[test]
+    fn databases_is_opt_in_and_clicks_without_actions_from_selection_flags() {
+        let mut bar = ChromeTopBar::new();
+        let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
+        paint_strip(&mut bar, strip);
+        assert!(!bar.databases_available);
+        assert_eq!(bar.databases_btn_rect.w, 0.0);
+        let original_conversations_x = bar.conversations_btn_rect.x;
+
+        bar.set_databases_available(true);
+        paint_strip(&mut bar, strip);
+        let btn = bar.databases_btn_rect;
+        assert_eq!(btn.w, bar.notes_btn_rect.w);
+        assert_eq!(btn.h, bar.notes_btn_rect.h);
+        assert_eq!(btn.x, bar.notes_btn_rect.x + bar.notes_btn_rect.w + BTN_GAP);
+        assert_eq!(bar.conversations_btn_rect.x, btn.x + btn.w + BTN_GAP);
+        assert_eq!(bar.take_action(), None);
+        bar.menu_open = true;
+        assert!(bar.handle_pointer_down(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5));
+        assert_eq!(bar.take_action(), Some(TopBarAction::OpenDatabases));
+        assert!(!bar.menu_open);
+
+        for sidebar in [Some("databases"), Some("notes"), Some("files"), Some("conversations"), None] {
+            bar.set_databases_open(sidebar == Some("databases"));
+            bar.set_notes_open(sidebar == Some("notes"));
+            bar.set_panel_open(sidebar == Some("files"));
+            bar.set_conversations_open(sidebar == Some("conversations"));
+            assert_eq!(bar.databases_open, sidebar == Some("databases"));
+            assert_eq!(bar.take_action(), None);
+        }
+        bar.handle_pointer_move(btn.x + 1.0, btn.y + 1.0);
+        assert!(bar.hover_databases_btn);
+        bar.clear_hover_state();
+        assert!(!bar.hover_databases_btn);
+        bar.set_databases_available(false);
+        assert_eq!(bar.databases_btn_rect.w, 0.0);
+        assert!(!bar.handle_pointer_down(btn.x + 1.0, btn.y + 1.0));
+        paint_strip(&mut bar, strip);
+        assert_eq!(bar.conversations_btn_rect.x, original_conversations_x);
+        assert_eq!(bar.take_action(), None);
     }
 
     #[test]

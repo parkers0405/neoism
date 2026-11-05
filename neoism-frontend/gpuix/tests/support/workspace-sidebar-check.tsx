@@ -13,23 +13,25 @@ import {SessionStore,type SavedSession} from "../../src/session-store";
 import {loadConfig} from "../../src/config";
 import {createAgentDaemon} from "./agent-daemon";
 import {createRecordingAppRenderer} from "./full-app-recording-renderer";
+import {withWorkspaceSidebar,type WorkspaceSidebar} from "../../src/ui/workspace-sidebar";
 const daemon=createAgentDaemon({deferCreations:false});
-daemon.workspaces.push({id:"c",host_id:"host",title:"C",root_dir:"/project/c"},{id:"d",host_id:"host",title:"D",root_dir:"/project/d"});
+daemon.workspaces.push({id:"c",host_id:"host",title:"C",root_dir:"/project/c"},{id:"d",host_id:"host",title:"D",root_dir:"/project/d"},{id:"e",host_id:"host",title:"E",root_dir:"/project/e"});
 // This scenario exercises passive Welcome actions and forbids shell allocation.
 const config={...loadConfig(["--config","/nonexistent/workspace-sidebar"],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false};
 const directory=mkdtempSync(join(tmpdir(),"neoism-sidebar-"));
 const store=new SessionStore(config,{NEOISM_GPUIX_STATE_PATH:join(directory,"recovery.json")});
 function mount(saved?:SavedSession){
  const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState(),host=createRecordingAppRenderer(),root=createRoot(host.renderer);
- if(saved)model.restoreSession(saved);else model.setUI({openWorkspaceIds:["a","b","c","d"],sidebar:"files"});
+ if(saved)model.restoreSession(saved);else model.setUI({openWorkspaceIds:["a","b","c","d","e"],sidebar:"files"});
  const [generation,setGeneration]=createSignal({config});
  const until=async(predicate:()=>boolean)=>{const deadline=Date.now()+5000;while(!predicate()){await host.pump(root);if(Date.now()>deadline)throw new Error("Workspace sidebar App fixture did not settle");await Bun.sleep(3);}await host.pump(root);};
  const ready=async()=>{model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);root.render(()=><AppGeneration value={generation()}>{value=><App model={model} config={value.config} visuals={visuals}/>}</AppGeneration>);await host.pump(root);};
  const activate=async(id:string)=>{await model.activateWorkspace(model.state.workspaces.find(workspace=>workspace.id===id)!);await host.pump(root);};
  const pick=async(name:string)=>{const button=host.find(`toggle-${name}`);assert.ok(button);root.dispatch({elementId:button.id,eventType:"mouseDown",button:0});await host.pump(root);};
- const expectView=(view:"files"|"notes"|"conversations"|null)=>{
+ const expectView=(view:WorkspaceSidebar|null)=>{
   assert.equal(!!host.find("sidebar"),view!==null);
-  assert.equal(!!host.find("file-tree"),view==="files");assert.equal(!!host.find("notes-tree"),view==="notes");assert.equal(!!host.find("conversation-list"),view==="conversations");
+   assert.equal(!!host.find("file-tree"),view==="files");assert.equal(!!host.find("notes-tree"),view==="notes");assert.equal(!!host.find("conversation-list"),view==="conversations");
+   assert.equal(!!host.find("database-sidebar"),view==="databases");
  };
  return {client,model,visuals,host,root,ready,activate,pick,expectView,async zoom(){setGeneration({config:{...config,fontSize:20,scale:20/14}});await host.pump(root);},dispose(){root.unmount();visuals.dispose();model.dispose();client.stop();}};
 }
@@ -49,22 +51,24 @@ try{
 
  await app.activate("b");await app.pick("notes");app.expectView("notes");
  await app.activate("c");await app.pick("conversations");app.expectView("conversations");
- await app.activate("d");await app.pick("files");app.expectView(null);
-   let expected:Record<string,"files"|"notes"|"conversations"|null>={a:"files",b:"notes",c:"conversations",d:null};
+  await app.activate("d");await app.pick("files");app.expectView(null);
+  await app.activate("e");app.model.setUI({workspaceSidebars:withWorkspaceSidebar(app.model.state.ui,"e","databases")});await app.host.pump(app.root);app.expectView("databases");
+  assert.ok(app.host.find("database-browse"));assert.equal(app.host.find("database-tabs"),undefined,"Database tables use Neoism buffer tabs, not a nested tab strip");
+  let expected:Record<string,WorkspaceSidebar|null>={a:"files",b:"notes",c:"conversations",d:null,e:"databases"};
  assert.deepEqual(app.model.state.ui.workspaceSidebars,expected);
- for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view as "files"|"notes"|"conversations"|null);}
+  for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view);}
   // Explicit close releases only this workspace's cached sidebar preference.
  assert.equal(await app.model.closeWorkspace(false,"b"),true);assert.ok(!app.model.windowWorkspaces().some(workspace=>workspace.id==="b"));
   assert.ok(!app.model.state.workspaces.some(workspace=>workspace.id==="b"));
   assert.ok([...app.visuals.trees.keys()].every(key=>JSON.parse(key)[0]!=="b"));
   assert.ok([...app.visuals.treeViewports.keys()].every(key=>JSON.parse(key)[0]!=="b"));
-  expected={a:"files",c:"conversations",d:null};
+   expected={a:"files",c:"conversations",d:null,e:"databases"};
   await app.activate("a");app.expectView("files");
   await app.zoom();app.expectView("files");
- for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view as "files"|"notes"|"conversations"|null);}
+  for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view);}
  await app.activate("a");store.write(app.model.captureSession());const saved=store.read()!;assert.deepEqual(saved.ui.workspaceSidebars,expected);
  app.dispose();app=mount(saved);await app.ready();
- for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view as "files"|"notes"|"conversations"|null);}
+  for(const[id,view]of Object.entries(expected)){await app.activate(id);app.expectView(view);}
   assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.filter(request=>request.tag==="SubmitPrompt").length,0);
    const creates=daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length;
    const resolves=daemon.workspaceRequests.filter(request=>request.tag==="ResolveInitialWorkspace").length;
@@ -80,5 +84,5 @@ try{
   }
    assert.equal(app.model.windowWorkspaces().length,1);assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="CreateHostWorkspace").length,creates);
    assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="ResolveInitialWorkspace").length,resolves+1);
-   console.log(JSON.stringify({actualApp:true,noWindow:true,workspacePlusNoEmptyFrame:true,independentFourStates:true,closedWorkspaceReleased:true,fontGenerationRetained:true,coldRecoveryRetained:true,noPtyOrPromptDuringSwitches:true,localWelcomeNoReplacement:true,emptyWelcomeAction:true}));
+   console.log(JSON.stringify({actualApp:true,noWindow:true,workspacePlusNoEmptyFrame:true,independentFiveStates:true,closedWorkspaceReleased:true,fontGenerationRetained:true,coldRecoveryRetained:true,databaseSidebarIntegrated:true,noPtyOrPromptDuringSwitches:true,localWelcomeNoReplacement:true,emptyWelcomeAction:true}));
 }finally{app.dispose();daemon.stop();rmSync(directory,{recursive:true,force:true});}

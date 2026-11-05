@@ -79,6 +79,10 @@ fn completion_reply_json(request_id: Option<u64>, message: ServerMessage) -> ser
 
 #[derive(Debug, Serialize)]
 pub(crate) enum ServiceServerMessage {
+    DatabaseReply {
+        request_id: u64,
+        message: neoism_protocol::database::DatabaseReply,
+    },
     FilesReply {
         request_id: u64,
         message: FilesServerMessage,
@@ -261,6 +265,32 @@ pub(crate) async fn handle_socket(
     // push lane so the socket pump never blocks behind them.
     let editor_query_tx = push_tx.clone();
     let git_blame_tx = push_tx.clone();
+    // Bounded FIFO; SQLite reads/writes cannot stall PTY forwarding or spawn
+    // unbounded workers. Replies use a separate bounded lane for backpressure.
+    let (database_tx, mut database_requests) = tokio::sync::mpsc::channel::<(u64, Option<String>, neoism_protocol::database::DatabaseRequest)>(8);
+    let (database_replies, mut database_rx) = tokio::sync::mpsc::channel(2);
+    let database_scope = device.as_ref().and_then(|device| device.workspace_id.clone());
+    let database_workspaces = workspace_manager.clone();
+    tokio::spawn(async move {
+        while let Some((request_id, root, request)) = database_requests.recv().await {
+            if database_replies.is_closed() { break; }
+            let scope = database_scope.clone();
+            let workspaces = database_workspaces.clone();
+            let resolved = tokio::task::spawn_blocking(move || {
+                let authorized_root = match scope.as_deref() {
+                    Some(id) => Some(agent_workspace_root(&workspaces, id)
+                        .ok_or_else(|| "Authorized database workspace is unavailable".to_string())?),
+                    None => None,
+                };
+                database_request_root(root.as_deref(), authorized_root.as_deref())
+            }).await;
+            let message = match resolved {
+                Ok(Ok(root)) => crate::database::handle(&root, request).await,
+                error => crate::database::error_reply(format!("Invalid database workspace: {error:?}")),
+            };
+            if database_replies.send(ServiceServerMessage::DatabaseReply { request_id, message }).await.is_err() { break; }
+        }
+    });
     // One FIFO for ordinary Git reads AND mutations. Never await queue capacity
     // in the socket pump: a slow Git operation must not stall PTY forwarding.
     let (git_tx, git_requests) = tokio::sync::mpsc::channel(GIT_QUEUE_CAPACITY);
@@ -454,6 +484,10 @@ pub(crate) async fn handle_socket(
                     poll_task.abort();
                     return;
                 }
+                continue;
+            }
+            Some(reply) = database_rx.recv() => {
+                if send_json(&mut sink, &reply).await.is_err() { return; }
                 continue;
             }
             diag = lsp_diagnostics_rx.recv() => {
@@ -823,6 +857,18 @@ pub(crate) async fn handle_socket(
         }
         if let Ok(msg) = serde_json::from_str::<ServiceClientMessage>(&text) {
             match msg {
+                ServiceClientMessage::Database { request_id, workspace_root, message } => {
+                    let required = if message.is_mutation() { Permission::WriteFiles } else { Permission::ReadFiles };
+                    let error = if let Err(denial) = check_permission(&device, required) {
+                        Some(match denial { ServerMessage::Error { message } => message, _ => "Permission denied".into() })
+                    } else if database_tx.try_send((request_id, workspace_root, message)).is_err() {
+                        Some("Database request queue is full".into())
+                    } else { None };
+                    if let Some(message) = error {
+                        let reply = ServiceServerMessage::DatabaseReply { request_id, message: neoism_protocol::database::DatabaseReply::Error { message } };
+                        if send_json(&mut sink, &reply).await.is_err() { return; }
+                    }
+                }
                 ServiceClientMessage::Pty {
                     request_id,
                     message,
@@ -2184,6 +2230,25 @@ pub(crate) async fn handle_socket(
     tracing::debug!("websocket connection closed");
 }
 
+/// Paired workspace-bound devices must not use a root override (or the
+/// daemon-wide default) to access another workspace. Called off the socket loop.
+fn database_request_root(
+    supplied: Option<&str>,
+    authorized_root: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, String> {
+    let supplied = supplied.filter(|root| !root.trim().is_empty());
+    let root = match (supplied, authorized_root) {
+        (None, Some(root)) => root.to_path_buf(),
+        _ => resolve_request_workspace_root(supplied)?,
+    };
+    if let Some(authorized) = authorized_root {
+        if !root.starts_with(authorized) {
+            return Err("Database is outside this device's authorized workspace scope".into());
+        }
+    }
+    Ok(root)
+}
+
 fn directory_permission_denial(
     message: &ClientMessage,
     device: &Option<crate::auth::DeviceRecord>,
@@ -2254,6 +2319,21 @@ mod directory_authorization_tests {
         device.workspace_id = Some("another-workspace".into());
         assert!(matches!(directory_permission_denial(&msg, &Some(device), &manager), Some(ServerMessage::Error { message }) if message.contains("scope")));
         assert_eq!(pty_client_session_id(&msg), None, "completion cannot attach itself");
+    }
+    #[test]
+    fn database_root_scope_defaults_to_authorized_workspace_and_rejects_escape() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = crate::path::canonicalize(project.path()).unwrap();
+        let other = outside.path().to_str().unwrap();
+        assert_eq!(database_request_root(None, Some(&root)).unwrap(), root);
+        assert_eq!(database_request_root(Some(""), Some(&root)).unwrap(), root);
+        assert!(database_request_root(Some(other), Some(&root)).is_err());
+        assert!(database_request_root(Some("relative"), Some(&root)).is_err());
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(outside.path(), project.path().join("escape")).unwrap();
+            assert!(database_request_root(project.path().join("escape").to_str(), Some(&root)).is_err());
+        }
     }
     #[test]
     fn directory_write_capability_and_workspace_scope_are_correlated() {

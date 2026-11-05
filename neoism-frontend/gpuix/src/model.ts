@@ -30,6 +30,8 @@ import {catalogAgentMessage} from "./agent/catalog-event";
 import {FamilyStreamOwnership,CompletedTranscriptRefresh} from "./agent/transcript-sync";
 import {agentFamily,agentFamilyRoot,noteAgentFamily} from "./agent/family";
 import type { GitReviewDescriptor } from "./git/GitReviewController";
+import { DatabaseController } from "./database/DatabaseController";
+import type { DatabaseConnection } from "./database/types";
 import { DirectorySchema, FileSchema, HistoryMessageSchema, ThreadSchema, TreeSchema, WorkspaceSchema,
   UsageSchema, TodoSchema, ProviderSchema, AgentSchema, SkillSchema, ProviderStateSchema, expectVariant, isRecord, variant,
   type ConnectionState, type Directory, type HistoryMessage, type Thread, type Todo, type Usage,
@@ -39,7 +41,7 @@ import { DirectorySchema, FileSchema, HistoryMessageSchema, ThreadSchema, TreeSc
 export type Surface = {
   id: string; title: string; workspaceId: string;
   kind: "file" | "agent" | "terminal" | "page" | "welcome" | "git";
-  page?: "extensions"; document?: { kind: "config"; revision: string; writable: boolean };
+  page?: "extensions" | "database"; databaseTable?: string; document?: { kind: "config"; revision: string; writable: boolean };
   path?: string; rootDir?: string; sessionId?: string; agentRootSessionId?: string;
   git?: GitReviewDescriptor; gitReveal?: number; gitEditorIds?: string[];
   /** Canonical source owner for inline Git editing, without a second visible tab. */
@@ -113,6 +115,8 @@ export class WorkspaceModel {
   private updateDepth = 0;
   private updatePending = false;
   readonly editors: Map<string, NativeEditor>;
+  private readonly databases = new Map<string, DatabaseController>();
+  private readonly databaseSchemas = new Map<string, DatabaseController>();
   readonly agentSdk: AgentSdk;
   readonly layouts = new Map<string, WorkspaceLayout>();
   private editorViews = new Map<string, { surfaceId: string; editor: NativeEditor }>();
@@ -138,6 +142,7 @@ export class WorkspaceModel {
     this.agentSdk = new AgentSdk(config);
     this.presence = new PresenceController(client,config);
     this.collaboration=new DocumentController(client,config,this.presence,this.report);
+    this.cleanups.push(() => { for (const database of [...this.databases.values(), ...this.databaseSchemas.values()]) database.dispose(); this.databases.clear(); this.databaseSchemas.clear(); });
     this.editors = seed?.editors || new Map();
     if (seed) {
       // Hot remounts retain the current view; a cold recovery opens Welcome.
@@ -272,6 +277,7 @@ export class WorkspaceModel {
     this.cleanups.push(this.client.subscribe(this.enqueueReceive));
     this.cleanups.push(this.client.subscribeStatus((connection) => {
       this.update({ connection });
+      if (connection.phase === "connected") for (const database of [...this.databases.values(), ...this.databaseSchemas.values()]) void database.initialize();
       if (connection.phase === "connected") void this.hydrate();
       else {this.presence.leaveWorkspace();this.epoch++;}
     }));
@@ -313,6 +319,11 @@ export class WorkspaceModel {
     // paint a loading skeleton forever and could not be closed. Drop it.
     const known = new Set(this.state.surfaces.map((s) => s.id));
     for (const leaf of [...layout.frame.leaves]) if (!leaf.surfaceId || !known.has(leaf.surfaceId)) layout.close(leaf.leaf);
+    // Older saved routes predate page metadata; recover it from the real surface,
+    // not from a table title or a database-looking route id.
+    for (const surface of this.state.surfaces.filter(s => s.workspaceId === workspaceId && s.page)) {
+      if (layout.frame.leaves.some(leaf => leaf.surfaceId === surface.id && leaf.page !== surface.page)) layout.rename(surface);
+    }
     if (!layout.frame.leaves.length) for (const surface of this.state.surfaces.filter((s) => s.workspaceId === workspaceId && !s.hidden)) layout.open(surface);
     // The layout owns this listener and clears it on dispose.
     layout.subscribe((frame) => {
@@ -333,6 +344,60 @@ export class WorkspaceModel {
   openPage = (page: "extensions") => {
     const workspace = this.state.activeWorkspace; if (!workspace) throw new Error("Select a workspace first");
     this.addSurface({ id: `page:${workspace.id}:${page}`, kind: "page", page, title: "Extensions", workspaceId: workspace.id });
+  };
+  getDatabase = (surface: Surface): DatabaseController => {
+    if (surface.page !== "database" || !surface.path || !surface.rootDir) throw new Error("Missing database path");
+    let controller = this.databases.get(surface.id);
+    if (!controller) {
+      let dirty = false;
+      controller = new DatabaseController(this.client, surface.rootDir, surface.path, () => {
+        const next = !!controller?.state.pending || !!controller?.state.applying;
+        if (next !== dirty) { dirty = next; this.update({ surfaces: [...this.state.surfaces] }); }
+      }, surface.databaseTable);
+      this.databases.set(surface.id, controller);
+    }
+    if (this.client.state.phase === "connected") void controller.initialize();
+    return controller;
+  };
+  databaseConnections = (workspaceId = this.state.activeWorkspace?.id): DatabaseConnection[] => {
+    if (!workspaceId) return [];
+    const stored = isRecord(this.state.ui.databaseConnections) ? this.state.ui.databaseConnections[workspaceId] : undefined;
+    const connections = new Map<string, DatabaseConnection>();
+    if (Array.isArray(stored)) for (const item of stored) {
+      if (isRecord(item) && typeof item.id === "string" && typeof item.title === "string" && typeof item.path === "string" && typeof item.rootDir === "string" && item.workspaceId === workspaceId)
+        connections.set(item.id, item as unknown as DatabaseConnection);
+    }
+    for (const surface of this.state.surfaces) if (surface.page === "database" && surface.workspaceId === workspaceId && surface.path && surface.rootDir) {
+      const id = `database:${workspaceId}:${surface.rootDir}:${surface.path}`;
+      if (!connections.has(id) && ![...connections.values()].some(connection=>connection.path===surface.path&&connection.rootDir===surface.rootDir)) connections.set(id, { id, workspaceId, path: surface.path, rootDir: surface.rootDir, title: surface.path.split(/[\\/]/).pop() || surface.path });
+    }
+    return [...connections.values()];
+  };
+  activeDatabaseConnection = (workspaceId = this.state.activeWorkspace?.id): DatabaseConnection | undefined => {
+    const selected = isRecord(this.state.ui.databaseSelections) && workspaceId ? this.state.ui.databaseSelections[workspaceId] : undefined;
+    const connections = this.databaseConnections(workspaceId);
+    return connections.find(connection => connection.id === selected) || connections[0];
+  };
+  selectDatabaseConnection = (id: string, workspaceId = this.state.activeWorkspace?.id) => {
+    if (!workspaceId || !this.databaseConnections(workspaceId).some(connection => connection.id === id)) return;
+    const selected = isRecord(this.state.ui.databaseSelections) ? this.state.ui.databaseSelections : {};
+    if (selected[workspaceId] !== id) this.setUI({ databaseSelections: { ...selected, [workspaceId]: id } });
+  };
+  getDatabaseSchema = (connection: DatabaseConnection): DatabaseController => {
+    let controller = this.databaseSchemas.get(connection.id);
+    if (!controller) { controller = new DatabaseController(this.client, connection.rootDir, connection.path, undefined, null); this.databaseSchemas.set(connection.id, controller); }
+    if (this.client.state.phase === "connected") void controller.initialize();
+    return controller;
+  };
+  openDatabaseTable = (connection: DatabaseConnection, table: string) => {
+    if (this.disposed || this.closingWorkspaces.has(connection.workspaceId) || !this.state.workspaces.some(workspace => workspace.id === connection.workspaceId)) return;
+    const schema = this.getDatabaseSchema(connection);
+    if (!schema.state.objects.some(object => object.name === table)) return;
+    const id = `${connection.id}:table:${encodeURIComponent(table)}`;
+    this.addSurface({ id, kind: "page", page: "database", databaseTable: table, title: table,
+      path: connection.path, rootDir: connection.rootDir, workspaceId: connection.workspaceId });
+    schema.highlightTable(table);
+    this.selectDatabaseConnection(connection.id, connection.workspaceId);
   };
   openGitReview = (descriptor: GitReviewDescriptor) => {
     const workspace = this.state.activeWorkspace;
@@ -377,7 +442,8 @@ export class WorkspaceModel {
       return true;
     }
     const layout=this.getLayout(surface.workspaceId);if(!layout.frame.leaves.some(entry=>entry.leaf===leaf&&entry.surfaceId===id))return false;
-    if(!discard&&this.surfaceDirty(id)&&layout.frame.leaves.filter(entry=>entry.surfaceId===id).length<2){this.report(new Error("Unsaved changes. Save this file or use :q! to discard it."));return false;}
+    if(this.databases.get(id)?.state.applying){this.report(new Error("Wait for the database transaction to finish before closing."));return false;}
+    if(!discard&&this.surfaceDirty(id)&&layout.frame.leaves.filter(entry=>entry.surfaceId===id).length<2){this.report(new Error(this.databases.has(id)?"Apply or discard the database changes before closing.":"Unsaved changes. Save this file or use :q! to discard it."));return false;}
     this.transaction(()=>{
       const key=`${id}@${leaf}`,view=this.editorViews.get(key);this.markdownViews.get(key)?.markdown.dispose();this.markdownViews.delete(key);delete this.recoveredMarkdownViews[key];if(view)this.collaboration.detach(view.editor);view?.editor.dispose();this.editorViews.delete(key);delete this.recoveredViews[`view:${key}`];
       layout.close(leaf);
@@ -632,6 +698,8 @@ export class WorkspaceModel {
       const opened=this.windowWorkspaces(),index=opened.findIndex(workspace=>workspace.id===workspaceId),workspace=opened[index];
       if(!workspace)return false;
       const localSurfaces=()=>this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId);
+      const databaseApplying=()=>localSurfaces().some(surface=>this.databases.get(surface.id)?.state.applying);
+      if(databaseApplying()){this.report(new Error("Wait for the database transaction to finish before closing this workspace."));return false;}
       const draftKeys=new Set([`home:${workspaceId}`,...localSurfaces().filter(surface=>!surface.sessionId).map(surface=>this.composerDraftKey(undefined,surface.id))]);
       const hasUnsaved=()=>localSurfaces().some(surface=>this.surfaceDirty(surface.id))||[...draftKeys].some(key=>{const draft=this.state.composerDrafts[key];return !!draft&&(!!draft.text||draft.attachments.length>0);});
       if(!discard&&hasUnsaved()){this.report(new Error("Unsaved changes or unsent drafts. Save this workspace or use :qall! to discard it."));return false;}
@@ -649,6 +717,7 @@ export class WorkspaceModel {
           else{++this.epoch;this.presence.leaveWorkspace();this.update({activeWorkspace:undefined,activeSurfaceId:undefined,loading:false});}
         }
         if(!discard&&hasUnsaved())throw new Error("Unsaved changes or unsent drafts. Save this workspace or use :qall! to discard it.");
+        if(databaseApplying())throw new Error("Wait for the database transaction to finish before closing this workspace.");
         const tree=Schema.decodeUnknownSync(TreeSchema)(expectVariant(await this.run(this.client.request("Workspace",{CloseWindowWorkspace:{workspace_id:workspaceId}})),"HostWorkspaceTree"));
         if(this.disposed)return false;
         this.transaction(()=>{
@@ -661,10 +730,11 @@ export class WorkspaceModel {
             this.closeSurface(surface.id,true);
           }
           this.layouts.get(workspaceId)?.dispose();this.layouts.delete(workspaceId);
+          for(const connection of this.databaseConnections(workspaceId)){this.databaseSchemas.get(connection.id)?.dispose();this.databaseSchemas.delete(connection.id);}
           for(const key of this.workspaceNavigation.keys())if(JSON.parse(key)[0]===workspaceId)this.workspaceNavigation.delete(key);
           this.seededWorkspaces.delete(workspaceId);
           const ui:Record<string,unknown>={};
-          for(const key of ["layouts","workspaceSidebars","mainTerminals","terminalWorkspaceRoots","explicitWorkspaceRoots"]){
+          for(const key of ["layouts","workspaceSidebars","mainTerminals","terminalWorkspaceRoots","explicitWorkspaceRoots","databaseConnections","databaseSelections"]){
             if(isRecord(this.state.ui[key])){const map={...this.state.ui[key]};delete map[workspaceId];ui[key]=map;}
           }
           this.setUI(ui);
@@ -858,6 +928,7 @@ export class WorkspaceModel {
     const to=directory?`${directory}/${name}`:name;
     if(to===from)return;
     if(directory===from||directory.startsWith(from+"/"))throw new Error("A folder cannot be moved inside itself.");
+    if(this.state.surfaces.some(surface=>surface.page==="database"&&surface.workspaceId===workspace.id&&surface.rootDir===root&&surface.path&&(surface.path===from||surface.path.startsWith(from+"/"))))throw new Error("Close the database tab before moving or renaming its file.");
     // Older daemons allow replacing a destination. Check the authoritative
     // listing, not our potentially stale navigation cache, before requesting it.
     const listing=Schema.decodeUnknownSync(DirectorySchema)(expectVariant(await this.run(this.client.request("Files",{ListDir:{path:directory}},root)),"DirListing"));
@@ -899,6 +970,21 @@ export class WorkspaceModel {
     const workspace = this.state.activeWorkspace;
     const root = rootOverride || workspace?.root_dir;
     if (!workspace || !root || this.closingWorkspaces.has(workspace.id)) return;
+    if (/\.(db|sqlite|sqlite3|db3)$/i.test(path)) {
+      const connection: DatabaseConnection = { id: `database:${workspace.id}:${root}:${path}`, workspaceId: workspace.id, rootDir: root, path, title: path.split(/[\\/]/).pop() || path };
+      const connections = this.databaseConnections(workspace.id);
+      const stored = isRecord(this.state.ui.databaseConnections) ? this.state.ui.databaseConnections : {};
+      const sidebars = isRecord(this.state.ui.workspaceSidebars) ? this.state.ui.workspaceSidebars : {};
+      this.setUI({ databaseConnections: { ...stored, [workspace.id]: connections.some(item => item.id === connection.id) ? connections : [...connections, connection] }, workspaceSidebars: { ...sidebars, [workspace.id]: "databases" } });
+      this.selectDatabaseConnection(connection.id, workspace.id);
+      const schema = this.getDatabaseSchema(connection);
+      if (this.client.state.phase === "connected") {
+        await schema.initialize();
+        const table = schema.state.table || schema.state.objects[0]?.name;
+        if (table && this.state.activeWorkspace?.id === workspace.id) this.openDatabaseTable(connection, table);
+      }
+      return;
+    }
     const declaredRoot=this.state.workspaces.find(entry=>entry.id===workspace.id)?.root_dir||workspace.root_dir;
     const existing=this.state.surfaces.find(surface=>surface.kind==="file"&&!surface.document&&surface.workspaceId===workspace.id&&surface.path===path&&(surface.rootDir||declaredRoot)===root);
     const baseId=`file:${workspace.id}:${root !== declaredRoot ? root + ":" : ""}${path}`;
@@ -1009,6 +1095,10 @@ export class WorkspaceModel {
   selectSurface = (id: string, preserveLeaf = false) => {
     const surface = this.state.surfaces.find((s) => s.id === id);
     if (!surface) return;
+    if (surface.page === "database") {
+      const connection = this.databaseConnections(surface.workspaceId).find(connection => connection.path === surface.path && connection.rootDir === surface.rootDir);
+      if (connection) { this.selectDatabaseConnection(connection.id, surface.workspaceId); if (surface.databaseTable) this.getDatabaseSchema(connection).highlightTable(surface.databaseTable); }
+    }
     const changed = this.state.activeSurfaceId !== id;
     this.transaction(() => {
       this.update({ activeSurfaceId: id });
@@ -1041,13 +1131,16 @@ export class WorkspaceModel {
   };
   private surfaceDirty(id:string):boolean{
     const surface=this.state.surfaces.find(surface=>surface.id===id);
+    const database = this.databases.get(id);
+    if (database) return database.state.pending > 0 || database.state.applying;
     if(surface?.kind==="git"&&Array.isArray(surface.gitEditorIds))return surface.gitEditorIds.some(owner=>owner!==id&&this.surfaceDirty(owner));
     const editor = this.editors.get(id);
     return (editor ? editor.frame.dirty : recoveredEditorState(this.recoveredViews[id])?.dirty)===true||[...this.editorViews.values()].some(view=>view.surfaceId===id&&view.editor.frame.dirty)||[...this.markdownViews.values()].some(view=>view.surfaceId===id&&view.markdown.frame.dirty);
   }
   closeSurface = (id: string, discard = false) => {
     const editor = this.editors.get(id);
-    if (!discard&&this.surfaceDirty(id)) { this.update({ error: "Save this file before closing it (Ctrl+S)." }); return; }
+    if (this.databases.get(id)?.state.applying) { this.report(new Error("Wait for the database transaction to finish before closing.")); return; }
+    if (!discard&&this.surfaceDirty(id)) { this.update({ error: this.databases.has(id) ? "Apply or discard the database changes before closing." : "Save this file before closing it (Ctrl+S)." }); return; }
     const closing = this.state.surfaces.find(surface => surface.id === id);
     if(closing?.kind==="welcome")this.releaseHomeTerminal(id);
     if (closing?.kind === "git") for (const ownerId of closing.gitEditorIds || []) {
@@ -1057,6 +1150,7 @@ export class WorkspaceModel {
       if (owner?.hidden && !usedByAnotherReview && !visible) this.closeSurface(ownerId, discard);
     }
     const targetLayout = closing?.workspaceId;
+    this.databases.get(id)?.dispose(); this.databases.delete(id);
     if (targetLayout&&!this.closingWorkspaces.has(targetLayout)) this.getLayout(targetLayout).closeSurface(id);
     for (const [key, view] of this.markdownViews) if (view.surfaceId === id) { view.markdown.dispose(); this.markdownViews.delete(key); delete this.recoveredMarkdownViews[key]; }
     for (const [key, view] of this.editorViews) if (view.surfaceId === id) { this.collaboration.detach(view.editor);view.editor.dispose(); this.editorViews.delete(key); }

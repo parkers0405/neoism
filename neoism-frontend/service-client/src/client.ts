@@ -5,11 +5,12 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import WebSocket from "ws";
 import { batch } from "solid-js";
+import type { DatabaseRequest } from "./protocol";
 import { parseEnvelope, variant, isRecord, type WireEvent, type ConnectionState, type Family,
   type WorkspaceClientMessage, type FilesClientMessage, type AgentClientMessage, type PtyMessage, type SearchClientMessage, type ConfigClientMessage, type EditorClientMessage, type DiagnosticsClientMessage, type GitClientMessage, type CrdtClientMessage } from "./protocol";
 
 export class DaemonError extends Data.TaggedError("DaemonError")<{ message: string }> {}
-type Messages = { Workspace: WorkspaceClientMessage; Files: FilesClientMessage; Agent: AgentClientMessage; Pty: PtyMessage; Search: SearchClientMessage; Config: ConfigClientMessage; Editor: EditorClientMessage; Diagnostics: DiagnosticsClientMessage; Git: GitClientMessage; Crdt:CrdtClientMessage };
+type Messages = { Database: DatabaseRequest; Workspace: WorkspaceClientMessage; Files: FilesClientMessage; Agent: AgentClientMessage; Pty: PtyMessage; Search: SearchClientMessage; Config: ConfigClientMessage; Editor: EditorClientMessage; Diagnostics: DiagnosticsClientMessage; Git: GitClientMessage; Crdt:CrdtClientMessage };
 interface Pending { family: Family; resume: (result: Effect.Effect<unknown, DaemonError>) => void; timer: ReturnType<typeof setTimeout> }
 export type SocketFactory = (endpoint: string, token?: string) => WebSocket;
 export interface ConnectionFailure { reason:string; attempt:number; quietMs:number; lastMessage?:{family:Family;kind:string;bytes:number} }
@@ -185,7 +186,7 @@ export class DaemonConnection {
     const entry = family === "Search" ? variant(message) : undefined;
     const payload = entry && entry[0] !== "CancelSearch" && isRecord(entry[1]) ? { [entry[0]]: { ...entry[1], req_id: requestId } } : message;
     this.socket.send(JSON.stringify({ [family]: { request_id: requestId, message: payload,
-      ...(workspaceRoot && ["Files", "Search", "Git", "Editor"].includes(family) ? { workspace_root: workspaceRoot } : {}) } }));
+      ...(workspaceRoot && ["Files", "Search", "Git", "Editor", "Database"].includes(family) ? { workspace_root: workspaceRoot } : {}) } }));
     return requestId;
   }
   request<F extends Family>(family: F, message: Messages[F], workspaceRoot?: string): Effect.Effect<unknown, DaemonError> {

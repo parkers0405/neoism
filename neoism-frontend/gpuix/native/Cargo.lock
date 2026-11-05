@@ -2653,10 +2653,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "neoism-product-docs"
-version = "0.7.143-nightly.20261105.3"
-
-[[package]]
 name = "neoism-protocol"
 version = "0.7.143-nightly.20261105.3"
 dependencies = [
@@ -2740,7 +2736,6 @@ version = "0.7.143-nightly.20261105.3"
 dependencies = [
  "dirs",
  "dunce",
- "neoism-product-docs",
  "notify",
  "serde",
  "serde_json",

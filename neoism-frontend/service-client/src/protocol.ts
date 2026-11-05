@@ -6,7 +6,8 @@ export type { WorkspaceClientMessage, FilesClientMessage, AgentClientMessage, At
   CrdtServerMessage, CrdtCursorPosition, CrdtSelectionRange, CrdtPeerPresence,
   CrdtClientMessage, EditorClientMessage, PtyClientMessage as PtyMessage,
 } from "../../../neoism-protocol/typescript/types";
-export type Family = "Workspace" | "Files" | "Agent" | "Pty" | "Search" | "Config" | "Editor" | "Diagnostics" | "Git" | "Crdt";
+export type { DatabaseRequest, DatabaseReply } from "../../../neoism-protocol/typescript/database";
+export type Family = "Workspace" | "Files" | "Agent" | "Pty" | "Search" | "Config" | "Editor" | "Diagnostics" | "Git" | "Crdt" | "Database";
 export interface WireEvent { family: Family; requestId: number; message: unknown }
 export interface ConnectionState {
   phase: "connecting" | "authenticating" | "connected" | "waiting" | "auth-rejected" | "closed";
@@ -114,7 +115,7 @@ export function parseEnvelope(raw: string): WireEvent | undefined {
   if (["PtyCreated", "PtyOutput", "PtyClosed", "SessionCwd", "SessionProgram", "TerminalDirectoryChanged", "TerminalDirectoryChangeFailed"].includes(tag) && isRecord(body))
     return { family: "Pty", requestId: 0, message: { [tag]: body } };
   const family = tag.replace(/Reply$/, "");
-  if (!["Workspace", "Files", "Agent", "Pty", "Search", "Config", "Editor", "Diagnostics", "Git", "Crdt"].includes(family) || !isRecord(body)) return;
+  if (!["Workspace", "Files", "Agent", "Pty", "Search", "Config", "Editor", "Diagnostics", "Git", "Crdt", "Database"].includes(family) || !isRecord(body)) return;
   if (typeof body.request_id !== "number" || !Number.isSafeInteger(body.request_id) || body.request_id < 0 || !("message" in body)) return;
   const inner = variant(body.message);
   const requestId = family === "Search" && inner && isRecord(inner[1]) && typeof inner[1].req_id === "number" ? inner[1].req_id : body.request_id;

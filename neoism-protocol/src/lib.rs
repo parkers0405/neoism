@@ -11,6 +11,7 @@ pub mod config_intelligence;
 pub mod crdt;
 pub mod cursor;
 pub mod diagnostics;
+pub mod database;
 pub mod editor;
 pub mod files;
 pub mod git;

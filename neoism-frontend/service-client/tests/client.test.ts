@@ -6,6 +6,7 @@ import {
   DaemonConnection, DaemonError, Daemon, daemonLayer,
   parseEnvelope, expectVariant, WorkspaceSchema,
   type WorkspaceClientMessage,
+  type DatabaseRequest, type DatabaseReply,
 } from "../src";
 
 class FakeSocket extends EventEmitter {
@@ -133,6 +134,62 @@ test("Effect service layer owns connection lifecycle", async () => {
   const connection = await Effect.runPromise(Effect.scoped(Effect.provide(Effect.gen(function* () { return yield* Daemon; }), daemonLayer(client))));
   expect(connection).toBe(client);
   expect(client.state.phase).toBe("closed");
+});
+
+test("Database envelopes validate request ids and retain canonical reply types", () => {
+  const message = { Applied: { affected: 1 } } satisfies DatabaseReply;
+  expect(parseEnvelope(JSON.stringify({ DatabaseReply: { request_id: 4, message } }))).toEqual({ family: "Database", requestId: 4, message });
+  for (const request_id of [-1, 1.5, "4", null])
+    expect(parseEnvelope(JSON.stringify({ DatabaseReply: { request_id, message } }))).toBeUndefined();
+});
+
+test("real Database wire requests route workspace roots and scope replies/errors by family and id", async () => {
+  const received: unknown[] = [];
+  const rows = { Rows: { columns: ["id"], rows: [[{ kind: "integer", value: "9223372036854775807" }]], identities: [null], total: 1, editable: false } } satisfies DatabaseReply;
+  const server = Bun.serve({
+    hostname: "127.0.0.1", port: 0,
+    fetch(request, server) {
+      return server.upgrade(request) ? undefined : new Response("Upgrade required", { status: 400 });
+    },
+    websocket: {
+      message(socket, raw) {
+        const envelope = JSON.parse(raw.toString());
+        if (envelope.Workspace) {
+          socket.send(JSON.stringify({ WorkspaceReply: { request_id: 0, message: { HelloAck: { accepted: true } } } }));
+          return;
+        }
+        received.push(envelope);
+        const { request_id, message } = envelope.Database;
+        // Neither an unrelated family's denial nor a stale Database denial may settle this request.
+        socket.send(JSON.stringify({ FilesReply: { request_id, message: { Error: { message: "wrong family" } } } }));
+        socket.send(JSON.stringify({ DatabaseReply: { request_id: request_id + 100, message: { Error: { message: "wrong id" } } } }));
+        socket.send(JSON.stringify({ DatabaseReply: { request_id, message: message.Apply ? { Error: { message: "database write denied" } } : rows } }));
+      },
+    },
+  });
+  const client = new DaemonConnection({ endpoint: `ws://127.0.0.1:${server.port}/session` });
+  clients.push(client);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Connection timed out")), 2000);
+      client.subscribeStatus(state => { if (state.phase === "connected") { clearTimeout(timer); resolve(); } });
+      client.start();
+    });
+    const browse = { Browse: { path: "data.sqlite", table: "items", limit: 20, offset: 0, filters: [] } } satisfies DatabaseRequest;
+    const reply = await Effect.runPromise(client.request("Database", browse, "/workspace/a"));
+    expect(reply).toEqual(rows);
+    const mutation = { Apply: { path: "data.sqlite", table: "items", changes: [{ kind: "insert", values: { id: { kind: "integer", value: "9223372036854775807" } } }] } } satisfies DatabaseRequest;
+    const error = await Effect.runPromise(client.request("Database", mutation, "/workspace/b")).catch(error => error);
+    expect(error).toBeInstanceOf(DaemonError);
+    expect(error).toMatchObject({ message: "database write denied" });
+    expect(received).toEqual([
+      { Database: { request_id: 1, workspace_root: "/workspace/a", message: browse } },
+      { Database: { request_id: 2, workspace_root: "/workspace/b", message: mutation } },
+    ]);
+  } finally {
+    client.stop();
+    await server.stop(true);
+  }
 });
 
 test("wire exports retain schema helpers and legacy PTY/search envelope decoding", () => {

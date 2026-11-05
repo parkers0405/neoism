@@ -28,6 +28,7 @@ impl ChromeTopBar {
             ("topbar-menu", "Menu", self.menu_btn_rect),
             ("toggle-files", "Files", self.panel_btn_rect),
             ("toggle-notes", "Notes", self.notes_btn_rect),
+            ("toggle-databases", "Databases", self.databases_btn_rect),
             ("toggle-conversations", "Conversations", self.conversations_btn_rect),
             ("open-finder", "Find", self.search_btn_rect),
             ("open-servers", "Servers", self.server_btn_rect),

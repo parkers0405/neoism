@@ -17,5 +17,11 @@ try{
  select(a);root.flush();assert.deepEqual(a.measuredViewport,{width:900,height:600,scale:config.scale},"Returning chat must not borrow the outgoing editor's one-row-taller viewport");
  assert.deepEqual(captured.at(-1),{id:"a",width:900,height:600,scale:config.scale});
  select(fresh);root.flush();assert.deepEqual(captured.at(-1),{id:"new",width:1100,height:628,scale:config.scale},"Never-visited pages receive the size before their component captures it");
+ fresh.open({id:"opaque",title:"Extensions",kind:"page",page:"database"});root.flush();
+ const hasGlyph=(glyph:string)=>[...host.nodes.values()].some(node=>node.text===glyph);
+ assert.ok(hasGlyph("\uf0ce"),"Database metadata renders a real table glyph even with an unrelated title");
+ assert.ok(!hasGlyph("\uf12e"),"Database tabs must not render the extension puzzle");
+ fresh.open({id:"database-looking-id",title:"apples",kind:"page",page:"extensions"});root.flush();
+ assert.ok(hasGlyph("\uf12e"),"Extension metadata keeps the puzzle regardless of id/title");
  console.log("Workspace first-frame geometry is stable for returning and new surfaces");
 }finally{root.unmount();for(const layout of [a,b,fresh])layout.dispose();}

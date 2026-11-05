@@ -165,7 +165,7 @@ export function PaneLayoutView(props: {
   const text: StyleDesc = { fontFamily: config.fontFamily, fontSize: d.tabFontSize * s,
     fontWeight: config.fontWeight, whiteSpace: "nowrap", userSelect: "none", pointerEvents: "none", color: c.fg };
   const row: StyleDesc = { display: "flex", flexDirection: "row", alignItems: "center" };
-  const tabIcon=(tab:LayoutTab)=>tab.kind==="terminal"?{glyph:"\uf489",color:c.accent}:tab.kind==="welcome"?{glyph:"\uf015",color:c.accent}:tab.kind==="agent"?{glyph:"n",color:c.accent}:tab.kind==="git"?{glyph:"\uf126",color:c.accent}:tab.kind==="page"?{glyph:"\uf12e",color:c.accent}:namedIcons[tab.title.toLowerCase()]||extensionIcons[tab.title.split(".").pop()?.toLowerCase()||""]||{glyph:"\uf15b",color:"#c8c8c8"};
+  const tabIcon=(tab:LayoutTab)=>tab.kind==="terminal"?{glyph:"\uf489",color:c.accent}:tab.kind==="welcome"?{glyph:"\uf015",color:c.accent}:tab.kind==="agent"?{glyph:"n",color:c.accent}:tab.kind==="git"?{glyph:"\uf126",color:c.accent}:tab.kind==="page"?{glyph:tab.page==="database"?"\uf0ce":"\uf12e",color:c.accent}:namedIcons[tab.title.toLowerCase()]||extensionIcons[tab.title.split(".").pop()?.toLowerCase()||""]||{glyph:"\uf15b",color:"#c8c8c8"};
   function Pane(p: { hostKey: string }) {
     const previewOnly=p.hostKey.startsWith("preview:");
     const testId=(name:string)=>previewOnly?`preview-${name}`:name;
@@ -279,6 +279,7 @@ export function PaneLayoutView(props: {
             <text style={{ ...text, fontFamily: config.iconFontFamily, fontWeight: 400, fontSize: chrome.iconSize, color: c.muted }}>{chrome.newIcon}</text>
           </div></Show>
         </div>
+        <div testId={testId(`pane-tab-baseline:${pane().leaf}`)} style={{position:"absolute",left:0,right:0,bottom:0,height:Math.max(1,s),backgroundColor:c.border,pointerEvents:"none"}} />
       </div>
       <div testId={testId(`pane-content:${pane().leaf}`)} onLayout={event=>setBodyBounds({x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0})} onMouseDown={() => {if(!paneFocused())focus(pane().leaf);}} style={{ display: "flex", flexDirection: "column", flexGrow: 1, minHeight: 0, minWidth: 0, position: "relative" }}>
         <Show when={pane().surfaceId ? `${pane().leaf}:${pane().surfaceId}` : undefined} keyed>{(_identity) => props.renderSurface(pane().surfaceId!, pane().leaf, paneFocused)}</Show>

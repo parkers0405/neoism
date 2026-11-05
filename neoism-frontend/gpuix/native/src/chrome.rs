@@ -14,6 +14,8 @@ fn render(host:&mut Host,v:&Value)->Result<Value,String>{
     match &mut host.kind {
         Kind::Top(top)=>{
             top.set_scale(scale);top.set_visible(true);
+            top.set_databases_available(true);
+            top.set_databases_open(v["sidebar"].as_str()==Some("databases"));
             // OS controls use window logical pixels; the panel scales its insets internally.
             top.set_left_safe_inset(n(v,"leftSafeInset",0.0)/scale);
             if let Some(peers)=v["peers"].as_array(){
@@ -69,4 +71,31 @@ pub fn dispatch(v:&Value)->Option<Result<Value,String>>{
         if op=="chrome.hit"{if let Kind::Status(line)=&mut host.kind{return Ok(json!({"action":line.click_action_at(n(v,"x",-1.0),n(v,"y",-1.0)),"branch":line.git_branch_at(n(v,"x",-1.0),n(v,"y",-1.0))}));}}
         render(host,v)
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn databases_region_click_and_sidebar_selection_do_not_synthesize_actions() {
+        let id = dispatch(&json!({"op":"chrome.new"})).unwrap().unwrap()["id"].clone();
+        let frame = dispatch(&json!({"op":"chrome.frame","id":id,"width":800,"sidebar":"databases"})).unwrap().unwrap();
+        let region = frame["regions"].as_array().unwrap().iter()
+            .find(|r| r["id"] == "toggle-databases").unwrap();
+        assert_eq!(region["label"], "Databases");
+        assert!(frame["action"].is_null());
+        let bounds = region["rect"].as_array().unwrap();
+        let clicked = dispatch(&json!({
+            "op":"chrome.click","id":id,"width":800,"sidebar":"databases",
+            "x":bounds[0].as_f64().unwrap() + bounds[2].as_f64().unwrap() / 2.0,
+            "y":bounds[1].as_f64().unwrap() + bounds[3].as_f64().unwrap() / 2.0,
+        })).unwrap().unwrap();
+        assert_eq!(clicked["action"], "OpenDatabases");
+        for sidebar in [json!("notes"), json!("files"), json!("conversations"), json!(null), json!("databases")] {
+            let frame = dispatch(&json!({"op":"chrome.frame","id":id,"width":800,"sidebar":sidebar})).unwrap().unwrap();
+            assert!(frame["action"].is_null());
+        }
+        dispatch(&json!({"op":"chrome.dispose","id":id})).unwrap().unwrap();
+    }
 }

@@ -32,6 +32,8 @@ import { ProviderLogo } from "./ProviderLogo";
 import { basename, posix, win32 } from "node:path";
 import {GitDiffPanelView} from "../git/GitDiffPanelView";
 import {GitReviewView} from "../git/GitReviewView";
+import {DatabaseView} from "../database/DatabaseView";
+import {DatabaseSidebar} from "../database/DatabaseSidebar";
 import type {GitReviewDescriptor} from "../git/GitReviewController";
 import type {GitFrame,GitHooks} from "../git/GitController";
 import {GitRestoreDialog,type GitRestoreTarget} from "../git/GitRestoreDialog";
@@ -485,7 +487,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   createEffect(()=>{const focus=chromeFocus(),workspace=untrack(activeWorkspaceId);if(workspace)visuals.workspaceFocus.set(workspace,focus);});
   const focusOpenedFile=async(open:()=>Promise<unknown>,origin?:number[])=>{
     const serial=++openNavigationSerial,workspace=activeWorkspaceId();
-    try{await open();if(serial!==openNavigationSerial||activeWorkspaceId()!==workspace)return;const surface=active();if(surface?.kind==="file"&&state().files[surface.id]!==undefined)focusChrome({zone:"content"},origin);}
+    try{await open();if(serial!==openNavigationSerial||activeWorkspaceId()!==workspace)return;const surface=active();if(surface?.kind==="file"&&state().files[surface.id]!==undefined||surface?.page==="database")focusChrome({zone:"content"},origin);}
     catch(error){model.report(error);}
   };
   const noteContentFocus=()=>{if(chromeFocus().zone!=="content"){setChromeFocus({zone:"content"});setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}};
@@ -585,6 +587,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       case "ToggleConversations": toggle("conversations"); return;
       case "ToggleAgentSidePanel": setDetails((value) => !value); return;
       case "OpenNotes": toggle("notes"); return;
+      case "OpenDatabases": toggle("databases"); return;
       case "OpenAgent": model.openAgentHome(); return;
       case "OpenSearch": openFind(); return;
       case "open-model": {
@@ -979,6 +982,22 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
         onCustomKey={handleSurfaceKey} onActivate={()=>focusChrome({zone:"content"})}
         onAction={(action, detail) => { if (action === "new-chat") {model.newAgentHome();focusChrome({zone:"content"});} else if (action === "focus-content")focusChrome({zone:"content"});else if (action === "search") openFind("files"); else if (action === "projects") openProjectPicker(detail); else void chooseDirectory().then(commitWorkspaceRoot); }} />}</Show>
     </div>;
+  }
+  function Databases() {
+    let target:ChromeCursorTarget|undefined;
+    sidebarTargets.set("databases",()=>target);
+    const connections = createMemo(() => { state().ui; state().surfaces; return model.databaseConnections(activeWorkspaceId()); }, undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+    const selected = createMemo(() => { state().ui; connections(); return model.activeDatabaseConnection(activeWorkspaceId()); }, undefined, { equals: (a, b) => a?.id === b?.id });
+    const schema = createMemo(() => { const connection = selected(); return connection ? model.getDatabaseSchema(connection) : undefined; });
+    onCleanup(() => { sidebarHosts.delete("databases");sidebarTargets.delete("databases"); });
+    return <DatabaseSidebar controller={schema()} config={config} connections={connections()} activeId={selected()?.id}
+      active={chromeFocus().zone === "sidebar"} focusToken={editorFocus()}
+      registerHost={host => { if (host) sidebarHosts.set("databases", host); else sidebarHosts.delete("databases"); }}
+      onBounds={updateChromeBounds}
+      onCursor={(rect,host,bounds)=>{chromeBounds.set(host.id,bounds);target=rect?{host,kind:"tree",bounds:rect,rowY:0,rowHeight:rect.height}:undefined;if(chromeFocus().zone==="sidebar"&&!pendingContentFocus)setChromeTarget(previous=>target?{...target,origin:previous?.host===host?previous.origin:pendingSidebarOrigin}:undefined);}}
+      onFocus={() => { if (!pendingContentFocus) { setChromeFocus({ zone: "sidebar" });const next=target;if(next)setChromeTarget(previous=>({...next,origin:previous?.host===next.host?previous.origin:pendingSidebarOrigin})); } }} onCustomKey={handleSurfaceKey}
+      onConnection={id => model.selectDatabaseConnection(id)} onBrowse={() => openFind("files")}
+      onTable={name => { const connection = selected(); if (connection) { model.openDatabaseTable(connection, name); focusChrome({ zone: "content" }); } }} />;
   }
   function Composer(props: { surfaceId: string; sessionId?: string; home: boolean; viewport: {width:number;height:number}; onFrame: (read:()=>ComposerFrame|undefined) => void }) {
     const initialDraftKey=model.composerDraftKey(props.sessionId,props.surfaceId),initialDraft=model.state.composerDrafts[initialDraftKey];
@@ -1403,7 +1422,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
    return <div data-font-size={config.fontSize} testId="app-content" onKeyDown={keyDown} onMouseDown={event=>{const host=sidebarHosts.get(sidebar()||""),bounds=host&&chromeBounds.get(host.id);if(bounds&&event.x!==undefined&&event.y!==undefined&&event.x>=bounds.x&&event.x<bounds.x+bounds.width&&event.y>=bounds.y&&event.y<bounds.y+bounds.height)return;const device=deviceVisible()&&deviceHost&&paintedChromeBounds(renderer,deviceHost.id);if(device&&event.x!==undefined&&event.y!==undefined&&event.x>=device.x&&event.x<device.x+device.width&&event.y>=device.y&&event.y<device.y+device.height)return;const git=gitViewport();if(gitVisible()&&event.x!==undefined&&event.y!==undefined&&event.x>=git.x+git.width-(gitFrame()?.width||0)&&event.x<git.x+git.width&&event.y>=git.y&&event.y<git.y+git.height)return;setChromeFocus({zone:"content"});setChromeTarget(undefined);}} style={{ ...column, width: "100%", height: "100%", backgroundColor: config.background?"transparent":c.bg, position: "relative", overflow: "hidden" }}>
     <TopBar config={config} peers={presencePeers()} sidebar={sidebar()} details={details()} agent={active()?.kind === "agent"} search={palette() && paletteMode() === "find"}
       connection={state().connection.phase} menuOpen={menu()} onMenuChange={setMenu} report={model.report}
-      onAction={(action) => ["TogglePanel", "ToggleConversations", "ToggleAgentSidePanel", "OpenNotes", "OpenAgent", "OpenSearch"].includes(action) ? onChromeAction(action) : chromeActions.open(action)} />
+      onAction={(action) => ["TogglePanel", "ToggleConversations", "ToggleAgentSidePanel", "OpenNotes", "OpenDatabases", "OpenAgent", "OpenSearch"].includes(action) ? onChromeAction(action) : chromeActions.open(action)} />
     <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0, position: "relative" }}>
       <Show when={sidebar()}><div testId="sidebar" style={{ ...column, width: Math.min(d.sidebarWidth, windowSize().width * 0.42), flexShrink: 0,
         borderTopLeftRadius: d.frameRadius * s, borderTopRightRadius: d.frameRadius * s, backgroundColor: c.bg, overflow: "hidden", borderRightWidth: d.frameStroke * s, borderColor: c.border }}>
@@ -1411,6 +1430,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
           <Match when={sidebar() === "files"}><Tree /></Match>
           <Match when={sidebar() === "conversations"}><Conversations /></Match>
           <Match when={sidebar() === "notes"}><Tree notes={true} /></Match>
+          <Match when={sidebar() === "databases"}><Databases /></Match>
         </Switch>
       </div></Show>
       <div testId="workspace-content" onLayout={event=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0};setWorkspaceBounds(before=>before.x===next.x&&before.y===next.y&&before.width===next.width&&before.height===next.height?before:next);}} style={{ ...column, flexGrow: 1, minWidth: 0, position: "relative", overflow: "hidden" }}>
@@ -1446,6 +1466,8 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
                     savedCommands={workspaceSavedCommands(state().ui.savedTerminalCommands,surface.workspaceId)}/>
                 </Show></Match>
                 <Match when={surface.kind === "page" && surface.page === "extensions"}><ChromeActionsView controller={chromeActions} config={config} pageMode active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
+                  onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} /></Match>
+                <Match when={surface.kind === "page" && surface.page === "database"}><DatabaseView controller={model.getDatabase(surface)} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} /></Match>
                 <Match when={surface.kind === "git"&&surface.git}><GitReviewView controller={visuals.gitReview(surface,model,config,()=>{layout.focus(leaf);model.selectSurface(id,true);closeFocusedTab();},leaf)} config={config} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={()=>{noteContentFocus();setGitFocused(false);layout.focus(leaf);model.selectSurface(id,true);}} onState={next=>{if(focused())setEditorState(next);}}/></Match>

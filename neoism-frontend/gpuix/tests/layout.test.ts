@@ -6,6 +6,31 @@ afterEach(() => layouts.splice(0).forEach((layout) => layout.dispose()));
 const file = (id: string): LayoutSurface => ({ id, title: `${id}.rs`, kind: "file" });
 const terminal = (id: string): LayoutSurface => ({ id, title: id, kind: "terminal" });
 
+test("page metadata survives splits, dragging, renaming, and saved route recovery", () => {
+  const layout = make();
+  const database: LayoutSurface = { id: "opaque-1", title: "Extensions", kind: "page", page: "database" };
+  const extensions: LayoutSurface = { id: "database-looking-id", title: "apples", kind: "page", page: "extensions" };
+  layout.open(database); const source = layout.frame.focusedLeaf!;
+  layout.open(extensions);
+  layout.split("horizontal", database);
+  layout.drop(source, 750, 350);
+  layout.rename({ ...database, title: "renamed" });
+  const restored = make(JSON.parse(JSON.stringify(layout.snapshot())));
+  for (const frame of [layout.frame, restored.frame]) {
+    expect(frame.leaves.filter(tab => tab.surfaceId === database.id).map(tab => tab.page)).toEqual(["database", "database"]);
+    expect(frame.panes.flatMap(pane => pane.tabs).find(tab => tab.surfaceId === extensions.id)?.page).toBe("extensions");
+  }
+});
+
+test("daemon route decoration retains explicitly resolved database metadata", () => {
+  const layout = make();
+  expect(layout.restoreDaemon({ schema_version: 1, workspace_id: "work", focused_pane_external_id: 10,
+    root: { kind: "leaf", pane_external_id: 10, surface_id: "opaque", session_id: "desktop:page", path: null },
+  }, () => ({ id: "opaque", title: "arbitrary", kind: "page", page: "database" }))).toBe(true);
+  expect(layout.frame.leaves[0].page).toBe("database");
+  expect(layout.frame.panes[0].tabs[0].page).toBe("database");
+});
+
 test("native tab groups keep hidden buffers alive, focus existing tabs, and close the last leaf cleanly", () => {
   const layout = make(); expect(layout.frame.panes).toHaveLength(0);
   layout.open(file("one")); const first = layout.frame.focusedLeaf!;

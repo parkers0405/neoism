@@ -27,7 +27,7 @@ export function decodeSession(value: unknown): SavedSession | undefined {
   if (!record(value) || value.version !== 1 || !Array.isArray(value.surfaces)) return;
   const surfaces = value.surfaces.filter((s): s is Surface => record(s) && typeof s.id === "string" && typeof s.title === "string"
     && typeof s.workspaceId === "string" && ["file", "terminal", "agent", "page", "welcome", "git"].includes(String(s.kind))
-    && (s.kind !== "file" || typeof s.path === "string") && (s.kind !== "page" || s.page === "extensions")
+    && (s.kind !== "file" || typeof s.path === "string") && (s.kind !== "page" || s.page === "extensions" || s.page === "database" && typeof s.path === "string" && typeof s.rootDir === "string" && (s.databaseTable === undefined || typeof s.databaseTable === "string"))
     && (s.kind !== "git" || record(s.git) && typeof s.git.root === "string" && ["working","commit","pull-request","pull-request-inbox","pull-request-create"].includes(String(s.git.mode)))
     && (s.kind === "file" || s.kind === "page" || s.kind === "welcome" || s.kind === "git" || (s.kind === "agent" && s.sessionId === undefined) || typeof s.sessionId === "string"));
   const composerDrafts: SavedSession["composerDrafts"] = {};

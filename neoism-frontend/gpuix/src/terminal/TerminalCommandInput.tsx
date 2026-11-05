@@ -48,8 +48,8 @@ export function TerminalCommandInput(props: {
     const point = caret();
     return !point || point.text === props.command && point.offset === new TextEncoder().encode(props.command).length && point.selectionStart === point.selectionEnd;
   };
-  const preview = (index: number) => { setChoice(index); const item = items()[index]; if (menu() === "completion" && item) writeDraft(item.value); };
-  const accept = (index = choice()) => { const item = items()[index]; if (!item) return; close(); writeDraft(item.value); };
+  const preview = (index: number) => { if (loading()) return; setChoice(index); const item = items()[index]; if (item) writeDraft(item.value); };
+  const accept = (index = choice()) => { if (loading()) return; const item = items()[index]; if (!item) return; close(); writeDraft(item.value); };
   const open = (kind: "history" | "completion", direction = 1) => {
     props.source.cancelCompletion();
     clearFeedback();
@@ -64,10 +64,12 @@ export function TerminalCommandInput(props: {
     if (kind === "history") {
       const ready = loaded(), options = props.source.history(command, recent);
       setItems(options.map(item => props.saved?.includes(item.value) ? { ...item, kind: "saved", detail: "Saved command" } : item)); setLoading(false);
+      if (previewOnLoad && options.length) untrack(() => preview(0));
       if (!options.length && ready) noMatches();
       return;
     }
-    setItems([]); setLoading(true);
+    // Retain the visible list during refresh, but don't accept stale candidates.
+    setLoading(true);
     pending = setTimeout(() => {
       void props.source.complete(command, directory, recent).then(options => {
         if (disposed || token !== generation) return;
@@ -83,10 +85,10 @@ export function TerminalCommandInput(props: {
   onCleanup(() => { disposed = true; generation++; clearTimeout(pending); props.source.cancelCompletion(); animation.dispose(); feedback.dispose(); props.onHost(undefined); });
   const move = (direction: number) => {
     const length = items().length;
-    if (!length) return;
+    if (!length || loading()) return;
     const next = choice() + direction;
     if (menu() === "completion") preview((next + length) % length);
-    else setChoice(Math.max(0, Math.min(length - 1, next)));
+    else preview(Math.max(0, Math.min(length - 1, next)));
   };
   const keyDown = (event: KeyEvent) => {
     const nativeKey = (event.key || "").toLowerCase().replace(/^arrow/, "");
@@ -100,7 +102,7 @@ export function TerminalCommandInput(props: {
     const key = nativeKey === "composer-escape" ? "escape" : nativeKey, mods = event.modifiers;
     const plain = !mods?.ctrl && !mods?.cmd && !mods?.alt;
     const handled = () => { event.preventDefault(); event.stopPropagation(); };
-    if (key === "escape" && menu()) { handled(); const original = query(), restore = menu() === "completion"; close(); if (restore) writeDraft(original); return; }
+    if (key === "escape" && menu()) { handled(); const original = query(); close(); writeDraft(original); return; }
     if (key === "r" && mods?.ctrl && !mods.alt && !mods.cmd) { handled(); open("history"); return; }
     if (plain && !mods?.shift && (key === "up" || key === "down") && (menu() || !props.command.includes("\n") || caret()?.offset === 0)) {
       handled();
@@ -157,7 +159,7 @@ export function TerminalCommandInput(props: {
   });
   const text = (color = c.fg, size = config.fontSize) => ({ color, fontFamily: config.fontFamily, fontSize: size, fontWeight: config.fontWeight, whiteSpace: "nowrap" as const, textOverflow: "ellipsis" as const, overflow: "hidden" as const });
   return <>
-    <textarea ref={host => { input = host; props.onHost(host); }} testId="terminal-command" aria-label="Shell command" aria-expanded={!!menu() && !loading() && items().length > 0}
+    <textarea ref={host => { input = host; props.onHost(host); }} testId="terminal-command" aria-label="Shell command" aria-expanded={!!menu() && items().length > 0}
       value={props.command} placeholder="Enter a command" minRows={1} maxRows={props.rows} readOnly={props.disabled}
       theme={{ bg: config.background ? "transparent" : c.bg, text: c.fg, caret: "transparent", textMuted: c.muted, accent: c.accent, fontMono: config.fontFamily, fontSans: config.fontFamily }}
       onFocus={props.onFocus} onBlur={() => { setCaret(undefined); props.onBlur(); }}
@@ -172,7 +174,7 @@ export function TerminalCommandInput(props: {
       </anchored>
     </Show>
     <Show when={missOpacity() > 0}><div testId="terminal-no-match-feedback" style={{ position: "absolute", left: 16 * s, right: 16 * s, top: 28 * s + row * .9 + props.rows * row + 4 * s, height: 2 * s, borderRadius: s, backgroundColor: c.red, opacity: missOpacity(), pointerEvents: "none" }}/></Show>
-    <Show when={menu() && !loading() && items().length > 0}>
+    <Show when={menu() && items().length > 0}>
       <div testId="terminal-suggestions" role="listbox" aria-label={menu() === "history" ? "Command history" : "Command completions"}
         onScroll={event => { if (event.deltaY) scrollTo(scrollTarget - event.deltaY * (event.precise ? 1 : itemHeight * 3), !event.precise); }}
         style={{ position: "absolute", left: 16 * s, right: 16 * s, ...(props.menuBelow ? { top: props.composerHeight } : { bottom: props.composerHeight }), height: menuHeight() + 10 * s, padding: 4 * s, borderWidth: 1, borderColor: c.border, borderRadius: 5 * s, backgroundColor: c.bg, overflow: "hidden" }}>

@@ -7,6 +7,19 @@ import type { PaintCommand } from "../src/ui/PaintLayer";
 const config={...loadConfig(["--config","/nonexistent/markdown-test-config"],{}),vim:true};
 const source="# Rich document\n\n- [ ] Task body\n\n| Name | Value |\n| --- | --- |\n| café | **bold** |\n\n> [!NOTE] Preserve formatting\n\n```ts\nconst answer = 42;\n```\n\n[Neoism](README.md)\n";
 const texts=(commands:PaintCommand[])=>commands.filter((c):c is Extract<PaintCommand,{kind:"text"}>=>c.kind==="text");
+test("rich Markdown undo restores saved bytes and clears unsaved state",()=>{
+ for(const source of ["- [ ] Task", "- [ ] Task\n", "- [ ] Task\n\n", "- [ ] Task\r\n", "- [ ] Task\r\n\r\n"]){
+  const editor=new NativeEditor("undo.md",source,true),markdown=new NativeMarkdown(editor,config,"/project/undo.md");
+  try{
+   markdown.call("goto",{line:0,col:0});markdown.call("key",{key:"enter"});
+   expect(editor.text()).toBe(source.replace("[ ]","[x]"));expect(editor.frame.dirty).toBe(true);
+   markdown.call("key",{key:"u",char:"u"});
+   expect(editor.text()).toBe(source);expect(editor.frame.dirty).toBe(false);expect(markdown.frame.dirty).toBe(false);
+   markdown.call("key",{key:"r",ctrl:true});
+   expect(editor.text()).toBe(source.replace("[ ]","[x]"));expect(editor.frame.dirty).toBe(true);
+  }finally{markdown.dispose();editor.dispose();}
+ }
+});
 test("inline-code pipes in a Markdown bullet wrap normally without a gray table fallback",()=>{
  const source="- Read paths must support `SYNAPSE_READ_MODEL=hybrid|qdrant|postgres` so local/dev/hosted reads remain available through the final sentinel.\n\n- Next bullet";
  const editor=new NativeEditor("pipes.md",source,true),markdown=new NativeMarkdown(editor,config,"/project/pipes.md");

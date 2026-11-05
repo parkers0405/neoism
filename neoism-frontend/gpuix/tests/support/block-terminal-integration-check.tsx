@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mock } from "bun:test";
 import { Effect } from "effect";
 import { createRoot, type EventPayload } from "@gpuix/solid";
 import { createSignal } from "solid-js";
@@ -10,6 +11,11 @@ import { TerminalOutputLinks } from "../../src/terminal/output-links";
 import type { DaemonConnection } from "../../src/daemon/client";
 import { createRecordingAppRenderer } from "./full-app-recording-renderer";
 import { usePresentationScheduler } from "../../src/animation/frame-scheduler";
+import { cssColor } from "../../src/ui/canvas";
+import type { TerminalSuggestion } from "../../src/terminal/suggestions";
+
+const clipboard: string[] = [];
+mock.module("../../src/clipboard", () => ({ readClipboard: async () => "", writeClipboard: async (text: string) => { clipboard.push(text); } }));
 
 // Only the daemon transport and window boundary are recorded. Terminal parsing,
 // key encoding, capture and session ownership use the real native bridge.
@@ -115,6 +121,25 @@ try {
   assert.ok(ink().some(op => op.k === "t" && op.t.includes("exit 7")), "Failed command status is rendered");
   assert.ok(host.find("terminal-command"), "D followed by B restores the composer");
 
+  const selectionColor = cssColor(config.theme.accent, .3);
+  const redInk = ink().find(op => op.k === "t" && op.t.includes("red output"));
+  const plainInk = ink().find(op => op.k === "t" && op.t.includes("plain output"));
+  const start = { x: 300 + redInk.x + 4 * 8, y: 90 + redInk.y + 3 };
+  const end = { x: 300 + plainInk.x + 5 * 8, y: 90 + plainInk.y + 3 };
+  const beforeSelection = inputPackets().length;
+  for (const [from, to] of [[start, end], [end, start]]) {
+    dispatch("terminal-block-history", { eventType: "mouseDown", button: 0, ...from });
+    dispatch("terminal-block-history", { eventType: "mouseMove", pressedButton: 0, ...to });
+    dispatch("terminal-block-history", { eventType: "mouseUp", button: 0, ...to }); await present();
+    assert.equal(ink().filter(op => op.k === "r" && op.c === selectionColor).length, 2, "Dragging highlights both selected output rows");
+    dispatch("terminal-block-history", { eventType: "keyDown", key: "c", modifiers: { ctrl: true, shift: true, alt: false, cmd: false } }); await present();
+    assert.equal(clipboard.at(-1), "output\nplain", "Copy uses only the selected characters, not the whole block");
+  }
+  assert.equal(inputPackets().length, beforeSelection, "Selecting and copying never submits terminal input");
+  dispatch("terminal-block-history", { eventType: "mouseDown", button: 0, ...start });
+  dispatch("terminal-block-history", { eventType: "mouseUp", button: 0, ...start }); await present();
+  assert.equal(ink().filter(op => op.k === "r" && op.c === selectionColor).length, 0, "A plain click clears the text highlight");
+
   root.render(() => <div/>); await present();
   assert.equal(host.find("block-terminal"), undefined);
   assert.strictEqual(terminalSession(client, session.id, config.theme, report, true), session);
@@ -207,11 +232,25 @@ try {
     dispatch("terminal-command", { eventType: "keyDown", ...event }); await present();
     assert.ok(host.find("terminal-suggestions"), "History key opens the picker");
     assert.ok(host.find("terminal-suggestion:0"));
+    assert.equal(blocks.draft, command, "Opening history previews the first command immediately");
     dispatch("terminal-command", { eventType: "submit" }); await present();
     assert.equal(blocks.draft, command, "Enter in history picker inserts the command");
     assert.equal(host.find("terminal-suggestions"), undefined);
     assert.equal(inputPackets().length, beforeSuggestions, "History picker Enter never executes");
   }
+  blocks.recentCommands = ["printf older", command]; await output(prompt);
+  dispatch("terminal-command", { eventType: "change", value: "pri" });
+  dispatch("terminal-command", { eventType: "keyDown", key: "up" }); await present();
+  assert.equal(blocks.draft, command);
+  const historyMenu = host.find("terminal-suggestions")!.id;
+  dispatch("terminal-command", { eventType: "keyDown", key: "up" }); await present();
+  assert.equal(blocks.draft, "printf older", "Each Up previews the next history entry without narrowing the original query");
+  dispatch("terminal-command", { eventType: "keyDown", key: "down" }); await present();
+  assert.equal(blocks.draft, command, "Down previews the previous history entry");
+  assert.equal(host.find("terminal-suggestions")!.id, historyMenu);
+  dispatch("terminal-command", { eventType: "keyDown", key: "composer-escape" }); await present();
+  assert.equal(blocks.draft, "pri", "History Escape restores the typed prefix");
+  assert.equal(inputPackets().length, beforeSuggestions, "History previews do not execute");
   dispatch("terminal-command", { eventType: "change", value: "pri" });
   dispatch("terminal-command", { eventType: "caretGeometry", x: 400, y: 620,
     value: JSON.stringify({ text: "pri", offset: 3, selectionStart: 3, selectionEnd: 3, visible: true, fontSize: 14, remainingWidth: 400 }) });
@@ -231,7 +270,34 @@ try {
    dispatch("terminal-command", { eventType: "keyDown", key: "up" }); await present();
    assert.ok(host.find("terminal-suggestions"));
    dispatch("terminal-command", { eventType: "keyDown", key: "composer-escape" }); await present();
-   assert.equal(host.find("terminal-suggestions"), undefined, "Native textarea Escape closes its picker");
+    assert.equal(host.find("terminal-suggestions"), undefined, "Native textarea Escape closes its picker");
+
+  dispatch("terminal-command", { eventType: "keyDown", key: "tab" });
+  await new Promise(resolve => setTimeout(resolve, 90)); await present();
+  const completionMenu = host.find("terminal-suggestions")!.id;
+  const source = session.suggestions!, complete = source.complete;
+  const completions = new Map<string, (options: TerminalSuggestion[]) => void>();
+  source.complete = query => new Promise(resolve => completions.set(query, resolve));
+  try {
+    dispatch("terminal-command", { eventType: "change", value: "prin" }); await present();
+    assert.equal(host.find("terminal-suggestions")!.id, completionMenu, "Typing retains the menu throughout the debounce");
+    await new Promise(resolve => setTimeout(resolve, 75)); await present();
+    dispatch("terminal-suggestion:0", { eventType: "mouseMove" });
+    dispatch("terminal-command", { eventType: "keyDown", key: "tab" }); await present();
+    assert.equal(blocks.draft, "prin", "Stale rows cannot overwrite typing during refresh");
+    dispatch("terminal-command", { eventType: "change", value: "print" });
+    await new Promise(resolve => setTimeout(resolve, 75)); await present();
+    assert.equal(host.find("terminal-suggestions")!.id, completionMenu, "The menu stays mounted while host completions are pending");
+    completions.get("print")!([{ label: "printf", value: "printf ", kind: "command", detail: "Command" }]); await present();
+    assert.equal(host.find("terminal-suggestions")!.id, completionMenu, "Refreshed results replace rows without remounting the menu");
+    completions.get("prin")!([{ label: "printer", value: "printer ", kind: "command", detail: "Command" }]); await present();
+    assert.equal(blocks.draft, "print", "A refresh never auto-previews over text just typed");
+    dispatch("terminal-command", { eventType: "keyDown", key: "tab" }); await present();
+    assert.equal(blocks.draft, "printf ", "Late results from an older query are discarded");
+    dispatch("terminal-command", { eventType: "keyDown", key: "composer-escape" }); await present();
+    assert.equal(blocks.draft, "print");
+    assert.equal(inputPackets().length, beforeSuggestions);
+  } finally { source.complete = complete; }
 
   for (const position of ["top", "flow"] as const) {
     root.render(() => <div/>); await present(); await mount(position);
@@ -264,6 +330,13 @@ try {
   dispatch("terminal-block-history", { eventType: "click", button: 0, x: bounds.x + listing.x + 2, y: rowY });
   dispatch("terminal-block-history", { eventType: "click", button: 0, x: bounds.x + listing.x + 11 * 8 + 2, y: rowY });
   assert.deepEqual(opened, [{ path: `${block.directory}/README.md`, isDirectory: false }, { path: `${block.directory}/src`, isDirectory: true }]);
+  dispatch("terminal-block-history", { eventType: "mouseDown", button: 0, x: bounds.x + listing.x, y: rowY });
+  dispatch("terminal-block-history", { eventType: "mouseMove", pressedButton: 0, x: bounds.x + listing.x + 8 * 8, y: rowY });
+  dispatch("terminal-block-history", { eventType: "mouseUp", button: 0, x: bounds.x + listing.x + 8 * 8, y: rowY });
+  dispatch("terminal-block-history", { eventType: "click", button: 0, x: bounds.x + listing.x + 8 * 8, y: rowY }); await present();
+  assert.equal(opened.length, 2, "Dragging over a file link selects text without opening the file");
+  dispatch("terminal-block-history", { eventType: "keyDown", key: "c", modifiers: { ctrl: true, shift: true, alt: false, cmd: false } }); await present();
+  assert.equal(clipboard.at(-1), "README.m");
   await output("clear\r\n" + osc("133;C") + "\x1b[H\x1b[2J\x1b[3J" + osc("133;D;0") + prompt);
   assert.equal(blocks.snapshot().length, 0, "clear removes completed, background, and clear-command blocks");
   assert.ok(blocks.recentCommands.includes("ls") && blocks.recentCommands.includes("clear"), "Clearing visible output preserves shell command history");
@@ -289,6 +362,13 @@ try {
   await output("more output\r\n".repeat(80) + osc("133;D;0") + prompt);
   assert.ok(Number(header().style.top) + Number(header().style.height) <= 0);
   assert.equal(host.find("home-splash-fixture"), undefined, "Offscreen splash content is culled");
+  const beforeDragScroll = Number(header().style.top), historyHeight = Number(host.find("terminal-block-history")!.style.height);
+  dispatch("terminal-block-history", { eventType: "mouseDown", button: 0, x: 316, y: 90 + historyHeight - 30 });
+  dispatch("terminal-block-history", { eventType: "mouseMove", pressedButton: 0, x: 348, y: 91 }); await present();
+  assert.ok(Number(header().style.top) > beforeDragScroll, "Holding a selection at the upper edge scrolls to older output");
+  dispatch("block-terminal", { eventType: "mouseUp", button: 0, x: 348, y: 91 }); await present();
+  const afterDragScroll = Number(header().style.top); await present();
+  assert.equal(Number(header().style.top), afterDragScroll, "Releasing the drag stops edge scrolling");
   dispatch("terminal-block-history", { eventType: "scroll", deltaY: 100000, precise: true }); await present();
   assert.equal(header().style.top, 0, "Scrolling back reveals the original splash");
   assert.ok(host.find("home-splash-fixture"));

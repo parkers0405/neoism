@@ -67,7 +67,12 @@ export class NativeMarkdown {
    for(const redo of frame.docHistory)this.editor.call("crdt.history",{redo});
    return this.frame;
   }
-  if(frame.revision!==this.richRevision){this.richRevision=frame.revision;if(sync){this.syncing=true;try{this.editor.call("replace-source",{text:this.text()});this.editorRevision=this.editor.frame.revision;this.lastDirty=this.editor.frame.dirty;}finally{this.syncing=false;}}}
+   if(frame.revision!==this.richRevision){this.richRevision=frame.revision;if(sync){this.syncing=true;try{
+    let text=this.text();
+    // Rich source omits disk EOF/EOL metadata; retain it in the canonical buffer.
+    if(!this.docBound){const current=this.editor.text(),eol=current.includes("\r\n")?"\r\n":"\n";text=text.replace(/\n/g,eol)+(current.endsWith("\n")?eol:"");}
+    this.editor.call("replace-source",{text});this.editorRevision=this.editor.frame.revision;this.lastDirty=this.editor.frame.dirty;
+   }finally{this.syncing=false;}}}
   if(sync&&["key","pointer","goto","restore","block-template","command","menu.pointer"].includes(op)){
    this.syncing=true;try{this.editor.call("goto",{line:frame.cursor.line,col:frame.cursor.col});this.editorCursor=`${this.editor.frame.cursor.line}:${this.editor.frame.cursor.col}`;}finally{this.syncing=false;}
   }

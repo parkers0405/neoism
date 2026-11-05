@@ -1460,6 +1460,34 @@ fn compaction_divider_arrives_in_parked_session_before_completion_without_reload
 }
 
 #[test]
+fn restored_todos_do_not_appear_after_unrelated_replies() {
+    use crate::panels::agent_pane::state::NeoismAgentTodo;
+
+    for status in ["completed", "in_progress"] {
+        let mut pane = NeoismAgentPane::default();
+        let todos = vec![NeoismAgentTodo { content: "Old work".into(), status: status.into() }];
+        pane.apply_history(vec![
+            NeoismAgentMessage::user("Thanks").with_id("user"),
+            NeoismAgentMessage::assistant("You're welcome").with_id("answer"),
+        ]);
+        pane.apply_todos(todos.clone());
+        for live_start in [None, Some(0)] {
+            assert_eq!(timeline_message_visibility(pane.messages(), live_start), [true, true, false]);
+        }
+        assert_eq!(pane.messages().last().unwrap().todos, todos);
+
+        // Loading the real call restores the checklist at its historical position.
+        let mut call = pane.messages().last().unwrap().clone();
+        call.id = "original-call".into();
+        let mut history = vec![call];
+        history.extend_from_slice(&pane.messages()[..2]);
+        pane.apply_history(history);
+        assert_eq!(pane.messages()[0].id, "original-call");
+        assert_eq!(timeline_message_visibility(pane.messages(), None), [true, true, true]);
+    }
+}
+
+#[test]
 fn stale_live_boundary_past_the_transcript_is_safely_treated_as_settled() {
     let messages = vec![
         text_message("u1", NeoismAgentMessageKind::User, "question"),

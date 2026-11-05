@@ -52,8 +52,8 @@ try {
   await dispatch("submit"); assert.deepEqual(submitted, ["cargo "]); assert.equal(host.find("terminal-suggestions"), undefined);
   assert.equal(draft(), "");
   await key("composer-interrupt"); assert.equal(forwarded.at(-1), "c");
-  // History intentionally remains insert-only: first Enter inserts, second submits.
-  await dispatch("change", { value: "echo" }); await key("up"); assert.equal(draft(), "echo");
+  // History previews immediately; first Enter accepts, second submits.
+  await dispatch("change", { value: "echo" }); await key("up"); assert.equal(draft(), "echo hello");
   await dispatch("submit"); assert.equal(draft(), "echo hello"); assert.deepEqual(submitted, ["cargo "]);
   await dispatch("submit"); assert.deepEqual(submitted, ["cargo ", "echo hello"]);
   await dispatch("change", { value: "echo" });
@@ -73,15 +73,16 @@ try {
     const delta = menuBelow ? -7.25 : 7.25;
     root.dispatch({ elementId: menu.id, eventType: "scroll", deltaY: delta, precise: true }); await pump();
     assert.equal(Number(host.find("terminal-suggestion:0")!.style.top), start + delta, "Trackpad preserves fractional pixel travel in both orientations");
-    assert.equal(draft(), "", "Scrolling never previews a different command");
+    assert.equal(draft(), "echo hello", "Scrolling never previews a different command");
     assert.equal(host.find("terminal-suggestion:0")!.props["aria-selected"], true, "Wheel does not move keyboard selection");
     root.dispatch({ elementId: menu.id, eventType: "scroll", deltaY: menuBelow ? -1 : 1, precise: false });
     await Bun.sleep(140); await pump();
     assert.equal(host.find("terminal-suggestion:0"), undefined, "Wheel moves the viewport past the selected row");
-    assert.equal(draft(), "");
+    assert.equal(draft(), "echo hello");
     await key(menuBelow ? "down" : "up"); await Bun.sleep(140); await pump();
     const selected = host.find("terminal-suggestion:1")!;
     assert.ok(selected); assert.equal(selected.props["aria-selected"], true);
+    assert.equal(draft(), "printf entry29", "Moving to a history row previews its full command in either menu orientation");
     assert.ok(Number(selected.style.top) >= 0 && Number(selected.style.top) <= 120, "Keyboard navigation reveals its selected row after wheel scrolling");
     await dispatch("change", { value: "echo" });
     assert.equal(host.find("terminal-suggestions-scrollbar"), undefined, "Filtering clamps the viewport to the shorter list");
@@ -92,7 +93,7 @@ try {
   assert.equal(host.find("terminal-suggestions")!.props["aria-label"], "Command history");
   await key("tab"); await wait();
   assert.equal(host.find("terminal-suggestions")!.props["aria-label"], "Command completions", "Tab leaves history mode for actual completions");
-  assert.equal(draft(), "echo ", "The command candidate comes before history");
+  assert.equal(draft(), "echo hello", "Tab completes the command currently previewed by history");
   await key("composer-escape");
   const unmatched = "zz-no-such-command";
   await dispatch("change", { value: unmatched });

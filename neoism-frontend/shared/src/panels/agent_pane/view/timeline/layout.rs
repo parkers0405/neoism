@@ -1439,7 +1439,7 @@ where
 /// text part — and hid even the final answer when a turn ended on a tool
 /// call — which wiped re-entered transcripts down to fragments. Answers must
 /// survive every reload and session switch. Nonempty task checklists also
-/// survive; empty task-clearing markers are state, never transcript content.
+/// survive; unanchored task snapshots and empty clears are state, not content.
 #[cfg(test)]
 pub(crate) fn timeline_message_visibility<M: AgentTimelineMessage>(
     messages: &[M],
@@ -1464,6 +1464,9 @@ fn timeline_message_visible<M: AgentTimelineMessage>(
 ) -> bool {
     if is_subagent_runtime_notification(message)
         || is_background_completion_result_card(message)
+        // Restored task state has no transcript anchor. In paginated chats its
+        // original call may not be loaded; don't invent a new call at the tail.
+        || message.id() == "todos-snapshot"
         || message.tool() == "compaction_reasoning"
         || message.tool() == "compaction_summary"
     {

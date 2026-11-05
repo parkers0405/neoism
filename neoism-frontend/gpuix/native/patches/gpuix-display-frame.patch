@@ -151,6 +151,14 @@ index 4459e7b..079dbbf 100644
  **React and Solid** for [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), Zed's GPU UI framework.
  
  Write a React or Solid tree in TypeScript. GPUIX paints it with Metal, DirectX, or Vulkan. No Electron. No web view.
+@@ -1868,6 +1931,7 @@
+ `<input>` and `<textarea>` use GPUI's platform input handler. They support a
+ native caret, text selection, IME composition, clipboard actions, undo/redo,
+ grapheme-safe deletion and mouse positioning.
++Primary-button hold-and-drag selection uses GPUI pointer capture armed by the native input press, including when the pointer leaves the input. Selection highlighting is independent of `theme.caret`; a transparent native caret does not hide a selection. On desktop, `Ctrl+Shift+V` and `Shift+Insert` use the same native Paste action as `Ctrl+V` and `Cmd+V`, replacing the selected range with clipboard text without submitting. These actions are resolved before application root key routing, so terminal clipboard shortcuts edit the focused command input rather than sending to its shell.
+ 
+ ```tsx
+ <textarea
 @@ -1898,6 +1961,16 @@ inactive. Override its colour through the shared native theme:
  <input theme={{ caret: '#22c55e' }} />
  ```
@@ -1022,6 +1030,16 @@ index 7be2d25..e1b04b7 100644
  }
 
  /// A terminal app quits on ctrl-c. Unbinding the text field's ctrl-c copy lets
+@@ -268,5 +307,9 @@ fn text_editor_bindings(
+         }
+     }
++    if bind_paste_shortcut {
++        bindings.push(KeyBinding::new("ctrl-shift-v", Paste, context));
++        bindings.push(KeyBinding::new("shift-insert", Paste, context));
++    }
+     bindings
+ }
+ 
 @@ -359,6 +398,7 @@ impl CustomElement for TextEditorElement {
          let emits_submit = ctx.events.contains("submit");
          let emits_key_down = ctx.events.contains("keyDown");
@@ -1206,6 +1224,16 @@ index 7be2d25..e1b04b7 100644
          let lines = window
              .text_system()
              .shape_text(display, font_size, &runs, wrap_width, None)
+@@ -1666,5 +1776,9 @@ impl gpui::Render for TextEditorState {
+         let element_id = self.element_id;
+         div()
++            .id(gpui::SharedString::from(format!("__gpuix_editor_input_{element_id}")))
++            // GPUI capture is armed by the press and keeps this native input's
++            // hitbox active through held drags outside it, just like host divs.
++            .capture_pointer()
+             .key_context(if !self.multiline {
+                 INPUT_KEY_CONTEXT
+             } else if self.emits_submit {
 @@ -1703,6 +1813,8 @@ impl gpui::Render for TextEditorState {
              .on_action(cx.listener(Self::delete_to_line_start))
              .on_action(cx.listener(Self::delete_to_line_end))
@@ -1230,6 +1258,36 @@ index 7be2d25..e1b04b7 100644
          });
          let input = self.input.read(cx);
          let origin = point(
+@@ -1989,6 +2117,19 @@ mod tests {
+         assert!(has_binding(&bindings, "ctrl-v", &Paste));
+     }
+ 
++    #[test]
++    fn terminal_paste_aliases_stay_in_the_focused_native_editor() {
++        for context in [INPUT_KEY_CONTEXT, TEXTAREA_KEY_CONTEXT, TEXTAREA_SUBMIT_KEY_CONTEXT] {
++            let bindings = text_editor_bindings(context, true, true, false, true);
++            for chord in ["cmd-v", "ctrl-v", "ctrl-shift-v", "shift-insert"] {
++                assert!(has_binding(&bindings, chord, &Paste), "{context}: {chord}");
++            }
++            let browser = text_editor_bindings(context, true, true, false, false);
++            assert!(!has_binding(&browser, "ctrl-shift-v", &Paste));
++            assert!(!has_binding(&browser, "shift-insert", &Paste));
++        }
++    }
++
+     #[test]
+     fn textarea_enter_inserts_a_newline_unless_on_submit_is_set() {
+         let textarea = text_editor_bindings(TEXTAREA_KEY_CONTEXT, true, false, true, true);
+diff --git i/.changeset/neoism-input-paste-drag.md w/.changeset/neoism-input-paste-drag.md
+new file mode 100644
+--- /dev/null
++++ w/.changeset/neoism-input-paste-drag.md
+@@ -0,0 +1,5 @@
++---
++"@gpuix/native": patch
++---
++
++Keep desktop terminal paste aliases in the focused native editor and arm native input pointer capture on press for hold-and-drag text selection. Reuse GPUI's existing capture_pointer API; upstream issue/PR search for capture_pointer returned no matching discussions. No GPUI workaround or fork change is needed.
 diff --git i/packages/native/src/custom_elements/input_caret_geometry.rs w/packages/native/src/custom_elements/input_caret_geometry.rs
 new file mode 100644
 --- /dev/null

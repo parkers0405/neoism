@@ -14,6 +14,7 @@ import { terminalInput } from "./input";
 import { CursorBlinkClock } from "../ui/cursor-blink";
 import { commandBlockHeader, terminalDirectoryLabel, terminalDurationLabel } from "./presentation";
 import { TerminalOutputLinks } from "./output-links";
+import { blockTextPoint, blockTextRanges, blockSelectedText, type BlockTextRow, type BlockTextSelection } from "./block-selection";
 
 interface BlockLayout { block: CommandBlock; top: number; height: number; output: number; command: string[]; lines: CommandBlock["lines"] }
 type OutputLink = Awaited<ReturnType<TerminalOutputLinks["resolve"]>>[number];
@@ -39,9 +40,19 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   const [historyFocused, setHistoryFocused] = createSignal(false), [blink, setBlink] = createSignal(true);
   const [filterId, setFilterId] = createSignal<number>(), [filter, setFilter] = createSignal("");
   const [moreId, setMoreId] = createSignal<number>();
+  const [selection, setSelection] = createSignal<BlockTextSelection>();
+  let selecting = false, dragged = false;
+  let dragPointer: { x: number; y: number } | undefined;
+  const selectionScroll = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
+  const stopSelecting = () => { selecting = false; dragPointer = undefined; selectionScroll.cancel(); };
   const blinkClock = new CursorBlinkClock(setBlink, { scope: renderer });
   const scheduler = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   let input: HostElement | undefined, history: HostElement | undefined, filterInput: HostElement | undefined, disposed = false, promptRevision = blocks.promptRevision;
+  let actionsHost: HostElement | undefined, menuHost: HostElement | undefined, filterHost: HostElement | undefined;
+  const insideControls = (x: number, y: number) => [actionsHost, menuHost, filterHost].some(host => {
+    const bounds = host && renderer.getElementBounds?.(host.id);
+    return bounds && x >= bounds.x && x < bounds.x + bounds.width && y >= bounds.y && y < bounds.y + bounds.height;
+  });
   let runningTimer: ReturnType<typeof setTimeout> | undefined, copyTimer: ReturnType<typeof setTimeout> | undefined;
   let hoverTimer: ReturnType<typeof setTimeout> | undefined, toolbarHover: number | undefined;
   const leaveHistory = () => { clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { if (toolbarHover === undefined && !disposed) setHovered(undefined); }, 100); };
@@ -85,6 +96,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
     for (const id of linkCache.keys()) if (!retained.has(id)) linkCache.delete(id);
     if (!retained.size) {
       setSelected(undefined); setHovered(undefined); setHoveredLink(undefined); setMoreId(undefined); setFilterId(undefined); setFilter("");
+      setSelection(undefined); stopSelecting();
       setHorizontal(0); setFollow(true); setCollapsed(new Set<number>());
     }
   });
@@ -111,6 +123,45 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   });
   const origin = () => (position() === "bottom" ? Math.max(0, viewportHeight() - total()) : 0) - scroll();
   const visible = createMemo(() => layout().filter(item => item.top + item.height + origin() >= 0 && item.top + origin() < viewportHeight()));
+  const textRows = createMemo(() => layout().flatMap(item => {
+    const rows: BlockTextRow[] = item.command.map((text, index) => ({ id: `${item.block.id}:command:${index}`, text, top: item.top + row * (1.1 + .9 + .19 + index) }));
+    if (!collapsed().has(item.block.id)) item.lines.forEach((runs, index) => rows.push({ id: `${item.block.id}:output:${index}`, runs, top: item.top + item.output + index * row }));
+    return rows;
+  }));
+  createEffect(() => { filter(); filterId(); collapsed(); setSelection(undefined); stopSelecting(); });
+  const ranges = createMemo(() => blockTextRanges(textRows(), selection()));
+  const selectedText = () => blockSelectedText(textRows(), selection());
+  const selectionPoint = (x: number, y: number) => {
+    let localY = y - size().y - historyTop() - origin();
+    const sticky = visible()[0];
+    if (sticky && sticky.top + origin() < -sticky.output && sticky.output < viewportHeight() / 2) {
+      const stickyY = Math.min(0, sticky.top + origin() + sticky.height - sticky.output);
+      if (y - size().y - historyTop() < stickyY + sticky.output) localY = y - size().y - historyTop() - stickyY + sticky.top;
+    }
+    return blockTextPoint(textRows(), localY, (x - size().x - inset + horizontal()) / cell());
+  };
+  const extendSelection = (x: number, y: number) => {
+    const current = selection(), head = selectionPoint(x, y);
+    if (!current || !head) return;
+    if (head.id !== current.anchor.id || head.column !== current.anchor.column) dragged = true;
+    setSelection({ anchor: current.anchor, head });
+  };
+  const scrollSelection = () => {
+    if (!selecting || !dragged || !dragPointer) return;
+    const y = dragPointer.y - size().y - historyTop(), height = viewportHeight();
+    const delta = y < row ? -row * .6 : y > height - row ? row * .6 : 0;
+    const next = Math.max(0, Math.min(maximum(), scroll() + delta));
+    if (!delta || next === scroll()) return;
+    setScroll(next);
+    extendSelection(dragPointer.x, size().y + historyTop() + Math.max(0, Math.min(height - 1, y)));
+    selectionScroll.request(scrollSelection);
+  };
+  const dragSelection = (event: { pressedButton?: number; x?: number; y?: number }) => {
+    if (!selecting) return;
+    if (event.pressedButton !== 0) { stopSelecting(); return; }
+    dragPointer = { x: event.x || 0, y: event.y || 0 };
+    extendSelection(dragPointer.x, dragPointer.y); selectionScroll.request(scrollSelection);
+  };
   createEffect(() => {
     if (!props.onOpenPath) return;
     for (const { block } of visible()) {
@@ -151,7 +202,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   });
   onCleanup(() => {
     blocks.view = { scroll: scroll(), follow: follow(), horizontal: horizontal(), collapsed: new Set(collapsed()), selected: selected() };
-    disposed = true; scheduler.dispose(); blinkClock.dispose(); releaseBlocks(); releaseBuffer(); clearTimeout(runningTimer); clearTimeout(copyTimer); clearTimeout(hoverTimer);
+    disposed = true; scheduler.dispose(); selectionScroll.dispose(); blinkClock.dispose(); releaseBlocks(); releaseBuffer(); clearTimeout(runningTimer); clearTimeout(copyTimer); clearTimeout(hoverTimer);
   });
   const text = (color = c.fg, fontSize = config.fontSize): StyleDesc => ({ color, fontFamily: config.fontFamily, fontSize,
     fontWeight: config.fontWeight, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" });
@@ -162,7 +213,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   };
   const submit = () => {
     if (!session.submitBlock(draft())) return;
-    setDraft(""); resetCaret(value => value + 1); setFollow(true); setSelected(undefined); setHorizontal(0);
+    setDraft(""); resetCaret(value => value + 1); setFollow(true); setSelected(undefined); setSelection(undefined); setHorizontal(0);
   };
   const openDirect = () => {
     const bytes = buffer.paste(draft());
@@ -171,7 +222,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   };
   const liveKey = terminalInput({ buffer, send: session.send, report: props.report, custom: props.onCustomKey, search: props.onSearch,
     focus, activity: () => { blinkClock.activity(); setFollow(true); }, disposed: () => disposed,
-    selection: () => { const block = all().find(block => block.id === selected()); return block ? terminalLinesText(block.lines) : ""; } });
+    selection: () => { if (selectedText()) return selectedText(); const block = all().find(block => block.id === selected()); return block ? terminalLinesText(block.lines) : ""; } });
   const keyDown = (event: KeyEvent) => {
     if (busy()) { liveKey(event); return; }
     if (props.onCustomKey?.(event)) { event.preventDefault(); event.stopPropagation(); return; }
@@ -225,11 +276,22 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
       if (block.truncated) label("Capture truncated; inspect retained scrollback in direct input mode", inset, y + item.height - row * 1.5, c.muted, config.fontSize * .85);
     }
     const sticky = visible()[0];
+    const highlight = (offset: number, onlyBlock?: number) => {
+      for (const range of ranges()) {
+        if (onlyBlock !== undefined && !range.row.id.startsWith(`${onlyBlock}:command:`)) continue;
+        const y = range.row.top + offset;
+        if (y + row <= 0 || y >= viewportHeight()) continue;
+        const width = (range.to - range.from + (range.newline ? 1 : 0)) * cell();
+        if (width > 0) ops.push({ k: "r", b: [inset - horizontal() + range.from * cell(), y, width, row], c: cssColor(c.accent, .3) });
+      }
+    };
+    highlight(origin());
     if (sticky && sticky.top + origin() < -sticky.output && sticky.output < viewportHeight() / 2) {
       const y = Math.min(0, sticky.top + origin() + sticky.height - sticky.output);
       ops.push({ k: "r", b: [0, y, width, sticky.output], c: cssColor(c.bg) });
       header(sticky.block, y);
       sticky.command.forEach((line, index) => label(line, inset - horizontal(), y + row * (1.1 + .9 + .19 + index), c.fg));
+      highlight(y - sticky.top, sticky.block.id);
       ops.push({ k: "r", b: [0, y + sticky.output, width, 1], c: cssColor(c.fg, .1) });
     }
     return JSON.stringify(ops);
@@ -239,25 +301,39 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
     return item && { ...item, y: Math.max(0, item.top + origin()) + 8 * s };
   });
   const toggleCollapse = (id: number) => setCollapsed(current => { const next = new Set(current); if (!next.delete(id)) next.add(id); return next; });
-  return <div testId="block-terminal" style={{ flexGrow: 1, minWidth: 0, minHeight: 0, position: "relative", overflow: "hidden", backgroundColor: config.background ? "transparent" : c.bg }}
+  return <div testId="block-terminal" onMouseMove={event => {
+    const y = (event.y || 0) - size().y - historyTop();
+    if (y < 0 || y >= viewportHeight()) dragSelection(event);
+  }} onMouseUp={event => { if (selecting && event.button === 0) extendSelection(event.x || 0, event.y || 0); stopSelecting(); }} style={{ flexGrow: 1, minWidth: 0, minHeight: 0, position: "relative", overflow: "hidden", backgroundColor: config.background ? "transparent" : c.bg }}
     onLayout={event => setSize({ width: event.width || 0, height: event.height || 0, x: event.x || 0, y: event.y || 0 })}>
     <text onLayout={event => { if (event.width) setCell(event.width / 10); }} style={{ ...text(), position: "absolute", opacity: 0, pointerEvents: "none" }}>MMMMMMMMMM</text>
     <Show when={!raw()} fallback={<div style={{ position: "absolute", left: alternate() ? 0 : inset, right: alternate() ? 0 : inset, top: 0, bottom: 0, display: "flex" }}>{props.grid()}</div>}>
       <div ref={history} testId="terminal-block-history" tabIndex={0} role="log" aria-label="Command history"
-        onFocus={() => { invalidateNativeFocus(renderer); setHistoryFocused(true); if (busy()) buffer.focus(true); }} onBlur={() => { invalidateNativeFocus(renderer); setHistoryFocused(false); if (busy()) buffer.focus(false); }}
-        onMouseMove={event => { if (toolbarHover !== undefined) return; clearTimeout(hoverTimer); const y = (event.y || 0) - size().y - historyTop() - origin(); setHovered(layout().find(item => y >= item.top && y < item.top + item.height)?.block.id); setHoveredLink(outputLinkAt(event.x || 0, event.y || 0)); }}
-        onMouseLeave={() => { leaveHistory(); setHoveredLink(undefined); }} onMouseDown={event => { if (event.button !== 0 || outputLinkAt(event.x || 0, event.y || 0) || props.historyHeader && (event.y || 0) - size().y - historyTop() < origin() + headerHeight()) return; setSelected(hovered()); props.onFocus?.(); if (history) focusNativeElement(renderer, history.id); }}
-        onClick={event => { if (event.button !== undefined && event.button !== 0) return; const hit = outputLinkAt(event.x || 0, event.y || 0); if (hit) { props.onFocus?.(); props.onOpenPath?.(hit.link.path, hit.link.isDirectory); } }}
+        onFocus={() => { invalidateNativeFocus(renderer); setHistoryFocused(true); if (busy()) buffer.focus(true); }} onBlur={() => { stopSelecting(); invalidateNativeFocus(renderer); setHistoryFocused(false); if (busy()) buffer.focus(false); }}
+        onMouseMove={event => {
+          if (selecting && event.pressedButton === 0) { dragSelection(event); setHoveredLink(undefined); return; }
+          stopSelecting();
+          if (toolbarHover !== undefined) return; clearTimeout(hoverTimer); const y = (event.y || 0) - size().y - historyTop() - origin(); setHovered(layout().find(item => y >= item.top && y < item.top + item.height)?.block.id); setHoveredLink(outputLinkAt(event.x || 0, event.y || 0));
+        }}
+        onMouseLeave={() => { leaveHistory(); setHoveredLink(undefined); }} onMouseDown={event => {
+          if (event.button !== 0 || insideControls(event.x || 0, event.y || 0) || props.historyHeader && (event.y || 0) - size().y - historyTop() < origin() + headerHeight()) return;
+          const point = selectionPoint(event.x || 0, event.y || 0), anchor = event.modifiers?.shift ? selection()?.anchor || point : point;
+          selecting = !!point; dragged = !!point && !!anchor && (point.id !== anchor.id || point.column !== anchor.column);
+          setSelection(point && anchor ? { anchor, head: point } : undefined);
+          setFollow(false); setSelected(hovered()); props.onFocus?.(); if (history) focusNativeElement(renderer, history.id);
+        }}
+        onMouseUp={event => { if (selecting && event.button === 0) extendSelection(event.x || 0, event.y || 0); stopSelecting(); }}
+        onClick={event => { if (dragged || event.button !== undefined && event.button !== 0 || insideControls(event.x || 0, event.y || 0)) return; const hit = outputLinkAt(event.x || 0, event.y || 0); if (hit) { props.onFocus?.(); props.onOpenPath?.(hit.link.path, hit.link.isDirectory); } }}
         onKeyDown={event => {
           if (event.key?.toLowerCase() === "escape" && moreId() !== undefined) { event.preventDefault(); event.stopPropagation(); setMoreId(undefined); return; }
           if (busy()) { liveKey(event); return; }
           if (props.onCustomKey?.(event)) { event.preventDefault(); event.stopPropagation(); return; }
           const key = event.key?.toLowerCase();
           if (key === "l" && event.modifiers?.ctrl && !event.modifiers.alt && !event.modifiers.cmd) { event.preventDefault(); event.stopPropagation(); blocks.clear(); setFollow(true); focus(); }
-          else if (key === "end" || key === "escape") { event.preventDefault(); event.stopPropagation(); setFollow(true); setSelected(undefined); focus(); }
+          else if (key === "end" || key === "escape") { event.preventDefault(); event.stopPropagation(); setFollow(true); setSelected(undefined); setSelection(undefined); focus(); }
           else if (key === "pageup" || key === "pagedown") { event.preventDefault(); event.stopPropagation(); const next = Math.max(0, Math.min(maximum(), scroll() + (key === "pageup" ? -1 : 1) * (viewportHeight() - row))); setFollow(topInput() ? next === 0 : next >= maximum()); setScroll(next); }
           else if (key === "c" && (event.modifiers?.cmd || event.modifiers?.ctrl && event.modifiers.shift)) {
-            const block = all().find(block => block.id === selected()); if (block) { event.preventDefault(); event.stopPropagation(); copy(terminalLinesText(block.lines), "Output copied"); }
+            const block = all().find(block => block.id === selected()), text = selectedText() || (block ? terminalLinesText(block.lines) : ""); if (text) { event.preventDefault(); event.stopPropagation(); copy(text, "Selection copied"); }
           }
         }}
         onKeyUp={event => { if (busy()) liveKey(event, true); }}
@@ -265,16 +341,16 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
           const delta = -(event.deltaY || 0) * (event.precise ? 1 : row) * (config.terminalScrollMultiplier ?? 3) / (config.terminalScrollDivider ?? 1);
           const next = Math.max(0, Math.min(maximum(), scroll() + delta)); setFollow(topInput() ? next === 0 : next >= maximum()); setScroll(next);
           if (event.deltaX) setHorizontal(value => Math.max(0, value - event.deltaX! * (event.precise ? 1 : cell())));
-        }} style={{ position: "absolute", left: 0, right: 0, top: historyTop(), height: viewportHeight(), overflow: "hidden", userSelect: "none", cursor: hoveredLink() ? "pointer" : "default" }}>
+        }} style={{ position: "absolute", left: 0, right: 0, top: historyTop(), height: viewportHeight(), overflow: "hidden", userSelect: "none", cursor: hoveredLink() ? "pointer" : "text" }}>
         <canvas testId="terminal-block-ink" commands={paint()} style={{ position: "absolute", left: 0, top: 0, width: "100%", height: "100%", pointerEvents: "none" }}/>
         <Show when={props.historyHeader}><div testId="terminal-history-header" style={{ position: "absolute", left: 0, right: 0, top: origin(), height: headerHeight(), overflow: "hidden" }}>
           <Show when={origin() + headerHeight() > 0}>{props.historyHeader?.(headerViewport)}</Show>
         </div></Show>
-        <Show when={toolbar()}>{item => { onCleanup(() => { toolbarHover = undefined; clearTimeout(hoverTimer); }); return <div testId="terminal-block-actions" onMouseEnter={() => keepToolbar(item().block.id, true)} onMouseLeave={() => keepToolbar(item().block.id, false)} style={{ position: "absolute", right: 16 * s, top: item().y, display: "flex", gap: 4 * s, padding: 4 * s, borderRadius: 4 * s, backgroundColor: commandBlockHeader(item().block, home()).length * cell() * .9 + inset > size().width - 76 * s ? c.bg : "transparent" }}>
+        <Show when={toolbar()}>{item => { onCleanup(() => { actionsHost = undefined; toolbarHover = undefined; clearTimeout(hoverTimer); }); return <div ref={actionsHost} testId="terminal-block-actions" onMouseEnter={() => keepToolbar(item().block.id, true)} onMouseLeave={() => keepToolbar(item().block.id, false)} style={{ position: "absolute", right: 16 * s, top: item().y, display: "flex", gap: 4 * s, padding: 4 * s, borderRadius: 4 * s, backgroundColor: commandBlockHeader(item().block, home()).length * cell() * .9 + inset > size().width - 76 * s ? c.bg : "transparent" }}>
           <TerminalAction config={config} label="Filter output" icon="filter" active={filterId() === item().block.id} testId="block-filter" onHover={over => keepToolbar(item().block.id, over)} action={() => { if (filterId() === item().block.id) { setFilterId(undefined); setFilter(""); } else { setFilter(""); setFilterId(item().block.id); queueMicrotask(() => { if (filterInput) focusNativeElement(renderer, filterInput.id); }); } }}/>
           <TerminalAction config={config} label="Block actions" icon="more" testId="block-more" active={moreId() === item().block.id} onHover={over => keepToolbar(item().block.id, over)} action={() => setMoreId(current => current === item().block.id ? undefined : item().block.id)}/>
         </div>; }}</Show>
-        <Show when={toolbar() && moreId() === toolbar()!.block.id ? toolbar() : undefined}>{item => <div testId="block-action-menu" role="menu" style={{ position: "absolute", right: 16 * s, top: Math.max(0, Math.min(item().y + 36 * s, viewportHeight() - 170 * s)), width: 190 * s, padding: 4 * s, display: "flex", flexDirection: "column", borderWidth: 1, borderColor: c.border, backgroundColor: c.surface, borderRadius: 5 * s }}>
+        <Show when={toolbar() && moreId() === toolbar()!.block.id ? toolbar() : undefined}>{item => <div ref={menuHost} testId="block-action-menu" role="menu" style={{ position: "absolute", right: 16 * s, top: Math.max(0, Math.min(item().y + 36 * s, viewportHeight() - 170 * s)), width: 190 * s, padding: 4 * s, display: "flex", flexDirection: "column", borderWidth: 1, borderColor: c.border, backgroundColor: c.surface, borderRadius: 5 * s }}>
           <For each={[
             { label: "Copy command", id: "block-copy-command", action: () => copy(toolbar()!.block.command, "Command copied") },
             { label: "Copy output", id: "block-copy-output", action: () => copy(terminalLinesText(toolbar()!.lines), "Output copied") },
@@ -283,7 +359,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
             { label: collapsed().has(toolbar()!.block.id) ? "Expand output" : "Collapse output", id: "block-collapse", action: () => toggleCollapse(toolbar()!.block.id) },
           ]}>{action => { const [over, setOver] = createSignal(false); return <div testId={action.id} role="menuitem" tabIndex={0} data-preserve-keyboard-focus={true} onMouseEnter={() => setOver(true)} onMouseLeave={() => setOver(false)} onClick={() => { action.action(); setMoreId(undefined); }} onKeyDown={event => { if (event.key === "enter") { event.preventDefault(); event.stopPropagation(); action.action(); setMoreId(undefined); } }} style={{ height: 30 * s, paddingLeft: 8 * s, display: "flex", alignItems: "center", backgroundColor: over() ? c.hover : "transparent", borderRadius: 3 * s, cursor: "pointer" }}><text style={text(c.fg, 11 * s)}>{action.label}</text></div>; }}</For>
         </div>}</Show>
-        <Show when={visible().find(item => item.block.id === filterId())}>{item => <div testId="block-output-filter" style={{ position: "absolute", left: inset, right: inset, top: Math.max(0, item().top + origin() + item().output - 34 * s), height: 28 * s, display: "flex", alignItems: "center", gap: 10 * s, backgroundColor: c.bg }}>
+        <Show when={visible().find(item => item.block.id === filterId())}>{item => <div ref={filterHost} testId="block-output-filter" style={{ position: "absolute", left: inset, right: inset, top: Math.max(0, item().top + origin() + item().output - 34 * s), height: 28 * s, display: "flex", alignItems: "center", gap: 10 * s, backgroundColor: c.bg }}>
           <input ref={filterInput} testId="block-filter-query" value={filter()} placeholder="Filter output..." aria-label="Filter block output" onChange={event => setFilter(event.value || "")} onKeyDown={event => { event.stopPropagation(); if (props.onCustomKey?.(event)) { event.preventDefault(); return; } if (event.key === "escape") { event.preventDefault(); setFilterId(undefined); setFilter(""); focus(); } }} onKeyUp={event => event.stopPropagation()} style={{ ...text(c.fg, 12 * s), flexGrow: 1, minWidth: 0, height: 26 * s, paddingLeft: 7 * s, borderWidth: 1, borderColor: c.border, borderRadius: 4 * s, backgroundColor: c.surface }}/>
           <text style={{ ...text(c.muted, 10 * s), width: 90 * s, flexShrink: 0, height: 28 * s, lineHeight: 28 * s }}>{`${item().lines.length} / ${item().block.lines.length} lines`}</text>
         </div>}</Show>

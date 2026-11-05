@@ -26,14 +26,19 @@ test("two independent Agent clients share one live chat; closing one preserves t
   expect(a.state.history.one).toEqual(b.state.history.one);
   await Bun.sleep(350);
   for(const id of [ea,eb]){const frame=coreCall<{commands:Array<{kind:string;text?:string}>}>("agenttimeline.layout",{id,width:1000,height:1400});const painted=frame.commands.filter(command=>command.kind==="text").map(command=>command.text).join(" ").replace(/\s+/g," ");expect(painted).toContain("Shared live answer");expect(painted).toContain("Alice question");expect(painted).toContain("Bob question");}
+  const closedHistory=a.state.history.one;
   expect(a.closeCurrentTab()).toBe(true);await until(()=>daemon.streamSubscribers("one")===1);
+  // Last-view close releases the local transcript, not the other client's chat.
+  expect(Object.hasOwn(a.state.history,"one")).toBe(false);
   daemon.pushSubscribed({ContentDelta:{session_id:"one",message_id:"answer",parent_message_id:"reply",kind:"Text",text:" still live"}});
   await until(()=>b.state.history.one?.find(row=>row.id==="answer")?.text==="Shared live answer still live");
-  expect(a.state.history.one?.find(row=>row.id==="answer")?.text).toBe("Shared live answer");
+  expect(closedHistory?.find(row=>row.id==="answer")?.text).toBe("Shared live answer");
+  expect(Object.hasOwn(a.state.history,"one")).toBe(false);
   cb.stop();await until(()=>daemon.streamSubscribers("one")===0);cb.start();
   await until(()=>cb.state.phase==="connected"&&!b.state.loading&&daemon.streamSubscribers("one")===1);
   daemon.pushSubscribed({ContentDelta:{session_id:"one",message_id:"answer",parent_message_id:"reply",kind:"Text",text:" after reconnect"}});
   await until(()=>b.state.history.one?.find(row=>row.id==="answer")?.text==="Shared live answer still live after reconnect");
+  expect(Object.hasOwn(a.state.history,"one")).toBe(false);
 
   expect(daemon.requests.filter(request=>request.tag==="SubmitPrompt")).toHaveLength(2);expect(daemon.ptyRequests).toHaveLength(0);
  }finally{offa();offb();a.dispose();b.dispose();ca.stop();cb.stop();daemon.stop();coreCall("agenttimeline.dispose",{id:ea});coreCall("agenttimeline.dispose",{id:eb});}

@@ -127,9 +127,9 @@ try{
  const requestsBefore=server.workspaceRequests.length,activeBefore=model.state.activeWorkspace!.id;
  await closeWithNativeBubbling("b");assert.equal(closes,1);assert.equal(activations,0);assert.equal(model.state.activeWorkspace!.id,activeBefore);assert.deepEqual(order(),["a","b","c"]);assert.ok(model.state.error?.includes(":qall!"));assert.equal(model.getEditor(dirtySurface).frame.dirty,true);
  assert.equal(server.workspaceRequests.length,requestsBefore,"dirty inactive X never activates/subscribes");
- await model.saveFile(dirtySurface);await closeWithNativeBubbling("b");assert.equal(closes,2);assert.equal(retargetedCloseClicks,1,"A release/click must actually land on the neighboring X after the first tab disappears");assert.equal(activations,0);assert.deepEqual(order(),["a","c"]);assert.equal(model.state.activeWorkspace!.id,"a");assert.equal(server.workspaces.length,3);
-  assert.equal(server.workspaceRequests.length,requestsBefore+1,"clean inactive X releases window membership without activating it");
-  assert.equal(server.workspaceRequests.at(-1)?.tag,"SetWindowWorkspaces");
+  await model.saveFile(dirtySurface);await closeWithNativeBubbling("b");assert.equal(closes,2);assert.equal(retargetedCloseClicks,1,"A release/click must actually land on the neighboring X after the first tab disappears");assert.equal(activations,0);assert.deepEqual(order(),["a","c"]);assert.equal(model.state.activeWorkspace!.id,"a");assert.equal(server.workspaces.length,2);assert.equal(server.workspaces.some(workspace=>workspace.id==="b"),false,"last-window close releases the host workspace");
+   assert.equal(server.workspaceRequests.length,requestsBefore+1,"clean inactive X tears down the workspace without activating it");
+   assert.deepEqual(server.workspaceRequests.at(-1),{tag:"CloseWindowWorkspace",body:{workspace_id:"b"}});
   await drag("a","c","after");assert.equal(activations,1);assert.equal(reorders,1);assert.equal(server.workspaceRequests.length,requestsBefore+1);
  // Translate the painted hosts without onLayout, as horizontal scrolling
  // does in GPUIX. The component must query current bounds at final drop.

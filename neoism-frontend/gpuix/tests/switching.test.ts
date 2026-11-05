@@ -29,6 +29,7 @@ function fixture(options: { gateSubscribe?: boolean; gateReads?: boolean } = {})
   })) as typeof client.request;
   client.send = (() => 1) as typeof client.send;
   const model = new WorkspaceModel(client, config); model.refreshCatalogs = async () => {};
+  model.agentSdk.catalogSessions = async () => ({items:[],cursor:{}});
   model.update({ workspaces: [a, b] }); cleanup.push(() => model.dispose());
   return { model, requests, subscriptions, reads };
 }
@@ -68,7 +69,8 @@ test("duplicate file clicks coalesce reads, retain scoped results across switche
 });
 
 test("closing a pending file does not resurrect its bytes, and initial surface publication is atomic", async () => {
-  const { model, reads } = fixture({ gateReads: true }); await model.activateWorkspace(a);
+  const { model, reads } = fixture({ gateReads: true }), initialThreads=model.state.threads;
+  await model.activateWorkspace(a); await until(()=>model.state.threads!==initialThreads);
   const observed: Array<{ active?: string; focused?: string }> = [];
   const unsubscribe = model.subscribe(() => observed.push({ active: model.state.activeSurfaceId, focused: model.getLayout().frame.focusedSurfaceId }));
   const open = model.openFile("a.txt"); await until(() => reads.length === 1);

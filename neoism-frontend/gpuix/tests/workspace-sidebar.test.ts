@@ -9,8 +9,8 @@ test("legacy sidebar migrates only to its workspace and closed choices stay expl
  expect(workspaceSidebar(ui,"c")).toBe("files");expect(workspaceSidebar(ui,"b")).toBeUndefined();
  expect(withWorkspaceSidebar(ui,"c","conversations")).toEqual({a:"notes",b:null,c:"conversations"});
 });
-test("actual App keeps all workspace sidebar choices through closing, font generations and cold recovery",async()=>{
+test("actual App releases closed workspace sidebar choices and retains open choices through font generations and cold recovery",async()=>{
  const child=Bun.spawn([process.execPath,"run","tests/support/workspace-sidebar-check.tsx"],{cwd:fileURLToPath(new URL("..",import.meta.url)),env:{...process.env,NODE_ENV:"test"},stdout:"pipe",stderr:"pipe"});
  const[status,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
-  expect({status,stderr}).toEqual({status:0,stderr:""});expect(JSON.parse(stdout)).toEqual({actualApp:true,noWindow:true,workspacePlusNoEmptyFrame:true,independentFourStates:true,closedWorkspaceRetained:true,fontGenerationRetained:true,coldRecoveryRetained:true,noPtyOrPromptDuringSwitches:true,localWelcomeNoReplacement:true,emptyWelcomeAction:true});
+  expect({status,stderr}).toEqual({status:0,stderr:""});expect(JSON.parse(stdout)).toEqual({actualApp:true,noWindow:true,workspacePlusNoEmptyFrame:true,independentFourStates:true,closedWorkspaceReleased:true,fontGenerationRetained:true,coldRecoveryRetained:true,noPtyOrPromptDuringSwitches:true,localWelcomeNoReplacement:true,emptyWelcomeAction:true});
 },15000);

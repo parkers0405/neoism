@@ -19,10 +19,11 @@ function fixture(){
       const result={PtyCreated:{session_id:`pty-${++sequence}`,presentation}};
       return holdCreate?Effect.promise(()=>new Promise(resolve=>{resolveCreate=()=>resolve(result);})):Effect.succeed(result);
     }
+    if(message.CloseWindowWorkspace)return Effect.succeed({HostWorkspaceTree:{hosts:[{id:"host",label:"Host"}],workspaces:[a,b].filter(workspace=>workspace.id!==message.CloseWindowWorkspace.workspace_id),tabs:[]}});
     if(message.BindEditorSurface&&failBind)return Effect.fail(new Error("bind failed"));
     return Effect.succeed("Ack");
   }) as typeof client.request;
-  model.update({workspaces:[a,b],activeWorkspace:a});
+  model.update({workspaces:[a,b],activeWorkspace:a,connection:{phase:"connected",attempt:0,workspaceLifecycle:true}});
   const home=model.ensureWelcome()!;
   cleanups.push(()=>{model.dispose();client.stop();});
   return {model,client,a,b,home,requests,
@@ -130,7 +131,12 @@ for(const inflight of [false,true]){
     f.model.update({activeWorkspace:f.b});
     expect(await f.model.closeWorkspace(false,"a")).toBe(true);
     if(inflight)f.release();await pending;await tick();
-    expect(f.closes().map(r=>r.message.ClosePty.session_id)).toEqual(["pty-1"]);
+    expect(f.requests.filter(r=>r.message.CloseWindowWorkspace).map(r=>r.message)).toEqual([{CloseWindowWorkspace:{workspace_id:"a"}}]);
+    // Established shells belong to host teardown (and may still be shared by
+    // another window). Only an unbound late create is closed by this client.
+    expect(f.closes().map(r=>r.message.ClosePty.session_id)).toEqual(inflight?["pty-1"]:[]);
+    expect(f.model.state.workspaces.map(workspace=>workspace.id)).toEqual(["b"]);
+    expect(f.model.state.ui.homeTerminalSessions).toEqual({});
     expect(f.model.state.surfaces.find(s=>s.id===f.home.id)?.sessionId).toBeUndefined();
     expect(f.model.state.ui.pendingTerminalBindings).toEqual({});
   });

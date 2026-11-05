@@ -131,9 +131,9 @@ try {
   assert.equal(host.nativeRoot, shell); assert.deepEqual(agents().map(surface => surface.id), [first.id, second.id]);
   assert.equal(model.state.composerDrafts[firstKey]?.text, "first actual App draft"); assert.equal(model.state.composerDrafts[secondKey]?.text, "second actual App draft");
   assert.ok(!model.state.workspaces.some(workspace => workspace.id === createdId),"unused newly-created workspace is pruned on close");
-  assert.ok(daemon.workspaceRequests.some(request=>request.tag==="SetWindowWorkspaces"&&request.body.prune_empty===createdId));
+  assert.equal(daemon.workspaceRequests.filter(request=>request.tag==="CloseWindowWorkspace"&&request.body.workspace_id===createdId).length,1,"qall requests exactly one host-authoritative workspace teardown");
   assert.equal(daemon.workspaceRequests.filter(request => request.tag === "SubscribeWorkspace" && request.body.workspace_id === "b").length, 0);
-  assert.equal(daemon.workspaceRequests.filter(request => /^(Close|Remove|Delete)/.test(request.tag)).length, 0);
+   assert.deepEqual(daemon.workspaceRequests.filter(request => /^(Close|Remove|Delete)/.test(request.tag)),[{tag:"CloseWindowWorkspace",body:{workspace_id:createdId}}],"only the explicitly closed workspace is torn down");
   assert.equal(daemon.requests.filter(request => ["CreateThread", "SubmitPrompt"].includes(request.tag)).length, 0); assert.equal(daemon.ptyRequests.length, 0);
    stage="Alt-number workspace round trip restores the real composer focus and caret";
    model.setUI({openWorkspaceIds:["a","b"]});await host.pump(root);

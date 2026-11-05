@@ -16,7 +16,12 @@ import {DocumentController} from "../../src/collaboration/DocumentController";
 const temp=canonicalPath(mkdtempSync(join(tmpdir(),"neoism-shared-doc-"))),directory=join(temp,"project"),runtime=join(temp,"runtime");mkdirSync(directory);mkdirSync(runtime,{mode:0o700});
 const path=join(directory,"shared.md"),initial="hello α\n";writeFileSync(path,initial);
 const token=crypto.randomUUID(),nonce=crypto.randomUUID();let address="",output="";
-const agent=Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>Response.json({workspaceId:"fixture-chat-namespace"})});
+const agent=Bun.serve({hostname:"127.0.0.1",port:0,fetch:request=>{
+ const path=new URL(request.url).pathname;
+ if(request.method==="GET"&&path==="/v2/health")return Response.json({healthy:true,version:"fixture",providerCredentialStore:"fixture"});
+ if(request.method==="POST"&&path==="/v2/hosting/associate")return Response.json({workspaceId:"fixture-chat-namespace"});
+ return new Response("Not found",{status:404});
+}});
 const daemon=Bun.spawn([daemonExecutable(),"--addr","127.0.0.1:0","--ephemeral","--no-unix-socket","--state-dir",join(temp,"state"),...localDaemonArgs(directory,{NEOISM_GPUIX_PRIVATE_DAEMON:"1"})],{detached:process.platform!=="win32",env:{...process.env,NEOISM_DAEMON_TOKEN:token,NEOISM_AGENT_SERVER:agent.url.origin,NEOISM_FAST_READINESS_NONCE:nonce,NEOISM_DAEMON_DATA_DIR:join(temp,"auth"),NEOISM_CONFIG_HOME:join(temp,"config"),XDG_CONFIG_HOME:join(temp,"config"),XDG_RUNTIME_DIR:runtime,XDG_DATA_HOME:join(temp,"data"),XDG_CACHE_HOME:join(temp,"cache"),NEOISM_REQUIRE_AUTH:"0"},stdout:"pipe",stderr:"pipe"});
 const stdout=(async()=>{let pending="";const reader=daemon.stdout.getReader();while(true){const {done,value}=await reader.read();if(done)break;const text=new TextDecoder().decode(value);output+=text;pending+=text;let newline;while((newline=pending.indexOf("\n"))>=0){const line=pending.slice(0,newline);pending=pending.slice(newline+1);try{const ack=JSON.parse(line);if(ack.nonce===nonce&&typeof ack.address==="string")address=ack.address;}catch{}}}})();
 const stderr=(async()=>{const reader=daemon.stderr.getReader();while(true){const {done,value}=await reader.read();if(done)break;output+=new TextDecoder().decode(value);}})();

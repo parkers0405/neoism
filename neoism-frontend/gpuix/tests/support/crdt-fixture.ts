@@ -1,4 +1,3 @@
-import {fileURLToPath} from "node:url";
 import {coreCall,NativeEditor} from "../../src/native-core";
 import * as Effect from "effect/Effect";
 import type {DaemonConnection} from "../../src/daemon/client";
@@ -11,7 +10,10 @@ export function createCrdtFixture(read:(path:string)=>string|undefined,write:(pa
   const spec=message.Owned?.message||message;
   if(spec.AcquireBuffer){const {buffer_id,initial_text}=spec.AcquireBuffer;
    if(!documents.has(buffer_id)){
-    const path=fileURLToPath(buffer_id),editor=new NativeEditor(path,"",false);
+    // HostPath::buffer_id is an opaque file:// prefix plus host spelling,
+    // not a percent-encoded URI or a path on the test runner's operating system.
+    if(!buffer_id.startsWith("file://"))throw Error("Invalid fixture document ID");
+    const path=buffer_id.slice(7),editor=new NativeEditor(path,"",false);
     coreCall("editor.crdt.bind",{id:editor.id,path,clientId:++actor});editor.call("crdt.event",{message:{Snapshot:{buffer_id,update_v1:[0,0],state_vector_v1:[0]}}});
     editor.call("paste",{text:read(path)??initial_text??""});editor.call("saved");documents.set(buffer_id,{editor,path});
    }

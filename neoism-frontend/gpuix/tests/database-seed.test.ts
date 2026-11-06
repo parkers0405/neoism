@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { rmSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { appleColumns, catalogColumns, checkDatabaseSeed, databaseFixtureObjects, seedDatabaseWorkspace } from "../scripts/database-debug";
 
-test("preview offers real populated sidebar categories and a wide catalog without changing fruit contracts", () => {
+test("preview offers real populated sidebar categories and a wide catalog without changing fruit contracts", async () => {
   const fixture = seedDatabaseWorkspace();
   try {
     checkDatabaseSeed(fixture.database);
@@ -20,5 +20,11 @@ test("preview offers real populated sidebar categories and a wide catalog withou
         expect(db.query<{ count: number }, []>(`SELECT count(*) AS count FROM "${name}"`).get()!.count).toBe(count);
       }
     } finally { db.close(); }
-  } finally { rmSync(fixture.workspace, { recursive: true, force: true }); }
+  } finally {
+    // SQLite's deferred-close statements and Windows file scanners may retain
+    // a scratch handle briefly after close. Release unreachable statements and
+    // await bounded cleanup rather than failing successful SQL assertions.
+    Bun.gc(true);
+    await rm(fixture.workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });

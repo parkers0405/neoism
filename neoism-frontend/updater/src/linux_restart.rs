@@ -248,13 +248,27 @@ mod tests {
         let exe = root.path().join("neoism");
         fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
         let marker = root.path().join("checkpoint");
-        let mut child = Command::new(&exe)
-            .args(["--exact", "linux_restart::tests::graceful_child"])
-            .env("NEOISM_TEST_GRACEFUL_RESTART", &marker)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let spawn_deadline = Instant::now() + Duration::from_secs(1);
+        let mut child = loop {
+            let spawned = Command::new(&exe)
+                .args(["--exact", "linux_restart::tests::graceful_child"])
+                .env("NEOISM_TEST_GRACEFUL_RESTART", &marker)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            match spawned {
+                Ok(child) => break child,
+                // Parallel test forks can temporarily inherit fs::copy's
+                // writable descriptor. Retry only this transient exec error;
+                // readiness, checkpoint and shutdown assertions stay intact.
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY)
+                    && Instant::now() < spawn_deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("could not spawn checkpoint child: {error}"),
+            }
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !marker.with_extension("ready").exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));

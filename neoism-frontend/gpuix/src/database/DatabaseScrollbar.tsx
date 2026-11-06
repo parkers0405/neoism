@@ -29,7 +29,7 @@ export function DatabaseScrollbar(props: {
   return <div ref={element => host = element} testId={`database-scrollbar-${props.axis}`} style={{
     position: "relative", flexShrink: 0, flexGrow: vertical ? 0 : 1, flexBasis: vertical ? undefined : 0,
     width: vertical ? 12 * scale() : undefined, height: vertical ? "100%" : 12 * scale(),
-    backgroundColor: props.config.theme.surface, minWidth: 0,
+    backgroundColor: props.config.theme.bg, minWidth: 0,
   }} onScroll={props.onWheel} onMouseDown={event => {
     if (event.button !== undefined && event.button !== 0 || !host) return;
     const pointer = coordinate(event), bounds = paintedChromeBounds(renderer, host.id);
@@ -63,7 +63,7 @@ export function DatabaseScrollbar(props: {
       }}
       style={{ position: "absolute", left: vertical ? 3 * scale() : position(), top: vertical ? position() : 3 * scale(),
         width: vertical ? 6 * scale() : length(), height: vertical ? length() : 6 * scale(),
-        borderRadius: 3 * scale(), backgroundColor: dragging() ? props.config.theme.muted : props.config.theme.border,
-        cursor: dragging() ? "grabbing" : "grab", hover: { backgroundColor: props.config.theme.muted } }} />
+        borderRadius: 3 * scale(), backgroundColor: props.config.theme.fg, opacity: dragging() ? 0.85 : 0.55,
+        cursor: dragging() ? "grabbing" : "grab", hover: { opacity: 0.85 } }} />
   </div>;
 }

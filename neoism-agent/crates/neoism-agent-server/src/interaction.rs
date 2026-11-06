@@ -321,7 +321,8 @@ pub(crate) async fn question_reply(
     }
     state.publish(EventPayload::new(
         event_type::QUESTION_REPLIED,
-        json!({ "requestID": request_id, "reply": reply, "info": removed }),
+        json!({ "sessionId": removed.as_ref().map(|request| &request.session_id),
+            "requestID": request_id, "reply": reply, "info": removed }),
     ));
     Json(true)
 }
@@ -359,7 +360,8 @@ pub(crate) async fn question_reject(
     }
     state.publish(EventPayload::new(
         event_type::QUESTION_REJECTED,
-        json!({ "requestID": request_id, "info": removed }),
+        json!({ "sessionId": removed.as_ref().map(|request| &request.session_id),
+            "requestID": request_id, "info": removed }),
     ));
     Json(true)
 }
@@ -410,7 +412,8 @@ pub(crate) async fn cancel_session_interactions(state: &AppState, session_id: &s
         }
         state.publish(EventPayload::new(
             event_type::QUESTION_REJECTED,
-            json!({ "requestID": id, "reason": "cancelled", "info": request }),
+            json!({ "sessionId": session_id,
+                "requestID": id, "reason": "cancelled", "info": request }),
         ));
     }
 }
@@ -588,6 +591,40 @@ mod tests {
         )
         .await;
         assert_lists(state, Some("missing"), None, &["unknown"]).await;
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn question_resolution_events_carry_source_session() {
+        let fixture = Fixture::new().await;
+        add_session(&fixture.state, "child", "tenant-a", "workspace-a").await;
+        for action in ["reply", "reject", "cancel", "abort"] {
+            add_pending(&fixture.state, action, "child").await;
+            let mut events = fixture.state.subscribe();
+            match action {
+                "reply" => {
+                    question_reply(State(fixture.state.clone()), Path(action.into()),
+                        Json(QuestionReplyRequest { answers: vec![vec!["yes".into()]] })).await;
+                }
+                "reject" => {
+                    question_reject(State(fixture.state.clone()), Path(action.into())).await;
+                }
+                "abort" => {
+                    crate::session_actions::abort_session_run(&fixture.state, "child").await;
+                }
+                _ => cancel_session_interactions(&fixture.state, "child").await,
+            }
+            let event = loop {
+                let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                    .await.unwrap().unwrap();
+                if matches!(event.kind.as_str(), "question.replied" | "question.rejected") {
+                    break event;
+                }
+            };
+            assert_eq!(event.properties["sessionId"], "child", "{action}");
+            assert_eq!(event.properties["requestID"], action);
+            assert_eq!(event.properties["info"]["sessionId"], "child");
+        }
         fixture.finish().await;
     }
 

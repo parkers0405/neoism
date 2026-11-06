@@ -15,7 +15,6 @@ fn render(host:&mut Host,v:&Value)->Result<Value,String>{
         Kind::Top(top)=>{
             top.set_scale(scale);top.set_visible(true);
             top.set_databases_available(true);
-            top.set_databases_open(v["sidebar"].as_str()==Some("databases"));
             // OS controls use window logical pixels; the panel scales its insets internally.
             top.set_left_safe_inset(n(v,"leftSafeInset",0.0)/scale);
             if let Some(peers)=v["peers"].as_array(){
@@ -78,13 +77,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn databases_region_click_and_sidebar_selection_do_not_synthesize_actions() {
+    fn database_menu_region_click_and_sidebar_selection_do_not_synthesize_actions() {
         let id = dispatch(&json!({"op":"chrome.new"})).unwrap().unwrap()["id"].clone();
         let frame = dispatch(&json!({"op":"chrome.frame","id":id,"width":800,"sidebar":"databases"})).unwrap().unwrap();
-        let region = frame["regions"].as_array().unwrap().iter()
-            .find(|r| r["id"] == "toggle-databases").unwrap();
-        assert_eq!(region["label"], "Databases");
+        assert!(!frame["regions"].as_array().unwrap().iter().any(|r| r["id"] == "toggle-databases"));
         assert!(frame["action"].is_null());
+        let menu = frame["regions"].as_array().unwrap().iter().find(|r| r["id"] == "topbar-menu").unwrap();
+        let bounds = menu["rect"].as_array().unwrap();
+        let opened = dispatch(&json!({
+            "op":"chrome.click","id":id,"width":800,
+            "x":bounds[0].as_f64().unwrap() + bounds[2].as_f64().unwrap() / 2.0,
+            "y":bounds[1].as_f64().unwrap() + bounds[3].as_f64().unwrap() / 2.0,
+        })).unwrap().unwrap();
+        let region = opened["regions"].as_array().unwrap().iter()
+            .find(|r| r["id"] == "menu:OpenDatabases").unwrap();
+        assert_eq!(region["label"], "Database");
+        assert_eq!(region["menu"], true);
         let bounds = region["rect"].as_array().unwrap();
         let clicked = dispatch(&json!({
             "op":"chrome.click","id":id,"width":800,"sidebar":"databases",
@@ -92,6 +100,7 @@ mod tests {
             "y":bounds[1].as_f64().unwrap() + bounds[3].as_f64().unwrap() / 2.0,
         })).unwrap().unwrap();
         assert_eq!(clicked["action"], "OpenDatabases");
+        assert_eq!(clicked["menuOpen"], false);
         for sidebar in [json!("notes"), json!("files"), json!("conversations"), json!(null), json!("databases")] {
             let frame = dispatch(&json!({"op":"chrome.frame","id":id,"width":800,"sidebar":sidebar})).unwrap().unwrap();
             assert!(frame["action"].is_null());

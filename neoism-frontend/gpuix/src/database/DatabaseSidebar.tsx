@@ -16,6 +16,7 @@ export interface DatabaseSidebarProps {
   onConnection: (id: string) => void;
   onTable: (name: string) => void;
   onBrowse: () => void;
+  onBackToFiles?: () => void;
   active?: boolean;
   focusToken?: number;
   onFocus?: () => void;
@@ -57,7 +58,7 @@ export function DatabaseSidebar(props: DatabaseSidebarProps) {
   const measureCursor=()=>{if(props.onCursor&&!disposed)measurements.request(publishCursor);};
   const scale = () => props.config.scale, palette = () => props.config.theme;
   const text = (color = palette().fg): StyleDesc => ({ fontFamily: props.config.fontFamily, fontWeight: props.config.fontWeight,
-    fontSize: 12 * scale(), color, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" });
+    fontSize: 13 * scale(), color, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" });
   const row = (): StyleDesc => ({ display: "flex", flexDirection: "row", alignItems: "center", minWidth: 0 });
   const toggle = (key: string) => setExpanded(old => { const next = new Set(old); if (next.has(key)) next.delete(key); else next.add(key); return next; });
   const focus = (force = false) => {
@@ -142,6 +143,14 @@ export function DatabaseSidebar(props: DatabaseSidebarProps) {
     style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", flexGrow: 1, minWidth: 0, minHeight: 0, overflow: "hidden", backgroundColor: palette().bg, userSelect: "none" }}>
     <div style={{ ...row(), height: 32 * scale(), minHeight: 32 * scale(), paddingLeft: 12 * scale(), paddingRight: 8 * scale(), borderBottomWidth: scale(), borderColor: palette().border }}>
       <text style={{ ...text(), flexGrow: 1 }}>Databases</text>
+      <Show when={props.onBackToFiles}>
+        <div role="button" aria-label="Back to Files" testId="database-back-to-files" tabIndex={0} onClick={() => props.onBackToFiles?.()}
+          onKeyDown={event => { if (handleApplicationShortcut(renderer, event) || props.onCustomKey?.(event)) return; if (event.key === "enter" || event.key === "space" || event.key === " ") { event.preventDefault(); event.stopPropagation(); props.onBackToFiles?.(); } }}
+          style={{ ...row(), height: 28 * scale(), paddingLeft: 6 * scale(), paddingRight: 6 * scale(), cursor: "pointer", hover: { backgroundColor: palette().hover } }}>
+          <text style={{ fontFamily: props.config.iconFontFamily, fontWeight: 400, fontSize: 12 * scale(), color: palette().muted, marginRight: 6 * scale(), pointerEvents: "none" }}>{"\uf060"}</text>
+          <text style={{ ...text(palette().muted), pointerEvents: "none" }}>Back to Files</text>
+        </div>
+      </Show>
     </div>
     <div role="button" aria-label="Open database" testId="database-browse" tabIndex={0} onClick={props.onBrowse}
       onKeyDown={event => { if (handleApplicationShortcut(renderer, event) || props.onCustomKey?.(event)) return; if (event.key === "enter" || event.key === "space" || event.key === " ") { event.preventDefault(); event.stopPropagation(); props.onBrowse(); } }}
@@ -152,15 +161,15 @@ export function DatabaseSidebar(props: DatabaseSidebarProps) {
       <For each={rows()}>{item => {
         onCleanup(() => rowHosts.delete(item.key));
         return <div ref={element => rowHosts.set(item.key, element)} onLayout={measureCursor} onMouseDown={() => { props.onFocus?.(); select(item.key); }} role="treeitem" aria-label={item.label} aria-level={item.depth + 1} aria-expanded={item.open} aria-selected={selection() === item.key} testId={item.testId ? `${item.testId}:row` : undefined}
-          style={{ ...row(), height: 25 * scale(), minHeight: 25 * scale(), paddingLeft: (6 + 12 * item.depth) * scale(), paddingRight: 8 * scale(), cursor: "pointer",
+          style={{ ...row(), height: 26 * scale(), minHeight: 26 * scale(), paddingLeft: (6 + 14 * item.depth) * scale(), paddingRight: 8 * scale(), cursor: "pointer",
             backgroundColor: selection() === item.key && (focused() || props.active) ? palette().surface : undefined, hover: { backgroundColor: palette().hover } }}>
           <div role={item.toggle ? "button" : undefined} aria-label={item.toggle ? `Expand ${item.label}` : undefined} testId={item.testId ? `${item.testId}:expand` : undefined}
             onClick={() => { select(item.key); item.toggle?.(); }}
-            style={{ ...row(), width: 14 * scale(), height: 25 * scale(), flexShrink: 0 }}>
-            <text style={{ ...text(palette().muted), pointerEvents: "none" }}>{item.open === undefined ? "" : item.open ? "⌄" : "›"}</text>
+            style={{ ...row(), justifyContent: "center", width: 14 * scale(), height: 26 * scale(), flexShrink: 0 }}>
+            <text style={{ fontFamily: props.config.iconFontFamily, fontWeight: 400, fontSize: 8 * scale(), color: palette().muted, pointerEvents: "none" }}>{item.open === undefined ? "" : item.open ? "\uf078" : "\uf054"}</text>
           </div>
           <div testId={item.testId} onClick={() => { select(item.key); (item.activate || item.toggle)?.(); }} style={{ ...row(), flexGrow: 1, flexBasis: 0, height: "100%" }}>
-            <text style={{ fontFamily: props.config.iconFontFamily, fontSize: 11 * scale(), color: item.glyph === "\uf07b" ? palette().folder : palette().dim, width: 18 * scale(), flexShrink: 0, pointerEvents: "none" }}>{item.glyph}</text>
+            <div style={{ ...row(), justifyContent: "center", width: 13 * scale(), marginRight: 8 * scale(), flexShrink: 0, pointerEvents: "none" }}><text style={{ fontFamily: props.config.iconFontFamily, fontWeight: 400, fontSize: 13 * scale(), color: item.glyph === "\uf07b" ? palette().folder : palette().dim, pointerEvents: "none" }}>{item.glyph}</text></div>
             <text style={{ ...text(selection() === item.key ? palette().fg : palette().dim), pointerEvents: "none" }}>{item.label}</text>
           </div>
         </div>;

@@ -1,4 +1,5 @@
 import type {ServerWebSocket} from "bun";
+import {createCrdtFixture} from "./crdt-fixture";
 export interface GitFixtureRequest{family:string;message:unknown;workspaceRoot?:string}
 /** Isolated real daemon wire protocol. Every Git mutation changes this fixture
  * state only; no git executable or user repository is accessed. */
@@ -6,6 +7,7 @@ export function createGitDaemon(options:{pullRequests?:boolean}={}){
  const requests:GitFixtureRequest[]=[],sockets=new Set<ServerWebSocket<unknown>>(),watchers=new Map<string,{socket:ServerWebSocket<unknown>;root:string}>();
  let heldDiff:{received:()=>void;reply?:()=>void}|undefined;
  const fileContents=new Map([["src/main.ts","const value = 2;\nconsole.log(value);\n"]]);
+ const documents=createCrdtFixture(path=>fileContents.get(path.split("/").slice(-2).join("/")),(path,text)=>fileContents.set(path.split("/").slice(-2).join("/"),text));
  let restoreError:string|undefined;
  let staged=false,branch="feature/fixture",upstream:string|null=null,commitError:string|undefined;
  let patch="diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,2 +1,2 @@\n-const value = 1;\n+const value = 2;\n console.log(value);\n";
@@ -20,7 +22,8 @@ export function createGitDaemon(options:{pullRequests?:boolean}={}){
  const server=Bun.serve({hostname:"127.0.0.1",port:0,fetch(request,server){return server.upgrade(request)?undefined:new Response("Fixture wire protocol",{status:400});},websocket:{
   open(socket){sockets.add(socket);},close(socket){sockets.delete(socket);for(const[token,watch]of watchers)if(watch.socket===socket)watchers.delete(token);},
   message(socket,data){const wire=JSON.parse(String(data)),[family,envelope]=Object.entries(wire)[0] as[string,{request_id:number;message:unknown;workspace_root?:string}];const message=envelope.message,record=typeof message==="object"&&message!==null?message as Record<string,any>:{};
-   requests.push({family,message,workspaceRoot:envelope.workspace_root});const reply=(message:unknown)=>socket.send(JSON.stringify({[family+"Reply"]:{request_id:envelope.request_id,message}}));
+    requests.push({family,message,workspaceRoot:envelope.workspace_root});const reply=(message:unknown)=>socket.send(JSON.stringify({[family+"Reply"]:{request_id:envelope.request_id,message}}));
+    if(family==="Crdt"){documents.handle(message,reply);return;}
    if(family==="Workspace"){if(record.Hello)reply({HelloAck:{accepted:true}});else reply("Ack");return;}
    if(family==="Files"){if(record.WriteFile){fileContents.set(record.WriteFile.path,new TextDecoder().decode(Uint8Array.from(record.WriteFile.bytes)));reply({FileWritten:{path:record.WriteFile.path}});}else if(record.ReadFile)reply({FileContent:{path:record.ReadFile.path,bytes:[...new TextEncoder().encode(fileContents.get(record.ReadFile.path)||"")]}});else reply("Ack");return;}
    if(family!=="Git"){reply("Ack");return;}
@@ -58,5 +61,5 @@ export function createGitDaemon(options:{pullRequests?:boolean}={}){
    reply({Error:{message:"Unsupported fixture Git message"}});
   }
  }});
- return{endpoint:`ws://127.0.0.1:${server.port}`,requests,files,push,setPatch(value:string){patch=value;},setRestoreError(value:string|undefined){restoreError=value;},holdNextDiff(){if(heldDiff)throw new Error("A fixture diff is already held");let received!:()=>void;const pending=new Promise<void>(resolve=>{received=resolve;});const held={received,reply:undefined as undefined|(()=>void)};heldDiff=held;return{received:pending,release(){if(heldDiff!==held)return;heldDiff=undefined;held.reply?.();}};},setCommitError(value:string|undefined){commitError=value;},close(){for(const socket of sockets)socket.close();server.stop(true);}};
+ return{endpoint:`ws://127.0.0.1:${server.port}`,requests,files,push,setPatch(value:string){patch=value;},setRestoreError(value:string|undefined){restoreError=value;},holdNextDiff(){if(heldDiff)throw new Error("A fixture diff is already held");let received!:()=>void;const pending=new Promise<void>(resolve=>{received=resolve;});const held={received,reply:undefined as undefined|(()=>void)};heldDiff=held;return{received:pending,release(){if(heldDiff!==held)return;heldDiff=undefined;held.reply?.();}};},setCommitError(value:string|undefined){commitError=value;},close(){for(const socket of sockets)socket.close();server.stop(true);documents.dispose();}};
 }

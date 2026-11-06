@@ -34,6 +34,7 @@ mod process;
 pub mod search;
 pub mod server;
 pub mod sessions;
+mod shell_environment;
 pub mod standalone;
 pub mod temporary;
 pub mod tailnet;

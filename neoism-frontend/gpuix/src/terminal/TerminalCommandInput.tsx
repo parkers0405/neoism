@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js";
 import type { HostElement, KeyEvent } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { ComposerCaret, type ComposerCaretGeometry } from "../agent/ComposerCaret";
@@ -20,13 +20,15 @@ export function TerminalCommandInput(props: {
   // Only real edits change the query. Preview writes must not collapse the list.
   const [query, setQuery] = createSignal(props.command);
   let expectedDraft = props.command, openingDirection = 1, previewOnLoad = false;
+  let pendingMoves = 0;
   let input: HostElement | undefined, disposed = false, generation = 0;
   let pending: ReturnType<typeof setTimeout> | undefined;
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const feedback = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
+  const presentation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
   const [missOpacity, setMissOpacity] = createSignal(0);
   const clearFeedback = () => { feedback.cancel(); setMissOpacity(0); };
-  const close = () => { generation++; clearTimeout(pending); props.source.cancelCompletion(); animation.cancel(); clearFeedback(); setMenu(undefined); setLoading(false); };
+  const close = () => { generation++; pendingMoves = 0; clearTimeout(pending); props.source.cancelCompletion(); animation.cancel(); clearFeedback(); setMenu(undefined); setLoading(false); };
   const noMatches = () => {
     close();
     const started = performance.now();
@@ -37,11 +39,11 @@ export function TerminalCommandInput(props: {
     };
     tick();
   };
-  const writeDraft = (value: string) => { expectedDraft = value; props.onChange(value); };
-  const edit = (value: string) => { props.source.cancelCompletion(); clearFeedback(); previewOnLoad = false; expectedDraft = value; setQuery(value); props.onChange(value); };
+  const writeDraft = (value: string) => { if (value === expectedDraft) return; expectedDraft = value; props.onChange(value); };
+  const edit = (value: string) => { props.source.cancelCompletion(); clearFeedback(); pendingMoves = 0; previewOnLoad = false; expectedDraft = value; setQuery(value); props.onChange(value); };
   createEffect(() => {
     const command = props.command;
-    if (command !== expectedDraft) { previewOnLoad = false; expectedDraft = command; setQuery(command); }
+    if (command !== expectedDraft) { pendingMoves = 0; previewOnLoad = false; expectedDraft = command; setQuery(command); }
   });
   const ghost = createMemo(() => { loaded(); return props.source.ghost(props.command, props.recent); });
   const atEnd = () => {
@@ -53,39 +55,57 @@ export function TerminalCommandInput(props: {
   const open = (kind: "history" | "completion", direction = 1) => {
     props.source.cancelCompletion();
     clearFeedback();
-    previewOnLoad = true; openingDirection = direction; setQuery(props.command); setItems([]); setChoice(0); setMenu(kind);
+    pendingMoves = 0; previewOnLoad = true; openingDirection = direction;
+    batch(() => { setQuery(props.command); setItems([]); setChoice(0); setMenu(kind); });
   };
   createEffect(() => {
     const kind = menu(), command = query(), directory = props.directory;
     const recent = untrack(() => props.recent);
     const token = ++generation; clearTimeout(pending);
     if (!kind || props.disabled) { setLoading(false); return; }
-    setChoice(0);
     if (kind === "history") {
       const ready = loaded(), options = props.source.history(command, recent);
-      setItems(options.map(item => props.saved?.includes(item.value) ? { ...item, kind: "saved", detail: "Saved command" } : item)); setLoading(false);
+      batch(() => { setChoice(0); setItems(options.map(item => props.saved?.includes(item.value) ? { ...item, kind: "saved", detail: "Saved command" } : item)); setLoading(false); });
       if (previewOnLoad && options.length) untrack(() => preview(0));
       if (!options.length && ready) noMatches();
       return;
     }
     // Retain the visible list during refresh, but don't accept stale candidates.
     setLoading(true);
-    pending = setTimeout(() => {
+    const complete = () => {
       void props.source.complete(command, directory, recent).then(options => {
         if (disposed || token !== generation) return;
         if (!options.length) { noMatches(); return; }
-        setItems(options.map(item => props.saved?.includes(item.value) ? { ...item, kind: "saved", detail: "Saved command" } : item)); setLoading(false);
-        if (previewOnLoad) untrack(() => preview(openingDirection < 0 ? Math.max(0, options.length - 1) : 0));
+        const previous = items(), selected = previous[choice()]?.value;
+        const retained = options.findIndex(item => item.value === selected);
+        const base = previous.length ? Math.max(0, retained) : openingDirection < 0 ? options.length - 1 : 0;
+        const index = ((base + pendingMoves) % options.length + options.length) % options.length;
+        const shouldPreview = previewOnLoad || pendingMoves !== 0;
+        const existing = new Map(previous.map(item => [item.value, item]));
+        pendingMoves = 0;
+        batch(() => {
+          setItems(options.map(item => {
+            const next: TerminalSuggestion = props.saved?.includes(item.value) ? { ...item, kind: "saved", detail: "Saved command" } : item;
+            const old = existing.get(next.value);
+            return old && old.label === next.label && old.kind === next.kind && old.detail === next.detail ? old : next;
+          }));
+          setChoice(index); setLoading(false);
+          if (shouldPreview) preview(index);
+        });
       }).catch(() => { if (!disposed && token === generation) { setItems([]); noMatches(); } });
-    }, 60);
+    };
+    // An explicit Tab starts immediately; only consecutive typing is debounced.
+    if (previewOnLoad) complete();
+    else pending = setTimeout(complete, 35);
   });
   onMount(() => {
     void props.source.loadHistory().catch(() => {}).finally(() => { if (!disposed) setLoaded(value => value + 1); });
   });
-  onCleanup(() => { disposed = true; generation++; clearTimeout(pending); props.source.cancelCompletion(); animation.dispose(); feedback.dispose(); props.onHost(undefined); });
+  onCleanup(() => { disposed = true; generation++; clearTimeout(pending); props.source.cancelCompletion(); animation.dispose(); feedback.dispose(); presentation.dispose(); props.onHost(undefined); });
   const move = (direction: number) => {
+    if (loading()) { pendingMoves += direction; previewOnLoad = true; return; }
     const length = items().length;
-    if (!length || loading()) return;
+    if (!length) return;
     const next = choice() + direction;
     if (menu() === "completion") preview((next + length) % length);
     else preview(Math.max(0, Math.min(length - 1, next)));
@@ -127,7 +147,7 @@ export function TerminalCommandInput(props: {
   const scrollTo = (value: number, smooth: boolean) => {
     scrollTarget = Math.max(0, Math.min(maximum(), value));
     animation.cancel();
-    if (!smooth) { setScroll(scrollTarget); return; }
+    if (!smooth || config.reducedMotion) { setScroll(scrollTarget); return; }
     const from = scroll(), started = performance.now(), to = scrollTarget;
     const tick = () => {
       const t = Math.min(1, (performance.now() - started) / 100);
@@ -136,9 +156,13 @@ export function TerminalCommandInput(props: {
     };
     animation.request(tick);
   };
+  let scrollMenu: "history" | "completion" | undefined;
   createEffect(() => {
-    items(); menuHeight(); const reverse = reversed();
-    untrack(() => scrollTo(reverse ? maximum() : 0, false));
+    const kind = menu(), length = items().length; menuHeight(); const reverse = reversed();
+    untrack(() => {
+      if (!kind) { scrollMenu = undefined; scrollTo(0, false); }
+      else if (length) { scrollTo(scrollMenu === kind ? scrollTarget : reverse ? maximum() : 0, false); scrollMenu = kind; }
+    });
   });
   // Keyboard navigation reveals its row; wheel input only moves the viewport.
   createEffect(() => {
@@ -149,13 +173,36 @@ export function TerminalCommandInput(props: {
       else if (top + itemHeight > scrollTarget + height) scrollTo(top + itemHeight - height, true);
     });
   });
-  const ordered = createMemo(() => {
-    const options = items().map((item, index) => ({ item, index }));
+  const ordered = createMemo<{ item: TerminalSuggestion; index: number }[]>((previous = []) => {
+    const existing = new Map(previous.map(entry => [entry.item, entry]));
+    const options = items().map((item, index) => { const old = existing.get(item); return old?.index === index ? old : { item, index }; });
     return reversed() ? options.reverse() : options;
   });
   const visible = createMemo(() => {
     const first = Math.max(0, Math.floor(scroll() / itemHeight));
     return ordered().slice(first, first + count() + 1);
+  });
+  const [paint, setPaint] = createSignal({ height: 0, selection: 0, reveal: 0 });
+  createEffect(() => {
+    const shown = !!menu() && items().length > 0;
+    const height = shown ? menuHeight() : 0;
+    const selection = (reversed() ? items().length - 1 - choice() : choice()) * itemHeight;
+    presentation.cancel();
+    if (!shown) { setPaint({ height: 0, selection: 0, reveal: 0 }); return; }
+    const current = untrack(paint);
+    const from = current.height ? { ...current } : { height, selection, reveal: 0 };
+    // Don't sweep the highlight through every row when Tab wraps or results reorder.
+    if (Math.abs(from.selection - selection) > itemHeight * 2) from.selection = selection;
+    const to = { height, selection, reveal: 1 };
+    if (config.reducedMotion) { setPaint(to); return; }
+    setPaint({ ...from });
+    const started = performance.now();
+    const tick = () => {
+      const t = Math.min(1, (performance.now() - started) / 120), eased = 1 - (1 - t) ** 3;
+      setPaint({ height: from.height + (height - from.height) * eased, selection: from.selection + (selection - from.selection) * eased, reveal: from.reveal + (1 - from.reveal) * eased });
+      if (t < 1) presentation.request(tick);
+    };
+    presentation.request(tick);
   });
   const text = (color = c.fg, size = config.fontSize) => ({ color, fontFamily: config.fontFamily, fontSize: size, fontWeight: config.fontWeight, whiteSpace: "nowrap" as const, textOverflow: "ellipsis" as const, overflow: "hidden" as const });
   return <>
@@ -177,11 +224,12 @@ export function TerminalCommandInput(props: {
     <Show when={menu() && items().length > 0}>
       <div testId="terminal-suggestions" role="listbox" aria-label={menu() === "history" ? "Command history" : "Command completions"}
         onScroll={event => { if (event.deltaY) scrollTo(scrollTarget - event.deltaY * (event.precise ? 1 : itemHeight * 3), !event.precise); }}
-        style={{ position: "absolute", left: 16 * s, right: 16 * s, ...(props.menuBelow ? { top: props.composerHeight } : { bottom: props.composerHeight }), height: menuHeight() + 10 * s, padding: 4 * s, borderWidth: 1, borderColor: c.border, borderRadius: 5 * s, backgroundColor: c.bg, overflow: "hidden" }}>
+        style={{ position: "absolute", left: 16 * s, right: 16 * s, ...(props.menuBelow ? { top: props.composerHeight + (1 - paint().reveal) * 4 * s } : { bottom: props.composerHeight + (1 - paint().reveal) * 4 * s }), height: paint().height + 10 * s, opacity: paint().reveal, padding: 4 * s, borderWidth: 1, borderColor: c.border, borderRadius: 5 * s, backgroundColor: c.bg, overflow: "hidden" }}>
         <div testId="terminal-suggestions-viewport" style={{ position: "relative", height: menuHeight(), overflow: "hidden" }}>
+          <div testId="terminal-suggestion-highlight" style={{ position: "absolute", left: 0, right: 0, top: paint().selection - scroll(), height: itemHeight, borderRadius: 3 * s, backgroundColor: c.hover, pointerEvents: "none" }}/>
           <For each={visible()}>{entry => <div testId={`terminal-suggestion:${entry.index}`} role="option" aria-selected={choice() === entry.index} aria-label={entry.item.label}
             data-preserve-keyboard-focus={true} onMouseMove={() => preview(entry.index)} onClick={() => accept(entry.index)}
-            style={{ position: "absolute", left: 0, right: 0, top: (reversed() ? items().length - 1 - entry.index : entry.index) * itemHeight - scroll(), display: "flex", height: itemHeight, alignItems: "center", gap: 8 * s, paddingLeft: 8 * s, paddingRight: 8 * s, borderRadius: 3 * s, backgroundColor: choice() === entry.index ? c.hover : "transparent", cursor: "pointer" }}>
+            style={{ position: "absolute", left: 0, right: 0, top: (reversed() ? items().length - 1 - entry.index : entry.index) * itemHeight - scroll(), display: "flex", height: itemHeight, alignItems: "center", gap: 8 * s, paddingLeft: 8 * s, paddingRight: 8 * s, borderRadius: 3 * s, backgroundColor: "transparent", cursor: "pointer" }}>
             <div style={{ width: 20 * s, height: 20 * s, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <svg source={terminalIcons[suggestionIcon(entry.item)]} style={{ width: 16 * s, height: 16 * s, color: choice() === entry.index ? c.accent : c.dim, pointerEvents: "none" }}/>
             </div>

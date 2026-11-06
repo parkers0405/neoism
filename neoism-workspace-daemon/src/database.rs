@@ -1,4 +1,5 @@
 //! SQLite work is executed by SQLx's dedicated SQLite worker, never the socket pump.
+//! Explicit local Turso filenames use the native engine, strictly read-only.
 //! No SQL supplied by the client is executed; names are validated then quoted.
 use anyhow::{bail, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -6,6 +7,9 @@ use futures::TryStreamExt;
 use neoism_protocol::database::*;
 use sqlx::{sqlite::{SqliteConnectOptions, SqliteRow}, Connection, Row, SqliteConnection, TypeInfo, ValueRef};
 use std::{path::Path, time::Duration};
+
+#[path = "database_turso.rs"]
+mod turso_readonly;
 
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_VALUES: usize = 200;
@@ -30,6 +34,11 @@ async fn execute(root: &Path, request: DatabaseRequest) -> Result<DatabaseReply>
         ensure!(path.is_file(), "Database path must be an existing regular file");
         Ok::<_, anyhow::Error>(path)
     }).await??;
+    // Explicit Turso filenames select the native engine, not a guess based on
+    // the SQLite header (Turso can have native indexes and a live WAL).
+    if turso_readonly::is_turso_path(&path) {
+        return turso_readonly::execute(&path, request).await;
+    }
     let options = SqliteConnectOptions::new().filename(&path).create_if_missing(false)
         .read_only(!request.is_mutation()).foreign_keys(true)
         .busy_timeout(Duration::from_millis(750))

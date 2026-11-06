@@ -548,14 +548,17 @@ impl IdeTheme {
 
     /// Deep elevated-panel background (floating pickers, hover docs,
     /// code blocks, reasoning cards). Dark themes keep the historical
-    /// `black` token (darker than `bg` — the "deep panel" look); light
-    /// themes use `white` (paper panel) since near-black cards on a
-    /// light bg read as unthemed holes.
+    /// `black` token (darker than `bg` — the "deep panel" look). Light
+    /// themes use a light surface, falling back to the page background
+    /// for partial overrides that retain a dark surface. ANSI `white`
+    /// can be dark foreground ink in a light palette, not a paper color.
     pub fn panel_bg(&self) -> u32 {
         if self.is_dark() {
             self.black
+        } else if (Self { bg: self.surface, ..*self }).is_dark() {
+            self.bg
         } else {
-            self.white
+            self.surface
         }
     }
 
@@ -564,7 +567,7 @@ impl IdeTheme {
     pub fn panel_text_theme(&self) -> Self {
         let bg = self.panel_bg();
         let mut panel = Self { bg, ..*self };
-        if panel.is_dark() == self.is_dark() {
+        if self.is_dark() && panel.is_dark() {
             return *self;
         }
         let bg_l = Self::relative_luminance(bg);
@@ -585,14 +588,12 @@ impl IdeTheme {
         macro_rules! adapt {
             ($($field:ident),* $(,)?) => { $(panel.$field = readable(self.$field);)* };
         }
-        adapt!(fg, muted, dim, accent, folder, red, green, yellow, blue, magenta, cyan,
+        adapt!(fg, white, muted, dim, accent, folder, red, green, yellow, blue, magenta, cyan,
             syn_comment, syn_string, syn_number, syn_keyword, syn_statement, syn_func,
             syn_type, syn_property, syn_constructor, syn_special);
         if panel.is_dark() {
             panel.black = bg;
             panel.white = panel.fg;
-        } else {
-            panel.white = bg;
         }
         panel
     }
@@ -674,12 +675,13 @@ mod custom_theme_tests {
     }
 
     #[test]
-    fn light_page_dark_panels_keep_readable_ink() {
+    fn light_panels_ignore_dark_ansi_white_and_keep_readable_ink() {
         let theme = IdeTheme { bg: 0xfafafa, fg: 0x24292e, white: 0x24292e,
             ..IdeTheme::pastel_dark() };
         let panel = theme.panel_text_theme();
         assert_eq!(panel.panel_bg(), theme.panel_bg());
-        assert!(panel.is_dark());
+        assert_eq!(theme.panel_bg(), theme.bg, "a partial light override must not retain the dark surface");
+        assert!(!panel.is_dark());
         let bg_l = IdeTheme::relative_luminance(panel.panel_bg());
         for color in [panel.fg, panel.white, panel.muted, panel.dim, panel.syn_keyword, panel.syn_string] {
             let l = IdeTheme::relative_luminance(color);
@@ -687,6 +689,27 @@ mod custom_theme_tests {
         }
         let dark = IdeTheme::pastel_dark();
         assert_eq!(dark.panel_text_theme().fg, dark.fg);
+    }
+
+    #[test]
+    fn builtin_panels_follow_the_theme_brightness() {
+        for name in all_ide_theme_names() {
+            let theme = IdeTheme::by_name(&name);
+            let panel = theme.panel_text_theme();
+            assert_eq!(panel.is_dark(), theme.is_dark(), "{name}");
+            if theme.is_dark() {
+                assert_eq!(theme.panel_bg(), theme.black, "{name}");
+                assert_eq!(panel.fg, theme.fg, "{name}");
+                assert_eq!(panel.syn_keyword, theme.syn_keyword, "{name}");
+            } else {
+                assert_eq!(panel.panel_bg(), theme.panel_bg(), "{name}");
+                let background = IdeTheme::relative_luminance(theme.panel_bg());
+                for color in [panel.fg, panel.white, panel.muted, panel.dim, panel.syn_keyword, panel.syn_string] {
+                    let ink = IdeTheme::relative_luminance(color);
+                    assert!((ink.max(background) + 0.05) / (ink.min(background) + 0.05) >= 4.5, "{name}");
+                }
+            }
+        }
     }
 
     #[test]

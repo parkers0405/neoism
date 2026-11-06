@@ -135,6 +135,7 @@ pub(super) struct ProjectSessionPage {
     pub request: Option<(Option<String>, u64)>,
     pub error: Option<String>,
     pub queued: bool,
+    refresh_head: bool,
     failures: u8,
     last_failure: Option<Instant>,
 }
@@ -269,7 +270,10 @@ impl NeoismAgentSidePanel {
                 .remove(&directory)
                 .or_else(|| self.project_pages.remove(&directory))
                 .unwrap_or_default();
-            page.updated_ms = updated_ms;
+            if updated_ms > page.updated_ms && (page.loaded || page.request.is_some()) {
+                page.refresh_head = true;
+            }
+            page.updated_ms = page.updated_ms.max(updated_ms);
             pages.insert(directory, page);
         }
         for page in self.project_pages.values() {
@@ -357,7 +361,7 @@ impl NeoismAgentSidePanel {
             if page.request.is_some()
                 || (!page.queued
                     && !page.retry_due(now)
-                    && (page.loaded || page.error.is_some()))
+                    && (page.error.is_some() || (page.loaded && !page.refresh_head)))
             {
                 continue;
             }
@@ -365,11 +369,12 @@ impl NeoismAgentSidePanel {
                 .project_generation
                 .checked_add(1)
                 .expect("project request generation exhausted");
-            let cursor = if page.loaded {
+            let cursor = if page.loaded && !page.refresh_head {
                 page.next_cursor.clone()
             } else {
                 None
             };
+            page.refresh_head = false;
             page.request = Some((cursor.clone(), self.project_generation));
             page.error = None;
             page.queued = false;
@@ -444,12 +449,16 @@ impl NeoismAgentSidePanel {
             }
         }
         let page = self.project_pages.get_mut(directory).unwrap();
+        let refreshing_head = page.loaded && requested_cursor.is_none();
         page.loaded = true;
         page.failures = 0;
         page.last_failure = None;
         // A broken server must not leave Show more repeatedly claiming the same cursor.
-        page.next_cursor =
-            next_cursor.filter(|cursor| Some(cursor.as_str()) != requested_cursor);
+        // Head refreshes merge new chats without losing the oldest loaded page's cursor.
+        if !refreshing_head || page.next_cursor.is_none() {
+            page.next_cursor =
+                next_cursor.filter(|cursor| Some(cursor.as_str()) != requested_cursor);
+        }
         page.request = None;
         page.error = None;
         self.rebuild_session_display();
@@ -478,6 +487,11 @@ impl NeoismAgentSidePanel {
             .is_some_and(|(_, token)| *token == generation)
         {
             return;
+        }
+        if page.loaded
+            && page.request.as_ref().is_some_and(|(cursor, _)| cursor.is_none())
+        {
+            page.refresh_head = true;
         }
         page.request = None;
         page.error = Some(message);

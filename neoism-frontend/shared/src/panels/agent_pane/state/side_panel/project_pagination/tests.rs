@@ -32,6 +32,59 @@ fn settle(
 }
 
 #[test]
+fn changed_projects_refresh_new_chats_without_losing_loaded_pages_or_activity() {
+    let mut p = panel(2);
+    for request in p.begin_project_session_requests() {
+        settle(&mut p, &request, Some("older"));
+    }
+    p.set_session_projects(vec![("/p/00".into(), 3), ("/p/01".into(), 1)]);
+    let requests = p.begin_project_session_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "/p/00");
+    assert_eq!(requests[0].1, None);
+    assert!(p.catalog_session("chat:/p/00").is_some());
+    p.set_session_activity("new-chat", neoism_agent_core::CatalogActivity::Running);
+    p.set_project_session_page(
+        "/p/00",
+        None,
+        vec![chat("new-chat", "/p/00")],
+        Some("head-cursor".into()),
+        requests[0].2,
+    );
+    assert!(p.catalog_session("chat:/p/00").is_some());
+    assert_eq!(
+        p.catalog_session("new-chat").unwrap().catalog_activity,
+        Some(neoism_agent_core::CatalogActivity::Running)
+    );
+    assert_eq!(p.project_pages["/p/00"].next_cursor.as_deref(), Some("older"));
+    p.set_session_projects(vec![("/p/00".into(), 3), ("/p/01".into(), 1)]);
+    assert!(p.begin_project_session_requests().is_empty());
+}
+
+#[test]
+fn project_changes_during_a_page_read_are_refreshed_and_retry_from_the_head() {
+    let mut p = panel(1);
+    let first = p.begin_project_session_requests().remove(0);
+    p.set_session_projects(vec![("/p/00".into(), 2)]);
+    settle(&mut p, &first, Some("older"));
+    let head = p.begin_project_session_requests().remove(0);
+    assert!(head.1.is_none());
+    p.set_session_projects(vec![("/p/00".into(), 3)]);
+    settle(&mut p, &head, Some("head-cursor"));
+    let head = p.begin_project_session_requests().remove(0);
+    assert!(head.1.is_none());
+    p.settle_project_session_error(&head.0, head.2, "offline".into());
+    assert!(p.begin_project_session_requests().is_empty());
+    p.project_pages.get_mut("/p/00").unwrap().last_failure =
+        Some(Instant::now() - std::time::Duration::from_secs(10));
+    let retry = p.begin_project_session_requests().remove(0);
+    assert!(retry.1.is_none());
+    settle(&mut p, &retry, Some("head-cursor"));
+    assert_eq!(p.project_pages["/p/00"].next_cursor.as_deref(), Some("older"));
+    assert!(p.begin_project_session_requests().is_empty());
+}
+
+#[test]
 fn remote_project_presentation_survives_paging_and_collapse() {
     let mut p = panel(2);
     p.set_remote_project_labels(HashMap::from([(
@@ -446,6 +499,11 @@ fn rediscovery_preserves_inflight_claims_history_cursor_and_worker_budget() {
     assert!(p.begin_project_session_requests().is_empty());
     for request in &initial {
         settle(&mut p, request, Some("more"));
+    }
+    // Rediscovery during those reads queues head refreshes, not continuation pages.
+    for request in p.begin_project_session_requests() {
+        assert!(request.1.is_none());
+        settle(&mut p, &request, Some("more"));
     }
     select(&mut p, "project-page:/p/00");
     p.toggle_selected_project();

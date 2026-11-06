@@ -3,7 +3,7 @@ import type {AppConfig} from "../config";
 import type {DaemonConnection} from "../daemon/client";
 import {isRecord,type CrdtClientMessage,type CrdtPeerPresence,type Workspace} from "../daemon/protocol";
 import {coreCall,NativeEditor} from "../native-core";
-import {collaborativeWorkspace,type PresenceController} from "./PresenceController";
+import type {PresenceController} from "./PresenceController";
 interface Binding {editor:NativeEditor;id:string;path:string;ownerId:string;attached:boolean;recovery?:boolean;seeded:boolean;error?:string;views:Set<NativeEditor>;release:()=>void}
 interface Drain {send:CrdtClientMessage[];seeded:boolean;bufferId:string}
 /** Native Yrs owns edit/history semantics. This controller only routes opaque
@@ -43,7 +43,9 @@ export class DocumentController {
  bufferId(editor:NativeEditor){return this.bindings.get(this.owners.get(editor)||editor)?.id;}
  isBound(editor:NativeEditor){return this.bindings.get(this.owners.get(editor)||editor)?.seeded===true;}
  attach(editor:NativeEditor,path:string,workspace?:Workspace){
-  if(this.disposed||this.bindings.has(editor)||!collaborativeWorkspace(this.config,workspace))return;
+  // Daemon document ownership also drives agent/disk refresh in private local
+  // workspaces. Presence remains independently gated by PresenceController.
+  if(this.disposed||this.bindings.has(editor)||!workspace)return;
   try{
    const drain=coreCall<Drain>("editor.crdt.bind",{id:editor.id,path,clientId:++this.clientId});
     const binding:Binding={editor,id:drain.bufferId,path,ownerId:crypto.randomUUID(),attached:true,seeded:drain.seeded,views:new Set(),release:()=>{}};

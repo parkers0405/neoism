@@ -209,7 +209,7 @@ async fn abort_session_run_impl(
             }
             state.publish(EventPayload::new(
                 event_type::QUESTION_REJECTED,
-                json!({ "requestID": id, "info": removed }),
+                json!({ "sessionId": session_id, "requestID": id, "info": removed }),
             ));
         }
     }

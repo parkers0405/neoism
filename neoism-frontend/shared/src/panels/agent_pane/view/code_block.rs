@@ -190,10 +190,13 @@ pub fn render_code_block(
         0.0
     };
     let code_left_pad = body_pad + num_text_w;
+    // Match fenced Markdown and reasoning cards: body ink (including syntax)
+    // must be resolved against the panel surface, not the page/terminal ANSI ink.
+    let panel_theme = theme.panel_text_theme();
     let opts = opts_with_clip(
         DrawOpts {
             font_size: 12.5 * s,
-            color: theme.u8(theme.fg),
+            color: panel_theme.u8(panel_theme.fg),
             bold: true,
             clip_rect: Some([
                 x + code_left_pad,
@@ -209,7 +212,7 @@ pub fn render_code_block(
         opts_with_clip(
             DrawOpts {
                 font_size: 12.5 * s,
-                color: theme.u8(theme.muted),
+                color: panel_theme.u8(panel_theme.muted),
                 clip_rect: Some([x + body_pad, body_y, num_text_w, body_h]),
                 ..DrawOpts::default()
             },
@@ -341,6 +344,7 @@ pub fn render_code_block(
         return;
     }
     let text = message.text();
+    let theme = &panel_theme;
     for ix in start_ix..end_ix {
         let line = line_ranges
             .get(ix)
@@ -427,6 +431,45 @@ pub fn diff_line_kind(lang: &str, line: &str) -> Option<DiffLineKind> {
 #[cfg(test)]
 mod tests {
     use super::{diff_line_kind, syntax_span_visible, DiffLineKind};
+
+    #[test]
+    fn code_boxes_paint_theme_surface_and_panel_syntax() {
+        use crate::panels::agent_pane::state::NeoismAgentPane;
+        use crate::primitives::{ide_theme::IdeTheme, paint_record::{PaintCommand, RecordingPainter}};
+
+        struct Code;
+        impl super::AgentCodeMessage for Code {
+            fn id(&self) -> &str { "panel-theme-regression" }
+            fn text(&self) -> &str { "let value = 42;" }
+            fn lang(&self) -> &str { "rust" }
+            fn line_offset(&self) -> Option<usize> { Some(0) }
+        }
+
+        for name in ["ayu_light", "pastel_dark"] {
+            let theme = IdeTheme::by_name(name);
+            assert_eq!(theme.is_dark(), name == "pastel_dark");
+            let panel = theme.panel_text_theme();
+            let mut painter = RecordingPainter::new("monospace", 400, vec![]);
+            let mut pane = NeoismAgentPane::new();
+            super::render_code_block(&mut painter, &mut pane, 10.0, 10.0, 400.0,
+                90.0, &Code, &theme, 1.0, [0.0, 0.0, 500.0, 200.0], &[]);
+            let commands = painter.borrowed_commands();
+            assert!(commands.iter().any(|command| matches!(command,
+                PaintCommand::Rect { color, .. } if *color == theme.f32(theme.panel_bg()))), "{name}");
+            assert!(commands.iter().any(|command| matches!(command,
+                PaintCommand::Text { text, color, .. }
+                    if text == "let" && *color == panel.u8(panel.syn_keyword))), "{name}");
+            assert!(commands.iter().any(|command| matches!(command,
+                PaintCommand::Text { text, color, .. }
+                    if text == "1" && *color == panel.u8(panel.muted))), "{name}");
+            if !theme.is_dark() {
+                assert!(!IdeTheme { bg: theme.panel_bg(), ..theme }.is_dark(), "{name}");
+            } else {
+                assert_eq!(theme.panel_bg(), theme.black);
+                assert_eq!(panel.syn_keyword, theme.syn_keyword);
+            }
+        }
+    }
 
     #[test]
     fn code_chrome_culling_is_independent_of_body_clip() {

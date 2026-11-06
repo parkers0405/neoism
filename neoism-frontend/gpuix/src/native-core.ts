@@ -10,6 +10,9 @@ export interface EditorRun { text: string; x: number; width?: number; token: str
 export interface EditorSnapshot { version: 1; text: string; buffer: unknown; [key: string]: unknown }
 export interface EditorRowRaster { id:number; ptr:number; len:number; width:number; height:number; scale:number; x:number; y:number }
 export interface EditorFrame {
+  externalEdit?:{first:number;last:number}|null;
+  editBand?:{top:number;height:number;alpha:number}|null;
+  editAnimating?:boolean;
   collaborationBound?:boolean;
   presence?:{cursor:import("./daemon/protocol").CrdtCursorPosition;selection:import("./daemon/protocol").CrdtSelectionRange|null;insert:boolean};
   remotePeers?:import("./daemon/protocol").CrdtPeerPresence[];
@@ -113,7 +116,7 @@ export class NativeEditor {
     this.animation.request(() => {
       const delta = this.pendingScroll; this.pendingScroll = 0;
       const full = this.fullFrameRequested; this.fullFrameRequested = false;
-      this.call(delta ? "scroll" : !full && this.frame.scrollAnimating === false && !this.frame.highlightAnimating ? "cursor-frame" : "frame", delta ? { delta } : {});
+      this.call(delta ? "scroll" : !full && this.frame.scrollAnimating === false && !this.frame.highlightAnimating && !this.frame.editAnimating ? "cursor-frame" : "frame", delta ? { delta } : {});
     }, this.lastFrameStarted);
   }
   cancelFrame() { this.animation.cancel(); this.pendingScroll = 0; this.fullFrameRequested = false; }

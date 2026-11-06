@@ -3,9 +3,10 @@ import {Effect} from "effect";
 import {loadConfig} from "../src/config";
 import {DaemonConnection} from "../src/daemon/client";
 import {WorkspaceModel} from "../src/model";
+import {installCrdtFixture} from "./support/crdt-fixture";
 
 function fixture(){
- const config=loadConfig(["--config","/nonexistent/tree-move-test"],{}),client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+ const config=loadConfig(["--config","/nonexistent/tree-move-test"],{}),client=new DaemonConnection(config);
  const workspace={id:"move-test",host_id:"local",title:"Move test",root_dir:"/work",notes_vault_dir:"/notes"};
  const files=new Map([["/work/src/a.ts","original"],["/work/src/note.md","# Note"],["/work/dest/taken.ts","keep"]]);
  const requests:{root?:string;message:any}[]=[];
@@ -18,8 +19,9 @@ function fixture(){
   else throw Error(`Unexpected ${family} ${JSON.stringify(message)}`);
   return Effect.succeed(reply);
  }) as typeof client.request;
+ const documents=installCrdtFixture(client,path=>files.get(path),(path,text)=>files.set(path,text)),model=new WorkspaceModel(client,config);
  model.update({activeWorkspace:workspace,workspaces:[workspace],loading:false,expanded:new Set(["","src","dest"])});
- return {model,files,requests,dispose:()=>{model.dispose();client.stop();}};
+ return {model,files,requests,dispose:()=>{model.dispose();client.stop();documents.dispose();}};
 }
 test("moving a folder rebinds open dirty code and Markdown without losing content or saving to old paths",async()=>{
  const f=fixture();try{

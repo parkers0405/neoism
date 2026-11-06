@@ -56,7 +56,7 @@ test("rich tasks, Vim editing, undo, canonical save state and snapshots use the 
   expect(editor.text()).toContain("- [x] Task body");expect(editor.frame.dirty).toBe(true);
   markdown.call("key",{key:"u",char:"u"});expect(editor.text()).toContain("- [ ] Task body");
   markdown.call("goto",{line:0,col:0});markdown.call("key",{key:"i",char:"i"});markdown.call("key",{key:"x",char:"X"});markdown.call("key",{key:"escape"});
-  expect(editor.text()).toStartWith("# XRich document");expect(markdown.text()).toBe(editor.text().replace(/\r\n/g,"\n").replace(/\n$/,""));
+  expect(editor.text()).toStartWith("# XRich document");expect(markdown.text()).toBe(editor.text().replace(/\r\n/g,"\n"));
   const snapshot=markdown.snapshot();markdown.call("goto",{line:5,col:0});markdown.restore(snapshot);
   expect(markdown.frame.cursor.line).toBe(snapshot.line);expect(markdown.frame.mode).toBe(snapshot.mode as typeof markdown.frame.mode);
   editor.call("saved",{revision:editor.frame.revision});expect(editor.frame.dirty).toBe(false);

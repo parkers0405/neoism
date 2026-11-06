@@ -24,7 +24,7 @@ const dispatch = async (eventType: string, payload: Record<string, unknown> = {}
   root.dispatch({ elementId: input().id, eventType, ...payload }); await pump();
 };
 const key = (key: string, shift = false) => dispatch("keyDown", { key, modifiers: { shift, ctrl: false, alt: false, cmd: false } });
-const wait = async () => { await Bun.sleep(90); await pump(); };
+const wait = async () => { await Bun.sleep(160); await pump(); };
 try {
   root.render(() => <div style={{ width: 260, height: 400 }}><TerminalCommandInput config={config} source={source} command={draft()} recent={recent} saved={["echo hello"]} directory="/project"
     rows={1} disabled={false} menuBelow={below()} menuSpace={160} composerHeight={80} onChange={setDraft} onSubmit={() => { submitted.push(draft()); setDraft(""); }}
@@ -33,8 +33,12 @@ try {
   assert.equal(draft(), "cat "); assert.deepEqual(queries, ["ca"]); assert.deepEqual(submitted, []);
   assert.equal(input().props.value, "cat ", "preview writes the actual native textarea value");
   assert.equal(host.find("terminal-suggestions")!.style.bottom, 80);
-   assert.equal(host.find("terminal-suggestion:0")!.style.backgroundColor, config.theme.hover);
-  await key("tab"); assert.equal(draft(), "cargo ");
+   assert.equal(host.find("terminal-suggestion-highlight")!.style.backgroundColor, config.theme.hover);
+   assert.equal(host.find("terminal-suggestion-highlight")!.style.top, 0);
+   assert.equal(host.find("terminal-suggestions")!.style.opacity, 1);
+   await key("tab"); assert.equal(draft(), "cargo ");
+   assert.ok(Number(host.find("terminal-suggestion-highlight")!.style.top) < 30 * config.scale, "Selection ink glides instead of snapping; command text updates immediately");
+   await wait(); assert.equal(host.find("terminal-suggestion-highlight")!.style.top, 30 * config.scale);
   await key("tab"); assert.equal(draft(), "cat ", "Tab wraps without requery");
   await key("tab", true); assert.equal(draft(), "cargo ");
   await key("up"); assert.equal(draft(), "cat ");
@@ -117,7 +121,61 @@ try {
   replies.get("beta")!([{ value: "beta-current ", label: "beta-current", kind: "function", detail: "" }]); await pump();
   assert.equal(draft(), "beta", "Editing while the host responds never unsolicitedly previews a command");
   await key("tab"); assert.equal(draft(), "beta-current ");
-  await key("composer-escape"); assert.equal(draft(), "beta");
-  assert.deepEqual(submitted, ["cargo ", "echo hello"]);
+   await key("composer-escape"); assert.equal(draft(), "beta");
+   // Slow providers must not eat repeated Tab/ShiftTab presses or accept stale rows.
+   const candidates = ["one", "two", "three"].map(label => ({ value: `${label} `, label, kind: "command" as const, detail: "Command" }));
+   await dispatch("change", { value: "queued" });
+   await dispatch("caretGeometry", { x: 40, y: 20, value: JSON.stringify({ text: "queued", offset: 6, selectionStart: 6, selectionEnd: 6, fontSize: 14, remainingWidth: 180, visible: true }) });
+   await key("tab");
+   assert.ok(replies.has("queued"), "Explicit Tab requests completions without a debounce timer");
+   await key("tab"); await key("tab"); await key("tab", true);
+   replies.get("queued")!(candidates); await pump();
+   assert.equal(draft(), "two ", "Every queued navigation press applies to the fresh result");
+   await wait();
+   const stableMenu = host.find("terminal-suggestions")!.id;
+   const stableRow = host.find("terminal-suggestion:1")!.id;
+   await dispatch("change", { value: "refresh" }); await wait();
+   assert.equal(host.find("terminal-suggestions")!.id, stableMenu);
+   assert.equal(host.find("terminal-suggestion:1")!.props["aria-selected"], true, "Selection does not reset while results are pending");
+   replies.get("refresh")!(candidates.map(item => ({ ...item }))); await pump();
+   assert.equal(draft(), "refresh", "Refreshing never overwrites real edits");
+   assert.equal(host.find("terminal-suggestion:1")!.id, stableRow, "Unchanged rows retain identity across a refresh");
+   assert.equal(host.find("terminal-suggestion:1")!.props["aria-selected"], true);
+   await dispatch("change", { value: "reorder" }); await wait();
+   replies.get("reorder")!([candidates[1]!, candidates[0]!, candidates[2]!]); await pump();
+   assert.equal(host.find("terminal-suggestion:0")!.props["aria-selected"], true, "Selection follows its candidate when results reorder");
+   await key("composer-escape"); assert.equal(draft(), "reorder");
+   const longList = Array.from({ length: 15 }, (_, index) => ({ value: `entry${index} `, label: `entry${index}`, kind: "command" as const, detail: "Command" }));
+   await dispatch("change", { value: "long" });
+   await dispatch("caretGeometry", { x: 40, y: 20, value: JSON.stringify({ text: "long", offset: 4, selectionStart: 4, selectionEnd: 4, fontSize: 14, remainingWidth: 180, visible: true }) });
+   await key("tab"); replies.get("long")!(longList); await pump();
+   for (let index = 0; index < 7; index++) await key("tab");
+   await wait();
+   const selectedTop = host.find("terminal-suggestion:7")!.style.top;
+   await dispatch("change", { value: "long-refresh" }); await wait();
+   replies.get("long-refresh")!(longList.map(item => ({ ...item }))); await pump();
+   assert.equal(host.find("terminal-suggestion:7")!.style.top, selectedTop, "A refresh preserves the scrolled viewport rather than jumping to the start");
+   assert.equal(host.find("terminal-suggestion:7")!.props["aria-selected"], true);
+   await dispatch("change", { value: "short" }); await wait();
+   replies.get("short")!([longList[7]!]); await pump();
+   assert.ok(Number(host.find("terminal-suggestions")!.style.height) > 40 * config.scale, "Popup height eases down instead of snapping to shorter results");
+   await wait();
+   assert.equal(host.find("terminal-suggestions")!.style.height, 40 * config.scale);
+   assert.equal(host.find("terminal-suggestion:0")!.style.top, 0, "A shorter result set clamps the viewport");
+   await key("composer-escape"); assert.equal(draft(), "short");
+   // Reduced motion keeps the same behavior without delayed presentation.
+   config.reducedMotion = true;
+   setBelow(true);
+   await dispatch("change", { value: "reorder" });
+   await dispatch("caretGeometry", { x: 40, y: 20, value: JSON.stringify({ text: "reorder", offset: 7, selectionStart: 7, selectionEnd: 7, fontSize: 14, remainingWidth: 180, visible: true }) });
+   await key("tab");
+   replies.get("reorder")!(candidates); await pump();
+   assert.equal(host.find("terminal-suggestions")!.style.opacity, 1);
+   assert.equal(host.find("terminal-suggestions")!.style.top, 80);
+   await key("tab");
+   assert.equal(draft(), "two ");
+   assert.equal(host.find("terminal-suggestion-highlight")!.style.top, 30 * config.scale);
+   await key("composer-escape");
+   assert.deepEqual(submitted, ["cargo ", "echo hello"]);
   console.log("completion input checks passed (noWindow, stable query, native event boundary, top/bottom, single submit, pixel scrolling, no-match feedback)");
 } finally { root.unmount(); }

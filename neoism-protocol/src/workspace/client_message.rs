@@ -397,6 +397,11 @@ pub enum WorkspaceClientMessage {
     RefreshHostWorkspaceNotes {
         workspace_id: String,
     },
+    /// Resolve notes for a frontend-local working directory without changing
+    /// the shared workspace root or broadcasting a workspace mutation.
+    ResolveNotesVault {
+        root_dir: PathBuf,
+    },
     /// Ask the daemon for a URL a PHONE (or any other device on the
     /// network) can open to reach this same workspace. Only the daemon
     /// can answer: the browser sees whatever origin it was loaded from,

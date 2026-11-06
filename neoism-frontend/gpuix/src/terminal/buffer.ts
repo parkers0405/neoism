@@ -82,25 +82,25 @@ export class TerminalBuffer {
     this.outputObserver = observer;
     return () => { if (this.outputObserver === observer) this.outputObserver = undefined; };
   }
-  private call(op: string, args: Record<string, unknown> = {}) {
+  private call(op: string, args: Record<string, unknown> = {}, respond = true) {
     if (this.disposed) return;
     this.reply = coreCall(this.op(op), { id: this.id, ...args });
-    if (this.reply.writes.length) for (const listener of this.writeListeners) listener(Uint8Array.from(this.reply.writes));
+    if (respond && this.reply.writes.length) for (const listener of this.writeListeners) listener(Uint8Array.from(this.reply.writes));
     if (!this.disposed) for (const listener of this.listeners) listener();
   }
-  async write(bytes: Uint8Array, offset?: number): Promise<void> {
+  async write(bytes: Uint8Array, offset?: number, respond = true): Promise<void> {
     if (this.disposed) return;
     let data = bytes;
     if (offset !== undefined) {
       if (this.offset !== undefined && offset < this.offset) data = bytes.subarray(Math.min(bytes.length, this.offset - offset));
       if (this.offset !== undefined && offset > this.offset) {
         this.outputObserver?.reset();
-        this.call("reset", { palette: this.palette, foreground: this.theme.fg, background: this.theme.bg });
+        this.call("reset", { palette: this.palette, foreground: this.theme.fg, background: this.theme.bg }, respond);
       }
       this.offset = Math.max(this.offset ?? 0, offset + bytes.length);
     }
-    if (this.outputObserver) this.outputObserver.feed(data, bytes => this.call("feed", { bytes: [...bytes] }));
-    else this.call("feed", { bytes: [...data] });
+    if (this.outputObserver) this.outputObserver.feed(data, bytes => this.call("feed", { bytes: [...bytes] }, respond));
+    else this.call("feed", { bytes: [...data] }, respond);
   }
   resize(cols: number, rows: number, cellWidth = 10, rowHeight = 20) {
     if (this.disposed) return false;

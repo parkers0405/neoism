@@ -405,9 +405,32 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 Ok(picker_frame(p, v))
             }
             _ => {
-                let q = store.questions.get_mut(&id).ok_or("Unknown question")?;
+                let Store { questions, painters, .. } = &mut *store;
+                let q = questions.get_mut(&id).ok_or("Unknown question")?;
                 let mut answers = None;
                 match op {
+                    "question.paint" => {
+                        use neoism_ui::primitives::{ide_theme::IdeTheme, paint::Paint, paint_record::RecordingPainter};
+                        let painter = painters.entry(id).or_insert_with(|| RecordingPainter::new(
+                            text(v, "fontFamily"), v["fontWeight"].as_u64().unwrap_or(400) as u16, vec![],
+                        ));
+                        let s = number(v, "scale", 1.0).clamp(0.5, 3.0);
+                        let anchor = v["anchor"].as_array().filter(|a| a.len() == 4)
+                            .map(|a| std::array::from_fn(|i| a[i].as_f64().unwrap_or(0.0) as f32))
+                            .unwrap_or([20.0, 600.0, 600.0, 100.0]);
+                        painter.begin_frame();
+                        let state = neoism_ui::panels::agent_pane::view::prompt_picker::render_question_picker(
+                            painter, q, anchor, &IdeTheme::by_name(text(v, "theme")), s,
+                            number(v, "minY", 8.0 * s), v["error"].as_str(),
+                        );
+                        let rows: Vec<Value> = state.as_ref().map(|state| {
+                            (0..state.visible_rows).filter_map(|slot| {
+                                let index = state.first_row + slot;
+                                (index < q.visible_rows().len()).then(|| json!({"index":index,"rect":state.row_rect(slot,s)}))
+                            }).collect()
+                        }).unwrap_or_default();
+                        return Ok(json!({"commands":painter.commands(),"rect":state.map(|s|s.rect),"rows":rows,"animating":false}));
+                    }
                     "question.query" if !q.responding => {
                         q.typed = text(v, "query").to_owned();
                         q.selected = 0;
@@ -447,4 +470,40 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             }
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn question_card_wraps_above_composer_and_keeps_answer_hit_geometry() {
+        let call = |op: &str, args: Value| {
+            let mut args = args;
+            args["op"] = json!(op);
+            dispatch(&args).unwrap().unwrap()
+        };
+        let id = call("question.new", json!({"request":{
+            "id":"q", "sessionId":"child", "questions":[{
+                "question":"May I launch another controlled diagnostic preview to capture the hang under the debugger from startup?",
+                "options":[{"label":"Yes","description":"Launch under debugger"},{"label":"No"}]
+            }]
+        }}))["id"].clone();
+        let paint = call("question.paint", json!({"id":id,"anchor":[20,600,420,100],"minY":40,"fontFamily":"monospace","scale":1}));
+        let rect = paint["rect"].as_array().unwrap();
+        let y = rect[1].as_f64().unwrap();
+        assert!(y >= 40.0);
+        assert!(y + rect[3].as_f64().unwrap() <= 600.0);
+        let rows = paint["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0]["rect"][1].as_f64().unwrap() > y + 54.0, "Long prompt must wrap before the answer rows");
+        assert!(paint["commands"].as_array().unwrap().iter().any(|c| c["text"] == "Yes"));
+        call("question.query", json!({"id":id,"query":"Only with a timeout"}));
+        let answer = call("question.commit", json!({"id":id}));
+        assert_eq!(answer["answers"], json!([["Only with a timeout"]]));
+        let sending = call("question.paint", json!({"id":id,"anchor":[20,600,420,100],"minY":40,"fontFamily":"monospace"}));
+        assert!(sending["rows"].as_array().unwrap().is_empty());
+        assert!(sending["commands"].as_array().unwrap().iter().any(|c| c["text"] == "sending…"));
+        call("question.dispose", json!({"id":id}));
+    }
 }

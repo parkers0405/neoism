@@ -42,7 +42,7 @@ host.renderer.scrollTo=(id,x,y)=>{scrollCalls.push({id,x,y});};
 const pump = () => host.pump(root);
 const panTo=async(x:number,y:number)=>{
   const plane=find("database-data-plane");
-  root.dispatch({elementId:find("database-grid").id,eventType:"scroll",deltaX:-Number(plane.style.left||0)-x,deltaY:-Number(plane.style.top||0)-y});
+  root.dispatch({elementId:find("database-grid").id,eventType:"scroll",precise:true,deltaX:-Number(plane.style.left||0)-x,deltaY:-Number(plane.style.top||0)-y});
   await pump();
 };
 const find = (id: string) => { const node = host.find(id); assert.ok(node, `Missing ${id}`); return node; };
@@ -82,6 +82,18 @@ try {
   assert.ok([...host.nodes.values()].filter(node => node.props.role === "row").length < 80, "Rows mount within the viewport plus bounded scroll buffer");
   assert.ok([...host.nodes.values()].filter(node => node.props.role === "gridcell").length < 800, "Only buffered viewport rows and viewport columns mount");
   const retained = find("database-cell:row:10:3").id, retainedHeader = find("database-filter:col3").id;
+  root.dispatch({elementId:find("database-grid").id,eventType:"scroll",precise:false,deltaY:-1});
+  await pump();
+  assert.equal(find("database-data-plane").style.top,-75*config.scale,"Mouse wheel scrolls three table rows instead of one pixel");
+  root.dispatch({elementId:find("database-header").id,eventType:"scroll",precise:false,deltaY:-1,modifiers:{shift:true,ctrl:false,alt:false,cmd:false}});
+  await pump();
+  assert.equal(find("database-data-plane").style.left,-75*config.scale,"Shift-wheel uses the same line conversion horizontally");
+  assert.equal(find("database-data-plane").style.top,-75*config.scale,"Shift-wheel leaves the vertical offset unchanged");
+  await panTo(0,0);
+  root.dispatch({elementId:find("database-grid").id,eventType:"scroll",precise:true,deltaY:-2.5});
+  await pump();
+  assert.equal(find("database-data-plane").style.top,-2.5,"Trackpad pixel deltas remain unscaled");
+  await panTo(0,0);
   for (const [x, y] of [[0, 1], [0, 200], [450, 200]]) {
     await panTo(x!*config.scale,y!*config.scale);
     assert.equal(find("database-cell:row:10:3").id, retained, "Overlapping cells must remain mounted during horizontal/vertical scroll");

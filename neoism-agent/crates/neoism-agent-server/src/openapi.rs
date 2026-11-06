@@ -3586,12 +3586,14 @@ fn event_data_schema(event_type: &str) -> Value {
         _ if event_type == et::QUESTION_ASKED => r("QuestionRequest"),
         _ if event_type == et::QUESTION_REJECTED => {
             json!({ "type": "object", "additionalProperties": false, "required": ["requestID"], "properties": {
+                "sessionId": nullable(json!({ "type": "string" })),
                 "requestID": { "type": "string" }, "reason": { "type": "string" },
                 "info": nullable(r("QuestionRequest"))
             }})
         }
         _ if event_type == et::QUESTION_REPLIED => {
             json!({ "type": "object", "additionalProperties": false, "required": ["requestID", "reply"], "properties": {
+                "sessionId": nullable(json!({ "type": "string" })),
                 "requestID": { "type": "string" },
                 "reply": { "type": "object", "additionalProperties": false, "required": ["answers"], "properties": {
                     "answers": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } }

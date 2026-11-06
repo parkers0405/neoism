@@ -3,6 +3,8 @@ import {Effect} from "effect";
 import {loadConfig} from "../src/config";
 import {DaemonConnection} from "../src/daemon/client";
 import {WorkspaceModel} from "../src/model";
+import {onTerminalUnavailable,terminalSession} from "../src/terminal/sessions";
+import type {WireEvent} from "../src/daemon/protocol";
 
 const cleanups:Array<()=>void>=[];
 afterEach(()=>cleanups.splice(0).reverse().forEach(cleanup=>cleanup()));
@@ -96,7 +98,14 @@ test("recovery retains ownership; authoritative retirement keeps Home and permit
   recovered.restoreSession(saved);recovered.update({workspaces:[f.a,f.b],activeWorkspace:f.a});
   await recovered.ensureHomeTerminal(f.home.id);
   expect(f.creates()).toHaveLength(1);
-  recovered.retireTerminal("pty-1");
+  let receive!: (event:WireEvent)=>void;
+  f.client.send=(()=>41) as typeof f.client.send;
+  f.client.subscribe=(listener)=>{receive=listener;return()=>{};};
+  f.client.subscribeStatus=(listener)=>{listener({phase:"connected",attempt:0});return()=>{};};
+  const unsubscribe=onTerminalUnavailable(f.client,recovered.retireTerminal);cleanups.push(unsubscribe);
+  terminalSession(f.client,"pty-1",f.model.config.theme,recovered.report,true);
+  receive({family:"Pty",requestId:41,message:{Error:{message:"unknown session pty-1"}}});
+  expect(recovered.state.error).toBeUndefined();
   expect(recovered.state.surfaces.find(s=>s.id===f.home.id)?.kind).toBe("welcome");
   await recovered.ensureHomeTerminal(f.home.id);
   expect(recovered.state.surfaces.find(s=>s.id===f.home.id)?.sessionId).toBe("pty-2");
@@ -111,6 +120,27 @@ test("an attached foreign shell is never adopted, replaced, or closed",async()=>
   f.model.closeSurface(f.home.id);
   expect(f.creates()).toHaveLength(0);expect(f.closes()).toHaveLength(0);
 });
+
+for(const phase of ["create","bind"]){
+  test(`fresh Home shell exit during ${phase} is not closed again or attached`,async()=>{
+    const f=fixture();
+    if(phase==="create")f.hold();
+    else{
+      const request=f.client.request.bind(f.client);
+      f.client.request=((family:string,message:any)=>{
+        if(message.BindEditorSurface)f.model.retireTerminal(message.BindEditorSurface.session_id);
+        return request(family as any,message);
+      }) as typeof f.client.request;
+    }
+    const pending=f.model.ensureHomeTerminal(f.home.id);await tick();
+    if(phase==="create"){f.model.retireTerminal("pty-1");f.release();}
+    await pending;
+    expect(f.model.state.surfaces.find(surface=>surface.id===f.home.id)?.sessionId).toBeUndefined();
+    expect(f.model.state.ui.homeTerminalSessions||{}).toEqual({});
+    expect(f.closes()).toHaveLength(0);
+    expect(f.model.state.error).toBeUndefined();
+  });
+}
 
 test("a queued Home binding error releases its owned shell",async()=>{
   const f=fixture();f.model.update({activeWorkspace:f.b});

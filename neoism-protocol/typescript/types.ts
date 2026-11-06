@@ -1837,6 +1837,7 @@ export type WorkspaceClientMessage =
   | { SetWorkspaceRoot: { workspace_id: string; root_dir: string } }
   | { CreateWorkspaceVault: { workspace_id: string } }
   | { RefreshHostWorkspaceNotes: { workspace_id: string } }
+  | { ResolveNotesVault: { root_dir: string } }
   | { RequestShareTarget: { workspace_id: string | null } }
   | { ShareWorkspace: { workspace_id: string } }
   | { StopSharingWorkspace: { workspace_id: string } }
@@ -1982,6 +1983,7 @@ export interface WorkplacePreferencesWire {
 }
 
 export type WorkspaceServerMessage =
+  | { NotesVaultResolved: { linked_vault_dir: string | null; notes_vault_dir: string } }
   | { ProjectRootList: { project_roots: ProjectRootSummary[] } }
   | {
       ProjectRootInfo: {

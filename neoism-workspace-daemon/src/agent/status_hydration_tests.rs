@@ -5,6 +5,76 @@ fn busy() -> Value {
     json!({"root": {"type": "busy", "startedAt": 41}})
 }
 
+#[tokio::test]
+async fn reconnect_recovers_family_questions_empty_snapshots_and_permissions() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let connections = Arc::new(AtomicUsize::new(0));
+    let stream_connections = connections.clone();
+    let question_connections = connections.clone();
+    let app = axum::Router::new()
+        .route("/v2/events", axum::routing::get(move || {
+            stream_connections.fetch_add(1, Ordering::SeqCst);
+            async { ([("content-type", "text/event-stream")], ": connected\n\n") }
+        }))
+        .route("/v2/sessions/status", axum::routing::get(|| async { axum::Json(json!({})) }))
+        .route("/v2/sessions/root/runtime", axum::routing::get(|| async {
+            axum::Json(json!({"rootSessionId":"root","branches":[
+                {"sessionId":"child","parentSessionId":"root","status":"blocked"},
+                {"sessionId":"invalid","parentSessionId":"root","status":"blocked"}
+            ]}))
+        }))
+        .route("/v2/sessions/root/todos", axum::routing::get(|| async { axum::Json(json!([])) }))
+        .route("/v2/interactions/questions", axum::routing::get(
+            move |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let generation = question_connections.load(Ordering::SeqCst);
+                async move {
+                axum::Json(match query.get("sessionId").map(String::as_str) {
+                    Some("child") => json!([{"id":format!("q{generation}"),"sessionId":"child","questions":[{"question":"Proceed?"}]}]),
+                    Some("invalid") => Value::Null,
+                    _ => json!([]),
+                })
+            }}))
+        .route("/v2/interactions/permissions", axum::routing::get(|| async {
+            axum::Json(json!([{"id":"p","sessionId":"root","title":"Allow read?","permission":"read"}]))
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (tx, mut rx) = reply_queue::channel();
+    let mut session = AgentSession::spawn(Some("test".into()), String::new(), tx);
+    let inner = Arc::get_mut(&mut session.inner).unwrap();
+    inner.agent_server = format!("http://{address}");
+    inner.agent_http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let inner = session.inner.clone();
+    let stream = tokio::spawn(async move { events::run_event_stream(inner, "root".into()).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (mut root, mut initial_child, mut recovered_child, mut permission) = (false, false, false, false);
+        while !(root && initial_child && recovered_child && permission) {
+            match rx.recv().await.unwrap() {
+                AgentServerMessage::QuestionsUpdated { session_id, requests } => {
+                    match session_id.as_str() {
+                        "root" => { assert!(requests.is_empty()); root = true; }
+                        "child" => {
+                            assert_eq!(requests[0]["sessionId"], "child");
+                            match requests[0]["id"].as_str() {
+                                Some("q1") => initial_child = true,
+                                Some("q2") => recovered_child = true,
+                                _ => {}
+                            }
+                        }
+                        _ => panic!("malformed snapshot must not clear pending questions"),
+                    }
+                }
+                AgentServerMessage::ToolUseRequest { request_id, .. } if request_id == "p" => permission = true,
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    assert!(connections.load(Ordering::SeqCst) >= 2, "must exercise automatic reconnect, not ResumeStream");
+    stream.abort();
+    server.abort();
+}
+
 fn publish(
     evidence: &SessionStatusEvidence,
     tx: &AgentReplySender,

@@ -59,12 +59,12 @@ fn event_source_session<'a>(event: &'a Value, bound_session_id: &'a str) -> &'a 
         .unwrap_or(bound_session_id)
 }
 
-pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
+pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) -> bool {
     // Idempotent: re-binding while a stream is already running is a
     // no-op (the existing handle keeps draining).
     let mut handles = inner.stream_handles.lock();
     if handles.contains_key(session_id) {
-        return;
+        return false;
     }
     let inner_clone = inner.clone();
     let key = session_id.to_string();
@@ -73,6 +73,7 @@ pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) {
         inner_clone.stream_handles.lock().remove(&key);
     });
     handles.insert(session_id.to_string(), handle);
+    true
 }
 
 pub(crate) fn start_catalog_event_stream(
@@ -198,6 +199,13 @@ async fn run_event_stream_inner(
             push_session_running_state(inner.clone(), session_id.clone()).await;
             push_runtime_snapshot(inner.clone(), session_id.clone()).await;
             push_todo_snapshot(inner.clone(), session_id.clone()).await;
+        }
+        // Establish the tail subscription BEFORE fetching pending interactions.
+        // Events published during hydration are buffered by this connection,
+        // closing the snapshot-before-subscribe gap on initial attach too.
+        if !catalog {
+            push_pending_questions(inner.clone(), session_id.clone()).await;
+            push_pending_permissions(inner.clone(), session_id.clone()).await;
         }
         connected_once = true;
 

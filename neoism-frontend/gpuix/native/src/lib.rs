@@ -70,6 +70,7 @@ struct Editor {
     compact: bool,
     raster: editor_raster::EditorRaster,
     presence: presence_cache::PresenceCache,
+    external_edit_revision: Option<(Instant, u64)>,
 }
 #[derive(Default)]
 struct Engines {
@@ -98,7 +99,7 @@ impl Editor {
         Self { collaboration:None, peers:self.peers.clone(), peer_paint:Default::default(), pane, register: self.register.clone(), clipboard: None, host_action: None,
             width: self.width, height: self.height, cell: self.cell, row: self.row,
             trail: neoism_ui::panels::trail_cursor::TrailCursor::new(),
-            last_frame: Instant::now(), last_cursor: self.last_cursor, lsp: Default::default(), compact: self.compact, raster: self.raster.clone_settings(), presence:Default::default() }
+            last_frame: Instant::now(), last_cursor: self.last_cursor, lsp: Default::default(), compact: self.compact, raster: self.raster.clone_settings(), presence:Default::default(), external_edit_revision:self.external_edit_revision }
     }
     fn snapshot(&mut self) -> Value {
         let collaboration=self.collaboration.as_mut().map(|binding|binding.snapshot(&mut self.pane.buffer));
@@ -176,6 +177,27 @@ impl Editor {
         let syntax_ready = neoism_ui::syntax::try_highlight_line("", pane.language).is_some();
         if syntax_ready { pane.highlight.refresh(&pane.buffer, pane.language); }
         let selection = pane.buffer.selection_range();
+        // The shared binding records daemon-authored edits. Keep that signal
+        // separate from row ink so the fade does not re-upload text rasters.
+        let external_edit = pane.buffer.external_edit_flash.and_then(|(first, last, at)| {
+            let progress = at.elapsed().as_secs_f32() / 0.55;
+            if self.external_edit_revision.map(|(seen,_)|seen) != Some(at) {
+                self.external_edit_revision = Some((at, pane.buffer.revision));
+            }
+            (progress < 1.0).then_some((first, last, progress))
+        });
+        // Later human typing can overlap the fade without becoming inbound.
+        let inbound_edit = external_edit.filter(|_|self.external_edit_revision.map(|(_,revision)|revision)==Some(pane.buffer.revision));
+        if external_edit.is_none() { pane.buffer.external_edit_flash = None; }
+        let edit_band = external_edit.and_then(|(first, last, progress)| {
+            let first = first.min(pane.buffer.lines.len().saturating_sub(1));
+            let last = last.min(pane.buffer.lines.len().saturating_sub(1));
+            let lift = -6.0 * (1.0 - neoism_ui::animation::ease_out_cubic(progress));
+            let top = (view.wrap.first_row_of_line(first) as f32 * row - pane.scroll_y + lift).max(0.0);
+            let bottom = (view.wrap.first_row_of_line(last + 1) as f32 * row - pane.scroll_y + lift).min(self.height);
+            (bottom > top).then(|| json!({"top":top,"height":bottom-top,"alpha":0.30*(1.0-progress)}))
+        });
+        let edit_animating = edit_band.is_some();
         let mut lines = Vec::new();
         let mut search_hits = Vec::new();
         self.raster.begin_frame();
@@ -296,12 +318,12 @@ impl Editor {
         self.trail.animate(cell, caret_h, if was_animating { dt } else { 0.0 });
         let lsp = self.lsp.frame(pane);
         let presence=self.presence.frame(pane.buffer.revision,&pane.buffer.lines,(pane.buffer.cursor_line,pane.buffer.cursor_col),selection.map(|(a,b)|((a.line,a.col),(b.line,b.col))),pane.buffer.mode==CodeMode::Insert);
-        json!({"peerCommands":self.peer_paint.frame(pane,&self.peers),"remotePeers":self.peers,"collaborationBound":pane.buffer.doc_history_bound(),"presence":presence,"packedRuns":self.compact,"lsp":lsp,"lines":lines,"searchHits":search_hits,"extraCarets":extra_carets,"rowHeight":row,"cellWidth":cell,"textX":text_x,"gutterWidth":gutter,
+        json!({"externalEdit":inbound_edit.map(|(first,last,_)|json!({"first":first,"last":last})),"editBand":edit_band,"editAnimating":edit_animating,"peerCommands":self.peer_paint.frame(pane,&self.peers),"remotePeers":self.peers,"collaborationBound":pane.buffer.doc_history_bound(),"presence":presence,"packedRuns":self.compact,"lsp":lsp,"lines":lines,"searchHits":search_hits,"extraCarets":extra_carets,"rowHeight":row,"cellWidth":cell,"textX":text_x,"gutterWidth":gutter,
             "cursor":{"x":cursor_x,"y":cursor_y,"line":pane.buffer.cursor_line,"col":pane.buffer.cursor_col,
               "shape":format!("{:?}",pane.cursor_shape()),"visible":cursor_y+row>0.0 && cursor_y<self.height},
             "mode":format!("{:?}",pane.buffer.mode),"wrap":pane.wrap,"vim":pane.input_mode==CodeInputMode::Vim,"dirty":pane.buffer.is_dirty(),"revision":pane.buffer.revision,
             "totalLines":pane.buffer.line_count(),"pendingKeys":pane.buffer.vim.pending.showcmd(),
-            "scrollY":pane.scroll_y,"contentHeight":view.content_h,"scrollAnimating":view.scroll_animating,"highlightAnimating":neoism_ui::syntax::highlighters_compiling(),"animating":view.scroll_animating||self.trail.is_animating()||neoism_ui::syntax::highlighters_compiling(),
+            "scrollY":pane.scroll_y,"contentHeight":view.content_h,"scrollAnimating":view.scroll_animating,"highlightAnimating":neoism_ui::syntax::highlighters_compiling(),"animating":edit_animating||view.scroll_animating||self.trail.is_animating()||neoism_ui::syntax::highlighters_compiling(),
             "clipboard":self.clipboard.take(),"hostAction":self.host_action.take(),"pendingEmpty":pane.buffer.vim.pending.is_empty()&&!pane.leader_pending,
             "cursorQuad":self.trail.quad_points(),"cursorHold":self.trail.blink_hold_visible(neoism_ui::editor::optimistic::DEFAULT_BLINK_PERIOD_MS),
             "selection":selection.map(|(a,b)|json!({"start":[a.line,a.col],"end":[b.line,b.col]}))})
@@ -843,6 +865,7 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                     compact: v["compact"].as_bool().unwrap_or(false),
                     raster: Default::default(),
                     presence: Default::default(),
+                    external_edit_revision: None,
                 },
             );
             Ok(json!({"id":id}))
@@ -1124,9 +1147,12 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
                     }
                 }
                 "editor.replace-source" => {
+                    let boundary=v["historyBoundary"].as_bool().unwrap_or(false);
+                    if boundary {if let Some(binding)=e.collaboration.as_mut(){binding.drain(&mut e.pane.buffer);binding.binding.break_undo_group();}}
                     if e.pane.buffer.doc_history_bound(){
                         if let Some(delta)=neoism_ui::editor::markdown::doc_sync::diff_doc_texts(&e.pane.buffer.lines.join("\n"),text(&v,"text")){neoism_ui::editor::code::doc_sync::apply_remote_delta_to_buffer(&mut e.pane.buffer,&delta);}
                     }else{e.pane.buffer.replace_from_disk_text(text(&v, "text"));}
+                    if boundary {if let Some(binding)=e.collaboration.as_mut(){binding.drain(&mut e.pane.buffer);binding.binding.break_undo_group();}}
                 }
                 "editor.paste" => e.pane.buffer.insert_text(text(&v, "text")),
                 "editor.frame" => {}
@@ -1138,6 +1164,91 @@ fn dispatch(v: Value, engines: &mut Engines) -> Result<Value, String> {
             Ok(e.frame())
         }
         _ => Err("Unknown engine operation".into()),
+    }
+}
+
+#[cfg(test)]
+mod external_edit_tests {
+    use super::*;
+    use neoism_ui::editor::{code::doc_sync::CodeDocBinding, crdt::{CrdtTextBuffer, CrdtTextEdit}};
+    use neoism_protocol::crdt::CRDT_DAEMON_CLIENT_ID;
+
+    #[test]
+    fn inbound_edit_outside_code_view_does_not_reveal_the_changed_location() {
+        for edit_line in [0, 90] {
+            let source = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+            let mut engines = Engines::default();
+            let id = dispatch(json!({"op":"editor.new","path":"/work/live.rs","text":source}), &mut engines).unwrap()["id"].as_u64().unwrap() as u32;
+            let editor = engines.editors.get_mut(&id).unwrap();
+            editor.height = 200.0;
+            let authority = CrdtTextBuffer::with_text(CRDT_DAEMON_CLIENT_ID, &source);
+            let mut binding = CodeDocBinding::new(42, "file:///work/live.rs");
+            binding.seed_from_snapshot(&authority.encode_full_update_v1(), &mut editor.pane.buffer).unwrap();
+            let row = editor.frame()["rowHeight"].as_f64().unwrap() as f32;
+            editor.pane.buffer.cursor_line = 45;
+            editor.pane.restore_host_scroll(0.0, 40.0 * row);
+            let before = editor.frame()["scrollY"].as_f64().unwrap();
+            // A pending local reveal must not become a reveal of remote text.
+            editor.pane.buffer.follow_cursor = true;
+            let offset = source.lines().take(edit_line).map(|line|line.len()+1).sum::<usize>();
+            let update = authority.apply_local_edit(CrdtTextEdit::Insert {index:offset as u32,content:"agent one\nagent two\nagent three\n".into()}).unwrap();
+            binding.apply_remote(CRDT_DAEMON_CLIENT_ID, &update.update_v1, &mut editor.pane.buffer).unwrap();
+            let expected = before + if edit_line == 0 {3.0 * row as f64} else {0.0};
+            for _ in 0..3 {
+                let after = editor.frame();
+                assert!((after["scrollY"].as_f64().unwrap()-expected).abs()<0.01, "offscreen edit at line {edit_line} must retain the viewed text");
+                assert!(after["editBand"].is_null());
+            }
+            assert_eq!(editor.pane.buffer.cursor_line, if edit_line == 0 {48} else {45});
+        }
+    }
+
+    #[test]
+    fn explicit_source_refresh_is_a_separate_yrs_undo_step() {
+        let mut engines=Engines::default();
+        let id=dispatch(json!({"op":"editor.new","path":"/work/restore.rs","text":""}),&mut engines).unwrap()["id"].as_u64().unwrap();
+        dispatch(json!({"op":"editor.crdt.bind","id":id,"path":"/work/restore.rs","clientId":42}),&mut engines).unwrap();
+        dispatch(json!({"op":"editor.crdt.event","id":id,"message":{"Snapshot":{"buffer_id":"file:///work/restore.rs","update_v1":[0,0],"state_vector_v1":[0]}}}),&mut engines).unwrap();
+        dispatch(json!({"op":"editor.paste","id":id,"text":"saved human edit"}),&mut engines).unwrap();
+        dispatch(json!({"op":"editor.replace-source","id":id,"text":"restored source","historyBoundary":true}),&mut engines).unwrap();
+        let outbound=dispatch(json!({"op":"editor.crdt.flush","id":id}),&mut engines).unwrap();
+        assert_eq!(outbound["send"].as_array().unwrap().len(),2,"history boundaries must retain both outbound edits");
+        dispatch(json!({"op":"editor.crdt.history","id":id,"redo":false}),&mut engines).unwrap();
+        assert_eq!(engines.editors.get(&(id as u32)).unwrap().pane.buffer.text_for_disk(),"saved human edit");
+    }
+
+    #[test]
+    fn inbound_edit_refreshes_code_and_paints_only_visible_rows_until_expiry() {
+        let source = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+        let mut engines = Engines::default();
+        let id = dispatch(json!({"op":"editor.new","path":"/work/live.rs","text":source}), &mut engines).unwrap()["id"].as_u64().unwrap() as u32;
+        let editor = engines.editors.get_mut(&id).unwrap();
+        editor.height = 200.0;
+        let authority = CrdtTextBuffer::with_text(CRDT_DAEMON_CLIENT_ID, &source);
+        let mut binding = CodeDocBinding::new(42, "file:///work/live.rs");
+        binding.seed_from_snapshot(&authority.encode_full_update_v1(), &mut editor.pane.buffer).unwrap();
+        assert!(editor.frame()["editBand"].is_null(), "initial load is not an agent edit");
+        let update = authority.apply_local_edit(CrdtTextEdit::Insert {index:0,content:"agent ".into()}).unwrap();
+        binding.apply_remote(CRDT_DAEMON_CLIENT_ID, &update.update_v1, &mut editor.pane.buffer).unwrap();
+        assert!(editor.pane.buffer.lines[0].starts_with("agent "));
+        assert!(!editor.pane.buffer.follow_cursor);
+        let visible = editor.frame();
+        assert_eq!(visible["externalEdit"]["first"], 0);
+        assert_eq!(visible["editAnimating"], true);
+        assert!(visible["editBand"]["height"].as_f64().unwrap() > 0.0);
+        editor.pane.restore_host_scroll(0.0, 1000.0);
+        let offscreen = editor.frame();
+        assert!(offscreen["externalEdit"].is_object());
+        assert!(offscreen["editBand"].is_null());
+        assert_eq!(offscreen["editAnimating"], false);
+        editor.pane.buffer.insert_text("human ");
+        assert!(editor.frame()["externalEdit"].is_null(), "typing during a fade is not another inbound edit");
+        let (first,last,at) = editor.pane.buffer.external_edit_flash.unwrap();
+        editor.pane.buffer.external_edit_flash = Some((first,last,at-std::time::Duration::from_secs(1)));
+        let expired = editor.frame();
+        assert!(expired["externalEdit"].is_null());
+        assert!(expired["editBand"].is_null());
+        assert_eq!(expired["editAnimating"], false);
     }
 }
 

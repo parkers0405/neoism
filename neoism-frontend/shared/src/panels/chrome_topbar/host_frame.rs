@@ -28,7 +28,6 @@ impl ChromeTopBar {
             ("topbar-menu", "Menu", self.menu_btn_rect),
             ("toggle-files", "Files", self.panel_btn_rect),
             ("toggle-notes", "Notes", self.notes_btn_rect),
-            ("toggle-databases", "Databases", self.databases_btn_rect),
             ("toggle-conversations", "Conversations", self.conversations_btn_rect),
             ("open-finder", "Find", self.search_btn_rect),
             ("open-servers", "Servers", self.server_btn_rect),
@@ -44,7 +43,7 @@ impl ChromeTopBar {
             }
         }
         if self.menu_open {
-            for (index, item) in MenuItem::visible(self.share_with_phone_enabled).iter().enumerate() {
+            for (index, item) in self.menu_items().iter().enumerate() {
                 regions.push(ChromeRegion { id: format!("menu:{:?}", item.action()), label: item.label().into(), rect: rect(self.menu_item_rect(index)), menu: true });
             }
         }

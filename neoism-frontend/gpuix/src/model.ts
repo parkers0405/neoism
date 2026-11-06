@@ -32,6 +32,8 @@ import {agentFamily,agentFamilyRoot,noteAgentFamily} from "./agent/family";
 import type { GitReviewDescriptor } from "./git/GitReviewController";
 import { DatabaseController } from "./database/DatabaseController";
 import type { DatabaseConnection } from "./database/types";
+import { isDatabasePath } from "./database/file-path";
+import { workspaceSidebarNavigation, type WorkspaceSidebar } from "./ui/workspace-sidebar";
 import { DirectorySchema, FileSchema, HistoryMessageSchema, ThreadSchema, TreeSchema, WorkspaceSchema,
   UsageSchema, TodoSchema, ProviderSchema, AgentSchema, SkillSchema, ProviderStateSchema, expectVariant, isRecord, variant,
   type ConnectionState, type Directory, type HistoryMessage, type Thread, type Todo, type Usage,
@@ -108,6 +110,7 @@ export class WorkspaceModel {
   private seededWorkspaces = new Set<string>();
   private startupWelcomePending = true;
   private workspaceNavigation = new Map<string, WorkspaceNavigation>();
+  private terminalNotesVaults = new Map<string, Pick<Workspace, "notes_vault_dir" | "linked_vault_dir">>();
   private fileLoads = new Map<string, Promise<void>>();
   private directoryVersions = new Map<string,number>();
   private directoryLoads = new Map<string, Promise<void>>();
@@ -552,7 +555,9 @@ export class WorkspaceModel {
         fresh=undefined;
         this.followMainTerminal();
       }catch(error){this.report(error);}
-      finally{if(fresh)await this.closeOwnedPty(fresh);}
+      // PtyClosed may beat the create/bind reply. The daemon has already
+      // removed that fresh PTY; closing it again only produces "unknown session".
+      finally{if(fresh&&available())await this.closeOwnedPty(fresh);}
     }).finally(()=>{if(this.homeTerminalRequests.get(surfaceId)===task)this.homeTerminalRequests.delete(surfaceId);});
     this.homeTerminalRequests.set(surfaceId,task);return task;
   };
@@ -734,7 +739,7 @@ export class WorkspaceModel {
           for(const key of this.workspaceNavigation.keys())if(JSON.parse(key)[0]===workspaceId)this.workspaceNavigation.delete(key);
           this.seededWorkspaces.delete(workspaceId);
           const ui:Record<string,unknown>={};
-          for(const key of ["layouts","workspaceSidebars","mainTerminals","terminalWorkspaceRoots","explicitWorkspaceRoots","databaseConnections","databaseSelections"]){
+          for(const key of ["layouts","workspaceSidebars","databaseSidebarOrigins","mainTerminals","terminalWorkspaceRoots","explicitWorkspaceRoots","databaseConnections","databaseSelections"]){
             if(isRecord(this.state.ui[key])){const map={...this.state.ui[key]};delete map[workspaceId];ui[key]=map;}
           }
           this.setUI(ui);
@@ -803,7 +808,8 @@ export class WorkspaceModel {
   };
   private workspaceView(workspace:Workspace):Workspace{
     const roots=isRecord(this.state.ui.terminalWorkspaceRoots)?this.state.ui.terminalWorkspaceRoots:{},entry=roots[workspace.id];
-    return terminalDirectoryFollowsWorkspace(workspace,this.config)&&isRecord(entry)&&entry.declaredRoot===(workspace.root_dir||null)&&absoluteTerminalDirectory(entry.root)?{...workspace,root_dir:entry.root}:workspace;
+    if(!terminalDirectoryFollowsWorkspace(workspace,this.config)||!isRecord(entry)||entry.declaredRoot!==(workspace.root_dir||null)||!absoluteTerminalDirectory(entry.root)||entry.root===workspace.root_dir)return workspace;
+    return {...workspace,root_dir:entry.root,notes_vault_dir:undefined,linked_vault_dir:undefined,...this.terminalNotesVaults.get(entry.root)};
   }
   private followMainTerminal(){
     const workspace=this.state.activeWorkspace,surface=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId);
@@ -813,13 +819,14 @@ export class WorkspaceModel {
     const declared=this.state.workspaces.find(entry=>entry.id===workspace.id)||workspace;
     const roots=isRecord(this.state.ui.terminalWorkspaceRoots)?this.state.ui.terminalWorkspaceRoots:{};
     this.setUI({terminalWorkspaceRoots:{...roots,[workspace.id]:{declaredRoot:declared.root_dir||null,root:cwd}}});
-    // Refresh only this frontend's Explorer/catalog scope. Never publish a
+    // Refresh only this frontend's Explorer/notes/catalog scope. Never publish a
     // host SetWorkspaceRoot or send a cd command into any running shell.
     void this.activateWorkspace(declared);
   }
   activateWorkspace = async (workspace: Workspace, force = false) => {
     if(this.closingWorkspaces.has(workspace.id))return;
-    workspace=this.workspaceView(this.state.workspaces.find(entry=>entry.id===workspace.id)||workspace);
+    const declared=this.state.workspaces.find(entry=>entry.id===workspace.id)||workspace;
+    workspace=this.workspaceView(declared);
     const previous = this.state.activeWorkspace, key = this.workspaceKey(workspace);
     if (!force && previous && this.workspaceKey(previous) === key) {
       if(this.presence.workspaceId()===workspace.id)this.presence.setWorkspace(workspace);
@@ -861,6 +868,20 @@ export class WorkspaceModel {
     const subscribed = this.syncWindowWorkspaces().then(()=>this.run(this.client.request("Workspace", { SubscribeWorkspace: { workspace_id: workspace.id } })));
     const listing = this.listDirectory("", epoch);
     if (workspace.notes_vault_dir) void this.listDirectory("", epoch, true);
+    if(workspace.root_dir!==declared.root_dir){
+      const root=workspace.root_dir!;
+      void this.run(this.client.request("Workspace",{ResolveNotesVault:{root_dir:root}})).then(reply=>{
+        const vault=expectVariant(reply,"NotesVaultResolved");
+        if(!isRecord(vault)||typeof vault.notes_vault_dir!=="string")throw new Error("Invalid notes vault reply");
+        if(this.disposed||epoch!==this.epoch)return;
+        const notes={notes_vault_dir:vault.notes_vault_dir,linked_vault_dir:typeof vault.linked_vault_dir==="string"?vault.linked_vault_dir:null};
+        this.terminalNotesVaults.set(root,notes);
+        const changed=this.state.activeWorkspace?.notes_vault_dir!==notes.notes_vault_dir;
+        workspace={...workspace,...notes};
+        this.update({activeWorkspace:workspace,...(changed?{notesDirectories:{},notesExpanded:new Set([""])}:{})});
+        void this.listDirectory("",epoch,true);
+      }).catch(error=>{if(!this.disposed&&epoch===this.epoch)this.report(error);});
+    }
     for (const pane of this.getLayout(workspace.id).frame.panes) {
       const surface = this.state.surfaces.find((s) => s.id === pane.surfaceId);
       if (surface?.kind === "file") void this.loadFile(surface);
@@ -891,7 +912,7 @@ export class WorkspaceModel {
       try {
         const reply = await this.run(this.client.request("Files", { ListDir: { path } }, root));
         const directory = Schema.decodeUnknownSync(DirectorySchema)(expectVariant(reply, "DirListing"));
-        if (epoch !== this.epoch || version !== (this.directoryVersions.get(root)||0)) return;
+        if (epoch !== this.epoch || version !== (this.directoryVersions.get(root)||0) || root !== (notes ? this.state.activeWorkspace?.notes_vault_dir : this.state.activeWorkspace?.root_dir)) return;
         const entries = [...directory.entries].sort((a, b) => Number(b.is_dir) - Number(a.is_dir) || a.name.localeCompare(b.name));
         const before = (notes ? this.state.notesDirectories : this.state.directories)[path];
         if (before && before.entries.length === entries.length && before.entries.every((entry, index) => entry.name === entries[index].name && entry.is_dir === entries[index].is_dir && entry.size === entries[index].size)) return;
@@ -966,16 +987,19 @@ export class WorkspaceModel {
     if(current){this.update(patch);await Promise.all([...new Set([oldParent,directory,...[...expanded].filter(path=>path===to||path.startsWith(to+"/"))])].map(path=>this.listDirectory(path,epoch,notes)));}
     else this.workspaceNavigation.set(navigationKey,{...source,...patch} as WorkspaceNavigation);
   };
-  openFile = async (path: string, rootOverride?: string) => {
+  setWorkspaceSidebar = (value: WorkspaceSidebar | undefined) => {
+    const id = this.state.activeWorkspace?.id;
+    if (id) this.setUI(workspaceSidebarNavigation(this.state.ui, id, value));
+  };
+  openFile = async (path: string, rootOverride?: string, origin?: "files") => {
     const workspace = this.state.activeWorkspace;
     const root = rootOverride || workspace?.root_dir;
     if (!workspace || !root || this.closingWorkspaces.has(workspace.id)) return;
-    if (/\.(db|sqlite|sqlite3|db3)$/i.test(path)) {
+    if (isDatabasePath(path)) {
       const connection: DatabaseConnection = { id: `database:${workspace.id}:${root}:${path}`, workspaceId: workspace.id, rootDir: root, path, title: path.split(/[\\/]/).pop() || path };
       const connections = this.databaseConnections(workspace.id);
       const stored = isRecord(this.state.ui.databaseConnections) ? this.state.ui.databaseConnections : {};
-      const sidebars = isRecord(this.state.ui.workspaceSidebars) ? this.state.ui.workspaceSidebars : {};
-      this.setUI({ databaseConnections: { ...stored, [workspace.id]: connections.some(item => item.id === connection.id) ? connections : [...connections, connection] }, workspaceSidebars: { ...sidebars, [workspace.id]: "databases" } });
+      this.setUI({ databaseConnections: { ...stored, [workspace.id]: connections.some(item => item.id === connection.id) ? connections : [...connections, connection] }, ...workspaceSidebarNavigation(this.state.ui, workspace.id, "databases", origin) });
       this.selectDatabaseConnection(connection.id, workspace.id);
       const schema = this.getDatabaseSchema(connection);
       if (this.client.state.phase === "connected") {
@@ -1052,7 +1076,13 @@ export class WorkspaceModel {
       for(const owner of owners){
         const current=this.state.surfaces.find(surface=>surface.id===owner.surface.id);
         if(!current||current.path!==owner.surface.path||current.rootDir!==owner.surface.rootDir||this.surfaceDirty(current.id)||this.state.files[current.id]!==owner.baseline||this.editors.get(current.id)!==owner.editor||owner.versions.some(version=>version.editor.frame.revision!==version.revision))continue;
-        if(owner.editor&&owner.editor.text()!==text){owner.editor.call("replace-source",{text});if(owner.editor.text()===text)owner.editor.call("saved",{revision:owner.editor.frame.revision});}
+        if(owner.editor&&owner.editor.text()!==text){
+          // A Git restore refreshes bytes, not the user's retained view. Bound
+          // Yrs splices otherwise transform carets as though this were typing.
+          const positions=owner.versions.map(({editor})=>({editor,...editor.frame.cursor}));
+          owner.editor.call("replace-source",{text,historyBoundary:true});if(owner.editor.text()===text)owner.editor.call("saved",{revision:owner.editor.frame.revision});
+          for(const position of positions)position.editor.call("goto",{line:position.line,col:position.col});
+        }
         if (!owner.editor) delete this.recoveredViews[current.id];
         if(files[current.id]!==text){files[current.id]=text;changed=true;}
       }

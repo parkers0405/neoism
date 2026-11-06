@@ -205,6 +205,16 @@ fn handle_inner(
                 DispatchOutcome::just(vec![err(format!("no such host workspace: {workspace_id}"))])
             }
         },
+        WorkspaceClientMessage::ResolveNotesVault { root_dir } => {
+            DispatchOutcome::just(if root_dir.is_absolute() {
+                vec![WorkspaceServerMessage::NotesVaultResolved {
+                    linked_vault_dir: resolve_linked_vault_dir(&root_dir),
+                    notes_vault_dir: resolve_notes_vault_dir(&root_dir),
+                }]
+            } else {
+                vec![err("notes directory must be absolute".into())]
+            })
+        }
         WorkspaceClientMessage::CreateWorkspaceVault { workspace_id } => {
             DispatchOutcome::just(create_workspace_vault(manager, conn, &workspace_id))
         }

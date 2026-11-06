@@ -154,6 +154,7 @@ export function EditorView(props: {
   const paintOrigin=createMemo(()=>rows()[0]?.y||0);
   const backgroundPaint=createMemo(()=>{
     const f=frame(),ops:CanvasOp[]=[{k:"r",b:[0,f.cursor.y,1e5,f.rowHeight],c:cssColor(c.hover+"88")}];
+    if(f.editBand)ops.push({k:"r",b:[0,f.editBand.top,size().width,f.editBand.height],c:cssColor(c.accent,f.editBand.alpha)});
     for(const hit of f.searchHits)ops.push({k:"r",b:[hit.x,hit.y,hit.width,f.rowHeight],c:cssColor(hit.selection?c.accent+"47":c.yellow+"4d")});
     return JSON.stringify(ops);
   });

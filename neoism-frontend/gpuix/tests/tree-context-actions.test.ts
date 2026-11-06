@@ -5,9 +5,10 @@ import {loadConfig} from "../src/config";
 import {DaemonConnection} from "../src/daemon/client";
 import {WorkspaceModel} from "../src/model";
 import {performTreeContext,type TreeContextTarget} from "../src/ui/tree-context-actions";
+import {installCrdtFixture} from "./support/crdt-fixture";
 
 function fixture(){
- const config=loadConfig(["--config","/nonexistent/context-test"],{}),client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+ const config=loadConfig(["--config","/nonexistent/context-test"],{}),client=new DaemonConnection(config);
  const workspace={id:"a",host_id:"remote",title:"A",root_dir:"/remote",notes_vault_dir:"/vault"};
  const files=new Map<string,string|null>([["/remote/src",null],["/remote/src/a.ts","original"],["/remote/dest",null],["/remote/dest/a.ts","keep"],["/vault",null]]);
  const requests:any[]=[];
@@ -22,9 +23,10 @@ function fixture(){
   if(message.Rename){const{from,to}=message.Rename;for(const[key,content]of [...files])if(key===path(from)||key.startsWith(path(from)+"/")){files.delete(key);files.set(path(to)+key.slice(path(from).length),content);}return{Renamed:{from,to}};}
   throw Error(`Unexpected ${family} ${JSON.stringify(message)}`);
  },catch:error=>error})) as typeof client.request;
+ const documents=installCrdtFixture(client,path=>files.get(path)??undefined,(path,text)=>files.set(path,text)),model=new WorkspaceModel(client,config);
  model.update({activeWorkspace:workspace,workspaces:[workspace],loading:false,expanded:new Set(["","src","dest"])});
  const target=(path?:string,directory="",notes=false):TreeContextTarget=>({workspaceId:"a",root:notes?"/vault":"/remote",notes,path,directory});
- return{model,files,requests,target,dispose:()=>{model.dispose();client.stop();}};
+ return{model,files,requests,target,dispose:()=>{model.dispose();client.stop();documents.dispose();}};
 }
 test("tree copy/paste duplicates files and folders through the daemon without overwriting collisions",async()=>{
  const f=fixture();try{

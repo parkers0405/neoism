@@ -3,6 +3,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { loadConfig } from "../src/config";
 import { DaemonConnection } from "../src/daemon/client";
 import { WorkspaceModel } from "../src/model";
+import {createCrdtFixture} from "./support/crdt-fixture";
 
 const resources: Array<() => void> = [];
 afterEach(() => resources.splice(0).reverse().forEach((close) => close()));
@@ -16,6 +17,7 @@ test("workspace switches discard stale replies; notes keep their own vault for r
     { id: "b", host_id: "host", title: "B", root_dir: "/project/b", notes_vault_dir: "/vault/b" },
   ];
   const writtenRoots: string[] = [];
+  const documents=createCrdtFixture(()=>"vault note",path=>writtenRoots.push(path.slice(0,path.lastIndexOf("/"))));resources.push(()=>documents.dispose());
   let ptySequence=0,activeWorkspaceId="a";
   let delayed: (() => void) | undefined;
   const server = Bun.serve({
@@ -26,6 +28,7 @@ test("workspace switches discard stale replies; notes keep their own vault for r
         const [family, envelope] = Object.entries(JSON.parse(String(data)))[0] as [string, { request_id: number; message: unknown; workspace_root?: string }];
         const reply = (message: unknown) => socket.send(JSON.stringify({ [family + "Reply"]: { request_id: envelope.request_id, message } }));
         const message = envelope.message as Record<string, unknown>;
+        if(family==="Crdt"){documents.handle(message,reply);return;}
         if (family === "Workspace") {
           if (message.Hello) reply({ HelloAck: { accepted: true } });
           else if (envelope.message === "RequestHostWorkspaceTree") reply({ HostWorkspaceTree: { hosts: [{ id: "host", label: "Host" }], workspaces, tabs: [] } });

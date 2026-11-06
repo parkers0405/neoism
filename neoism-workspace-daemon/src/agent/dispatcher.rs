@@ -108,11 +108,9 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
             });
         }
         AgentClientMessage::ResumeStream { session_id } => {
-            start_event_stream(&inner, &session_id);
-            // Recover interactions that happened while no client was
-            // attached: a `question` tool call parks the run until it
-            // is answered, so a reloaded page must learn about it even
-            // though the `question.asked` SSE event is long gone.
+            let started = start_event_stream(&inner, &session_id);
+            // Pending interactions are hydrated by the stream task after its
+            // tail subscription is established, including on reconnect.
             tokio::spawn(async move {
                 // Also surface whether the session is mid-run right now,
                 // so an attach during a live turn shows the activity
@@ -120,8 +118,12 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 push_session_running_state(inner.clone(), session_id.clone()).await;
                 push_runtime_snapshot(inner.clone(), session_id.clone()).await;
                 push_todo_snapshot(inner.clone(), session_id.clone()).await;
-                push_pending_questions(inner.clone(), session_id.clone()).await;
-                push_pending_permissions(inner, session_id).await;
+                // An idempotent resume still needs a baseline for its client;
+                // a newly started stream hydrates after subscribing instead.
+                if !started {
+                    push_pending_questions(inner.clone(), session_id.clone()).await;
+                    push_pending_permissions(inner, session_id).await;
+                }
             });
         }
         AgentClientMessage::StopStream { session_id } => {

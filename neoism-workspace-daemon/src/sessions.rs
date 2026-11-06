@@ -453,6 +453,12 @@ impl SessionRegistry {
         let control_token = executable.as_ref().map(|_| Uuid::new_v4().to_string());
         let control = Arc::new(Mutex::new(DirectoryControl::new(control_token.clone(), executable)));
         let mut env: Vec<(String, String)> = std::env::vars().collect();
+        if let Some(executable) = actual_shell.as_ref().and_then(|shell| {
+            let program = if Path::new(shell).is_absolute() { shell.clone() } else { command_in_path(shell)? };
+            fs::canonicalize(program).ok()
+        }) {
+            crate::shell_environment::prepare_shell_environment(&mut env, &executable);
+        }
         env.retain(|(key, _)| key != "NEOISM_COMPLETION_DIR");
         if let Some(snapshot) = &completion { env.push(("NEOISM_COMPLETION_DIR".into(), snapshot.directory().to_string_lossy().into_owned())); }
         env.retain(|(key, _)| key != "NEOISM_DIRECTORY_CONTROL_TOKEN");

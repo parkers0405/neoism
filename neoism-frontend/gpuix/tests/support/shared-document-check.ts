@@ -90,8 +90,24 @@ try{
  const legacyModel=new WorkspaceModel(b.client,config);models.push(legacyModel);legacyModel.restoreSession(legacy);legacyModel.update({workspaces:[workspace],activeWorkspace:workspace,activeSurfaceId:mb.surface.id});const legacyEditor=legacyModel.getEditor(mb.surface,11);
  b.client.start();await until(()=>legacyModel.collaboration.isBound(legacyEditor)&&legacyEditor.text()===ma.editor.text()&&legacyEditor.text().includes("legacy-local ")&&legacyEditor.text().includes("legacy-peer "),"Legacy dirty source rebases its local delta instead of overwriting the live peer");assert.ok(!legacyEditor.text().includes("body α"),"Local deletion survives while the concurrent insertion inside that range remains");
  await legacyModel.saveFile(mb.surface);await until(()=>!ma.editor.frame.dirty&&!legacyEditor.frame.dirty,"Legacy recovery save leaves both replicas clean");assert.equal(readFileSync(splitPath,"utf8"),legacyEditor.text());
- ma.model.closeSurface(ma.surface.id,true);legacyModel.closeSurface(mb.surface.id,true);
- a.presence.updateLocal(a.document.bufferId(ea)!,ea.getPresence()!.cursor,null,false);await Bun.sleep(30);assert.deepEqual(failures,[]);
+  ma.model.closeSurface(ma.surface.id,true);legacyModel.closeSurface(mb.surface.id,true);
+  // Private local workspaces need the same disk reconciliation as multiplayer,
+  // without enabling presence. Do not list the parent: acquisition owns its watch.
+  const privateWorkspace={...declared,visibility:"private"},privateConfig={...config,collaborative:false};
+  const localModel=new WorkspaceModel(a.client,privateConfig);models.push(localModel);
+  const localSurfaces:Surface[]=["local.rs","local.md"].map(name=>({id:`private:${name}`,kind:"file",title:name,path:name,rootDir:directory,workspaceId:id}));
+  for(const surface of localSurfaces)writeFileSync(join(directory,surface.path!),"original");
+  localModel.update({workspaces:[privateWorkspace],activeWorkspace:privateWorkspace,surfaces:localSurfaces,activeSurfaceId:localSurfaces[0].id,files:Object.fromEntries(localSurfaces.map(surface=>[surface.id,"original"])),loading:false});
+  const localCode=localModel.getEditor(localSurfaces[0],21),localRich=localModel.getMarkdown(localSurfaces[1],22);
+  await until(()=>localCode.frame.collaborationBound===true&&localRich.editor.frame.collaborationBound===true,"Private local documents acquire daemon synchronization");
+  assert.equal(localModel.presence.isCollaborative(),false,"Document liveness does not enable multiplayer presence");
+  let codeFlash=false,markdownFlash=false;
+  const releaseCode=localCode.subscribe(frame=>{codeFlash ||= !!frame.editBand&&!!frame.editAnimating;}),releaseRich=localRich.subscribe(frame=>{markdownFlash ||= frame.animating&&localRich.text()==="agent markdown";});
+  writeFileSync(join(directory,"local.rs"),"agent code");writeFileSync(join(directory,"local.md"),"agent markdown");
+  await until(()=>localCode.text()==="agent code"&&localRich.text()==="agent markdown"&&!localCode.frame.dirty&&!localRich.editor.frame.dirty,"External disk edits refresh private code and rich Markdown splits without reopening");
+  assert.ok(codeFlash,"Visible agent code edit has a landing band");assert.ok(markdownFlash,"Visible Markdown edit requests animated frames");
+  releaseCode();releaseRich();
+  a.presence.updateLocal(a.document.bufferId(ea)!,ea.getPresence()!.cursor,null,false);await Bun.sleep(30);assert.deepEqual(failures,[]);
 
  console.log(JSON.stringify({noWindow:true,isolatedRealDaemon:true,twoAuthenticatedClients:true,codeAndRichMarkdownConverge:true,originScopedUndo:true,authoritativeSave:true,utf16Presence:true,originalRemoteCursorPaint:true,offlineReconnectConverges:true,actualModelSplitOwner:true,recreatedModelCausalMerge:true,recoveryActorRetained:true,reconnectSavedClean:true,legacyRecoveryDiffRebased:true}));
 }finally{for(const model of models)model.dispose();markdown?.dispose();for(const document of controllers)document.dispose();for(const presence of presences)presence.dispose();for(const editor of editors)editor.dispose();for(const client of clients)client.stop();daemon.kill("SIGTERM");await daemon.exited;await Promise.all([stdout,stderr]);agent.stop(true);rmSync(temp,{recursive:true,force:true});}

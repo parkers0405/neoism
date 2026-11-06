@@ -20,3 +20,16 @@ export function withWorkspaceSidebar(ui: Record<string, unknown>, workspaceId: s
   const stored = record(ui.workspaceSidebars) ? ui.workspaceSidebars : {};
   return { ...stored, [workspaceId]: value ?? null } as WorkspaceSidebars;
 }
+
+export function databaseSidebarFromFiles(ui: Record<string, unknown>, workspaceId?: string): boolean {
+  return !!workspaceId && workspaceSidebar(ui, workspaceId) === "databases"
+    && record(ui.databaseSidebarOrigins) && ui.databaseSidebarOrigins[workspaceId] === "files";
+}
+
+/** Explicit navigation clears any previous return target, only for this workspace. */
+export function workspaceSidebarNavigation(ui: Record<string, unknown>, workspaceId: string, value: WorkspaceSidebar | undefined, origin?: "files") {
+  const origins = record(ui.databaseSidebarOrigins) ? { ...ui.databaseSidebarOrigins } : {};
+  if (value === "databases" && origin === "files") origins[workspaceId] = origin;
+  else delete origins[workspaceId];
+  return { workspaceSidebars: withWorkspaceSidebar(ui, workspaceId, value), databaseSidebarOrigins: origins };
+}

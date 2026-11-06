@@ -32,6 +32,7 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 sqlx = { workspace = true }
+turso = { workspace = true }
 base64 = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }

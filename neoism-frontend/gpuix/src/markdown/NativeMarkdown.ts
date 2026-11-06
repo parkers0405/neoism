@@ -37,8 +37,9 @@ export class NativeMarkdown {
    if(this.syncing||this.disposed)return;
    if(this.docBound!==!!frame.collaborationBound){this.docBound=!!frame.collaborationBound;this.call("doc-bound",{bound:this.docBound},false);}
    if(this.peers!==frame.remotePeers){this.peers=frame.remotePeers;this.call("presence",{peers:frame.remotePeers||[]},false);}
-   if(frame.revision!==this.editorRevision){this.editorRevision=frame.revision;this.call("source",{text:editor.text()},false);}
-   const cursor=`${frame.cursor.line}:${frame.cursor.col}`;if(cursor!==this.editorCursor){this.editorCursor=cursor;this.call("goto",{line:frame.cursor.line,col:frame.cursor.col},false);}
+   const inbound=frame.revision!==this.editorRevision&&!!frame.externalEdit;
+   if(frame.revision!==this.editorRevision){this.editorRevision=frame.revision;this.call("source",{text:editor.text(),inboundEdit:inbound?frame.externalEdit:null},false);}
+   const cursor=`${frame.cursor.line}:${frame.cursor.col}`;if(cursor!==this.editorCursor){this.editorCursor=cursor;if(!inbound)this.call("goto",{line:frame.cursor.line,col:frame.cursor.col},false);}
    if(frame.vim!==undefined&&frame.vim!==this.frame.vim)this.call("toggle-vim",{},false);
    if(this.lastDirty&&!frame.dirty)this.call("saved",{},false);this.lastDirty=frame.dirty;
   });
@@ -69,8 +70,9 @@ export class NativeMarkdown {
   }
    if(frame.revision!==this.richRevision){this.richRevision=frame.revision;if(sync){this.syncing=true;try{
     let text=this.text();
-    // Rich source omits disk EOF/EOL metadata; retain it in the canonical buffer.
-    if(!this.docBound){const current=this.editor.text(),eol=current.includes("\r\n")?"\r\n":"\n";text=text.replace(/\n/g,eol)+(current.endsWith("\n")?eol:"");}
+     // The rich pane now retains the exact EOF bytes as well as live splices.
+     // Only restore disk EOL encoding; appending another newline duplicates EOF.
+     if(!this.docBound){const current=this.editor.text(),eol=current.includes("\r\n")?"\r\n":"\n";text=text.replace(/\r?\n/g,eol);}
     this.editor.call("replace-source",{text});this.editorRevision=this.editor.frame.revision;this.lastDirty=this.editor.frame.dirty;
    }finally{this.syncing=false;}}}
   if(sync&&["key","pointer","goto","restore","block-template","command","menu.pointer"].includes(op)){

@@ -1308,6 +1308,8 @@ impl FileBrowserModal {
         let row_offset = entering * 12.0;
         let row_opacity = 1.0 - entering * 0.8;
         let palette = FileBrowserPalette::from_theme(theme);
+        let panel_theme = theme.panel_text_theme();
+        let theme = &panel_theme;
         sugarloaf.rect(
             None,
             vx,

@@ -2,6 +2,11 @@
 use super::MarkdownPane;
 use neoism_paint::{NodeId,VirtualScrollAnchor};
 impl MarkdownPane {
+ /// A host-applied document splice is not a caret navigation request.
+ pub fn cancel_host_caret_follow(&mut self){
+  self.follow_cursor=false;
+  self.pending_reveal_line=None;
+ }
  pub fn capture_host_scroll_anchor(&mut self)->Option<VirtualScrollAnchor>{
   self.virtual_render.surface.capture_scroll_anchor((self.scroll_viewport_height*0.35).max(0.0))
  }

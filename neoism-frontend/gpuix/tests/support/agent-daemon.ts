@@ -1,5 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import { applyEdits, modify, parse } from "jsonc-parser";
+import {createCrdtFixture} from "./crdt-fixture";
 // An isolated protocol fixture used only by tests. The production frontend has
 // no fixture mode and connects through the same daemon transport in every test.
 export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSessionUpdates?:boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;deferPrompts?:boolean;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;agentCatalog?:readonly unknown[];usageResponse?:unknown;usageDelayMs?:number;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
@@ -19,6 +20,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
   const statuses=new Map<string,{type:"idle"|"busy"|"retry"}>();
   const statusRequests={defer:false,fail:false,count:0,pending:[] as Array<()=>void>};
   const workspaceSubscriptions:Array<{workspaceId:string;release:()=>void}>=[];
+  const notesVaults={resolve:(root:string)=>({notes_vault_dir:"/vaults/Default",linked_vault_dir:null as string|null}),delay:0};
   const directoryChanges:Array<()=>void>=[];
   const workspaceClose={error:undefined as string|undefined};
   const ptyCreations={defer:false,pending:[] as Array<()=>void>};
@@ -43,6 +45,8 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
   };
   const pushCrdt=(message:unknown)=>broadcast("Crdt",message);
   const crdtRequests:Array<{tag:string;body:Record<string,unknown>}>=[];
+  const relative=(path:string)=>{const roots=[...workspaces.map(w=>w.root_dir),...Object.keys(config.scopedFiles||{})].sort((a,b)=>b.length-a.length);const root=roots.find(root=>path.startsWith(root+"/"));return{root:root||"",path:root?path.slice(root.length+1):path};};
+  const documents=createCrdtFixture(path=>{const entry=relative(path);return config.scopedFiles?.[entry.root]?.[entry.path]??files.get(entry.path);},(path,text)=>files.set(relative(path).path,text));
   const pushPty=(message:unknown)=>broadcast("Pty",message);
   const pushWorkspace=(message:unknown)=>broadcast("Workspace",message);
   const catalogStreams=new Map<ReadableStreamDefaultController<Uint8Array>,string|undefined>();
@@ -148,7 +152,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
         const body = typeof envelope.message === "string" ? {} : envelope.message as Record<string, unknown>;
         const tag = typeof envelope.message === "string" ? envelope.message : Object.keys(body)[0];
         const payload = (body[tag] || {}) as Record<string, unknown>;
-        if(family==="Crdt"){crdtRequests.push({tag,body:payload});return;}
+        if(family==="Crdt"){crdtRequests.push({tag,body:payload});documents.handle(envelope.message,reply);return;}
         if(family==="Git"){if(tag==="WatchStatus"){for(const[token,owner]of gitWatchers)if(owner===client)gitWatchers.delete(token);gitWatchers.set(String(payload.token),client);}else if(tag==="UnwatchStatus")gitWatchers.delete(String(payload.token));gitRequests.push({message:envelope.message,root:envelope.workspace_root});if(config.gitHandler)config.gitHandler(envelope.message,envelope.workspace_root,reply);else reply("Ack");return;}
         if (family === "Workspace") {
           workspaceRequests.push({ tag, body: payload });
@@ -185,6 +189,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
             if(config.workspaceCreateDelayMs)setTimeout(complete,config.workspaceCreateDelayMs);else complete();
           }
           if (tag === "SubscribeWorkspace") {socketWorkspaces.set(client,String(payload.workspace_id));const complete=()=>reply({ HostWorkspaceUpserted: { workspace: workspaces.find((w) => w.id === payload.workspace_id) } });if(config.deferWorkspaceSubscriptions)workspaceSubscriptions.push({workspaceId:String(payload.workspace_id),release:complete});else complete();}
+          if(tag==="ResolveNotesVault"){const vault=notesVaults.resolve(String(payload.root_dir));const complete=()=>reply({NotesVaultResolved:vault});if(notesVaults.delay)setTimeout(complete,notesVaults.delay);else complete();}
           if(tag==="SetWorkspaceRoot"){const workspace=workspaces.find(entry=>entry.id===payload.workspace_id);if(workspace){workspace.root_dir=String(payload.root_dir);reply({HostWorkspaceUpserted:{workspace}});}else reply({Error:{message:"Unknown workspace"}});}
           if(tag==="BindEditorSurface")reply({EditorSurfaceChanged:{surface:{surface_id:payload.surface_id,session_id:payload.session_id,workspace_id:socketWorkspaces.get(client)||"a",path:payload.path}}});
         }
@@ -202,7 +207,10 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
             if (config.fileReadDelayMs) setTimeout(send, config.fileReadDelayMs); else send();
           }
           else if (tag === "WriteFile") { files.set(String(payload.path), new TextDecoder().decode(Uint8Array.from(payload.bytes as number[]))); reply({ FileWritten: { path: payload.path } }); }
-          else reply({ DirListing: { path: String(payload.path || ""), entries: config.directoryEntries?.[String(payload.path || "")] || [...files.keys()].map((name) => ({ name, is_dir: false })) } });
+          else {
+            const scoped=config.scopedFiles?.[envelope.workspace_root||""];
+            reply({ DirListing: { path: String(payload.path || ""), entries: config.directoryEntries?.[String(payload.path || "")] || (scoped?Object.keys(scoped):[...files.keys()]).map((name) => ({ name, is_dir: false })) } });
+          }
         }
         if (family === "Pty") {
           ptyRequests.push({tag,body:payload});
@@ -282,5 +290,5 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
     },
   });
   return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,prompts,statuses,statusRequests,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
-    workspaceClose,ptyCreations,mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);} };
+    workspaceClose,ptyCreations,notesVaults,mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);documents.dispose();} };
 }

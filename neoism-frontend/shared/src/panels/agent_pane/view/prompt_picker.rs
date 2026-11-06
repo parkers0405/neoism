@@ -164,13 +164,38 @@ fn render_question_prompt(
     s: f32,
     min_y: f32,
 ) -> Option<[f32; 4]> {
+    let question = pane.pending_question()?;
+    let responding = question.responding;
+    let row_count = question.visible_rows().len();
+    let state = render_question_picker(sugarloaf, question, input_rect, theme, s, min_y, None)?;
+    if !responding {
+        for visible_index in 0..state.visible_rows {
+            let source_index = state.first_row + visible_index;
+            if source_index >= row_count {
+                break;
+            }
+            pane.register_question_option_rect(source_index, state.row_rect(visible_index, s));
+        }
+    }
+    Some(state.rect)
+}
+
+/// Shared question card paint and hit geometry for Sugarloaf and GPUIX hosts.
+pub fn render_question_picker(
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
+    question: &crate::panels::agent_pane::question_policy::NeoismAgentPendingQuestion,
+    input_rect: [f32; 4],
+    theme: &IdeTheme,
+    s: f32,
+    min_y: f32,
+    error: Option<&str>,
+) -> Option<inline_picker::InlinePickerRenderState> {
     let (title, typed, rows_data, selected, scroll_offset, responding, has_options) = {
-        let question = pane.pending_question()?;
-        let item = question.current_item()?;
+        let item = question.current_item().or_else(|| question.questions.last())?;
         let title = if question.questions.len() > 1 {
             format!(
                 "({}/{}) {}",
-                question.current + 1,
+                (question.current + 1).min(question.questions.len()),
                 question.questions.len(),
                 item.text
             )
@@ -214,12 +239,14 @@ fn render_question_prompt(
             })
             .collect::<Vec<_>>()
     };
-    let footer_hint = if responding {
+    let footer_hint = if let Some(error) = error {
+        error
+    } else if responding {
         "sending…"
     } else {
         "enter answer · esc skip"
     };
-    let state = inline_picker::render_limited(
+    inline_picker::render_limited(
         sugarloaf,
         InlinePickerView {
             title: &title,
@@ -247,18 +274,5 @@ fn render_question_prompt(
         s,
         inline_picker::DEFAULT_MAX_ROWS,
         min_y,
-    )?;
-    if !responding {
-        for visible_index in 0..state.visible_rows {
-            let source_index = state.first_row + visible_index;
-            if source_index >= rows_data.len() {
-                break;
-            }
-            pane.register_question_option_rect(
-                source_index,
-                state.row_rect(visible_index, s),
-            );
-        }
-    }
-    Some(state.rect)
+    )
 }

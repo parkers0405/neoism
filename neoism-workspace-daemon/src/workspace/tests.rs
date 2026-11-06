@@ -794,6 +794,63 @@ fn workspace_action_create_note_falls_back_to_default_vault() {
 }
 
 #[test]
+fn resolve_notes_vault_follows_directory_links_without_moving_workspace() {
+    let td = TempDir::new().unwrap();
+    let _notes_home = NotesHomeGuard::new(&td.path().join("vaults"));
+    // Bootstrap Default before importing the separate linked vault.
+    let default_vault = neoism_workspace_index::default_notes_vault().unwrap();
+    let vault_dir = td.path().join("vaults").join("Linked");
+    std::fs::create_dir_all(&vault_dir).unwrap();
+    neoism_workspace_index::register_notes_vault("Linked", &vault_dir).unwrap();
+    let code = td.path().join("code");
+    let unlinked = td.path().join("unlinked");
+    std::fs::create_dir_all(code.join("sub")).unwrap();
+    std::fs::create_dir_all(&unlinked).unwrap();
+    let mut notes = neoism_workspace_index::init_workspace(&code).unwrap();
+    notes.config.notes.workspace = "Linked".into();
+    notes.config.notes.vault_id = None;
+    neoism_workspace_index::link_code_dir_to_workspace_vault(&mut notes, &code).unwrap();
+    let mgr = make_manager(&td);
+    let mut conn = ConnectionWorkspace::default();
+    handle(
+        &mgr,
+        &mut conn,
+        WorkspaceClientMessage::CreateWorkspace {
+            workspace_id: Some("notes-follow".into()),
+            title: None,
+            root_dir: Some(code.clone()),
+        },
+    );
+    let before = mgr.list_host_workspaces(None);
+    for (root, linked) in [(code.join("sub"), true), (unlinked, false), (code, true)] {
+        let replies = handle(
+            &mgr,
+            &mut conn,
+            WorkspaceClientMessage::ResolveNotesVault { root_dir: root },
+        );
+        match &replies[..] {
+            [WorkspaceServerMessage::NotesVaultResolved {
+                notes_vault_dir,
+                linked_vault_dir,
+            }] => {
+                let expected = if linked {
+                    vault_dir.clone()
+                } else {
+                    default_vault.path.clone()
+                };
+                assert_eq!(
+                    crate::path::canonicalize_lossy(notes_vault_dir),
+                    crate::path::canonicalize_lossy(&expected)
+                );
+                assert_eq!(linked_vault_dir.is_some(), linked);
+            }
+            other => panic!("unexpected notes resolution: {other:?}"),
+        }
+    }
+    assert_eq!(mgr.list_host_workspaces(None), before);
+}
+
+#[test]
 fn refresh_host_workspace_notes_advertises_a_late_vault_link() {
     let td = TempDir::new().unwrap();
     let _notes_home = NotesHomeGuard::new(&td.path().join("vaults"));

@@ -2824,6 +2824,8 @@ impl UniversalModal {
         if !self.active {
             return;
         }
+        let panel_theme = theme.panel_text_theme();
+        let theme = &panel_theme;
         let (window_width, window_height, scale_factor) = dimensions;
         let viewport_height = (window_height / scale_factor).max(1.0);
         if self.viewport_height != viewport_height {

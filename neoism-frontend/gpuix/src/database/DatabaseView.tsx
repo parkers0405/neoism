@@ -58,8 +58,9 @@ export function DatabaseView(props: {
   });
   const moveScrollbar = (axis: "horizontal" | "vertical", offset: number) => moveTo(axis==="horizontal"?offset:scrollX(),axis==="vertical"?offset:scrollY());
   const wheel = (event:EventPayload) => {
-    const dx=event.modifiers?.shift?-(event.deltaY||0):-(event.deltaX||0);
-    const dy=event.modifiers?.shift?0:-(event.deltaY||0);
+    const unit=event.precise?1:rowHeight()*3;
+    const dx=(event.modifiers?.shift?-(event.deltaY||0):-(event.deltaX||0))*unit;
+    const dy=(event.modifiers?.shift?0:-(event.deltaY||0))*unit;
     moveTo(scrollX()+dx,scrollY()+dy);
   };
   createEffect(()=>{contentWidth();contentHeight();size();moveTo(scrollX(),scrollY());});
@@ -198,8 +199,8 @@ export function DatabaseView(props: {
       }}
       style={{ ...horizontal(), height: 25 * scale(), paddingLeft: 7 * scale(), paddingRight: 7 * scale(), flexShrink: 0,
         cursor: button.disabled ? "default" : "pointer", opacity: button.disabled ? 0.45 : 1, hover: { backgroundColor: button.disabled ? undefined : palette().hover } }}>
-      <Show when={button.icon === "filter"} fallback={<text style={{ ...text(button.accent ? palette().accent : palette().muted), pointerEvents: "none" }}>{button.label}</text>}>
-        <svg source={`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="${button.accent ? palette().accent : palette().muted}" stroke-width="1.2" stroke-linejoin="round"><path d="M2 3h12L9.5 8v4.5l-3 1V8z"/></svg>`} style={{ width: 13 * scale(), height: 13 * scale(), pointerEvents: "none" }} />
+      <Show when={button.icon === "filter"} fallback={<text style={{ ...text(button.accent ? palette().accent : palette().fg), pointerEvents: "none" }}>{button.label}</text>}>
+        <svg source={`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="${button.accent ? palette().accent : palette().fg}" stroke-width="1.6" stroke-linejoin="round"><path d="M2 3h12L9.5 8v4.5l-3 1V8z"/></svg>`} style={{ width: 14 * scale(), height: 14 * scale(), pointerEvents: "none" }} />
       </Show>
     </div>;
   }
@@ -214,7 +215,7 @@ export function DatabaseView(props: {
         </div>
       </Show>
       <Show when={state().table} fallback={<div style={{ flexGrow: 1, flexBasis: 0, padding: 18 * scale() }}><text style={text(palette().muted)}>{state().loading ? "Loading schema…" : "Select a table or view"}</text></div>}>
-        <div role="row" testId="database-header" onScroll={wheel} style={{ ...line(), height: headerHeight(), minHeight: headerHeight(), position: "relative", overflow: "hidden", backgroundColor: palette().surface }}>
+        <div role="row" testId="database-header" onScroll={wheel} style={{ ...line(), height: headerHeight(), minHeight: headerHeight(), position: "relative", overflow: "hidden", backgroundColor: palette().bg }}>
           <div testId="database-header-plane" style={{position:"absolute",left:-scrollX(),top:0,width:contentWidth(),height:headerHeight(),pointerEvents:"none"}}>
             <For each={visibleColumns()}>{column => <div role="columnheader" style={{ ...horizontal(), position: "absolute", left: gutter() + column.index * columnWidth(), top: 0, width: columnWidth(), height: headerHeight(), borderRightWidth: scale(), borderColor: palette().border }}>
             <div role="button" aria-label={`Sort ${column.name}`} onClick={() => run(() => props.controller.sortColumn(column.name))} style={{ flexGrow: 1, flexBasis: 0, minWidth: 0, paddingLeft: 9 * scale(), cursor: "pointer" }}>
@@ -223,8 +224,8 @@ export function DatabaseView(props: {
             <Action label="Filter" icon="filter" accessibleLabel={`Filter ${column.name}`} disabled={busy()} accent={state().filters[column.name] !== undefined} id={`database-filter:${column.name}`} onClick={() => openFilter(column.name)} />
           </div>}</For>
           </div>
-          <div style={{ position: "absolute", left: 0, top: 0, width: gutter(), height: headerHeight(), backgroundColor: palette().surface, borderRightWidth: scale(), borderColor: palette().border, padding: 8 * scale() }}><text style={text(palette().muted)}>#</text></div>
-          <Show when={verticalScrollbar()}><div style={{position:"absolute",right:0,top:0,width:12*scale(),height:headerHeight(),backgroundColor:palette().surface,pointerEvents:"none"}}/></Show>
+          <div style={{ position: "absolute", left: 0, top: 0, width: gutter(), height: headerHeight(), backgroundColor: palette().bg, borderRightWidth: scale(), borderColor: palette().border, padding: 8 * scale() }}><text style={text(palette().fg)}>#</text></div>
+          <Show when={verticalScrollbar()}><div style={{position:"absolute",right:0,top:0,width:12*scale(),height:headerHeight(),backgroundColor:palette().bg,pointerEvents:"none"}}/></Show>
         </div>
         <div style={{display:"flex",flexDirection:"row",flexGrow:1,flexBasis:0,minHeight:0,minWidth:0}}>
         <div ref={element => grid = element} role="grid" aria-label={state().table} testId="database-grid"
@@ -254,9 +255,9 @@ export function DatabaseView(props: {
               }}</For>
             </div>}</For>
           </div>
-          <div testId="database-gutter-plane" style={{position:"absolute",left:0,top:-scrollY(),width:gutter(),height:Math.max(size().height,contentHeight()),backgroundColor:palette().surface,pointerEvents:"none",borderRightWidth:scale(),borderColor:palette().border}}>
+          <div testId="database-gutter-plane" style={{position:"absolute",left:0,top:-scrollY(),width:gutter(),height:Math.max(size().height,contentHeight()),backgroundColor:palette().bg,pointerEvents:"none",borderRightWidth:scale(),borderColor:palette().border}}>
             <For each={visibleRows()}>{entry=><div role="rowheader" testId={`database-gutter:${entry.row.key}`} onClick={() => { props.controller.selectCell(entry.row.key, state().selected?.column ?? 0); focus(true); }}
-                style={{ position: "absolute", left:0, top: entry.index*rowHeight(), width: gutter(), height: rowHeight(),borderBottomWidth:scale(), borderColor: palette().border, backgroundColor: palette().surface, paddingTop: 4 * scale(), paddingRight: 7 * scale() }}>
+                style={{ position: "absolute", left:0, top: entry.index*rowHeight(), width: gutter(), height: rowHeight(),borderBottomWidth:scale(), borderColor: palette().border, backgroundColor: palette().bg, paddingTop: 4 * scale(), paddingRight: 7 * scale() }}>
                 <text style={{ ...text(entry.row.kind === "existing" ? palette().muted : palette().accent), textAlign: "right", pointerEvents: "none" }}>{entry.row.kind === "delete" ? "−" : entry.row.kind === "insert" ? "+" : entry.row.kind === "update" ? "•" : String(offset() + entry.index + 1)}</text>
             </div>}</For>
           </div>
@@ -287,11 +288,11 @@ export function DatabaseView(props: {
           <Action label="Discard" disabled={busy() || !state().pending} onClick={() => { props.controller.discard(); setConfirmDelete(false); setEditor(undefined); }} />
         </div>
       </Show>
-      <div testId="database-footer" style={{ ...horizontal(), height: 30 * scale(), minHeight: 30 * scale(), borderTopWidth: scale(), borderColor: palette().border, paddingLeft: 15 * scale(), paddingRight:8*scale(), backgroundColor: palette().surface, overflow:"hidden" }}>
-        <text testId="database-rows-label" style={{ ...text(palette().muted), flexGrow:1,flexBasis:0,minWidth:0,marginRight:6*scale() }}>{`Rows ${state().rows.some(row => row.kind !== "insert") ? state().offset + 1 : 0}–${Math.min(state().offset + state().rows.filter(row => row.kind !== "insert").length, state().total)} of ${state().total}${busy()?" · Working…":!state().editable?" · Read-only":""}`}</text>
+      <div testId="database-footer" style={{ ...horizontal(), height: 30 * scale(), minHeight: 30 * scale(), borderTopWidth: scale(), borderColor: palette().border, paddingLeft: 15 * scale(), paddingRight:8*scale(), backgroundColor: palette().bg, overflow:"hidden" }}>
+        <text testId="database-rows-label" style={{ ...text(), flexGrow:1,flexBasis:0,minWidth:0,marginRight:6*scale() }}>{`Rows ${state().rows.some(row => row.kind !== "insert") ? state().offset + 1 : 0}–${Math.min(state().offset + state().rows.filter(row => row.kind !== "insert").length, state().total)} of ${state().total}${busy()?" · Working…":!state().editable?" · Read-only":""}`}</text>
         <Action label={`${state().limit} / page`} accessibleLabel="Rows per page" id="database-page-size" disabled={pageLocked()} onClick={()=>setPageSizeOpen(!pageSizeOpen())}/>
         <Action label="Prev" accessibleLabel="Previous page" id="database-page-prev" disabled={pageLocked() || state().offset === 0} onClick={() => run(() => props.controller.page(-1))} />
-        <text testId="database-page-number" style={{...text(palette().muted),flexShrink:0,marginLeft:4*scale(),marginRight:4*scale()}}>{`Page ${Math.floor(state().offset/state().limit)+1} / ${Math.max(1,Math.ceil(state().total/state().limit))}`}</text>
+        <text testId="database-page-number" style={{...text(),flexShrink:0,marginLeft:4*scale(),marginRight:4*scale()}}>{`Page ${Math.floor(state().offset/state().limit)+1} / ${Math.max(1,Math.ceil(state().total/state().limit))}`}</text>
         <Action label="Next" accessibleLabel="Next page" id="database-page-next" disabled={pageLocked() || state().offset + state().limit >= state().total} onClick={() => run(() => props.controller.page(1))} />
         <Action label="↻" accessibleLabel="Refresh table" disabled={pageLocked()} onClick={() => run(() => props.controller.refresh())} />
       </div>

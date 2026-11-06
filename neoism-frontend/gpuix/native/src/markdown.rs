@@ -154,6 +154,11 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
   let family=text(v,"fontFamily");let document=text(v,"markdownFontFamily");
   let mut look=(*neoism_ui::primitives::look::active_look()).clone();look.markdown.font_family=(!document.is_empty()).then(||document.to_owned());neoism_ui::primitives::look::set_active_look(look);
   let mut pane=MarkdownPane::from_source(PathBuf::from(text(v,"path")),text(v,"text"));pane.vim_enabled=v["vim"].as_bool().unwrap_or(true);if !pane.vim_enabled{pane.enter_insert();}
+  // The canonical editor retains the final newline. Seed identical bytes so
+  // the first live splice cannot include a spurious EOF change and move carets.
+  if let Some(delta)=md::doc_sync::diff_doc_texts(&pane.lines.join("\n"),text(v,"text")){
+   md::doc_sync::apply_remote_delta_to_pane(&mut pane,&delta);pane.mark_saved();
+  }
   let painter=RecordingPainter::new(if family.is_empty(){"Cascadia Code NF"}else{family},v["fontWeight"].as_u64().unwrap_or(400) as u16,if document.is_empty(){vec![]}else{vec![document.to_owned()]});
   store.views.insert(id,View{pane,painter,width:800.0,height:600.0,scale:number(v,"scale",1.0),theme:text(v,"theme").to_owned(),mouse:None,effects:Value::Null,trail:neoism_ui::panels::trail_cursor::TrailCursor::new(),last_cursor:(usize::MAX,usize::MAX),last_frame:std::time::Instant::now(),leader_pending:None,menu:ContextMenu::new(),menu_painter:None,presence:Default::default(),canvas_style:None});return Ok(json!({"id":id}));
  }
@@ -169,7 +174,13 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
   "markdown.restore"=>restore(&mut view.pane,&v["snapshot"]),
   "markdown.restore-anchor"=>{let anchor=serde_json::from_value::<neoism_ui::neoism_paint::VirtualScrollAnchor>(v["anchor"].clone()).map_err(|error|error.to_string())?;view.pane.restore_host_scroll_anchor(anchor);},
   "markdown.source"=>{
-    if view.pane.doc_history_bound(){if let Some(delta)=md::doc_sync::diff_doc_texts(&view.pane.lines.join("\n"),text(v,"text")){md::doc_sync::apply_remote_delta_to_pane(&mut view.pane,&delta);}}
+    if view.pane.doc_history_bound(){if let Some(delta)=md::doc_sync::diff_doc_texts(&view.pane.lines.join("\n"),text(v,"text")){
+      if v["inboundEdit"].is_object(){view.pane.cancel_host_caret_follow();}
+      md::doc_sync::apply_remote_delta_to_pane(&mut view.pane,&delta);
+      if let (Some(first),Some(last))=(v["inboundEdit"]["first"].as_u64(),v["inboundEdit"]["last"].as_u64()){
+        view.pane.flash_inbound_edit(first as usize..(last as usize).saturating_add(1));
+      }
+    }}
     else{view.pane.set_source_preserving_view(text(v,"text"));}
   },
   "markdown.path"=>{view.pane.path=PathBuf::from(text(v,"path"));},
@@ -270,6 +281,56 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
 mod tests {
     use super::*;
     use neoism_ui::panels::trail_cursor::TrailCursor;
+
+    #[test]
+    fn inbound_edit_outside_markdown_view_does_not_reveal_the_changed_location() {
+        for edit_line in [0, 180] {
+            let source = (0..100).map(|i|format!("Paragraph {i}\n\n")).collect::<String>();
+            let id = dispatch(&json!({"op":"markdown.new","path":"live.md","text":source})).unwrap().unwrap()["id"].as_u64().unwrap();
+            dispatch(&json!({"op":"markdown.doc-bound","id":id,"bound":true})).unwrap().unwrap();
+            dispatch(&json!({"op":"markdown.layout","id":id,"width":800,"height":300})).unwrap().unwrap();
+            STORE.with(|store| {
+                let mut store = store.borrow_mut();
+                let view = store.views.get_mut(&(id as u32)).unwrap();
+                view.pane.cursor_line=40;
+                view.pane.restore_scroll_position(600.0);
+            });
+            let before = dispatch(&json!({"op":"markdown.frame","id":id})).unwrap().unwrap()["scrollY"].as_f64().unwrap();
+            let before_cursor = STORE.with(|store|store.borrow().views.get(&(id as u32)).unwrap().pane.cursor_line);
+            // Same-size offscreen replacements should not move the viewport at
+            // all, even if a local key had left caret-follow armed.
+            STORE.with(|store|store.borrow_mut().views.get_mut(&(id as u32)).unwrap().pane.rearm_caret_follow());
+            let updated = source.replace(&format!("Paragraph {}",edit_line/2), &format!("Agent edit {}",edit_line/2));
+            dispatch(&json!({"op":"markdown.source","id":id,"text":updated,"inboundEdit":{"first":edit_line,"last":edit_line}})).unwrap().unwrap();
+            for _ in 0..3 {
+                let after = dispatch(&json!({"op":"markdown.frame","id":id})).unwrap().unwrap();
+                assert!((after["scrollY"].as_f64().unwrap()-before).abs()<0.01, "offscreen edit at line {edit_line} must not move the viewport");
+            }
+            STORE.with(|store|assert_eq!(store.borrow().views.get(&(id as u32)).unwrap().pane.cursor_line,before_cursor));
+            dispatch(&json!({"op":"markdown.dispose","id":id})).unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn inbound_edit_refreshes_rich_markdown_and_starts_shared_landing_animation() {
+        let id = dispatch(&json!({"op":"markdown.new","path":"live.md","text":"old paragraph"})).unwrap().unwrap()["id"].as_u64().unwrap();
+        dispatch(&json!({"op":"markdown.doc-bound","id":id,"bound":true})).unwrap().unwrap();
+        dispatch(&json!({"op":"markdown.source","id":id,"text":"initial snapshot"})).unwrap().unwrap();
+        STORE.with(|store| assert!(store.borrow_mut().views.get_mut(&(id as u32)).unwrap().pane.drag_drop_flash_progress().is_none()));
+        dispatch(&json!({"op":"markdown.layout","id":id,"width":800,"height":300})).unwrap().unwrap();
+        dispatch(&json!({"op":"markdown.goto","id":id,"line":0,"col":8})).unwrap().unwrap();
+        let updated = dispatch(&json!({"op":"markdown.source","id":id,"text":"agent paragraph\n\n".repeat(80),"inboundEdit":{"first":0,"last":159}})).unwrap().unwrap();
+        assert_eq!(updated["animating"], true);
+        let settled = dispatch(&json!({"op":"markdown.frame","id":id})).unwrap().unwrap();
+        assert_eq!(settled["scrollY"], 0.0, "a transformed caret must not pull the viewport to the replacement's end");
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            let view = store.views.get_mut(&(id as u32)).unwrap();
+            assert_eq!(view.pane.lines[0], "agent paragraph");
+            assert!(view.pane.drag_drop_flash_progress().is_some());
+        });
+        dispatch(&json!({"op":"markdown.dispose","id":id})).unwrap().unwrap();
+    }
 
     #[test]
     fn scrolling_follows_the_caret_without_restarting_its_jump() {

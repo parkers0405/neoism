@@ -12,6 +12,7 @@ import {paintOps,type PaintCommand} from "./PaintLayer";
 export class WordmarkHosts {
  private entries=new Map<string,{id:number;users:number;pins:Map<object,CanvasImages>}>();
  private splashViewports=new Map<string,{width:number;height:number}>();
+ private splashPainters=new Map<string,number>();
  private paintPins=new Map<object,Map<number,CanvasImages>>();
  private paintLRU=new Map<CanvasImages,{owner:Map<number,CanvasImages>;key:number}>();
  private disposed=false;
@@ -26,6 +27,16 @@ export class WordmarkHosts {
  private lastSplashViewport?:{width:number;height:number};
  splashViewport(key:string){return this.splashViewports.get(key)??this.lastSplashViewport;}
  rememberSplashViewport(key:string,viewport:{width:number;height:number}){if(!this.disposed&&viewport.width>0&&viewport.height>0){this.splashViewports.set(key,{...viewport});this.lastSplashViewport={...viewport};}}
+ /** The menu painter owns raster identities too. Recreating it for every Home
+  * generation defeats the image leases below and rapidly evicts visible ink.
+  * Font generations may overlap; never reuse a painter with another font. */
+ splashPainter(contextId:string,fontFamily:string,fontWeight:number){
+  if(this.disposed)throw new Error("Wordmark host scope has closed");
+  const key=JSON.stringify([contextId,fontFamily,fontWeight]);
+  let id=this.splashPainters.get(key);
+  if(id===undefined){id=coreCall<{id:number}>("splash.new",{fontFamily,fontWeight}).id;this.splashPainters.set(key,id);}
+  return id;
+ }
  /** Keep the static GPU image alive while a font-config generation unmounts
   * its canvas. The replacement canvas takes its reference before reuse. */
  pinImage(key:string,renderer:object,raster:CanvasRaster){
@@ -44,7 +55,7 @@ export class WordmarkHosts {
   this.paintLRU.delete(images);this.paintLRU.set(images,{owner,key});
   while(this.paintLRU.size>512){const oldest=this.paintLRU.entries().next().value!;oldest[0].dispose();oldest[1].owner.delete(oldest[1].key);this.paintLRU.delete(oldest[0]);}
  }
- dispose(){if(this.disposed)return;this.disposed=true;for(const host of this.entries.values()){for(const images of host.pins.values())images.dispose();coreCall("wordmark.dispose",{id:host.id});}for(const images of this.paintLRU.keys())images.dispose();this.paintLRU.clear();this.paintPins.clear();this.entries.clear();this.splashViewports.clear();this.lastSplashViewport=undefined;}
+ dispose(){if(this.disposed)return;this.disposed=true;for(const host of this.entries.values()){for(const images of host.pins.values())images.dispose();coreCall("wordmark.dispose",{id:host.id});}for(const images of this.paintLRU.keys())images.dispose();for(const id of this.splashPainters.values())coreCall("splash.dispose",{id});this.splashPainters.clear();this.paintLRU.clear();this.paintPins.clear();this.entries.clear();this.splashViewports.clear();this.lastSplashViewport=undefined;}
 }
 
 export function initialWordmarkSize(style?:StyleDesc){return {x:0,y:0,width:typeof style?.width==="number"?style.width:0,height:typeof style?.height==="number"?style.height:0};}

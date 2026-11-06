@@ -2003,23 +2003,36 @@ pub(crate) async fn push_runtime_snapshot(inner: Arc<AgentInner>, session_id: St
 }
 
 pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: String) {
-    let path = format!(
-        "/v2/interactions/questions?sessionId={}",
-        percent_encode(&session_id)
-    );
-    let Ok(value) = http_get_json(&inner, &path).await else {
-        // Recovery is best-effort; a failed poll must not spam the
-        // transcript with errors on every reconnect.
-        return;
-    };
-    let requests = value.as_array().cloned().unwrap_or_default();
-    if requests.is_empty() {
-        return;
+    let mut sessions = std::collections::BTreeSet::from([session_id.clone()]);
+    // Runtime already exposes the current execution family. Only expand a root attach;
+    // attaching a child must not hydrate its siblings into the child's scope.
+    let runtime_path = format!("/v2/sessions/{}/runtime", percent_encode(&session_id));
+    if let Ok(value) = http_get_json(&inner, &runtime_path).await {
+        if let Ok(snapshot) =
+            serde_json::from_value::<neoism_protocol::agent::AgentRuntimeSnapshot>(value)
+        {
+            if snapshot.root_session_id == session_id {
+                sessions.extend(snapshot.branches.into_iter().map(|branch| branch.session_id));
+            }
+        }
     }
-    let _ = inner.tx.send(AgentServerMessage::QuestionsUpdated {
-        session_id,
-        requests,
-    });
+    for session_id in sessions {
+        let path = format!(
+            "/v2/interactions/questions?sessionId={}",
+            percent_encode(&session_id)
+        );
+        let Ok(value) = http_get_json(&inner, &path).await else {
+            // Failed or malformed polls are not authoritative empty snapshots.
+            continue;
+        };
+        let Some(requests) = value.as_array() else {
+            continue;
+        };
+        let _ = inner.tx.send(AgentServerMessage::QuestionsUpdated {
+            session_id,
+            requests: requests.clone(),
+        });
+    }
 }
 
 pub(crate) async fn push_pending_permissions(inner: Arc<AgentInner>, session_id: String) {

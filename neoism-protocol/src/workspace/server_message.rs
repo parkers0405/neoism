@@ -7,6 +7,11 @@ use super::*;
 // `f32`); `PartialEq` is still derived for the roundtrip tests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WorkspaceServerMessage {
+    /// Reply to `ResolveNotesVault`: linked scope, otherwise the Default vault.
+    NotesVaultResolved {
+        linked_vault_dir: Option<PathBuf>,
+        notes_vault_dir: PathBuf,
+    },
     /// Reply to `RequestShareTarget`. `url` is absent when the daemon has
     /// no address another device could reach (offline, or loopback-only),
     /// in which case `hint` explains why so the UI can say something

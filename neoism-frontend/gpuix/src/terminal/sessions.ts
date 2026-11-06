@@ -12,7 +12,11 @@ export function onTerminalUnavailable(client:DaemonConnection,listener:(id:strin
  let listeners=unavailable.get(client);if(!listeners){listeners=new Set();unavailable.set(client,listeners);}listeners.add(listener);
  return ()=>{listeners!.delete(listener);if(!listeners!.size)unavailable.delete(client);};
 }
-function terminalUnavailable(client:DaemonConnection,id:string){for(const listener of [...unavailable.get(client)||[]])listener(id);}
+function terminalUnavailable(client:DaemonConnection,id:string){
+ const listeners=[...unavailable.get(client)||[]];
+ for(const listener of listeners)listener(id);
+ return listeners.length>0;
+}
 /** A terminal engine lives with its daemon session, across local tab mounts. */
 export class TerminalSession {
   readonly buffer: TerminalBuffer;
@@ -36,7 +40,8 @@ export class TerminalSession {
         const message=typeof entry[1].message === "string" ? entry[1].message : "Could not attach terminal";
         // Only an authoritative missing-session reply retires a recovered tab.
         // Authentication/transport errors must leave potentially live PTYs alone.
-        if(message===`unknown session ${id}`||message===`No such PTY: ${id}`)terminalUnavailable(client,id);
+        // A daemon restart can expire saved IDs. Recovery handles this without an error toast.
+        if((message===`unknown session ${id}`||message===`No such PTY: ${id}`)&&terminalUnavailable(client,id))return;
         this.report(new Error(message));
         return;
       }
@@ -45,7 +50,9 @@ export class TerminalSession {
       if (entry[0] === "PtyClosed") { terminalUnavailable(client, id); return; }
       if (entry[0] === "PtyOutput" && Array.isArray(entry[1].bytes)) {
         const bytes=Uint8Array.from(entry[1].bytes),offset=typeof entry[1].offset === "number" ? entry[1].offset : undefined;
-        void this.buffer.write(bytes,offset).catch(this.report);
+        // Attach backlog carries a request ID; live output is uncorrelated (0).
+        // Restore VT state, but never send answers to historical queries into the shell.
+        void this.buffer.write(bytes,offset,event.requestId === 0).catch(this.report);
       }
     }));
     this.cleanups.push(client.subscribeStatus((state) => { if (state.phase === "connected") this.attach(); }));

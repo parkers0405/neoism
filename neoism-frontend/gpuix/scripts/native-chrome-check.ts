@@ -19,7 +19,9 @@ try {
   if (boxes.some((box, i) => Math.abs(box.width - 22) > .65 || Math.abs(box.height - 22) > .65 || Math.abs(box.width - boxes[0].width) > .01 || i > 0 && Math.abs(box.x - boxes[i - 1].x - 26) > .65)) throw new Error(`Original equal toolbar geometry drifted: ${JSON.stringify(boxes)}`);
   stage = "original hamburger menu";
   await app.getByTestId("topbar-menu").click(); await app.getByTestId("original-hamburger-menu").waitFor();
-  for (const action of ["OpenAbout", "OpenSettings", "StartWebServer", "OpenThemes", "OpenBackgrounds", "OpenExtensions"]) await app.getByTestId(`menu:${action}`).waitFor();
+  for (const action of ["OpenAbout", "OpenSettings", "OpenDatabases", "OpenThemes", "OpenBackgrounds", "OpenExtensions"]) await app.getByTestId(`menu:${action}`).waitFor();
+  if (await app.getByTestId("menu:StartWebServer").count()) throw new Error("Open Agent in Browser is still visible in the menu");
+  if (await app.getByTestId("toggle-databases").count()) throw new Error("Database still has a standalone toolbar button");
   if (await app.getByText("Reconnect daemon").count() || await app.getByText("New terminal").count()) throw new Error("Invented hamburger actions remain");
   stage = "hamburger close and reopen";
   await app.getByTestId("topbar-menu").click(); await until(async () => await app.getByTestId("original-hamburger-menu").count() === 0);
@@ -33,6 +35,6 @@ try {
   await app.getByTestId("file:README.md").click(); await app.getByTestId("rich-markdown-editor").waitFor();
   const height = (await app.getByTestId("original-statusline").bounds()).height;
   if (Math.abs(height - 22) > .65) throw new Error(`Original status strip height drifted: ${height}`);
-  console.log("Production native chrome passed: original equal toolbar geometry, exact six-item menu, toggle/close, original About glyphs, rich Markdown, and original status strip.");
+  console.log("Production native chrome passed: original equal toolbar geometry, six-item menu including Database, toggle/close, original About glyphs, rich Markdown, and original status strip.");
 } catch (error) { console.error(`Original chrome check failed at ${stage}`); throw error; }
 finally { await app.close(); server.stop(); rmSync(directory, { recursive: true, force: true }); }

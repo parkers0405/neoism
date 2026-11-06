@@ -22,7 +22,7 @@ import {terminalBlockContext,saveTerminalCommand,workspaceSavedCommands} from ".
 import { AnimatedWordmark as Wordmark } from "./AnimatedWordmark";
 import {AppVisualState} from "./AppVisualState";
 import {createModelSnapshot} from "./model-snapshot";
-import {initialWorkspaceSidebars,workspaceSidebar,withWorkspaceSidebar,type WorkspaceSidebar} from "./workspace-sidebar";
+import {initialWorkspaceSidebars,workspaceSidebar,databaseSidebarFromFiles,type WorkspaceSidebar} from "./workspace-sidebar";
 import { SplashView } from "./SplashView";
 import { HomeTerminalView } from "./HomeTerminalView";
 import { coreCall, type SearchHost } from "../native-core";
@@ -102,7 +102,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   onCleanup(model.onWorkspaceClosed(id=>visuals.closeWorkspace(id)));
   const trees = visuals.trees;
   const sidebar = createMemo(() => workspaceSidebar(state().ui,state().activeWorkspace?.id));
-  const setSidebar = (value:WorkspaceSidebar|undefined) => { const id=model.state.activeWorkspace?.id;if(id)model.setUI({workspaceSidebars:withWorkspaceSidebar(model.state.ui,id,value)}); };
+  const setSidebar = (value:WorkspaceSidebar|undefined) => model.setWorkspaceSidebar(value);
   createEffect(()=>{const initial=initialWorkspaceSidebars(state().ui,state().activeWorkspace?.id);if(initial)model.setUI({workspaceSidebars:initial});});
   const [details, setDetails] = createSignal(model.state.ui.details !== false);
   createEffect(()=>clearHiddenTreePanels(visuals,sidebar()));
@@ -305,15 +305,30 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     setFinder(controller); onCleanup(() => controller.dispose());
   });
   const pendingPermission = () => state().permissions.find((p) => p.sessionId === active()?.sessionId);
-  const pendingQuestion = () => state().questions.find((q) => q.sessionId === active()?.sessionId);
+  const pendingQuestion = () => {
+    const session = active()?.sessionId;
+    if (!session) return;
+    const own = state().questions.find((q) => q.sessionId === session);
+    // Family events retain the requesting child's identity for reply routing,
+    // but the root conversation must still surface a parked subagent's prompt.
+    return own || (model.agentFamily(session).root === session
+      ? state().questions.find((q) => model.agentFamily(q.sessionId).root === session)
+      : undefined);
+  };
   const measuredComposerAnchor = (key: string): Anchor | undefined => {
     const cached = composerAnchors()[key], shell = composerShells.get(key);
     // Layout events only report size changes; the card can move without resizing.
     const bounds = shell && paintedChromeBounds(renderer, shell.id);
-    return bounds ? [bounds.x, bounds.y, bounds.width, bounds.height] : cached;
+    if (bounds && bounds.width > 0 && bounds.height > 0) return [bounds.x, bounds.y, bounds.width, bounds.height];
+    return cached && cached[2] > 0 && cached[3] > 0 ? cached : undefined;
   };
   const activeComposerKey=()=>active()?.sessionId||active()?.id||"home";
-  const composerAnchor = () => measuredComposerAnchor(activeComposerKey()) || [320, windowSize().height - 160 * s, Math.max(200, windowSize().width - 360), 100] as Anchor;
+  const composerAnchor = (): Anchor => {
+    const measured = measuredComposerAnchor(activeComposerKey());
+    if (measured && measured[2] > 0 && measured[3] > 0) return measured;
+    const bounds = workspaceBounds();
+    return [bounds.x + 20 * s, bounds.y + Math.max(0, bounds.height - 160 * s), Math.max(1, bounds.width - 40 * s), 100 * s];
+  };
   const focusComposer = () => { const input = composerInputs.get(activeComposerKey()); if (input) {input.root?.mutations.flushMutations();if(focusedNativeElement(renderer)!==input.id)focusNativeElement(renderer,input.id);} };
   const closeChoice = () => { const previous = choice(); setChoice(undefined); previous?.restore(); };
   const providerCatalog = createMemo(() => state().providers);
@@ -751,7 +766,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     // not in the file navigator. The daemon listing is authoritative.
     const directories=sourceDirectories;
     const toggle=(path:string)=>model.toggleDirectory(path,props.notes);
-    const open = (entry: { path: string; dir: boolean }) => {if(entry.dir)toggle(entry.path);else void focusOpenedFile(()=>model.openFile(entry.path,root()));};
+    const open = (entry: { path: string; dir: boolean }) => {if(entry.dir)toggle(entry.path);else void focusOpenedFile(()=>model.openFile(entry.path,root(),props.notes?undefined:"files"));};
     const [viewportRevision, setViewportRevision] = createSignal(0);
     const [heightRevision, setHeightRevision] = createSignal(0);
     const [hiddenRevision,setHiddenRevision]=createSignal(0);
@@ -991,6 +1006,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     const schema = createMemo(() => { const connection = selected(); return connection ? model.getDatabaseSchema(connection) : undefined; });
     onCleanup(() => { sidebarHosts.delete("databases");sidebarTargets.delete("databases"); });
     return <DatabaseSidebar controller={schema()} config={config} connections={connections()} activeId={selected()?.id}
+      onBackToFiles={databaseSidebarFromFiles(state().ui, activeWorkspaceId()) ? () => { setSidebar("files"); focusChrome({ zone: "sidebar" }); } : undefined}
       active={chromeFocus().zone === "sidebar"} focusToken={editorFocus()}
       registerHost={host => { if (host) sidebarHosts.set("databases", host); else sidebarHosts.delete("databases"); }}
       onBounds={updateChromeBounds}
@@ -1536,10 +1552,10 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
         if (request.kind === "account") { model.setSelection("model", request.model!, request.sessionId, value); closeChoice(); return; }
         model.setSelection(request.kind, value, request.sessionId); closeChoice();
       }} onClose={closeChoice} />}</Show>
-    <Show when={pendingPermission() && measuredComposerAnchor(activeComposerKey()) ? `${pendingPermission()!.sessionId}:${pendingPermission()!.requestId}` : undefined} keyed>{(_id) => <InlinePicker config={config} kind="permission" title={pendingPermission()!.title} current="Yes" anchor={composerAnchor()} responding={pendingPermission()!.responding} error={pendingPermission()!.error}
+    <Show when={pendingPermission() ? `${pendingPermission()!.sessionId}:${pendingPermission()!.requestId}` : undefined} keyed>{(_id) => <InlinePicker config={config} kind="permission" title={pendingPermission()!.title} current="Yes" anchor={composerAnchor()} responding={pendingPermission()!.responding} error={pendingPermission()!.error}
       options={[{ title: "Always", description: "Allow this tool for this session", footer: "a", value: "Always" }, { title: "Yes", description: "Allow once", footer: "enter", value: "Yes" }, { title: "No", description: "Reject this request", footer: "n", value: "No" }]}
       onSelect={(value) => model.answerPermission(pendingPermission()!, value as "Yes" | "Always" | "No")} onClose={() => model.answerPermission(pendingPermission()!, "No")} />}</Show>
-    <Show when={!pendingPermission() && pendingQuestion() && measuredComposerAnchor(activeComposerKey()) ? `${pendingQuestion()!.sessionId}:${pendingQuestion()!.requestId}` : undefined} keyed>{(_id) => <InlinePicker config={config} kind="question" anchor={composerAnchor()}
+    <Show when={!pendingPermission() && pendingQuestion() ? `${pendingQuestion()!.sessionId}:${pendingQuestion()!.requestId}` : undefined} keyed>{(_id) => <InlinePicker config={config} kind="question" anchor={composerAnchor()}
       question={pendingQuestion()!.request} responding={pendingQuestion()!.responding} error={pendingQuestion()!.error}
       onAnswers={(answers) => model.answerQuestion(pendingQuestion()!, answers)} onClose={() => model.rejectQuestion(pendingQuestion()!)} />}</Show>
     <Show when={imagePreview()} keyed>{image=><ImagePreviewModal image={image} config={config} onClose={()=>setImagePreview(undefined)}/>}</Show>

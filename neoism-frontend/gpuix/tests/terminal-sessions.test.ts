@@ -29,6 +29,40 @@ test("Ghostty engines retain background output and scroll state across tab mount
   } finally { disposeTerminalSessions(client); }
 });
 
+test("attach replay restores terminal state without answering stale shell probes, while live probes still work", async () => {
+  for (const blockUi of [false, true]) {
+    let receive!: (event: WireEvent) => void;
+    const sent: any[] = [], errors: unknown[] = [];
+    const client = {
+      send: (_family: string, message: unknown) => { sent.push(message); return sent.length; },
+      subscribe: (fn: (event: WireEvent) => void) => { receive = fn; return () => {}; },
+      subscribeStatus: (fn: (state: ConnectionState) => void) => { fn({ phase: "connected", attempt: 0 }); return () => {}; },
+    } as unknown as DaemonConnection;
+    const session = terminalSession(client, "probes", palettes.pastel_dark, error => errors.push(error), blockUi);
+    const emit = (requestId: number, message: unknown) => receive({ family: "Pty", requestId, message });
+    const probes = "\x1b[?2026$p\x1b[?2027$p\x1b[?u";
+    try {
+      emit(1, { PtyCreated: { session_id: "probes" } });
+      const replay = new TextEncoder().encode("restored output\r\n" + probes + "\x1b[?2004h");
+      emit(1, { PtyOutput: { session_id: "probes", offset: 0, bytes: [...replay] } });
+      await Promise.resolve();
+      expect(session.buffer.frame().lines.flat().map(run => run.text).join("")).toContain("restored output");
+      expect(new TextDecoder().decode(session.buffer.paste("test"))).toBe("\x1b[200~test\x1b[201~");
+      session.buffer.resize(90, 25); // A later frame must not flush discarded replies.
+      expect(sent.filter(message => message.PtyInput)).toEqual([]);
+      const live = new TextEncoder().encode(probes);
+      emit(0, { PtyOutput: { session_id: "probes", offset: replay.length, bytes: [...live] } });
+      await Promise.resolve();
+      const replies = sent.filter(message => message.PtyInput).map(message => new TextDecoder().decode(Uint8Array.from(message.PtyInput.bytes))).join("");
+      expect(replies).toContain("\x1b[?2026;2$y");
+      expect(replies).toContain("\x1b[?2027;1$y");
+      expect(replies).toContain("\x1b[?0u");
+      expect(session.buffer.nextOffset).toBe(replay.length + live.length);
+      expect(errors).toEqual([]);
+    } finally { disposeTerminalSessions(client); }
+  }
+});
+
 test("restoring an unavailable daemon terminal surfaces its attach error", () => {
   let receive: ((event: WireEvent) => void) | undefined;
   const errors: string[] = [];
@@ -55,6 +89,6 @@ test("only a correlated authoritative missing PTY retires a recovered terminal",
   terminalSession(client,"one",palettes.pastel_dark,error=>errors.push((error as Error).message));send(10,"permission denied");expect(retired).toEqual([]);
   terminalSession(client,"two",palettes.pastel_dark,error=>errors.push((error as Error).message));send(11,"unknown session another-session");expect(retired).toEqual([]);
   terminalSession(client,"three",palettes.pastel_dark,error=>errors.push((error as Error).message));send(99,"unknown session three");expect(retired).toEqual([]);send(12,"unknown session three");expect(retired).toEqual(["three"]);
-  expect(errors).toEqual(["permission denied","unknown session another-session","unknown session three"]);
+   expect(errors).toEqual(["permission denied","unknown session another-session"]);
  }finally{unsubscribe();disposeTerminalSessions(client);}
 });

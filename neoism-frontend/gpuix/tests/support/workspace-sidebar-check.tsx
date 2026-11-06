@@ -47,7 +47,26 @@ try{
  while(app.model.state.activeWorkspace?.id==="a"||app.model.state.creatingWorkspace){await app.host.pump(app.root);if(Date.now()>deadline)throw new Error("Workspace + did not settle");await Bun.sleep(3);}
  await app.host.pump(app.root);watching=false;
  assert.ok(firstFrames.length>0);assert.ok(firstFrames.every(count=>count>0),"Every workspace + frame must already contain file rows, without an empty/loading flash");assert.equal(app.host.find("file-tree")!.id,originalTree,"Same-panel creation keeps the tree host mounted");
- const created=app.model.state.activeWorkspace!.id;await app.activate("a");await app.model.closeWorkspace(false,created);
+  const created=app.model.state.activeWorkspace!.id;await app.activate("a");await app.model.closeWorkspace(false,created);
+
+  // Enter through the actual file-tree row, not a direct Database menu action.
+  app.model.update({directories:{...app.model.state.directories,"":{path:"",entries:[{name:"agent.sqlite3",is_dir:false}]}}});
+  await app.host.pump(app.root);
+  const databaseFile=app.host.find("file:agent.sqlite3");assert.ok(databaseFile);
+  app.root.dispatch({elementId:databaseFile.id,eventType:"click",button:0});await app.host.pump(app.root);
+  app.expectView("databases");assert.ok(app.host.find("database-back-to-files"));
+  const connection=app.model.activeDatabaseConnection()!;assert.equal(connection.path,"agent.sqlite3");
+  app.model.openDatabaseTable(connection,"fruit");await app.host.pump(app.root);
+  const selectedDatabase=app.model.state.activeSurfaceId!;
+  await app.activate("e");app.model.setWorkspaceSidebar("databases");await app.host.pump(app.root);
+  assert.equal(app.host.find("database-back-to-files"),undefined,"Other workspace's direct Database entry has no Back button");
+  await app.activate("a");assert.ok(app.host.find("database-back-to-files"),"Origin follows its workspace");
+  const back=app.host.find("database-back-to-files")!;assert.equal(back.props["aria-label"],"Back to Files");
+  app.root.dispatch({elementId:back.id,eventType:"keyDown",key:"enter"});await app.host.pump(app.root);
+  app.expectView("files");assert.equal(app.model.state.activeSurfaceId,selectedDatabase,"Back preserves the selected database tab");
+  app.model.setWorkspaceSidebar("databases");await app.host.pump(app.root);
+  assert.equal(app.host.find("database-back-to-files"),undefined,"Direct Database navigation clears stale file-tree origin");
+  app.model.setWorkspaceSidebar("files");app.model.closeSurface(selectedDatabase);await app.host.pump(app.root);
 
  await app.activate("b");await app.pick("notes");app.expectView("notes");
  await app.activate("c");await app.pick("conversations");app.expectView("conversations");

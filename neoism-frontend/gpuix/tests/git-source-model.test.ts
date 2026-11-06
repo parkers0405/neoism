@@ -56,7 +56,7 @@ test("actual native inline edit uses the model's canonical source and survives r
    restored.model.selectSurface(review.id);const before=restored.daemon.fileRequests.filter(request=>request.tag==="ReadFile").length,again=await restored.model.loadGitEditor(repo,path);
    expect(again.text()).toBe(bytes);expect(again.frame.dirty).toBe(true);expect(restored.model.isSurfaceModified(review.id)).toBe(true);expect(restored.model.getLayout().frame.leaves.some(leaf=>leaf.surfaceId===owner.id)).toBe(false);expect(restored.daemon.fileRequests.filter(request=>request.tag==="ReadFile")).toHaveLength(before);
    await restored.model.saveGitEditor(again);expect(again.frame.dirty).toBe(false);expect(restored.model.isSurfaceModified(review.id)).toBe(false);expect(restored.daemon.files.get(path)).toBe(bytes);
-   const write=restored.wire.find(entry=>entry.family==="Files"&&typeof entry.message==="object"&&entry.message!==null&&"WriteFile"in entry.message)!;expect(write.root).toBe(repo);expect((write.message as any).WriteFile.path).toBe(path);expect(restored.daemon.ptyRequests).toHaveLength(0);
+   const write=restored.wire.find(entry=>entry.family==="Crdt"&&(entry.message as any)?.Owned?.message?.SaveBuffer)!;expect((write.message as any).Owned.message.SaveBuffer.buffer_id).toBe(`file://${repo}/${path}`);expect(restored.wire.some(entry=>entry.family==="Files"&&(entry.message as any)?.WriteFile)).toBe(false);expect(restored.daemon.ptyRequests).toHaveLength(0);
   }finally{restored.close();}
  }finally{if(id!==undefined)coreCall("gitreview.dispose",{id});f.close();}
 });

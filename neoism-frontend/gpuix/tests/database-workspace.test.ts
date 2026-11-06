@@ -4,8 +4,23 @@ import { loadConfig } from "../src/config";
 import { DaemonConnection } from "../src/daemon/client";
 import { WorkspaceModel } from "../src/model";
 import { decodeSession } from "../src/session-store";
-import { workspaceSidebar } from "../src/ui/workspace-sidebar";
+import { databaseSidebarFromFiles, workspaceSidebar } from "../src/ui/workspace-sidebar";
 import { createAgentDaemon } from "./support/agent-daemon";
+
+test("local Turso extensions register in the database workbench, not the text editor", async () => {
+  const config = loadConfig(["--config", "/nonexistent/turso-workspace"], {});
+  const model = new WorkspaceModel(new DaemonConnection(config), config);
+  const workspace = { id: "local", host_id: "local", title: "State", root_dir: "/state" };
+  model.update({ workspaces: [workspace], activeWorkspace: workspace });
+  try {
+    for (const path of ["agent.turso.db", "notes.turso", "notes.TursoDB"]) {
+      await model.openFile(path);
+      expect(model.activeDatabaseConnection()?.path).toBe(path);
+    }
+    expect(model.databaseConnections()).toHaveLength(3);
+    expect(model.editors.size).toBe(0);
+  } finally { model.dispose(); }
+});
 
 test("SQLite files open a recoverable database tab instead of reading binary bytes into the code editor", async () => {
   const config = loadConfig(["--config", "/nonexistent/database-workspace"], {});
@@ -91,7 +106,8 @@ test("host workspace teardown waits for database transactions and releases datab
     model.start(); client.start();
     const deadline = Date.now() + 2500;
     while (!model.state.activeWorkspace || model.state.loading) { if (Date.now() > deadline) throw new Error("Database workspace did not connect"); await Bun.sleep(5); }
-    await model.openFile("fruit.db");
+    await model.openFile("fruit.db", undefined, "files");
+    expect(databaseSidebarFromFiles(model.state.ui, model.state.activeWorkspace?.id)).toBe(true);
     const connection = model.activeDatabaseConnection()!;
     const surface = model.state.surfaces.find(entry => entry.id === model.state.activeSurfaceId)!;
     const database = model.getDatabase(surface);
@@ -112,6 +128,7 @@ test("host workspace teardown waits for database transactions and releases datab
     expect(model.databaseConnections(connection.workspaceId)).toEqual([]);
     expect((model.state.ui.databaseSelections as Record<string, unknown>)[connection.workspaceId]).toBeUndefined();
     expect((model.state.ui.workspaceSidebars as Record<string, unknown>)[connection.workspaceId]).toBeUndefined();
+    expect((model.state.ui.databaseSidebarOrigins as Record<string, unknown>)[connection.workspaceId]).toBeUndefined();
     model.openDatabaseTable(connection, "fruit");
     expect(model.state.surfaces.some(entry => entry.workspaceId === connection.workspaceId)).toBe(false);
     expect(daemon.workspaceRequests.filter(entry => entry.tag === "CloseWindowWorkspace")).toHaveLength(1);

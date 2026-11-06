@@ -11,7 +11,8 @@ interface SplashFrame{commands:PaintCommand[];rows:Array<{action:string;label:st
 /** Original splash composition, standalone or embedded in Home scrollback. */
 export function SplashView(props:{contextId:string;config:AppConfig;wordmarkHosts?:WordmarkHosts;initialViewport?:{width:number;height:number};embedded?:boolean;active?:boolean;focusToken?:number;onCustomKey?:(event:KeyEvent)=>boolean;onFocus?:()=>void;onAction:(action:string)=>void}){
  const config=props.config,renderer=useGpuixRequired();
- const id=coreCall<{id:number}>("splash.new",{fontFamily:config.fontFamily,fontWeight:config.fontWeight}).id;
+ const retained=props.wordmarkHosts;
+ const id=retained?retained.splashPainter(props.contextId,config.fontFamily,config.fontWeight):coreCall<{id:number}>("splash.new",{fontFamily:config.fontFamily,fontWeight:config.fontWeight}).id;
  const [viewport,setViewport]=createSignal(props.initialViewport&&props.initialViewport.width>0&&props.initialViewport.height>0?props.initialViewport:props.wordmarkHosts?.splashViewport(props.contextId)||{width:0,height:0});
  const [frame,setFrame]=createSignal<SplashFrame>({commands:[],rows:[],wordmark:[0,0,0,0],alpha:1});
  const contentTop=createMemo(()=>{
@@ -36,7 +37,7 @@ export function SplashView(props:{contextId:string;config:AppConfig;wordmarkHost
  draw();
  createEffect(()=>{viewport();untrack(draw);});
   createEffect(()=>{props.focusToken;if(active()&&!props.embedded)focus();});onMount(()=>{if(!props.embedded)focus();});
- onCleanup(()=>{disposed=true;coreCall("splash.dispose",{id});});
+  onCleanup(()=>{disposed=true;if(!retained)coreCall("splash.dispose",{id});});
   return <div ref={host} testId="welcome-page" tabIndex={0} role="region" aria-label="Welcome" onFocus={props.onFocus} onMouseDown={()=>{props.onFocus?.();focus();}} onBlur={()=>terminalShortcut.reset()} onKeyDown={event=>{
    if(props.onCustomKey?.(event)){terminalShortcut.reset();return;}
    const action=terminalShortcut.key(event);if(!action)return;

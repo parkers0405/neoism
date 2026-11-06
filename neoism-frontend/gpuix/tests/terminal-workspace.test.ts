@@ -31,6 +31,43 @@ test("first grid terminal binds durably and its cwd follows only this frontend's
   const saved=model.captureSession();expect(saved.ui.terminalWorkspaceRoots).toEqual({a:{declaredRoot:"/project/a",root:"/project/a/subdirectory"}});
  }finally{close();}
 });
+test("main terminal cd selects the linked notes vault or returns to Default, including Home",async()=>{
+ for(const home of [false,true]){
+  const {daemon,model,close}=await fixture({scopedFiles:{"/vaults/Default":{"default.md":"Default"},"/vaults/Linked":{"linked.md":"Linked"}}},!home,{terminal:{"block-ui":home}});
+  try{
+   if(home)await model.ensureHomeTerminal(model.ensureWelcome()!.id);
+   const main=model.mainTerminalSurface()!;
+   const declared={...model.state.workspaces[0],notes_vault_dir:"/vaults/Linked",linked_vault_dir:"/vaults/Linked"};
+   Object.assign(daemon.workspaces[0],declared);
+   model.update({workspaces:[declared,...model.state.workspaces.slice(1)]});await model.activateWorkspace(declared);
+   await until(()=>model.state.notesDirectories[""]?.entries[0]?.name==="linked.md");
+   daemon.notesVaults.resolve=root=>root.startsWith("/other-linked")?{notes_vault_dir:"/vaults/Linked",linked_vault_dir:"/vaults/Linked"}:{notes_vault_dir:"/vaults/Default",linked_vault_dir:null};
+   for(const [cwd,vault,note] of [["/unlinked","Default","default.md"],["/other-linked/sub","Linked","linked.md"],["/unlinked-again","Default","default.md"],["/project/a","Linked","linked.md"]]){
+    daemon.pushPty({SessionCwd:{session_id:main.sessionId,cwd}});
+    await until(()=>model.state.activeWorkspace?.root_dir===cwd&&model.state.activeWorkspace.notes_vault_dir===`/vaults/${vault}`&&model.state.notesDirectories[""]?.entries[0]?.name===note);
+    expect(model.state.activeWorkspace?.linked_vault_dir).toBe(vault==="Linked"?"/vaults/Linked":null);
+   }
+   expect(model.state.workspaces[0].root_dir).toBe("/project/a");
+   expect(daemon.workspaceRequests.some(request=>request.tag==="SetWorkspaceRoot")).toBe(false);
+  }finally{close();}
+ }
+});
+test("delayed notes resolution cannot restore a vault from an obsolete terminal cwd",async()=>{
+ const {daemon,model,close}=await fixture();
+ try{
+  const main=model.mainTerminalSurface()!;
+  daemon.notesVaults.resolve=root=>({notes_vault_dir:root==="/slow-linked"?"/vaults/Linked":"/vaults/Default",linked_vault_dir:null});
+  daemon.notesVaults.delay=100;
+  daemon.pushPty({SessionCwd:{session_id:main.sessionId,cwd:"/slow-linked"}});
+  await until(()=>daemon.workspaceRequests.some(request=>request.tag==="ResolveNotesVault"&&request.body.root_dir==="/slow-linked"));
+  daemon.notesVaults.delay=0;
+  daemon.pushPty({SessionCwd:{session_id:main.sessionId,cwd:"/unlinked"}});
+  await until(()=>model.state.activeWorkspace?.root_dir==="/unlinked"&&model.state.activeWorkspace.notes_vault_dir==="/vaults/Default");
+  await Bun.sleep(150);
+  expect(model.state.activeWorkspace?.root_dir).toBe("/unlinked");
+  expect(model.state.activeWorkspace?.notes_vault_dir).toBe("/vaults/Default");
+ }finally{close();}
+});
 test("secondary terminal cwd stays local and root follows its observed cwd only when selected",async()=>{
  const {daemon,model,close}=await fixture();
  try{

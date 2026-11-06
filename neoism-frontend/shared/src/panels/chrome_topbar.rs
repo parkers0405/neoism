@@ -131,7 +131,7 @@ pub enum ServerIndicatorStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuItem {
     Settings,
-    StartWebServer,
+    Database,
     ShareWithPhone,
     Themes,
     Backgrounds,
@@ -147,7 +147,7 @@ impl MenuItem {
     const ALL: [MenuItem; 7] = [
         MenuItem::About,
         MenuItem::Settings,
-        MenuItem::StartWebServer,
+        MenuItem::Database,
         MenuItem::ShareWithPhone,
         MenuItem::Themes,
         MenuItem::Backgrounds,
@@ -171,7 +171,7 @@ impl MenuItem {
     fn label(self) -> &'static str {
         match self {
             MenuItem::Settings => "Settings",
-            MenuItem::StartWebServer => "Open Agent in Browser",
+            MenuItem::Database => "Database",
             MenuItem::ShareWithPhone => "Share with Phone",
             MenuItem::Themes => "Themes",
             MenuItem::Backgrounds => "Backgrounds",
@@ -194,7 +194,7 @@ impl MenuItem {
     fn icon(self) -> &'static str {
         match self {
             MenuItem::Settings => "\u{f013}",
-            MenuItem::StartWebServer => "\u{f0ac}",
+            MenuItem::Database => DATABASES_GLYPH,
             MenuItem::Themes => "\u{f1fc}",
             MenuItem::Backgrounds => "\u{f03e}",
             MenuItem::ShareWithPhone => "\u{f10b}", // FA mobile
@@ -206,7 +206,7 @@ impl MenuItem {
     fn action(self) -> TopBarAction {
         match self {
             MenuItem::Settings => TopBarAction::OpenSettings,
-            MenuItem::StartWebServer => TopBarAction::StartWebServer,
+            MenuItem::Database => TopBarAction::OpenDatabases,
             MenuItem::ShareWithPhone => TopBarAction::ShareWithPhone,
             MenuItem::Themes => TopBarAction::OpenThemes,
             MenuItem::Backgrounds => TopBarAction::OpenBackgrounds,
@@ -230,7 +230,6 @@ pub struct ChromeTopBar {
     panel_open: bool,
     notes_open: bool,
     databases_available: bool,
-    databases_open: bool,
     conversations_open: bool,
     search_open: bool,
     right_panel_open: bool,
@@ -244,7 +243,6 @@ pub struct ChromeTopBar {
     panel_btn_rect: Rect,
     menu_btn_rect: Rect,
     notes_btn_rect: Rect,
-    databases_btn_rect: Rect,
     conversations_btn_rect: Rect,
     search_btn_rect: Rect,
     server_btn_rect: Rect,
@@ -255,7 +253,6 @@ pub struct ChromeTopBar {
     hover_panel_btn: bool,
     hover_menu_btn: bool,
     hover_notes_btn: bool,
-    hover_databases_btn: bool,
     hover_conversations_btn: bool,
     hover_search_btn: bool,
     hover_server_btn: bool,
@@ -287,7 +284,6 @@ impl ChromeTopBar {
             panel_open: false,
             notes_open: false,
             databases_available: false,
-            databases_open: false,
             conversations_open: false,
             search_open: false,
             right_panel_open: false,
@@ -297,7 +293,6 @@ impl ChromeTopBar {
             panel_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             menu_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             notes_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
-            databases_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             conversations_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             search_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
             server_btn_rect: Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -308,7 +303,6 @@ impl ChromeTopBar {
             hover_panel_btn: false,
             hover_menu_btn: false,
             hover_notes_btn: false,
-            hover_databases_btn: false,
             hover_conversations_btn: false,
             hover_search_btn: false,
             hover_server_btn: false,
@@ -385,17 +379,16 @@ impl ChromeTopBar {
     }
 
     /// Opt in only when the host can handle the Databases sidebar action.
-    /// Legacy renderers leave this disabled, with no painted or live target.
+    /// Legacy renderers leave the Database menu item disabled.
     pub fn set_databases_available(&mut self, available: bool) {
         self.databases_available = available;
-        if !available {
-            self.databases_btn_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
-            self.hover_databases_btn = false;
-        }
     }
 
-    pub fn set_databases_open(&mut self, open: bool) {
-        self.databases_open = open;
+    fn menu_items(&self) -> Vec<MenuItem> {
+        MenuItem::visible(self.share_with_phone_enabled)
+            .into_iter()
+            .filter(|item| self.databases_available || *item != MenuItem::Database)
+            .collect()
     }
 
     pub fn set_conversations_open(&mut self, open: bool) {
@@ -471,7 +464,7 @@ impl ChromeTopBar {
     pub fn menu_height(&self) -> f32 {
         let item_h = MENU_ITEM_HEIGHT * self.scale;
         let pad_y = MENU_PAD_Y * self.scale;
-        item_h * MenuItem::visible(self.share_with_phone_enabled).len() as f32
+        item_h * self.menu_items().len() as f32
             + pad_y * 2.0
     }
 
@@ -523,7 +516,7 @@ impl ChromeTopBar {
         let item_h = MENU_ITEM_HEIGHT * scale;
         let pad_y = MENU_PAD_Y * scale;
         let menu_h = item_h
-            * MenuItem::visible(self.share_with_phone_enabled).len() as f32
+            * self.menu_items().len() as f32
             + pad_y * 2.0;
         let (menu_x, menu_y) = match dock {
             DockEdge::Top => (menu_btn.x, strip.y + strip.h),
@@ -553,16 +546,10 @@ impl ChromeTopBar {
         self.panel_btn_rect = snap_square(Rect::new(left_x + btn + gap, cy, btn, btn));
         self.notes_btn_rect =
             snap_square(Rect::new(left_x + (btn + gap) * 2.0, cy, btn, btn));
-        let databases_slots = if self.databases_available { 1.0 } else { 0.0 };
-        self.databases_btn_rect = if self.databases_available {
-            snap_square(Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn))
-        } else {
-            Rect::new(0.0, 0.0, 0.0, 0.0)
-        };
         self.conversations_btn_rect =
-            snap_square(Rect::new(left_x + (btn + gap) * (3.0 + databases_slots), cy, btn, btn));
+            snap_square(Rect::new(left_x + (btn + gap) * 3.0, cy, btn, btn));
         self.search_btn_rect =
-            snap_square(Rect::new(left_x + (btn + gap) * (4.0 + databases_slots), cy, btn, btn));
+            snap_square(Rect::new(left_x + (btn + gap) * 4.0, cy, btn, btn));
         self.server_btn_rect = snap_square(Rect::new(
             strip.x + strip.w - edge - self.right_safe_inset * scale - btn,
             cy,
@@ -663,8 +650,6 @@ impl ChromeTopBar {
         self.menu_btn_rect = icon_rect(CHROME_MENU_ITEM);
         self.panel_btn_rect = icon_rect(CHROME_EXPLORER_ITEM);
         self.notes_btn_rect = icon_rect(CHROME_NOTES_ITEM);
-        // The legacy resolved-surface registry has no Databases slot.
-        self.databases_btn_rect = Rect::new(0.0, 0.0, 0.0, 0.0);
         self.conversations_btn_rect = icon_rect(CHROME_NEW_AGENT_ITEM);
         self.search_btn_rect = icon_rect(CHROME_SEARCH_ITEM);
         if dock == DockEdge::Top && self.left_safe_inset > 0.0 {
@@ -755,7 +740,6 @@ impl ChromeTopBar {
                 || self.hover_menu_btn
                 || self.hover_search_btn
                 || self.hover_notes_btn
-                || self.hover_databases_btn
                 || self.hover_conversations_btn
                 || self.hover_server_btn
                 || self.hover_right_btn
@@ -774,7 +758,6 @@ impl ChromeTopBar {
             || self.menu_btn_rect.contains(x, y)
             || self.search_btn_rect.contains(x, y)
             || self.notes_btn_rect.contains(x, y)
-            || (self.databases_available && self.databases_btn_rect.contains(x, y))
             || self.conversations_btn_rect.contains(x, y)
             || self.server_btn_rect.contains(x, y)
             || (self.right_button_visible && self.right_btn_rect.contains(x, y))
@@ -792,8 +775,6 @@ impl ChromeTopBar {
         self.hover_menu_btn = self.menu_btn_rect.contains(x, y);
         self.hover_search_btn = self.search_btn_rect.contains(x, y);
         self.hover_notes_btn = self.notes_btn_rect.contains(x, y);
-        self.hover_databases_btn =
-            self.databases_available && self.databases_btn_rect.contains(x, y);
         self.hover_conversations_btn = self.conversations_btn_rect.contains(x, y);
         self.hover_server_btn = self.server_btn_rect.contains(x, y);
         self.hover_right_btn =
@@ -801,7 +782,7 @@ impl ChromeTopBar {
         self.hover_mobile_agent_panel_btn = self.mobile_agent_panel_button_visible
             && self.mobile_agent_panel_hit_rect.contains(x, y);
         self.hover_menu_item = if self.menu_open {
-            (0..MenuItem::visible(self.share_with_phone_enabled).len())
+            (0..self.menu_items().len())
                 .find(|i| self.menu_item_rect(*i).contains(x, y))
         } else {
             None
@@ -816,7 +797,6 @@ impl ChromeTopBar {
         self.hover_menu_btn = false;
         self.hover_search_btn = false;
         self.hover_notes_btn = false;
-        self.hover_databases_btn = false;
         self.hover_conversations_btn = false;
         self.hover_server_btn = false;
         self.hover_right_btn = false;
@@ -850,11 +830,6 @@ impl ChromeTopBar {
             self.menu_open = false;
             return true;
         }
-        if self.databases_available && self.databases_btn_rect.contains(x, y) {
-            self.pending_action = Some(TopBarAction::OpenDatabases);
-            self.menu_open = false;
-            return true;
-        }
         if self.server_btn_rect.contains(x, y) {
             self.pending_action = Some(TopBarAction::OpenSystems);
             self.menu_open = false;
@@ -873,11 +848,11 @@ impl ChromeTopBar {
             return true;
         }
         if self.menu_open {
-            if let Some(idx) = (0..MenuItem::visible(self.share_with_phone_enabled).len())
+            if let Some(idx) = (0..self.menu_items().len())
                 .find(|i| self.menu_item_rect(*i).contains(x, y))
             {
                 self.pending_action =
-                    Some(MenuItem::visible(self.share_with_phone_enabled)[idx].action());
+                    Some(self.menu_items()[idx].action());
                 self.menu_open = false;
                 return true;
             }
@@ -1013,17 +988,6 @@ impl ChromeTopBar {
             theme,
             style,
         );
-        if self.databases_available && self.databases_btn_rect.w > 0.0 {
-            self.draw_icon_button(
-                sugarloaf,
-                self.databases_btn_rect,
-                DATABASES_GLYPH,
-                self.hover_databases_btn,
-                self.databases_open,
-                theme,
-                style,
-            );
-        }
         self.draw_icon_button(
             sugarloaf,
             self.conversations_btn_rect,
@@ -1456,7 +1420,7 @@ impl ChromeTopBar {
         );
 
         let font = MENU_FONT_SIZE * self.scale;
-        let items = MenuItem::visible(self.share_with_phone_enabled);
+        let items = self.menu_items();
         let last_ix = items.len() - 1;
         for (i, item) in items.iter().enumerate() {
             let row = self.menu_item_rect(i);
@@ -1593,21 +1557,23 @@ mod tests {
     }
 
     #[test]
-    fn databases_is_opt_in_and_clicks_without_actions_from_selection_flags() {
+    fn database_menu_is_opt_in_and_does_not_reserve_a_toolbar_slot() {
         let mut bar = ChromeTopBar::new();
         let strip = Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT);
         paint_strip(&mut bar, strip);
         assert!(!bar.databases_available);
-        assert_eq!(bar.databases_btn_rect.w, 0.0);
+        assert!(!bar.menu_items().contains(&MenuItem::Database));
         let original_conversations_x = bar.conversations_btn_rect.x;
+        let original_menu_height = bar.menu_height();
 
         bar.set_databases_available(true);
         paint_strip(&mut bar, strip);
-        let btn = bar.databases_btn_rect;
-        assert_eq!(btn.w, bar.notes_btn_rect.w);
-        assert_eq!(btn.h, bar.notes_btn_rect.h);
-        assert_eq!(btn.x, bar.notes_btn_rect.x + bar.notes_btn_rect.w + BTN_GAP);
-        assert_eq!(bar.conversations_btn_rect.x, btn.x + btn.w + BTN_GAP);
+        assert_eq!(bar.conversations_btn_rect.x, original_conversations_x);
+        assert_eq!(bar.menu_height(), original_menu_height + MENU_ITEM_HEIGHT);
+        assert_eq!(MenuItem::Database.label(), "Database");
+        assert_eq!(MenuItem::Database.icon(), "\u{f1c0}");
+        let index = bar.menu_items().iter().position(|item| *item == MenuItem::Database).unwrap();
+        let btn = bar.menu_item_rect(index);
         assert_eq!(bar.take_action(), None);
         bar.menu_open = true;
         assert!(bar.handle_pointer_down(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5));
@@ -1615,21 +1581,15 @@ mod tests {
         assert!(!bar.menu_open);
 
         for sidebar in [Some("databases"), Some("notes"), Some("files"), Some("conversations"), None] {
-            bar.set_databases_open(sidebar == Some("databases"));
             bar.set_notes_open(sidebar == Some("notes"));
             bar.set_panel_open(sidebar == Some("files"));
             bar.set_conversations_open(sidebar == Some("conversations"));
-            assert_eq!(bar.databases_open, sidebar == Some("databases"));
             assert_eq!(bar.take_action(), None);
         }
-        bar.handle_pointer_move(btn.x + 1.0, btn.y + 1.0);
-        assert!(bar.hover_databases_btn);
-        bar.clear_hover_state();
-        assert!(!bar.hover_databases_btn);
         bar.set_databases_available(false);
-        assert_eq!(bar.databases_btn_rect.w, 0.0);
-        assert!(!bar.handle_pointer_down(btn.x + 1.0, btn.y + 1.0));
+        assert!(!bar.menu_items().contains(&MenuItem::Database));
         paint_strip(&mut bar, strip);
+        assert_eq!(bar.menu_height(), original_menu_height);
         assert_eq!(bar.conversations_btn_rect.x, original_conversations_x);
         assert_eq!(bar.take_action(), None);
     }
@@ -1863,7 +1823,7 @@ mod tests {
         assert_eq!(bar.take_action(), None);
 
         // Locate Themes by action so menu additions cannot stale this test.
-        let themes_ix = MenuItem::visible(bar.share_with_phone_enabled)
+        let themes_ix = bar.menu_items()
             .iter()
             .position(|item| item.action() == TopBarAction::OpenThemes)
             .expect("Themes menu item present");
@@ -1892,15 +1852,27 @@ mod tests {
     /// A hidden row must not shift what the remaining rows dispatch —
     /// menu hit-testing indexes into the FILTERED list.
     #[test]
-    fn hidden_share_row_does_not_shift_other_menu_actions() {
+    fn hidden_rows_do_not_shift_other_menu_actions() {
         for enabled in [false, true] {
-            let items = MenuItem::visible(enabled);
-            for (ix, item) in items.iter().enumerate() {
-                assert_eq!(
-                    items[ix].action(),
-                    item.action(),
-                    "row {ix} dispatches its own action (share enabled: {enabled})"
+            for databases in [false, true] {
+                let mut bar = ChromeTopBar::new();
+                bar.set_share_with_phone_enabled(enabled);
+                bar.set_databases_available(databases);
+                paint_strip(&mut bar, Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT));
+                bar.menu_rect = bar.menu_overlay_rect_for(
+                    bar.menu_btn_rect,
+                    Rect::new(0.0, 0.0, 800.0, CHROME_TOPBAR_HEIGHT),
+                    DockEdge::Top,
+                    Rect::new(0.0, 0.0, 800.0, 600.0),
                 );
+                let items = bar.menu_items();
+                for (ix, item) in items.iter().enumerate() {
+                    bar.menu_open = true;
+                    let row = bar.menu_item_rect(ix);
+                    assert!(bar.handle_pointer_down(row.x + 4.0, row.y + 4.0));
+                    assert_eq!(bar.take_action(), Some(item.action()));
+                    assert!(!bar.is_menu_open());
+                }
             }
         }
     }

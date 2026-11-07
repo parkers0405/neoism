@@ -1,12 +1,20 @@
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/windows-validation-process.ps1"
+$evidence = (New-Item -ItemType Directory -Force 'windows-validation').FullName
 $bin = (Resolve-Path 'neoism-frontend/gpuix/dist').Path
 # MSI consumes dist directly; do not rely on a prior ZIP packaging invocation.
 python "$PSScriptRoot/windows-bundle.py" $bin (Join-Path $PSScriptRoot '../target/release')
 if ($LASTEXITCODE -ne 0) { throw 'Windows GUI subsystem or release service provenance validation failed' }
 node "$PSScriptRoot/build-docs.mjs" --verify (Join-Path $bin 'resources/docs')
 if ($LASTEXITCODE -ne 0) { throw 'Bundled docs verification failed' }
-$version = (& "$bin/neoism.exe" --version).Trim().Split(' ')[1]
-if ($LASTEXITCODE -ne 0) { throw 'Cannot read application version' }
+# GUI-subsystem executables are not reliable PowerShell success-pipeline
+# producers. Explicitly wait and redirect, as installed-binary validation does.
+Invoke-CheckedProcess (Join-Path $bin 'neoism.exe') '--version' "$evidence/packaging-version" 30
+$versionOutput = [IO.File]::ReadAllText("$evidence/packaging-version.stdout.log").Trim()
+if ($versionOutput -notmatch '^neoism (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)$') {
+    throw "Cannot read application version: $versionOutput"
+}
+$version = $Matches[1]
 $installerVersion = ($version -split '[-+]', 2)[0]
 $fixture = Join-Path $env:RUNNER_TEMP 'neoism-msi-fixture'
 New-Item -ItemType Directory -Force $fixture | Out-Null

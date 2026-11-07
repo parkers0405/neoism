@@ -106,6 +106,8 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       const route = match[2].match(/^sessions\/([^/]+)(?:\/(.*))?$/);
       if (route) {
         const id = decodeURIComponent(route[1]);
+        // Opening details hydrates the canonical session (including goal state).
+        if (!route[2] && request.method === "GET") return Response.json(session(id));
         if (request.method === "PATCH") {
           if(config.rejectSessionUpdates)return Response.json({code:"not_found",message:"Session not found",retryable:false,details:{}},{status:404});
           const old:Selection = selections.get(id) || { agent: "build", model: "openai/base", thinking: "medium" };

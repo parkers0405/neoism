@@ -53,6 +53,7 @@ export interface PendingQuestion { sessionId: string; requestId: string; request
 export interface PromptOptions { attachments?: readonly Attachment[]; delivery?: "steer" | "queue"; selection?: ProviderState; messageId?:string }
 export interface Permission { sessionId: string; requestId: string; tool: string; title: string; responding?: boolean; error?: string }
 export interface ComposerDraft { text: string; attachments: Array<Attachment & { token: string; name: string }> }
+export interface SessionGoalView { text: string; paused: boolean; status: "active" | "complete" | "blocked"; summary: string }
 export interface AppState {
   ui: Record<string, unknown>;
   composerDrafts: Readonly<Record<string, ComposerDraft>>;
@@ -72,6 +73,7 @@ export interface AppState {
   pendingAgentSessions: Readonly<Record<string,string>>;
   usage: Readonly<Record<string, Usage>>;
   todos: Readonly<Record<string, readonly Todo[]>>;
+  goals: Readonly<Record<string, SessionGoalView | null>>;
   streaming: Readonly<Record<string, string>>;
   sessionErrors: Readonly<Record<string, string | undefined>>;
   permissions: readonly Permission[];
@@ -140,7 +142,7 @@ export class WorkspaceModel {
   state: AppState = {
     ui: {}, composerDrafts: {}, connection: { phase: "closed", attempt: 0 }, workspaces: [], workspaceTabs: [],
     surfaces: [], notesDirectories: {}, notesExpanded: new Set([""]), directories: {}, expanded: new Set([""]), files: {}, threads: [],
-    history: {}, pendingAgentSessions:{}, usage: {}, todos: {}, streaming: {}, sessionErrors: {}, permissions: [], questions: [], providers: [], agents: [], skills: [], providerStates: {}, drafts: {}, queues: {}, catalogsLoading: false, loading: false,
+    history: {}, pendingAgentSessions:{}, usage: {}, todos: {}, goals: {}, streaming: {}, sessionErrors: {}, permissions: [], questions: [], providers: [], agents: [], skills: [], providerStates: {}, drafts: {}, queues: {}, catalogsLoading: false, loading: false,
   };
   constructor(readonly client: DaemonConnection, readonly config: AppConfig, seed?: { state: AppState; editors: Map<string, NativeEditor>; recovery?: SavedSession }) {
     this.agentSdk = new AgentSdk(config);
@@ -1505,6 +1507,22 @@ export class WorkspaceModel {
     this.queuedHistory.delete(sessionId);
     this.sendAgent({GetHistory:{session_id:sessionId,cursor:null,limit:200}}, true);
   };
+  private goalVersions = new Map<string, number>();
+  private applySessionGoal(sessionId: string, info: Record<string, unknown>) {
+    const version=isRecord(info.time)&&typeof info.time.updated==="number"?info.time.updated:0;
+    // Include cleared goals in the watermark: a delayed initial read must not resurrect them.
+    if(version<(this.goalVersions.get(sessionId)??0))return;
+    const value=info.goal;
+    const goal:SessionGoalView|null=isRecord(value)&&typeof value.text==="string"?{
+      text:value.text,paused:value.paused===true,status:value.status==="complete"||value.status==="blocked"?value.status:"active",summary:typeof value.summary==="string"?value.summary:"",
+    }:null;
+    this.goalVersions.set(sessionId,version);
+    this.update({goals:{...this.state.goals,[sessionId]:goal}});
+  }
+  refreshSessionGoal = async (sessionId: string) => {
+    const info=await this.sdkForSession(sessionId).sessions.get(sessionId);
+    if(!this.disposed)this.applySessionGoal(sessionId,info);
+  };
   sendAgent = (message: AgentClientMessage, replaceHistory = false) => {
     if(this.catalogRead(message))return;
     // Legacy Agent envelopes carry the most recent request id, not the
@@ -1647,6 +1665,7 @@ export class WorkspaceModel {
         providers=result;providersReady=true;publishDefaults();
         const catalog = result.providers.map((p) => ({ id: p.id, name: p.name || p.id,
           models: Object.entries(p.models).map(([key, model]) => ({ id: model.id || key, name: model.name || model.id || key,
+            aliases: [key, ...(isRecord(model.api) && typeof model.api.id === "string" ? [model.api.id] : [])],
             context_limit: isRecord(model.limit) && typeof model.limit.context === "number" && model.limit.context > 0 ? model.limit.context : undefined })) }));
         return { providers: Schema.decodeUnknownSync(Schema.Array(ProviderSchema))(catalog), providerCatalog: result };
       },()=>{providersReady=true;providersFailed=true;publishDefaults();}),
@@ -2250,6 +2269,7 @@ export class WorkspaceModel {
       } else if (tag === "SessionEvent" && body.kind === "session.updated" && isRecord(body.properties) && isRecord(body.properties.info)) {
         const info=body.properties.info,id=typeof info.id==="string"?info.id:sessionId;
         if(id&&typeof info.title==="string")this.updateAgentTitle(id,info.title);
+        if(id)this.applySessionGoal(id,info);
       } else if (tag === "QuestionAsked" && sessionId) this.receiveQuestion(sessionId, body.request);
       else if (tag === "QuestionsUpdated" && sessionId && Array.isArray(body.requests)) {
         const ids = new Set(body.requests.filter(isRecord).map((request) => request.id));

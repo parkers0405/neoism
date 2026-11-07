@@ -56,7 +56,7 @@ export const ThreadSchema = Schema.Struct({
   busy: Schema.optionalKey(Schema.Boolean),
 });
 export type Thread = typeof ThreadSchema.Type;
-export const ModelSchema = Schema.Struct({ id: Schema.String, name: Schema.String, context_limit: Schema.optionalKey(Schema.NullOr(Schema.Number)) });
+export const ModelSchema = Schema.Struct({ id: Schema.String, name: Schema.String, aliases: Schema.optionalKey(Schema.Array(Schema.String)), context_limit: Schema.optionalKey(Schema.NullOr(Schema.Number)) });
 export const ProviderSchema = Schema.Struct({ id: Schema.String, name: Schema.String, models: Schema.optionalKey(Schema.Array(ModelSchema)) });
 export type Provider = typeof ProviderSchema.Type;
 export const AgentSchema = Schema.Struct({ name: Schema.String, description: Schema.String, mode: Schema.optionalKey(Schema.NullOr(Schema.String)) });

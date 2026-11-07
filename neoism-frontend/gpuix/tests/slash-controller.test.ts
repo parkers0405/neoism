@@ -55,6 +55,21 @@ test("permissions/questions remain session scoped and skip-permission toggle res
  await f.controller.execute("/answer first; second");expect(f.server.requests.find(r=>r.path==="/interactions/questions/q-one/reply")?.body).toEqual({answers:[["first"],["second"]]});expect(f.model.state.questions.map(q=>q.sessionId)).toEqual(["two"]);
  const previous=f.server.sessions.get("one")!.permission;await f.controller.execute("/yolo");expect(f.server.sessions.get("one")?.permission?.at(-1)).toEqual({permission:"*",pattern:"*",action:"allow"});await f.controller.execute("/yolo");expect(f.server.sessions.get("one")?.permission).toEqual(previous);
 });
+test("detail goals hydrate and follow live status and clear events without stale resurrection",async()=>{
+ const f=await fixture(),info=f.server.sessions.get("one")!;
+ f.model.start();
+ const goal={text:"Ship the feature",paused:false,status:"active",summary:"",created:1,updated:2,research:[]};
+ f.server.sessions.set("one",{...info,goal,time:{...info.time,updated:2}});
+ await f.model.refreshSessionGoal("one");expect(f.model.state.goals.one?.text).toBe(goal.text);
+ expect(f.model.state.goals.two).toBeUndefined();
+ f.server.emitSession({...info,goal:{...goal,status:"complete",summary:"Shipped"},time:{...info.time,updated:3}});
+ await until(()=>f.model.state.goals.one?.status==="complete");expect(f.model.state.goals.one?.summary).toBe("Shipped");
+ f.server.defer("/sessions/one");const pending=f.model.refreshSessionGoal("one");
+ f.server.emitSession({...info,time:{...info.time,updated:4}});
+ await until(()=>f.model.state.goals.one===null);
+ f.server.release("/sessions/one");await pending;
+ expect(f.model.state.goals.one).toBeNull();
+});
 test("undo and redo reconcile the captured conversation and recover failed mutations",async()=>{
  const f=await fixture(),refreshes:string[]=[];
  f.model.refreshSessionHistory=id=>{refreshes.push(id);};
@@ -95,6 +110,15 @@ test("MCP distinguishes idle connections, real errors, disabled servers and lega
  expect(rows.find(row=>row.value==="broken")).toMatchObject({footer:"failed",description:"Connection refused"});
  expect(rows.find(row=>row.value==="off")).toMatchObject({footer:"disabled",description:"disabled"});
  expect(f.server.requests.some(request=>request.method==="POST")).toBe(false);
+});
+test("MCP enable and disable explicitly persist global preferences",async()=>{
+ const f=await fixture();
+ for(const action of ["disable","enable"]){
+  await f.controller.execute("/mcp");await f.pickers.at(-1)?.onSelect?.("local");await f.pickers.at(-1)?.onSelect?.(action);
+  const patched=f.server.requests.filter(r=>r.method==="PATCH"&&r.path==="/plugins/dev.neoism.mcp/local/config").at(-1);
+  expect(patched?.body).toEqual({enabled:action==="enable",scope:"global"});expect(patched?.directory).toBe("/project/a");
+ }
+ expect(f.server.requests.some(r=>r.path.endsWith("/connect")||r.path.endsWith("/disconnect"))).toBe(false);
 });
 test("MCP and subagent pickers execute plugin operations rather than send substitute prompts",async()=>{
  const f=await fixture();await f.controller.execute("/mcp");expect(f.pickers.at(-1)?.kind).toBe("mcp");await f.pickers.at(-1)?.onSelect?.("local");expect(f.pickers.at(-1)?.kind).toBe("mcp-action");await f.pickers.at(-1)?.onSelect?.("connect");

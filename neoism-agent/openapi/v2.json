@@ -4610,6 +4610,15 @@
         "properties": {
           "enabled": {
             "type": "boolean"
+          },
+          "scope": {
+            "default": "owner",
+            "description": "Global stores an installation enabled preference without changing workspace transports; owner updates the defining source.",
+            "enum": [
+              "owner",
+              "global"
+            ],
+            "type": "string"
           }
         },
         "required": [

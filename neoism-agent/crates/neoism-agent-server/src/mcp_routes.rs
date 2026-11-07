@@ -77,6 +77,16 @@ pub(crate) struct CodeRequest {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct McpConfigPatch {
     pub enabled: bool,
+    #[serde(default)]
+    pub scope: McpConfigScope,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum McpConfigScope {
+    #[default]
+    Owner,
+    Global,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -147,17 +157,39 @@ pub(crate) async fn mcp_config_patch(
         .services()
         .builtin_mcp(&name)
         .map(|_| crate::config::builtin_mcp_config(&name));
-    crate::config::set_mcp_enabled_with_default(
-        state.services(),
-        &directory,
-        &name,
-        request.enabled,
-        builtin_default,
-    )
-    .await
-    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let result = match request.scope {
+        McpConfigScope::Global => crate::config::set_global_mcp_enabled(
+            state.services(),
+            &directory,
+            &name,
+            request.enabled,
+        )
+        .await,
+        McpConfigScope::Owner => crate::config::set_mcp_enabled_with_default(
+            state.services(),
+            &directory,
+            &name,
+            request.enabled,
+            builtin_default,
+        )
+        .await,
+    };
+    result.map_err(|error| ApiError::bad_request(error.to_string()))?;
     if !request.enabled {
         let _ = mcp::disconnect(&state, &directory, &name).await;
+    }
+    if matches!(request.scope, McpConfigScope::Global) {
+        // Refresh already-open workspaces as well, rather than waiting for their
+        // polling interval to observe an installation preference.
+        for runtime in state.inner.workspace_runtimes.runtimes().await {
+            crate::workspace_runtime::refresh_plugins(&runtime, &state)
+                .await
+                .map_err(|error| ApiError::internal(format!(
+                    "Global MCP preference was saved but publication failed: {error}"
+                )))?;
+            let snapshot = runtime.published_snapshot();
+            state.reconcile_workspace_plugins(&runtime, &snapshot).await;
+        }
     }
     let plugins = state
         .publish_config_mutation(&directory)

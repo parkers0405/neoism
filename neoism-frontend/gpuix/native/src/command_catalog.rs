@@ -186,6 +186,48 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             "commands.surface" => host.palette.set_surface(surface(v)),
             _ => return Err(format!("Unknown command operation: {op}")),
         }
+        // Scrolling and selection cannot change the catalog or card bounds.
+        // Keep the rows on the host, but refresh the action for the new selection.
+        if matches!(op, "commands.scroll" | "commands.select" | "commands.move")
+            && v["retainRows"].as_bool().unwrap_or(false)
+            && close_target(&host.palette.query).is_none()
+        {
+            let mut frame = host.palette.host_motion_frame(host.base_rect);
+            frame["retainedRows"] = json!(true);
+            frame["target"] = host.palette.get_selected_action().map(|a|json!({"action":format!("{a:?}")}))
+                .or_else(||host.palette.get_selected_ex_command().map(|command|json!({"action":"ExCommand","argument":command})))
+                .or_else(||host.palette.get_typed_cd_target().map(|path|json!({"action":"ChangeWorkspaceDirectory","argument":path}))).unwrap_or(Value::Null);
+            return Ok(frame);
+        }
         Ok(frame(host))
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_selection_updates_match_full_frames_without_serializing_rows() {
+        let new = dispatch(&json!({"op":"commands.new","surface":"editor"})).unwrap().unwrap();
+        let id = &new["id"];
+        for (op, args) in [("move", json!({"delta":2})), ("select", json!({"index":4})), ("scroll", json!({"delta":-132}))] {
+            let mut request = args;
+            request["op"] = json!(format!("commands.{op}"));
+            request["id"] = id.clone();
+            request["retainRows"] = json!(true);
+            let compact = dispatch(&request).unwrap().unwrap();
+            assert!(compact.get("rows").is_none(), "{op} serialized unchanged rows");
+            assert_eq!(compact["retainedRows"], true);
+            let full = dispatch(&json!({"op":"commands.frame","id":id})).unwrap().unwrap();
+            for field in ["selected", "top", "target"] {
+                assert_eq!(compact[field], full[field], "{op}: {field}");
+            }
+        }
+        dispatch(&json!({"op":"commands.query","id":id,"query":":q!"})).unwrap().unwrap();
+        let close = dispatch(&json!({"op":"commands.select","id":id,"index":0,"retainRows":true})).unwrap().unwrap();
+        assert_eq!(close["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(close["target"], json!({"action":"CloseTab","argument":"discard"}));
+        dispatch(&json!({"op":"commands.dispose","id":id})).unwrap().unwrap();
+    }
 }

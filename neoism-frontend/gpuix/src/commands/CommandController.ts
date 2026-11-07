@@ -39,7 +39,8 @@ export class CommandController {
   private call(op: string, args: Record<string, unknown> = {}) {
     if (this.disposed) return this.frame;
     const started = performance.now(); this.animation.cancel();
-    const next = coreCall<CommandFrame & {retainedRows?:boolean}>(`commands.${op}`, { id: this.id, ...(op==="frame"?{retainRows:true}:{}), ...args });
+    const retainRows = op === "frame" || op === "scroll" || op === "select" || op === "move";
+    const next = coreCall<CommandFrame & {retainedRows?:boolean}>(`commands.${op}`, { id: this.id, ...(retainRows?{retainRows:true}:{}), ...args });
     if(next.retainedRows)this.frame={...this.frame,...next};
     else {
       // Input may move selection without changing any catalog entry.

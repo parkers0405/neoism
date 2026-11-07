@@ -61,12 +61,14 @@ export function FinderView(props: { controller: FinderController; config: AppCon
           style={{position:"absolute",left:frame().inputRect[0]+frame().inputRect[2]-80*config.scale,top:frame().inputRect[1],width:80*config.scale,height:frame().inputRect[3],cursor:"pointer"}}/>
         <div testId="finder-results" onScroll={event=>props.controller.scroll(event.precise?event.deltaY||0:(event.deltaY||0)*22*3)}
           style={{position:"absolute",left:frame().listRect[0],top:frame().listRect[1],width:frame().listRect[2],height:frame().listRect[3],overflow:"hidden"}}>
+          <div testId="finder-result-strip" style={{position:"absolute",left:0,top:frame().offset-frame().top*frame().rowHeight,width:"100%",height:0}}>
           <For each={rows().map(row=>row.index)}>{index=>{
             const initial=frame().rows[index]!,row=()=>frame().rows[index]||initial;
             return <div testId={`finder-result:${index}`} role="option" aria-selected={frame().selected===index} aria-label={row().path||row().text}
               onMouseDown={()=>accept(index)} onMouseMove={()=>{if(frame().selected!==index)props.controller.select(index);}}
-              style={{position:"absolute",left:0,top:(index-frame().top)*frame().rowHeight+frame().offset,width:"100%",height:frame().rowHeight,cursor:"pointer"}}/>;
+              style={{position:"absolute",left:0,top:index*frame().rowHeight,width:"100%",height:frame().rowHeight,cursor:"pointer"}}/>;
           }}</For>
+          </div>
           <Show when={frame().error&&!frame().rows.length}><div role="alert" style={{position:"absolute",left:0,top:0,width:"100%",height:frame().rowHeight,backgroundColor:config.theme.bg,pointerEvents:"none"}}>
             <text style={{position:"absolute",left:14*config.scale,top:(frame().rowHeight-frame().fontSize)/2,fontSize:frame().fontSize,fontFamily:config.fontFamily,color:config.theme.red}}>{frame().error}</text>
           </div></Show>

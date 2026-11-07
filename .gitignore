@@ -21,6 +21,7 @@ target/
 /neoism-linux-*/
 /neoism-darwin-*/
 .tmp/
+/.neoism/
 .tmp/claude-worktrees-archive-*/
 .DS_Store
 rls/

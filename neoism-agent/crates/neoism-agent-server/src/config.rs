@@ -158,6 +158,37 @@ pub(crate) async fn set_mcp_enabled_with_default(
         .map_err(Into::into)
 }
 
+pub(crate) async fn set_global_mcp_enabled(
+    services: &AgentServices,
+    directory: &str,
+    name: &str,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    let mut effective = load(services, directory)?;
+    inject_builtin_mcp(&mut effective.info, services);
+    anyhow::ensure!(
+        effective.info.mcp.contains_key(name),
+        "MCP server {name} is not configured"
+    );
+    let global = services
+        .config
+        .snapshot(&ConfigSnapshotRequest::installation())?;
+    // Always use the installation target: never promote a workspace transport
+    // (which may contain private environment variables or headers).
+    services
+        .config
+        .update(&ConfigUpdateRequest {
+            workspace: global.workspace,
+            source_id: global.writable_target.source_id,
+            update: ConfigUpdate::SetValue {
+                path: vec!["mcpEnabled".into(), name.into()],
+                value: Value::Bool(enabled),
+            },
+        })
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod mcp_write_tests {
     use super::*;
@@ -627,6 +658,7 @@ pub(crate) fn inject_builtin_mcp(
         });
     }
     inject_browser_mcp(info);
+    info.apply_mcp_enabled_preferences();
 }
 
 fn inject_browser_mcp(info: &mut AgentConfigDocument) {

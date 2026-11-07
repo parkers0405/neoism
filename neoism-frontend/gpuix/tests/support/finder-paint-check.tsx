@@ -10,6 +10,7 @@ const host=createRecordingAppRenderer(),root=createRoot(host.renderer),config=lo
 const finder=new FinderController({cwd:"/host/project",search:async message=>{
  const[tag,body]=variant(message)!;return tag==="CollectFiles"?{CollectFilesResult:{req_id:0,paths:["src/main.rs"]}}:{SearchFilesResult:{req_id:0,hits:(body as {query?:string}).query==="absent"?[]:[{path:"src/main.rs",score:100}]}};
 }});
+let scrolling:FinderController|undefined;
 const until=async(predicate:()=>boolean)=>{const limit=Date.now()+3000;while(!predicate()){root.flush();if(Date.now()>limit)throw new Error("Finder original paint did not settle");await Bun.sleep(5);}root.flush();};
 try{
  setOverlayViewport(host.renderer,{x:300,y:120,width:520,height:480});
@@ -45,6 +46,28 @@ try{
  setOverlayViewport(host.renderer,{x:0,y:120,width:1120,height:680});await until(()=>!finder.frame.animating);centered({x:0,y:120,width:1440,height:780});
  finder.query("absent");await until(()=>finder.frame.rows.length===0&&!finder.frame.animating);centered({x:0,y:120,width:1440,height:780});
  finder.query("main");await until(()=>finder.frame.rows.length===1&&!finder.frame.animating);centered({x:0,y:120,width:1440,height:780});
- const row=host.find("finder-result:0")!;root.dispatch({elementId:row.id,eventType:"mouseDown",button:0,x:500,y:450});root.flush();assert.deepEqual(accepted,["src/main.rs"],"Centered row must retain its actual selection action");
+  const row=host.find("finder-result:0")!;root.dispatch({elementId:row.id,eventType:"mouseDown",button:0,x:500,y:450});root.flush();assert.deepEqual(accepted,["src/main.rs"],"Centered row must retain its actual selection action");
+  scrolling=new FinderController({cwd:"/host/project",mode:"symbols",symbols:Array.from({length:100},(_,n)=>({kind:"Function",name:`symbol_${n}`,line:n+1,column:0})),search:async()=>{throw Error("Unexpected search");}});
+  const controller=scrolling,selected:number[]=[];
+  root.render(()=><FinderView controller={controller} config={config} onAccept={target=>selected.push(target.line!)} onClose={()=>{}}/>);
+  await until(()=>!controller.frame.animating);
+  controller.move(20);root.flush();
+  let rowStyleWrites=0,stripWrites=0;
+  const apply=host.renderer.applyBatch.bind(host.renderer);
+  host.renderer.applyBatch=json=>{
+    for(const[op,id]of JSON.parse(json))if(op==="setStyle"){
+      const testId=String(host.nodes.get(id)?.props.testId||"");
+      if(testId.startsWith("finder-result:"))rowStyleWrites++;
+      if(testId==="finder-result-strip")stripWrites++;
+    }
+    return apply(json);
+  };
+  await until(()=>!controller.frame.animating);
+  assert.ok(stripWrites>0,"Scroll spring must move the shared hit-target strip");
+  assert.equal(rowStyleWrites,0,"Scroll interpolation must not reposition every row hit target");
+  const current=controller.frame,target=host.find(`finder-result:${current.selected}`)!,strip=host.find("finder-result-strip")!;
+  assert.ok(Math.abs(Number(strip.style.top)+Number(target.style.top)-((current.selected-current.top)*current.rowHeight+current.offset))<.01,"Hit targets must stay aligned with the Rust-painted rows");
+  root.dispatch({elementId:target.id,eventType:"mouseDown",button:0,x:500,y:450});root.flush();
+  assert.deepEqual(selected,[current.rows[current.selected]!.line]);
  console.log(JSON.stringify({noWindow:true,originalRustFinderPaint:true,nativeGlyphRasters:true,transparentNativeInput:true,focusedPaneBodyGeometry:true,viewportResizeRetainsController:true}));
-}finally{root.unmount();finder.dispose();setOverlayViewport(host.renderer,undefined);setDialogViewport(host.renderer,undefined);}
+}finally{root.unmount();finder.dispose();scrolling?.dispose();setOverlayViewport(host.renderer,undefined);setDialogViewport(host.renderer,undefined);}

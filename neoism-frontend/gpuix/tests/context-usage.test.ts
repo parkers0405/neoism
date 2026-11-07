@@ -11,6 +11,21 @@ test("reopened conversations restore their last nonzero context usage without a 
 });
 
 const providers=[{id:"p",name:"Provider",models:[{id:"model",name:"Model",context_limit:128000}]}];
+test("reopened wire-ID and configured-key sessions resolve the catalog denominator",()=>{
+ const catalog=[{id:"openai",name:"OpenAI",models:[{id:"sol-alias",name:"Sol",aliases:["configured-sol","gpt-6.1-sol"],context_limit:872000}]}];
+ for(const id of ["sol-alias","configured-sol","gpt-6.1-sol"]){
+  expect(contextMetrics([message({input:90000,output:1400})],undefined,undefined,catalog,`openai/${id}`)).toMatchObject({limit:872000,total:91400,percent:10});
+ }
+ expect(contextMetrics([], {input:91400,output:0},undefined,catalog,"other/gpt-6.1-sol").limit).toBeUndefined();
+ const exact=[{...catalog[0]!,models:[...catalog[0]!.models,{id:"gpt-6.1-sol",name:"Explicit Sol",context_limit:128000}]}];
+ expect(contextMetrics([],{input:91400,output:0},undefined,exact,"openai/gpt-6.1-sol").limit).toBe(128000);
+});
+test("invalid session limits do not mask valid catalog or measured limits",()=>{
+ for(const context_limit of [-1,Infinity,NaN]){
+  expect(contextMetrics([],{input:100,output:0},{context_limit},providers,"p/model").limit).toBe(128000);
+  expect(contextMetrics([],{input:100,output:0,context_limit:200000},{context_limit},[],"p/model").limit).toBe(200000);
+ }
+});
 test("footer and rail share actual totals and session/catalog/usage denominator precedence",()=>{
  const usage={input:40000,output:2000,total:42100,context_limit:200000};
  const metrics=contextMetrics([],usage,{context_limit:100000},providers,"p/model");

@@ -174,10 +174,16 @@ fn load_snapshot_with_project_disabled(
 ) -> anyhow::Result<(AgentConfigDocument, Vec<PathBuf>)> {
     use neoism_agent_service_api::ConfigDiscoveryScope;
     let mut value = serde_json::json!({});
+    let mut mcp_enabled = serde_json::json!({});
     for layer in snapshot.layers.iter().filter(|layer| {
         !disabled || layer.scope == ConfigDiscoveryScope::Installation
     }) {
         merge(&mut value, layer.document.clone());
+        if layer.scope == ConfigDiscoveryScope::Installation {
+            if let Some(preferences) = layer.document.get("mcpEnabled") {
+                merge(&mut mcp_enabled, preferences.clone());
+            }
+        }
     }
     let roots: Vec<_> = snapshot.discovery_roots.iter().filter(|root| {
         !disabled || root.scope == ConfigDiscoveryScope::Installation
@@ -185,8 +191,11 @@ fn load_snapshot_with_project_disabled(
     for root in &roots {
         merge_markdown_entries(&mut value, root)?;
     }
-    let mut document = serde_json::from_value(value)?;
+    // A workspace may define the transport, but cannot mask a global GUI toggle.
+    value["mcpEnabled"] = mcp_enabled;
+    let mut document: AgentConfigDocument = serde_json::from_value(value)?;
     normalize(&mut document);
+    document.apply_mcp_enabled_preferences();
     Ok((document, roots))
 }
 

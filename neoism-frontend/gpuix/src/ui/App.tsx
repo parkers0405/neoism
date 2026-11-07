@@ -406,7 +406,12 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     syntax: { comment: c.syn_comment, string: c.syn_string, number: c.syn_number, keyword: c.syn_keyword, function: c.syn_func, typeName: c.syn_type, property: c.syn_property, constructor: c.syn_constructor },
     metrics: { codeTextSize: config.fontSize, codeLineHeight: config.fontSize * 1.5, mdTextSize: d.chatTextSize * s, mdLineHeight: d.chatLineHeight * s,
       mdHeadingSizes: [21 * s, 18 * s, 16 * s, 16 * s] } };
-  const toggle = (view: typeof sidebar extends Accessor<infer T> ? T : never) => setSidebar(sidebar() === view ? undefined : view);
+  const toggle = (view: typeof sidebar extends Accessor<infer T> ? T : never) => {
+    const next=sidebar()===view?undefined:view;
+    setSidebar(next);
+    // Wait for the new sidebar host before transferring native focus and cursor ownership.
+    queueMicrotask(()=>{if(sidebar()===next)focusChrome({zone:next?"sidebar":"content"});});
+  };
    const availableWidth = () => windowSize().width - 52 * s - (sidebar() ? Math.min(d.sidebarWidth, windowSize().width * 0.42) : 0) - (deviceVisible()?deviceWidth():0);
   const overlayDetails = () => availableWidth() < (d.detailMinChatWidth + d.detailMinRailWidth + d.detailGap) * s;
   const detailWidth = () => overlayDetails() ? Math.min(d.detailRailWidth * s, Math.max(0, availableWidth() - d.detailGap * s)) : Math.min(d.detailRailWidth, Math.max(0, availableWidth() / s - d.detailMinChatWidth - d.detailGap)) * s;
@@ -1388,6 +1393,9 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     // Fixed ink geometry avoids font bearings/baselines moving the checkmark.
     const checkmark=JSON.stringify([{k:"p",c:cssColor(c.green),p:[[3,7,5,9,11,2,12,3,5,12,2,8].map(n=>n*s)]}]);
     const session = detailSession;
+    const goal=()=>state().goals[session()];
+    const goalSession=createMemo(()=>state().connection.phase==="connected"?session():"");
+    createEffect(()=>{const id=goalSession();if(id)void model.refreshSessionGoal(id).catch(model.report);});
     const context=createMemo(()=>sessionContextMetrics(session(),activeSelection().model||""));
     const usage=()=>context().usage;
     const todos = createMemo(() => sessionTodos(state().history[session()]||[],state().todos[session()]));
@@ -1412,6 +1420,13 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       {detailsLabel("Agent", (activeSelection().agent || "build").replace(/^./, (letter) => letter.toUpperCase()))}
       {detailsLabel("Model", activeSelection().model || "Default")}
       {detailsLabel("Reasoning", activeSelection().thinking || "none")}
+      <Show when={goal()}>{value=><>
+        <div style={{ height: 10 * s, flexShrink: 0 }} />
+        <PixelHeading>Goal</PixelHeading>
+        <Label size={12.35} color={value().status==="complete"?c.green:value().status==="blocked"?c.yellow:c.dim}>{value().paused?"Paused":value().status==="complete"?"Complete":value().status==="blocked"?"Blocked":"Active"}</Label>
+        <text testId="session-goal" style={{...text(14,c.fg),whiteSpace:"normal",flexShrink:0}}>{value().text}</text>
+        <Show when={value().summary}><text style={{...text(12.35,c.dim),whiteSpace:"normal",flexShrink:0}}>{value().summary}</text></Show>
+      </>}</Show>
       <Show when={usage()}>
         <div style={{ height: 10 * s, flexShrink: 0 }} />
         <PixelHeading>Usage</PixelHeading>

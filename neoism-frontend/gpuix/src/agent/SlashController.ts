@@ -250,7 +250,7 @@ export class SlashController{
    return {...option(name,description,name,label),mcp:{name,...entry}};
   }),async name=>{
    const entry=catalog[name];if(!entry)return;
-   const actions=[option(entry.runtimeConnected?"Disconnect":"Connect",name,entry.runtimeConnected?"disconnect":"connect"),option(entry.enabled?"Disable":"Enable",name,entry.enabled?"disable":"enable"),option("Tools",name,"tools"),option("Resources",name,"resources"),option("Prompts",name,"prompts")];
+   const actions=[option(entry.runtimeConnected?"Disconnect":"Connect",name,entry.runtimeConnected?"disconnect":"connect"),option(entry.enabled?"Disable":"Enable","Global preference",entry.enabled?"disable":"enable"),option("Tools",name,"tools"),option("Resources",name,"resources"),option("Prompts",name,"prompts")];
    if(entry.oauthCapable)actions.push(option("Authorize",name,"authorize"));
    const showActions=(activity?:SlashPickerRequest["activity"])=>this.picker(scope,"mcp-action",name,actions,async action=>{
     const directory=scope.directory;
@@ -259,7 +259,7 @@ export class SlashController{
     else if(action==="prompts")this.notice(scope,`${name} prompts`,await client.prompts(name,directory));
     else if(action==="authorize"){const auth=await client.startAuth(name,directory);this.assertCurrent(scope);if(this.options.hooks.openExternal)await this.options.hooks.openExternal(auth.authorizationUrl);
      await showActions({body:`Authorize ${name} in your browser, then return here.`,status:"Waiting for authorization…",busy:true,url:auth.authorizationUrl});}
-    else{if(action==="connect")await client.connect(name,directory);else if(action==="disconnect")await client.disconnect(name,directory);else await client.configure(name,{enabled:action==="enable"},directory);await this.mcpPicker(scope);}
+     else{if(action==="connect")await client.connect(name,directory);else if(action==="disconnect")await client.disconnect(name,directory);else await client.configure(name,{enabled:action==="enable",scope:"global"},directory);await this.mcpPicker(scope);}
    },undefined,{activity,mcpServer:name,mcpEntry:{name,...entry}});
    await showActions();
   });

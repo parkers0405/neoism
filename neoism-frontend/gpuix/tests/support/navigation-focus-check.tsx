@@ -16,6 +16,7 @@ import {createAgentDaemon} from "./agent-daemon";
 const directory=mkdtempSync(join(tmpdir(),"neoism-navigation-focus-")),path=join(directory,"config.json");
 const configuration={appearance:{fonts:{family:"Cascadia Code NF",size:14}},editor:{"vim-mode":true}};writeFileSync(path,JSON.stringify(configuration));process.argv.push("--config",path);
 const daemon=createAgentDaemon({configuration,deferCreations:false,fileReadDelayMs:25});daemon.files.set("code.rs","pub fn code() {}\n");daemon.files.set("second.rs","fn second() { let needle = 1; }\n");
+for(let i=0;i<60;i++)daemon.files.set(`zz-${String(i).padStart(2,"0")}.rs`, "");
 daemon.threads.push(...Array.from({length:100},(_,i)=>({...daemon.threads[0],session_id:`older-${i}`,title:`Older ${i}`})));
 // Isolate file/Agent focus and assert no implicit shells in passive Welcome mode.
 const config={...loadConfig(["--config",path],{}),terminalBlockUi:false,endpoint:daemon.endpoint,authToken:undefined,pairingToken:undefined,reducedMotion:true,cursorBlink:false,agentStars:false};
@@ -38,6 +39,16 @@ try{
  const code=host.find("code-editor")!,surface=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!,editor=model.getEditor(surface);editor.call("paste",{text:"// retained dirty bytes\n"});const dirty=editor.text();
  await until(()=>!host.find("chrome-focus-cursor:content"));
  stage="already open clicked file preserves host/editor/dirty document and returns the shared block cursor";await press("left",true);await until(()=>host.focused===sidebar().id&&!!host.find("chrome-focus-cursor:sidebar"));
+ stage="Alt-E close and reopen restores the sidebar cursor and arrow tracking";
+ await press("e",true);await until(()=>!host.find("file-tree")&&host.focused===code.id);
+ await press("e",true);await until(()=>host.focused===sidebar()?.id&&!!host.find("chrome-focus-cursor:sidebar"));
+ const treeCursorY=Number(host.find("chrome-focus-cursor:sidebar")!.style.top);
+ await press("down");await until(()=>Number(host.find("chrome-focus-cursor:sidebar")?.style.top)>treeCursorY+1);
+ for(let i=0;i<40;i++)await press("down");
+ await until(()=>!host.find("file:code.rs")&&!!host.find("chrome-focus-cursor:sidebar")&&!host.find("chrome-focus-cursor:sidebar")!.props["data-cursor-animating"]);
+ const treeBounds=host.renderer.getElementBounds!(sidebar().id)!,cursorTop=Number(host.find("chrome-focus-cursor:sidebar")!.style.top);
+ assert.ok(cursorTop>=treeBounds.y&&cursorTop<treeBounds.y+treeBounds.height,"Repeated Down must keep the cursor inside the scrolled Files viewport");
+ await press("home");await until(()=>!!host.find("file:code.rs")&&!!host.find("chrome-focus-cursor:sidebar"));
  const from=Number(host.find("chrome-focus-cursor:sidebar")!.style.left);await clickTree("code.rs");await until(()=>host.focused===code.id);
  const samples:number[]=[];for(let i=0;i<60;i++){const caret=host.find("chrome-focus-cursor:content");if(caret)samples.push(Number(caret.style.left));await pulse();if(i>4&&!host.find("chrome-focus-cursor:content"))break;}
  assert.ok(samples.length>=2,"shared cursor has continuous content travel frames");assert.ok(samples.some(x=>x>from+1&&x<340),"shared cursor traverses between sidebar and document");assert.equal(host.find("code-editor")!.id,code.id);assert.equal(model.getEditor(surface),editor);assert.equal(editor.text(),dirty);assert.equal(editor.frame.dirty,true);

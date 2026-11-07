@@ -1,6 +1,86 @@
 use super::*;
 
 #[tokio::test]
+async fn mcp_global_preferences_override_workspace_flags_without_promoting_transports() {
+    let root = std::env::temp_dir()
+        .join(format!("mcp-global-{}", Id::ascending(IdKind::Event)));
+    let user = root.join("user");
+    let first = root.join("first");
+    let second = root.join("second");
+    std::fs::create_dir_all(&user).unwrap();
+    let original_global = json!({"theme":"keep", "mcpEnabled":{"unrelated":false}});
+    std::fs::write(user.join("agent.json"), original_global.to_string()).unwrap();
+    let mut originals = Vec::new();
+    for (workspace, enabled) in [(&first, true), (&second, false)] {
+        std::fs::create_dir_all(workspace.join(".agent")).unwrap();
+        let path = workspace.join(".agent/agent.json");
+        let text = json!({"mcp":{"alpha":{
+            "type":"remote", "url":format!("https://{}.invalid", workspace.file_name().unwrap().to_str().unwrap()),
+            "headers":{"Authorization":"workspace-secret"}, "enabled":enabled
+        }}, "mcpEnabled":{"alpha": !enabled}, "theme":"project"}).to_string();
+        std::fs::write(&path, &text).unwrap();
+        originals.push((path, text));
+    }
+    let services = neoism_agent_service_api::AgentServices::new(
+        std::sync::Arc::new(neoism_agent_service_api::StandardExecutableService),
+        crate::standard_workspace_search(),
+    ).with_config(std::sync::Arc::new(
+        neoism_agent_service_api::StandardConfigSourceService::new(&user),
+    ));
+    let state = AppState::open_database_with_services(root.join("agent.db"), services).await.unwrap();
+    let router = app(state.clone());
+    // Warm both workspaces so publication also exercises cached generations.
+    for workspace in [&first, &second] {
+        state.refreshed_plugin_snapshot(workspace.to_str().unwrap()).await;
+    }
+    for enabled in [false, true] {
+        let patched: Value = response_json(router.clone().oneshot(request(
+            Method::PATCH,
+            &format!("/v2/plugins/dev.neoism.mcp/alpha/config?directory={}", first.display()),
+            Some(json!({"enabled":enabled,"scope":"global"})),
+        )).await.unwrap()).await;
+        assert_eq!(patched["enabled"], enabled);
+        for workspace in [&first, &second] {
+            let current: Value = response_json(router.clone().oneshot(request(
+                Method::GET,
+                &format!("/v2/plugins/dev.neoism.mcp/catalog?directory={}", workspace.display()),
+                None,
+            )).await.unwrap()).await;
+            assert_eq!(current["alpha"]["enabled"], enabled);
+            let config = crate::config::load(state.services(), workspace.to_str().unwrap()).unwrap();
+            let transport = serde_json::to_value(&config.info.mcp["alpha"]).unwrap();
+            assert_eq!(transport["headers"]["Authorization"], "workspace-secret");
+            assert_eq!(transport["url"], format!("https://{}.invalid", workspace.file_name().unwrap().to_str().unwrap()));
+        }
+        let saved: Value = serde_json::from_slice(&std::fs::read(user.join("agent.json")).unwrap()).unwrap();
+        assert_eq!(saved, json!({"theme":"keep","mcpEnabled":{"alpha":enabled,"unrelated":false}}));
+        for (path, text) in &originals {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+        }
+    }
+    // Builtins need only a preference too, not a persisted synthetic transport.
+    let builtin: Value = response_json(router.clone().oneshot(request(
+        Method::PATCH,
+        &format!("/v2/plugins/dev.neoism.mcp/computer/config?directory={}", first.display()),
+        Some(json!({"enabled":false,"scope":"global"})),
+    )).await.unwrap()).await;
+    assert_eq!(builtin["enabled"], false);
+    let saved = std::fs::read(user.join("agent.json")).unwrap();
+    let persisted: Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(persisted["mcpEnabled"]["computer"], false);
+    assert!(persisted.get("mcp").is_none());
+    let rejected = router.clone().oneshot(request(
+        Method::PATCH,
+        &format!("/v2/plugins/dev.neoism.mcp/unknown/config?directory={}", first.display()),
+        Some(json!({"enabled":false,"scope":"global"})),
+    )).await.unwrap();
+    assert!(!rejected.status().is_success());
+    assert_eq!(std::fs::read(user.join("agent.json")).unwrap(), saved);
+    state.inner.store.close().await;
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn mcp_routed_patch_publishes_before_immediate_get() {
     let root = std::env::temp_dir()
         .join(format!("mcp-publish-{}", Id::ascending(IdKind::Event)));

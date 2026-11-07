@@ -33,6 +33,21 @@ test("command navigation and scrolling use the existing selection and cursor spr
   commands.query("Write File"); expect(commands.target()?.action).toBe("SaveDocument");
   commands.select(0); expect(commands.target()?.action).toBe("SaveDocument");
 });
+test("scroll and selection retain catalog rows while updating the accepted command", () => {
+  const commands = palette({ surface: "file" });
+  const rows = commands.frame.rows;
+  for (const update of [() => commands.move(2), () => commands.select(4), () => commands.scroll(-132)]) {
+    update();
+    expect(commands.frame.rows).toBe(rows);
+    const full = coreCall<any>("commands.frame", { id: commands.id });
+    expect(commands.frame.selected).toBe(full.selected);
+    expect(commands.frame.top).toBe(full.top);
+    expect(commands.target()).toEqual(full.target || undefined);
+  }
+  commands.query("Write File");
+  expect(commands.frame.rows).not.toBe(rows);
+  expect(commands.frame.rows[0].action).toBe("SaveDocument");
+});
 test("binding action aliases come from the desktop parser, including dynamic forms", () => {
   const aliases = coreCall<Record<string, string>>("commands.action-aliases"); expect(Object.keys(aliases).length).toBeGreaterThan(50);
   const parse = (action: string) => coreCall<KeyboardAction>("commands.parse-action", { action });

@@ -66,6 +66,9 @@ pub struct AgentConfigDocument {
     pub lsp: LspConfig,
     #[serde(default)]
     pub mcp: BTreeMap<String, McpConfig>,
+    /// Installation-only enabled preferences, applied after workspace MCP settings.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_enabled: BTreeMap<String, bool>,
     #[serde(default)]
     pub permission: BTreeMap<String, Value>,
     /// `neoism --dangerously-skip-permissions`, as a config key: every
@@ -82,6 +85,20 @@ pub struct AgentConfigDocument {
     pub experimental: ExperimentalConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
+}
+
+impl AgentConfigDocument {
+    pub fn apply_mcp_enabled_preferences(&mut self) {
+        for (name, preference) in &self.mcp_enabled {
+            if let Some(config) = self.mcp.get_mut(name) {
+                match config {
+                    McpConfig::Local { enabled, .. } | McpConfig::Remote { enabled, .. } => {
+                        *enabled = Some(*preference);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Optional fields allow model and agent policies to inherit individual settings.

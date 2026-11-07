@@ -722,6 +722,35 @@ mod tests {
             .any(|layer| layer.source_id == PROJECT_SOURCE));
     }
 
+    #[tokio::test]
+    async fn installation_mcp_preference_writes_only_global_gui_config() {
+        let fixture = MigrationFixture::new("mcp-preference");
+        let global = fixture.0.join("user");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(fixture.0.join(".neoism")).unwrap();
+        std::fs::write(global.join("config.json"), r#"{"appearance":{"theme":"keep"},"agent":{"model":"keep/model"}}"#).unwrap();
+        let project = fixture.0.join(".neoism/mcp.json");
+        let original = r#"{"alpha":{"command":["private-command"],"enabled":true}}"#;
+        std::fs::write(&project, original).unwrap();
+        let service = fixture.service();
+        let installation = service.snapshot(&ConfigSnapshotRequest::installation()).unwrap();
+        assert_eq!(installation.writable_target.source_id, GUI_SOURCE);
+        service.update(&ConfigUpdateRequest {
+            workspace: installation.workspace,
+            source_id: installation.writable_target.source_id,
+            update: ConfigUpdate::SetValue {
+                path: vec!["mcpEnabled".into(), "alpha".into()],
+                value: json!(false),
+            },
+        }).await.unwrap();
+        let saved = NeoismConfigSourceService::read(&global.join("config.json")).unwrap();
+        assert_eq!(saved, json!({"appearance":{"theme":"keep"},"agent":{"model":"keep/model","mcpEnabled":{"alpha":false}}}));
+        assert_eq!(std::fs::read_to_string(&project).unwrap(), original);
+        assert!(!fixture.0.join(".neoism/config.json").exists());
+        let snapshot = service.snapshot(&ConfigSnapshotRequest::new(&fixture.0)).unwrap();
+        assert_eq!(snapshot.layers[0].document["mcpEnabled"]["alpha"], false);
+    }
+
     #[test]
     fn snapshots_without_a_legacy_file_never_probe_git() {
         let fixture = MigrationFixture::new("no-legacy");

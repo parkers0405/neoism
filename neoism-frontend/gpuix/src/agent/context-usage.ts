@@ -15,9 +15,12 @@ export const compactTokenCount=(n:number)=>n>=1_000_000?`${(n/1_000_000).toFixed
  * limits take precedence over catalog limits (e.g. account-specific windows). */
 export function contextMetrics(history:readonly HistoryMessage[],live:Usage|undefined,providerState:ProviderState|undefined,providers:readonly Provider[],selectedModel:string){
  const usage=contextUsage(history,live),slash=selectedModel.indexOf("/");
- const catalog=providers.find(provider=>provider.id===selectedModel.slice(0,slash))?.models?.find(model=>model.id===selectedModel.slice(slash+1));
- const candidate=providerState?.context_limit||catalog?.context_limit||usage?.context_limit;
- const limit=candidate&&Number.isFinite(candidate)&&candidate>0?candidate:undefined;
+ const models=providers.find(provider=>provider.id===selectedModel.slice(0,slash))?.models;
+ const modelId=selectedModel.slice(slash+1);
+ // Sessions may retain a wire ID while the configured catalog uses an alias.
+ // Prefer exact IDs so an alias cannot override an explicitly configured model.
+ const catalog=models?.find(model=>model.id===modelId)||models?.find(model=>model.aliases?.includes(modelId));
+ const limit=[providerState?.context_limit,catalog?.context_limit,usage?.context_limit].find((candidate):candidate is number=>typeof candidate==="number"&&Number.isFinite(candidate)&&candidate>0);
  const total=usage?.total??(usage?.input||0)+(usage?.output||0);
  const percent=limit?Math.round(total/limit*100):undefined;
  return {usage,limit,total,percent,

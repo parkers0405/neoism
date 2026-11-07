@@ -8,6 +8,29 @@ pub(crate) enum ExternalRuntime {
 }
 
 impl ExternalRuntime {
+    pub(crate) fn native_driver_id(self) -> &'static str {
+        match self {
+            Self::Codex => "codex-app-server",
+            Self::Claude => "claude-agent-sdk",
+            Self::OpenCode => "opencode-server",
+        }
+    }
+
+    /// Ownership is explicit. Observed provider children are never resumable tasks.
+    pub(crate) fn owns_session(self, session: &SessionInfo) -> bool {
+        session.extra.get("externalAgent").is_some_and(|extra| {
+            extra["provider"] == self.provider_id()
+                && extra["nested"] != true
+                && extra["nativeProjection"] != true
+                && extra["runtime"].as_str().is_some_and(|driver| {
+                    driver == self.native_driver_id() || driver == "acp"
+                })
+        })
+    }
+
+    pub(crate) fn is_legacy_session(self, session: &SessionInfo) -> bool {
+        self.owns_session(session) && session.extra["externalAgent"]["runtime"] == "acp"
+    }
     pub(crate) fn resolve(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "opencode" | "open-code" => Some(Self::OpenCode),
@@ -54,13 +77,21 @@ impl ExternalRuntime {
                 PathBuf::from(cwd),
             )
             .args(["acp", "--cwd", cwd]),
-            Self::Codex => package_acp_config(
-                services,
-                "codex",
-                "Codex",
-                "@agentclientprotocol/codex-acp@1.13.1",
-                cwd,
-            )?,
+            Self::Codex => {
+                let mut config = package_acp_config(
+                    services,
+                    "codex",
+                    "Codex",
+                    "@agentclientprotocol/codex-acp@1.13.1",
+                    cwd,
+                )?;
+                if std::env::var_os("CODEX_PATH").is_none() {
+                    if let Some(path) = resolve_runtime_path(services, "codex") {
+                        config.env.push(("CODEX_PATH".to_string(), path));
+                    }
+                }
+                config
+            }
             Self::Claude => {
                 let mut config = package_acp_config(
                     services,
@@ -143,26 +174,43 @@ fn resolve_runtime_path(
         .map(|result| result.path.to_string_lossy().into_owned())
 }
 
-/// Only root sessions explicitly created as ACP chats are routed here.
+/// Only explicitly owned roots are routed here; never infer a protocol from a model.
 pub(crate) fn root_runtime(session: &SessionInfo) -> Option<ExternalRuntime> {
     if session.parent_id.is_some() {
         return None;
     }
     let extra = session.extra.get("externalAgent")?;
-    if extra.get("runtime")?.as_str()? != "acp" {
-        return None;
-    }
-    match extra.get("provider")?.as_str()? {
+    let runtime = match extra.get("provider")?.as_str()? {
         "opencode" => Some(ExternalRuntime::OpenCode),
         "claude" => Some(ExternalRuntime::Claude),
         "codex" => Some(ExternalRuntime::Codex),
         _ => None,
-    }
+    }?;
+    runtime.owns_session(session).then_some(runtime)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_adapter_prefers_host_cli_without_overriding_explicit_path() {
+        let mut services = crate::standard_services();
+        let codex = if cfg!(windows) { r"C:\neoism\codex\codex.exe" } else { "/neoism/codex/bin/codex" };
+        let npx = if cfg!(windows) { r"C:\neoism\node\npx.cmd" } else { "/neoism/node/bin/npx" };
+        services.executables = Arc::new(
+            crate::executable::test_support::FakeExecutableService::with("npx", npx)
+                .with_path("codex", codex),
+        );
+        let config = ExternalRuntime::Codex.acp_config(".", &services).unwrap();
+        assert_eq!(config.command, npx);
+        let override_path = config.env.iter().find_map(|(name, value)| (name == "CODEX_PATH").then_some(value.as_str()));
+        if std::env::var_os("CODEX_PATH").is_some() {
+            assert_eq!(override_path, None, "preserve the inherited explicit override");
+        } else {
+            assert_eq!(override_path, Some(codex));
+        }
+    }
 
     #[test]
     fn package_adapter_uses_resolved_npx_and_prepends_its_node_bin() {

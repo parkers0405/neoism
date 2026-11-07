@@ -5,7 +5,7 @@ fn view(source:&str)->View {
     let mut pane=NeoismAgentPane::new();pane.set_session_id(Some("json-session".into()));pane.set_text_reveal_enabled(false);
     let event:AgentServerMessage=serde_json::from_value(json!({"HistoryChunk":{"session_id":"json-session","messages":[{"id":"json-message","role":"Assistant","kind":"Assistant","text":format!("```json-render\n{source}\n```")}],"next_cursor":null}})).unwrap();
     apply_agent_event_to_pane(&mut pane,event);
-    View{visible:true,preparation_scope:987654,preparing:false,scroll_trace:None,compact_paint:false,canvas_paint:false,chunked_paint:false,font_family:"monospace".into(),font_weight:400,pane,painter:RecordingPainter::new("monospace",400,vec![]),session_id:"json-session".into(),width:700.0,height:1000.0,content_bottom:900.0,scale:1.0,theme:"dark".into(),mouse:None,selecting:false,selection:None,scrollbar_drag:false,horizontal_drag:false}
+    View{visible:true,preparation_scope:987654,preparing:false,scroll_trace:None,compact_paint:false,canvas_paint:false,chunked_paint:false,font_family:"monospace".into(),font_weight:400,pane,painter:RecordingPainter::new("monospace",400,vec![]),session_id:"json-session".into(),width:700.0,height:1000.0,content_bottom:900.0,scale:1.0,theme:"dark".into(),mouse:None,selecting:false,selection:None,scrollbar_drag:false,horizontal_drag:false,inner_scroll_focus:None,inner_scroll_drag:None}
 }
 fn ready(view:&mut View)->Value {let mut m=frame(view);for _ in 0..8 {if !view.preparing {break;}m=frame(view);}m}
 fn local_source()->String {json!({"root":"c","elements":{

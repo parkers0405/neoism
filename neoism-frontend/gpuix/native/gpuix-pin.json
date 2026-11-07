@@ -38,9 +38,10 @@
   "defaultFeatures": false,
   "jobs": 2,
   "zedPatch": "native/patches/gpui-wayland-vsync.patch",
-  "zedPatchSha256": "607b497e4a10ddaca445b716c2f48809afd1d0754727bb460168fe0b724b5db8",
+  "zedPatchSha256": "58da7b83935b5778eceae7987eeec8f57e1712f4eb778ce01adc156ed6caa18e",
   "zedPatchedFiles": {
-    "README.md": "7b3d348fc07873bcfa7b244fb2a2225a9f07f4eb3508822879196edc6bf333ea",
+    "README.md": "3df29780fcbda8a4445fdd7714c9c3558980bac57b1de8c71d0958bdbdc46552",
+    "crates/gpui_windows/src/window.rs": "dea345c0bda30532def2d1cd2244455c9ed8353c0a8ca8eef3c91db0f60c0c21",
     "crates/gpui_linux/src/linux/wayland/window.rs": "97ac391a92fab08c54cbe78e7c0565e90f97ea8c3b0e8b66c7bf9f442c2f6e8b",
     "crates/gpui_linux/src/linux/wayland/client.rs": "69bf57ad45195cd6cf2230f28a1dc67d8da7bf2b7c939c178b24dda7e3e6c948",
     "crates/gpui_linux/src/gpui_linux.rs": "b7e10caab668d5e23dca9312bf4135db9def879947eac608bd8d2a03497d8147",

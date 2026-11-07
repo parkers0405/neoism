@@ -6,12 +6,87 @@ fn busy() -> Value {
 }
 
 #[tokio::test]
+async fn attaching_stream_forwards_output_while_interactions_are_loading() {
+    use futures::StreamExt;
+    let fetched = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let fetched_handler = fetched.clone();
+    let release_handler = release.clone();
+    let app = axum::Router::new()
+        .route("/v2/health", axum::routing::get(|| async {
+            axum::Json(json!({"healthy":true,"version":"test","providerCredentialStore":"test"}))
+        }))
+        .route("/v2/events", axum::routing::get(|| async {
+            let events = [
+                json!({"type":"message.part.delta","data":{
+                    "sessionID":"child","messageID":"message","partID":"part","field":"text","delta":"Already working"
+                }}),
+                json!({"type":"question.asked","data":{
+                    "id":"live-question","sessionID":"root","questions":[{"question":"Proceed?"}]
+                }}),
+            ].map(|value| Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(value.to_string())));
+            axum::response::Sse::new(futures::stream::iter(events).chain(futures::stream::pending()))
+        }))
+        .route("/v2/sessions/root/runtime", axum::routing::get(|| async {
+            axum::Json(json!({"rootSessionId":"root","branches":[]}))
+        }))
+        .route("/v2/interactions/questions", axum::routing::get(move || {
+            let fetched = fetched_handler.clone();
+            let release = release_handler.clone();
+            async move {
+                fetched.notify_one();
+                release.notified().await;
+                axum::Json(json!([]))
+            }
+        }))
+        .route("/v2/interactions/permissions", axum::routing::get(|| async { axum::Json(json!([])) }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (tx, mut rx) = reply_queue::channel();
+    let mut session = AgentSession::spawn(Some("test".into()), String::new(), tx);
+    let inner = Arc::get_mut(&mut session.inner).unwrap();
+    inner.agent_server = format!("http://{address}");
+    inner.agent_http = reqwest::Client::builder().no_proxy().build().unwrap();
+    events::start_event_stream(&session.inner, "root");
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        fetched.notified().await;
+        loop {
+            if let AgentServerMessage::ContentDelta { session_id, text, .. } = rx.recv().await.unwrap() {
+                assert_eq!(session_id, "child");
+                assert_eq!(text, "Already working");
+                break;
+            }
+        }
+        release.notify_one();
+        let mut snapshot = false;
+        loop {
+            match rx.recv().await.unwrap() {
+                AgentServerMessage::QuestionsUpdated { requests, .. } => { assert!(requests.is_empty()); snapshot = true; }
+                AgentServerMessage::QuestionAsked { request, .. } => {
+                    assert!(snapshot, "replay live interactions after their baseline, not before it");
+                    assert_eq!(request["id"], "live-question");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }).await;
+    events::stop_event_stream(&session.inner, "root");
+    server.abort();
+    result.expect("live child output must not wait for pending interaction HTTP reads");
+}
+
+#[tokio::test]
 async fn reconnect_recovers_family_questions_empty_snapshots_and_permissions() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let connections = Arc::new(AtomicUsize::new(0));
     let stream_connections = connections.clone();
     let question_connections = connections.clone();
     let app = axum::Router::new()
+        .route("/v2/health", axum::routing::get(|| async {
+            axum::Json(json!({"healthy":true,"version":"test","providerCredentialStore":"test"}))
+        }))
         .route("/v2/events", axum::routing::get(move || {
             stream_connections.fetch_add(1, Ordering::SeqCst);
             async { ([("content-type", "text/event-stream")], ": connected\n\n") }

@@ -14,6 +14,56 @@ pub const ISSUER: &str = "neoism-workspace-daemon";
 pub const AUDIENCE: &str = "neoism-agent-server";
 pub const PREFIX: &str = "neoism-daemon-v1";
 pub const MAX_LIFETIME_SECS: i64 = 120;
+pub const AGENT_SIGNING_KEY_ENV: &str = "NEOISM_AGENT_SIGNING_KEY";
+
+/// One trust-root path for the desktop, temporary hosts, and Agent verifier.
+/// Product config/data directories are deliberately not involved.
+pub fn canonical_daemon_token_path() -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+            return std::path::PathBuf::from(runtime).join("neoism/daemon-token");
+        }
+        std::env::temp_dir()
+            .join(format!("neoism-{}", unsafe { libc::geteuid() }))
+            .join("daemon-token")
+    }
+    #[cfg(not(unix))]
+    {
+        windows_daemon_token_path(&std::env::temp_dir(), std::env::var("USERNAME").ok().as_deref())
+    }
+}
+
+pub fn windows_daemon_token_path(temp: &std::path::Path, username: Option<&str>) -> std::path::PathBuf {
+    let user = username.filter(|name| !name.is_empty()).map(|name| {
+        name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>()
+    }).unwrap_or_else(|| "default".into());
+    temp.join(format!("neoism-{user}")).join("daemon-token")
+}
+
+/// A hosted daemon's transport password is not an Agent signing authority.
+/// Capture the parent's Agent authority before replacing that password.
+pub fn agent_signing_key() -> Option<String> {
+    signing_key_from_sources(
+        &canonical_daemon_token_path(),
+        std::env::var(AGENT_SIGNING_KEY_ENV).ok(),
+        std::env::var("NEOISM_DAEMON_TOKEN").ok(),
+        std::env::var("NEOISM_FAST_SERVER").as_deref() == Ok("1"),
+    )
+}
+
+fn signing_key_from_sources(
+    path: &std::path::Path,
+    shared: Option<String>,
+    transport: Option<String>,
+    fast: bool,
+) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| shared.filter(|key| !key.trim().is_empty()))
+        .or_else(|| if fast { None } else { transport.filter(|key| !key.trim().is_empty()) })
+        .map(|key| key.trim().to_owned())
+}
 
 pub const SYSTEM_WORKFLOW_VERSION: u32 = 1;
 pub const SYSTEM_WORKFLOW_SUBJECT: &str = "daemon:system-workflow";
@@ -298,6 +348,36 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_host_keeps_agent_authority_separate_from_transport_password() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon-token");
+        let shared = Some("shared-agent-key".to_owned());
+        let transport = Some("private-host-password".to_owned());
+        let key = signing_key_from_sources(&path, shared, transport.clone(), true).unwrap();
+        let claims = DaemonCredentialClaims::new(
+            "neoism:host-chat-association", "host", "workspace:host",
+            vec![temp.path().to_string_lossy().into_owned()], true, 100, 60,
+        ).unwrap();
+        let credential = issue(&claims,key.as_bytes()).unwrap();
+        assert_eq!(verify(&credential,b"shared-agent-key",110).unwrap(),claims);
+        assert!(verify(&credential,b"private-host-password",110).is_err());
+        assert!(signing_key_from_sources(&path,None,transport.clone(),true).is_none());
+        // Ordinary home daemons may have an operator-supplied, nonpersisted key.
+        assert_eq!(signing_key_from_sources(&path,None,transport.clone(),false),transport);
+        // Keep following live key-file rotations instead of a captured old key.
+        std::fs::write(&path,"rotated-agent-key\n").unwrap();
+        assert_eq!(signing_key_from_sources(&path,Some(key),transport,true).as_deref(),Some("rotated-agent-key"));
+    }
+
+    #[test]
+    fn windows_agent_key_is_independent_of_roaming_product_config() {
+        let temp = std::path::Path::new("C:/Users/test/AppData/Local/Temp");
+        assert_eq!(windows_daemon_token_path(temp,Some("chandler")),temp.join("neoism-chandler/daemon-token"));
+        assert_eq!(windows_daemon_token_path(temp,Some("User Name!")),temp.join("neoism-User-Name-/daemon-token"));
+        assert_eq!(windows_daemon_token_path(temp,None),temp.join("neoism-default/daemon-token"));
+    }
 
     #[test]
     fn system_workflow_is_explicit_unscoped_short_lived_and_fail_closed() {

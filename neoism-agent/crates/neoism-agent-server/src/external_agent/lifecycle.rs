@@ -49,6 +49,22 @@ pub(crate) async fn execute_external_task(
     background: bool,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<tool::ToolExecutionResult, String> {
+    execute_external_task_with_options(state, parent, agent_name, command, description, prompt, task_id, background, cancel, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_external_task_with_options(
+    state: &AppState,
+    parent: &SessionInfo,
+    agent_name: &str,
+    command: &str,
+    description: &str,
+    prompt: String,
+    task_id: Option<String>,
+    background: bool,
+    cancel: Option<Arc<AtomicBool>>,
+    external_options: Option<BTreeMap<String, String>>,
+) -> Result<tool::ToolExecutionResult, String> {
     if !crate::caller::native_execution_allowed(&crate::caller::session_execution_policy(
         state.services(),
         parent,
@@ -58,7 +74,7 @@ pub(crate) async fn execute_external_task(
     let runtime = ExternalRuntime::resolve(agent_name)
         .ok_or_else(|| format!("Unknown external agent type: {agent_name}"))?;
     let continuing = task_id.is_some();
-    let child = match task_id.as_deref() {
+    let mut child = match task_id.as_deref() {
         Some(task_id) => {
             let child = state
                 .inner
@@ -68,11 +84,7 @@ pub(crate) async fn execute_external_task(
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("task_id {task_id} not found"))?;
             ensure_child_task_belongs_to_parent(parent, &child)?;
-            if !child.extra.get("externalAgent").is_some_and(|external| {
-                external["runtime"] == "acp"
-                    && external["provider"] == runtime.provider_id()
-                    && external["nested"] != true
-            }) {
+            if !runtime.owns_session(&child) {
                 return Err(format!(
                     "task_id {task_id} is not a Neoism-managed {} task; continue it with its original subagent_type. Provider-native nested tasks cannot be independently resumed.",
                     runtime.display_name()
@@ -91,6 +103,18 @@ pub(crate) async fn execute_external_task(
             "task_id {} is still running; the follow-up prompt was not submitted. Wait for completion or stop_task before continuing the same external session.",
             child.id
         ));
+    }
+
+    if let Some(choices) = external_options {
+        if runtime.is_legacy_session(&child) {
+            return Err("external_options targets native tasks only; legacy ACP selection must use its original options interface".into());
+        }
+        if choices.len() > 256 { return Err("Too many external_options".into()); }
+        let metadata = child.extra.get_mut("externalAgent").expect("owned child metadata");
+        let mut requested = metadata["nativeOptions"].as_object().cloned().unwrap_or_default();
+        for (key, value) in choices { requested.insert(key, json!(value)); }
+        metadata["nativeOptions"] = json!(requested);
+        state.inner.store.update_session(&child).await.map_err(|error| error.to_string())?;
     }
 
     if background {
@@ -132,7 +156,7 @@ pub(crate) async fn execute_external_task(
         return Ok(tool::ToolExecutionResult {
             title: description.to_string(),
             output: task_started_output(child.id.as_str()),
-            metadata: Some(task_metadata(child.id.as_str(), runtime, "running", true)),
+            metadata: Some(task_metadata(&child, runtime, "running", true)),
         });
     }
 
@@ -172,7 +196,7 @@ pub(crate) async fn execute_external_task(
                     assistant_text(&message).unwrap_or_default(),
                 ),
                 metadata: Some(task_metadata(
-                    child.id.as_str(),
+                    &child,
                     runtime,
                     "completed",
                     false,
@@ -221,7 +245,7 @@ pub(super) async fn create_external_subtask_session(
     extra.insert(
         "externalAgent".to_string(),
         json!({
-            "runtime": "acp",
+            "runtime": runtime.native_driver_id(),
             "provider": runtime.provider_id(),
             "agent": runtime.agent_name(),
             "status": "created",
@@ -538,9 +562,13 @@ async fn run_external_subtask_prompt_with_cancel(
         let activity_segment =
             crate::execution_activity::begin_provider_segment(state, child.id.as_str())
                 .await;
-        let acp_result =
-            run_acp_prompt(state, &child, prompt, runtime, &step, &model, cancellation)
-                .await;
+        let acp_result = if runtime.is_legacy_session(&child) {
+            run_acp_prompt(state, &child, prompt, runtime, &step, &model, cancellation).await
+        } else if runtime.owns_session(&child) {
+            super::native::run_native_prompt(state, &child, prompt, runtime, &step, &model, cancellation).await
+        } else {
+            Err("External conversation driver ownership is invalid".into())
+        };
         crate::execution_activity::end_provider_segment(activity_segment).await;
         match acp_result {
             Ok(result) => {

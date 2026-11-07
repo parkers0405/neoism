@@ -40,6 +40,8 @@ mod events;
 mod helpers;
 #[path = "external_agent/lifecycle.rs"]
 mod lifecycle;
+#[path = "external_agent/native.rs"]
+pub(crate) mod native;
 #[path = "external_agent/options.rs"]
 pub(crate) mod options;
 pub(crate) use options::{external_options_get, external_options_set};

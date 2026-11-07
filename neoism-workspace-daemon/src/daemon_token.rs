@@ -178,44 +178,12 @@ pub fn accepted_daemon_tokens() -> Vec<String> {
 }
 
 pub fn daemon_token_path() -> PathBuf {
-    #[cfg(unix)]
-    {
-        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-            let path = PathBuf::from(runtime);
-            if !path.as_os_str().is_empty() {
-                return path.join("neoism").join("daemon-token");
-            }
-        }
-        let uid = unsafe { libc::geteuid() };
-        std::env::temp_dir()
-            .join(format!("neoism-{uid}"))
-            .join("daemon-token")
-    }
-
-    #[cfg(windows)]
-    {
-        // This is also the signing key for credentials sent to the shared
-        // Agent. It MUST match desktop::embedded_daemon_token_path and
-        // agent_server::caller::canonical_daemon_token_from_disk. Using
-        // dirs::data_dir here made hosted children fall back to their private
-        // password/Fast master token, which the shared Agent cannot verify.
-        windows_daemon_token_path(std::env::var("USERNAME").ok().as_deref())
-    }
+    neoism_agent_service_api::daemon_credential::canonical_daemon_token_path()
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 fn windows_daemon_token_path(username: Option<&str>) -> PathBuf {
-    let user = username
-        .filter(|name| !name.is_empty())
-        .map(|name| {
-            name.chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect::<String>()
-        })
-        .unwrap_or_else(|| "default".to_string());
-    std::env::temp_dir()
-        .join(format!("neoism-{user}"))
-        .join("daemon-token")
+    neoism_agent_service_api::daemon_credential::windows_daemon_token_path(&std::env::temp_dir(), username)
 }
 
 #[cfg(test)]

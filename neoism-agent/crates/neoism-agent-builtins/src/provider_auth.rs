@@ -136,7 +136,15 @@ pub async fn callback(
         }
         ProviderAuthMethodKind::OAuth => {
             if provider_id == "openai" && method.label.contains("browser") {
-                let auth = exchange_openai_browser(pending_key, pending).await?;
+                let device_fallback = matches!(
+                    pending.read().await.get(pending_key),
+                    Some(ProviderOAuthPending::OpenAiHeadless { .. })
+                );
+                let auth = if device_fallback {
+                    poll_openai_headless(pending_key, pending).await?
+                } else {
+                    exchange_openai_browser(pending_key, pending).await?
+                };
                 return Ok(auth);
             }
             if provider_id == "openai" && method.label.contains("headless") {

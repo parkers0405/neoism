@@ -332,7 +332,7 @@ async fn create_session_in_directory_inner(
     };
     if external.is_some() && state.services().shared_control_plane() {
         return Err(ApiError::forbidden(
-            "ACP chats use host-owned provider credentials and are unavailable in hosted workspaces",
+            "External native chats use host-owned provider credentials and are unavailable in hosted workspaces",
         ));
     }
     if external.is_some() && request.parent_id.is_some() {
@@ -344,7 +344,7 @@ async fn create_session_in_directory_inner(
         && (external.is_none() || request.parent_id.is_some() || pending_import.is_some())
     {
         return Err(ApiError::bad_request(
-            "externalOptions requires a new external ACP root",
+            "externalOptions requires a new external native root",
         ));
     }
     if external.is_some()
@@ -356,13 +356,13 @@ async fn create_session_in_directory_inner(
                 .is_some_and(|tenant| tenant != "local"))
     {
         return Err(ApiError::forbidden(
-            "Host-native ACP requires the local operator",
+            "Host-native external agents require the local operator",
         ));
     }
     if let Some(runtime) = external {
         extra.insert("externalAgent".into(), json!({
-            "provider": runtime.provider_id(), "runtime": "acp",
-            "agent": runtime.agent_name(), "status": "created", "externalSessionId": null,
+            "provider": runtime.provider_id(), "runtime": runtime.native_driver_id(),
+            "agent": runtime.agent_name(), "status": "created", "nativeSessionId": null,
             "historyState": "neoism_only"
         }));
     }
@@ -392,25 +392,16 @@ async fn create_session_in_directory_inner(
     .map_err(|error| {
         ApiError::internal(format!("directory discovery failed: {error}"))
     })??;
-    if let (Some(runtime), Some(choices)) = (external, request.external_options.take()) {
-        let draft = crate::external_agent::options::validate_draft(
-            state,
-            runtime,
-            &directory.to_string_lossy(),
-            choices,
-        )
-        .await?;
+    if let (Some(_runtime), Some(choices)) = (external, request.external_options.take()) {
+        if choices.len() > 256 {
+            return Err(ApiError::bad_request("Too many external options"));
+        }
         let metadata = extra
             .get_mut("externalAgent")
             .expect("external root metadata");
-        for key in [
-            "selectedOptions",
-            "configOptions",
-            "modeFallback",
-            "optionsValid",
-        ] {
-            metadata[key] = draft[key].clone();
-        }
+        // Pending selection is validated and provider-confirmed by the native runner,
+        // after all session/directory admissions. Never replay ACP for a new root.
+        metadata["nativeOptions"] = json!(choices);
     }
     if state
         .services()
@@ -619,6 +610,7 @@ pub(crate) async fn session_delete(
         None => None,
     };
     crate::interaction::cancel_session_interactions(&state, &session_id).await;
+    crate::external_agent::native::close_session(&state, &session_id).await;
     if !state.inner.store.delete_session(&session_id).await? {
         return Err(ApiError::not_found("Session not found"));
     }
@@ -1303,8 +1295,9 @@ mod directory_tests {
             .unwrap();
             assert!(created.parent_id.is_none());
             assert_eq!(created.extra["externalAgent"]["provider"], provider);
-            assert_eq!(created.extra["externalAgent"]["runtime"], "acp");
-            assert!(created.extra["externalAgent"]["externalSessionId"].is_null());
+            let runtime = crate::external_agent::ExternalRuntime::resolve(provider).unwrap();
+            assert_eq!(created.extra["externalAgent"]["runtime"], runtime.native_driver_id());
+            assert!(created.extra["externalAgent"]["nativeSessionId"].is_null());
             let loaded = state
                 .inner
                 .store

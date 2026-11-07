@@ -118,6 +118,12 @@ async fn handle_acp_session_update(
         .get("sessionUpdate")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    #[cfg(test)]
+    if std::env::var_os("NEOISM_ACP_TEST_TOOL_TRACE").is_some()
+        && matches!(kind, "tool_call" | "tool_call_update")
+    {
+        eprintln!("ACP_TEST_TOOL {update}");
+    }
     if std::env::var_os("NEOISM_ACP_EVENT_KIND_LOG").is_some() {
         let logged_kind = match kind {
             "user_message_chunk" => "user_message_chunk",
@@ -157,7 +163,8 @@ async fn handle_acp_session_update(
                 }
             }
         }
-        "agent_message_chunk" => {
+        "agent_message_chunk" | "agent_thought_chunk" => {
+            let reasoning = kind == "agent_thought_chunk";
             let delta = update
                 .get("content")
                 .and_then(|content| content.get("text"))
@@ -171,39 +178,81 @@ async fn handle_acp_session_update(
                 // Pinned adapters give user and assistant turns distinct stable
                 // message IDs. Only suppress an exact prompt echo mislabeled
                 // as an assistant chunk with the *same user message ID*.
-                if echo_of_user_chunk(&mut collector, update["messageId"].as_str(), delta)
+                if !reasoning
+                    && echo_of_user_chunk(
+                        &mut collector,
+                        update["messageId"].as_str(),
+                        delta,
+                    )
                 {
                     return Ok(());
                 }
-                collector.text.push_str(delta);
+                if !reasoning {
+                    collector.text.push_str(delta);
+                }
+            }
+            let continuing = {
+                let message = ctx.live_message.lock().await;
+                matches!(message.parts.last(), Some(Part::Text(text)) if !reasoning && text.time.as_ref().is_some_and(|time| time.end.is_none()))
+                    || matches!(message.parts.last(), Some(Part::Reasoning(text)) if reasoning && text.time.end.is_none())
+            };
+            if !continuing {
+                finish_acp_text_parts(&ctx.state, &ctx.child_id, &ctx.live_message)
+                    .await?;
             }
             let (part_id, inserted) = {
                 let mut message = ctx.live_message.lock().await;
-                if let Some(Part::Text(text)) = message.parts.last_mut() {
+                if continuing && reasoning {
+                    let Some(Part::Reasoning(text)) = message.parts.last_mut() else {
+                        unreachable!()
+                    };
+                    text.text.push_str(delta);
+                    (text.id.clone(), None)
+                } else if continuing {
+                    let Some(Part::Text(text)) = message.parts.last_mut() else {
+                        unreachable!()
+                    };
                     text.text.push_str(delta);
                     (text.id.clone(), None)
                 } else {
-                    let id = if message
-                        .parts
-                        .iter()
-                        .any(|part| matches!(part, Part::Text(_)))
-                    {
+                    let id = if reasoning
+                        || message.parts.iter().any(|part| {
+                            matches!(
+                                part,
+                                Part::Text(_) | Part::Reasoning(_) | Part::Tool(_)
+                            )
+                        }) {
                         Id::ascending(IdKind::Part)
                     } else {
                         ctx.text_part_id.clone()
                     };
-                    let part = Part::Text(TextPart {
-                        id: id.clone(),
-                        session_id: Id::parse(IdKind::Session, ctx.child_id.clone())
-                            .map_err(|error| ApiError::internal(error.to_string()))?,
-                        message_id: ctx.assistant_id.clone(),
-                        text: delta.to_string(),
-                        synthetic: None,
-                        time: Some(PartTime {
-                            start: now_millis(),
-                            end: None,
-                        }),
-                    });
+                    let part = if reasoning {
+                        Part::Reasoning(neoism_agent_core::ReasoningPart {
+                            id: id.clone(),
+                            session_id: Id::parse(IdKind::Session, ctx.child_id.clone())
+                                .map_err(|error| ApiError::internal(error.to_string()))?,
+                            message_id: ctx.assistant_id.clone(),
+                            text: delta.to_string(),
+                            time: PartTime {
+                                start: now_millis(),
+                                end: None,
+                            },
+                            metadata: None,
+                        })
+                    } else {
+                        Part::Text(TextPart {
+                            id: id.clone(),
+                            session_id: Id::parse(IdKind::Session, ctx.child_id.clone())
+                                .map_err(|error| ApiError::internal(error.to_string()))?,
+                            message_id: ctx.assistant_id.clone(),
+                            text: delta.to_string(),
+                            synthetic: None,
+                            time: Some(PartTime {
+                                start: now_millis(),
+                                end: None,
+                            }),
+                        })
+                    };
                     message.parts.push(part.clone());
                     (id, Some(part))
                 }
@@ -220,7 +269,7 @@ async fn handle_acp_session_update(
                         "sessionID": ctx.child_id,
                         "messageID": ctx.assistant_id,
                         "partID": part_id,
-                        "partType": "text",
+                        "partType": if reasoning { "reasoning" } else { "text" },
                         "field": "text",
                         "delta": delta,
                     }),
@@ -228,6 +277,7 @@ async fn handle_acp_session_update(
             }
         }
         "tool_call" | "tool_call_update" => {
+            finish_acp_text_parts(&ctx.state, &ctx.child_id, &ctx.live_message).await?;
             update_external_tool_part(ctx, update.clone()).await?;
             update_external_activity(&ctx.state, &ctx.child_id, ctx.runtime, update)
                 .await?;
@@ -282,6 +332,42 @@ async fn handle_acp_session_update(
                 .await?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Persist full snapshots at semantic boundaries, not once per token. This
+/// gives history/reconnect the same ordered text and reasoning as live clients.
+pub(crate) async fn finish_acp_text_parts(
+    state: &AppState,
+    session_id: &str,
+    live_message: &Arc<tokio::sync::Mutex<MessageWithParts>>,
+) -> Result<(), ApiError> {
+    let mut message = live_message.lock().await;
+    let mut closed = Vec::new();
+    for part in &mut message.parts {
+        let time = match part {
+            Part::Text(text) => text.time.as_mut(),
+            Part::Reasoning(text) => Some(&mut text.time),
+            _ => None,
+        };
+        if let Some(time) = time.filter(|time| time.end.is_none()) {
+            time.end = Some(now_millis());
+            closed.push(part.clone());
+        }
+    }
+    if !closed.is_empty() {
+        state
+            .inner
+            .store
+            .update_message(session_id, &message)
+            .await?;
+        for part in closed {
+            state.publish(EventPayload::new(
+                event_type::MESSAGE_PART_UPDATED,
+                json!({ "sessionID": session_id, "part": part, "time": now_millis() }),
+            ));
+        }
     }
     Ok(())
 }
@@ -561,6 +647,7 @@ pub(super) async fn update_external_tool_part(
         .unwrap_or_else(|| tool_title.clone());
     let mut input = update
         .get("rawInput")
+        .filter(|value| !value.is_null())
         .cloned()
         .or_else(|| {
             previous.as_ref().map(|tool| match &tool.state {
@@ -619,7 +706,11 @@ pub(super) async fn update_external_tool_part(
     let status = update
         .get("status")
         .and_then(Value::as_str)
-        .unwrap_or("in_progress");
+        .unwrap_or_else(|| match previous.as_ref().map(|tool| &tool.state) {
+            Some(neoism_agent_core::ToolState::Completed { .. }) => "completed",
+            Some(neoism_agent_core::ToolState::Error { .. }) => "failed",
+            _ => "in_progress",
+        });
     let acp_diffs = acp_diff_content(&update).or_else(|| {
         previous
             .as_ref()
@@ -670,19 +761,32 @@ pub(super) async fn update_external_tool_part(
     );
     let terminal_chunk = is_terminal_output_update(&update);
     if terminal_chunk {
-        let append = ctx
-            .collector
-            .lock()
-            .await
-            .tool_outputs
-            .contains_key(&tool_call_id);
-        write_acp_output(output_path.clone(), output.clone(), append).await?;
+        // A terminal can start with a normal ACP output snapshot before its
+        // first extension delta. Appending also creates a missing spool.
+        write_acp_output(output_path.clone(), output.clone(), true).await?;
         // Keep only a presence marker, not an ever-growing copy of the output.
         ctx.collector
             .lock()
             .await
             .tool_outputs
             .insert(tool_call_id.clone(), String::new());
+    } else if update.get("content").is_some_and(|value| !value.is_null())
+        || update
+            .get("rawOutput")
+            .is_some_and(|value| !value.is_null())
+    {
+        // Standard ACP content/rawOutput are replacement snapshots, unlike
+        // the terminal_output extension's deltas. Keep output received while
+        // running even when the final update contains only a status.
+        let accumulated = ctx
+            .collector
+            .lock()
+            .await
+            .tool_outputs
+            .contains_key(&tool_call_id);
+        if !accumulated {
+            write_acp_output(output_path.clone(), output.clone(), false).await?;
+        }
     }
     let completion_output = if matches!(status, "completed" | "failed" | "error") {
         let accumulated = ctx
@@ -691,13 +795,8 @@ pub(super) async fn update_external_tool_part(
             .await
             .tool_outputs
             .contains_key(&tool_call_id);
-        if !terminal_chunk && !output.trim().is_empty() {
-            let suffix = if accumulated {
-                format!("\n{output}")
-            } else {
-                output.clone()
-            };
-            write_acp_output(output_path.clone(), suffix, accumulated).await?;
+        if accumulated && !terminal_chunk && !output.trim().is_empty() {
+            write_acp_output(output_path.clone(), format!("\n{output}"), true).await?;
         }
         acp_output_preview(output_path.clone())
             .await?
@@ -705,6 +804,9 @@ pub(super) async fn update_external_tool_part(
     } else {
         String::new()
     };
+    let terminal_output = acp_output_preview(output_path.clone())
+        .await?
+        .or(terminal_output);
     // Output is represented by the bounded completion preview/spool, never a
     // second unbounded copy hidden inside durable completion metadata.
     let mut metadata_update = update.clone();
@@ -713,6 +815,7 @@ pub(super) async fn update_external_tool_part(
         object.remove("content"); // Diffs have their own bounded acpDiffs field.
         if let Some(meta) = object.get_mut("_meta").and_then(Value::as_object_mut) {
             meta.remove("terminal_output");
+            meta.remove("terminal_output_delta");
             meta.remove("terminal_exit");
         }
     }
@@ -725,6 +828,28 @@ pub(super) async fn update_external_tool_part(
             .or_insert_with(|| Id::ascending(IdKind::Part))
             .clone();
         let mut message = ctx.live_message.lock().await;
+        // A completion update can carry the first/final rawInput. Completion
+        // helpers otherwise retain stale input from the original tool_call.
+        for part in &mut message.parts {
+            if let Part::Tool(tool) = part {
+                if tool.id == part_id {
+                    match &mut tool.state {
+                        neoism_agent_core::ToolState::Pending {
+                            input: stored, ..
+                        }
+                        | neoism_agent_core::ToolState::Running {
+                            input: stored, ..
+                        }
+                        | neoism_agent_core::ToolState::Completed {
+                            input: stored, ..
+                        }
+                        | neoism_agent_core::ToolState::Error { input: stored, .. } => {
+                            *stored = input.clone()
+                        }
+                    }
+                }
+            }
+        }
         let mut part = match status {
             "completed" => set_tool_completed(
                 &mut message.parts,
@@ -1400,12 +1525,7 @@ pub(super) fn acp_diff_content(update: &Value) -> Option<Value> {
 }
 
 fn external_tool_output(update: &Value) -> String {
-    if let Some(output) = update
-        .get("_meta")
-        .and_then(|meta| meta.get("terminal_output"))
-        .and_then(|terminal| terminal.get("output"))
-        .and_then(Value::as_str)
-    {
+    if let Some(output) = terminal_output_delta(update) {
         return output.to_string();
     }
     if let Some(exit) = update
@@ -1442,8 +1562,20 @@ fn external_tool_output(update: &Value) -> String {
 }
 
 fn is_terminal_output_update(update: &Value) -> bool {
-    update
-        .get("_meta")
-        .and_then(|meta| meta.get("terminal_output"))
-        .is_some()
+    terminal_output_delta(update).is_some()
+}
+
+fn terminal_output_delta(update: &Value) -> Option<&str> {
+    // Codex ACP's negotiated legacy terminal_output and its newer
+    // terminal_output_delta extension both carry streamed bytes in `data`.
+    // Retain `output` compatibility for older adapters/fixtures.
+    ["terminal_output", "terminal_output_delta"]
+        .into_iter()
+        .find_map(|key| {
+            let terminal = update.get("_meta")?.get(key)?;
+            terminal
+                .get("data")
+                .or_else(|| terminal.get("output"))?
+                .as_str()
+        })
 }

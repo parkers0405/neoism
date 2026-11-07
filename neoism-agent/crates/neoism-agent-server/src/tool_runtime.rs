@@ -1526,6 +1526,11 @@ fn truncate_direct_tool_result(
 fn apply_central_output_truncation(
     result: &mut tool::ToolExecutionResult,
 ) -> Result<(), String> {
+    // User shell output is already bounded by local_process (1 MiB/stream).
+    // Unlike model tools, its persisted terminal transcript must not be summarized.
+    if crate::session_actions::shell::is_direct_shell() {
+        return Ok(());
+    }
     // Enrich outputs spilled by an individual tool or provider. Historically
     // these had outputPath but no artifact registration.
     let existing_path = result

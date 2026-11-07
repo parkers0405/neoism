@@ -18,8 +18,8 @@ const until = async (predicate: () => boolean | Promise<boolean>) => { const end
 const overlay = app.getByTestId("chrome-action-overlay");
 let reference: number | undefined;
 const menu = async (action: string) => { await until(async()=>await app.getByTestId("topbar-menu").count()===1); await app.getByTestId("topbar-menu").click(); await app.getByTestId(`menu:${action}`).waitFor();
-  const button=await app.getByTestId("topbar-menu").bounds(),dropdown=await app.getByTestId("original-hamburger-menu").bounds(),tree=await app.getByTestId("file-tree").bounds();
-  if(Math.abs(dropdown.x-button.x)>1||dropdown.x>=tree.x+tree.width||dropdown.y<button.y+button.height)throw new Error("Top-chrome hamburger must open below its button over the tree");
+  const button=await app.getByTestId("topbar-menu").bounds(),dropdown=await app.getByTestId("original-hamburger-menu").bounds(),tree=await app.getByTestId("file-tree").bounds(),rail=await app.getByTestId("activity-rail").bounds();
+  if(Math.abs(dropdown.x-rail.x-rail.width)>1||dropdown.x>=tree.x+tree.width||Math.abs(dropdown.y-button.y)>1)throw new Error("Activity-rail hamburger must open beside its button over the tree");
   await app.getByTestId(`menu:${action}`).click(); await overlay.waitFor();
   if (reference !== undefined) { coreCall("menu.dispose", { id: reference }); reference = undefined; }
   if (action === "OpenSettings") { const bounds = await overlay.bounds();
@@ -39,6 +39,8 @@ const glyph = async (label: string): Promise<TreeNode> => {
 
 let stage = "About";
 try {
+  await app.getByTestId("toggle-files").waitFor({ timeoutMs: 15000 });
+  await app.getByTestId("toggle-files").click();
   await app.getByTestId("file-tree").waitFor({ timeoutMs: 15000 });
   await menu("OpenAbout"); await until(async () => (await overlay.getByType("canvas").all()).some(node => (node.bounds?.width || 0) > 1)); await overlay.press("enter"); await until(async () => await overlay.count() === 0);
   stage = "Settings actual Config write and same-window reopen";
@@ -51,7 +53,7 @@ try {
   await until(() => server.configRequests.some((request) => request.tag === "SetSetting"));
   await until(async () => await overlay.count() === 1 && (await overlay.element()).id !== previousOverlay);
   if (parse(server.configDocument().content).editor["vim-mode"] !== false) throw new Error("Settings toggle did not persist its real Config.SetSetting");
-  if (await app.getByTestId("original-topbar").count() !== 1) throw new Error("Appearance reload replaced or duplicated the window root");
+  if (await app.getByTestId("activity-rail").count() !== 1) throw new Error("Appearance reload replaced or duplicated the window root");
   await overlay.press("escape"); await until(async () => await overlay.count() === 0);
   stage = "Themes revision-checked write";
   await menu("OpenThemes"); for (const key of "tokyo") await overlay.press(key); await overlay.press("enter");

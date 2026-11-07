@@ -200,13 +200,18 @@ async fn run_event_stream_inner(
             push_runtime_snapshot(inner.clone(), session_id.clone()).await;
             push_todo_snapshot(inner.clone(), session_id.clone()).await;
         }
-        // Establish the tail subscription BEFORE fetching pending interactions.
-        // Events published during hydration are buffered by this connection,
-        // closing the snapshot-before-subscribe gap on initial attach too.
-        if !catalog {
-            push_pending_questions(inner.clone(), session_id.clone()).await;
-            push_pending_permissions(inner.clone(), session_id.clone()).await;
-        }
+        // Subscribe before hydrating, but do not hold live output behind REST.
+        // Only interaction edges wait for their baseline so a delayed empty
+        // snapshot cannot erase a question/permission received during attach.
+        let hydration = async {
+            if !catalog {
+                push_pending_questions(inner.clone(), session_id.clone()).await;
+                push_pending_permissions(inner.clone(), session_id.clone()).await;
+            }
+        };
+        tokio::pin!(hydration);
+        let mut hydrated = catalog;
+        let mut pending_interactions = Vec::new();
         connected_once = true;
 
         let mut stream = resp.bytes_stream();
@@ -217,7 +222,20 @@ async fn run_event_stream_inner(
             }
             let chunk = match tokio::time::timeout(
                 std::time::Duration::from_secs(45),
-                stream.next(),
+                async {
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = &mut hydration, if !hydrated => {
+                                hydrated = true;
+                                for event in pending_interactions.drain(..) {
+                                    inner.status_evidence.forward(&inner.tx, &session_id, event);
+                                }
+                            }
+                            chunk = stream.next() => return chunk,
+                        }
+                    }
+                },
             )
             .await
             {
@@ -253,12 +271,22 @@ async fn run_event_stream_inner(
                             let event = normalize_v2_event(value);
                             if catalog {
                                 forward_catalog_event(&inner.tx, event);
+                            } else if !hydrated && event.get("type").and_then(Value::as_str)
+                                .is_some_and(|kind| kind.starts_with("question.") || kind.starts_with("permission."))
+                            {
+                                pending_interactions.push(event);
                             } else {
                                 inner.status_evidence.forward(&inner.tx, &session_id, event);
                             }
                         }
                     }
                 }
+            }
+        }
+        if !hydrated {
+            hydration.await;
+            for event in pending_interactions {
+                inner.status_evidence.forward(&inner.tx, &session_id, event);
             }
         }
         tokio::time::sleep(retry_delay).await;

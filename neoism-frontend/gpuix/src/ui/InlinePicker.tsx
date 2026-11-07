@@ -22,7 +22,8 @@ export function InlinePicker(props: {
   config: AppConfig; kind: string; title?: string; options?: readonly PickerOption[]; current?: string | null;
   question?: Record<string, unknown>; anchor: Anchor; loading?: boolean; error?: string; responding?: boolean;
   entry?:boolean; secret?:boolean; initialValue?:string; placeholder?:string; query?: string; onAcceptHandler?: (handler:(()=>void)|undefined)=>void; onKeyHandler?: (handler: ((event: KeyEvent) => boolean) | undefined) => void;
-  onSelect?: (value: string) => void; onAnswers?: (answers: string[][]) => void; onClose: () => void;
+   onSelect?: (value: string) => void; onAnswers?: (answers: string[][]) => void; onClose: () => void;
+   onBack?: () => void; providerRows?: boolean;
   ignoreOutsideClick?: (x: number, y: number) => boolean;
   activity?: PickerActivity; mcpServer?: string; mcpEntry?: unknown;
   usage?:{accounts:readonly {connection_id:string;label:string}[]};onRefresh?:()=>void|Promise<void>;onLoadMore?:()=>void|Promise<void>;
@@ -38,7 +39,7 @@ export function InlinePicker(props: {
   const id = coreCall<{ id: number }>(`${engine}.new`, { request: props.question, kind: nativeKind, title: props.title,
     options: props.options, selected: Math.max(0, props.options?.findIndex((o) => o.value === props.current) ?? 0), loading: props.loading,
     mcpServer: props.mcpServer, mcpEntry: props.mcpEntry, placeholder:props.placeholder }).id;
-  const [card, setCard] = createSignal<{ commands: PaintCommand[]; rect?: Anchor | null; rows?: Array<{index:number;rect:Anchor}> }>({ commands: [] });
+  const [card, setCard] = createSignal<{ commands: PaintCommand[]; rect?: Anchor | null; backRect?: Anchor; rows?: Array<{index:number;rect:Anchor}> }>({ commands: [] });
   const [frame, setFrame] = createSignal<PickerFrame>(coreCall(`${engine}.frame`, { id, ...placement(), scale: s }));
   let input: HostElement | undefined;
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
@@ -48,8 +49,8 @@ export function InlinePicker(props: {
     const next = coreCall<PickerFrame>(`${engine}.${op}`, { id, ...placement(), scale: s, entry:props.entry, footer: props.kind === "permission" && !!(props.responding || props.error), ...args });
     let animating = next.animating;
     {
-      const painted = coreCall<{ commands: PaintCommand[]; rect?: Anchor | null; rows?: Array<{index:number;rect:Anchor}>; animating: boolean }>(`${engine}.paint`, { id, ...placement(), scale: s,
-        theme: config.themeName, fontFamily: config.fontFamily, fontWeight: config.fontWeight, caret: props.query === undefined, error:props.error });
+      const painted = coreCall<{ commands: PaintCommand[]; rect?: Anchor | null; backRect?: Anchor; rows?: Array<{index:number;rect:Anchor}>; animating: boolean }>(`${engine}.paint`, { id, ...placement(), scale: s,
+        theme: config.themeName, fontFamily: config.fontFamily, fontWeight: config.fontWeight, caret: props.query === undefined, error:props.error, back: !!props.onBack, providerRows: props.providerRows || props.kind === "connect" && !props.activity });
       batch(()=>{setFrame(next);setCard(painted);}); animating ||= painted.animating;
     }
     if (animating) animation.request(() => { if (!disposed) update("frame"); }, started);
@@ -65,7 +66,7 @@ export function InlinePicker(props: {
   const mutate=(op:string,args:Record<string,unknown>)=>untrack(()=>{coreCall(`${engine}.${op}`,{id,...args,deferFrame:true});refresh();});
   createEffect(()=>{if(native){const a=props.activity;mutate("activity",a?{body:a.body,status:a.status,busy:!!a.busy,url:a.url}:{});}});
   createEffect(()=>{viewport();props.anchor;props.responding;props.error;refresh();});
-  createEffect(()=>{if(engine==="picker")mutate("options",{options:props.options||[],loading:props.loading});});
+  createEffect(()=>{if(engine==="picker")mutate("options",{options:props.options||[],loading:props.loading,title:props.title,placeholder:props.placeholder});});
   createEffect(()=>{if(props.kind==="usage")mutate("usage",{usage:props.usage,loading:props.loading,error:props.error});});
   createEffect(()=>{if(engine==="question"&&props.error)untrack(()=>update("retry"));});
   createEffect(()=>{const query=props.query;if(query!==undefined&&engine==="picker")mutate("query",{query});});
@@ -95,7 +96,7 @@ export function InlinePicker(props: {
     let handled = true;
     const key = event.key?.toLowerCase().replace(/^arrow/, "") || "", ctrl = event.modifiers?.ctrl;
     if(props.kind==="usage"&&key==="enter"){event.preventDefault();event.stopPropagation();if(!props.loading)void props.onRefresh?.();}
-    else if (key === "escape") { event.preventDefault(); event.stopPropagation(); if (!props.responding) props.onClose(); }
+    else if (key === "escape" || props.onBack && key === "left" && (event.modifiers?.alt || !frame().query)) { event.preventDefault(); event.stopPropagation(); if (!props.responding) (props.onBack || props.onClose)(); }
     else if (["up", "down"].includes(key) || ctrl && ["n", "p"].includes(key)) {
       event.preventDefault(); event.stopPropagation(); update("move", { delta: key === "up" || key === "p" ? -1 : 1 });
     } else if (key === "enter") { event.preventDefault(); event.stopPropagation(); accept(); }
@@ -113,6 +114,10 @@ export function InlinePicker(props: {
         onMouseDown={(event) => { if(!native)return; const result = hit(event); if (result.url) { void openExternalUrl(result.url).catch(error=>console.error("Could not open authorization link",error)); } else if (result.hit) { update("frame"); accept(); } }}
         onScroll={(event) => {const delta=(event.deltaY || 0) * (event.precise ? 1 / s : d.pickerRowHeight * 3);if(native)update("scroll",{delta});else if(delta)update("move",{delta:delta>0?-1:1});}}
         style={{ position: "absolute", left: rect()[0], top: rect()[1], width: rect()[2], height: rect()[3], pointerEvents: "auto", userSelect: "none" }}>
+        <Show when={props.onBack && card().backRect}>{bounds => <div role="button" tabIndex={0} testId="picker-back" aria-label="Back to providers or previous screen"
+          onClick={() => {if(!props.responding)props.onBack?.();}}
+          onKeyDown={event => {if(["enter"," ","space"].includes(event.key?.toLowerCase() || "")){event.preventDefault();event.stopPropagation();if(!props.responding)props.onBack?.();}}}
+          style={{position:"absolute",left:bounds()[0]-rect()[0],top:bounds()[1]-rect()[1],width:bounds()[2],height:bounds()[3],cursor:"pointer",pointerEvents:"auto"}} />}</Show>
         <Index each={frame().rows}>{(option,slot) => {
           const index=()=>option().index??slot;
           const bounds=()=>card().rows?.find(row=>row.index===index())?.rect;

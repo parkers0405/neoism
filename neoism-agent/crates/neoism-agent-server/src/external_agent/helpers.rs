@@ -98,7 +98,10 @@ pub(crate) async fn update_external_session_metadata(
         .get("externalAgent")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    external["runtime"] = json!("acp");
+    // Keep the persisted driver identity across status updates and continuation.
+    if external.get("runtime").is_none() {
+        return Err(ApiError::bad_request("External session has no driver identity"));
+    }
     external["provider"] = json!(runtime.provider_id());
     external["agent"] = json!(runtime.agent_name());
     external["externalSessionId"] = json!(external_session_id);
@@ -149,7 +152,9 @@ pub(crate) async fn update_external_session_status(
         .get("externalAgent")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    external["runtime"] = json!("acp");
+    if external.get("runtime").is_none() {
+        return Err(ApiError::bad_request("External session has no driver identity"));
+    }
     external["provider"] = json!(runtime.provider_id());
     external["agent"] = json!(runtime.agent_name());
     external["status"] = json!(status);
@@ -178,7 +183,9 @@ pub(crate) async fn update_external_activity(
         .get("externalAgent")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    external["runtime"] = json!("acp");
+    if external.get("runtime").is_none() {
+        return Err(ApiError::bad_request("External session has no driver identity"));
+    }
     external["provider"] = json!(runtime.provider_id());
     external["agent"] = json!(runtime.agent_name());
     external["lastUpdate"] = update;
@@ -262,15 +269,15 @@ pub(crate) fn ensure_child_task_belongs_to_parent(
 }
 
 pub(crate) fn task_metadata(
-    child_session_id: &str,
+    child: &SessionInfo,
     runtime: ExternalRuntime,
     status: &str,
     background: bool,
 ) -> Value {
     json!({
-        "sessionId": child_session_id,
+        "sessionId": child.id,
         "agent": runtime.agent_name(),
-        "runtime": "acp",
+        "runtime": child.extra["externalAgent"]["runtime"],
         "provider": runtime.provider_id(),
         "status": status,
         "background": background,

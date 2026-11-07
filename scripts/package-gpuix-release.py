@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Package and smoke-test the native GPUIX bundle on the current platform."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,12 @@ LIBRARIES = {'linux': ['libneoism_gpuix_core.so', 'libghostty-vt.so'],
 OUT = ROOT / 'release'
 OUT.mkdir(exist_ok=True)
 NAME = f'neoism-{SYSTEM}-{ARCH}'
+
+def verify_windows_payload(bundle):
+    spec = importlib.util.spec_from_file_location('windows_bundle', ROOT / 'scripts/windows-bundle.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.verify_windows_bundle(bundle, ROOT / 'target/release')
 
 def run(*args):
     return subprocess.check_output([str(arg) for arg in args], text=True, stderr=subprocess.STDOUT).strip()
@@ -71,13 +78,14 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     (bundle / 'web/agent-gui').mkdir()
     for marker in ['web/index.html', 'web/agent-gui/index.html']:
         (bundle / marker).write_bytes(b'<!-- Neoism native runtime resources; no browser UI. -->\n')
+    service_hashes = verify_windows_payload(bundle) if SYSTEM == 'windows' else {}
     run(bundle / ('neoism' + SUFFIX), '--neoism-verify-runtime')
     assert VERSION in run(bundle / ('neoism' + SUFFIX), '--version')
     if SYSTEM == 'linux':
         subprocess.run(['cargo', 'test', '--locked', '--release', '-p', 'neoism-update-helper', '--bin', 'neoism-update-helper', 'legacy_installer_keeps_gpuix_runtime'], cwd=ROOT, env={**os.environ, 'NEOISM_TEST_UPDATE_PAYLOAD': str(bundle)}, check=True)
     commit = run('git', 'rev-parse', 'HEAD')
     metadata = json.dumps({'version': VERSION, 'commit': commit,
-        'platform': SYSTEM, 'architecture': ARCH}, indent=2) + '\n'
+        'platform': SYSTEM, 'architecture': ARCH, 'services': service_hashes}, indent=2) + '\n'
     (bundle / 'build-info.json').write_text(metadata)
     (OUT / f'{NAME}.build-info.json').write_text(metadata)
     if SYSTEM == 'linux':
@@ -142,6 +150,8 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
         with tarfile.open(archive) as source:
             source.extractall(extracted, filter='data')
     installed = extracted / NAME / 'Neoism.app/Contents/MacOS' if SYSTEM == 'darwin' else extracted / NAME
+    if SYSTEM == 'windows':
+        verify_windows_payload(installed)
     docs = installed.parent / 'Resources/resources/docs' if SYSTEM == 'darwin' else installed / 'resources/docs'
     run('node', ROOT / 'scripts/build-docs.mjs', '--verify', docs)
     assert VERSION in run(installed / ('neoism' + SUFFIX), '--version')

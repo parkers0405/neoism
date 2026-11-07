@@ -9,6 +9,11 @@ const transcriptEvents=["ContentDelta","MessageUpdated","HistoryChunk","MessageE
  * before the catalog identifies its parent. */
 export function timelineReceivesEvent(root:string,ui:Record<string,unknown>,knownRoots:Pick<ReadonlySet<string>,"has">,message:unknown):boolean{
  if(!isRecord(message))return true;
+ const raw=message.SessionEvent;
+ if(isRecord(raw)&&typeof raw.session_id==="string"&&typeof raw.kind==="string"&&raw.kind.startsWith("message.part.")){
+  const family=agentFamilyRoot(ui,raw.session_id);
+  return family===root||!knownRoots.has(family);
+ }
  for(const tag of transcriptEvents){
   const body=message[tag];if(!isRecord(body)||typeof body.session_id!=="string")continue;
   const family=agentFamilyRoot(ui,body.session_id);

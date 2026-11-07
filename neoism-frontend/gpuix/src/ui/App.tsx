@@ -64,12 +64,15 @@ import {handleApplicationShortcut,registerApplicationShortcuts} from "../command
 import { readClipboardImage, readClipboard, writeClipboard } from "../clipboard";
 import { terminalSession } from "../terminal/sessions";
 import { modelPickerOptions, modelCatalogStatus } from "../agent/model-picker";
+import { SelectionPicker } from "./SelectionPicker";
 import type { FinderMode } from "../finder/FinderController";
 import { visibleTreeRange, treeCursorRowY, beginTreePanel, clearHiddenTreePanels } from "./tree-viewport";
 import { tabChrome,rgba } from "../layout/tab-chrome";
 import { ChromeActionsController, type ServerSelection } from "../menu-actions/ChromeActionsController";
 import { ChromeActionsView } from "../menu-actions/ChromeActionsView";
-import { TopBar } from "./TopBar";
+import { ActivityRail } from "./TopBar";
+import { AgentDetailsButton } from "./GlassPanelControls";
+import { observeTitlebarInset } from "../chrome/window-titlebar";
 import {WorkspaceTabs} from "./WorkspaceTabs";
 import { StatusLine } from "./StatusLine";
 import { workspaceLabel } from "../layout/tab-chrome";
@@ -104,7 +107,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   const sidebar = createMemo(() => workspaceSidebar(state().ui,state().activeWorkspace?.id));
   const setSidebar = (value:WorkspaceSidebar|undefined) => model.setWorkspaceSidebar(value);
   createEffect(()=>{const initial=initialWorkspaceSidebars(state().ui,state().activeWorkspace?.id);if(initial)model.setUI({workspaceSidebars:initial});});
-  const [details, setDetails] = createSignal(model.state.ui.details !== false);
+  const [details, setDetails] = createSignal(model.state.ui.details === true);
   createEffect(()=>clearHiddenTreePanels(visuals,sidebar()));
   createEffect(() => model.setUI({ details: details() }));
   const keyBindings = KeyboardBindings.fromConfig();
@@ -124,6 +127,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   const [composerAnchors, setComposerAnchors] = createSignal<Record<string, Anchor>>({});
   const [imagePreview,setImagePreview]=createSignal<ImagePreview>();
   const composerPaste=new Map<string,()=>Promise<void>>();
+  const composerConnect=new Map<string,()=>Promise<void>>();
   const composerInputs = new Map<string, HostElement>();
   const composerShells = new Map<string, HostElement>();
   const composerPickerButtons = new Set<HostElement>();
@@ -171,6 +175,9 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   };
   const windowSize = createWindowSize();
   const renderer = useGpuixRequired();
+  const [titlebarSpace, setTitlebarSpace] = createSignal(0);
+  onCleanup(observeTitlebarInset(renderer as typeof renderer & { isFullscreen: () => boolean }, process.platform,
+    inset => setTitlebarSpace(inset > 0 ? 30 : 0)));
   const contentViewport=useOverlayViewport(renderer,windowSize);
   const dialogViewport=useDialogViewport(renderer,windowSize);
   const chromeMeasurements=new AnimationFrameScheduler(ANIMATION_FRAME_MS);
@@ -198,7 +205,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   const [gitFrame,setGitFrame]=createSignal<GitFrame>();
   const [gitFocused,setGitFocused]=createSignal(false),[gitFocusToken,setGitFocusToken]=createSignal(0);
   const [workspaceBounds,setWorkspaceBounds]=createSignal({x:0,y:0,width:windowSize().width,height:windowSize().height});
-  createEffect(()=>{const size=windowSize(),top=Math.min(size.height,Math.max(d.topbarHeight*s,workspaceBounds().y)+tabChromeSpec.workspace.height+tabChromeSpec.buffer.height);setDialogViewport(renderer,{x:0,y:top,width:size.width,height:Math.max(0,size.height-top-d.statusHeight*s)});});
+  createEffect(()=>{const size=windowSize(),top=Math.min(size.height,Math.max(titlebarSpace(),workspaceBounds().y)+tabChromeSpec.workspace.height+tabChromeSpec.buffer.height);setDialogViewport(renderer,{x:0,y:top,width:size.width,height:Math.max(0,size.height-top-d.statusHeight*s)});});
   const gitViewport=createMemo(()=>{const bounds=workspaceBounds(),top=tabChromeSpec.workspace.height;return{x:bounds.x,y:bounds.y+top,width:bounds.width,height:Math.max(0,bounds.height-top)};});
   const [gitRestore,setGitRestore]=createSignal<{target:GitRestoreTarget;workspaceId:string;resolve:(confirmed:boolean)=>void;focus?:number}>();
   let gitHost:HostElement|undefined;
@@ -348,7 +355,8 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   const configuredProviderCatalog = createMemo(() => state().providerCatalog);
   const modelCatalogOptions = createMemo(() => coreCall<PickerOption[]>("picker.model-options", { catalog: configuredProviderCatalog() ?? { providers: [] } }));
   const recentModels = createMemo(() => (Array.isArray(state().ui.recentModels) ? state().ui.recentModels as PickerOption[] : []));
-  const modelAvailability = createMemo(() => modelCatalogStatus(configuredProviderCatalog()));
+  const catalogRetryAfterMs = createMemo(() => state().catalogRetryAfterMs);
+  const modelAvailability = createMemo(() => modelCatalogStatus(configuredProviderCatalog(),catalogRetryAfterMs()));
   const catalogsLoading = createMemo(() => state().catalogsLoading);
   createEffect(() => {
     if (choice()?.kind !== "model" || catalogsLoading()) return;
@@ -399,11 +407,12 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     metrics: { codeTextSize: config.fontSize, codeLineHeight: config.fontSize * 1.5, mdTextSize: d.chatTextSize * s, mdLineHeight: d.chatLineHeight * s,
       mdHeadingSizes: [21 * s, 18 * s, 16 * s, 16 * s] } };
   const toggle = (view: typeof sidebar extends Accessor<infer T> ? T : never) => setSidebar(sidebar() === view ? undefined : view);
-   const availableWidth = () => windowSize().width - (sidebar() ? d.sidebarWidth : 0) - (deviceVisible()?deviceWidth():0);
-  const detailWidth = () => Math.min(d.detailRailWidth, Math.max(0, availableWidth() / s - d.detailMinChatWidth - d.detailGap)) * s;
-   const detailSession = () => {const surface=active();return surface?.sessionId||state().pendingAgentSessions[surface?.id||""]||"";};
-   const showDetails = () => details() && active()?.kind === "agent" && (!!(state().ui.agentParentSessions as Record<string,string>|undefined)?.[detailSession()] || (state().history[detailSession()]||[]).some(message=>message.kind!=="System")) && availableWidth() >= (d.detailMinChatWidth + d.detailMinRailWidth + d.detailGap) * s;
-  const chatWidth = () => availableWidth() - (showDetails() ? detailWidth() + d.detailGap * s : 0);
+   const availableWidth = () => windowSize().width - 52 * s - (sidebar() ? Math.min(d.sidebarWidth, windowSize().width * 0.42) : 0) - (deviceVisible()?deviceWidth():0);
+  const overlayDetails = () => availableWidth() < (d.detailMinChatWidth + d.detailMinRailWidth + d.detailGap) * s;
+  const detailWidth = () => overlayDetails() ? Math.min(d.detailRailWidth * s, Math.max(0, availableWidth() - d.detailGap * s)) : Math.min(d.detailRailWidth, Math.max(0, availableWidth() / s - d.detailMinChatWidth - d.detailGap)) * s;
+   const detailSession = () => {const surface=active();return surface?.kind === "agent" ? surface.sessionId||state().pendingAgentSessions[surface.id]||"" : "";};
+   const showDetails = () => details() && active()?.kind === "agent";
+  const chatWidth = () => availableWidth() - (showDetails() && !overlayDetails() ? detailWidth() + d.detailGap * s : 0);
   const columnInset = () => chatWidth() < 520 * s ? 8 * s : 20 * s;
   createEffect(() => { const workspace = state().activeWorkspace; renderer.setWindowTitle?.(`${workspace ? workspaceLabel(workspace.title, workspace.root_dir) : "Neoism"} — Neoism GPUIX`); });
   const closeCommands = () => {
@@ -607,7 +616,8 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       case "OpenSearch": openFind(); return;
       case "open-model": {
         if (active()?.kind !== "agent") model.openAgentHome();
-        setChoice({ kind: "model", sessionId: active()?.sessionId, anchor: composerAnchor(), restore: focusComposer }); return;
+        setChoice({ kind: "model", sessionId: active()?.sessionId, anchor: composerAnchor(), restore: focusComposer });
+        void model.refreshCatalogs(); return;
       }
       default: await runCommand({ action });
     }
@@ -1074,6 +1084,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       chooseDirectory,
     }});
     onCleanup(slash.subscribe(()=>setSlashRevision(value=>value+1)));
+    createEffect(()=>{const id=key(),connect=async()=>{setSlashDismissed(true);await slash.execute("/connect");};composerConnect.set(id,connect);onCleanup(()=>{if(composerConnect.get(id)===connect)composerConnect.delete(id);});});
     const slashOptions=()=>{slashRevision();return slash.state.options;};
     const slashOpen=()=>!slashDismissed()&&draft().startsWith("/")&&!/\s/.test(draft());
     let slashWasOpen=false;
@@ -1298,9 +1309,11 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       </div></Show>
       <Show when={slashOpen()}><InlinePicker config={config} kind="slash" title="Commands" options={slashOptions()} loading={slash.state.loading} error={slash.state.error} anchor={anchor} query={draft().replace(/^\/+/,"")} onKeyHandler={handler=>slashKey=handler} onAcceptHandler={handler=>slashAccept=handler} onSelect={acceptSlash} onClose={()=>{setSlashDismissed(true);focus();}}/></Show>
       <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue} placeholder={entry.request.placeholder} activity={entry.request.activity}
+        onBack={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}
         onSelect={value=>{setSlashInput(undefined);entry.resolve(value);focus();}} onClose={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}/>}</Show>
       <Show when={slashPicker()?.token||slashPicker()} keyed>{_token=>{const initial=slashPicker()!;const request=()=>slashPicker()?.token===initial.token?slashPicker()!:initial;return <InlinePicker config={config} kind={request().kind} title={request().title} options={request().options} current={request().selected} anchor={anchor}
         loading={request().loading} error={request().error} usage={request().usage} onRefresh={request().onRefresh} onLoadMore={request().onLoadMore} activity={request().activity} mcpServer={request().mcpServer} mcpEntry={request().mcpEntry}
+        onBack={request().onBack ? ()=>{const current=request();setSlashPicker(undefined);void Promise.resolve(current.onBack?.()).catch(model.report);focus();} : undefined}
         onSelect={value=>{const current=request();if(!current.options.find(option=>option.value===value)?.keepOpen)setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{const current=request();setSlashPicker(undefined);if(current.onBack)void Promise.resolve(current.onBack()).catch(model.report);else current.onCancel?.();focus();}}/>;}}</Show>
     </>;
   }
@@ -1374,7 +1387,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   function DetailRail() {
     // Fixed ink geometry avoids font bearings/baselines moving the checkmark.
     const checkmark=JSON.stringify([{k:"p",c:cssColor(c.green),p:[[3,7,5,9,11,2,12,3,5,12,2,8].map(n=>n*s)]}]);
-    const session = () => active()?.sessionId || "";
+    const session = detailSession;
     const context=createMemo(()=>sessionContextMetrics(session(),activeSelection().model||""));
     const usage=()=>context().usage;
     const todos = createMemo(() => sessionTodos(state().history[session()]||[],state().todos[session()]));
@@ -1389,11 +1402,12 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     const detailsLabel = (label: string, value: string) => <div style={{ ...row, height: 13 * 1.55 * s, flexShrink: 0, gap: 8 * s }}>
       <Label size={13} color={c.dim}>{label}</Label><Label size={13} style={{ flexGrow: 1 }}>{value}</Label>
     </div>;
-    return <div style={{ ...column, width: detailWidth(), marginLeft: 6 * s, flexShrink: 0, borderRadius: d.frameRadius * s, borderWidth: d.frameStroke * s, borderColor: c.border,
+    return <div style={{ ...column, ...(overlayDetails() ? { position: "absolute", right: 0, top: 0, bottom: 0 } as const : {}), width: detailWidth(), marginLeft: overlayDetails() ? 0 : d.detailGap * s, flexShrink: 0, borderRadius: d.frameRadius * s, borderWidth: d.frameStroke * s, borderColor: c.border,
       backgroundColor: c.bg, padding: 12 * s, paddingTop: 14 * s, overflowY: "scroll" }} testId="agent-details">
       <PixelHeading>Directory</PixelHeading>
       <Label size={12.35}>{directory()}</Label>
       <div style={{ height: 10 * s, flexShrink: 0 }} />
+      <Show when={active()?.kind === "agent"}>
       <PixelHeading>Session</PixelHeading>
       {detailsLabel("Agent", (activeSelection().agent || "build").replace(/^./, (letter) => letter.toUpperCase()))}
       {detailsLabel("Model", activeSelection().model || "Default")}
@@ -1424,6 +1438,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
           <text style={{ ...text(14, todo.status === "in_progress" ? c.yellow : c.fg), whiteSpace: "normal", lineClamp: 2, lineHeight: 15 * s, flexGrow: 1 }}>{todo.content}</text>
         </div>}</For>
       </Show>
+      </Show>
     </div>;
   }
   const paletteEntries = () => [
@@ -1436,12 +1451,18 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     { label: "New conversation", type: "Command", action: model.openAgentHome },
   ].filter((entry) => entry.label.toLowerCase().includes(query().toLowerCase())).slice(0, 30);
    return <div data-font-size={config.fontSize} testId="app-content" onKeyDown={keyDown} onMouseDown={event=>{const host=sidebarHosts.get(sidebar()||""),bounds=host&&chromeBounds.get(host.id);if(bounds&&event.x!==undefined&&event.y!==undefined&&event.x>=bounds.x&&event.x<bounds.x+bounds.width&&event.y>=bounds.y&&event.y<bounds.y+bounds.height)return;const device=deviceVisible()&&deviceHost&&paintedChromeBounds(renderer,deviceHost.id);if(device&&event.x!==undefined&&event.y!==undefined&&event.x>=device.x&&event.x<device.x+device.width&&event.y>=device.y&&event.y<device.y+device.height)return;const git=gitViewport();if(gitVisible()&&event.x!==undefined&&event.y!==undefined&&event.x>=git.x+git.width-(gitFrame()?.width||0)&&event.x<git.x+git.width&&event.y>=git.y&&event.y<git.y+git.height)return;setChromeFocus({zone:"content"});setChromeTarget(undefined);}} style={{ ...column, width: "100%", height: "100%", backgroundColor: config.background?"transparent":c.bg, position: "relative", overflow: "hidden" }}>
-    <TopBar config={config} peers={presencePeers()} sidebar={sidebar()} details={details()} agent={active()?.kind === "agent"} search={palette() && paletteMode() === "find"}
+    <Show when={titlebarSpace() > 0}><div testId="native-window-controls-space" style={{ height: titlebarSpace(), minHeight: titlebarSpace(), flexShrink: 0 }} /></Show>
+    <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0, position: "relative" }}>
+    <ActivityRail config={config} topOffset={titlebarSpace()} peers={presencePeers()} sidebar={sidebar()} details={details()} agent={active()?.kind === "agent"} search={palette() && paletteMode() === "find"}
       connection={state().connection.phase} menuOpen={menu()} onMenuChange={setMenu} report={model.report}
       onAction={(action) => ["TogglePanel", "ToggleConversations", "ToggleAgentSidePanel", "OpenNotes", "OpenDatabases", "OpenAgent", "OpenSearch"].includes(action) ? onChromeAction(action) : chromeActions.open(action)} />
-    <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0, position: "relative" }}>
       <Show when={sidebar()}><div testId="sidebar" style={{ ...column, width: Math.min(d.sidebarWidth, windowSize().width * 0.42), flexShrink: 0,
         borderTopLeftRadius: d.frameRadius * s, borderTopRightRadius: d.frameRadius * s, backgroundColor: c.bg, overflow: "hidden", borderRightWidth: d.frameStroke * s, borderColor: c.border }}>
+        <Show when={sidebar() === "files" || sidebar() === "notes" || sidebar() === "conversations"}>
+          <div testId="sidebar-heading" role="heading" aria-level={2} style={{ ...row, height: 36 * s, minHeight: 36 * s, flexShrink: 0, paddingLeft: 14 * s, paddingRight: 14 * s, borderBottomWidth: d.frameStroke * s, borderColor: c.border }}>
+            <Label size={13} color={c.fg} style={{ fontWeight: 600 }}>{sidebar() === "files" ? "File Tree" : sidebar() === "notes" ? "Notes" : "Agent"}</Label>
+          </div>
+        </Show>
         <Switch>
           <Match when={sidebar() === "files"}><Tree /></Match>
           <Match when={sidebar() === "conversations"}><Conversations /></Match>
@@ -1451,12 +1472,16 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       </div></Show>
       <div testId="workspace-content" onLayout={event=>{const next={x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0};setWorkspaceBounds(before=>before.x===next.x&&before.y===next.y&&before.width===next.width&&before.height===next.height?before:next);}} style={{ ...column, flexGrow: 1, minWidth: 0, position: "relative", overflow: "hidden" }}>
          <WorkspaceTabs config={config} workspaces={windowWorkspaces()} activeId={activeWindowWorkspaceId()} workspaceContext={props.workspaceNavigation?.context} connectedHostId={state().connection.connectedHostId} directoryRoots={state().ui.terminalWorkspaceRoots}
-           accessoryWidth={devicePreviewEnabled?36*s:0} accessory={devicePreviewEnabled?<DevicePreviewButton config={config} selected={deviceVisible()} onClick={toggleDevice}/>:undefined}
+           accessoryWidth={(Number(devicePreviewEnabled) + Number(active()?.kind === "agent")) * 36 * s}
+           accessory={<div style={{ ...row, justifyContent: "flex-end", height: tabChromeSpec.workspace.height }}>
+             <Show when={devicePreviewEnabled}><DevicePreviewButton config={config} selected={deviceVisible()} onClick={toggleDevice}/></Show>
+             <Show when={active()?.kind === "agent"}><AgentDetailsButton config={config} height={tabChromeSpec.workspace.height} open={showDetails()} onToggle={() => setDetails(value => !value)}/></Show>
+           </div>}
           keyboardIndex={chromeFocus().zone==="workspaces"?(chromeFocus() as {index:number}).index:undefined}
           onActivate={workspace=>void activateWindowWorkspace(workspace).catch(model.report)} onNew={()=>void newWindowWorkspace().catch(model.report)} onClose={workspaceId=>void closeWindowWorkspace(false,workspaceId).catch(model.report)} onReorder={reorderWindowWorkspace}
           registerHost={(id,host)=>{if(host)workspaceHosts.set(id,host);else workspaceHosts.delete(id);}}
           registerNewHost={host=>{workspaceNewHost=host;}} onBounds={updateChromeBounds} onScroll={refreshChromeTargetBounds}/>
-        <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0 }}>
+        <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0, position: "relative" }}>
           <Show when={workspaceLayout()} keyed fallback={<div style={{position:"relative",flexGrow:1,minWidth:0}}><Show when={!state().loading}><SplashView contextId="empty-window" config={config} wordmarkHosts={wordmarkHosts} active={chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={noteContentFocus} onAction={action=>void welcomeAction(action).catch(model.report)}/></Show></div>}>{(layout) => <PaneLayoutView controller={layout} config={config}
             keyboardTab={chromeFocus().zone==="buffers"?focusedPane()?.tabs[(chromeFocus() as {index:number}).index]?.leaf:undefined}
             keyboardNewPane={chromeFocus().zone==="buffers"&&(chromeFocus() as {index:number}).index>=(focusedPane()?.tabs.length||0)?focusedPane()?.leaf:undefined}
@@ -1539,7 +1564,8 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
         else if (action.kind === "toggle_git_diff") toggleGit();
       }} />
     <ToastNotifications id={visuals.notifications()} delivery={visuals.notificationDelivery} config={config} message={state().error||(state().connection.phase==="auth-rejected"?state().connection.reason:undefined)} consume={model.clearError} report={model.report}/>
-    <Show when={choice()} keyed>{(request) => <InlinePicker config={config} kind={request.kind}
+    <Show when={choice()} keyed>{(request) => <SelectionPicker config={config} kind={request.kind}
+      onAddProvider={()=>{const connect=composerConnect.get(request.sessionId || activeComposerKey());closeChoice();void connect?.().catch(model.report);}}
       ignoreOutsideClick={(x,y)=>[...composerPickerButtons].some(button=>{
         const bounds=paintedChromeBounds(renderer,button.id);
         return bounds&&x>=bounds.x&&x<bounds.x+bounds.width&&y>=bounds.y&&y<bounds.y+bounds.height;

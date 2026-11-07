@@ -1,0 +1,8 @@
+{
+  "name": "neoism-native-agent-runtime",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test *.test.mjs" },
+  "dependencies": { "@anthropic-ai/claude-agent-sdk": "0.2.76" }
+}

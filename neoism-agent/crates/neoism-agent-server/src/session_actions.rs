@@ -134,6 +134,7 @@ async fn abort_session_run_impl(
     if let Some(cancelled) = cancelled.as_ref() {
         cancelled.cancel.store(true, Ordering::SeqCst);
     }
+    let closed_native = crate::external_agent::native::close_session(state, session_id).await;
     if removed_compact {
         crate::session_queue::publish_prompt_queue_changed(
             state,
@@ -219,7 +220,7 @@ async fn abort_session_run_impl(
     }
 
     crate::execution_activity::finish_if_quiescent(state, session_id).await;
-    cancelled.is_some() || was_busy || cancelled_activity
+    cancelled.is_some() || was_busy || cancelled_activity || closed_native
 }
 
 pub(crate) async fn create_subtask_session(
@@ -3365,4 +3366,4 @@ pub(crate) async fn session_shell_capabilities(
 }
 
 #[path = "session_shell.rs"]
-mod shell;
+pub(crate) mod shell;

@@ -193,6 +193,26 @@ test("provider OAuth honors conditional prompts, attempt identity and explicit c
  const count=f.server.requests.filter(request=>request.method==="POST").length;f.answers.push(undefined);await f.controller.execute("/connect");await f.pickers.at(-1)?.onSelect?.("openai");await f.pickers.at(-1)?.onSelect?.("__add_account__");expect(f.server.requests.filter(request=>request.method==="POST")).toHaveLength(count);
 });
 
+test("browser OAuth accepts automatic device fallback instructions and callbacks without requesting a code",async()=>{
+ const f=await fixture(),before=structuredClone(f.model.state.providerStates);
+ const instructions="Enter DEVICE-CODE at the device verification page",url="https://auth.example/device";
+ f.server.setOAuthAuthorization({attemptId:"device-fallback-attempt",method:"auto",instructions,url});
+ f.server.defer("/providers/openai/oauth/callback");
+ f.answers.push("Device fallback account","my-tenant");
+ await connectAccounts(f);await f.pickers.at(-1)!.onSelect!("__add_account__");await f.pickers.at(-1)!.onSelect!("1");
+ const pending=f.pickers.at(-1)!.onSelect!("us");
+ await until(()=>f.server.requests.some(request=>request.path==="/providers/openai/oauth/callback"));
+ expect(f.server.requests.find(request=>request.path==="/providers/openai/oauth/authorize")?.body).toEqual({method:1,label:"Device fallback account",inputs:{region:"us",tenant:"my-tenant"}});
+ expect(f.pickers.at(-1)).toMatchObject({kind:"connect-authorize",activity:{body:instructions,url,busy:true}});
+ expect(f.urls).toEqual([url]);expect(f.notices.at(-1)).toMatchObject({title:"Provider authorization",value:`${instructions}\n${url}`});
+ expect(f.inputs.some(request=>request.title==="Authorization code")).toBe(false);
+ expect(f.server.requests.filter(request=>request.path==="/providers/openai/oauth/callback").map(request=>request.body)).toEqual([{method:1,attemptId:"device-fallback-attempt"}]);
+ f.server.release("/providers/openai/oauth/callback");await pending;
+ expect(f.pickers.at(-1)?.activity).toMatchObject({status:"Connected",busy:false});
+ expect([...f.server.connections.get("a")!.values()].some(account=>account.label==="Device fallback account"&&account.authType==="oauth")).toBe(true);
+ expect(f.model.state.providerStates).toEqual(before);
+});
+
 test("model commands retain already-qualified catalog IDs without duplicating providers",async()=>{
  const f=await fixture();f.model.update({providers:[{id:"openai",name:"OpenAI",models:[{id:"openai/qualified",name:"Qualified"}]}]});await f.controller.execute("/model");expect(f.pickers.at(-1)?.options[0].value).toBe("openai/qualified");await f.controller.execute("/model openai/qualified");expect(f.model.selection("one").model).toBe("openai/qualified");
 });

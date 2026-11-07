@@ -19,6 +19,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
   const prompts: Array<() => void> = [];
   const statuses=new Map<string,{type:"idle"|"busy"|"retry"}>();
   const statusRequests={defer:false,fail:false,count:0,pending:[] as Array<()=>void>};
+  const providerCatalogFailure={status:0};
   const workspaceSubscriptions:Array<{workspaceId:string;release:()=>void}>=[];
   const notesVaults={resolve:(root:string)=>({notes_vault_dir:"/vaults/Default",linked_vault_dir:null as string|null}),delay:0};
   const directoryChanges:Array<()=>void>=[];
@@ -74,6 +75,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       if(match[2]==="session-projects")return Response.json({items:[...new Set(threads.map(thread=>thread.directory))].map((directory,index)=>({directory,updatedMs:100-index})),pinnedSessions:[]});
       if(match[2]==="config/defaults"){const delay=config.agentDefaultsDelayMs?.[match[1]];if(delay)await Bun.sleep(delay);return Response.json(config.agentConfigDefaults?.[match[1]]||{defaultAgent:null,model:null,variant:null});}
       if(match[2]==="providers/openai/usage"){if(config.usageDelayMs)await Bun.sleep(config.usageDelayMs);return Response.json(config.usageResponse||{accounts:[]});}
+      if (match[2] === "providers/configured" && providerCatalogFailure.status) return Response.json({code:"transport.request_failed",message:"Model discovery unavailable",retryable:true,details:{}},{status:providerCatalogFailure.status});
       if (match[2] === "providers/configured") return Response.json(config.agentProviderCatalog||{ default: {}, providers: [{ id: "openai", name: "OpenAI", models: {
         base: { id: "base", name: "Base", limit: { context: 128000 } }, advanced: { id: "advanced", name: "Advanced", limit: { context: 256000 } },
       } }] });
@@ -289,6 +291,6 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       },
     },
   });
-  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,prompts,statuses,statusRequests,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
+  return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,prompts,statuses,statusRequests,providerCatalogFailure,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
     workspaceClose,ptyCreations,notesVaults,mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);documents.dispose();} };
 }

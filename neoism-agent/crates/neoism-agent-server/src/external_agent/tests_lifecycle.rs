@@ -98,6 +98,8 @@ fn mock_adapter(
     let edit_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"edit-1","status":"completed"}}}).to_string();
     let tool_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"native-tool-1","status":"completed","rawOutput":{"text":"inspected"}}}}).to_string();
     let first = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"First "}}}}).to_string();
+    let first_prefix = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Fir"}}}}).to_string();
+    let first_suffix = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"st "}}}}).to_string();
     let second = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer"}}}}).to_string();
     let user_echo = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"user_message_chunk","messageId":"same-user-id","content":{"type":"text","text":"second turn"}}}}).to_string();
     let mislabeled_echo = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","messageId":"same-user-id","content":{"type":"text","text":"second turn"}}}}).to_string();
@@ -140,7 +142,7 @@ while IFS= read -r line; do
           done
           ;;
         *'first turn'*)
-          printf '%s\n' '{tool}' '{edit}' '{nested}' '{nested_input_update}' '{nested_progress}' '{plan}' '{usage}' '{first}' '{permission}'
+          printf '%s\n' '{tool}' '{edit}' '{nested}' '{nested_input_update}' '{nested_progress}' '{plan}' '{usage}' '{first_prefix}' '{first_suffix}' '{permission}'
           IFS= read -r reply || exit 1
           printf '%s\n' "$reply" >> '{log}'
           case "$reply" in *'"optionId":"allow"'*) ;; *) exit 2 ;; esac
@@ -165,6 +167,8 @@ done
         edit_done = edit_done,
         plan = plan,
         first = first,
+        first_prefix = first_prefix,
+        first_suffix = first_suffix,
         second = second,
         continued = continued,
         user_echo = user_echo,
@@ -213,6 +217,105 @@ async fn orchestrate(
 }
 
 #[tokio::test]
+#[ignore = "requires authenticated local Codex and Node/npx; makes a real provider request"]
+async fn live_codex_new_task_streams_tools_and_retains_stdout() {
+    let root = std::env::temp_dir().join(format!(
+        "neoism-live-codex-{}", Id::ascending(IdKind::Event)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let state = AppState::open_database_with_services(root.join("agent.sqlite3"), crate::standard_services())
+        .await.unwrap();
+    if std::env::var_os("NEOISM_ACP_TEST_TOOL_TRACE").is_some() {
+        let config = ExternalRuntime::Codex.acp_config(root.to_str().unwrap(), state.services()).unwrap();
+        eprintln!("ACP_TEST_CODEX_PATH {:?}", config.env.iter().find(|(name, _)| name == "CODEX_PATH"));
+    }
+    let app = crate::app(state.clone());
+    let parent: SessionInfo = json_response(app.clone().oneshot(http(
+        Method::POST,
+        &format!("/v2/sessions?directory={}", root.display()),
+        Some(json!({
+            "model":{"providerId":"orchestration-test","id":"none"},
+            "permission":[{"permission":"bash","pattern":"*","action":"allow"}]
+        })),
+    )).await.unwrap()).await;
+    let mut events = state.subscribe();
+    let task_state = state.clone();
+    let task_parent = parent.clone();
+    let mut running = tokio::spawn(async move {
+        orchestrate(
+            &task_state, &task_parent, "codex", Some(""),
+            "This is an integration smoke test in an empty temporary workspace. Do not read or modify files or spawn agents. First send ACP_LIVE_TEXT_BEGIN. Use your command tool exactly once to execute `printf 'ACP_LIVE_TOOL_BEGIN\\n'; sleep 2; printf 'ACP_LIVE_TOOL_END\\n'`. Then reply ACP_LIVE_TEXT_END. Actually execute the command; report any actual error instead of pretending to succeed.",
+            false, None,
+        ).await
+    });
+    let mut streamed = String::new();
+    let mut assistant_ids = std::collections::HashSet::new();
+    let mut saw_running_tool = false;
+    let outcome = tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            tokio::select! {
+                result = &mut running => break result.map_err(|error| error.to_string()).and_then(|result| result),
+                event = events.recv() => {
+                    let Ok(event) = event else { continue; };
+                    if event.kind == event_type::MESSAGE_UPDATED && event.properties["info"]["role"] == "assistant" {
+                        if let Some(id) = event.properties["info"]["id"].as_str() {
+                            assistant_ids.insert(id.to_owned());
+                        }
+                    } else if event.kind == event_type::MESSAGE_PART_UPDATED {
+                        let part = &event.properties["part"];
+                        if !part.get("messageId").or_else(|| part.get("messageID")).and_then(Value::as_str)
+                            .is_some_and(|id| assistant_ids.contains(id)) { continue; }
+                        if part["type"] == "tool" && part["state"]["status"] == "running" {
+                            saw_running_tool = true;
+                        }
+                        if part["type"] == "text" {
+                            streamed.push_str(part["text"].as_str().unwrap_or_default());
+                        }
+                    } else if event.kind == event_type::MESSAGE_PART_DELTA {
+                        if event.properties.get("messageID").or_else(|| event.properties.get("messageId"))
+                            .and_then(Value::as_str).is_some_and(|id| assistant_ids.contains(id)) {
+                            streamed.push_str(event.properties["delta"].as_str().unwrap_or_default());
+                        }
+                    }
+                }
+            }
+        }
+    }).await;
+    if outcome.is_err() {
+        for child in state.inner.store.list_child_sessions(parent.id.as_str()).await.unwrap() {
+            crate::session_actions::abort_session_run(&state, child.id.as_str()).await;
+        }
+        if tokio::time::timeout(Duration::from_secs(5), &mut running).await.is_err() {
+            running.abort();
+            let _ = running.await;
+        }
+    }
+    let result = outcome.unwrap_or_else(|_| Err("live Codex task timed out".into()));
+    let mut saved_output = String::new();
+    if let Ok(result) = &result {
+        let child = result.metadata.as_ref().unwrap()["sessionId"].as_str().unwrap();
+        for message in state.inner.store.list_messages(child).await.unwrap() {
+            for part in message.parts {
+                let part = serde_json::to_value(part).unwrap();
+                if part["type"] == "tool" {
+                    saved_output.push_str(part["state"]["output"].as_str().unwrap_or_default());
+                }
+            }
+        }
+    }
+    drop(events);
+    drop(app);
+    state.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+    let result = result.expect("real Codex task failed");
+    assert!(streamed.contains("ACP_LIVE_TEXT_BEGIN"), "no live assistant text: {streamed}");
+    assert!(saw_running_tool, "no running tool event before task completion");
+    assert!(result.output.contains("ACP_LIVE_TEXT_END"), "{}", result.output);
+    assert!(saved_output.contains("ACP_LIVE_TOOL_BEGIN"), "stdout missing: {saved_output}");
+    assert!(saved_output.contains("ACP_LIVE_TOOL_END"), "stdout missing: {saved_output}");
+}
+
+#[tokio::test]
 async fn external_orchestration_continues_same_provider_and_delivers_background_results() {
     for provider in ["opencode", "claude", "codex"] {
         let root = std::env::temp_dir().join(format!(
@@ -239,7 +342,10 @@ async fn external_orchestration_continues_same_provider_and_delivers_background_
             &format!("/v2/sessions?directory={}", root.display()),
             Some(json!({"model":{"providerId":"orchestration-test","id":"none"}})),
         )).await.unwrap()).await;
-        let result = orchestrate(&state, &parent, provider, None, "Review workspace", false, None)
+        let mut legacy = create_external_subtask_session(&state, &parent, "review", "Review", ExternalRuntime::resolve(provider).unwrap()).await.unwrap();
+        legacy.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
+        state.inner.store.update_session(&legacy).await.unwrap();
+        let result = orchestrate(&state, &parent, provider, Some(legacy.id.as_str()), "Review workspace", false, None)
             .await
             .unwrap();
         let metadata = result.metadata.unwrap();
@@ -335,11 +441,14 @@ async fn external_orchestration_stop_cancels_foreground_child_without_cancelling
             Some(json!({"model":{"providerId":"orchestration-test","id":"none"}})),
         )).await.unwrap()).await;
         let parent_cancel = Arc::new(AtomicBool::new(false));
+        let mut legacy = create_external_subtask_session(&state, &parent, "review", "Review", ExternalRuntime::resolve(provider).unwrap()).await.unwrap();
+        legacy.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
+        state.inner.store.update_session(&legacy).await.unwrap();
         let task_state = state.clone();
         let task_parent = parent.clone();
         let task_cancel = parent_cancel.clone();
         let running = tokio::spawn(async move {
-            orchestrate(&task_state, &task_parent, provider, None, "abort me", false, Some(task_cancel)).await
+            orchestrate(&task_state, &task_parent, provider, Some(legacy.id.as_str()), "abort me", false, Some(task_cancel)).await
         });
         let child = tokio::time::timeout(Duration::from_secs(8), async {
             loop {
@@ -409,7 +518,7 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
         state.start_session_list_backfill();
         let app = crate::app(state.clone());
         let mut events = state.subscribe();
-        let session: SessionInfo = json_response(
+        let mut session: SessionInfo = json_response(
             app.clone()
                 .oneshot(http(
                     Method::POST,
@@ -420,6 +529,8 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
                 .unwrap(),
         )
         .await;
+        session.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
+        state.inner.store.update_session(&session).await.unwrap();
         assert_eq!(
             session.extra["externalAgent"]["historyState"],
             "neoism_only"
@@ -581,7 +692,7 @@ async fn three_provider_roots_run_via_real_http_queue_and_reload() {
             .parts
             .iter()
             .position(
-                |part| matches!(part, Part::Text(text) if text.text == "First answer"),
+                |part| matches!(part, Part::Text(text) if text.text == "answer"),
             )
             .expect("assistant answer part");
         assert!(

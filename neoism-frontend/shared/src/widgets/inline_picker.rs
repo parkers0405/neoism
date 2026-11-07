@@ -46,7 +46,7 @@ pub struct InlinePickerRow<'a> {
     pub description: &'a str,
     pub footer: &'a str,
     pub is_header: bool,
-    /// Draw a filled accent-colored dot on the left to mark the currently
+    /// Draw an accent-colored checkmark on the right to mark the currently
     /// active item (e.g. the session the user is presently inside).
     pub is_current: bool,
     /// Draw a small pin glyph on the right of the row to mark a pinned
@@ -929,34 +929,20 @@ fn render_limited_content(
                 .clamp(list_y, (list_bottom - cursor_h).max(list_y));
             selected_cursor_rect = Some([cursor_x, cursor_y, cursor_w, cursor_h]);
         }
-        // Current-session dot — small filled circle in accent color,
-        // left-aligned in the 22 px gutter, independent of selection.
-        // Rects/quads aren't bounded by the text `clip_rect`, so cull the
-        // dot when its row is sliced at the list edges — otherwise it bleeds
-        // past the modal's top/bottom rounded corners as the row scrolls out.
+        // Keep the active choice distinct from the keyboard cursor on the left.
         if row.is_current {
-            let dot_d = 6.0 * s;
-            let dot_x = x + 7.0 * s;
-            let dot_y = row_y + (row_h - dot_d) / 2.0;
-            if dot_y >= list_y && dot_y + dot_d <= list_bottom {
-                sugarloaf.overlay_rounded_rect(
-                    dot_x,
-                    dot_y,
-                    dot_d,
-                    dot_d,
-                    theme.f32(theme.accent),
-                    DEPTH,
-                    dot_d / 2.0,
-                    ORDER + 5,
-                );
-            }
+            sugarloaf.overlay_text_mut().draw(
+                x + width - 30.0 * s,
+                row_y + 15.0 * s,
+                "✓",
+                &DrawOpts { color: theme.u8(theme.accent), ..footer_opts },
+            );
         }
         let icon = row_icons.get(absolute_ix).copied().flatten();
-        let indent = if grouped { 20.0 * s } else { 0.0 };
-        // Keep folder children inset even when their message icon is omitted.
-        let title_x = x + indent + if icon.is_some() || grouped { 48.0 } else { 22.0 } * s;
+        // Session titles align with their folder heading, without a child indent.
+        let title_x = x + if icon.is_some() || grouped { 48.0 } else { 22.0 } * s;
         if let Some(icon) = icon {
-            icon.draw(sugarloaf, [x + indent + 22.0 * s, row_y + (ROW_H - 18.0) * 0.5 * s, 18.0 * s, 18.0 * s], list_clip, theme.u8(theme.fg));
+            icon.draw(sugarloaf, [x + 22.0 * s, row_y + (ROW_H - 18.0) * 0.5 * s, 18.0 * s, 18.0 * s], list_clip, theme.u8(theme.fg));
         }
         let footer_w = if row.footer.is_empty() {
             0.0
@@ -967,7 +953,7 @@ fn render_limited_content(
                 + 22.0 * s
                 + if row.status.is_some() { 12.0 * s } else { 0.0 }
         };
-        let footer_x = x + width - footer_w;
+        let footer_x = x + width - footer_w - if row.is_current { 24.0 * s } else { 0.0 };
         // Reserve a gap before the footer so long titles don't smear
         // through the time column; trim with an ellipsis when needed.
         let title_max_w = (footer_x - title_x - 14.0 * s).max(48.0);
@@ -1031,7 +1017,7 @@ fn render_limited_content(
         }
         // Pinned marker — a small cyan dot in the row's right padding,
         // clear of the right-aligned time text. Culled at the list edges
-        // for the same reason as the current-session dot above.
+        // to avoid bleeding into the card's rounded corners.
         if row.is_pinned {
             let dot_d = 6.0 * s;
             let dot_x = x + width - dot_d - 8.0 * s;

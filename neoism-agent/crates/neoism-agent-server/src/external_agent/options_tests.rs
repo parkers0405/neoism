@@ -4,6 +4,19 @@ use axum::http::{Method, Request, StatusCode};
 use std::os::unix::fs::PermissionsExt;
 use tower::ServiceExt;
 
+fn native_fixture(root: &std::path::Path, provider: &str) -> (neoism_agent_service_api::AgentServices, std::path::PathBuf) {
+    let mut services = crate::standard_services();
+    let node = services.executables.resolve(&neoism_agent_service_api::ExecutableRequest::new("node", neoism_agent_service_api::ExecutablePurpose::ExternalAgent)).unwrap().path;
+    let wrapper = root.join("native-host");
+    if !wrapper.exists() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/external_agent/native/connection_fixture.mjs");
+        std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{}' '{}'\n", node.display(), fixture.display())).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    services.executables = Arc::new(crate::executable::test_support::FakeExecutableService::with("node", &wrapper).with_path(provider, &node).with_path("npm", &node));
+    (services, root.join("calls.log"))
+}
+
 #[tokio::test]
 async fn preview_cold_concurrent_same_key_single_flight() {
     let root = std::env::temp_dir().join(format!(
@@ -11,11 +24,7 @@ async fn preview_cold_concurrent_same_key_single_flight() {
         Id::ascending(IdKind::Event)
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let (script, log) = fake(&root);
-    let mut services = crate::standard_services();
-    services.executables = Arc::new(
-        crate::executable::test_support::FakeExecutableService::with("opencode", script),
-    );
+    let (services, log) = native_fixture(&root, "opencode");
     let state =
         AppState::open_database_with_services(root.join("agent.sqlite3"), services)
             .await
@@ -32,7 +41,7 @@ async fn preview_cold_concurrent_same_key_single_flight() {
     assert_eq!(
         std::fs::read_to_string(&log)
             .unwrap()
-            .matches("\"method\":\"initialize\"")
+            .matches("\"method\":\"runtime.initialize\"")
             .count(),
         1
     );
@@ -47,11 +56,7 @@ async fn preview_stale_last_good_refresh_failure_backs_off() {
         Id::ascending(IdKind::Event)
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let (script, log) = fake(&root);
-    let mut services = crate::standard_services();
-    services.executables = Arc::new(
-        crate::executable::test_support::FakeExecutableService::with("opencode", script),
-    );
+    let (services, log) = native_fixture(&root, "opencode");
     let state =
         AppState::open_database_with_services(root.join("agent.sqlite3"), services)
             .await
@@ -121,6 +126,7 @@ fn preview_cache_rejects_tampered_snapshots() {
         available_commands: vec![],
         replay_error: None,
         catalog_stale: None,
+        pending_selection: None,
     };
     assert!(cache::sanitized(response).is_none());
 }
@@ -132,20 +138,7 @@ async fn preview_post_reveals_conditional_effort_without_creating_root() {
         Id::ascending(IdKind::Event)
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let (script, log) = fake(&root);
-    // The adapter advertises effort only after selecting the non-default model.
-    let source = std::fs::read_to_string(&script)
-        .unwrap()
-        .replace("thought", "effort")
-        .replace("Thought", "Effort");
-    std::fs::write(&script, source).unwrap();
-    let mut services = crate::standard_services();
-    services.executables = Arc::new(
-        crate::executable::test_support::FakeExecutableService::with(
-            "opencode",
-            script.clone(),
-        ),
-    );
+    let (services, log) = native_fixture(&root, "opencode");
     let state =
         AppState::open_database_with_services(root.join("agent.sqlite3"), services)
             .await
@@ -162,7 +155,7 @@ async fn preview_post_reveals_conditional_effort_without_creating_root() {
             .unwrap(),
     )
     .await;
-    assert_eq!(initial["configOptions"][0]["currentValue"], "base");
+    assert!(initial["configOptions"][0]["currentValue"].is_null());
     assert!(initial["configOptions"]
         .as_array()
         .unwrap()
@@ -190,10 +183,10 @@ async fn preview_post_reveals_conditional_effort_without_creating_root() {
             .unwrap(),
     )
     .await;
-    assert_eq!(selected["configOptions"][0]["currentValue"], "fast");
-    assert_eq!(selected["configOptions"][1]["id"], "effort");
-    assert_eq!(selected["configOptions"][1]["currentValue"], "deep");
-    assert_eq!(selected["selectedOptions"], json!({"model":"fast"}));
+    assert_eq!(selected["configOptions"][0]["id"], "effort");
+    assert_eq!(selected["configOptions"][0]["currentValue"], "deep");
+    assert_eq!(selected["selectedOptions"], json!({}));
+    assert_eq!(selected["pendingSelection"], json!({"model":"fast","options":{}}));
     assert!(selected["externalSessionId"].is_null());
     let effort = body_json(
         app.clone()
@@ -206,10 +199,10 @@ async fn preview_post_reveals_conditional_effort_without_creating_root() {
             .unwrap(),
     )
     .await;
-    assert_eq!(effort["configOptions"][1]["currentValue"], "shallow");
+    assert_eq!(effort["configOptions"][0]["currentValue"], "deep");
     assert_eq!(
-        effort["selectedOptions"],
-        json!({"model":"fast","effort":"shallow"})
+        effort["pendingSelection"],
+        json!({"model":"fast","options":{"effort":"shallow"}})
     );
     let unchanged = body_json(
         app.clone()
@@ -249,18 +242,16 @@ async fn preview_post_reveals_conditional_effort_without_creating_root() {
             .unwrap(),
     )
     .await;
-    assert_eq!(cached_selected["selectedOptions"], json!({"model":"fast"}));
+    assert_eq!(cached_selected["pendingSelection"]["model"], "fast");
     assert!(state.inner.store.list_sessions().await.unwrap().is_empty());
     let wire = std::fs::read_to_string(&log).unwrap();
-    assert!(wire.contains("session/set_config_option"));
-    assert!(!wire.contains("session/prompt"));
+    assert!(wire.contains("runtime.describe"));
+    assert!(!wire.contains("conversation.open"));
+    assert!(!wire.contains("turn.start"));
     state.shutdown().await.unwrap();
     drop(app);
     drop(state);
-    let mut services = crate::standard_services();
-    services.executables = Arc::new(
-        crate::executable::test_support::FakeExecutableService::with("opencode", script),
-    );
+    let (services, _) = native_fixture(&root, "opencode");
     let restarted =
         AppState::open_database_with_services(root.join("agent.sqlite3"), services)
             .await
@@ -286,18 +277,7 @@ async fn preview_and_draft_are_ephemeral_and_replay_on_first_prompt() {
             Id::ascending(IdKind::Event)
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let (script, log) = fake(&root);
-        let mut services = crate::standard_services();
-        services.executables = Arc::new(
-            crate::executable::test_support::FakeExecutableService::with(
-                if provider == "opencode" {
-                    "opencode"
-                } else {
-                    "npx"
-                },
-                script,
-            ),
-        );
+        let (services, log) = native_fixture(&root, provider);
         let state =
             AppState::open_database_with_services(root.join("agent.sqlite3"), services)
                 .await
@@ -318,18 +298,19 @@ async fn preview_and_draft_are_ephemeral_and_replay_on_first_prompt() {
         )
         .await;
         assert_eq!(preview["provider"], provider);
-        assert_eq!(preview["configOptions"][0]["currentValue"], "base");
+        assert!(preview["configOptions"][0]["currentValue"].is_null());
         assert_eq!(preview["availableCommands"].as_array().unwrap().len(), 1);
         assert_eq!(preview["availableCommands"][0]["name"], "review");
         assert_eq!(preview["selectedOptions"], json!({}));
         assert!(preview["externalSessionId"].is_null());
         assert!(state.inner.store.list_sessions().await.unwrap().is_empty());
-        let invalid = app.clone().oneshot(request(Method::POST, &format!("/v2/sessions?directory={}", root.display()),
-            Some(json!({"externalProvider":provider,"externalOptions":{"model":"invented"}})))).await.unwrap();
+        let preview_uri = format!("/v2/external/options/preview?provider={provider}&directory={}", root.display());
+        let invalid = app.clone().oneshot(request(Method::POST, &preview_uri,
+            Some(json!({"selectedOptions":{"model":"invented"}})))).await.unwrap();
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
         assert!(state.inner.store.list_sessions().await.unwrap().is_empty());
-        let invalid_dependency = app.clone().oneshot(request(Method::POST, &format!("/v2/sessions?directory={}", root.display()),
-            Some(json!({"externalProvider":provider,"externalOptions":{"thought":"shallow"}})))).await.unwrap();
+        let invalid_dependency = app.clone().oneshot(request(Method::POST, &preview_uri,
+            Some(json!({"selectedOptions":{"effort":"shallow"}})))).await.unwrap();
         assert_eq!(invalid_dependency.status(), StatusCode::BAD_REQUEST);
         let non_acp = app
             .clone()
@@ -344,16 +325,18 @@ async fn preview_and_draft_are_ephemeral_and_replay_on_first_prompt() {
         assert!(state.inner.store.list_sessions().await.unwrap().is_empty());
         let created = body_json(app.clone().oneshot(request(Method::POST,
             &format!("/v2/sessions?directory={}", root.display()),
-            Some(json!({"externalProvider":provider,"externalOptions":{"model":"fast","thought":"shallow","mode":"code"}})))).await.unwrap()).await;
+            Some(json!({"externalProvider":provider,"externalOptions":{"model":"fast","effort":"shallow"},
+                "permission":[{"permission":"read","pattern":"*","action":"allow"}]})))).await.unwrap()).await;
         let id = created["id"].as_str().unwrap();
         assert_eq!(
-            created["externalAgent"]["selectedOptions"],
-            json!({"model":"fast","thought":"shallow","mode":"code"})
+            created["externalAgent"]["nativeOptions"],
+            json!({"model":"fast","effort":"shallow"})
         );
-        assert_eq!(created["externalAgent"]["optionsValid"], false);
+        assert_eq!(created["externalAgent"]["runtime"], ExternalRuntime::resolve(provider).unwrap().native_driver_id());
         assert!(created["externalAgent"]["externalSessionId"].is_null());
         let before = std::fs::read_to_string(&log).unwrap();
-        assert!(!before.contains("session/prompt"));
+        assert!(!before.contains("conversation.open"));
+        assert!(!before.contains("turn.start"));
         let sent = app
             .clone()
             .oneshot(request(
@@ -373,12 +356,13 @@ async fn preview_and_draft_are_ephemeral_and_replay_on_first_prompt() {
             }
         }).await.unwrap();
         let after = std::fs::read_to_string(&log).unwrap();
-        assert!(after.contains("session/prompt"));
-        assert!(after.matches("session/set_config_option").count() >= 6);
+        assert!(after.contains("turn.start"));
+        assert!(!after.contains("session/prompt"));
+        assert!(!after.contains("session/set_config_option"));
         let saved = state.inner.store.get_session(id).await.unwrap().unwrap();
         assert_eq!(
-            saved.extra["externalAgent"]["selectedOptions"],
-            json!({"model":"fast","thought":"shallow","mode":"code"})
+            saved.extra["externalAgent"]["nativeOptions"],
+            json!({"model":"fast","effort":"shallow"})
         );
         state.shutdown().await.unwrap();
         drop(app);
@@ -394,11 +378,7 @@ async fn preview_rejects_scoped_claims_before_launch() {
         Id::ascending(IdKind::Event)
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let (script, log) = fake(&root);
-    let mut services = crate::standard_services();
-    services.executables = Arc::new(
-        crate::executable::test_support::FakeExecutableService::with("opencode", script),
-    );
+    let (services, log) = native_fixture(&root, "opencode");
     let state =
         AppState::open_database_with_services(root.join("agent.sqlite3"), services)
             .await
@@ -706,7 +686,9 @@ async fn options_http_confirms_complete_state_and_reapplies_after_reload() {
         )
         .await;
         let id = new["id"].as_str().unwrap();
-        let info = state.inner.store.get_session(id).await.unwrap().unwrap();
+        let mut info = state.inner.store.get_session(id).await.unwrap().unwrap();
+        info.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
+        state.inner.store.update_session(&info).await.unwrap();
         let created_at = info.time.updated;
         let scoped = crate::caller::CallerClaims {
             subject: "other-actor".into(),
@@ -1115,6 +1097,9 @@ done
             .unwrap(),
     )
     .await;
+    let mut legacy = state.inner.store.get_session(new["id"].as_str().unwrap()).await.unwrap().unwrap();
+    legacy.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
+    state.inner.store.update_session(&legacy).await.unwrap();
     let uri = format!(
         "/v2/sessions/{}/external/options",
         new["id"].as_str().unwrap()

@@ -893,18 +893,10 @@ fn sign_agent_credential(
     // agent-server process — and it rotates when the runtime dir is
     // recreated. Prefer the current file so a signer with a stale env can
     // never mint credentials the verifier must reject.
-    let signing_key = std::fs::read_to_string(crate::daemon_token::daemon_token_path())
-        .ok()
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())
-        .or_else(|| {
-            std::env::var("NEOISM_DAEMON_TOKEN")
-                .ok()
-                .filter(|key| !key.is_empty())
-        })
+    let signing_key = neoism_agent_service_api::daemon_credential::agent_signing_key()
         .ok_or_else(|| {
             tracing::error!(
-                "cannot mint Agent credential: no daemon token on disk or in NEOISM_DAEMON_TOKEN"
+                "cannot mint Agent credential: shared Agent signing authority unavailable"
             );
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         })?;

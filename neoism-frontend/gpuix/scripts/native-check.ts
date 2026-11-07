@@ -16,6 +16,7 @@ const until = async (predicate: () => Promise<boolean>) => { const end = Date.no
 let stage = "workspace", editorChecked = false;
 try {
   await app.getByTestId("workspace-tabs").waitFor({ timeoutMs: 15000 });
+  await app.getByTestId("toggle-files").click();
   await app.getByTestId("file-tree").waitFor({ timeoutMs: 15000 });
   const width = (await app.getByTestId("file-tree").bounds()).width;
   if (Math.abs(width - dimensions.sidebarWidth) > 8) throw new Error(`Sidebar width drifted: ${width}`);

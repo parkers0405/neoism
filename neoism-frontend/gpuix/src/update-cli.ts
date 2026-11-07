@@ -14,6 +14,6 @@ export function updaterPath(executable:string,platform:NodeJS.Platform=process.p
 }
 export async function runUpdate(args:string[]):Promise<number>{
  const helper=updaterPath(process.execPath);
- const child=Bun.spawn([helper,...args,...(args[0]==="--macos-update-helper"?[]:["--invoking-exe",realpathSync(process.execPath),"--parent-pid",String(process.pid)])],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});
+ const child=Bun.spawn([helper,...args,...(args[0]==="--macos-update-helper"?[]:["--invoking-exe",realpathSync(process.execPath),"--parent-pid",String(process.pid)])],{stdin:"inherit",stdout:"inherit",stderr:"inherit",windowsHide:true});
  return await child.exited;
 }

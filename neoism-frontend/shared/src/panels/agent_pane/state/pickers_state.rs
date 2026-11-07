@@ -63,14 +63,22 @@ impl NeoismAgentPane {
     }
 
     pub fn refresh_visible_model_catalog(&mut self) {
+        // A retry must not silently adopt a new scope with the old scope's
+        // options/query. Closing also revokes desktop Arc ownership.
+        if self.picker.as_ref().is_some_and(|p| p.kind == NeoismAgentPickerKind::Model
+            && (p.model_refresh_started.is_some() || p.model_refresh_due.is_some())
+            && p.model_request_directory != self.directory) {
+            self.picker = None;
+            return;
+        }
         let Some(picker) = self.picker.as_mut().filter(|p| p.kind == NeoismAgentPickerKind::Model) else { return; };
-        if picker.model_refresh_started.is_some() { return; }
+        if picker.model_refresh_started.is_some()
+            || (picker.model_refresh_due.is_some() && !picker.model_catalog_poll_due()) { return; }
         static NEXT_REQUEST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
         let request_id = format!("models-{}", NEXT_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         picker.model_request_id = Some(request_id.clone());
         picker.model_request_directory = self.directory.clone();
         picker.begin_model_catalog_request();
-        picker.set_loading(true);
         self.push_outbound(OutboundAgentCommand::RefreshModelCatalog { request_id, directory: self.directory.clone() });
     }
 
@@ -81,8 +89,10 @@ impl NeoismAgentPane {
         if let Some(id) = request_id {
             if !self.picker.as_ref().is_some_and(|p| p.kind == NeoismAgentPickerKind::Model && p.model_request_id.as_deref() == Some(id) && p.model_request_directory == self.directory) { return false; }
         } else if self.picker.as_ref().is_some_and(|p| p.model_request_id.is_some()) { return false; }
-        let failed = status.and_then(|s| s.get("state")).and_then(Value::as_str) == Some("retryable-error");
-        if !failed || self.model_options.is_empty() { self.set_model_options(options); }
+        let state = status.and_then(|s| s.get("state")).and_then(Value::as_str);
+        let preserve_known = !self.model_options.is_empty()
+            && (state == Some("retryable-error") || (state == Some("loading") && options.is_empty()));
+        if !preserve_known { self.set_model_options(options); }
         if let Some(picker) = self.picker.as_mut().filter(|p| p.kind == NeoismAgentPickerKind::Model) {
             picker.apply_model_catalog_status(status);
         }

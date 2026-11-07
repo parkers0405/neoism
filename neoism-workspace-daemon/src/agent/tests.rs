@@ -317,6 +317,12 @@ fn thread_summary_serializes_only_persisted_acp_root_provider() {
     );
 
     let mut child = base.clone();
+    for (provider, driver) in [("codex", "codex-app-server"), ("claude", "claude-agent-sdk"), ("opencode", "opencode-server")] {
+        child["externalAgent"] = json!({"provider":provider,"runtime":driver});
+        assert_eq!(super::thread_summary_from_session(&child).unwrap().external_provider.as_deref(), Some(provider));
+        child["externalAgent"]["runtime"] = json!("wrong-driver");
+        assert!(super::thread_summary_from_session(&child).unwrap().external_provider.is_none());
+    }
     child["parentId"] = json!("ses_parent");
     assert_eq!(
         super::thread_summary_from_session(&child)

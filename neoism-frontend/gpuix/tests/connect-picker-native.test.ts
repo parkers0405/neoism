@@ -3,6 +3,13 @@ import {coreCall} from "../src/native-core";
 import {connectCatalog} from "../src/agent/connect-catalog";
 import type {PickerFrame,PickerOption} from "../src/ui/InlinePicker";
 const geometry={anchor:[100,700,600,120],scale:1};
+test("Connect excludes Claude Code while keeping Anthropic even when both are connected",()=>{
+ const catalog=connectCatalog({all:[{id:"claude-code",name:"Claude Code"},{id:"anthropic",name:"Anthropic"}],connected:["claude-code","anthropic"]});
+ expect(catalog).toEqual({all:[{id:"anthropic",name:"Anthropic"}],connected:["anthropic"]});
+ const rows=coreCall<PickerOption[]>("picker.connect-options",{catalog});
+ expect(rows.some(row=>row.value==="claude-code")).toBe(false);
+ expect(rows.some(row=>row.value==="anthropic")).toBe(true);
+});
 test("Connect strips model catalogs before FFI without changing provider choices",()=>{
  const catalog={all:[{id:"openai",name:"OpenAI",models:{large:{description:"unused".repeat(10000)}},options:{unused:true}},{id:"custom",name:"",models:{},options:{}}],connected:["openai"]};
  const compact=connectCatalog(catalog);

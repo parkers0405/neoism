@@ -1235,6 +1235,7 @@ impl NeoismAgentPane {
         }
         self.streaming_state = state;
         self.streaming_tool_label = tool;
+        self.retain_inflight_child_trace();
     }
 
     pub fn streaming_state_changed_elapsed(&self) -> Option<f32> {

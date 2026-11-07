@@ -110,7 +110,8 @@ pub(crate) async fn start_task_tool(
                 neoism_agent_builtins::plugin::subagents::ID
             )
         })?;
-    let task_id = string_arg(&input, "task_id");
+    // Tool clients may serialize the optional continuation ID as an empty string.
+    let task_id = string_arg(&input, "task_id").filter(|id| !id.trim().is_empty());
     let continuing = task_id.is_some();
     if !continuing {
         let depth = crate::tool_runtime::session_subtask_depth(state, &parent).await;
@@ -129,7 +130,11 @@ pub(crate) async fn start_task_tool(
                 "external native subagents are unavailable for this session".into()
             );
         }
-        return crate::external_agent::execute_external_task(
+        let external_options = input.get("external_options").map(|value| {
+            serde_json::from_value::<std::collections::BTreeMap<String, String>>(value.clone())
+                .map_err(|_| "external_options must be a string-map".to_string())
+        }).transpose()?;
+        return crate::external_agent::execute_external_task_with_options(
             state,
             &parent,
             &agent_name,
@@ -139,8 +144,12 @@ pub(crate) async fn start_task_tool(
             task_id,
             background,
             cancel,
+            external_options,
         )
         .await;
+    }
+    if input.get("external_options").is_some() {
+        return Err("external_options requires an external subagent_type".into());
     }
     let agents = plugins::agent_catalog(&snapshot, &parent.directory)
         .map_err(|error| error.to_string())?;
@@ -515,6 +524,9 @@ async fn stop(
         let child = child_session(state, task_id).await?;
         crate::tool_runtime::ensure_child_task_belongs_to_parent(state, parent, &child)
             .await?;
+        if child.extra.get("externalAgent").is_some_and(|external| external["nativeProjection"] == true || external["nested"] == true) {
+            return Err("Provider-native nested tasks are observed only; stop their owning external task instead".into());
+        }
         vec![child]
     } else {
         crate::tool_runtime::descendant_sessions(state, parent.id.as_str()).await?

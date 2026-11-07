@@ -1,5 +1,8 @@
 $ErrorActionPreference = 'Stop'
 $bin = (Resolve-Path 'neoism-frontend/gpuix/dist').Path
+# MSI consumes dist directly; do not rely on a prior ZIP packaging invocation.
+python "$PSScriptRoot/windows-bundle.py" $bin (Join-Path $PSScriptRoot '../target/release')
+if ($LASTEXITCODE -ne 0) { throw 'Windows GUI subsystem or release service provenance validation failed' }
 node "$PSScriptRoot/build-docs.mjs" --verify (Join-Path $bin 'resources/docs')
 if ($LASTEXITCODE -ne 0) { throw 'Bundled docs verification failed' }
 $version = (& "$bin/neoism.exe" --version).Trim().Split(' ')[1]

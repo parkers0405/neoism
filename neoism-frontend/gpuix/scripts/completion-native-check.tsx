@@ -48,8 +48,11 @@ try {
   setBelow(true); await key("tab", true); await wait(); assert.equal(draft(), "cargo ", "ShiftTab opens on final candidate");
   assert.equal(host.find("terminal-suggestions")!.style.top, 80);
   await dispatch("change", { value: "git st" }); await wait(); assert.equal(draft(), "git st", "real typing rebases without unsolicited preview");
-  assert.deepEqual(queries, ["ca", "ca", "git st"]);
-  await key("down"); assert.equal(draft(), "git stash ");
+   assert.deepEqual(queries, ["ca", "ca", "git st"]);
+   await key("tab"); assert.equal(draft(), "git status ", "First Tab applies the highlighted result after typing instead of skipping it");
+   await key("tab"); assert.equal(draft(), "git stash ", "Subsequent Tab cycles to the next result");
+   await key("up"); assert.equal(draft(), "git status ");
+   await key("down"); assert.equal(draft(), "git stash ");
   await key("composer-escape"); assert.equal(draft(), "git st", "Escape restores the rebased draft");
   await dispatch("change", { value: "ca" }); await key("tab"); await wait();
   await key("tab"); assert.equal(draft(), "cargo ");
@@ -118,7 +121,10 @@ try {
   await dispatch("change", { value: "beta" }); await wait();
   replies.get("alpha")!([{ value: "alpha-old ", label: "alpha-old", kind: "alias", detail: "" }]); await pump();
   assert.equal(draft(), "beta"); assert.equal(host.find("terminal-suggestions"), undefined, "A late host reply cannot reopen stale suggestions");
-  replies.get("beta")!([{ value: "beta-current ", label: "beta-current", kind: "function", detail: "" }]); await pump();
+   replies.get("beta")!([
+     { value: "beta-current ", label: "beta-current", kind: "function", detail: "" },
+     { value: "beta-next ", label: "beta-next", kind: "function", detail: "" },
+   ]); await pump();
   assert.equal(draft(), "beta", "Editing while the host responds never unsolicitedly previews a command");
   await key("tab"); assert.equal(draft(), "beta-current ");
    await key("composer-escape"); assert.equal(draft(), "beta");

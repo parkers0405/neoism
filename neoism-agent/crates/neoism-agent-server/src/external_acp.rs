@@ -212,6 +212,7 @@ impl AcpClient {
                         "terminal": true,
                         "_meta": {
                             "terminal_output": true,
+                            "terminal_output_delta": true,
                         },
                     },
                     "clientInfo": {

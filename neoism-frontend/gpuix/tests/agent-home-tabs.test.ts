@@ -24,6 +24,29 @@ test("fresh catalogs are reused for picker opens and concurrent refreshes share 
   expect(daemon.httpRequests.length).toBeGreaterThan(before);
  }finally{close();}
 });
+test("model catalog transport failures retain known choices and recover with capped backoff",async()=>{
+ const {daemon,model,close}=await fixture();try{
+  await model.refreshCatalogs();
+  const known=model.state.providers,catalog=model.state.providerCatalog,selection=model.selection();
+  expect(known.some(provider=>(provider.models?.length||0)>0)).toBe(true);
+  daemon.providerCatalogFailure.status=503;
+  for(const delay of [2000,4000,8000,16000,32000,60000,60000]){
+   await model.refreshCatalogs();
+   expect(model.state.catalogRetryAfterMs).toBe(delay);
+   expect(model.state.catalogsLoading).toBe(false);
+   expect(model.state.providers).toBe(known);expect(model.state.providerCatalog).toBe(catalog);
+   expect(model.selection()).toEqual(selection);
+  }
+  daemon.providerCatalogFailure.status=0;await model.refreshCatalogs();
+  expect(model.state.catalogRetryAfterMs).toBeUndefined();expect(model.state.catalogsError).toBeUndefined();
+  expect(model.state.providers).toEqual(known);
+  daemon.providerCatalogFailure.status=503;await model.refreshCatalogs();
+  expect(model.state.catalogRetryAfterMs).toBe(2000);
+  await model.activateWorkspace(daemon.workspaces[1]);await model.refreshCatalogs();
+  expect(model.state.providers).toEqual([]);expect(model.state.providerCatalog).toBeUndefined();
+  expect(model.state.catalogRetryAfterMs).toBeGreaterThan(0);
+ }finally{close();}
+});
 test("conversation agent catalog excludes hidden and subagent-only agents by mode",async()=>{
  const {model,close}=await fixture({agentCatalog:[
   {name:"build",mode:"primary"},{name:"plan",mode:"primary"},{name:"both",mode:"all"},

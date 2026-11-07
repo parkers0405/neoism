@@ -12,11 +12,24 @@ use super::*;
 const HOST_ENDED_BROADCAST_CAPACITY: usize = 16;
 
 impl WorkspaceManager {
-    /// Construct a manager seeded from `~/.local/share/neoism/workspaces.json`.
-    /// Missing / unreadable persistence file is treated as an empty
-    /// registry; we log and continue.
+    /// Construct a manager seeded from `NEOISM_WORKSPACE_REGISTRY`, or the
+    /// platform user-data `neoism/workspaces.json` when unset/empty. The resolved
+    /// path is retained for all later registry mutations, including on clones.
+    /// Missing / unreadable persistence files are treated as empty registries.
     pub fn bootstrap() -> Self {
-        let path = persistence_path();
+        Self::bootstrap_from_registry_path(persistence_path())
+    }
+
+    /// Bootstrap a disposable manager without resolving or reading the user's
+    /// registry (or an inherited `NEOISM_WORKSPACE_REGISTRY`). Registry reads
+    /// and later mutations are confined to `state_dir/workspaces.json`;
+    /// snapshot loading/writing remains disabled. A fresh state directory starts
+    /// empty, without importing unrelated workspaces or preferences.
+    pub fn bootstrap_isolated(state_dir: PathBuf) -> Self {
+        Self::bootstrap_from_registry_path(state_dir.join("workspaces.json"))
+    }
+
+    fn bootstrap_from_registry_path(path: PathBuf) -> Self {
         let registry = load_registry_full(&path);
         let workspaces = registry
             .workspaces
@@ -68,19 +81,19 @@ impl WorkspaceManager {
     /// can give us, so the daemon never starts on a "lost" world view
     /// — workspaces survive even when the richer snapshot is stale.
     ///
-    /// `ephemeral = true` skips both load and install (the writer is
-    /// left in `ephemeral()` mode) so tests and one-shot cloud runs
-    /// don't touch disk.
+    /// `ephemeral = true` uses [`Self::bootstrap_isolated`] before any global
+    /// registry access. It skips snapshot loading/writing and confines legacy
+    /// registry reads and mutations to `state_dir/workspaces.json`. It does not
+    /// mean all mutations are memory-only: the state-local registry can still
+    /// be written. Disposable callers must supply a fresh temporary directory.
     pub fn bootstrap_with_state_dir(state_dir: PathBuf, ephemeral: bool) -> Self {
+        if ephemeral {
+            return Self::bootstrap_isolated(state_dir);
+        }
+
         // Start from the legacy registry so we keep workspaces /
         // preferences in the worst case (stale or missing snapshot).
         let mut manager = Self::bootstrap();
-
-        if ephemeral {
-            // Nothing more to do — `bootstrap()` already left the
-            // writer in `ephemeral()` mode.
-            return manager;
-        }
 
         match persistence::load_snapshot(&state_dir) {
             Ok(Some(snapshot)) => {

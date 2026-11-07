@@ -104,6 +104,27 @@ impl NeoismAgentPane {
         )
     }
 
+    pub fn diff_scroll_target_at(&self, x: f32, y: f32) -> Option<String> {
+        if self.timeline_paint_region.as_ref().is_some_and(|region| !region.contains(x, y)) { return None; }
+        self.diff_scroll_rects.iter().rev()
+            .find(|(_, rect, _)| interaction_policy::rect_contains(*rect, x, y))
+            .map(|(key, _, _)| key.clone())
+    }
+
+    pub fn diff_scroll_target(&self, key: &str) -> Option<([f32; 4], f32)> {
+        self.diff_scroll_rects.iter().rev().find(|(id, _, _)| id == key)
+            .map(|(_, rect, max)| (*rect, *max))
+    }
+
+    pub fn scroll_diff_key(&mut self, key: &str, delta: f32) -> Option<bool> {
+        let (_, max) = self.diff_scroll_target(key)?;
+        let offset = self.diff_scroll_offsets.entry(key.to_owned()).or_insert(0.0);
+        let next = (*offset + delta).clamp(0.0, max);
+        let changed = next != *offset;
+        *offset = next;
+        Some(changed)
+    }
+
     pub fn register_markdown_horizontal_scroll_rect(
         &mut self,
         key: String,

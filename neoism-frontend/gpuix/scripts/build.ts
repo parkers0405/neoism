@@ -8,6 +8,7 @@ import {createRequire} from "node:module";
 import {devicePreviewPlugin} from "./device-preview-build";
 import {pruneBrowserAssets} from "../../../scripts/native-runtime.mjs";
 import {buildDocs} from "../../../scripts/build-docs.mjs";
+import {assertWindowsGuiExecutable} from "./windows-executable";
 // Release builds always build the shared pinned site; never package raw source/Notes.
 buildDocs();
 createRequire(import.meta.url)("./patch-solid-host.cjs")();
@@ -59,6 +60,8 @@ const result = await Bun.build({
   }},nativePlugin(),solid],
 });
 if (!result.success) { console.error(result.logs); process.exit(1); }
+// Fail before publishing the launcher if Bun ignored/regressed hideConsole.
+if(process.platform==="win32")assertWindowsGuiExecutable(readFileSync(`dist/${pendingExecutable}`));
 
 mkdirSync("dist/web/native", {recursive:true});
 const packagedBinding=resolve("dist/web/native",stamp.artifact);

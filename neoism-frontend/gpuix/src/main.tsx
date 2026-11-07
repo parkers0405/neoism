@@ -30,6 +30,7 @@ import type {ServerSelection} from "./menu-actions/ChromeActionsController";
 import {localDaemon} from "./menu-actions/web-frontend";
 import {startDiscordPresence} from "./discord-presence";
 import type { WindowBootstrap } from "./window-bootstrap";
+import {windowTitlebarOptions} from "./chrome/window-titlebar";
 
 export type {ServerSelection} from "./menu-actions/ChromeActionsController";
 
@@ -117,7 +118,7 @@ if (!host) {
     if(process.platform!=="darwin")(renderer as typeof renderer & {setStartupRenderingReady(ready:boolean):void}).setStartupRenderingReady(false);
   }
   const ready = bootstrap?.ready || (renderer as GpuixRenderer & {initAsync(options:Parameters<GpuixRenderer["init"]>[0]):Promise<void>}).initAsync({ title: "Neoism", appName: "Neoism", appId: "ai.neoism.gpuix", width: 1440, height: 900,
-    minWidth: 720, minHeight: 480, titlebarTransparent: true, windowBackground: "opaque",focus:process.env.GPUIX_BACKGROUND!=="1" });
+    minWidth: 720, minHeight: 480, ...windowTitlebarOptions(process.platform), windowBackground: "opaque",focus:process.env.GPUIX_BACKGROUND!=="1" });
   // Build the retained UI while the native thread initializes graphics. Its
   // command queue and requested viewport already exist; first paint can use
   // the real root instead of drawing an empty window and mounting afterward.

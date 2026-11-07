@@ -9,11 +9,14 @@ import {fileURLToPath} from 'node:url';
 
 const repository=fileURLToPath(new URL('..',import.meta.url));
 const userConfig=process.argv.includes('--user-config');
-const workspace=resolve(process.argv.slice(2).find(arg=>arg!=='--user-config')||repository);
+const debug=process.argv.includes('--debug');
+const workspace=resolve(process.argv.slice(2).find(arg=>arg!=='--user-config'&&arg!=='--debug')||repository);
 const suffix=process.platform==='win32'?'.exe':'';
-const binary=resolve(process.env.NEOISM_GPUIX_PREVIEW_BINARY||join(repository,`neoism-frontend/gpuix/dist/neoism${suffix}`));
-const daemon=join(dirname(binary),`neoism-workspace-daemon${suffix}`);
-if(!existsSync(binary)||!existsSync(daemon))throw new Error('Build and stage the production bundle first.');
+const frontend=join(repository,'neoism-frontend/gpuix');
+const binary=resolve(process.env.NEOISM_GPUIX_PREVIEW_BINARY||join(frontend,debug?`node_modules/.bin/bun${suffix}`:`dist/neoism${suffix}`));
+const daemon=debug?join(repository,`target/debug/neoism-workspace-daemon${suffix}`):join(dirname(binary),`neoism-workspace-daemon${suffix}`);
+const core=join(repository,'target/gpuix-core-cargo/debug',process.platform==='win32'?'neoism_gpuix_core.dll':process.platform==='darwin'?'libneoism_gpuix_core.dylib':'libneoism_gpuix_core.so');
+if(!existsSync(binary)||!existsSync(daemon)||(debug&&!existsSync(core)))throw new Error(debug?'Build the debug services and native core first.':'Build and stage the production bundle first.');
 const freePort=()=>new Promise((resolve,reject)=>{
  const server=createServer();server.once('error',reject);
  server.listen(0,'127.0.0.1',()=>{const port=server.address().port;server.close(error=>error?reject(error):resolve(port));});
@@ -37,6 +40,8 @@ for(const key of ['NEOISM_GPUIX_DAEMON_URL','NEOISM_DAEMON_TOKEN','NEOISM_PAIRIN
 if(env.WAYLAND_DISPLAY&&!isAbsolute(env.WAYLAND_DISPLAY)&&env.XDG_RUNTIME_DIR)env.WAYLAND_DISPLAY=join(env.XDG_RUNTIME_DIR,env.WAYLAND_DISPLAY);
 if(!env.XAUTHORITY&&existsSync(join(homedir(),'.Xauthority')))env.XAUTHORITY=join(homedir(),'.Xauthority');
 Object.assign(env,{
+  // Unoptimized GPUI style builders need more stack for nested workspace trees.
+  ...(debug?{NEOISM_GPUIX_CORE:core,NEOISM_GPUIX_DISPLAY_DEBUG:'1',RUST_MIN_STACK:env.RUST_MIN_STACK||'67108864'}:{}),
  ...(userConfig?{NEOISM_AGENT_MCP_AUTH_PATH:mcpAuth}:{
   XDG_CONFIG_HOME:join(profile,'config'),XDG_DATA_HOME:join(profile,'data'),XDG_STATE_HOME:join(profile,'state'),
   NEOISM_CONFIG_HOME:join(profile,'config/neoism'),NEOISM_CONFIG_DIR:join(profile,'config/neoism'),
@@ -56,8 +61,19 @@ Object.assign(env,{
 const log=join(profile,'app.log'),fd=openSync(log,'a',0o600);
 let child;
 try{
- child=spawn(binary,[],{cwd:workspace,env,detached:true,stdio:['ignore',fd,fd]});
- await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});
+  child=spawn(binary,debug?['src/cli.ts']:[],{cwd:debug?frontend:workspace,env,detached:true,stdio:['ignore',fd,fd]});
+  await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});
+  if(debug)await new Promise((resolve,reject)=>{
+   const exited=(code,signal)=>{clearTimeout(timer);reject(new Error(`Debug preview exited during startup (${signal||code}); see ${log}`));};
+   const timer=setTimeout(()=>{child.removeListener('exit',exited);resolve();},3000);
+   child.once('exit',exited);
+  });
  child.unref();
 }finally{closeSync(fd);}
-console.log(JSON.stringify({pid:child.pid,binary,workspace,profile,userConfig,agentUrl:env.NEOISM_AGENT_SERVER,log}));
+console.log(JSON.stringify({pid:child.pid,binary,debug,workspace,profile,userConfig,agentUrl:env.NEOISM_AGENT_SERVER,log}));
+if(process.env.NEOISM_GPUIX_PREVIEW_WAIT==='1'){
+ child.ref();
+ await new Promise(resolve=>child.once('exit',(code,signal)=>{
+  console.log(JSON.stringify({pid:child.pid,exitCode:code,signal}));resolve();
+ }));
+}

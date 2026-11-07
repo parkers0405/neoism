@@ -73,6 +73,16 @@ pub(super) fn source_key_for(
     cwd: &Path,
     external_session_id: &str,
 ) -> Option<String> {
+    source_key_for_driver(runtime, "acp", tenant, cwd, external_session_id)
+}
+
+pub(super) fn source_key_for_driver(
+    runtime: ExternalRuntime,
+    driver: &str,
+    tenant: &str,
+    cwd: &Path,
+    external_session_id: &str,
+) -> Option<String> {
     let host_id = native_host_id();
     let mut hasher = Sha256::new();
     for segment in [
@@ -86,7 +96,7 @@ pub(super) fn source_key_for(
         hasher.update(segment.as_bytes());
     }
     Some(format!(
-        "acp:{}:{:x}",
+        "{driver}:{}:{:x}",
         runtime.provider_id(),
         hasher.finalize()
     ))
@@ -110,7 +120,7 @@ fn verified_catalog_entry(
     if canonical != cwd {
         return None;
     }
-    let source_key = source_key_for(runtime, tenant, cwd, external_session_id)?;
+    let source_key = source_key_for_driver(runtime, runtime.native_driver_id(), tenant, cwd, external_session_id)?;
     Some(ExternalCatalogEntry {
         provider: runtime.provider_id().into(),
         source_key,
@@ -269,38 +279,40 @@ pub(crate) async fn external_catalog(
         .as_ref()
         .map(|Extension(claims)| claims.tenant_id.as_str())
         .unwrap_or("local");
-    let (client, _events) = AcpClient::spawn(
-        runtime
-            .acp_config(&cwd_text, state.services())
-            .map_err(ApiError::bad_request)?,
-    )
-    .map_err(|err| {
-        ApiError::bad_request(format!(
-            "{} ACP launch failed: {err}",
-            runtime.display_name()
-        ))
-    })?;
-    let initialize = super::acp_run::initialize_acp_client(
-        &client,
-        runtime,
-        Arc::new(AtomicBool::new(false)),
-    )
-    .await
-    .map_err(ApiError::bad_request)?;
-    if !initialize["agentCapabilities"]["sessionCapabilities"]["list"].is_object() {
-        return Err(ApiError::bad_request(format!(
-            "{} ACP adapter does not advertise sessionCapabilities.list",
-            runtime.display_name()
-        )));
+    let describe = super::native::request(&state, runtime, &cwd_text, None, "runtime.describe", json!({}))
+        .await.map_err(ApiError::bad_request)?;
+    if describe["capabilities"]["list"] != true {
+        return Err(ApiError::bad_request("Native driver does not support conversation.list"));
     }
-    let mut sessions =
-        fetch_catalog_entries(&client, &initialize, runtime, tenant, &cwd).await?;
+    let mut sessions = Vec::new();
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut seen_ids = HashSet::new();
+    for _ in 0..20 {
+        let page = super::native::request(&state, runtime, &cwd_text, None, "conversation.list", json!({"cwd": cwd_text, "cursor": cursor}))
+            .await.map_err(ApiError::bad_request)?;
+        let rows = page["sessions"].as_array().ok_or_else(|| ApiError::bad_request("Native list has no sessions array"))?;
+        for row in rows {
+            if let Some(entry) = verified_catalog_entry(runtime, tenant, &cwd, row) {
+                if seen_ids.insert(entry.external_session_id.clone()) { sessions.push(entry); }
+            }
+            if sessions.len() > 1000 { return Err(ApiError::bad_request("Native history exceeds 1000 sessions")); }
+        }
+        cursor = page["nextCursor"].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        match &cursor {
+            None => break,
+            Some(value) if !seen_cursors.insert(value.clone()) => return Err(ApiError::bad_request("Native list repeated a cursor")),
+            _ => {}
+        }
+    }
+    if cursor.is_some() { return Err(ApiError::bad_request("Native history exceeds 20 pages")); }
     let existing = state.inner.store.list_sessions().await?;
     for entry in &mut sessions {
         entry.neoism_session_id = existing
             .iter()
             .find(|session| {
                 session.parent_id.is_none()
+                    && runtime.owns_session(session)
                     && session.directory == cwd_text
                     && crate::caller::session_tenant(session) == tenant
                     && claims.as_ref().is_none_or(|Extension(claims)| {
@@ -309,13 +321,15 @@ pub(crate) async fn external_catalog(
                     && session.extra.get("externalAgent").is_some_and(|external| {
                         external["provider"] == runtime.provider_id()
                             && external["sourceHost"] == native_host_id()
-                            && external["externalSessionId"] == entry.external_session_id
+                            && external["runtime"] == runtime.native_driver_id()
+                            && external["nativeSessionId"] == entry.external_session_id
                     })
             })
             .and_then(|session| {
                 entry.history_state =
                     match session.extra["externalAgent"]["historyState"].as_str() {
                         Some("text_only") => "text_only",
+                        Some("loaded") => "loaded",
                         Some("importing") => "importing",
                         _ => "not_loaded",
                     };
@@ -331,12 +345,11 @@ pub(crate) async fn external_catalog(
         provider: runtime.provider_id().into(),
         cwd: cwd_text,
         sessions,
-        import_supported: initialize["agentCapabilities"]["loadSession"] == true,
-        import_unavailable_reason: (initialize["agentCapabilities"]["loadSession"]
-            != true)
+        import_supported: describe["capabilities"]["history"] == true && describe["capabilities"]["completeHistory"] != false,
+        import_unavailable_reason: (describe["capabilities"]["history"] != true || describe["capabilities"]["completeHistory"] == false)
             .then(|| {
                 format!(
-                    "{} ACP adapter does not advertise session/load replay",
+                    "{} native driver cannot supply a complete conversation history",
                     runtime.display_name()
                 )
             }),
@@ -346,6 +359,18 @@ pub(crate) async fn external_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_import_source_identity_cannot_collide_with_legacy_acp() {
+        let cwd = Path::new("/workspace");
+        for runtime in [ExternalRuntime::Codex, ExternalRuntime::Claude, ExternalRuntime::OpenCode] {
+            let native = source_key_for_driver(runtime, runtime.native_driver_id(), "tenant", cwd, "same-native-id").unwrap();
+            let legacy = source_key_for(runtime, "tenant", cwd, "same-native-id").unwrap();
+            assert_ne!(native, legacy);
+            assert!(native.starts_with(runtime.native_driver_id()));
+            assert_ne!(native, source_key_for_driver(runtime, runtime.native_driver_id(), "other-tenant", cwd, "same-native-id").unwrap());
+        }
+    }
 
     #[tokio::test]
     async fn opencode_catalog_hides_only_known_empty_unimported_sessions() {
@@ -622,7 +647,7 @@ impl HistoricalReplay {
     }
 }
 
-async fn load_native_replay(
+async fn load_legacy_acp_replay(
     state: &AppState,
     runtime: ExternalRuntime,
     cwd: &str,
@@ -723,15 +748,19 @@ fn matching_native_root(
     tenant: &str,
 ) -> bool {
     session.parent_id.is_none()
+        && ExternalRuntime::resolve(&entry.provider).is_some_and(|runtime| {
+            runtime.owns_session(session) && !runtime.is_legacy_session(session)
+        })
         && session.directory == entry.cwd
         && crate::caller::session_tenant(session) == tenant
         && session.extra.get("externalAgent").is_some_and(|external| {
             external["provider"] == entry.provider
-                && external["externalSessionId"] == entry.external_session_id
+                && external["nativeSessionId"] == entry.external_session_id
+                && external["sourceKey"] == entry.source_key
         })
 }
 
-/// Replay import is enabled only for adapters advertising session/load.
+/// Import requires a native driver that can supply complete, read-only history.
 /// Every source ID is reverified against the authorized, exact-cwd catalog.
 pub(crate) async fn external_import(
     State(state): State<AppState>,
@@ -763,7 +792,7 @@ pub(crate) async fn external_import(
         return Err(ApiError::bad_request(
             catalog
                 .import_unavailable_reason
-                .unwrap_or_else(|| "ACP replay unavailable".into()),
+                .unwrap_or_else(|| "Native history import unavailable".into()),
         ));
     }
     let entry = catalog
@@ -799,59 +828,40 @@ pub(crate) async fn external_import(
             })
         {
             return Err(ApiError::forbidden(
-                "Existing ACP root is outside the caller workspace",
+                "Existing external root is outside the caller workspace",
             ));
         }
         if existing.extra["externalAgent"]["sourceHost"] != native_host_id() {
-            return Err(ApiError::conflict("An ACP root for this provider session belongs to another host or has unverified origin"));
+            return Err(ApiError::conflict("An external root for this provider session belongs to another host or has unverified origin"));
         }
-        if existing.extra["externalAgent"]["historyState"] == "text_only"
+        if existing.extra["externalAgent"]["historyState"] == "loaded"
+            || (existing.extra["externalAgent"]["historyState"] == "text_only"
             && !state
                 .inner
                 .store
                 .list_messages(existing.id.as_str())
                 .await?
-                .is_empty()
+                .is_empty())
         {
             return Ok(Json(existing));
         }
-        return Err(ApiError::conflict("Existing Neoism ACP root has no imported transcript; refusing to merge histories"));
-    }
-    let replay =
-        load_native_replay(&state, runtime, &entry.cwd, &entry.external_session_id)
-            .await?;
-    if replay
-        .turns
-        .iter()
-        .find(|turn| !turn.text.is_empty())
-        .is_none_or(|turn| turn.role != "user")
-    {
-        return Err(ApiError::bad_request(
-            "ACP replay does not begin with a user turn; cannot safely import",
-        ));
+        return Err(ApiError::conflict("Existing external root has no imported transcript; refusing to merge histories"));
     }
     if crate::project::discover(state.services(), PathBuf::from(&entry.cwd)).directory
         != entry.cwd
     {
         return Err(ApiError::bad_request("Neoism session root differs from provider cwd; refusing cross-workspace import"));
     }
-    let replay_title = replay
-        .turns
-        .iter()
-        .find(|turn| turn.role == "user" && !turn.text.trim().is_empty())
-        .and_then(|turn| crate::session_context::title_from_text(&turn.text));
     let import_title = entry
         .title
         .as_deref()
         .filter(|title| !crate::session_context::is_default_session_title(title))
-        .map(str::to_owned)
-        .or(replay_title);
+        .map(str::to_owned);
     let external = json!({
-        "provider": runtime.provider_id(), "runtime": "acp", "agent": runtime.agent_name(),
-        "status": "imported", "externalSessionId": entry.external_session_id,
+        "provider": runtime.provider_id(), "runtime": runtime.native_driver_id(), "agent": runtime.agent_name(),
+        "status": "imported", "nativeSessionId": entry.external_session_id,
         "sourceHost": native_host_id(), "sourceKey": entry.source_key,
-        "historyState": "importing", "historyToolEvents": replay.tool_events,
-        "historyIncompleteContent": replay.incomplete_content
+        "historyState": "importing"
     });
     let mut info = crate::session_routes::session_create_importing(
         state.clone(),
@@ -873,72 +883,20 @@ pub(crate) async fn external_import(
         external,
     )
     .await?;
-    let mut last_user = None;
-    for turn in replay.turns {
-        if turn.text.is_empty() {
-            continue;
+    if let Err(error) = super::native::import_history(&state, runtime, &info, &entry.external_session_id).await {
+        if let Ok(children) = crate::tool_runtime::descendant_sessions(&state, info.id.as_str()).await {
+            for child in children.into_iter().rev() {
+                let _ = state.inner.store.delete_session(child.id.as_str()).await;
+            }
         }
-        let message_id = Id::ascending(IdKind::Message);
-        let message = if turn.role == "user" {
-            last_user = Some(message_id.clone());
-            MessageInfo::User(UserMessage {
-                id: message_id.clone(),
-                session_id: info.id.clone(),
-                time: CreatedTime {
-                    created: now_millis(),
-                },
-                agent: runtime.agent_name().into(),
-                model: external_model(runtime),
-                system: None,
-                tools: None,
-                author: None,
-            })
-        } else {
-            let Some(parent_id) = &last_user else {
-                continue;
-            };
-            MessageInfo::Assistant(AssistantMessage {
-                provider_replay: None,
-                id: message_id.clone(),
-                session_id: info.id.clone(),
-                time: CompletedTime {
-                    created: now_millis(),
-                    streamed: None,
-                    completed: Some(now_millis()),
-                },
-                parent_id: parent_id.clone(),
-                mode: runtime.provider_id().into(),
-                agent: runtime.agent_name().into(),
-                path: AssistantPath {
-                    cwd: info.directory.clone(),
-                    root: info.directory.clone(),
-                },
-                cost: 0.0,
-                tokens: TokenUsage::default(),
-                model_id: runtime.provider_id().into(),
-                provider_id: "external".into(),
-                finish: None,
-                error: None,
-            })
-        };
-        let message = MessageWithParts {
-            info: message,
-            parts: vec![Part::Text(TextPart {
-                id: Id::ascending(IdKind::Part),
-                session_id: info.id.clone(),
-                message_id,
-                text: turn.text,
-                synthetic: None,
-                time: None,
-            })],
-        };
-        state
-            .inner
-            .store
-            .append_message(info.id.as_str(), &message)
-            .await?;
+        state.inner.store.delete_session(info.id.as_str()).await?;
+        return Err(ApiError::bad_request(error));
     }
-    info.extra.get_mut("externalAgent").unwrap()["historyState"] = json!("text_only");
+    // The importer may have persisted provider-confirmed metadata while storing
+    // normalized events. Do not overwrite it with the pre-import snapshot.
+    info = state.inner.store.get_session(info.id.as_str()).await?
+        .ok_or_else(|| ApiError::not_found("Imported root disappeared"))?;
+    info.extra.get_mut("externalAgent").unwrap()["historyState"] = json!("loaded");
     state.inner.store.update_session(&info).await?;
     state.publish(EventPayload::new(
         event_type::SESSION_CREATED,
@@ -956,6 +914,17 @@ mod provider_import_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    pub(super) fn native_fixture(root: &Path, provider: &str) -> (neoism_agent_service_api::AgentServices, PathBuf) {
+        let mut services = crate::standard_services();
+        let node = services.executables.resolve(&neoism_agent_service_api::ExecutableRequest::new("node", neoism_agent_service_api::ExecutablePurpose::ExternalAgent)).unwrap().path;
+        let wrapper = root.join("native-host");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/external_agent/native/connection_fixture.mjs");
+        std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{}' '{}'\n", node.display(), fixture.display())).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        services.executables = Arc::new(crate::executable::test_support::FakeExecutableService::with("node", wrapper).with_path(provider, node.clone()).with_path("npm", node));
+        (services, root.join("catalog-fixture.json"))
+    }
+
     #[tokio::test]
     async fn opencode_and_codex_replay_are_real_idempotent_and_hidden_while_importing() {
         for provider in ["opencode", "codex"] {
@@ -965,27 +934,13 @@ mod provider_import_tests {
             ));
             std::fs::create_dir_all(&root).unwrap();
             let cwd = std::fs::canonicalize(&root).unwrap();
-            let init = json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"list":{}},"loadSession":true}}}).to_string();
-            let list = json!({"jsonrpc":"2.0","id":2,"result":{"sessions":[{"sessionId":"native-id","cwd":cwd,"title":"Actual chat"}]}}).to_string();
-            let user = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"native-id","update":{"sessionUpdate":"user_message_chunk","messageId":"u1","content":{"type":"text","text":"actual question"}}}}).to_string();
-            let answer = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"native-id","update":{"sessionUpdate":"agent_message_chunk","messageId":"a1","content":{"type":"text","text":"actual answer"}}}}).to_string();
-            let omitted = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"native-id","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"synthetic status"}}}}).to_string();
-            let loaded = json!({"jsonrpc":"2.0","id":2,"result":{}}).to_string();
-            let script = root.join("adapter");
-            std::fs::write(&script, format!("#!/bin/sh\nread line\nprintf '%s\\n' '{init}'\nread line\ncase \"$line\" in\n  *'\"session/list\"'*) printf '%s\\n' '{list}' ;;\n  *'\"session/load\"'*) printf '%s\\n' '{user}' '{answer}' '{omitted}' '{loaded}' ;;\nesac\nread line\n")).unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-                .unwrap();
-            let mut services = crate::standard_services();
-            services.executables = Arc::new(
-                crate::executable::test_support::FakeExecutableService::with(
-                    if provider == "opencode" {
-                        "opencode"
-                    } else {
-                        "npx"
-                    },
-                    script.clone(),
-                ),
-            );
+            let (services, script) = native_fixture(&root, provider);
+            let fixture = json!({"capabilities":{"history":true}, "sessions":[{"sessionId":"native-id","cwd":cwd,"title":"Actual chat"}],
+                "history":{"sessionId":"native-id","cwd":cwd,"complete":true,"messages":[
+                    {"id":"u1","role":"user","events":[{"type":"text.completed","id":"u1","text":"actual question"}]},
+                    {"id":"a1","role":"assistant","events":[{"type":"text.completed","id":"a1","text":"actual answer"}]}
+                ]}});
+            std::fs::write(&script, fixture.to_string()).unwrap();
             let state = AppState::open_database_with_services(
                 root.join("agent.sqlite3"),
                 services,
@@ -1020,7 +975,7 @@ mod provider_import_tests {
             let valid_adapter = std::fs::read_to_string(&script).unwrap();
             std::fs::write(
                 &script,
-                valid_adapter.replace("\"loadSession\":true", "\"loadSession\":false"),
+                valid_adapter.replace("\"history\":true", "\"history\":false"),
             )
             .unwrap();
             let unavailable = external_catalog(
@@ -1040,7 +995,7 @@ mod provider_import_tests {
                 .import_unavailable_reason
                 .as_deref()
                 .unwrap()
-                .contains("session/load"));
+                .contains("complete conversation history"));
             assert!(external_import(
                 State(state.clone()),
                 query(),
@@ -1051,14 +1006,9 @@ mod provider_import_tests {
             .await
             .is_err());
             assert!(state.inner.store.list_sessions().await.unwrap().is_empty());
-            std::fs::write(
-                &script,
-                valid_adapter.replace(
-                    &format!("'{user}' '{answer}' '{omitted}' '{loaded}'"),
-                    &format!("'{loaded}'"),
-                ),
-            )
-            .unwrap();
+            let mut empty = fixture.clone();
+            empty["history"]["messages"] = json!([]);
+            std::fs::write(&script, empty.to_string()).unwrap();
             assert!(external_import(
                 State(state.clone()),
                 query(),
@@ -1080,11 +1030,7 @@ mod provider_import_tests {
             .await
             .unwrap()
             .0;
-            assert_eq!(imported.extra["externalAgent"]["historyState"], "text_only");
-            assert_eq!(
-                imported.extra["externalAgent"]["historyIncompleteContent"],
-                true
-            );
+            assert_eq!(imported.extra["externalAgent"]["historyState"], "loaded");
             let second = external_import(
                 State(state.clone()),
                 query(),
@@ -1233,72 +1179,58 @@ mod provider_import_tests {
 #[cfg(all(test, unix))]
 mod import_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
-    async fn claude_import_is_idempotent_and_replays_only_authorized_history() {
+    async fn partial_native_history_is_not_offered_as_a_complete_import() {
+        let root = std::env::temp_dir().join(format!("native-partial-history-{}", Id::ascending(IdKind::Event)));
+        std::fs::create_dir_all(&root).unwrap();
+        let cwd = root.canonicalize().unwrap();
+        let (services, fixture) = super::provider_import_tests::native_fixture(&root, "claude");
+        std::fs::write(fixture, json!({"sessions":[{"sessionId":"claude-session","cwd":cwd}]}).to_string()).unwrap();
+        let state = AppState::open_database_with_services(root.join("agent.sqlite3"), services).await.unwrap();
+        let catalog = external_catalog(State(state.clone()), Query(ExternalCatalogQuery {
+            provider:"claude".into(), directory:Some(cwd.to_string_lossy().into_owned()),
+        }), HeaderMap::new(), None).await.unwrap().0;
+        assert_eq!(catalog.sessions.len(), 1);
+        assert!(!catalog.import_supported);
+        assert!(external_import(State(state.clone()), Query(crate::InstanceQuery { directory:Some(cwd.to_string_lossy().into_owned()) }),
+            HeaderMap::new(), None, Json(ExternalImportRequest { provider:"claude".into(), external_session_id:"claude-session".into() })).await.is_err());
+        assert!(state.inner.store.list_sessions().await.unwrap().is_empty());
+        let calls = std::fs::read_to_string(root.join("calls.log")).unwrap();
+        assert!(!calls.contains("conversation.open"));
+        assert!(!calls.contains("conversation.history"));
+        state.shutdown().await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_import_is_idempotent_and_replays_only_authorized_history() {
         let root = std::env::temp_dir().join(format!(
             "acp-replay-import-{}",
             Id::ascending(IdKind::Event)
         ));
         std::fs::create_dir_all(&root).unwrap();
         let cwd = std::fs::canonicalize(&root).unwrap();
-        let list = json!({"jsonrpc":"2.0","id":2,"result":{"sessions":[
+        let fixture = json!({"sessions":[
             {"sessionId":"provider-opaque-id", "cwd":cwd, "title":"Native session"},
             {"sessionId":"other-workspace", "cwd":std::env::temp_dir(), "title":"hidden"}
-        ]}})
-        .to_string();
-        let init = json!({"jsonrpc":"2.0","id":1,"result":{
-            "protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"list":{}}}
-        }}).to_string();
-        let user = json!({"jsonrpc":"2.0","method":"session/update","params":{
-            "sessionId":"provider-opaque-id","update":{
-                "sessionUpdate":"user_message_chunk","messageId":"native-user-1","content":{"type":"text","text":"historical question"}
-            }
-        }}).to_string();
-        let assistant = json!({"jsonrpc":"2.0","method":"session/update","params":{
-            "sessionId":"provider-opaque-id","update":{
-                "sessionUpdate":"agent_message_chunk","messageId":"native-answer-1","content":{"type":"text","text":"real response"}
-            }
-        }}).to_string();
-        let tool = json!({"jsonrpc":"2.0","method":"session/update","params":{
-            "sessionId":"provider-opaque-id","update":{"sessionUpdate":"tool_call","toolCallId":"t1"}
-        }}).to_string();
-        let loaded = json!({"jsonrpc":"2.0","id":2,"result":{}}).to_string();
-        let script = root.join("mock-npx");
-        let valid_script = format!(
-            r#"#!/bin/sh
-read line
-printf '%s\n' '{init}'
-read line
-case "$line" in
-  *'"session/list"'*) printf '%s\n' '{list}' ;;
-  *'"session/load"'*) printf '%s\n' '{user}' '{assistant}' '{tool}' '{loaded}' ;;
-esac
-read line
-"#
-        );
-        let failed_load = json!({"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"session unavailable"}}).to_string();
-        let denied_script = valid_script.replace(
-            &format!("'{user}' '{assistant}' '{tool}' '{loaded}'"),
-            &format!("'{failed_load}'"),
-        );
-        std::fs::write(&script, denied_script).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-            .unwrap();
-        let mut services = crate::standard_services();
-        services.executables = Arc::new(
-            crate::executable::test_support::FakeExecutableService::with(
-                "npx",
-                script.to_str().unwrap(),
-            ),
-        );
+        ],"history":{"sessionId":"provider-opaque-id","cwd":cwd,"complete":true,"messages":[
+            {"id":"u1","role":"user","events":[{"type":"text.completed","id":"u1","text":"historical question"}]},
+            {"id":"a1","role":"assistant","events":[{"type":"text.completed","id":"a1","text":"real response"},
+                {"type":"tool.started","id":"t1","name":"read","input":{"path":"README.md"}},
+                {"type":"tool.completed","id":"t1","output":"historical tool output"}]}
+        ]}});
+        let valid_script = fixture.to_string();
+        let mut denied = fixture.clone();
+        denied["history"]["complete"] = json!(false);
+        let (services, script) = super::provider_import_tests::native_fixture(&root, "codex");
+        std::fs::write(&script, denied.to_string()).unwrap();
         let state =
             AppState::open_database_with_services(root.join("agent.sqlite3"), services)
                 .await
                 .unwrap();
         let request = || ExternalImportRequest {
-            provider: "claude".into(),
+            provider: "codex".into(),
             external_session_id: "provider-opaque-id".into(),
         };
         let query = || {
@@ -1336,7 +1268,7 @@ read line
         let first = first.unwrap().0;
         assert_eq!(first.id, parallel.unwrap().0.id);
         assert!(first.parent_id.is_none());
-        assert_eq!(first.extra["externalAgent"]["historyState"], "text_only");
+        assert_eq!(first.extra["externalAgent"]["historyState"], "loaded");
         assert_eq!(first.extra["externalAgent"]["sourceHost"], native_host_id());
         let prompt = || {
             serde_json::from_value(
@@ -1366,11 +1298,10 @@ read line
         )
         .await
         .is_err());
-        assert_eq!(first.extra["externalAgent"]["historyToolEvents"], 1);
         let catalog = external_catalog(
             State(state.clone()),
             Query(ExternalCatalogQuery {
-                provider: "claude".into(),
+                provider: "codex".into(),
                 directory: Some(cwd.to_string_lossy().to_string()),
             }),
             HeaderMap::new(),
@@ -1385,7 +1316,7 @@ read line
             catalog.sessions[0].neoism_session_id.as_deref(),
             Some(first.id.as_str())
         );
-        assert_eq!(catalog.sessions[0].history_state, "text_only");
+        assert_eq!(catalog.sessions[0].history_state, "loaded");
         assert_eq!(
             catalog.sessions[0].source_key,
             first.extra["externalAgent"]["sourceKey"]
@@ -1411,6 +1342,7 @@ read line
         assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0].info, MessageInfo::User(_)));
         assert!(matches!(messages[1].info, MessageInfo::Assistant(_)));
+        assert!(messages[1].parts.iter().any(|part| matches!(part, Part::Tool(tool) if matches!(&tool.state, neoism_agent_core::ToolState::Completed { output, .. } if output.contains("historical tool output")))));
         assert_eq!(
             messages[1]
                 .parts
@@ -1429,7 +1361,7 @@ read line
             HeaderMap::new(),
             None,
             Json(ExternalImportRequest {
-                provider: "claude".into(),
+                provider: "codex".into(),
                 external_session_id: "other-workspace".into(),
             }),
         )
@@ -1449,7 +1381,7 @@ read line
             .unwrap();
         assert_eq!(
             persisted.extra["externalAgent"]["historyState"],
-            "text_only"
+            "loaded"
         );
         assert_eq!(
             reopened

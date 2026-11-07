@@ -172,8 +172,52 @@ fn root_routing_requires_persisted_acp_metadata_and_no_parent() {
         json!({"runtime":"acp", "provider":"codex"}),
     );
     assert_eq!(root_runtime(&session), Some(ExternalRuntime::Codex));
+    assert!(ExternalRuntime::Codex.is_legacy_session(&session));
+    for runtime in [ExternalRuntime::Codex, ExternalRuntime::Claude, ExternalRuntime::OpenCode] {
+        session.extra.insert("externalAgent".into(), json!({"runtime":runtime.native_driver_id(), "provider":runtime.provider_id()}));
+        assert_eq!(root_runtime(&session), Some(runtime));
+        assert!(runtime.owns_session(&session));
+        assert!(!runtime.is_legacy_session(&session));
+        assert_eq!(task_metadata(&session, runtime, "running", true)["runtime"], runtime.native_driver_id());
+        session.extra.get_mut("externalAgent").unwrap()["nested"] = json!(true);
+        assert!(!runtime.owns_session(&session));
+        assert!(root_runtime(&session).is_none());
+    }
+    session.extra.insert("externalAgent".into(), json!({"runtime":"claude-agent-sdk", "provider":"codex"}));
+    assert!(root_runtime(&session).is_none());
+    assert!(!ExternalRuntime::Codex.owns_session(&session));
     session.parent_id = Some(id);
     assert!(root_runtime(&session).is_none());
+}
+
+#[tokio::test]
+async fn native_child_creation_and_status_preserve_driver_without_launching_acp() {
+    let root = std::env::temp_dir().join(format!("native-owned-child-{}", Id::ascending(IdKind::Event)));
+    std::fs::create_dir_all(&root).unwrap();
+    let state = AppState::open_database(root.join("agent.sqlite3")).await.unwrap();
+    let parent = crate::session_routes::create_session_in_directory(
+        &state, root.to_str().unwrap(), neoism_agent_core::CreateSessionRequest {
+            parent_id: None, title: None, agent: None, model: None, permission: None,
+            workspace_id: None, external_provider: None, external_options: None,
+        }, BTreeMap::new(),
+    ).await.unwrap();
+    for runtime in [ExternalRuntime::Codex, ExternalRuntime::Claude, ExternalRuntime::OpenCode] {
+        let child = lifecycle::create_external_subtask_session(&state, &parent, "test", "Owned", runtime).await.unwrap();
+        assert_eq!(child.extra["externalAgent"]["runtime"], runtime.native_driver_id());
+        assert!(runtime.owns_session(&child));
+        assert!(!runtime.is_legacy_session(&child));
+        assert!(root_runtime(&child).is_none());
+        update_external_session_status(&state, child.id.as_str(), runtime, "running").await.unwrap();
+        let mut saved = state.inner.store.get_session(child.id.as_str()).await.unwrap().unwrap();
+        assert_eq!(saved.extra["externalAgent"]["runtime"], runtime.native_driver_id());
+        assert!(saved.extra["externalAgent"]["nativeSessionId"].is_null());
+        saved.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
+        state.inner.store.update_session(&saved).await.unwrap();
+        update_external_session_status(&state, child.id.as_str(), runtime, "ready").await.unwrap();
+        let saved = state.inner.store.get_session(child.id.as_str()).await.unwrap().unwrap();
+        assert!(runtime.is_legacy_session(&saved));
+        assert_eq!(task_metadata(&saved, runtime, "ready", false)["runtime"], "acp");
+    }
 }
 
 #[tokio::test]
@@ -184,7 +228,7 @@ async fn structured_acp_plan_persists_emits_and_reloads_for_root_and_child() {
     std::fs::create_dir_all(&root).unwrap();
     let db = root.join("agent.sqlite3");
     let state = AppState::open_database(db.clone()).await.unwrap();
-    let session = crate::session_routes::create_session_in_directory(
+    let mut session = crate::session_routes::create_session_in_directory(
         &state,
         root.to_str().unwrap(),
         CreateSessionRequest {
@@ -201,6 +245,8 @@ async fn structured_acp_plan_persists_emits_and_reloads_for_root_and_child() {
     )
     .await
     .unwrap();
+    session.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
+    state.inner.store.update_session(&session).await.unwrap();
     let mut child = session.clone();
     child.id = Id::ascending(IdKind::Session);
     child.parent_id = Some(session.id.clone());

@@ -896,6 +896,7 @@ impl NeoismAgentPane {
             self.prompt_echo_aliases = live_only.prompt_echo_aliases;
             self.restore_session_runtime_ui(live_only.runtime);
         }
+        self.retain_inflight_child_trace();
         self.invalidate_timeline_layout();
         self.push_outbound(OutboundAgentCommand::SwitchSession {
             session_id: trimmed,

@@ -1273,6 +1273,23 @@ impl NeoismAgentPane {
         *self.timeline_layout_cache.borrow_mut() = None;
     }
 
+    /// Late selection must reveal the in-flight child turn, not archived turns.
+    /// History alone is not generally live evidence: only an unfinished tool in
+    /// the latest turn or the restored streaming state can open this window.
+    pub(in crate::panels::agent_pane::state) fn retain_inflight_child_trace(&mut self) {
+        if !self.is_subagent_session() || self.messages.is_empty() || self.timeline_live_trace_start.is_some() {
+            return;
+        }
+        let start = self.messages.iter().rposition(|m| m.kind == NeoismAgentMessageKind::User)
+            .map_or(0, |index| index + 1);
+        if self.streaming_state != NeoismAgentStreamingState::Idle
+            || self.messages[start..].iter().any(|m| m.kind == NeoismAgentMessageKind::Tool
+                && matches!(m.status.as_str(), "pending" | "running"))
+        {
+            self.retain_current_turn_trace();
+        }
+    }
+
     pub(in crate::panels::agent_pane::state) fn retain_current_turn_trace(&mut self) {
         if self.timeline_live_trace_start.is_some() {
             return;

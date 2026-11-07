@@ -123,6 +123,28 @@ test("the readiness probe checks a real Unix listener and does not trust socket-
   expect(await reachable(`ws+unix://${path}:/session`)).toBe(false);
  }finally{server.close();rmSync(folder,{recursive:true,force:true});}
 });
+test("recovery adopts the new private Unix socket instead of retrying the initial port zero",async()=>{
+ if(process.platform==="win32")return;
+ const folder=mkdtempSync(join(tmpdir(),"neoism-private-recovery-")),path=join(folder,"daemon.sock");
+ const keys=["NEOISM_DAEMON_SOCKET","NEOISM_DAEMON_ADDR","NEOISM_GPUIX_DAEMON_URL"] as const;
+ const previous=keys.map(key=>process.env[key]);
+ const controller=new AbortController();
+ let server:ReturnType<typeof Bun.serve>|undefined;
+ try{
+  process.env.NEOISM_DAEMON_SOCKET=path;process.env.NEOISM_DAEMON_ADDR="127.0.0.1:0";delete process.env.NEOISM_GPUIX_DAEMON_URL;
+  const config=loadConfig([],process.env,{});
+  expect(config.endpoint).toBe("ws://127.0.0.1:0/session");
+  server=Bun.serve({unix:path,fetch(request,server){return server.upgrade(request,{data:undefined})?undefined:new Response("",{status:400});},websocket:{message(socket){
+   socket.send(JSON.stringify({WorkspaceReply:{request_id:0,message:{HelloAck:{accepted:true}}}}));
+  }}});
+  const result=await recoverLocalDaemon(config,controller.signal);
+  expect(result.endpoint).toBe(`ws+unix://${path}:/session`);
+ }finally{
+  controller.abort();await server?.stop(true);
+  keys.forEach((key,index)=>{if(previous[index]===undefined)delete process.env[key];else process.env[key]=previous[index];});
+  rmSync(folder,{recursive:true,force:true});
+ }
+});
 test("application readiness also works over the default Unix transport",async()=>{
  if(process.platform==="win32")return;
  const folder=mkdtempSync(join(tmpdir(),"neoism-startup-handshake-")),path=join(folder,"daemon.sock");

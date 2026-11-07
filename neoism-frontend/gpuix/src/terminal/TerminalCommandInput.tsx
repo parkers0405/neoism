@@ -131,7 +131,14 @@ export function TerminalCommandInput(props: {
       return;
     }
     if (key === "tab" && plain && (menu() || atEnd())) {
-      handled(); if (menu() === "completion") move(mods?.shift ? -1 : 1); else open("completion", mods?.shift ? -1 : 1); return;
+      handled();
+      if (menu() !== "completion") open("completion", mods?.shift ? -1 : 1);
+      else if (!previewOnLoad && !mods?.shift) {
+        // A refreshed list highlights a row without applying it to the draft.
+        previewOnLoad = true;
+        if (!loading()) preview(choice());
+      } else move(mods?.shift ? -1 : 1);
+      return;
     }
     if (key === "right" && plain && !mods?.shift && !menu() && caret()?.visible && atEnd() && ghost()) { handled(); props.onChange(ghost()!); return; }
     if (key === "c" && mods?.ctrl || key === "l" && mods?.ctrl) close();

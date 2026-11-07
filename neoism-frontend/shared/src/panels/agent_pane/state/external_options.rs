@@ -1,4 +1,4 @@
-//! Provider-confirmed ACP option snapshots. Values and order are never synthesized.
+//! External option snapshots keep effective and next-turn selections separate.
 use serde_json::Value;
 
 pub fn auth_required(error: &str) -> bool {
@@ -18,15 +18,26 @@ pub struct ExternalOption {
     pub name: String,
     pub category: String,
     pub current_value: String,
+    pub pending_value: Option<String>,
     pub choices: Vec<ExternalChoice>,
 }
 
 impl ExternalOption {
     pub fn selected_label(&self) -> &str {
+        if self.current_value.is_empty() { return "Provider default"; }
         self.choices
             .iter()
             .find(|choice| choice.value == self.current_value)
             .map_or(self.current_value.as_str(), |choice| choice.name.as_str())
+    }
+
+    pub fn display_label(&self) -> String {
+        if let Some(value) = &self.pending_value {
+            let label = self.choices.iter().find(|choice| &choice.value == value).map_or(value.as_str(), |choice| choice.name.as_str());
+            format!("{label} (next turn)")
+        } else {
+            self.selected_label().to_owned()
+        }
     }
 }
 
@@ -105,13 +116,17 @@ impl ExternalOptions {
             if entry.get("type").and_then(Value::as_str) != Some("select") {
                 continue;
             }
-            let (Some(id), Some(name), Some(current), Some(raw_choices)) = (
+            let (Some(id), Some(name), Some(raw_choices)) = (
                 entry.get("id").and_then(Value::as_str),
                 entry.get("name").and_then(Value::as_str),
-                entry.get("currentValue").and_then(Value::as_str),
                 entry.get("options").and_then(Value::as_array),
             ) else {
                 continue;
+            };
+            let current = match entry.get("currentValue") {
+                Some(Value::String(value)) => value.as_str(),
+                Some(Value::Null) => "",
+                _ => continue,
             };
             let category = entry.get("category").and_then(Value::as_str).unwrap_or("");
             let mut choices = Vec::new();
@@ -137,6 +152,7 @@ impl ExternalOptions {
                 name: name.to_owned(),
                 category: category.to_owned(),
                 current_value: current.to_owned(),
+                pending_value: if id == "model" { value["pendingSelection"]["model"].as_str() } else { value["pendingSelection"]["options"][id].as_str() }.map(str::to_owned),
                 choices,
             });
         }
@@ -207,6 +223,20 @@ fn push_choice(choices: &mut Vec<ExternalChoice>, item: &Value, group: Option<&s
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_picker_preserves_unknown_effective_model_and_marks_pending_choice() {
+        let mut response = json!({"provider":"codex","externalSessionId":null,"modeFallback":false,"selectedOptions":{},
+            "configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":null,"options":[{"value":"native-model","name":"Native model"}]}]});
+        let unknown = ExternalOptions::parse(&response, "codex").unwrap();
+        assert_eq!(unknown.footer_order(), vec![0]);
+        assert!(unknown.options[0].current_value.is_empty());
+        assert_eq!(unknown.options[0].display_label(), "Provider default");
+        response["pendingSelection"] = json!({"model":"native-model","options":{}});
+        let pending = ExternalOptions::parse(&response, "codex").unwrap();
+        assert!(pending.options[0].current_value.is_empty());
+        assert_eq!(pending.options[0].display_label(), "Native model (next turn)");
+    }
 
     #[test]
     fn auth_cue_requires_explicit_acp_auth_failure() {

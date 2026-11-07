@@ -3030,7 +3030,7 @@ pub fn render_status_chips(
             .find(|option| option.category == "thought_level")
             .map_or(0.0, |option| {
                 let opts = DrawOpts { font_size, bold: true, ..DrawOpts::default() };
-                sugarloaf.text_mut().measure(&capitalize_chip_label(option.selected_label()), &opts)
+                sugarloaf.text_mut().measure(&capitalize_chip_label(&option.display_label()), &opts)
                     + caret_w + 22.0 * s + gap
             });
         for option_index in order {
@@ -3039,8 +3039,8 @@ pub fn render_status_chips(
                 thought_width = 0.0;
             }
             let label = match option.category.as_str() {
-                "model" => model_chip_label(option.selected_label(), narrow),
-                _ => capitalize_chip_label(option.selected_label()),
+                "model" => model_chip_label(&option.display_label(), narrow),
+                _ => capitalize_chip_label(&option.display_label()),
             };
             let color = match option.category.as_str() {
                 "mode" => theme.yellow,

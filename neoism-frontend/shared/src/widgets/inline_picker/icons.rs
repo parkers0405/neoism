@@ -51,6 +51,20 @@ impl InlinePickerIcon {
         color: [u8; 4],
     ) {
         match self {
+            Self::Glyph("+") => {
+                let [x, y, w, h] = rect;
+                let side = w.min(h);
+                let length = side * (2.0 / 3.0);
+                let stroke = side / 9.0;
+                for bar in [
+                    [x + (w - length) / 2.0, y + (h - stroke) / 2.0, length, stroke],
+                    [x + (w - stroke) / 2.0, y + (h - length) / 2.0, stroke, length],
+                ] {
+                    if let Some(([x, y, w, h], _)) = crop(bar, [0.0, 0.0, 1.0, 1.0], clip) {
+                        sugarloaf.overlay_rect(x, y, w, h, color.map(|c| c as f32 / 255.0), 0.0, 185);
+                    }
+                }
+            }
             Self::Glyph(glyph) => {
                 sugarloaf.overlay_text_mut().draw(
                     rect[0],

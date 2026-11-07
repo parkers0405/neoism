@@ -155,10 +155,11 @@ pub enum ProviderLogo {
     GitHubCopilot,
     Vercel,
     OpenCode,
+    XAi,
 }
 
 impl ProviderLogo {
-    const COUNT: f32 = 7.0;
+    const COUNT: f32 = 8.0;
     pub const SOURCE_SIDE: usize = 64;
 
     pub fn from_provider_id(id: &str) -> Option<Self> {
@@ -170,6 +171,7 @@ impl ProviderLogo {
             "github-copilot" | "copilot" => Some(Self::GitHubCopilot),
             "vercel" | "vercel-ai-gateway" => Some(Self::Vercel),
             "opencode" | "open-code" => Some(Self::OpenCode),
+            "xai" | "x-ai" | "grok" => Some(Self::XAi),
             _ => None,
         }
     }
@@ -183,7 +185,7 @@ impl ProviderLogo {
     pub fn composer_color(self, dark: bool, fallback: [u8; 4]) -> [u8; 4] {
         match self {
             Self::Anthropic => [217, 119, 87, 255],
-            Self::OpenAi | Self::OpenRouter => {
+            Self::OpenAi | Self::OpenRouter | Self::XAi => {
                 if dark {
                     [255; 4]
                 } else {
@@ -208,6 +210,7 @@ impl ProviderLogo {
             Self::GitHubCopilot => 4,
             Self::Vercel => 5,
             Self::OpenCode => 6,
+            Self::XAi => 7,
         }
     }
 }
@@ -392,6 +395,19 @@ mod tests {
 
     #[test]
     fn resolves_known_model_providers_without_guessing_routed_models() {
+        for alias in ["xai", "x-ai", "grok", " XAI "] {
+            assert_eq!(ProviderLogo::from_provider_id(alias), Some(ProviderLogo::XAi));
+            assert_eq!(
+                ProviderLogo::from_model(&format!("{alias}/grok-4")),
+                Some(ProviderLogo::XAi)
+            );
+        }
+        assert_eq!(
+            ProviderLogo::from_model("openrouter/xai/grok-4"),
+            Some(ProviderLogo::OpenRouter)
+        );
+        assert_eq!(ProviderLogo::from_model("unknown/grok-4"), None);
+        assert_eq!(ProviderLogo::XAi.source_rect(), [0.875, 0.0, 1.0, 1.0]);
         assert_eq!(
             ProviderLogo::from_model("anthropic/claude-sonnet-4"),
             Some(ProviderLogo::Anthropic)
@@ -423,7 +439,11 @@ mod tests {
                 ProviderLogo::Anthropic.composer_color(dark, fallback),
                 [217, 119, 87, 255],
             );
-            for provider in [ProviderLogo::OpenAi, ProviderLogo::OpenRouter] {
+            for provider in [
+                ProviderLogo::OpenAi,
+                ProviderLogo::OpenRouter,
+                ProviderLogo::XAi,
+            ] {
                 let expected = if dark { [255; 4] } else { [0, 0, 0, 255] };
                 assert_eq!(provider.composer_color(dark, fallback), expected);
             }
@@ -456,13 +476,30 @@ mod tests {
     }
 
     #[test]
+    fn xai_atlas_cell_is_the_sourced_logo_not_a_generic_x_glyph() {
+        let encoded: String = PROVIDER_LOGO_ATLAS_BASE64.split_whitespace().collect();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let image = image_rs::load_from_memory(&bytes).unwrap().to_rgba8();
+        // FNV-1a of the 64x64 alpha mask rasterized from xai.svg.
+        let mut fingerprint = 14_695_981_039_346_656_037_u64;
+        let start_x = ProviderLogo::XAi.index() * ProviderLogo::SOURCE_SIDE;
+        for y in 0..ProviderLogo::SOURCE_SIDE {
+            for x in start_x..start_x + ProviderLogo::SOURCE_SIDE {
+                fingerprint = (fingerprint ^ image.get_pixel(x as u32, y as u32)[3] as u64)
+                    .wrapping_mul(1_099_511_628_211);
+            }
+        }
+        assert_eq!(fingerprint, 0x07e8_5412_449c_43fc);
+    }
+
+    #[test]
     fn provider_logo_atlas_decodes_to_expected_strip() {
         let encoded: String = PROVIDER_LOGO_ATLAS_BASE64.split_whitespace().collect();
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .expect("provider atlas base64");
         let image = image_rs::load_from_memory(&bytes).expect("provider atlas PNG");
-        assert_eq!((image.width(), image.height()), (448, 64));
+        assert_eq!((image.width(), image.height()), (512, 64));
         let image = image.to_rgba8();
         for provider in [
             ProviderLogo::OpenRouter,
@@ -472,6 +509,7 @@ mod tests {
             ProviderLogo::GitHubCopilot,
             ProviderLogo::Vercel,
             ProviderLogo::OpenCode,
+            ProviderLogo::XAi,
         ] {
             let start_x = provider.index() * ProviderLogo::SOURCE_SIDE;
             assert!((0..ProviderLogo::SOURCE_SIDE).any(|y| {

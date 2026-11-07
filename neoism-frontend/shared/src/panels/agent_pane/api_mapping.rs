@@ -1659,6 +1659,36 @@ mod tests {
     }
 
     #[test]
+    fn direct_shell_mapping_preserves_full_output_and_distinguishes_model_tools() {
+        let output = format!("  first\n\n{}\nlast", "line\n".repeat(100));
+        for status in ["running", "completed", "error"] {
+            let mut part = json!({"type":"tool", "tool":"bash", "state":{"status":status,
+                "input":{"command":"printf test"}, "output":output, "metadata":{"directShell":true,"cwd":"/project","exitCode":7}}});
+            let message = tool_block(&part);
+            assert_eq!(message.tool, "user_shell");
+            assert_eq!(message.title, "printf test");
+            assert_eq!(message.detail, output);
+            assert_eq!(message.status, "error");
+            assert!(message.text.contains("exit 7"));
+            part["state"]["metadata"] = json!({});
+            assert_eq!(tool_block(&part).tool, "bash");
+        }
+        let message = tool_block(&json!({"tool":"bash", "state":{"status":"running","input":{"command":"build"},
+            "metadata":{"directShell":true,"cwd":"/project","output":"live output"}}}));
+        assert_eq!(message.detail, "live output");
+        let message = tool_block(&json!({"tool":"bash", "state":{"status":"running","input":{"command":"build"}},
+            "metadata":{"directShell":true,"cwd":"/project","output":"live part output"}}));
+        assert_eq!(message.detail, "live part output");
+        let message = tool_block(&json!({"tool":"bash", "state":{"status":"error","input":{"command":"build"},"error":"failed output"},
+            "metadata":{"directShell":true,"cwd":"/project","exitCode":1,"output":"failed output"}}));
+        assert_eq!(message.detail, "failed output");
+        let message = tool_block(&json!({"tool":"bash", "metadata":{"directShell":true,"cwd":"/project"},
+            "state":{"status":"error","input":{"command":"build"},"output":"\u{1b}[31mred\u{1b}[0m\r\nold\rnew","error":"Stopped"}}));
+        assert_eq!(message.tool, "user_shell");
+        assert_eq!(message.detail, "red\nnew\nStopped");
+    }
+
+    #[test]
     fn running_acp_terminal_exposes_bounded_output_in_chat() {
         let part = json!({"type":"tool", "tool":"bash", "state":{"status":"running", "input":{"command":"sleep 2"}},
             "metadata":{"terminalOutput":"building...\n"}});
@@ -3036,6 +3066,29 @@ fn subtask_block(part: &Value) -> NeoismAgentMessage {
 fn tool_block(part: &Value) -> NeoismAgentMessage {
     let tool = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
     let state = part.get("state").unwrap_or(&Value::Null);
+    let shell = state.get("metadata").filter(|metadata| metadata.get("directShell").and_then(Value::as_bool) == Some(true))
+        .or_else(|| part.get("metadata").filter(|metadata| metadata.get("directShell").and_then(Value::as_bool) == Some(true)));
+    if let Some(shell) = shell.filter(|_| tool == "bash") {
+        let status = state.get("status").and_then(Value::as_str).unwrap_or("pending");
+        let command = shell.get("command").and_then(Value::as_str)
+            .or_else(|| state.pointer("/input/command").and_then(Value::as_str)).unwrap_or("");
+        let output = state.get("output").and_then(Value::as_str)
+            .or_else(|| shell.get("output").and_then(Value::as_str)).unwrap_or("");
+        let mut detail = output.to_owned();
+        if let Some(error) = state.get("error").and_then(Value::as_str).filter(|error| !error.is_empty() && *error != output) {
+            if !detail.is_empty() { detail.push('\n'); }
+            detail.push_str(error);
+        }
+        let cwd = shell.get("cwd").and_then(Value::as_str).unwrap_or("");
+        let exit = shell.get("exitCode").and_then(Value::as_i64);
+        let label = exit.map(|code| format!("{cwd}  |  exit {code}"))
+            .unwrap_or_else(|| format!("{cwd}  |  {status}"));
+        let mut message = agent_message_tool(command, label, if exit.is_some_and(|code| code != 0) { "error" } else { status },
+            "user_shell", NeoismAgentOutputKind::Text, "", Vec::new());
+        message.detail = crate::editor::notebook::normalize_notebook_carriage_returns(
+            &crate::editor::notebook::strip_ansi_escapes(&detail));
+        return message;
+    }
     let status = state
         .get("status")
         .and_then(Value::as_str)

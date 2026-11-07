@@ -1,71 +1,125 @@
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::time::{Duration, Instant};
+
+struct BrowserCallbackRegistration {
+    callback_path: String,
+    state: String,
+    sender: oneshot::Sender<Result<String, String>>,
+    deadline: Instant,
+}
+
+type BrowserListeners = BTreeMap<u16, mpsc::UnboundedSender<BrowserCallbackRegistration>>;
+static LISTENERS: OnceLock<Mutex<BrowserListeners>> = OnceLock::new();
 
 pub(super) async fn start_openai_browser_callback_listener(
     port: u16,
     callback_path: String,
     expected_state: String,
     sender: oneshot::Sender<Result<String, String>>,
-) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    tokio::spawn(run_openai_browser_callback_listener(
-        listener,
+) -> std::io::Result<()> {
+    // The port belongs to the process, not an individual login attempt. Route
+    // callbacks by state so retries/windows cannot steal each other's result.
+    let mut listeners = LISTENERS.get_or_init(Mutex::default).lock().await;
+    let registration = BrowserCallbackRegistration {
         callback_path,
-        expected_state,
+        state: expected_state,
         sender,
-        std::time::Duration::from_secs(300),
-    ));
+        deadline: Instant::now() + Duration::from_secs(300),
+    };
+    let registration = if let Some(registrations) = listeners.get(&port) {
+        match registrations.send(registration) {
+            Ok(()) => return Ok(()),
+            Err(error) => error.0,
+        }
+    } else {
+        registration
+    };
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let _ = sender.send(registration);
+    listeners.insert(port, sender);
+    tokio::spawn(run_openai_browser_callback_listener(listener, receiver, Some(port)));
     Ok(())
 }
 
 async fn run_openai_browser_callback_listener(
     listener: tokio::net::TcpListener,
-    callback_path: String,
-    expected_state: String,
-    sender: oneshot::Sender<Result<String, String>>,
-    timeout: std::time::Duration,
+    mut registrations: mpsc::UnboundedReceiver<BrowserCallbackRegistration>,
+    registered_port: Option<u16>,
 ) {
-    let mut sender = Some(sender);
-    // One lifetime for the whole listener, including stalled HTTP reads and
-    // writes. Repeated unrelated connections must not reset the deadline.
-    let result = tokio::time::timeout(timeout, async {
-        loop {
-            let Ok((mut stream, _addr)) = listener.accept().await else {
-                break;
-            };
-
-            let mut buffer = vec![0_u8; 4096];
-            let read = stream.read(&mut buffer).await.unwrap_or_default();
-            let request = String::from_utf8_lossy(&buffer[..read]);
-            let path = request
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or("/");
-            let outcome =
-                openai_browser_callback_outcome(path, &callback_path, &expected_state);
-            let should_stop = outcome.result.is_some();
-            if let Some(result) = outcome.result {
-                if let Some(sender) = sender.take() {
-                    let _ = sender.send(result);
-                }
-            }
-            let _ = write_http_response(&mut stream, outcome.status, &outcome.body).await;
-            if should_stop {
-                break;
+    let mut pending = BTreeMap::<String, BrowserCallbackRegistration>::new();
+    let mut cleanup = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        let expired = pending.iter().filter_map(|(state, entry)| {
+            (entry.sender.is_closed() || entry.deadline <= Instant::now())
+                .then_some(state.clone())
+        }).collect::<Vec<_>>();
+        for state in expired {
+            if let Some(entry) = pending.remove(&state) {
+                let _ = entry.sender.send(Err("OpenAI OAuth callback timed out".into()));
             }
         }
-    })
-    .await;
-    if let Some(sender) = sender.take() {
-        let message = if result.is_err() {
-            "OpenAI OAuth callback timed out"
-        } else {
-            "OpenAI OAuth callback listener stopped"
-        };
-        let _ = sender.send(Err(message.to_string()));
+        tokio::select! {
+            biased;
+            registration = registrations.recv() => {
+                let Some(registration) = registration else { break };
+                pending.insert(registration.state.clone(), registration);
+            }
+            _ = cleanup.tick() => {
+                if let Some(port) = registered_port.filter(|_| pending.is_empty()) {
+                    let mut listeners = LISTENERS.get_or_init(Mutex::default).lock().await;
+                    // Registration and idle shutdown share this lock. Drain any
+                    // new attempts before releasing the port to other apps.
+                    while let Ok(registration) = registrations.try_recv() {
+                        pending.insert(registration.state.clone(), registration);
+                    }
+                    if pending.is_empty() {
+                        drop(listener);
+                        listeners.remove(&port);
+                        return;
+                    }
+                }
+            }
+            accepted = listener.accept() => {
+                let Ok((mut stream, _)) = accepted else { break };
+                // A stray/stalled local HTTP connection must not hold up login
+                // or extend any attempt's lifetime.
+                let deadline = pending.values().map(|entry| entry.deadline)
+                    .min().unwrap_or_else(Instant::now)
+                    .min(Instant::now() + Duration::from_secs(2));
+                let _ = tokio::time::timeout_at(deadline, async {
+                    let mut buffer = vec![0_u8; 4096];
+                    let read = stream.read(&mut buffer).await.unwrap_or_default();
+                    let request = String::from_utf8_lossy(&buffer[..read]);
+                    let path = request.lines().next()
+                        .and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/");
+                    let query = parse_query(path.split_once('?').map(|(_, q)| q).unwrap_or(""));
+                    let state = query.get("state").map(String::as_str).unwrap_or("");
+                    let outcome = if let Some(entry) = pending.get(state) {
+                        openai_browser_callback_outcome(path, &entry.callback_path, state)
+                    } else {
+                        BrowserCallbackOutcome {
+                            status: "400 Bad Request",
+                            body: html_error("Invalid or expired OAuth state"),
+                            result: None,
+                        }
+                    };
+                    if let Some(result) = outcome.result {
+                        if let Some(entry) = pending.remove(state) {
+                            let _ = entry.sender.send(result);
+                        }
+                    }
+                    let _ = write_http_response(&mut stream, outcome.status, &outcome.body).await;
+                }).await;
+            }
+        }
+    }
+    for (_, entry) in pending {
+        let _ = entry.sender.send(Err("OpenAI OAuth callback listener stopped".into()));
     }
 }
 
@@ -73,25 +127,73 @@ async fn run_openai_browser_callback_listener(
 mod lifetime_tests {
     use super::*;
 
+    async fn request(address: std::net::SocketAddr, path: &str) -> String {
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn browser_listener_shares_port_and_isolates_attempts() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let (first_sender, mut first) = oneshot::channel();
+        let (second_sender, second) = oneshot::channel();
+        start_openai_browser_callback_listener(address.port(), "/auth/callback".into(), "first".into(), first_sender).await.unwrap();
+        start_openai_browser_callback_listener(address.port(), "/auth/callback".into(), "second".into(), second_sender).await.unwrap();
+        assert!(request(address, "/auth/callback?code=wrong&state=unknown").await.contains("400 Bad Request"));
+        assert!(request(address, "/auth/callback?code=two&state=second").await.contains("200 OK"));
+        assert_eq!(second.await.unwrap().unwrap(), "two");
+        assert!(matches!(first.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        assert!(request(address, "/auth/callback?code=one&state=first").await.contains("200 OK"));
+        assert_eq!(first.await.unwrap().unwrap(), "one");
+        let (sender, third) = oneshot::channel();
+        start_openai_browser_callback_listener(address.port(), "/auth/callback".into(), "third".into(), sender).await.unwrap();
+        assert!(request(address, "/cancel?state=third").await.contains("200 OK"));
+        assert_eq!(third.await.unwrap().unwrap_err(), "Login cancelled");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(listener) = tokio::net::TcpListener::bind(address).await {
+                    drop(listener);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("idle callback port was not released");
+        let (sender, fourth) = oneshot::channel();
+        start_openai_browser_callback_listener(address.port(), "/auth/callback".into(), "fourth".into(), sender).await.unwrap();
+        assert!(request(address, "/auth/callback?code=four&state=fourth").await.contains("200 OK"));
+        assert_eq!(fourth.await.unwrap().unwrap(), "four");
+    }
+
     #[tokio::test]
     async fn browser_listener_deadline_covers_stalled_socket_reads() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = oneshot::channel();
-        let task = tokio::spawn(run_openai_browser_callback_listener(
-            listener,
-            "/auth/callback".into(),
-            "state".into(),
-            sender,
-            std::time::Duration::from_millis(100),
-        ));
+        let (registrations, incoming) = mpsc::unbounded_channel();
+        registrations.send(BrowserCallbackRegistration {
+            callback_path: "/auth/callback".into(), state: "state".into(), sender,
+            deadline: Instant::now() + Duration::from_millis(100),
+        }).unwrap();
+        let task = tokio::spawn(run_openai_browser_callback_listener(listener, incoming, None));
         let _socket = tokio::net::TcpStream::connect(address).await.unwrap();
-        let error = tokio::time::timeout(std::time::Duration::from_secs(2), receiver)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap_err();
+        let error = tokio::time::timeout(Duration::from_secs(2), receiver)
+            .await.unwrap().unwrap().unwrap_err();
         assert!(error.contains("timed out"));
+        // Expiration affects only the old attempt; the shared listener stays
+        // usable for a fresh login without a daemon restart.
+        let (sender, receiver) = oneshot::channel();
+        registrations.send(BrowserCallbackRegistration {
+            callback_path: "/auth/callback".into(), state: "fresh".into(), sender,
+            deadline: Instant::now() + Duration::from_secs(2),
+        }).unwrap();
+        assert!(request(address, "/auth/callback?code=fresh&state=fresh").await.contains("200 OK"));
+        assert_eq!(receiver.await.unwrap().unwrap(), "fresh");
+        drop(registrations);
         task.await.unwrap();
     }
 }

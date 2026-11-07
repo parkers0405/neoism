@@ -679,6 +679,7 @@ impl AgentToolPane for NeoismAgentPane {
 mod diff;
 pub(super) mod motion;
 mod render;
+mod shell;
 mod widgets;
 
 pub use diff::*;

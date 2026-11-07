@@ -2,12 +2,29 @@ diff --git c/README.md w/README.md
 index 24840ee..e1dc180 100644
 --- c/README.md
 +++ w/README.md
-@@ -49,3 +49,5 @@ Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+@@ -49,3 +49,7 @@ Zed is developed by **Zed Industries, Inc.**, a for-profit company.
  If you’d like to financially support the project, you can do so via GitHub Sponsors.
  Sponsorships go directly to Zed Industries and are used as general company revenue.
  There are no perks or entitlements associated with sponsorship.
 +
 +Neoism first tries hardware Vulkan with the existing compositor/GPU ranking and real surface configuration checks. If unavailable, it initializes the original OpenGL/software fallback. Successful Vulkan launches no longer pay for unused EGL contexts; existing windows reuse their device.
++
++On Windows, a nontransparent titlebar requests the standard OS caption (WS_CAPTION), including native dragging, system menu, minimize/maximize/restore/close, snap and resize behavior. Transparent custom-titlebar windows retain their existing styles. Neoism selects the standard caption on Windows; its in-client top bar remains an application toolbar, not imitation window controls.
+diff --git c/crates/gpui_windows/src/window.rs w/crates/gpui_windows/src/window.rs
+--- c/crates/gpui_windows/src/window.rs
++++ w/crates/gpui_windows/src/window.rs
+@@ -472,6 +472,11 @@
+             (WS_EX_TOOLWINDOW | WS_EX_TOPMOST, WINDOW_STYLE(0x0))
+         } else {
+             let mut dwstyle = WS_SYSMENU;
++            // DefWindowProc can only draw/hit-test the standard caption when
++            // WS_CAPTION is present; appears_transparent=false alone is not enough.
++            if !hide_title_bar {
++                dwstyle |= WS_CAPTION;
++            }
+
+             if params.is_resizable {
+                 dwstyle |= WS_THICKFRAME | WS_MAXIMIZEBOX;
 diff --git c/crates/gpui/src/elements/div.rs w/crates/gpui/src/elements/div.rs
 index 51379b8..c75e98b 100644
 --- c/crates/gpui/src/elements/div.rs

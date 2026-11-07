@@ -2282,6 +2282,7 @@ impl NeoismAgentPane {
             );
         }
         self.messages = messages;
+        self.retain_inflight_child_trace();
         self.text_reveal.scope(self.session_id.as_deref());
         self.tool_motion.scope(self.session_id.as_deref());
         self.text_reveal.reconcile_history_with_footers(

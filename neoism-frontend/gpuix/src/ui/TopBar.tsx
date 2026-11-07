@@ -1,29 +1,43 @@
 import type {PresenceAvatar} from "../collaboration/PresenceController";
 import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-scheduler";
 import { createEffect, createMemo, createSignal, Index, onCleanup, Show } from "solid-js";
-import { createWindowSize,useGpuixRequired } from "@gpuix/solid";
+import { createWindowSize } from "@gpuix/solid";
 import type { AppConfig } from "../config";
 import { coreCall } from "../native-core";
 import { sharePaintCommands } from "../editor/paint-command";
 import { PaintLayer, type PaintCommand } from "./PaintLayer";
 import {placeOverlayRect} from "./overlay-viewport";
 import {translatePaintCommands} from "./translate-paint";
-import {observeTitlebarInset} from "../chrome/window-titlebar";
+import { animateRailIcon, railIconMotion } from "./activity-rail-motion";
 
 interface Region { id: string; label: string; rect: number[]; menu: boolean }
-interface Frame { commands: PaintCommand[]; regions: Region[]; menuOpen: boolean; menuRect: number[]; animating: boolean; height: number; action?: string | null }
-/** Original Rust chrome, including its exact glyph ink centering and menu. */
-export function TopBar(props: { config: AppConfig; peers?:readonly PresenceAvatar[]; sidebar?: string; details: boolean; agent: boolean; search: boolean; connection: string;
+interface Frame { commands: PaintCommand[]; regions: Region[]; menuOpen: boolean; menuRect: number[]; animating: boolean; height: number; width?: number; action?: string | null }
+/** Window-level navigation, outside both the sidebar and workspace tab strips. */
+export function ActivityRail(props: { config: AppConfig; topOffset: number; peers?:readonly PresenceAvatar[]; sidebar?: string; details: boolean; agent: boolean; search: boolean; connection: string;
   menuOpen: boolean; onMenuChange: (open: boolean) => void; onAction: (action: string) => void | Promise<void>; report: (error: unknown) => void }) {
   const size = createWindowSize(), config = props.config;
-  const renderer=useGpuixRequired();
-  const [leftSafeInset,setLeftSafeInset]=createSignal(0);
-  onCleanup(observeTitlebarInset(renderer as typeof renderer & {isFullscreen:()=>boolean},process.platform,setLeftSafeInset));
   const id = coreCall<{ id: number }>("chrome.new", { kind: "topbar", family: config.fontFamily, weight: config.fontWeight, fonts: [config.iconFontFamily, "Symbols Nerd Font Mono"] }).id;
   const [frame, setFrame] = createSignal<Frame>({ commands: [], regions: [], menuOpen: false, menuRect: [0, 0, 0, 0], animating: false, height: 30 * config.scale });
-  const parameters = createMemo(() => ({ id, width: size().width, height: size().height, scale: config.scale, leftSafeInset:leftSafeInset(), theme: config.themeName,
+  const parameters = createMemo(() => ({ id, rail: true, width: size().width, height: Math.max(0, size().height - props.topOffset), scale: config.scale, theme: config.themeName,
     sidebar: props.sidebar || null, details: props.details, agent: props.agent, search: props.search, connection: props.connection, peers:props.peers||[], menu: props.menuOpen }), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
+  const motion = new AnimationFrameScheduler(ANIMATION_FRAME_MS);
+  const [motionTime, setMotionTime] = createSignal(0);
+  const motions = new Map<string, { from: number; to: number; started: number; clicked: number }>();
+  const hoverValue = (state: { from: number; to: number; started: number }, now: number) => {
+    const t = Math.max(0, Math.min(1, (now - state.started) / 160));
+    return state.from + (state.to - state.from) * (1 - (1 - t) ** 3);
+  };
+  const tickMotion = () => {
+    const now = performance.now(); setMotionTime(now);
+    if ([...motions.values()].some(state => now - state.started < 160 || now - state.clicked < 420)) motion.request(tickMotion);
+  };
+  const animate = (key: string, over: boolean, click = false) => {
+    if (!key || config.reducedMotion) return;
+    const now = performance.now(), previous = motions.get(key);
+    motions.set(key, { from: previous ? hoverValue(previous, now) : 0, to: over ? 1 : 0, started: now, clicked: click ? now : previous?.clicked ?? -Infinity });
+    tickMotion();
+  };
   let hovered = "";
   const draw = (op = "chrome.frame", args: Record<string, unknown> = {}) => {
     try {
@@ -39,29 +53,44 @@ export function TopBar(props: { config: AppConfig; peers?:readonly PresenceAvata
     } catch (error) { props.report(error); }
   };
   createEffect(() => { parameters(); draw(); });
-  onCleanup(() => { animation.dispose(); coreCall("chrome.dispose", { id }); });
-  const height=createMemo(()=>Math.max(frame().height,leftSafeInset()>0?30:0));
-  const base = createMemo(() => frame().commands.filter((command) => command.layer < 2));
-  // Top chrome belongs to the window, including the sidebar and tab strips.
-  const menuRect=createMemo(()=>placeOverlayRect(frame().menuRect,{x:0,y:0,...size()}));
+  onCleanup(() => { animation.dispose(); motion.dispose(); coreCall("chrome.dispose", { id }); });
+  const base = createMemo(() => {
+    const now = motionTime();
+    return frame().commands.filter(command => command.layer < 2).map(command => {
+      if (config.reducedMotion) return command;
+      for (const region of frame().regions) {
+        const state = !region.menu && motions.get(region.id);
+        if (!state) continue;
+        const { zoom, lift } = railIconMotion(hoverValue(state, now), now - state.clicked, config.scale);
+        if (zoom === 1 && lift === 0) continue;
+        const next = animateRailIcon(command, region.rect, zoom, lift);
+        if (next !== command) return next;
+      }
+      return command;
+    });
+  });
+  const menuRect=createMemo(()=>placeOverlayRect([frame().menuRect[0], frame().menuRect[1] + props.topOffset, ...frame().menuRect.slice(2)],{x:0,y:0,...size()}));
   const menuShift=createMemo(()=>({x:menuRect()[0]-frame().menuRect[0],y:menuRect()[1]-frame().menuRect[1]}));
-  const overlay = createMemo(() => translatePaintCommands(frame().commands.filter((command) => command.layer >= 2),frame().menuOpen?menuShift().x:0,frame().menuOpen?menuShift().y:0));
+  const overlay = createMemo(() => translatePaintCommands(frame().commands.filter((command) => command.layer >= 2),frame().menuOpen?menuShift().x:0,frame().menuOpen?menuShift().y:props.topOffset));
   const move = (x = -1, y = -1) => {
     const hit = frame().regions.find((region) => x >= region.rect[0] && x <= region.rect[0] + region.rect[2] && y >= region.rect[1] && y <= region.rect[1] + region.rect[3]);
-    const key = hit?.id || ""; if (key === hovered) return; hovered = key; draw("chrome.pointer", { x, y });
+    const key = hit?.id || ""; if (key === hovered) return;
+    animate(hovered, false); hovered = key;
+    if (hit && !hit.menu) animate(key, true);
+    draw("chrome.pointer", { x, y });
   };
   const hit = (region: () => Region, offset = () => [0, 0]) => <div role="button" aria-label={region().label} testId={region().id}
-    onMouseMove={(event) => move((event.x??-1)-(region().menu?menuShift().x:0), (event.y??-1)-(region().menu?menuShift().y:0))} onMouseLeave={() => move()}
-    onMouseDown={(event) => { if (event.button === undefined || event.button === 0) { draw("chrome.click", { x: region().rect[0] + region().rect[2] / 2, y: region().rect[1] + region().rect[3] / 2 }); } }}
+    onMouseMove={() => move(region().rect[0] + region().rect[2] / 2, region().rect[1] + region().rect[3] / 2)} onMouseLeave={() => move()}
+    onMouseDown={(event) => { if (event.button === undefined || event.button === 0) { if (!region().menu) animate(region().id, true, true); draw("chrome.click", { x: region().rect[0] + region().rect[2] / 2, y: region().rect[1] + region().rect[3] / 2 }); } }}
     style={{ position: "absolute", left: region().rect[0] - offset()[0], top: region().rect[1] - offset()[1], width: region().rect[2], height: region().rect[3], cursor: "pointer", backgroundColor: "transparent" }} />;
-  return <div testId="original-topbar" style={{ position: "relative", height: height(), minHeight: height(), flexShrink: 0 }}>
+  return <div testId="activity-rail" role="toolbar" aria-label="Navigation" aria-orientation="vertical" style={{ position: "relative", width: frame().width ?? 52 * config.scale, flexShrink: 0, alignSelf: "stretch" }}>
     <PaintLayer commands={base()} config={config} />
     <Index each={frame().regions.filter((region) => !region.menu)}>{(region) => hit(region)}</Index>
     <Show when={overlay().length>0}><anchored fill="window" deferred priority={3} occlude={false} style={{ pointerEvents: "none", backgroundColor: "transparent" }}>
       <PaintLayer commands={overlay()} config={config} />
       <Show when={frame().menuOpen}><div testId="original-hamburger-menu" onMouseDownOutside={(event) => {
         const button = frame().regions.find((region) => region.id === "topbar-menu")?.rect;
-        if (button && (event.x || 0) >= button[0] && (event.x || 0) <= button[0] + button[2] && (event.y || 0) >= button[1] && (event.y || 0) <= button[1] + button[3]) return;
+        if (button && (event.x || 0) >= button[0] && (event.x || 0) <= button[0] + button[2] && (event.y || 0) >= button[1] + props.topOffset && (event.y || 0) <= button[1] + props.topOffset + button[3]) return;
         draw("chrome.click", { x: -10000, y: -10000 });
       }}
         style={{ position: "absolute", left: menuRect()[0], top: menuRect()[1], width: menuRect()[2], height: menuRect()[3], pointerEvents: "auto", backgroundColor: "transparent" }}>

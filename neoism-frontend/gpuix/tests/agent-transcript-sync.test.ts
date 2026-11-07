@@ -51,6 +51,29 @@ test("compaction completion refreshes unseen sessions without content and dedupl
  expect(sync.observe({SessionIdle:{session_id:"streaming"}})).toBe("streaming");
 });
 const until=async(predicate:()=>boolean)=>{const end=Date.now()+4000;while(!predicate()){if(Date.now()>end)throw Error("Agent stream fixture timed out");await Bun.sleep(5);}};
+test("open families preload child history before navigation without flooding catalog reads or rewinding live text",async()=>{
+ const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/gpuix-agent-prefetch"],{}),endpoint:daemon.endpoint,authToken:undefined},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
+ try{
+  model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a");
+  const root=daemon.threads[0].session_id;model.openThread(daemon.threads[0]);await until(()=>model.historyCursors.has(root));
+  const branches=Array.from({length:7},(_,index)=>({sessionId:`warm-${index}`,parentSessionId:root,title:`Child ${index}`,status:"running"}));
+  for(const branch of branches)daemon.history.set(branch.sessionId,[{id:`answer-${branch.sessionId}`,role:"Assistant",kind:"Assistant",text:"Accumulated output"}]);
+  daemon.push({CatalogFamily:{session_id:"unopened",snapshot:{branches:[{sessionId:"unopened-child",parentSessionId:"unopened"}]}}});
+  daemon.push({CatalogFamily:{session_id:root,snapshot:{familyRevision:1,branches}}});
+  await until(()=>branches.every(branch=>model.state.history[branch.sessionId]?.[0]?.text==="Accumulated output"));
+  expect(model.state.surfaces.find(surface=>surface.kind==="agent")?.sessionId).toBe(root);
+  expect(daemon.requests.filter(row=>row.tag==="GetHistory"&&row.body.session_id==="unopened-child")).toHaveLength(0);
+  expect(daemon.requests.filter(row=>row.tag==="GetHistory"&&String(row.body.session_id).startsWith("warm-")).length).toBe(7);
+  daemon.push({CatalogFamily:{session_id:root,snapshot:{familyRevision:2,branches}}});await Bun.sleep(40);
+  expect(daemon.requests.filter(row=>row.tag==="GetHistory"&&String(row.body.session_id).startsWith("warm-")).length).toBe(7);
+  daemon.push({ContentDelta:{session_id:"warm-0",message_id:"answer-warm-0",kind:"Text",text:" with live tokens"}});
+  await until(()=>model.state.history["warm-0"]?.[0]?.text==="Accumulated output with live tokens");
+  model.openThread({session_id:"warm-0",title:"Child",directory:"/project/a"},false,root);
+  await until(()=>daemon.requests.filter(row=>row.tag==="GetHistory"&&row.body.session_id==="warm-0").length===2);await Bun.sleep(40);
+  expect(model.state.history["warm-0"][0].text).toBe("Accumulated output with live tokens");
+ }finally{model.dispose();client.stop();daemon.stop();}
+});
+
 test("returning through layout focus refreshes an already-loaded conversation exactly once",async()=>{
  const daemon=createAgentDaemon(),config={...loadConfig(["--config","/nonexistent/tab-resume"],{}),endpoint:daemon.endpoint},client=new DaemonConnection(config),model=new WorkspaceModel(client,config);
  try{

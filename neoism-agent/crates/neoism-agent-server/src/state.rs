@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Context;
+use futures::FutureExt;
 use neoism_agent_core::{
     ArtifactInfo, AuditEntry, EventPayload, Id, IdKind, MessageInfo, MessageWithParts,
     PermissionRequestInfo, PermissionRule, PromptRequest, QuestionRequestInfo,
@@ -40,6 +41,7 @@ pub(crate) struct InnerState {
     pub(crate) external_catalog_import_lock: Mutex<()>,
     /// Per-root gate shared by provider-option discovery/mutation and ACP prompts.
     pub(crate) external_session_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) native_agents: crate::external_agent::native::NativeRegistry,
     pub(crate) utilities: Arc<crate::utility_runtime::UtilityRuntime>,
     pub(crate) workspace_runtimes: crate::workspace_runtime::WorkspaceRuntimeRegistry,
     pub(crate) scoped_plugin_runtimes:
@@ -156,6 +158,7 @@ pub(crate) enum ExecutionSubtaskRegistration {
     Rejected,
 }
 
+mod bookkeeping_recovery;
 mod conversation_search;
 mod event_retention;
 mod event_storage;
@@ -484,14 +487,16 @@ impl Db {
 
     async fn execute(&self, sql: &str, params: Vec<SqlValue>) -> anyhow::Result<u64> {
         let _writer = self.lock_writer().await;
-        Ok(turso_busy_retry(|| {
+        Ok(std::panic::AssertUnwindSafe(turso_busy_retry(|| {
             let params = params.clone();
             async move {
                 let conn = self.database.connect()?;
                 conn.execute(sql, params).await
             }
-        })
-        .await?)
+        }))
+        .catch_unwind()
+        .await
+        .map_err(|_| anyhow::anyhow!("Saved agent state needs repair; restart Neoism to run recovery. Conversations are preserved."))??)
     }
 
     async fn fetch_all(
@@ -500,7 +505,7 @@ impl Db {
         params: Vec<SqlValue>,
     ) -> anyhow::Result<Vec<DbRow>> {
         let started = std::time::Instant::now();
-        let result = turso_busy_retry(|| {
+        let result = std::panic::AssertUnwindSafe(turso_busy_retry(|| {
             let params = params.clone();
             async move {
                 let conn = self.database.connect()?;
@@ -518,8 +523,10 @@ impl Db {
                 }
                 Ok(out)
             }
-        })
-        .await;
+        }))
+        .catch_unwind()
+        .await
+        .map_err(|_| anyhow::anyhow!("Saved agent state needs repair; restart Neoism to run recovery. Conversations are preserved."))?;
         let elapsed = started.elapsed();
         if elapsed >= std::time::Duration::from_millis(250) {
             // Include row stepping and retries, but never bind values or results:
@@ -597,7 +604,9 @@ impl Db {
                 }
             })
         };
-        match run().await {
+        let result = std::panic::AssertUnwindSafe(run()).catch_unwind().await
+            .map_err(|_| anyhow::anyhow!("Saved agent state needs repair; restart Neoism to run recovery. Conversations are preserved."))?;
+        match result {
             Err(error)
                 if conversation_search::is_registry_corruption(&error)
                     && statements
@@ -609,7 +618,8 @@ impl Db {
                 // The index is a rebuildable projection: rebuild, retry once.
                 tracing::warn!(%error, "conversation search index corrupt; rebuilding it");
                 conversation_search::repair_fts_locked(self).await?;
-                Ok(run().await?)
+                Ok(std::panic::AssertUnwindSafe(run()).catch_unwind().await
+                    .map_err(|_| anyhow::anyhow!("Saved agent state needs repair; restart Neoism to run recovery. Conversations are preserved."))??)
             }
             result => Ok(result?),
         }
@@ -1110,6 +1120,7 @@ impl AppState {
                 management_lock: Mutex::new(()),
                 external_catalog_import_lock: Mutex::new(()),
                 external_session_locks: Mutex::new(HashMap::new()),
+                native_agents: Default::default(),
                 utilities,
                 workspace_runtimes: Default::default(),
                 scoped_plugin_runtimes: Default::default(),
@@ -1227,7 +1238,9 @@ impl AppState {
         });
         let resume_started = crate::perf::now();
         let phase_started = crate::perf::now();
-        crate::session_queue::resume_prompt_queues(state.clone()).await?;
+        if let Err(error) = crate::session_queue::resume_prompt_queues(state.clone()).await {
+            tracing::warn!(%error, "Saved prompts could not be resumed; agent remains available");
+        }
         if let Err(error) =
             crate::external_agent::reconcile_interrupted_nested_sessions(&state).await
         {
@@ -1626,6 +1639,7 @@ impl AppState {
     pub async fn shutdown(
         &self,
     ) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        self.inner.native_agents.shutdown().await;
         if let Some(worker) = self.inner.store._event_compactor.as_ref() {
             worker.shutdown().await;
         }
@@ -2059,6 +2073,7 @@ impl SessionStore {
         };
         let migration_started = crate::perf::now();
         store.migrate().await?;
+        bookkeeping_recovery::recover(&store.db).await?;
         conversation_search::migrate(&store.db).await?;
         store._search_worker = Some(Arc::new(conversation_search::spawn(store.db.clone())));
         store._event_compactor = Some(Arc::new(event_storage::spawn(store.db.clone())));

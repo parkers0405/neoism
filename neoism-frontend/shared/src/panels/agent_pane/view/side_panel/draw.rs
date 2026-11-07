@@ -230,16 +230,17 @@ fn render_scramble_text_inner(
 /// Resolve server authority before the legacy runtime-status fallback.
 pub(super) fn catalog_activity_color(
     entry: &NeoismAgentSessionEntry,
+    foreground: [f32; 3],
     red: [f32; 3],
     yellow: [f32; 3],
 ) -> Option<[f32; 3]> {
     use neoism_agent_core::CatalogActivity;
     match entry.catalog_activity {
         Some(CatalogActivity::Idle) => None,
-        Some(CatalogActivity::Running) => Some([1.0; 3]),
+        Some(CatalogActivity::Running) => Some(foreground),
         Some(CatalogActivity::Background) => Some(red),
         Some(CatalogActivity::Permission) => Some(yellow),
-        None => session_entry_is_running(entry).then_some([1.0; 3]),
+        None => session_entry_is_running(entry).then_some(foreground),
     }
 }
 
@@ -434,18 +435,8 @@ pub(crate) fn render_sessions_list(
     pane.side_panel_mut().clear_selected_cursor_rect();
 
     // Catalog is always the left rail, whether a chat is open or not.
-    let mut y = cy + 14.0 * s;
+    let mut y = cy + if navigation { 0.0 } else { 14.0 * s };
     pane.side_panel_mut().close_provider_menu();
-    y = render_section_header(
-        sugarloaf,
-        "Chats",
-        text_x,
-        y,
-        theme,
-        s,
-        clip,
-        occlusion_rects,
-    );
 
     let button_h = 34.0 * s;
     let button_rect = [text_x, y + 5.0 * s, text_w, button_h];
@@ -1164,12 +1155,14 @@ pub(crate) fn render_sessions_list(
         let text_clip = [title_x, visible_y, title_budget, visible_h];
 
         let is_current = current_id.as_deref() == Some(entry.id.as_str());
+        let foreground = theme.f32_alpha(theme.fg, 1.0)[..3].try_into().unwrap();
         let activity_color = if is_child {
             matches!(catalog_branch_status(entry), BranchStatus::Active)
-                .then_some([1.0; 3])
+                .then_some(foreground)
         } else {
             catalog_activity_color(
                 entry,
+                foreground,
                 theme.f32_alpha(theme.red, 1.0)[..3].try_into().unwrap(),
                 theme.f32_alpha(theme.yellow, 1.0)[..3].try_into().unwrap(),
             )
@@ -1383,7 +1376,7 @@ pub(crate) fn render_sessions_list(
             badge_x + (badge - spinner) * 0.5,
             badge_y + (badge - spinner) * 0.5,
             spinner,
-            [1.0; 3],
+            theme.f32_alpha(theme.fg, 1.0)[..3].try_into().unwrap(),
             now_seconds,
             list_rect,
             s,

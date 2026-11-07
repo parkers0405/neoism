@@ -9,7 +9,7 @@ const server=createAgentDaemon({deferCreations:false});
 const app=await launchNative({openWorkspaceIds:["a"],command:process.execPath,args:["src/main.tsx","--daemon",server.endpoint,"--workspace","a","--config",config],cwd:process.cwd(),env:{...process.env,NEOISM_GPUIX_STATE_PATH:join(directory,"state.json")}});
 const press=(keys:string)=>app.call("keystrokes",{keys});
 try{
- await app.getByTestId("original-topbar").waitFor({timeoutMs:15000});
+ await app.getByTestId("activity-rail").waitFor({timeoutMs:15000});
  await press("alt-a");const composer=app.getByTestId("composer");await composer.waitFor();await composer.fill("preserve this draft");
  // GPUI uses alt for the macOS Option modifier. These must escape native
  // textarea word/paragraph movement and reach the app's focus ladder.

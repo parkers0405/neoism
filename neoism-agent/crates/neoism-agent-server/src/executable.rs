@@ -67,6 +67,15 @@ pub(crate) mod test_support {
     }
 
     impl FakeExecutableService {
+        pub(crate) fn with_path(
+            mut self,
+            program: impl Into<OsString>,
+            path: impl Into<PathBuf>,
+        ) -> Self {
+            self.paths.insert(program.into(), path.into());
+            self
+        }
+
         pub(crate) fn with(
             program: impl Into<OsString>,
             path: impl Into<PathBuf>,

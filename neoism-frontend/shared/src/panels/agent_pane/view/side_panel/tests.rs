@@ -415,7 +415,10 @@ fn root_indicator_is_independent_of_running_child_rows() {
             .iter()
             .find(|row| row.id == "child")
             .unwrap();
-        assert_eq!(draw::catalog_activity_color(root, red, yellow), expected);
+        assert_eq!(
+            draw::catalog_activity_color(root, [1.0; 3], red, yellow),
+            expected
+        );
         assert_eq!(draw::catalog_branch_status(child), BranchStatus::Active);
     }
 }
@@ -423,30 +426,40 @@ fn root_indicator_is_independent_of_running_child_rows() {
 #[test]
 fn catalog_activity_color_authority_and_legacy_fallback() {
     use neoism_agent_core::CatalogActivity;
+    let foreground = [0.12, 0.14, 0.18];
     let red = [0.8, 0.1, 0.2];
     let yellow = [0.9, 0.7, 0.1];
     let mut entry = NeoismAgentSessionEntry::new("root", "Root", "")
         .with_runtime_status(Some("running".into()));
     for (activity, expected) in [
-        (CatalogActivity::Running, Some([1.0; 3])),
+        (CatalogActivity::Running, Some(foreground)),
         (CatalogActivity::Background, Some(red)),
         (CatalogActivity::Permission, Some(yellow)),
         (CatalogActivity::Idle, None),
     ] {
         entry.catalog_activity = Some(activity);
-        assert_eq!(draw::catalog_activity_color(&entry, red, yellow), expected);
+        assert_eq!(
+            draw::catalog_activity_color(&entry, foreground, red, yellow),
+            expected
+        );
         entry.runtime_status = Some("idle".into());
-        assert_eq!(draw::catalog_activity_color(&entry, red, yellow), expected);
+        assert_eq!(
+            draw::catalog_activity_color(&entry, foreground, red, yellow),
+            expected
+        );
     }
     entry.catalog_activity = None;
     for (status, expected) in [
-        ("running", Some([1.0; 3])),
-        ("busy", Some([1.0; 3])),
+        ("running", Some(foreground)),
+        ("busy", Some(foreground)),
         ("idle", None),
         ("blocked", None),
     ] {
         entry.runtime_status = Some(status.into());
-        assert_eq!(draw::catalog_activity_color(&entry, red, yellow), expected);
+        assert_eq!(
+            draw::catalog_activity_color(&entry, foreground, red, yellow),
+            expected
+        );
     }
 }
 

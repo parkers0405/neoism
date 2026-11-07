@@ -129,9 +129,15 @@ export async function recoverLocalDaemon(config:AppConfig,signal:AbortSignal):Pr
  const key=config.endpoint;
  let entry=recovering.get(key);
  if(!entry){
-  const env={...process.env,NEOISM_GPUIX_DAEMON_URL:undefined};
-  const controller=new AbortController();
-  const promise=ensureLocalDaemon(config,[],env,{refresh:()=>({...config,endpoint:discoveredLocalDaemon(env)||config.endpoint,authToken:loadConfig([],env).authToken??config.authToken}),signal:controller.signal});
+   const env={...process.env,NEOISM_GPUIX_DAEMON_URL:undefined};
+   const controller=new AbortController();
+   const refresh=()=>{
+    const fresh=loadConfig([],env);
+    // A fresh local launch starts with TCP before its Unix socket exists.
+    // Adopt that socket without redirecting a deliberately selected endpoint.
+    return {...config,endpoint:discoveredLocalDaemon(env)||(config.endpoint===localEndpoint(env)?fresh.endpoint:config.endpoint),authToken:fresh.authToken??config.authToken};
+   };
+   const promise=ensureLocalDaemon(config.endpoint===localEndpoint(env)?refresh():config,[],env,{refresh,signal:controller.signal});
   entry={promise,controller,users:0};recovering.set(key,entry);
  }
  const active=entry;active.users++;

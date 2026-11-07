@@ -1,7 +1,7 @@
 use super::*;
 use crate::external_acp::ACP_PROTOCOL_VERSION;
 
-pub(crate) struct AcpRunResult {
+pub(crate) struct ExternalRunResult {
     pub(crate) provider_response: ProviderGenerationResponse,
 }
 
@@ -307,6 +307,11 @@ async fn settle_acp_run(
     collector: &Arc<tokio::sync::Mutex<AcpRunCollector>>,
     status: &str,
 ) {
+    if let Err(error) =
+        super::events::finish_acp_text_parts(state, child_id, &step.live_message).await
+    {
+        tracing::warn!(%error, "failed to persist ACP transcript boundary");
+    }
     let snapshot = collector.lock().await;
     if snapshot.usage_seen || snapshot.usage.observed() {
         if let Err(error) = super::events::project_acp_usage(
@@ -345,7 +350,10 @@ pub(crate) async fn run_acp_prompt(
     step: &StartedAssistantStep,
     model: &UserModel,
     cancellation: Arc<AtomicBool>,
-) -> Result<AcpRunResult, String> {
+) -> Result<ExternalRunResult, String> {
+    if !runtime.is_legacy_session(child) {
+        return Err("ACP runner requires an explicitly persisted legacy ACP conversation".into());
+    }
     let session_lock = super::options::session_lock(state, child.id.as_str()).await;
     let _session_guard = session_lock.lock().await;
     // The queued run may have captured the root before an options GET created
@@ -544,7 +552,7 @@ pub(crate) async fn run_acp_prompt(
     }
     let text = collector.text.clone();
     let usage = collector.usage.clone();
-    Ok(AcpRunResult {
+    Ok(ExternalRunResult {
         provider_response: ProviderGenerationResponse {
             provider_id: model.provider_id.clone(),
             model_id: confirmed_model,

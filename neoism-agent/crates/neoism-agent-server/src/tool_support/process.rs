@@ -17,6 +17,19 @@ pub(crate) fn read_child_output<T>(
 where
     T: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
+    read_child_output_observed(pipe, maximum_bytes, None)
+}
+
+pub(crate) type OutputObserver = Arc<dyn Fn(&[u8], bool) + Send + Sync>;
+
+pub(crate) fn read_child_output_observed<T>(
+    pipe: Option<T>,
+    maximum_bytes: usize,
+    observer: Option<OutputObserver>,
+) -> tokio::task::JoinHandle<anyhow::Result<CapturedOutput>>
+where
+    T: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         let mut output = Vec::new();
         let mut truncated = false;
@@ -32,6 +45,9 @@ where
                     output.extend_from_slice(&chunk[..read.min(remaining)]);
                 }
                 truncated |= read > remaining;
+                if let Some(observer) = &observer {
+                    observer(&chunk[..read.min(remaining)], truncated);
+                }
             }
         }
         Ok(CapturedOutput {

@@ -654,6 +654,7 @@ impl NeoismAgentPane {
         self.pending_user_prompts = cached.pending_user_prompts;
         self.prompt_echo_aliases = cached.prompt_echo_aliases;
         self.restore_session_runtime_ui(cached.runtime);
+        self.retain_inflight_child_trace();
         if let Some((authority, count, started_at)) = family_jobs {
             self.background_task_authority = authority;
             self.running_background_task_count = count;

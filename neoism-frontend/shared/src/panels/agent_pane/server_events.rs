@@ -2,6 +2,46 @@
 //! every host that speaks the daemon protocol (web/wasm and GPUIX); moved
 //! verbatim from the web frontend so both stay identical.
 
+// SessionEvent is the protocol's fallback for SDK-shaped events that have not
+// been promoted to typed envelopes. Use the same part mapper as native SSE,
+// including for parked children; never infer the child/provider from its title.
+fn apply_raw_part_event(
+    pane: &mut crate::panels::agent_pane::state::NeoismAgentPane,
+    parsed: &neoism_protocol::agent::AgentServerMessage,
+    cached: bool,
+) -> bool {
+    use neoism_protocol::agent::AgentServerMessage;
+    use crate::panels::agent_pane::{api_mapping::part_block, stream_events::{event_message_id, event_part_id, event_part_kind}};
+    let AgentServerMessage::SessionEvent { session_id, kind, properties } = parsed else { return false; };
+    match kind.as_str() {
+        "message.part.updated" => {
+            if let Some(part) = properties.get("part") {
+                if let Some(message) = part_block(part) {
+                    let parent = event_message_id(part);
+                    if cached { pane.cache_upsert_part_message_with_parent(session_id, message, parent); }
+                    else { pane.ingest_live_part_message_with_parent(message, parent); }
+                }
+            }
+        }
+        "message.part.delta" if properties["field"] == "text" => {
+            let delta = properties["delta"].as_str().unwrap_or_default();
+            let parent = event_message_id(properties);
+            let part = event_part_id(properties);
+            let kind = event_part_kind(properties);
+            if cached { pane.cache_apply_part_delta_with_parent(session_id, parent, part, kind, delta); }
+            else { pane.ingest_live_part_delta(parent.map(str::to_owned), part.map(str::to_owned), kind.map(str::to_owned), delta); }
+        }
+        "message.part.removed" => {
+            if let Some(part) = event_part_id(properties) {
+                if cached { pane.cache_remove_part_message(session_id, part); }
+                else { pane.remove_part_message(part); }
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 pub fn apply_agent_event_to_pane(
     pane: &mut crate::panels::agent_pane::state::NeoismAgentPane,
     parsed: neoism_protocol::agent::AgentServerMessage,
@@ -23,6 +63,7 @@ pub fn apply_agent_event_to_pane_with_history_kind(
     parsed: neoism_protocol::agent::AgentServerMessage,
     history_older: Option<bool>,
 ) {
+    if apply_raw_part_event(pane, &parsed, false) { return; }
     use neoism_protocol::agent::{
         AgentServerMessage, CompactionPhase as ProtoCompactionPhase, ContentKind,
         NoticeLevel, Role, SubagentStatus, ToolStatus,
@@ -960,6 +1001,7 @@ pub fn apply_agent_event_to_cache_with_history_kind(
     parsed: neoism_protocol::agent::AgentServerMessage,
     history_older: Option<bool>,
 ) -> bool {
+    if apply_raw_part_event(pane, &parsed, true) { return true; }
     use neoism_protocol::agent::{
         AgentServerMessage, CompactionPhase, ContentKind, Role,
     };

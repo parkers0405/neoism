@@ -43,9 +43,15 @@ pub(super) async fn authorize_openai_browser(
     provider_id: &str,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<ProviderAuthAuthorization> {
+    let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
+        .unwrap_or_else(|_| OPENAI_ISSUER.to_string());
+    let redirect_uri = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_REDIRECT_URI")
+        .unwrap_or_else(|_| {
+            format!("http://localhost:{OPENAI_BROWSER_OAUTH_PORT}/auth/callback")
+        });
     tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        authorize_openai_browser_inner(provider_id, pending),
+        authorize_openai_browser_inner(provider_id, pending, &issuer, &redirect_uri, OPENAI_BROWSER_OAUTH_PORT),
     )
     .await
     .map_err(|_| anyhow::anyhow!("OpenAI browser authorization preparation timed out"))?
@@ -53,15 +59,12 @@ pub(super) async fn authorize_openai_browser(
 
 async fn authorize_openai_browser_inner(
     provider_id: &str,
-    pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
+    pending_flows: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
+    issuer: &str,
+    redirect_uri: &str,
+    port: u16,
 ) -> anyhow::Result<ProviderAuthAuthorization> {
-    let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
-        .unwrap_or_else(|_| OPENAI_ISSUER.to_string());
-    let redirect_uri = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_REDIRECT_URI")
-        .unwrap_or_else(|_| {
-            format!("http://localhost:{OPENAI_BROWSER_OAUTH_PORT}/auth/callback")
-        });
-    let mut pending = pending.write().await;
+    let mut pending = pending_flows.write().await;
     if let Some(ProviderOAuthPending::OpenAiBrowser {
         issuer,
         redirect_uri,
@@ -80,18 +83,26 @@ async fn authorize_openai_browser_inner(
     let code_verifier = random_oauth_string(64);
     let state = random_oauth_string(43);
     let (sender, receiver) = oneshot::channel();
-    start_openai_browser_callback_listener(
-        OPENAI_BROWSER_OAUTH_PORT,
+    if let Err(error) = start_openai_browser_callback_listener(
+        port,
         "/auth/callback".to_string(),
         state.clone(),
         sender,
     )
-    .await?;
+    .await {
+        if error.kind() != std::io::ErrorKind::AddrInUse {
+            return Err(error.into());
+        }
+        // Another daemon (or Codex) owns the fixed redirect port. Recover
+        // through device login without cancelling another app's login flow.
+        drop(pending);
+        return authorize_openai_headless_inner(provider_id, pending_flows, issuer).await;
+    }
     pending.insert(
         provider_id.to_string(),
         ProviderOAuthPending::OpenAiBrowser {
-            issuer: issuer.clone(),
-            redirect_uri: redirect_uri.clone(),
+            issuer: issuer.to_string(),
+            redirect_uri: redirect_uri.to_string(),
             code_verifier: code_verifier.clone(),
             state: state.clone(),
             receiver: Arc::new(Mutex::new(Some(receiver))),
@@ -99,8 +110,8 @@ async fn authorize_openai_browser_inner(
     );
 
     Ok(openai_browser_authorization(
-        &issuer,
-        &redirect_uri,
+        issuer,
+        redirect_uri,
         &code_verifier,
         &state,
     ))
@@ -217,9 +228,11 @@ pub(super) async fn authorize_openai_headless(
     provider_id: &str,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
 ) -> anyhow::Result<ProviderAuthAuthorization> {
+    let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
+        .unwrap_or_else(|_| OPENAI_ISSUER.to_string());
     tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        authorize_openai_headless_inner(provider_id, pending),
+        authorize_openai_headless_inner(provider_id, pending, &issuer),
     )
     .await
     .map_err(|_| anyhow::anyhow!("OpenAI device authorization preparation timed out"))?
@@ -228,9 +241,8 @@ pub(super) async fn authorize_openai_headless(
 async fn authorize_openai_headless_inner(
     provider_id: &str,
     pending: &RwLock<std::collections::HashMap<String, ProviderOAuthPending>>,
+    issuer: &str,
 ) -> anyhow::Result<ProviderAuthAuthorization> {
-    let issuer = std::env::var("NEOISM_AGENT_OPENAI_OAUTH_ISSUER")
-        .unwrap_or_else(|_| OPENAI_ISSUER.to_string());
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{issuer}/api/accounts/deviceauth/usercode"))
@@ -253,7 +265,7 @@ async fn authorize_openai_headless_inner(
     pending.write().await.insert(
         provider_id.to_string(),
         ProviderOAuthPending::OpenAiHeadless {
-            issuer: issuer.clone(),
+            issuer: issuer.to_string(),
             device_auth_id: response.device_auth_id,
             user_code: response.user_code.clone(),
             interval_ms,
@@ -352,5 +364,69 @@ fn openai_auth_from_token_response(token_response: OpenAiTokenResponse) -> AuthI
         ),
         account_id,
         enterprise_url: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn occupied_browser_port_automatically_completes_device_login() {
+        // Stand in for another daemon/Codex without touching the user's port.
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer_url = format!("http://{}", issuer.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (path, body) in [
+                ("/api/accounts/deviceauth/usercode", r#"{"device_auth_id":"device","user_code":"ABC-123","interval":"1"}"#),
+                ("/api/accounts/deviceauth/token", r#"{"authorization_code":"code","code_verifier":"verifier"}"#),
+                ("/oauth/token", r#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#),
+            ] {
+                let (mut socket, _) = issuer.accept().await.unwrap();
+                let mut buffer = vec![0; 8192];
+                let mut read = 0;
+                loop {
+                    read += socket.read(&mut buffer[read..]).await.unwrap();
+                    if let Some(end) = buffer[..read].windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&buffer[..end]);
+                        let length = headers.lines().find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                        }).unwrap_or(0);
+                        if read >= end + 4 + length {
+                            assert!(headers.starts_with(&format!("POST {path} HTTP/1.1")));
+                            break;
+                        }
+                    }
+                    assert!(read < buffer.len(), "unexpected OAuth request");
+                }
+                socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let pending = RwLock::new(std::collections::HashMap::new());
+        let authorization = authorize_openai_browser_inner(
+            "attempt", &pending, &issuer_url, "http://localhost/auth/callback",
+            occupied.local_addr().unwrap().port(),
+        ).await.unwrap();
+        assert_eq!(authorization.url, format!("{issuer_url}/codex/device"));
+        assert_eq!(authorization.instructions, "Enter code: ABC-123");
+        let provider = neoism_agent_core::ProviderInfo {
+            id: "openai".into(), name: "OpenAI".into(),
+            source: neoism_agent_core::ProviderSource::Builtin,
+            env: vec![], key: None,
+            options: Default::default(), models: Default::default(),
+        };
+        // Clients still submit the browser method they originally selected.
+        let auth = super::super::callback(
+            "openai", "attempt", &serde_json::json!(0), None, &[provider], &pending,
+        ).await.unwrap();
+        assert!(matches!(auth, AuthInfo::OAuth { access, refresh, .. }
+            if access == "access" && refresh == "refresh"));
+        assert!(pending.read().await.is_empty());
+        // Recovery must leave the other process's listener untouched.
+        assert!(occupied.local_addr().is_ok());
+        server.await.unwrap();
     }
 }

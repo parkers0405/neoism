@@ -1,3 +1,8 @@
+/** Windows needs the OS non-client caption, not Mac-style content under traffic lights. */
+export function windowTitlebarOptions(platform: string) {
+  return { titlebarTransparent: platform !== "win32" };
+}
+
 /** AppKit traffic lights occupy logical pixels, independent of Neoism's UI scale. */
 export function titlebarLeftInset(platform: string, fullscreen: boolean) {
   return platform === "darwin" && !fullscreen ? 80 : 0;

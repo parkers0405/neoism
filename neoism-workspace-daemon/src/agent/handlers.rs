@@ -513,7 +513,15 @@ pub(crate) fn thread_summary_from_session(session: &Value) -> Option<ThreadSumma
         session
             .get("externalAgent")
             .filter(|external| {
-                external.get("runtime").and_then(Value::as_str) == Some("acp")
+                let driver = match external.get("provider").and_then(Value::as_str) {
+                    Some("codex") => "codex-app-server",
+                    Some("claude") => "claude-agent-sdk",
+                    Some("opencode") => "opencode-server",
+                    _ => return false,
+                };
+                external["nested"] != true && external["nativeProjection"] != true
+                    && external.get("runtime").and_then(Value::as_str)
+                        .is_some_and(|value| value == "acp" || value == driver)
             })
             .and_then(|external| external.get("provider").and_then(Value::as_str))
             .filter(|provider| matches!(*provider, "opencode" | "claude" | "codex"))

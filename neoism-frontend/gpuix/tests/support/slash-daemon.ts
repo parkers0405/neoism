@@ -1,4 +1,4 @@
-import type {Session,ProviderConnectionSummary} from "@neoism/sdk";
+import type {Session,ProviderConnectionSummary,ProviderAuthAuthorization} from "@neoism/sdk";
 export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
  const requests:Array<{workspace:string;path:string;method:string;body:any;directory:string|null;authorization:string|null;query:Partial<Record<string,string>>}>=[];
  const session=(id:string,workspace="a",model={providerId:"openai",id:"base",variant:"high",connectionId:"account-a"}):Session=>({id,title:id,directory:`/project/${workspace}`,projectId:`project-${workspace}`,slug:id,version:"1",time:{created:1,updated:1},agent:"build",model,permission:[{permission:"read",pattern:"*",action:"ask"}]});
@@ -11,7 +11,8 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   ["b",new Map<string,ProviderConnectionSummary>([["foreign",{providerId:"openai",connectionId:"foreign",label:"Other workspace",scope:{tenantId:"fixture",workspaceId:"b"},authType:"api",isDefault:true}]])]
  ]);
  let connectionCounter=0,failConnectionMethod:string|undefined,failHistory=false;
- const oauthLabels=new Map<string,string>();
+  const oauthLabels=new Map<string,string>();
+  let oauthAuthorization:ProviderAuthAuthorization={attemptId:"attempt-one",instructions:"Sign in with your browser",method:"code",url:"https://auth.example/sign-in"};
  const capabilities=new Set(["neoism.goals","neoism.mcp","neoism.subagents"]);
  const permissions=[{id:"p-one",sessionId:"one",messageId:"m",permission:"read",patterns:["*"],always:["*"],title:"Read file"},{id:"p-two",sessionId:"two",messageId:"m",permission:"read",patterns:["*"],always:["*"],title:"Read other file"}];
  const questions=[{id:"q-one",sessionId:"one",messageId:"m",questions:[{question:"First?"},{question:"Second?"}]},{id:"q-two",sessionId:"two",messageId:"m",questions:[{question:"Other?"}]}];
@@ -48,7 +49,7 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
    if(request.method==="PATCH"){const renamed={...current,label:body.label};accounts.set(current.connectionId,renamed);return Response.json(renamed);}
    if(request.method==="POST"&&connectionRoute[3]){for(const[id,account]of accounts)if(account.providerId===providerId)accounts.set(id,{...account,isDefault:id===current.connectionId});return Response.json(accounts.get(current.connectionId));}
   }
-  if(path==="/providers/openai/oauth/authorize"){oauthLabels.set(workspace,body.label);return Response.json({attemptId:"attempt-one",instructions:"Sign in with your browser",method:"code",url:"https://auth.example/sign-in",expiresAt:Date.now()+60000});}
+  if(path==="/providers/openai/oauth/authorize"){oauthLabels.set(workspace,body.label);return Response.json({expiresAt:Date.now()+60000,...oauthAuthorization});}
   if(path==="/providers/openai/oauth/callback"){const account:ProviderConnectionSummary={providerId:"openai",connectionId:`oauth-${++connectionCounter}`,label:oauthLabels.get(workspace)||"Browser account",scope:{tenantId:"fixture",workspaceId:workspace},authType:"oauth",isDefault:false};connections.get(workspace)?.set(account.connectionId,account);return Response.json(true);}
   if(path==="/providers/openai/usage")return Response.json({accounts:[{auth_type:"oauth",connection_id:"account-a",error:null,is_default:true,label:"Personal",plan_type:"pro",windows:[{label:"5 hours",limit_window_seconds:18000,reset_at:1900000000,used_percent:24}]}]});
   if(path==="/commands")return Response.json([{name:"review",description:"Review this repository"},{name:"compact",description:"Duplicate builtin"},{name:"models",description:"Duplicate alias"}]);
@@ -98,5 +99,5 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   if(path.startsWith("/plugins/dev.neoism.subagents/sessions/"))return Response.json([{id:"task",sessionId:"one",childSessionId:"two",agent:"plan",description:"Inspect source",status:"done",nested:false}]);
   return Response.json({message:`Unhandled fixture operation ${request.method} ${path}`},{status:404});
  },websocket:{message(socket,data){const [family,envelope]=Object.entries(JSON.parse(String(data)))[0]as[string,{request_id:number;message:any}];const reply=(message:unknown)=>socket.send(JSON.stringify({[family+"Reply"]:{request_id:envelope.request_id,message}}));if(envelope.message.Hello)reply({HelloAck:{accepted:true}});else if(envelope.message.GetHistory)reply({HistoryChunk:{session_id:envelope.message.GetHistory.session_id,messages:[]}});}}});
-  return {defer:(path:string)=>{deferred.add(path);},release,endpoint:`ws://127.0.0.1:${server.port}/session`,requests,sessions,connections,capabilities,creations,enableMasterCatalog:()=>{masterCatalog=true;},failSessionPage:()=>{failSessionPage=true;},failHistory:()=>{failHistory=true;},failConnection:(method:string)=>{failConnectionMethod=method;},setFailCommand:()=>{failCommand=true;},deferCreation:()=>{deferCreation=true;},stop:()=>{for(const path of deferred)release(path);server.stop(true);}};
+  return {setOAuthAuthorization:(authorization:ProviderAuthAuthorization)=>{oauthAuthorization=authorization;},defer:(path:string)=>{deferred.add(path);},release,endpoint:`ws://127.0.0.1:${server.port}/session`,requests,sessions,connections,capabilities,creations,enableMasterCatalog:()=>{masterCatalog=true;},failSessionPage:()=>{failSessionPage=true;},failHistory:()=>{failHistory=true;},failConnection:(method:string)=>{failConnectionMethod=method;},setFailCommand:()=>{failCommand=true;},deferCreation:()=>{deferCreation=true;},stop:()=>{for(const path of deferred)release(path);server.stop(true);}};
 }

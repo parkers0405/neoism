@@ -40,14 +40,14 @@ const assertOpen = async (ids: string[]) => {
 const geometry: unknown[] = [];
 const assertGeometry = async (sidebarVisible: boolean) => {
   const nodes = await tree(), bounds = (id: string) => nodes.find(node => node.testId === id)?.bounds;
-  const topbar = bounds("original-topbar"), strip = bounds("workspace-tabs"), content = bounds("workspace-content"), sidebar = bounds("sidebar");
+  const rail = bounds("activity-rail"), shell = bounds("app-shell"), strip = bounds("workspace-tabs"), content = bounds("workspace-content"), sidebar = bounds("sidebar");
   const pane = nodes.find(node => /^pane-tabs:/.test(node.testId || ""))?.bounds;
-  if (!topbar || !strip || !content || !pane || strip.width <= 100 || content.height <= 100) return false;
+  if (!rail || !shell || !strip || !content || !pane || strip.width <= 100 || content.height <= 100) return false;
   const near = (a: number, b: number) => Math.abs(a - b) <= 1.3;
-  const aligned = near(strip.y, topbar.y + topbar.height) && near(strip.x, content.x) && near(strip.width, content.width)
+  const aligned = near(rail.x, shell.x) && near(rail.width, 52) && near(strip.y, rail.y) && near(content.y, rail.y) && near(strip.x, content.x) && near(strip.width, content.width)
     && near(pane.y, strip.y + strip.height)
-    && (sidebarVisible ? !!sidebar && near(sidebar.y, strip.y) && near(strip.x, sidebar.x + sidebar.width) : !sidebar && near(strip.x, topbar.x));
-  if (aligned) geometry.push({ sidebarVisible, topbar, strip, content, sidebar, pane });
+    && (sidebarVisible ? !!sidebar && near(sidebar.y, strip.y) && near(sidebar.x, rail.x + rail.width) && near(strip.x, sidebar.x + sidebar.width) : !sidebar && near(strip.x, rail.x + rail.width));
+  if (aligned) geometry.push({ sidebarVisible, rail, strip, content, sidebar, pane });
   return aligned;
 };
 const assertNoWrites = () => {
@@ -61,7 +61,7 @@ try {
   await until(async () => (await workspaceTabs()).length > 0); await assertOpen(["a"]);
   if (server.workspaces.length !== 4 || !server.workspaceRequests.some(request => request.tag === "RequestHostWorkspaceTree")) throw new Error("Fixture did not supply the complete workspace catalog");
   assertNoWrites();
-  stage = "workspace bar starts beside the sidebar directly under the topbar";
+  stage = "workspace bar and sidebar start at the top beside the far-left activity rail";
   await until(() => assertGeometry(true));
   stage = "hiding and showing sidebar recomputes workspace bar width and origins";
   await press("alt-e"); await until(() => assertGeometry(false));

@@ -8,7 +8,7 @@ import {Effect} from "effect";
 import {CommandView} from "../../src/commands/CommandView";
 import {CommandController} from "../../src/commands/CommandController";
 import {InlinePicker} from "../../src/ui/InlinePicker";
-import {TopBar} from "../../src/ui/TopBar";
+import {ActivityRail} from "../../src/ui/TopBar";
 import {DirectoryBrowserView} from "../../src/agent/DirectoryBrowserView";
 import {ChromeActionsView} from "../../src/menu-actions/ChromeActionsView";
 import {ChromeActionsController} from "../../src/menu-actions/ChromeActionsController";
@@ -34,7 +34,7 @@ function Fixture(){return <div>
  <InlinePicker config={config} kind="question" anchor={anchor()} question={{id:"one",sessionID:"thread",questions:[{question:"Which option?",options:[{label:"First"},{label:"Second"}]}]}} onClose={()=>{}}/>
  <ChromeActionsView controller={chrome} config={config}/>
  <DirectoryBrowserView config={config} root={rootDir} start={rootDir} onDone={()=>{}}/>
- <TopBar config={config} details={false} agent={true} search={false} connection="connected" menuOpen={menu()} onMenuChange={setMenu} onAction={action=>{actions.push(action);}} report={error=>{throw error;}}/>
+  <ActivityRail config={config} topOffset={0} details={false} agent={true} search={false} connection="connected" menuOpen={menu()} onMenuChange={setMenu} onAction={action=>{actions.push(action);}} report={error=>{throw error;}}/>
  </div>;}
 const byTest=(id:string)=>[...nodes.values()].find(node=>node.props.testId===id)!;
 const parent=(node:Node)=>[...nodes.values()].find(candidate=>candidate.children.includes(node.id));
@@ -50,8 +50,8 @@ try{
   for(const id of dialogs){const node=byTest(id);assert.ok(node,`${id} must mount its real original component`);const rect=origin(node);
    if(id==="original-hamburger-menu"){
     const button=byTest("topbar-menu"),anchor=origin(button);
-    assert.ok(Math.abs(rect.x-anchor.x)<1,"Hamburger stays under its top-chrome button over the tree");
-    assert.ok(rect.y>=anchor.y+Number(button.style.height)&&rect.y<next.y,"Hamburger starts below its button, above the pane headers");
+    assert.ok(Math.abs(rect.x-anchor.x-Number(button.style.width))<1,"Hamburger stays beside its activity-rail button over the tree");
+    assert.ok(Math.abs(rect.y-anchor.y)<1&&rect.y<next.y,"Hamburger aligns with its rail button independently of pane headers");
    }else{
     assert.ok(rect.y>=next.y-0.1,`${id} overlaps reserved headers: ${rect.y} < ${next.y}`);
     assert.ok(rect.x>=(["command-dialog","chrome-action-overlay","directory-browser"].includes(id)?0:next.x)-0.1,`${id} starts outside its intended viewport`);

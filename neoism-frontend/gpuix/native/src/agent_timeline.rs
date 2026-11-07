@@ -29,6 +29,9 @@ mod animation;
 #[cfg(test)]
 #[path = "agent_timeline_json_ui_tests.rs"]
 mod json_ui_tests;
+#[cfg(test)]
+#[path = "agent_timeline_shell_tests.rs"]
+mod shell_tests;
 
 struct View {
     visible: bool,
@@ -55,6 +58,8 @@ struct View {
     selection: Option<String>,
     scrollbar_drag: bool,
     horizontal_drag: bool,
+    inner_scroll_focus: Option<String>,
+    inner_scroll_drag: Option<(String, f32)>,
 }
 
 struct ScrollTrace {
@@ -119,6 +124,7 @@ fn render_frame(view: &mut View) -> Value {
 fn render_frame_with_outbound(view: &mut View, drain_outbound:bool) -> Value {
     if !view.visible {
         view.mouse=None;view.selecting=false;view.scrollbar_drag=false;view.horizontal_drag=false;
+        view.inner_scroll_focus=None;view.inner_scroll_drag=None;
         view.painter.begin_frame();view.pane.composer_interactions.clear_rects();
         view.pane.json_ui.borrow_mut().begin_frame(&view.session_id,[0.0;4]);
         return json!({"preparing":false,"animating":false,"reason":null,"selecting":false,"pointer":false,"hasConversation":view.pane.has_conversation(),"send":[],"header":[],"sessionId":view.session_id,"jsonUi":view.pane.json_ui.borrow().metadata()});
@@ -198,7 +204,7 @@ fn render_frame_with_outbound(view: &mut View, drain_outbound:bool) -> Value {
         "preparing":view.preparing,
         "animating": animating,
         "reason": reason,
-        "selecting": view.selecting,
+        "selecting": view.selecting || view.inner_scroll_drag.is_some(),
         "pointer": pointer,
         "hasConversation": view.pane.has_conversation(),
         "send":send,"header":header,"subagent":view.pane.is_subagent_session(),"sessionId":view.session_id,
@@ -253,14 +259,50 @@ pub fn serialized_frame(v: &Value) -> Option<Result<String, String>> {
     }))
 }
 
+fn drag_inner_scroll(view: &mut View, y: f32) {
+    let Some((key, grab)) = view.inner_scroll_drag.clone() else { return; };
+    let Some((rect, max)) = view.pane.diff_scroll_target(&key) else { view.inner_scroll_drag=None; return; };
+    let thumb = (rect[3]*rect[3]/(rect[3]+max)).max(18.0*view.scale).min(rect[3]);
+    let travel = (rect[3]-thumb).max(1.0);
+    let target = ((y-rect[1]-grab)/travel).clamp(0.0, 1.0)*max;
+    let offset = view.pane.diff_scroll_offset(&key, max);
+    view.pane.scroll_diff_key(&key, target-offset);
+}
+
 fn pointer(view: &mut View, v: &Value) -> Value {
     if !view.visible {return json!({});}
     let (x, y) = (number(v, "x", 0.0), number(v, "y", 0.0));
     view.mouse = Some((x, y));
     if text(v,"kind")=="down" {
+        let previous_focus=view.inner_scroll_focus.take();
+        view.inner_scroll_focus=view.pane.diff_scroll_target_at(x,y);
+        view.inner_scroll_drag=None;
+        if let Some(key)=view.inner_scroll_focus.clone().filter(|key|key.starts_with("shell:")) {
+            if let Some((rect,max))=view.pane.diff_scroll_target(&key) {
+                if x>=rect[0]+rect[2]-16.0*view.scale {
+                    let thumb=(rect[3]*rect[3]/(rect[3]+max)).max(18.0*view.scale).min(rect[3]);
+                    let top=rect[1]+(rect[3]-thumb)*view.pane.diff_scroll_offset(&key,max)/max;
+                    let grab=if y>=top&&y<=top+thumb {y-top} else {thumb/2.0};
+                    view.inner_scroll_drag=Some((key,grab));
+                    view.selecting=false;view.pane.clear_selection();view.selection=None;
+                    drag_inner_scroll(view,y);
+                    return json!({});
+                }
+            }
+        }
+        // Clicking the same output body again releases wheel capture. Grabbing
+        // its scrollbar above always activates it instead of toggling it off.
+        if view.inner_scroll_focus.as_deref().is_some_and(|key|key.starts_with("shell:"))
+            && view.inner_scroll_focus==previous_focus {
+            view.inner_scroll_focus=None;
+        }
         let activated=view.pane.json_ui.borrow_mut().pointer_activate(x,y);
         if activated {view.pane.invalidate_json_ui_layout();render_frame_with_outbound(view,false);return json!({"jsonUi":view.pane.json_ui.borrow().metadata()});}
     }
+    if text(v,"kind")=="move" && view.inner_scroll_drag.is_some() {
+        drag_inner_scroll(view,y);return json!({});
+    }
+    if text(v,"kind")=="up" { view.inner_scroll_drag=None; }
     let pane = &mut view.pane;
     let mut preview = None;
     let mut copy = None;
@@ -534,6 +576,8 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 selection: None,
                 scrollbar_drag: false,
                 horizontal_drag: false,
+                inner_scroll_focus: None,
+                inner_scroll_drag: None,
             });
             return Ok(json!({"id": id}));
         }
@@ -682,6 +726,21 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                     ScrollDelta::Lines { x: number(v, "deltaX", 0.0), y: number(v, "deltaY", 0.0) }
                 };
                 let wheel = agent_timeline_wheel(&delta, number(v, "lineHeight", 24.0));
+                // Shell output captures the wheel only after a click. Hovering
+                // an inactive block must leave the conversation scrollable.
+                let inner=if v["x"].is_number()&&v["y"].is_number() {
+                    point.and_then(|(x,y)|view.pane.diff_scroll_target_at(x,y))
+                } else {
+                    view.inner_scroll_focus.clone().or_else(||point.and_then(|(x,y)|view.pane.diff_scroll_target_at(x,y)))
+                };
+                let inner=inner.filter(|key| !key.starts_with("shell:") || view.inner_scroll_focus.as_deref()==Some(key.as_str()));
+                if let Some(key)=inner {
+                    if view.pane.scroll_diff_key(&key,-wheel.pixels).is_some() {
+                        if v["deferFrame"].as_bool().unwrap_or(false) {return Ok(Value::Null);}
+                        return Ok(frame(view));
+                    }
+                    view.inner_scroll_focus=None;
+                }
                 if let Some(trace) = view.scroll_trace.as_mut() {trace.input_pixels+=wheel.pixels;trace.input_events+=1;trace.precise_events+=u32::from(!wheel.smooth);}
                 if wheel.smooth {
                     view.pane.scroll_timeline_wheel_pixels(wheel.pixels);
@@ -929,7 +988,10 @@ fn outbound(panel: &mut Panel) -> Vec<Value> {
 }
 
 fn render_panel_metadata(panel: &mut Panel) -> Value {
-    use neoism_ui::panels::agent_pane::view::side_panel::{render_side_panel_with_icons, SharedAgentSidePanelIcons};
+    use neoism_ui::panels::agent_pane::view::side_panel::{
+        render_side_panel_with_icons_and_frame, SharedAgentSidePanelIcons,
+        SidePanelFrameStyle,
+    };
     let theme = IdeTheme::by_name(&panel.theme);
     panel.pane.side_panel_mut().set_navigation_header_enabled(true);
     // Keep search implemented, but hide its row until we bring it back.
@@ -939,7 +1001,8 @@ fn render_panel_metadata(panel: &mut Panel) -> Value {
     panel.pane.side_panel_mut().set_catalog_viewed_root(viewed.as_deref());
     panel.painter.begin_frame();
     let painter: &mut dyn Paint = &mut panel.painter;
-    render_side_panel_with_icons::<NeoismAgentPane, SharedAgentSidePanelIcons>(
+    // App owns the outer Agent frame and heading; paint only its square body.
+    render_side_panel_with_icons_and_frame::<NeoismAgentPane, SharedAgentSidePanelIcons>(
         painter,
         &mut panel.pane,
         [0.0, 0.0, panel.width, panel.height],
@@ -948,6 +1011,7 @@ fn render_panel_metadata(panel: &mut Panel) -> Value {
         now_seconds(),
         panel.mouse,
         &[],
+        SidePanelFrameStyle::Integrated,
     );
     let side=panel.pane.side_panel();
     let selected=if side.new_chat_selected(){"new-chat".to_owned()}else if let Some(action)=side.selected_header_action(){format!("{:?}",action).to_lowercase()}else{side.selected_row().map(|row|format!("row:{}",row.id)).unwrap_or_default()};
@@ -960,6 +1024,59 @@ fn render_panel_metadata(panel: &mut Panel) -> Value {
         "focused": panel.pane.side_panel().is_focused(),
         "selected": selected,
     })
+}
+
+#[cfg(test)]
+mod side_panel_frame_tests {
+    use super::*;
+    use neoism_ui::panels::agent_pane::view::side_panel::{
+        render_side_panel_with_icons_and_frame, SharedAgentSidePanelIcons,
+        SidePanelFrameStyle,
+    };
+    use neoism_ui::primitives::paint_record::PaintCommand;
+
+    #[test]
+    fn integrated_catalog_is_square_without_moving_content_or_hit_targets() {
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            let mut results = Vec::new();
+            for style in [SidePanelFrameStyle::Standalone, SidePanelFrameStyle::Integrated] {
+                let mut pane = NeoismAgentPane::new();
+                pane.side_panel_mut().set_navigation_header_enabled(true);
+                pane.side_panel_mut().set_navigation_search_visible(false);
+                pane.side_panel_mut().set_focused(true);
+                pane.side_panel_mut().select_new_chat();
+                let mut painter = RecordingPainter::new("Cascadia Code NF", 400, vec![]);
+                let rect = [0.0, 0.0, 300.0, 600.0];
+                render_side_panel_with_icons_and_frame::<NeoismAgentPane, SharedAgentSidePanelIcons>(
+                    &mut painter, &mut pane, rect, &IdeTheme::by_name(""),
+                    scale, 0.0, None, &[], style,
+                );
+                let commands = painter.borrowed_commands();
+                if style == SidePanelFrameStyle::Integrated {
+                    assert!(matches!(commands.first(), Some(PaintCommand::Rect {
+                        rect: painted, radii, ..
+                    }) if *painted == rect && *radii == [0.0; 4]));
+                    assert!(!commands.iter().any(|command| matches!(command,
+                        PaintCommand::Ring { .. }
+                    )));
+                } else {
+                    assert!(matches!(commands.first(), Some(PaintCommand::Rect { radii, .. })
+                        if radii[0] > 0.0 && radii[1] > 0.0)
+                        || matches!(commands.first(), Some(PaintCommand::Ring { .. })));
+                }
+                let text_positions: Vec<_> = commands.iter().filter_map(|command| {
+                    if let PaintCommand::Text { text, x, y, .. } = command {
+                        Some((text.clone(), *x, *y))
+                    } else {
+                        None
+                    }
+                }).collect();
+                assert!(!text_positions.is_empty());
+                results.push((text_positions, pane.side_panel().selected_cursor_rect()));
+            }
+            assert_eq!(results[0], results[1]);
+        }
+    }
 }
 
 fn panel_frame(panel: &mut Panel) -> Value {

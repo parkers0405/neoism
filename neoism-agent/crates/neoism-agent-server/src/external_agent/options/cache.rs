@@ -1,13 +1,13 @@
-//! Versioned, per-context last-good ACP preview snapshots. Only this route uses
+//! Versioned, per-context last-good native preview snapshots. Only this route uses
 //! these snapshots; root creation and prompt replay still contact the provider.
 use super::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const FRESH: Duration = Duration::from_secs(10 * 60);
 const RETRY: Duration = Duration::from_secs(60);
 const MAX_BYTES: u64 = 1024 * 1024;
@@ -17,6 +17,7 @@ const MAX_BYTES: u64 = 1024 * 1024;
 struct Snapshot {
     version: u32,
     key: String,
+    choices: BTreeMap<String, String>,
     saved_at: u64,
     response: ExternalOptionsResponse,
 }
@@ -60,28 +61,27 @@ pub(super) fn key(
     choices: &BTreeMap<String, String>,
     state: &AppState,
 ) -> Result<String, ApiError> {
-    let config = runtime
-        .acp_config(cwd, state.services())
-        .map_err(ApiError::bad_request)?;
-    let command = Path::new(&config.command);
-    let meta = std::fs::metadata(command).ok();
-    let modified = meta
-        .as_ref()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|t| t.as_nanos());
-    // Hash (never persist) the config including env values. Package versions are
-    // pinned in args; executable identity includes path, size and mtime.
+    let mut executables = Vec::new();
+    for name in ["node", runtime.provider_id()] {
+        let result = state.services().executables.resolve(&neoism_agent_service_api::ExecutableRequest::new(name, neoism_agent_service_api::ExecutablePurpose::ExternalAgent));
+        let path = match result {
+            Ok(result) => result.path,
+            Err(_) if runtime == ExternalRuntime::Claude && name == "claude" => continue,
+            Err(error) => return Err(ApiError::bad_request(error.to_string())),
+        };
+        let meta = std::fs::metadata(&path).ok();
+        let modified = meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|t| t.as_nanos());
+        executables.push((path, meta.map(|m| m.len()), modified));
+    }
+    let revision = Sha256::digest([include_str!("../native_runtime/host.mjs"), include_str!("../native_runtime/codex.mjs"),
+        include_str!("../native_runtime/claude.mjs"), include_str!("../native_runtime/opencode.mjs"), include_str!("../native_runtime/package-lock.json")].join("\n").as_bytes());
     let context = serde_json::to_vec(&(
         VERSION,
-        runtime.provider_id(),
+        runtime.native_driver_id(),
         cwd,
         choices,
-        &config.command,
-        &config.args,
-        &config.env,
-        meta.map(|m| m.len()),
-        modified,
+        executables,
+        format!("{revision:x}"),
     ))
     .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(format!("{:x}", Sha256::digest(context)))
@@ -89,7 +89,7 @@ pub(super) fn key(
 
 pub(super) fn path(key: &str) -> PathBuf {
     neoism_agent_builtins::default_cache_dir()
-        .join("acp-options-v1")
+        .join("native-options-v2")
         .join(format!("{key}.json"))
 }
 
@@ -173,7 +173,8 @@ pub(super) fn sanitized(
     response.external_session_id = None;
     response.replay_error = None;
     response.catalog_stale = None;
-    validate_options(&json!(response.config_options)).ok()?;
+    let known: Vec<_> = response.config_options.iter().filter(|option| !option["currentValue"].is_null()).cloned().collect();
+    validate_options(&json!(known)).ok()?;
     validate_commands(&json!({"availableCommands":response.available_commands})).ok()?;
     if response.selected_options.iter().any(|(id, value)| {
         response
@@ -204,7 +205,7 @@ fn load(
     if snap.version != VERSION
         || snap.key != key
         || snap.response.provider != provider
-        || snap.response.selected_options != *choices
+        || snap.choices != *choices
         || snap.response.external_session_id.is_some()
         || snap.response.replay_error.is_some()
         || snap.response.catalog_stale.is_some()
@@ -216,7 +217,7 @@ fn load(
     Some(snap)
 }
 
-fn save(key: &str, response: ExternalOptionsResponse) -> bool {
+fn save(key: &str, choices: BTreeMap<String, String>, response: ExternalOptionsResponse) -> bool {
     let Some(response) = sanitized(response) else {
         return false;
     };
@@ -230,6 +231,7 @@ fn save(key: &str, response: ExternalOptionsResponse) -> bool {
     let snapshot = Snapshot {
         version: VERSION,
         key: key.to_owned(),
+        choices,
         saved_at: now(),
         response,
     };
@@ -272,9 +274,9 @@ pub(super) async fn preview(
                 let state = state.clone();
                 let cwd = cwd.to_owned();
                 tokio::spawn(async move {
-                    let success = ephemeral(&state, runtime, &cwd, choices)
+                    let success = native_control(&state, runtime, &cwd, None, choices.clone())
                         .await
-                        .is_ok_and(|response| save(&key, response));
+                        .is_ok_and(|response| save(&key, choices, response));
                     *slot.retry_after.lock().unwrap_or_else(|e| e.into_inner()) =
                         (!success).then(|| std::time::Instant::now() + RETRY);
                     drop(guard);
@@ -293,7 +295,7 @@ pub(super) async fn preview(
         }
         return Ok(response);
     }
-    let response = ephemeral(state, runtime, cwd, choices).await?;
-    let _ = save(&key, response.clone());
+    let response = native_control(state, runtime, cwd, None, choices.clone()).await?;
+    let _ = save(&key, choices, response.clone());
     Ok(response)
 }

@@ -37,7 +37,7 @@ try {
       env: { ...process.env, NEOISM_GPUIX_STATE_PATH: state } });
     let stage = fixture.name;
     try {
-      await app.getByTestId("original-topbar").waitFor({ timeoutMs: 20000 });
+      await app.getByTestId("activity-rail").waitFor({ timeoutMs: 20000 });
       await app.getByTestId("file:README.md").waitFor({ timeoutMs: 20000 });
       // Cold recovery intentionally opens Home. Use real UI entry points.
       if (fixture.name === "git") {

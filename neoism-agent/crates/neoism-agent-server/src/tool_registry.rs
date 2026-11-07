@@ -458,7 +458,12 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                     },
                     "task_id": {
                         "type": "string",
-                        "description": "Only set this to resume a previous task_id in the same child session and with the same subagent_type. External children must finish or be stopped before accepting a follow-up; a running external task rejects the new prompt rather than dropping it."
+                        "description": "Leave empty when starting a new task. Set this only to resume a previous task_id in the same child session and with the same subagent_type. External children must finish or be stopped before accepting a follow-up; a running external task rejects the new prompt rather than dropping it."
+                    },
+                    "external_options": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Optional explicit native provider selection for a new or resumed external task. Keys and values must be advertised by that provider (model selects its native model); never infer these from the Neoism API model. Unsupported selections fail."
                     },
                     "background": {
                         "type": "boolean",

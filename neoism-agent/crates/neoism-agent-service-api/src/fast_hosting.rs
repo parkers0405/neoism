@@ -577,6 +577,13 @@ pub fn spawn_fast_daemon_with_prefix(
     }
     let (provider_auth, mcp_auth) = credential_source_paths(&std::env::current_dir()?);
     let mut command = Command::new(binary);
+    // Keep the home Agent's authority distinct from this host's random local
+    // transport password, including when the shared token file is unavailable.
+    if let Some(key) = crate::daemon_credential::agent_signing_key() {
+        command.env(crate::daemon_credential::AGENT_SIGNING_KEY_ENV, key);
+    } else {
+        command.env_remove(crate::daemon_credential::AGENT_SIGNING_KEY_ENV);
+    }
     command
         .args(prefix)
         .env("NEOISM_FAST_READINESS_NONCE", &nonce)
@@ -1149,10 +1156,11 @@ mod tests {
         use std::{os::unix::fs::PermissionsExt, time::Duration};
         let project = tempfile::tempdir().unwrap();
         let binary = project.path().join("env-daemon");
-        std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' \"$NEOISM_AGENT_AUTH_PATH\" \"$NEOISM_AGENT_MCP_AUTH_PATH\" \"$NEOISM_CONFIG_HOME\" > stores\n").unwrap();
+        std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' \"$NEOISM_AGENT_AUTH_PATH\" \"$NEOISM_AGENT_MCP_AUTH_PATH\" \"$NEOISM_CONFIG_HOME\" > stores\nif [ -n \"$NEOISM_AGENT_SIGNING_KEY\" ]; then echo present >> stores; else echo missing >> stores; fi\n[ \"$NEOISM_DAEMON_TOKEN\" = private-master ] && echo private-transport >> stores\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
             .unwrap();
         let expected = credential_source_paths(&std::env::current_dir().unwrap());
+        let has_agent_key = crate::daemon_credential::agent_signing_key().is_some();
         let mut daemon =
             spawn_fake_daemon(&binary, project.path(), "private-master").unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -1165,6 +1173,8 @@ mod tests {
         assert_eq!(paths[0], expected.0);
         assert_eq!(paths[1], expected.1);
         assert!(paths[2].starts_with(daemon._state.path()));
+        assert_eq!(paths[3], PathBuf::from(if has_agent_key { "present" } else { "missing" }));
+        assert_eq!(paths[4], PathBuf::from("private-transport"));
     }
 
     #[test]

@@ -2,13 +2,28 @@ import { expect, test } from "bun:test";
 import { coreCall } from "../src/native-core";
 import type { PickerFrame } from "../src/ui/InlinePicker";
 const geometry = { anchor: [100, 700, 600, 120], scale: 1 };
-test("session directory headers keep folder icons and inset chats without message icons",()=>{
+test("loaded model picker library paints the active checkmark and Add Provider icon", () => {
+  const { id } = coreCall<{ id: number }>("picker.new", { kind: "model", options: [
+    { title: "Recent model", value: "openai/recent", current: true },
+    { title: "Add Provider", value: "action:add-provider" },
+  ] });
+  try {
+    const { commands } = coreCall<{ commands: { kind: string; text?: string; rect?: number[] }[] }>("picker.paint", { id, ...geometry });
+    expect(commands.some(command => command.text === "✓")).toBe(true);
+    const horizontal = commands.find(command => command.kind === "rect" && command.rect?.[2] === 12 && command.rect?.[3] === 2)?.rect;
+    const vertical = commands.find(command => command.kind === "rect" && command.rect?.[2] === 2 && command.rect?.[3] === 12)?.rect;
+    expect(horizontal).toBeDefined(); expect(vertical).toBeDefined();
+    expect(horizontal![0] + horizontal![2] / 2).toBeCloseTo(vertical![0] + vertical![2] / 2);
+    expect(horizontal![1] + horizontal![3] / 2).toBeCloseTo(vertical![1] + vertical![3] / 2);
+  } finally { coreCall("picker.dispose", { id }); }
+});
+test("session titles align with folder headings without message icons",()=>{
  const options=[{title:"/project/a",value:"",header:true,section:"directory"},{title:"Alpha chat",value:"a",section:"/project/a",description:"/project/a"},{title:"/project/b",value:"",header:true,section:"directory"},{title:"Beta chat",value:"b",section:"/project/b",description:"/project/b"}];
  const {id}=coreCall<{id:number}>("picker.new",{kind:"sessions",title:"Sessions",options});
  try{
   const commands=coreCall<{commands:{kind:string;text?:string;x:number;y:number}[]}>("picker.paint",{id,...geometry,theme:"pastel_dark"}).commands.filter(command=>command.kind==="text");
   const folder=commands.find(command=>command.text==="/project/a")!,chat=commands.find(command=>command.text==="Alpha chat")!;
-  expect(folder).toBeDefined();expect(chat.x-folder.x).toBeCloseTo(20,3);
+   expect(folder).toBeDefined();expect(chat.x).toBeCloseTo(folder.x,3);
    expect(commands.some(command=>command.x<folder.x&&Math.abs(command.y-folder.y)<5&&command.text!=="/project/a")).toBe(true);
    expect(commands.some(command=>command.text==="\uf075")).toBe(false);
   expect(coreCall<PickerFrame>("picker.query",{id,...geometry,query:"Beta"}).rows.map(row=>row.title)).toEqual(["/project/b","Beta chat"]);

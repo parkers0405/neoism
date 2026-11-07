@@ -81,6 +81,23 @@ fn sync_mcp_icons(p: &mut NeoismAgentPicker, v: &Value) {
     }
 }
 
+/// Reuse the shared, theme-tinted provider atlas rather than shipping picker art.
+fn provider_icon(
+    paint: &mut dyn neoism_ui::primitives::paint::Paint,
+    provider: &str,
+    color: [u8; 4],
+) -> Option<inline_picker::InlinePickerIcon> {
+    use neoism_ui::panels::agent_pane::icon::{register_provider_logo_atlas, ProviderLogo};
+    let logo = ProviderLogo::from_provider_id(provider)?;
+    Some(inline_picker::InlinePickerIcon::Image {
+        // RecordingPainter resets overlays each frame; keep this adapter's
+        // artwork namespace independent of the desktop's private panel IDs.
+        panel_id: 0x5052_4f56,
+        image_id: register_provider_logo_atlas(paint, color)?,
+        source_rect: logo.source_rect(),
+    })
+}
+
 /// The original inline picker card (`view::picker::render_picker` body):
 /// shell, rows, current/pinned marks, MCP status and artwork, activity, caret.
 fn paint_picker(
@@ -117,6 +134,8 @@ fn paint_picker(
     painter.begin_frame();
     let paint: &mut dyn Paint = painter;
     let mcp = picker.kind == NeoismAgentPickerKind::Mcp;
+    let back = v["back"].as_bool().unwrap_or(false);
+    let provider_rows = v["providerRows"].as_bool().unwrap_or(false);
     let rows = picker.options().iter().map(|option| InlinePickerRow {
         title: &option.title,
         description: &option.description,
@@ -132,6 +151,16 @@ fn paint_picker(
         }),
     }).collect::<Vec<_>>();
     let row_icons = picker.options().iter().map(|option| {
+        if option.value == "action:add-provider" {
+            return Some(inline_picker::InlinePickerIcon::Glyph("+"));
+        }
+        if picker.kind == NeoismAgentPickerKind::Model && !option.is_header {
+            let provider = option.value.split('/').next().unwrap_or_default();
+            return provider_icon(paint, provider, theme.u8(theme.fg));
+        }
+        if provider_rows && !option.is_header {
+            return provider_icon(paint, &option.value, theme.u8(theme.fg));
+        }
         if picker.kind == NeoismAgentPickerKind::Session {
             if option.is_header {
                 return (option.section == "directory").then(|| inline_picker::InlinePickerIcon::Glyph(neoism_ui::panels::file_tree::icons::folder_icon(true).0));
@@ -141,10 +170,18 @@ fn paint_picker(
         if !mcp || option.is_header { return None; }
         Some(picker.mcp_icons.get(&option.title).cloned().unwrap_or_default().presentation(paint, theme.u8(theme.fg)))
     }).collect::<Vec<_>>();
-    let header_icon = (picker.kind == NeoismAgentPickerKind::McpActions).then(|| {
-        picker.mcp_server.as_ref().and_then(|name| picker.mcp_icons.get(name)).cloned().unwrap_or_default()
-            .presentation(paint, theme.u8(theme.fg))
-    });
+    // The icon slot reserves title space and clips long titles before `esc`.
+    // Back takes precedence over artwork; the host owns its hit overlay.
+    let header_icon = if back {
+        Some(inline_picker::InlinePickerIcon::Glyph("←"))
+    } else if let Some(provider) = v["provider"].as_str() {
+        provider_icon(paint, provider, theme.u8(theme.fg))
+    } else {
+        (picker.kind == NeoismAgentPickerKind::McpActions).then(|| {
+            picker.mcp_server.as_ref().and_then(|name| picker.mcp_icons.get(name)).cloned().unwrap_or_default()
+                .presentation(paint, theme.u8(theme.fg))
+        })
+    };
     let state = inline_picker::render_limited_with_icons(
         paint,
         InlinePickerView {
@@ -182,6 +219,9 @@ fn paint_picker(
     json!({
         "commands": painter.commands(),
         "rect": state.map(|state| state.rect),
+        // Same device-pixel coordinate space as `rect`; includes 4px padding
+        // around the shared header's 16px arrow, without covering the title.
+        "backRect": state.filter(|_| back).map(|state| [state.rect[0] + 10.0 * s, state.rect[1] + 4.0 * s, 24.0 * s, 24.0 * s]),
         "animating": picker.is_animating(),
         "selectedValue": picker.selected_option().map(|o| &o.value),
     })
@@ -345,6 +385,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                         p.set_loading(v["loading"].as_bool().unwrap_or(false));
                     }
                     "picker.options" => {
+                        if let Some(title) = v["title"].as_str() { p.title = title.to_owned(); }
                         p.replace_options(options(v));
                         p.set_loading(v["loading"].as_bool().unwrap_or(false));
                         if let Some(placeholder)=v["placeholder"].as_str(){p.search_placeholder=Some(placeholder.to_owned());}
@@ -475,6 +516,71 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_picker_paints_active_check_and_add_provider_action() {
+        let call = |op: &str, mut args: Value| {
+            args["op"] = json!(op);
+            dispatch(&args).unwrap().unwrap()
+        };
+        let id = call("picker.new", json!({"kind":"model", "options":[
+            {"title":"Recent model", "value":"openai/recent", "current":true, "footer":"selected"},
+            {"title":"Add Provider", "value":"action:add-provider"}
+        ]}))["id"].clone();
+        let painted = call("picker.paint", json!({"id":id, "anchor":[20,600,600,100], "scale":1, "caret":false}));
+        let commands = painted["commands"].as_array().unwrap();
+        let check = commands.iter().find(|c| c["text"] == "✓").unwrap();
+        let footer = commands.iter().find(|c| c["text"] == "selected").unwrap();
+        assert!(check["x"].as_f64().unwrap() > footer["x"].as_f64().unwrap() + footer["width"].as_f64().unwrap());
+        let horizontal = commands.iter().find(|c| c["kind"] == "rect" && c["rect"][2] == 12.0 && c["rect"][3] == 2.0).unwrap();
+        let vertical = commands.iter().find(|c| c["kind"] == "rect" && c["rect"][2] == 2.0 && c["rect"][3] == 12.0).unwrap();
+        let row = &painted["rows"][1]["rect"];
+        for bar in [horizontal, vertical] {
+            let rect = &bar["rect"];
+            assert_eq!(rect[0].as_f64().unwrap() + rect[2].as_f64().unwrap() / 2.0, row[0].as_f64().unwrap() + 31.0);
+            assert_eq!(rect[1].as_f64().unwrap() + rect[3].as_f64().unwrap() / 2.0, row[1].as_f64().unwrap() + row[3].as_f64().unwrap() / 2.0);
+        }
+        call("picker.dispose", json!({"id":id}));
+    }
+
+    #[test]
+    fn provider_picker_back_header_and_dynamic_title_keep_anchored_geometry() {
+        let call = |op: &str, mut args: Value| {
+            args["op"] = json!(op);
+            dispatch(&args).unwrap().unwrap()
+        };
+        let options = json!([
+            {"title":"Providers", "header":true, "value":"openai"},
+            {"title":"Not a provider name", "value":"anthropic"},
+            {"title":"Custom", "value":"custom-endpoint"}
+        ]);
+        let id = call("picker.new", json!({"kind":"connect", "title":"Connect", "options":options}))["id"].clone();
+        let updated = call("picker.options", json!({"id":id, "title":"Choose authentication", "options":options}));
+        assert_eq!(updated["title"], "Choose authentication");
+        for scale in [1.0, 2.0] {
+            let mut request = json!({"id":id,"anchor":[20,600,600,100],"minY":8,"fontFamily":"monospace","scale":scale,"caret":false,"providerRows":true,"back":true});
+            let painted = call("picker.paint", request.clone());
+            let card = painted["rect"].as_array().unwrap();
+            let back = painted["backRect"].as_array().unwrap();
+            let x = card[0].as_f64().unwrap();
+            let y = card[1].as_f64().unwrap();
+            assert!(y >= 8.0 && y + card[3].as_f64().unwrap() <= 600.0);
+            assert_eq!(back, &vec![json!(x + 10.0 * scale), json!(y + 4.0 * scale), json!(24.0 * scale), json!(24.0 * scale)]);
+            let commands = painted["commands"].as_array().unwrap();
+            assert!(commands.iter().any(|c| c["text"] == "←"));
+            let title = commands.iter().find(|c| c["text"] == "Choose authentication").unwrap();
+            assert!(title["x"].as_f64().unwrap() >= back[0].as_f64().unwrap() + back[2].as_f64().unwrap());
+            // Only the known non-header value resolves artwork, regardless of label.
+            assert_eq!(commands.iter().filter(|c| c["kind"] == "image").count(), 1);
+            request["back"] = json!(false);
+            request["provider"] = json!("openai");
+            let header = call("picker.paint", request);
+            assert!(header["backRect"].is_null());
+            assert_eq!(header["rect"], painted["rect"]);
+            assert_eq!(header["commands"].as_array().unwrap().iter().filter(|c| c["kind"] == "image").count(), 2);
+        }
+        call("picker.dispose", json!({"id":id}));
+    }
 
     #[test]
     fn question_card_wraps_above_composer_and_keeps_answer_hit_geometry() {

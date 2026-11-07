@@ -193,6 +193,7 @@ async fn ephemeral(
         available_commands,
         replay_error: None,
         catalog_stale: None,
+        pending_selection: None,
     })
 }
 
@@ -260,6 +261,74 @@ pub(crate) async fn validate_draft(
         "optionsValid": false}))
 }
 
+/// Thin DTO projection only: native discovery and selection stay driver-owned.
+async fn native_control(
+    state: &AppState,
+    runtime: ExternalRuntime,
+    directory: &str,
+    session: Option<&SessionInfo>,
+    choices: BTreeMap<String, String>,
+) -> Result<ExternalOptionsResponse, ApiError> {
+    let mut requested: BTreeMap<String, String> = session.and_then(|session| session.extra.get("externalAgent")).and_then(|external| external.get("nativeOptions")).cloned()
+        .and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default();
+    requested.extend(choices.clone());
+    let mut selection = json!({"options": requested});
+    // Model selection comes only from this explicit native selector, never
+    // from the Neoism API model attached to the surrounding conversation.
+    if let Some(model) = selection["options"].as_object_mut().and_then(|options| options.remove("model")) {
+        selection["model"] = model;
+    }
+    let describe = super::native::request(state, runtime, directory, session, "runtime.describe", json!({"selection":selection}))
+        .await.map_err(ApiError::bad_request)?;
+    let mut pending_selection = describe.get("pendingSelection").filter(|value| !value.is_null()).cloned();
+    let mut selected_options = BTreeMap::new();
+    let mut effective = describe["effectiveSelection"].clone();
+    if session.is_none() && !choices.is_empty() {
+        pending_selection = Some(super::native::selection(&json!(requested), &describe).map_err(ApiError::bad_request)?);
+    } else if !choices.is_empty() {
+        let applied = super::native::request(state, runtime, directory, session, "selection.apply", json!({"selection": selection}))
+            .await.map_err(ApiError::bad_request)?;
+        if applied["applied"] == "next-turn" {
+            pending_selection = Some(applied.get("selection").cloned().unwrap_or(selection));
+        } else {
+            effective = applied.get("selection").cloned().unwrap_or(applied);
+        }
+    }
+    if let Some(options) = effective["options"].as_object() {
+        for (key, value) in options {
+            if value.is_string() || value.is_boolean() || value.is_number() {
+                selected_options.insert(key.clone(), value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()));
+            }
+        }
+    }
+    if let Some(model) = effective["model"].as_str() { selected_options.insert("model".into(), model.into()); }
+    let mut config_options = describe["options"].as_array().cloned().unwrap_or_default();
+    for option in &mut config_options {
+        if option["category"].is_null() {
+            option["category"] = match option["id"].as_str() {
+                Some("effort" | "reasoningEffort" | "variant") => json!("thought_level"),
+                Some("agent") => json!("mode"),
+                _ => Value::Null,
+            };
+        }
+        if let Some(value) = option["id"].as_str().and_then(|id| effective["options"].get(id)).cloned() {
+            option["currentValue"] = value;
+        }
+    }
+    if let Some(models) = describe["models"].as_array().filter(|models| !models.is_empty()) {
+        config_options.push(json!({"id":"model", "name":"Model", "type":"select", "category":"model", "currentValue": effective["model"],
+            "options": models.iter().filter_map(|model| model["id"].as_str().map(|id| json!({"value":id,"name":model.get("name").and_then(Value::as_str).unwrap_or(id)}))).collect::<Vec<_>>() }));
+    }
+    let latest = if let Some(session) = session { state.inner.store.get_session(session.id.as_str()).await? } else { None };
+    Ok(ExternalOptionsResponse {
+        provider: runtime.provider_id().into(), config_options, mode_fallback: false,
+        selected_options, pending_selection,
+        external_session_id: latest.as_ref().and_then(|s| s.extra["externalAgent"]["nativeSessionId"].as_str()).map(str::to_owned),
+        available_commands: describe["commands"].as_array().cloned().unwrap_or_default(),
+        replay_error: None, catalog_stale: None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ExternalOptionsResponse {
@@ -278,6 +347,9 @@ pub(crate) struct ExternalOptionsResponse {
     replay_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     catalog_stale: Option<bool>,
+    /// Desired selection is not effective until the driver confirms application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_selection: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -559,6 +631,7 @@ fn response(session: &SessionInfo, runtime: ExternalRuntime) -> ExternalOptionsR
             .unwrap_or_default(),
         replay_error: None,
         catalog_stale: None,
+        pending_selection: None,
     }
 }
 
@@ -1037,6 +1110,15 @@ async fn handle(
         claims.as_ref().map(|Extension(claims)| claims),
         &session,
     )?;
+    // Native manager owns the managed-session gate. Never hold the ACP lock
+    // while invoking it (including runtime.describe).
+    if !runtime.is_legacy_session(&session) {
+        idle(&state, &id).await?;
+        let choices = choice.as_ref().map(|choice| {
+            BTreeMap::from([(choice.config_id.clone(), choice.value.clone())])
+        }).unwrap_or_default();
+        return Ok(Json(native_control(&state, runtime, &session.directory, Some(&session), choices).await?));
+    }
     if choice.is_none()
         && session.extra["externalAgent"]["configOptions"].is_array()
         && session.extra["externalAgent"]["optionsValid"] != false

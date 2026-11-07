@@ -193,7 +193,13 @@ pub(super) async fn bash_tool(
         stdin: None,
         timeout_ms: Some(timeout_ms),
     };
-    let result = crate::local_process::run(spec, context.cancel.clone()).await?;
+    let direct_shell = crate::session_actions::shell::is_direct_shell();
+    let result = crate::local_process::run_observed(
+        spec, context.cancel.clone(),
+        crate::session_actions::shell::output_observer(false),
+        crate::session_actions::shell::output_observer(true),
+    ).await?;
+    crate::session_actions::shell::record_exit_code(result.status);
     let capture_truncated = result.truncated;
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -217,7 +223,7 @@ pub(super) async fn bash_tool(
     }
 
     let exit = Some(result.status);
-    if result.status != 0 {
+    if result.status != 0 && !direct_shell {
         let rendered = truncate::truncate_output(&rendered)?.output;
         anyhow::bail!(
             "{} command failed with status {:?}\n{}",
@@ -239,6 +245,10 @@ pub(super) async fn bash_tool(
         "commandPatterns": scan.command_patterns.into_iter().collect::<Vec<_>>(),
         "externalDirectories": scan.external_dirs.into_iter().collect::<Vec<_>>(),
     });
+    if direct_shell && result.status != 0 {
+        metadata["isError"] = json!(true);
+        rendered = format!("{} command failed with status {:?}\n{}", runtime.display_name(), exit, rendered);
+    }
     crate::snapshot::add_metadata_snapshots(&mut metadata, snapshots);
 
     Ok(ToolExecutionResult {

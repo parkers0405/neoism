@@ -269,8 +269,9 @@ pub struct NeoismAgentPicker {
     /// Picker-local lifecycle: replacement/close drops pending revalidation.
     pub model_refresh_due: Option<Instant>,
     pub model_refresh_started: Option<Instant>,
-    /// One elapsed-time budget across all hydration reads, not a request count.
+    /// Bounds the initial active spinner, not the lifetime of recovery.
     pub model_hydration_deadline: Option<Instant>,
+    model_retry_attempt: u32,
     pub model_request_id: Option<String>,
     pub model_request_directory: Option<String>,
     loading_started: Option<Instant>,
@@ -294,8 +295,8 @@ pub struct NeoismAgentPicker {
 }
 
 impl NeoismAgentPicker {
-    /// Missing status is the legacy ready contract. Never spin indefinitely on
-    /// a server that cannot finish hydration; reopening /model is manual retry.
+    /// Missing status is the legacy ready contract. Recovery belongs to this
+    /// open picker; waiting offline must not require reopening /model.
     pub fn apply_model_catalog_status(&mut self, status: Option<&serde_json::Value>) {
         self.model_refresh_started = None;
         self.model_refresh_due = None;
@@ -304,34 +305,45 @@ impl NeoismAgentPicker {
             "loading" => {
                 let now = Instant::now();
                 let deadline = *self.model_hydration_deadline.get_or_insert(now + std::time::Duration::from_secs(60));
-                let delay = std::time::Duration::from_millis(status.and_then(|s| s.get("retryAfterMs")).and_then(serde_json::Value::as_u64).unwrap_or(1000).max(250));
-                // Never shorten a server backoff. If it exceeds this picker's
-                // remaining window, offer manual retry rather than polling early.
-                if delay >= deadline.saturating_duration_since(now) {
-                    self.model_catalog_failed();
-                    return;
-                }
-                self.model_refresh_due = Some(now + delay);
+                let delay = self.model_retry_delay(status);
+                self.model_refresh_due = now.checked_add(delay);
                 self.title = "Refreshing models...".into();
-                self.set_loading(true);
+                self.set_loading(now < deadline && delay < deadline.saturating_duration_since(now));
             }
             "ready" => {
                 self.model_hydration_deadline = None;
+                self.model_retry_attempt = 0;
                 self.title = "Select model".into();
                 self.set_loading(false);
             }
-            _ => self.model_catalog_failed(),
+            _ => self.schedule_model_catalog_retry(status),
         }
     }
 
+    fn model_retry_delay(&mut self, status: Option<&serde_json::Value>) -> std::time::Duration {
+        // Local exponential backoff is capped at 30s. Honor longer server waits
+        // beyond the spinner budget, clamping pathological hints to one day so
+        // Instant arithmetic remains portable (including on Windows).
+        let local_ms = 1000u64 << self.model_retry_attempt.min(5);
+        self.model_retry_attempt = self.model_retry_attempt.saturating_add(1);
+        let server_ms = status.and_then(|s| s.get("retryAfterMs")).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        std::time::Duration::from_millis(local_ms.min(30_000).max(server_ms).min(86_400_000))
+    }
+
     pub fn model_catalog_failed(&mut self) {
+        self.schedule_model_catalog_retry(None);
+    }
+
+    fn schedule_model_catalog_retry(&mut self, status: Option<&serde_json::Value>) {
         self.model_refresh_started = None;
-        self.model_refresh_due = None;
-        self.model_hydration_deadline = None;
+        let delay = self.model_retry_delay(status);
+        self.model_refresh_due = Some(Instant::now() + delay);
+        // An expired spinner budget stays expired through subsequent retries.
+        self.model_hydration_deadline = Some(Instant::now());
         self.model_request_id = None;
         // Revoke both desktop Arc ownership and shared protocol correlation.
         self.activity_identity = std::sync::Arc::new(());
-        self.title = "Models offline; /model to retry".into();
+        self.title = "Models offline; retrying automatically".into();
         self.set_loading(false);
     }
 
@@ -345,17 +357,22 @@ impl NeoismAgentPicker {
         self.model_refresh_due = None;
         let now = Instant::now();
         self.model_refresh_started = Some(now);
-        self.model_hydration_deadline.get_or_insert(now + std::time::Duration::from_secs(60));
+        let deadline = *self.model_hydration_deadline.get_or_insert(now + std::time::Duration::from_secs(60));
+        self.title = "Refreshing models...".into();
+        self.set_loading(now < deadline);
     }
 
     pub fn model_catalog_expired(&self) -> bool {
         self.model_refresh_started.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(20))
-            || self.model_hydration_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            || (self.loading && self.model_hydration_deadline.is_some_and(|deadline| Instant::now() >= deadline))
     }
 
     pub fn expire_model_catalog_request(&mut self) {
-        if self.model_catalog_expired() {
+        if self.model_refresh_started.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(20)) {
             self.model_catalog_failed();
+        } else if self.model_hydration_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            // Do not revoke a live request or its next poll just to stop shimmer.
+            self.set_loading(false);
         }
     }
 
@@ -425,6 +442,7 @@ impl NeoismAgentPicker {
             model_refresh_due: None,
             model_refresh_started: None,
             model_hydration_deadline: None,
+            model_retry_attempt: 0,
             model_request_id: None,
             model_request_directory: None,
             loading_started: None,
@@ -967,6 +985,10 @@ impl NeoismAgentPicker {
             // Loading may outlive a failed request, but shimmer does not
             // own frames indefinitely.
             || (self.loading && self.loading_elapsed() < 1.5)
+            // Hosts use this to drive redraw/tick and drain_pending_outbound.
+            // Recovery must keep ticking even with the offline spinner stopped.
+            || (self.kind == NeoismAgentPickerKind::Model
+                && (self.model_refresh_due.is_some() || self.model_refresh_started.is_some()))
     }
 
     /// Largest committed pixel scroll that still leaves the last row flush

@@ -1472,6 +1472,10 @@ fn timeline_message_visible<M: AgentTimelineMessage>(
     {
         return false;
     }
+    // Direct user commands are transcript output, not an archived model trace.
+    if message.kind() == AgentTimelineMessageKind::Tool && message.tool() == "user_shell" {
+        return true;
+    }
     if message.kind() == AgentTimelineMessageKind::Tool
         && message.output_kind() == AgentTimelineOutputKind::Todos
     {

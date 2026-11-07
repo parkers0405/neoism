@@ -72,38 +72,7 @@ pub(crate) struct CallerPolicy {
 /// temp-dir variant elsewhere. Mirrors `daemon_token::daemon_token_path` /
 /// the desktop's `embedded_daemon_token_path`.
 fn canonical_daemon_token_from_disk() -> Option<String> {
-    let path = {
-        #[cfg(unix)]
-        {
-            match std::env::var_os("XDG_RUNTIME_DIR") {
-                Some(runtime) if !runtime.is_empty() => std::path::PathBuf::from(runtime)
-                    .join("neoism")
-                    .join("daemon-token"),
-                _ => {
-                    let uid = unsafe { libc::geteuid() };
-                    std::env::temp_dir()
-                        .join(format!("neoism-{uid}"))
-                        .join("daemon-token")
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            // Mirror the desktop's `per_user_suffix`: sanitized USERNAME.
-            let user = std::env::var("USERNAME")
-                .ok()
-                .filter(|name| !name.is_empty())
-                .map(|name| {
-                    name.chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                        .collect::<String>()
-                })
-                .unwrap_or_else(|| "default".to_string());
-            std::env::temp_dir()
-                .join(format!("neoism-{user}"))
-                .join("daemon-token")
-        }
-    };
+    let path = neoism_agent_service_api::daemon_credential::canonical_daemon_token_path();
     let token = std::fs::read_to_string(path).ok()?;
     let token = token.trim().to_string();
     (!token.is_empty()).then_some(token)

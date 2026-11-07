@@ -84,6 +84,9 @@ pub fn measure_tool_message_height(
     tool_expanded: bool,
     selected_group_child: Option<&str>,
 ) -> Option<f32> {
+    if message.tool() == "user_shell" {
+        return Some(super::shell::height(sugarloaf, message, width, s));
+    }
     let mut height = measure_single_tool_message_height(
         sugarloaf,
         pane,
@@ -173,6 +176,9 @@ pub fn render_tool_message(
     prepared_diff_sections: Option<&[ToolDiffSection]>,
     mouse: Option<(f32, f32)>,
 ) -> f32 {
+    if message.tool() == "user_shell" {
+        return super::shell::render(sugarloaf, pane, x, y, w, h, message, theme, s, viewport_clip, occlusion_rects);
+    }
     if message.composition_children().is_empty() {
         return render_single_tool_message(
             sugarloaf,

@@ -424,6 +424,14 @@ pub fn render_side_panel<P: AgentSidePanelPane>(
     );
 }
 
+/// The integrated host owns the surrounding border and heading. This affects
+/// paint only: both styles retain the standalone panel's content/hit insets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidePanelFrameStyle {
+    Standalone,
+    Integrated,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_side_panel_with_icons<P, I>(
     sugarloaf: &mut dyn crate::primitives::paint::Paint,
@@ -434,6 +442,27 @@ pub fn render_side_panel_with_icons<P, I>(
     now_seconds: f32,
     mouse: Option<(f32, f32)>,
     occlusion_rects: &[[f32; 4]],
+) where
+    P: AgentSidePanelPane,
+    I: AgentSidePanelIconHost,
+{
+    render_side_panel_with_icons_and_frame::<P, I>(
+        sugarloaf, pane, panel_rect, theme, s, now_seconds, mouse,
+        occlusion_rects, SidePanelFrameStyle::Standalone,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_side_panel_with_icons_and_frame<P, I>(
+    sugarloaf: &mut dyn crate::primitives::paint::Paint,
+    pane: &mut P,
+    panel_rect: [f32; 4],
+    theme: &IdeTheme,
+    s: f32,
+    now_seconds: f32,
+    mouse: Option<(f32, f32)>,
+    occlusion_rects: &[[f32; 4]],
+    frame_style: SidePanelFrameStyle,
 ) where
     P: AgentSidePanelPane,
     I: AgentSidePanelIconHost,
@@ -453,29 +482,36 @@ pub fn render_side_panel_with_icons<P, I>(
 
     let frame_stroke = (FRAME_STROKE * s).max(2.0);
     let frame_radius = FRAME_RADIUS * s;
+    let integrated = frame_style == SidePanelFrameStyle::Integrated;
     // The bottom strip used to host the open/close toggle icon, but
     // The sidebar uses the full panel height; its open/close controls are
     // handled by the pane and `/sidebar`, not by a reserved footer strip.
     let frame_h = ph;
 
-    draw_frame(
-        sugarloaf,
-        [px, py, pw, frame_h],
-        &FrameConfig {
-            outer_color: theme.f32(theme.surface),
-            inner_color: crate::primitives::surface_background::base_color(
-                "agent.sidebar",
-                theme,
-                theme.f32(theme.bg),
-            ),
-            radius: frame_radius,
-            border_thickness: frame_stroke,
-            rounded_corners: FrameCorners::Top,
-        },
-        DEPTH,
-        ORDER_PANEL,
-        ORDER_PANEL + 1,
+    let background = crate::primitives::surface_background::base_color(
+        "agent.sidebar", theme, theme.f32(theme.bg),
     );
+    if integrated {
+        sugarloaf.quad(
+            None, px, py, pw, frame_h, background, [0.0; 4],
+            DEPTH, ORDER_PANEL + 1,
+        );
+    } else {
+        draw_frame(
+            sugarloaf,
+            [px, py, pw, frame_h],
+            &FrameConfig {
+                outer_color: theme.f32(theme.surface),
+                inner_color: background,
+                radius: frame_radius,
+                border_thickness: frame_stroke,
+                rounded_corners: FrameCorners::Top,
+            },
+            DEPTH,
+            ORDER_PANEL,
+            ORDER_PANEL + 1,
+        );
+    }
 
     // No footer toggle is painted; clear its legacy hit rectangle.
     pane.side_panel_mut().clear_toggle_button_rect();
@@ -506,7 +542,7 @@ pub fn render_side_panel_with_icons<P, I>(
         now_seconds,
         mouse,
         occlusion_rects,
-        frame_radius - frame_stroke,
+        if integrated { 0.0 } else { frame_radius - frame_stroke },
     );
 }
 

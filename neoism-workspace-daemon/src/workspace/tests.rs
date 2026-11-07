@@ -5,6 +5,7 @@ use neoism_protocol::workspace::{
 use tempfile::TempDir;
 
 mod empty_lifecycle;
+mod registry_isolation;
 
 static NOTES_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 struct NotesHomeGuard { previous: Option<std::ffi::OsString>, _lock: std::sync::MutexGuard<'static, ()> }

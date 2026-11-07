@@ -5,6 +5,76 @@ use neoism_agent_core::{
     UserMessage,
 };
 
+// Internal execution context, never a model-supplied bash argument. The pipe
+// observers retain only bytes admitted by the process runner's capture bound.
+tokio::task_local! {
+    static DIRECT_SHELL: std::sync::Arc<std::sync::Mutex<ShellCapture>>;
+}
+
+#[derive(Default)]
+struct ShellCapture {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    truncated: bool,
+    dirty: bool,
+    exit_code: Option<i32>,
+}
+
+pub(crate) fn is_direct_shell() -> bool {
+    DIRECT_SHELL.try_with(|_| ()).is_ok()
+}
+
+pub(crate) fn record_exit_code(exit_code: i32) {
+    let _ = DIRECT_SHELL.try_with(|capture| capture.lock().unwrap().exit_code = Some(exit_code));
+}
+
+pub(crate) fn output_observer(stderr: bool) -> Option<crate::tool::process::OutputObserver> {
+    DIRECT_SHELL.try_with(|capture| {
+        let capture = capture.clone();
+        std::sync::Arc::new(move |bytes: &[u8], truncated: bool| {
+            let mut capture = capture.lock().unwrap();
+            if stderr { capture.stderr.extend_from_slice(bytes); }
+            else { capture.stdout.extend_from_slice(bytes); }
+            capture.dirty |= !bytes.is_empty() || (truncated && !capture.truncated);
+            capture.truncated |= truncated;
+        }) as crate::tool::process::OutputObserver
+    }).ok()
+}
+
+impl ShellCapture {
+    fn output(&self) -> String {
+        let mut output = String::from_utf8_lossy(&self.stdout).into_owned();
+        if !self.stderr.is_empty() {
+            if !output.is_empty() { output.push('\n'); }
+            output.push_str(&String::from_utf8_lossy(&self.stderr));
+        }
+        if self.truncated {
+            output.push_str("\n\n[process output capture truncated at the 1 MiB per-stream safety limit]");
+        }
+        output
+    }
+}
+
+fn shell_metadata(message: &mut MessageWithParts, metadata: &Value) {
+    if let Some(Part::Tool(tool)) = message.parts.first_mut() {
+        let outer = tool.metadata.get_or_insert_with(|| json!({}));
+        let completed_state = matches!(tool.state, neoism_agent_core::ToolState::Completed { .. });
+        if let Some(fields) = metadata.as_object() {
+            for (key, value) in fields {
+                if key != "output" || !completed_state { outer[key] = value.clone(); }
+            }
+        }
+        if completed_state { outer.as_object_mut().unwrap().remove("output"); }
+        if let neoism_agent_core::ToolState::Completed { metadata: completed, .. } = &mut tool.state {
+            if let Some(fields) = metadata.as_object() {
+                for (key, value) in fields {
+                    if key != "output" { completed[key] = value.clone(); }
+                }
+            }
+        }
+    }
+}
+
 pub(super) async fn execute(
     state: AppState,
     session_id: String,
@@ -110,6 +180,12 @@ pub(super) async fn execute(
         &mut message.parts, part_id.clone(), &session.id, &message_id,
         call_id.clone(), "bash".into(), input.clone(),
     );
+    let mut metadata = json!({
+        "directShell": true, "command": request.command,
+        "cwd": crate::workspace_runtime::canonical_location(&session.directory).to_string_lossy(),
+        "output": "",
+    });
+    shell_metadata(&mut message, &metadata);
     persist(&state, &session_id, &message, true).await?;
     drop(admission);
     // Detach ownership from the HTTP connection; disconnecting must not strand a
@@ -117,16 +193,47 @@ pub(super) async fn execute(
     let task = tokio::spawn(async move {
         let _workspace_lease = workspace;
         let mut guard = guard;
-        let result = crate::tool_runtime::execute_tool_call_scoped(
+        let capture = std::sync::Arc::new(std::sync::Mutex::new(ShellCapture::default()));
+        let execution = DIRECT_SHELL.scope(capture.clone(), crate::tool_runtime::execute_tool_call_scoped(
             &state, &session.id, &message_id, &session.directory,
             permissions, &call_id, "bash", input, snapshot, Default::default(),
-        ).await;
+        ));
+        tokio::pin!(execution);
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        let result = loop {
+            tokio::select! {
+                result = &mut execution => break result,
+                _ = interval.tick() => {
+                    let output = {
+                        let mut capture = capture.lock().unwrap();
+                        if capture.dirty {
+                            capture.dirty = false;
+                            Some((capture.output(), capture.truncated))
+                        } else { None }
+                    };
+                    if let Some((output, truncated)) = output {
+                        metadata["output"] = json!(output);
+                        metadata["captureTruncated"] = json!(truncated);
+                        shell_metadata(&mut message, &metadata);
+                        state.publish_live(EventPayload::new(event_type::MESSAGE_PART_UPDATED,
+                            json!({"sessionID":session_id,"part":message.parts[0],"time":now_millis()})));
+                    }
+                }
+            }
+        };
+        metadata["output"] = json!(capture.lock().unwrap().output());
+        metadata["captureTruncated"] = json!(capture.lock().unwrap().truncated);
+        if let Some(exit) = capture.lock().unwrap().exit_code {
+            metadata["exitCode"] = json!(exit);
+        }
         match result {
             Ok(result) => {
-                crate::message_part_mutation::set_tool_completed(
-                    &mut message.parts, part_id.as_str(), result.output,
-                    result.title, result.metadata.unwrap_or_else(|| json!({})),
-                );
+                metadata["output"] = json!(result.output);
+                if let Some(exit) = result.metadata.as_ref().and_then(|m| m.get("exit")) {
+                    metadata["exitCode"] = exit.clone();
+                }
+                crate::message_part_mutation::set_tool_execution_result(
+                    &mut message.parts, part_id.as_str(), result);
             }
             Err(error) => {
                 crate::message_part_mutation::set_tool_error(
@@ -134,6 +241,7 @@ pub(super) async fn execute(
                 );
             }
         }
+        shell_metadata(&mut message, &metadata);
         if let MessageInfo::Assistant(info) = &mut message.info {
             info.time.completed = Some(now_millis());
             info.finish = Some("stop".into());

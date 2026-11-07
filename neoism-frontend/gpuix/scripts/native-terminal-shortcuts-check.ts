@@ -16,7 +16,7 @@ const until=async(check:()=>boolean|Promise<boolean>)=>{const end=Date.now()+100
 const input=()=>server.ptyRequests.filter(row=>row.tag==="PtyInput").flatMap(row=>row.body.bytes as number[]);
 let stage="open terminal";
 try{
- await app.getByTestId("original-topbar").waitFor({timeoutMs:15000});await app.call("keystrokes",{keys:"alt-t"});
+ await app.getByTestId("activity-rail").waitFor({timeoutMs:15000});await app.call("keystrokes",{keys:"alt-t"});
  const terminal=app.getByTestId("terminal");await terminal.waitFor();await until(()=>server.ptyRequests.some(row=>row.tag==="AttachPty"));
  server.pushPty({PtyOutput:{session_id:"fixture-pty",bytes:[...new TextEncoder().encode("\x1b[2J\x1b[HSELECT_ME\r\n\x1b[?2004h")]}});await Bun.sleep(150);
  stage="Command+C copies terminal selection";

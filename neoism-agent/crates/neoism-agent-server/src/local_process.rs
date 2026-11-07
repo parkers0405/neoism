@@ -50,6 +50,15 @@ pub(crate) async fn run(
     spec: ProcessSpec,
     cancel: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<ExecResult> {
+    run_observed(spec, cancel, None, None).await
+}
+
+pub(crate) async fn run_observed(
+    spec: ProcessSpec,
+    cancel: Option<Arc<AtomicBool>>,
+    stdout_observer: Option<process::OutputObserver>,
+    stderr_observer: Option<process::OutputObserver>,
+) -> anyhow::Result<ExecResult> {
     if cancel
         .as_ref()
         .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
@@ -75,9 +84,9 @@ pub(crate) async fn run(
     let mut child = command.spawn().context("failed to spawn process")?;
     let child_id = child.id();
     let mut stdout =
-        process::read_child_output(child.stdout.take(), MAX_CAPTURE_BYTES_PER_STREAM);
+        process::read_child_output_observed(child.stdout.take(), MAX_CAPTURE_BYTES_PER_STREAM, stdout_observer);
     let mut stderr =
-        process::read_child_output(child.stderr.take(), MAX_CAPTURE_BYTES_PER_STREAM);
+        process::read_child_output_observed(child.stderr.take(), MAX_CAPTURE_BYTES_PER_STREAM, stderr_observer);
     let stdin = child.stdin.take();
     let mut input = tokio::spawn(async move {
         if let (Some(mut pipe), Some(bytes)) = (stdin, spec.stdin) {

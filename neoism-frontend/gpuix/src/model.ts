@@ -89,6 +89,7 @@ export interface AppState {
   queues: Readonly<Record<string, { count: number; preview?: string | null }>>;
   catalogsLoading: boolean;
   catalogsError?: string;
+  catalogRetryAfterMs?: number;
   loading: boolean;
   creatingWorkspace?: boolean;
   error?: string;
@@ -1397,6 +1398,26 @@ export class WorkspaceModel {
     this.sendAgent({ SwitchThread: { session_id: sessionId } });
     this.sendAgent({ GetHistory: { session_id: sessionId, cursor: null, limit: 200 } });
     this.sendAgent({ ResumeStream: { session_id: sessionId } });
+    this.preloadFamilyHistory();
+  }
+  private preloadFamilyHistory(){
+    if(this.disposed||this.client.state.phase!=="connected")return;
+    const now=Date.now();let available=4-[...this.historyRequests.values()].filter(request=>now-request.sentAt<30000).length;
+    // Warm only open families, not the entire sidebar catalog. Reuse the head
+    // cursor as the hydrated marker; live-only rows still need their baseline.
+    const roots=new Set<string>();
+    for(const surface of this.state.surfaces){
+      if(surface.kind!=="agent"||!surface.sessionId)continue;
+      const family=this.agentFamily(surface.agentRootSessionId||surface.sessionId);
+      if(roots.has(family.root)||this.closedTranscriptRoots.has(family.root))continue;
+      roots.add(family.root);
+      for(const row of family.roster){
+        if(available<=0)return;
+        if(this.historyCursors.has(row.id)||now-(this.historyRequests.get(row.id)?.sentAt??0)<30000)continue;
+        this.sessionWorkspaces.set(row.id,surface.workspaceId);
+        this.sendAgent({GetHistory:{session_id:row.id,cursor:null,limit:200}});available--;
+      }
+    }
   }
   private familyStreams=new FamilyStreamOwnership(id=>agentFamilyRoot(this.state.ui,id));
   private completedTranscript=new CompletedTranscriptRefresh();
@@ -1565,6 +1586,7 @@ export class WorkspaceModel {
   private catalogFetchedAt=new Map<string,number>();
   private catalogScope="";
   private catalogGeneration=0;
+  private catalogFailures=0;
   private catalogDirectory(){
     const sessionId=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.sessionId;
     return this.state.threads.find(thread=>thread.session_id===sessionId)?.directory||this.state.activeWorkspace?.root_dir||undefined;
@@ -1574,6 +1596,10 @@ export class WorkspaceModel {
     const directory=this.catalogDirectory(),key=JSON.stringify([this.epoch,workspace.id,directory]);
     const pending=this.catalogFlights.get(key);if(pending&&this.catalogScope===key)return pending;
     if(this.catalogScope===key&&options.maxAgeMs&&Date.now()-(this.catalogFetchedAt.get(key)||0)<options.maxAgeMs)return Promise.resolve();
+    if(this.catalogScope!==key){
+      this.catalogFailures=0;
+      this.update({providers:[],providerCatalog:undefined,catalogRetryAfterMs:undefined});
+    }
     this.catalogScope=key;
     const task=this.loadCatalogs(directory).then(current=>{if(current&&!this.state.catalogsError)this.catalogFetchedAt.set(key,Date.now());}).finally(()=>{if(this.catalogFlights.get(key)===task)this.catalogFlights.delete(key);});
     this.catalogFlights.set(key,task);return task;
@@ -1592,38 +1618,46 @@ export class WorkspaceModel {
     const projectSdk=this.agentSdk.forDirectory(workspace.id);
     const key=JSON.stringify([workspace.id,directory||""]);
     const hadReadyModel=!!this.state.agentDefaults?.[key]?.model;
-    let config:unknown={},providers:unknown={},configReady=false,providersReady=false;
+    let config:unknown={},providers:unknown={},configReady=false,providersReady=false,providersFailed=false;
     const publishDefaults=()=>{
       if(!isCurrent())return;
       // Config is authoritative and arrives on its own critical path. Provider
       // discovery only supplies the original fallback when no model is set.
       if(!configReady)return;
       const resolved=coreCall<ProviderState>("agentcomposer.defaults",{config,providers});
-      if(hadReadyModel&&!resolved.model&&!providersReady)return;
+      if(hadReadyModel&&!resolved.model&&(!providersReady||providersFailed))return;
       const selection:ProviderState={...(resolved.agent?{agent:resolved.agent}:{}),...(resolved.model?{model:resolved.model}:{}),...(resolved.thinking?{thinking:resolved.thinking}:{})};
       this.update({agentDefaults:{...this.state.agentDefaults,[key]:selection},agentDefaultsLoading:!resolved.model&&!providersReady});
     };
     this.update({ catalogsLoading: true, catalogsError: undefined,agentDefaultsLoading:!hadReadyModel });
-    const catalog = async (load: () => Promise<Partial<AppState>>,failed?:()=>void) => {
+    const catalog = async (load: (signal:AbortSignal) => Promise<Partial<AppState>>,failed?:()=>void) => {
       try {
-        const patch = await this.run(Effect.tryPromise({ try: load, catch: (error) => error }));
+        const patch = await this.run(Effect.timeout(
+          Effect.tryPromise({ try: load, catch: (error) => error }),
+          "20 seconds",
+        ));
         if (isCurrent()) this.update(patch);
       } catch (error) { if (isCurrent()) {failed?.();this.update({ catalogsError: error instanceof Error ? error.message : "Catalog unavailable" });} }
     };
     await Promise.all([
-      catalog(async()=>{config=await(await projectSdk).config.defaults(directory);configReady=true;publishDefaults();return{};}),
-      catalog(async () => {
-        const result = await sdk.catalog.providers.configured(providerDirectory);
+      catalog(async(signal)=>{const result=await(await projectSdk).operations.request("v2.config.defaults",{query:{directory},signal});if(signal.aborted)return{};config=result;configReady=true;publishDefaults();return{};}),
+      catalog(async (signal) => {
+        const result = await sdk.operations.request("v2.providers.configured",{query:{directory:providerDirectory},signal});
+        if(signal.aborted)return{};
         providers=result;providersReady=true;publishDefaults();
         const catalog = result.providers.map((p) => ({ id: p.id, name: p.name || p.id,
           models: Object.entries(p.models).map(([key, model]) => ({ id: model.id || key, name: model.name || model.id || key,
             context_limit: isRecord(model.limit) && typeof model.limit.context === "number" && model.limit.context > 0 ? model.limit.context : undefined })) }));
         return { providers: Schema.decodeUnknownSync(Schema.Array(ProviderSchema))(catalog), providerCatalog: result };
-      },()=>{providersReady=true;publishDefaults();}),
-      catalog(async () => ({ agents: Schema.decodeUnknownSync(Schema.Array(AgentSchema))((await(await projectSdk).catalog.agents.list(directory)).filter((a) => !a.hidden && a.mode !== "subagent").map((a) => ({ ...a, description: a.description || "" }))) })),
-      catalog(async () => ({ skills: Schema.decodeUnknownSync(Schema.Array(SkillSchema))((await(await projectSdk).catalog.skills.list(directory)).map((a) => ({ ...a, description: a.description || "" }))) })),
+      },()=>{providersReady=true;providersFailed=true;publishDefaults();}),
+      catalog(async (signal) => ({ agents: Schema.decodeUnknownSync(Schema.Array(AgentSchema))((await(await projectSdk).operations.request("v2.agents.list",{query:{directory},signal})).filter((a) => !a.hidden && a.mode !== "subagent").map((a) => ({ ...a, description: a.description || "" }))) })),
+      catalog(async (signal) => ({ skills: Schema.decodeUnknownSync(Schema.Array(SkillSchema))((await(await projectSdk).operations.request("v2.skills.list",{query:{directory},signal})).map((a) => ({ ...a, description: a.description || "" }))) })),
     ]);
-    if (epoch===this.epoch&&generation===this.catalogGeneration) this.update({ catalogsLoading: false,agentDefaultsLoading:false });
+    if (isCurrent()) {
+      this.catalogFailures=this.state.catalogsError?Math.min(6,this.catalogFailures+1):0;
+      this.update({catalogsLoading:false,agentDefaultsLoading:false,
+        catalogRetryAfterMs:this.catalogFailures?Math.min(60_000,1000*2**this.catalogFailures):undefined});
+    }
     return isCurrent();
   };
   private async createThread(selection: ProviderState, optimistic?:{sessionId:string;message:HistoryMessage}) {
@@ -2056,7 +2090,7 @@ export class WorkspaceModel {
         if(key&&isRecord(ui.agentFamilyVersions)&&ui.agentFamilyVersions[key]!==undefined)this.agentFamilyWatermarks.set(key,ui.agentFamilyVersions[key]);
         const metadata=["agentParentSessions","agentFamilyRoots","agentFamilyRosters"] as const;
         const changed=metadata.some(field=>ui[field]!==current[field]&&(current[field]!==undefined||isRecord(ui[field])&&Object.keys(ui[field]).length>0));
-        if(changed){this.update({ui:{...current,agentParentSessions:ui.agentParentSessions,agentFamilyRoots:ui.agentFamilyRoots,agentFamilyRosters:ui.agentFamilyRosters}});for(const stopped of this.familyStreams.reconcile())this.sendAgent({StopStream:{session_id:stopped}});}
+        if(changed){this.update({ui:{...current,agentParentSessions:ui.agentParentSessions,agentFamilyRoots:ui.agentFamilyRoots,agentFamilyRosters:ui.agentFamilyRosters}});for(const stopped of this.familyStreams.reconcile())this.sendAgent({StopStream:{session_id:stopped}});this.preloadFamilyHistory();}
       }
       const completed=!deferredHydration&&this.completedTranscript.observe(event.message);if(completed)this.refreshCompletedHistory(completed);
       if(tag==="ThreadSwitched"&&typeof body.session_id==="string")for(const stopped of this.familyStreams.switched(body.session_id))this.sendAgent({StopStream:{session_id:stopped}});
@@ -2144,10 +2178,18 @@ export class WorkspaceModel {
         });
         const edit=this.historyEdits.get(sessionId);
         if(this.closedTranscriptRoots.has(agentFamilyRoot(this.state.ui,sessionId))||(request&&request.revision!==(this.historyRevisions.get(sessionId)||0))||edit?.pending.length)return;
-        const history = Schema.decodeUnknownSync(Schema.Array(HistoryMessageSchema))(body.messages);
+        let history = Schema.decodeUnknownSync(Schema.Array(HistoryMessageSchema))(body.messages);
         for(const message of history)if(message.kind==="User"){this.optimisticPrompts.delete(message.id);this.promptArrivals.delete(message.id);}
         const previous = this.state.history[sessionId] || [];
         const older = request?.older ?? false;
+        if(!older&&!request?.replace){
+          const live=new Map(previous.map(message=>[message.id,message]));
+          history=history.map(incoming=>{
+            const message=live.get(incoming.id);
+            // A head read can finish after newer tokens reached the cache.
+            return message&&["Assistant","Reasoning","Compaction"].includes(incoming.kind)&&["Assistant","Reasoning","Compaction"].includes(message.kind)&&typeof message.text==="string"&&message.text.startsWith(incoming.text||"")?{...incoming,text:message.text}:incoming;
+          });
+        }
         const nextCursor = request
           ? historyPageCursor(body.next_cursor, history, previous, older)
           : typeof body.next_cursor === "string" ? body.next_cursor : null;
@@ -2175,6 +2217,7 @@ export class WorkspaceModel {
         // loading flag: an older request can be queued behind a head refresh.
         const delivered = {HistoryChunk:{...body,messages:older ? history : merged,next_cursor:this.historyCursors.get(sessionId) ?? null}};
         for (const listener of this.agentEventListeners) { try { listener(delivered, request?.replace ? "replace" : older ? "older" : "head"); } catch (error) { this.report(error); } }
+        this.preloadFamilyHistory();
       } else if (tag === "MessageUpdated" && sessionId) {
         const message=Schema.decodeUnknownSync(HistoryMessageSchema)(body.message);
         if(message.kind==="User"&&!this.state.history[sessionId]?.some(row=>row.id===message.id))this.historyEdits.delete(sessionId);

@@ -220,6 +220,8 @@ impl MenuItem {
 pub struct ChromeTopBar {
     visible: bool,
     scale: f32,
+    /// Scoped to GPU-host rail painting; never changes the original top path.
+    painting_rail_host: bool,
     menu_open: bool,
     /// True when the active Agent chat can show its right details panel.
     /// Drives whether the right-edge button is painted and hit-tested.
@@ -278,6 +280,7 @@ impl ChromeTopBar {
         Self {
             visible: true,
             scale: 1.0,
+            painting_rail_host: false,
             menu_open: false,
             right_button_visible: false,
             mobile_agent_panel_button_visible: false,
@@ -806,6 +809,18 @@ impl ChromeTopBar {
     }
 
     fn handle_pointer_down(&mut self, x: f32, y: f32) -> bool {
+        // A viewport-clamped side menu can overlap the rail. Its rows must
+        // win over the controls underneath, just as they do visually. The
+        // original top menu does not overlap its strip.
+        if self.menu_open {
+            if let Some(idx) = (0..self.menu_items().len())
+                .find(|i| self.menu_item_rect(*i).contains(x, y))
+            {
+                self.pending_action = Some(self.menu_items()[idx].action());
+                self.menu_open = false;
+                return true;
+            }
+        }
         if self.panel_btn_rect.contains(x, y) {
             self.pending_action = Some(TopBarAction::TogglePanel);
             self.menu_open = false;
@@ -848,14 +863,6 @@ impl ChromeTopBar {
             return true;
         }
         if self.menu_open {
-            if let Some(idx) = (0..self.menu_items().len())
-                .find(|i| self.menu_item_rect(*i).contains(x, y))
-            {
-                self.pending_action =
-                    Some(self.menu_items()[idx].action());
-                self.menu_open = false;
-                return true;
-            }
             // Click anywhere else (still routed to us via the menu
             // overlay rect) closes the menu without firing an action.
             self.menu_open = false;
@@ -1067,6 +1074,10 @@ impl ChromeTopBar {
         // Right-most first so the left-most orb lands on top (face-pile).
         for i in (0..self.peer_rects.len()).rev() {
             let r = self.peer_rects[i];
+            let r = if self.painting_rail_host {
+                let size = 28.0 * self.scale;
+                Rect::new(r.x + (r.w - size) * 0.5, r.y + (r.h - size) * 0.5, size, size)
+            } else { r };
             sugarloaf.rounded_rect(
                 None,
                 r.x - ring_pad,
@@ -1101,7 +1112,10 @@ impl ChromeTopBar {
                 };
                 let label = format!("+{overflow}");
                 let w = sugarloaf.text_mut().measure(&label, &opts);
-                let (tx, ty) = if matches!(dock, DockEdge::Top | DockEdge::Bottom) {
+                let (tx, ty) = if self.painting_rail_host {
+                    let last = self.peer_rects.last().unwrap();
+                    (strip.x + (strip.w - w) * 0.5, last.y + last.h)
+                } else if matches!(dock, DockEdge::Top | DockEdge::Bottom) {
                     (
                         first.x - 4.0 * self.scale - w,
                         strip.y + (strip.h - opts.font_size) * 0.5,
@@ -1206,8 +1220,9 @@ impl ChromeTopBar {
         if rect.w <= 0.0 || rect.h <= 0.0 {
             return;
         }
+        let rect = self.host_icon_paint_rect(rect);
         if hovered {
-            sugarloaf.rect(
+            sugarloaf.rounded_rect(
                 None,
                 rect.x,
                 rect.y,
@@ -1218,10 +1233,11 @@ impl ChromeTopBar {
                     theme.f32_alpha(theme.hover, 0.85),
                 ),
                 DEPTH,
+                if self.painting_rail_host { 8.0 * self.scale } else { 0.0 },
                 ORDER_HOVER,
             );
         }
-        let icon_size = ICON_FONT_SIZE * self.scale;
+        let icon_size = if self.painting_rail_host { 19.0 } else { ICON_FONT_SIZE } * self.scale;
         let icon_font = if glyph == CONVERSATIONS_GLYPH {
             sugarloaf
                 .font_id_for_family("Symbols Nerd Font Mono")
@@ -1265,9 +1281,9 @@ impl ChromeTopBar {
         theme: &IdeTheme,
         style: &neoism_customization::StylePatch,
     ) {
-        let rect = self.server_btn_rect;
+        let rect = self.host_icon_paint_rect(self.server_btn_rect);
         if self.hover_server_btn {
-            sugarloaf.rect(
+            sugarloaf.rounded_rect(
                 None,
                 rect.x,
                 rect.y,
@@ -1278,11 +1294,14 @@ impl ChromeTopBar {
                     theme.f32_alpha(theme.hover, 0.85),
                 ),
                 DEPTH,
+                if self.painting_rail_host { 8.0 * self.scale } else { 0.0 },
                 ORDER_HOVER,
             );
         }
 
-        let scale = self.scale;
+        // The rack is hand-painted rather than a glyph, so scale its entire
+        // geometry as well (the original compact rack is about 14px tall).
+        let scale = self.scale * if self.painting_rail_host { 19.0 / 14.0 } else { 1.0 };
         let rack_w = 10.0 * scale;
         let rack_x = rect.x + (rect.w - rack_w) * 0.5;
         let rack_y = rect.y + (rect.h - 12.0 * scale) * 0.5;

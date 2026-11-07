@@ -1,6 +1,6 @@
 import { createMemo, Show } from "solid-js";
 import type { AppConfig } from "../config";
-import { providerLogoAtlasBase64, providerLogos } from "../design/generated";
+import { providerLogoAtlasBase64, providerLogoAtlasWidth, providerLogos } from "../design/generated";
 
 export function providerLogoIndex(model: string | null | undefined): number | undefined {
   const slash = model?.trim().indexOf("/") ?? -1;
@@ -13,7 +13,7 @@ const luminance = (channels: number[]) => channels.map(c => c/255).map(c => c <=
 export function providerLogoColor(index: number, theme: AppConfig["theme"]): string {
   const background = rgb(theme.bg), dark = background.reduce((sum,c,i) => sum+c*[0.299,0.587,0.114][i],0) < 128;
   if (index === 1) return "#d97757";
-  if (index === 0 || index === 2) return dark ? "#ffffff" : "#000000";
+  if (index === 0 || index === 2 || index === providerLogos.xai) return dark ? "#ffffff" : "#000000";
   if (dark) return theme.blue;
   const bg = luminance(background), contrast = (channels: number[]) => { const l=luminance(channels); return (Math.max(l,bg)+0.05)/(Math.min(l,bg)+0.05); };
   let shade = rgb(theme.blue); if (contrast(shade) >= 2.6) return theme.blue;
@@ -22,7 +22,7 @@ export function providerLogoColor(index: number, theme: AppConfig["theme"]): str
 }
 export function providerLogoSvg(index: number) {
   const x=index*64;
-  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="64" height="64" viewBox="${x} 0 64 64"><defs><mask id="provider" maskUnits="userSpaceOnUse" x="${x}" y="0" width="64" height="64" style="mask-type:alpha"><image x="0" y="0" width="448" height="64" xlink:href="data:image/png;base64,${providerLogoAtlasBase64}"/></mask></defs><rect x="${x}" y="0" width="64" height="64" fill="white" mask="url(#provider)"/></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="64" height="64" viewBox="${x} 0 64 64"><defs><mask id="provider" maskUnits="userSpaceOnUse" x="${x}" y="0" width="64" height="64" style="mask-type:alpha"><image x="0" y="0" width="${providerLogoAtlasWidth}" height="64" xlink:href="data:image/png;base64,${providerLogoAtlasBase64}"/></mask></defs><rect x="${x}" y="0" width="64" height="64" fill="white" mask="url(#provider)"/></svg>`;
 }
 /** Exact 17px original atlas mark, centered against the chip's em box. */
 export function ProviderLogo(props: { model?: string | null; config: AppConfig }) {

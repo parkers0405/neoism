@@ -27,7 +27,7 @@ try{
  await press("h",true);assert.ok(!has(".env"),"Ctrl+h is not the plain hidden-file toggle");
  await pick("notes");assert.ok(has(".env",true));await press("h");assert.ok(!has(".env",true));await pick("files");assert.ok(!has(".env"));await press("h");assert.ok(has(".env"));
  setGeneration({...config,fontSize:16,scale:16/14});await host.pump(root);assert.ok(has(".env"));await pick("notes");assert.ok(!has(".env",true),"Notes hidden state survives font generations independently");await pick("files");
- model.update({activeWorkspace:workspaces[1],directories,notesDirectories:directories});await host.pump(root);assert.ok(has(".env"));await press("h");assert.ok(!has(".env"));
+  model.update({activeWorkspace:workspaces[1],directories,notesDirectories:directories});model.setWorkspaceSidebar("files");await host.pump(root);assert.ok(has(".env"));await press("h");assert.ok(!has(".env"));
  model.update({activeWorkspace:workspaces[0],directories,notesDirectories:directories});await host.pump(root);assert.ok(has(".env"),"A retains its own visibility after B");
  await press("home");await press("down");await press("down");await press("left");assert.ok(!has("folder/keep.md"),"ArrowLeft keeps its original collapse behavior");
  console.log(JSON.stringify({actualApp:true,noWindow:true,plainHToggles:true,nestedDotfiles:true,canonicalExclusions:true,selectedPathPreserved:true,independentWorkspaceAndNotes:true,zoomRetained:true,arrowLeftStillCollapses:true}));

@@ -16,7 +16,7 @@ const client=new DaemonConnection(config),model=new WorkspaceModel(client,config
 try{
  model.start();client.start();
  const deadline=Date.now()+4000;while(!model.state.activeWorkspace||model.state.loading){if(Date.now()>deadline)throw Error("workspace timeout");await Bun.sleep(5);}
- model.openAgentHome();root.render(()=><App model={model} config={config}/>);await host.pump(root);
+ model.setWorkspaceSidebar("files");model.openAgentHome();root.render(()=><App model={model} config={config}/>);await host.pump(root);
  assert.ok(host.find("composer"));assert.ok(host.find("file-tree"));
  calls.clear();
  for(let i=0;i<40;i++){model.setUI({unrelatedBudgetProbe:i});root.flush();}

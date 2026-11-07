@@ -24,7 +24,8 @@ const echoCalls=()=>calls.filter(call=>call.op==="agenttimeline.event"&&(call.ar
 try{
  model.start();client.start();await until(()=>!model.state.loading&&!model.state.catalogsLoading&&model.state.connection.phase==="connected");
   model.newAgentHome();const surface=model.state.activeSurfaceId!;
-  model.setUI({workspaceSidebars:{[model.state.activeWorkspace!.id]:"conversations"}});
+   // Exercise adoption with an explicitly opened rail; fresh chats default closed.
+   model.setUI({workspaceSidebars:{[model.state.activeWorkspace!.id]:"conversations"},details:true});
   root.render(()=><App model={model} config={config} visuals={visuals}/>);await host.pump(root);
   assert.ok(host.find("conversation-list"));
  const composer=host.find("composer")!;assert.ok(host.find("agent-wordmark"));

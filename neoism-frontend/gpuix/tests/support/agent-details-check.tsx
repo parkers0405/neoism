@@ -17,7 +17,7 @@ for(const width of [1440,700,400]){
   model.update({surfaces:model.state.surfaces.map(item=>item.id===surface.id?{...item,sessionId:"details"}:item),history:{details:[{id:"answer",role:"Assistant",kind:"Assistant",text:"A conversation with session details."}]}});
   const toggle=()=>{
     const button=host.find("toggle-details");assert.ok(button,"The details toggle must stay available");
-    root.dispatch({elementId:button.id,eventType:"mouseDown",button:0});
+    root.dispatch({elementId:button.id,eventType:"click",button:0});
   };
   try{
     root.render(()=><App model={model} config={config}/>);await host.pump(root);

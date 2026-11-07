@@ -17,7 +17,7 @@ const restore=usePresentationScheduler(callback=>{frames.add(callback);return()=
 const workspaces=[{id:"a",host_id:"host",title:"A",root_dir:"/project/a",notes_vault_dir:"/notes/a"},{id:"b",host_id:"host",title:"B",root_dir:"/project/b",notes_vault_dir:"/notes/b"}];
 const entries=Array.from({length:200},(_,i)=>({name:`file-${String(i).padStart(3,"0")}.ts`,is_dir:false}));
 const listing={"":{path:"",entries}};
-model.update({activeWorkspace:workspaces[0],workspaces,directories:listing,notesDirectories:listing,expanded:new Set([""]),notesExpanded:new Set([""]),loading:false,ui:{sidebar:"files",openWorkspaceIds:["a","b"]}});
+model.update({activeWorkspace:workspaces[0],workspaces,directories:listing,notesDirectories:listing,expanded:new Set([""]),notesExpanded:new Set([""]),loading:false,ui:{workspaceSidebars:{a:"files",b:"files"},openWorkspaceIds:["a","b"]}});
 const [generation,setGeneration]=createSignal(config);
 const node=()=>host.find("file-tree")||host.find("notes-tree");
 const treeId=()=>visuals.trees.get(JSON.stringify([model.state.activeWorkspace?.id,!!host.find("notes-tree"),host.find("notes-tree")?model.state.activeWorkspace?.notes_vault_dir:model.state.activeWorkspace?.root_dir]));

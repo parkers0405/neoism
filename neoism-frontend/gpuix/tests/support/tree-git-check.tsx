@@ -23,7 +23,7 @@ const instrument=(value:typeof config)=>{const glyphs=visuals.treeGlyphHost(valu
 instrument(config);
 const workspaces=[{id:"a",host_id:"host",title:"A",root_dir:treeGitRoot},{id:"b",host_id:"host",title:"B",root_dir:treeGitOtherRoot}];
 const listing={"":{path:"",entries:[...treeGitEntries]},src:{path:"src",entries:[{name:"nested.rs",is_dir:false}]}};
-model.update({activeWorkspace:workspaces[0],workspaces,directories:listing,expanded:new Set([""]),loading:false,ui:{sidebar:"files",openWorkspaceIds:["a","b"]}});
+ model.update({activeWorkspace:workspaces[0],workspaces,directories:listing,expanded:new Set([""]),loading:false,ui:{workspaceSidebars:{a:"files",b:"files"},openWorkspaceIds:["a","b"]}});
 let stage="mount",releaseExtra=()=>{};
 const pulse=async()=>{for(const callback of [...frames]){frames.delete(callback);callback();}await host.pump(root);await Bun.sleep(4);};
 const until=async(check:()=>boolean)=>{const end=Date.now()+5000;while(!check()){await pulse();if(Date.now()>end)throw new Error(`Tree Git App did not settle: ${stage}`);}await host.pump(root);};

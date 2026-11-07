@@ -15,7 +15,7 @@ const config={...loadConfig(["--config","/nonexistent/tree-root-app-check"],{}),
 const client=new DaemonConnection(config),model=new WorkspaceModel(client,config),visuals=new AppVisualState();
 const host=createRecordingAppRenderer(),root=createRoot(host.renderer),callbacks=new Set<()=>void>();
 const restore=usePresentationScheduler(callback=>{callbacks.add(callback);return()=>{callbacks.delete(callback);};});
-model.setUI({openWorkspaceIds:["a","b"]});
+ model.setUI({openWorkspaceIds:["a","b"],workspaceSidebars:{a:"files",b:"files"}});
 const until=async(predicate:()=>boolean)=>{
   const deadline=Date.now()+5000;
   while(!predicate()){await host.pump(root);if(Date.now()>deadline)throw new Error("Actual App tree did not converge");await Bun.sleep(2);}
@@ -31,7 +31,7 @@ const switchTo=async(id:string)=>{
   await until(()=>model.state.activeWorkspace?.id===id&&!model.state.loading&&!!row());
 };
 try{
-  model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);
+   model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);model.setUI({workspaceSidebars:{a:"files",b:"files"}});
   root.render(()=><App model={model} config={config} visuals={visuals}/>);
   await until(()=>!!row());
   assert.ok(Number.isFinite(opacity()),"the hook alpha reaches the actual glyph image host");

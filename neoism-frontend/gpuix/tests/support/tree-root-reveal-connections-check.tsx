@@ -62,7 +62,8 @@ const promote=async()=>{
 };
 try{
   await until(()=>!!local.model.state.activeWorkspace&&!local.model.state.loading&&!!remote.model.state.activeWorkspace&&!remote.model.state.loading);
-  await Promise.all([local.model.listDirectory(""),remote.model.listDirectory("")]);
+   await Promise.all([local.model.listDirectory(""),remote.model.listDirectory("")]);
+   for(const connection of [local,remote])connection.model.setWorkspaceSidebar("files");
   root.render(()=><AppGeneration value={generation()}>{current=><App model={current.session.model} config={current.config} visuals={current.session.visuals} workspaceActivation={current.workspaceActivation} workspaceNavigation={tabs}/>}</AppGeneration>);
   await until(()=>!!host.find("file:README.md"));await expire();
   for(const next of [remote,local,remote]){

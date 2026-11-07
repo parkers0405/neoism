@@ -8,7 +8,7 @@ import {createRequire} from "node:module";
 import {devicePreviewPlugin} from "./device-preview-build";
 import {pruneBrowserAssets} from "../../../scripts/native-runtime.mjs";
 import {buildDocs} from "../../../scripts/build-docs.mjs";
-import {assertWindowsGuiExecutable} from "./windows-executable";
+import {assertWindowsGuiExecutable,configureWindowsGuiExecutable} from "./windows-executable";
 // Release builds always build the shared pinned site; never package raw source/Notes.
 buildDocs();
 createRequire(import.meta.url)("./patch-solid-host.cjs")();
@@ -60,8 +60,13 @@ const result = await Bun.build({
   }},nativePlugin(),solid],
 });
 if (!result.success) { console.error(result.logs); process.exit(1); }
-// Fail before publishing the launcher if Bun ignored/regressed hideConsole.
-if(process.platform==="win32")assertWindowsGuiExecutable(readFileSync(`dist/${pendingExecutable}`));
+// Enforce the loader-level GUI subsystem even when Bun retains its CUI header.
+// Verify the persisted image, not merely our compile options or in-memory copy.
+if(process.platform==="win32"){
+  const path=`dist/${pendingExecutable}`,bytes=readFileSync(path);
+  configureWindowsGuiExecutable(bytes);writeFileSync(path,bytes);
+  assertWindowsGuiExecutable(readFileSync(path));
+}
 
 mkdirSync("dist/web/native", {recursive:true});
 const packagedBinding=resolve("dist/web/native",stamp.artifact);

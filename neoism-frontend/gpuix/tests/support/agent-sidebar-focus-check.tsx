@@ -20,6 +20,7 @@ try {
  model.update({activeWorkspace:{id:"a",host_id:"host",title:"A",root_dir:"/project/a"},workspaces:[{id:"a",host_id:"host",title:"A",root_dir:"/project/a"}],loading:false,threads:daemon.threads,history:{one:[{id:"answer",role:"Assistant",kind:"Assistant",text:"A saved conversation with selectable text.",usage:{input:100,output:20,context_limit:1000}}]}});
  stage="load history";model.openThread(daemon.threads[0]);
 
+ model.setWorkspaceSidebar("files");model.setUI({details:true});
  stage="render";root.render(()=><App model={model} config={config} visuals={visuals}/>);await host.pump(root);
  await until(()=>!!model.state.history.one?.length);
  stage="saved usage";if(!host.find("agent-details"))await key("h",true);

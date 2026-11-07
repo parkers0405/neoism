@@ -32,7 +32,7 @@ const sidebar=()=>host.find("file-tree")!;
 const clickTree=async(file:string)=>{await event("file-tree","mouseDown",{button:0,x:30,y:150});await Promise.resolve();await event("app-content","mouseDown",{button:0,x:30,y:150});await event(`file:${file}`,"click",{button:0,x:30,y:150});};
 const panelFocus=()=>{const value=String(host.find("conversation-list")?.props["aria-description"]||"");return value==="New chat"?"new-chat":value==="Search"?"search":value==="Project directory"?"projects":value.startsWith("Conversation: ")?`row:${model.state.threads.find(thread=>thread.title===value.slice(14))?.session_id||""}`:"";};
 try{
- model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);
+ model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);model.setWorkspaceSidebar("files");
  root.render(()=><AppGeneration value={{model,config}}>{current=><App model={current.model} config={current.config} visuals={visuals} registerWindowKeys={keys.register}/>}</AppGeneration>);await host.pump(root);
  stage="cold clicked file transfers actual native focus after deferred bubbling";await clickTree("code.rs");await until(()=>!!host.find("code-editor")&&host.focused===host.find("code-editor")!.id);
  const code=host.find("code-editor")!,surface=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!,editor=model.getEditor(surface);editor.call("paste",{text:"// retained dirty bytes\n"});const dirty=editor.text();
@@ -52,7 +52,9 @@ try{
  await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);
  for(let i=0;i<8&&panelFocus()!=="new-chat";i++)await press("up");assert.equal(panelFocus(),"new-chat");
  const panelBounds=host.renderer.getElementBounds?.(host.find("conversation-list")!.id);assert.ok(panelBounds);
- const newChatX=panelBounds.x+40*config.scale,newChatY=panelBounds.y+65*config.scale;
+ // Use the native selection's actual ink bounds, not the old header's Y offset.
+ const newChatCursor=host.find("chrome-focus-cursor:sidebar");assert.ok(newChatCursor);
+ const newChatX=Number(newChatCursor.style.left)+Number(newChatCursor.style.width)/2,newChatY=Number(newChatCursor.style.top)+Number(newChatCursor.style.height)/2;
  const beforeClick=model.state.surfaces.filter(surface=>surface.kind==="agent").length;
  await event("conversation-list","mouseDown",{button:0,x:newChatX,y:newChatY});
  await until(()=>model.state.surfaces.filter(surface=>surface.kind==="agent").length===beforeClick+1&&host.focused===host.find("composer")?.id);

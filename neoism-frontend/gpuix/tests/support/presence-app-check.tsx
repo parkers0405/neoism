@@ -12,7 +12,7 @@ const client=new DaemonConnection(config),model=new WorkspaceModel(client,config
 const until=async(check:()=>boolean)=>{const end=Date.now()+4000;while(!check()){await host.pump(root);if(Date.now()>end)throw new Error("App presence did not converge");await Bun.sleep(5);}await host.pump(root);};
 const peer={buffer_id:"file:///project/a/README.md",peer_id:"remote@windows",display_name:"Remote",client_os:"windows",color:{r:60,g:90,b:120},cursor:{line:1,column:2},selection:null,insert:false,rainbow:false,updated_at_ms:Date.now()};
 try{
- model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);
+ model.start();client.start();await until(()=>!!model.state.activeWorkspace&&!model.state.loading);model.setWorkspaceSidebar("files");
  root.render(()=><App model={model} config={config}/>);await host.pump(root);
  const selfId=`presence:${model.presence.identity.peerId}`;
  assert.ok(!host.find(selfId),"No own avatar while alone");

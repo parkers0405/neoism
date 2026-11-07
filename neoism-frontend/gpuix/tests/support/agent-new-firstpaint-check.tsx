@@ -26,7 +26,7 @@ const fresh=()=>{
  assert.equal(host.find("composer")!.props.value,"");return surface;
 };
 try{
- model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);root.render(()=><App model={model} config={config} visuals={visuals} registerWindowKeys={keys.register}/>);await host.pump(root);assert.ok(host.find("file-tree"));
+ model.start();client.start();await until(()=>model.state.activeWorkspace?.id==="a"&&!model.state.loading);model.setWorkspaceSidebar("files");root.render(()=><App model={model} config={config} visuals={visuals} registerWindowKeys={keys.register}/>);await host.pump(root);assert.ok(host.find("file-tree"));
  const first=fresh();await host.pump(root);root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"first private draft"});await host.pump(root);
  const second=fresh();assert.notEqual(second.id,first.id);assert.equal(model.state.composerDrafts[model.composerDraftKey(undefined,first.id)]?.text,"first private draft");await host.pump(root);
  // A fresh Agent in a narrow split must derive the smaller current body,

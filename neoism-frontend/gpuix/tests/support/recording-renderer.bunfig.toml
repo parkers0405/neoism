@@ -1,0 +1,3 @@
+# JSX-only recording hosts do not load a native window/display binding.
+# Use a real config file: Bun 1.3.13 crashes when --config points to Windows NUL.
+preload = ["@gpuix/solid/preload"]

@@ -408,6 +408,9 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       mdHeadingSizes: [21 * s, 18 * s, 16 * s, 16 * s] } };
   const toggle = (view: typeof sidebar extends Accessor<infer T> ? T : never, keyboardFocus = true) => {
     const next=sidebar()===view?undefined:view;
+    // Clear sidebar ownership before mounting its replacement; Tree.onMount
+    // otherwise focuses the new panel before the deferred mouse handoff.
+    if(!keyboardFocus&&chromeFocus().zone==="sidebar")focusChrome({zone:"content"});
     setSidebar(next);
     // Wait for the new sidebar host before transferring native focus and cursor ownership.
     queueMicrotask(()=>{if(sidebar()!==next)return;if(keyboardFocus)focusChrome({zone:next?"sidebar":"content"});else if(chromeFocus().zone==="sidebar")focusChrome({zone:"content"});else setChromeTarget(undefined);});
@@ -942,9 +945,16 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       // macOS supplies a newline keyChar for Enter; named keys must use key.
       const key = event.key || event.keyChar || "";
       if (!["j", "k", "g", "G", "up", "down", "home", "end", "d", "u", "enter", "right", "left", "h", "l", "escape"].includes(key) && !/^\d$/.test(key)) return;
-      if(key==="h"&&event.modifiers?.ctrl)return;
-      event.preventDefault(); event.stopPropagation();
-      if(key==="h"){update("key",{key:"escape"});viewport().showHidden=!showHidden();setHiddenRevision(value=>value+1);return;}
+       if(key==="h"&&event.modifiers?.ctrl)return;
+       event.preventDefault(); event.stopPropagation();
+       // Native focus callbacks can arrive out of order while replacing the
+       // Agent sidebar. A key delivered here is authoritative ownership of
+       // both selection and its caret, not just the scrolling viewport.
+       if(!focused()||chromeFocus().zone!=="sidebar"){
+         contentFocusSerial++;pendingContentFocus=false;contentFocusFrames.cancel();
+         setFocused(true);setChromeFocus({zone:"sidebar"});
+       }
+       if(key==="h"){update("key",{key:"escape"});viewport().showHidden=!showHidden();setHiddenRevision(value=>value+1);return;}
       const entry = rows()[view().selected];
       if (key === "enter") { if (entry) open(entry); }
       else if (["right", "l"].includes(key)) { if (entry?.dir && !expanded().has(entry.path)) toggle(entry.path); }

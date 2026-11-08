@@ -87,7 +87,17 @@ try{
  const revealed=host.find("chrome-focus-cursor:sidebar")!;
  assert.ok(Number(revealed.style.top)>=90&&Number(revealed.style.top)<770,"Agent arrow cursor must be within its viewport");
  const selected=panelFocus().slice(4);await press("enter");await until(()=>model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)?.sessionId===selected&&host.focused===host.find("composer")?.id);
- assert.equal(editor.text(),dirty);assert.equal(editor.frame.dirty,true);assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.some(request=>["CreateThread","SubmitPrompt"].includes(request.tag)),false);
+  stage="Agent to Files handoff keeps the tree cursor following repeated arrow keys";
+  await press("left",true);await until(()=>host.focused===host.find("conversation-list")?.id);
+  await press("e",true);await until(()=>host.focused===sidebar()?.id&&!!host.find("chrome-focus-cursor:sidebar"));
+  await press("home");await until(()=>!host.find("chrome-focus-cursor:sidebar")?.props["data-cursor-animating"]);
+  const handoffTop=Number(host.find("chrome-focus-cursor:sidebar")!.style.top);
+  // A delayed blur must not leave JS ownership stale after native input has
+  // already transferred to the replacement tree.
+  root.dispatch({elementId:sidebar().id,eventType:"blur"});await host.pump(root);
+  for(let i=0;i<6;i++)await press("down");
+  await until(()=>Number(host.find("chrome-focus-cursor:sidebar")?.style.top)>handoffTop+26);
+  assert.equal(editor.text(),dirty);assert.equal(editor.frame.dirty,true);assert.equal(daemon.ptyRequests.length,0);assert.equal(daemon.requests.some(request=>["CreateThread","SubmitPrompt"].includes(request.tag)),false);
  console.log(JSON.stringify({noWindow:true,actualApp:true,treeClickNativeFocus:true,warmFileKeepsDirtyEditorAndHost:true,treeEnterNativeFocus:true,sharedCursorHasIntermediateFrames:true,finderKeyboardNativeFocus:true,finderMouseNativeFocus:true,agentAltArrowFocusAndExactCursor:true,originalAgentControlsTraverseAndActivate:true,newChatCreatesFreshLocalTab:true,unrelatedDirtyDocumentPreserved:true,noBackendThreadsOrPty:true}));
 }catch(error){console.error(JSON.stringify({stage,focused:host.focused,composer:host.find("composer")?.id,agentCount:model.state.surfaces.filter(surface=>surface.kind==="agent").length,surface:model.state.activeSurfaceId,chrome:[...host.nodes.values()].filter(node=>String(node.props.testId||"").startsWith("chrome-focus-cursor")).map(node=>({props:node.props,style:node.style})),panel:panelFocus(),error:model.state.error}));throw error;}
 finally{root.unmount();offCatalog();restoreSchedule();visuals.dispose();model.dispose();client.stop();daemon.stop();rmSync(directory,{recursive:true,force:true});}

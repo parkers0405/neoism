@@ -79,7 +79,8 @@ export function ActivityRail(props: { config: AppConfig; topOffset: number; peer
     if (hit && !hit.menu) animate(key, true);
     draw("chrome.pointer", { x, y });
   };
-  const hit = (region: () => Region, offset = () => [0, 0]) => <div role="button" aria-label={region().label} testId={region().id}
+  // Native default-focus prevention is element-local, not inherited from the rail.
+  const hit = (region: () => Region, offset = () => [0, 0]) => <div role="button" data-preserve-keyboard-focus={true} aria-label={region().label} testId={region().id}
     onMouseMove={() => move(region().rect[0] + region().rect[2] / 2, region().rect[1] + region().rect[3] / 2)} onMouseLeave={() => move()}
     onMouseDown={(event) => { if (event.button === undefined || event.button === 0) { if (!region().menu) animate(region().id, true, true); draw("chrome.click", { x: region().rect[0] + region().rect[2] / 2, y: region().rect[1] + region().rect[3] / 2 }); } }}
     style={{ position: "absolute", left: region().rect[0] - offset()[0], top: region().rect[1] - offset()[1], width: region().rect[2], height: region().rect[3], cursor: "pointer", backgroundColor: "transparent" }} />;

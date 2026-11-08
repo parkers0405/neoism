@@ -57,7 +57,7 @@ export class NativeEditor {
     const signature=configurable?JSON.stringify(args):undefined;
     if(signature!==undefined&&this.configuration.get(op)===signature)return this.frame;
     const overlayOnly=["lsp.pointer","lsp.geometry","lsp.hover-configure","lsp.hover-input","lsp.wheel"].includes(op);
-    if(!op.startsWith("lsp.")&&!["frame","cursor-frame","scroll"].includes(op))this.recoveryVersion++;
+    if(!op.startsWith("lsp.")&&!["frame","cursor-frame","scroll","presence"].includes(op))this.recoveryVersion++;
     if(!overlayOnly){this.animation.cancel(); this.fullFrameRequested = false; this.lastFrameStarted = performance.now();}
     const next = coreCall<EditorFrame | {lspOnly:true;lsp:EditorFrame["lsp"]} | {cursorOnly:true;cursorQuad:number[][];cursorHold:boolean;animating:boolean}>(`editor.${op}`, { id: this.id, ...args, ...(overlayOnly?{overlayOnly:true}:{}) });
     if("lspOnly" in next){

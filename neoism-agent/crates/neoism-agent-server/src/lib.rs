@@ -399,10 +399,14 @@ async fn listen_impl(
         Some(root) => gui::with_gui(api, root.for_listener(actual)),
         None => api,
     };
-    let server = std::future::IntoFuture::into_future(axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    ));
+    // Keep small streamed updates responsive on direct remote TCP connections.
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .tcp_nodelay(true),
+    );
     let result = if let Some(worker) = &state.services().workspace_worker {
         tokio::select! {
             result = server => result,

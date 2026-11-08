@@ -94,6 +94,7 @@ export function createSlashDaemon(mcpCatalog?:Record<string,unknown>){
   const permission=path.match(/^\/interactions\/permissions\/([^/]+)\/reply$/);if(permission){const index=permissions.findIndex(p=>p.id===permission[1]);if(index>=0)permissions.splice(index,1);return Response.json(true);}
   const question=path.match(/^\/interactions\/questions\/([^/]+)\/(reply|reject)$/);if(question){const index=questions.findIndex(q=>q.id===question[1]);if(index>=0)questions.splice(index,1);return Response.json(true);}
   if(path==="/plugins/dev.neoism.mcp/catalog")return Response.json(mcpCatalog||{local:{configScope:"workspace",configWritable:true,enabled:true,hasCredentials:false,oauthCapable:false,runtimeConnected:connected,status:{status:connected?"connected":"disconnected"}}});
+  if(/^\/plugins\/dev\.neoism\.mcp\/[^/]+\/auth$/.test(path)&&request.method==="POST")return Response.json({authorizationUrl:"https://auth.example/mcp",oauthState:"mcp-state"});
   if(path.includes("/plugins/dev.neoism.mcp/local/connect")){connected=true;return Response.json(true);}
   if(path.includes("/plugins/dev.neoism.mcp/local/disconnect")){connected=false;return Response.json(true);}
   if(path==="/plugins/dev.neoism.mcp/local/config"&&request.method==="PATCH")return Response.json({enabled:body.enabled});

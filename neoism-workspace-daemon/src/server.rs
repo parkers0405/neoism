@@ -398,6 +398,14 @@ async fn agent_proxy_inner(
     body: axum::body::Bytes,
 ) -> Response {
     let (workspace_id, root, subject) = if system {
+        // Browser redirects carry OAuth state, not the desktop's master bearer.
+        // Only this exact callback reaches Agent's one-time state validator.
+        if method == axum::http::Method::GET
+            && body.is_empty()
+            && mcp_oauth_callback_name(&path).is_some()
+        {
+            return proxy_mcp_oauth_callback(state, &path, query.as_deref()).await;
+        }
         if let Err(response) = require_system_master(&headers) {
             return response;
         }
@@ -451,28 +459,7 @@ async fn agent_proxy_inner(
             && body.is_empty()
             && mcp_oauth_callback_name(&path).is_some()
         {
-            if let Some(callback) = mcp_oauth_callback_target(&path, query.as_deref()) {
-                crate::agent::ensure_agent_server_started(state.workspaces.clone());
-                let target =
-                    format!("{}{}", agent_handler::configured_agent_server(), callback);
-                return match reqwest::Client::new().get(target).send().await {
-                    Ok(upstream) => {
-                        let status = StatusCode::from_u16(upstream.status().as_u16())
-                            .unwrap_or(StatusCode::BAD_GATEWAY);
-                        let mut response = Response::new(axum::body::Body::from_stream(
-                            upstream.bytes_stream(),
-                        ));
-                        *response.status_mut() = status;
-                        response.headers_mut().insert(
-                            header::CONTENT_TYPE,
-                            "text/html; charset=utf-8".parse().unwrap(),
-                        );
-                        response
-                    }
-                    Err(_) => StatusCode::BAD_GATEWAY.into_response(),
-                };
-            }
-            return StatusCode::BAD_REQUEST.into_response();
+            return proxy_mcp_oauth_callback(state, &path, query.as_deref()).await;
         }
         let subject = match agent_proxy_principal(
             &state.auth,
@@ -537,8 +524,13 @@ async fn agent_proxy_inner(
         let Ok(mut url) = reqwest::Url::parse(&target) else {
             return StatusCode::BAD_REQUEST.into_response();
         };
+        let callback_prefix = if system {
+            "/agent/system".to_string()
+        } else {
+            format!("/agent/workspaces/{workspace_id}")
+        };
         let Ok(callback) = reqwest::Url::parse(&format!(
-            "{scheme}://{host}/agent/workspaces/{workspace_id}/{path}/callback"
+            "{scheme}://{host}{callback_prefix}/{path}/callback"
         )) else {
             return StatusCode::BAD_REQUEST.into_response();
         };
@@ -706,6 +698,44 @@ mod agent_proxy_failure_tests {
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(response.headers()[header::RETRY_AFTER], "1");
         }
+    }
+}
+
+async fn proxy_mcp_oauth_callback(
+    state: &AppState,
+    path: &str,
+    query: Option<&str>,
+) -> Response {
+    let Some(callback) = mcp_oauth_callback_target(path, query) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    crate::agent::ensure_agent_server_started(state.workspaces.clone());
+    let base = agent_handler::configured_agent_server();
+    let Ok(client) = agent_handler::agent_http_client(&base) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    // Do not forward credentials or caller scope. The saved attempt determines
+    // the credential owner, and the existing Agent handler renders the HTML.
+    match client
+        .get(format!("{base}{callback}"))
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+    {
+        Ok(upstream) => {
+            let status = StatusCode::from_u16(upstream.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+            let mut response = Response::new(axum::body::Body::from_stream(
+                upstream.bytes_stream(),
+            ));
+            *response.status_mut() = status;
+            if let Some(content_type) = content_type {
+                response.headers_mut().insert(header::CONTENT_TYPE, content_type);
+            }
+            response
+        }
+        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
 
@@ -995,6 +1025,73 @@ mod agent_proxy_auth_tests {
     use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[tokio::test]
+    async fn system_mcp_oauth_round_trip_preserves_callback_html_without_browser_bearer() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _token = DaemonTokenGuard::set("mcp-callback-test-key");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let previous_agent = std::env::var_os("NEOISM_AGENT_SERVER");
+        let previous_server = std::env::var_os("NEOISM_SERVER");
+        std::env::set_var("NEOISM_AGENT_SERVER", format!("http://{}", listener.local_addr().unwrap()));
+        let upstream = tokio::spawn(async move {
+            axum::serve(listener, Router::new()
+                .route("/v2/health", get(|| async { Json(serde_json::json!({"healthy": true, "version": "test", "providerCredentialStore": "test"})) }))
+                .route("/v2/plugins/dev.neoism.mcp/vercel/auth", post(|Query(query): Query<HashMap<String, String>>, headers: HeaderMap| async move {
+                    assert!(headers.contains_key(header::AUTHORIZATION));
+                    Json(serde_json::json!({"redirectUri": query["redirectUri"]}))
+                }))
+                .route("/v2/plugins/dev.neoism.mcp/vercel/auth/callback", get(|Query(query): Query<HashMap<String, String>>, headers: HeaderMap| async move {
+                    assert!(!headers.contains_key(header::AUTHORIZATION));
+                    assert!(!headers.contains_key("x-neoism-directory"));
+                    assert_eq!(query.len(), 2);
+                    assert_eq!(query["code"], "test-code");
+                    assert_eq!(query["state"], "test-state");
+                    axum::response::Html(neoism_agent_service_api::browser_pages::mcp_connected())
+                })))
+                .await.unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let app = router(test_state(AuthService::bootstrap(temp.path()).unwrap()));
+        let start = app.clone().oneshot(axum::http::Request::post(
+            "/agent/system/v2/plugins/dev.neoism.mcp/vercel/auth?directory=%2Fproject&redirectUri=http%3A%2F%2Fwrong.example",
+        )
+            .header(header::AUTHORIZATION, "Bearer mcp-callback-test-key")
+            .header(header::HOST, "127.0.0.1:7878")
+            .body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(start.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(start.into_body(), 8192).await.unwrap();
+        let start: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let callback = reqwest::Url::parse(start["redirectUri"].as_str().unwrap()).unwrap();
+        assert_eq!(callback.as_str(), "http://127.0.0.1:7878/agent/system/v2/plugins/dev.neoism.mcp/vercel/auth/callback");
+        let response = app.clone().oneshot(axum::http::Request::get(format!(
+            "{}?code=test-code&state=test-state&directory=%2Fspoofed", callback.path(),
+        )).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        let expected_html = neoism_agent_service_api::browser_pages::mcp_connected();
+        let bytes = axum::body::to_bytes(response.into_body(), expected_html.len()).await.unwrap();
+        assert_eq!(bytes.as_ref(), expected_html.as_bytes());
+
+        // Only a state-bearing GET callback is exempt from the master bearer gate.
+        for (method, path, body, expected) in [
+            ("GET", "/agent/system/v2/plugins/dev.neoism.mcp/vercel/auth/callback?code=test-code", "", StatusCode::BAD_REQUEST),
+            ("POST", "/agent/system/v2/plugins/dev.neoism.mcp/vercel/auth/callback?code=test-code&state=test-state", "", StatusCode::UNAUTHORIZED),
+            ("GET", "/agent/system/v2/plugins/dev.neoism.mcp/vercel/auth/callback?code=test-code&state=test-state", "body", StatusCode::UNAUTHORIZED),
+            ("GET", "/agent/system/v2/plugins/dev.neoism.mcp/catalog?code=test-code&state=test-state", "", StatusCode::UNAUTHORIZED),
+        ] {
+            let response = app.clone().oneshot(axum::http::Request::builder()
+                .method(method).uri(path).body(axum::body::Body::from(body)).unwrap()).await.unwrap();
+            assert_eq!(response.status(), expected, "{method} {path}");
+        }
+        upstream.abort();
+        for (key, previous) in [("NEOISM_AGENT_SERVER", previous_agent), ("NEOISM_SERVER", previous_server)] {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn system_proxy_master_only_even_with_spoofed_scope_and_denies_global_routes() {

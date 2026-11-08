@@ -3,6 +3,7 @@ import type { DaemonConnection } from "../src/daemon/client";
 import type { ConnectionState, WireEvent } from "../src/daemon/protocol";
 import { terminalSession, closeTerminalSession, disposeTerminalSessions,onTerminalUnavailable } from "../src/terminal/sessions";
 import { palettes } from "../src/design/generated";
+import { usePresentationScheduler } from "../src/animation/frame-scheduler";
 test("Ghostty engines retain background output and scroll state across tab mounts, replay only new bytes, and never close daemon shells", async () => {
   const listeners = new Set<(event: WireEvent) => void>(), statuses = new Set<(state: ConnectionState) => void>();
   const sent: unknown[] = [];
@@ -52,8 +53,8 @@ test("attach replay restores terminal state without answering stale shell probes
       expect(sent.filter(message => message.PtyInput)).toEqual([]);
       const live = new TextEncoder().encode(probes);
       emit(0, { PtyOutput: { session_id: "probes", offset: replay.length, bytes: [...live] } });
-      await Promise.resolve();
-      const replies = sent.filter(message => message.PtyInput).map(message => new TextDecoder().decode(Uint8Array.from(message.PtyInput.bytes))).join("");
+       await Bun.sleep(20);
+       const replies = sent.filter(message => message.PtyInput).map(message => new TextDecoder().decode(Uint8Array.from(message.PtyInput.bytes))).join("");
       expect(replies).toContain("\x1b[?2026;2$y");
       expect(replies).toContain("\x1b[?2027;1$y");
       expect(replies).toContain("\x1b[?0u");
@@ -61,6 +62,42 @@ test("attach replay restores terminal state without answering stale shell probes
       expect(errors).toEqual([]);
     } finally { disposeTerminalSessions(client); }
   }
+});
+
+test("terminal bursts publish once per frame without delaying first echo or losing replay offsets", () => {
+  let receive!: (event: WireEvent) => void, present: (() => void) | undefined;
+  const restore = usePresentationScheduler(callback => { present = callback; return () => { present = undefined; }; });
+  const sent: any[] = [], errors: unknown[] = [];
+  const client = {
+    send: (_family: string, message: unknown) => { sent.push(message); return sent.length; },
+    subscribe: (fn: (event: WireEvent) => void) => { receive = fn; return () => {}; },
+    subscribeStatus: (fn: (state: ConnectionState) => void) => { fn({ phase: "connected", attempt: 0 }); return () => {}; },
+  } as unknown as DaemonConnection;
+  const session = terminalSession(client,"burst",palettes.pastel_dark,error => errors.push(error));
+  let publications = 0;
+  session.buffer.subscribe(() => publications++);
+  const emit = (offset: number, text: string, requestId = 0) => receive({family:"Pty",requestId,message:{PtyOutput:{session_id:"burst",offset,bytes:[...new TextEncoder().encode(text)]}}});
+  const text = () => session.buffer.frame().lines.flat().map(run => run.text).join("");
+  try {
+    emit(0,"A"); expect(text()).toContain("A"); expect(publications).toBe(1);
+    expect(present).toBeUndefined();
+    for (let i = 1; i <= 50; i++) emit(i,"x");
+    expect(publications).toBe(1);
+    present!();
+    expect(publications).toBe(2); expect(text()).toContain("A" + "x".repeat(50));
+    expect(session.buffer.nextOffset).toBe(51);
+    emit(51,"B"); emit(51,"B",1); emit(52,"C");
+    present!();
+    expect(text()).toContain("A" + "x".repeat(50) + "BC");
+    expect(session.buffer.nextOffset).toBe(53);
+    emit(53,"D"); emit(54,"E");
+    session.send(new Uint8Array([13]));
+    expect(session.buffer.nextOffset).toBe(55); expect(text()).toContain("BCDE");
+    emit(100,"reset"); emit(105,"!");
+    present!();
+    expect(text().trim()).toBe("reset!"); expect(session.buffer.nextOffset).toBe(106);
+    expect(errors).toEqual([]);
+  } finally { disposeTerminalSessions(client); restore(); }
 });
 
 test("restoring an unavailable daemon terminal surfaces its attach error", () => {

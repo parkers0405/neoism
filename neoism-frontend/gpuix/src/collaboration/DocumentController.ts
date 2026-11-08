@@ -11,6 +11,7 @@ interface Drain {send:CrdtClientMessage[];seeded:boolean;bufferId:string}
 export class DocumentController {
  private bindings=new Map<NativeEditor,Binding>();
  private owners=new Map<NativeEditor,NativeEditor>();
+ private paintedPeers=new WeakMap<NativeEditor,string>();
  private cleanup:()=>void;
  private disposed=false;
  private connected=false;
@@ -60,9 +61,15 @@ export class DocumentController {
  private sendOwned(binding:Binding,message:CrdtClientMessage){this.client.send("Crdt",{Owned:{owner_id:binding.ownerId,message}});}
  private ship(binding:Binding,drain:Drain){binding.seeded=drain.seeded;if(!this.connected)return;for(const message of drain.send)try{if("OpenBuffer" in message)this.acquire(binding,message.OpenBuffer.initial_text);else this.sendOwned(binding,message);}catch(error){this.report(error);break;}}
  private flush(binding:Binding){if(this.disposed)return;try{this.ship(binding,coreCall<Drain>("editor.crdt.flush",{id:binding.editor.id}));}catch(error){this.report(error);}}
- private paintPeers(binding:Binding){
-  const peers=this.presence.filePeers(binding.id) as CrdtPeerPresence[];
-  for(const editor of [binding.editor,...binding.views])try{editor.call("presence",{peers,fontFamily:this.config.fontFamily,fontWeight:this.config.fontWeight,fontSize:this.config.fontSize,theme:this.config.themeName});}catch(error){this.report(error);}
+  private paintPeers(binding:Binding){
+   const peers=this.presence.filePeers(binding.id) as CrdtPeerPresence[];
+   // Heartbeat timestamps affect expiry, not ink. Unrelated buffers and newly
+   // attached splits must not invalidate each other's viewport/recovery work.
+   const signature=JSON.stringify(peers.map(({updated_at_ms,...peer})=>peer));
+   for(const editor of [binding.editor,...binding.views]){
+    if(this.paintedPeers.get(editor)===signature)continue;
+    try{editor.call("presence",{peers,fontFamily:this.config.fontFamily,fontWeight:this.config.fontWeight,fontSize:this.config.fontSize,theme:this.config.themeName});this.paintedPeers.set(editor,signature);}catch(error){this.report(error);}
+   }
  }
  /** Saving is daemon-owned, after every queued local Yrs edit on this socket.
   * Request-id handling and ordering are the existing daemon transport's own. */

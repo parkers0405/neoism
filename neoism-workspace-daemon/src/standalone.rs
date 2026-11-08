@@ -549,10 +549,13 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
         };
         write_readiness(&mut std::io::stdout().lock(), &acknowledgement)?;
     }
+    // WebSocket upgrades retain this socket: send small interactive frames
+    // immediately, including when clients connect directly over remote TCP.
     let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
-    );
+    )
+    .tcp_nodelay(true);
     // NO graceful shutdown: axum's graceful path waits for every open
     // connection — and this daemon holds long-lived client websockets
     // that never close on their own. A SIGTERM'd daemon then became a

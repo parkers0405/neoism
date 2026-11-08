@@ -111,6 +111,24 @@ test("MCP distinguishes idle connections, real errors, disabled servers and lega
  expect(rows.find(row=>row.value==="off")).toMatchObject({footer:"disabled",description:"disabled"});
  expect(f.server.requests.some(request=>request.method==="POST")).toBe(false);
 });
+test("MCP requires authorization before offering connection or server actions",async()=>{
+ const entry={configScope:"global",configWritable:true,enabled:true,hasCredentials:false,oauthCapable:true,runtimeConnected:false,status:{status:"needs_auth",error:""}};
+ const f=await fixture({vercel:entry});
+ for(const status of ["needs_auth","needs_client_registration"]){
+  entry.status.status=status;
+  await f.controller.execute("/mcp");await f.pickers.at(-1)!.onSelect!("vercel");
+  expect(f.pickers.at(-1)!.options.map(row=>row.value)).toEqual(["authorize"]);
+  // Expired/rejected credentials must not restore Connect or Tools.
+  entry.hasCredentials=true;
+ }
+ await f.pickers.at(-1)!.onSelect!("authorize");
+ expect(f.urls).toEqual(["https://auth.example/mcp"]);
+ expect(f.pickers.at(-1)!.options.map(row=>row.value)).toEqual(["authorize"]);
+ expect(f.server.requests.filter(request=>request.method==="POST").map(request=>request.path)).toEqual(["/plugins/dev.neoism.mcp/vercel/auth"]);
+ entry.status.status="disconnected";
+ await f.controller.execute("/mcp");await f.pickers.at(-1)!.onSelect!("vercel");
+ expect(f.pickers.at(-1)!.options.map(row=>row.value)).toEqual(["connect","disable","tools","resources","prompts","authorize"]);
+});
 test("MCP enable and disable explicitly persist global preferences",async()=>{
  const f=await fixture();
  for(const action of ["disable","enable"]){

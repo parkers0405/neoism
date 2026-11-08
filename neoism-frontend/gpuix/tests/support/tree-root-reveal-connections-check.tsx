@@ -26,8 +26,8 @@ let now=0;const realNow=performance.now;performance.now=()=>now;
 // Exercise AppGeneration's actual hidden-layout path, not its headless atomic
 // fallback. A parked native frame counter promotes at the real 120ms cap.
 Object.assign(host.renderer,{getRenderedFrameCount:()=>0});
-const root=createRoot(host.renderer),callbacks=new Set<()=>void>();
-const restore=usePresentationScheduler(callback=>{callbacks.add(callback);return()=>{callbacks.delete(callback);};});
+const root=createRoot(host.renderer),callbacks=new Set<()=>void>(),callbackOrigins=new Map<()=>void,string|undefined>();
+const restore=usePresentationScheduler(callback=>{callbacks.add(callback);callbackOrigins.set(callback,new Error("Scheduled presentation callback").stack);return()=>{callbacks.delete(callback);callbackOrigins.delete(callback);};});
 let selected=local,workspaceActivation=0;
 const snapshot=()=>({session:selected,config:{...selected.config},workspaceActivation});
 const [generation,setGeneration]=createSignal(snapshot());
@@ -83,7 +83,7 @@ try{
   tabs.select(local);assert.equal(ink(true).style.opacity,1);
   root.flushSync(()=>setGeneration(snapshot()));assert.equal(ink(true).style.opacity,1);
   await promote();
-  root.unmount();assert.equal(callbacks.size,0);
+  root.unmount();assert.equal(callbacks.size,0,[...callbacks].map(callback=>callbackOrigins.get(callback)).join("\n"));
   console.log("Cached connection A/B/A, hidden promotion clock, config no-replay and superseded-generation reveal passed.");
 }finally{
   root.unmount();tabs.dispose();restore();performance.now=realNow;

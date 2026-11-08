@@ -250,7 +250,8 @@ export class SlashController{
    return {...option(name,description,name,label),mcp:{name,...entry}};
   }),async name=>{
    const entry=catalog[name];if(!entry)return;
-   const actions=[option(entry.runtimeConnected?"Disconnect":"Connect",name,entry.runtimeConnected?"disconnect":"connect"),option(entry.enabled?"Disable":"Enable","Global preference",entry.enabled?"disable":"enable"),option("Tools",name,"tools"),option("Resources",name,"resources"),option("Prompts",name,"prompts")];
+   const needsAuth=entry.status.status==="needs_auth"||entry.status.status==="needs_client_registration";
+   const actions=needsAuth?[]:[option(entry.runtimeConnected?"Disconnect":"Connect",name,entry.runtimeConnected?"disconnect":"connect"),option(entry.enabled?"Disable":"Enable","Global preference",entry.enabled?"disable":"enable"),option("Tools",name,"tools"),option("Resources",name,"resources"),option("Prompts",name,"prompts")];
    if(entry.oauthCapable)actions.push(option("Authorize",name,"authorize"));
    const showActions=(activity?:SlashPickerRequest["activity"])=>this.picker(scope,"mcp-action",name,actions,async action=>{
     const directory=scope.directory;

@@ -12,6 +12,7 @@ export interface PresenceAvatar {peer_id:string;display_name:string;client_os?:s
 interface Frame {peers:PresenceAvatar[];buffers:Record<string,PresencePeer[]>;send:unknown[];changed:boolean}
 interface Focus {bufferId:string;cursor:PresenceCursor;selection:PresenceSelection|null;insert:boolean}
 const empty=():Frame=>({peers:[],buffers:{},send:[],changed:false});
+const sameCursor=(a:PresenceCursor,b:PresenceCursor)=>a.line===b.line&&a.column===b.column&&(a.offset??null)===(b.offset??null);
 export function collaborativeWorkspace(config:Pick<AppConfig,"endpoint"|"collaborative">,workspace?:Workspace){return !!workspace&&((config.collaborative??!localDaemon(config.endpoint))||workspace.visibility==="shared"||workspace.visibility==="team");}
 /** One canonical presence plane per connection/model, shared by all views.
  * Original Rust coalescing/heartbeats, identity, peer dedupe and TTL policy. */
@@ -91,10 +92,15 @@ export class PresenceController {
   this.snapshots();
   this.schedule();
  }
- updateLocal(bufferId:string,cursor:PresenceCursor,selection:PresenceSelection|null=null,insert=false){
-  const changed=this.focus?.bufferId!==bufferId;
+  updateLocal(bufferId:string,cursor:PresenceCursor,selection:PresenceSelection|null=null,insert=false){
+   const previous=this.focus;
+   // Scrolling publishes view frames, not logical presence changes. The timer
+   // still owns heartbeat publication and expiry while the cursor is unchanged.
+   if(previous&&previous.bufferId===bufferId&&previous.insert===insert&&sameCursor(previous.cursor,cursor)&&
+    (previous.selection===selection||!!previous.selection&&!!selection&&sameCursor(previous.selection.anchor,selection.anchor)&&sameCursor(previous.selection.head,selection.head)))return;
+   const changed=this.focus?.bufferId!==bufferId;
   this.focus={bufferId,cursor,selection,insert};if(changed)this.snapshot(bufferId);this.tick();
  }
- clearLocal(bufferId?:string){if(bufferId&&this.focus?.bufferId!==bufferId)return;this.focus=undefined;this.tick();}
+  clearLocal(bufferId?:string){if(!this.focus||bufferId&&this.focus.bufferId!==bufferId)return;this.focus=undefined;this.tick();}
  dispose(){if(this.disposed)return;this.leaveWorkspace();this.disposed=true;clearInterval(this.timer);this.cleanup();this.knownBuffers.clear();this.listeners.clear();coreCall("presence.dispose",{id:this.id});}
 }

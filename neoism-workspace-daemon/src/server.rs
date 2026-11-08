@@ -1150,13 +1150,27 @@ mod agent_proxy_auth_tests {
         );
         assert_eq!(info.as_object().unwrap().len(), 4);
         let app = router_from_registry(SessionRegistry::shared());
+        // Installation MCP is an explicitly allowed system workflow, but only
+        // the master bearer may reach it (never paired or workspace visitors).
+        assert!(neoism_agent_service_api::daemon_credential::system_workflow_allows(
+            "GET", "/v2/plugins/dev.neoism.mcp/catalog",
+        ));
+        for token in [None, Some(device.raw_token.as_str()), Some(visitor.raw_token.as_str()), Some("neoism-daemon-v1.forged.signature")] {
+            let expected = if token.is_some() { StatusCode::FORBIDDEN } else { StatusCode::UNAUTHORIZED };
+            let mut request = axum::http::Request::get("/agent/system/v2/plugins/dev.neoism.mcp/catalog")
+                .header("x-neoism-tenant-id", "local")
+                .header("x-neoism-subject", "local-operator")
+                .header("x-neoism-directory", "/");
+            if let Some(token) = token { request = request.header(header::AUTHORIZATION, format!("Bearer {token}")); }
+            assert_eq!(app.clone().oneshot(request.body(axum::body::Body::empty()).unwrap()).await.unwrap().status(), expected);
+        }
         for (method, path) in [
             ("GET", "/agent/system/v2/config"),
             ("GET", "/agent/system/v2/management/agents"),
             ("GET", "/agent/system/v2/providers/openai/auth"),
             ("POST", "/agent/system/v2/providers/openai/oauth/authorize"),
             ("POST", "/agent/system/v2/hosting/associate"),
-            ("GET", "/agent/system/v2/plugins/dev.neoism.mcp/catalog"),
+            ("GET", "/agent/system/v2/plugins/dev.neoism.other/catalog"),
         ] {
             let req = axum::http::Request::builder()
                 .method(method)
@@ -1448,7 +1462,7 @@ mod agent_proxy_auth_tests {
         let upstream = tokio::spawn(async move {
             axum::serve(listener, Router::new().route("/v2/hosting/associate", post(|| async {
                 Json(serde_json::json!({"workspaceId": "phone-test-namespace"}))
-            })).route("/global/health", get(|| async { Json(serde_json::json!({"healthy": true})) })))
+            })).route("/v2/health", get(|| async { Json(serde_json::json!({"healthy": true, "version": "test", "providerCredentialStore": "test"})) })))
                 .await.unwrap();
         });
         let temp = tempfile::tempdir().unwrap();

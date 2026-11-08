@@ -83,7 +83,7 @@ export function ActivityRail(props: { config: AppConfig; topOffset: number; peer
     onMouseMove={() => move(region().rect[0] + region().rect[2] / 2, region().rect[1] + region().rect[3] / 2)} onMouseLeave={() => move()}
     onMouseDown={(event) => { if (event.button === undefined || event.button === 0) { if (!region().menu) animate(region().id, true, true); draw("chrome.click", { x: region().rect[0] + region().rect[2] / 2, y: region().rect[1] + region().rect[3] / 2 }); } }}
     style={{ position: "absolute", left: region().rect[0] - offset()[0], top: region().rect[1] - offset()[1], width: region().rect[2], height: region().rect[3], cursor: "pointer", backgroundColor: "transparent" }} />;
-  return <div testId="activity-rail" role="toolbar" aria-label="Navigation" aria-orientation="vertical" style={{ position: "relative", width: frame().width ?? 52 * config.scale, flexShrink: 0, alignSelf: "stretch" }}>
+  return <div testId="activity-rail" data-preserve-keyboard-focus={true} role="toolbar" aria-label="Navigation" aria-orientation="vertical" style={{ position: "relative", width: frame().width ?? 52 * config.scale, flexShrink: 0, alignSelf: "stretch" }}>
     <PaintLayer commands={base()} config={config} />
     <Index each={frame().regions.filter((region) => !region.menu)}>{(region) => hit(region)}</Index>
     <Show when={overlay().length>0}><anchored fill="window" deferred priority={3} occlude={false} style={{ pointerEvents: "none", backgroundColor: "transparent" }}>

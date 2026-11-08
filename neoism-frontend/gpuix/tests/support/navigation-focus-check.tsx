@@ -37,8 +37,13 @@ try{
  root.render(()=><AppGeneration value={{model,config}}>{current=><App model={current.model} config={current.config} visuals={visuals} registerWindowKeys={keys.register}/>}</AppGeneration>);await host.pump(root);
  stage="cold clicked file transfers actual native focus after deferred bubbling";await clickTree("code.rs");await until(()=>!!host.find("code-editor")&&host.focused===host.find("code-editor")!.id);
  const code=host.find("code-editor")!,surface=model.state.surfaces.find(surface=>surface.id===model.state.activeSurfaceId)!,editor=model.getEditor(surface);editor.call("paste",{text:"// retained dirty bytes\n"});const dirty=editor.text();
- await until(()=>!host.find("chrome-focus-cursor:content"));
- stage="already open clicked file preserves host/editor/dirty document and returns the shared block cursor";await press("left",true);await until(()=>host.focused===sidebar().id&&!!host.find("chrome-focus-cursor:sidebar"));
+  await until(()=>!host.find("chrome-focus-cursor:content"));
+  stage="mouse rail toggles preserve editor focus instead of parking the cursor in the sidebar";
+  await event("toggle-files","mouseDown",{button:0,x:26,y:80});await until(()=>!host.find("file-tree"));
+  assert.equal(host.focused,code.id);assert.equal(host.find("chrome-focus-cursor:sidebar"),undefined);
+  await event("toggle-files","mouseDown",{button:0,x:26,y:80});await until(()=>!!host.find("file-tree"));
+  assert.equal(host.focused,code.id);assert.equal(host.find("chrome-focus-cursor:sidebar"),undefined);
+  stage="already open clicked file preserves host/editor/dirty document and returns the shared block cursor";await press("left",true);await until(()=>host.focused===sidebar().id&&!!host.find("chrome-focus-cursor:sidebar"));
  stage="Alt-E close and reopen restores the sidebar cursor and arrow tracking";
  await press("e",true);await until(()=>!host.find("file-tree")&&host.focused===code.id);
  await press("e",true);await until(()=>host.focused===sidebar()?.id&&!!host.find("chrome-focus-cursor:sidebar"));

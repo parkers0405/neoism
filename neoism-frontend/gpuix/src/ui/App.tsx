@@ -406,11 +406,11 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     syntax: { comment: c.syn_comment, string: c.syn_string, number: c.syn_number, keyword: c.syn_keyword, function: c.syn_func, typeName: c.syn_type, property: c.syn_property, constructor: c.syn_constructor },
     metrics: { codeTextSize: config.fontSize, codeLineHeight: config.fontSize * 1.5, mdTextSize: d.chatTextSize * s, mdLineHeight: d.chatLineHeight * s,
       mdHeadingSizes: [21 * s, 18 * s, 16 * s, 16 * s] } };
-  const toggle = (view: typeof sidebar extends Accessor<infer T> ? T : never) => {
+  const toggle = (view: typeof sidebar extends Accessor<infer T> ? T : never, keyboardFocus = true) => {
     const next=sidebar()===view?undefined:view;
     setSidebar(next);
     // Wait for the new sidebar host before transferring native focus and cursor ownership.
-    queueMicrotask(()=>{if(sidebar()===next)focusChrome({zone:next?"sidebar":"content"});});
+    queueMicrotask(()=>{if(sidebar()!==next)return;if(keyboardFocus)focusChrome({zone:next?"sidebar":"content"});else if(chromeFocus().zone==="sidebar")focusChrome({zone:"content"});else setChromeTarget(undefined);});
   };
    const availableWidth = () => windowSize().width - 52 * s - (sidebar() ? Math.min(d.sidebarWidth, windowSize().width * 0.42) : 0) - (deviceVisible()?deviceWidth():0);
   const overlayDetails = () => availableWidth() < (d.detailMinChatWidth + d.detailMinRailWidth + d.detailGap) * s;
@@ -610,13 +610,13 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     }
   };
   const dispatchCommand = (target: CommandTarget) => { void runCommand(target).catch(model.report); };
-  const onChromeAction = async (action: string) => {
+  const onChromeAction = async (action: string, keyboardFocus = true) => {
     switch (action) {
-      case "TogglePanel": toggle("files"); return;
-      case "ToggleConversations": toggle("conversations"); return;
+      case "TogglePanel": toggle("files", keyboardFocus); return;
+      case "ToggleConversations": toggle("conversations", keyboardFocus); return;
       case "ToggleAgentSidePanel": setDetails((value) => !value); return;
-      case "OpenNotes": toggle("notes"); return;
-      case "OpenDatabases": toggle("databases"); return;
+      case "OpenNotes": toggle("notes", keyboardFocus); return;
+      case "OpenDatabases": toggle("databases", keyboardFocus); return;
       case "OpenAgent": model.openAgentHome(); return;
       case "OpenSearch": openFind(); return;
       case "open-model": {
@@ -1470,7 +1470,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     <div style={{ ...row, alignItems: "stretch", flexGrow: 1, minHeight: 0, position: "relative" }}>
     <ActivityRail config={config} topOffset={titlebarSpace()} peers={presencePeers()} sidebar={sidebar()} details={details()} agent={active()?.kind === "agent"} search={palette() && paletteMode() === "find"}
       connection={state().connection.phase} menuOpen={menu()} onMenuChange={setMenu} report={model.report}
-      onAction={(action) => ["TogglePanel", "ToggleConversations", "ToggleAgentSidePanel", "OpenNotes", "OpenDatabases", "OpenAgent", "OpenSearch"].includes(action) ? onChromeAction(action) : chromeActions.open(action)} />
+      onAction={(action) => ["TogglePanel", "ToggleConversations", "ToggleAgentSidePanel", "OpenNotes", "OpenDatabases", "OpenAgent", "OpenSearch"].includes(action) ? onChromeAction(action, false) : chromeActions.open(action)} />
       <Show when={sidebar()}><div testId="sidebar" style={{ ...column, width: Math.min(d.sidebarWidth, windowSize().width * 0.42), flexShrink: 0,
         borderTopLeftRadius: d.frameRadius * s, borderTopRightRadius: d.frameRadius * s, backgroundColor: c.bg, overflow: "hidden", borderRightWidth: d.frameStroke * s, borderColor: c.border }}>
         <Show when={sidebar() === "files" || sidebar() === "notes" || sidebar() === "conversations"}>

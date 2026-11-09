@@ -483,8 +483,17 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
     for dir in &cli.workspace {
         let workspace = workspaces.declare_startup_workspace(dir);
         if let Some(root) = workspace.root_dir.as_deref() {
-            if let Err(error) = crate::agent_hosting::associate(&workspace.id, root).await
-            {
+            if cli.auto_port && nonce.is_none() && hosted_nonce.is_none() {
+                // Local editing/terminals must survive an unavailable Agent.
+                // Explicit hosts still withhold readiness until chats are bound.
+                let workspace_id = workspace.id.clone();
+                let root = root.to_path_buf();
+                tokio::spawn(async move {
+                    if let Err(error) = crate::agent_hosting::associate(&workspace_id, &root).await {
+                        tracing::warn!(%workspace_id, %error, "local chat association unavailable; workspace service remains online");
+                    }
+                });
+            } else if let Err(error) = crate::agent_hosting::associate(&workspace.id, root).await {
                 tracing::error!(
                     workspace_id = %workspace.id,
                     root = %root.display(),

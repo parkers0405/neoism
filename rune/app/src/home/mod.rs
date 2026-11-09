@@ -344,10 +344,16 @@ impl App {
             PtyServer::PtyCreated { session_id, .. } => {
                 // A reattach acknowledges a session a tab already has; a new PTY fills the
                 // oldest pending tab.
-                if self.terminals.values().any(|t| t.shell.session.as_deref() == Some(&session_id)) { return; }
-                if let Some(tab_id) = self.pending_pty.pop_front() {
-                    if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.attach(session_id); }
-                }
+                let known = self.terminals.values().find(|t| t.shell.session.as_deref() == Some(&session_id));
+                let size = match known {
+                    Some(term) => Some(term.shell.size()),
+                    None => self.pending_pty.pop_front().and_then(|tab_id| self.terminals.get_mut(&tab_id)).map(|term| {
+                        term.shell.attach(session_id.clone());
+                        term.shell.size()
+                    }),
+                };
+                // The pane may have been measured (or resized) after the PTY was requested.
+                if let Some((cols, rows)) = size { self.send_pty(PtyClient::Resize { session_id, cols, rows }); }
             }
             PtyServer::PtyOutput { session_id, bytes, offset } => {
                 let replies = self.terminals.values_mut().find(|t| t.shell.session.as_deref() == Some(&session_id))

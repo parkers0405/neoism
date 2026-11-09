@@ -72,10 +72,8 @@ impl App {
     pub fn visible_wordmark(&self) -> Option<&'static str> {
         let tab = self.active_tab();
         match &tab.kind {
-            TabKind::Home => {
-                let busy = self.terminals.get(&tab.id).is_some_and(|t| !t.blocks.is_empty() || t.live.is_some() || t.error.is_some());
-                (!busy).then_some("splash-wordmark")
-            }
+            // The splash heads the Home scrollback; it animates while it is on screen.
+            TabKind::Home => self.splash_on_screen().then_some("splash-wordmark"),
             TabKind::Agent { session: None } => Some("agent-wordmark"),
             TabKind::Agent { .. } | TabKind::Editor { .. } => None,
         }

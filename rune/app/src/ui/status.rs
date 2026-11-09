@@ -20,6 +20,7 @@ const ADVANCE: f32 = 0.6;
 const GLYPH_MODE: &str = "\u{e7c5}";
 const GLYPH_FOLDER: &str = "\u{f07b}";
 const GLYPH_BRANCH: &str = "\u{e725}";
+const GLYPH_LINES: &str = "\u{f0c9}";
 
 /// Git branch and working-tree line counts for the branch pill.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -117,6 +118,10 @@ pub fn view(app: &App) -> El {
         if git.added > 0 { parts.push((format!(" +{}", git.added), p.green)); }
         if git.deleted > 0 { parts.push((format!(" -{}", git.deleted), p.red)); }
         pills.push(Pill { icon: (GLYPH_BRANCH.into(), Some(super::theme::NERD)), icon_bg: p.blue, text: parts });
+    }
+    if let Some(buffer) = app.active_buffer().filter(|b| b.loaded) {
+        let label = format!(" {}/{}", buffer.cursor.0 + 1, buffer.lines.len());
+        pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)] });
     }
     if let Some(fps) = app.fps {
         pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(format!(" {fps}"), p.cyan)] });

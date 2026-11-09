@@ -18,6 +18,18 @@ fn srgb(v: f32) -> f32 {
     if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
 }
 
+/// Rec. 601 luma below half: a dark theme (`IdeTheme::is_dark`).
+pub fn is_dark(color: u32) -> bool {
+    let (r, g, b) = (((color >> 16) & 0xff) as f32, ((color >> 8) & 0xff) as f32, (color & 0xff) as f32);
+    0.299 * r + 0.587 * g + 0.114 * b < 128.0
+}
+
+/// The deep elevated-panel background (`IdeTheme::panel_bg`): `black` on dark themes, else a light
+/// surface (or the page when the surface is dark).
+pub fn panel_bg(p: &Palette) -> u32 {
+    if is_dark(p.bg) { p.black } else if is_dark(p.surface) { p.bg } else { p.surface }
+}
+
 pub fn palette(name: &str) -> &'static Palette {
     PALETTES.iter().find(|p| p.name == name).unwrap_or(&PALETTES[0])
 }

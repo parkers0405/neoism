@@ -43,6 +43,12 @@ const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 pub struct App {
     /// The notes sidebar (the workspace's notes vault).
     pub notes: crate::tree::Tree,
+    /// The open app menu (rail hamburger).
+    pub menu: Option<crate::ui::menu::Menu>,
+    /// The open Settings page.
+    pub settings: Option<crate::settings::Settings>,
+    /// The window wallpaper (`ui.window.background-image`).
+    pub wallpaper: crate::ui::wallpaper::Wallpaper,
     /// The window size in points, from the root layout.
     pub window: [f32; 2],
     /// Background previews by image path (`None` while decoding).
@@ -149,6 +155,9 @@ impl App {
             tools: Default::default(),
             picker: None,
             notes: Default::default(),
+            menu: None,
+            settings: None,
+            wallpaper: crate::ui::wallpaper::Wallpaper::from_config(&crate::config::read()),
             window: [1252.0, 674.0],
             background_previews: Default::default(),
             decoded_previews: Default::default(),
@@ -226,6 +235,7 @@ impl App {
             Inbound::Reply { family, message, .. } if family == "Workspace" => {
                 if let Some(dir) = message["NotesVaultResolved"]["notes_vault_dir"].as_str() { self.apply_notes_vault(dir); }
             }
+            Inbound::Reply { family, message, .. } if family == "Config" => self.apply_config_reply(&message),
             Inbound::Reply { .. } => {}
         }
     }

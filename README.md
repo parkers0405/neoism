@@ -12,6 +12,9 @@ Run commands, delegate coding tasks, and make changes yourself. Move between she
 
 [Download](https://github.com/parkers0405/neoism/releases) · [Get started](docs/README.md) · [Agent SDK](neoism-agent/sdk/typescript/README.md) · [Art](https://neoism.ai/art)
 
+> **Frontend rewrite in progress.** The UI is being rebuilt natively in Rust on [Rune](https://github.com/anomalyco/rune).
+> The plan, design spec and reference screenshots live in [`rune/`](rune/README.md); agents start with [`AGENTS.md`](AGENTS.md).
+
 ## Build with agents. Stay in control.
 
 - **A command line you can work with.** Ghostty-powered terminals organize commands and output into blocks, with completion previews, command history, filtering, copying, and reusable commands. Choose the block interface or the classic terminal.

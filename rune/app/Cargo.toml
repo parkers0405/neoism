@@ -1,0 +1,29 @@
+[package]
+name = "neoism-rune"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Neoism frontend built natively on Rune"
+
+# Its own workspace: Rune pins Rust 1.99.1 and the services keep building unchanged.
+[workspace]
+
+[[bin]]
+name = "neoism-rune"
+path = "src/main.rs"
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb", features = ["markdown"] }
+neoism-protocol = { path = "../../neoism-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+dirs = "6"
+png = "0.17"
+
+[profile.release]
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2

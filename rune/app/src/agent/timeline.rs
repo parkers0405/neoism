@@ -151,14 +151,23 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
         // alone leaves a many-paragraph text its full height, which breaks narrow transcripts.
         HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)
             .font(app.ty.small()).color(rgb(p.muted)).mt(16.0).w_full().wrap().max_lines(6).truncate(),
-        HistoryMessageKind::Assistant => col().key(key).w_full().mt(24.0).gap(14.0)
-            .child(Markdown::new(message.text.clone())
-                .highlights(prose::highlights(&message.text, p))
-                .streaming(streaming)
-                .reveal(if streaming { 0.18 } else { 0.0 })
-                .code_frame(code_frame(app))
-                .render(&markdown_style(app)))
-            .child_meta(app, message),
+        HistoryMessageKind::Assistant => {
+            // Pipe tables render as the original's data grid; everything else as markdown.
+            let style = markdown_style(app);
+            let mut body = col().key(key).w_full().mt(24.0).gap(14.0);
+            for segment in super::table::segments(&message.text) {
+                body = body.child(match segment {
+                    super::table::Segment::Table(rows) => super::table::view(app, &rows, app.timeline_width, &style),
+                    super::table::Segment::Text(text) => Markdown::new(text.to_owned())
+                        .highlights(prose::highlights(text, p))
+                        .streaming(streaming)
+                        .reveal(if streaming { 0.18 } else { 0.0 })
+                        .code_frame(code_frame(app))
+                        .render(&style),
+                });
+            }
+            body.child_meta(app, message)
+        }
     }
 }
 

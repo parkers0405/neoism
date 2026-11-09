@@ -6,6 +6,7 @@ pub(crate) mod family;
 mod header;
 mod prose;
 mod sidebar;
+mod table;
 pub mod slash;
 mod user;
 mod timeline;

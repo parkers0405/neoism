@@ -26,6 +26,7 @@ pub enum Connection {
 pub enum Sidebar {
     Conversations,
     Files,
+    Notes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +48,8 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// The notes sidebar (the workspace's notes vault).
+    pub notes: crate::tree::Tree,
     /// The window size in points, from the root layout.
     pub window: [f32; 2],
     /// Background previews by image path (`None` while decoding).
@@ -151,6 +154,7 @@ impl App {
             wheel_target: None,
             tools: Default::default(),
             picker: None,
+            notes: Default::default(),
             window: [1252.0, 674.0],
             background_previews: Default::default(),
             decoded_previews: Default::default(),
@@ -222,6 +226,9 @@ impl App {
                     self.apply_file_content(&path, &bytes);
                     self.apply_opened_file(&path, &bytes);
                 }
+            }
+            Inbound::Reply { family, message, .. } if family == "Workspace" => {
+                if let Some(dir) = message["NotesVaultResolved"]["notes_vault_dir"].as_str() { self.apply_notes_vault(dir); }
             }
             Inbound::Reply { .. } => {}
         }

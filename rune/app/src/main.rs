@@ -56,6 +56,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Presence orbs flow every frame while a transcript with people in it is on screen.
     if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
     app.editor_follow_cursor(tx);
+    let focus_changed = app.sync_field_focus();
     // The finder searches once its query settles.
     if let Some(delay) = app.finder_tick(std::time::Instant::now()) { tx.wake_after(delay); }
     // The cursor trails and blinks on its own schedule.
@@ -70,7 +71,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

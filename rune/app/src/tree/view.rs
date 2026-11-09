@@ -18,12 +18,13 @@ const HEADER_H: f32 = 36.0;
 pub fn view(app: &App) -> El {
     let p = app.pal;
     let s = app.ty.scale();
-    let rows = app.tree.rows();
+    let Some(tree) = app.active_tree() else { return el() };
+    let rows = tree.rows();
     let focused = app.focus == Focus::Sidebar;
     let mut list = col().w_full();
     for (index, item) in rows.iter().enumerate() {
-        let selected = index == app.tree.selected;
-        let open = item.entry.is_dir && app.tree.open.contains(&item.path);
+        let selected = index == tree.selected;
+        let open = item.entry.is_dir && tree.open.contains(&item.path);
         let (glyph, icon_color) = if item.entry.is_dir {
             (if open { icons::FOLDER_OPEN } else { icons::FOLDER_CLOSED }, p.folder)
         } else {
@@ -49,7 +50,7 @@ pub fn view(app: &App) -> El {
     col().key("file-tree").w_full().h_full().fill(rgb(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(row().w_full().h(HEADER_H * s).px(16.0 * s).center_y()
-            .child(text("File Tree").font(app.ty.sized_bold(14.0)).color(rgb(p.fg))))
+            .child(text(if app.sidebar == Some(crate::app::Sidebar::Notes) { "Notes" } else { "File Tree" }).font(app.ty.sized_bold(14.0)).color(rgb(p.fg))))
         .child(col().key("file-tree-rows").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false }).child(list))
 }
 

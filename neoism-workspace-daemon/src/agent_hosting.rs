@@ -1,4 +1,4 @@
-//! Called only for operator-supplied `--workspace` roots, before accepting joins.
+//! Associates workspace roots with their local Agent chat namespace.
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},

@@ -46,6 +46,9 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// Sub-agent families: child sessions, their roots and roster order.
+    pub families: crate::agent::Families,
+    pub header_hover: Option<crate::agent::HeaderStep>,
     /// Branch and line counts from the daemon's Git `RepoStatus` watch.
     pub git: Option<crate::ui::status::GitSummary>,
     pub splash: crate::home::SplashState,
@@ -112,6 +115,8 @@ impl App {
             scroll: Default::default(),
             wheel_target: None,
             picker: None,
+            families: Default::default(),
+            header_hover: None,
             // The local branch until the daemon's Git watch reports counts.
             git: crate::config::git_branch().map(|branch| crate::ui::status::GitSummary { branch, ..Default::default() }),
             splash: Default::default(),

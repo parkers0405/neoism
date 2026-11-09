@@ -45,7 +45,9 @@ impl App {
             TabKind::Home => "Home".into(),
             TabKind::Agent { session: None } => "Neoism".into(),
             TabKind::Agent { session: Some(id) } => self.threads.iter().find(|t| &t.session_id == id)
-                .map(|t| t.title.clone()).unwrap_or_else(|| "Neoism".into()),
+                .map(|t| t.title.clone())
+                .or_else(|| self.families.member(id).map(|m| m.title.clone()))
+                .unwrap_or_else(|| "Neoism".into()),
         }
     }
 

@@ -16,6 +16,8 @@ const MAX_ROWS: usize = 20_000;
 /// A live block re-reads only this many rows above where its cursor was at the last read.
 /// Appending output is the common case; progress bars move up a few lines at most.
 const LIVE_REREAD_ROWS: usize = 64;
+/// Rows one block keeps (GPUiX's capture limit; Ghostty's scrollback holds about as many).
+const BLOCK_ROWS: usize = 2000;
 
 #[derive(Clone, Debug)]
 pub struct Block {
@@ -31,6 +33,8 @@ pub struct Block {
     pub background: bool,
     /// A running block's cursor: `(row within lines, column)`.
     pub cursor: Option<(usize, u16)>,
+    /// Only the newest `BLOCK_ROWS` rows were kept.
+    pub truncated: bool,
 }
 
 impl Block {
@@ -54,6 +58,9 @@ struct Live {
     cursor: Option<(usize, u16)>,
     /// The next read must take every row (after a resize reflowed them).
     stale: bool,
+    /// Once the block outgrows `BLOCK_ROWS`: a mark at its oldest kept row.
+    base: Option<u64>,
+    truncated: bool,
 }
 
 /// One shell: Ghostty plus the block model built from its shell-integration marks.
@@ -130,6 +137,9 @@ impl Shell {
             }
         }
     }
+
+    /// The next PTY output byte this shell needs (the cursor for a reattach).
+    pub fn next_offset(&self) -> Option<u64> { self.offset }
 
     /// The grid size the PTY should have.
     pub fn size(&self) -> (u16, u16) { self.size }
@@ -236,33 +246,58 @@ impl Shell {
         Some(Live {
             id: self.next_id, command: command.to_owned(), cwd: self.cwd.clone(), started: Instant::now(), start, mark,
             background: command.is_empty(), clear_command: false, saw_clear: false, lines: Vec::new(),
-            cursor_row: 0, cursor: None, stale: false,
+            cursor_row: 0, cursor: None, stale: false, base: None, truncated: false,
         })
     }
 
     /// Bring a live block's rows up to date from Ghostty's grid (never from a viewport copy).
     /// Rows above `LIVE_REREAD_ROWS` before the last cursor row are kept from the previous read.
-    fn capture(vt: &Vt, block: &mut Live) {
+    /// A block keeps its newest `BLOCK_ROWS` rows (as GPUiX's capture did), anchored by a mark at
+    /// the oldest one kept, so its tail stays live after its own start leaves the scrollback.
+    fn capture(vt: &mut Vt, block: &mut Live) {
         let end = vt.position();
         if end.alt { return; }
-        // Where the block starts now (scrollback pruning and reflow move it). A mark Ghostty
-        // can no longer resolve (pruned, reset) keeps the rows already read.
-        let Some(first) = vt.mark_row(block.mark) else { return };
+        // Where the kept rows start now (scrollback pruning and reflow move it).
+        let anchor = block.base.unwrap_or(block.mark);
+        let first = match vt.mark_row(anchor) {
+            Some(first) => first,
+            // The anchor was pruned: what remains of the scrollback is all this block's.
+            None => {
+                let first = (end.row + 1).saturating_sub(BLOCK_ROWS as u64);
+                Self::rebase(vt, block, first);
+                block.stale = true;
+                first
+            }
+        };
         let keep = if block.stale { 0 } else { block.cursor_row.saturating_sub(LIVE_REREAD_ROWS).min(block.lines.len()) };
         block.stale = false;
         let Ok(mut rows) = vt.capture(first + keep as u64, end.row + 1) else { return };
         // B usually follows visible prompt ink on the same row; never archive that prefix.
-        if keep == 0 && block.background && block.start.col > 0 && first == block.start.row {
+        if keep == 0 && block.base.is_none() && block.background && block.start.col > 0 && first == block.start.row {
             if let Some(row) = rows.first_mut() { *row = after_column(row, block.start.col as usize); }
         }
         block.lines.truncate(keep);
         block.lines.extend(rows);
+        let mut first = first;
+        if block.lines.len() > BLOCK_ROWS {
+            let drop = block.lines.len() - BLOCK_ROWS;
+            block.lines.drain(..drop);
+            first += drop as u64;
+            Self::rebase(vt, block, first);
+        }
         block.cursor_row = (end.row.saturating_sub(first)) as usize;
         block.cursor = Some((block.cursor_row, end.col));
     }
 
+    /// Anchor a truncated block at screen row `first`.
+    fn rebase(vt: &mut Vt, block: &mut Live, first: u64) {
+        if let Some(old) = block.base.take() { vt.unmark(old); }
+        block.base = vt.mark_at(first);
+        block.truncated = true;
+    }
+
     fn refresh_live(&mut self) {
-        let Some(vt) = &self.vt else { return };
+        let Some(vt) = &mut self.vt else { return };
         let active = if self.running.is_some() { &mut self.running } else { &mut self.background };
         self.live = active.as_mut().and_then(|block| {
             Self::capture(vt, block);
@@ -270,6 +305,7 @@ impl Shell {
             visible.then(|| Block {
                 id: block.id, command: block.command.clone(), cwd: block.cwd.clone(), started: block.started,
                 elapsed_ms: None, exit: None, lines: block.lines.clone(), background: block.background, cursor: block.cursor,
+                truncated: block.truncated,
             })
         });
     }
@@ -278,6 +314,7 @@ impl Shell {
         if let Some(vt) = &mut self.vt {
             Self::capture(vt, &mut block);
             vt.unmark(block.mark);
+            if let Some(base) = block.base { vt.unmark(base); }
         }
         let mut lines = block.lines;
         while lines.last().is_some_and(|r| !ghostty::row_visible(r)) { lines.pop(); }
@@ -285,6 +322,7 @@ impl Shell {
             self.blocks.push(Block {
                 id: block.id, command: block.command, cwd: block.cwd, started: block.started,
                 elapsed_ms: Some(block.started.elapsed().as_millis()), exit, lines, background: block.background, cursor: None,
+                truncated: block.truncated,
             });
         }
         self.live = None;
@@ -317,6 +355,8 @@ impl Shell {
                         running.lines.clear();
                         running.cursor_row = 0;
                         running.stale = true;
+                        if let Some(base) = running.base.take() { vt.unmark(base); }
+                        running.truncated = false;
                     }
                 } else if self.running.is_none() && self.ready && !self.pending {
                     // Readline's Ctrl-L repaint.
@@ -389,7 +429,10 @@ impl Shell {
     /// Drop every block and capture (the `clear` command, Ctrl-L at a prompt).
     pub fn clear(&mut self) {
         if let Some(vt) = &mut self.vt {
-            for live in [self.running.take(), self.background.take()].into_iter().flatten() { vt.unmark(live.mark); }
+            for live in [self.running.take(), self.background.take()].into_iter().flatten() {
+                vt.unmark(live.mark);
+                if let Some(base) = live.base { vt.unmark(base); }
+            }
         }
         self.blocks.clear();
         self.live = None;
@@ -513,5 +556,30 @@ mod tests {
         assert_eq!(text.iter().filter(|l| !l.is_empty()).count(), 300);
         t.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07", None);
         assert_eq!(t.blocks.last().unwrap().lines.len(), 300);
+    }
+
+    #[test]
+    fn huge_output_keeps_the_newest_rows_live_and_survives_archiving() {
+        let mut t = shell();
+        t.resize(40, 10, (9, 20));
+        t.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07", None);
+        t.submission("seq 30000").unwrap();
+        t.feed(b"seq 30000\r\n\x1b]133;C\x07", None);
+        for chunk in (1..=30000).collect::<Vec<_>>().chunks(700) {
+            let mut output = Vec::new();
+            for n in chunk { output.extend(format!("{n}\r\n").bytes()); }
+            t.feed(&output, None);
+            t.sync();
+        }
+        let live = t.live.clone().unwrap();
+        assert!(live.truncated);
+        assert!(live.lines.len() <= BLOCK_ROWS && live.lines.len() > BLOCK_ROWS / 2, "{}", live.lines.len());
+        let last = live.lines.iter().rev().map(|r| ghostty::row_text(r)).find(|l| !l.is_empty());
+        assert_eq!(last.as_deref(), Some("30000"));
+        t.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07", None);
+        let block = t.blocks.last().unwrap();
+        assert!(block.truncated);
+        assert_eq!(ghostty::row_text(block.lines.last().unwrap()), "30000");
+        assert!(block.lines.len() <= BLOCK_ROWS);
     }
 }

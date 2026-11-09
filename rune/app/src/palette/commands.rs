@@ -13,6 +13,9 @@ pub enum Action {
     DecreaseFontSize,
     ResetFontSize,
     ThemePicker,
+    SearchFiles,
+    SearchWords,
+    SearchGitChanges,
     OpenAgent,
     ToggleConversations,
     Quit,
@@ -22,6 +25,7 @@ pub enum Action {
 pub enum Service {
     Neoism,
     Agent,
+    Workspace,
 }
 
 impl Service {
@@ -29,6 +33,7 @@ impl Service {
         match self {
             Service::Neoism => "neoism",
             Service::Agent => "neoism-agent",
+            Service::Workspace => "workspace",
         }
     }
 
@@ -36,6 +41,7 @@ impl Service {
         match self {
             Service::Neoism => "\u{f0c9}",
             Service::Agent => "\u{f135}",
+            Service::Workspace => "\u{f07b}",
         }
     }
 }
@@ -61,6 +67,9 @@ pub const COMMANDS: &[Command] = &[
     cmd("Decrease Font Size", "Cmd+-", Action::DecreaseFontSize, Service::Neoism),
     cmd("Reset Font Size", "Cmd+0", Action::ResetFontSize, Service::Neoism),
     cmd("Theme Picker", "", Action::ThemePicker, Service::Neoism),
+    cmd("Search Files", "<leader>ff", Action::SearchFiles, Service::Workspace),
+    cmd("Search Words", "<leader>fw", Action::SearchWords, Service::Workspace),
+    cmd("Search Git Changes", "<leader>fg", Action::SearchGitChanges, Service::Workspace),
     cmd("Neoism", "Alt+A", Action::OpenAgent, Service::Agent),
     cmd("Conversations", "Alt+C", Action::ToggleConversations, Service::Agent),
     cmd("Quit", "Cmd+Q", Action::Quit, Service::Neoism),

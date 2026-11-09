@@ -26,7 +26,6 @@ pub fn view(app: &App) -> El {
 
     let input = rune::text_input(&picker.query, app.ty.sized(14.0))
         .key("picker-query")
-        .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder(if themes { "Search themes..." } else { "Type a command..." }, rgb(p.muted))
         .color(rgb(p.fg)).w_full()
         .on_edit(|a: &mut App| &mut a.picker.as_mut().expect("picker open").query)
@@ -87,6 +86,9 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
                 if let (true, Some(picker)) = (inside, &mut a.picker) { picker.selected = index; }
             })
             .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker(Some(index), tx));
+        if selected {
+            line = line.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("picker-row".into(), r); });
+        }
         if let Some(icon) = item.icon {
             line = line.child(text(icon).font(app.ty.icon_sized(13.0)).color(rgb(p.dim)));
         }

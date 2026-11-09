@@ -9,6 +9,8 @@ pub enum TabKind {
     Home,
     /// An agent conversation; `None` until the first prompt creates the thread.
     Agent { session: Option<String> },
+    /// A file in the code editor (workspace-relative path).
+    Editor { path: String },
 }
 
 pub struct Tab {
@@ -43,6 +45,7 @@ impl App {
     pub fn tab_title(&self, tab: &Tab) -> String {
         match &tab.kind {
             TabKind::Home => "Home".into(),
+            TabKind::Editor { path } => path.rsplit('/').next().unwrap_or(path).to_owned(),
             TabKind::Agent { session: None } => "Neoism".into(),
             TabKind::Agent { session: Some(id) } => self.threads.iter().find(|t| &t.session_id == id)
                 .map(|t| t.title.clone())
@@ -60,6 +63,7 @@ impl App {
             TabKind::Home => self.run_command(index, text),
             TabKind::Agent { session: Some(session_id) } => self.submit_prompt(&session_id, text),
             TabKind::Agent { session: None } => self.create_thread(index, text),
+            TabKind::Editor { .. } => {}
         }
     }
 
@@ -73,7 +77,7 @@ impl App {
                 (!busy).then_some("splash-wordmark")
             }
             TabKind::Agent { session: None } => Some("agent-wordmark"),
-            TabKind::Agent { .. } => None,
+            TabKind::Agent { .. } | TabKind::Editor { .. } => None,
         }
     }
 

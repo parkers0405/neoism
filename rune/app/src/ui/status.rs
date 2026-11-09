@@ -87,7 +87,7 @@ pub fn view(app: &App) -> El {
 
     let (mode, mode_color) = match app.active_tab().kind {
         TabKind::Agent { .. } => ("AGENT", p.red),
-        TabKind::Home => ("NORMAL", p.blue),
+        TabKind::Home | TabKind::Editor { .. } => ("NORMAL", p.blue),
     };
     let mut bar = el().key("original-statusline").w_full().h(strip_h).fill(rgb(p.bg))
         .child(el().w_full().h((2.0 * s).max(2.0)).fill(rgb(p.surface)).absolute(0.0, 0.0));

@@ -5,6 +5,8 @@ mod agent;
 mod app;
 mod config;
 mod daemon;
+mod editor;
+mod finder;
 mod ghostty;
 mod home;
 mod keys;
@@ -47,6 +49,9 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if animating { tx.wake_after(std::time::Duration::ZERO); }
     // Presence orbs flow every frame while a transcript with people in it is on screen.
     if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
+    app.editor_follow_cursor(tx);
+    // The finder searches once its query settles.
+    if let Some(delay) = app.finder_tick(std::time::Instant::now()) { tx.wake_after(delay); }
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
     let target = app.cursor_target();
@@ -86,7 +91,9 @@ fn main() {
         ],
         ..AppSpec::new("Neoism", (1252.0, 674.0), App::new, ui::chrome::root)
     };
-    rune::set_app_id("ai.neoism.rune");
+    // A distinct id per instance lets several builds run side by side (and be found by class).
+    let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
+    rune::set_app_id(Box::leak(app_id.into_boxed_str()));
     let mut app = rune::App::new(spec).init(App::new);
     // Every encoded frame feeds the FPS pill; `NEOISM_RUNE_FRAME_TRACE=1` also logs each one for
     // the missed-frame analysis the GPUiX investigation used (`docs/gpuix-live-rendering-baseline.md`).

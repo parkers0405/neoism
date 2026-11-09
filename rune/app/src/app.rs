@@ -46,6 +46,18 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// The editor cursor moved: scroll it into view after its next layout.
+    pub editor_follow: bool,
+    /// A `g` waiting for its second key (`gg`).
+    pub pending_g: bool,
+    /// Open files by workspace-relative path.
+    pub buffers: HashMap<String, crate::editor::Buffer>,
+    /// The active editor's `(offset, max, viewport)`, mirrored from its scroll view.
+    pub editor_scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
+    /// Lines the active editor shows at once.
+    pub editor_rows: usize,
+    /// The open project finder (`Alt+S`).
+    pub finder: Option<crate::finder::Finder>,
     /// This person's presence name (their orb seed and message author).
     pub local_name: String,
     /// Presence orbs (profile pictures) shown so far.
@@ -127,6 +139,12 @@ impl App {
             scroll: Default::default(),
             wheel_target: None,
             picker: None,
+            editor_follow: false,
+            pending_g: false,
+            buffers: HashMap::new(),
+            editor_scroll: Default::default(),
+            editor_rows: 30,
+            finder: None,
             local_name: crate::ui::orb::local_display_name(config.display_name.as_deref()),
             orbs: Default::default(),
             timeline_width: 830.0,
@@ -174,6 +192,17 @@ impl App {
             }
             Inbound::Reply { family, message, .. } if family == "Git" => {
                 if let Some(status) = message.get("RepoStatus") { self.apply_git_status(status); }
+            }
+            Inbound::Reply { family, message, .. } if family == "Search" => {
+                if let Ok(typed) = serde_json::from_value(message) { self.apply_search(typed); }
+            }
+            Inbound::Reply { family, message, .. } if family == "Files" => {
+                if let Some(file) = message.get("FileContent") {
+                    let path = file["path"].as_str().unwrap_or_default().to_owned();
+                    let bytes: Vec<u8> = serde_json::from_value(file["bytes"].clone()).unwrap_or_default();
+                    self.apply_file_content(&path, &bytes);
+                    self.apply_opened_file(&path, &bytes);
+                }
             }
             Inbound::Reply { .. } => {}
         }

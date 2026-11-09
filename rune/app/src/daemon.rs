@@ -20,6 +20,7 @@ pub enum Family {
     Agent,
     Pty,
     Files,
+    Search,
     Git,
     Config,
 }
@@ -31,6 +32,7 @@ impl Family {
             Family::Agent => "Agent",
             Family::Pty => "Pty",
             Family::Files => "Files",
+            Family::Search => "Search",
             Family::Git => "Git",
             Family::Config => "Config",
         }

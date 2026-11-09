@@ -28,6 +28,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(super::status::view(app))
         .child_if(app.overlay.is_some(), || agent::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
+        .child_if(app.finder.is_some(), || crate::finder::view(app))
         .child_if(app.cursor.visible, || cursor_quad(app))
 }
 
@@ -39,7 +40,7 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
     } else {
         match app.active_tab().kind {
             TabKind::Agent { .. } => app.ty.composer().size,
-            TabKind::Home => app.ty.small().size,
+            TabKind::Home | TabKind::Editor { .. } => app.ty.small().size,
         }
     };
     app.cursor.caret_font.set(font);
@@ -107,9 +108,13 @@ fn pane_tabs(app: &App) -> El {
         .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border));
     for (index, tab) in app.tabs.iter().enumerate() {
         let active = index == app.active;
-        let (g, color) = match tab.kind {
+        let (g, color) = match &tab.kind {
             TabKind::Home => (glyph::HOME, rgb(p.fg)),
             TabKind::Agent { .. } => ("\u{f0a1e}", rgb(p.fg)),
+            TabKind::Editor { path } => {
+                let (glyph, color) = crate::ui::icons::for_file(path.rsplit('/').next().unwrap_or(path));
+                (glyph, rgb(color))
+            }
         };
         let title = app.tab_title(tab);
         let fg = if active { rgb(p.fg) } else { rgb(p.muted) };
@@ -139,6 +144,7 @@ fn content(app: &App, cx: &mut Cx<App>) -> El {
     match &tab.kind {
         TabKind::Home => crate::home::view(app),
         TabKind::Agent { session } => agent::pane(app, session.as_deref(), cx),
+        TabKind::Editor { .. } => crate::editor::view(app),
     }
     .key(format!("pane-content:{}", tab.id))
     .grow(1.0)

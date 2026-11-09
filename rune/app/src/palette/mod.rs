@@ -20,6 +20,8 @@ pub enum Mode {
     Commands,
     Themes,
     Backgrounds,
+    /// `Alt+D`: `cd` into a workspace directory.
+    Directories,
 }
 
 pub struct Picker {
@@ -28,6 +30,9 @@ pub struct Picker {
     pub selected: usize,
     /// The Backgrounds catalog, read when the picker opens.
     pub backgrounds: Vec<backgrounds::Background>,
+    /// Directory hits for the `cd` query, newest search only.
+    pub directories: Vec<String>,
+    directory_request: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,6 +40,7 @@ pub enum Target {
     Command(Action),
     Theme(&'static str),
     Background(usize),
+    Directory(usize),
 }
 
 pub struct Row {
@@ -61,7 +67,8 @@ impl Picker {
             let dir = crate::config::dir();
             backgrounds::catalog(&dir, crate::config::background_image().as_deref())
         } else { Vec::new() };
-        Picker { mode, query, selected: 0, backgrounds }
+        if mode == Mode::Directories { query.replace_text("cd "); }
+        Picker { mode, query, selected: 0, backgrounds, directories: Vec::new(), directory_request: 0 }
     }
 
     /// Ranked rows for the current query; ties keep catalog order.
@@ -75,6 +82,10 @@ impl Picker {
             Mode::Backgrounds => self.backgrounds.iter().enumerate().filter_map(|(i, b)| {
                 let score = fuzzy_score(query, &b.name).or_else(|| fuzzy_score(query, &b.description).map(|s| s - 4))?;
                 Some((score, Row { icon: None, title: b.name.clone(), shortcut: "", target: Target::Background(i) }))
+            }).collect(),
+            // The daemon ranks directories; rows keep its order.
+            Mode::Directories => return self.directories.iter().enumerate().map(|(i, path)| {
+                Row { icon: Some(crate::ui::icons::FOLDER_CLOSED), title: path.clone(), shortcut: "", target: Target::Directory(i) }
             }).collect(),
             Mode::Themes => PALETTES.iter().filter_map(|p| {
                 let title = theme_display_name(p.name);
@@ -94,6 +105,24 @@ impl App {
             picker.selected = PALETTES.iter().position(|p| std::ptr::eq(p, self.pal)).unwrap_or(0);
         }
         self.picker = Some(picker);
+        if mode == Mode::Directories { self.search_directories(); }
+    }
+
+    /// Search directories for the `cd …` query (`ChromeActionsController.searchDirectories`).
+    pub fn search_directories(&mut self) {
+        let Some(picker) = &mut self.picker else { return };
+        if picker.mode != Mode::Directories { return; }
+        picker.directory_request += 1;
+        let query = picker.query.text.strip_prefix("cd").unwrap_or(&picker.query.text).trim().to_owned();
+        let message = json!({"SearchDirectories": {"req_id": picker.directory_request, "query": query, "cwd": ""}});
+        if let Some(daemon) = &self.daemon { daemon.send_scoped(Family::Search, message, &self.cwd); }
+    }
+
+    pub(crate) fn apply_directory_hits(&mut self, req_id: u64, hits: Vec<String>) {
+        let Some(picker) = &mut self.picker else { return };
+        if picker.mode != Mode::Directories || req_id != picker.directory_request { return; }
+        picker.directories = hits;
+        picker.selected = 0;
     }
 
     pub fn move_picker(&mut self, delta: isize) {
@@ -111,6 +140,12 @@ impl App {
         match row.target {
             Target::Command(action) => self.run_action(action, tx),
             Target::Theme(name) => self.apply_theme(name),
+            Target::Directory(index) => {
+                if let Some(dir) = picker.directories.get(index) {
+                    let path = std::path::Path::new(&self.cwd).join(dir).display().to_string();
+                    self.change_directory(&path);
+                }
+            }
             Target::Background(index) => {
                 if let Some(background) = picker.backgrounds.get(index) { self.apply_background(&background.choice); }
             }

@@ -15,6 +15,7 @@ mod settings;
 mod tabs;
 mod tree;
 mod ui;
+mod workspace;
 mod wordmark;
 
 use rune::{AppSpec, ImageCache, KeyEvent, Tx};

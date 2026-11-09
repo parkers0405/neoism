@@ -28,10 +28,13 @@ pub fn view(app: &App) -> El {
 
     let input = rune::text_input(&picker.query, app.ty.sized(14.0))
         .key("picker-query")
-        .placeholder(match picker.mode { Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...", Mode::Commands => "Type a command..." }, rgb(p.muted))
+        .placeholder(match picker.mode { Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...", Mode::Commands | Mode::Directories => "Type a command..." }, rgb(p.muted))
         .color(rgb(p.fg)).w_full()
         .on_edit(|a: &mut App| &mut a.picker.as_mut().expect("picker open").query)
-        .on_input_change(|a: &mut App, _: &mut Tx| { if let Some(picker) = &mut a.picker { picker.selected = 0; } })
+        .on_input_change(|a: &mut App, _: &mut Tx| {
+            if let Some(picker) = &mut a.picker { picker.selected = 0; }
+            a.search_directories();
+        })
         .on_input_key(keys)
         .on_submit(|a: &mut App, tx: &mut Tx| a.accept_picker(None, tx));
     let field = if themes {

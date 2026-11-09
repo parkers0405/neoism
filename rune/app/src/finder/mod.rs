@@ -160,6 +160,10 @@ impl App {
     }
 
     pub(crate) fn apply_search(&mut self, message: SearchServerMessage) {
+        if let SearchServerMessage::SearchDirectoriesResult { req_id, hits } = message {
+            self.apply_directory_hits(req_id, hits.into_iter().map(|h| h.path).collect());
+            return;
+        }
         let Some(finder) = &mut self.finder else { return };
         let (req_id, hits) = match message {
             SearchServerMessage::SearchFilesResult { req_id, hits } => (req_id, hits.into_iter().map(|h| Hit::File { path: h.path }).collect::<Vec<_>>()),

@@ -389,6 +389,8 @@ impl App {
                     self.create_pty(tab_id);
                 }
             }
+            PtyServer::TerminalDirectoryChanged { request_id, directory, .. } => self.directory_changed(&request_id, Some(&directory)),
+            PtyServer::TerminalDirectoryChangeFailed { request_id, .. } => self.directory_changed(&request_id, None),
             _ => {}
         }
     }

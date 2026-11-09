@@ -51,7 +51,8 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
         if let Key::Text(t) = &event.key {
             match t.to_lowercase().as_str() {
                 "a" => { app.open_tab(TabKind::Agent { session: None }); return true; }
-                "t" | "d" => { app.open_tab(TabKind::Home); return true; }
+                "t" => { app.open_tab(TabKind::Home); return true; }
+                "d" => { app.open_picker(crate::palette::Mode::Directories); return true; }
                 "c" => {
                     app.toggle_conversations();
                     return true;

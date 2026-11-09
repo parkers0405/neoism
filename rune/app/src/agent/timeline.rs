@@ -32,7 +32,8 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let messages = session.map(|s| s.messages.as_slice()).unwrap_or(&[]);
     let streaming = session.is_some_and(|s| s.streaming);
     let live_from = session.and_then(|s| s.live_from).unwrap_or(usize::MAX);
-    let mut rows = col().key(format!("timeline:{session_id}")).w_full().px(COLUMN_PAD_X).pt(16.0).pb(200.0).gap(0.0);
+    let mut rows = col().key(format!("timeline:{session_id}")).w_full().px(COLUMN_PAD_X).pt(16.0).pb(200.0).gap(0.0)
+        .on_layout(|a: &mut App, [_, _, w, _]: [f32; 4]| a.timeline_width = (w - 2.0 * COLUMN_PAD_X).max(0.0));
     for (index, message) in messages.iter().enumerate() {
         let trace = matches!(message.kind, HistoryMessageKind::Tool | HistoryMessageKind::Subtask | HistoryMessageKind::Reasoning);
         if message.kind == HistoryMessageKind::System && message.title == "Context" { continue; }
@@ -131,10 +132,8 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let p = app.pal;
     let key = format!("msg:{}", message.id);
     match message.kind {
-        HistoryMessageKind::User => row().key(key).w_full().justify_end().items_end().gap(12.0).mt(26.0)
-            .child(col().max_w(830.0).shrink().px(20.0).py(12.0).radius(22.0).fill(rgb(0x0a84ff))
-                .child(text(message.text.clone()).font(app.ty.body()).color(Color::WHITE).w_full()))
-            .child(orb(app)),
+        HistoryMessageKind::User => super::user::view(app, &message.text, message.author.as_deref(), app.timeline_width)
+            .key(key).mt(26.0),
         HistoryMessageKind::Reasoning => col().key(key).w_full().mt(24.0).gap(10.0)
             .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })
                 .font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)))
@@ -183,17 +182,3 @@ fn tool_card(app: &App, message: &HistoryMessage) -> El {
         .child(text(title).font(app.ty.body()).color(rgb(p.fg)).truncate().shrink())
 }
 
-/// The animated pixel orb beside user messages; a static stand-in until the orb port lands.
-fn orb(app: &App) -> El {
-    let p = app.pal;
-    let colors = [p.blue, p.green, p.magenta, p.yellow, p.cyan, p.red];
-    let mut grid = col().w(32.0).h(32.0).clip_rounded(16.0);
-    for y in 0..6 {
-        let mut line = row();
-        for x in 0..6 {
-            line = line.child(el().w(32.0 / 6.0).h(32.0 / 6.0).fill(rgb(colors[(x * 7 + y * 3) % colors.len()])));
-        }
-        grid = grid.child(line);
-    }
-    grid
-}

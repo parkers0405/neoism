@@ -45,6 +45,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let animating = app.wordmark.tick(app.visible_wordmark(), clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }
+    // Presence orbs flow every frame while a transcript with people in it is on screen.
+    if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
     let target = app.cursor_target();

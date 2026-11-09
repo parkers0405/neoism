@@ -76,4 +76,13 @@ impl App {
             TabKind::Agent { .. } => None,
         }
     }
+
+    /// Whether the active tab shows user messages (and so presence orbs).
+    pub fn orbs_on_screen(&self) -> bool {
+        match &self.active_tab().kind {
+            TabKind::Agent { session: Some(id) } => self.sessions.get(id)
+                .is_some_and(|s| s.messages.iter().any(|m| m.kind == neoism_protocol::agent::HistoryMessageKind::User)),
+            _ => false,
+        }
+    }
 }

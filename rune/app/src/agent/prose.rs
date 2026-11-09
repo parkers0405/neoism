@@ -2,7 +2,7 @@
 //! (`neoism-frontend/shared/src/panels/agent_pane/view/markdown/inline_style.rs`; the word
 //! classifiers below are copied from it unchanged).
 
-use crate::theme::{Palette, rgb};
+use crate::ui::theme::{Palette, rgb};
 use rune_kit::markdown::Highlight;
 use std::ops::Range;
 

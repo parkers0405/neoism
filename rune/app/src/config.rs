@@ -1,5 +1,8 @@
 //! The user's appearance settings from `~/.config/neoism/config.json`, as GPUiX reads them.
 
+/// `appearance.fonts.size` when the config has none.
+pub const DEFAULT_FONT_SIZE: f32 = 15.0;
+
 use serde_json::Value;
 
 pub struct Config {
@@ -21,7 +24,7 @@ pub fn load() -> Config {
         .unwrap_or(Value::Null);
     let appearance = value.get("appearance").unwrap_or(&value);
     let theme = appearance["theme"].as_str().or(value["theme"].as_str()).unwrap_or("pastel_dark").to_owned();
-    let font_size = appearance["fonts"]["size"].as_f64().or(value["fonts"]["size"].as_f64()).unwrap_or(15.0) as f32;
+    let font_size = appearance["fonts"]["size"].as_f64().or(value["fonts"]["size"].as_f64()).unwrap_or(DEFAULT_FONT_SIZE as f64) as f32;
     let font_weight = appearance["fonts"]["weight"].as_f64().unwrap_or(400.0) as f32;
     let model = value["agent"]["model"].as_str().map(str::to_owned);
     let variant = value["agent"]["variant"].as_str().map(str::to_owned);

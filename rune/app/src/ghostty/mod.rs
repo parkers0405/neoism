@@ -1,11 +1,11 @@
 //! libghostty-vt, the same terminal engine the GPUiX frontend used: Ghostty owns the parser,
 //! screen, scrollback, Unicode and replies; Neoism reads cell runs back out of it. This is the
-//! subset of `neoism-frontend/gpuix/native/src/ghostty.rs` the block terminal needs (create,
-//! write, position, tracked marks, capture), called directly instead of through JSON ops.
+//! subset of the GPUiX adapter the block terminal needs (create, write, position, tracked marks,
+//! capture), as a plain Rust type.
 
 #[allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code, unsafe_op_in_unsafe_fn, clippy::all)]
 mod ffi {
-    include!("ghostty_bindings.rs");
+    include!("bindings.rs");
 
     impl GhosttyApi {
         // Exported by the pinned library, but not in the generated subset.
@@ -155,6 +155,7 @@ impl Drop for Vt {
     }
 }
 
+#[derive(Clone)]
 /// Theme colours for the 16 ANSI slots plus default foreground/background, as `0xRRGGBB`.
 pub struct Colors {
     pub palette: [u32; 16],

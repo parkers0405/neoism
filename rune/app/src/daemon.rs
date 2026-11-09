@@ -196,6 +196,10 @@ fn run(rx: Receiver<(Family, Value)>, inbox: Inbox, wake: impl Fn()) {
 fn parse(text: &str) -> Option<Inbound> {
     let value: Value = serde_json::from_str(text).ok()?;
     let (tag, body) = value.as_object()?.iter().next()?;
+    // PTY output and lifecycle arrive unsolicited, without a reply envelope.
+    if matches!(tag.as_str(), "PtyCreated" | "PtyOutput" | "PtyClosed" | "SessionCwd" | "SessionProgram" | "TerminalDirectoryChanged" | "TerminalDirectoryChangeFailed") {
+        return Some(Inbound::Reply { family: "Pty".into(), request_id: 0, message: json!({ tag.clone(): body.clone() }) });
+    }
     let family = tag.strip_suffix("Reply").unwrap_or(tag).to_owned();
     let request_id = body["request_id"].as_u64().unwrap_or(0);
     let message = body.get("message").cloned().unwrap_or_else(|| json!({ tag.clone(): body.clone() }));

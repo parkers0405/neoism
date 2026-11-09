@@ -138,8 +138,9 @@ fn markdown_style(app: &App) -> MarkdownStyle {
         .muted(rgb(p.blue))
         .link(rgb(p.blue))
         .inline_code_bg(Color::TRANSPARENT)
-        .code_block(rgb(p.surface).alpha(0.55), rgb(p.border))
-        .code_block_padding(22.0, 12.0)
+        // `code_frame` draws the card; the kit's own block is bare so numbers line up with rows.
+        .code_block(Color::TRANSPARENT, Color::TRANSPARENT)
+        .code_block_padding(0.0, 0.0)
         .body_font(app.ty.body())
         .heading_font(1, app.ty.heading(1))
         .heading_font(2, app.ty.heading(2))
@@ -184,8 +185,8 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let key = format!("msg:{}", message.id);
     match message.kind {
         HistoryMessageKind::User => row().key(key).w_full().justify_end().items_end().gap(12.0).mt(26.0)
-            .child(text(message.text.clone()).font(app.ty.body()).color(Color::WHITE)
-                .max_w(830.0).shrink().px(20.0).py(12.0).radius(22.0).fill(rgb(0x0a84ff)))
+            .child(col().max_w(830.0).shrink().px(20.0).py(12.0).radius(22.0).fill(rgb(0x0a84ff))
+                .child(text(message.text.clone()).font(app.ty.body()).color(Color::WHITE).w_full()))
             .child(orb(app)),
         HistoryMessageKind::Reasoning => col().key(key).w_full().mt(24.0).gap(10.0)
             .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })

@@ -7,6 +7,9 @@ use rune::{Key, KeyEvent, Tx};
 
 pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if shortcut(app, event, tx) { return true; }
+    if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && editor_key(app, event, tx) {
+        return true;
+    }
     let m = event.mods;
     match (&event.key, app.focus) {
         (Key::Enter, Focus::Buffers(index)) => {
@@ -43,6 +46,7 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
                     return true;
                 }
                 "p" => { app.open_picker(crate::palette::Mode::Commands); return true; }
+                "s" => { app.open_finder(crate::finder::Mode::Files); return true; }
                 _ => {}
             }
         }
@@ -55,6 +59,40 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
         }
     }
     false
+}
+
+/// Vim normal-mode motions in an editor tab; the view follows the cursor on the scroll spring.
+fn editor_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    use crate::editor::Motion;
+    let m = event.mods;
+    let pending_g = std::mem::take(&mut app.pending_g);
+    let motion = match &event.key {
+        Key::Left => Motion::Left,
+        Key::Right => Motion::Right,
+        Key::Up => Motion::Up,
+        Key::Down => Motion::Down,
+        Key::Home => Motion::LineStart,
+        Key::End => Motion::LineEnd,
+        Key::Text(t) if m.ctrl && t == "d" => Motion::HalfPageDown,
+        Key::Text(t) if m.ctrl && t == "u" => Motion::HalfPageUp,
+        Key::Text(t) if !m.ctrl && !m.alt => match t.as_str() {
+            "h" => Motion::Left,
+            "l" => Motion::Right,
+            "k" => Motion::Up,
+            "j" => Motion::Down,
+            "0" => Motion::LineStart,
+            "$" => Motion::LineEnd,
+            "G" => Motion::Bottom,
+            "g" if pending_g => Motion::Top,
+            "g" => { app.pending_g = true; return true; }
+            _ => return false,
+        },
+        _ => return false,
+    };
+    // The view follows once the moved cursor cell has been laid out (lines wrap).
+    if app.editor_motion(motion) { app.editor_follow = true; }
+    let _ = tx;
+    true
 }
 
 fn focus_up(app: &mut App) {
@@ -93,9 +131,22 @@ impl App {
     pub fn cursor_target(&self) -> Option<[f32; 4]> {
         use crate::ui::cursor::tab_bar;
         let scale = 1.0;
+        // An open finder or palette parks the cursor on its selected row; the query field keeps
+        // its own line caret (`selected_cursor_rect`: a 0.6 em block left of the row's text).
+        let row = if self.finder.is_some() { self.rects.get("finder-row").map(|r| (*r, 14.0, 13.0)) }
+            else if self.picker.is_some() { self.rects.get("picker-row").map(|r| (*r, 10.0, 13.0)) }
+            else { None };
+        if let Some((r, pad_x, font)) = row {
+            let s = self.ty.scale();
+            let (font, row_h) = (font * s, r[3]);
+            let w = (font * 0.6).max(2.0);
+            let h = (row_h - 5.0 * s).max(font).min(row_h);
+            return Some([(r[0] + pad_x * s - w - 2.0 * s).max(r[0]), r[1] + (row_h - h) / 2.0, w, h]);
+        }
         match self.focus {
             Focus::Buffers(i) => self.rects.get(&format!("pane-tab:{i}")).map(|r| tab_bar(*r, 16.0, scale, i == self.tabs.len())),
             Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == 1)),
+            Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.rects.get("editor-cursor").copied(),
             Focus::Sidebar | Focus::Content => self.cursor.caret_block(),
         }
     }

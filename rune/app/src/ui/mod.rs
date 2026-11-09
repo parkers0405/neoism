@@ -3,6 +3,7 @@
 pub mod chrome;
 pub mod cursor;
 pub mod fps;
+pub mod icons;
 pub mod orb;
 pub mod palettes;
 pub mod status;

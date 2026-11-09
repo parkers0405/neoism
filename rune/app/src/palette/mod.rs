@@ -119,6 +119,9 @@ impl App {
             Action::DecreaseFontSize => self.set_font_size(self.ty.size - 1.0),
             Action::ResetFontSize => self.set_font_size(crate::config::DEFAULT_FONT_SIZE),
             Action::ThemePicker => self.open_picker(Mode::Themes),
+            Action::SearchFiles => self.open_finder(crate::finder::Mode::Files),
+            Action::SearchWords => self.open_finder(crate::finder::Mode::Grep),
+            Action::SearchGitChanges => self.open_finder(crate::finder::Mode::Git),
             Action::OpenAgent => { self.open_tab(TabKind::Agent { session: None }); }
             Action::ToggleConversations => self.toggle_conversations(),
             Action::Quit => tx.quit(),

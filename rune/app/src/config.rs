@@ -22,7 +22,7 @@ pub fn dir() -> std::path::PathBuf {
         .unwrap_or_default()
 }
 
-fn read() -> Value {
+pub fn read() -> Value {
     std::fs::read_to_string(dir().join("config.json")).ok()
         .and_then(|s| serde_json::from_str(&strip_comments(&s)).ok())
         .unwrap_or(Value::Null)

@@ -47,6 +47,12 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// The open app menu (rail hamburger).
+    pub menu: Option<crate::ui::menu::Menu>,
+    /// The open Settings page.
+    pub settings: Option<crate::settings::Settings>,
+    /// The window wallpaper (`ui.window.background-image`).
+    pub wallpaper: crate::ui::wallpaper::Wallpaper,
     /// The window size in points, from the root layout.
     pub window: [f32; 2],
     /// Background previews by image path (`None` while decoding).
@@ -151,6 +157,9 @@ impl App {
             wheel_target: None,
             tools: Default::default(),
             picker: None,
+            menu: None,
+            settings: None,
+            wallpaper: crate::ui::wallpaper::Wallpaper::from_config(&crate::config::read()),
             window: [1252.0, 674.0],
             background_previews: Default::default(),
             decoded_previews: Default::default(),
@@ -223,6 +232,7 @@ impl App {
                     self.apply_opened_file(&path, &bytes);
                 }
             }
+            Inbound::Reply { family, message, .. } if family == "Config" => self.apply_config_reply(&message),
             Inbound::Reply { .. } => {}
         }
     }

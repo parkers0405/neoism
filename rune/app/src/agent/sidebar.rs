@@ -53,7 +53,7 @@ pub fn conversations(app: &App) -> El {
     }
     list = list.child(heading("Recent"));
     for t in app.threads.iter().filter(|t| !t.pinned) { list = list.child(row_for(t)); }
-    col().key("sidebar").h_full().fill(rgb(p.bg)).border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
+    col().key("sidebar").h_full().fill(app.surface(p.bg)).border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(row().key("sidebar-heading").w_full().h(38.5).px(16.0).center_y()
             .border_sides([0.0, 0.0, 1.5, 0.0], rgb(p.border))
             .child(text("Agent").font(app.ty.body()).color(rgb(p.fg))))

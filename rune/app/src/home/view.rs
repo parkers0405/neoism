@@ -12,7 +12,7 @@ use rune::{Color, El, Tx, col, el, row, text};
 pub fn view(app: &App) -> El {
     let p = app.pal;
     let body = if app.visible_wordmark().is_some() { splash(app) } else { terminal_blocks(app) };
-    col().w_full().h_full().fill(rgb(p.bg))
+    col().w_full().h_full().fill(app.surface(p.bg))
         .child(body)
         .child(terminal_composer(app))
 }

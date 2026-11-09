@@ -11,6 +11,7 @@ mod ghostty;
 mod home;
 mod keys;
 mod palette;
+mod settings;
 mod tabs;
 mod tree;
 mod ui;
@@ -92,6 +93,16 @@ fn main() {
             ("palette", |s| s.open_picker(palette::Mode::Commands)),
             ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),
             ("backgrounds", |s| { s.open_picker(palette::Mode::Backgrounds); s.move_picker(2); }),
+            ("app-menu", |s| { s.toggle_menu(); if let Some(m) = &mut s.menu { m.selected = 1; } }),
+            ("settings", |s| s.open_settings()),
+            // The first installed background behind the Home splash (no config is written).
+            ("wallpaper", |s| {
+                let image = std::fs::read_dir(config::dir().join("bg")).ok()
+                    .and_then(|mut files| files.find_map(|f| f.ok().map(|f| f.path())));
+                if let Some(path) = image {
+                    s.wallpaper = ui::wallpaper::Wallpaper::from_config(&serde_json::json!({"ui": {"window": {"background-image": {"path": path, "opacity": 0.35}}}}));
+                }
+            }),
             ("timeline-report", |s| s.load_fixture("fixture-report", "Read-Only GPU Frame Analysis and Documentation Report", include_str!("../fixtures/report-timeline.json"))),
             ("code", |s| s.load_fixture("fixture-code", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"))),
             ("tool-cards", |s| {

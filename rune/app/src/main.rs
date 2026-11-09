@@ -60,6 +60,9 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
     app.editor_follow_cursor(tx);
     let focus_changed = app.sync_field_focus();
+    // The live turn's status line animates on live bindings; it rebuilds only on state changes.
+    let (busy, activity_changed) = app.tick_activity();
+    if busy { tx.wake_after(std::time::Duration::ZERO); }
     // The finder searches once its query settles.
     if let Some(delay) = app.finder_tick(std::time::Instant::now()) { tx.wake_after(delay); }
     // A `/piss` … `/praise` skit plays on the frame clock.
@@ -77,7 +80,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || skit
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || skit || activity_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -112,6 +115,14 @@ fn main() {
             ("app-menu", |s| { s.toggle_menu(); if let Some(m) = &mut s.menu { m.selected = 1; } }),
             ("settings", |s| s.open_settings()),
             ("about", |s| s.modal = Some(ui::modal::Modal::about())),
+            // A live turn mid-stream: the animated "Crafting . . ." status line.
+            ("activity", |s| {
+                s.load_fixture("fixture-activity", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"));
+                if let Some(session) = s.sessions.get_mut("fixture-activity") {
+                    session.live_from = Some(session.messages.len());
+                    session.streaming = true;
+                }
+            }),
             // The first installed background behind the Home splash (no config is written).
             ("wallpaper", |s| {
                 let image = std::fs::read_dir(config::dir().join("bg")).ok()

@@ -48,8 +48,8 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         rows = rows.child(message_row(app, message, last && streaming));
         index += 1;
     }
-    if streaming {
-        rows = rows.child(text("Crafting . . .").font(app.ty.pixel(0.95)).color(rgb(p.fg)).mt(18.0).key("activity"));
+    if let Some(activity) = app.activity.as_ref().filter(|_| streaming) {
+        rows = rows.child(activity.view(app));
     }
     let id = session_id.to_owned();
     // Older history pages load when this sentinel near the top comes into view.

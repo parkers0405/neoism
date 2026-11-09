@@ -46,7 +46,7 @@ pub fn view(app: &App) -> El {
         }
         list = list.child(line);
     }
-    col().key("file-tree").w_full().h_full().fill(rgb(p.bg))
+    col().key("file-tree").w_full().h_full().fill(app.surface(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(row().w_full().h(HEADER_H * s).px(16.0 * s).center_y()
             .child(text("File Tree").font(app.ty.sized_bold(14.0)).color(rgb(p.fg))))

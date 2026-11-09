@@ -23,7 +23,7 @@ const WHEEL_SPRING: Spring = Spring::new(0.39, 0.0);
 pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let p = app.pal;
     let Some(session_id) = session else {
-        return col().key("agent-pane").w_full().h_full().fill(rgb(p.bg)).items_center().justify_center()
+        return col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg)).items_center().justify_center()
             .child(wordmark::view(app, "agent-wordmark", 470.5))
             .child(el().h(47.0))
             .child(composer(app, 845.0).key("agent-composer-shell"));
@@ -76,7 +76,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             true
         })
         .child(col().w_full().child(sentinel).child(rows));
-    let mut pane = col().key("agent-pane").w_full().h_full().fill(rgb(p.bg));
+    let mut pane = col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg));
     if let Some(header) = super::header::view(app, session_id) {
         pane = pane.child(col().w_full().px(COLUMN_PAD_X).child(header));
     }

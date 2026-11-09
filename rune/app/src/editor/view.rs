@@ -29,7 +29,7 @@ pub fn view(app: &App) -> El {
     } else {
         code(app, buffer)
     };
-    col().key("editor").w_full().h_full().fill(rgb(p.bg))
+    col().key("editor").w_full().h_full().fill(app.surface(p.bg))
         .child(breadcrumb(app, &buffer.path))
         .child(body)
 }

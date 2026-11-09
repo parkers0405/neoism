@@ -7,6 +7,7 @@ use rune::{Key, KeyEvent, Tx};
 
 pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if shortcut(app, event, tx) { return true; }
+    if app.settings.is_some() { return app.settings_key(event); }
     if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && editor_key(app, event, tx) {
         return true;
     }
@@ -29,6 +30,8 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 /// Window shortcuts. Text fields route their keys here first (`on_input_key`), so Alt chords
 /// never type into the composer.
 pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
+    // An open menu owns its navigation keys before anything else.
+    if app.menu.is_some() && app.menu_key(event) { return true; }
     let m = event.mods;
     let alt_only = m.alt && !m.ctrl && !m.shift && !m.logo;
     if let Key::Escape = event.key {
@@ -158,6 +161,12 @@ impl App {
         let scale = 1.0;
         // An open finder or palette parks the cursor on its selected row; the query field keeps
         // its own line caret (`selected_cursor_rect`: a 0.6 em block left of the row's text).
+        if self.menu.is_some() { return self.rects.get("menu-row").map(|r| crate::ui::menu::cursor_rect(self, *r)); }
+        if self.settings.is_some() {
+            let settings = self.settings.as_ref()?;
+            let index = *settings.visible().get(settings.focused)?;
+            return self.rects.get(&format!("settings-control:{index}")).map(|r| crate::settings::view::cursor_rect(self, *r));
+        }
         let row = if self.finder.is_some() { self.rects.get("finder-row").map(|r| (*r, 14.0, 13.0)) }
             else if self.picker.is_some() { self.rects.get("picker-row").map(|r| (*r, 10.0, 13.0)) }
             else { None };

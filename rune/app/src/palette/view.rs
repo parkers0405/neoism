@@ -26,6 +26,7 @@ pub fn view(app: &App) -> El {
 
     let input = rune::text_input(&picker.query, app.ty.sized(14.0))
         .key("picker-query")
+        .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder(if themes { "Search themes..." } else { "Type a command..." }, rgb(p.muted))
         .color(rgb(p.fg)).w_full()
         .on_edit(|a: &mut App| &mut a.picker.as_mut().expect("picker open").query)

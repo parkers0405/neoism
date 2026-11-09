@@ -22,11 +22,42 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
             .child(workspace_tabs(app))
             .child(pane_tabs(app))
             .child(content(app, cx)));
+    track_caret(app, cx);
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .child(body)
         .child(super::status::view(app))
         .child_if(app.overlay.is_some(), || agent::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
+        .child_if(app.caret.visible, || caret_block(app))
+}
+
+/// Report the focused field's caret line (and its font) so `poll` can trail the block to it.
+fn track_caret(app: &App, cx: &mut Cx<App>) {
+    let line = cx.caret("app-shell");
+    let font = if app.picker.is_some() {
+        app.ty.sized(14.0).size
+    } else {
+        match app.active_tab().kind {
+            TabKind::Agent { .. } => app.ty.composer().size,
+            TabKind::Home => app.ty.small().size,
+        }
+    };
+    app.caret.font_size.set(font);
+    if app.caret.line.get() != line {
+        app.caret.line.set(line);
+        if let Some(wake) = &app.waker { wake(); }
+    }
+}
+
+/// The trailing block caret, drawn over everything in the accent colour.
+fn caret_block(app: &App) -> El {
+    let quad = app.caret.trail.quad();
+    let (x0, y0) = quad.iter().fold((f32::MAX, f32::MAX), |(x, y), p| (x.min(p[0]), y.min(p[1])));
+    let (x1, y1) = quad.iter().fold((f32::MIN, f32::MIN), |(x, y), p| (x.max(p[0]), y.max(p[1])));
+    let (w, h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+    let points: Vec<[f32; 2]> = quad.iter().map(|p| [p[0] - x0, p[1] - y0]).collect();
+    rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent)))
+        .key("text-caret").w(w).h(h).absolute(x0, y0)
 }
 
 fn rail(app: &App) -> El {

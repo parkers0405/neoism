@@ -3,6 +3,7 @@
 //! line lit, syntax colour, and the window block cursor on the caret cell. Motions are vim's.
 
 pub mod view;
+mod wrap;
 
 pub use view::view;
 

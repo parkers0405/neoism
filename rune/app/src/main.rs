@@ -27,6 +27,7 @@ pub const FONTS: &[&[u8]] = &[
 ];
 
 fn setup(app: &mut App, waker: rune::Waker) {
+    app.waker = Some(waker.clone());
     let images = ImageCache::new(waker.clone());
     app.wordmark.load(&images, app.pal.fg);
     app.images = Some(images);
@@ -44,6 +45,11 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let animating = app.wordmark.tick(app.visible_wordmark(), clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }
+    // The block caret trails and blinks on its own schedule.
+    let caret_was = (app.caret.visible, app.caret.trail.quad());
+    let caret_next = app.caret.tick(std::time::Instant::now());
+    if let Some(delay) = caret_next { tx.wake_after(delay); }
+    let caret_changed = caret_was != (app.caret.visible, app.caret.trail.quad());
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     let fps = ui::fps::rate();
     let fps_changed = app.fps != Some(fps);
@@ -51,7 +57,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || fps_changed
+    animating || changed || fps_changed || caret_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

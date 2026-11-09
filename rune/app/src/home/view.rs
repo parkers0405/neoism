@@ -54,6 +54,7 @@ fn terminal_composer(app: &App) -> El {
     let tab = app.active_tab();
     let input = rune::text_input(&tab.draft, app.ty.small())
         .key(format!("terminal-command:{}", tab.id))
+        .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder("Enter a command", rgb(p.muted))
         .color(rgb(p.fg)).w_full()
         .on_edit(|s: &mut App| { let i = s.active; &mut s.tabs[i].draft })

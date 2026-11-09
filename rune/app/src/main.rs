@@ -111,6 +111,7 @@ fn main() {
             }),
             ("app-menu", |s| { s.toggle_menu(); if let Some(m) = &mut s.menu { m.selected = 1; } }),
             ("settings", |s| s.open_settings()),
+            ("about", |s| s.modal = Some(ui::modal::Modal::about())),
             // The first installed background behind the Home splash (no config is written).
             ("wallpaper", |s| {
                 let image = std::fs::read_dir(config::dir().join("bg")).ok()

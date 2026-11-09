@@ -41,6 +41,8 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// The open universal modal (About, confirmations).
+    pub modal: Option<crate::ui::modal::Modal>,
     /// A `cd` waiting for the shell to confirm it (request id).
     pub pending_cd: Option<String>,
     /// The notes sidebar (the workspace's notes vault).
@@ -156,6 +158,7 @@ impl App {
             wheel_target: None,
             tools: Default::default(),
             picker: None,
+            modal: None,
             pending_cd: None,
             notes: Default::default(),
             menu: None,

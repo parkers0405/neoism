@@ -31,6 +31,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(agent::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
         .child_if(app.finder.is_some(), || crate::finder::view(app))
+        .child_if(app.modal.is_some(), || super::modal::view(app))
         .child_if(app.menu.is_some(), || super::menu::view(app))
         .child_if(app.settings.is_some(), || crate::settings::view(app))
         .child_if(app.cursor.visible, || cursor_quad(app))

@@ -1,6 +1,6 @@
 import {goals,mcp,subagents,type NeoismClient,type Session,type PermissionRule,type CapabilityInfo,type ProviderAuthMethod,type ProviderAuthPrompt} from "@neoism/sdk";
 import type {AppConfig} from "../config";
-import type {WorkspaceModel} from "../model";
+import {agentSurface,type WorkspaceModel} from "../model";
 import type {ProviderState} from "../daemon/protocol";
 import {sdkModel} from "../daemon/sdk";
 import {coreCall} from "../native-core";
@@ -69,7 +69,7 @@ export class SlashController{
  }
  private current(scope:Scope){
    const state=this.options.model.state;if(state.activeWorkspace?.id!==scope.workspaceId)return false;
-   const session=state.surfaces.find(surface=>surface.id===state.activeSurfaceId)?.sessionId;
+   const session=agentSurface(state.surfaces.find(surface=>surface.id===state.activeSurfaceId))?.sessionId;
    const directory=state.threads.find(thread=>thread.session_id===scope.sessionId)?.directory||state.activeWorkspace?.root_dir||"";
    return directory===scope.directory&&(scope.sessionId?session===scope.sessionId:state.activeSurfaceId===scope.surfaceId);
  }
@@ -129,7 +129,8 @@ export class SlashController{
   const parents={...(model.state.ui.agentParentSessions||{}) as Record<string,string>};
   if(session.parentId)parents[session.id]=session.parentId;else delete parents[session.id];
   model.setUI({agentParentSessions:parents});
-  const surfaceId=model.openThread(thread);scope.sessionId=session.id;scope.surfaceId=surfaceId||`agent:${session.id}`;scope.directory=thread.directory||scope.directory;
+  const home=model.state.surfaces.find(surface=>surface.id===scope.surfaceId)?.kind==="welcome";
+  const surfaceId=model.openThread(thread,home);scope.sessionId=session.id;scope.surfaceId=surfaceId||`agent:${session.id}`;scope.directory=thread.directory||scope.directory;
   scope.sdk=model.agentSdk.forSession(scope.workspaceId,session.id);
  }
  private pickerRequest(scope:Scope,request:SlashPickerRequest):SlashPickerRequest{

@@ -10,6 +10,7 @@ import { AnimationFrameScheduler, ANIMATION_FRAME_MS } from "../animation/frame-
 export function TerminalCommandInput(props: {
   config: AppConfig; source: TerminalSuggestions; command: string; recent: readonly string[]; saved?: readonly string[]; directory: string;
   rows: number; disabled: boolean; menuBelow: boolean; menuSpace: number; composerHeight: number; resetToken?: number;
+  agentMode?: boolean;
   onChange: (value: string) => void; onSubmit: () => void; onFocus: () => void; onBlur: () => void;
   onHost: (host: HostElement | undefined) => void; onKeyDown: (event: KeyEvent) => void; onKeyUp?: (event: KeyEvent) => void; onCustomKey?: (event: KeyEvent) => boolean;
 }) {
@@ -29,6 +30,7 @@ export function TerminalCommandInput(props: {
   const [missOpacity, setMissOpacity] = createSignal(0);
   const clearFeedback = () => { feedback.cancel(); setMissOpacity(0); };
   const close = () => { generation++; pendingMoves = 0; clearTimeout(pending); props.source.cancelCompletion(); animation.cancel(); clearFeedback(); setMenu(undefined); setLoading(false); };
+  createEffect(() => { props.agentMode; untrack(close); });
   const noMatches = () => {
     close();
     const started = performance.now();
@@ -45,7 +47,7 @@ export function TerminalCommandInput(props: {
     const command = props.command;
     if (command !== expectedDraft) { pendingMoves = 0; previewOnLoad = false; expectedDraft = command; setQuery(command); }
   });
-  const ghost = createMemo(() => { loaded(); return props.source.ghost(props.command, props.recent); });
+  const ghost = createMemo(() => { loaded(); return props.agentMode ? undefined : props.source.ghost(props.command, props.recent); });
   const atEnd = () => {
     const point = caret();
     return !point || point.text === props.command && point.offset === new TextEncoder().encode(props.command).length && point.selectionStart === point.selectionEnd;
@@ -111,6 +113,9 @@ export function TerminalCommandInput(props: {
     else preview(Math.max(0, Math.min(length - 1, next)));
   };
   const keyDown = (event: KeyEvent) => {
+    if (props.agentMode) {
+      props.onKeyDown(event); return;
+    }
     const nativeKey = (event.key || "").toLowerCase().replace(/^arrow/, "");
     if (nativeKey === "composer-interrupt") {
       close();
@@ -213,8 +218,8 @@ export function TerminalCommandInput(props: {
   });
   const text = (color = c.fg, size = config.fontSize) => ({ color, fontFamily: config.fontFamily, fontSize: size, fontWeight: config.fontWeight, whiteSpace: "nowrap" as const, textOverflow: "ellipsis" as const, overflow: "hidden" as const });
   return <>
-    <textarea ref={host => { input = host; props.onHost(host); }} testId="terminal-command" aria-label="Shell command" aria-expanded={!!menu() && items().length > 0}
-      value={props.command} placeholder="Enter a command" minRows={1} maxRows={props.rows} readOnly={props.disabled}
+    <textarea ref={host => { input = host; props.onHost(host); }} testId="terminal-command" aria-label={props.agentMode ? "Agent message" : "Shell command"} aria-expanded={!!menu() && items().length > 0}
+      value={props.command} placeholder={props.agentMode ? "Ask anything" : "Enter a command"} minRows={1} maxRows={props.rows} readOnly={props.disabled}
       theme={{ bg: config.background ? "transparent" : c.bg, text: c.fg, caret: "transparent", textMuted: c.muted, accent: c.accent, fontMono: config.fontFamily, fontSans: config.fontFamily }}
       onFocus={props.onFocus} onBlur={() => { setCaret(undefined); props.onBlur(); }}
       onChange={event => edit(event.value || "")} onSubmit={() => { if (props.disabled) return; if (menu() === "history") accept(); else { close(); props.onSubmit(); } }} onKeyDown={keyDown} onKeyUp={props.onKeyUp}

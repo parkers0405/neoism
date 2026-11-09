@@ -17,6 +17,21 @@ import {AnimationFrameScheduler,ANIMATION_FRAME_MS} from "../animation/frame-sch
 import { BlockTerminalView } from "./BlockTerminalView";
 import { terminalInput } from "./input";
 
+export interface TerminalAgentInput {
+  text: string;
+  resetToken: number;
+  footerHeight: number;
+  footer: JSX.Element;
+  overlays: JSX.Element;
+  onHost: (host: HostElement | undefined) => void;
+  onBounds: (bounds: { x: number; y: number; width: number; height: number }) => void;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onKeyDown: (event: KeyEvent) => void;
+  onFocus: () => void;
+  onBlur: () => void;
+}
+
 export interface TerminalViewProps { onCustomKey?: (event: KeyEvent) => boolean; active?: boolean; focusToken?: number; onFocus?: () => void; sessionId: string; client: DaemonConnection; config: AppConfig; onSearch: (kind: "/" | "?", host: SearchHost) => void; report: (error: unknown) => void;
   onAttachBlock?: (block: { command: string; directory: string; output: string }) => void;
   onSaveCommand?: (command: string, directory: string) => void;
@@ -26,6 +41,9 @@ export interface TerminalViewProps { onCustomKey?: (event: KeyEvent) => boolean;
   onMakeDirectoryAuthority?: () => void;
   /** Home content participates in scrollback above a bottom-anchored composer. */
   historyHeader?: (viewport: { width: number; height: number }) => JSX.Element;
+  agentMode?: boolean;
+  agentInput?: TerminalAgentInput;
+  agentHistory?: (viewport: { width: number; height: number }) => JSX.Element;
 }
 
 export function TerminalView(props: TerminalViewProps) {

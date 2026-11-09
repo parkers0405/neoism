@@ -3,7 +3,7 @@ import type {ImagePreview} from "../ui/AttachmentImage";
 import { batch, createEffect, createSignal, For, Show, onCleanup, onMount, untrack } from "solid-js";
 import { useGpuixRequired, type HostElement, type KeyEvent, type EventPayload } from "@gpuix/solid";
 import type { AppConfig } from "../config";
-import type { WorkspaceModel, Surface } from "../model";
+import { agentSurface, type WorkspaceModel, type Surface } from "../model";
 import { coreCall } from "../native-core";
 import { writeClipboard } from "../clipboard";
 import { PaintLayer, type PaintCommand, type PreparedCanvas } from "../ui/PaintLayer";
@@ -34,7 +34,7 @@ const positions=new WeakMap<WorkspaceModel,Map<string,{sessionId:string;offset:n
 const engineLimit=8;
 function pruneEngines(model:WorkspaceModel){
  const entries=engines.get(model);if(!entries)return;
-  const roots=new Set(model.state.surfaces.filter(s=>s.kind==="agent").flatMap(s=>{const root=s.sessionId?s.agentRootSessionId||model.agentFamily(s.sessionId).root:model.state.pendingAgentSessions[s.id];return root?[engineKey(s.workspaceId,root)]:[];}));
+   const roots=new Set(model.state.surfaces.map(surface=>agentSurface(surface)).filter(s=>s.kind==="agent").flatMap(s=>{const root=s.sessionId?s.agentRootSessionId||model.agentFamily(s.sessionId).root:model.state.pendingAgentSessions[s.id];return root?[engineKey(s.workspaceId,root)]:[];}));
  for(const root of positions.get(model)?.keys()||[])if(!roots.has(root))positions.get(model)?.delete(root);
  for(const[root,engine]of entries)if(!roots.has(root)&&!engine.dirty.size){engine.dispose();positions.get(model)?.delete(root);}
  for(const[root,engine]of [...entries].sort((a,b)=>a[1].touched-b[1].touched)){
@@ -49,7 +49,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
     byModel = new Map(); engines.set(model, byModel);positions.set(model,new Map());
     const off=model.subscribe(()=>pruneEngines(model));
     const offSurface=model.onSurfaceClosed((surface:Surface)=>{
-      if(surface.kind!=="agent")return;
+       if(surface.kind!=="agent"&&surface.kind!=="welcome")return;
       for(const engine of [...byModel!.values()])if(engine.workspaceId===surface.workspaceId&&engine.surfaces.delete(surface.id)&&!engine.surfaces.size){positions.get(model)?.delete(engineKey(engine.workspaceId,engine.root()));engine.dispose();}
     });
     const offWorkspace=model.onWorkspaceClosed((workspaceId:string)=>{
@@ -59,7 +59,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
     model.onDispose(()=>{off();offSurface();offWorkspace();for(const engine of [...byModel!.values()])engine.dispose();engines.delete(model);positions.delete(model);});
   }
   let key=engineKey(workspaceId,rootSessionId);
-  const owners=()=>model.state.surfaces.filter(surface=>surface.workspaceId===workspaceId&&surface.kind==="agent"&&(surface.id===surfaceId||(surface.sessionId?(surface.agentRootSessionId||model.agentFamily(surface.sessionId).root):model.state.pendingAgentSessions[surface.id])===rootSessionId)).map(surface=>surface.id);
+   const owners=()=>model.state.surfaces.map(surface=>agentSurface(surface)).filter(surface=>surface.workspaceId===workspaceId&&surface.kind==="agent"&&(surface.id===surfaceId||(surface.sessionId?(surface.agentRootSessionId||model.agentFamily(surface.sessionId).root):model.state.pendingAgentSessions[surface.id])===rootSessionId)).map(surface=>surface.id);
   const existing = byModel.get(key); if (existing) {existing.touched=performance.now();for(const id of owners())existing.surfaces.add(id);return existing;}
   const { id } = coreCall<{ id: number }>("agenttimeline.new", { compactPaint: true, canvasPaint: true, chunkedPaint: true, sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
     fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight,reducedMotion:config.reducedMotion,localName:localPresenceIdentity(config).displayName });
@@ -79,7 +79,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
     }
     // An evicted open family is still a known root. Do not broadcast its
     // transcript into every remaining engine just because it has no cache.
-    const knownRoots={has:(root:string)=>byModel!.has(engineKey(workspaceId,root))||model.state.surfaces.some(surface=>surface.kind==="agent"&&!!surface.sessionId&&(surface.agentRootSessionId||model.agentFamily(surface.sessionId).root)===root)};
+     const knownRoots={has:(root:string)=>byModel!.has(engineKey(workspaceId,root))||model.state.surfaces.map(surface=>agentSurface(surface)).some(surface=>surface.kind==="agent"&&!!surface.sessionId&&(surface.agentRootSessionId||model.agentFamily(surface.sessionId).root)===root)};
     if(!timelineReceivesEvent(rootSessionId,model.state.ui,knownRoots,message))return;
     const echo=(message as {MessageUpdated?:{session_id:string;local_echo?:boolean;message:{id:string}}})?.MessageUpdated;
     if(echo?.local_echo&&model.agentFamily(echo.session_id).root===rootSessionId)model.consumePromptArrival(echo.message.id);

@@ -15,9 +15,9 @@ import { dimensions as d, thinkingOptions } from "../design/generated";
 import { fileIcon } from "../design/file-icons";
 export { fileIcon } from "../design/file-icons";
 import { easeOutCubicBezier } from "../design/animation";
-import { WorkspaceModel, type AppState, type Surface } from "../model";
+import { WorkspaceModel, agentSurface, type AppState, type Surface } from "../model";
 import { FileSchema, expectVariant, isRecord, type HistoryMessage, type Attachment } from "../daemon/protocol";
-import { TerminalView } from "../terminal/TerminalView";
+import { TerminalView, type TerminalAgentInput } from "../terminal/TerminalView";
 import {terminalBlockContext,saveTerminalCommand,workspaceSavedCommands} from "../terminal/block-actions";
 import { AnimatedWordmark as Wordmark } from "./AnimatedWordmark";
 import {AppVisualState} from "./AppVisualState";
@@ -190,7 +190,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   onCleanup(chromeActions.subscribe(() => setChromeFrame(chromeActions.frame)));
   onCleanup(() => chromeActions.dispose());
   onMount(() => { if (model.state.ui.chromeAction === "OpenSettings") { model.setUI({ chromeAction: null }); void chromeActions.open("OpenSettings"); } });
-  const active = createMemo(() => state().surfaces.find((surface) => surface.id === state().activeSurfaceId));
+  const active = createMemo(() => {const surface=state().surfaces.find((surface) => surface.id === state().activeSurfaceId);return surface?.kind==="welcome"&&surface.homeMode==="agent"?agentSurface(surface):surface;});
   const activeWorkspaceId = createMemo(() => state().activeWorkspace?.id);
   const [workspaceRevision,setWorkspaceRevision]=createSignal(0);
   if(props.workspaceNavigation)onCleanup(props.workspaceNavigation.subscribe(()=>setWorkspaceRevision(value=>value+1)));
@@ -703,7 +703,12 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     }
     return true;
   };
-  const handleSurfaceKey = (event: KeyEvent) => { try { return handleApplicationShortcut(renderer,event) || handleCommandHandoffKey(event) || handleAgentHistoryKey(event) || handleCustomKey(event) || handleApplicationKey(event); } catch (error) { model.report(error); return true; } };
+  const handleHomeModeKey=(event:KeyEvent)=>{
+    const mods=event.modifiers,home=state().surfaces.find(surface=>surface.id===state().activeSurfaceId);
+    if(event.key?.toLowerCase()!=="tab"||!mods?.ctrl||mods.cmd||mods.alt||mods.shift||!config.terminalBlockUi||home?.kind!=="welcome"||chromeFocus().zone!=="content"||palette()||commands()||chromeFrame()||choice()||pendingPermission()||pendingQuestion()||imagePreview()||projectPicker()||directoryBrowser()||gitRestore())return false;
+    event.preventDefault();event.stopPropagation();model.setHomeMode(home.id,home.homeMode==="agent"?"terminal":"agent");setEditorFocus(value=>value+1);return true;
+  };
+  const handleSurfaceKey = (event: KeyEvent) => { try { return handleHomeModeKey(event) || handleApplicationShortcut(renderer,event) || handleCommandHandoffKey(event) || handleAgentHistoryKey(event) || handleCustomKey(event) || handleApplicationKey(event); } catch (error) { model.report(error); return true; } };
   onCleanup(registerApplicationShortcuts(renderer,(action,event)=>{
     if(action==="zoom-in"||action==="zoom-out"){
       if(chromeFrame()?.kind==="settings")model.setUI({chromeAction:"OpenSettings",chromeSnapshot:chromeFrame()?.snapshot});
@@ -1040,7 +1045,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       onConnection={id => model.selectDatabaseConnection(id)} onBrowse={() => openFind("files")}
       onTable={name => { const connection = selected(); if (connection) { model.openDatabaseTable(connection, name); focusChrome({ zone: "content" }); } }} />;
   }
-  function Composer(props: { surfaceId: string; sessionId?: string; home: boolean; viewport: {width:number;height:number}; onFrame: (read:()=>ComposerFrame|undefined) => void }) {
+  function Composer(props: { surfaceId: string; sessionId?: string; home: boolean; viewport: {width:number;height:number}; onFrame?: (read:()=>ComposerFrame|undefined) => void; enabled?:boolean; renderInput?:(input:TerminalAgentInput)=>JSX.Element }) {
     const initialDraftKey=model.composerDraftKey(props.sessionId,props.surfaceId),initialDraft=model.state.composerDrafts[initialDraftKey];
     const promptHistory=new PromptHistory();
     let lastEscapeAt:number|undefined;
@@ -1108,20 +1113,21 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     // from an effect let the first chat layout use the previous Home center.
     const frame=createMemo(()=>{
       frameRevision();
+      if(props.renderInput)return undefined;
       // Retain the last shaped height while typing; the textarea reports the
       // new row count after layout, rather than speculating with another font.
       const measured=textLayout();
       const next=native.frame({width:props.viewport.width,height:props.viewport.height,home:props.home,text:draft(),help:help(),images:attachments().length,cwd:cwd(),system:sessionError()?"Agent error":undefined,contextLabel:context().label,noProviders:noProviders()&&!shellMode(),busy:localBusy(),state:activityState(),visualRows:draft()?measured?.rows:1,textWidth:draft()?measured?.width:cached.frame?.controls.text_rect[2]});
       cached.frame=next;return next;
     });
-    props.onFrame(frame);
-    createEffect(()=>{const next=frame();activityAnimation.cancel();if(next.animating&&!config.reducedMotion)activityAnimation.request(()=>{if(!disposed)setFrameRevision(value=>value+1);},performance.now());});
+    props.onFrame?.(frame);
+    createEffect(()=>{const next=frame();activityAnimation.cancel();if(next?.animating&&!config.reducedMotion)activityAnimation.request(()=>{if(!disposed)setFrameRevision(value=>value+1);},performance.now());});
     const sampleEffect=()=>{if(disposed||!effectActive)return;if(effectScope!==`${state().activeWorkspace?.id}\0${state().activeSurfaceId||"home"}`){effectActive=false;setEffectCommands([]);return;}const started=performance.now(),next=native.effect({width:props.viewport.width,height:props.viewport.height,inputY:frame()?.inputRect[1]||0});setEffectCommands(next.commands);effectActive=next.animating;
       if(next.prompt){if(props.sessionId)void model.submitPrompt(props.sessionId,next.prompt);else void model.submitNewPrompt(next.prompt);}
       if(next.animating)effectsAnimation.request(sampleEffect,started);
     };
     onCleanup(()=>{disposed=true;slashInput()?.resolve(undefined);slash.dispose();activityAnimation.dispose();effectsAnimation.dispose();});
-    const width=createMemo(()=>frame()?.cardRect[2]||800);
+    const width=createMemo(()=>props.renderInput?props.viewport.width:frame()?.cardRect[2]||800);
     const absolute=(rect:readonly number[]|undefined):StyleDesc=>({position:"absolute",left:rect?.[0]||0,top:rect?.[1]||0,width:rect?.[2]||0,height:rect?.[3]||0});
 
     const labels = createMemo(() => coreCall<{ agent: string; model: string; thinking: string; narrow: boolean }>("composer.labels", {
@@ -1130,7 +1136,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     const chipParameters=createMemo(()=>({width:frame()?.controls.chips_rect[2]||0,height:frame()?.controls.chips_rect[3]||0,agent:selection().agent||"build",model:selection().model||"Default model",thinking:selection().thinking||"none"}),undefined,{equals:(a,b)=>JSON.stringify(a)===JSON.stringify(b)});
     const chipGeometry=createMemo(()=>native.chips(chipParameters()));
     let input: HostElement | undefined, shell: HostElement | undefined, anchor: Anchor = [0, 0, 0, 0];
-    const focus = () => { if (input && composerInputs.get(key()) === input&&!slashPicker()&&!slashInput()&&chromeFocus().zone==="content"&&!imagePreview()&&!pendingPermission()&&!pendingQuestion()&&!choice()&&!commands()&&!palette()&&(props.sessionId?active()?.sessionId===props.sessionId:active()?.id===props.surfaceId)){input.root?.mutations.flushMutations();focusNativeElement(renderer,input.id);} };
+    const focus = () => { if (props.enabled!==false&&input && composerInputs.get(key()) === input&&!slashPicker()&&!slashInput()&&chromeFocus().zone==="content"&&!imagePreview()&&!pendingPermission()&&!pendingQuestion()&&!choice()&&!commands()&&!palette()&&(props.sessionId?active()?.sessionId===props.sessionId:active()?.id===props.surfaceId)){input.root?.mutations.flushMutations();focusNativeElement(renderer,input.id);} };
     createEffect(()=>{
       const id=key();if(input)composerInputs.set(id,input);if(shell)composerShells.set(id,shell);
       if(anchor[2]>0)setComposerAnchors(current=>({...current,[id]:anchor}));
@@ -1139,7 +1145,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     onMount(()=>queueMicrotask(focus));
     // The native textarea can mount after Composer (once its measured frame
     // exists). Retry on activation and host creation, not on every draft edit.
-    createEffect(()=>{editorFocus();active()?.id;chromeFocus().zone;queueMicrotask(()=>{if(!disposed)focus();});});
+    createEffect(()=>{editorFocus();active()?.id;chromeFocus().zone;props.enabled;queueMicrotask(()=>{if(!disposed)focus();});});
     onCleanup(() => { if (composerInputs.get(key()) === input) composerInputs.delete(key()); if (composerShells.get(key()) === shell) { composerShells.delete(key()); setComposerAnchors(current=>{const next={...current};delete next[key()];return next;}); } });
     const pickerButtons: HostElement[] = [];
     onCleanup(() => { for (const button of pickerButtons) composerPickerButtons.delete(button); });
@@ -1222,6 +1228,81 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
         {title:"Dismiss",description:"Clear this error from the composer",footer:"",value:"dismiss"},
       ],onSelect:async value=>{if(value==="connect")await slash.execute("/connect");else if(value==="copy")await writeClipboard(message);else if(value==="dismiss")model.clearSessionError(sessionId);}});
     };
+    const inputChange=(value:string)=>{lastEscapeAt=undefined;promptHistory.reset();setDraft(value);setSlashDismissed(false);};
+    const inputSubmit=()=>{if(slashOpen()&&!slashOptions().some(row=>row.value===draft())&&slashOptions().some(row=>row.value.startsWith(draft()))){slashAccept?.();return;}void submit();};
+    const inputKeyDown=(event:KeyEvent)=>{
+      const exited = exitShellMode(draft(), event.key?.toLowerCase() || "");
+      if (exited !== undefined) { event.preventDefault();event.stopPropagation();setDraft(exited);promptHistory.reset();lastEscapeAt=undefined;return; }
+      if(event.key?.toLowerCase()==="paste"||event.key?.toLowerCase()==="v"&&(event.modifiers?.ctrl||event.modifiers?.cmd)&&!event.modifiers?.alt
+        ||event.key?.toLowerCase()==="insert"&&event.modifiers?.shift&&!event.modifiers.ctrl&&!event.modifiers.cmd&&!event.modifiers.alt){
+        event.preventDefault();event.stopPropagation();
+        // Replay remapped paste chords through native selection and undo.
+        if(event.key?.toLowerCase()!=="paste"&&"simulateKeystrokes" in renderer&&typeof renderer.simulateKeystrokes==="function"){
+          focus();renderer.simulateKeystrokes(process.platform==="darwin"?"cmd-v":"ctrl-v");
+        }else void paste(false);
+        return;
+      }
+      if(event.key==="composer-escape"||event.key?.toLowerCase()==="escape"){
+        event.preventDefault();event.stopPropagation();
+        if(slashOpen()){setSlashDismissed(true);lastEscapeAt=undefined;return;}
+        if(slashPicker()||slashInput()||choice()||commands()||palette()||pendingPermission()||pendingQuestion())return;
+        const now=performance.now(),double=lastEscapeAt!==undefined&&now-lastEscapeAt<=1400;
+        lastEscapeAt=now;
+        if(draft()||attachments().length){promptHistory.reset();setDraft("");setAttachments([]);setSlashDismissed(false);}
+        else if(props.sessionId&&(interruptible()||double))stop();
+        return;
+      }
+      if(event.key==="composer-interrupt"||event.key?.toLowerCase()==="c"&&event.modifiers?.ctrl&&!event.modifiers.cmd&&!event.modifiers.alt&&!event.modifiers.shift){
+        event.preventDefault();event.stopPropagation();
+        if(draft()||attachments().length){promptHistory.reset();setDraft("");setAttachments([]);setSlashDismissed(false);}
+        else if(interruptible()&&props.sessionId)stop();
+        return;
+      }
+      if((event.key?.toLowerCase()==="copy"||event.key?.toLowerCase()==="c"&&(event.modifiers?.ctrl||event.modifiers?.cmd)&&!event.modifiers.alt)&&props.sessionId){
+        const selected=agentSelectedText(model,props.sessionId);
+        if(selected){event.preventDefault();event.stopPropagation();void writeClipboard(selected).catch(model.report);return;}
+      }
+      if(handleSurfaceKey(event))return;
+      if(slashOpen()&&slashKey?.(event))return;
+      const direction=event.key?.toLowerCase().replace(/^arrow/,"");
+      if(!slashOpen()&&(direction==="up"||direction==="down")&&!event.modifiers?.ctrl&&!event.modifiers?.cmd&&!event.modifiers?.alt&&!event.modifiers?.shift){
+        const entries=model.composerHistory.length?model.composerHistory:(props.sessionId?state().history[props.sessionId]||[]:[]).filter(message=>message.kind==="User"&&!message.attachments?.length).map(message=>({text:message.text||"",attachments:[]}));
+        const previous=direction==="up"?promptHistory.previous(entries,{text:draft(),attachments:attachments()}):promptHistory.next();
+        if(previous){event.preventDefault();event.stopPropagation();setDraft(previous.text);setAttachments(previous.attachments);setSlashDismissed(true);}
+        return;
+      }
+      if(event.key==="tab"&&!event.modifiers?.ctrl&&!event.modifiers?.alt){event.preventDefault();model.setSelection("agent",selection().agent==="plan"?"build":"plan",props.sessionId);}
+      if(event.key==="enter"&&event.modifiers?.alt){event.preventDefault();event.stopPropagation();void submit("queue");}
+    };
+    const menus=()=> <>
+      <Show when={slashOpen()}><InlinePicker config={config} kind="slash" title="Commands" options={slashOptions()} loading={slash.state.loading} error={slash.state.error} anchor={anchor} query={draft().replace(/^\/+/,"")} onKeyHandler={handler=>slashKey=handler} onAcceptHandler={handler=>slashAccept=handler} onSelect={acceptSlash} onClose={()=>{setSlashDismissed(true);focus();}}/></Show>
+      <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue} placeholder={entry.request.placeholder} activity={entry.request.activity}
+        onBack={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}
+        onSelect={value=>{setSlashInput(undefined);entry.resolve(value);focus();}} onClose={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}/>}</Show>
+      <Show when={slashPicker()?.token||slashPicker()} keyed>{_token=>{const initial=slashPicker()!;const request=()=>slashPicker()?.token===initial.token?slashPicker()!:initial;return <InlinePicker config={config} kind={request().kind} title={request().title} options={request().options} current={request().selected} anchor={anchor}
+        loading={request().loading} error={request().error} usage={request().usage} onRefresh={request().onRefresh} onLoadMore={request().onLoadMore} activity={request().activity} mcpServer={request().mcpServer} mcpEntry={request().mcpEntry}
+        onBack={request().onBack ? ()=>{const current=request();setSlashPicker(undefined);void Promise.resolve(current.onBack?.()).catch(model.report);focus();} : undefined}
+        onSelect={value=>{const current=request();if(!current.options.find(option=>option.value===value)?.keepOpen)setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{const current=request();setSlashPicker(undefined);if(current.onBack)void Promise.resolve(current.onBack()).catch(model.report);else current.onCancel?.();focus();}}/>;}}</Show>
+    </>;
+    if(props.renderInput)return props.renderInput({
+      get text(){return draft();},get resetToken(){return caretReset();},get footerHeight(){return (attachments().length?112:30)*s;},
+      get footer(){return <div style={{...column,height:"100%",gap:4*s}}>
+        <Show when={attachments().length}><div style={{...row,height:78*s,gap:6*s,overflowX:"scroll"}}><For each={attachments()}>{attachment=><div style={{...row,gap:6*s,padding:5*s,backgroundColor:c.surface,borderRadius:5*s,flexShrink:0}}>
+          <Show when={attachment.kind.startsWith("image/")} fallback={<Label size={11}>{attachment.name}</Label>}><div role="button" aria-label={`Preview ${attachment.name}`} onClick={()=>setImagePreview({name:attachment.name,bytes:Uint8Array.from(attachment.bytes||[])})} style={{width:64*s,height:64*s,cursor:"pointer"}}><AttachmentImage image={{name:attachment.name,bytes:Uint8Array.from(attachment.bytes||[])}} style={{width:64*s,height:64*s}}/></div></Show>
+          <div role="button" aria-label={`Remove ${attachment.name}`} data-preserve-keyboard-focus={true} onClick={()=>removeAttachment(attachment.token)} style={{cursor:"pointer"}}><Label size={11} color={c.muted}>×</Label></div>
+        </div>}</For></div></Show>
+        <div style={{...row,height:30*s,gap:16*s,minWidth:0,overflow:"hidden"}}><For each={["agent","model","thinking"] as const}>{kind=><div ref={element=>{pickerButtons.push(element);composerPickerButtons.add(element);}} role="button" testId={`select-${kind}`} aria-label={kind==="thinking"?"Select reasoning":`Select ${kind}`} data-preserve-keyboard-focus={true} onClick={()=>openPicker(kind,true)} style={{...row,gap:5*s,cursor:"pointer",minWidth:0,flexShrink:kind==="model"?1:0}}><Label size={11} color={c.dim}>{kind==="thinking"?"Think":kind==="agent"?"Agent":"Model"}</Label><Label size={11}>{labels()[kind]}</Label><Icon glyph={"\uf078"} color={c.muted} size={7}/></div>}</For>
+          <IconButton glyph={"\uf0c6"} label="Attach files" testId="attach-files" onClick={()=>void attach()}/>
+          <Show when={localBusy()}><IconButton glyph={"\uf04d"} label="Stop generation" testId="stop-home-agent" onClick={stop}/></Show>
+          <Show when={sessionError()}><div role="button" onClick={showSessionError} style={{cursor:"pointer"}}><Label size={11} color={c.red}>Agent error</Label></div></Show>
+        </div>
+      </div>;},
+      get overlays(){return menus();},
+      onHost:host=>{if(input&&composerInputs.get(key())===input)composerInputs.delete(key());input=host;if(host)composerInputs.set(key(),host);},
+      onBounds:bounds=>{anchor=[bounds.x,bounds.y,bounds.width,bounds.height];setComposerAnchors(current=>current[key()]?.every((n,i)=>n===anchor[i])?current:{...current,[key()]:anchor});},
+      onChange:inputChange,onSubmit:inputSubmit,onKeyDown:inputKeyDown,
+      onFocus:()=>{invalidateNativeFocus(renderer);noteContentFocus();},onBlur:()=>invalidateNativeFocus(renderer),
+    });
     // A returning workspace already knows its pane size and draft. Emit the
     // complete input in its first transaction, before another layout event.
     frame();
@@ -1241,54 +1322,8 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
           }}</For></div></Show>
           <textarea ref={element=>{input=element;composerInputs.set(key(),element);queueMicrotask(()=>{if(!disposed)focus();});}} testId="composer" aria-label={shellMode()?"Shell command":"Message"} value={draft()} placeholder={shellMode()?"Enter a shell command":"Ask anything"} minRows={1} maxRows={5} theme={{...nativeTheme,caret:"#00000000"}}
             onFocus={()=>{invalidateNativeFocus(renderer);noteContentFocus();}} onBlur={()=>invalidateNativeFocus(renderer)}
-            onChange={event=>{lastEscapeAt=undefined;promptHistory.reset();setDraft(event.value||"");setSlashDismissed(false);}} onSubmit={()=>{if(slashOpen()&&!slashOptions().some(row=>row.value===draft())&&slashOptions().some(row=>row.value.startsWith(draft()))){slashAccept?.();return;}void submit();}}
-            onKeyDown={event=>{
-              const exited = exitShellMode(draft(), event.key?.toLowerCase() || "");
-              if (exited !== undefined) { event.preventDefault();event.stopPropagation();setDraft(exited);promptHistory.reset();lastEscapeAt=undefined;return; }
-              if(event.key?.toLowerCase()==="paste"||event.key?.toLowerCase()==="v"&&(event.modifiers?.ctrl||event.modifiers?.cmd)&&!event.modifiers?.alt
-                ||event.key?.toLowerCase()==="insert"&&event.modifiers?.shift&&!event.modifiers.ctrl&&!event.modifiers.cmd&&!event.modifiers.alt){
-                event.preventDefault();event.stopPropagation();
-                // Desktop remappers may send Shift+Insert or Ctrl+Super+V.
-                // Those raw chords have no native Paste binding. Replay the
-                // canonical chord so native selection replacement/undo apply;
-                // only the native "paste" fallback is image-only.
-                if(event.key?.toLowerCase()!=="paste"&&"simulateKeystrokes" in renderer&&typeof renderer.simulateKeystrokes==="function"){
-                  focus();renderer.simulateKeystrokes(process.platform==="darwin"?"cmd-v":"ctrl-v");
-                }else void paste(false);
-                return;
-              }
-              if(event.key==="composer-escape"||event.key?.toLowerCase()==="escape"){
-                event.preventDefault();event.stopPropagation();
-                if(slashOpen()){setSlashDismissed(true);lastEscapeAt=undefined;return;}
-                if(slashPicker()||slashInput()||choice()||commands()||palette()||pendingPermission()||pendingQuestion())return;
-                const now=performance.now(),double=lastEscapeAt!==undefined&&now-lastEscapeAt<=1400;
-                lastEscapeAt=now;
-                if(draft()||attachments().length){promptHistory.reset();setDraft("");setAttachments([]);setSlashDismissed(false);}
-                else if(props.sessionId&&(interruptible()||double))stop();
-                return;
-              }
-              if(event.key==="composer-interrupt"||event.key?.toLowerCase()==="c"&&event.modifiers?.ctrl&&!event.modifiers.cmd&&!event.modifiers.alt&&!event.modifiers.shift){
-                event.preventDefault();event.stopPropagation();
-                if(draft()||attachments().length){promptHistory.reset();setDraft("");setAttachments([]);setSlashDismissed(false);}
-                else if(interruptible()&&props.sessionId)stop();
-                return;
-              }
-              if((event.key?.toLowerCase()==="copy"||event.key?.toLowerCase()==="c"&&(event.modifiers?.ctrl||event.modifiers?.cmd)&&!event.modifiers.alt)&&props.sessionId){
-                const selected=agentSelectedText(model,props.sessionId);
-                if(selected){event.preventDefault();event.stopPropagation();void writeClipboard(selected).catch(model.report);return;}
-              }
-              if(handleSurfaceKey(event))return;
-              if(slashOpen()&&slashKey?.(event))return;
-              const direction=event.key?.toLowerCase().replace(/^arrow/,"");
-              if(!slashOpen()&&(direction==="up"||direction==="down")&&!event.modifiers?.ctrl&&!event.modifiers?.cmd&&!event.modifiers?.alt&&!event.modifiers?.shift){
-                const entries=model.composerHistory.length?model.composerHistory:(props.sessionId?state().history[props.sessionId]||[]:[]).filter(message=>message.kind==="User"&&!message.attachments?.length).map(message=>({text:message.text||"",attachments:[]}));
-                const previous=direction==="up"?promptHistory.previous(entries,{text:draft(),attachments:attachments()}):promptHistory.next();
-                if(previous){event.preventDefault();event.stopPropagation();setDraft(previous.text);setAttachments(previous.attachments);setSlashDismissed(true);}
-                return;
-              }
-              if(event.key==="tab"&&!event.modifiers?.ctrl&&!event.modifiers?.alt){event.preventDefault();model.setSelection("agent",selection().agent==="plan"?"build":"plan",props.sessionId);}
-              if(event.key==="enter"&&event.modifiers?.alt){event.preventDefault();event.stopPropagation();void submit("queue");}
-            }} style={{...text(16),...absolute(frame()?.controls.text_rect),lineHeight:22*s,padding:0,backgroundColor:"transparent",borderWidth:0}}/>
+            onChange={event=>inputChange(event.value||"")} onSubmit={inputSubmit} onKeyDown={inputKeyDown}
+            style={{...text(16),...absolute(frame()?.controls.text_rect),lineHeight:22*s,padding:0,backgroundColor:"transparent",borderWidth:0}}/>
           <ComposerCaret config={config} input={()=>input} home={props.home} resetToken={caretReset()} onLayout={layout=>{
             if(layout.text!==draft()||Math.abs(layout.width-(frame()?.controls.text_rect[2]||0))>=0.1)return;
             setTextLayout(previous=>previous?.width===layout.width&&previous.rows===layout.rows?previous:{width:layout.width,rows:layout.rows});
@@ -1322,14 +1357,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
         <Show when={!sessionError()&&state().catalogsError}>{error=><text testId="agent-catalog-error" style={{position:"absolute",right:16*s,top:(frame()?.cardRect[3]||0)+8*s,...text(11,c.red)}}>Model settings unavailable: {error()}</text>}</Show>
         <For each={sessionError()?[]:frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>
       </div></Show>
-      <Show when={slashOpen()}><InlinePicker config={config} kind="slash" title="Commands" options={slashOptions()} loading={slash.state.loading} error={slash.state.error} anchor={anchor} query={draft().replace(/^\/+/,"")} onKeyHandler={handler=>slashKey=handler} onAcceptHandler={handler=>slashAccept=handler} onSelect={acceptSlash} onClose={()=>{setSlashDismissed(true);focus();}}/></Show>
-      <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue} placeholder={entry.request.placeholder} activity={entry.request.activity}
-        onBack={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}
-        onSelect={value=>{setSlashInput(undefined);entry.resolve(value);focus();}} onClose={()=>{setSlashInput(undefined);entry.resolve(undefined);focus();}}/>}</Show>
-      <Show when={slashPicker()?.token||slashPicker()} keyed>{_token=>{const initial=slashPicker()!;const request=()=>slashPicker()?.token===initial.token?slashPicker()!:initial;return <InlinePicker config={config} kind={request().kind} title={request().title} options={request().options} current={request().selected} anchor={anchor}
-        loading={request().loading} error={request().error} usage={request().usage} onRefresh={request().onRefresh} onLoadMore={request().onLoadMore} activity={request().activity} mcpServer={request().mcpServer} mcpEntry={request().mcpEntry}
-        onBack={request().onBack ? ()=>{const current=request();setSlashPicker(undefined);void Promise.resolve(current.onBack?.()).catch(model.report);focus();} : undefined}
-        onSelect={value=>{const current=request();if(!current.options.find(option=>option.value===value)?.keepOpen)setSlashPicker(undefined);void Promise.resolve(current.onSelect?.(value)).catch(model.report);focus();}} onClose={()=>{const current=request();setSlashPicker(undefined);if(current.onBack)void Promise.resolve(current.onBack()).catch(model.report);else current.onCancel?.();focus();}}/>;}}</Show>
+      {menus()}
     </>;
   }
   function AgentSurface(props:{surfaceId:string;sessionId?:string;initialViewport:{width:number;height:number}}) {
@@ -1369,6 +1397,29 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     </div>;
   }
   function Conversation(props: { surfaceId: string;initialViewport:{width:number;height:number} }) { const surface=()=>state().surfaces.find(surface=>surface.id===props.surfaceId);return <AgentSurface surfaceId={props.surfaceId} sessionId={surface()?.sessionId} initialViewport={props.initialViewport}/>; }
+
+  function HomeSurface(props:{surfaceId:string;initialViewport:{width:number;height:number};active:boolean;onFocus:()=>void}) {
+    const surface=()=>state().surfaces.find(surface=>surface.id===props.surfaceId)!;
+    const agentMode=()=>surface().homeMode==="agent";
+    const [viewport,setViewport]=createSignal(props.initialViewport);
+    const sessionId=()=>surface().homeAgentSessionId;
+    const timelineSession=()=>sessionId()||state().pendingAgentSessions[props.surfaceId];
+    const family=()=>{state().ui;return model.agentFamily(sessionId()||"");};
+    const splash=(view:{width:number;height:number})=><SplashView contextId={props.surfaceId} config={config} wordmarkHosts={wordmarkHosts} embedded initialViewport={{width:Math.max(0,view.width-80*s),height:Math.max(0,view.height-16*s)}} active={props.active} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={props.onFocus} onAction={action=>{if(action==="open-agent"){model.setHomeMode(props.surfaceId,"agent");setEditorFocus(value=>value+1);}else void welcomeAction(action).catch(model.report);}}/>;
+    const history=(view:{width:number;height:number})=> <Show when={timelineSession()&&((!!sessionId()&&state().history[sessionId()!]===undefined)||(state().history[timelineSession()!]||[]).some(message=>message.kind!=="System"))} fallback={splash(view)}>
+      <AgentTimelineView surfaceId={props.surfaceId} viewport={view} contentBottom={view.height} sessionId={timelineSession()!} provisional={!sessionId()} rootSessionId={sessionId()?family().root:timelineSession()!} familyRoster={family().roster} model={model} config={config} report={model.report} onPreview={setImagePreview}
+        onFocus={()=>{++contentFocusSerial;contentFocusFrames.cancel();pendingContentFocus=false;props.onFocus();setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}
+        onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}}
+        openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/>
+    </Show>;
+    return <Composer surfaceId={props.surfaceId} sessionId={sessionId()} home={false} viewport={viewport()} enabled={agentMode()} renderInput={input=><HomeTerminalView
+      sessionId={homeTerminalId(surface())} ensureSession={()=>model.ensureHomeTerminal(props.surfaceId)} client={model.client} config={config}
+      agentMode={agentMode()} agentInput={input} agentHistory={history} onViewport={next=>setViewport(previous=>previous.width===next.width&&previous.height===next.height?previous:next)}
+      directoryAuthority={isDirectoryAuthority(surface())} onMakeDirectoryAuthority={()=>model.setMainTerminal(props.surfaceId)}
+      contextId={props.surfaceId} wordmarkHosts={wordmarkHosts} active={props.active} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={props.onFocus} onSearch={openTerminalSearch} report={model.report}
+      onAction={action=>{if(action==="open-agent"){model.setHomeMode(props.surfaceId,"agent");setEditorFocus(value=>value+1);}else void welcomeAction(action).catch(model.report);}}
+      onOpenPath={(path,isDirectory)=>openTerminalPath(surface(),path,isDirectory)} savedCommands={workspaceSavedCommands(state().ui.savedTerminalCommands,surface().workspaceId)}/>}/>;
+  }
 
   function sessionContextMetrics(sessionId:string|undefined,selectedModel:string) {
     const id=sessionId||"";
@@ -1524,12 +1575,8 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
                 <Match when={surface.kind === "welcome"}><Show when={config.terminalBlockUi} fallback={<SplashView initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border-80*s),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border-16*s)};})()} config={config} contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onAction={action=>{
                   void welcomeAction(action).catch(model.report);
                 }}/>}>
-                  <HomeTerminalView sessionId={homeTerminalId(found())} ensureSession={()=>model.ensureHomeTerminal(surface.id)} client={model.client} config={config}
-                    directoryAuthority={isDirectoryAuthority(found())} onMakeDirectoryAuthority={()=>model.setMainTerminal(surface.id)}
-                    contextId={surface.id} wordmarkHosts={wordmarkHosts} active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()}
-                    onCustomKey={handleSurfaceKey} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}} onSearch={openTerminalSearch} report={model.report}
-                    onAction={action=>void welcomeAction(action).catch(model.report)} onOpenPath={(path,isDirectory)=>openTerminalPath(surface,path,isDirectory)}
-                    savedCommands={workspaceSavedCommands(state().ui.savedTerminalCommands,surface.workspaceId)}/>
+                  <HomeSurface surfaceId={surface.id} active={focused()&&chromeFocus().zone==="content"} onFocus={()=>{noteContentFocus();layout.focus(leaf);model.selectSurface(id,true);}}
+                    initialViewport={(()=>{const pane=layout.frame.panes.find(pane=>pane.leaf===leaf),border=layout.frame.panes.length>1?s:0;return{width:Math.max(0,(pane?.rect[2]||0)-2*border),height:Math.max(0,(pane?.rect[3]||0)-tabChromeSpec.buffer.height-2*border)};})()}/>
                 </Show></Match>
                 <Match when={surface.kind === "page" && surface.page === "extensions"}><ChromeActionsView controller={chromeActions} config={config} pageMode active={focused()&&chromeFocus().zone==="content"} focusToken={editorFocus()} onCustomKey={handleSurfaceKey}
                   onFocus={() => { noteContentFocus();layout.focus(leaf); model.selectSurface(id, true); }} /></Match>

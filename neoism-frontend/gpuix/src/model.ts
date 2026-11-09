@@ -45,10 +45,17 @@ export type Surface = {
   kind: "file" | "agent" | "terminal" | "page" | "welcome" | "git";
   page?: "extensions" | "database"; databaseTable?: string; document?: { kind: "config"; revision: string; writable: boolean };
   path?: string; rootDir?: string; sessionId?: string; agentRootSessionId?: string;
+  /** Home keeps its PTY in sessionId; Agent mode owns a separate conversation. */
+  homeMode?: "terminal" | "agent"; homeAgentSessionId?: string;
   git?: GitReviewDescriptor; gitReveal?: number; gitEditorIds?: string[];
   /** Canonical source owner for inline Git editing, without a second visible tab. */
   hidden?: boolean;
 };
+export function agentSurface(surface:Surface):Surface;
+export function agentSurface(surface:Surface|undefined):Surface|undefined;
+export function agentSurface(surface:Surface|undefined):Surface|undefined {
+  return surface?.kind==="welcome"?{...surface,kind:"agent",sessionId:surface.homeAgentSessionId}:surface;
+}
 export interface PendingQuestion { sessionId: string; requestId: string; request: Record<string, unknown>; responding: boolean; error?: string }
 export interface PromptOptions { attachments?: readonly Attachment[]; delivery?: "steer" | "queue"; selection?: ProviderState; messageId?:string }
 export interface Permission { sessionId: string; requestId: string; tool: string; title: string; responding?: boolean; error?: string }
@@ -189,7 +196,13 @@ export class WorkspaceModel {
   composerDraftKey = (sessionId?: string,surfaceId?:string) => {
     if(sessionId)return sessionId;
     const surface=surfaceId?this.state.surfaces.find(surface=>surface.id===surfaceId):undefined;
-    return surface?.kind==="agent"&&!surface.sessionId&&surface.id!==`agent-home:${surface.workspaceId}`?`home:${surface.id}`:`home:${surface?.workspaceId||this.state.activeWorkspace?.id||""}`;
+    return surface?.kind==="welcome"||surface?.kind==="agent"&&!surface.sessionId&&surface.id!==`agent-home:${surface.workspaceId}`?`home:${surface.id}`:`home:${surface?.workspaceId||this.state.activeWorkspace?.id||""}`;
+  };
+  setHomeMode = (surfaceId:string,mode:"terminal"|"agent") => {
+    const surface=this.state.surfaces.find(surface=>surface.id===surfaceId&&surface.kind==="welcome");
+    if(!surface||surface.homeMode===mode)return;
+    this.update({surfaces:this.state.surfaces.map(current=>current.id===surfaceId?{...current,homeMode:mode}:current)});
+    if(mode==="agent"&&surface.homeAgentSessionId)this.resumeThread(surface.homeAgentSessionId);
   };
   readonly composerHistory:ComposerDraft[]=[];
   rememberComposerPrompt(draft:ComposerDraft){
@@ -337,7 +350,7 @@ export class WorkspaceModel {
       const patch: Partial<AppState> = { ui: { ...this.state.ui, layouts: { ...layouts, [workspaceId]: layout!.snapshot() } } };
       if (this.state.activeWorkspace?.id === workspaceId) patch.activeSurfaceId = frame.focusedSurfaceId;
       const focused = patch.activeSurfaceId && patch.activeSurfaceId !== this.state.activeSurfaceId
-        ? this.state.surfaces.find(surface=>surface.id===patch.activeSurfaceId) : undefined;
+        ? agentSurface(this.state.surfaces.find(surface=>surface.id===patch.activeSurfaceId)) : undefined;
       this.update(patch);
       // Layout-driven tab/pane navigation publishes focus before selectSurface.
       // Reconcile warm chats here too, while the actual transition is known.
@@ -708,7 +721,7 @@ export class WorkspaceModel {
       const localSurfaces=()=>this.state.surfaces.filter(surface=>surface.workspaceId===workspaceId);
       const databaseApplying=()=>localSurfaces().some(surface=>this.databases.get(surface.id)?.state.applying);
       if(databaseApplying()){this.report(new Error("Wait for the database transaction to finish before closing this workspace."));return false;}
-      const draftKeys=new Set([`home:${workspaceId}`,...localSurfaces().filter(surface=>!surface.sessionId).map(surface=>this.composerDraftKey(undefined,surface.id))]);
+      const draftKeys=new Set([`home:${workspaceId}`,...localSurfaces().flatMap(surface=>surface.kind==="welcome"?[this.composerDraftKey(surface.homeAgentSessionId,surface.id)]:!surface.sessionId?[this.composerDraftKey(undefined,surface.id)]:[])]);
       const hasUnsaved=()=>localSurfaces().some(surface=>this.surfaceDirty(surface.id))||[...draftKeys].some(key=>{const draft=this.state.composerDrafts[key];return !!draft&&(!!draft.text||draft.attachments.length>0);});
       if(!discard&&hasUnsaved()){this.report(new Error("Unsaved changes or unsent drafts. Save this workspace or use :qall! to discard it."));return false;}
       if(!this.state.connection.workspaceLifecycle){this.report(new Error("Update and restart the daemon to close this workspace and its resources safely."));return false;}
@@ -894,7 +907,7 @@ export class WorkspaceModel {
       if (epoch !== this.epoch) return;
       this.presence.setWorkspace(workspace);
       for (const pane of this.getLayout(workspace.id).frame.panes) {
-        const surface = this.state.surfaces.find((s) => s.id === pane.surfaceId);
+        const surface = agentSurface(this.state.surfaces.find((s) => s.id === pane.surfaceId));
         if (surface?.kind === "agent" && surface.sessionId) this.resumeThread(surface.sessionId);
       }
       await this.bindPendingTerminals(workspace.id);
@@ -1137,14 +1150,15 @@ export class WorkspaceModel {
       this.update({ activeSurfaceId: id });
       if (!preserveLeaf) this.getLayout(surface.workspaceId).focusSurface(id);
     });
-    if (surface.kind === "agent" && surface.sessionId) {
-      const pending = this.historyRequests.get(surface.sessionId);
+    const agent=agentSurface(surface);
+    if (agent?.kind === "agent" && agent.sessionId) {
+      const pending = this.historyRequests.get(agent.sessionId);
       // Layout focus publishes activeSurfaceId before PaneLayoutView calls
       // selectSurface. A restored chat still needs its first history request
       // even when that earlier publication makes `changed` false here.
-      const needsHistory = !this.historyCursors.has(surface.sessionId)
+      const needsHistory = !this.historyCursors.has(agent.sessionId)
         && (!pending || Date.now() - pending.sentAt >= 30000);
-      if (changed || needsHistory) this.resumeThread(surface.sessionId);
+      if (changed || needsHistory) this.resumeThread(agent.sessionId);
     }
     if (surface.kind === "file" && this.state.files[id] === undefined) void this.loadFile(surface);
     if(surface.kind==="terminal"||surface.kind==="welcome")this.followMainTerminal();
@@ -1194,7 +1208,7 @@ export class WorkspaceModel {
     if(this.state.files[id]!==undefined){const files={...this.state.files};delete files[id];this.update({files});}
     this.fileLoads.delete(id);
     editor?.dispose(); this.editors.delete(id);
-    const target = this.state.surfaces.find((s) => s.id === id);
+    const target = agentSurface(this.state.surfaces.find((s) => s.id === id));
     if (target?.kind === "terminal") {
       closeTerminalSession(this.client, target.sessionId!);
       const main={...(isRecord(this.state.ui.mainTerminals)?this.state.ui.mainTerminals:{})};
@@ -1204,13 +1218,13 @@ export class WorkspaceModel {
       delete cwds[target.sessionId!];delete pending[target.id];
       this.setUI({mainTerminals:main,terminalCwds:cwds,pendingTerminalBindings:pending});
     }
-    if (target?.kind === "agent" && target.sessionId&&!this.state.surfaces.some(surface=>surface.id!==id&&surface.kind==="agent"&&surface.sessionId===target.sessionId)) {this.familyStreams.deactivate(target.sessionId);this.sendAgent({ StopStream: { session_id: target.sessionId } });}
+    if (target?.kind === "agent" && target.sessionId&&!this.state.surfaces.map(agentSurface).some(surface=>surface?.id!==id&&surface?.kind==="agent"&&surface.sessionId===target.sessionId)) {this.familyStreams.deactivate(target.sessionId);this.sendAgent({ StopStream: { session_id: target.sessionId } });}
     // Closing a UI tab never kills a daemon-owned shell or deletes a chat.
     const surfaces = this.state.surfaces.filter((s) => s.id !== id);
     this.update({ surfaces, activeSurfaceId: this.state.activeSurfaceId === id ? surfaces.findLast((s) => s.workspaceId === this.state.activeWorkspace?.id && !s.hidden)?.id : this.state.activeSurfaceId });
     if(target?.kind==="agent"&&target.sessionId){
       const root=target.agentRootSessionId||agentFamilyRoot(this.state.ui,target.sessionId);
-      if(!surfaces.some(surface=>surface.kind==="agent"&&surface.sessionId&&(surface.agentRootSessionId||agentFamilyRoot(this.state.ui,surface.sessionId))===root)){
+      if(!surfaces.map(agentSurface).some(surface=>surface?.kind==="agent"&&surface.sessionId&&(surface.agentRootSessionId||agentFamilyRoot(this.state.ui,surface.sessionId))===root)){
         this.closedTranscriptRoots.add(root);
         const history={...this.state.history};
         for(const session of new Set([root,target.sessionId,...Object.keys(history),...this.historyRequests.keys()])){
@@ -1370,18 +1384,19 @@ export class WorkspaceModel {
     this.sessionWorkspaces.set(thread.session_id, workspace.id);
     // Reuse a tab only in this workspace: a chat already open in another
     // workspace tab is opened here too, never focused invisibly over there.
-    const existing=this.state.surfaces.find(s=>s.kind==="agent"&&s.sessionId&&s.workspaceId===workspace.id&&(s.agentRootSessionId||agentFamilyRoot(this.state.ui,s.sessionId))===root);
+    const existing=this.state.surfaces.find(s=>{const agent=agentSurface(s);return agent?.kind==="agent"&&agent.sessionId&&s.workspaceId===workspace.id&&(s.agentRootSessionId||agentFamilyRoot(this.state.ui,agent.sessionId))===root;});
     if(existing){
       // Desktop catalog_activation_target: pointer on the viewed child goes
       // back to its family root; keyboard Enter keeps the selected transcript.
-      const target=pointer&&existing.sessionId===thread.session_id&&thread.session_id!==root?root:thread.session_id;
+      const current=agentSurface(existing)!;
+      const target=pointer&&current.sessionId===thread.session_id&&thread.session_id!==root?root:thread.session_id;
       const title=this.state.threads.find(thread=>thread.session_id===root)?.title||existing.title;
-      if(existing.sessionId!==target||existing.agentRootSessionId!==root){const updated={...existing,sessionId:target,agentRootSessionId:root,title};this.update({surfaces:this.state.surfaces.map(s=>s.id===existing.id?updated:s)});this.getLayout(workspace.id).rename(updated);}
-      this.selectSurface(existing.id);if(existing.sessionId!==target)this.resumeThread(target);return existing.id;
+      if(current.sessionId!==target||existing.agentRootSessionId!==root||existing.kind==="welcome"&&existing.homeMode!=="agent"){const updated:Surface=existing.kind==="welcome"?{...existing,homeAgentSessionId:target,agentRootSessionId:root,homeMode:"agent"}:{...existing,sessionId:target,agentRootSessionId:root,title};this.update({surfaces:this.state.surfaces.map(s=>s.id===existing.id?updated:s)});this.getLayout(workspace.id).rename(updated);}
+      this.selectSurface(existing.id);if(current.sessionId!==target)this.resumeThread(target);return existing.id;
     }
-    const home = adoptHome ? this.state.surfaces.find((s) => s.id === this.state.activeSurfaceId && s.kind === "agent" && !s.sessionId && s.workspaceId === workspace.id) : undefined;
+    const home = adoptHome ? this.state.surfaces.find((s) => s.id === this.state.activeSurfaceId && (s.kind === "agent" && !s.sessionId || s.kind==="welcome"&&s.homeMode==="agent") && s.workspaceId === workspace.id) : undefined;
     if (home) {
-      const adopted = { ...home, sessionId: thread.session_id, agentRootSessionId:root,title: thread.title };
+      const adopted:Surface = home.kind==="welcome"?{...home,homeAgentSessionId:thread.session_id,agentRootSessionId:root}:{ ...home, sessionId: thread.session_id, agentRootSessionId:root,title: thread.title };
       this.update({ surfaces: this.state.surfaces.map((s) => s.id === home.id ? adopted : s) });
       this.getLayout(workspace.id).rename(adopted);
       this.resumeThread(thread.session_id);
@@ -1408,7 +1423,8 @@ export class WorkspaceModel {
     // Warm only open families, not the entire sidebar catalog. Reuse the head
     // cursor as the hydrated marker; live-only rows still need their baseline.
     const roots=new Set<string>();
-    for(const surface of this.state.surfaces){
+    for(const source of this.state.surfaces){
+      const surface=agentSurface(source)!;
       if(surface.kind!=="agent"||!surface.sessionId)continue;
       const family=this.agentFamily(surface.agentRootSessionId||surface.sessionId);
       if(roots.has(family.root)||this.closedTranscriptRoots.has(family.root))continue;
@@ -1683,7 +1699,7 @@ export class WorkspaceModel {
     const workspace = this.state.activeWorkspace;
     if (!workspace) throw new Error("Select a workspace first");
     const sourceId=this.state.activeSurfaceId;
-    const home=this.state.surfaces.find(surface=>surface.id===sourceId&&surface.kind==="agent"&&!surface.sessionId&&surface.workspaceId===workspace.id);
+    const home=this.state.surfaces.find(surface=>surface.id===sourceId&&(surface.kind==="agent"&&!surface.sessionId||surface.kind==="welcome"&&surface.homeMode==="agent"&&!surface.homeAgentSessionId)&&surface.workspaceId===workspace.id);
     const homeDraftKey=home?this.composerDraftKey(undefined,home.id):undefined;
     const declaredRoot=this.state.workspaces.find(entry=>entry.id===workspace.id)?.root_dir;
     const paths=hostPaths(declaredRoot||""),relative=declaredRoot&&workspace.root_dir?paths.relative(declaredRoot,workspace.root_dir):undefined;
@@ -1707,8 +1723,9 @@ export class WorkspaceModel {
     }
     // A slow create belongs to the home that submitted it. Opening another
     // Agent tab or workspace must never adopt or select that newer page.
-    if(home&&this.state.surfaces.some(surface=>surface.id===home.id&&!surface.sessionId)){
-      const adopted={...home,sessionId:thread.session_id,title:thread.title};
+    const current=home&&this.state.surfaces.find(surface=>surface.id===home.id);
+    if(home&&current&&!agentSurface(current)?.sessionId){
+      const adopted:Surface=current.kind==="welcome"?{...current,homeAgentSessionId:thread.session_id}:{...current,sessionId:thread.session_id,title:thread.title};
       this.transaction(()=>{
         const draft=homeDraftKey?this.state.composerDrafts[homeDraftKey]:undefined;
         const pendingAgentSessions={...this.state.pendingAgentSessions};delete pendingAgentSessions[home.id];
@@ -1874,7 +1891,8 @@ export class WorkspaceModel {
     const selection=this.selection(),sourceId=this.state.activeSurfaceId;
     const request=sdkPrompt(text,options.attachments||[],selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
     const message=this.promptMessage(request),sessionId=`pending:${request.messageId}`;
-    const home=this.state.surfaces.find(surface=>surface.id===sourceId&&surface.kind==="agent"&&!surface.sessionId);
+    const home=this.state.surfaces.find(surface=>surface.id===sourceId&&(surface.kind==="agent"&&!surface.sessionId||surface.kind==="welcome"&&surface.homeMode==="agent"&&!surface.homeAgentSessionId));
+    if(home&&this.state.pendingAgentSessions[home.id])return false;
     const optimistic=home&&options.delivery!=="queue"?{sessionId,message}:undefined;
     if(home&&optimistic)this.transaction(()=>{this.update({pendingAgentSessions:{...this.state.pendingAgentSessions,[home.id]:sessionId}});this.showPrompt(sessionId,message);});
     try {
@@ -2255,6 +2273,7 @@ export class WorkspaceModel {
         this.update({ providerStates: { ...this.state.providerStates, [sessionId]: Schema.decodeUnknownSync(ProviderStateSchema)(body) } });
       } else if (tag === "ThreadDeleted" && sessionId) {
         for(const surface of this.state.surfaces.filter(surface=>surface.kind==="agent"&&(surface.sessionId===sessionId||surface.agentRootSessionId===sessionId)))this.closeSurface(surface.id);
+        this.update({surfaces:this.state.surfaces.map(surface=>surface.kind==="welcome"&&(surface.homeAgentSessionId===sessionId||surface.agentRootSessionId===sessionId)?{...surface,homeAgentSessionId:undefined,agentRootSessionId:undefined}:surface)});
         this.update({threads:this.state.threads.filter(thread=>thread.session_id!==sessionId)});
       } else if (tag === "ThreadUpdated" && sessionId) {
         if (typeof body.title === "string") this.updateAgentTitle(sessionId,body.title);

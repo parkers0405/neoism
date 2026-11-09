@@ -45,7 +45,7 @@ export class AppVisualState {
   const state:CachedAgentComposer={viewport:initialViewport&&initialViewport.width>0&&initialViewport.height>0?{...initialViewport}:previous?.viewport||{width:0,height:0}};
   this.agentComposers.set(key,{surfaceId,state});return state;
  }
- pruneAgentComposers(surfaces:readonly Surface[]){const ids=new Set(surfaces.filter(surface=>surface.kind==="agent").map(surface=>surface.id));for(const[key,entry]of this.agentComposers)if(!ids.has(entry.surfaceId)){entry.state.native?.dispose();this.agentComposers.delete(key);}}
+  pruneAgentComposers(surfaces:readonly Surface[]){const ids=new Set(surfaces.filter(surface=>surface.kind==="agent"||surface.kind==="welcome").map(surface=>surface.id));for(const[key,entry]of this.agentComposers)if(!ids.has(entry.surfaceId)){entry.state.native?.dispose();this.agentComposers.delete(key);}}
  gitPanel(workspaceId:string,model:WorkspaceModel,config:AppConfig){
   let controller=this.gitPanels.get(workspaceId);
   if(!controller){controller=new GitController({model,config});this.gitPanels.set(workspaceId,controller);}

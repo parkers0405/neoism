@@ -32,6 +32,7 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   const [home, setHome] = createSignal<string>(), [linksRevision, refreshLinks] = createSignal(0), [hoveredLink, setHoveredLink] = createSignal<HoveredOutputLink>();
   const [revision, refresh] = createSignal(0), [size, setSize] = createSignal({ width: 0, height: 0, x: 0, y: 0 });
   const [cell, setCell] = createSignal(config.fontSize * .6), [draft, setDraftValue] = createSignal(blocks.draft);
+  const command = () => props.agentMode ? props.agentInput?.text || "" : draft();
   const [caretReset, resetCaret] = createSignal(0);
   const [direct, setDirect] = createSignal(blocks.directInput), [longRunning, setLongRunning] = createSignal(false);
   const [scroll, setScroll] = createSignal(blocks.view.scroll), [follow, setFollow] = createSignal(blocks.view.follow), [horizontal, setHorizontal] = createSignal(blocks.view.horizontal);
@@ -79,9 +80,9 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
     onCleanup(() => clearInterval(timer));
   });
   const commandRows = createMemo(() => Math.max(1, Math.min(Math.floor(Math.max(row, size().height / 2 - row - 52 * s) / row),
-    draft().split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / Math.max(1, Math.floor((size().width - inset * 2) / cell())))), 0))));
-  const composerHeight = () => row * .9 + commandRows() * row + 52 * s;
-  const reserve = () => longRunning() && !props.historyHeader ? 0 : composerHeight();
+    command().split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / Math.max(1, Math.floor((size().width - inset * 2) / cell())))), 0))));
+  const composerHeight = () => row * .9 + commandRows() * row + 52 * s + (props.agentMode ? props.agentInput?.footerHeight || 0 : 0);
+  const reserve = () => !props.agentMode && longRunning() && !props.historyHeader ? 0 : composerHeight();
   const viewportHeight = () => Math.max(0, size().height - reserve());
   const position = () => props.historyHeader ? "bottom" : config.terminalInputPosition || "bottom";
   const headerHeight = () => props.historyHeader ? Math.max(0, size().height - composerHeight()) : 0;
@@ -203,8 +204,8 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
     const link = linkCache.get(item.block.id)?.links.find(link => link.row === originalRow && column >= link.column && column < link.endColumn);
     return link ? { blockId: item.block.id, link } : undefined;
   };
-  const focus = () => { const target = longRunning() ? history : input; if (target && !raw() && props.active !== false) focusNativeElement(renderer, target.id); };
-  createEffect(() => { props.focusToken; props.active; raw(); longRunning(); queueMicrotask(() => { if (!disposed) focus(); }); });
+  const focus = () => { const target = !props.agentMode && longRunning() ? history : input; if (target && (props.agentMode || !raw()) && props.active !== false) focusNativeElement(renderer, target.id); };
+  createEffect(() => { props.focusToken; props.active; props.agentMode; raw(); longRunning(); queueMicrotask(() => { if (!disposed) focus(); }); });
   createEffect(() => {
     const live = all().find(block => block.running)?.cursor;
     blinkClock.update({ active: historyFocused() && !!live?.visible, enabled: config.cursorBlink, intervalMs: config.cursorBlinkInterval, mode: "terminal", animating: false, activityToken: live ? `${live.row}:${live.col}` : undefined });
@@ -324,7 +325,8 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
   }} onMouseUp={event => { if (selecting && event.button === 0) extendSelection(event.x || 0, event.y || 0); stopSelecting(); }} style={{ flexGrow: 1, minWidth: 0, minHeight: 0, position: "relative", overflow: "hidden", backgroundColor: config.background ? "transparent" : c.bg }}
     onLayout={event => setSize({ width: event.width || 0, height: event.height || 0, x: event.x || 0, y: event.y || 0 })}>
     <text onLayout={event => { if (event.width) setCell(event.width / 10); }} style={{ ...text(), position: "absolute", opacity: 0, pointerEvents: "none" }}>MMMMMMMMMM</text>
-    <Show when={!raw()} fallback={<div style={{ position: "absolute", left: alternate() ? 0 : inset, right: alternate() ? 0 : inset, top: 0, bottom: 0, display: "flex" }}>{props.grid()}</div>}>
+    <Show when={props.agentMode || !raw()} fallback={<div style={{ position: "absolute", left: alternate() ? 0 : inset, right: alternate() ? 0 : inset, top: 0, bottom: 0, display: "flex" }}>{props.grid()}</div>}>
+      <Show when={!props.agentMode} fallback={<div testId="home-agent-history" style={{position:"absolute",left:0,right:0,top:0,height:viewportHeight(),display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>{props.agentHistory?.({width:size().width,height:viewportHeight()})}</div>}>
       <div ref={history} testId="terminal-block-history" tabIndex={0} role="log" aria-label="Command history"
         onFocus={() => { invalidateNativeFocus(renderer); setHistoryFocused(true); if (busy()) buffer.focus(true); }} onBlur={() => { stopSelecting(); invalidateNativeFocus(renderer); setHistoryFocused(false); if (busy()) buffer.focus(false); }}
         onMouseMove={event => {
@@ -382,23 +384,26 @@ export function BlockTerminalView(props: TerminalViewProps & { grid: () => JSX.E
         </div>}</Show>
         <Show when={!follow() && maximum() > 0}><div style={{ position: "absolute", ...(topInput() ? {top: 10 * s} : {bottom: 10 * s}), right: 16 * s, backgroundColor: c.surface, borderRadius: 4 * s }}><TerminalAction config={config} label="Jump to latest output" icon={topInput() ? "up" : "down"} testId="block-jump-latest" action={() => setFollow(true)}/></div></Show>
       </div>
-      <Show when={!longRunning() || props.historyHeader}>
-      <div testId="terminal-block-input" onClick={focus} style={{ position: "absolute", left: 0, right: 0, ...(position() === "bottom" ? { bottom: 0 } : { top: composerTop() }), height: composerHeight(), ...(topInput() ? {borderBottomWidth: 1} : {borderTopWidth: 1}), borderColor: c.fg + "1a", backgroundColor: config.background ? "transparent" : c.bg, opacity: busy() ? .6 : 1 }}>
+      </Show>
+      <Show when={props.agentMode || !longRunning() || props.historyHeader}>
+      <div testId="terminal-block-input" onClick={focus} onLayout={event=>props.agentInput?.onBounds({x:event.x||0,y:event.y||0,width:event.width||0,height:event.height||0})} style={{ position: "absolute", left: 0, right: 0, ...(position() === "bottom" ? { bottom: 0 } : { top: composerTop() }), height: composerHeight(), ...(topInput() ? {borderBottomWidth: 1} : {borderTopWidth: 1}), borderColor: c.fg + "1a", backgroundColor: config.background ? "transparent" : c.bg, opacity: !props.agentMode && busy() ? .6 : 1 }}>
         <text style={{ ...text(c.dim, config.fontSize * .9), position: "absolute", left: inset, right: 60 * s, top: 13 * s, height: row }}>{(revision(), terminalDirectoryLabel(blocks.directory, home()))}</text>
         <Show when={showDirectInputButton}><div style={{ position: "absolute", right: 12 * s, top: 9 * s }}><TerminalAction config={config} label="Direct shell input" icon="terminal" testId="block-direct-input" action={() => openDirect()}/></div></Show>
         <Show when={props.onMakeDirectoryAuthority}><div style={{ position: "absolute", right: (showDirectInputButton ? 42 : 12) * s, top: 9 * s }}>
           <TerminalAction config={config} label={props.directoryAuthority ? "Controls the working directory" : "Use this terminal's working directory"} tooltip={false} icon={props.directoryAuthority ? "starFilled" : "star"} color={props.directoryAuthority ? c.yellow : undefined} testId="terminal-directory-authority" active={!!props.directoryAuthority}
             action={() => { props.onFocus?.(); props.onMakeDirectoryAuthority?.(); }}/>
         </div></Show>
-        <TerminalCommandInput config={config} source={session.suggestions!} command={draft()} saved={props.savedCommands} recent={recentCommands()} directory={(revision(), blocks.directory)}
-          rows={commandRows()} disabled={busy()} resetToken={caretReset()} composerHeight={composerHeight()} menuBelow={composerTop() < viewportHeight() / 2} menuSpace={composerTop() < viewportHeight() / 2 ? size().height - composerTop() - composerHeight() : composerTop()}
-          onHost={element => { input = element; queueMicrotask(() => { if (!disposed) focus(); }); }}
-          onFocus={() => { invalidateNativeFocus(renderer); setFocused(true); props.onFocus?.(); }} onBlur={() => { invalidateNativeFocus(renderer); setFocused(false); }}
-          onChange={setDraft} onSubmit={submit} onKeyDown={keyDown} onKeyUp={event => { if (busy()) liveKey(event, true); }} onCustomKey={props.onCustomKey}/>
+        <TerminalCommandInput config={config} source={session.suggestions!} command={command()} agentMode={props.agentMode} saved={props.savedCommands} recent={recentCommands()} directory={(revision(), blocks.directory)}
+          rows={commandRows()} disabled={!props.agentMode && busy()} resetToken={props.agentMode ? props.agentInput?.resetToken : caretReset()} composerHeight={composerHeight()} menuBelow={composerTop() < viewportHeight() / 2} menuSpace={composerTop() < viewportHeight() / 2 ? size().height - composerTop() - composerHeight() : composerTop()}
+          onHost={element => { input = element; props.agentInput?.onHost(element); queueMicrotask(() => { if (!disposed) focus(); }); }}
+          onFocus={() => { invalidateNativeFocus(renderer); setFocused(true); props.onFocus?.(); if(props.agentMode)props.agentInput?.onFocus(); }} onBlur={() => { invalidateNativeFocus(renderer); setFocused(false); if(props.agentMode)props.agentInput?.onBlur(); }}
+          onChange={value=>props.agentMode?props.agentInput?.onChange(value):setDraft(value)} onSubmit={()=>props.agentMode?props.agentInput?.onSubmit():submit()} onKeyDown={event=>props.agentMode?props.agentInput?.onKeyDown(event):keyDown(event)} onKeyUp={event => { if (!props.agentMode && busy()) liveKey(event, true); }} onCustomKey={props.onCustomKey}/>
+        <Show when={props.agentMode}><div testId="home-agent-settings" style={{position:"absolute",left:inset,right:inset,bottom:8*s,height:props.agentInput?.footerHeight||0}}>{props.agentInput?.footer}</div></Show>
         <Show when={copied()}><text style={{ ...text(c.dim, 10 * s), position: "absolute", right: inset, bottom: 5 * s }}>{copied()}</text></Show>
         <Show when={focused()}><div style={{ position: "absolute", left: 0, ...(topInput() ? {bottom: 0} : {top: 0}), right: 0, height: 1, backgroundColor: c.fg + "26", pointerEvents: "none" }}/></Show>
       </div>
       </Show>
+      <Show when={props.agentMode}>{props.agentInput?.overlays}</Show>
     </Show>
   </div>;
 }

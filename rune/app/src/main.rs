@@ -29,6 +29,7 @@ pub const FONTS: &[&[u8]] = &[
 fn setup(app: &mut App, waker: rune::Waker) {
     let images = ImageCache::new(waker.clone());
     app.wordmark.load(&images, app.pal.fg);
+    app.tools.icons.load(&images);
     app.images = Some(images);
     // Headless renders (`--snap`, `--tree`) draw the reference look without a daemon.
     if std::env::var_os("NEOISM_RUNE_OFFLINE").is_none() {
@@ -44,6 +45,10 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let animating = app.wordmark.tick(app.visible_wordmark(), clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }
+    // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap).
+    app.tools.clock = clock;
+    let spinning = app.running_tools();
+    if spinning { tx.wake_after(std::time::Duration::from_millis(45)); }
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     let fps = ui::fps::rate();
     let fps_changed = app.fps != Some(fps);
@@ -51,7 +56,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || fps_changed
+    animating || changed || spinning || fps_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -74,11 +79,27 @@ fn main() {
             ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),
             ("timeline-report", |s| s.load_fixture("fixture-report", "Read-Only GPU Frame Analysis and Documentation Report", include_str!("../fixtures/report-timeline.json"))),
             ("code", |s| s.load_fixture("fixture-code", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"))),
+            ("tool-cards", |s| {
+                s.load_fixture("fixture-tool-cards", "Tool Cards", include_str!("../fixtures/tool-cards-timeline.json"));
+                // Shown as the live turn, so its whole trace is visible.
+                if let Some(session) = s.sessions.get_mut("fixture-tool-cards") { session.live_from = Some(0); }
+            }),
+            ("tool-cards-open", |s| {
+                s.load_fixture("fixture-tool-cards", "Tool Cards", include_str!("../fixtures/tool-cards-timeline.json"));
+                if let Some(session) = s.sessions.get_mut("fixture-tool-cards") { session.live_from = Some(0); }
+                for id in ["prt_1c14b7a66001aYzMV0RbE1Psr2..", "prt_1c2505048001v1gMCUm75EWj9h", "prt_1c15712740011BAWLf1gNhsbMf:0",
+                    "prt_1c250073a001g03n2pGaegM5tS", "prt_1c198dac10011iePQvpkkfkmwM",
+                    "prt_1c198dac10011iePQvpkkfkmwM/compose/prt_1c198e302002zGwGCWKs45Ca8Z"] {
+                    s.tools.expand(id);
+                }
+            }),
             ("timeline-tools", |s| s.load_fixture("fixture-tools", "Inspect Git History and GPU Sources; Edit Scratchpad", include_str!("../fixtures/tools-timeline.json"))),
         ],
         ..AppSpec::new("Neoism", (1252.0, 674.0), App::new, ui::chrome::root)
     };
-    rune::set_app_id("ai.neoism.rune");
+    // `NEOISM_RUNE_APP_ID` gives a test instance its own window class next to a running one.
+    let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
+    rune::set_app_id(Box::leak(app_id.into_boxed_str()));
     let mut app = rune::App::new(spec).init(App::new);
     // Every encoded frame feeds the FPS pill; `NEOISM_RUNE_FRAME_TRACE=1` also logs each one for
     // the missed-frame analysis the GPUiX investigation used (`docs/gpuix-live-rendering-baseline.md`).

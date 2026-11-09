@@ -48,8 +48,10 @@ const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 pub struct App {
     /// Wakes the UI thread (poll) from views and background work.
     pub waker: Option<rune::Waker>,
-    /// The block text caret and its trail.
-    pub caret: crate::ui::cursor::Caret,
+    /// The window cursor: focus bar on chrome, block caret in fields, one trail between them.
+    pub cursor: crate::ui::cursor::Cursor,
+    /// Laid-out rects of focusable chrome (`pane-tab:N`, `workspace-tab:N`), for the cursor.
+    pub rects: HashMap<String, [f32; 4]>,
     /// Sub-agent families: child sessions, their roots and roster order.
     pub families: crate::agent::Families,
     pub header_hover: Option<crate::agent::HeaderStep>,
@@ -120,7 +122,8 @@ impl App {
             wheel_target: None,
             picker: None,
             waker: None,
-            caret: Default::default(),
+            cursor: Default::default(),
+            rects: HashMap::new(),
             families: Default::default(),
             header_hover: None,
             // The local branch until the daemon's Git watch reports counts.

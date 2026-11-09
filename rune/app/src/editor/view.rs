@@ -13,6 +13,8 @@ use rune_kit::syntax::{Paint, Syntax, highlight};
 /// Critically damped, omega 16: the editor scroll spring (`rune/README.md`, Motion).
 pub const SCROLL_SPRING: Spring = Spring::new(0.39, 0.0);
 const BREADCRUMB_H: f32 = 24.0;
+/// Tab width for display columns.
+const TAB: usize = 4;
 
 pub fn line_height(app: &App) -> f32 { (app.ty.size * 1.55).round() }
 pub fn advance(app: &App) -> f32 { app.ty.size * 0.6 }
@@ -74,11 +76,14 @@ fn code(app: &App, buffer: &Buffer) -> El {
     let p = app.pal;
     let line_h = line_height(app);
     let adv = advance(app);
-    let font = app.ty.body().lh(line_h);
+    let font = app.ty.code().lh(line_h);
     let source = buffer.lines.join("\n");
     let marks = highlight(buffer.language(), &source);
     let digits = buffer.lines.len().max(1).to_string().len().max(2);
     let gutter_w = (digits as f32 + 2.0) * adv;
+    // Text columns available beside the gutter (the view's width from its last layout).
+    let view_w = app.rects.get("editor-view").map_or(900.0, |r| r[2]);
+    let cols = ((view_w - gutter_w - adv) / adv).floor().max(12.0) as usize;
 
     let mut rows = col().w_full().pb(line_h * 4.0);
     let mut start = 0usize;
@@ -100,16 +105,35 @@ fn code(app: &App, buffer: &Buffer) -> El {
             k += 1;
         }
         let current = index == buffer.cursor.0;
-        let mut line_row = row().key(format!("line:{index}")).w_full().min_h(line_h)
-            .fill(if current { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT })
-            .child(row().w(gutter_w - adv).mr(adv).justify_end()
-                .child(text(format!("{}", index + 1)).font(if current { app.ty.bold().lh(line_h) } else { font })
-                    .color(rgb(if current { p.fg } else { p.muted }))))
-            .child(rune::rich(line.clone(), spans).font(font).color(rgb(p.fg)).grow(1.0).shrink());
-        if current {
-            let col = buffer.cursor.1 as f32 * adv + gutter_w;
-            line_row = line_row.child(el().w(adv).h(line_h).absolute(col, 0.0)
-                .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("editor-cursor".into(), r); }));
+        // Soft-wrapped rows: the first shows the line number, continuations a muted `↳` and
+        // hang at their indent (`wrap_segments`).
+        let segments = super::wrap::wrap_segments(line, cols, TAB);
+        let cursor_byte = line.char_indices().nth(buffer.cursor.1).map_or(line.len(), |(b, _)| b);
+        let mut line_row = col().key(format!("line:{index}")).w_full()
+            .fill(if current { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT });
+        for (n, segment) in segments.iter().enumerate() {
+            let gutter = if n == 0 {
+                text(format!("{}", index + 1)).font(if current { app.ty.bold().lh(line_h) } else { font })
+                    .color(rgb(if current { p.fg } else { p.muted }))
+            } else {
+                text("\u{21b3}").font(font).color(rgb(p.muted))
+            };
+            let piece = &line[segment.byte_start..segment.byte_end];
+            let piece_spans: Vec<Span> = spans.iter().filter_map(|span| {
+                let (a, b) = (span.start as usize, span.end as usize);
+                let (a, b) = (a.max(segment.byte_start), b.min(segment.byte_end));
+                (a < b).then(|| Span { start: (a - segment.byte_start) as u32, end: (b - segment.byte_start) as u32, ..span.clone() })
+            }).collect();
+            let mut visual = row().w_full().h(line_h)
+                .child(row().w(gutter_w - adv).mr(adv).justify_end().child(gutter))
+                .child(rune::rich(piece.to_owned(), piece_spans).font(font).color(rgb(p.fg)).ml(segment.visual_indent as f32 * adv).shrink());
+            let last = n + 1 == segments.len();
+            if current && cursor_byte >= segment.byte_start && (cursor_byte < segment.byte_end || last) {
+                let column = super::wrap::display_col_for_byte(line, cursor_byte, TAB) - segment.source_col + segment.visual_indent;
+                visual = visual.child(el().w(adv).h(line_h).absolute(gutter_w + column as f32 * adv, 0.0)
+                    .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("editor-cursor".into(), r); }));
+            }
+            line_row = line_row.child(visual);
         }
         rows = rows.child(line_row);
         start = end + 1;

@@ -135,6 +135,7 @@ impl App {
             Action::DecreaseFontSize => self.set_font_size(self.ty.size - 1.0),
             Action::ResetFontSize => self.set_font_size(crate::config::DEFAULT_FONT_SIZE),
             Action::ThemePicker => self.open_picker(Mode::Themes),
+            Action::OpenSettings => self.open_settings(),
             Action::Backgrounds => self.open_picker(Mode::Backgrounds),
             Action::SearchFiles => self.open_finder(crate::finder::Mode::Files),
             Action::SearchWords => self.open_finder(crate::finder::Mode::Grep),
@@ -162,7 +163,10 @@ impl App {
             _ => serde_json::Value::Null,
         };
         self.set_setting("ui.window.background-image-disabled", json!(*choice == backgrounds::Choice::None));
-        self.set_setting("ui.window.background-image", image);
+        self.set_setting("ui.window.background-image", image.clone());
+        // Show the choice now rather than after the daemon's write lands on disk.
+        self.wallpaper = crate::ui::wallpaper::Wallpaper::from_config(&json!({"ui": {"window": {
+            "background-image-disabled": *choice == backgrounds::Choice::None, "background-image": image }}}));
     }
 
     /// The preview image for a background path, once decoded. The first ask starts a decode on

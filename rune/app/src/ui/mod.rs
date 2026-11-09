@@ -4,6 +4,8 @@ pub mod chrome;
 pub mod cursor;
 pub mod fps;
 pub mod icons;
+pub mod menu;
+pub mod wallpaper;
 pub mod orb;
 pub mod palettes;
 pub mod status;

@@ -22,7 +22,7 @@ pub fn view(app: &App) -> El {
     let tab = app.active_tab();
     let tab_id = tab.id;
     let Some(term) = app.terminals.get(&tab_id) else { return el() };
-    let pane = col().key(format!("home-pane:{tab_id}")).w_full().h_full().fill(rgb(p.bg))
+    let pane = col().key(format!("home-pane:{tab_id}")).w_full().h_full().fill(app.surface(p.bg))
         .on_layout(move |a: &mut App, [_, _, w, h]: [f32; 4]| {
             if let Some(term) = a.terminals.get_mut(&tab_id) { term.area = [w, h]; }
         });

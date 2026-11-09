@@ -25,11 +25,14 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
     track_caret(app, cx);
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
+        .child(super::wallpaper::view(app))
         .child(body)
         .child(super::status::view(app))
         .child(agent::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
         .child_if(app.finder.is_some(), || crate::finder::view(app))
+        .child_if(app.menu.is_some(), || super::menu::view(app))
+        .child_if(app.settings.is_some(), || crate::settings::view(app))
         .child_if(app.cursor.visible, || cursor_quad(app))
 }
 
@@ -75,7 +78,8 @@ fn rail(app: &App) -> El {
         .child(el().w(6.0).h(6.0).radius(3.0).fill(rgb(p.green)).absolute(38.0, 13.0));
     col().key("activity-rail").w(RAIL_W).h_full().pt(6.5).fill(rgb(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
-        .child(button("topbar-menu", glyph::MENU, false, |_| {}))
+        .child(button("topbar-menu", glyph::MENU, app.menu.is_some(), |s| s.toggle_menu())
+            .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("topbar-menu".into(), r); }))
         .child(button("toggle-files", glyph::FOLDER, app.sidebar == Some(Sidebar::Files), |s| s.toggle_file_tree()))
         .child(button("toggle-notes", glyph::FILE, app.sidebar == Some(Sidebar::Notes), |s| s.toggle_tree(Sidebar::Notes)))
         .child(button("toggle-conversations", glyph::SPARKLES, app.sidebar == Some(Sidebar::Conversations), |s| {

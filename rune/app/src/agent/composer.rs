@@ -58,7 +58,8 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .child(row().gap(10.0).center_y()
             .child(icon(app, glyph::FOLDER, 0.85, rgb(p.dim)))
             .child(text(format!("{}/", app.display_cwd())).font(app.ty.small()).color(rgb(p.fg))))
-        .child(row().gap(10.0)
+        .child(row().gap(10.0).center_y()
+            .child_opt(app.context_label().map(|label| text(label).font(app.ty.small()).color(rgb(p.muted)).mr(18.0)))
             .child(text("/").font(app.ty.small()).color(rgb(p.fg)))
             .child(text("commands").font(app.ty.small()).color(rgb(p.muted))));
     let column = col().w_full().max_w(max_w).child(card);
@@ -86,4 +87,33 @@ pub fn overlay(app: &App) -> El {
     el().key("agent-overlay").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .child(super::slash::effect_layer(app))
         .child(super::slash::picker_card(app))
+}
+
+impl App {
+    /// The footer's context reading (`context-usage.ts`): the newest usage with tokens, as
+    /// `14.5k (2%)` against the session's window, else the catalog's, else the usage's own.
+    pub fn context_label(&self) -> Option<String> {
+        let TabKind::Agent { session: Some(id) } = &self.active_tab().kind else { return None };
+        let session = self.sessions.get(id)?;
+        let usage = session.messages.iter().rev().filter_map(|m| m.usage.as_ref()).find(|u| u.input > 0 || u.output > 0 || u.total > 0)?;
+        let total = if usage.total > 0 { usage.total } else { usage.input + usage.output };
+        let model = self.composer.selection.model.to_lowercase();
+        let limit = session.context_limit.or_else(|| self.composer.context_limit(&model)).or(usage.context_limit.filter(|l| *l > 0));
+        let count = match total {
+            n if n >= 1_000_000 => format!("{:.1}m", n as f64 / 1_000_000.0),
+            n if n >= 10_000 => format!("{:.1}k", n as f64 / 1000.0),
+            n => n.to_string(),
+        };
+        Some(match limit { Some(limit) => format!("{count} ({}%)", (total as f64 / limit as f64 * 100.0).round() as u64), None => count })
+    }
+}
+
+trait ChildOpt {
+    fn child_opt(self, child: Option<El>) -> Self;
+}
+
+impl ChildOpt for El {
+    fn child_opt(self, child: Option<El>) -> El {
+        match child { Some(c) => self.child(c), None => self }
+    }
 }

@@ -43,6 +43,8 @@ pub struct Session {
     /// First message of a turn that streamed while open here; its tool and thinking rows stay
     /// visible. Reloaded history shows finished turns as prompt, answer and footer only.
     pub live_from: Option<usize>,
+    /// The session's context window from `ProviderState`, when the daemon knows it.
+    pub context_limit: Option<u64>,
 }
 
 impl App {
@@ -266,7 +268,8 @@ impl App {
                 if self.sessions.contains_key(&session_id) { self.set_streaming(&session_id, activity == "running"); }
             }
             AgentServerMessage::SessionIdle { session_id, .. } => self.set_streaming(&session_id, false),
-            AgentServerMessage::ProviderState { model: Some(model), provider_id, .. } => {
+            AgentServerMessage::ProviderState { session_id, model: Some(model), provider_id, context_limit, .. } => {
+                if let Some(limit) = context_limit.filter(|l| *l > 0) { self.sessions.entry(session_id).or_default().context_limit = Some(limit); }
                 let provider = provider_id.unwrap_or_default();
                 self.model = title_case(&if provider.is_empty() || model.contains('/') { model } else { format!("{provider}/{model}") });
             }

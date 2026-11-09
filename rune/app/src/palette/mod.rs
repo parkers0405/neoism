@@ -6,7 +6,7 @@ mod view;
 
 pub use view::view;
 
-use crate::app::{App, Sidebar};
+use crate::app::App;
 use crate::daemon::Family;
 use crate::tabs::TabKind;
 use crate::ui::theme::{PALETTES, palette};
@@ -120,10 +120,7 @@ impl App {
             Action::ResetFontSize => self.set_font_size(crate::config::DEFAULT_FONT_SIZE),
             Action::ThemePicker => self.open_picker(Mode::Themes),
             Action::OpenAgent => { self.open_tab(TabKind::Agent { session: None }); }
-            Action::ToggleConversations => {
-                self.sidebar = if self.sidebar.is_some() { None } else { Some(Sidebar::Conversations) };
-                if self.sidebar.is_some() { self.refresh_threads(); }
-            }
+            Action::ToggleConversations => self.toggle_conversations(),
             Action::Quit => tx.quit(),
         }
     }

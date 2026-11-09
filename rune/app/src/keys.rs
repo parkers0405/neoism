@@ -1,7 +1,7 @@
 //! Window shortcuts and the chrome focus ladder (`rune/README.md`, "Keyboard focus and the cursor";
 //! source of truth: `neoism-frontend/chrome-navigation.ts`).
 
-use crate::app::{App, Focus, Sidebar};
+use crate::app::{App, Focus};
 use crate::tabs::TabKind;
 use rune::{Key, KeyEvent, Tx};
 
@@ -39,8 +39,7 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
                 "a" => { app.open_tab(TabKind::Agent { session: None }); return true; }
                 "t" | "d" => { app.open_tab(TabKind::Home); return true; }
                 "c" => {
-                    app.sidebar = if app.sidebar == Some(Sidebar::Conversations) { None } else { Some(Sidebar::Conversations) };
-                    if app.sidebar.is_some() { app.refresh_threads(); }
+                    app.toggle_conversations();
                     return true;
                 }
                 "p" => { app.open_picker(crate::palette::Mode::Commands); return true; }

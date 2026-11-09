@@ -24,6 +24,8 @@ pub fn palette(name: &str) -> &'static Palette {
 
 pub const ICONS: Family = Family::Named("Cascadia Code NF");
 pub const PIXEL: Family = Family::Named("Press Start 2P");
+/// The paint layer's icon face: Nerd glyphs sized to fill a cell, for sizes ported in points.
+pub const NERD: Family = Family::Named("Symbols Nerd Font Mono");
 
 /// Fonts and sizes derived from the configured font size (default 15 at scale 1).
 #[derive(Clone, Copy, Debug)]
@@ -39,7 +41,7 @@ impl Type {
     /// A size given in the original's unscaled points, at the configured weight.
     pub fn sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), self.weight).mono() }
     pub fn sized_bold(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 800.0).mono() }
-    pub fn icon_sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 400.0).family(ICONS) }
+    pub fn icon_sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 400.0).family(NERD) }
     pub fn body(self) -> TextStyle {
         TextStyle::new(self.size, self.weight).mono().lh(self.size * 1.45)
     }

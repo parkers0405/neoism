@@ -1,47 +1,52 @@
 //! Home views: the splash (wordmark and shortcut grid) until the first command, then blocks;
 //! the command composer is always pinned below.
 
+use super::splash::{MENU, layout};
 use crate::app::App;
 use crate::ui::icon;
-use crate::ui::theme::{glyph, rgb};
+use crate::ui::theme::{NERD, glyph, rgb};
 use crate::wordmark;
+use rune::tok::TextStyle;
 use rune::{Color, El, Tx, col, el, row, text};
 
 pub fn view(app: &App) -> El {
     let p = app.pal;
-    let actions: [(&str, &str, &str); 8] = [
-        (glyph::FOLDER, "Change Directory", "[Alt + D]"),
-        (glyph::FILE, "Notes", "[Alt + N]"),
-        (glyph::FOLDER, "Open file tree", "[Alt + E]"),
-        (glyph::ROCKET, "Neoism Agent", "[Alt + A]"),
-        (glyph::SEARCH, "Search", "[Alt + S]"),
-        (glyph::SPARKLES, "Agent panel", "[Alt + C]"),
-        (glyph::MENU, "Command palette", "[Alt + P]"),
-        (glyph::TERMINAL, "New Terminal", "[Alt + T]"),
-    ];
-    let mut grid = col().w_full().gap(0.0).px(86.0);
-    for pair in actions.chunks(2) {
-        let mut line = row().w_full().h(51.0).center_y().gap(85.0);
-        for (g, label, keys) in pair {
-            line = line.child(row().w(0.0).grow(1.0).center_y().gap(17.0)
-                .child(el().w(20.0).center().child(icon(app, g, 1.45, rgb(p.dim))))
-                .child(text(*label).font(app.ty.body()).color(rgb(p.dim)).grow(1.0))
-                .child(text(*keys).font(app.ty.body()).color(rgb(p.green))));
-        }
-        grid = grid.child(line);
-    }
-    if app.visible_wordmark().is_none() {
-        return col().w_full().h_full().fill(rgb(p.bg))
-            .child(terminal_blocks(app))
-            .child(terminal_composer(app));
-    }
-    let splash = col().w_full().grow(1.0).items_center().pt(57.0)
-        .child(wordmark::view(app, "splash-wordmark", 582.0))
-        .child(el().h(83.0))
-        .child(grid);
+    let body = if app.visible_wordmark().is_some() { splash(app) } else { terminal_blocks(app) };
     col().w_full().h_full().fill(rgb(p.bg))
-        .child(splash)
+        .child(body)
         .child(terminal_composer(app))
+}
+
+/// The wordmark and shortcut menu, placed by `splash::layout` in the measured area.
+fn splash(app: &App) -> El {
+    let p = app.pal;
+    let [width, height] = app.splash.area;
+    let mut area = el().key("splash").w_full().grow(1.0).shrink()
+        .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.splash.area = [w, h]);
+    // The Home pane insets its splash by 40 x 8 pt a side (`HomeTerminalView`, 80 x 16 total).
+    let s = app.ty.scale();
+    let (inset_x, inset_y) = (40.0 * s, 8.0 * s);
+    let Some(g) = layout(width - 2.0 * inset_x, height - 2.0 * inset_y, app.ty.size, s) else { return area };
+    let [x, y, w, _] = g.wordmark;
+    area = area.child(wordmark::view(app, "splash-wordmark", w).absolute(inset_x + x, inset_y + y));
+    for (index, (item, rect)) in MENU.iter().zip(&g.buttons).enumerate() {
+        let hovered = app.splash.hover == Some(index);
+        let ink = if hovered { rgb(p.fg) } else { rgb(p.dim) };
+        let action = item.action;
+        let button = row().key(format!("splash-menu:{index}")).w(rect[2]).h(rect[3]).px(g.pad).center_y()
+            .radius(g.radius)
+            .fill(if hovered { rgb(p.hover).alpha(0.95) } else { Color::TRANSPARENT })
+            .child(el().w(g.icon_slot).center().child(text(item.icon).font(TextStyle::new(g.icon_font, 400.0).family(NERD)).color(ink)))
+            .child(text(item.label).font(TextStyle::new(g.label_font, 700.0).mono()).color(ink).ml(g.label_gap).grow(1.0).truncate().shrink())
+            .child(text(format!("[{}]", item.keys)).font(TextStyle::new(g.key_font, 700.0).mono()).color(rgb(p.green)))
+            .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
+                if inside { a.splash.hover = Some(index); } else if a.splash.hover == Some(index) { a.splash.hover = None; }
+            })
+            .on_press_tx(move |a: &mut App, tx: &mut Tx| a.splash_action(action, tx))
+            .absolute(inset_x + rect[0], inset_y + rect[1]);
+        area = area.child(button);
+    }
+    area
 }
 
 fn terminal_composer(app: &App) -> El {

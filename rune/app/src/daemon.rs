@@ -49,10 +49,13 @@ pub enum Inbound {
 
 pub type Inbox = Arc<Mutex<VecDeque<Inbound>>>;
 
+/// A request: its family, message, and the workspace it is scoped to (if any).
+type Outbound = (Family, Value, Option<String>);
+
 /// Cheap, cloneable sender the UI keeps in its state.
 #[derive(Clone)]
 pub struct Daemon {
-    outbound: Sender<(Family, Value)>,
+    outbound: Sender<Outbound>,
 }
 
 impl Daemon {
@@ -69,7 +72,12 @@ impl Daemon {
     }
 
     pub fn send(&self, family: Family, message: Value) {
-        let _ = self.outbound.send((family, message));
+        let _ = self.outbound.send((family, message, None));
+    }
+
+    /// A request for one workspace (`Files`, `Search`, `Git`, `Editor`, `Database`).
+    pub fn send_scoped(&self, family: Family, message: Value, workspace_root: &str) {
+        let _ = self.outbound.send((family, message, Some(workspace_root.to_owned())));
     }
 
     pub fn agent(&self, message: &AgentClientMessage) {
@@ -140,7 +148,7 @@ fn push(inbox: &Inbox, wake: &dyn Fn(), event: Inbound) {
     wake();
 }
 
-fn run(rx: Receiver<(Family, Value)>, inbox: Inbox, wake: impl Fn()) {
+fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn()) {
     let mut request_id: u64 = 0;
     loop {
         push(&inbox, &wake, Inbound::Connecting);
@@ -161,9 +169,11 @@ fn run(rx: Receiver<(Family, Value)>, inbox: Inbox, wake: impl Fn()) {
             // Writes first: user actions should not wait behind a read timeout.
             loop {
                 match rx.try_recv() {
-                    Ok((family, message)) => {
+                    Ok((family, message, workspace_root)) => {
                         request_id += 1;
-                        let frame = json!({ family.name(): {"request_id": request_id, "message": message} });
+                        let mut envelope = json!({"request_id": request_id, "message": message});
+                        if let Some(root) = workspace_root { envelope["workspace_root"] = json!(root); }
+                        let frame = json!({ family.name(): envelope });
                         if let Err(e) = socket.send(Message::text(frame.to_string())) {
                             break 'session format!("Daemon write failed: {e}");
                         }

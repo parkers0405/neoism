@@ -20,6 +20,14 @@ fn ago(updated_ms: u64) -> String {
     }
 }
 
+impl App {
+    /// `Alt+C`, the rail button and the splash "Agent panel" entry.
+    pub fn toggle_conversations(&mut self) {
+        self.sidebar = if self.sidebar.is_some() { None } else { Some(crate::app::Sidebar::Conversations) };
+        if self.sidebar.is_some() { self.refresh_threads(); }
+    }
+}
+
 /// `Alt+C` / rail sidebar: New chat, scope, Pinned and Recent (`reference/04-sidebar-conversations.png`).
 pub fn conversations(app: &App) -> El {
     let p = app.pal;

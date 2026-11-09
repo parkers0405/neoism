@@ -5,13 +5,12 @@
 use super::theme::{glyph, rgb};
 use super::{ChildIf, icon};
 use crate::agent;
-use crate::app::{App, Connection, Focus, Sidebar};
+use crate::app::{App, Focus, Sidebar};
 use crate::tabs::TabKind;
 use rune::{Color, Cx, El, col, el, row, text};
 
 pub const RAIL_W: f32 = 55.5;
 pub const TAB_ROW_H: f32 = 30.0;
-pub const STATUS_H: f32 = 23.5;
 pub const SIDEBAR_W: f32 = 300.0;
 
 pub fn root(app: &App, cx: &mut Cx<App>) -> El {
@@ -25,7 +24,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
             .child(content(app, cx)));
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .child(body)
-        .child(status_line(app))
+        .child(super::status::view(app))
         .child_if(app.overlay.is_some(), || agent::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
 }
@@ -47,8 +46,7 @@ fn rail(app: &App) -> El {
         .child(button("toggle-files", glyph::FOLDER, false, |_| {}))
         .child(button("toggle-notes", glyph::FILE, false, |_| {}))
         .child(button("toggle-conversations", glyph::SPARKLES, app.sidebar == Some(Sidebar::Conversations), |s| {
-            s.sidebar = if s.sidebar == Some(Sidebar::Conversations) { None } else { Some(Sidebar::Conversations) };
-            if s.sidebar.is_some() { s.refresh_threads(); }
+            s.toggle_conversations();
         }))
         .child(button("open-finder", glyph::SEARCH, false, |_| {}))
         .child(servers)
@@ -116,42 +114,4 @@ fn content(app: &App, cx: &mut Cx<App>) -> El {
     .grow(1.0)
     .shrink()
     .w_full()
-}
-
-fn status_line(app: &App) -> El {
-    let p = app.pal;
-    let mode = match app.active_tab().kind {
-        TabKind::Agent { .. } => "AGENT",
-        TabKind::Home => "NORMAL",
-    };
-    let mode_color = if mode == "AGENT" { rgb(p.red) } else { rgb(p.cyan) };
-    let path_color = rgb(p.red);
-    let pill = |content: El, fill: Color| row().h(STATUS_H - 4.0).px(8.0).gap(6.0).center_y().radius(10.0).fill(fill).child(content);
-    let left = row().gap(8.0).center_y()
-        .child(pill(row().gap(7.0).center_y()
-            .child(icon(app, glyph::NEOISM, 0.95, rgb(p.bg)))
-            .child(text(mode).font(app.ty.status()).color(rgb(p.bg))), mode_color))
-        .child(text(app.tab_cwd(app.active_tab())).font(app.ty.status()).color(path_color))
-        .child(pill(icon(app, glyph::FOLDER, 1.1, rgb(p.bg)), path_color));
-    let connection = match &app.connection {
-        Connection::Connected => None,
-        Connection::Connecting => Some(("connecting", rgb(p.yellow))),
-        Connection::Disconnected(_) => Some(("offline", rgb(p.red))),
-    };
-    let mut right = row().gap(8.0).center_y();
-    if let Some((label, color)) = connection {
-        right = right.child(text(label).font(app.ty.status()).color(color));
-    }
-    if let Some(branch) = &app.branch {
-        right = right.child(row().gap(6.0).center_y()
-            .child(pill(icon(app, glyph::BRANCH, 0.8, rgb(p.bg)), rgb(p.blue)))
-            .child(text(branch.clone()).font(app.ty.status()).color(rgb(p.blue))));
-    }
-    right = right.child(row().center_y()
-        .child(pill(text("FPS").font(app.ty.status()).color(rgb(p.bg)), rgb(p.cyan)))
-        .child(text(app.fps.map(|f| f.to_string()).unwrap_or_else(|| "120".into())).font(app.ty.status()).color(rgb(p.fg)).ml(10.0)));
-    row().key("original-statusline").w_full().h(STATUS_H).px(2.0).center_y().justify_between().fill(rgb(p.bg))
-        .border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border))
-        .child(left)
-        .child(right.pr(6.0))
 }

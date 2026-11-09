@@ -208,6 +208,11 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn()) {
 fn parse(text: &str) -> Option<Inbound> {
     let value: Value = serde_json::from_str(text).ok()?;
     let (tag, body) = value.as_object()?.iter().next()?;
+    if std::env::var_os("NEOISM_RUNE_TRACE_DAEMON").is_some() {
+        let inner = body.get("message").and_then(|m| m.as_object()).and_then(|m| m.keys().next().cloned()).unwrap_or_default();
+        eprintln!("[daemon] {tag} {inner} {}", text.len());
+        if std::env::var_os("NEOISM_RUNE_TRACE_BODIES").is_some() && text.len() < 4000 { eprintln!("[body] {text}"); }
+    }
     // PTY output and lifecycle arrive unsolicited, without a reply envelope.
     if matches!(tag.as_str(), "PtyCreated" | "PtyOutput" | "PtyClosed" | "SessionCwd" | "SessionProgram" | "TerminalDirectoryChanged" | "TerminalDirectoryChangeFailed") {
         return Some(Inbound::Reply { family: "Pty".into(), request_id: 0, message: json!({ tag.clone(): body.clone() }) });

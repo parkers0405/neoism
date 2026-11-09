@@ -88,6 +88,22 @@ impl App {
         self.load_session(session_id);
     }
 
+    /// A turn starts or ends. The live turn keeps its trace rows (`live_from`); when it ends the
+    /// head page is fetched again for the server-composed footer and settled rows.
+    fn set_streaming(&mut self, session_id: &str, streaming: bool) {
+        let Some(session) = self.sessions.get_mut(session_id) else { return };
+        if session.streaming == streaming { return; }
+        session.streaming = streaming;
+        if streaming {
+            if session.live_from.is_none() {
+                session.live_from = Some(session.messages.iter().rposition(|m| m.kind == HistoryMessageKind::User).unwrap_or(session.messages.len()));
+            }
+        } else {
+            session.status = None;
+            self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
+        }
+    }
+
     pub fn request_older(&mut self, session_id: &str) {
         let Some(session) = self.sessions.get_mut(session_id) else { return };
         let Some(cursor) = session.older_cursor.clone() else { return };
@@ -179,6 +195,10 @@ impl App {
                     let prompt = self.tabs[index].pending_prompt.take().unwrap_or_default();
                     let session = self.sessions.entry(session_id.clone()).or_default();
                     session.loaded = true;
+                    // Follow the new conversation's stream before the first prompt goes out, so
+                    // its streaming state, deltas and tool rows arrive live.
+                    self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.clone() });
+                    self.send_agent(AgentClientMessage::ResumeStream { session_id: session_id.clone() });
                     self.submit_prompt(&session_id, prompt);
                 }
                 self.refresh_threads();
@@ -234,16 +254,14 @@ impl App {
                 }
             }
             AgentServerMessage::StreamingState { session_id, state, label } => {
-                let session = self.sessions.entry(session_id).or_default();
-                session.streaming = !matches!(state, StreamingState::Idle);
-                if session.streaming && session.live_from.is_none() {
-                    session.live_from = Some(session.messages.iter().rposition(|m| m.kind == HistoryMessageKind::User).unwrap_or(session.messages.len()));
-                }
-                session.status = label;
+                self.set_streaming(&session_id, !matches!(state, StreamingState::Idle));
+                if let Some(session) = self.sessions.get_mut(&session_id) { session.status = label; }
             }
-            AgentServerMessage::SessionIdle { session_id, .. } => {
-                if let Some(session) = self.sessions.get_mut(&session_id) { session.streaming = false; session.status = None; }
+            // The daemon reports a conversation's turn as catalog activity (`running` / `idle`).
+            AgentServerMessage::CatalogActivity { session_id, activity } => {
+                if self.sessions.contains_key(&session_id) { self.set_streaming(&session_id, activity == "running"); }
             }
+            AgentServerMessage::SessionIdle { session_id, .. } => self.set_streaming(&session_id, false),
             AgentServerMessage::ProviderState { model: Some(model), provider_id, .. } => {
                 let provider = provider_id.unwrap_or_default();
                 self.model = title_case(&if provider.is_empty() || model.contains('/') { model } else { format!("{provider}/{model}") });

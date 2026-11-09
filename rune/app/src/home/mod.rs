@@ -3,17 +3,39 @@
 
 mod blocks;
 mod shell_events;
+mod splash;
 mod view;
 
 pub use blocks::{Block, Terminal};
 pub use view::view;
+
+use splash::MenuAction;
 
 use crate::app::{App, Connection};
 use crate::daemon::Family;
 use crate::tabs::Tab;
 use neoism_protocol::pty::{ClientMessage as PtyClient, Presentation, ServerMessage as PtyServer};
 
+/// Home view state that is not terminal state: the measured splash area and hovered button.
+#[derive(Default)]
+pub struct SplashState {
+    pub area: [f32; 2],
+    pub hover: Option<usize>,
+}
+
 impl App {
+    /// A splash menu button: the same actions as its `Alt` shortcut.
+    pub fn splash_action(&mut self, action: MenuAction, _tx: &mut rune::Tx) {
+        match action {
+            MenuAction::Agent => { self.open_tab(crate::tabs::TabKind::Agent { session: None }); }
+            MenuAction::AgentPanel => self.toggle_conversations(),
+            MenuAction::CommandPalette => self.open_picker(crate::palette::Mode::Commands),
+            MenuAction::NewTerminal => { self.open_tab(crate::tabs::TabKind::Home); }
+            // Surfaces still being built: directory picker, notes, file tree, search.
+            MenuAction::ChangeDirectory | MenuAction::Notes | MenuAction::FileTree | MenuAction::Search => {}
+        }
+    }
+
     pub(crate) fn open_terminal(&mut self, tab_id: u64) {
         self.terminals.insert(tab_id, Terminal::new(self.cwd.clone(), self.terminal_colors()));
         self.create_pty(tab_id);

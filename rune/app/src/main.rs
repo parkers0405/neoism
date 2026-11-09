@@ -23,6 +23,7 @@ pub const FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/GeistMono-BoldItalic.otf"),
     include_bytes!("../assets/fonts/CascadiaCodeNF-Regular.otf"),
     include_bytes!("../assets/fonts/PressStart2P-Regular.ttf"),
+    include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf"),
 ];
 
 fn setup(app: &mut App, waker: rune::Waker) {
@@ -43,7 +44,14 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let animating = app.wordmark.tick(app.visible_wordmark(), clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }
-    animating || changed
+    // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
+    let fps = ui::fps::rate();
+    let fps_changed = app.fps != Some(fps);
+    if fps_changed {
+        app.fps = Some(fps);
+        tx.wake_after(std::time::Duration::from_millis(500));
+    }
+    animating || changed || fps_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -72,14 +80,16 @@ fn main() {
     };
     rune::set_app_id("ai.neoism.rune");
     let mut app = rune::App::new(spec).init(App::new);
-    // `NEOISM_RUNE_FRAME_TRACE=1`: one stderr line per frame, for the same missed-frame analysis
-    // the GPUiX investigation used (`docs/gpuix-live-rendering-baseline.md`).
-    if std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1") {
-        let origin = std::time::Instant::now();
-        app = app.on_frame_encoded(move |frame| {
+    // Every encoded frame feeds the FPS pill; `NEOISM_RUNE_FRAME_TRACE=1` also logs each one for
+    // the missed-frame analysis the GPUiX investigation used (`docs/gpuix-live-rendering-baseline.md`).
+    let trace = std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1");
+    let origin = std::time::Instant::now();
+    app = app.on_frame_encoded(move |frame| {
+        ui::fps::record(frame.at());
+        if trace {
             eprintln!("[rune-frame] seq={} at_us={} outcome={:?} hz={:?}", frame.seq(),
                 frame.at().duration_since(origin).as_micros(), frame.outcome(), frame.refresh_hz());
-        });
-    }
+        }
+    });
     app.run();
 }

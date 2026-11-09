@@ -2,7 +2,10 @@
 //! modules (`agent`, `home`, `tabs`) add their own `impl App` blocks next to their views.
 
 use crate::agent::Session;
-use crate::daemon::{Daemon, Inbound, Inbox};
+use crate::daemon::{Daemon, Family, Inbound, Inbox};
+use crate::ui::status::GitSummary;
+use neoism_protocol::git::GitRepoStatus;
+use serde_json::json;
 use crate::home::Terminal;
 use crate::tabs::{Tab, TabKind};
 use crate::ui::theme::{Palette, Type, palette};
@@ -40,7 +43,12 @@ pub enum Focus {
     Workspaces(usize),
 }
 
+const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
+
 pub struct App {
+    /// Branch and line counts from the daemon's Git `RepoStatus` watch.
+    pub git: Option<crate::ui::status::GitSummary>,
+    pub splash: crate::home::SplashState,
     /// The open centered picker (`Alt+P`, themes), above everything else.
     pub picker: Option<crate::palette::Picker>,
     pub daemon: Option<Daemon>,
@@ -51,7 +59,6 @@ pub struct App {
     pub ty: Type,
     pub workspace_name: String,
     pub cwd: String,
-    pub branch: Option<String>,
     pub threads: Vec<ThreadSummary>,
     pub sessions: HashMap<String, Session>,
     pub tabs: Vec<Tab>,
@@ -89,7 +96,6 @@ impl App {
             ty: Type { size: config.font_size, weight: config.font_weight },
             workspace_name: if cwd == home { "~".into() } else { workspace_name },
             cwd,
-            branch: crate::config::git_branch(),
             threads: Vec::new(),
             sessions: HashMap::new(),
             tabs: Vec::new(),
@@ -106,6 +112,9 @@ impl App {
             scroll: Default::default(),
             wheel_target: None,
             picker: None,
+            // The local branch until the daemon's Git watch reports counts.
+            git: crate::config::git_branch().map(|branch| crate::ui::status::GitSummary { branch, ..Default::default() }),
+            splash: Default::default(),
             terminals: HashMap::new(),
             pending_pty: Default::default(),
         };
@@ -133,13 +142,35 @@ impl App {
                 self.connection = Connection::Connected;
                 self.agent_connected();
                 self.terminals_connected();
+                self.watch_git();
             }
             Inbound::Disconnected(reason) => self.connection = Connection::Disconnected(reason),
             Inbound::Agent(message) => self.apply_agent(*message),
             Inbound::Reply { family, message, .. } if family == "Pty" => {
                 if let Ok(typed) = serde_json::from_value::<PtyServer>(message) { self.apply_pty(typed); }
             }
+            Inbound::Reply { family, message, .. } if family == "Git" => {
+                if let Some(status) = message.get("RepoStatus") { self.apply_git_status(status); }
+            }
             Inbound::Reply { .. } => {}
         }
+    }
+
+    /// Subscribe to the workspace's Git status (branch and changed line counts).
+    fn watch_git(&self) {
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Git, json!({"WatchStatus": {"token": GIT_WATCH_TOKEN}}), &self.cwd);
+        }
+    }
+
+    fn apply_git_status(&mut self, status: &serde_json::Value) {
+        if status["token"] != GIT_WATCH_TOKEN { return; }
+        let Ok(snapshot) = serde_json::from_value::<GitRepoStatus>(status["snapshot"].clone()) else { return };
+        if snapshot.error.is_some() { return; }
+        self.git = snapshot.branch.filter(|_| snapshot.repo_root.is_some()).map(|branch| GitSummary {
+            branch,
+            added: snapshot.files.iter().map(|f| u64::from(f.additions)).sum(),
+            deleted: snapshot.files.iter().map(|f| u64::from(f.deletions)).sum(),
+        });
     }
 }

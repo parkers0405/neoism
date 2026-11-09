@@ -1,7 +1,9 @@
 //! Shared look: theme, palettes, the window chrome, and small element helpers.
 
 pub mod chrome;
+pub mod fps;
 pub mod palettes;
+pub mod status;
 pub mod theme;
 
 use crate::app::App;

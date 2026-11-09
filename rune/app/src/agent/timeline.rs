@@ -3,9 +3,9 @@
 
 use super::composer::composer;
 use super::prose;
+use super::tools;
 use crate::app::App;
-use crate::ui::icon;
-use crate::ui::theme::{glyph, rgb};
+use crate::ui::theme::rgb;
 use crate::wordmark;
 use neoism_protocol::agent::{HistoryMessage, HistoryMessageKind};
 use rune::{Color, Cx, El, ScrollSpec, Spring, Tx, WheelEvent, col, el, row, text};
@@ -33,12 +33,19 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let streaming = session.is_some_and(|s| s.streaming);
     let live_from = session.and_then(|s| s.live_from).unwrap_or(usize::MAX);
     let mut rows = col().key(format!("timeline:{session_id}")).w_full().px(COLUMN_PAD_X).pt(16.0).pb(200.0).gap(0.0);
-    for (index, message) in messages.iter().enumerate() {
-        let trace = matches!(message.kind, HistoryMessageKind::Tool | HistoryMessageKind::Subtask | HistoryMessageKind::Reasoning);
-        if message.kind == HistoryMessageKind::System && message.title == "Context" { continue; }
-        if trace && index < live_from { continue; }
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        if !tools::visible(message, index, live_from) { index += 1; continue; }
+        // Runs of reads and of settled edits fold into one row.
+        if let Some((end, group)) = tools::group_at(messages, index) {
+            rows = rows.child(tools::row(app, &group));
+            index = end;
+            continue;
+        }
         let last = index + 1 == messages.len();
         rows = rows.child(message_row(app, message, last && streaming));
+        index += 1;
     }
     if streaming {
         rows = rows.child(text("Crafting . . .").font(app.ty.pixel(0.95)).color(rgb(p.fg)).mt(18.0).key("activity"));
@@ -136,7 +143,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })
                 .font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)))
             .child(text(first_line(&message.text)).font(app.ty.body().italic()).color(rgb(p.dim))),
-        HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tool_card(app, message).key(key),
+        HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tools::row(app, message),
         HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.clone()).key(key)
             .font(app.ty.small()).color(rgb(p.muted)).mt(16.0).w_full().max_lines(6).truncate(),
         HistoryMessageKind::Assistant => col().key(key).w_full().mt(24.0).gap(14.0)
@@ -168,16 +175,6 @@ impl Meta for El {
 
 fn first_line(text: &str) -> String {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").trim_matches('*').to_owned()
-}
-
-fn tool_card(app: &App, message: &HistoryMessage) -> El {
-    let p = app.pal;
-    let done = matches!(message.status.as_str(), "completed" | "complete" | "success" | "");
-    let title = if message.title.is_empty() { message.tool.clone() } else { message.title.clone() };
-    row().w_full().mt(18.0).gap(12.0).center_y()
-        .child(el().w(8.0).h(8.0).radius(4.0).fill(if done { rgb(p.green) } else { rgb(p.yellow) }))
-        .child(icon(app, glyph::EDIT, 0.85, rgb(p.dim)))
-        .child(text(title).font(app.ty.body()).color(rgb(p.fg)).truncate().shrink())
 }
 
 /// The animated pixel orb beside user messages; a static stand-in until the orb port lands.

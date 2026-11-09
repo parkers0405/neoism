@@ -1745,6 +1745,7 @@ dependencies = [
 name = "neoism-rune"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "dirs",
  "libloading",
  "neoism-protocol",

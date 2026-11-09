@@ -5,6 +5,7 @@ mod composer;
 mod prose;
 mod sidebar;
 mod timeline;
+pub mod tools;
 
 pub use composer::overlay;
 pub use sidebar::conversations;

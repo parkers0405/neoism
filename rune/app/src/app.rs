@@ -76,6 +76,8 @@ pub struct App {
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
     /// Where notched wheel input is gliding the transcript to.
     pub wheel_target: Option<f32>,
+    /// Tool rows: expansion, selected group children, spinner clock, service icons.
+    pub tools: crate::agent::tools::ToolState,
     /// Home block terminals by tab id, and the tabs whose `CreatePty` is still in flight.
     pub terminals: HashMap<u64, Terminal>,
     pub pending_pty: VecDeque<u64>,
@@ -111,6 +113,7 @@ impl App {
             fps: None,
             scroll: Default::default(),
             wheel_target: None,
+            tools: Default::default(),
             picker: None,
             // The local branch until the daemon's Git watch reports counts.
             git: crate::config::git_branch().map(|branch| crate::ui::status::GitSummary { branch, ..Default::default() }),

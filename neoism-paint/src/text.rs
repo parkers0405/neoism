@@ -1313,6 +1313,8 @@ impl Text {
             font_id: run.font_id,
             glyph_id: glyph_id as u32,
             size_bucket: run.size_bucket,
+            synthetic_bold: run.synthetic_bold,
+            synthetic_italic: run.synthetic_italic,
         };
 
         self.rasterize_slot_cpu(run, glyph_id, key)
@@ -2574,6 +2576,30 @@ mod tests {
             }
         }
         assert!(changed > 0 && settled > 0);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn synthesized_bold_pixels_do_not_depend_on_prior_regular_glyphs() {
+        let (library, _) = FontLibrary::new(FontConfig::default());
+        let render = |text: &mut Text, source: &str, bold: bool| {
+            text.instances.clear();
+            text.draw(0.0, 0.0, source, &DrawOpts {
+                font_id: Some(0), bold, ..DrawOpts::default()
+            });
+            let image = text.host_run_raster(0).expect("Latin text raster");
+            (image.width, image.height, image.rgba)
+        };
+        for bold in [false, true] {
+            let mut fresh = Text::new(&library);
+            fresh.init_cpu();
+            let expected = render(&mut fresh, "measure", bold);
+            let mut warmed = Text::new(&library);
+            warmed.init_cpu();
+            render(&mut warmed, "mse", !bold);
+            assert!(render(&mut warmed, "measure", bold) == expected,
+                "individual letters must not inherit a previously rasterized weight");
+        }
     }
 
     #[test]

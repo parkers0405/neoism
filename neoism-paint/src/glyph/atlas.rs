@@ -17,11 +17,14 @@
 /// resize animation) without re-rasterizing. Quantize to 1/4 of a
 /// physical pixel to keep the cache hit rate high:
 /// `size_bucket = (scaled_px * 4.0).round() as u16`.
+/// Synthetic styles alter the bitmap without changing the source font or glyph.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GlyphKey {
     pub font_id: u32,
     pub glyph_id: u32,
     pub size_bucket: u16,
+    pub synthetic_bold: bool,
+    pub synthetic_italic: bool,
 }
 
 /// Atlas position + glyph metrics for one rasterized glyph. Exactly

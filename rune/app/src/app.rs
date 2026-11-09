@@ -152,6 +152,7 @@ impl App {
             Inbound::Reply { family, message, .. } if family == "Git" => {
                 if let Some(status) = message.get("RepoStatus") { self.apply_git_status(status); }
             }
+            Inbound::Reply { family, message, .. } if family == "Files" => self.apply_files(&message),
             Inbound::Reply { .. } => {}
         }
     }

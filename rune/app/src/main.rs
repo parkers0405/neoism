@@ -79,7 +79,9 @@ fn main() {
         ],
         ..AppSpec::new("Neoism", (1252.0, 674.0), App::new, ui::chrome::root)
     };
-    rune::set_app_id("ai.neoism.rune");
+    // `NEOISM_RUNE_APP_ID` gives a test instance its own window class.
+    let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
+    rune::set_app_id(Box::leak(app_id.into_boxed_str()));
     let mut app = rune::App::new(spec).init(App::new);
     // Every encoded frame feeds the FPS pill; `NEOISM_RUNE_FRAME_TRACE=1` also logs each one for
     // the missed-frame analysis the GPUiX investigation used (`docs/gpuix-live-rendering-baseline.md`).

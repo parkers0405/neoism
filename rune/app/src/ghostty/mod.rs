@@ -261,7 +261,9 @@ impl Vt {
             // Ghostty's application default (`grapheme-width-method=unicode`).
             let grapheme_mode = GhosttyTerminalModeConfig { mode: 2027, value: true };
             check(a.ghostty_terminal_set(vt.inner, GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, (&grapheme_mode as *const GhosttyTerminalModeConfig).cast()))?;
-            let max_lines = 2000usize;
+            // Headroom over the 2000 rows a block keeps, so its anchor mark is never pruned
+            // (Ghostty prunes whole pages, well before the nominal limit).
+            let max_lines = 10_000usize;
             check(a.ghostty_terminal_set(vt.inner, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, (&max_lines as *const usize).cast()))?;
             check(a.ghostty_terminal_set(vt.inner, GHOSTTY_TERMINAL_OPT_USERDATA, (&mut *vt.effects as *mut Effects).cast()))?;
             check(a.ghostty_terminal_set(vt.inner, GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty as *const () as *const c_void))?;
@@ -535,6 +537,19 @@ impl Vt {
             self.marks.insert(mark, (reference, self.get(GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)));
         }
         Ok(mark)
+    }
+
+    /// Track the start of screen row `row` (for a block whose own start scrolled out of range).
+    pub fn mark_at(&mut self, row: u64) -> Option<u64> {
+        let mark = self.next_mark;
+        unsafe {
+            let mut reference = ptr::null_mut();
+            let point = GhosttyPoint { tag: GHOSTTY_POINT_TAG_SCREEN, value: GhosttyPointValue { coordinate: GhosttyPointCoordinate { x: 0, y: row as u32 } } };
+            if self.api.ghostty_terminal_grid_ref_track(self.inner, point, &mut reference) != GHOSTTY_SUCCESS { return None; }
+            self.marks.insert(mark, (reference, self.get(GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN)));
+        }
+        self.next_mark += 1;
+        Some(mark)
     }
 
     /// The screen row a mark points at now, if it still resolves on the active screen.

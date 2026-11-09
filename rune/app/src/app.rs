@@ -146,8 +146,9 @@ impl App {
             }
             Inbound::Disconnected(reason) => self.connection = Connection::Disconnected(reason),
             Inbound::Agent(message) => self.apply_agent(*message),
-            Inbound::Reply { family, message, .. } if family == "Pty" => {
-                if let Ok(typed) = serde_json::from_value::<PtyServer>(message) { self.apply_pty(typed); }
+            // Live PTY output is uncorrelated (request 0); a reattach replays backlog under its request.
+            Inbound::Reply { family, message, request_id } if family == "Pty" => {
+                if let Ok(typed) = serde_json::from_value::<PtyServer>(message) { self.apply_pty(typed, request_id == 0); }
             }
             Inbound::Reply { family, message, .. } if family == "Git" => {
                 if let Some(status) = message.get("RepoStatus") { self.apply_git_status(status); }

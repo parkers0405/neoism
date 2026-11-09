@@ -89,13 +89,17 @@ impl App {
         if let Some(session_id) = term.shell.session { self.send_pty(PtyClient::ClosePty { session_id }); }
     }
 
-    /// After a (re)connect every Home tab gets a fresh shell.
+    /// After a (re)connect: reattach each shell from the next byte it needs (the daemon drops a
+    /// socket that falls behind and expects this cursor replay), or start one for new tabs.
     pub(crate) fn terminals_connected(&mut self) {
         self.pending_pty.clear();
         let tabs: Vec<u64> = self.terminals.keys().copied().collect();
         for tab_id in tabs {
-            if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.session = None; }
-            self.create_pty(tab_id);
+            let Some(term) = self.terminals.get(&tab_id) else { continue };
+            match term.shell.session.clone() {
+                Some(session_id) => self.send_pty(PtyClient::AttachPty { session_id, cursor: term.shell.next_offset() }),
+                None => self.create_pty(tab_id),
+            }
         }
     }
 
@@ -333,9 +337,14 @@ impl App {
         }
     }
 
-    pub(crate) fn apply_pty(&mut self, message: PtyServer) {
+    /// A `Pty` message. `live` is false for backlog a reattach replays: Ghostty re-parses it, but
+    /// its answers to historical queries must not reach the shell.
+    pub(crate) fn apply_pty(&mut self, message: PtyServer, live: bool) {
         match message {
             PtyServer::PtyCreated { session_id, .. } => {
+                // A reattach acknowledges a session a tab already has; a new PTY fills the
+                // oldest pending tab.
+                if self.terminals.values().any(|t| t.shell.session.as_deref() == Some(&session_id)) { return; }
                 if let Some(tab_id) = self.pending_pty.pop_front() {
                     if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.attach(session_id); }
                 }
@@ -343,17 +352,28 @@ impl App {
             PtyServer::PtyOutput { session_id, bytes, offset } => {
                 let replies = self.terminals.values_mut().find(|t| t.shell.session.as_deref() == Some(&session_id))
                     .map(|term| term.shell.feed(&bytes, offset)).unwrap_or_default();
-                self.pty_input(&session_id, &replies);
+                if live { self.pty_input(&session_id, &replies); }
+            }
+            // The daemon restarted (or reaped the shell): a reattach finds nothing, so start over.
+            PtyServer::Error { message } => {
+                let tab = self.terminals.iter()
+                    .find(|(_, t)| t.shell.session.as_ref().is_some_and(|id| message == format!("unknown session {id}") || message == format!("No such PTY: {id}")))
+                    .map(|(id, _)| *id);
+                if let Some(tab_id) = tab {
+                    if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.session = None; }
+                    self.create_pty(tab_id);
+                }
             }
             PtyServer::SessionCwd { session_id, cwd } => {
                 if let Some(term) = self.terminals.values_mut().find(|t| t.shell.session.as_deref() == Some(&session_id)) { term.shell.cwd = cwd; }
             }
             PtyServer::TerminalCompletions { session_id, line, entries, .. } => {
-                if let Some(term) = self.terminals.values_mut().find(|t| t.shell.session.as_deref() == Some(&session_id)) {
-                    let recent = term.shell.recent.clone();
-                    let native = entries.into_iter().map(|e| (e.value, e.label, e.detail, e.kind)).collect();
-                    term.composer.completions(&line, native, &recent);
-                }
+                let Some((&tab_id, term)) = self.terminals.iter_mut().find(|(_, t)| t.shell.session.as_deref() == Some(&session_id)) else { return };
+                let recent = term.shell.recent.clone();
+                let native = entries.into_iter().map(|e| (e.value, e.label, e.detail, e.kind)).collect();
+                let preview = term.composer.completions(&line, native, &recent);
+                let index = self.tabs.iter().position(|t| t.id == tab_id);
+                if let (Some(value), Some(index)) = (preview, index) { self.set_draft(index, value); }
             }
             PtyServer::PtyClosed { session_id, .. } => {
                 let tab = self.terminals.iter().find(|(_, t)| t.shell.session.as_deref() == Some(&session_id)).map(|(id, _)| *id);

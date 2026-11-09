@@ -97,29 +97,24 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
     let width = term.area[0];
     let command: Vec<&str> = if block.background { Vec::new() } else { block.command.split('\n').collect() };
     let output = row_h * (1.1 + 0.9 + 0.19 + command.len() as f32 + if block.lines.is_empty() { 0.0 } else { 0.5 });
-    let height = output + block.lines.len() as f32 * row_h + row_h * if block.running() { 0.2 } else { 1.0 };
+    // A truncated block says so in one muted row above the rows it kept.
+    let note = if block.truncated { row_h } else { 0.0 };
+    let height = output + note + block.lines.len() as f32 * row_h + row_h * if block.running() { 0.2 } else { 1.0 };
     let failed = block.failed();
     let selected = term.selected == Some(block.id);
     let block_id = block.id;
     let tab_id = app.active_tab().id;
-    let mut item = el().key(format!("terminal-block:{}", block.id)).w_full().h(height)
-        .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
-            if let Some(term) = a.terminals.get_mut(&tab_id) {
-                if inside { term.hovered = Some(block_id); } else if term.hovered == Some(block_id) { term.hovered = None; }
-            }
-        })
-        .on_press(move |a: &mut App| {
-            if let Some(term) = a.terminals.get_mut(&tab_id) {
-                term.selected = if term.selected == Some(block_id) { None } else { Some(block_id) };
-            }
-        });
-    if failed || selected {
-        let tint = if failed { p.red } else { p.accent };
-        item = item.fill(rgb(tint).alpha(0.06))
-            .child(el().w(2.0 * s).h(height).fill(rgb(tint)).absolute(0.0, 0.0));
-    }
-    let header = if block.background { "Shell output".to_owned() } else { directory_label(&block.cwd, home) };
-    item = item.child(text(header).font(ink(app, 0.9, None)).color(rgb(p.dim)).absolute(cells.inset, row_h * 1.1));
+    let tint = (failed || selected).then_some(if failed { p.red } else { p.accent });
+    // Tinted blocks wash the whole block and carry a 2 pt bar on the left.
+    let wash = |el: El, h: f32| match tint {
+        Some(tint) => el.child(el_fill(rgb(tint).alpha(0.06), h)).child(el_bar(rgb(tint), 2.0 * s, h)),
+        None => el,
+    };
+    // The header (directory, status, command) sticks to the top while its output scrolls
+    // under it, as GPUiX's sticky header did; the block's end pushes it out.
+    let label = if block.background { "Shell output".to_owned() } else { directory_label(&block.cwd, home) };
+    let mut header = wash(el().w_full().h(output).fill(rgb(p.bg)), output).sticky_top(0.0)
+        .child(text(label).font(ink(app, 0.9, None)).color(rgb(p.dim)).absolute(cells.inset, row_h * 1.1));
     // The status hides under the pointer (where GPUiX shows the block's actions).
     if !block.background && term.hovered != Some(block.id) && width > 260.0 * s {
         let ms = block.elapsed_ms.unwrap_or_else(|| block.started.elapsed().as_millis() / 1000 * 1000);
@@ -131,22 +126,44 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
         } else {
             (duration, p.muted)
         };
-        item = item.child(text(status).font(ink(app, 0.9, None)).color(rgb(color))
+        header = header.child(text(status).font(ink(app, 0.9, None)).color(rgb(color))
             .pin(None, Some(row_h * 1.1), Some(cells.inset), None));
     }
     for (index, line) in command.iter().enumerate() {
-        item = item.child(text((*line).to_owned()).font(ink(app, 1.0, None)).color(rgb(p.fg))
+        header = header.child(text((*line).to_owned()).font(ink(app, 1.0, None)).color(rgb(p.fg))
             .absolute(cells.inset, row_h * (2.19 + index as f32)));
     }
+    let body_h = height - output;
+    let mut body = wash(el().w_full().h(body_h), body_h);
+    if block.truncated {
+        body = body.child(text(format!("Earlier output truncated; showing the last {} lines", block.lines.len()))
+            .font(ink(app, 0.85, None)).color(rgb(p.muted)).absolute(cells.inset, 0.0));
+    }
     if !block.lines.is_empty() {
-        item = item.child(rows_view(app, &block.lines, cells, lift_for(p)).absolute(cells.inset, output));
+        body = body.child(rows_view(app, &block.lines, cells, lift_for(p)).absolute(cells.inset, note));
     }
     if let (Some((row, col)), true) = (block.cursor, block.running() && term.long_running()) {
-        item = item.child(el().w(cells.cell).h(row_h).fill(rgb(p.accent).alpha(0.45))
-            .absolute(cells.inset + col as f32 * cells.cell, output + row as f32 * row_h));
+        body = body.child(el().w(cells.cell).h(row_h).fill(rgb(p.accent).alpha(0.45))
+            .absolute(cells.inset + col as f32 * cells.cell, note + row as f32 * row_h));
     }
-    item
+    col().key(format!("terminal-block:{}", block.id)).w_full().h(height)
+        .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
+            if let Some(term) = a.terminals.get_mut(&tab_id) {
+                if inside { term.hovered = Some(block_id); } else if term.hovered == Some(block_id) { term.hovered = None; }
+            }
+        })
+        .on_press(move |a: &mut App| {
+            if let Some(term) = a.terminals.get_mut(&tab_id) {
+                term.selected = if term.selected == Some(block_id) { None } else { Some(block_id) };
+            }
+        })
+        .child(header)
+        .child(body)
 }
+
+fn el_fill(color: Color, h: f32) -> El { el().w_full().h(h).fill(color).absolute(0.0, 0.0) }
+
+fn el_bar(color: Color, w: f32, h: f32) -> El { el().w(w).h(h).fill(color).absolute(0.0, 0.0) }
 
 /// `terminalDirectoryLabel`: `~` for the home directory.
 fn directory_label(directory: &str, home: &str) -> String {

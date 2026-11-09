@@ -105,10 +105,11 @@ impl Composer {
     }
 
     /// The daemon's completions for `line` arrived: merge native rows, argument hints, then history.
-    pub fn completions(&mut self, line: &str, native: Vec<(String, String, String, String)>, recent: &[String]) {
+    /// Returns the first row's command line, which the composer previews (as Tab in GPUiX did).
+    pub fn completions(&mut self, line: &str, native: Vec<(String, String, String, String)>, recent: &[String]) -> Option<String> {
         let history = self.history(line, recent);
-        let Some(menu) = &mut self.menu else { return };
-        if menu.kind != MenuKind::Completion || menu.query != line { return; }
+        let menu = self.menu.as_mut()?;
+        if menu.kind != MenuKind::Completion || menu.query != line || !menu.loading { return None; }
         let mut items: Vec<Suggestion> = Vec::new();
         let mut add = |row: Suggestion| {
             if items.len() < LIMIT && !items.iter().any(|existing| existing.value.trim_end() == row.value.trim_end()) { items.push(row); }
@@ -122,6 +123,12 @@ impl Composer {
         menu.items = items;
         menu.choice = 0;
         menu.loading = false;
+        if menu.items.is_empty() {
+            // No matches: close (GPUiX flashes a red underline).
+            self.menu = None;
+            return None;
+        }
+        Some(menu.items[0].value.clone())
     }
 
     /// Move the highlighted row; completion lists wrap, history stops at the ends.

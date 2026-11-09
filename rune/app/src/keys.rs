@@ -7,6 +7,8 @@ use rune::{Key, KeyEvent, Tx};
 
 pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if shortcut(app, event, tx) { return true; }
+    // A full-screen program or running command in the Home pane owns the keyboard.
+    if app.terminal_key(event) { return true; }
     if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && editor_key(app, event, tx) {
         return true;
     }

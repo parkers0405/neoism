@@ -45,7 +45,7 @@ fn setup(app: &mut App, waker: rune::Waker) {
 }
 
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
-    let changed = app.drain();
+    let changed = app.drain() | app.take_decoded_previews();
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let animating = app.wordmark.tick(app.visible_wordmark(), clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }
@@ -91,6 +91,7 @@ fn main() {
             ("slash", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); s.overlay = Some(app::Overlay::Slash); }),
             ("palette", |s| s.open_picker(palette::Mode::Commands)),
             ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),
+            ("backgrounds", |s| { s.open_picker(palette::Mode::Backgrounds); s.move_picker(2); }),
             ("timeline-report", |s| s.load_fixture("fixture-report", "Read-Only GPU Frame Analysis and Documentation Report", include_str!("../fixtures/report-timeline.json"))),
             ("code", |s| s.load_fixture("fixture-code", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"))),
             ("tool-cards", |s| {

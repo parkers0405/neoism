@@ -24,6 +24,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
             .child(content(app, cx)));
     track_caret(app, cx);
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
+        .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
         .child(body)
         .child(super::status::view(app))
         .child_if(app.overlay.is_some(), || agent::overlay(app))

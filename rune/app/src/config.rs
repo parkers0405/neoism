@@ -15,6 +15,24 @@ pub struct Config {
     pub variant: Option<String>,
 }
 
+/// `~/.config/neoism` (or `NEOISM_CONFIG_HOME`).
+pub fn dir() -> std::path::PathBuf {
+    std::env::var_os("NEOISM_CONFIG_HOME").map(std::path::PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|d| d.join("neoism")))
+        .unwrap_or_default()
+}
+
+fn read() -> Value {
+    std::fs::read_to_string(dir().join("config.json")).ok()
+        .and_then(|s| serde_json::from_str(&strip_comments(&s)).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// `ui.window.background-image.path`, read fresh (the Backgrounds picker shows the live choice).
+pub fn background_image() -> Option<String> {
+    read()["ui"]["window"]["background-image"]["path"].as_str().map(str::to_owned)
+}
+
 pub fn load() -> Config {
     let path = std::env::var_os("NEOISM_CONFIG_HOME")
         .map(std::path::PathBuf::from)
@@ -35,7 +53,7 @@ pub fn load() -> Config {
 }
 
 /// JSONC: drop `//` and `/* */` comments outside strings.
-fn strip_comments(source: &str) -> String {
+pub fn strip_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
     let mut in_string = false;

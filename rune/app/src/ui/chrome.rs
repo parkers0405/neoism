@@ -75,7 +75,7 @@ fn rail(app: &App) -> El {
     col().key("activity-rail").w(RAIL_W).h_full().pt(6.5).fill(rgb(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(button("topbar-menu", glyph::MENU, false, |_| {}))
-        .child(button("toggle-files", glyph::FOLDER, false, |_| {}))
+        .child(button("toggle-files", glyph::FOLDER, app.sidebar == Some(Sidebar::Files), |s| s.toggle_file_tree()))
         .child(button("toggle-notes", glyph::FILE, false, |_| {}))
         .child(button("toggle-conversations", glyph::SPARKLES, app.sidebar == Some(Sidebar::Conversations), |s| {
             s.toggle_conversations();
@@ -85,7 +85,10 @@ fn rail(app: &App) -> El {
 }
 
 fn sidebar(app: &App) -> El {
-    agent::conversations(app).w(SIDEBAR_W)
+    match app.sidebar {
+        Some(Sidebar::Files) => crate::tree::view(app).w(SIDEBAR_W),
+        _ => agent::conversations(app).w(SIDEBAR_W),
+    }
 }
 
 fn workspace_tabs(app: &App) -> El {

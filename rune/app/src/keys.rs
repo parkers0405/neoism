@@ -10,6 +10,9 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && editor_key(app, event, tx) {
         return true;
     }
+    if app.focus == Focus::Sidebar && app.sidebar == Some(crate::app::Sidebar::Files) && tree_key(app, event) {
+        return true;
+    }
     let m = event.mods;
     match (&event.key, app.focus) {
         (Key::Enter, Focus::Buffers(index)) => {
@@ -47,6 +50,7 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
                 }
                 "p" => { app.open_picker(crate::palette::Mode::Commands); return true; }
                 "s" => { app.open_finder(crate::finder::Mode::Files); return true; }
+                "e" => { app.toggle_file_tree(); return true; }
                 _ => {}
             }
         }
@@ -92,6 +96,27 @@ fn editor_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     // The view follows once the moved cursor cell has been laid out (lines wrap).
     if app.editor_motion(motion) { app.editor_follow = true; }
     let _ = tx;
+    true
+}
+
+/// Tree navigation while the file tree has focus.
+fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
+    if event.mods.ctrl || event.mods.alt { return false; }
+    match &event.key {
+        Key::Up => app.tree_move(-1),
+        Key::Down => app.tree_move(1),
+        Key::Right | Key::Enter => app.tree_activate(None),
+        Key::Left => app.tree_collapse(),
+        Key::Escape => app.focus = Focus::Content,
+        Key::Text(t) => match t.as_str() {
+            "k" => app.tree_move(-1),
+            "j" => app.tree_move(1),
+            "l" | "o" => app.tree_activate(None),
+            "h" => app.tree_collapse(),
+            _ => return false,
+        },
+        _ => return false,
+    }
     true
 }
 
@@ -147,6 +172,7 @@ impl App {
             Focus::Buffers(i) => self.rects.get(&format!("pane-tab:{i}")).map(|r| tab_bar(*r, 16.0, scale, i == self.tabs.len())),
             Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == 1)),
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.rects.get("editor-cursor").copied(),
+            Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Files) => self.rects.get("tree-row").map(|r| crate::tree::view::cursor_rect(self, *r)),
             Focus::Sidebar | Focus::Content => self.cursor.caret_block(),
         }
     }

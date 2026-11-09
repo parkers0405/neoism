@@ -25,6 +25,7 @@ pub enum Connection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sidebar {
     Conversations,
+    Files,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +47,8 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// The file tree sidebar.
+    pub tree: crate::tree::Tree,
     /// The editor cursor moved: scroll it into view after its next layout.
     pub editor_follow: bool,
     /// A `g` waiting for its second key (`gg`).
@@ -139,6 +142,7 @@ impl App {
             scroll: Default::default(),
             wheel_target: None,
             picker: None,
+            tree: Default::default(),
             editor_follow: false,
             pending_g: false,
             buffers: HashMap::new(),
@@ -197,6 +201,9 @@ impl App {
                 if let Ok(typed) = serde_json::from_value(message) { self.apply_search(typed); }
             }
             Inbound::Reply { family, message, .. } if family == "Files" => {
+                if let Some(listing) = message.get("DirListing") {
+                    self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);
+                }
                 if let Some(file) = message.get("FileContent") {
                     let path = file["path"].as_str().unwrap_or_default().to_owned();
                     let bytes: Vec<u8> = serde_json::from_value(file["bytes"].clone()).unwrap_or_default();

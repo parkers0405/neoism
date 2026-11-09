@@ -12,6 +12,7 @@ mod home;
 mod keys;
 mod palette;
 mod tabs;
+mod tree;
 mod ui;
 mod wordmark;
 

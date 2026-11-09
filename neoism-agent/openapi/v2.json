@@ -1992,6 +1992,12 @@
               },
               "requestID": {
                 "type": "string"
+              },
+              "sessionId": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "null" }
+                ]
               }
             },
             "required": [
@@ -2069,6 +2075,12 @@
               },
               "requestID": {
                 "type": "string"
+              },
+              "sessionId": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "null" }
+                ]
               }
             },
             "required": [
@@ -6303,6 +6315,10 @@
           "model": {
             "$ref": "#/components/schemas/ModelRef"
           },
+          "neoSessionId": {
+            "readOnly": true,
+            "type": "string"
+          },
           "parentId": {
             "type": "string"
           },
@@ -6316,6 +6332,11 @@
             "type": "array"
           },
           "projectId": {
+            "type": "string"
+          },
+          "sessionRole": {
+            "enum": ["neo"],
+            "readOnly": true,
             "type": "string"
           },
           "slug": {
@@ -12848,6 +12869,30 @@
         "tags": [
           "system"
         ]
+      }
+    },
+    "/v2/neo/session": {
+      "post": {
+        "description": "Idempotently get or create the durable workspace Neo session, hidden from ordinary catalogs via sessionRole=neo.",
+        "operationId": "v2.neo.session",
+        "parameters": [
+          { "in": "query", "name": "directory", "required": false, "schema": { "type": "string" } },
+          { "in": "header", "name": "X-Neoism-Directory", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } }, "description": "Workspace Neo session" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "501": { "$ref": "#/components/responses/NotImplemented" }
+        },
+        "tags": ["sessions"]
       }
     },
     "/v2/plugins": {

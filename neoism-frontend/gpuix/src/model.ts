@@ -1356,6 +1356,27 @@ export class WorkspaceModel {
     const surface:Surface={id:`agent-home:${workspace.id}:${crypto.randomUUID()}`,kind:"agent",title:"Neoism",workspaceId:workspace.id};
     this.addSurface(surface);return surface;
   };
+  private neoFlights=new Map<string,Promise<string|undefined>>();
+  /** Neo has a server-owned durable identity, not a draft or a catalog row. */
+  openNeo = ():Promise<string|undefined> => {
+    const workspace=this.state.activeWorkspace;
+    if(!workspace)return Promise.resolve(undefined);
+    const pending=this.neoFlights.get(workspace.id);if(pending)return pending;
+    const epoch=this.epoch,sourceId=this.state.activeSurfaceId;
+    const task=(async()=>{
+      const session=await this.agentSdk.forWorkspace(workspace.id).neo.session();
+      if(this.disposed||epoch!==this.epoch||this.state.activeWorkspace?.id!==workspace.id||this.state.activeSurfaceId!==sourceId)return;
+      const thread=Schema.decodeUnknownSync(ThreadSchema)(sdkThread(session));
+      const previous=this.state.providerStates[session.id];
+      this.update({providerStates:{...this.state.providerStates,[session.id]:{
+        ...previous,agent:"neo",model:session.model?`${session.model.providerId}/${session.model.id}`:previous?.model,
+        provider_id:session.model?.providerId||previous?.provider_id,connection_id:session.model?.connectionId||previous?.connection_id,
+        thinking:session.model?.variant||previous?.thinking,
+      }}});
+      return this.openThread({...thread,title:"Neo"});
+    })().finally(()=>{if(this.neoFlights.get(workspace.id)===task)this.neoFlights.delete(workspace.id);});
+    this.neoFlights.set(workspace.id,task);return task;
+  };
   /** `adoptHome`: a conversation started from the Neoism page becomes that tab. */
   /** Opens (or focuses) the chat in the active workspace; returns its surface id. */
   openThread = (thread: Thread, adoptHome = false, familyRoot?:string, pointer=false): string | undefined => {
@@ -1557,6 +1578,7 @@ export class WorkspaceModel {
       ? [{ id: row.connectionId, label: row.label, authType: typeof row.authType === "string" ? row.authType : "", isDefault: row.isDefault === true }] : []);
   };
   setSelection = (field: "agent" | "model" | "thinking", value: string, sessionId?: string, connectionId?: string) => {
+    if(field==="agent"&&sessionId&&this.selection(sessionId).agent==="neo")return;
     const previous=this.selection(sessionId),selection={...previous,[field]:value};
     if(field==="model"){
       const provider=(model:string|null|undefined)=>{const slash=model?.indexOf("/")??-1;return model&&slash>0?model.slice(0,slash):undefined;};

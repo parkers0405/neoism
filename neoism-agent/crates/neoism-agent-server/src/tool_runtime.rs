@@ -612,6 +612,17 @@ async fn execute_stateful_tool_call(
             .await?;
             Ok(Some(result))
         }
+        "neo_task" => {
+            ensure_tool_permission(permissions, "neo_task", "*")?;
+            let parent = state.inner.store.get_session(session_id.as_str()).await.map_err(|error| error.to_string())?
+                .ok_or_else(|| "Session not found".to_string())?;
+            if !parent.is_neo() { return Err("neo_task is only available to Neo".into()); }
+            let mut input = input;
+            input["subagent_type"] = json!("build");
+            input["background"] = json!(true);
+            if let Some(id) = input.get("session_id").cloned() { input["task_id"] = id; }
+            crate::plugins::subagents::start_task_tool(state, snapshot.clone(), session_id, input, cancel.clone()).await.map(Some)
+        }
         "task" => {
             let agent_name = string_arg(&input, "subagent_type")
                 .ok_or_else(|| "tool argument subagent_type is required".to_string())?;
@@ -876,7 +887,7 @@ pub(crate) async fn ensure_child_task_belongs_to_parent(
     parent: &SessionInfo,
     child: &SessionInfo,
 ) -> Result<(), String> {
-    let mut ancestor = child.parent_id.clone();
+    let mut ancestor = child.task_parent_id();
     let mut hops = 0usize;
     while let Some(id) = ancestor {
         if id.as_str() == parent.id.as_str() {
@@ -887,7 +898,7 @@ pub(crate) async fn ensure_child_task_belongs_to_parent(
             break;
         }
         ancestor = match state.inner.store.get_session(id.as_str()).await {
-            Ok(Some(info)) => info.parent_id,
+            Ok(Some(info)) => info.task_parent_id(),
             _ => None,
         };
     }
@@ -910,7 +921,7 @@ pub(crate) async fn descendant_sessions(
         let children = state
             .inner
             .store
-            .list_child_sessions(&id)
+            .list_task_sessions(&id)
             .await
             .map_err(|error| error.to_string())?;
         for child in children {

@@ -802,6 +802,11 @@ fn apply_authoritative_contract(document: &mut Value) {
         value
     };
 
+    let mut neo = op("v2.neo.session", "sessions", json!([directory()]), None,
+        success("200", "Workspace Neo session", r("Session")));
+    neo["description"] = json!("Idempotently get or create the durable workspace Neo session, hidden from ordinary catalogs via sessionRole=neo.");
+    add("/v2/neo/session", "post", neo);
+
     add(
         "/v2/directories",
         "get",
@@ -3308,6 +3313,7 @@ fn canonical_schemas() -> Value {
             "agent": { "type": ["string", "null"] }, "depth": { "type": "integer", "minimum": 0 }, "permissionPending": { "type": "boolean" }
         }},
         "Session": { "type": "object", "additionalProperties": true, "required": ["id", "slug", "projectId", "directory", "title", "version", "time"], "properties": {
+            "sessionRole": { "type": "string", "enum": ["neo"], "readOnly": true }, "neoSessionId": { "type": "string", "readOnly": true },
             "catalogActivity": { "$ref": "#/components/schemas/CatalogActivity", "readOnly": true },
             "id": { "type": "string" }, "slug": { "type": "string" }, "projectId": { "type": "string" }, "workspaceId": { "type": "string" }, "directory": { "type": "string" },
             "path": { "type": "string" }, "parentId": { "type": "string" }, "title": { "type": "string" }, "agent": { "type": "string" }, "model": { "$ref": "#/components/schemas/ModelRef" },

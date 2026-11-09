@@ -98,7 +98,7 @@ export function AgentSidePanelView(props: { model: WorkspaceModel; config: AppCo
     }});
   };
 
-  const selectionDescription=()=>selected()==="new-chat"?"New chat":selected()==="search"?"Search":selected()==="projects"?"Project directory":selected().startsWith("row:")?`Conversation: ${model.state.threads.find(thread=>thread.session_id===selected().slice(4))?.title||model.agentFamily(selected().slice(4)).roster.find(row=>row.id===selected().slice(4))?.title||"Selected conversation"}`:"Conversation browser";
+  const selectionDescription=()=>selected()==="neo"?"Neo":selected()==="new-chat"?"New chat":selected()==="search"?"Search":selected()==="projects"?"Project directory":selected().startsWith("row:")?`Conversation: ${model.state.threads.find(thread=>thread.session_id===selected().slice(4))?.title||model.agentFamily(selected().slice(4)).roster.find(row=>row.id===selected().slice(4))?.title||"Selected conversation"}`:"Conversation browser";
   let bounds = { x: 0, y: 0, width:panel?.viewport.width||0,height:panel?.viewport.height||0 }, host: HostElement | undefined, disposed = false, startedAt = performance.now();
   let actualFocused=false;
   const animation = new AnimationFrameScheduler(ANIMATION_FRAME_MS);

@@ -342,6 +342,9 @@ fn forward_catalog_event(tx: &AgentReplySender, event: Value) {
     ) {
         let properties = event.get("properties").unwrap_or(&Value::Null);
         let info = properties.get("info").unwrap_or(&Value::Null);
+        if info.get("sessionRole").and_then(Value::as_str) == Some("neo") {
+            return;
+        }
         if let Some(session_id) = properties
             .get("sessionID")
             .or_else(|| info.get("id"))
@@ -462,6 +465,9 @@ pub(crate) fn forward_agent_server_event(
             // The agent server has no `subagent.*` event family — this is its
             // only live announcement of a newly spawned child session.
             let info = properties.get("info").unwrap_or(&Value::Null);
+            if info.get("sessionRole").and_then(Value::as_str) == Some("neo") {
+                return;
+            }
             let parent_session_id = info
                 .get("parentId")
                 .or_else(|| info.get("parentID"))

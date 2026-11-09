@@ -276,6 +276,17 @@ impl NeoismAgentPane {
         cache.insert(key, (blocks, tick));
     }
 
+    pub fn neo_mode(&self) -> bool { self.neo_mode }
+
+    pub fn set_neo_mode(&mut self, enabled: bool) {
+        if self.neo_mode == enabled { return; }
+        self.neo_mode = enabled;
+        self.clear_selection();
+        self.selectable_lines_len = 0;
+        self.timeline_measure_cache.borrow_mut().clear();
+        self.invalidate_timeline_layout();
+    }
+
     pub(crate) fn timeline_layout_epoch(&self) -> u64 {
         self.timeline_layout_epoch
     }

@@ -378,6 +378,10 @@ fn json_ui_event(view:&mut View,v:&Value)->Value {
 }
 
 #[cfg(test)]
+#[path = "agent_timeline_neo_tests.rs"]
+mod neo_tests;
+
+#[cfg(test)]
 mod user_arrival_tests {
     use super::*;
 
@@ -549,6 +553,7 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
             );
             let session_id = text(v, "sessionId").to_owned();
             let mut pane = NeoismAgentPane::new();
+            pane.set_neo_mode(v["neoMode"].as_bool().unwrap_or(false));
             if let Some(reduced) = v["reducedMotion"].as_bool() { pane.set_text_reveal_enabled(!reduced); }
             pane.set_virtual_timeline_enabled(v["virtualTimeline"].as_bool().unwrap_or(false));
             pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));
@@ -686,6 +691,10 @@ pub fn dispatch(v: &Value) -> Option<Result<Value, String>> {
                 Ok(frame(view))
             }
             "agenttimeline.layout" => {
+                if let Some(neo) = v["neoMode"].as_bool() {
+                    if neo != view.pane.neo_mode() { view.selection=None; view.selecting=false; }
+                    view.pane.set_neo_mode(neo);
+                }
                 if let Some(visible)=v["visible"].as_bool() {view.visible=visible;}
                 if let Some(reduced) = v["reducedMotion"].as_bool() { view.pane.set_text_reveal_enabled(!reduced); }
                 if v.get("localName").is_some(){view.pane.set_local_presence_name(v["localName"].as_str().map(str::to_owned));}
@@ -1036,6 +1045,47 @@ mod side_panel_frame_tests {
     use neoism_ui::primitives::paint_record::PaintCommand;
 
     #[test]
+    fn neo_header_action_uses_native_navigation_pointer_and_focus_without_a_session() {
+        fn call(op: &str, id: u64, mut args: Value) -> Value {
+            args["op"] = json!(format!("agentsidepanel.{op}"));
+            args["id"] = json!(id);
+            dispatch_panel(&args).unwrap().unwrap()
+        }
+        for scale in [0.75, 1.0, 1.5, 2.0] {
+            let id = call("new", 0, json!({"directory":"/neo-test", "scale":scale}))["id"].as_u64().unwrap();
+            let frame = call("frame", id, json!({"width":300, "height":650}));
+            let commands = frame["commands"].as_array().unwrap();
+            let label = |name: &str| commands.iter().find(|command| command["text"] == name).unwrap();
+            assert_eq!(label("Neo")["x"], label("New chat")["x"]);
+            assert!(label("Neo")["y"].as_f64().unwrap() < label("New chat")["y"].as_f64().unwrap());
+            // The fixed mark is the existing provider image, not a substitute glyph.
+            assert!(commands.iter().any(|command| command["kind"] == "image"));
+            let new_chat = call("focus", id, json!({"focused":true}));
+            assert_eq!(new_chat["selected"], "new-chat");
+            let neo = call("key", id, json!({"key":"up"}));
+            assert_eq!(neo["selected"], "neo");
+            assert!(neo["cursor"][1].as_f64().unwrap() < new_chat["cursor"][1].as_f64().unwrap());
+            assert_eq!(call("key", id, json!({"key":"enter"}))["result"], json!({"action":"neo"}));
+            assert_eq!(call("key", id, json!({"key":"up", "ctrl":false}))["selected"], "neo");
+            assert!(call("focus", id, json!({"focused":false}))["cursor"].is_null());
+            assert_eq!(call("focus", id, json!({"focused":true}))["selected"], "neo");
+            call("event", id, json!({"message":{"ThreadList":{"threads":[],"requested_cursor":null,"next_cursor":null}}}));
+            assert_eq!(call("focus", id, json!({"focused":true}))["selected"], "neo");
+            assert_eq!(call("debug", id, json!({}))["sessions"], 0);
+            assert_eq!(call("key", id, json!({"key":"down"}))["selected"], "new-chat");
+            let x = neo["cursor"][0].as_f64().unwrap() + 10.0;
+            let y = neo["cursor"][1].as_f64().unwrap() + neo["cursor"][3].as_f64().unwrap() / 2.0;
+            let pointer = call("pointer", id, json!({"kind":"down", "x":x, "y":y}));
+            assert_eq!(pointer["selected"], "neo");
+            assert_eq!(pointer["cursor"], neo["cursor"]);
+            assert_eq!(pointer["result"], json!({"action":"neo"}));
+            // Context menu actions remain exclusive to real session rows.
+            assert!(call("pointer", id, json!({"kind":"context", "x":x, "y":y}))["result"].is_null());
+            call("dispose", id, json!({}));
+        }
+    }
+
+    #[test]
     fn integrated_catalog_is_square_without_moving_content_or_hit_targets() {
         for scale in [0.75, 1.0, 1.5, 2.0] {
             let mut results = Vec::new();
@@ -1124,6 +1174,7 @@ fn configure_panel_frame(panel: &mut Panel, v: &Value) {
 fn panel_activate(panel:&mut Panel)->Value{
     use neoism_ui::panels::agent_pane::state::side_panel::CatalogHeaderAction;
     let side=panel.pane.side_panel_mut();
+    if side.selected_header_action()==Some(CatalogHeaderAction::Neo){return json!({"action":"neo"});}
     if side.selected_header_action()==Some(CatalogHeaderAction::Search){return json!({"action":"search"});}
     if side.projects_selected(){return json!({"action":"projects","anchor":side.project_button_rect(),"projects":side.session_project_directories(),"root":side.catalog_directory().is_none()});}
     if side.new_chat_selected(){return json!({"action":"new-chat"});}
@@ -1175,6 +1226,7 @@ fn panel_pointer(panel: &mut Panel, v: &Value) -> Value {
     side.set_focused(true);
     if let Some(action) = side.header_action_at(x, y) {
         let name = match action {
+            CatalogHeaderAction::Neo => { side.select_header_action(CatalogHeaderAction::Neo); "neo" }
             CatalogHeaderAction::Search => { side.select_header_action(CatalogHeaderAction::Search); "search" }
             CatalogHeaderAction::Projects => {
                 side.select_projects();

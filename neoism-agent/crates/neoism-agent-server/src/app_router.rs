@@ -108,6 +108,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         )
         .route("/v2/session-projects", get(v2_session_projects))
         .route("/v2/sessions", get(v2_session_list).post(session_create))
+        .route("/v2/neo/session", post(crate::session_routes::neo_session))
         .route(
             "/v2/sessions/external/catalog",
             get(crate::external_agent::external_catalog),

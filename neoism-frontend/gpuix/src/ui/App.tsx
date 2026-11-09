@@ -1020,7 +1020,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
         onCursor={(rect,host,bounds)=>{chromeBounds.set(host.id,bounds);target=rect?{host,kind:"sidebar",bounds:rect}:undefined;if(chromeFocus().zone==="sidebar")setChromeTarget(previous=>target?{...target,origin:previous?.host===host?previous.origin:pendingSidebarOrigin}:undefined);}}
         onFocus={()=>{if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});const next=target;if(next)setChromeTarget(previous=>({...next,origin:previous?.host===next.host?previous.origin:pendingSidebarOrigin}));}}}
         onCustomKey={handleSurfaceKey} onActivate={()=>focusChrome({zone:"content"})}
-        onAction={(action, detail) => { if (action === "new-chat") {model.newAgentHome();focusChrome({zone:"content"});} else if (action === "focus-content")focusChrome({zone:"content"});else if (action === "search") openFind("files"); else if (action === "projects") openProjectPicker(detail); else void chooseDirectory().then(commitWorkspaceRoot); }} />}</Show>
+        onAction={(action, detail) => { if(action==="neo"){void model.openNeo().then(surface=>{if(surface)focusChrome({zone:"content"});}).catch(model.report);} else if (action === "new-chat") {model.newAgentHome();focusChrome({zone:"content"});} else if (action === "focus-content")focusChrome({zone:"content"});else if (action === "search") openFind("files"); else if (action === "projects") openProjectPicker(detail); else void chooseDirectory().then(commitWorkspaceRoot); }} />}</Show>
     </div>;
   }
   function Databases() {
@@ -1144,6 +1144,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     const pickerButtons: HostElement[] = [];
     onCleanup(() => { for (const button of pickerButtons) composerPickerButtons.delete(button); });
     const openPicker = (kind: Choice["kind"], toggle = false) => {
+      if(kind==="agent"&&selection().agent==="neo")return;
       if (toggle && choice()?.kind === kind && choice()?.sessionId === props.sessionId) {
         closeChoice();
         return;
@@ -1297,10 +1298,10 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
             <Show when={shellMode()} fallback={<>
             <For each={["agent","model","thinking"] as const}>{(kind,index)=>{
               const geometry=()=>chipGeometry().chips[index()];
-              return <div ref={element=>{pickerButtons.push(element);composerPickerButtons.add(element);}} role="button" testId={`select-${kind}`} aria-label={kind==="thinking"?"Select reasoning":`Select ${kind}`} onClick={()=>openPicker(kind,true)} style={{...absolute(geometry().rect),cursor:"pointer",overflow:"hidden",pointerEvents:"auto"}}>
+              return <div ref={element=>{pickerButtons.push(element);composerPickerButtons.add(element);}} role="button" testId={`select-${kind}`} aria-label={kind==="agent"&&selection().agent==="neo"?"Neo orchestrator":kind==="thinking"?"Select reasoning":`Select ${kind}`} aria-disabled={kind==="agent"&&selection().agent==="neo"} onClick={()=>openPicker(kind,true)} style={{...absolute(geometry().rect),cursor:kind==="agent"&&selection().agent==="neo"?"default":"pointer",overflow:"hidden",pointerEvents:"auto"}}>
                 <Show when={geometry().logo_rect}>{rect=><div style={{...absolute(rect()),pointerEvents:"none"}}><ProviderLogo model={selection().model} config={config}/></div>}</Show>
                 <div style={{...absolute(geometry().label_rect),pointerEvents:"none"}}><AgentChipLabel config={config} hosts={visuals.agentChips} paintPins={wordmarkHosts} scope={model.composerDraftKey(props.sessionId,props.surfaceId)} kind={kind} label={labels()[kind]} displayLabel={geometry().label} maxWidth={geometry().label_rect[2]} size={chipGeometry().font_size/s} loading={!props.sessionId&&!!state().agentDefaultsLoading}/></div>
-                <div style={{...absolute(geometry().caret_rect),pointerEvents:"none"}}><Icon glyph={"\uf078"} color={c.muted} size={chipGeometry().font_size/s*.66}/></div>
+                <Show when={kind!=="agent"||selection().agent!=="neo"}><div style={{...absolute(geometry().caret_rect),pointerEvents:"none"}}><Icon glyph={"\uf078"} color={c.muted} size={chipGeometry().font_size/s*.66}/></div></Show>
               </div>;
             }}</For>
             <div style={{...absolute(chipGeometry().attach_rect),pointerEvents:"auto"}}><IconButton glyph={"\uf0c6"} label="Attach files" testId="attach-files" onClick={()=>void attach()}/></div>
@@ -1361,7 +1362,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     return <div testId="agent-pane" data-home={home()} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",minWidth:0,minHeight:0,overflow:"hidden"}}
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
-      <Show when={!home()&&!!timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><AgentTimelineView surfaceId={props.surfaceId} viewport={viewport()} onPreview={setImagePreview} sessionId={timelineSession()!} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:timelineSession()!} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
+      <Show when={!home()&&!!timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><AgentTimelineView surfaceId={props.surfaceId} viewport={viewport()} onPreview={setImagePreview} sessionId={timelineSession()!} neoMode={state().providerStates[timelineSession()!]?.agent==="neo"} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:timelineSession()!} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
         onFocus={()=>{++contentFocusSerial;contentFocusFrames.cancel();pendingContentFocus=false;noteContentFocus();setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}
         contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]??viewport().height)}
         openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/></div></Show>

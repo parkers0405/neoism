@@ -165,6 +165,11 @@ pub(crate) async fn append_prompt_admission(
     {
         return Err(ApiError::conflict(SESSION_RUNNING_CONFLICT));
     }
+    // Neo's delegates own independent root executions. A durable, exact outbox
+    // notification may therefore wake Neo after its prior execution settled.
+    // Do not grant this to arbitrary runtime-marked prompts or ordinary agents.
+    let neo_completion_wakeup = info.is_neo() && admission.is_some()
+        && crate::session_actions::parent_subtask_completion_needs_recovery(state, &session_id_text, &request).await?;
     let PromptRequest {
         message_id,
         model,
@@ -187,7 +192,7 @@ pub(crate) async fn append_prompt_admission(
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     });
     let agents = crate::plugins::agent_catalog(&plugin_snapshot, &info.directory)?;
-    let agent_name = agent
+    let agent_name = if info.is_neo() { Some("neo".to_string()) } else { agent }
         .or_else(|| info.agent.clone())
         .unwrap_or_else(|| agents.default_agent().to_string());
     let agent_info = agents
@@ -206,7 +211,7 @@ pub(crate) async fn append_prompt_admission(
     info.model = Some(model_ref_from_user_model(&reply_model));
     let request_system = system.filter(|system| !system.trim().is_empty());
     let starts_top_level_execution =
-        request_may_start_execution(info.parent_id.is_none(), request_system.as_deref());
+        request_may_start_execution(info.parent_id.is_none(), request_system.as_deref()) || neo_completion_wakeup;
     // Runtime notifications (background-job / subagent completions) are
     // injected as user-role turns so the model sees the captured output, but
     // they must NOT render as user bubbles. The live part broadcast below
@@ -2859,6 +2864,7 @@ async fn run_assistant_step(
                 })
         });
     }
+    provider_tools.retain(|tool| crate::tool_selection::tool_allowed_for_session(&tool.id, info));
     let provider_tool_map = provider_tool_map(&provider_tools);
     let chat_hook_ctx = plugin::ChatHookContext {
         session_id: session_id.to_string(),

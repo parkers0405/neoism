@@ -187,8 +187,15 @@ pub(crate) async fn start_task_tool(
                     "task_id {task_id} belongs to an external agent; continue it with its original external subagent_type, not {agent_name}"
                 ));
             }
+            if parent.is_neo() && (child.parent_id.is_some()
+                || child.extra.get("neoSessionId").and_then(Value::as_str) != Some(parent.id.as_str())) {
+                return Err("Neo follow-ups must target a directly delegated top-level session".into());
+            }
             child.id.to_string()
         } else {
+            if parent.is_neo() {
+                return Err(format!("Delegated session {task_id} not found"));
+            }
             create_child(
                 state,
                 &snapshot,
@@ -454,7 +461,7 @@ pub(crate) async fn task_result_tool(
         let status = crate::tool_runtime::task_status_for_child(state, &child).await?;
         let agent = child.agent.as_deref().unwrap_or("subagent");
         let nested =
-            child.parent_id.as_ref().map(|id| id.as_str()) != Some(parent.id.as_str());
+            child.task_parent_id().as_ref().map(|id| id.as_str()) != Some(parent.id.as_str());
         lines.push(format!(
             "task_id: {} status: {} agent: {} title: {}{}",
             child.id,
@@ -583,7 +590,7 @@ async fn task_info(
         status,
         description: child.title.clone(),
         result,
-        nested: child.parent_id.as_ref() != Some(&parent.id),
+        nested: child.task_parent_id().as_ref() != Some(&parent.id),
     })
 }
 

@@ -33,6 +33,7 @@ import {
 } from "./extensions.js";
 
 export interface NeoismClient {
+  readonly neo: { session(directory?: string): Promise<Session> };
   readonly transport: NeoismTransport;
   /** Complete generated V2 surface, keyed by canonical operation ID. */
   readonly operations: ContractClient;
@@ -346,6 +347,9 @@ export function createNeoismClient(transport: NeoismTransport): NeoismClient {
           path: { id, version }, query: clean({ directory: options.directory, scope: options.scope, expectedRevision: options.expectedRevision }), headers: clean({ "If-Match": options.expectedRevision }),
         }),
       }),
+    },
+    neo: {
+      session: (directory?: string) => operations.request("v2.neo.session", { query: clean({ directory }) }),
     },
     sessions: {
       list: (options = {}) => operations.request("v2.sessions.list", { query: clean({ ...options, roots: options.roots === undefined ? undefined : String(options.roots) }) }),

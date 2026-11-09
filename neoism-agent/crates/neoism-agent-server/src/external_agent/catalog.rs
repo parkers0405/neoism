@@ -55,6 +55,7 @@ pub(crate) fn is_importing(session: &SessionInfo) -> bool {
 }
 
 pub(crate) fn is_neoism_owned_root(session: &SessionInfo) -> bool {
+    if session.is_neo() { return false; }
     session.extra.get("externalAgent").is_none_or(|external| {
         external.get("historyState").and_then(Value::as_str) == Some("neoism_only")
     })

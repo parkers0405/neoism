@@ -747,6 +747,8 @@ pub struct NeoismAgentPane {
         RefCell<HashMap<MarkdownBlocksKey, (CachedMarkdownBlocks, u64)>>,
     markdown_blocks_tick: Cell<u64>,
     markdown_blocks_source_bytes: Cell<usize>,
+    /// Host-selected presentation only; never persisted into raw session history.
+    neo_mode: bool,
     timeline_layout_epoch: u64,
     timeline_layout_cache: RefCell<Option<TimelineLayoutCache>>,
     timeline_dirty_message_ids: BTreeSet<String>,
@@ -1149,6 +1151,7 @@ impl Default for NeoismAgentPane {
             markdown_blocks_cache: RefCell::new(HashMap::new()),
             markdown_blocks_tick: Cell::new(0),
             markdown_blocks_source_bytes: Cell::new(0),
+            neo_mode: false,
             timeline_layout_epoch: 0,
             timeline_layout_cache: RefCell::new(None),
             timeline_dirty_message_ids: BTreeSet::new(),

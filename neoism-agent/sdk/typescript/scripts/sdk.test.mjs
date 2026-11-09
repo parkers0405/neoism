@@ -74,6 +74,19 @@ assert.deepEqual(
   ],
 );
 
+const neoRequests = [];
+const neoSession = { id: "neo-1", agent: "neo", sessionRole: "neo", model: { id: "model", connectionId: "connection", variant: "high" } };
+const neoClient = createNeoismClient({
+  async request(request) { neoRequests.push(request); return neoSession; },
+  async *events() {},
+});
+assert.equal(await neoClient.neo.session(), neoSession);
+assert.equal(await neoClient.neo.session("/workspace"), neoSession);
+assert.deepEqual(neoRequests.map(({ method, path, query, body }) => ({ method, path, query, body })), [
+  { method: "POST", path: "/v2/neo/session", query: {}, body: undefined },
+  { method: "POST", path: "/v2/neo/session", query: { directory: "/workspace" }, body: undefined },
+]);
+
 const managementRequests = [];
 const managementClient = createNeoismClient({
   async request(request) {

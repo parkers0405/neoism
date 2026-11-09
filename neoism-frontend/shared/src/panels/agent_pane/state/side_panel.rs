@@ -190,6 +190,12 @@ mod navigation_header_tests {
             panel.select_prev();
             assert!(panel.new_chat_selected());
             panel.select_prev();
+            assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Neo));
+            panel.select_prev();
+            assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Neo));
+            assert!(panel.selected_session().is_none());
+            assert_eq!(panel.catalog_highlight_index(None), None);
+            panel.select_next_by(10);
             assert!(panel.new_chat_selected());
             panel.select_next_by(10);
             assert_eq!(panel.selected_header_action(), Some(CatalogHeaderAction::Search));
@@ -312,6 +318,8 @@ mod navigation_header_tests {
 /// Typed navigation intents; hosts own data loading and overlays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogHeaderAction {
+    /// Permanent assistant entry, separate from the paginated session catalog.
+    Neo,
     Search,
     Projects,
     AddWorkspace,
@@ -1714,7 +1722,7 @@ impl NeoismAgentSidePanel {
 
     pub fn select_header_action(&mut self, action: CatalogHeaderAction) {
         if self.header_action_enabled(action) && matches!(self.mode, SidePanelMode::Sessions)
-            && matches!(action, CatalogHeaderAction::Search | CatalogHeaderAction::Projects)
+            && matches!(action, CatalogHeaderAction::Neo | CatalogHeaderAction::Search | CatalogHeaderAction::Projects)
         {
             self.new_chat_selected = false;
             self.search_focused = false;
@@ -4580,6 +4588,10 @@ impl NeoismAgentSidePanel {
 
     pub fn select_next(&mut self) {
         let len = self.active_len();
+        if self.selected_header_action() == Some(CatalogHeaderAction::Neo) {
+            self.select_new_chat();
+            return;
+        }
         if self.new_chat_selected() && self.navigation_header_enabled {
             if self.header_action_enabled(CatalogHeaderAction::Search) {
                 self.select_header_action(CatalogHeaderAction::Search);
@@ -4621,6 +4633,13 @@ impl NeoismAgentSidePanel {
     }
 
     pub fn select_prev(&mut self) {
+        if self.selected_header_action() == Some(CatalogHeaderAction::Neo) {
+            return;
+        }
+        if self.new_chat_selected() && self.navigation_header_enabled {
+            self.select_header_action(CatalogHeaderAction::Neo);
+            return;
+        }
         if self.projects_selected() {
             if self.header_action_enabled(CatalogHeaderAction::Search) {
                 self.select_header_action(CatalogHeaderAction::Search);

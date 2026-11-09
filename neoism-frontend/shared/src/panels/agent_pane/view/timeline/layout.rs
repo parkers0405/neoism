@@ -115,8 +115,11 @@ where
     let width_bucket = f32_measure_bucket(width);
     let scale_bucket = f32_measure_bucket(s);
     let gap_bucket = f32_measure_bucket(gap);
-    let epoch = pane.timeline_layout_epoch();
-    let lazy = pane.timeline_lazy_measurement();
+    // Session caches may be restored under a different host-selected mode.
+    let epoch = pane.timeline_layout_epoch() ^ ((pane.neo_mode() as u64) << 63);
+    // Developer transcript estimates include tool chrome/footer reserves and
+    // prompt truncation. Neo uses exact cached Markdown bubble heights instead.
+    let lazy = !pane.neo_mode() && pane.timeline_lazy_measurement();
     let mut dirty = pane.take_timeline_dirty_marks();
     if pane.any_tool_expand_animating() {
         mark_animating_tool_rows_dirty(pane, &mut dirty);
@@ -983,6 +986,7 @@ fn prepared_message_markdown_blocks<P>(
 where
     P: AgentTimelinePane,
 {
+    if pane.neo_mode() { return None; } // Bubble geometry prepares at its own wrap width.
     let text = message.text();
     if text.trim().is_empty() {
         return None;
@@ -1401,6 +1405,16 @@ where
     // Filter before grouping. Otherwise an archived read-tool run could enter
     // through the group fast path even though its typed rows are hidden.
     let message = messages.get(source_index)?;
+    if pane.neo_mode() {
+        // Filter BEFORE grouping/measurement: no invisible rows, hit targets,
+        // selection text or gaps. Keep the original source index/identity.
+        if !matches!(message.kind(), AgentTimelineMessageKind::User | AgentTimelineMessageKind::Assistant)
+            || !message.tool().is_empty()
+            || is_subagent_runtime_notification(message)
+            || (message.text().trim().is_empty() && message.images().is_empty())
+        { return None; }
+        return Some(NextTimelineItem::Message { message: message.clone() });
+    }
     let live_start = pane
         .timeline_live_trace_start()
         .unwrap_or(messages.len())

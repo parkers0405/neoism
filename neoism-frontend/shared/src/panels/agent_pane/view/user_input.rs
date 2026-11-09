@@ -1677,6 +1677,40 @@ fn wrap_user_message_with(
     lines
 }
 
+pub(super) fn wrap_user_message_unlimited(
+    painter: &mut dyn crate::primitives::paint::Paint,
+    text: &str,
+    width: f32,
+    opts: &DrawOpts,
+) -> Vec<WrappedSelectionLine> {
+    // Unlike developer prompt previews, personal messages retain every byte of
+    // whitespace (including pasted code), and never cap the number of lines.
+    let mut lines = Vec::new();
+    for source in text.split('\n') {
+        if source.is_empty() { lines.push(WrappedSelectionLine::new(String::new(), "\n")); continue; }
+        let boundaries: Vec<usize> = source.grapheme_indices(true).map(|(i,_)| i).chain(std::iter::once(source.len())).collect();
+        let mut start = 0;
+        while start + 1 < boundaries.len() {
+            let mut low = start + 1;
+            let mut high = boundaries.len();
+            while low < high {
+                let mid = low + (high - low) / 2;
+                if measure_text_cached(painter, &source[boundaries[start]..boundaries[mid]], opts) <= width {
+                    low = mid + 1;
+                } else { high = mid; }
+            }
+            let mut end = low.saturating_sub(1).max(start + 1);
+            if end + 1 < boundaries.len() {
+                if let Some(space) = (start+1..=end).rev().find(|&i| source[boundaries[i-1]..boundaries[i]].chars().all(char::is_whitespace)) { end = space; }
+            }
+            let separator = if end + 1 == boundaries.len() { "\n" } else { "" };
+            lines.push(WrappedSelectionLine::new(source[boundaries[start]..boundaries[end]].to_owned(), separator));
+            start = end;
+        }
+    }
+    lines
+}
+
 pub(super) fn wrap_user_message(
     sugarloaf: &mut dyn crate::primitives::paint::Paint,
     text: &str,

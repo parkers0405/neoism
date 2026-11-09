@@ -478,6 +478,9 @@ pub(crate) fn thread_summaries_from_sessions(
 }
 
 pub(crate) fn thread_summary_from_session(session: &Value) -> Option<ThreadSummary> {
+    if session.get("sessionRole").and_then(Value::as_str) == Some("neo") {
+        return None;
+    }
     let session_id = session.get("id").and_then(Value::as_str)?.to_string();
     let title = session
         .get("title")
@@ -2509,6 +2512,17 @@ mod connect_catalog_tests;
 #[cfg(test)]
 mod canonical_route_tests {
     use super::{running_state_message, session_list_path};
+
+    #[test]
+    fn neo_is_hidden_from_legacy_thread_lists_without_title_heuristics() {
+        let sessions = serde_json::json!({"items": [
+            {"id":"assistant", "title":"Anything", "sessionRole":"neo"},
+            {"id":"regular", "title":"Neo"},
+            {"id":"delegate", "neoSessionId":"assistant"}
+        ]});
+        let threads = super::thread_summaries_from_sessions(&sessions, 24);
+        assert_eq!(threads.iter().map(|thread| thread.session_id.as_str()).collect::<Vec<_>>(), vec!["regular", "delegate"]);
+    }
 
     #[test]
     fn catalog_activity_survives_parent_idle_and_legacy_busy_snapshots() {

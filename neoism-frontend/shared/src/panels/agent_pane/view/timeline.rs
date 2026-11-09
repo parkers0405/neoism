@@ -403,6 +403,8 @@ pub trait AgentTimelinePane: AgentMarkdownPane {
     type Message: AgentTimelineMessage;
     type MeasureKey;
 
+    fn neo_mode(&self) -> bool { false }
+
     fn messages(&self) -> &[Self::Message];
     fn timeline_scroll_offset(&self) -> f32;
     fn timeline_follow_bottom(&self) -> bool;
@@ -1152,6 +1154,7 @@ mod footer_edge_tests;
 mod footer_tests;
 mod impls;
 mod layout;
+mod neo_bubble;
 mod read_group;
 mod patch_group;
 mod render;

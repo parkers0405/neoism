@@ -1,6 +1,7 @@
 use super::sections::render_section_header;
 use super::*;
 use crate::panels::agent_pane::view::draw::measure_text_cached;
+use crate::panels::agent_pane::state::side_panel::CatalogHeaderAction;
 
 #[derive(Clone, Copy)]
 enum CatalogIcon {
@@ -439,87 +440,93 @@ pub(crate) fn render_sessions_list(
     pane.side_panel_mut().close_provider_menu();
 
     let button_h = 34.0 * s;
-    let button_rect = [text_x, y + 5.0 * s, text_w, button_h];
-    pane.side_panel_mut().set_new_chat_rect(button_rect);
-    let button_hovered = mouse.is_some_and(|(mx, my)| {
-        mx >= button_rect[0]
-            && mx <= button_rect[0] + button_rect[2]
-            && my >= button_rect[1]
-            && my <= button_rect[1] + button_rect[3]
-    });
-    let button_selected =
-        pane.side_panel().new_chat_selected() && pane.side_panel().is_focused();
     let radius = 7.0 * s;
-    if button_hovered || button_selected {
-        sugarloaf.rounded_rect(
-            None,
-            button_rect[0],
-            button_rect[1],
-            button_rect[2],
-            button_rect[3],
-            sidebar_background_opacity(
-                theme.f32_alpha(theme.surface, if button_hovered { 0.78 } else { 0.55 }),
-            ),
-            DEPTH,
-            radius,
-            ORDER_PANEL + 2,
-        );
-    }
     let label_size = FONT_SIZE * s * if navigation { 1.0 } else { 0.95 };
-    let ([icon_x, icon_y, icon_side, _], [label_x, label_y]) =
-        catalog_action_layout(button_rect, s, label_size);
-    if !navigation && (button_hovered || button_selected) {
-        sugarloaf.rounded_rect(
-            None,
-            icon_x,
-            icon_y,
-            icon_side,
-            icon_side,
-            sidebar_background_opacity(
-                theme.f32_alpha(theme.accent, if button_hovered { 0.24 } else { 0.16 }),
-            ),
-            DEPTH,
-            5.0 * s,
-            ORDER_PANEL + 3,
+    // Fixed actions are not catalog sessions. Share their chrome and geometry
+    // so pointer selection and the native keyboard cursor agree exactly.
+    for is_neo in [true, false] {
+        if is_neo && !navigation {
+            continue;
+        }
+        let button_rect = [text_x, y + 5.0 * s, text_w, button_h];
+        if is_neo {
+            if let Some(hit) = intersect_rect(button_rect, clip) {
+                pane.side_panel_mut().set_header_action_rect(CatalogHeaderAction::Neo, hit);
+            }
+        } else {
+            pane.side_panel_mut().set_new_chat_rect(button_rect);
+        }
+        let button_hovered = mouse.is_some_and(|(mx, my)| {
+            mx >= button_rect[0]
+                && mx <= button_rect[0] + button_rect[2]
+                && my >= button_rect[1]
+                && my <= button_rect[1] + button_rect[3]
+        });
+        let button_selected = pane.side_panel().is_focused()
+            && if is_neo {
+                pane.side_panel().selected_header_action() == Some(CatalogHeaderAction::Neo)
+            } else {
+                pane.side_panel().new_chat_selected()
+            };
+        if button_hovered || button_selected {
+            sugarloaf.rounded_rect(
+                None,
+                button_rect[0], button_rect[1], button_rect[2], button_rect[3],
+                sidebar_background_opacity(
+                    theme.f32_alpha(theme.surface, if button_hovered { 0.78 } else { 0.55 }),
+                ),
+                DEPTH, radius, ORDER_PANEL + 2,
+            );
+        }
+        let ([icon_x, icon_y, icon_side, _], [label_x, label_y]) =
+            catalog_action_layout(button_rect, s, label_size);
+        if !navigation && (button_hovered || button_selected) {
+            sugarloaf.rounded_rect(
+                None, icon_x, icon_y, icon_side, icon_side,
+                sidebar_background_opacity(
+                    theme.f32_alpha(theme.accent, if button_hovered { 0.24 } else { 0.16 }),
+                ),
+                DEPTH, 5.0 * s, ORDER_PANEL + 3,
+            );
+        }
+        if is_neo {
+            agent_icon::register_neoism_icon(sugarloaf);
+            push_provider_icon_clipped(
+                sugarloaf,
+                agent_icon::AgentKind::Neoism,
+                [icon_x, icon_y, icon_side, icon_side],
+                clip,
+                occlusion_rects,
+            );
+        } else {
+            draw_catalog_icon(
+                sugarloaf, CatalogIcon::Compose, icon_x, icon_y, s, theme, clip, occlusion_rects,
+            );
+        }
+        let label_opts = DrawOpts {
+            font_size: label_size,
+            color: theme.u8(theme.fg),
+            bold: !navigation && (button_hovered || button_selected),
+            clip_rect: Some(clip),
+            ..DrawOpts::default()
+        };
+        draw_text_with_occlusion(
+            sugarloaf, label_x, label_y,
+            if is_neo { "Neo" } else { "New chat" },
+            &label_opts, occlusion_rects,
         );
+        if button_selected {
+            let cursor_w = (FONT_SIZE * s * 0.6).max(2.0);
+            let cursor_h = (button_h - 8.0 * s).max(FONT_SIZE * s).min(button_h);
+            pane.side_panel_mut().set_selected_cursor_rect([
+                button_rect[0] + s,
+                button_rect[1] + (button_h - cursor_h) / 2.0,
+                cursor_w,
+                cursor_h,
+            ]);
+        }
+        y = button_rect[1] + button_rect[3] + if navigation { 0.0 } else { 8.0 * s };
     }
-    draw_catalog_icon(
-        sugarloaf,
-        CatalogIcon::Compose,
-        icon_x,
-        icon_y,
-        s,
-        theme,
-        clip,
-        occlusion_rects,
-    );
-    let label_opts = DrawOpts {
-        font_size: label_size,
-        color: theme.u8(theme.fg),
-        bold: !navigation && (button_hovered || button_selected),
-        clip_rect: Some(clip),
-        ..DrawOpts::default()
-    };
-    draw_text_with_occlusion(
-        sugarloaf,
-        label_x,
-        label_y,
-        "New chat",
-        &label_opts,
-        occlusion_rects,
-    );
-    if button_selected {
-        let cursor_w = (FONT_SIZE * s * 0.6).max(2.0);
-        let cursor_h = (button_h - 8.0 * s).max(FONT_SIZE * s).min(button_h);
-        pane.side_panel_mut().set_selected_cursor_rect([
-            button_rect[0] + 1.0 * s,
-            button_rect[1] + (button_h - cursor_h) / 2.0,
-            cursor_w,
-            cursor_h,
-        ]);
-    }
-
-    y = button_rect[1] + button_rect[3] + if navigation { 0.0 } else { 8.0 * s };
     if navigation {
         use crate::panels::agent_pane::state::side_panel::CatalogHeaderAction;
         let label = pane.side_panel().project_button_label().to_owned();

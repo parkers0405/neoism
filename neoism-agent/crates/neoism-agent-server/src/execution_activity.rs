@@ -482,6 +482,10 @@ async fn register_subtask_inner(
     child_session_id: &str,
     allow_resume: bool,
 ) -> anyhow::Result<bool> {
+    if parent.is_neo() {
+        // Neo's delegates own independent top-level execution lifetimes.
+        return Ok(false);
+    }
     let Some(execution_id) = parent
         .extra
         .get(EXECUTION_ID_KEY)

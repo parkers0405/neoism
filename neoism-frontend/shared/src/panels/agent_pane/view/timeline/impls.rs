@@ -105,6 +105,8 @@ impl AgentTimelinePane for NeoismAgentPane {
     type Message = NeoismAgentMessage;
     type MeasureKey = TimelineMeasureKey;
 
+    fn neo_mode(&self) -> bool { NeoismAgentPane::neo_mode(self) }
+
     fn set_visible_running_tool_active(&mut self, active: bool) {
         NeoismAgentPane::set_visible_running_tool_active(self, active);
     }
@@ -413,6 +415,9 @@ impl AgentTimelineDelegate<NeoismAgentPane> for SharedTimelineDelegate {
         tool_expanded: bool,
         tool_expand_progress: f32,
     ) -> f32 {
+        if pane.neo_mode() {
+            return super::neo_bubble::measure(sugarloaf, pane, message, width, theme, s);
+        }
         measure_message_height(
             sugarloaf,
             pane,
@@ -442,6 +447,9 @@ impl AgentTimelineDelegate<NeoismAgentPane> for SharedTimelineDelegate {
         viewport_clip: [f32; 4],
         occlusion_rects: &[[f32; 4]],
     ) -> f32 {
+        if pane.neo_mode() {
+            return super::neo_bubble::render(sugarloaf, pane, message, [x,y,w,measured_h], theme, s, now_seconds, mouse, viewport_clip, occlusion_rects);
+        }
         render_message_card(
             sugarloaf,
             x,
@@ -471,6 +479,10 @@ impl AgentTimelineDelegate<NeoismAgentPane> for SharedTimelineDelegate {
         viewport_clip: [f32; 4],
         occlusion_rects: &[[f32; 4]],
     ) {
+        if pane.neo_mode() {
+            super::neo_bubble::typing(sugarloaf, rect, theme, s, viewport_clip, occlusion_rects);
+            return;
+        }
         render_streaming_status_row(
             sugarloaf,
             pane,

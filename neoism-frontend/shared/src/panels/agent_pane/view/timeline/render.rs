@@ -190,7 +190,9 @@ where
         layout.question_targets = question_targets(&layout.rows, pane.messages());
     }
     let row_count = layout.rows.len();
-    let status_h = if pane.has_status_activity() {
+    let status_h = if pane.neo_mode() && pane.has_status_activity() {
+        STREAMING_STATUS_LINE_H * s
+    } else if pane.has_status_activity() {
         let primary_lines =
             streaming_status_primary_line_count(sugarloaf, &pane.streaming_label(), w, s);
         let lines = streaming_status_line_count(
@@ -489,7 +491,7 @@ where
                     .get(row.source_index)
                     .map(|message| message.kind())
             });
-            if kind == Some(AgentTimelineMessageKind::User) {
+            if kind == Some(AgentTimelineMessageKind::User) && !pane.neo_mode() {
                 visible_user_orb = true;
             }
         }
@@ -733,7 +735,7 @@ where
         pane.timeline_measure_key(message, width, s, tool_expanded, selected_group_child);
     // Artifact metrics are host-fed independently of message text. Layout dirty
     // marks must remeasure them rather than revive a pre-metric cached height.
-    let cacheable = !tool_expand_animating
+    let cacheable = !pane.neo_mode() && !tool_expand_animating
         && message.tool() != "compose"
         && !message.text().contains("neoism-html");
     if cacheable {

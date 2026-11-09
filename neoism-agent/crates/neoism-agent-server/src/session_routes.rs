@@ -69,7 +69,16 @@ pub(crate) async fn session_create(
     claims: Option<Extension<crate::caller::CallerClaims>>,
     body: Option<Json<CreateSessionRequest>>,
 ) -> Result<Json<SessionInfo>, ApiError> {
-    session_create_inner(state, query, headers, claims, body, None).await
+    session_create_inner(state, query, headers, claims, body, None, false).await
+}
+
+pub(crate) async fn neo_session(
+    State(state): State<AppState>,
+    Query(query): Query<InstanceQuery>,
+    headers: HeaderMap,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
+) -> Result<Json<SessionInfo>, ApiError> {
+    session_create_inner(state, query, headers, claims, None, None, true).await
 }
 
 /// Internal-only pending root: preserve the normal claims/quota checks, but
@@ -89,6 +98,7 @@ pub(crate) async fn session_create_importing(
         claims,
         Some(Json(request)),
         Some(external_metadata),
+        false,
     )
     .await?
     .0)
@@ -101,6 +111,7 @@ async fn session_create_inner(
     claims: Option<Extension<crate::caller::CallerClaims>>,
     body: Option<Json<CreateSessionRequest>>,
     pending_import: Option<Value>,
+    neo: bool,
 ) -> Result<Json<SessionInfo>, ApiError> {
     let mut request = body.map(|Json(body)| body).unwrap_or(CreateSessionRequest {
         parent_id: None,
@@ -128,10 +139,73 @@ async fn session_create_inner(
         resolve_directory(query.directory, &headers)
     };
     let mut extra = BTreeMap::new();
+    let neo_scope = if neo {
+        let canonical = crate::windows_process::canonicalize_path(FsPath::new(&directory))
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let caller = claims.as_ref().map(|Extension(claims)| claims);
+        if caller.is_some_and(|claims| !crate::caller::allows_directory(claims, &directory)) {
+            return Err(ApiError::forbidden("The caller is not authorized for this directory"));
+        }
+        let worker = state.services().workspace_worker.as_ref();
+        if let (Some(worker), Some(claims)) = (worker, caller) {
+            if claims.tenant_id != worker.tenant_id()
+                || claims.workspace_id.as_deref().is_some_and(|id| id != worker.workspace_id()) {
+                return Err(ApiError::forbidden("Neo does not match the worker binding"));
+            }
+        }
+        let tenant = caller.map(|claims| claims.tenant_id.as_str())
+            .or_else(|| worker.map(|worker| worker.tenant_id())).unwrap_or("local");
+        let workspace = caller.and_then(|claims| claims.workspace_id.as_deref())
+            .or_else(|| worker.map(|worker| worker.workspace_id()));
+        if worker.is_some_and(|worker| !worker.admits_path(&canonical)) {
+            return Err(ApiError::forbidden("Session directory is outside the worker root"));
+        }
+        let scope = json!([tenant, workspace, workspace.is_none().then_some(&canonical)]).to_string();
+        if let Some(mut info) = state.inner.store.neo_session(&scope).await? {
+            // An authenticated workspace may move roots without acquiring a
+            // second identity. Only rebind to an already-authorized directory,
+            // never use the workspace key to bypass directory admission.
+            // Only the authoritative worker binding or a locally daemon-signed
+            // workspace capability may move a saved root. A narrowed hosted
+            // resolver credential must not gain old history by rebinding it.
+            let may_rebind = worker.is_some_and(|worker| !worker.admits_path(FsPath::new(&info.directory)))
+                || caller.is_some_and(|claims| claims.hosted && claims.resolved.is_none() && claims.workspace_id.is_some());
+            if workspace.is_some() && may_rebind && (caller.is_some_and(|claims| !crate::caller::allows_directory(claims, &info.directory))
+                || worker.is_some_and(|worker| !worker.admits_path(FsPath::new(&info.directory)))) {
+                let context = state.inner.workspace_runtimes.project_discovery
+                    .discover(state.services(), canonical.clone()).await
+                    .map_err(|error| ApiError::internal(error.to_string()))?;
+                info.directory = context.directory;
+                info.project_id = context.info.id;
+                info.path = context.path;
+                if let Some(claims) = caller {
+                    info.extra.insert(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.into(), json!(claims.directory_prefixes));
+                } else if let Some(worker) = worker {
+                    info.extra.insert(crate::caller::DIRECTORY_PREFIXES_EXTRA_KEY.into(), json!([worker.root()]));
+                }
+                if caller.is_some_and(|claims| !crate::caller::allows_session(claims, &info)) {
+                    return Err(ApiError::forbidden("Neo is outside the caller's workspace"));
+                }
+                state.inner.store.update_session(&info).await?;
+            }
+            if caller.is_some_and(|claims| !crate::caller::allows_session(claims, &info)) {
+                return Err(ApiError::forbidden("Neo is outside the caller's workspace"));
+            }
+            return Ok(Json(info));
+        }
+        request.agent = Some("neo".into());
+        request.title = Some("Neo".into());
+        extra.insert("sessionRole".into(), json!("neo"));
+        extra.insert("neoWorkspace".into(), json!(scope));
+        Some(scope)
+    } else { None };
+    if !neo && request.agent.as_deref() == Some("neo") {
+        return Err(ApiError::bad_request("Use POST /v2/neo/session for Neo"));
+    }
     let creating_actor = claims
         .as_ref()
         .map(|Extension(claims)| (claims.subject.clone(), claims.actor_type_label()));
-    if let Some(Extension(claims)) = claims {
+    if let Some(Extension(claims)) = claims.as_ref() {
         if !crate::caller::allows_directory(&claims, &directory) {
             return Err(ApiError::forbidden(
                 "The caller is not authorized for this directory",
@@ -149,6 +223,13 @@ async fn session_create_inner(
                 })
                 .count();
             if count >= limit {
+                if let Some(scope) = neo_scope.as_deref() {
+                    if let Some(info) = state.inner.store.neo_session(scope).await? {
+                        if crate::caller::allows_session(&claims, &info) {
+                            return Ok(Json(info));
+                        }
+                    }
+                }
                 return Err(ApiError::too_many_requests("Session quota exceeded"));
             }
         }
@@ -219,7 +300,23 @@ async fn session_create_inner(
         extra,
         pending_import,
     )
-    .await?;
+    .await;
+    let info = match info {
+        Ok(info) => info,
+        Err(error) => {
+            // A database uniqueness constraint arbitrates concurrent creators,
+            // including creators in different server processes.
+            if let Some(scope) = neo_scope {
+                if let Some(info) = state.inner.store.neo_session(&scope).await? {
+                    if claims.as_ref().is_some_and(|Extension(claims)| !crate::caller::allows_session(claims, &info)) {
+                        return Err(ApiError::forbidden("Neo is outside the caller's workspace"));
+                    }
+                    return Ok(Json(info));
+                }
+            }
+            return Err(error);
+        }
+    };
     if let Some((subject, actor_type)) = creating_actor {
         state
             .inner
@@ -603,6 +700,9 @@ pub(crate) async fn session_delete(
     Path(session_id): Path<String>,
 ) -> Result<Json<bool>, ApiError> {
     let deleted_session = state.inner.store.get_session(&session_id).await?;
+    if deleted_session.as_ref().is_some_and(SessionInfo::is_neo) {
+        return Err(ApiError::forbidden("Neo cannot be deleted through ordinary session mutations"));
+    }
     let execution_root = match deleted_session.as_ref() {
         Some(session) => {
             Some(crate::execution_activity::root_session_id(&state, session).await)
@@ -662,6 +762,15 @@ pub(crate) async fn session_update(
         .await?
         .ok_or_else(|| ApiError::not_found("Session not found"))?;
     let previous_directory = info.directory.clone();
+    if !info.is_neo() && update.agent.as_deref() == Some("neo") {
+        return Err(ApiError::bad_request("Use POST /v2/neo/session for Neo"));
+    }
+    if info.is_neo() && (update.title.as_ref().is_some_and(|title| title != &info.title)
+        || update.agent.as_deref().is_some_and(|agent| agent != "neo")
+        || update.directory.as_ref().is_some_and(|directory| directory != &info.directory)
+        || update.time.is_some()) {
+        return Err(ApiError::forbidden("Neo identity, agent, and workspace are immutable"));
+    }
     if let Some(title) = update.title {
         info.title = title;
     }

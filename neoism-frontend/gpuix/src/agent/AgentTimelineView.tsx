@@ -61,7 +61,7 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
   let key=engineKey(workspaceId,rootSessionId);
   const owners=()=>model.state.surfaces.filter(surface=>surface.workspaceId===workspaceId&&surface.kind==="agent"&&(surface.id===surfaceId||(surface.sessionId?(surface.agentRootSessionId||model.agentFamily(surface.sessionId).root):model.state.pendingAgentSessions[surface.id])===rootSessionId)).map(surface=>surface.id);
   const existing = byModel.get(key); if (existing) {existing.touched=performance.now();for(const id of owners())existing.surfaces.add(id);return existing;}
-  const { id } = coreCall<{ id: number }>("agenttimeline.new", { compactPaint: true, canvasPaint: true, chunkedPaint: true, sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
+  const { id } = coreCall<{ id: number }>("agenttimeline.new", { compactPaint: true, canvasPaint: true, chunkedPaint: true, neoMode:model.selection(sessionId).agent==="neo", sessionId,rootSessionId, theme: config.themeName, scale: config.scale,
     fontFamily: config.fontFamily, markdownFontFamily: config.markdownFontFamily, fontWeight: config.fontWeight,reducedMotion:config.reducedMotion,localName:localPresenceIdentity(config).displayName });
   const family=model.agentFamily(sessionId);
   coreCall("agenttimeline.family",{id,deferFrame:true,rootSessionId,sessionId,roster:family.roster,rootTitle:model.state.threads.find(thread=>thread.session_id===rootSessionId)?.title||rootSessionId});
@@ -122,7 +122,7 @@ export function scrollAgentHalfPage(model:WorkspaceModel,sessionId:string,config
 
 export function AgentTimelineView(props: { sessionId: string; model: WorkspaceModel; config: AppConfig; report: (error: unknown) => void; openFile: (path: string) => void;
   /** Explicit owner, including provisional conversations without a session yet. */
-  workspaceId?:string;surfaceId?:string;
+  workspaceId?:string;surfaceId?:string;neoMode?:boolean;
   /** Composer top: scroll metrics and sticky controls stop here; body paint continues behind the floating card. */
   viewport?:{width:number;height:number};pinImage?:(source:number,raster:CanvasRaster)=>void;onPreview?:(image:ImagePreview)=>void;provisional?:boolean;contentBottom?: number;rootSessionId?:string;familyRoster?:AgentFamilyRow[];onNavigate?:(sessionId:string)=>void;onFocus?:()=>void }) {
   const config = props.config, s = config.scale, renderer = useGpuixRequired();
@@ -187,10 +187,11 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   const layout = (contentBottom = props.contentBottom ?? bounds.height) => {
     if(engine.lifetime.closed)return;
     if (bounds.width <= 0 || bounds.height <= 0) return;
-    const signature = `${bounds.width}:${bounds.height}:${contentBottom}:${config.reducedMotion}`;
+    const neoMode=props.neoMode??props.model.selection(props.sessionId).agent==="neo";
+    const signature = `${bounds.width}:${bounds.height}:${contentBottom}:${config.reducedMotion}:${neoMode}`;
     if (signature === layoutSignature) return;
     layoutSignature = signature;
-    batch(()=>{coreCall("agenttimeline.layout",{id:engine.id,visible:true,width:bounds.width,height:bounds.height,contentBottom,scale:s,theme:config.themeName,reducedMotion:config.reducedMotion,localName,deferFrame:true});call("frame");});
+    batch(()=>{coreCall("agenttimeline.layout",{id:engine.id,visible:true,width:bounds.width,height:bounds.height,contentBottom,scale:s,theme:config.themeName,reducedMotion:config.reducedMotion,localName,neoMode,deferFrame:true});call("frame");});
   };
   // One paint per display frame however many events or animations arrive.
   const schedule = () => { if (!disposed&&!engine.lifetime.closed) animation.request(() => { if (!disposed && bounds.width > 0) call("frame"); }, startedAt); };
@@ -205,7 +206,7 @@ export function AgentTimelineView(props: { sessionId: string; model: WorkspaceMo
   onMount(() => schedule());
   let familySignature=JSON.stringify(pendingFamily),selectedSession=props.sessionId;
   createEffect(()=>{const family=familyArgs();const signature=JSON.stringify(family);if(signature!==familySignature){familySignature=signature;untrack(()=>{pendingFamily=family;if(selectedSession!==props.sessionId){selectedSession=props.sessionId;pointerPending=undefined;call("frame");}else schedule();});}});
-  createEffect(() => { const bottom = props.contentBottom; untrack(() => layout(bottom ?? bounds.height)); });
+  createEffect(() => { const bottom = props.contentBottom; props.neoMode; untrack(() => layout(bottom ?? bounds.height)); });
   const local = (event: {x?:number;y?:number}) => {
     // Read the completed paint snapshot, including moves without resize events.
     const painted=host&&paintedChromeBounds(renderer,host.id);

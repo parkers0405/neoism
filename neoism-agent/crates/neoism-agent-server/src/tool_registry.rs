@@ -480,6 +480,13 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         ),
         tool(
             ToolOwner::Subagents, owner,
+            "neo_task",
+            "Delegate work to a real visible top-level Build session. Returns task_id/session ID immediately; completion or error automatically wakes Neo. Set session_id to follow up in a previously delegated session. Use task_result and stop_task for status and cancellation.",
+            json!({"type":"object", "properties": {"description":{"type":"string"}, "prompt":{"type":"string"}, "session_id":{"type":"string"}}, "required":["description","prompt"]}),
+            stateful_handler,
+        ),
+        tool(
+            ToolOwner::Subagents, owner,
             "task_result",
             "Check background subagent task status or collect a completed result",
             json!({

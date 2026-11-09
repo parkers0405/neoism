@@ -1,6 +1,8 @@
 mod event_storage_replay;
 #[path = "tests_subtask_recovery.rs"]
 mod subtask_recovery;
+#[path = "tests_neo.rs"]
+mod neo_tests;
 mod live_messages;
 #[path = "tests_shell.rs"]
 mod shell_tests;

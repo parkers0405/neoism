@@ -3,6 +3,14 @@ use std::collections::HashMap;
 use neoism_agent_core::ToolListItem;
 use serde_json::Value;
 
+pub(crate) fn tool_allowed_for_session(tool: &str, session: &neoism_agent_core::SessionInfo) -> bool {
+    if session.is_neo() {
+        matches!(tool, "neo_task" | "task_result" | "stop_task" | "question" | "memory")
+    } else {
+        tool != "neo_task"
+    }
+}
+
 pub(crate) fn provider_tool_map(tools: &[ToolListItem]) -> HashMap<String, ToolListItem> {
     tools
         .iter()

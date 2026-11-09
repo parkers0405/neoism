@@ -268,7 +268,7 @@ pub(crate) async fn create_subtask_session(
     } else {
         format!("{} (@{} subagent)", description.trim(), agent_info.name)
     };
-    let child = SessionInfo {
+    let mut child = SessionInfo {
         id: child_id.clone(),
         slug: slug(),
         project_id: parent.project_id.clone(),
@@ -306,6 +306,14 @@ pub(crate) async fn create_subtask_session(
         })
         .collect(),
     };
+    if parent.is_neo() {
+        child.parent_id = None;
+        child.title = description.to_string();
+        child.extra.insert("neoSessionId".into(), json!(parent.id));
+        // A delegated session is a real root, not part of Neo's execution family.
+        child.extra.remove(crate::execution_activity::EXECUTION_ID_KEY);
+        child.extra.remove(crate::execution_activity::EXECUTION_ROOT_KEY);
+    }
     state.inner.store.insert_session(&child).await?;
     state.publish(EventPayload::new(
         event_type::SESSION_CREATED,
@@ -439,7 +447,7 @@ pub(crate) async fn publish_background_subtask_finished(
     };
     let completion = mutation.and_then(|(child, _created)| {
         child
-            .parent_id
+            .task_parent_id()
             .as_ref()
             .map(ToString::to_string)
             .map(|parent_id| (child, parent_id))
@@ -516,7 +524,7 @@ async fn mark_subtask_completion_pending(
     let Some(mut child) = state.inner.store.get_session(child_id).await? else {
         return Ok(None);
     };
-    if child.parent_id.is_none() {
+    if child.task_parent_id().is_none() {
         return Ok(None);
     }
     if owed_completion_generation(&child) != Some(generation.clone()) {
@@ -804,7 +812,7 @@ pub(crate) async fn mark_subtask_notify_on_idle(
     let Some(mut child) = state.inner.store.get_session(child_id).await? else {
         return Ok(());
     };
-    if child.parent_id.is_none() {
+    if child.task_parent_id().is_none() {
         return Ok(());
     }
     if let Some(runtime) = state
@@ -843,7 +851,7 @@ pub(crate) async fn publish_deferred_subtask_completion_if_idle(
         Ok(Some(child)) => child,
         _ => return false,
     };
-    if child.parent_id.is_none() {
+    if child.task_parent_id().is_none() {
         return false;
     }
     let Some(generation) = owed_completion_generation(&child) else {
@@ -977,7 +985,7 @@ pub(crate) async fn reconcile_parent_subtask_completions_for_child(
         return;
     }
     let parent_id = match state.inner.store.get_session(child_id).await {
-        Ok(Some(child)) => child.parent_id.map(|parent| parent.to_string()),
+        Ok(Some(child)) => child.task_parent_id().map(|parent| parent.to_string()),
         Ok(None) => None,
         Err(error) => {
             tracing::warn!(session_id = %child_id, %error, "failed to load child while reconciling subtask completions");
@@ -1047,7 +1055,7 @@ async fn migrate_subtask_persistence_v1(state: &AppState) -> Result<(), ApiError
         // is consumed by the next assistant step whose parent remains the
         // original user turn. Version 3 derives delivery from transcript order
         // and normalizes both cases without replaying historical completions.
-        if let Some(parent_id) = child.parent_id.as_ref() {
+        if let Some(parent_id) = child.task_parent_id().as_ref() {
             let parent_messages =
                 state.inner.store.list_messages(parent_id.as_str()).await?;
             let successful_replies = successful_parent_reply_ids(&parent_messages);
@@ -1155,7 +1163,7 @@ pub(crate) async fn resume_pending_subtask_completions(state: &AppState) {
         // launch: each reconciliation scans the child set again. Only a
         // genuinely pending outbox record requires startup delivery.
         .filter(has_pending_subtask_completion)
-        .filter_map(|session| session.parent_id.map(|parent| parent.to_string()))
+        .filter_map(|session| session.task_parent_id().map(|parent| parent.to_string()))
         .collect::<BTreeSet<_>>();
     for parent_id in parent_ids {
         if let Err(error) =
@@ -1185,7 +1193,7 @@ async fn pending_parent_subtask_completions(
     let mut pending = state
         .inner
         .store
-        .list_child_sessions(parent_id)
+        .list_task_sessions(parent_id)
         .await?
         .into_iter()
         .flat_map(|child| {
@@ -1470,6 +1478,10 @@ fn subtask_permission(
     parent: &SessionInfo,
     agent: &neoism_agent_core::AgentInfo,
 ) -> Vec<PermissionRule> {
+    if parent.is_neo() {
+        // Inherit session/user restrictions, not Neo's role-specific tool mask.
+        return parent.permission.clone().unwrap_or_default();
+    }
     let mut rules = parent
         .permission
         .clone()
@@ -1533,6 +1545,80 @@ mod tests {
             permission: None,
             extra: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn neo_root_task_completion_outbox_is_durable_and_generation_scoped() {
+        let database = std::env::temp_dir().join(format!("neo-outbox-{}.db", Id::ascending(IdKind::Event)));
+        let state = AppState::open_database(database.clone()).await.unwrap();
+        let mut neo = test_child_session();
+        neo.parent_id = None;
+        neo.agent = Some("neo".into());
+        neo.extra.insert("sessionRole".into(), json!("neo"));
+        state.inner.store.insert_session(&neo).await.unwrap();
+        let mut delegate = test_child_session();
+        delegate.parent_id = None;
+        delegate.agent = Some("build".into());
+        delegate.extra.insert("neoSessionId".into(), json!(neo.id));
+        state.inner.store.insert_session(&delegate).await.unwrap();
+        let generation = Id::ascending(IdKind::Message);
+        mark_subtask_notify_on_idle(&state, delegate.id.as_str(), &generation).await.unwrap();
+        let stale = Id::ascending(IdKind::Message);
+        assert!(mark_subtask_completion_pending(&state, delegate.id.as_str(), &stale, "completed", "stale").await.unwrap().is_none());
+        assert!(mark_subtask_completion_pending(&state, delegate.id.as_str(), &generation, "error", "worker failed").await.unwrap().is_some());
+        // Reopen the store without starting recovery workers so the durable
+        // outbox can be inspected deterministically before queue admission.
+        let disk = crate::state::SessionStore::open(database).await.unwrap();
+        let saved = disk.get_session(delegate.id.as_str()).await.unwrap().unwrap();
+        assert!(has_pending_subtask_completion(&saved));
+        let reopened = state.clone();
+        let pending = pending_parent_subtask_completions(&reopened, neo.id.as_str()).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, "error");
+        assert_eq!(pending[0].text, "worker failed");
+        assert_eq!(pending[0].child.id, delegate.id);
+        let notification = parent_subtask_completions_request(&pending);
+        assert!(notification.system.as_deref().unwrap().starts_with(SUBTASK_COMPLETION_SYSTEM_MARKER));
+        assert!(mark_subtask_completion_pending(&reopened, delegate.id.as_str(), &generation, "error", "worker failed").await.unwrap().is_none());
+        seed_parent_execution(&reopened, &mut neo).await;
+        hold_parent_run(&reopened, &neo).await;
+        enqueue_parent_subtask_completion_prompts_if_ready(&reopened, neo.id.as_str()).await.unwrap();
+        let queued = reopened.inner.store.list_queued_prompt_entries(neo.id.as_str()).await.unwrap();
+        assert_eq!(queued.len(), 1, "a persisted root-task failure wakes Neo via the durable prompt queue");
+        assert_eq!(queued[0].1, "continue");
+        enqueue_parent_subtask_completion_prompts_if_ready(&reopened, neo.id.as_str()).await.unwrap();
+        assert_eq!(reopened.inner.store.list_queued_prompt_entries(neo.id.as_str()).await.unwrap().len(), 1, "recovery must deduplicate notifications");
+    }
+
+    #[tokio::test]
+    async fn neo_completion_wakes_idle_orchestrator_without_inherited_execution() {
+        let database = std::env::temp_dir().join(format!("neo-wakeup-{}.db", Id::ascending(IdKind::Event)));
+        let state = AppState::open_database(database.clone()).await.unwrap();
+        let mut neo = test_child_session();
+        neo.parent_id = None;
+        neo.agent = Some("neo".into());
+        neo.model = model_ref_from_config("neoism/stub");
+        neo.extra.insert("sessionRole".into(), json!("neo"));
+        state.inner.store.insert_session(&neo).await.unwrap();
+        let mut delegate = test_child_session();
+        delegate.parent_id = None;
+        delegate.extra.insert("neoSessionId".into(), json!(neo.id));
+        state.inner.store.insert_session(&delegate).await.unwrap();
+        let generation = Id::ascending(IdKind::Message);
+        mark_subtask_notify_on_idle(&state, delegate.id.as_str(), &generation).await.unwrap();
+        assert!(state.inner.store.get_execution_activity(neo.id.as_str()).await.unwrap().is_none());
+        mark_subtask_completion_pending(&state, delegate.id.as_str(), &generation, "completed", "implementation finished").await.unwrap().unwrap();
+        // Startup recovery must wake a settled Neo from the durable delegate
+        // record without borrowing the delegate's independent execution.
+        let state = AppState::open_database(database).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let messages = state.inner.store.list_messages(neo.id.as_str()).await.unwrap();
+                if !successful_parent_reply_ids(&messages).is_empty() { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("durable completion must wake idle Neo and generate a reply");
+        assert!(state.inner.store.get_execution_activity(neo.id.as_str()).await.unwrap().is_some());
     }
 
     fn queued_user_prompt(text: &str) -> PromptRequest {

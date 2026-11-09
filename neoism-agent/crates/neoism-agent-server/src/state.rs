@@ -275,13 +275,13 @@ fn int(value: i64) -> SqlValue {
     SqlValue::Integer(value)
 }
 
-const NEOISM_ROOT_INDEX_CONDITION: &str = "((json_extract(i.summary_json, '$.externalAgent') IS NULL AND json_extract(i.summary_json, '$.extra.externalAgent') IS NULL) OR COALESCE(json_extract(i.summary_json, '$.externalAgent.historyState'), json_extract(i.summary_json, '$.extra.externalAgent.historyState')) = 'neoism_only')";
+const NEOISM_ROOT_INDEX_CONDITION: &str = "COALESCE(json_extract(i.summary_json, '$.sessionRole'), '') != 'neo' AND ((json_extract(i.summary_json, '$.externalAgent') IS NULL AND json_extract(i.summary_json, '$.extra.externalAgent') IS NULL) OR COALESCE(json_extract(i.summary_json, '$.externalAgent.historyState'), json_extract(i.summary_json, '$.extra.externalAgent.historyState')) = 'neoism_only')";
 
 fn session_list_index_statement(
     info: &SessionInfo,
 ) -> anyhow::Result<(String, Vec<SqlValue>)> {
     let mut extra = BTreeMap::new();
-    for key in [crate::caller::TENANT_EXTRA_KEY, "pinned"] {
+    for key in [crate::caller::TENANT_EXTRA_KEY, "pinned", "sessionRole", "neoSessionId"] {
         if let Some(value) = info.extra.get(key) {
             extra.insert(key.to_string(), value.clone());
         }
@@ -2106,6 +2106,8 @@ impl SessionStore {
                 Vec::new(),
             )
             .await?;
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_neo_workspace ON sessions(json_extract(info_json, '$.neoWorkspace')) WHERE json_extract(info_json, '$.neoWorkspace') IS NOT NULL", Vec::new()).await?;
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_neo_owner ON sessions(json_extract(info_json, '$.neoSessionId')) WHERE json_extract(info_json, '$.neoSessionId') IS NOT NULL", Vec::new()).await?;
         // List metadata lives in a compact sidecar. Creating it is constant
         // time even for legacy databases whose session JSON is many gigabytes.
         self.db
@@ -3493,6 +3495,20 @@ impl SessionStore {
             .map(|row| decode_json(row.get_str("info_json")?))
             .collect::<anyhow::Result<Vec<SessionInfo>>>()?;
         self.hydrate_host_associations(&mut sessions).await?;
+        Ok(sessions)
+    }
+
+    pub(crate) async fn neo_session(&self, scope: &str) -> anyhow::Result<Option<SessionInfo>> {
+        let row = self.db.fetch_optional("SELECT info_json FROM sessions WHERE json_extract(info_json, '$.neoWorkspace') = ?", vec![text(scope)]).await?;
+        row.map(|row| decode_json(row.get_str("info_json")?)).transpose()
+    }
+
+    pub(crate) async fn list_task_sessions(&self, parent_id: &str) -> anyhow::Result<Vec<SessionInfo>> {
+        let mut sessions = self.list_child_sessions(parent_id).await?;
+        let rows = self.db.fetch_all("SELECT info_json FROM sessions WHERE json_extract(info_json, '$.neoSessionId') = ?", vec![text(parent_id)]).await?;
+        for row in rows {
+            sessions.push(decode_json(row.get_str("info_json")?)?);
+        }
         Ok(sessions)
     }
 

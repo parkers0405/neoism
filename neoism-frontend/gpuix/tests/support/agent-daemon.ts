@@ -16,6 +16,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
   const searchRequests:Array<{tag:string;body:Record<string,unknown>}>=[];
   const ptyRequests:Array<{tag:string;body:Record<string,unknown>}>=[],socketWorkspaces=new WeakMap<object,string>(),ptyModes=new Map<string,unknown>();let nextPty=0;
   const creations: Array<() => void> = [];
+  const neo={defer:false,pending:[] as Array<()=>void>,count:0};
   const prompts: Array<() => void> = [];
   const statuses=new Map<string,{type:"idle"|"busy"|"retry"}>();
   const statusRequests={defer:false,fail:false,count:0,pending:[] as Array<()=>void>};
@@ -90,6 +91,13 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
           model: { providerId: selection.model.slice(0, slash), id: selection.model.slice(slash + 1), variant: selection.thinking,connectionId:selection.connection_id } };
       };
       const payload = request.method === "POST" || request.method === "PATCH" ? await request.json().catch(() => ({})) : {};
+      if(match[2]==="neo/session"&&request.method==="POST"){
+        neo.count++;
+        const id=`neo-${workspace.id}`;
+        if(!selections.has(id))selections.set(id,{agent:"neo",model:"openai/base",thinking:"medium"});
+        if(neo.defer)await new Promise<void>(resolve=>neo.pending.push(resolve));
+        return Response.json({...session(id),title:"Neo"});
+      }
       if(match[2]==="sessions"&&request.method==="GET")return Response.json({items:threads.filter(thread=>!url.searchParams.get("directory")||thread.directory===url.searchParams.get("directory")).map(thread=>{const selected=selections.get(thread.session_id)||thread,model=selected.model?.split("/");return{id:thread.session_id,title:thread.title,directory:thread.directory,agent:selected.agent,...(model&&model.length>1?{model:{providerId:model[0],id:model.slice(1).join("/")}}:{})};}),cursor:{}});
       if(match[2]==="sessions/status"){
         const snapshot=Object.fromEntries(statuses);statusRequests.count++;
@@ -294,5 +302,5 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
     },
   });
   return { endpoint: `ws://127.0.0.1:${server.port}/session`, workspaces, threads,history,agentStreams,streamSubscribers,pushSubscribed,pushCrdt,crdtRequests, requests, httpRequests, files, fileRequests, workspaceRequests,searchRequests,gitRequests,ptyRequests, creations,prompts,statuses,statusRequests,providerCatalogFailure,workspaceSubscriptions,directoryChanges, push,pushCatalog,pushGit,pushPty,pushWorkspace, configRequests, configDocument, descriptors,
-    workspaceClose,ptyCreations,notesVaults,mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);documents.dispose();} };
+    neo,workspaceClose,ptyCreations,notesVaults,mutateConfigDocument: (content: string) => { configContent = content; configRevision++; }, stop: () => {for(const stream of catalogStreams.keys()){try{stream.close();}catch{}}catalogStreams.clear();server.stop(true);documents.dispose();} };
 }

@@ -54,6 +54,20 @@ pub struct SessionInfo {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl SessionInfo {
+    pub fn is_neo(&self) -> bool {
+        self.extra.get("sessionRole").and_then(Value::as_str) == Some("neo")
+    }
+
+    /// Task ownership is independent of sidebar/session tree ancestry.
+    pub fn task_parent_id(&self) -> Option<SessionId> {
+        self.parent_id.clone().or_else(|| {
+            self.extra.get("neoSessionId").and_then(Value::as_str)
+                .and_then(|id| crate::id::Id::parse(IdKind::Session, id.to_string()).ok())
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRule {

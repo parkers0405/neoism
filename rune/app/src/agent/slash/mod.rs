@@ -71,6 +71,13 @@ pub struct Composer {
 }
 
 impl Composer {
+    /// The catalog's context window for `model` (`provider/id`, or an alias's id).
+    pub fn context_limit(&self, model: &str) -> Option<u64> {
+        let (provider, id) = model.split_once('/')?;
+        let models = &self.providers.iter().find(|p| p.id.eq_ignore_ascii_case(provider))?.models;
+        models.iter().find(|m| m.id.eq_ignore_ascii_case(id) || m.id.eq_ignore_ascii_case(model))?.context_limit.filter(|l| *l > 0)
+    }
+
     pub fn new(model: Option<&str>, thinking: Option<&str>) -> Composer {
         Composer {
             selection: Selection {

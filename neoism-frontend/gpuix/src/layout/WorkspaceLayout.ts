@@ -54,7 +54,7 @@ export class WorkspaceLayout {
   private register(surface: LayoutSurface) {
     const existing = [...this.routes].find(([, entry]) => entry.id === surface.id)?.[0];
     const id = existing ?? this.nextExternal++;
-    const title=surface.kind==="welcome"?"Home":surface.title;
+    const title=surface.title;
     this.routes.set(id, { ...surface, title });
     return { externalId: id, title, kind: surface.kind };
   }

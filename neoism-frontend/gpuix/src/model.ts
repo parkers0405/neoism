@@ -1,6 +1,6 @@
 import {HistoryUpdates} from "./agent/history-updates";
 import {sessionErrorMessage} from "./agent/session-error";
-import {mergeHistoryHead} from "./agent/merge-history";
+import {headRowUpdates,mergeHistoryHead} from "./agent/merge-history";
 import {stepHistoryEdit,type HistoryEdit,type EditableHistory} from "./agent/history-edit";
 import { recoveredEditorState } from "./editor/recovery-state";
 import { profileStart, profileEnd } from "./profiling";
@@ -2008,7 +2008,10 @@ export class WorkspaceModel {
     // transaction between animation frames. A hidden/occluded window may not
     // receive display callbacks; the deadline keeps its event FIFO draining.
     this.incomingAgentTimer=setTimeout(()=>this.flushAgentEvents(),16);
-    this.incomingAgentFrames.request(()=>this.flushAgentEvents());
+    // Run after this display frame's batch has committed its paint. A large
+    // history page or tool result then spends the frame's idle slack instead
+    // of delaying the frame that was already due; its rows paint next frame.
+    this.incomingAgentFrames.request(()=>setImmediate(()=>this.flushAgentEvents()));
   }
   private flushAgentEvents(){
     clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;
@@ -2155,8 +2158,11 @@ export class WorkspaceModel {
         if(tag==="PtyClosed"&&typeof body.session_id==="string")this.retireTerminal(body.session_id);
         if(tag==="SessionProgram"&&typeof body.session_id==="string"&&typeof body.program==="string"){
           const program=body.program.split(/[\\/]/).pop()?.toLowerCase();
-          const title=program==="claude"?"Claude":program==="codex"?"Codex":program==="opencode"?"OpenCode":"Terminal";
-          const changed=this.state.surfaces.filter(surface=>surface.kind==="terminal"&&surface.sessionId===body.session_id&&surface.title!==title).map(surface=>({...surface,title}));
+          const agentTitle=program==="claude"?"Claude":program==="codex"?"Codex":program==="opencode"?"OpenCode":undefined;
+          const changed=this.state.surfaces.filter(surface=>(surface.kind==="terminal"||surface.kind==="welcome")&&surface.sessionId===body.session_id).flatMap(surface=>{
+            const title=agentTitle||(surface.kind==="welcome"?"Home":"Terminal");
+            return surface.title===title?[]:[{...surface,title}];
+          });
           if(changed.length){
             const updates=new Map(changed.map(surface=>[surface.id,surface]));
             this.update({surfaces:this.state.surfaces.map(surface=>updates.get(surface.id)||surface)});
@@ -2197,7 +2203,9 @@ export class WorkspaceModel {
         });
         const edit=this.historyEdits.get(sessionId);
         if(this.closedTranscriptRoots.has(agentFamilyRoot(this.state.ui,sessionId))||(request&&request.revision!==(this.historyRevisions.get(sessionId)||0))||edit?.pending.length)return;
+        const decodeStarted=profileStart();
         let history = Schema.decodeUnknownSync(Schema.Array(HistoryMessageSchema))(body.messages);
+        profileEnd("history.decode",decodeStarted);const mergeStarted=profileStart();
         for(const message of history)if(message.kind==="User"){this.optimisticPrompts.delete(message.id);this.promptArrivals.delete(message.id);}
         const previous = this.state.history[sessionId] || [];
         const older = request?.older ?? false;
@@ -2221,7 +2229,9 @@ export class WorkspaceModel {
         const retained = previous.map(message => updates.get(message.id) || message);
         const merged = request?.replace ? [...history,...previous.filter(row=>this.optimisticPrompts.get(row.id)===sessionId&&!updates.has(row.id))] : older ? [...added, ...retained] : mergeHistoryHead(previous,history,initial);
         if(edit&&request?.replace)edit.base={...edit.base,messages:merged};
+        profileEnd("history.merge",mergeStarted);const updateStarted=profileStart();
         this.update({ history: { ...this.state.history, [sessionId]: merged } });
+        profileEnd("history.update",updateStarted);
         // Recover a terminal failure after reconnect/reopen, but never revive
         // an older turn's error or a dismissed error on a later head refresh.
         if(initial&&!older&&!(sessionId in this.state.sessionErrors)){
@@ -2234,8 +2244,22 @@ export class WorkspaceModel {
         }
         // Classify by the request that actually completed, not the pane's
         // loading flag: an older request can be queued behind a head refresh.
-        const delivered = {HistoryChunk:{...body,messages:older ? history : merged,next_cursor:this.historyCursors.get(sessionId) ?? null}};
-        for (const listener of this.agentEventListeners) { try { listener(delivered, request?.replace ? "replace" : older ? "older" : "head"); } catch (error) { this.report(error); } }
+        const historyKind=request?.replace ? "replace" : older ? "older" : "head";
+        const deliverStarted=profileStart();
+        // A refresh of an already hydrated transcript (turn completion,
+        // family preload, reconnect) usually changes a few rows. Upsert those
+        // instead of resending every loaded row to each native transcript.
+        const rowUpdates=historyKind==="head"&&!initial?headRowUpdates(previous,history,merged):undefined;
+        if(rowUpdates){
+          for(const message of rowUpdates){
+            const event={MessageUpdated:{session_id:sessionId,message}};
+            for (const listener of this.agentEventListeners) { try { listener(event); } catch (error) { this.report(error); } }
+          }
+        }else{
+          const delivered = {HistoryChunk:{...body,messages:older ? history : merged,next_cursor:this.historyCursors.get(sessionId) ?? null}};
+          for (const listener of this.agentEventListeners) { try { listener(delivered, historyKind); } catch (error) { this.report(error); } }
+        }
+        profileEnd(`history.deliver.${rowUpdates?"updates":historyKind}`,deliverStarted,rowUpdates?rowUpdates.length:(older?history:merged).length);
         this.preloadFamilyHistory();
       } else if (tag === "MessageUpdated" && sessionId) {
         const message=Schema.decodeUnknownSync(HistoryMessageSchema)(body.message);

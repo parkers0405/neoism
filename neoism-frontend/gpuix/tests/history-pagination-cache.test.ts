@@ -31,9 +31,10 @@ test("older pages retain order and cursor through head refresh",()=>{
   expect(model.state.history.chat.map(m=>m.id)).toEqual(["a","b","c","d"]);
   expect(model.state.history.chat.at(-1)?.text).toBe("updated");
   expect(model.historyCursors.get("chat")).toBe("before-a");
-  expect(delivered.at(-1)?.kind).toBe("head");
-  expect(delivered.at(-1)?.message.HistoryChunk.messages.map((m:any)=>m.id)).toEqual(["a","b","c","d"]);
-  expect(delivered.at(-1)?.message.HistoryChunk.next_cursor).toBe("before-a");
+  // The refresh changed one row of an already hydrated transcript: native
+  // transcripts receive that row instead of every loaded row again.
+  expect(delivered.at(-1)?.kind).toBeUndefined();
+  expect(delivered.at(-1)?.message).toEqual({MessageUpdated:{session_id:"chat",message:row("d","updated")}});
   model.sendAgent({GetHistory:{session_id:"chat",cursor:"before-a",limit:2}});page([row("zero"),row("a")],null);
   expect(model.state.history.chat.map(m=>m.id)).toEqual(["zero","a","b","c","d"]);
   expect(model.historyCursors.get("chat")).toBeNull();
@@ -56,7 +57,8 @@ test("history requests serialize per session despite unrelated envelope ids",asy
   expect(kinds).toEqual(["head","older"]);
   request("even-older");request(null);expect(sent).toHaveLength(3);
   page("oldest",null);await Promise.resolve();expect(sent).toHaveLength(4);
-  page("new", "older");expect(kinds).toEqual(["head","older","older","head"]);
+  // An unchanged head refresh has nothing to deliver.
+  page("new", "older");expect(kinds).toEqual(["head","older","older"]);
   expect(model.state.history.chat.map(m=>m.id)).toEqual(["oldest","old","new"]);
   expect(model.historyCursors.get("chat")).toBeNull();
  }finally{model.dispose();client.stop();}

@@ -311,6 +311,11 @@ process.on("SIGUSR2", () => {
     workspaces: state.workspaces.map(workspace => ({ id: workspace.id, title: workspace.title, root: workspace.root_dir })),
   };
   void Bun.write(`/tmp/neoism-gpuix-state-${process.pid}.json`, JSON.stringify(dump, null, 2));
+  if(process.env.NEOISM_GPUIX_FRAME_TRACE==="1")void import("bun:jsc").then(jsc=>{
+    const before=jsc.heapStats(),started=performance.now();Bun.gc(true);const fullGcMs=performance.now()-started,after=jsc.heapStats();
+    const types=Object.entries(after.objectTypeCounts).sort((a,b)=>b[1]-a[1]).slice(0,12);
+    console.error("[heap]",JSON.stringify({fullGcMs,heapBefore:before.heapSize,heapAfter:after.heapSize,objectsBefore:before.objectCount,objectsAfter:after.objectCount,types}));
+  });
 });
 if (import.meta.hot) import.meta.hot.dispose(() => {
   stopDiscordPresence();

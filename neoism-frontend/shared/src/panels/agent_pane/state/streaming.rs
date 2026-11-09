@@ -8,9 +8,9 @@ impl NeoismAgentPane {
     ) {
         // Keep history materialization frame-sized. Long agent turns are
         // allowed to span multiple pages instead of arriving as one huge UI
-        // prepend merely to reach their user-message boundary.
-        const LOAD_OLDER_LIMIT: usize = 64;
-        let threshold = (viewport_h * 0.75).max(720.0);
+        // prepend merely to reach their user-message boundary. Pages are
+        // sized by bytes, so request smaller ones further ahead.
+        let threshold = (viewport_h * 1.5).max(1200.0);
         if self.timeline_follow_bottom
             || scroll_top > threshold
             || !self.timeline_history.has_older
@@ -31,7 +31,7 @@ impl NeoismAgentPane {
         self.push_outbound(OutboundAgentCommand::LoadOlderTimeline {
             session_id,
             before: self.timeline_history.oldest_loaded_cursor.clone(),
-            limit: LOAD_OLDER_LIMIT,
+            limit: self.timeline_history.older_page_limit,
         });
     }
 

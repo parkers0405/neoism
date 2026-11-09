@@ -6,7 +6,14 @@ import { StallRecorder } from "./stall-recorder";
  * only after a trigger; it never requests a redraw. */
 const reportMetrics=process.env.NEOISM_GPUIX_PROFILE==="1";
 const traceStalls=process.env.NEOISM_GPUIX_STALL_TRACE==="1";
-export const profilingEnabled=reportMetrics||traceStalls;
+/** Per-operation trace on the monotonic clock used by Wayland presentation
+ * feedback, so each missed vblank can be matched to the JS work before it. */
+const traceFrames=process.env.NEOISM_GPUIX_FRAME_TRACE==="1";
+export const profilingEnabled=reportMetrics||traceStalls||traceFrames;
+const monotonicUs=()=>Number(process.hrtime.bigint()/1000n);
+export function traceFrame(name:string,durationMs:number,bytes=0){
+  if(traceFrames)console.error(`[js-op] end_us=${monotonicUs()} ms=${durationMs.toFixed(3)} ${name}${bytes?` bytes=${bytes}`:""}`);
+}
 const stalls=traceStalls?new StallRecorder(performance.now()):undefined;
 /** Process-relative startup milestones; no user paths or session data. */
 export function profileStartup(phase:string){
@@ -20,6 +27,7 @@ export function profileEnd(name:string,start:number,bytes=0){
   if(!profilingEnabled)return;
   const now=performance.now(),elapsed=now-start;
   stalls?.record(name,start,now,bytes);
+  if(traceFrames&&(elapsed>=0.3||bytes>=65536))traceFrame(name,elapsed,bytes);
   if(!reportMetrics)return;
   let metric=metrics.get(name);if(!metric){metric={count:0,ms:0,maxMs:0,bytes:0,samples:[]};metrics.set(name,metric);}
   metric.count++;metric.ms+=elapsed;metric.maxMs=Math.max(metric.maxMs,elapsed);metric.bytes+=bytes;

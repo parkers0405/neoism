@@ -187,3 +187,21 @@ NEOISM_BENCH_MAXIMIZED=1 NEOISM_BENCH_SCROLL=touchpad-regular NEOISM_BENCH_MS=40
 ```
 
 For the next real-chat comparison, retain the real history/tool/diff/subagent structure and instrument event arrival, model application, layout/preparation, raster misses, native batch submission, and content presentation. Record distributions and pauses alongside CPU and process-tree resources, with one/three/five active children and warm/cold LSP activity separated. Do not call average FPS, draw-only duration, or reduced upload traffic an input-latency improvement.
+## Per-frame miss attribution (2026-11-09)
+
+Presentation feedback on Hyprland reports `sequence=0` for every frame, so missed vblanks must be derived from presentation timestamps, not sequence numbers. `NEOISM_GPUIX_FRAME_TRACE=1` logs frame-wake arrivals and every JavaScript operation of at least 0.3 ms (or 64 KiB) on the same monotonic clock as `GPUI_WAYLAND_PRESENTATION_TRACE=1`, plus native timeline phases (`[core-timeline]`), the slowest painted transcript row (`[neoism-timeline-row-slow]`), and large daemon messages by variant and size. `scripts/analyze-gpuix-frames.py` replays the FPS pill's 500 ms buckets and classifies each missed vblank (late native wake, long or late JavaScript, GPU blocking, long UI frame, or compositor latch). Tracing adds JavaScript overhead; compare traced runs only with traced runs.
+
+Measured on a mirror of the live window (same session, 1252x674 logical at scale 2, 120 Hz), all without restarting the user's app or daemon:
+
+- Idle, real wheel scrolling of loaded history, streaming, and tool-heavy turns lost 0-0.4% of vblanks. Nearly all of the remainder had the wake and JavaScript on time with the UI frame near 1 ms; the compositor latched the frame one vblank late.
+- Paging into unloaded history caused the reported dips (pill readings of 80, 93 and 104). Each older page arrived as one 0.3-1.9 MB message and cost about 11 ms per MB on the display thread: WebSocket parse, a JSON re-encode for the native timeline and a native parse, all inside the display-frame batch.
+- Every completed turn re-fetched a 200-message head and re-sent the entire merged transcript to the native timeline: 13 ms for 699 rows, growing with loaded history.
+- A real `cargo build` sharing the window's cgroup lowered pill readings to 86-100. Scheduler wait stayed below 20 us per wakeup; UI, JavaScript and Hyprland work instead took about 1.7x longer (SMT siblings, all-core clocks, cache pressure), and Hyprland itself delivered some frame callbacks a frame late.
+
+Changes:
+
+- Agent events are applied after the display frame's batch commits (`setImmediate` from the frame request) instead of inside it.
+- Older pages are sized by bytes: the next request scales the previous limit toward 160 KiB of message text (8-64 server messages, starting at 24) and is requested further ahead.
+- A head refresh of an already hydrated transcript delivers only the rows that changed, as `MessageUpdated`, when they keep their order or extend the end. Inserted or reordered rows still deliver the complete merged transcript.
+
+Untraced source-mode A/B on the 2,115-message conversation, fresh process each: paging 1.00% missed (pill minimum 92) before, 0.57% (minimum 112) after; scrolling loaded history 0.50% before, 0.17% after; wheel scrolling during a real release build 2.82% before, 2.26% after. Build-load sensitivity remains largely outside the frontend's control.

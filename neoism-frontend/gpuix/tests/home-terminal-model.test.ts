@@ -34,6 +34,17 @@ function fixture(){
 }
 async function tick(){await Bun.sleep(0);}
 
+test("Home follows its shell's agent title and restores Home when the agent exits",async()=>{
+  const f=fixture();await f.model.ensureHomeTerminal(f.home.id);
+  const other=f.model.newWelcome()!;await f.model.ensureHomeTerminal(other.id);
+  for(const [program,title] of [["codex","Codex"],["claude","Claude"],["opencode","OpenCode"],["zsh","Home"]]){
+    (f.model as any).receive({family:"Pty",message:{SessionProgram:{session_id:"pty-1",program}}});
+    expect(f.model.state.surfaces.find(surface=>surface.id===f.home.id)).toMatchObject({kind:"welcome",title,sessionId:"pty-1"});
+    expect(Object.values(f.model.getLayout("a").snapshot().routes).find(surface=>surface.id===f.home.id)?.title).toBe(title);
+    expect(f.model.state.surfaces.find(surface=>surface.id===other.id)?.title).toBe("Home");
+  }
+});
+
 test("Home is single-flight, honors shell, and only the first shell gets the main role",async()=>{
   const f=fixture(),before=f.model.state.activeSurfaceId;
   const first=f.model.ensureHomeTerminal(f.home.id);

@@ -226,6 +226,11 @@ fn canvas_packet(view: &View) -> crate::paint_canvas::CanvasPacket {
     encode(&view.painter.borrowed_commands(), &view.font_family, view.font_weight)
 }
 
+fn frame_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("NEOISM_GPUIX_FRAME_TRACE").as_deref() == Ok("1"))
+}
+
 /// The animation hot path writes borrowed paint commands straight into the
 /// response buffer. Building a serde_json::Value tree first allocates a map
 /// and strings for every primitive on every display frame.
@@ -237,7 +242,9 @@ pub fn serialized_frame(v: &Value) -> Option<Result<String, String>> {
         let view = store.views.get_mut(&id).ok_or_else(|| "Unknown agent timeline".to_owned())?;
         if let Some(compact) = v["compactPaint"].as_bool() { view.compact_paint = compact; }
         if let Some(canvas) = v["canvasPaint"].as_bool() { view.canvas_paint = canvas; }
+        let trace = frame_trace_enabled().then(std::time::Instant::now);
         let metadata = render_frame(view);
+        let rendered = trace.map(|_| std::time::Instant::now());
         #[derive(serde::Serialize)]
         struct Frame<C: serde::Serialize> {
             #[serde(flatten)]
@@ -249,8 +256,16 @@ pub fn serialized_frame(v: &Value) -> Option<Result<String, String>> {
         #[derive(serde::Serialize)]
         struct Response<T: serde::Serialize> { ok: T }
         let canvas = view.canvas_paint.then(|| canvas_packet(view));
+        let encoded = trace.map(|_| std::time::Instant::now());
         if canvas.is_some() && !v["includeCommands"].as_bool().unwrap_or(false) {
-            return serde_json::to_string(&Response {ok: Frame {metadata,commands:Vec::<u8>::new(),canvas}}).map_err(|error|error.to_string());
+            let commands = view.painter.borrowed_commands().len();
+            let response = serde_json::to_string(&Response {ok: Frame {metadata,commands:Vec::<u8>::new(),canvas}}).map_err(|error|error.to_string());
+            if let (Some(start), Some(rendered), Some(encoded)) = (trace, rendered, encoded) {
+                eprintln!("[core-timeline] render_us={} encode_us={} serialize_us={} commands={} bytes={}",
+                    rendered.duration_since(start).as_micros(), encoded.duration_since(rendered).as_micros(),
+                    encoded.elapsed().as_micros(), commands, response.as_ref().map_or(0, String::len));
+            }
+            return response;
         }
         let response = serde_json::to_string(&Response { ok: Frame {
             metadata, commands: view.painter.serializable_commands(view.compact_paint), canvas,

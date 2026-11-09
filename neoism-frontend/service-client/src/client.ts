@@ -137,6 +137,9 @@ export class DaemonConnection {
       this.lastMessageAt = Date.now();
       const message = variant(event.message);
       this.lastMessage={family:event.family,kind:(message?.[0]||"unknown").slice(0,80),bytes};
+      // Frame tracing attributes stalls to large messages by variant and size
+      // only; message contents never reach the log.
+      if(bytes>=65536&&process.env.NEOISM_GPUIX_FRAME_TRACE==="1")console.error(`[daemon-large] family=${event.family} kind=${(message?.[0]||"unknown").slice(0,80)} bytes=${bytes}`);
       if (event.family === "Workspace" && message?.[0] === "HelloAck") {
         let ack: { readonly accepted: boolean; readonly reason?: string | null;readonly connected_host_id?:string|null;readonly workspace_lifecycle?:boolean };
         try { ack = Schema.decodeUnknownSync(Schema.Struct({ accepted: Schema.Boolean, reason: Schema.optionalKey(Schema.NullOr(Schema.String)),connected_host_id:Schema.optionalKey(Schema.NullOr(Schema.String)),workspace_lifecycle:Schema.optionalKey(Schema.Boolean) }))(message[1]); }

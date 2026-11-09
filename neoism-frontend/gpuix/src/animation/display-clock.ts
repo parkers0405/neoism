@@ -1,6 +1,6 @@
 import { usePresentationScheduler, type Schedule } from "./frame-scheduler";
 import {batch} from "solid-js";
-import {profileStart,profileEnd} from "../profiling";
+import {profileStart,profileEnd,traceFrame} from "../profiling";
 
 export interface DisplayRenderer {
   setFrameWakeCallback?: (callback?: (() => void) | null) => boolean;
@@ -71,6 +71,7 @@ export function installDisplayClock(renderer: DisplayRenderer, onError: (error: 
     const accepted = setWake(() => {
       if (!active || disposed) return;
       if(requested)profileEnd(callbacks.size?"display.frameWakeWait":"display.reservedWakeWait",wakeStarted);
+      traceFrame(`display.wake owners=${callbacks.size}`,0);
       requested = false;
       const batch = [...callbacks.values()]; callbacks.clear();
       // Reserve the following platform opportunity before preparing this frame.

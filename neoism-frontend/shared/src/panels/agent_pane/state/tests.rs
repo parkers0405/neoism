@@ -6413,7 +6413,7 @@ fn older_timeline_request_requires_leaving_bottom_follow() {
     assert_eq!(commands.len(), 1);
     assert!(matches!(
         &commands[0],
-        OutboundAgentCommand::LoadOlderTimeline { limit: 64, .. }
+        OutboundAgentCommand::LoadOlderTimeline { limit: 24, .. }
     ));
 
     pane.timeline_history.loading_older = false;
@@ -9039,4 +9039,31 @@ fn cold_history_never_invents_child_completion_from_background_launch() {
     assert_eq!(pane.active_subagent_count(), 0, "history alone cannot start live activity");
     let completed = task_tool_message("child", "completed");
     assert_eq!(subagent_seeds_from_history(&[completed])[0].1, BranchStatus::Completed);
+}
+
+#[test]
+fn older_timeline_pages_are_sized_by_bytes() {
+    let mut pane = NeoismAgentPane::default();
+    pane.session_id = Some("session-1".to_string());
+    pane.timeline_follow_bottom = false;
+    let page = |count: usize, bytes: usize, prefix: &str| {
+        (0..count)
+            .map(|index| NeoismAgentMessage::assistant("x".repeat(bytes)).with_id(format!("{prefix}-{index}")))
+            .collect::<Vec<_>>()
+    };
+    let requested_limit = |pane: &mut NeoismAgentPane| {
+        pane.maybe_request_older_timeline_page(0.0, 500.0);
+        match pane.drain_pending_outbound().as_slice() {
+            [OutboundAgentCommand::LoadOlderTimeline { limit, .. }] => *limit,
+            other => panic!("expected one older page request, got {other:?}"),
+        }
+    };
+
+    assert_eq!(requested_limit(&mut pane), 24);
+    // 24 messages of 40 KiB: shrink toward the byte budget.
+    pane.apply_history_page_with_kind(page(24, 40 * 1024, "huge"), Some("c1".into()), Some(true));
+    assert_eq!(requested_limit(&mut pane), 8);
+    // Small messages grow the page again, never past the maximum.
+    pane.apply_history_page_with_kind(page(8, 100, "small"), Some("c2".into()), Some(true));
+    assert_eq!(requested_limit(&mut pane), 64);
 }

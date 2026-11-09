@@ -297,6 +297,9 @@ struct AgentTimelineHistoryState {
     has_older: bool,
     loading_older: bool,
     last_requested_session_id: Option<String>,
+    /// Message count for the next older page, sized from the previous page so
+    /// one page stays within a frame's idle time on every thread it crosses.
+    older_page_limit: usize,
 }
 
 impl Default for AgentTimelineHistoryState {
@@ -306,8 +309,36 @@ impl Default for AgentTimelineHistoryState {
             has_older: true,
             loading_older: false,
             last_requested_session_id: None,
+            older_page_limit: OLDER_PAGE_INITIAL_MESSAGES,
         }
     }
+}
+
+const OLDER_PAGE_MAX_MESSAGES: usize = 64;
+/// Unknown sizes start small; text-only history grows back toward the max.
+const OLDER_PAGE_INITIAL_MESSAGES: usize = 24;
+const OLDER_PAGE_MIN_MESSAGES: usize = 8;
+/// Every page is parsed by the frontend, re-encoded for the native timeline
+/// and parsed again there, all on the display thread. About 11ms per MB was
+/// measured end to end, so this budget keeps one page near 2ms.
+const OLDER_PAGE_TARGET_BYTES: usize = 160 * 1024;
+
+fn history_message_bytes(message: &NeoismAgentMessage) -> usize {
+    message.text.len()
+        + message.detail.len()
+        + message.title.len()
+        + message.composition_children.iter().map(history_message_bytes).sum::<usize>()
+}
+
+/// Size the next older page from the previous request. The limit counts
+/// server messages, each of which may expand into many timeline rows.
+fn next_older_page_limit(requested: usize, messages: &[NeoismAgentMessage]) -> usize {
+    let bytes = messages.iter().map(history_message_bytes).sum::<usize>();
+    if bytes == 0 {
+        return requested;
+    }
+    (requested * OLDER_PAGE_TARGET_BYTES / bytes)
+        .clamp(OLDER_PAGE_MIN_MESSAGES, OLDER_PAGE_MAX_MESSAGES)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2365,6 +2396,8 @@ impl NeoismAgentPane {
 
         self.timeline_history.loading_older = false;
         self.timeline_history.last_requested_session_id = None;
+        self.timeline_history.older_page_limit =
+            next_older_page_limit(self.timeline_history.older_page_limit, &messages);
         let existing = self
             .messages
             .iter()

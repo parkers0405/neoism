@@ -472,7 +472,10 @@ where
     let mut rendered_rows = 0usize;
     let mut rendered_text_bytes = 0usize;
     let mut visible_user_orb = false;
+    let row_profile = row_profile_enabled();
+    let mut slowest_row: Option<(u128, String)> = None;
     for row in &layout.rows[row_range.clone()] {
+        let row_started = row_profile.then(web_time::Instant::now);
         let card_h = row.height;
         let card_y = sugarloaf.snap_y(y + row.top - render_scroll_top);
         let card_bottom = card_y + card_h;
@@ -504,7 +507,9 @@ where
             .as_ref()
             .map(|sections| sections.as_slice());
         rendered_rows += 1;
+        let mut row_label = String::new();
         if let Some(message) = row.display_message.as_ref() {
+            if row_profile { row_label = format!("{:?} bytes={} md={} diff={}", message.kind(), message.text().len(), markdown_blocks.map_or(0, <[_]>::len), tool_diff_sections.map_or(0, <[_]>::len)); }
             rendered_text_bytes += message.text().len();
             let message_theme = message_theme(theme, plugins, message.kind());
             D::render_message_card(
@@ -537,6 +542,7 @@ where
                 message = message.with_text(text.clone());
             }
             rendered_text_bytes += message.text().len();
+            if row_profile { row_label = format!("{:?} bytes={} md={} diff={} cloned", message.kind(), message.text().len(), markdown_blocks.map_or(0, <[_]>::len), tool_diff_sections.map_or(0, <[_]>::len)); }
             let message_theme = message_theme(theme, plugins, message.kind());
             D::render_message_card(
                 sugarloaf,
@@ -556,9 +562,18 @@ where
                 occlusion_rects,
             );
         }
+        if let Some(started) = row_started {
+            let us = started.elapsed().as_micros();
+            if slowest_row.as_ref().map_or(true, |(slowest, _)| us > *slowest) {
+                slowest_row = Some((us, row_label));
+            }
+        }
     }
     pane.set_selection_content_offset(None);
     let rows_ended = web_time::Instant::now();
+    if let Some((us, label)) = slowest_row.filter(|(us, _)| *us >= 2_000) {
+        eprintln!("[neoism-timeline-row-slow] us={us} visible_rows={rendered_rows} {label}");
+    }
     let rows_us = Some(
         rows_ended
             .saturating_duration_since(rows_started)
@@ -657,6 +672,11 @@ fn message_theme(
         *theme,
         &crate::primitives::surface_background::resolve_style(selector, &plugins.styles),
     )
+}
+
+fn row_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("NEOISM_GPUIX_FRAME_TRACE").as_deref() == Ok("1"))
 }
 
 #[allow(clippy::too_many_arguments)]

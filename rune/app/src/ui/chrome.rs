@@ -27,7 +27,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
         .child(body)
         .child(super::status::view(app))
-        .child_if(app.overlay.is_some(), || agent::overlay(app))
+        .child(agent::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
         .child_if(app.finder.is_some(), || crate::finder::view(app))
         .child_if(app.cursor.visible, || cursor_quad(app))

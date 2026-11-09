@@ -60,6 +60,9 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let focus_changed = app.sync_field_focus();
     // The finder searches once its query settles.
     if let Some(delay) = app.finder_tick(std::time::Instant::now()) { tx.wake_after(delay); }
+    // A `/piss` … `/praise` skit plays on the frame clock.
+    let skit = app.tick_effect();
+    if skit { tx.wake_after(std::time::Duration::ZERO); }
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
     let target = app.cursor_target();
@@ -72,7 +75,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || skit
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -90,10 +93,20 @@ fn main() {
             ("welcome", |_| {}),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
             ("sidebar", |s| s.sidebar = Some(app::Sidebar::Conversations)),
-            ("slash", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); s.overlay = Some(app::Overlay::Slash); }),
+            ("slash", |s| {
+                s.open_tab(tabs::TabKind::Agent { session: None });
+                let i = s.active;
+                s.tabs[i].draft.replace_text("/");
+                s.composer_changed();
+            }),
             ("palette", |s| s.open_picker(palette::Mode::Commands)),
             ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),
             ("backgrounds", |s| { s.open_picker(palette::Mode::Backgrounds); s.move_picker(2); }),
+            // `NEOISM_RUNE_FIXTURE=history.json`: render any recorded history page.
+            ("fixture", |s| {
+                let json = std::env::var("NEOISM_RUNE_FIXTURE").ok().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+                s.load_fixture("fixture", "Fixture", &json);
+            }),
             ("timeline-report", |s| s.load_fixture("fixture-report", "Read-Only GPU Frame Analysis and Documentation Report", include_str!("../fixtures/report-timeline.json"))),
             ("code", |s| s.load_fixture("fixture-code", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"))),
             ("tool-cards", |s| {

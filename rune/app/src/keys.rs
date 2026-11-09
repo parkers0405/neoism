@@ -34,7 +34,10 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
     let m = event.mods;
     let alt_only = m.alt && !m.ctrl && !m.shift && !m.logo;
     if let Key::Escape = event.key {
-        if app.overlay.take().is_some() { return true; }
+        if app.composer.picker.is_some() {
+            if !app.picker_back() { app.close_prompt_picker(); }
+            return true;
+        }
         match app.focus {
             Focus::Workspaces(_) => { app.focus = Focus::Buffers(app.active); return true; }
             Focus::Buffers(_) => { app.focus = Focus::Content; return true; }

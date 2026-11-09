@@ -213,7 +213,7 @@ impl App {
 
     /// Composer keys before the text field (`TerminalCommandInput`'s keyDown): history and
     /// completion menus, ghost acceptance, Ctrl+C and Ctrl+L.
-    pub fn composer_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
+    pub fn terminal_composer_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
         if crate::keys::shortcut(self, event, tx) { return true; }
         let Some(key) = TermKey::from_event(event) else { return false };
         let index = self.active;

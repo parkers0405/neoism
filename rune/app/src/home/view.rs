@@ -292,7 +292,7 @@ fn composer(app: &App, term: &Terminal, height: f32) -> El {
         .color(rgb(p.fg)).w_full()
         .on_edit(|a: &mut App| { let i = a.active; &mut a.tabs[i].draft })
         .on_input_change(|a: &mut App, _: &mut Tx| a.composer_edited())
-        .on_input_key(|a: &mut App, e: &rune::KeyEvent, tx: &mut Tx| a.composer_key(e, tx))
+        .on_input_key(|a: &mut App, e: &rune::KeyEvent, tx: &mut Tx| a.terminal_composer_key(e, tx))
         .on_submit(|a: &mut App, _: &mut Tx| a.submit());
     let line_top = 28.0 * s + cells.row * 0.9;
     let mut card = el().key("terminal-block-input").w_full().h(height)

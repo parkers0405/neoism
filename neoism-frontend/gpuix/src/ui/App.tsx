@@ -1319,7 +1319,6 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
           <text style={{...text(12.5,c.red),flexGrow:1,minWidth:0,overflow:"hidden",whiteSpace:"nowrap"}}>{sessionError()?.replace(/\s+/g," ")}</text>
           <div testId="agent-error-details" role="button" tabIndex={0} aria-label="Show full agent error and recovery actions" onClick={showSessionError} onKeyDown={event=>{if(event.key?.toLowerCase()==="enter"||event.key===" "){event.preventDefault();event.stopPropagation();showSessionError();}}} style={{...row,flexShrink:0,height:"100%",cursor:"pointer"}}><Label size={12.5} color={c.red}>Details</Label></div>
         </div>;}}</Show>
-        <Show when={!sessionError()&&state().catalogsError}>{error=><text testId="agent-catalog-error" style={{position:"absolute",right:16*s,top:(frame()?.cardRect[3]||0)+8*s,...text(11,c.red)}}>Model settings unavailable: {error()}</text>}</Show>
         <For each={sessionError()?[]:frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>
       </div></Show>
       <Show when={slashOpen()}><InlinePicker config={config} kind="slash" title="Commands" options={slashOptions()} loading={slash.state.loading} error={slash.state.error} anchor={anchor} query={draft().replace(/^\/+/,"")} onKeyHandler={handler=>slashKey=handler} onAcceptHandler={handler=>slashAccept=handler} onSelect={acceptSlash} onClose={()=>{setSlashDismissed(true);focus();}}/></Show>

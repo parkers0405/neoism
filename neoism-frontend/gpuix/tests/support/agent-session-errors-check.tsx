@@ -18,6 +18,13 @@ try{
   model.setUI({agentHints:false});model.openThread(daemon.threads[0]);
   root.render(()=><App model={model} config={config} visuals={visuals}/>);await until(()=>!!host.find("composer"));
   root.dispatch({elementId:host.find("composer")!.id,eventType:"change",value:"Keep this draft"});await host.pump(root);
+  await model.refreshCatalogs();daemon.providerCatalogFailure.status=503;
+  await model.refreshCatalogs();await host.pump(root);
+  assert.ok(model.state.catalogsError,"Catalog failure is retained for settings diagnostics");
+  assert.equal(host.find("agent-catalog-error"),undefined,"Background catalog failures must not add a composer warning");
+  assert.equal(host.find("agent-composer-error"),undefined,"Catalog failures are not chat failures");
+  assert.equal(host.find("composer")!.props.value,"Keep this draft");
+  daemon.providerCatalogFailure.status=0;await model.refreshCatalogs();
   daemon.push({SessionEvent:{session_id:"one",kind:"session.error",properties:{error:{name:"ProviderAuthError",data:{message}}}}});
   await until(()=>!!host.find("agent-composer-error"));
   assert.equal(model.state.error,message,"Live error cards must reach the Rust timeline without a protocol error");

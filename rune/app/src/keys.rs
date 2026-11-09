@@ -87,3 +87,16 @@ fn focus_step(app: &mut App, previous: bool) {
         other => other,
     };
 }
+
+impl App {
+    /// Where the window cursor belongs: the focus bar on a tab, or the focused field's caret.
+    pub fn cursor_target(&self) -> Option<[f32; 4]> {
+        use crate::ui::cursor::tab_bar;
+        let scale = 1.0;
+        match self.focus {
+            Focus::Buffers(i) => self.rects.get(&format!("pane-tab:{i}")).map(|r| tab_bar(*r, 16.0, scale, i == self.tabs.len())),
+            Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == 1)),
+            Focus::Sidebar | Focus::Content => self.cursor.caret_block(),
+        }
+    }
+}

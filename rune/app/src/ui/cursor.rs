@@ -180,44 +180,58 @@ impl Trail {
     }
 }
 
-/// The focused field's caret: the view reports Rune's caret line, `poll` animates the block.
-pub struct Caret {
-    /// Rune's caret line for the focused field, as the last view read it.
-    pub line: std::cell::Cell<Option<[f32; 4]>>,
-    /// That field's font size, for the block width.
-    pub font_size: std::cell::Cell<f32>,
+/// The one window cursor (`ChromeFocusCursor` + `ComposerCaret`): it sits on the focused tab,
+/// workspace or sidebar row, and trails into the text caret when focus returns to content.
+pub struct Cursor {
+    /// Rune's caret line for the focused field, as the last view read it, and its font size.
+    pub caret_line: std::cell::Cell<Option<[f32; 4]>>,
+    pub caret_font: std::cell::Cell<f32>,
     pub trail: Trail,
     shown: Option<[f32; 4]>,
     epoch: Instant,
     pub visible: bool,
 }
 
-impl Default for Caret {
-    fn default() -> Caret {
-        Caret { line: Default::default(), font_size: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, epoch: Instant::now(), visible: false }
+impl Default for Cursor {
+    fn default() -> Cursor {
+        Cursor { caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, epoch: Instant::now(), visible: false }
     }
 }
 
-impl Caret {
-    /// Advance to `now`. Returns when to run again (`ZERO` while moving), or `None` when idle.
-    pub fn tick(&mut self, now: Instant) -> Option<Duration> {
-        let Some(line) = self.line.get() else {
+impl Cursor {
+    /// The text caret block, when a field is focused.
+    pub fn caret_block(&self) -> Option<[f32; 4]> {
+        self.caret_line.get().map(|line| block_for_caret(line, self.caret_font.get()))
+    }
+
+    /// Trail toward `target` as of `now`. Returns when to run again (`ZERO` while moving), or
+    /// `None` when there is nothing to show.
+    pub fn tick(&mut self, target: Option<[f32; 4]>, now: Instant) -> Option<Duration> {
+        let Some(target) = target else {
             self.shown = None;
             self.visible = false;
             self.trail = Trail::default();
             return None;
         };
-        let block = block_for_caret(line, self.font_size.get());
-        if self.shown != Some(block) {
+        if self.shown != Some(target) {
             let first = self.shown.is_none();
-            self.trail.target(block);
+            self.trail.target(target);
             if first { self.trail.snap(); }
-            self.shown = Some(block);
+            self.shown = Some(target);
         }
         let moving = self.trail.tick(now);
         self.visible = self.trail.blink_visible(now, self.epoch);
         Some(if moving { Duration::ZERO } else { self.trail.next_blink(now, self.epoch) })
     }
+}
+
+/// The chrome focus bar on a tab (`buffer_tabs::keyboard_cursor_rect`): 3 pt wide, inset to the
+/// tab's left padding, 8 pt shorter than the row. The `+` slot puts it at the slot's left edge.
+pub fn tab_bar(rect: [f32; 4], padding: f32, scale: f32, plus: bool) -> [f32; 4] {
+    let width = (3.0 * scale).max(2.0);
+    let height = (rect[3] - 8.0 * scale).max(8.0).min(rect[3]);
+    let x = rect[0] + if plus { 0.0 } else { (padding - width).max(0.0) };
+    [x, rect[1] + (rect[3] - height) / 2.0, width, height]
 }
 
 /// The original text caret block for a Rune caret line `[x, y, w, h]`: `0.6 em` wide.

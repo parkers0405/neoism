@@ -45,11 +45,11 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let animating = app.wordmark.tick(app.visible_wordmark(), clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }
-    // The block caret trails and blinks on its own schedule.
-    let caret_was = (app.caret.visible, app.caret.trail.quad());
-    let caret_next = app.caret.tick(std::time::Instant::now());
-    if let Some(delay) = caret_next { tx.wake_after(delay); }
-    let caret_changed = caret_was != (app.caret.visible, app.caret.trail.quad());
+    // The cursor trails and blinks on its own schedule.
+    let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
+    let target = app.cursor_target();
+    if let Some(delay) = app.cursor.tick(target, std::time::Instant::now()) { tx.wake_after(delay); }
+    let caret_changed = cursor_was != (app.cursor.visible, app.cursor.trail.quad());
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     let fps = ui::fps::rate();
     let fps_changed = app.fps != Some(fps);

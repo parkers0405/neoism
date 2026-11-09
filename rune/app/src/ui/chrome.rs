@@ -28,7 +28,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(super::status::view(app))
         .child_if(app.overlay.is_some(), || agent::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
-        .child_if(app.caret.visible, || caret_block(app))
+        .child_if(app.cursor.visible, || cursor_quad(app))
 }
 
 /// Report the focused field's caret line (and its font) so `poll` can trail the block to it.
@@ -42,22 +42,22 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
             TabKind::Home => app.ty.small().size,
         }
     };
-    app.caret.font_size.set(font);
-    if app.caret.line.get() != line {
-        app.caret.line.set(line);
+    app.cursor.caret_font.set(font);
+    if app.cursor.caret_line.get() != line {
+        app.cursor.caret_line.set(line);
         if let Some(wake) = &app.waker { wake(); }
     }
 }
 
-/// The trailing block caret, drawn over everything in the accent colour.
-fn caret_block(app: &App) -> El {
-    let quad = app.caret.trail.quad();
+/// The trailing cursor, drawn over everything in the accent colour.
+fn cursor_quad(app: &App) -> El {
+    let quad = app.cursor.trail.quad();
     let (x0, y0) = quad.iter().fold((f32::MAX, f32::MAX), |(x, y), p| (x.min(p[0]), y.min(p[1])));
     let (x1, y1) = quad.iter().fold((f32::MIN, f32::MIN), |(x, y), p| (x.max(p[0]), y.max(p[1])));
     let (w, h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
     let points: Vec<[f32; 2]> = quad.iter().map(|p| [p[0] - x0, p[1] - y0]).collect();
     rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent)))
-        .key("text-caret").w(w).h(h).absolute(x0, y0)
+        .key("window-cursor").w(w).h(h).absolute(x0, y0)
 }
 
 fn rail(app: &App) -> El {
@@ -89,20 +89,16 @@ fn sidebar(app: &App) -> El {
 
 fn workspace_tabs(app: &App) -> El {
     let p = app.pal;
-    let focused = matches!(app.focus, Focus::Workspaces(_));
     let tab = row().key("workspace-tab").h(TAB_ROW_H).px(14.0).gap(9.0).center_y().fill(rgb(p.bg))
         .corners([6.0, 6.0, 0.0, 0.0])
-        .child_if(focused, || caret(app))
         .child(icon(app, glyph::FOLDER, 1.25, rgb(p.folder)))
         .child(text(app.workspace_name.clone()).font(app.ty.tab()).color(rgb(p.fg)))
-        .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)).ml(8.0));
+        .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)).ml(8.0))
+        .on_layout(|s: &mut App, r: [f32; 4]| { s.rects.insert("workspace-tab:0".into(), r); });
     row().key("workspace-tabs").w_full().h(TAB_ROW_H).fill(rgb(p.surface)).items_end()
         .child(tab)
-        .child(el().w(32.0).h(TAB_ROW_H).center().child(icon(app, glyph::PLUS, 0.8, rgb(p.muted))))
-}
-
-fn caret(app: &App) -> El {
-    el().w(3.0).h(18.0).fill(rgb(app.pal.fg))
+        .child(el().w(32.0).h(TAB_ROW_H).center().child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
+            .on_layout(|s: &mut App, r: [f32; 4]| { s.rects.insert("workspace-tab:1".into(), r); }))
 }
 
 fn pane_tabs(app: &App) -> El {
@@ -122,6 +118,7 @@ fn pane_tabs(app: &App) -> El {
             .fill(if active { rgb(p.bg) } else { Color::TRANSPARENT })
             .child(icon(app, g, 1.2, if active { color } else { rgb(p.muted) }))
             .child(text(title).font(app.ty.tab()).color(fg).truncate().shrink())
+            .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(format!("pane-tab:{index}"), r); })
             .on_press(move |s: &mut App| { s.active = index; s.focus = Focus::Content; });
         if active {
             item = item.child(el().w(18.0).h(18.0).center()
@@ -130,7 +127,9 @@ fn pane_tabs(app: &App) -> El {
         }
         tabs = tabs.child(item);
     }
+    let plus = app.tabs.len();
     tabs.child(el().key("pane-new").w(32.0).h(TAB_ROW_H).center()
+        .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(format!("pane-tab:{plus}"), r); })
         .child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
         .on_press(|s: &mut App| { s.open_tab(TabKind::Home); }))
 }

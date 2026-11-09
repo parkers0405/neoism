@@ -6,6 +6,7 @@ mod family;
 mod header;
 mod prose;
 mod sidebar;
+mod user;
 mod timeline;
 
 pub use composer::overlay;
@@ -116,7 +117,7 @@ impl App {
             id: message_id.clone(),
             role: Role::User,
             kind: HistoryMessageKind::User,
-            author: None,
+            author: Some(self.local_name.clone()),
             title: String::new(),
             text: text.clone(),
             status: String::new(),
@@ -138,7 +139,7 @@ impl App {
             session_id: session_id.into(),
             message_id,
             text,
-            author: None,
+            author: Some(self.local_name.clone()),
             attachments: Vec::new(),
             mode: Some(self.agent.to_lowercase()),
             model: None,

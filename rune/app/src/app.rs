@@ -46,6 +46,12 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// This person's presence name (their orb seed and message author).
+    pub local_name: String,
+    /// Presence orbs (profile pictures) shown so far.
+    pub orbs: crate::ui::orb::Orbs,
+    /// The transcript column's width, for user bubble geometry.
+    pub timeline_width: f32,
     /// Wakes the UI thread (poll) from views and background work.
     pub waker: Option<rune::Waker>,
     /// The window cursor: focus bar on chrome, block caret in fields, one trail between them.
@@ -121,6 +127,9 @@ impl App {
             scroll: Default::default(),
             wheel_target: None,
             picker: None,
+            local_name: crate::ui::orb::local_display_name(config.display_name.as_deref()),
+            orbs: Default::default(),
+            timeline_width: 830.0,
             waker: None,
             cursor: Default::default(),
             rects: HashMap::new(),

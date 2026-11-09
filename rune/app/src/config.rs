@@ -6,6 +6,8 @@ pub const DEFAULT_FONT_SIZE: f32 = 15.0;
 use serde_json::Value;
 
 pub struct Config {
+    /// `presence.display-name`.
+    pub display_name: Option<String>,
     pub theme: String,
     pub font_size: f32,
     pub font_weight: f32,
@@ -28,7 +30,8 @@ pub fn load() -> Config {
     let font_weight = appearance["fonts"]["weight"].as_f64().unwrap_or(400.0) as f32;
     let model = value["agent"]["model"].as_str().map(str::to_owned);
     let variant = value["agent"]["variant"].as_str().map(str::to_owned);
-    Config { theme, font_size, font_weight, model, variant }
+    let display_name = value["presence"]["display-name"].as_str().map(str::to_owned);
+    Config { display_name, theme, font_size, font_weight, model, variant }
 }
 
 /// JSONC: drop `//` and `/* */` comments outside strings.

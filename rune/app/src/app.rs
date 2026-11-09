@@ -41,6 +41,8 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// A `cd` waiting for the shell to confirm it (request id).
+    pub pending_cd: Option<String>,
     /// The notes sidebar (the workspace's notes vault).
     pub notes: crate::tree::Tree,
     /// The open app menu (rail hamburger).
@@ -154,6 +156,7 @@ impl App {
             wheel_target: None,
             tools: Default::default(),
             picker: None,
+            pending_cd: None,
             notes: Default::default(),
             menu: None,
             settings: None,
@@ -241,7 +244,7 @@ impl App {
     }
 
     /// Subscribe to the workspace's Git status (branch and changed line counts).
-    fn watch_git(&self) {
+    pub(crate) fn watch_git(&self) {
         if let Some(daemon) = &self.daemon {
             daemon.send_scoped(Family::Git, json!({"WatchStatus": {"token": GIT_WATCH_TOKEN}}), &self.cwd);
         }

@@ -36,6 +36,9 @@ fn scan_line(line: &str, base: usize, p: &Palette, out: &mut Vec<(Range<usize>, 
                 i += end + 2;
                 continue;
             }
+            // An unclosed backtick (streaming text before its pair arrives) is just a character.
+            i += 1;
+            continue;
         }
         if bytes[i].is_ascii_whitespace() || matches!(bytes[i], b'*' | b'_' | b'[' | b']' | b'(' | b')') {
             i += 1;
@@ -379,3 +382,18 @@ fn looks_like_codeish_word(token: &str) -> bool {
         || token.contains("~/.config/")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unclosed_backticks_terminate() {
+        let p = crate::ui::theme::palette("pastel_dark");
+        // Streaming text often ends mid-span; this used to spin forever.
+        for text in ["Counting files in `rune/app/src", "a ` b", "`", "``", "x `y` `z"] {
+            let _ = highlights(text, p);
+        }
+        let marks = highlights("see `src/main.rs` now", p);
+        assert!(marks.iter().any(|(r, _)| &"see `src/main.rs` now"[r.clone()] == "src/main.rs"));
+    }
+}

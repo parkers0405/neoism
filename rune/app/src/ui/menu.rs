@@ -72,8 +72,9 @@ impl App {
             Item::Settings => self.open_settings(),
             Item::Themes => self.open_picker(crate::palette::Mode::Themes),
             Item::Backgrounds => self.open_picker(crate::palette::Mode::Backgrounds),
-            // Not built yet in this frontend: the about card, database and extensions pages.
-            Item::About | Item::Database | Item::Extensions => {}
+            Item::About => self.modal = Some(crate::ui::modal::Modal::about()),
+            // Not built yet in this frontend: the database and extensions pages.
+            Item::Database | Item::Extensions => {}
         }
     }
 

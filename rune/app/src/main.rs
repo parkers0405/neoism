@@ -2,20 +2,19 @@
 //! See `rune/README.md` for the plan, the look and the motion this must match.
 
 mod agent;
+mod app;
 mod config;
 mod daemon;
 mod ghostty;
+mod home;
 mod keys;
-mod prose;
-mod state;
-mod terminal;
-mod theme;
-mod theme_data;
-mod view;
+mod palette;
+mod tabs;
+mod ui;
 mod wordmark;
 
 use rune::{AppSpec, ImageCache, KeyEvent, Tx};
-use state::App;
+use app::App;
 
 pub const FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/GeistMono-Regular.otf"),
@@ -39,8 +38,12 @@ fn setup(app: &mut App, waker: rune::Waker) {
     }
 }
 
-fn poll(app: &mut App, _clock: f64, _tx: &mut Tx) -> bool {
-    app.drain()
+fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
+    let changed = app.drain();
+    // The wordmark eases hover, shimmers and plays click effects off the frame clock.
+    let animating = app.wordmark.tick(app.visible_wordmark(), clock);
+    if animating { tx.wake_after(std::time::Duration::ZERO); }
+    animating || changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -56,14 +59,16 @@ fn main() {
         on_key: Some(on_key),
         scenes: &[
             ("welcome", |_| {}),
-            ("agent-new", |s| { s.open_tab(state::TabKind::Agent { session: None }); }),
-            ("sidebar", |s| s.sidebar = Some(state::Sidebar::Conversations)),
-            ("slash", |s| { s.open_tab(state::TabKind::Agent { session: None }); s.overlay = Some(state::Overlay::Slash); }),
+            ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
+            ("sidebar", |s| s.sidebar = Some(app::Sidebar::Conversations)),
+            ("slash", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); s.overlay = Some(app::Overlay::Slash); }),
+            ("palette", |s| s.open_picker(palette::Mode::Commands)),
+            ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),
             ("timeline-report", |s| s.load_fixture("fixture-report", "Read-Only GPU Frame Analysis and Documentation Report", include_str!("../fixtures/report-timeline.json"))),
             ("code", |s| s.load_fixture("fixture-code", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"))),
             ("timeline-tools", |s| s.load_fixture("fixture-tools", "Inspect Git History and GPU Sources; Edit Scratchpad", include_str!("../fixtures/tools-timeline.json"))),
         ],
-        ..AppSpec::new("Neoism", (1252.0, 674.0), App::new, view::root)
+        ..AppSpec::new("Neoism", (1252.0, 674.0), App::new, ui::chrome::root)
     };
     rune::set_app_id("ai.neoism.rune");
     let mut app = rune::App::new(spec).init(App::new);

@@ -1,6 +1,6 @@
 //! Theme tokens and type scale, matching the GPUiX build (`rune/README.md`, "Look").
 
-pub use crate::theme_data::{PALETTES, Palette};
+pub use super::palettes::{PALETTES, Palette};
 use rune::tok::{Family, TextStyle};
 use rune::Color;
 
@@ -34,6 +34,12 @@ pub struct Type {
 }
 
 impl Type {
+    /// The original UI scale: configured font size over 14.
+    pub fn scale(self) -> f32 { (self.size / 14.0).clamp(0.5, 3.0) }
+    /// A size given in the original's unscaled points, at the configured weight.
+    pub fn sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), self.weight).mono() }
+    pub fn sized_bold(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 800.0).mono() }
+    pub fn icon_sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 400.0).family(ICONS) }
     pub fn body(self) -> TextStyle {
         TextStyle::new(self.size, self.weight).mono().lh(self.size * 1.45)
     }

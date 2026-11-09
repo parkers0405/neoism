@@ -1,6 +1,7 @@
 //! The Neoism agent: conversation state fed by the daemon's `Agent` family, and its surfaces
 //! (sidebar, transcript, composer). References: `rune/reference/04..13*.png`.
 
+mod activity;
 mod composer;
 pub(crate) mod family;
 mod header;
@@ -12,6 +13,7 @@ mod user;
 mod timeline;
 pub mod tools;
 
+pub use activity::Activity;
 pub use composer::overlay;
 pub use family::Families;
 pub use header::Step as HeaderStep;

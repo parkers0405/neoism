@@ -68,8 +68,11 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             true
         })
         .child(col().w_full().child(sentinel).child(rows));
-    col().key("agent-pane").w_full().h_full().fill(rgb(p.bg))
-        .child(timeline)
+    let mut pane = col().key("agent-pane").w_full().h_full().fill(rgb(p.bg));
+    if let Some(header) = super::header::view(app, session_id) {
+        pane = pane.child(col().w_full().px(COLUMN_PAD_X).child(header));
+    }
+    pane.child(timeline)
         .child(col().w_full().px(86.0).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
             .child(composer(app, f32::INFINITY)))
 }

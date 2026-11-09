@@ -2,11 +2,15 @@
 //! (sidebar, transcript, composer). References: `rune/reference/04..13*.png`.
 
 mod composer;
+mod family;
+mod header;
 mod prose;
 mod sidebar;
 mod timeline;
 
 pub use composer::overlay;
+pub use family::Families;
+pub use header::Step as HeaderStep;
 pub use sidebar::conversations;
 pub use timeline::pane;
 
@@ -59,13 +63,27 @@ impl App {
             return;
         }
         self.open_tab(TabKind::Agent { session: Some(session_id.into()) });
+        self.load_session(session_id);
+    }
+
+    /// Fetch a session's newest page and follow its stream, once.
+    fn load_session(&mut self, session_id: &str) {
         let session = self.sessions.entry(session_id.into()).or_default();
-        if !session.loaded {
-            session.older_limit = 24;
-            self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.into() });
-            self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
-            self.send_agent(AgentClientMessage::ResumeStream { session_id: session_id.into() });
-        }
+        if session.loaded { return; }
+        session.older_limit = 24;
+        self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.into() });
+        self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
+        self.send_agent(AgentClientMessage::ResumeStream { session_id: session_id.into() });
+    }
+
+    /// Show `session_id` in the active agent tab: a sub-agent opened from a task card or the
+    /// family header replaces the view in place, as GPUiX's `openThread(thread, false, root)`.
+    pub fn view_session(&mut self, session_id: &str) {
+        let index = self.active;
+        if !matches!(self.tabs[index].kind, TabKind::Agent { .. }) { return; }
+        self.tabs[index].kind = TabKind::Agent { session: Some(session_id.to_owned()) };
+        self.wheel_target = None;
+        self.load_session(session_id);
     }
 
     pub fn request_older(&mut self, session_id: &str) {
@@ -148,6 +166,7 @@ impl App {
     }
 
     pub(crate) fn apply_agent(&mut self, message: AgentServerMessage) {
+        if self.families.note(&message) { return; }
         match message {
             AgentServerMessage::ThreadList { threads, requested_cursor, .. } => {
                 if requested_cursor.is_none() { self.threads = threads; } else { self.threads.extend(threads); }
@@ -169,6 +188,8 @@ impl App {
                 }
             }
             AgentServerMessage::HistoryChunk { session_id, messages, next_cursor } => {
+                // Task cards name their child sessions; seed the family so it can be walked.
+                if !self.families.is_child(&session_id) { self.families.seed_from_history(&session_id, &messages); }
                 let session = self.sessions.entry(session_id).or_default();
                 if session.loading_older {
                     // Size the next page from this one (bytes per server message).

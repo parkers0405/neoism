@@ -40,7 +40,7 @@ pub fn view(app: &App) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     let wide = finder.has_preview();
-    let width = if wide { WIDE } else { WIDTH } * s;
+    let width = (if wide { WIDE } else { WIDTH } * s).min((app.window[0] - 16.0).max(1.0));
     let stroke = (STROKE * s).max(2.0);
     let inner_w = width - 2.0 * (stroke + PAD * s);
     let list_w = if wide && !finder.hits.is_empty() { (inner_w * LIST_RATIO).floor() } else { inner_w };

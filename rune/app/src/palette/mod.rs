@@ -1,6 +1,7 @@
 //! Centered pickers: the `Alt+P` command palette and the theme picker with its live preview card
 //! (`reference/14`, `23`, `24`). One query field, a ranked list, keyboard and pointer selection.
 
+mod backgrounds;
 mod commands;
 mod view;
 
@@ -18,18 +19,22 @@ use serde_json::json;
 pub enum Mode {
     Commands,
     Themes,
+    Backgrounds,
 }
 
 pub struct Picker {
     pub mode: Mode,
     pub query: TextEdit,
     pub selected: usize,
+    /// The Backgrounds catalog, read when the picker opens.
+    pub backgrounds: Vec<backgrounds::Background>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
     Command(Action),
     Theme(&'static str),
+    Background(usize),
 }
 
 pub struct Row {
@@ -52,7 +57,11 @@ impl Picker {
     fn new(mode: Mode) -> Picker {
         let mut query = TextEdit::new("");
         query.focused = true;
-        Picker { mode, query, selected: 0 }
+        let backgrounds = if mode == Mode::Backgrounds {
+            let dir = crate::config::dir();
+            backgrounds::catalog(&dir, crate::config::background_image().as_deref())
+        } else { Vec::new() };
+        Picker { mode, query, selected: 0, backgrounds }
     }
 
     /// Ranked rows for the current query; ties keep catalog order.
@@ -62,6 +71,10 @@ impl Picker {
             Mode::Commands => COMMANDS.iter().filter_map(|c| {
                 let score = command_score(query, c)?;
                 Some((score, Row { icon: Some(c.service.icon()), title: format!("{}: {}", c.service.prefix(), c.title), shortcut: c.shortcut, target: Target::Command(c.action) }))
+            }).collect(),
+            Mode::Backgrounds => self.backgrounds.iter().enumerate().filter_map(|(i, b)| {
+                let score = fuzzy_score(query, &b.name).or_else(|| fuzzy_score(query, &b.description).map(|s| s - 4))?;
+                Some((score, Row { icon: None, title: b.name.clone(), shortcut: "", target: Target::Background(i) }))
             }).collect(),
             Mode::Themes => PALETTES.iter().filter_map(|p| {
                 let title = theme_display_name(p.name);
@@ -98,6 +111,9 @@ impl App {
         match row.target {
             Target::Command(action) => self.run_action(action, tx),
             Target::Theme(name) => self.apply_theme(name),
+            Target::Background(index) => {
+                if let Some(background) = picker.backgrounds.get(index) { self.apply_background(&background.choice); }
+            }
         }
     }
 
@@ -119,6 +135,7 @@ impl App {
             Action::DecreaseFontSize => self.set_font_size(self.ty.size - 1.0),
             Action::ResetFontSize => self.set_font_size(crate::config::DEFAULT_FONT_SIZE),
             Action::ThemePicker => self.open_picker(Mode::Themes),
+            Action::Backgrounds => self.open_picker(Mode::Backgrounds),
             Action::SearchFiles => self.open_finder(crate::finder::Mode::Files),
             Action::SearchWords => self.open_finder(crate::finder::Mode::Grep),
             Action::SearchGitChanges => self.open_finder(crate::finder::Mode::Git),
@@ -136,6 +153,39 @@ impl App {
     fn set_font_size(&mut self, size: f32) {
         self.ty.size = size.clamp(8.0, 40.0);
         self.set_setting("appearance.fonts.size", json!(self.ty.size));
+    }
+
+    /// Persist a background choice (`ui.window.background-image[-disabled]`).
+    pub fn apply_background(&mut self, choice: &backgrounds::Choice) {
+        let image = match choice {
+            backgrounds::Choice::Image(path) => json!({"path": path, "opacity": 1.0, "blur": 0.0, "fit": "cover", "position-x": 0.5, "position-y": 0.5}),
+            _ => serde_json::Value::Null,
+        };
+        self.set_setting("ui.window.background-image-disabled", json!(*choice == backgrounds::Choice::None));
+        self.set_setting("ui.window.background-image", image);
+    }
+
+    /// The preview image for a background path, once decoded. The first ask starts a decode on
+    /// a worker thread; `take_decoded_previews` (from `poll`) turns the pixels into an image.
+    pub fn background_preview(&self, path: &std::path::Path) -> Option<rune::Image> {
+        if let Some(image) = self.background_previews.borrow().get(path) { return image.clone(); }
+        self.background_previews.borrow_mut().insert(path.to_owned(), None);
+        let (queue, wake, path) = (self.decoded_previews.clone(), self.waker.clone(), path.to_owned());
+        std::thread::spawn(move || {
+            if let Some(pixels) = backgrounds::decode(&path) { queue.lock().unwrap().push((path, pixels)); }
+            if let Some(wake) = wake { wake(); }
+        });
+        None
+    }
+
+    /// Move decoded previews into the image cache. Returns whether any arrived.
+    pub fn take_decoded_previews(&mut self) -> bool {
+        let decoded: Vec<_> = self.decoded_previews.lock().unwrap().drain(..).collect();
+        let Some(images) = &self.images else { return false };
+        for (path, (w, h, bytes)) in &decoded {
+            self.background_previews.borrow_mut().insert(path.clone(), Some(images.rgba(*w, *h, bytes.clone())));
+        }
+        !decoded.is_empty()
     }
 
     pub fn apply_theme(&mut self, name: &str) {

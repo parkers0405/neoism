@@ -47,6 +47,12 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// The window size in points, from the root layout.
+    pub window: [f32; 2],
+    /// Background previews by image path (`None` while decoding).
+    pub background_previews: std::cell::RefCell<HashMap<std::path::PathBuf, Option<rune::Image>>>,
+    /// Pixels decoded off-thread, waiting for the image cache.
+    pub decoded_previews: std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, (u32, u32, Vec<u8>))>>>,
     /// The file tree sidebar.
     pub tree: crate::tree::Tree,
     /// The editor cursor moved: scroll it into view after its next layout.
@@ -145,6 +151,9 @@ impl App {
             wheel_target: None,
             tools: Default::default(),
             picker: None,
+            window: [1252.0, 674.0],
+            background_previews: Default::default(),
+            decoded_previews: Default::default(),
             tree: Default::default(),
             editor_follow: false,
             pending_g: false,

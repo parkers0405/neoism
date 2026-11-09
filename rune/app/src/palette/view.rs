@@ -21,12 +21,14 @@ pub fn view(app: &App) -> El {
     let s = app.ty.scale();
     let p = app.pal;
     let rows = picker.rows();
-    let themes = picker.mode == Mode::Themes;
-    let width = if themes { THEME_WIDTH } else { WIDTH } * s;
+    // Themes and Backgrounds share the wide frame with a preview card on the right.
+    let themes = matches!(picker.mode, Mode::Themes | Mode::Backgrounds);
+    // Never wider than the window less 16 pt (`active_rect`).
+    let width = (if themes { THEME_WIDTH } else { WIDTH } * s).min((app.window[0] - 16.0).max(1.0));
 
     let input = rune::text_input(&picker.query, app.ty.sized(14.0))
         .key("picker-query")
-        .placeholder(if themes { "Search themes..." } else { "Type a command..." }, rgb(p.muted))
+        .placeholder(match picker.mode { Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...", Mode::Commands => "Type a command..." }, rgb(p.muted))
         .color(rgb(p.fg)).w_full()
         .on_edit(|a: &mut App| &mut a.picker.as_mut().expect("picker open").query)
         .on_input_change(|a: &mut App, _: &mut Tx| { if let Some(picker) = &mut a.picker { picker.selected = 0; } })
@@ -41,12 +43,17 @@ pub fn view(app: &App) -> El {
         .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.surface))
         .child(field);
 
-    let list = list(app, picker, &rows, if themes { THEME_LIST_WIDTH * s } else { width });
+    let list = list(app, picker, &rows, if themes { (THEME_LIST_WIDTH * s).min(width * 0.45) } else { width });
     let body = if themes {
-        let previewed = rows.get(picker.selected).and_then(|r| match r.target { Target::Theme(name) => Some(name), _ => None }).unwrap_or(p.name);
+        let card = match rows.get(picker.selected).map(|r| r.target) {
+            Some(Target::Background(index)) => background_preview(app, &picker.backgrounds[index]),
+            Some(Target::Theme(name)) => preview(app, palette(name)),
+            _ if picker.mode == Mode::Themes => preview(app, palette(p.name)),
+            _ => el(),
+        };
         row().w_full()
             .child(list.border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.surface)))
-            .child(preview(app, palette(previewed)).grow(1.0))
+            .child(card.grow(1.0).shrink())
     } else {
         list
     };
@@ -133,4 +140,29 @@ fn preview(app: &App, theme: &'static Palette) -> El {
             .child(text(theme_display_name(t.name)).font(app.ty.sized_bold(13.0)).color(rgb(t.fg)))
             .child(hint))
         .child(code)
+}
+
+/// The Backgrounds card: name, description, a rule, then the image (or what the row means).
+fn background_preview(app: &App, background: &super::backgrounds::Background) -> El {
+    use super::backgrounds::Choice;
+    let p = app.pal;
+    let s = app.ty.scale();
+    let hint = row().gap(6.0 * s).center_y()
+        .child(text("\u{2191}\u{2193} preview  \u{b7}  Enter apply").font(app.ty.sized(10.0)).color(rgb(p.muted)));
+    let body = match &background.choice {
+        Choice::Inherit => text("Use inherited background").font(app.ty.sized(10.5)).color(rgb(p.muted)),
+        Choice::None => text("No background image").font(app.ty.sized(10.5)).color(rgb(p.muted)),
+        Choice::Image(path) => match app.background_preview(path) {
+            Some(image) => el().w_full().h(220.0 * s).radius(6.0 * s).clip_rounded(6.0 * s).pixels(image.pixels()),
+            None => text("Loading preview...").font(app.ty.sized(10.5)).color(rgb(p.muted)),
+        },
+    };
+    col().key("background-preview").shrink().clip_rounded(6.0 * s).mx(6.0 * s).mt(6.0 * s).mb(6.0 * s).px(16.0 * s).pt(12.0 * s).pb(12.0 * s).radius(6.0 * s)
+        .fill(rgb(p.bg)).border(1.0 * s, rgb(p.border))
+        .child(row().w_full().center_y().justify_between()
+            .child(text(background.name.clone()).font(app.ty.sized_bold(13.0)).color(rgb(p.fg)).truncate().shrink())
+            .child(hint))
+        .child(text(background.description.clone()).font(app.ty.sized(10.5)).color(rgb(p.muted)).mt(8.0 * s))
+        .child(el().w_full().h(1.0).fill(rgb(p.border)).mt(12.0 * s).mb(14.0 * s))
+        .child(body)
 }

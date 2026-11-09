@@ -173,7 +173,7 @@ export type RevertRequest = { messageId?: string; partId?: string; };
 export type RuntimeInfo = { deployment: "local" | "shared-control-plane" | "workspace-worker"; executionAvailable: boolean; worker?: WorkspaceWorkerInfo; };
 export type SemanticSearchHit = { created: number; distance: number; excerpt: string; messageId: string; role: string; sessionId: string; };
 export type SemanticSearchResponse = { available: boolean; hits: Array<SemanticSearchHit>; };
-export type Session = { agent?: string; catalogActivity?: CatalogActivity; directory: string; id: string; model?: ModelRef; neoSessionId?: string; parentId?: string; path?: string; permission?: Array<PermissionRule>; projectId: string; sessionRole?: "neo"; slug: string; time: SessionTime; title: string; version: string; workspaceId?: string; [key: string]: unknown; };
+export type Session = { agent?: string; catalogActivity?: CatalogActivity; directory: string; id: string; model?: ModelRef; neoSessionId?: string; parentId?: string; path?: string; permission?: Array<PermissionRule>; projectId: string; sessionRole?: "neo"; sessionScope?: "root"; slug: string; time: SessionTime; title: string; version: string; workspaceId?: string; [key: string]: unknown; };
 export type SessionBundle = { compactionQueued?: boolean; messages: Array<Message>; queuedPrompts: Array<QueuedPromptBundleItem>; session: Session; version: number; workspaceRoot?: string; };
 export type SessionCommandRequest = { agent?: string; arguments?: string; command: string; messageId?: string; model?: UserModel; };
 export type SessionControl = { actorType: "human" | "service-account"; controllerSubject: string; leaseExpiresAt: number; revision: number; sessionId: string; updated: number; };
@@ -301,7 +301,7 @@ export interface ApiOperations {
   "v2.management.workspaces.list": { method: "GET"; path: "/v2/management/workspaces"; input: { signal?: AbortSignal; }; responses: { "200": Array<ManagedWorkspace>; }; response: Array<ManagedWorkspace>; };
   "v2.management.workspaces.update": { method: "PUT"; path: "/v2/management/workspaces/{id}"; input: { path: { id: string; }; headers?: { "If-Match"?: string; }; body: WorkspaceUpdateRequest; signal?: AbortSignal; }; responses: { "200": ManagedWorkspace; }; response: ManagedWorkspace; };
   "v2.meta.get": { method: "GET"; path: "/v2/meta"; input: { signal?: AbortSignal; }; responses: { "200": ApiMeta; }; response: ApiMeta; };
-  "v2.neo.session": { method: "POST"; path: "/v2/neo/session"; input: { query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
+  "v2.neo.session": { method: "POST"; path: "/v2/neo/session"; input: { signal?: AbortSignal; }; responses: { "200": Session; }; response: Session; };
   "v2.openapi.get": { method: "GET"; path: "/v2/openapi.json"; input: { signal?: AbortSignal; }; responses: { "200": OpenApiDocument; }; response: OpenApiDocument; };
   "v2.plugins.get": { method: "GET"; path: "/v2/plugins/{plugin_id}/manifest"; input: { path: { plugin_id: string; }; query?: { directory?: string; }; headers?: { "X-Neoism-Directory"?: string; }; signal?: AbortSignal; }; responses: { "200": PluginManifest; }; response: PluginManifest; };
   "v2.plugins.goals.clear": { method: "DELETE"; path: "/v2/plugins/dev.neoism.goals/{session_id}"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": GoalResponse; }; response: GoalResponse; };

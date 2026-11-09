@@ -81,10 +81,8 @@ const neoClient = createNeoismClient({
   async *events() {},
 });
 assert.equal(await neoClient.neo.session(), neoSession);
-assert.equal(await neoClient.neo.session("/workspace"), neoSession);
 assert.deepEqual(neoRequests.map(({ method, path, query, body }) => ({ method, path, query, body })), [
-  { method: "POST", path: "/v2/neo/session", query: {}, body: undefined },
-  { method: "POST", path: "/v2/neo/session", query: { directory: "/workspace" }, body: undefined },
+  { method: "POST", path: "/v2/neo/session", query: undefined, body: undefined },
 ]);
 
 const managementRequests = [];

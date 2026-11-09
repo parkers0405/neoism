@@ -640,6 +640,15 @@ pub(crate) fn allows_session(
     claims: &CallerClaims,
     session: &neoism_agent_core::SessionInfo,
 ) -> bool {
+    if session.is_neo() {
+        if !crate::neo::root_operator(claims) { return false; }
+        return if session.extra.get("sessionScope").and_then(serde_json::Value::as_str) == Some("root") {
+            session_tenant(session) == "local"
+                && session.extra.get("neoOwner").and_then(serde_json::Value::as_str) == Some(crate::neo::OWNER)
+        } else {
+            crate::neo::legacy_owned(session)
+        };
+    }
     if claims.is_system_workflow() {
         return allows_directory(claims, &session.directory);
     }

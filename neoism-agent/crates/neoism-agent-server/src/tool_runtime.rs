@@ -617,10 +617,11 @@ async fn execute_stateful_tool_call(
             let parent = state.inner.store.get_session(session_id.as_str()).await.map_err(|error| error.to_string())?
                 .ok_or_else(|| "Session not found".to_string())?;
             if !parent.is_neo() { return Err("neo_task is only available to Neo".into()); }
+            let delegate = crate::neo::delegate(state, &parent, &input).await.map_err(|e| e.to_string())?;
             let mut input = input;
             input["subagent_type"] = json!("build");
             input["background"] = json!(true);
-            if let Some(id) = input.get("session_id").cloned() { input["task_id"] = id; }
+            input["task_id"] = json!(delegate.id);
             crate::plugins::subagents::start_task_tool(state, snapshot.clone(), session_id, input, cancel.clone()).await.map(Some)
         }
         "task" => {

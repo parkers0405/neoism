@@ -22,7 +22,8 @@ pub(crate) async fn session_upgrade(
         .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)));
     let peer_ip = peer_addr.ip().to_string();
     // Preferred path: paired-device bearer token (Phase 10 auth system).
-    if let Some(bearer) = extract_bearer(&headers) {
+    let master_bearer = extract_bearer(&headers).filter(|token| cloud_auth::legacy_daemon_token_matches(token));
+    if let Some(bearer) = extract_bearer(&headers).filter(|_| master_bearer.is_none()) {
         match state.auth.authenticate_bearer(&bearer) {
             Ok(rec) => {
                 tracing::info!(
@@ -63,7 +64,7 @@ pub(crate) async fn session_upgrade(
     // older smoke tests and the legacy local-dev path. Gated by env var; a
     // production deployment should rely on bearer auth or the first-frame
     // `Hello { token }` handshake below.
-    let token = params.get("token").cloned();
+    let token = master_bearer.or_else(|| params.get("token").cloned());
     let upgrade_auth_reason = match token.as_deref() {
         Some(token) => {
             if let Err(err) = auth::verify(Some(token)) {

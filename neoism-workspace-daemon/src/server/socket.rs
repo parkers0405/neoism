@@ -351,6 +351,13 @@ pub(crate) async fn handle_socket(
     let agent_api_key = std::env::var("NEOISM_AGENT_API_KEY").ok();
     let agent_model = std::env::var("NEOISM_AGENT_MODEL").unwrap_or_default();
     let agent_session = AgentSession::spawn(agent_api_key, agent_model, agent_tx);
+    // The legacy bridge must not lend its process master authority to peers.
+    // Root Neo remains addressable by session ID without any active workspace.
+    if device.is_some() || upgrade_auth_reason != Some("valid daemon token") {
+        let scope = device.as_ref().and_then(|device| device.workspace_id.as_ref())
+            .and_then(|id| agent_workspace_root(&workspace_manager, id).map(|root| (id.clone(), root)));
+        agent_session.authorize_as_peer(scope);
+    }
     let mut agent_request_id: u64 = 0;
 
     // ---------------- wave-7 web parity per-socket state ----------------
@@ -1908,6 +1915,13 @@ pub(crate) async fn handle_socket(
                     request_id,
                     message,
                 } => {
+                    if device.is_none() {
+                        if let WorkspaceClientMessage::Hello { token, .. } = &message {
+                            if token.as_deref().is_some_and(cloud_auth::legacy_daemon_token_matches) {
+                                agent_session.authorize_as_root();
+                            }
+                        }
+                    }
                     if !matches!(message, WorkspaceClientMessage::Hello { .. }) {
                         if let Err(denial) =
                             check_permission(&device, Permission::ReadFiles)

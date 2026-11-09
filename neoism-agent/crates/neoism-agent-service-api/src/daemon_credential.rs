@@ -67,6 +67,7 @@ fn signing_key_from_sources(
 
 pub const SYSTEM_WORKFLOW_VERSION: u32 = 1;
 pub const SYSTEM_WORKFLOW_SUBJECT: &str = "daemon:system-workflow";
+pub const LOCAL_AGENT_SUBJECT: &str = "daemon:local-agent";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -74,6 +75,8 @@ pub enum DaemonCredentialKind {
     #[default]
     Workspace,
     SystemWorkflow,
+    /// Existing unscoped local/paired Agent bridge, explicitly NOT root owner.
+    LocalAgent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -94,6 +97,12 @@ pub struct DaemonCredentialClaims {
 }
 
 impl DaemonCredentialClaims {
+    pub fn local_agent(now: i64, lifetime_secs: i64) -> Result<Self, &'static str> {
+        let mut claims = Self::system_workflow(now, lifetime_secs)?;
+        claims.kind = DaemonCredentialKind::LocalAgent;
+        claims.subject = LOCAL_AGENT_SUBJECT.into();
+        Ok(claims)
+    }
     /// Machine workflow access is intentionally not a workspace or hosted identity.
     pub fn system_workflow(now: i64, lifetime_secs: i64) -> Result<Self, &'static str> {
         let mut claims = Self::new(
@@ -212,17 +221,17 @@ fn validate_shape(claims: &DaemonCredentialClaims) -> Result<(), &'static str> {
                 .workspace_id
                 .as_deref()
                 .is_none_or(|id| id.trim().is_empty())
-                || claims.subject == SYSTEM_WORKFLOW_SUBJECT
+                || matches!(claims.subject.as_str(), SYSTEM_WORKFLOW_SUBJECT | LOCAL_AGENT_SUBJECT)
             {
                 return Err("invalid workspace credential scope");
             }
         }
-        DaemonCredentialKind::SystemWorkflow => {
+        DaemonCredentialKind::SystemWorkflow | DaemonCredentialKind::LocalAgent => {
             if claims.workspace_id.is_some()
                 || claims.hosted
                 || claims.tenant_id != "local"
                 || !claims.directory_prefixes.is_empty()
-                || claims.subject != SYSTEM_WORKFLOW_SUBJECT
+                || claims.subject != if claims.kind == DaemonCredentialKind::SystemWorkflow { SYSTEM_WORKFLOW_SUBJECT } else { LOCAL_AGENT_SUBJECT }
             {
                 return Err("invalid system workflow credential scope");
             }
@@ -248,6 +257,7 @@ pub fn system_workflow_allows(method: &str, path: &str) -> bool {
         return false;
     }
     match parts.as_slice() {
+        ["v2", "neo", "session"] => method == "POST",
         ["v2", "health" | "meta" | "capabilities" | "providers" | "agents"
         | "commands" | "skills" | "tools" | "session-projects" | "directories" | "events"] => {
             method == "GET"
@@ -348,6 +358,25 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neo_root_and_local_peer_capabilities_are_distinct_and_fail_closed() {
+        let peer = DaemonCredentialClaims::local_agent(100, 60).unwrap();
+        let signed = issue(&peer, b"key").unwrap();
+        assert_eq!(verify(&signed, b"key", 110).unwrap(), peer);
+        assert_eq!(peer.kind, DaemonCredentialKind::LocalAgent);
+        assert_eq!(peer.subject, LOCAL_AGENT_SUBJECT);
+        assert_ne!(peer.subject, SYSTEM_WORKFLOW_SUBJECT);
+        let mut forged = peer.clone();
+        forged.kind = DaemonCredentialKind::SystemWorkflow;
+        assert!(issue(&forged, b"key").is_err());
+        forged = peer;
+        forged.workspace_id = Some("workspace".into());
+        assert!(issue(&forged, b"key").is_err());
+        assert!(system_workflow_allows("POST", "/v2/neo/session"));
+        assert!(!system_workflow_allows("GET", "/v2/neo/session"));
+        assert!(!system_workflow_allows("POST", "/v2/neo/session/extra"));
+    }
 
     #[test]
     fn fast_host_keeps_agent_authority_separate_from_transport_password() {

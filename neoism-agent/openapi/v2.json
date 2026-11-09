@@ -6339,6 +6339,11 @@
             "readOnly": true,
             "type": "string"
           },
+          "sessionScope": {
+            "enum": ["root"],
+            "readOnly": true,
+            "type": "string"
+          },
           "slug": {
             "type": "string"
           },
@@ -12820,6 +12825,27 @@
         ]
       }
     },
+    "/v2/neo/session": {
+      "post": {
+        "description": "Idempotently get or adopt the root operator's durable personal assistant. No directory, project or workspace binding. Requires root owner capability; workspace/paired credentials are rejected. sessionRole=neo and sessionScope=root; hidden from ordinary catalogs. The directory field is private runtime storage, not task context; projectId is empty.",
+        "operationId": "v2.neo.session",
+        "parameters": [],
+        "responses": {
+          "200": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } }, "description": "Root personal assistant session" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "501": { "$ref": "#/components/responses/NotImplemented" }
+        },
+        "tags": ["sessions"]
+      }
+    },
     "/v2/openapi.json": {
       "get": {
         "operationId": "v2.openapi.get",
@@ -12869,30 +12895,6 @@
         "tags": [
           "system"
         ]
-      }
-    },
-    "/v2/neo/session": {
-      "post": {
-        "description": "Idempotently get or create the durable workspace Neo session, hidden from ordinary catalogs via sessionRole=neo.",
-        "operationId": "v2.neo.session",
-        "parameters": [
-          { "in": "query", "name": "directory", "required": false, "schema": { "type": "string" } },
-          { "in": "header", "name": "X-Neoism-Directory", "required": false, "schema": { "type": "string" } }
-        ],
-        "responses": {
-          "200": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } }, "description": "Workspace Neo session" },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "403": { "$ref": "#/components/responses/Forbidden" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
-          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
-          "429": { "$ref": "#/components/responses/TooManyRequests" },
-          "500": { "$ref": "#/components/responses/InternalError" },
-          "501": { "$ref": "#/components/responses/NotImplemented" }
-        },
-        "tags": ["sessions"]
       }
     },
     "/v2/plugins": {

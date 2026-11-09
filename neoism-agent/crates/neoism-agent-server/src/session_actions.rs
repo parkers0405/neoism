@@ -231,6 +231,9 @@ pub(crate) async fn create_subtask_session(
     agent: &str,
     model: Option<UserModel>,
 ) -> Result<SessionInfo, ApiError> {
+    if parent.is_neo() {
+        return Err(ApiError::bad_request("Root Neo must use neo_task with an explicit target directory/workspace"));
+    }
     if state
         .services()
         .workspace_worker
@@ -268,7 +271,7 @@ pub(crate) async fn create_subtask_session(
     } else {
         format!("{} (@{} subagent)", description.trim(), agent_info.name)
     };
-    let mut child = SessionInfo {
+    let child = SessionInfo {
         id: child_id.clone(),
         slug: slug(),
         project_id: parent.project_id.clone(),
@@ -306,14 +309,6 @@ pub(crate) async fn create_subtask_session(
         })
         .collect(),
     };
-    if parent.is_neo() {
-        child.parent_id = None;
-        child.title = description.to_string();
-        child.extra.insert("neoSessionId".into(), json!(parent.id));
-        // A delegated session is a real root, not part of Neo's execution family.
-        child.extra.remove(crate::execution_activity::EXECUTION_ID_KEY);
-        child.extra.remove(crate::execution_activity::EXECUTION_ROOT_KEY);
-    }
     state.inner.store.insert_session(&child).await?;
     state.publish(EventPayload::new(
         event_type::SESSION_CREATED,

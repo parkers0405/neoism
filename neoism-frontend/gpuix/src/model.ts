@@ -42,6 +42,8 @@ import { DirectorySchema, FileSchema, HistoryMessageSchema, ThreadSchema, TreeSc
 
 export type Surface = {
   id: string; title: string; workspaceId: string;
+  /** Root surfaces belong to the application, never a declared workspace. */
+  scope?: "root";
   kind: "file" | "agent" | "terminal" | "page" | "welcome" | "git";
   page?: "extensions" | "database"; databaseTable?: string; document?: { kind: "config"; revision: string; writable: boolean };
   path?: string; rootDir?: string; sessionId?: string; agentRootSessionId?: string;
@@ -292,14 +294,14 @@ export class WorkspaceModel {
   onSurfaceClosed(listener:(surface:Surface)=>void){this.surfaceClosedListeners.add(listener);return()=>{this.surfaceClosedListeners.delete(listener);};}
   onWorkspaceClosed(listener:(workspaceId:string)=>void){this.workspaceClosedListeners.add(listener);return()=>{this.workspaceClosedListeners.delete(listener);};}
   dispose(preserveEditors = false) { this.historyUpdates.clear(); this.collaboration.dispose(); this.presence.dispose(); this.historyRequests.clear();this.queuedHistory.clear();this.historyCursors.clear(); clearTimeout(this.completedHistoryTimer);this.completedHistory.clear();this.agentCatalogStream?.abort.abort();this.agentCatalogStream=undefined; this.incomingAgentFrames.dispose(); clearTimeout(this.incomingAgentTimer);this.incomingAgentTimer=undefined;this.incomingAgentEvents=[];this.incomingAgentHead=0; for (const view of this.markdownViews.values()) view.markdown.dispose(); this.markdownViews.clear(); disposeTerminalSessions(this.client); this.disposed = true; this.epoch++; this.abort.abort(); this.agentSdk.dispose(); this.cleanups.forEach((cleanup) => cleanup()); this.listeners.clear(); for (const layout of this.layouts.values()) layout.dispose(); this.layouts.clear(); for (const view of this.editorViews.values()) view.editor.dispose(); this.editorViews.clear(); if (!preserveEditors) { for (const editor of this.editors.values()) editor.dispose(); this.editors.clear(); } }
-  getLayout(workspaceId = this.state.activeWorkspace?.id): WorkspaceLayout {
-    if (!workspaceId) throw new Error("Select a workspace first");
+  getLayout(workspaceId = this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.scope==="root"?"":this.state.activeWorkspace?.id): WorkspaceLayout {
+    if (workspaceId===undefined) throw new Error("Select a workspace first");
     let layout = this.layouts.get(workspaceId);
     if (layout) return layout;
     const stored = isRecord(this.state.ui.layouts) ? this.state.ui.layouts[workspaceId] : undefined;
     try { layout = new WorkspaceLayout(stored as LayoutSnapshot | undefined); } catch { layout = new WorkspaceLayout(); }
     this.layouts.set(workspaceId, layout);
-    const workspace = this.state.workspaces.find((w) => w.id === workspaceId) || this.state.activeWorkspace;
+    const workspace = workspaceId ? this.state.workspaces.find((w) => w.id === workspaceId) || this.state.activeWorkspace : undefined;
     if (!stored && workspace?.layout_snapshot) {
       const surfaces: Surface[] = [];
       try { layout.restoreDaemon(workspace.layout_snapshot, (_externalId, path, leaf) => {
@@ -335,7 +337,8 @@ export class WorkspaceModel {
     layout.subscribe((frame) => {
       const layouts = isRecord(this.state.ui.layouts) ? this.state.ui.layouts : {};
       const patch: Partial<AppState> = { ui: { ...this.state.ui, layouts: { ...layouts, [workspaceId]: layout!.snapshot() } } };
-      if (this.state.activeWorkspace?.id === workspaceId) patch.activeSurfaceId = frame.focusedSurfaceId;
+      const rootActive=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.scope==="root";
+      if (rootActive?workspaceId==="":this.state.activeWorkspace?.id === workspaceId) patch.activeSurfaceId = frame.focusedSurfaceId;
       const focused = patch.activeSurfaceId && patch.activeSurfaceId !== this.state.activeSurfaceId
         ? this.state.surfaces.find(surface=>surface.id===patch.activeSurfaceId) : undefined;
       this.update(patch);
@@ -566,6 +569,8 @@ export class WorkspaceModel {
   };
   private async hydrate() {
     const epoch = ++this.epoch;
+    const active=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId);
+    const restoreNeo=active?.sessionId&&this.isNeoSession(active.sessionId);
     this.update({ loading: true, error: undefined });
     try {
       const tree = Schema.decodeUnknownSync(TreeSchema)(expectVariant(await this.run(this.client.request("Workspace", "RequestHostWorkspaceTree")), "HostWorkspaceTree"));
@@ -586,7 +591,8 @@ export class WorkspaceModel {
       const rememberedWindow=openWorkspaceIds(this.state.ui);
       if(!this.config.workspaceId&&remembered?.length===0){
         await this.syncWindowWorkspaces([]);
-        this.update({activeWorkspace:undefined,activeSurfaceId:undefined});
+        this.update({activeWorkspace:undefined,activeSurfaceId:restoreNeo?active?.id:undefined});
+        if(restoreNeo)await this.openNeo();
         return;
       }
       const opened=this.windowWorkspaces().filter(eligible);
@@ -613,6 +619,7 @@ export class WorkspaceModel {
         return;
       }
       await this.activateWorkspace(workspace, true);
+      if(restoreNeo&&!this.disposed)await this.openNeo();
     } catch (error) { if (epoch === this.epoch) this.report(error); }
     finally { if (epoch === this.epoch) this.update({ loading: false }); }
   }
@@ -722,7 +729,7 @@ export class WorkspaceModel {
         // close restores the view without disposing its documents or tabs.
         if(wasActive){
           if(adjacent)await this.activateWorkspace(adjacent);
-          else{++this.epoch;this.presence.leaveWorkspace();this.update({activeWorkspace:undefined,activeSurfaceId:undefined,loading:false});}
+          else{++this.epoch;this.presence.leaveWorkspace();const root=this.state.surfaces.find(surface=>surface.scope==="root");this.update({activeWorkspace:undefined,activeSurfaceId:root?.id,loading:false});}
         }
         if(!discard&&hasUnsaved())throw new Error("Unsaved changes or unsent drafts. Save this workspace or use :qall! to discard it.");
         if(databaseApplying())throw new Error("Wait for the database transaction to finish before closing this workspace.");
@@ -1116,14 +1123,16 @@ export class WorkspaceModel {
   };
   private addSurface(surface: Surface, split?: SplitAxis) {
     if(this.closingWorkspaces.has(surface.workspaceId))return;
+    const wasRoot=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.scope==="root";
     if(surface.kind!=="welcome")this.disposableWorkspaces.delete(surface.workspaceId);
     this.transaction(() => {
-      this.update({ surfaces: this.state.surfaces.some((s) => s.id === surface.id) ? this.state.surfaces : [...this.state.surfaces, surface], ...(surface.workspaceId===this.state.activeWorkspace?.id?{activeSurfaceId:surface.id}:{}) });
+      this.update({ surfaces: this.state.surfaces.some((s) => s.id === surface.id) ? this.state.surfaces : [...this.state.surfaces, surface], ...(surface.scope==="root"||surface.workspaceId===this.state.activeWorkspace?.id?{activeSurfaceId:surface.id}:{}) });
       const layout = this.getLayout(surface.workspaceId);
       if (split) layout.split(split, surface);
       else if (layout.frame.leaves.some((leaf) => leaf.surfaceId === surface.id)) layout.focusSurface(surface.id);
       else layout.open(surface);
     });
+    if(wasRoot!==(surface.scope==="root"))void this.refreshCatalogs();
   }
   selectSurface = (id: string, preserveLeaf = false) => {
     const surface = this.state.surfaces.find((s) => s.id === id);
@@ -1133,6 +1142,7 @@ export class WorkspaceModel {
       if (connection) { this.selectDatabaseConnection(connection.id, surface.workspaceId); if (surface.databaseTable) this.getDatabaseSchema(connection).highlightTable(surface.databaseTable); }
     }
     const changed = this.state.activeSurfaceId !== id;
+    const wasRoot=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.scope==="root";
     this.transaction(() => {
       this.update({ activeSurfaceId: id });
       if (!preserveLeaf) this.getLayout(surface.workspaceId).focusSurface(id);
@@ -1148,6 +1158,7 @@ export class WorkspaceModel {
     }
     if (surface.kind === "file" && this.state.files[id] === undefined) void this.loadFile(surface);
     if(surface.kind==="terminal"||surface.kind==="welcome")this.followMainTerminal();
+    if(changed&&wasRoot!==(surface.scope==="root"))void this.refreshCatalogs();
   };
   retireTerminal=(sessionId:string)=>{
     if(this.disposed)return;
@@ -1184,7 +1195,7 @@ export class WorkspaceModel {
     }
     const targetLayout = closing?.workspaceId;
     this.databases.get(id)?.dispose(); this.databases.delete(id);
-    if (targetLayout&&!this.closingWorkspaces.has(targetLayout)) this.getLayout(targetLayout).closeSurface(id);
+    if (targetLayout!==undefined&&!this.closingWorkspaces.has(targetLayout)) this.getLayout(targetLayout).closeSurface(id);
     for (const [key, view] of this.markdownViews) if (view.surfaceId === id) { view.markdown.dispose(); this.markdownViews.delete(key); delete this.recoveredMarkdownViews[key]; }
     for (const [key, view] of this.editorViews) if (view.surfaceId === id) { this.collaboration.detach(view.editor);view.editor.dispose(); this.editorViews.delete(key); }
     if(editor)this.collaboration.detach(editor);
@@ -1356,26 +1367,33 @@ export class WorkspaceModel {
     const surface:Surface={id:`agent-home:${workspace.id}:${crypto.randomUUID()}`,kind:"agent",title:"Neoism",workspaceId:workspace.id};
     this.addSurface(surface);return surface;
   };
-  private neoFlights=new Map<string,Promise<string|undefined>>();
+  private neoFlight?:Promise<string|undefined>;
+  private neoIntent?:{epoch:number;sourceId:string|undefined};
+  isNeoSession=(sessionId:string)=>this.state.providerStates[sessionId]?.agent==="neo"||this.state.surfaces.some(surface=>surface.scope==="root"&&surface.sessionId===sessionId);
   /** Neo has a server-owned durable identity, not a draft or a catalog row. */
   openNeo = ():Promise<string|undefined> => {
-    const workspace=this.state.activeWorkspace;
-    if(!workspace)return Promise.resolve(undefined);
-    const pending=this.neoFlights.get(workspace.id);if(pending)return pending;
-    const epoch=this.epoch,sourceId=this.state.activeSurfaceId;
+    this.neoIntent={epoch:this.epoch,sourceId:this.state.activeSurfaceId};
+    if(this.neoFlight)return this.neoFlight;
     const task=(async()=>{
-      const session=await this.agentSdk.forWorkspace(workspace.id).neo.session();
-      if(this.disposed||epoch!==this.epoch||this.state.activeWorkspace?.id!==workspace.id||this.state.activeSurfaceId!==sourceId)return;
-      const thread=Schema.decodeUnknownSync(ThreadSchema)(sdkThread(session));
+      const session=await this.agentSdk.forRoot().neo.session();
+      if(this.disposed||this.neoIntent?.epoch!==this.epoch||this.state.activeSurfaceId!==this.neoIntent.sourceId)return;
       const previous=this.state.providerStates[session.id];
       this.update({providerStates:{...this.state.providerStates,[session.id]:{
         ...previous,agent:"neo",model:session.model?`${session.model.providerId}/${session.model.id}`:previous?.model,
         provider_id:session.model?.providerId||previous?.provider_id,connection_id:session.model?.connectionId||previous?.connection_id,
         thinking:session.model?.variant||previous?.thinking,
       }}});
-      return this.openThread({...thread,title:"Neo"});
-    })().finally(()=>{if(this.neoFlights.get(workspace.id)===task)this.neoFlights.delete(workspace.id);});
-    this.neoFlights.set(workspace.id,task);return task;
+      const id=`agent:${session.id}`;
+      // Move old workspace-owned tabs into the root view without deleting chats.
+      for(const surface of [...this.state.surfaces])if(surface.kind==="agent"&&surface.sessionId&&this.isNeoSession(surface.sessionId)&&(surface.id!==id||surface.scope!=="root"))this.closeSurface(surface.id);
+      const existing=this.state.surfaces.find(surface=>surface.id===id);
+      if(existing)this.selectSurface(id);
+      else this.addSurface({id,kind:"agent",title:"Neo",sessionId:session.id,agentRootSessionId:session.id,workspaceId:"",scope:"root"});
+      this.resumeThread(session.id);
+      void this.refreshCatalogs();
+      return id;
+    })().finally(()=>{if(this.neoFlight===task)this.neoFlight=undefined;});
+    this.neoFlight=task;return task;
   };
   /** `adoptHome`: a conversation started from the Neoism page becomes that tab. */
   /** Opens (or focuses) the chat in the active workspace; returns its surface id. */
@@ -1572,8 +1590,10 @@ export class WorkspaceModel {
   /** Accounts (profiles) connected for one provider, like the desktop's
    * `/v2/providers/{id}/connections`; one provider can hold several logins. */
   providerConnections = async (providerId: string) => {
-    const workspace = this.state.activeWorkspace; if (!workspace) return [];
-    const rows = await this.agentSdk.forWorkspace(workspace.id).catalog.providers.connections(providerId, workspace.id) as unknown;
+    const workspace = this.state.activeWorkspace,root=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.scope==="root";
+    if (!workspace&&!root) return [];
+    const sdk=root?this.agentSdk.forRoot():this.agentSdk.forWorkspace(workspace!.id);
+    const rows = await sdk.catalog.providers.connections(providerId,root?undefined:workspace!.id) as unknown;
     return (Array.isArray(rows) ? rows : []).filter(isRecord).flatMap((row) => typeof row.connectionId === "string" && typeof row.label === "string"
       ? [{ id: row.connectionId, label: row.label, authType: typeof row.authType === "string" ? row.authType : "", isDefault: row.isDefault === true }] : []);
   };
@@ -1607,6 +1627,7 @@ export class WorkspaceModel {
     void task.finally(() => { if (this.selectionTasks.get(sessionId) === task) this.selectionTasks.delete(sessionId); });
   };
   private sdkForSession(sessionId: string) {
+    if(this.isNeoSession(sessionId))return this.agentSdk.forRoot();
     const workspaceId = this.sessionWorkspaces.get(sessionId) || this.state.surfaces.find((s) => s.sessionId === sessionId)?.workspaceId || this.state.activeWorkspace?.id;
     if (!workspaceId) throw new Error("Select a workspace first");
     this.sessionWorkspaces.set(sessionId, workspaceId);
@@ -1629,11 +1650,13 @@ export class WorkspaceModel {
   private catalogFailures=0;
   private catalogDirectory(){
     const sessionId=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.sessionId;
+    if(sessionId&&this.isNeoSession(sessionId))return undefined;
     return this.state.threads.find(thread=>thread.session_id===sessionId)?.directory||this.state.activeWorkspace?.root_dir||undefined;
   }
   refreshCatalogs = (options:{maxAgeMs?:number}={}) => {
-    const workspace=this.state.activeWorkspace;if(!workspace)return Promise.resolve();
-    const directory=this.catalogDirectory(),key=JSON.stringify([this.epoch,workspace.id,directory]);
+    const workspace=this.state.activeWorkspace,root=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.scope==="root";
+    if(!workspace&&!root)return Promise.resolve();
+    const directory=this.catalogDirectory(),key=JSON.stringify([this.epoch,root?"root":workspace?.id,directory]);
     const pending=this.catalogFlights.get(key);if(pending&&this.catalogScope===key)return pending;
     if(this.catalogScope===key&&options.maxAgeMs&&Date.now()-(this.catalogFetchedAt.get(key)||0)<options.maxAgeMs)return Promise.resolve();
     if(this.catalogScope!==key){
@@ -1646,17 +1669,18 @@ export class WorkspaceModel {
   };
   private loadCatalogs = async (directory:string|undefined) => {
     const epoch = this.epoch, workspace = this.state.activeWorkspace;
-    if (!workspace) return;
-    const generation=++this.catalogGeneration,isCurrent=()=>epoch===this.epoch&&generation===this.catalogGeneration&&directory===this.catalogDirectory();
-    const sdk = this.agentSdk.forWorkspace(workspace.id);
+    const rootScope=this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.scope==="root";
+    if (!workspace&&!rootScope) return;
+    const generation=++this.catalogGeneration,isCurrent=()=>epoch===this.epoch&&generation===this.catalogGeneration&&directory===this.catalogDirectory()&&rootScope===(this.state.surfaces.find(surface=>surface.id===this.state.activeSurfaceId)?.scope==="root");
+    const sdk = rootScope?this.agentSdk.forRoot():this.agentSdk.forWorkspace(workspace!.id);
     // Provider accounts retain workspace scope. Project metadata follows the
     // actual cwd through daemon-verified desktop access, never the old root.
-    const root=this.state.workspaces.find(entry=>entry.id===workspace.id)?.root_dir;
+    const root=rootScope?undefined:this.state.workspaces.find(entry=>entry.id===workspace!.id)?.root_dir;
     const paths=hostPaths(root||"");
     const child=root&&directory?paths.relative(root,directory):undefined;
     const providerDirectory=child!==undefined&&child!==".."&&!child.startsWith(`..${paths.sep}`)&&!paths.isAbsolute(child)?directory:undefined;
-    const projectSdk=this.agentSdk.forDirectory(workspace.id);
-    const key=JSON.stringify([workspace.id,directory||""]);
+    const projectSdk=rootScope?Promise.resolve(sdk):this.agentSdk.forDirectory(workspace!.id);
+    const key=JSON.stringify([rootScope?"root":workspace!.id,directory||""]);
     const hadReadyModel=!!this.state.agentDefaults?.[key]?.model;
     let config:unknown={},providers:unknown={},configReady=false,providersReady=false,providersFailed=false;
     const publishDefaults=()=>{
@@ -1682,7 +1706,7 @@ export class WorkspaceModel {
     await Promise.all([
       catalog(async(signal)=>{const result=await(await projectSdk).operations.request("v2.config.defaults",{query:{directory},signal});if(signal.aborted)return{};config=result;configReady=true;publishDefaults();return{};}),
       catalog(async (signal) => {
-        const result = await sdk.operations.request("v2.providers.configured",{query:{directory:providerDirectory},signal});
+        const result = await sdk.operations.request("v2.providers.configured",{query:{directory:providerDirectory,...(rootScope?{scope:"installation" as const}:{})},signal});
         if(signal.aborted)return{};
         providers=result;providersReady=true;publishDefaults();
         const catalog = result.providers.map((p) => ({ id: p.id, name: p.name || p.id,
@@ -1691,8 +1715,8 @@ export class WorkspaceModel {
             context_limit: isRecord(model.limit) && typeof model.limit.context === "number" && model.limit.context > 0 ? model.limit.context : undefined })) }));
         return { providers: Schema.decodeUnknownSync(Schema.Array(ProviderSchema))(catalog), providerCatalog: result };
       },()=>{providersReady=true;providersFailed=true;publishDefaults();}),
-      catalog(async (signal) => ({ agents: Schema.decodeUnknownSync(Schema.Array(AgentSchema))((await(await projectSdk).operations.request("v2.agents.list",{query:{directory},signal})).filter((a) => !a.hidden && a.mode !== "subagent").map((a) => ({ ...a, description: a.description || "" }))) })),
-      catalog(async (signal) => ({ skills: Schema.decodeUnknownSync(Schema.Array(SkillSchema))((await(await projectSdk).operations.request("v2.skills.list",{query:{directory},signal})).map((a) => ({ ...a, description: a.description || "" }))) })),
+      catalog(async (signal) => ({ agents: Schema.decodeUnknownSync(Schema.Array(AgentSchema))((await(await projectSdk).operations.request("v2.agents.list",{query:{directory,...(rootScope?{scope:"installation" as const}:{})},signal})).filter((a) => !a.hidden && a.mode !== "subagent").map((a) => ({ ...a, description: a.description || "" }))) })),
+      catalog(async (signal) => ({ skills: Schema.decodeUnknownSync(Schema.Array(SkillSchema))((await(await projectSdk).operations.request("v2.skills.list",{query:{directory,...(rootScope?{scope:"installation" as const}:{})},signal})).map((a) => ({ ...a, description: a.description || "" }))) })),
     ]);
     if (isCurrent()) {
       this.catalogFailures=this.state.catalogsError?Math.min(6,this.catalogFailures+1):0;
@@ -1854,6 +1878,7 @@ export class WorkspaceModel {
     if (!text.trim() && !attachments.length) return false;
     this.clearSessionError(sessionId);
     const selection=options.selection||this.selection(sessionId),request=sdkPrompt(text,attachments,selection,options.delivery||"steer",localPresenceIdentity(this.config).displayName);
+    if(this.isNeoSession(sessionId))request.system=`You are the root personal assistant, with no workspace or working directory. Current UI project context (optional task target, not your identity or cwd): ${JSON.stringify(this.state.activeWorkspace?{workspaceId:this.state.activeWorkspace.id,directory:this.state.activeWorkspace.root_dir}:null)}. Use this target only when the user refers to the current project; otherwise ask which project to work on. Pass an explicit target directory to neo_task.`;
     if(options.messageId)request.messageId=options.messageId;
     // Idle sends still paint before any await. A busy session may queue or
     // steer this prompt: wait for its canonical message instead of flashing

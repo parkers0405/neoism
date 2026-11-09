@@ -908,8 +908,15 @@ pub(crate) fn mint_agent_credential(
     sign_agent_credential(&claims)
 }
 
-fn mint_system_agent_credential() -> Result<String, Response> {
+pub(crate) fn mint_system_agent_credential() -> Result<String, Response> {
     let claims = neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::system_workflow(
+        time::OffsetDateTime::now_utc().unix_timestamp(), AGENT_CREDENTIAL_LIFETIME_SECS,
+    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    sign_agent_credential(&claims)
+}
+
+pub(crate) fn mint_local_agent_credential() -> Result<String, Response> {
+    let claims = neoism_agent_service_api::daemon_credential::DaemonCredentialClaims::local_agent(
         time::OffsetDateTime::now_utc().unix_timestamp(), AGENT_CREDENTIAL_LIFETIME_SECS,
     ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     sign_agent_credential(&claims)
@@ -1155,12 +1162,16 @@ mod agent_proxy_auth_tests {
         assert!(neoism_agent_service_api::daemon_credential::system_workflow_allows(
             "GET", "/v2/plugins/dev.neoism.mcp/catalog",
         ));
+        assert!(neoism_agent_service_api::daemon_credential::system_workflow_allows("POST", "/v2/neo/session"));
         for token in [None, Some(device.raw_token.as_str()), Some(visitor.raw_token.as_str()), Some("neoism-daemon-v1.forged.signature")] {
             let expected = if token.is_some() { StatusCode::FORBIDDEN } else { StatusCode::UNAUTHORIZED };
             let mut request = axum::http::Request::get("/agent/system/v2/plugins/dev.neoism.mcp/catalog")
                 .header("x-neoism-tenant-id", "local")
                 .header("x-neoism-subject", "local-operator")
                 .header("x-neoism-directory", "/");
+            if let Some(token) = token { request = request.header(header::AUTHORIZATION, format!("Bearer {token}")); }
+            assert_eq!(app.clone().oneshot(request.body(axum::body::Body::empty()).unwrap()).await.unwrap().status(), expected);
+            let mut request = axum::http::Request::post("/agent/system/v2/neo/session");
             if let Some(token) = token { request = request.header(header::AUTHORIZATION, format!("Bearer {token}")); }
             assert_eq!(app.clone().oneshot(request.body(axum::body::Body::empty()).unwrap()).await.unwrap().status(), expected);
         }

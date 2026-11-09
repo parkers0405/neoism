@@ -48,13 +48,33 @@ pub(crate) struct ImportSessionResponse {
 pub(crate) async fn session_import(
     State(state): State<AppState>,
     claims: Option<Extension<crate::caller::CallerClaims>>,
-    Json(request): Json<ImportSessionRequest>,
+    Json(mut request): Json<ImportSessionRequest>,
 ) -> Result<Json<ImportSessionResponse>, ApiError> {
-    if let Some(Extension(claims)) = claims {
+    let existing = state.inner.store.get_session(request.bundle.session.id.as_str()).await?;
+    if let Some(Extension(claims)) = claims.as_ref() {
+        if existing.as_ref().is_some_and(|info| !crate::caller::allows_session(claims, info)) {
+            return Err(ApiError::forbidden("The caller cannot overwrite this session"));
+        }
         if !crate::caller::allows_directory(&claims, &request.target_workspace_root) {
             return Err(ApiError::forbidden(
                 "The caller cannot import into this workspace",
             ));
+        }
+    }
+    // Transfer metadata is not proof of root task ownership. Workspace visitors
+    // may preserve an existing trusted association, never mint one or forge its
+    // completion outbox. The root operator may transfer owned task records.
+    if claims.as_ref().is_some_and(|Extension(claims)| !crate::neo::root_operator(claims))
+        && (request.bundle.session.extra.contains_key("neoSessionId")
+            || existing.as_ref().is_some_and(|info| info.extra.contains_key("neoSessionId"))) {
+        if let Some(info) = existing.as_ref().filter(|info| info.extra.contains_key("neoSessionId")) {
+            request.bundle.session.parent_id = info.parent_id.clone();
+        }
+        for key in ["neoSessionId", "neoTargetWorkspaceId", "subtaskNotifyOnIdle", "subtaskCompletion", "subtaskCompletions", "subtaskPersistenceVersion"] {
+            request.bundle.session.extra.remove(key);
+            if let Some(value) = existing.as_ref().and_then(|info| info.extra.get(key)) {
+                request.bundle.session.extra.insert(key.into(), value.clone());
+            }
         }
     }
     let session_id =

@@ -14,6 +14,8 @@ pub(super) fn tenant_predicate(alias: &str, id_column: &str, parameter: &str) ->
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HostingSession {
+    #[serde(default)]
+    session_role: Option<String>,
     id: String,
     parent_id: Option<String>,
     workspace_id: Option<String>,
@@ -123,7 +125,7 @@ impl SessionStore {
         }
         let mut families = Vec::new();
         for session in &sessions {
-            if session.parent_id.is_some()
+            if session.session_role.as_deref() == Some("neo") || session.parent_id.is_some()
                 || !((session.workspace_id.is_none() && session.tenant == "local")
                     || (session.workspace_id.as_deref() == Some(workspace.as_str())
                         && session.tenant == format!("workspace:{workspace}")))
@@ -269,6 +271,9 @@ impl Db {
         }
         for session in sessions {
             session.extra.remove(crate::caller::HOST_LOCAL_ACCESS_KEY);
+            if session.is_neo() && session.extra.get("sessionScope").and_then(serde_json::Value::as_str) == Some("root") {
+                continue;
+            }
             if let Some(workspace) = revocations.get(session.id.as_str()) {
                 if session.workspace_id.is_none()
                     && crate::caller::session_tenant(session) == "local"

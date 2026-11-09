@@ -17,6 +17,28 @@ test("SDK endpoints preserve the daemon origin and proxy prefix with an explicit
   expect(() => agentSdkEndpoint("ws+unix:///missing-separator", "a")).toThrow();
 });
 
+test("root assistant requests need no directory and never fall back to workspace credentials",async()=>{
+  const requests:Array<{path:string;authorization:string|null;directory:string|null}>=[];
+  const server=Bun.serve({hostname:"127.0.0.1",port:0,fetch:request=>{
+    const url=new URL(request.url),authorization=request.headers.get("authorization");
+    requests.push({path:url.pathname,authorization,directory:url.searchParams.get("directory")});
+    if(authorization!=="Bearer owner")return Response.json({code:"forbidden",message:"Root access denied",retryable:false,details:{}},{status:403});
+    if(url.pathname==="/agent/system/v2/neo/session")return Response.json({id:"root-neo",title:"Neo",directory:"",agent:"neo",sessionRole:"neo"});
+    return new Response(null,{status:204});
+  }});cleanups.push(()=>server.stop(true));
+  const endpoint=`${server.url.origin.replace(/^http/,"ws")}/session`,owner=new AgentSdk({endpoint,authToken:"owner"});
+  cleanups.push(()=>owner.dispose());
+  const session=await owner.forRoot().neo.session();
+  await owner.forRoot().sessions.prompt(session.id,sdkPrompt("Hello",[],{agent:"neo"},"steer"));
+  expect(requests).toEqual([
+    {path:"/agent/system/v2/neo/session",authorization:"Bearer owner",directory:null},
+    {path:"/agent/system/v2/sessions/root-neo/prompt",authorization:"Bearer owner",directory:null},
+  ]);
+  const paired=new AgentSdk({endpoint,authToken:"owner",pairingToken:"project-device"});cleanups.push(()=>paired.dispose());
+  await expect(paired.forRoot().neo.session()).rejects.toThrow("Root access denied");
+  expect(requests.slice(2)).toEqual([{path:"/agent/system/v2/neo/session",authorization:"Bearer project-device",directory:null}]);
+});
+
 test("the real SDK sends prompts through the scoped local proxy with header authentication and exact attachment bytes", async () => {
   const directory = mkdtempSync(join(tmpdir(), "neoism-sdk-"));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));

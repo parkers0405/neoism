@@ -189,6 +189,15 @@ pub async fn import_session(
 
     let mut session = bundle.session;
     let session_id = session.id.clone();
+    anyhow::ensure!(!session.is_neo() && !session.extra.contains_key("neoOwnerKey")
+        && session.extra.get("sessionScope").and_then(serde_json::Value::as_str) != Some("root"),
+        "The personal assistant cannot be imported/rebound as a workspace session");
+    let existing = state.inner.store.get_session(session_id.as_str()).await?;
+    anyhow::ensure!(!existing.as_ref().is_some_and(SessionInfo::is_neo), "Workspace imports cannot overwrite Neo history");
+    if let Some(parent) = session.parent_id.as_ref() {
+        anyhow::ensure!(!state.inner.store.get_session(parent.as_str()).await?.as_ref().is_some_and(SessionInfo::is_neo),
+            "Neo cannot be a workspace session parent");
+    }
 
     // Re-root the session directory under the importing host's workspace.
     session.directory = rebind_directory(target_root, session.path.as_deref());

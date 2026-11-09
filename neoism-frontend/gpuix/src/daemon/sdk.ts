@@ -29,7 +29,7 @@ export function sdkPrompt(text: string, attachments: readonly Attachment[], sele
 }
 
 /** Reach the Agent through the same daemon and workspace as the native UI. */
-export function agentSdkEndpoint(endpoint: string, workspaceId: string) {
+export function agentSdkEndpoint(endpoint: string, workspaceId?: string) {
   const url = new URL(endpoint);
   let socket: string | undefined;
   if (url.protocol === "ws+unix:") {
@@ -41,7 +41,7 @@ export function agentSdkEndpoint(endpoint: string, workspaceId: string) {
   const base = socket ? new URL(`http://localhost${url.pathname}`) : new URL(url);
   base.protocol = url.protocol === "wss:" ? "https:" : "http:";
   base.pathname = base.pathname.replace(/\/session\/?$/, "").replace(/\/$/, "")
-    + `/agent/workspaces/${encodeURIComponent(workspaceId)}/`;
+    + (workspaceId===undefined?"/agent/system/":`/agent/workspaces/${encodeURIComponent(workspaceId)}/`);
   base.search = ""; base.hash = "";
   return { baseUrl: base.toString(), socket, token: url.searchParams.get("token") || undefined };
 }
@@ -55,7 +55,13 @@ export class AgentSdk {
   constructor(private config: Pick<AppConfig, "endpoint" | "authToken" | "pairingToken">,
     private fetcher: typeof fetch = globalThis.fetch) {}
   forWorkspace(workspaceId: string): NeoismClient {
-    let client = this.clients.get(workspaceId);
+    return this.scopedClient(workspaceId);
+  }
+  /** Root assistant access never falls back to a project-scoped capability. */
+  forRoot():NeoismClient { return this.scopedClient(); }
+  private scopedClient(workspaceId?:string):NeoismClient {
+    const key=JSON.stringify(workspaceId===undefined?["root"]:["workspace",workspaceId]);
+    let client = this.clients.get(key);
     if (client) return client;
     const endpoint = agentSdkEndpoint(this.config.endpoint, workspaceId);
     const fetcher = this.fetcher, signal = this.abort.signal;
@@ -65,7 +71,7 @@ export class AgentSdk {
     })) as typeof fetch;
     client = createHttpClient({ baseUrl: endpoint.baseUrl,
       token: this.config.pairingToken || this.config.authToken || endpoint.token, fetch: request });
-    this.clients.set(workspaceId, client);
+    this.clients.set(key, client);
     return client;
   }
   /** A local terminal may navigate beyond the workspace's declared root.

@@ -147,6 +147,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   const chooseDirectory = (start?: string) => {const workspace=model.state.activeWorkspace;return new Promise<string|undefined>(resolve=>setDirectoryBrowser({start:start||"",resolve:path=>{const current=model.state.activeWorkspace;resolve(current?.id===workspace?.id&&current?.root_dir===workspace?.root_dir?path:undefined);}}));};
   const commitWorkspaceRoot = (path: string | undefined) => { if (path) void chromeActions.setActiveWorkspaceRoot(path).catch(model.report); };
   const chooseStatusDirectory=()=>{
+    if(state().surfaces.find(surface=>surface.id===state().activeSurfaceId)?.scope==="root")return;
     const workspace=state().activeWorkspace;if(!workspace||directoryBrowser())return;
     if(!localDaemon(config.endpoint)||workspace.host_kind&&workspace.host_kind!=="local"){model.report(new Error("This host does not expose a remote folder browser; no client directory was selected"));return;}
     void chooseDirectory(workspace.root_dir||"").then(path=>{
@@ -200,7 +201,9 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
   const newWindowWorkspace=()=>props.workspaceNavigation?props.workspaceNavigation.newWorkspace():model.newWorkspace();
   const closeWindowWorkspace=(discard=false,id=activeWindowWorkspaceId())=>props.workspaceNavigation?props.workspaceNavigation.close(discard,id):model.closeWorkspace(discard,id);
   const reorderWindowWorkspace=(dragId:string,targetId:string,position:"before"|"after")=>props.workspaceNavigation?props.workspaceNavigation.reorder(dragId,targetId,position):model.reorderWorkspace(dragId,targetId,position);
-  const workspaceLayout = createMemo(() => state().activeWorkspace ? model.getLayout(state().activeWorkspace!.id) : undefined);
+  const workspaceLayout = createMemo(() => active()?.scope === "root" ? model.getLayout("") : state().activeWorkspace ? model.getLayout(state().activeWorkspace!.id) : undefined);
+  const rootAgent = (surfaceId:string,sessionId?:string) => state().surfaces.find(surface=>surface.id===surfaceId)?.scope==="root" || !!sessionId&&model.isNeoSession(sessionId);
+  const agentDirectory = (surfaceId:string,sessionId?:string) => rootAgent(surfaceId,sessionId) ? undefined : state().threads.find(thread=>thread.session_id===sessionId)?.directory||state().activeWorkspace?.root_dir||undefined;
   const gitController=createMemo(()=>{const id=activeWorkspaceId();return id?visuals.gitPanel(id,model,config):undefined;});
   const [gitFrame,setGitFrame]=createSignal<GitFrame>();
   const [gitFocused,setGitFocused]=createSignal(false),[gitFocusToken,setGitFocusToken]=createSignal(0);
@@ -261,7 +264,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     untrack(publish);onCleanup(view.subscribe(publish));
   });
   const saveSurface = async (surface: Surface) => { await model.saveFile(surface); if (surface.document?.kind === "config") await props.reloadConfig?.(undefined,true); };
-  const nativeStatus = createMemo(() => statusInfo(active(), state().activeWorkspace?.root_dir, editorState(), activeEditor()?.frame), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+  const nativeStatus = createMemo(() => statusInfo(active(), active()?.scope==="root"?undefined:state().activeWorkspace?.root_dir, editorState(), activeEditor()?.frame), undefined, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const closePalette = (cancel = true) => {
     const terminal = terminalSearch();
     if (cancel && ["/", "?"].includes(paletteMode())) { if (terminal) terminal.cancel(); else activeEditor()?.call("search.cancel"); }
@@ -1015,7 +1018,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     onCleanup(()=>{sidebarHosts.delete("conversations");sidebarTargets.delete("conversations");});
     // The original desktop conversations sidebar, painted by the shared Rust renderer.
     return <div style={{ ...column, flexGrow: 1, minHeight: 0 }}>
-      <Show when={activeWorkspaceId()} keyed>{(workspaceId) => <AgentSidePanelView model={model} config={config} cacheKey={workspaceId} directory={state().activeWorkspace?.id === workspaceId ? state().activeWorkspace?.root_dir : undefined} viewedSession={active()?.sessionId} report={model.report}
+      <Show when={activeWorkspaceId()||"root-neo"} keyed>{(workspaceId) => <AgentSidePanelView model={model} config={config} cacheKey={workspaceId} directory={state().activeWorkspace?.id === workspaceId ? state().activeWorkspace?.root_dir : undefined} viewedSession={active()?.scope==="root"||active()?.sessionId&&model.isNeoSession(active()!.sessionId!)?undefined:active()?.sessionId} report={model.report}
         onHost={host=>{if(host)sidebarHosts.set("conversations",host);else sidebarHosts.delete("conversations");}}
         onCursor={(rect,host,bounds)=>{chromeBounds.set(host.id,bounds);target=rect?{host,kind:"sidebar",bounds:rect}:undefined;if(chromeFocus().zone==="sidebar")setChromeTarget(previous=>target?{...target,origin:previous?.host===host?previous.origin:pendingSidebarOrigin}:undefined);}}
         onFocus={()=>{if(!pendingContentFocus){setChromeFocus({zone:"sidebar"});const next=target;if(next)setChromeTarget(previous=>({...next,origin:previous?.host===next.host?previous.origin:pendingSidebarOrigin}));}}}
@@ -1084,7 +1087,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     // still active. Escape must interrupt that execution as in the Rust pane.
     const interruptible=createMemo(()=>{state().ui;return localBusy()||!!props.sessionId&&((state().queues[props.sessionId]?.count||0)>0||model.agentFamily(props.sessionId).roster.some(row=>["running","active","busy","blocked","pending","outstanding"].includes(row.status)));});
     const noProviders=createMemo(()=>!state().catalogsLoading&&!state().catalogsError&&!modelAvailability().loading&&!modelAvailability().error&&providerCatalog().length===0);
-    const cwd=createMemo(()=>state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined);
+    const cwd=createMemo(()=>agentDirectory(props.surfaceId,props.sessionId));
     const slash=new SlashController({model,config,sessionId:()=>props.sessionId,attachments,hooks:{
       openSelectionPicker:kind=>{setSlashDismissed(true);setSlashPicker(undefined);openPicker(kind);},
       picker:request=>{setSlashDismissed(true);setSlashPicker(request);},
@@ -1321,7 +1324,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
           <div testId="agent-error-details" role="button" tabIndex={0} aria-label="Show full agent error and recovery actions" onClick={showSessionError} onKeyDown={event=>{if(event.key?.toLowerCase()==="enter"||event.key===" "){event.preventDefault();event.stopPropagation();showSessionError();}}} style={{...row,flexShrink:0,height:"100%",cursor:"pointer"}}><Label size={12.5} color={c.red}>Details</Label></div>
         </div>;}}</Show>
         <Show when={!sessionError()&&state().catalogsError}>{error=><text testId="agent-catalog-error" style={{position:"absolute",right:16*s,top:(frame()?.cardRect[3]||0)+8*s,...text(11,c.red)}}>Model settings unavailable: {error()}</text>}</Show>
-        <For each={sessionError()?[]:frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>
+        <For each={sessionError()||rootAgent(props.surfaceId,props.sessionId)?[]:frame()?.cwdRects||[]}>{rect=><div role="button" aria-label="Change directory" onClick={()=>void slash.execute("/cd").catch(model.report)} style={{...absolute(rect),cursor:"pointer"}}/>}</For>
       </div></Show>
       <Show when={slashOpen()}><InlinePicker config={config} kind="slash" title="Commands" options={slashOptions()} loading={slash.state.loading} error={slash.state.error} anchor={anchor} query={draft().replace(/^\/+/,"")} onKeyHandler={handler=>slashKey=handler} onAcceptHandler={handler=>slashAccept=handler} onSelect={acceptSlash} onClose={()=>{setSlashDismissed(true);focus();}}/></Show>
       <Show when={slashInput()} keyed>{entry=><InlinePicker config={config} kind="connect-input" title={entry.request.title} entry anchor={anchor} secret={entry.request.secret} initialValue={entry.request.initialValue} placeholder={entry.request.placeholder} activity={entry.request.activity}
@@ -1334,6 +1337,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     </>;
   }
   function AgentSurface(props:{surfaceId:string;sessionId?:string;initialViewport:{width:number;height:number}}) {
+    const owner=()=>state().surfaces.find(surface=>surface.id===props.surfaceId);
     const cached=visuals.agentComposer(props.surfaceId,config,props.initialViewport);
     const timelineSession=createMemo(()=>props.sessionId||state().pendingAgentSessions[props.surfaceId]);
     const messages=createMemo(()=>timelineSession()?state().history[timelineSession()!]||[]:[]);
@@ -1353,7 +1357,7 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
       cached.frame=native.frame({...cached.viewport,home:home(),text:draft?.text||"",images:draft?.attachments?.length||0,help:model.state.ui.agentHints!==false,
         contextLabel:sessionContextMetrics(props.sessionId,model.selection(props.sessionId).model||"").label,
         system:props.sessionId&&state().sessionErrors[props.sessionId]?"Agent error":undefined,
-        cwd:state().threads.find(thread=>thread.session_id===props.sessionId)?.directory||state().activeWorkspace?.root_dir||undefined,
+        cwd:agentDirectory(props.surfaceId,props.sessionId),
         noProviders:!state().catalogsLoading&&!state().catalogsError&&state().providers.length===0,busy:!!props.sessionId&&![undefined,"Idle"].includes(state().streaming[props.sessionId]),state:props.sessionId?state().streaming[props.sessionId]||"Idle":"Idle"});
     }
     const [viewport,setViewport]=createSignal(cached.viewport);
@@ -1362,10 +1366,10 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     return <div testId="agent-pane" data-home={home()} style={{position:"absolute",left:0,top:0,width:"100%",height:"100%",minWidth:0,minHeight:0,overflow:"hidden"}}
       onLayout={event=>{const next={width:event.width||0,height:event.height||0};if(next.width>0&&next.height>0)cached.viewport=next;setViewport(old=>old.width===next.width&&old.height===next.height?old:next);}}>
       <Show when={home()}><Wordmark config={config} kind="agent" hosts={wordmarkHosts} startupKey={`agent:${props.sessionId||props.surfaceId}`} testId="agent-wordmark" paintBounds={[-(frame()?.logoRect[0]||0),-(frame()?.logoRect[1]||0),viewport().width,viewport().height]} style={{position:"absolute",left:frame()?.logoRect[0]||0,top:frame()?.logoRect[1]||0,width:frame()?.logoRect[2]||0,height:frame()?.logoRect[3]||0,pointerEvents:"auto"}}/></Show>
-      <Show when={!home()&&!!timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><AgentTimelineView surfaceId={props.surfaceId} viewport={viewport()} onPreview={setImagePreview} sessionId={timelineSession()!} neoMode={state().providerStates[timelineSession()!]?.agent==="neo"} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:timelineSession()!} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:state().activeWorkspace?.root_dir};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
+      <Show when={!home()&&!!timelineSession()}><div style={{...column,position:"absolute",left:0,top:0,width:"100%",height:"100%"}}><AgentTimelineView workspaceId={owner()?.workspaceId} surfaceId={props.surfaceId} viewport={viewport()} onPreview={setImagePreview} sessionId={timelineSession()!} neoMode={rootAgent(props.surfaceId,props.sessionId)||state().providerStates[timelineSession()!]?.agent==="neo"} provisional={!props.sessionId} rootSessionId={props.sessionId?family().root:timelineSession()!} familyRoster={family().roster} onNavigate={target=>{const thread=state().threads.find(thread=>thread.session_id===target)||{session_id:target,title:family().roster.find(row=>row.id===target)?.title||target,directory:agentDirectory(props.surfaceId,props.sessionId)};model.openThread(thread,false,family().root);}} model={model} config={config} report={model.report}
         onFocus={()=>{++contentFocusSerial;contentFocusFrames.cancel();pendingContentFocus=false;noteContentFocus();setChromeTarget(undefined);suppressSurfaceCursor(renderer,false);}}
         contentBottom={Math.max(0,subagent()?viewport().height-12*s:frame()?.inputRect[1]??viewport().height)}
-        openFile={path=>{const root=state().activeWorkspace?.root_dir;void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/></div></Show>
+        openFile={path=>{const root=agentDirectory(props.surfaceId,props.sessionId);if(!root&&rootAgent(props.surfaceId,props.sessionId)&&!posix.isAbsolute(path)&&!win32.isAbsolute(path)){model.report(new Error("Neo has no directory; open an absolute file path or select a project explicitly"));return;}void model.openFile(root&&path.startsWith(root+"/")?path.slice(root.length+1):path);}}/></div></Show>
       <Show when={!subagent()&&viewport().width>0&&viewport().height>0}><Composer surfaceId={props.surfaceId} sessionId={props.sessionId} home={home()} viewport={viewport()} onFrame={read=>setReadFrame(()=>read)}/></Show>
     </div>;
   }
@@ -1423,9 +1427,9 @@ export function App(props: { workspaceActivation?:number; workspaceNavigation?:W
     </div>;
     return <div style={{ ...column, ...(overlayDetails() ? { position: "absolute", right: 0, top: 0, bottom: 0 } as const : {}), width: detailWidth(), marginLeft: overlayDetails() ? 0 : d.detailGap * s, flexShrink: 0, borderRadius: d.frameRadius * s, borderWidth: d.frameStroke * s, borderColor: c.border,
       backgroundColor: c.bg, padding: 12 * s, paddingTop: 14 * s, overflowY: "scroll" }} testId="agent-details">
-      <PixelHeading>Directory</PixelHeading>
+      <Show when={active()?.scope!=="root"}><PixelHeading>Directory</PixelHeading>
       <Label size={12.35}>{directory()}</Label>
-      <div style={{ height: 10 * s, flexShrink: 0 }} />
+      <div style={{ height: 10 * s, flexShrink: 0 }} /></Show>
       <Show when={active()?.kind === "agent"}>
       <PixelHeading>Session</PixelHeading>
       {detailsLabel("Agent", (activeSelection().agent || "build").replace(/^./, (letter) => letter.toUpperCase()))}

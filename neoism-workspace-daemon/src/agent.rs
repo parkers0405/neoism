@@ -629,6 +629,7 @@ pub struct AgentSession {
 }
 
 pub(crate) struct AgentInner {
+    authority: Mutex<AgentAuthority>,
     /// `None` when `NEOISM_AGENT_API_KEY` was unset at spawn time.
     api_key: Option<String>,
     /// Model id (e.g. `"claude-opus-4-5-20250929"`). Empty string =
@@ -704,6 +705,7 @@ impl AgentSession {
             .unwrap_or_else(|_| http.clone());
         AgentSession {
             inner: Arc::new(AgentInner {
+                authority: Mutex::new(AgentAuthority::Operator),
                 api_key: api_key.filter(|s| !s.is_empty()),
                 model,
                 tx,
@@ -759,6 +761,24 @@ impl AgentSession {
             prev.abort();
         }
     }
+
+    pub(crate) fn authorize_as_root(&self) {
+        *self.inner.authority.lock() = AgentAuthority::Operator;
+    }
+
+    pub(crate) fn authorize_as_peer(&self, workspace: Option<(String, std::path::PathBuf)>) {
+        *self.inner.authority.lock() = match workspace {
+            Some((id, root)) => AgentAuthority::Workspace(id, root),
+            None => AgentAuthority::LocalPeer,
+        };
+    }
+}
+
+#[derive(Clone)]
+enum AgentAuthority {
+    Operator,
+    LocalPeer,
+    Workspace(String, std::path::PathBuf),
 }
 
 impl AgentInner {
@@ -766,10 +786,24 @@ impl AgentInner {
         &self,
         request: reqwest::RequestBuilder,
     ) -> reqwest::RequestBuilder {
-        match &self.agent_server_token {
-            Some(token) => request.bearer_auth(token),
-            None => request,
-        }
+        let authority = self.authority.lock().clone();
+        let local = local_bind_target(&self.agent_server).is_some();
+        let token = match authority {
+            AgentAuthority::Operator if local => crate::server::mint_system_agent_credential().ok()
+                .or_else(|| self.agent_server_token.clone()),
+            // Never disclose a locally minted operator capability to a
+            // configured remote server. Explicit remote credentials keep their
+            // existing behavior; peers never borrow that operator credential.
+            AgentAuthority::Operator => self.agent_server_token.clone(),
+            _ if !local => Some("invalid-remote-peer-agent-capability".into()),
+            AgentAuthority::LocalPeer => Some(crate::server::mint_local_agent_credential().unwrap_or_else(|_| "invalid-peer-agent-capability".into())),
+            AgentAuthority::Workspace(id, root) => {
+                let namespace = crate::agent_hosting::namespace(&id, &root).unwrap_or(id);
+                Some(crate::server::mint_agent_credential("paired-agent".into(), &namespace, &root)
+                    .unwrap_or_else(|_| "invalid-peer-agent-capability".into()))
+            }
+        };
+        match token { Some(token) => request.bearer_auth(token), None => request }
     }
 }
 

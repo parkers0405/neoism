@@ -25,6 +25,8 @@ interface TimelineFrame { selecting?:boolean; preview?:{name:string;url:string};
 interface TimelineFrame {jsonUi?:JsonUiFrame;jsonUiAccepted?:boolean}
 interface Engine { touched:number; id: number; workspaceId:string; surfaces:Set<string>; root:()=>string; images:Map<object,RecentCanvasImages>; lifetime:NativeViewLifetime; dirty: Set<() => void>; dispose: () => void }
 const engineKey=(workspaceId:string,root:string)=>JSON.stringify([workspaceId,root]);
+// Root Neo belongs to the global surface, never the selected project's cwd.
+const sessionWorkspaceId=(model:WorkspaceModel,sessionId:string)=>model.state.surfaces.find(surface=>surface.kind==="agent"&&(surface.sessionId===sessionId||surface.agentRootSessionId===model.agentFamily(sessionId).root))?.workspaceId??(model.isNeoSession(sessionId)?"":model.state.activeWorkspace?.id??"");
 
 /** One original agent timeline engine per conversation (the shared Rust
  * `NeoismAgentPane`: cached layout, scroll-by-offset, stable-prefix
@@ -43,7 +45,7 @@ function pruneEngines(model:WorkspaceModel){
  }
 }
 const engines = new WeakMap<WorkspaceModel, Map<string, Engine>>();
-function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,rootSessionId=sessionId,workspaceId=model.state.activeWorkspace?.id||"",surfaceId?:string): Engine {
+function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,rootSessionId=sessionId,workspaceId=sessionWorkspaceId(model,sessionId),surfaceId?:string): Engine {
   let byModel = engines.get(model);
   if (!byModel) {
     byModel = new Map(); engines.set(model, byModel);positions.set(model,new Map());
@@ -102,13 +104,13 @@ function engineFor(model: WorkspaceModel, sessionId: string, config: AppConfig,r
 
 /** Read the visible family's selection without creating an unseen timeline engine. */
 export function agentSelectedText(model:WorkspaceModel,sessionId:string):string|undefined {
- const engine=engines.get(model)?.get(engineKey(model.state.activeWorkspace?.id||"",model.agentFamily(sessionId).root));
+  const engine=engines.get(model)?.get(engineKey(sessionWorkspaceId(model,sessionId),model.agentFamily(sessionId).root));
  return engine?coreCall<{text:string|null}>("agenttimeline.copy",{id:engine.id}).text||undefined:undefined;
 }
 
 /** Enter the original queue handoff immediately, before the abort round trip. */
 export function stopAgentTimeline(model:WorkspaceModel,sessionId:string){
-  const engine=engines.get(model)?.get(engineKey(model.state.activeWorkspace?.id||"",model.agentFamily(sessionId).root));if(!engine)return;
+   const engine=engines.get(model)?.get(engineKey(sessionWorkspaceId(model,sessionId),model.agentFamily(sessionId).root));if(!engine)return;
  coreCall("agenttimeline.stop",{id:engine.id,sessionId});
  for(const listener of engine.dirty)listener();
 }

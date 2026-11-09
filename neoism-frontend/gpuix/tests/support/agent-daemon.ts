@@ -3,8 +3,8 @@ import { applyEdits, modify, parse } from "jsonc-parser";
 import {createCrdtFixture} from "./crdt-fixture";
 // An isolated protocol fixture used only by tests. The production frontend has
 // no fixture mode and connects through the same daemon transport in every test.
-export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSessionUpdates?:boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;deferPrompts?:boolean;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;agentCatalog?:readonly unknown[];usageResponse?:unknown;usageDelayMs?:number;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
-  const workspaces = [{ id: "a", host_id: "host", title: "A", root_dir: "/project/a" }, { id: "b", host_id: "host", title: "B", root_dir: "/project/b" }];
+export function createAgentDaemon(config: { noWorkspaces?:boolean;questionsOnSwitch?: boolean;rejectSessionUpdates?:boolean; deferCreations?: boolean; configuration?: Record<string, unknown>;slashCommands?:readonly {name:string;description?:string}[]; binaryFiles?: Readonly<Record<string, Uint8Array>>; directoryEntries?: Readonly<Record<string, ReadonlyArray<{ name: string; is_dir: boolean }>>>; fileReadDelayMs?: number;gridPresentation?:boolean;scopedFiles?:Readonly<Record<string,Readonly<Record<string,string>>>>;workspaceCreateError?:string;workspaceCreateDelayMs?:number;promptError?:string;deferPrompts?:boolean;terminalDirectoryChange?:"success"|"failure"|"ack"|"defer";terminalDirectoryResult?:string;gitHandler?:(message:unknown,root:string|undefined,reply:(message:unknown)=>void)=>void;agentConfigDefaults?:Readonly<Record<string,unknown>>;agentDefaultsDelayMs?:Readonly<Record<string,number>>;agentProviderCatalog?:unknown;agentCatalog?:readonly unknown[];usageResponse?:unknown;usageDelayMs?:number;deferWorkspaceSubscriptions?:boolean;agentCatalogEvents?:readonly unknown[] } = {}) {
+  const workspaces = config.noWorkspaces?[]:[{ id: "a", host_id: "host", title: "A", root_dir: "/project/a" }, { id: "b", host_id: "host", title: "B", root_dir: "/project/b" }];
   const threads = [{ session_id: "one", title: "One", directory: "/project/a", agent: "build", model: "openai/base" }, { session_id: "two", title: "Two", directory: "/project/a", agent: "plan", model: "other/second" }];
   const history=new Map<string,unknown[]>(),agentStreams=new Set<string>();
   const requests: Array<{ tag: string; body: Record<string, unknown> }> = [];
@@ -60,10 +60,11 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       if (url.pathname === "/session") return server.upgrade(request) ? undefined : new Response("", { status: 400 });
       if (url.pathname === "/health") return Response.json({ok:true});
       httpRequests.push({ path: url.pathname, authorization: request.headers.get("authorization"), directory: url.searchParams.get("directory") });
-      const match = url.pathname.match(/^\/agent\/workspaces\/([^/]+)\/v2\/(.*)$/);
+      const match = url.pathname.match(/^\/agent\/(?:workspaces\/([^/]+)|system)\/v2\/(.*)$/);
       if (!match) return new Response("Not found", { status: 404 });
-      if(!workspaces.some(workspace=>workspace.id===match[1]))return new Response("Unknown workspace",{status:404});
-      if(["config/defaults","providers/configured","agents","skills"].includes(match[2])){
+      const rootScope=match[1]===undefined;
+      if(!rootScope&&!workspaces.some(workspace=>workspace.id===match[1]))return new Response("Unknown workspace",{status:404});
+      if(!rootScope&&["config/defaults","providers/configured","agents","skills"].includes(match[2])){
         const root=workspaces.find(workspace=>workspace.id===match[1])!.root_dir,directory=url.searchParams.get("directory");
         if(directory&&directory!==root&&!directory.startsWith(root+"/"))return Response.json({code:"forbidden",message:"The caller is not authorized for this directory",retryable:false,details:{}},{status:403});
       }
@@ -83,7 +84,7 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       if (match[2] === "commands") return Response.json(config.slashCommands||[]);
       if (match[2] === "agents") return Response.json(config.agentCatalog ?? [{ name: "build", description: "Build" }, { name: "plan", description: "Plan" }, { name: "internal", hidden: true }]);
       if (match[2] === "skills") return Response.json([{ name: "review", description: "Review" }]);
-      const workspace = workspaces.find((w) => w.id === match[1])!;
+      const workspace = rootScope?{id:"",root_dir:""}:workspaces.find((w) => w.id === match[1])!;
       const session = (id: string) => {
         const selection:Selection = selections.get(id) || { agent: "build", model: "openai/base", thinking: "medium" };
         const slash = selection.model.indexOf("/");
@@ -92,11 +93,12 @@ export function createAgentDaemon(config: { questionsOnSwitch?: boolean;rejectSe
       };
       const payload = request.method === "POST" || request.method === "PATCH" ? await request.json().catch(() => ({})) : {};
       if(match[2]==="neo/session"&&request.method==="POST"){
+        if(!rootScope)return new Response("Neo belongs to root",{status:403});
         neo.count++;
-        const id=`neo-${workspace.id}`;
+        const id="neo-root";
         if(!selections.has(id))selections.set(id,{agent:"neo",model:"openai/base",thinking:"medium"});
         if(neo.defer)await new Promise<void>(resolve=>neo.pending.push(resolve));
-        return Response.json({...session(id),title:"Neo"});
+        return Response.json({...session(id),title:"Neo",sessionRole:"neo"});
       }
       if(match[2]==="sessions"&&request.method==="GET")return Response.json({items:threads.filter(thread=>!url.searchParams.get("directory")||thread.directory===url.searchParams.get("directory")).map(thread=>{const selected=selections.get(thread.session_id)||thread,model=selected.model?.split("/");return{id:thread.session_id,title:thread.title,directory:thread.directory,agent:selected.agent,...(model&&model.length>1?{model:{providerId:model[0],id:model.slice(1).join("/")}}:{})};}),cursor:{}});
       if(match[2]==="sessions/status"){

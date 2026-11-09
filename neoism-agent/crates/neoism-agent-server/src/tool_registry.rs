@@ -481,8 +481,8 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Subagents, owner,
             "neo_task",
-            "Delegate work to a real visible top-level Build session. Returns task_id/session ID immediately; completion or error automatically wakes Neo. Set session_id to follow up in a previously delegated session. Use task_result and stop_task for status and cancellation.",
-            json!({"type":"object", "properties": {"description":{"type":"string"}, "prompt":{"type":"string"}, "session_id":{"type":"string"}}, "required":["description","prompt"]}),
+            "Delegate to a visible top-level Build session. New work requires an explicit absolute directory or registered workspace_id; Neo has no default project. Set session_id to follow up in an owned delegate. Returns immediately; durable completion/error wakes Neo. Use task_result and stop_task for status/cancellation.",
+            json!({"type":"object", "properties": {"description":{"type":"string"}, "prompt":{"type":"string"}, "directory":{"type":"string"}, "workspace_id":{"type":"string"}, "session_id":{"type":"string"}}, "required":["description","prompt"], "anyOf":[{"required":["directory"]},{"required":["workspace_id"]},{"required":["session_id"]}]}),
             stateful_handler,
         ),
         tool(

@@ -94,6 +94,7 @@ mod session_prompt_routes;
 mod session_queue;
 mod session_retry;
 mod session_routes;
+mod neo;
 mod session_run;
 mod session_transfer;
 mod session_undo;

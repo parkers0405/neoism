@@ -281,7 +281,7 @@ fn session_list_index_statement(
     info: &SessionInfo,
 ) -> anyhow::Result<(String, Vec<SqlValue>)> {
     let mut extra = BTreeMap::new();
-    for key in [crate::caller::TENANT_EXTRA_KEY, "pinned", "sessionRole", "neoSessionId"] {
+    for key in [crate::caller::TENANT_EXTRA_KEY, "pinned", "sessionRole", "sessionScope", "neoOwner", "neoSessionId"] {
         if let Some(value) = info.extra.get(key) {
             extra.insert(key.to_string(), value.clone());
         }
@@ -2107,6 +2107,7 @@ impl SessionStore {
             )
             .await?;
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_neo_workspace ON sessions(json_extract(info_json, '$.neoWorkspace')) WHERE json_extract(info_json, '$.neoWorkspace') IS NOT NULL", Vec::new()).await?;
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_neo_root_owner ON sessions(json_extract(info_json, '$.neoOwnerKey')) WHERE json_extract(info_json, '$.neoOwnerKey') IS NOT NULL", Vec::new()).await?;
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_neo_owner ON sessions(json_extract(info_json, '$.neoSessionId')) WHERE json_extract(info_json, '$.neoSessionId') IS NOT NULL", Vec::new()).await?;
         // List metadata lives in a compact sidecar. Creating it is constant
         // time even for legacy databases whose session JSON is many gigabytes.
@@ -3499,7 +3500,7 @@ impl SessionStore {
     }
 
     pub(crate) async fn neo_session(&self, scope: &str) -> anyhow::Result<Option<SessionInfo>> {
-        let row = self.db.fetch_optional("SELECT info_json FROM sessions WHERE json_extract(info_json, '$.neoWorkspace') = ?", vec![text(scope)]).await?;
+        let row = self.db.fetch_optional("SELECT info_json FROM sessions WHERE json_extract(info_json, '$.neoOwnerKey') = ?", vec![text(scope)]).await?;
         row.map(|row| decode_json(row.get_str("info_json")?)).transpose()
     }
 

@@ -90,8 +90,10 @@ impl App {
         self.buffers.insert(relative.clone(), Buffer::new(relative.clone(), line));
         self.open_tab(TabKind::Editor { path: relative.clone() });
         self.focus = crate::app::Focus::Content;
+        // Notes live outside the workspace: their reads are scoped to the vault.
+        let scope = self.notes.root.clone().filter(|root| relative.starts_with(root.as_str())).unwrap_or_else(|| self.cwd.clone());
         if let Some(daemon) = &self.daemon {
-            daemon.send_scoped(Family::Files, serde_json::json!({"ReadFile": {"path": relative}}), &self.cwd);
+            daemon.send_scoped(Family::Files, serde_json::json!({"ReadFile": {"path": relative}}), &scope);
         }
     }
 

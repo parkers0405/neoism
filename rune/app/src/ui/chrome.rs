@@ -77,7 +77,7 @@ fn rail(app: &App) -> El {
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(button("topbar-menu", glyph::MENU, false, |_| {}))
         .child(button("toggle-files", glyph::FOLDER, app.sidebar == Some(Sidebar::Files), |s| s.toggle_file_tree()))
-        .child(button("toggle-notes", glyph::FILE, false, |_| {}))
+        .child(button("toggle-notes", glyph::FILE, app.sidebar == Some(Sidebar::Notes), |s| s.toggle_tree(Sidebar::Notes)))
         .child(button("toggle-conversations", glyph::SPARKLES, app.sidebar == Some(Sidebar::Conversations), |s| {
             s.toggle_conversations();
         }))
@@ -87,7 +87,7 @@ fn rail(app: &App) -> El {
 
 fn sidebar(app: &App) -> El {
     match app.sidebar {
-        Some(Sidebar::Files) => crate::tree::view(app).w(SIDEBAR_W),
+        Some(Sidebar::Files | Sidebar::Notes) => crate::tree::view(app).w(SIDEBAR_W),
         _ => agent::conversations(app).w(SIDEBAR_W),
     }
 }

@@ -10,6 +10,7 @@ use neoism_protocol::agent::{
 use rune::{ImageCache, TextEdit};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use neoism_protocol::pty::{ClientMessage as PtyClient, Presentation, ServerMessage as PtyServer};
 
 /// Older pages are sized by bytes, as in the GPUiX fix (`rune/README.md`, data rules).
 const OLDER_PAGE_TARGET_BYTES: usize = 160 * 1024;
@@ -101,6 +102,9 @@ pub struct App {
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
     /// Where notched wheel input is gliding the transcript to.
     pub wheel_target: Option<f32>,
+    /// Home block terminals by tab id, and the tabs whose `CreatePty` is still in flight.
+    pub terminals: HashMap<u64, crate::terminal::Terminal>,
+    pub pending_pty: std::collections::VecDeque<u64>,
 }
 
 impl App {
@@ -134,6 +138,8 @@ impl App {
             fps: None,
             scroll: Default::default(),
             wheel_target: None,
+            terminals: HashMap::new(),
+            pending_pty: Default::default(),
         };
         app.open_tab(TabKind::Home);
         app
@@ -150,12 +156,86 @@ impl App {
         self.tabs.push(Tab { id, kind, draft: TextEdit::new(""), pending_prompt: None });
         self.active = self.tabs.len() - 1;
         self.tabs[self.active].draft.focused = true;
+        if matches!(self.tabs[self.active].kind, TabKind::Home) {
+            self.terminals.insert(id, crate::terminal::Terminal::new(self.cwd.clone(), self.terminal_colors()));
+            self.create_pty(id);
+        }
         self.active
+    }
+
+    /// Ask the daemon for a block-presentation shell for the Home tab `tab_id`.
+    fn create_pty(&mut self, tab_id: u64) {
+        let Some(daemon) = &self.daemon else { return };
+        if self.connection != Connection::Connected || self.pending_pty.contains(&tab_id) { return; }
+        let cwd = self.terminals.get(&tab_id).map(|t| t.cwd.clone()).unwrap_or_else(|| self.cwd.clone());
+        let message = PtyClient::CreatePty { cwd: Some(cwd), cols: crate::terminal::COLS, rows: crate::terminal::ROWS, shell: None, shell_args: None, presentation: Some(Presentation::Blocks) };
+        if let Ok(value) = serde_json::to_value(&message) {
+            daemon.send(Family::Pty, value);
+            self.pending_pty.push_back(tab_id);
+        }
+    }
+
+    /// The ANSI palette GPUiX gave Ghostty (`terminal/buffer.ts`, `terminalPalette`).
+    pub fn terminal_colors(&self) -> crate::ghostty::Colors {
+        let p = self.pal;
+        crate::ghostty::Colors {
+            palette: [p.black, p.red, p.green, p.yellow, p.blue, p.magenta, p.cyan, p.white,
+                p.muted, p.red, p.green, p.yellow, p.blue, p.magenta, p.cyan, p.fg],
+            fg: p.fg,
+            bg: p.bg,
+        }
+    }
+
+    fn pty_input(&self, session_id: &str, bytes: &[u8]) {
+        if let Some(daemon) = &self.daemon {
+            if let Ok(value) = serde_json::to_value(PtyClient::PtyInput { session_id: session_id.into(), bytes: bytes.to_vec() }) {
+                daemon.send(Family::Pty, value);
+            }
+        }
+    }
+
+    fn apply_pty(&mut self, message: PtyServer) {
+        match message {
+            PtyServer::PtyCreated { session_id, .. } => {
+                if let Some(tab_id) = self.pending_pty.pop_front() {
+                    if let Some(term) = self.terminals.get_mut(&tab_id) { term.attach(session_id); }
+                }
+            }
+            PtyServer::PtyOutput { session_id, bytes, offset } => {
+                let replies = self.terminals.values_mut().find(|t| t.session.as_deref() == Some(&session_id))
+                    .map(|term| term.feed(&bytes, offset)).unwrap_or_default();
+                if !replies.is_empty() { self.pty_input(&session_id, &replies); }
+            }
+            PtyServer::SessionCwd { session_id, cwd } => {
+                if let Some(term) = self.terminals.values_mut().find(|t| t.session.as_deref() == Some(&session_id)) { term.cwd = cwd; }
+            }
+            PtyServer::PtyClosed { session_id, .. } => {
+                let tab = self.terminals.iter().find(|(_, t)| t.session.as_deref() == Some(&session_id)).map(|(id, _)| *id);
+                if let Some(tab_id) = tab {
+                    if let Some(term) = self.terminals.get_mut(&tab_id) { term.session = None; }
+                    // A shell that exited (`exit`, crash) is replaced so Home always has a prompt.
+                    self.create_pty(tab_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The working directory shown above the Home composer.
+    pub fn tab_cwd(&self, tab: &Tab) -> String {
+        let cwd = self.terminals.get(&tab.id).map(|t| t.cwd.as_str()).unwrap_or(&self.cwd);
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() && cwd.starts_with(&home) { format!("~{}", &cwd[home.len()..]) } else { cwd.to_owned() }
     }
 
     pub fn close_tab(&mut self, index: usize) {
         if index >= self.tabs.len() { return; }
-        self.tabs.remove(index);
+        let removed = self.tabs.remove(index);
+        if let Some(term) = self.terminals.remove(&removed.id) {
+            if let (Some(session_id), Some(daemon)) = (term.session, &self.daemon) {
+                if let Ok(value) = serde_json::to_value(PtyClient::ClosePty { session_id }) { daemon.send(Family::Pty, value); }
+            }
+        }
         if self.tabs.is_empty() { self.open_tab(TabKind::Home); }
         self.active = self.active.min(self.tabs.len() - 1);
     }
@@ -211,8 +291,16 @@ impl App {
         self.tabs[index].draft.clear();
         match self.tabs[index].kind.clone() {
             TabKind::Home => {
-                // The Home composer runs a shell command (block terminal, step 6).
-                self.tabs[index].draft.replace_text("");
+                let tab_id = self.tabs[index].id;
+                if text == "clear" {
+                    if let Some(term) = self.terminals.get_mut(&tab_id) { term.clear(); }
+                    return;
+                }
+                let Some(term) = self.terminals.get_mut(&tab_id) else { return };
+                let Some(session_id) = term.session.clone() else { return };
+                // Not at a prompt (a command is reading stdin): the line goes to it as input.
+                term.prepare(&text);
+                self.pty_input(&session_id, format!("{text}\r").as_bytes());
             }
             TabKind::Agent { session: Some(session_id) } => self.submit_prompt(&session_id, text),
             TabKind::Agent { session: None } => {
@@ -302,12 +390,21 @@ impl App {
             Inbound::Connected => {
                 self.connection = Connection::Connected;
                 self.refresh_threads();
+                self.pending_pty.clear();
+                let homes: Vec<u64> = self.terminals.keys().copied().collect();
+                for tab_id in homes {
+                    if let Some(term) = self.terminals.get_mut(&tab_id) { term.session = None; }
+                    self.create_pty(tab_id);
+                }
                 if let Some(daemon) = &self.daemon {
                     daemon.send(Family::Agent, json!({"GetConfigDefaults": {"directory": self.cwd}}));
                 }
             }
             Inbound::Disconnected(reason) => self.connection = Connection::Disconnected(reason),
             Inbound::Agent(message) => self.apply_agent(*message),
+            Inbound::Reply { family, message, .. } if family == "Pty" => {
+                if let Ok(typed) = serde_json::from_value::<PtyServer>(message) { self.apply_pty(typed); }
+            }
             Inbound::Reply { .. } => {}
         }
     }

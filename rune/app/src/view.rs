@@ -152,6 +152,12 @@ fn home(app: &App) -> El {
         }
         grid = grid.child(line);
     }
+    let has_blocks = app.terminals.get(&app.active_tab().id).is_some_and(|t| !t.blocks.is_empty() || t.live.is_some() || t.error.is_some());
+    if has_blocks {
+        return col().w_full().h_full().fill(rgb(p.bg))
+            .child(terminal_blocks(app))
+            .child(terminal_composer(app));
+    }
     let splash = col().w_full().grow(1.0).items_center().pt(57.0)
         .child(wordmark::view(app, "splash-wordmark", 582.0))
         .child(el().h(83.0))
@@ -174,10 +180,88 @@ fn terminal_composer(app: &App) -> El {
     col().key("terminal-block-input").w_full().h(93.0).px(16.5).pt(16.0).gap(14.0)
         .border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border))
         .child(row().w_full().center_y()
-            .child(text(app.display_cwd()).font(app.ty.small()).color(rgb(p.dim)).grow(1.0))
+            .child(text(app.tab_cwd(tab)).font(app.ty.small()).color(rgb(p.dim)).grow(1.0))
             .child(el().w(28.0).h(28.0).radius(6.0).center()
                 .child(icon(app, glyph::STAR_OUTLINE, 1.1, rgb(p.dim)))))
         .child(input)
+}
+
+/// Warp-style command blocks (`reference/02`): cwd, bold command, output, duration or exit
+/// status on the right, 1 pt rules between blocks; failed blocks get a red tint and left bar.
+fn terminal_blocks(app: &App) -> El {
+    let p = app.pal;
+    let tab = app.active_tab();
+    let Some(term) = app.terminals.get(&tab.id) else { return el() };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut list = col().w_full();
+    for block in term.blocks.iter().chain(term.live.iter()) {
+        list = list.child(terminal_block(app, block, &home));
+    }
+    if let Some(error) = &term.error {
+        list = list.child(text(error.clone()).font(app.ty.small()).color(rgb(p.red)).px(16.5).py(12.0));
+    }
+    col().key(format!("terminal-scroll:{}", tab.id)).w_full().grow(1.0).shrink()
+        .scroll(rune::ScrollSpec { stick_bottom: true })
+        .child(list)
+}
+
+fn terminal_block(app: &App, block: &crate::terminal::Block, home: &str) -> El {
+    let p = app.pal;
+    let cwd = if !home.is_empty() && block.cwd.starts_with(home) { format!("~{}", &block.cwd[home.len()..]) } else { block.cwd.clone() };
+    let ms = block.elapsed_ms.unwrap_or_else(|| block.started.elapsed().as_millis());
+    let meta = match block.exit {
+        Some(code) if code != 0 => format!("exit {code}"),
+        _ if block.elapsed_ms.is_none() => format!("{} s", ms / 1000),
+        _ if ms >= 1000 => format!("{:.1} s", ms as f32 / 1000.0),
+        _ => format!("{ms} ms"),
+    };
+    let meta_color = if block.failed() { rgb(p.red) } else { rgb(p.dim) };
+    let (body, spans) = terminal_rich(&block.lines);
+    let mut item = col().key(format!("terminal-block:{}", block.id)).w_full().px(16.5).pt(16.0).pb(18.0).gap(6.0)
+        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border));
+    if !block.background {
+        item = item
+            .child(row().w_full().center_y()
+                .child(text(cwd).font(app.ty.small()).color(rgb(p.dim)).grow(1.0))
+                .child(text(meta).font(app.ty.small()).color(meta_color)))
+            .child(text(block.command.clone()).font(app.ty.bold()).color(rgb(p.fg)));
+    }
+    if !body.is_empty() {
+        item = item.child(rune::rich(body, spans).font(app.ty.body()).color(rgb(p.fg)).w_full().mt(if block.background { 0.0 } else { 10.0 }));
+    }
+    if block.failed() {
+        item = item.fill(rgb(p.red).alpha(0.08)).border_sides([0.0, 0.0, 1.0, 3.0], rgb(p.red));
+    }
+    item
+}
+
+/// Ghostty rows as one text element: runs padded to their cell column, coloured by span.
+fn terminal_rich(lines: &[crate::ghostty::Row]) -> (String, Vec<rune::Span>) {
+    let mut body = String::new();
+    let mut spans = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 { body.push('\n'); }
+        let mut col = 0;
+        let last = line.iter().rposition(|r| !r.text.trim_end().is_empty() || r.bg.is_some());
+        for (index, run) in line.iter().enumerate() {
+            if last.is_none_or(|last| index > last) { break; }
+            body.extend(std::iter::repeat_n(' ', run.col.saturating_sub(col)));
+            col = run.col + run.width;
+            let text = if Some(index) == last && run.bg.is_none() { run.text.trim_end() } else { run.text.as_str() };
+            let start = body.len();
+            body.push_str(text);
+            if run.fg.is_some() || run.bg.is_some() || run.bold || run.italic || run.underline {
+                let mut span = rune::Span::new(start, body.len());
+                if let Some(c) = run.fg { span = span.color(rgb(c)); }
+                if let Some(c) = run.bg { span.bg = Some(rgb(c)); }
+                if run.bold { span = span.weight(800.0); }
+                if run.italic { span = span.italic(); }
+                if run.underline { span.underline = Some(run.fg.map(rgb).unwrap_or(Color::TRANSPARENT)); }
+                spans.push(span);
+            }
+        }
+    }
+    (body, spans)
 }
 
 fn status_line(app: &App) -> El {
@@ -193,7 +277,7 @@ fn status_line(app: &App) -> El {
         .child(pill(row().gap(7.0).center_y()
             .child(icon(app, glyph::NEOISM, 0.95, rgb(p.bg)))
             .child(text(mode).font(app.ty.status()).color(rgb(p.bg))), mode_color))
-        .child(text(app.display_cwd()).font(app.ty.status()).color(path_color))
+        .child(text(app.tab_cwd(app.active_tab())).font(app.ty.status()).color(path_color))
         .child(pill(icon(app, glyph::FOLDER, 1.1, rgb(p.bg)), path_color));
     let connection = match &app.connection {
         Connection::Connected => None,

@@ -4,9 +4,11 @@
 mod agent;
 mod config;
 mod daemon;
+mod ghostty;
 mod keys;
 mod prose;
 mod state;
+mod terminal;
 mod theme;
 mod theme_data;
 mod view;
@@ -58,6 +60,7 @@ fn main() {
             ("sidebar", |s| s.sidebar = Some(state::Sidebar::Conversations)),
             ("slash", |s| { s.open_tab(state::TabKind::Agent { session: None }); s.overlay = Some(state::Overlay::Slash); }),
             ("timeline-report", |s| s.load_fixture("fixture-report", "Read-Only GPU Frame Analysis and Documentation Report", include_str!("../fixtures/report-timeline.json"))),
+            ("code", |s| s.load_fixture("fixture-code", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"))),
             ("timeline-tools", |s| s.load_fixture("fixture-tools", "Inspect Git History and GPU Sources; Edit Scratchpad", include_str!("../fixtures/tools-timeline.json"))),
         ],
         ..AppSpec::new("Neoism", (1252.0, 674.0), App::new, view::root)

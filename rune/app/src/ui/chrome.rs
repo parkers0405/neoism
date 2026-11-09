@@ -26,7 +26,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .child(body)
         .child(super::status::view(app))
-        .child_if(app.overlay.is_some(), || agent::overlay(app))
+        .child(agent::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
         .child_if(app.cursor.visible, || cursor_quad(app))
 }

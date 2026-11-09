@@ -27,13 +27,6 @@ pub enum Sidebar {
     Conversations,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Overlay {
-    Slash,
-    Models,
-    Agents,
-}
-
 /// Window keyboard focus zones (`rune/README.md`, "Keyboard focus and the cursor").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -80,7 +73,8 @@ pub struct App {
     pub active: usize,
     pub next_tab: u64,
     pub sidebar: Option<Sidebar>,
-    pub overlay: Option<Overlay>,
+    /// The `/` commands, the pickers above the composer, and the model/agent/effort choice.
+    pub composer: crate::agent::slash::Composer,
     pub focus: Focus,
     pub agent: String,
     pub model: String,
@@ -117,7 +111,7 @@ impl App {
             active: 0,
             next_tab: 1,
             sidebar: None,
-            overlay: None,
+            composer: crate::agent::slash::Composer::new(config.model.as_deref(), config.variant.as_deref()),
             focus: Focus::Content,
             agent: "Build".into(),
             model: crate::agent::title_case(config.model.as_deref().unwrap_or("openai/gpt-6.1-sol")),

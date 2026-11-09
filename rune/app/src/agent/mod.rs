@@ -6,6 +6,7 @@ mod family;
 mod header;
 mod prose;
 mod sidebar;
+pub mod slash;
 mod user;
 mod timeline;
 
@@ -56,6 +57,7 @@ impl App {
         if let Some(daemon) = &self.daemon {
             daemon.send(Family::Agent, json!({"GetConfigDefaults": {"directory": self.cwd}}));
         }
+        self.slash_connected();
     }
 
     pub fn open_conversation(&mut self, session_id: &str) {
@@ -102,11 +104,11 @@ impl App {
         self.send_agent(AgentClientMessage::CreateThread {
             title: None,
             directory: Some(self.cwd.clone()),
-            agent: Some(self.agent.to_lowercase()),
-            model: None,
+            agent: Some(self.composer.selection.agent.clone()).filter(|a| !a.is_empty()),
+            model: Some(self.composer.selection.model.clone()).filter(|m| !m.is_empty()),
             connection_id: None,
             external_provider: None,
-            thinking: Some(self.effort.to_lowercase()),
+            thinking: Some(self.composer.selection.thinking.clone()).filter(|t| !t.is_empty()),
         });
     }
 
@@ -141,10 +143,10 @@ impl App {
             text,
             author: Some(self.local_name.clone()),
             attachments: Vec::new(),
-            mode: Some(self.agent.to_lowercase()),
-            model: None,
+            mode: Some(self.composer.selection.agent.clone()).filter(|a| !a.is_empty()),
+            model: Some(self.composer.selection.model.clone()).filter(|m| !m.is_empty()),
             connection_id: None,
-            thinking: Some(self.effort.to_lowercase()),
+            thinking: Some(self.composer.selection.thinking.clone()).filter(|t| !t.is_empty()),
             delivery: PromptDelivery::Steer,
         });
     }
@@ -168,6 +170,7 @@ impl App {
 
     pub(crate) fn apply_agent(&mut self, message: AgentServerMessage) {
         if self.families.note(&message) { return; }
+        if self.apply_slash_event(&message) { return; }
         match message {
             AgentServerMessage::ThreadList { threads, requested_cursor, .. } => {
                 if requested_cursor.is_none() { self.threads = threads; } else { self.threads.extend(threads); }

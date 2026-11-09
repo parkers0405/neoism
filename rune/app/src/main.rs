@@ -47,6 +47,9 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if animating { tx.wake_after(std::time::Duration::ZERO); }
     // Presence orbs flow every frame while a transcript with people in it is on screen.
     if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
+    // A `/piss` … `/praise` skit plays on the frame clock.
+    let skit = app.tick_effect();
+    if skit { tx.wake_after(std::time::Duration::ZERO); }
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
     let target = app.cursor_target();
@@ -59,7 +62,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || fps_changed || caret_changed
+    animating || changed || fps_changed || caret_changed || skit
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -77,16 +80,28 @@ fn main() {
             ("welcome", |_| {}),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
             ("sidebar", |s| s.sidebar = Some(app::Sidebar::Conversations)),
-            ("slash", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); s.overlay = Some(app::Overlay::Slash); }),
+            ("slash", |s| {
+                s.open_tab(tabs::TabKind::Agent { session: None });
+                let i = s.active;
+                s.tabs[i].draft.replace_text("/");
+                s.composer_changed();
+            }),
             ("palette", |s| s.open_picker(palette::Mode::Commands)),
             ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),
+            // `NEOISM_RUNE_FIXTURE=history.json`: render any recorded history page.
+            ("fixture", |s| {
+                let json = std::env::var("NEOISM_RUNE_FIXTURE").ok().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+                s.load_fixture("fixture", "Fixture", &json);
+            }),
             ("timeline-report", |s| s.load_fixture("fixture-report", "Read-Only GPU Frame Analysis and Documentation Report", include_str!("../fixtures/report-timeline.json"))),
             ("code", |s| s.load_fixture("fixture-code", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"))),
             ("timeline-tools", |s| s.load_fixture("fixture-tools", "Inspect Git History and GPU Sources; Edit Scratchpad", include_str!("../fixtures/tools-timeline.json"))),
         ],
         ..AppSpec::new("Neoism", (1252.0, 674.0), App::new, ui::chrome::root)
     };
-    rune::set_app_id("ai.neoism.rune");
+    // `NEOISM_RUNE_APP_ID` lets parallel test builds run side by side as distinct windows.
+    let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
+    rune::set_app_id(Box::leak(app_id.into_boxed_str()));
     let mut app = rune::App::new(spec).init(App::new);
     // Every encoded frame feeds the FPS pill; `NEOISM_RUNE_FRAME_TRACE=1` also logs each one for
     // the missed-frame analysis the GPUiX investigation used (`docs/gpuix-live-rendering-baseline.md`).

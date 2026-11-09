@@ -69,7 +69,8 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             true
         })
         .child(col().w_full().child(sentinel).child(rows));
-    let mut pane = col().key("agent-pane").w_full().h_full().fill(rgb(p.bg));
+    let mut pane = col().key("agent-pane").w_full().h_full().fill(rgb(p.bg))
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("agent-pane".into(), r); });
     if let Some(header) = super::header::view(app, session_id) {
         pane = pane.child(col().w_full().px(COLUMN_PAD_X).child(header));
     }
@@ -139,8 +140,10 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                 .font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)))
             .child(text(first_line(&message.text)).font(app.ty.body().italic()).color(rgb(p.dim))),
         HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tool_card(app, message).key(key),
-        HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.clone()).key(key)
-            .font(app.ty.small()).color(rgb(p.muted)).mt(16.0).w_full().max_lines(6).truncate(),
+        // Bound notices and compaction summaries to six source lines before layout: `max_lines`
+        // alone leaves a many-paragraph text its full height, which breaks narrow transcripts.
+        HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)
+            .font(app.ty.small()).color(rgb(p.muted)).mt(16.0).w_full().wrap().max_lines(6).truncate(),
         HistoryMessageKind::Assistant => col().key(key).w_full().mt(24.0).gap(14.0)
             .child(Markdown::new(message.text.clone())
                 .highlights(prose::highlights(&message.text, p))

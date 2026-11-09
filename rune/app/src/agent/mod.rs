@@ -2,12 +2,13 @@
 //! (sidebar, transcript, composer). References: `rune/reference/04..13*.png`.
 
 mod composer;
-mod family;
+pub(crate) mod family;
 mod header;
 mod prose;
 mod sidebar;
 mod user;
 mod timeline;
+pub mod tools;
 
 pub use composer::overlay;
 pub use family::Families;

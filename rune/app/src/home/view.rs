@@ -53,8 +53,11 @@ fn history(app: &App, term: &Terminal, composer_h: f32) -> El {
     let key = format!("terminal-scroll:{tab_id}");
     let viewport_h = (term.area[1] - if term.shell.busy() && term.long_running() { 0.0 } else { composer_h }).max(0.0);
     let home = std::env::var("HOME").unwrap_or_default();
-    let mut content = col().w_full().min_h(viewport_h).justify_end()
-        .child(splash(app).h(viewport_h).w_full());
+    // Home heads its scrollback with the splash; a plain Terminal tab starts at the prompt.
+    let mut content = col().w_full().min_h(viewport_h).justify_end();
+    if app.active_tab().kind == crate::tabs::TabKind::Home {
+        content = content.child(splash(app).h(viewport_h).w_full());
+    }
     for block in term.shell.blocks.iter().chain(term.shell.live.iter()) {
         content = content
             .child(block_view(app, term, block, &home))

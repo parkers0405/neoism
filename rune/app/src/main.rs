@@ -3,6 +3,7 @@
 
 mod agent;
 mod app;
+mod browser;
 mod clipboard;
 mod session;
 mod config;
@@ -129,6 +130,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if skit { tx.wake_after(std::time::Duration::ZERO); }
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
+    app.browser_follow(tx);
     let list_sliding = app.step_list_residual(clock);
     let target = app.cursor_target();
     let moved_at = app.cursor.trail.moved_at;
@@ -215,6 +217,8 @@ fn main() {
                 s.split(panes::Axis::Vertical);
             }),
             ("palette", |s| s.open_picker(palette::Mode::Commands)),
+            // Change Directory's folder browser, from the launch directory.
+            ("browser", |s| s.open_file_browser(browser::Mode::ChooseDirectory)),
             // Forty file hits, for the finder's list and highlight springs.
             // The real Alt+S: the daemon's file search over the working directory (`--live`).
             ("finder", |s| {

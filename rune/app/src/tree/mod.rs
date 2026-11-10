@@ -134,6 +134,13 @@ impl App {
 
     pub fn toggle_file_tree(&mut self) { self.toggle_tree(Sidebar::Files); }
 
+    /// The rail's tree button: open or close the panel, the keyboard staying where it was.
+    pub fn click_tree(&mut self, sidebar: Sidebar) {
+        let focus = self.focus;
+        self.toggle_tree(sidebar);
+        if self.sidebar.is_some() && focus != Focus::Sidebar { self.focus = focus; }
+    }
+
     pub(crate) fn apply_notes_vault(&mut self, dir: &str) {
         self.notes.root = Some(dir.trim_end_matches('/').to_owned());
         self.list_dir(Sidebar::Notes, "");
@@ -157,6 +164,21 @@ impl App {
     pub fn tree_page_rows(&self) -> isize {
         let row_h = 26.0 * self.ty.scale();
         ((self.tree_follow.scroll.get().2 / row_h).floor() as isize - 1).max(1)
+    }
+
+    /// Select the tree's 1-based row `row` (vim `<count>G`, Alt+P `:N`), clamped to the last.
+    pub fn tree_go_to_row(&mut self, row: usize) {
+        let Some((_, tree)) = self.sidebar_tree() else { return };
+        let count = tree.rows().len();
+        if count == 0 { return; }
+        tree.selected = row.saturating_sub(1).min(count - 1);
+        self.tree_follow.request();
+    }
+
+    /// Rows in the focused file or notes tree, for the palette's `:N`.
+    pub fn focused_tree_rows(&mut self) -> Option<usize> {
+        if self.focus != crate::app::Focus::Sidebar { return None; }
+        self.sidebar_tree().map(|(_, tree)| tree.rows().len()).filter(|n| *n > 0)
     }
 
     pub fn tree_move(&mut self, delta: isize) {

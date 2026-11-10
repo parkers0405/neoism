@@ -137,7 +137,7 @@ impl App {
         if value == ALL_PROJECTS {
             if let Ok(home) = std::env::var("HOME") { self.set_workspace_root(&home); }
         } else if value == ADD_WORKSPACE {
-            self.open_picker(crate::palette::Mode::Directories);
+            self.open_file_browser(crate::browser::Mode::ChooseDirectory);
         } else if let Some(path) = value.strip_prefix("project:") {
             self.set_workspace_root(path);
         }

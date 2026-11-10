@@ -12,28 +12,31 @@ use rune::{Color, El, Tx, col, el, row, text};
 pub fn composer(app: &App, max_w: f32) -> El {
     let p = app.pal;
     let tab = app.active_tab();
+    let tab_id = tab.id;
     let streaming = matches!(&tab.kind, TabKind::Agent { session: Some(id) } if app.sessions.get(id).is_some_and(|s| s.streaming));
     let input = rune::text_input(&tab.draft, app.ty.composer())
         .key(format!("composer:{}", tab.id))
         .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder("Ask anything", rgb(p.dim))
         .color(rgb(p.fg)).w_full().min_h(26.0)
-        .on_edit(|s: &mut App| { let i = s.active; &mut s.tabs[i].draft })
-        .on_input_change(|s: &mut App, _: &mut Tx| s.composer_changed())
-        .on_input_key(|s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| s.agent_composer_key(e, tx) || crate::keys::shortcut(s, e, tx))
-        .on_submit(|s: &mut App, tx: &mut Tx| { if !s.submit_command(tx) { s.submit(); } });
+        .on_edit(move |s: &mut App| { s.select_tab(tab_id); let i = s.active; &mut s.tabs[i].draft })
+        .on_input_change(move |s: &mut App, _: &mut Tx| { s.select_tab(tab_id); s.composer_changed(); })
+        .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.agent_composer_key(e, tx) || crate::keys::shortcut(s, e, tx) })
+        .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_command(tx) { s.submit(); } });
     // Chips and their `/model` `/agent` `/think` aliases open the same pickers.
     // In a narrow split the chips give way (labels truncate) instead of widening the card.
     let chip = |label: String, color: Color, kind: Kind| row().gap(6.0).center_y().shrink()
         .child(text(label).font(app.ty.composer()).color(color).truncate().shrink())
         .child(icon(app, glyph::CHEVRON_DOWN, 0.5, rgb(p.muted)))
         .on_press(move |s: &mut App| {
+            s.select_tab(tab_id);
             if s.composer.picker.as_ref().is_some_and(|picker| picker.kind == kind) { s.close_prompt_picker(); } else { s.open_selection(kind); }
         });
     let send = el().key("composer-send").w(36.0).h(36.0).radius(8.0).center()
         .fill(if streaming { rgb(p.fg) } else { rgb(p.muted).alpha(0.6) })
         .child(icon(app, if streaming { glyph::STOP } else { glyph::ARROW_UP }, 0.9, if streaming { rgb(p.bg) } else { rgb(p.fg) }))
-        .on_press(|s: &mut App| {
+        .on_press(move |s: &mut App| {
+            s.select_tab(tab_id);
             let i = s.active;
             match s.tabs[i].kind.clone() {
                 TabKind::Agent { session: Some(id) } if s.sessions.get(&id).is_some_and(|x| x.streaming) => s.stop(&id),
@@ -41,7 +44,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
             }
         });
     let card = col().key("agent-input-card")
-        .on_layout(|s: &mut App, r: [f32; 4]| { s.rects.insert("composer-card".into(), r); }).w_full().radius(18.0).fill(rgb(p.bg)).border(1.0, rgb(p.border))
+        .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(format!("composer-card:{tab_id}"), r); }).w_full().radius(18.0).fill(rgb(p.bg)).border(1.0, rgb(p.border))
         .px(20.0).pt(16.0).pb(12.0).gap(22.0)
         .child(stars(app))
         .child(input)

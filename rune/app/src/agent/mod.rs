@@ -35,6 +35,10 @@ const HEAD_PAGE: u32 = 80;
 
 #[derive(Default)]
 pub struct Session {
+    pub message_versions: std::collections::HashMap<String, u64>,
+    pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
+    pub wheel_target: Option<f32>,
+    pub width: f32,
     pub messages: Vec<HistoryMessage>,
     pub older_cursor: Option<String>,
     pub loaded: bool,
@@ -47,6 +51,14 @@ pub struct Session {
     pub live_from: Option<usize>,
     /// The session's context window from `ProviderState`, when the daemon knows it.
     pub context_limit: Option<u64>,
+}
+
+impl Session {
+    fn note_message(&mut self, message: &HistoryMessage) {
+        let changed = self.messages.iter().find(|m| m.id == message.id)
+            .is_none_or(|old| old.text != message.text || old.status != message.status || old.kind != message.kind);
+        if changed { *self.message_versions.entry(message.id.clone()).or_default() += 1; }
+    }
 }
 
 impl App {
@@ -91,7 +103,7 @@ impl App {
         let index = self.active;
         if !matches!(self.tabs[index].kind, TabKind::Agent { .. }) { return; }
         self.tabs[index].kind = TabKind::Agent { session: Some(session_id.to_owned()) };
-        self.wheel_target = None;
+        if let Some(session) = self.sessions.get_mut(session_id) { session.wheel_target = None; }
         self.load_session(session_id);
     }
 
@@ -221,6 +233,7 @@ impl App {
                 // Task cards name their child sessions; seed the family so it can be walked.
                 if !self.families.is_child(&session_id) { self.families.seed_from_history(&session_id, &messages); }
                 let session = self.sessions.entry(session_id).or_default();
+                for message in &messages { session.note_message(message); }
                 if session.loading_older {
                     // Size the next page from this one (bytes per server message).
                     let bytes: usize = messages.iter().map(message_bytes).sum();
@@ -242,10 +255,12 @@ impl App {
             }
             AgentServerMessage::MessageUpdated { session_id, message, .. } => {
                 let session = self.sessions.entry(session_id).or_default();
+                session.note_message(&message);
                 upsert(&mut session.messages, message);
             }
             AgentServerMessage::ContentDelta { session_id, message_id, text, kind, .. } => {
                 let session = self.sessions.entry(session_id).or_default();
+                *session.message_versions.entry(message_id.clone()).or_default() += 1;
                 if let Some(message) = session.messages.iter_mut().find(|m| m.id == message_id) {
                     message.text.push_str(&text);
                 } else {
@@ -308,4 +323,26 @@ pub(crate) fn title_case(model: &str) -> String {
         let mut c = w.chars();
         c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
     }).collect::<Vec<_>>().join("-")).collect::<Vec<_>>().join("/")
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn unchanged_history_keeps_other_message_versions() {
+        let message: HistoryMessage = serde_json::from_value(json!({"id":"a", "role":"Assistant", "kind":"Assistant", "text":"first"})).unwrap();
+        let mut session = Session::default();
+        session.note_message(&message);
+        session.messages.push(message.clone());
+        let version = session.message_versions["a"];
+        session.note_message(&message);
+        assert_eq!(session.message_versions["a"], version);
+        let mut changed = message.clone();
+        changed.status = "Build · model".into();
+        session.note_message(&changed);
+        assert_eq!(session.message_versions["a"], version + 1);
+        let mut other = message; other.id = "b".into();
+        session.note_message(&other);
+        assert_eq!(session.message_versions["a"], version + 1);
+    }
 }

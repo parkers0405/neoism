@@ -206,7 +206,45 @@ Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.
 ## Running
 
 ```sh
-cd rune/app
-cargo run --release            # connects to the running local daemon
-cargo run --release -- --png out.png   # headless render for screenshot comparison
+rune/app/build.sh build --release
+/tmp/neoism-rune-target/release/neoism-rune  # connects to the running local daemon
+NEOISM_RUNE_OFFLINE=1 /tmp/neoism-rune-target/release/neoism-rune \
+  --scene editor-long --snap /tmp/editor.png --size 1252x674 --scale 2 --at 2
 ```
+
+The build helper selects Rune's pinned toolchain. Set `CARGO_TARGET_DIR` to override its default output directory.
+Use `--list-scenes` for reproducible surfaces, `--tree` for element/accessibility inspection, and `--trace`
+for per-frame geometry. Native windows do not replay `--script` in the pinned Rune version; the native checker
+sends actual input to its own focused test window.
+
+## Validation and remaining migration work
+
+The editor now mounts visible wrapped rows and caches syntax/wrap geometry until text or width changes.
+Scrolling and cursor movement reuse that cache. Editor and conversation scroll state belongs to each buffer
+or session, so input over another split does not reuse the active pane's geometry.
+
+LSP status, diagnostics, mouse/keyboard hover and completion are wired through the existing daemon protocol.
+Live checks covered Rust, TypeScript, JavaScript and Python. Clipboard paste, mouse word/line selection,
+dragging beyond the editor edge, `/usage`, Database browsing/editing and shortcut rebinding are implemented.
+Markdown files intentionally use the code editor for now; Extensions remains removed.
+
+Run the checks from the repository root:
+
+```sh
+rune/app/build.sh test --release
+python3 rune/scripts/check-headless.py
+# Opens a bounded test window on workspace 5, then restores the prior focus.
+python3 rune/scripts/check-native.py --scene editor-long --wheel --natural --size 624x674
+python3 rune/scripts/check-trace.py /tmp/neoism-rune-verify/native-editor.jsonl --require-scroll --require-cursor
+python3 rune/scripts/analyze-presentations.py /tmp/neoism-rune-verify/native-editor.wayland.log \
+  --trim-seconds 2 --end-seconds 4.4
+```
+
+The native checker requires this machine's Hyprland Lua dispatch API, `wtype`, and `/dev/uinput` access for
+wheel input. It stops sending input if focus changes. `--natural` exercises normal redraw scheduling;
+without it, `--frames` forces continuous submissions and is insufficient to verify redraw scheduling.
+Measure only intervals with active scrolling or animation: idle gaps are deliberate, not missed frames.
+
+See [VALIDATION.md](VALIDATION.md) for measured results and their limits. Step 8 remains in progress:
+the screenshot suite exercises surfaces and input, but does not establish complete visual/behavioral parity.
+Step 9 has not run; the installed app and release packaging still use GPUiX, which remains the reference.

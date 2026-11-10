@@ -135,6 +135,12 @@ impl App {
         }
     }
 
+    pub fn terminal_paste(&mut self, text: &str) {
+        let Some(term) = self.active_terminal() else { return };
+        let Some(session) = term.shell.session.clone() else { return };
+        if term.direct() { self.pty_input(&session, &term.shell.encode_paste(text)); }
+    }
+
     fn pty_input(&self, session_id: &str, bytes: &[u8]) {
         if bytes.is_empty() { return; }
         self.send_pty(PtyClient::PtyInput { session_id: session_id.into(), bytes: bytes.to_vec() });

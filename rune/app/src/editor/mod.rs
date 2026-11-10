@@ -6,8 +6,12 @@
 
 pub mod document;
 pub mod input;
+mod mouse;
+mod completion;
+pub mod lsp;
+pub mod lsp_view;
 pub mod view;
-mod vim;
+pub(crate) mod vim;
 mod vim_apply;
 mod wrap;
 
@@ -37,6 +41,14 @@ pub struct Buffer {
     initial_line: Option<usize>,
     /// Set for the daemon's `config.json` document: saved through `Config` with this revision.
     config: Option<ConfigDocument>,
+    /// Language-server status, diagnostics, hover and completion.
+    pub lsp: lsp::BufferLsp,
+    pub mouse: mouse::Mouse,
+    pub code_cache: view::CodeCache,
+    pub view_rect: Option<[f32; 4]>,
+    pub cursor_rect: Option<[f32; 4]>,
+    pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
+    pub wheel_target: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +66,10 @@ impl Buffer {
             path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, saving: None, message: None,
             initial_line: line.map(|l| l.saturating_sub(1) as usize),
             config: None,
+            lsp: lsp::BufferLsp::default(),
+            mouse: mouse::Mouse::default(),
+            code_cache: Default::default(),
+            view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None,
         }
     }
 
@@ -112,6 +128,7 @@ fn editor_key(event: &rune::KeyEvent) -> Option<Key> {
 impl App {
     /// Open `path` (absolute, or relative to the workspace) in an editor tab, at `line`.
     pub fn open_file(&mut self, path: &str, line: Option<u32>) {
+        if crate::database::is_path(path) { self.open_database(path); return; }
         let relative = std::path::Path::new(path).strip_prefix(&self.cwd).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_owned());
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Editor { path: relative.clone() }) {
             self.active = index;
@@ -155,13 +172,16 @@ impl App {
             if !buffer.doc.is_dirty() { buffer.doc.replace_from_disk(&text); }
             return;
         }
+        buffer.code_cache.clear();
         buffer.doc = Document::from_text(&text);
         buffer.loaded = true;
+        let opened = buffer.path.clone();
         if let Some(line) = buffer.initial_line.take() {
             let col = vim::vim_first_non_blank(buffer.doc.lines.get(line).map_or("", String::as_str));
             buffer.doc.set_cursor(vim::Pos { line, col });
             self.editor_follow = true;
         }
+        self.lsp_sync(&opened);
     }
 
     /// `FileWritten`: the save landed; what it carried is the new baseline.
@@ -200,7 +220,7 @@ impl App {
     /// A key in the focused editor. Returns whether the editor took it.
     pub fn editor_key(&mut self, event: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
         let Some(key) = editor_key(event) else { return false };
-        let rows = self.editor_rows;
+        let rows = self.active_buffer().and_then(|b| b.view_rect).map_or(30, |r| (r[3] / view::line_height(self)).floor().max(1.0) as usize);
         let clipboard = self.clipboard.clone();
         let Some(buffer) = self.active_buffer_mut() else { return false };
         if !buffer.loaded || buffer.error.is_some() { return false; }
@@ -210,12 +230,34 @@ impl App {
             self.save_active();
             return true;
         }
+        // Resolve on a clone so `fp` and named-register pastes retain Vim semantics.
+        if matches!(key, Key::Char('p' | 'P')) && buffer.prompt.is_none() && buffer.doc.mode != Mode::Insert {
+            let Key::Char(c) = key else { unreachable!() };
+            let mut probe = buffer.doc.vim.clone();
+            if matches!(probe.feed(c, buffer.doc.mode == Mode::Visual), vim::VimKeyFeed::Action(vim::VimAction::Paste { .. }))
+                && matches!(buffer.doc.vim.pending_register, None | Some('"' | '+' | '*')) {
+                let path = buffer.path.clone();
+                let state = (buffer.doc.revision, buffer.doc.cursor(), buffer.doc.mode, buffer.doc.vim.pending.showcmd());
+                tx.read_clipboard(move |a: &mut App, content, tx| {
+                    let Some(b) = a.active_buffer_mut().filter(|b| b.path == path) else { return };
+                    if (b.doc.revision, b.doc.cursor(), b.doc.mode, b.doc.vim.pending.showcmd()) != state { return; }
+                    let value = (!content.text().is_empty()).then_some(content.text());
+                    let outcome = b.doc.key(key, &mut b.prompt, value);
+                    a.editor_follow = true;
+                    if let Outcome::Yanked(text) = outcome { tx.copy(text); }
+                });
+                return true;
+            }
+        }
         buffer.doc.page_rows = rows;
+        if self.lsp_key_before(&key) { return true; }
+        let Some(buffer) = self.active_buffer_mut() else { return false };
         let before = (buffer.doc.cursor(), buffer.doc.revision);
         let outcome = buffer.doc.key(key, &mut buffer.prompt, clipboard.as_deref());
         if (buffer.doc.cursor(), buffer.doc.revision) != before || std::mem::take(&mut buffer.doc.follow_cursor) {
             self.editor_follow = true;
         }
+        self.lsp_key_after(&key);
         match outcome {
             Outcome::Handled => true,
             Outcome::Unhandled => false,
@@ -292,6 +334,7 @@ impl App {
     pub fn editor_click(&mut self, line: usize, col: usize, drag: bool) {
         let Some(buffer) = self.active_buffer_mut() else { return };
         buffer.prompt = None;
+        buffer.lsp.dismiss();
         let doc = &mut buffer.doc;
         let pos = vim::Pos { line, col };
         if drag && doc.mode != Mode::Visual && pos == doc.cursor() { return; }
@@ -346,7 +389,8 @@ impl App {
             if let Some(lines) = buffer.saving.take() { buffer.doc.mark_saved_lines(lines); }
             buffer.message = Some(format!("\"{}\" written", document["display_path"].as_str().unwrap_or("config.json")));
         } else if !buffer.loaded {
-            buffer.doc = Document::from_text(document["content"].as_str().unwrap_or_default());
+            buffer.code_cache.clear();
+        buffer.doc = Document::from_text(document["content"].as_str().unwrap_or_default());
             buffer.loaded = true;
         }
     }
@@ -370,16 +414,16 @@ impl App {
         use crate::ui::follow::{Reveal, reveal_top};
         if !self.editor_follow { return; }
         // Until the view has laid out once there is no height to aim within; try next frame.
-        let Some(view) = self.rects.get("editor-view").copied() else { return };
+        let Some(view) = self.active_buffer().and_then(|b| b.view_rect) else { return };
         let Some(buffer) = self.active_buffer().filter(|b| b.loaded) else { return };
         let key = view::scroll_key(&buffer.path);
-        let (row_y, content_h) = view::cursor_row_y(self, &buffer.doc);
+        let (row_y, content_h) = view::cursor_row_y(self, buffer);
+        let offset = buffer.scroll.get().0;
+        let base = buffer.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
         self.editor_follow = false;
         let line_h = view::line_height(self);
         let viewport = view[3];
         let max_offset = (content_h - viewport).max(0.0);
-        let offset = self.editor_scroll.get().0;
-        let base = self.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
         let rows_fit = (viewport / line_h).floor().max(1.0) as i64;
         let max_top = (max_offset / line_h).ceil() as i64;
         let current_top = (base / line_h).round() as i64;
@@ -387,11 +431,29 @@ impl App {
         let top = reveal_top(row, rows_fit, max_top, current_top, Reveal::Center { edge: 4 });
         if top == current_top { return; }
         let target = (top as f32 * line_h).clamp(0.0, max_offset);
-        self.wheel_target = Some(target);
+        if let Some(b) = self.active_buffer_mut() { b.wheel_target = Some(target); }
         if (target - offset).abs() > viewport * 1.25 {
             tx.scroll_to_y(key, target);
         } else {
             tx.scroll_to_with(key, 0.0, target, view::SCROLL_SPRING);
         }
+    }
+}
+
+impl App {
+    pub fn paste_content(&mut self, text: &str) {
+        if let Some(b) = self.active_buffer_mut() {
+            if !b.loaded || b.error.is_some() { return; }
+            b.lsp.dismiss();
+            if b.doc.mode == Mode::Insert {
+                b.doc.begin_insert_group();
+                for (i, part) in text.split('\n').enumerate() {
+                    if i > 0 { b.doc.split_line_at_cursor(false); }
+                    b.doc.insert_str_at_cursor(part);
+                }
+                b.doc.mark_edited();
+            } else { b.doc.key(Key::Char('p'), &mut b.prompt, Some(text)); }
+            self.editor_follow = true;
+        } else { self.terminal_paste(text); }
     }
 }

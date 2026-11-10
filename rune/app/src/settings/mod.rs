@@ -3,6 +3,7 @@
 //! edited in place and written back with `SetSetting`.
 
 pub mod keybinds;
+pub mod rebind;
 pub mod view;
 
 pub use view::view;
@@ -191,13 +192,15 @@ pub struct Settings {
     /// The row being edited as text.
     pub editing: Option<(usize, TextEdit)>,
     pub loading: bool,
+    pub rebinding: Option<usize>,
+    pub binding_error: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
         let mut search = TextEdit::new("");
         search.focused = true;
-        Settings { rows: Vec::new(), values: Value::Null, category: Category::General, search, focused: 0, dropdown: None, editing: None, loading: true }
+        Settings { rows: Vec::new(), values: Value::Null, category: Category::General, search, focused: 0, dropdown: None, editing: None, loading: true, rebinding: None, binding_error: None }
     }
 }
 
@@ -307,6 +310,7 @@ impl App {
 
     pub(crate) fn apply_config_reply(&mut self, message: &Value) {
         self.apply_config_document_reply(message);
+        if let Some(config) = message.get("Config") { self.keybindings = config["value"]["keybinds"]["keys"].clone(); }
         let Some(settings) = &mut self.settings else { return };
         if let Some(config) = message.get("Config") {
             settings.values = config["value"].clone();
@@ -317,6 +321,7 @@ impl App {
 
     /// Write one setting, mirror it locally, and apply what the app shows live.
     pub fn write_setting(&mut self, path: &str, value: Value) {
+        if path == "keybinds.keys" { self.keybindings = value.clone(); }
         if let Some(settings) = &mut self.settings { settings.set_local(path, value.clone()); }
         match path {
             "appearance.theme" => if let Some(name) = value.as_str() { self.apply_theme(name); return },

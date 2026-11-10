@@ -951,6 +951,11 @@ impl Document {
         // host clipboard (for `+`/`*` / first-run bootstrap).
         let reg_name = self.vim.pending_register.take().unwrap_or('"');
         let stored = self.vim.registers.get(reg_name).cloned();
+        // A fresh OS clipboard wins for the shared registers; preserve the local register's
+        // line/block shape when it is the same yank, and fall back if the OS has no text.
+        let stored = if matches!(reg_name, '"' | '+' | '*') {
+            stored.filter(|v| paste.is_none_or(|text| text.is_empty() || text == v.text))
+        } else { stored };
         let (text, linewise, blockwise) =
             if let Some(val) = stored.filter(|v| !v.text.is_empty()) {
                 (val.text, val.linewise, val.blockwise)

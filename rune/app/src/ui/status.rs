@@ -21,6 +21,9 @@ const GLYPH_MODE: &str = "\u{e7c5}";
 const GLYPH_FOLDER: &str = "\u{f07b}";
 const GLYPH_BRANCH: &str = "\u{e725}";
 const GLYPH_LINES: &str = "\u{f0c9}";
+const GLYPH_LSP: &str = "\u{f0e7}";
+const GLYPH_ERROR: &str = "\u{ea87}";
+const GLYPH_WARN: &str = "\u{f071}";
 
 /// Git branch and working-tree line counts for the branch pill.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -88,6 +91,7 @@ pub fn view(app: &App) -> El {
 
     let (mode, mode_color) = match app.active_tab().kind {
         TabKind::Agent { .. } => ("AGENT", p.red),
+        TabKind::Database { .. } => ("DATABASE", p.blue),
         TabKind::Terminal => ("TERMINAL", p.green),
         TabKind::Editor { .. } if app.active_buffer().is_some_and(|b| b.prompt.is_some()) => ("COMMAND", p.green),
         TabKind::Editor { .. } => match app.editor_mode() {
@@ -118,20 +122,38 @@ pub fn view(app: &App) -> El {
                 .child(el().ml(gap).child(thick(&m, mode, None, black))))));
 
     // Right: pills chain leftward from the window edge; later pills sit on top.
-    struct Pill { icon: (String, Option<Family>), icon_bg: u32, text: Vec<(String, u32)> }
+    // A `solid` pill (diagnostic counts) is one colour end to end with black text.
+    struct Pill { icon: (String, Option<Family>), icon_bg: u32, text: Vec<(String, u32)>, solid: bool }
     let mut pills = Vec::new();
     if let Some(git) = &app.git {
         let mut parts = vec![(git.branch.clone(), p.blue)];
         if git.added > 0 { parts.push((format!(" +{}", git.added), p.green)); }
         if git.deleted > 0 { parts.push((format!(" -{}", git.deleted), p.red)); }
-        pills.push(Pill { icon: (GLYPH_BRANCH.into(), Some(super::theme::NERD)), icon_bg: p.blue, text: parts });
+        pills.push(Pill { icon: (GLYPH_BRANCH.into(), Some(super::theme::NERD)), icon_bg: p.blue, text: parts, solid: false });
+    }
+    // Diagnostic counts, then the LSP pill: green attached, yellow warming, red none.
+    if let Some((lsp, errors, warns)) = crate::editor::lsp_view::status(app) {
+        if errors > 0 {
+            pills.push(Pill { icon: (GLYPH_ERROR.into(), Some(super::theme::NERD)), icon_bg: p.red, text: vec![(format!(" {errors}"), p.black)], solid: true });
+        }
+        if warns > 0 {
+            pills.push(Pill { icon: (GLYPH_WARN.into(), Some(super::theme::NERD)), icon_bg: p.yellow, text: vec![(format!(" {warns}"), p.black)], solid: true });
+        }
+        if let Some(lsp) = lsp {
+            let color = match lsp {
+                crate::editor::lsp::Status::Active => p.green,
+                crate::editor::lsp::Status::Initializing => p.yellow,
+                crate::editor::lsp::Status::Missing => p.red,
+            };
+            pills.push(Pill { icon: (GLYPH_LSP.into(), Some(super::theme::NERD)), icon_bg: color, text: vec![(" LSP".into(), color)], solid: false });
+        }
     }
     if let Some(buffer) = app.active_buffer().filter(|b| b.loaded) {
         let label = format!(" {}/{}", buffer.doc.cursor_line + 1, buffer.doc.lines.len());
-        pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)] });
+        pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)], solid: false });
     }
     if let Some(fps) = app.fps {
-        pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(format!(" {fps}"), p.cyan)] });
+        pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(format!(" {fps}"), p.cyan)], solid: false });
     }
     let widths: Vec<(f32, f32)> = pills.iter().enumerate().map(|(i, pill)| {
         let icon_w = if pill.icon.1.is_some() { m.icon_w() } else { m.text_w(&pill.icon.0) };
@@ -149,7 +171,7 @@ pub fn view(app: &App) -> El {
         }
         let glyph = el().w(*icon_w).h(pill_h).center().child(thick(&m, &pill.icon.0, pill.icon.1, black));
         bar = bar
-            .child(section_right(&m, total - (x + icon_w + text_w), icon_w + text_w, rgb(p.surface), [r, 0.0, 0.0, r])
+            .child(section_right(&m, total - (x + icon_w + text_w), icon_w + text_w, rgb(if pill.solid { pill.icon_bg } else { p.surface }), [r, 0.0, 0.0, r])
                 .child(row_at(&m, icon_w + m.pad, label)))
             .child(section_right(&m, total - (x + icon_w), *icon_w, rgb(pill.icon_bg), [r, 0.0, 0.0, r]).child(glyph.absolute(0.0, 0.0)));
         x += icon_w + text_w - tail;

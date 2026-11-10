@@ -9,6 +9,7 @@ use rune::TextEdit;
 pub enum Kind {
     /// The `/` menu; its query is the composer text itself.
     Slash,
+    Usage,
     Model,
     Agent,
     Thinking,

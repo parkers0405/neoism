@@ -5,12 +5,14 @@ mod agent;
 mod app;
 mod config;
 mod daemon;
+mod database;
 mod editor;
 mod finder;
 mod ghostty;
 mod home;
 mod keys;
 mod palette;
+mod replay;
 mod panes;
 mod settings;
 mod tabs;
@@ -47,9 +49,23 @@ fn setup(app: &mut App, waker: rune::Waker) {
     }
 }
 
+/// `src/demo.rs` open with rust-analyzer attached and two diagnostics.
+fn lsp_fixture(s: &mut App) {
+    s.open_file("src/demo.rs", None);
+    s.apply_opened_file("src/demo.rs", b"fn main() {\n    let mut items = Vec::new();\n    items.pu\n    println!(\"{}\", items.len());\n}\n");
+    s.apply_editor_reply(serde_json::json!({"LspSnapshot": {"surface_id": "rune-editor:src/demo.rs", "filetype": "rust",
+        "servers": [{"name": "rust-analyzer", "binary": "rust-analyzer", "filetype": "rust", "state": "active"}]}}));
+    let diag = |severity: &str, line: u32, col: u32, end: u32, message: &str| serde_json::json!({
+        "severity": severity, "message": message, "source": "rust-analyzer", "line": line, "col": col, "end_line": line, "end_col": end, "lnum": line + 1});
+    s.apply_editor_reply(serde_json::json!({"Diagnostics": {"surface_id": "rune-editor:src/demo.rs", "items": [
+        diag("Warn", 1, 12, 17, "variable does not need to be mutable"),
+        diag("Error", 2, 10, 12, "no field `pu` on type `Vec<_>`"),
+    ]}}));
+}
+
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
-    let changed = app.drain() | app.take_decoded_previews() | app.sync_terminals(tx);
+    let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.sync_terminals(tx);
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let animating = app.wordmark.tick(app.visible_wordmark(), clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }
@@ -66,6 +82,9 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.conversation_follow(tx);
     let panes_changed = app.sync_panes();
     let flashing = app.editor_tick();
+    let mouse_changed = app.editor_mouse_tick(tx);
+    // Edited buffers re-sync to the language servers once typing settles.
+    if let Some(delay) = app.lsp_tick() { tx.wake_after(delay); }
     if flashing { tx.wake_after(std::time::Duration::ZERO); }
     let focus_changed = app.sync_field_focus();
     // The live turn's status line animates on live bindings; it rebuilds only on state changes.
@@ -88,7 +107,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -126,7 +145,19 @@ fn main() {
                 s.load_fixture("fixture", "Fixture", &json);
             }),
             ("app-menu", |s| { s.toggle_menu(); if let Some(m) = &mut s.menu { m.selected = 1; } }),
-            ("settings", |s| s.open_settings()),
+            ("settings", |s| {
+                s.open_settings();
+                if let Some(settings) = &mut s.settings {
+                    settings.set_descriptors(serde_json::from_str(include_str!("../fixtures/settings-schema.json")).expect("settings fixture"));
+                }
+            }),
+            ("keybinds", |s| { s.open_settings(); if let Some(settings) = &mut s.settings { settings.category = settings::Category::Keybinds; settings.loading = false; } }),
+            ("database", database::fixture),
+            ("editor-splits", |s| {
+                s.open_file("left.rs", None); s.apply_opened_file("left.rs", b"let left_value = 1;\n");
+                s.split(panes::Axis::Horizontal);
+                s.open_file("right.rs", None); s.apply_opened_file("right.rs", b"let right_value = 2;\n");
+            }),
             ("about", |s| s.modal = Some(ui::modal::Modal::about())),
             // A long file and a long tree, for walking with held arrows.
             ("editor-long", |s| {
@@ -135,6 +166,15 @@ fn main() {
                 let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();
                 s.apply_dir_listing("", &serde_json::Value::Array(entries));
                 s.sidebar = Some(app::Sidebar::Files);
+            }),
+            // Large, wrapped file in a narrow split: scrolling must only mount visible rows.
+            ("editor-stress", |s| {
+                s.open_file("left.rs", None);
+                s.apply_opened_file("left.rs", b"// Adjacent pane stays independent.\n");
+                s.split(panes::Axis::Horizontal);
+                let source: String = (0..20_000).map(|i| format!("pub fn item_{i}(value: usize) -> String {{ format!(\"value: {{}} — Unicode and a wrapped source line\", value + {i}) }}\n")).collect();
+                s.open_file("stress.rs", None);
+                s.apply_opened_file("stress.rs", source.as_bytes());
             }),
             ("editor-md", |s| {
                 s.open_file("README.md", None);
@@ -147,6 +187,33 @@ fn main() {
                 s.sidebar = Some(app::Sidebar::Conversations);
                 s.focus = app::Focus::Sidebar;
             }),
+            // A Rust buffer with a live language server: diagnostics and the `K` hover card.
+            ("lsp", |s| {
+                lsp_fixture(s);
+                if let Some(b) = s.buffers.get_mut("src/demo.rs") {
+                    b.doc.set_cursor(editor::vim::Pos { line: 1, col: 24 });
+                    b.lsp.hover = Some(editor::lsp::Hover { seq: 7, text: None, anchor: None });
+                }
+                s.apply_editor_reply(serde_json::json!({"LspHoverResult": {"seq": 7, "line": 1, "character": 24,
+                    "contents": "```rust\nalloc::vec::Vec\n\npub struct Vec<T, A = Global>\n```\n\n---\n\nA contiguous growable array type, written as `Vec<T>`, short for 'vector'."}}));
+            }),
+            // The real daemon: open the launch directory's `src/main.rs` (language servers attach).
+            ("lsp-live", |s| s.open_file("src/main.rs", Some(2))),
+            // Insert mode after `items.pu`: the completion menu.
+            ("lsp-complete", |s| {
+                lsp_fixture(s);
+                if let Some(b) = s.buffers.get_mut("src/demo.rs") {
+                    b.doc.mode = editor::document::Mode::Insert;
+                    b.doc.set_cursor(editor::vim::Pos { line: 2, col: 12 });
+                    b.lsp.completion = Some(editor::lsp::Completion { seq: 9, line: 2, start: 10, items: Vec::new(), selected: 0 });
+                }
+                let item = |label: &str, kind: &str, detail: &str| serde_json::json!({"label": label, "kind": kind, "detail": detail, "insert_text": label});
+                s.apply_editor_reply(serde_json::json!({"LspCompletions": {"seq": 9, "items": [
+                    item("push", "method", "fn(&mut self, T)"), item("push_within_capacity", "method", "fn(&mut self, T) -> Result"),
+                    item("pop", "method", "fn(&mut self) -> Option<T>"), item("capacity", "method", "fn(&self) -> usize"),
+                    item("PUBLIC", "constant", "usize"),
+                ]}}));
+            }),
             ("tree-long", |s| {
                 let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();
                 s.apply_dir_listing("", &serde_json::Value::Array(entries));
@@ -154,6 +221,7 @@ fn main() {
                 s.focus = app::Focus::Sidebar;
             }),
             // A live turn mid-stream: the animated "Crafting . . ." status line.
+            ("streaming", replay::start),
             ("activity", |s| {
                 s.load_fixture("fixture-activity", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"));
                 if let Some(session) = s.sessions.get_mut("fixture-activity") {
@@ -193,8 +261,8 @@ fn main() {
     let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
     rune::set_app_id(Box::leak(app_id.into_boxed_str()));
     let mut app = rune::App::new(spec).init(App::new);
-    // Every encoded frame feeds the FPS pill; `NEOISM_RUNE_FRAME_TRACE=1` also logs each one for
-    // the missed-frame analysis the GPUiX investigation used (`docs/gpuix-live-rendering-baseline.md`).
+    // Encoded frame callbacks measure submission cadence only. They are not compositor
+    // presentation timestamps and cannot establish missed-vblank parity (see rune/README.md).
     let trace = std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1");
     let origin = std::time::Instant::now();
     app = app.on_frame_encoded(move |frame| {

@@ -83,6 +83,7 @@ fn header(app: &App, settings: &Settings, s: f32) -> El {
 }
 
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if app.capture_binding(event) { return true; }
     // Left/Right edit the query while there is one; otherwise they change category.
     if matches!(event.key, Key::Left | Key::Right) && app.settings.as_ref().is_some_and(|s| !s.searching() && s.editing.is_none()) {
         return app.settings_key(event);
@@ -229,24 +230,30 @@ fn keybind_rows(app: &App, settings: &Settings, s: f32) -> El {
     let p = app.pal;
     let mut list = col().w_full();
     let mut group: Option<KeyGroup> = None;
-    for def in KEYBINDS {
+    for (index, def) in KEYBINDS.iter().enumerate() {
         if group != Some(def.group) {
             group = Some(def.group);
             list = list.child(col().w_full().h(52.0 * s).justify_end().pb(10.0 * s)
                 .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border).alpha(0.6))
                 .child(text(def.group.title()).font(TextStyle::new(10.0 * s, 400.0).family(PIXEL)).color(rgb(p.dim))));
         }
-        let combo = settings.keybind(def);
+        let combo = if settings.rebinding == Some(index) { "Press shortcut · Esc cancels".into() } else { settings.keybind(def) };
         let mut item = col().w_full().pt(12.0 * s)
             .child(text(def.label).font(app.ty.sized(14.0).lh(20.0 * s)).color(rgb(p.fg)));
         if !def.action.is_empty() {
             item = item.child(text(def.action).font(app.ty.sized(12.0).lh(18.0 * s)).color(rgb(p.dim)).mt(4.0 * s));
         }
         let combo_w = combo.chars().count() as f32 * 12.5 * s * 0.6;
-        list = list.child(item
-            .child(row().w((combo_w + 26.0 * s).max(72.0 * s)).h(PILL_H * s).mt(10.0 * s).radius(6.0 * s).center().fill(rgb(p.surface))
-                .child(text(combo).font(app.ty.sized(12.5)).color(rgb(p.fg))))
-            .child(el().w_full().h(s).mt(14.0 * s).fill(rgb(p.border).alpha(0.5))));
+        let mut pill = row().key(format!("keybind:{}", def.action)).w((combo_w + 26.0 * s).max(72.0 * s)).h(PILL_H * s).mt(10.0 * s).radius(6.0 * s).center().fill(rgb(p.surface))
+            .child(text(combo).font(app.ty.sized(12.5)).color(rgb(p.fg)));
+        if super::rebind::supported(def.action) { pill = pill.hover(rgb(p.hover)).on_press(move |a: &mut App| a.start_rebind(index)); }
+        let mut controls = row().gap(12.0 * s).center_y().child(pill);
+        if super::rebind::supported(def.action) {
+            controls = controls.child(text("Reset").font(app.ty.sized(12.5)).color(rgb(p.dim)).on_press(move |a: &mut App| a.reset_binding(index)));
+        }
+        item = item.child(controls);
+        if settings.rebinding == Some(index) { if let Some(error) = &settings.binding_error { item = item.child(text(error.clone()).font(app.ty.sized(12.5)).color(rgb(p.red))); } }
+        list = list.child(item.child(el().w_full().h(s).mt(14.0 * s).fill(rgb(p.border).alpha(0.5))));
     }
     list
 }

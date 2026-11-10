@@ -116,7 +116,7 @@ pub const KEYBINDS: &[KeybindDef] = &[
         "p",
     ),
     kbg("Search files", KeyGroup::Global, "alt", "s", "alt", "s"),
-    kbg("Open agent", KeyGroup::Global, "alt", "t", "alt", "t"),
+    kbg("Open agent", KeyGroup::Global, "alt", "a", "alt", "a"),
     kbg("Toggle file tree", KeyGroup::Global, "alt", "e", "alt", "e"),
     kb(
         "toggleneoismnotes",

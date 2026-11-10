@@ -8,12 +8,13 @@
 use super::Buffer;
 use super::document::{Document, Mode};
 use super::wrap::{WrapSegment, byte_for_display_col, display_col_for_byte, display_col_for_byte_from, wrap_segments};
-use crate::app::{App, Focus};
+use crate::app::App;
 use crate::ui::icons;
 use crate::ui::theme::{NERD, Palette, rgb};
 use rune::tok::TextStyle;
-use rune::{Color, Drag, El, Phase, ScrollSpec, Span, Spring, Tx, WheelEvent, col, el, row, text};
-use rune_kit::syntax::{Paint, Syntax, highlight};
+use rune::{Color, Drag, El, ScrollSpec, Span, Spring, Tx, WheelEvent, col, el, row, text};
+use rune_kit::syntax::{Highlight, Paint, Syntax, highlight};
+use std::{cell::RefCell, rc::Rc};
 
 /// Critically damped, omega 16: the editor scroll spring (`rune/README.md`, Motion).
 pub const SCROLL_SPRING: Spring = Spring::new(0.39, 0.0);
@@ -40,11 +41,12 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn of(app: &App, doc: &Document) -> Metrics {
+    fn of(app: &App, buffer: &Buffer) -> Metrics {
+        let doc = &buffer.doc;
         let (line_h, adv) = (line_height(app), advance(app));
         let digits = doc.lines.len().max(1).to_string().len().max(2);
         let gutter_w = (digits as f32 + 2.0) * adv;
-        let view_w = app.rects.get("editor-view").map_or(900.0, |r| r[2]);
+        let view_w = buffer.view_rect.map_or(900.0, |r| r[2]);
         let cols = ((view_w - gutter_w - adv) / adv).floor().max(12.0) as usize;
         Metrics { line_h, adv, gutter_w, cols }
     }
@@ -102,14 +104,15 @@ fn breadcrumb(app: &App, path: &str) -> El {
 /// The `:` / `/` prompt while open, else the last message (`"x" written`, `E37: …`).
 fn command_line(app: &App, buffer: &Buffer) -> Option<El> {
     let p = app.pal;
-    let m = Metrics::of(app, &buffer.doc);
+    let m = Metrics::of(app, buffer);
     let font = app.ty.code().lh(m.line_h);
     let line = row().key("editor-command").w_full().h(m.line_h).px(m.adv).center_y();
     if let Some(prompt) = &buffer.prompt {
         let shown = format!("{}{}", prompt.kind, prompt.text);
         let x = m.adv + display_col_for_byte(&shown, shown.len(), TAB) as f32 * m.adv;
+        let path = buffer.path.clone();
         let caret = el().w(m.caret(Mode::Insert)).h(m.line_h).absolute(x, 0.0)
-            .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("editor-cursor".into(), r); });
+            .on_layout(move |a: &mut App, r: [f32; 4]| { if let Some(b) = a.buffers.get_mut(&path) { b.cursor_rect = Some(r); } });
         return Some(line.child(text(shown).font(font).color(rgb(p.fg))).child(caret));
     }
     // Keys of an unfinished command (`2d`, `"a`, `ci`) sit at the right, as vim's showcmd.
@@ -183,30 +186,59 @@ fn expand_tabs(piece: &str, start_col: usize, spans: Vec<Span>) -> (String, Vec<
     (out, spans)
 }
 
-fn code(app: &App, buffer: &Buffer) -> El {
+/// Geometry and syntax are rebuilt only after text or wrapping width changes. Visual rows
+/// have exact, uniform heights, so virtualization never estimates a long line's height.
+#[derive(Default)]
+pub struct CodeCache(RefCell<Option<Rc<CodeLayout>>>);
+struct CodeLayout {
+    revision: u64,
+    cols: usize,
+    marks: Rc<[Highlight]>,
+    offsets: Vec<usize>,
+    first: Vec<usize>,
+    rows: Vec<(usize, WrapSegment, bool, bool)>,
+}
+impl CodeCache { pub fn clear(&self) { *self.0.borrow_mut() = None; } }
+fn layout(buffer: &Buffer, cols: usize) -> Rc<CodeLayout> {
+    let mut slot = buffer.code_cache.0.borrow_mut();
+    if let Some(c) = slot.as_ref().filter(|c| c.revision == buffer.doc.revision && c.cols == cols) { return c.clone(); }
+    let mut rows = Vec::new();
+    let mut first = Vec::new();
+    let mut offsets = Vec::new();
+    let mut offset = 0;
+    for (i, line) in buffer.doc.lines.iter().enumerate() {
+        offsets.push(offset); offset += line.len() + 1;
+        first.push(rows.len());
+        let wrapped = segments(line, cols);
+        let count = wrapped.len();
+        rows.extend(wrapped.into_iter().enumerate().map(|(n, s)| (i, s, n == 0, n + 1 == count)));
+    }
+    let marks = highlight(buffer.language(), &buffer.doc.lines.join("\n"));
+    let result = Rc::new(CodeLayout { revision: buffer.doc.revision, cols, marks, offsets, first, rows });
+    *slot = Some(result.clone());
+    result
+}
+
+fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     let p = app.pal;
     let doc = &buffer.doc;
-    let m = Metrics::of(app, doc);
+    let m = Metrics::of(app, buffer);
     let (line_h, adv) = (m.line_h, m.adv);
     let font = app.ty.code().lh(line_h);
-    let source = doc.lines.join("\n");
-    let marks = highlight(buffer.language(), &source);
+    let cached = layout(buffer, m.cols);
+    let Some(&(index, segment, first, last)) = cached.rows.get(row_index) else { return el().h(line_h); };
+    let line = &doc.lines[index];
+    let start = cached.offsets[index];
+    let marks = &cached.marks;
     let selection = rgb(p.accent).alpha(0.28);
-    let show_cursor = buffer.prompt.is_none();
-    // The yank flash: a band over the yanked bytes fading out over `YANK_FLASH_SECS`.
     let flash = doc.yank_flash.as_ref().and_then(|f| {
         let age = f.started_at.elapsed().as_secs_f32();
         (age < YANK_FLASH_SECS).then(|| (f, rgb(p.accent).alpha(0.35 * (1.0 - age / YANK_FLASH_SECS))))
     });
-
-    let mut rows = col().w_full().pb(line_h * 4.0);
-    let mut start = 0usize;
-    let mut mark = 0usize;
-    for (index, line) in doc.lines.iter().enumerate() {
         let end = start + line.len();
         // The highlights inside this line, rebased to it.
         let mut spans = Vec::new();
-        while mark < marks.len() && marks[mark].0.end <= start { mark += 1; }
+        let mark = marks.partition_point(|(r, _)| r.end <= start);
         let mut k = mark;
         while k < marks.len() && marks[k].0.start < end {
             let (range, paint) = &marks[k];
@@ -218,17 +250,10 @@ fn code(app: &App, buffer: &Buffer) -> El {
             }
             k += 1;
         }
-        let current = index == doc.cursor_line;
-        let selected = selection_on_line(doc, index);
-        // Soft-wrapped rows: the first shows the line number, continuations a muted `↳` and
-        // hang at their indent (`wrap_segments`).
-        let segments = segments(line, m.cols);
-        let mut line_row = col().key(format!("line:{index}")).w_full()
-            .fill(if current && selected.is_none() { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT });
-        for (n, segment) in segments.iter().enumerate() {
-            let last = n + 1 == segments.len();
+    let current = index == doc.cursor_line;
+    let selected = selection_on_line(doc, index);
             let x_of = |byte: usize| m.gutter_w + segment.visual_col(segment.source_col_for_byte(line, byte, TAB)) as f32 * adv;
-            let mut visual = row().w_full().h(line_h);
+            let mut visual = row().w_full().h(line_h).fill(if current && selected.is_none() { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT });
             if let Some((a, b)) = selected {
                 let (a, b) = (a.max(segment.byte_start), b.min(segment.byte_end));
                 // An empty stretch (a blank line, or the newline of a multi-line selection)
@@ -241,7 +266,7 @@ fn code(app: &App, buffer: &Buffer) -> El {
                 let to = if index == flash.end.line { flash.end.col } else { line.len() }.min(line.len()).min(segment.byte_end);
                 if from < to { visual = visual.child(el().w((x_of(to) - x_of(from)).max(adv)).h(line_h).absolute(x_of(from), 0.0).fill(color)); }
             }
-            let gutter = if n == 0 {
+            let gutter = if first {
                 text(format!("{}", index + 1)).font(if current { app.ty.bold().lh(line_h) } else { font })
                     .color(rgb(if current { p.fg } else { p.muted }))
             } else {
@@ -255,40 +280,54 @@ fn code(app: &App, buffer: &Buffer) -> El {
             visual = visual
                 .child(row().w(m.gutter_w - adv).mr(adv).justify_end().child(gutter))
                 .child(rune::rich(piece, piece_spans).font(font).color(rgb(p.fg)).ml(segment.visual_indent as f32 * adv).shrink());
-            let cursor = doc.cursor_col;
-            if show_cursor && current && cursor >= segment.byte_start && (cursor < segment.byte_end || last) {
-                visual = visual.child(el().w(m.caret(doc.mode)).h(line_h).absolute(x_of(cursor), 0.0)
-                    .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("editor-cursor".into(), r); }));
+            let marks = super::lsp_view::RowMarks {
+                buffer, index, line, first_row: first, last_row: last,
+                byte_start: segment.byte_start, byte_end: segment.byte_end, line_h, adv,
+            };
+            for mark in super::lsp_view::row_marks(app, &marks, x_of) { visual = visual.child(mark); }
+    visual
+}
+
+fn code(app: &App, buffer: &Buffer) -> El {
+    let line_h = line_height(app);
+    let cached = layout(buffer, Metrics::of(app, buffer).cols);
+    let path = buffer.path.clone();
+    let rows = col().key("code-rows").w_full().growth(rune::GrowthSpec::default())
+        .virtual_rows(cached.rows.len() + 4, line_h,
+            |_: &App, i| format!("visual:{i}").into(),
+            move |a: &App, i| a.buffers.get(&path).map_or_else(el, |b| code_row(a, b, i)))
+        .virtual_rows_version(0u64);
+    let tab = app.active_tab().id;
+    let rows = rows.on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| { a.select_tab(tab); a.editor_drag(d, tx); })
+        .on_pointer_move_local(move |a: &mut App, p, tx| {
+            if a.active_tab().id != tab { return; }
+            if let Some((line, col)) = hit(a, p.x, p.y) {
+                a.lsp_pointer(line, col, [p.window_x, p.window_y, 1.0, line_height(a)]);
+                tx.wake_after(std::time::Duration::from_millis(350));
             }
-            line_row = line_row.child(visual);
-        }
-        rows = rows.child(line_row);
-        start = end + 1;
-    }
-    let rows = rows.on_drag(|a: &mut App, d: &mut Drag, _: &mut Tx| {
-        if d.phase == Phase::Up { return; }
-        let Some((line, byte)) = hit(a, d.x, d.y) else { return };
-        a.focus = Focus::Content;
-        a.editor_click(line, byte, d.phase == Phase::Move);
-    });
+        })
+        .on_hover_change(|a: &mut App, inside, _| { if !inside { a.lsp_pointer_leave(); } });
 
     let key = scroll_key(&buffer.path);
     let wheel_key = key.clone();
-    let mirror = app.editor_scroll.clone();
+    let mirror = buffer.scroll.clone();
+    let layout_path = buffer.path.clone();
+    let wheel_path = buffer.path.clone();
     col().key(key).w_full().grow(1.0).shrink()
         .scroll(ScrollSpec { stick_bottom: false })
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
         .on_layout(move |a: &mut App, r: [f32; 4]| {
-            a.editor_rows = (r[3] / line_h).floor().max(1.0) as usize;
-            a.rects.insert("editor-view".into(), r);
+            if let Some(b) = a.buffers.get_mut(&layout_path) { b.view_rect = Some(r); }
         })
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Trackpads scroll directly; notches glide three lines each on the spring.
             if e.precise || e.dy == 0.0 { return false; }
-            let (offset, max, _) = a.editor_scroll.get();
-            let base = a.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
+            let Some(b) = a.buffers.get_mut(&wheel_path) else { return false };
+            b.lsp.hover = None;
+            let (offset, max, _) = b.scroll.get();
+            let base = b.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
             let target = (base - e.dy / 40.0 * 3.0 * line_h).clamp(0.0, max);
-            a.wheel_target = Some(target);
+            b.wheel_target = Some(target);
             tx.scroll_to_with(wheel_key.clone(), 0.0, target, SCROLL_SPRING);
             tx.live_only();
             true
@@ -299,45 +338,63 @@ fn code(app: &App, buffer: &Buffer) -> El {
 /// The top of the cursor's visual row and the column's full height, in the code column's own
 /// coordinates (wrapped rows counted). Read from the document rather than the last layout, so a
 /// follow issued before the next frame already aims at the right place.
-pub fn cursor_row_y(app: &App, doc: &Document) -> (f32, f32) {
-    let m = Metrics::of(app, doc);
-    let line = doc.cursor_line.min(doc.lines.len().saturating_sub(1));
-    let rows: Vec<usize> = doc.lines.iter().map(|l| segments(l, m.cols).len()).collect();
-    let segs = segments(&doc.lines[line], m.cols);
-    let within = segs.iter().position(|s| doc.cursor_col < s.byte_end).unwrap_or(segs.len() - 1);
-    let above: usize = rows[..line].iter().sum();
-    let total: usize = rows.iter().sum();
-    ((above + within) as f32 * m.line_h, (total + 4) as f32 * m.line_h)
+pub fn cursor_row_y(app: &App, buffer: &Buffer) -> (f32, f32) {
+    let m = Metrics::of(app, buffer);
+    let cached = layout(buffer, m.cols);
+    let line = buffer.doc.cursor_line.min(buffer.doc.lines.len().saturating_sub(1));
+    let first = cached.first[line];
+    let within = cached.rows[first..].iter().position(|&(i, seg, _, last)| i == line && (buffer.doc.cursor_col < seg.byte_end || last)).unwrap_or(0);
+    ((first + within) as f32 * m.line_h, (cached.rows.len() + 4) as f32 * m.line_h)
 }
 
-/// The `(line, byte)` under a point in the code column (its own layout points, so scrolling is
-/// already accounted for). Past the last row lands on the last line; past a row's text lands
-/// on its end.
-fn hit(app: &App, x: f32, y: f32) -> Option<(usize, usize)> {
-    let doc = &app.active_buffer()?.doc;
-    let m = Metrics::of(app, doc);
-    let target = (y / m.line_h).floor().max(0.0) as usize;
+/// Compute the cursor even when its row is unmounted. Scrolling it out of view must
+/// never leave a stale layout rectangle over another line or over the chrome.
+pub fn cursor_rect(app: &App, buffer: &Buffer) -> Option<[f32; 4]> {
+    if buffer.prompt.is_some() { return buffer.cursor_rect; }
+    let rect = buffer.view_rect?;
+    let m = Metrics::of(app, buffer);
+    let cached = layout(buffer, m.cols);
+    let (y, _) = cursor_row_y(app, buffer);
+    let (_, seg, _, _) = cached.rows.get((y / m.line_h).round() as usize)?;
+    let line = &buffer.doc.lines[buffer.doc.cursor_line];
+    let x = m.gutter_w + seg.visual_col(seg.source_col_for_byte(line, buffer.doc.cursor_col, TAB)) as f32 * m.adv;
+    Some([rect[0] + x, rect[1] + y - buffer.scroll.get().0, m.caret(buffer.doc.mode), m.line_h])
+}
+
+/// Hit testing shares the exact cached visual rows used by rendering and following.
+pub(super) fn hit(app: &App, x: f32, y: f32) -> Option<(usize, usize)> {
+    let buffer = app.active_buffer()?;
+    let m = Metrics::of(app, buffer);
+    let cached = layout(buffer, m.cols);
+    let target = ((y / m.line_h).floor().max(0.0) as usize).min(cached.rows.len().checked_sub(1)?);
+    let &(index, segment, _, last) = cached.rows.get(target)?;
+    let line = &buffer.doc.lines[index];
     let visual_col = ((x - m.gutter_w) / m.adv).max(0.0) as usize;
-    let mut first_row = 0;
-    let last_line = doc.lines.len().checked_sub(1)?;
-    for (index, line) in doc.lines.iter().enumerate() {
-        let segments = segments(line, m.cols);
-        if target < first_row + segments.len() || index == last_line {
-            let n = target.saturating_sub(first_row).min(segments.len() - 1);
-            let segment = segments[n];
-            let byte = byte_for_display_col(line, segment.source_col_at_visual(visual_col), TAB);
-            // A wrapped row's end belongs to the next row: stop on its last char instead.
-            let end = if n + 1 < segments.len() { super::vim::prev_char_boundary(line, segment.byte_end) } else { segment.byte_end };
-            return Some((index, byte.clamp(segment.byte_start, end.max(segment.byte_start))));
-        }
-        first_row += segments.len();
-    }
-    None
+    let byte = byte_for_display_col(line, segment.source_col_at_visual(visual_col), TAB);
+    let end = if last { segment.byte_end } else { super::vim::prev_char_boundary(line, segment.byte_end) };
+    Some((index, byte.clamp(segment.byte_start, end.max(segment.byte_start))))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrolling_reuses_layout_but_text_and_wrap_changes_invalidate_it() {
+        let mut buffer = Buffer::new("sample.rs".into(), String::new(), None);
+        buffer.doc = Document::from_text("let value = 42;\n// a wrapped Unicode line: 日本語 and more text");
+        let initial = layout(&buffer, 20);
+        buffer.doc.cursor_line = 1;
+        buffer.scroll.set((100.0, 500.0, 200.0));
+        assert!(Rc::ptr_eq(&initial, &layout(&buffer, 20)));
+        let wider = layout(&buffer, 80);
+        assert!(!Rc::ptr_eq(&initial, &wider));
+        assert!(wider.rows.len() < initial.rows.len());
+        buffer.doc.replace_from_disk("let changed = 7;\n");
+        let edited = layout(&buffer, 80);
+        assert!(!Rc::ptr_eq(&wider, &edited));
+        assert_eq!(edited.rows.len(), 1);
+    }
 
     #[test]
     fn tabs_expand_to_stops_and_spans_follow() {

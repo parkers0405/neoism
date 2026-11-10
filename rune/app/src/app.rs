@@ -43,6 +43,7 @@ const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 pub struct App {
     /// The live turn's animated status line ("Crafting . . . · 4.2s model").
     pub activity: Option<crate::agent::Activity>,
+    pub replay: Option<crate::replay::Replay>,
     /// The open universal modal (About, confirmations).
     pub modal: Option<crate::ui::modal::Modal>,
     /// A `cd` waiting for the shell to confirm it (request id).
@@ -55,6 +56,8 @@ pub struct App {
     pub menu: Option<crate::ui::menu::Menu>,
     /// The open Settings page.
     pub settings: Option<crate::settings::Settings>,
+    pub keybindings: serde_json::Value,
+    pub databases: HashMap<String, crate::database::Database>,
     /// The window wallpaper (`ui.window.background-image`).
     pub wallpaper: crate::ui::wallpaper::Wallpaper,
     /// The window size in points, from the root layout.
@@ -79,18 +82,12 @@ pub struct App {
     pub pending_g: bool,
     /// Open files by workspace-relative path.
     pub buffers: HashMap<String, crate::editor::Buffer>,
-    /// The active editor's `(offset, max, viewport)`, mirrored from its scroll view.
-    pub editor_scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
-    /// Lines the active editor shows at once.
-    pub editor_rows: usize,
     /// The open project finder (`Alt+S`).
     pub finder: Option<crate::finder::Finder>,
     /// This person's presence name (their orb seed and message author).
     pub local_name: String,
     /// Presence orbs (profile pictures) shown so far.
     pub orbs: crate::ui::orb::Orbs,
-    /// The transcript column's width, for user bubble geometry.
-    pub timeline_width: f32,
     /// Wakes the UI thread (poll) from views and background work.
     pub waker: Option<rune::Waker>,
     /// The window cursor: focus bar on chrome, block caret in fields, one trail between them.
@@ -134,10 +131,6 @@ pub struct App {
     pub effort: String,
     pub wordmark: Wordmark,
     pub fps: Option<u32>,
-    /// The transcript viewport's `(offset, max)`, mirrored each frame from `on_scroll_offset`.
-    pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
-    /// Where notched wheel input is gliding the transcript to.
-    pub wheel_target: Option<f32>,
     /// Tool rows: expansion, selected group children, spinner clock, service icons.
     pub tools: crate::agent::tools::ToolState,
     /// Home block terminals by tab id, and the tabs whose `CreatePty` is still in flight.
@@ -176,17 +169,17 @@ impl App {
             effort: crate::agent::title_case(config.variant.as_deref().unwrap_or("medium")),
             wordmark: Wordmark::default(),
             fps: None,
-            scroll: Default::default(),
-            wheel_target: None,
             tools: Default::default(),
             picker: None,
-            activity: None,
+            activity: None, replay: None,
             modal: None,
             pending_cd: None,
             clipboard: None,
             notes: Default::default(),
             menu: None,
             settings: None,
+            databases: HashMap::new(),
+            keybindings: crate::config::read()["keybinds"]["keys"].clone(),
             wallpaper: crate::ui::wallpaper::Wallpaper::from_config(&crate::config::read()),
             window: [1252.0, 674.0],
             background_previews: Default::default(),
@@ -200,12 +193,9 @@ impl App {
             finder_follow: Default::default(),
             pending_g: false,
             buffers: HashMap::new(),
-            editor_scroll: Default::default(),
-            editor_rows: 30,
             finder: None,
             local_name: crate::ui::orb::local_display_name(config.display_name.as_deref()),
             orbs: Default::default(),
-            timeline_width: 830.0,
             waker: None,
             cursor: Default::default(),
             rects: HashMap::new(),
@@ -242,9 +232,11 @@ impl App {
                 self.agent_connected();
                 self.terminals_connected();
                 self.watch_git();
+                self.lsp_reconnect();
             }
-            Inbound::Disconnected(reason) => self.connection = Connection::Disconnected(reason),
+            Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.database_disconnected(); },
             Inbound::Agent(message) => self.apply_agent(*message),
+            Inbound::Editor(message) => self.apply_editor_message(*message),
             // Live PTY output is uncorrelated (request 0); a reattach replays backlog under its request.
             Inbound::Reply { family, message, request_id } if family == "Pty" => {
                 if let Ok(typed) = serde_json::from_value::<PtyServer>(message) { self.apply_pty(typed, request_id == 0); }
@@ -277,7 +269,9 @@ impl App {
             Inbound::Reply { family, message, .. } if family == "Workspace" => {
                 if let Some(dir) = message["NotesVaultResolved"]["notes_vault_dir"].as_str() { self.apply_notes_vault(dir); }
             }
+            Inbound::Database { request_id, message } => self.apply_database_reply(request_id, message),
             Inbound::Reply { family, message, .. } if family == "Config" => self.apply_config_reply(&message),
+            Inbound::Reply { family, message, .. } if family == "Editor" => self.apply_editor_reply(message),
             Inbound::Reply { .. } => {}
         }
     }

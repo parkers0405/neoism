@@ -22,18 +22,23 @@ const WHEEL_SPRING: Spring = Spring::new(0.39, 0.0);
 /// One agent tab: the wordmark home before the first prompt, then the transcript.
 pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let p = app.pal;
+    let tab_id = app.active_tab().id;
+    let available = app.rects.get(&format!("agent-area:{tab_id}")).map_or(app.window[0] - 55.5, |r| r[2]);
     let Some(session_id) = session else {
         return col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg)).items_center().justify_center()
-            .child(wordmark::view(app, "agent-wordmark", 470.5))
+            .on_layout(move |a: &mut App, r| { a.rects.insert(format!("agent-area:{tab_id}"), r); })
+            .child(wordmark::view(app, "agent-wordmark", 470.5_f32.min((available - 32.0).max(16.0))))
             .child(el().h(47.0))
-            .child(composer(app, 845.0).key("agent-composer-shell"));
+            .child(composer(app, 845.0_f32.min((available - 24.0).max(16.0))).key("agent-composer-shell"));
     };
     let session = app.sessions.get(session_id);
     let messages = session.map(|s| s.messages.as_slice()).unwrap_or(&[]);
     let streaming = session.is_some_and(|s| s.streaming);
     let live_from = session.and_then(|s| s.live_from).unwrap_or(usize::MAX);
-    let mut rows = col().key(format!("timeline:{session_id}")).w_full().px(COLUMN_PAD_X).pt(16.0).pb(200.0).gap(0.0)
-        .on_layout(|a: &mut App, [_, _, w, _]: [f32; 4]| a.timeline_width = (w - 2.0 * COLUMN_PAD_X).max(0.0));
+    let pad = if available >= 700.0 { COLUMN_PAD_X } else { 24.0 };
+    let width_id = session_id.to_owned();
+    let mut rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(200.0).gap(0.0)
+        .on_layout(move |a: &mut App, [_, _, w, _]: [f32; 4]| { if let Some(session) = a.sessions.get_mut(&width_id) { session.width = (w - 2.0 * pad).max(0.0); } });
     let mut index = 0;
     while index < messages.len() {
         let message = &messages[index];
@@ -56,7 +61,8 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let sentinel = el().key("older-sentinel").w_full().h(1.0)
         .on_visible(move |s: &mut App, visible: bool, _: &mut Tx| if visible { s.request_older(&id); });
     let scroll_key = format!("conversation:{session_id}");
-    let mirror = app.scroll.clone();
+    let mirror = session.map(|s| s.scroll.clone()).unwrap_or_default();
+    let wheel_id = session_id.to_owned();
     let line_h = app.ty.body().line_px();
     let wheel_key = scroll_key.clone();
     let timeline = col().key(scroll_key).w_full().grow(1.0).shrink()
@@ -67,23 +73,31 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             // Trackpads keep Rune's direct 1:1 scroll and fling; notches glide on the spring,
             // retargeting mid-glide so consecutive notches are one continuous motion.
             if e.precise || e.dy == 0.0 { return false; }
-            let (offset, max) = s.scroll.get();
-            let base = s.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
+            let Some(session) = s.sessions.get_mut(&wheel_id) else { return false };
+            let (offset, max) = session.scroll.get();
+            let base = session.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
             let target = (base - e.dy / 40.0 * 3.0 * line_h).clamp(0.0, max);
-            s.wheel_target = Some(target);
+            session.wheel_target = Some(target);
             tx.scroll_to_with(wheel_key.clone(), 0.0, target, WHEEL_SPRING);
             tx.live_only();
             true
         })
         .child(col().w_full().child(sentinel).child(rows));
     let mut pane = col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg))
-        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("agent-pane".into(), r); });
+        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("agent-area:{tab_id}"), r); });
     if let Some(header) = super::header::view(app, session_id) {
-        pane = pane.child(col().w_full().px(COLUMN_PAD_X).child(header));
+        pane = pane.child(col().w_full().px(pad).child(header));
     }
     pane.child(timeline)
-        .child(col().w_full().px(86.0).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
+        .child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
             .child(composer(app, f32::INFINITY)))
+}
+
+fn timeline_width(app: &App) -> f32 {
+    if let crate::tabs::TabKind::Agent { session: Some(id) } = &app.active_tab().kind {
+        if let Some(session) = app.sessions.get(id).filter(|s| s.width > 0.0) { return session.width; }
+    }
+    830.0
 }
 
 fn markdown_style(app: &App) -> MarkdownStyle {
@@ -140,7 +154,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let p = app.pal;
     let key = format!("msg:{}", message.id);
     match message.kind {
-        HistoryMessageKind::User => super::user::view(app, &message.text, message.author.as_deref(), app.timeline_width)
+        HistoryMessageKind::User => super::user::view(app, &message.text, message.author.as_deref(), timeline_width(app))
             .key(key).mt(26.0),
         HistoryMessageKind::Reasoning => col().key(key).w_full().mt(24.0).gap(10.0)
             .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })
@@ -152,12 +166,18 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
         HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)
             .font(app.ty.small()).color(rgb(p.muted)).mt(16.0).w_full().wrap().max_lines(6).truncate(),
         HistoryMessageKind::Assistant => {
+            let revision = match &app.active_tab().kind {
+                crate::tabs::TabKind::Agent { session: Some(id) } => app.sessions.get(id).and_then(|s| s.message_versions.get(&message.id)).copied().unwrap_or(0),
+                _ => 0,
+            };
+            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming);
+            rune::memo(format!("assistant:{}:{}", app.active_tab().id, message.id), version, || {
             // Pipe tables render as the original's data grid; everything else as markdown.
             let style = markdown_style(app);
             let mut body = col().key(key).w_full().mt(24.0).gap(14.0);
             for segment in super::table::segments(&message.text) {
                 body = body.child(match segment {
-                    super::table::Segment::Table(rows) => super::table::view(app, &rows, app.timeline_width, &style),
+                    super::table::Segment::Table(rows) => super::table::view(app, &rows, timeline_width(app), &style),
                     super::table::Segment::Text(text) => Markdown::new(text.to_owned())
                         .highlights(prose::highlights(text, p))
                         .streaming(streaming)
@@ -167,6 +187,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                 });
             }
             body.child_meta(app, message)
+            })
         }
     }
 }

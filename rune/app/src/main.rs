@@ -107,6 +107,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if let Some(delay) = app.lsp_tick() { tx.wake_after(delay); }
     if flashing { tx.wake_after(std::time::Duration::ZERO); }
     let focus_changed = app.sync_field_focus();
+    // A selecting drag resting at the transcript's edge keeps scrolling it.
+    if app.timeline_edge_scroll(tx) { tx.wake_after(std::time::Duration::ZERO); }
     // The live turn's status line animates on live bindings; it rebuilds only on state changes.
     let (busy, activity_changed) = app.tick_activity();
     if busy { tx.wake_after(std::time::Duration::ZERO); }

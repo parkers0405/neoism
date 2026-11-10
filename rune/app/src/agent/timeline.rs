@@ -38,7 +38,13 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let pad = if available >= 700.0 { COLUMN_PAD_X } else { 24.0 };
     let width_id = session_id.to_owned();
     let mut rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(200.0).gap(0.0)
-        .on_layout(move |a: &mut App, [_, _, w, _]: [f32; 4]| { if let Some(session) = a.sessions.get_mut(&width_id) { session.width = (w - 2.0 * pad).max(0.0); } });
+        .on_layout(move |a: &mut App, [_, _, w, _]: [f32; 4]| { if let Some(session) = a.sessions.get_mut(&width_id) { session.width = (w - 2.0 * pad).max(0.0); } })
+        // Press, hold and drag selects across the whole transcript; letting go copies it.
+        .selection_group(true)
+        // The composer keeps the keyboard through a press here: refocusing it afterwards
+        // would clear the selection being made.
+        .preserve_focus_on_press(true)
+        .on_selection_change(|a: &mut App, change: &rune::SelectionChange, tx: &mut Tx| a.timeline_selection_changed(change, tx));
     let mut index = 0;
     while index < messages.len() {
         let message = &messages[index];
@@ -70,6 +76,10 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         .scroll(ScrollSpec { stick_bottom: true })
         .scroll_anchor()
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1])))
+        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("timeline-view:{tab_id}"), r); })
+        .on_pointer_move_local(|a: &mut App, p: rune::PointerEvent, _: &mut Tx| {
+            if a.selection.copy.dragging() { a.selection.pointer_y = Some(p.window_y); }
+        })
         .on_wheel(move |s: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Trackpads keep Rune's direct 1:1 scroll and fling; notches glide on the spring,
             // retargeting mid-glide so consecutive notches are one continuous motion.
@@ -95,6 +105,54 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             .child(composer(app, f32::INFINITY)))
 }
 
+/// The transcript's selection highlight.
+pub(super) fn selection_color(app: &App) -> Color { crate::ui::selection::highlight(rgb(app.pal.accent)) }
+
+/// A drag that selects near the top or bottom edge scrolls the transcript
+/// (`scroll_for_drag_edge`): within 32 pt of an edge, up to 22 pt a frame, faster closer in.
+const EDGE_ZONE: f32 = 32.0;
+const EDGE_STEP: f32 = 22.0;
+
+/// The transcript selection as it is being made (`state/selection.rs`).
+#[derive(Default)]
+pub struct Selecting {
+    pub copy: crate::ui::selection::CopyOnRelease,
+    /// Where the pointer is during a selecting drag, in window points.
+    pub pointer_y: Option<f32>,
+}
+
+impl App {
+    /// A drag selecting in the transcript: remember it while it runs, and copy the selection
+    /// when the press lets go (`end_selection`), as the original does.
+    pub fn timeline_selection_changed(&mut self, change: &rune::SelectionChange, tx: &mut Tx) {
+        if let Some(text) = self.selection.copy.change(change, tx) { self.copied_selection = Some(text); }
+        if !self.selection.copy.dragging() { self.selection.pointer_y = None; }
+    }
+
+    /// Keep scrolling while a selecting drag rests near the transcript's top or bottom edge.
+    /// Returns whether it moved (the frame clock keeps running then).
+    pub fn timeline_edge_scroll(&mut self, tx: &mut Tx) -> bool {
+        if !self.selection.copy.dragging() { return false; }
+        let Some(y) = self.selection.pointer_y else { return false };
+        let tab = self.active_tab().id;
+        let crate::tabs::TabKind::Agent { session: Some(id) } = &self.active_tab().kind else { return false };
+        let Some([_, top, _, h]) = self.rects.get(&format!("timeline-view:{tab}")).copied() else { return false };
+        let Some(session) = self.sessions.get(id) else { return false };
+        let (offset, max) = session.scroll.get();
+        // The composer floats over the transcript's foot: the visible bottom is its top.
+        let bottom = self.rects.get(&format!("composer-card:{tab}")).map_or(top + h, |c| (c[1] - 6.0).min(top + h));
+        let above = (top + EDGE_ZONE) - y;
+        let below = y - (bottom - EDGE_ZONE);
+        let delta = if above > 0.0 { -(above / EDGE_ZONE).clamp(0.05, 1.0) * EDGE_STEP }
+            else if below > 0.0 { (below / EDGE_ZONE).clamp(0.05, 1.0) * EDGE_STEP }
+            else { return false };
+        let next = (offset + delta).clamp(0.0, max);
+        if (next - offset).abs() < 0.5 { return false; }
+        tx.scroll_to_y(format!("conversation:{id}"), next);
+        true
+    }
+}
+
 fn timeline_width(app: &App) -> f32 {
     if let crate::tabs::TabKind::Agent { session: Some(id) } = &app.active_tab().kind {
         if let Some(session) = app.sessions.get(id).filter(|s| s.width > 0.0) { return session.width; }
@@ -106,6 +164,7 @@ fn markdown_style(app: &App) -> MarkdownStyle {
     let p = app.pal;
     MarkdownStyle::neutral(true)
         .text(rgb(p.fg))
+        .selection(selection_color(app))
         // List markers and level 4+ headings take `muted`; the original draws bullets blue.
         .muted(rgb(p.blue))
         .link(rgb(p.blue))
@@ -160,13 +219,14 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             .key(key).mt(26.0),
         HistoryMessageKind::Reasoning => col().key(key).w_full().mt(24.0).gap(10.0)
             .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })
-                .font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)))
-            .child(text(first_line(&message.text)).font(app.ty.body().italic()).color(rgb(p.dim))),
+                .font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)).selectable(true).selection_color(selection_color(app)))
+            .child(text(first_line(&message.text)).font(app.ty.body().italic()).color(rgb(p.dim)).selectable(true).selection_color(selection_color(app))),
         HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tools::row(app, message),
         // Bound notices and compaction summaries to six source lines before layout: `max_lines`
         // alone leaves a many-paragraph text its full height, which breaks narrow transcripts.
         HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)
-            .font(app.ty.small()).color(rgb(p.muted)).mt(16.0).w_full().wrap().max_lines(6).truncate(),
+            .font(app.ty.small()).color(rgb(p.muted)).mt(16.0).w_full().wrap().max_lines(6).truncate()
+            .selectable(true).selection_color(selection_color(app)),
         HistoryMessageKind::Assistant => {
             let revision = match &app.active_tab().kind {
                 crate::tabs::TabKind::Agent { session: Some(id) } => app.sessions.get(id).and_then(|s| s.message_versions.get(&message.id)).copied().unwrap_or(0),
@@ -185,7 +245,10 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                         .streaming(streaming)
                         .reveal(if streaming { 0.18 } else { 0.0 })
                         .code_frame(code_frame(app))
-                        .render(&style),
+                        .selectable(true)
+                        .render(&style)
+                        // One selection spans the whole transcript, not just this block.
+                        .selection_group(false),
                 });
             }
             body.child_meta(app, message)

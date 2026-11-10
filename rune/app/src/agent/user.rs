@@ -59,7 +59,9 @@ pub fn view(app: &App, message: &str, author: Option<&str>, width: f32) -> El {
     let pad = pad_x(width, s);
     let radius = 22.0 * s;
     let body = col().max_w(max_w).shrink().px(pad).py(PAD_Y * s).radius(radius).fill(blue)
-        .child(text(message.to_owned()).font(app.ty.sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap());
+        .child(text(message.to_owned()).font(app.ty.sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap()
+            // White over the blue bubble: the accent highlight would vanish into it.
+            .selectable(true).selection_color(Color::WHITE.alpha(0.3)));
     // The tail hangs off the body's lower-right corner; it overlaps the capsule's own rounding.
     let bubble = el().shrink()
         .child(tail(s, blue).pin(None, None, Some(-3.0 * s), Some(-5.0 * s)))

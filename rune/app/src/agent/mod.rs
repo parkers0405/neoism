@@ -12,7 +12,7 @@ mod sidebar;
 mod table;
 pub mod slash;
 mod user;
-mod timeline;
+pub mod timeline;
 pub mod tools;
 
 pub use activity::Activity;

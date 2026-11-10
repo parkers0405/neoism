@@ -203,10 +203,12 @@ impl App {
         let cells = Cells::of(self);
         let mut changed = false;
         let mut resizes = Vec::new();
+        // A hovered drop only previews the panes: shells are resized once the tab is released.
+        let previewing = self.tab_drag.as_ref().is_some_and(|d| d.preview().is_some());
         for term in self.terminals.values_mut() {
             changed |= term.sync();
             let [width, height] = term.area;
-            if width > 0.0 && height > 0.0 {
+            if width > 0.0 && height > 0.0 && !previewing {
                 let inset = if term.raw() && term.shell.alt() { 0.0 } else { cells.inset };
                 let cols = ((width - 2.0 * inset) / cells.cell).floor().max(2.0) as u16;
                 let rows = (height / cells.row).floor().max(1.0) as u16;

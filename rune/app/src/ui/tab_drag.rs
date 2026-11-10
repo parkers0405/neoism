@@ -1,6 +1,6 @@
 //! GPUiX TabSlide behavior on Rune: live adjacent crossings, sliding neighbors and a plain ghost.
 //! Stable tab/workspace identities retain the selected content and saved state.
-use crate::{app::{App, Focus}, tabs::TabKind};
+use crate::{app::{App, Focus}, panes::{Layout, PaneId, Placement}, tabs::TabKind};
 use rune::{Anim, Drag, El, Phase, Spring, Tx, el, row, text};
 use super::theme::{glyph, rgb};
 
@@ -27,6 +27,30 @@ pub struct TabDrag {
     strip_key: String,
     viewport: [f32; 4],
     dirty: bool,
+    drop: Option<Drop>,
+    /// The pane a buffer tab was pressed in and whether panes were framed (more than one).
+    home: (PaneId, bool),
+}
+
+/// Where the dragged tab would land if released now, and the layout that drop gives. The
+/// panes draw from `layout` while it hovers (GPUiX `TabDropPreview`); the real tree is only
+/// replaced on release, so leaving the zone or cancelling restores it untouched.
+struct Drop { target: PaneId, placement: Placement, layout: Layout }
+
+/// GPUiX eases panes to a previewed drop over 120 ms; this spring settles in about that.
+pub const PREVIEW: Spring = Spring::new(0.16, 0.0);
+
+impl TabDrag {
+    /// The layout to draw while a dragged tab hovers a drop zone.
+    pub fn preview(&self) -> Option<&Layout> { self.drop.as_ref().map(|d| &d.layout) }
+    /// A buffer tab is off its strip: panes ease to and from the previewed drop.
+    pub fn splitting(&self) -> bool { self.moving && matches!(self.source, Source::Buffer(_)) }
+    /// (tab, pane it was pressed in, panes were framed) while a drop is previewed. Rune sends a
+    /// drag to the key path it was pressed on, and the preview moves the tab to another pane,
+    /// so the panes keep a hidden stand-in on the old path until the gesture ends.
+    pub fn anchor(&self) -> Option<(u64, PaneId, bool)> {
+        match (&self.source, &self.drop) { (Source::Buffer(tab), Some(_)) => Some((*tab, self.home.0, self.home.1)), _ => None }
+    }
 }
 
 fn relocate<T: PartialEq>(values: &mut Vec<T>, source: &T, target: &T, after: bool) -> bool {
@@ -117,13 +141,14 @@ impl App {
 
     /// GPUiX checks the dragged center against its own logical slot edges, never
     /// against a neighbor's animated paint position. This prevents back-and-forth swaps.
-    fn reorder_drag(&mut self, drag: &mut TabDrag) {
+    /// Returns whether the pointer is on the tab's own strip (where a drag only reorders).
+    fn reorder_drag(&mut self, drag: &mut TabDrag) -> bool {
         let [x,y,w,h] = drag.viewport;
         let extra = if matches!(drag.source, Source::Workspace(_)) { 36.0 * self.ty.scale() } else { 0.0 };
-        if drag.point[0] < x || drag.point[0] > x+w || drag.point[1] < y || drag.point[1] > y+h+extra { return; }
+        if drag.point[0] < x || drag.point[0] > x+w || drag.point[1] < y || drag.point[1] > y+h+extra { return false; }
         let center = drag.point[0] - self.drag_origin(drag) - drag.grab[0] + drag.size[0] * 0.5;
         for _ in 0..drag.slots.len() {
-            let Some(index) = drag.slots.iter().position(|(id,_)| *id == drag.source) else { return };
+            let Some(index) = drag.slots.iter().position(|(id,_)| *id == drag.source) else { return true };
             let start: f32 = drag.slots[..index].iter().map(|(_,width)| width).sum();
             let next = if center > start + drag.size[0] { index.checked_add(1) }
                 else if center < start { index.checked_sub(1) } else { None };
@@ -137,6 +162,7 @@ impl App {
             if !changed { break; }
             drag.slots.swap(index,next);
         }
+        true
     }
 
     /// Let Rune animate every neighbor. The hidden original tracks the hand instantly;
@@ -144,6 +170,8 @@ impl App {
     pub fn tab_slide(&self, source: Source, item: El) -> El {
         let item = item.motion(SLIDE).offset(0.0, 0.0).offset_motion(SLIDE).opacity_motion(Anim::INSTANT);
         let Some(drag) = self.tab_drag.as_ref().filter(|d| d.moving && d.source == source) else { return item };
+        // In a previewed drop the tab already sits in the strip it will land in, hidden under the ghost.
+        if drag.drop.is_some() { return item.motion(Spring::NONE).offset_motion(Anim::INSTANT).opacity(0.0); }
         let start: f32 = drag.slots.iter().take_while(|(id,_)| *id != source).map(|(_,w)| w).sum();
         item.motion(Spring::NONE).offset_motion(Anim::INSTANT).opacity(0.0)
             .offset(drag.point[0] - drag.grab[0] - self.drag_origin(drag) - start, 0.0)
@@ -180,7 +208,8 @@ impl App {
             let point = d.window_point();
             let agent_icon = matches!(&source, Source::Buffer(id) if self.tabs.iter().any(|t| t.id == *id && matches!(t.kind, TabKind::Agent { .. })));
             let pressed = source.clone();
-            self.tab_drag = Some(TabDrag { agent_icon, source, point, grab: [(point[0]-x).clamp(0.0,w),point[1]-y], size: [w,h], label, icon, moving: false, slots, strip_key, viewport, dirty });
+            let home = match &source { Source::Buffer(id) => self.layout.pane_of(*id).unwrap_or(self.layout.focus), _ => self.layout.focus };
+            self.tab_drag = Some(TabDrag { agent_icon, source, point, grab: [(point[0]-x).clamp(0.0,w),point[1]-y], size: [w,h], label, icon, moving: false, slots, strip_key, viewport, dirty, drop: None, home: (home, self.layout.pane_count() > 1) });
             // The reference activates on press, so the content under a dragged tab
             // remains that tab throughout the gesture, including an outside drop.
             match pressed {
@@ -193,13 +222,50 @@ impl App {
         drag.point = d.window_point();
         let threshold = 5.0 * self.ty.scale();
         drag.moving |= d.dx * d.dx + d.dy * d.dy >= threshold * threshold;
-        if drag.moving && !d.cancelled() { self.reorder_drag(&mut drag); tx.animated(); }
+        if drag.moving && !d.cancelled() {
+            let on_strip = self.reorder_drag(&mut drag);
+            self.preview_drop(&mut drag, on_strip);
+            tx.animated();
+        }
         if d.phase == Phase::Up {
             self.suppress_tab_press = drag.moving;
             // Reorders already belong to the canonical strip, as in GPUiX.
             // Keep its last order on cancellation; the tab springs into that slot.
             if drag.moving { tx.animated(); }
+            if let Some(drop) = drag.drop.take().filter(|_| !d.cancelled()) {
+                self.layout = drop.layout;
+                self.show_focused_pane();
+                self.focus = Focus::Content;
+                self.chrome_reveal.clear();
+            }
         } else { self.tab_drag = Some(drag); }
+    }
+
+    /// The pane and zone a dragged buffer tab is over (`tabDropPoint` + `layout.drop-preview`),
+    /// tested against the committed layout so panes moving under the pointer in the preview
+    /// never change the answer. Another pane's tab strip always adopts; the tab's own pane
+    /// only splits, and only when a tab stays behind.
+    pub fn drop_zone(&self, tab: u64, point: [f32; 2]) -> Option<(PaneId, Placement)> {
+        let area = *self.rects.get("panes-area")?;
+        let s = self.ty.scale();
+        let (panes, _) = self.layout.solve(area, crate::panes::GAP * s);
+        let (target, rect) = panes.into_iter().find(|(_, r)| point[0] >= r[0] && point[0] < r[0] + r[2] && point[1] >= r[1] && point[1] < r[1] + r[3])?;
+        let pane = self.layout.pane(target)?;
+        let own = pane.tabs.contains(&tab);
+        let placement = if !own && point[1] < rect[1] + crate::panes::TAB_ROW_H + 2.0 * s { Placement::Center }
+            else { crate::panes::placement_at(rect, point[0], point[1]) };
+        if own && (placement == Placement::Center || pane.tabs.len() < 2) { return None; }
+        Some((target, placement))
+    }
+
+    fn preview_drop(&mut self, drag: &mut TabDrag, on_strip: bool) {
+        let Source::Buffer(tab) = drag.source else { return };
+        let zone = if on_strip { None } else { self.drop_zone(tab, drag.point) };
+        if zone == drag.drop.as_ref().map(|d| (d.target, d.placement)) { return; }
+        drag.drop = zone.and_then(|(target, placement)| {
+            let mut layout = self.layout.clone();
+            layout.drop_tab(tab, target, placement).then_some(Drop { target, placement, layout })
+        });
     }
 }
 
@@ -250,6 +316,34 @@ mod tests {
         let other = app.active_tab().id;
         assert!(!app.reorder_buffer_tab(home, other, false));
         assert_eq!(app.active_tab().id, other);
+    }
+    #[test]
+    fn a_dragged_tab_finds_its_drop_zone_in_the_committed_panes() {
+        let mut app = App::new();
+        let home = app.active_tab().id;
+        app.rects.insert("panes-area".into(), [100.0, 50.0, 800.0, 400.0]);
+        // A lone tab has nowhere to go in its own pane.
+        assert_eq!(app.drop_zone(home, [880.0, 250.0]), None);
+        app.open_file("a.rs", None);
+        let editor = app.active_tab().id;
+        // Its own pane: an edge splits, the centre and the tab strip's row are not drops.
+        assert_eq!(app.drop_zone(editor, [880.0, 250.0]), Some((1, Placement::Right)));
+        assert_eq!(app.drop_zone(editor, [500.0, 430.0]), Some((1, Placement::Bottom)));
+        assert_eq!(app.drop_zone(editor, [500.0, 250.0]), None);
+        assert_eq!(app.drop_zone(editor, [50.0, 250.0]), None, "outside the panes");
+        let mut split = app.layout.clone();
+        assert!(split.drop_tab(editor, 1, Placement::Right));
+        app.layout = split;
+        let other = app.layout.pane_of(editor).unwrap();
+        let gap = crate::panes::GAP * app.ty.scale();
+        let left = (800.0 - gap) / 2.0;
+        // Another pane: its tab strip and centre adopt, its edges split it.
+        assert_eq!(app.drop_zone(home, [100.0 + left + gap + 150.0, 60.0]), Some((other, Placement::Center)));
+        assert_eq!(app.drop_zone(home, [100.0 + left + gap + left / 2.0, 250.0]), Some((other, Placement::Center)));
+        assert_eq!(app.drop_zone(home, [895.0, 250.0]), Some((other, Placement::Right)));
+        assert_eq!(app.drop_zone(home, [100.0 + left + gap / 2.0, 250.0]), None, "the gap between panes");
+        // The lone tab left in the first pane still cannot split it.
+        assert_eq!(app.drop_zone(home, [110.0, 250.0]), None);
     }
     #[test]
     fn workspace_reorder_keeps_drafts_identity_and_keyboard_focus() {

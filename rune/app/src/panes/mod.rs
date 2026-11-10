@@ -6,7 +6,7 @@
 mod actions;
 mod view;
 
-pub use view::view;
+pub use view::{GAP, TAB_ROW_H, view};
 
 /// `Horizontal` places children side by side (Split Right); `Vertical` stacks them (Split Down).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +24,39 @@ pub enum Direction {
 }
 
 pub type PaneId = u64;
+
+/// Where a dragged tab lands in a pane (`DropPlacement`): an edge splits the pane on that
+/// side, the centre adopts the tab into the pane's own strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+}
+
+/// Each edge band is a quarter of the pane (`layout.drop` passes 0.25 to `drop_zone_at`).
+const DROP_EDGE: f32 = 0.25;
+
+/// The drop zone of a point inside `rect` (`drop_zone_at`): the edge whose band holds it,
+/// the relatively nearest one where bands overlap in a corner, else the centre.
+pub fn placement_at(rect: [f32; 4], x: f32, y: f32) -> Placement {
+    let [left, top, w, h] = rect;
+    let bands = [
+        (x - left, w * DROP_EDGE, Placement::Left),
+        (left + w - x, w * DROP_EDGE, Placement::Right),
+        (y - top, h * DROP_EDGE, Placement::Top),
+        (top + h - y, h * DROP_EDGE, Placement::Bottom),
+    ];
+    let mut best: Option<(f32, Placement)> = None;
+    for (distance, band, placement) in bands {
+        if band > 0.0 && distance <= band && best.is_none_or(|(nearest, _)| distance / band < nearest) {
+            best = Some((distance / band, placement));
+        }
+    }
+    best.map_or(Placement::Center, |(_, placement)| placement)
+}
 
 /// Ratios stay inside 10%..90% of a split (`MIN_SPLIT_RATIO` / `MAX_SPLIT_RATIO`).
 const MIN_RATIO: f32 = 0.10;
@@ -185,7 +218,10 @@ impl Layout {
     /// Split the focused pane: a split of the same axis gains a sibling after it (shares
     /// rebalanced), otherwise the pane becomes a two-way split. The new pane holds `tab` and
     /// takes focus (`SessionTree::split_focused`).
-    pub fn split(&mut self, axis: Axis, tab: u64) {
+    pub fn split(&mut self, axis: Axis, tab: u64) { self.split_side(axis, false, tab); }
+
+    /// [`split`](Self::split) with the new pane `before` the focused one (left / above) or after it.
+    pub fn split_side(&mut self, axis: Axis, before: bool, tab: u64) {
         let id = self.next;
         self.next += 1;
         let new = Node::Pane(Pane { id, tabs: vec![tab], active: 0 });
@@ -193,11 +229,12 @@ impl Layout {
         if let Some((&index, parent)) = path.split_last() {
             if let Some(Node::Split { axis: parent_axis, children, ratios }) = self.node_mut(parent) {
                 if *parent_axis == axis {
+                    let at = index + usize::from(!before);
                     let mut parts = shares(ratios, children.len());
                     let share = 1.0 / (children.len() as f32 + 1.0);
                     parts.iter_mut().for_each(|s| *s *= 1.0 - share);
-                    parts.insert(index + 1, share);
-                    children.insert(index + 1, new);
+                    parts.insert(at, share);
+                    children.insert(at, new);
                     *ratios = ratios_from(&parts);
                     self.focus = id;
                     return;
@@ -206,9 +243,30 @@ impl Layout {
         }
         if let Some(node) = self.node_mut(&path) {
             let old = std::mem::replace(node, Node::Split { axis, children: Vec::new(), ratios: vec![0.5] });
-            if let Node::Split { children, .. } = node { *children = vec![old, new]; }
+            if let Node::Split { children, .. } = node { *children = if before { vec![new, old] } else { vec![old, new] }; }
         }
         self.focus = id;
+    }
+
+    /// Drop a dragged tab on pane `target` (GPUiX `layout.drop`): an edge splits that pane on
+    /// that side with the tab in the new pane, the centre adopts the tab into the pane. The
+    /// tab's pane takes focus. A tab dropped on its own pane splits it only if another tab
+    /// stays behind. Returns whether the layout changed.
+    pub fn drop_tab(&mut self, tab: u64, target: PaneId, placement: Placement) -> bool {
+        let Some(source) = self.pane_of(tab) else { return false };
+        if self.pane(target).is_none() { return false; }
+        if source == target && (placement == Placement::Center || self.pane(source).is_some_and(|p| p.tabs.len() < 2)) { return false; }
+        // The target is another pane or keeps a tab, so closing an emptied source never takes it.
+        self.remove(tab);
+        self.focus = target;
+        match placement {
+            Placement::Center => self.open(tab),
+            Placement::Left => self.split_side(Axis::Horizontal, true, tab),
+            Placement::Right => self.split_side(Axis::Horizontal, false, tab),
+            Placement::Top => self.split_side(Axis::Vertical, true, tab),
+            Placement::Bottom => self.split_side(Axis::Vertical, false, tab),
+        }
+        true
     }
 
     /// Remove `tab`. A pane left empty closes (unless it is the last); focus moves to the
@@ -447,5 +505,54 @@ mod tests {
         let Node::Split { ratios, .. } = &l.root else { panic!("split root") };
         assert!((ratios[0] - MAX_RATIO).abs() < 1e-4);
         assert!(!l.nudge(Axis::Vertical, 0.03));
+    }
+
+    #[test]
+    fn drop_zones_are_quarter_edge_bands_around_an_adopting_centre() {
+        let r = [100.0, 50.0, 400.0, 200.0];
+        assert_eq!(placement_at(r, 300.0, 150.0), Placement::Center);
+        assert_eq!(placement_at(r, 110.0, 150.0), Placement::Left);
+        assert_eq!(placement_at(r, 490.0, 150.0), Placement::Right);
+        assert_eq!(placement_at(r, 300.0, 60.0), Placement::Top);
+        assert_eq!(placement_at(r, 300.0, 240.0), Placement::Bottom);
+        // A corner goes to the edge it is relatively nearer: 10 of 100 across beats 20 of 50 down.
+        assert_eq!(placement_at(r, 110.0, 70.0), Placement::Left);
+        assert_eq!(placement_at(r, 180.0, 55.0), Placement::Top);
+    }
+
+    #[test]
+    fn dropping_a_tab_on_an_edge_splits_that_side_and_the_centre_adopts() {
+        let mut l = Layout::new(1);
+        l.open(2);
+        l.open(3);
+        // Its own pane: the centre is no move, an edge splits with the rest staying behind.
+        assert!(!l.drop_tab(3, 1, Placement::Center));
+        assert!(l.drop_tab(3, 1, Placement::Left));
+        let r = rects(&l);
+        assert_eq!(r.len(), 2);
+        assert_eq!(l.focused().tabs, vec![3]);
+        assert_eq!(r[0].0, l.focus, "the new pane is on the left");
+        assert_eq!(l.pane(1).unwrap().tabs, vec![1, 2]);
+        // A lone tab cannot split its own pane.
+        let lone = l.focus;
+        assert!(!l.drop_tab(3, lone, Placement::Bottom));
+        // Below the other pane: the emptied pane closes and the target splits down.
+        assert!(l.drop_tab(3, 1, Placement::Bottom));
+        let r = rects(&l);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0], (1, [0.0, 0.0, 1000.0, 298.0]));
+        assert_eq!(l.focused().tabs, vec![3]);
+        assert_eq!(r[1].0, l.focus);
+        // The centre of another pane adopts the tab after its active one and shows it.
+        assert!(l.drop_tab(3, 1, Placement::Center));
+        assert_eq!(l.pane_count(), 1);
+        assert_eq!(l.focused().tabs, vec![1, 2, 3]);
+        assert_eq!(l.focused().active_tab(), Some(3));
+        // A same-axis drop joins the existing split and shares evenly.
+        assert!(l.drop_tab(3, 1, Placement::Right));
+        assert!(l.drop_tab(2, 1, Placement::Left));
+        let widths: Vec<f32> = rects(&l).iter().map(|(_, r)| r[2].round()).collect();
+        assert_eq!(widths, vec![331.0, 331.0, 331.0]);
+        assert_eq!(rects(&l).iter().map(|(id, _)| l.pane(*id).unwrap().tabs.clone()).collect::<Vec<_>>(), vec![vec![2], vec![1], vec![3]]);
     }
 }

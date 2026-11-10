@@ -12,7 +12,7 @@
 
 use crate::app::App;
 use crate::ui::theme::rgb;
-use rune::{El, Tx, col, el, row};
+use rune::{El, Tx, WheelEvent, col, el, row};
 use rune_kit::markdown::{Markdown, MarkdownStyle};
 
 const LINE_H: f32 = 17.0;
@@ -86,10 +86,11 @@ fn looks_like_file_ref(cell: &str) -> bool {
     !cell.contains(' ') && (cell.contains('/') || cell.rsplit_once('.').is_some_and(|(_, e)| !e.is_empty() && e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric())))
 }
 
-/// The table grid for `rows` in a `width` point column. `scroll_key` names its sideways scroll;
-/// `foot` is how far above the transcript viewport's bottom the composer's top sits (the
-/// scroll bar holds there while the table runs on underneath).
-pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, scroll_key: String, foot: f32) -> El {
+/// The table grid for `rows` in a `width` point column of `session`'s transcript.
+/// `scroll_key` names its sideways scroll; `foot` is how far above the transcript viewport's
+/// bottom the composer's top sits (the scroll bar holds there while the table runs on
+/// underneath).
+pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, scroll_key: String, foot: f32, session: &str) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -132,8 +133,28 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
     // The thumb follows the scroll as a live offset: no view re-runs for it.
     let thumb_x = rune::Live::new([0.0_f32, 0.0]);
     let follow = thumb_x.clone();
+    // Where the table is scrolled to, for the shared scroller (`ui/scroll.rs`).
+    let place = std::rc::Rc::new(std::cell::Cell::new((0.0_f32, 0.0_f32)));
+    let (mirror, source) = (place.clone(), place);
+    let (wheel_key, session, line_h) = (scroll_key.clone(), session.to_owned(), crate::editor::view::line_height(app));
     let viewport = el().key(scroll_key.clone()).w_full().scroll_x()
-        .on_scroll_offset(move |at| { follow.set([travel * (at.offset[0] / at.max[0].max(1.0)).clamp(0.0, 1.0), 0.0]); })
+        .on_scroll_offset(move |at| {
+            mirror.set((at.offset[0], at.max[0]));
+            follow.set([travel * (at.offset[0] / at.max[0].max(1.0)).clamp(0.0, 1.0), 0.0]);
+        })
+        // Over a table the pointer scrolls as it does over the rest of the transcript: a
+        // vertical delta is the transcript's own, and a sideways one (a trackpad swipe, or
+        // Shift with a wheel) gets the same reading gain, glide and momentum. Left to Rune's
+        // built-in viewport scrolling, both moved at half the speed with none of it.
+        .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
+            let sideways = if e.precise { e.dx.abs() > e.dy.abs() } else { e.mods.shift };
+            if !sideways { return a.timeline_wheel(&session, e, line_h, tx); }
+            let delta = if e.dx.abs() > e.dy.abs() { e.dx } else { e.dy };
+            let source = source.clone();
+            a.scrollers.sideways(&wheel_key, if e.precise { delta * 2.0 } else { delta }, e.precise, 3.0 * line_h, std::rc::Rc::new(move || source.get()), tx);
+            tx.live_only();
+            true
+        })
         .child(row().child(grid).child(el().w(END_REVEAL * s).h(1.0)));
     let rail_y = (BAR_H - RAIL_H) * s / 2.0;
     let pill = |w: f32, color: rune::Color| el().w(w).h(RAIL_H * s).radius(RAIL_H * s / 2.0).fill(color);

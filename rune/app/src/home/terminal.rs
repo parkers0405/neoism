@@ -30,9 +30,33 @@ pub struct Terminal {
     pub screen: Option<Screen>,
     /// A grid-presentation shell (`terminal.block-ui: false`): always Ghostty's grid.
     pub grid: bool,
+    /// The block whose actions menu is open (`moreId`).
+    pub more: Option<u64>,
+    /// The block whose output is being filtered, and the filter query (`filterId`, `filter`).
+    pub filter: Option<(u64, rune::TextEdit)>,
+    /// Blocks whose output is collapsed.
+    pub collapsed: std::collections::HashSet<u64>,
 }
 
 impl Terminal {
+    /// The block that shows the actions toolbar: an open menu, else the hovered, selected or
+    /// filtered block (`toolbar`).
+    pub fn toolbar_block(&self) -> Option<u64> {
+        self.more.or(self.hovered).or(self.selected).or(self.filter.as_ref().map(|(id, _)| *id))
+    }
+
+    /// A block's visible output rows: none when collapsed, the matching ones while filtered.
+    pub fn visible_lines<'a>(&self, block: &'a super::blocks::Block) -> Vec<&'a crate::ghostty::Row> {
+        if self.collapsed.contains(&block.id) { return Vec::new(); }
+        match &self.filter {
+            Some((id, query)) if *id == block.id && !query.text.is_empty() => {
+                let needle = query.text.to_lowercase();
+                block.lines.iter().filter(|row| crate::ghostty::row_text(row).to_lowercase().contains(&needle)).collect()
+            }
+            _ => block.lines.iter().collect(),
+        }
+    }
+
     pub fn new(cwd: String, colors: Colors) -> Terminal {
         Terminal {
             shell: Shell::new(cwd, colors),
@@ -45,6 +69,9 @@ impl Terminal {
             selected: None,
             screen: None,
             grid: false,
+            more: None,
+            filter: None,
+            collapsed: Default::default(),
         }
     }
 

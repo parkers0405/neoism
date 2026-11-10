@@ -23,8 +23,9 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .on_input_key(|s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| s.agent_composer_key(e, tx) || crate::keys::shortcut(s, e, tx))
         .on_submit(|s: &mut App, tx: &mut Tx| { if !s.submit_command(tx) { s.submit(); } });
     // Chips and their `/model` `/agent` `/think` aliases open the same pickers.
-    let chip = |label: String, color: Color, kind: Kind| row().gap(6.0).center_y()
-        .child(text(label).font(app.ty.composer()).color(color))
+    // In a narrow split the chips give way (labels truncate) instead of widening the card.
+    let chip = |label: String, color: Color, kind: Kind| row().gap(6.0).center_y().shrink()
+        .child(text(label).font(app.ty.composer()).color(color).truncate().shrink())
         .child(icon(app, glyph::CHEVRON_DOWN, 0.5, rgb(p.muted)))
         .on_press(move |s: &mut App| {
             if s.composer.picker.as_ref().is_some_and(|picker| picker.kind == kind) { s.close_prompt_picker(); } else { s.open_selection(kind); }
@@ -46,24 +47,24 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .child(input)
         .child(row().key("composer-chip-row").w_full().gap(26.0).center_y()
             .child(chip(app.agent.clone(), rgb(p.red), Kind::Agent))
-            .child(row().gap(8.0).center_y()
+            .child(row().gap(8.0).center_y().shrink()
                 .child(super::slash::provider_mark(app, 17.0 * app.ty.scale()))
                 .child(chip(app.model.clone(), rgb(p.blue), Kind::Model)))
             .child(chip(app.effort.clone(), rgb(p.magenta), Kind::Thinking))
             .child(el().grow(1.0))
             .child(icon(app, glyph::PAPERCLIP, 0.9, rgb(p.dim)))
             .child(send));
-    let footer = row().key("composer-footer").w_full().h(32.0).mx(28.0).px(18.0).center_y().justify_between()
+    let footer = row().key("composer-footer").grow(1.0).shrink().h(32.0).px(18.0).center_y().justify_between()
         .fill(rgb(p.surface).alpha(0.7)).corners([0.0, 0.0, 12.0, 12.0])
         .child(row().gap(10.0).center_y()
             .child(icon(app, glyph::FOLDER, 0.85, rgb(p.dim)))
-            .child(text(format!("{}/", app.display_cwd())).font(app.ty.small()).color(rgb(p.fg))))
+            .child(text(format!("{}/", app.display_cwd())).font(app.ty.small()).color(rgb(p.fg)).truncate().shrink()).shrink())
         .child(row().gap(10.0).center_y()
             .child_opt(app.context_label().map(|label| text(label).font(app.ty.small()).color(rgb(p.muted)).mr(18.0)))
             .child(text("/").font(app.ty.small()).color(rgb(p.fg)))
             .child(text("commands").font(app.ty.small()).color(rgb(p.muted))));
     let column = col().w_full().max_w(max_w).child(card);
-    if app.composer.hints_hidden { column } else { column.child(footer) }
+    if app.composer.hints_hidden { column } else { column.child(row().w_full().px(28.0).child(footer)) }
 }
 
 /// Faint stars inside the composer card. Deterministic positions; twinkle is a later pass.

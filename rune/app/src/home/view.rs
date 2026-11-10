@@ -250,28 +250,31 @@ fn contrast(a: f32, b: f32) -> f32 { (a.max(b) + 0.05) / (a.min(b) + 0.05) }
 /// The wordmark and shortcut menu, placed by `splash::layout` in the measured area.
 fn splash(app: &App) -> El {
     let p = app.pal;
-    let [width, height] = app.splash.area;
-    let mut area = el().key("splash")
-        .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.splash.area = [w, h]);
+    let tab = app.active_tab().id;
+    let [width, height] = app.splash.area.get(&tab).copied().unwrap_or_default();
+    let mut area = el().key(format!("splash:{tab}"))
+        .on_layout(move |a: &mut App, [_, _, w, h]: [f32; 4]| { a.splash.area.insert(tab, [w, h]); });
     // The Home pane insets its splash by 40 x 8 pt a side (`HomeTerminalView`, 80 x 16 total).
     let s = app.ty.scale();
     let (inset_x, inset_y) = (40.0 * s, 8.0 * s);
     let Some(g) = layout(width - 2.0 * inset_x, height - 2.0 * inset_y, app.ty.size, s) else { return area };
     let [x, y, w, _] = g.wordmark;
-    area = area.child(wordmark::view(app, "splash-wordmark", w).absolute(inset_x + x, inset_y + y)
-        .on_visible(|a: &mut App, visible: bool, _: &mut Tx| a.splash.visible = visible));
+    area = area.child(wordmark::view(app, &format!("splash-wordmark:{tab}"), w).absolute(inset_x + x, inset_y + y)
+        .on_visible(move |a: &mut App, visible: bool, _: &mut Tx| {
+            if visible { a.splash.hidden.remove(&tab); } else { a.splash.hidden.insert(tab); }
+        }));
     for (index, (item, rect)) in MENU.iter().zip(&g.buttons).enumerate() {
-        let hovered = app.splash.hover == Some(index);
+        let hovered = app.splash.hover == Some((tab, index));
         let ink = if hovered { rgb(p.fg) } else { rgb(p.dim) };
         let action = item.action;
-        let button = row().key(format!("splash-menu:{index}")).w(rect[2]).h(rect[3]).px(g.pad).center_y()
+        let button = row().key(format!("splash-menu:{tab}:{index}")).w(rect[2]).h(rect[3]).px(g.pad).center_y()
             .radius(g.radius)
             .fill(if hovered { rgb(p.hover).alpha(0.95) } else { Color::TRANSPARENT })
             .child(el().w(g.icon_slot).center().child(text(item.icon).font(TextStyle::new(g.icon_font, 400.0).family(NERD)).color(ink)))
             .child(text(item.label).font(TextStyle::new(g.label_font, 700.0).mono()).color(ink).ml(g.label_gap).grow(1.0).truncate().shrink())
             .child(text(format!("[{}]", item.keys)).font(TextStyle::new(g.key_font, 700.0).mono()).color(rgb(p.green)))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
-                if inside { a.splash.hover = Some(index); } else if a.splash.hover == Some(index) { a.splash.hover = None; }
+                if inside { a.splash.hover = Some((tab, index)); } else if a.splash.hover == Some((tab, index)) { a.splash.hover = None; }
             })
             .on_press_tx(move |a: &mut App, tx: &mut Tx| a.splash_action(action, tx))
             .absolute(inset_x + rect[0], inset_y + rect[1]);

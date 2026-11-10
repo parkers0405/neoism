@@ -30,20 +30,19 @@ use std::time::Duration;
 
 /// Home view state that is not terminal state: the measured splash area, hovered button, and
 /// whether the wordmark is on screen (it scrolls away above the blocks).
+/// Kept per tab: split panes each lay out their own splash.
+#[derive(Default)]
 pub struct SplashState {
-    pub area: [f32; 2],
-    pub hover: Option<usize>,
-    pub visible: bool,
-}
-
-impl Default for SplashState {
-    fn default() -> SplashState { SplashState { area: [0.0; 2], hover: None, visible: true } }
+    pub area: std::collections::HashMap<u64, [f32; 2]>,
+    pub hover: Option<(u64, usize)>,
+    /// Tabs whose wordmark has scrolled off.
+    pub hidden: std::collections::HashSet<u64>,
 }
 
 impl App {
     /// The Home splash is showing in the active tab (not scrolled off, not replaced by a grid).
     pub fn splash_on_screen(&self) -> bool {
-        self.splash.visible && self.active_terminal().is_none_or(|t| !t.raw())
+        !self.splash.hidden.contains(&self.active_tab().id) && self.active_terminal().is_none_or(|t| !t.raw())
     }
 }
 

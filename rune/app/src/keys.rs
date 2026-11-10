@@ -241,6 +241,8 @@ impl App {
         if self.finder.is_some() { return self.rects.get("finder-results").copied(); }
         if self.picker.is_some() { return self.rects.get("picker-results").copied(); }
         match self.focus {
+            Focus::Buffers(_) => self.rects.get(&format!("pane-tab-strip:{}", self.layout.focus)).copied(),
+            Focus::Workspaces(_) => self.rects.get("workspace-tabs").copied(),
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| b.view_rect),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("file-tree-rows").copied(),
             Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) => self.rects.get("conversation-list").copied(),

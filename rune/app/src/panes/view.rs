@@ -120,7 +120,7 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
                 }));
         }
         if !modified && app.tab_hover != Some(tab_id) { item = item.child(el().w(18.0).h(18.0)); }
-        tabs = tabs.child(item);
+        tabs = tabs.child(app.tab_slide(crate::ui::tab_drag::Source::Buffer(tab_id), item));
     }
     let plus = app.tabs.len();
     let mut new_tab = el().key(format!("pane-new:{pane_id}")).w(32.0).h(TAB_ROW_H).center()
@@ -129,7 +129,13 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
     if focused {
         new_tab = new_tab.on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("pane-tab:{plus}"), r); });
     }
-    tabs.child(new_tab)
+    let strip_key = format!("pane-tab-strip:{}:{pane_id}", app.workspace_id);
+    let mirror = app.chrome_scroll.clone();
+    let mirror_key = strip_key.clone();
+    el().key(strip_key).w_full().h(TAB_ROW_H).scroll_x()
+        .on_scroll_offset(move |pos| { mirror.borrow_mut().insert(mirror_key.clone(), [pos.offset[0],pos.max[0]]); })
+        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("pane-tab-strip:{pane_id}"), r); })
+        .child(tabs.child(new_tab))
 }
 
 /// The pane's active tab's surface. Unfocused panes draw theirs through `render_tab`, so the

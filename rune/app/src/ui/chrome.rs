@@ -112,7 +112,10 @@ fn sidebar(app: &App) -> El {
 
 fn workspace_tabs(app: &App) -> El {
     let p = app.pal;
-    let mut strip = row().key("workspace-tabs").w_full().h(TAB_ROW_H).fill(rgb(p.surface)).items_end();
+    let mirror = app.chrome_scroll.clone();
+    let mut strip = row().key("workspace-tabs").w_full().h(TAB_ROW_H).scroll_x()
+        .on_scroll_offset(move |pos| { mirror.borrow_mut().insert("workspace-tabs".into(), [pos.offset[0],pos.max[0]]); })
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-tabs".into(), r); }).fill(rgb(p.surface)).items_end();
     for (index, entry) in app.workspaces.iter().enumerate() {
         let active = index == app.workspace_active;
         let title = if active { app.workspace_name.clone() } else { entry.title.clone() };
@@ -141,7 +144,7 @@ fn workspace_tabs(app: &App) -> El {
                 a.rects.insert(format!("workspace-tab:{index}"), r);
                 a.rects.insert(super::tab_drag::Source::Workspace(identity.clone()).rect_key(), r);
             });
-        strip = strip.child(tab);
+        strip = strip.child(app.tab_slide(super::tab_drag::Source::Workspace(entry.id.clone()), tab));
     }
     let plus = app.workspaces.len();
     strip.child(el().key("workspace-new").w(32.0).h(TAB_ROW_H).center().hover(rgb(p.hover))

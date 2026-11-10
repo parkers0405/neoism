@@ -49,6 +49,8 @@ pub struct App {
     pub quit_requested: bool,
     pub tab_hover: Option<u64>,
     pub workspace_hover: Option<String>,
+    pub chrome_reveal: Vec<String>,
+    pub chrome_scroll: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, [f32; 2]>>>,
     pub tab_drag: Option<crate::ui::tab_drag::TabDrag>,
     pub suppress_tab_press: bool,
     /// The live turn's animated status line ("Crafting . . . · 4.2s model").
@@ -156,7 +158,7 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_default();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, tab_hover: None, workspace_hover: None, tab_drag: None, suppress_tab_press: false,
+            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
             daemon: None,
             inbox: None,
             images: None,

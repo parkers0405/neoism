@@ -38,6 +38,7 @@ pub struct Picker {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
     Command(Action),
+    Close(crate::tabs::CloseCommand),
     Theme(&'static str),
     Background(usize),
     Directory(usize),
@@ -74,6 +75,14 @@ impl Picker {
     /// Ranked rows for the current query; ties keep catalog order.
     pub fn rows(&self) -> Vec<Row> {
         let query = self.query.text.trim();
+        if self.mode == Mode::Commands {
+            if let Some(command) = crate::tabs::CloseCommand::parse(query) {
+                let title = if command.workspace { "Close Workspace" } else { "Close Tab" };
+                return vec![Row { icon: Some(commands::Service::Neoism.icon()),
+                    title: format!("neoism: {title}{}", if command.discard { " (discard changes)" } else { "" }),
+                    shortcut: "", target: Target::Close(command) }];
+            }
+        }
         let mut scored: Vec<(i32, Row)> = match self.mode {
             Mode::Commands => COMMANDS.iter().filter_map(|c| {
                 let score = command_score(query, c)?;
@@ -139,6 +148,7 @@ impl App {
         let rows = picker.rows();
         let Some(row) = rows.get(index.unwrap_or(picker.selected)) else { return };
         match row.target {
+            Target::Close(command) => self.run_close_command(command),
             Target::Command(action) => self.run_action(action, tx),
             Target::Theme(name) => self.apply_theme(name),
             Target::Directory(index) => {
@@ -159,6 +169,7 @@ impl App {
             Action::NewWorkspace => self.new_workspace(),
             Action::NewTab => { self.open_tab(TabKind::Home); }
             Action::CloseTab => self.close_tab(self.active),
+            Action::CloseWorkspace => self.close_workspace(self.workspace_active),
             Action::CloseOtherTabs => {
                 let keep = self.tabs[self.active].id;
                 for index in (0..count).rev() {
@@ -246,6 +257,22 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_close_aliases_never_choose_fuzzy_quit() {
+        let mut picker = Picker::new(Mode::Commands);
+        for (workspace, names) in [(false, &["q", "quit", "quite", "close"][..]), (true, &["qa", "qall", "quitall"][..])] {
+            for name in names { for prefix in ["", ":"] { for suffix in ["", "!"] {
+                picker.query.replace_text(&format!("{prefix}{name}{suffix}"));
+                let rows = picker.rows();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].target, Target::Close(crate::tabs::CloseCommand { workspace, discard: suffix == "!" }));
+                assert!(!rows[0].title.contains("Quit"));
+            } } }
+        }
+        picker.query.replace_text("qalligator");
+        assert!(picker.rows().iter().all(|r| !matches!(r.target, Target::Close(_))));
+    }
 
     #[test]
     fn themes_keep_curated_order_then_filter() {

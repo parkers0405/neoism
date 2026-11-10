@@ -22,6 +22,7 @@ parser.add_argument('--frames', type=int, default=720)
 parser.add_argument('--natural', action='store_true', help='Use normal redraw scheduling instead of forcing every frame')
 parser.add_argument('--keys', default='j' * 140)
 parser.add_argument('--wheel', action='store_true', help='Scroll up and down over the test window using /dev/uinput')
+parser.add_argument('--wheel-seconds', type=float, default=3, help='Duration of alternating native wheel input')
 parser.add_argument('--daemon-url', help='Use a scratch daemon instead of offline fixtures')
 parser.add_argument('--terminal', action='store_true', help='Run bounded ANSI output in a scratch daemon terminal')
 args = parser.parse_args()
@@ -44,7 +45,7 @@ if args.daemon_url:
     environment.append('NEOISM_GPUIX_DAEMON_URL=' + args.daemon_url)
 else:
     environment.append('NEOISM_RUNE_OFFLINE=1')
-command = shlex.join(['env', *environment, 'timeout', '--signal=INT', '12', args.binary,
+command = shlex.join(['env', *environment, 'timeout', '--signal=INT', str(max(12, args.wheel_seconds + 5)), args.binary,
     '--scene', args.scene, '--native', '--trace', str(trace), *([] if args.natural else ['--frames', str(args.frames)])])
 command += ' > ' + shlex.quote(str(log)) + ' 2>&1'
 dispatch(f'hl.dsp.exec_cmd({json.dumps(command)}, {{ workspace = "{args.workspace}" }})')
@@ -109,14 +110,18 @@ elif args.wheel:
         fcntl.ioctl(fd, 0x5501)
         created = True
         time.sleep(.5)
-        for direction in (-1, 1):
+        wheel_end = time.monotonic() + args.wheel_seconds
+        direction = -1
+        while time.monotonic() < wheel_end:
             start = time.monotonic()
             for notch in range(45):
+                if time.monotonic() >= wheel_end: break
                 if active().get('pid') != window['pid']:
                     raise SystemExit('Focus changed; wheel input stopped')
                 time.sleep(max(0, start + notch / 30 - time.monotonic()))
                 for kind, code, value in [(2, 8, direction), (2, 11, 120 * direction), (0, 0, 0)]:
                     os.write(fd, struct.pack('llHHi', 0, 0, kind, code, value))
+            direction = -direction
     finally:
         if created:
             fcntl.ioctl(fd, 0x5502)

@@ -83,6 +83,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.finder_follow_selection(tx);
     app.conversation_follow(tx);
     let panes_changed = app.sync_panes();
+    app.follow_tab_chrome(tx);
     let flashing = app.editor_tick();
     let mouse_changed = app.editor_mouse_tick(tx);
     // Edited buffers re-sync to the language servers once typing settles.
@@ -143,6 +144,11 @@ fn main() {
             ("mcp-timeline", |s| {
                 s.load_fixture("mcp-icons", "Server-supplied artwork", include_str!("../fixtures/mcp-timeline.json"));
                 s.sessions.get_mut("mcp-icons").unwrap().live_from = Some(0);
+            }),
+            ("tab-overflow", |s| {
+                for i in 0..16 { let path = format!("source_{i}.rs"); s.open_file(&path, None); s.apply_opened_file(&path, b"let value = 1;\n"); }
+                for i in 0..12 { s.new_workspace(); s.workspace_name = format!("Workspace {i}"); }
+                s.select_workspace(0);
             }),
             ("tab-reorder", |s| {
                 s.workspace_name = "First".into();

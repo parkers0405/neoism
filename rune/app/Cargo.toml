@@ -25,6 +25,8 @@ base64 = "0.22"
 libloading = "0.8"
 unicode-segmentation = "1"
 unicode-width = "0.2"
+# Question previews drop Markdown to one plain line (the copy rune-kit already builds).
+pulldown-cmark = { version = "0.13", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 
 [profile.release]

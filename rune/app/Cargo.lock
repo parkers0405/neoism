@@ -1751,6 +1751,7 @@ dependencies = [
  "libloading",
  "neoism-protocol",
  "png 0.17.16",
+ "pulldown-cmark",
  "rune",
  "rune-kit",
  "serde",

@@ -172,6 +172,14 @@ fn main() {
                 s.split(panes::Axis::Vertical);
             }),
             ("palette", |s| s.open_picker(palette::Mode::Commands)),
+            // Forty file hits, for the finder's list and highlight springs.
+            ("finder-hits", |s| {
+                s.open_finder(finder::Mode::Files);
+                if let Some(f) = &mut s.finder {
+                    f.hits = (0..40).map(|i| finder::Hit::File { path: format!("src/module_{i:02}/file_{i:02}.rs") }).collect();
+                    f.loading = false;
+                }
+            }),
             ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),
             ("backgrounds", |s| { s.open_picker(palette::Mode::Backgrounds); s.move_picker(2); }),
             // `NEOISM_RUNE_FIXTURE=history.json`: render any recorded history page.

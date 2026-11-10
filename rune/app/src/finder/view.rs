@@ -30,9 +30,28 @@ impl App {
         let Some(finder) = &self.finder else { return };
         let (selected, count) = (finder.selected, finder.hits.len());
         let row_h = ROW_H * self.ty.scale();
-        self.finder_follow.apply(LIST_KEY, selected, row_h, count as f32 * row_h, crate::ui::follow::Reveal::Margin(4), tx);
+        self.finder_follow.apply_with(LIST_KEY, selected, row_h, count as f32 * row_h,
+            crate::ui::follow::Reveal::Margin(SCROLL_OFF_ROWS as i64), crate::ui::follow::LIST_SPRING, false, tx);
+    }
+
+    /// A wheel notch over the hits steps them by whole rows on the list spring and keeps the
+    /// selection inside the visible band (`finder::scroll_pixels`).
+    fn finder_wheel(&mut self, e: &rune::WheelEvent, tx: &mut Tx) -> bool {
+        if e.precise || e.dy == 0.0 { return false; }
+        let row_h = ROW_H * self.ty.scale();
+        let Some(count) = self.finder.as_ref().map(|f| f.hits.len()) else { return false };
+        let Some((top, fit)) = self.finder_follow.wheel_rows(LIST_KEY, e.dy, row_h, count as f32 * row_h, crate::ui::follow::LIST_SPRING, tx) else { return true };
+        tx.animated();
+        if let Some(selected) = self.finder.as_ref().map(|f| f.selected) {
+            let next = crate::ui::follow::clamp_into_view(selected, count, top, fit, SCROLL_OFF_ROWS);
+            if next != selected { self.select_finder(next); }
+        }
+        true
     }
 }
+
+/// The finder's scrolloff (`finder::SCROLL_OFF_ROWS`).
+const SCROLL_OFF_ROWS: usize = 4;
 const ROW_FONT: f32 = 13.0;
 const COMPACT_ROWS: usize = 8;
 const PREVIEW_LINE_H: f32 = 20.0;
@@ -98,8 +117,9 @@ pub fn view(app: &App) -> El {
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     match event.key {
         Key::Escape => { app.finder = None; true }
-        Key::Up => { app.move_finder(-1); true }
-        Key::Down => { app.move_finder(1); true }
+        // The query field makes its commits instant; list moves glide like the original's springs.
+        Key::Up => { tx.animated(); app.move_finder(-1); true }
+        Key::Down => { tx.animated(); app.move_finder(1); true }
         Key::Tab if event.mods.ctrl && !event.mods.alt => { app.cycle_finder_mode(); true }
         _ => crate::keys::shortcut(app, event, tx),
     }
@@ -113,12 +133,15 @@ fn list(app: &App, finder: &Finder, width: f32) -> El {
         let hint = if finder.loading { "Searching..." } else if let Some(error) = &finder.error { error.as_str() } else if finder.query.text.trim().is_empty() && finder.mode == Mode::Grep { "Start typing to search" } else { "No matches" };
         return rows.child(row().h(ROW_H * s).px(INPUT_PAD_X * s).center_y().child(text(hint.to_owned()).font(app.ty.sized(ROW_FONT)).color(rgb(p.muted))));
     }
+    // One highlight glides between hits on the cursor spring; a new query or mode lands it at once.
+    rows = rows.child(el().key(format!("finder-highlight:{:?}:{}", finder.mode, finder.query.text))
+        .w_full().h(ROW_H * s).radius(3.0).fill(rgb(p.hover)).absolute(0.0, 0.0)
+        .offset(0.0, finder.selected as f32 * ROW_H * s).offset_motion(crate::ui::follow::CURSOR_SPRING));
     for (index, hit) in finder.hits.iter().enumerate() {
         let selected = index == finder.selected;
         let (dir, name) = split_path(hit.path());
         let (glyph, color) = icons::for_file(name);
         let mut line = row().key(format!("finder-row:{index}")).w_full().h(ROW_H * s).px(INPUT_PAD_X * s).center_y()
-            .radius(3.0).fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT })
             .child(el().w(ROW_FONT * s).center().child(text(glyph).font(TextStyle::new(ROW_FONT * s, 400.0).family(NERD)).color(rgb(color))))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| if inside { a.select_finder(index) })
             .on_press(move |a: &mut App| a.accept_finder(Some(index)));
@@ -143,6 +166,7 @@ fn list(app: &App, finder: &Finder, width: f32) -> El {
     col().key(LIST_KEY).w(width).scroll(rune::ScrollSpec { stick_bottom: false })
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
+        .on_wheel(|a: &mut App, e: rune::WheelEvent, tx: &mut Tx| a.finder_wheel(&e, tx))
         .child(rows)
 }
 

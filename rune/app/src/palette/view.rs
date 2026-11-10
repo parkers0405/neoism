@@ -4,7 +4,7 @@
 use super::{Mode, Picker, Target, theme_display_name};
 use crate::app::App;
 use crate::ui::theme::{Palette, palette, rgb};
-use rune::{Color, El, Key, KeyEvent, Tx, col, el, row, text};
+use rune::{El, Key, KeyEvent, Tx, col, el, row, text};
 
 const WIDTH: f32 = 480.0;
 const THEME_WIDTH: f32 = 820.0;
@@ -21,9 +21,28 @@ impl App {
         let Some(picker) = &self.picker else { return };
         let (selected, count) = (picker.selected, picker.rows().len());
         let row_h = ROW_H * self.ty.scale();
-        self.palette_follow.apply(LIST_KEY, selected, row_h, count as f32 * row_h + 4.0 * self.ty.scale(), crate::ui::follow::Reveal::Margin(2), tx);
+        self.palette_follow.apply_with(LIST_KEY, selected, row_h, count as f32 * row_h + 4.0 * self.ty.scale(),
+            crate::ui::follow::Reveal::Margin(SCROLL_OFF_ROWS as i64), crate::ui::follow::LIST_SPRING, false, tx);
+    }
+
+    /// A wheel notch over the list steps it by whole rows on the list spring and keeps the
+    /// selection inside the visible band (`command_palette::scroll_pixels`).
+    fn palette_wheel(&mut self, e: &rune::WheelEvent, tx: &mut Tx) -> bool {
+        if e.precise || e.dy == 0.0 { return false; }
+        let row_h = ROW_H * self.ty.scale();
+        let Some(count) = self.picker.as_ref().map(|p| p.rows().len()) else { return false };
+        let content_h = count as f32 * row_h + 4.0 * self.ty.scale();
+        let Some((top, fit)) = self.palette_follow.wheel_rows(LIST_KEY, e.dy, row_h, content_h, crate::ui::follow::LIST_SPRING, tx) else { return true };
+        tx.animated();
+        if let Some(picker) = &mut self.picker {
+            picker.selected = crate::ui::follow::clamp_into_view(picker.selected, count, top, fit, SCROLL_OFF_ROWS);
+        }
+        true
     }
 }
+
+/// The palette's scrolloff (`command_palette::SCROLL_OFF_ROWS`).
+const SCROLL_OFF_ROWS: usize = 2;
 /// The pane tab rows sit above the content the picker is placed in.
 const CHROME_TOP: f32 = 60.0;
 
@@ -88,8 +107,9 @@ pub fn view(app: &App) -> El {
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     match event.key {
         Key::Escape => { app.picker = None; true }
-        Key::Up => { app.move_picker(-1); true }
-        Key::Down => { app.move_picker(1); true }
+        // The query field makes its commits instant; list moves glide like the original's springs.
+        Key::Up => { tx.animated(); app.move_picker(-1); true }
+        Key::Down => { tx.animated(); app.move_picker(1); true }
         _ => crate::keys::shortcut(app, event, tx),
     }
 }
@@ -97,12 +117,17 @@ fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
     let s = app.ty.scale();
     let p = app.pal;
+    // The selection highlight is one element gliding between rows on the cursor spring; a
+    // new query keys a new one, so filtering lands it at once (`reset_motion`).
     let mut list = col().w_full();
+    if !rows.is_empty() {
+        list = list.child(el().key(format!("picker-highlight:{:?}:{}", picker.mode, picker.query.text))
+            .w_full().h(ROW_H * s).radius(3.0 * s).fill(rgb(p.hover)).absolute(0.0, 0.0)
+            .offset(0.0, picker.selected as f32 * ROW_H * s).offset_motion(crate::ui::follow::CURSOR_SPRING));
+    }
     for (index, item) in rows.iter().enumerate() {
         let selected = index == picker.selected;
         let mut line = row().key(format!("picker-row:{index}")).w_full().h(ROW_H * s).px(10.0 * s).gap(8.0 * s).center_y()
-            .radius(3.0 * s)
-            .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT })
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
                 if let (true, Some(picker)) = (inside, &mut a.picker) { picker.selected = index; }
             })
@@ -125,6 +150,7 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
+        .on_wheel(|a: &mut App, e: rune::WheelEvent, tx: &mut Tx| a.palette_wheel(&e, tx))
         .child(list)
 }
 

@@ -207,3 +207,16 @@ A subsequent 30-second native wheel run stopped when desktop focus changed; the 
 guard correctly stopped sending wheel events. It is **not** a completed sustained-scroll
 measurement. The earlier short presentation samples remain the measured performance evidence.
 The native harness now accepts `--wheel-seconds` for a future uninterrupted longer capture.
+
+## Large-file open and edit cost (Claude, 2026-11-09)
+
+`editor-stress` (20,000 wrapped Unicode lines in a split) used to spend two ~180 ms frames on open: one
+wrapping every line at a guessed 900 pt width before the view was measured, then again at the real width.
+Every keystroke also re-wrapped the whole file (~150 ms), since the layout cache was keyed on the revision.
+
+- The code view mounts no rows until the view has reported its width, so the guessed-width pass is gone:
+  first frame 180 ms -> 7 ms; the one real wrap pass (~150-180 ms for this pathological file) remains.
+- Wraps are cached per distinct line text (hash) at the current width, so an edit re-wraps only the lines
+  it changed wherever the others shifted to; highlighting stays whole-file (~2 ms here).
+
+121 Rust tests and `check-headless.py` pass.

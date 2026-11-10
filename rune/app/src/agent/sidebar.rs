@@ -107,6 +107,13 @@ impl App {
     /// Keys while the conversations panel has focus: walk, open, leave.
     pub fn conversation_key(&mut self, event: &rune::KeyEvent) -> bool {
         use rune::Key;
+        // Ctrl+D / Ctrl+U move half a page (rows are two lines, measured from the first one).
+        if let Some(letter @ ('d' | 'u')) = crate::keys::ctrl_letter(event) {
+            let row_h = self.rects.get("conv:0").map_or(50.0, |r| r[3].max(1.0));
+            let half = ((self.conv_follow.scroll.get().2 / row_h / 2.0).floor() as isize).max(1);
+            self.conversation_move(if letter == 'd' { half } else { -half });
+            return true;
+        }
         if event.mods.ctrl || event.mods.alt { return false; }
         let pending_g = std::mem::take(&mut self.pending_g);
         match &event.key {

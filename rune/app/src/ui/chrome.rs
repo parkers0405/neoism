@@ -89,7 +89,10 @@ fn rail(app: &App) -> El {
     };
     let servers = el().key("open-servers").w(RAIL_W).h(51.5).center()
         .child(icon(app, glyph::SERVERS, 1.9, rgb(p.dim)))
-        .child(el().w(6.0).h(6.0).radius(3.0).fill(rgb(p.green)).absolute(38.0, 13.0));
+        .child(el().w(6.0).h(6.0).radius(3.0).fill(rgb(p.green)).absolute(38.0, 13.0))
+        .hover(rgb(p.hover))
+        // The server button opens Systems (`TopBarAction::OpenSystems`).
+        .on_press(|s: &mut App| s.open_picker(crate::palette::Mode::Systems));
     col().key("activity-rail").w(RAIL_W).h_full().pt(6.5).fill(rgb(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(button("topbar-menu", glyph::MENU, app.menu.is_some(), |s| s.toggle_menu())

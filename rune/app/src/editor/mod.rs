@@ -89,6 +89,11 @@ fn editor_key(event: &rune::KeyEvent) -> Option<Key> {
         K::Down => Key::Down,
         K::Home => Key::Home,
         K::End => Key::End,
+        // Page keys scroll half a page, as Ctrl+D / Ctrl+U do.
+        K::PageDown => Key::Ctrl('d'),
+        K::PageUp => Key::Ctrl('u'),
+        // Rune delivers Ctrl chords as `Command` keys.
+        K::Command(c) if m.ctrl => Key::Ctrl(c.to_ascii_lowercase()),
         K::Text(t) if m.ctrl => {
             // Some layouts deliver the control code (`\u{4}` for Ctrl+D) rather than the letter.
             let c = t.chars().next()?;

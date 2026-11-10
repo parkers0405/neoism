@@ -313,8 +313,8 @@ impl App {
 
     /// Wheel over the raw grid: mouse reports when the program tracks the mouse, arrow keys on
     /// the alternate screen in alternate-scroll mode (as terminals do), else nothing.
-    pub fn grid_wheel(&mut self, steps: i32, col: u16, row: u16) {
-        let Some(term) = self.active_terminal_mut() else { return };
+    pub fn grid_wheel(&mut self, tab_id: u64, steps: i32, col: u16, row: u16) {
+        let Some(term) = self.terminals.get_mut(&tab_id) else { return };
         let Some(session_id) = term.shell.session.clone() else { return };
         let button = if steps > 0 { MouseButton::WheelUp } else { MouseButton::WheelDown };
         let mut bytes = Vec::new();
@@ -333,8 +333,13 @@ impl App {
     }
 
     /// A press, drag or release over the raw grid, for programs that track the mouse.
-    pub fn grid_mouse(&mut self, action: MouseAction, col: u16, row: u16) {
-        let Some(term) = self.active_terminal_mut() else { return };
+    pub fn grid_mouse(&mut self, tab_id: u64, action: MouseAction, col: u16, row: u16) {
+        // Pressing into another pane's program focuses that pane first.
+        if action == MouseAction::Press && self.active_tab().id != tab_id {
+            self.select_tab(tab_id);
+            self.focus = crate::app::Focus::Content;
+        }
+        let Some(term) = self.terminals.get_mut(&tab_id) else { return };
         let Some(session_id) = term.shell.session.clone() else { return };
         if let Some(bytes) = term.shell.encode_mouse(&MouseInput { action, button: Some(MouseButton::Left), col, row, ctrl: false, alt: false }) {
             self.pty_input(&session_id, &bytes);

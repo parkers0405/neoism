@@ -34,6 +34,8 @@ pub fn view(app: &App, term: &Terminal) -> El {
             .offset(cursor.col as f32 * cells.cell, cursor.row as f32 * cells.row + dy)
             .offset_motion(CURSOR_SPRING));
     }
+    // The tab this grid belongs to: in a split, the pane under the pointer, not the focused one.
+    let tab_id = app.active_tab().id;
     let cell_at = move |x: f32, y: f32| ((x / cells.cell).max(0.0) as u16, (y / cells.row).max(0.0) as u16);
     grid = grid
         .on_wheel(move |a: &mut App, e: WheelEvent, _: &mut Tx| {
@@ -42,7 +44,7 @@ pub fn view(app: &App, term: &Terminal) -> El {
             let steps = rows.round() as i32;
             if steps == 0 { return true; }
             let (col, row) = cell_at(e.x, e.y);
-            a.grid_wheel(steps, col, row);
+            a.grid_wheel(tab_id, steps, col, row);
             true
         })
         .on_drag(move |a: &mut App, d: &mut Drag, _: &mut Tx| {
@@ -52,7 +54,7 @@ pub fn view(app: &App, term: &Terminal) -> El {
                 Phase::Up => MouseAction::Release,
             };
             let (col, row) = cell_at(d.x, d.y);
-            a.grid_mouse(action, col, row);
+            a.grid_mouse(tab_id, action, col, row);
         });
     el().w_full().h_full().pl(inset).pr(inset).child(grid)
 }

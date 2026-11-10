@@ -104,8 +104,8 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Quit => "quit".to_owned(),
             };
             // How much history is loaded says what a span was measured against.
-            let messages = active_session(app).and_then(|id| app.sessions.get(&id).map(|s| s.messages.len())).unwrap_or(0);
-            eprintln!("[drive] {name} mono_us={} messages={messages}", crate::ui::fps::monotonic_us(std::time::Instant::now()));
+            let (messages, (offset, end)) = active_session(app).and_then(|id| app.sessions.get(&id).map(|s| (s.messages.len(), s.scroll.get()))).unwrap_or_default();
+            eprintln!("[drive] {name} mono_us={} messages={messages} offset={offset:.1} end={end:.1}", crate::ui::fps::monotonic_us(std::time::Instant::now()));
         }
         // How long the step still runs; `None` once it is over.
         let remaining = match step {

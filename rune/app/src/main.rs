@@ -137,7 +137,9 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let mode_changing = app.tick_mode_pill() | app.tick_chip_scramble();
     // Wheel and trackpad motion on every scroll view, stepped on the frame clock.
     let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx);
-    let rail_bottom = app.rail_follow_bottom();
+    // A transcript's steps hold a row rather than an offset (`agent/anchor.rs`).
+    app.place_conversations(tx);
+    let rail_bottom = app.rail_follow_bottom() | app.timeline_away_tick();
     if gliding { wake!("glide", std::time::Duration::ZERO); }
     if mode_changing { wake!("mode", std::time::Duration::ZERO); }
     let panes_changed = app.sync_panes();

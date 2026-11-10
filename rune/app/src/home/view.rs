@@ -206,7 +206,7 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
 
 /// A `TerminalAction`: the icon at 60% (95% hovered or active) over a faint 5 pt wash when
 /// active or hovered, in the accent when active unless the action names its own colour.
-pub(super) fn action_button(app: &App, key: String, icon: Icon, active: bool, color: Option<u32>) -> El {
+pub(crate) fn action_button(app: &App, key: String, icon: Icon, active: bool, color: Option<u32>) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     let ink = color.unwrap_or(if active { p.accent } else { p.fg });

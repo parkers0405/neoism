@@ -229,16 +229,16 @@ dragging beyond the editor edge, `/usage`, Database browsing/editing and shortcu
 Markdown files intentionally use the code editor for now; Extensions remains removed.
 
 Workspace creation is wired to Ctrl+Shift+W and the top `+`; Alt+1..9 restores each workspace's own panes,
-drafts and focus. Ctrl+Shift+Left/Right steps tabs in the active pane. Agent `q` closes its tab; `qall` closes
+drafts and focus. Ctrl+Shift+Left/Right steps tabs in the active pane. Agent and exact command-palette `q` close the current tab; `qall` closes
 its workspace through the daemon, selects an adjacent workspace, and quits when the last workspace closes.
 Tab close buttons appear only on hover, file icons share the tree's font and mapping, and agent tabs use
-Neoism's image. Both strips support dragging to reorder. Shift+Alt+Left/Right moves the focused tab;
+Neoism's image. Both strips reorder live while dragging, using GPUiX's slot-crossing rule and critically
+damped neighbor slides. The dragged tab follows the pointer without an insertion line or border. Shift+Alt+Left/Right moves the focused tab;
 workspace focus or Ctrl+Alt+Shift+Left/Right targets the workspace strip. Normal-mode Space+x closes the
 editor buffer through the unsaved-edit guard. Home and agent wordmarks animate hover in every visible pane.
 MCP-supplied artwork is shared by /mcp, its actions header, and timeline tool calls, with bundled marks and
 the original plug as fallbacks. Dirty editor closes wait
-for a successful save acknowledgement or an explicit discard choice. See VALIDATION.md for the current build
-pause and source changes still awaiting compilation.
+for a successful save acknowledgement or an explicit discard choice. See VALIDATION.md for completed checks and the remaining parity/cutover work.
 
 Run the checks from the repository root:
 

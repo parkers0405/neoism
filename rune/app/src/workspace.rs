@@ -253,11 +253,13 @@ impl App {
     }
 
     pub fn select_workspace(&mut self, index: usize) {
-        if self.workspace_closing.is_some() {
+        if self.workspace_closing.is_some() || index >= self.workspaces.len() || index == self.workspace_active {
             return;
         }
         self.swap_workspace(index);
-        self.rects.clear();
+        // This strip is window-scoped and may not relayout when selection changes.
+        // Keep its measured bounds, including an in-flight workspace drag.
+        self.rects.retain(|key, _| key.starts_with("workspace-") || key.starts_with("reorder:workspace:"));
         self.tab_hover = None;
         self.field_tab = None;
     }
@@ -338,6 +340,10 @@ impl App {
     }
 
     pub fn close_workspace(&mut self, index: usize) {
+        self.close_workspace_with_discard(index, false);
+    }
+
+    pub fn close_workspace_with_discard(&mut self, index: usize, discard: bool) {
         if index >= self.workspaces.len() {
             return;
         }
@@ -345,11 +351,11 @@ impl App {
         if self.workspace_closing.is_some() {
             return;
         }
-        if self.buffers.values().any(|b| b.dirty())
+        if !discard && (self.buffers.values().any(|b| b.dirty())
             || self.databases.values().any(|d| {
                 d.pending.is_some() || d.cell.is_some() || !d.changes().is_empty()
             })
-            || self.tabs.iter().any(|t| !t.draft.text.trim().is_empty())
+            || self.tabs.iter().any(|t| !t.draft.text.trim().is_empty()))
         {
             self.modal = Some(crate::ui::modal::Modal {
                 title: "Workspace has unsaved changes".into(), body: "Save or discard the open edits and drafts before closing this workspace.".into(), buttons: vec![], selected: 0,
@@ -463,6 +469,23 @@ mod tests {
         assert_eq!(app.active_tab().id, tab);
         assert_eq!(app.active_tab().draft.text, "unfinished prompt");
         assert!(matches!(app.focus, Focus::Buffers(_)));
+    }
+    #[test]
+    fn workspace_selection_keeps_window_strip_geometry() {
+        let mut app = App::new();
+        app.new_workspace();
+        let rect = [55.5, 0.0, 180.0, 30.0];
+        let stable = format!("reorder:workspace:{}", app.workspaces[0].id);
+        app.rects.insert(stable.clone(), rect);
+        app.rects.insert("workspace-tabs".into(), rect);
+        app.rects.insert("old-editor".into(), rect);
+        app.select_workspace(0);
+        assert_eq!(app.rects[&stable], rect);
+        assert_eq!(app.rects["workspace-tabs"], rect);
+        assert!(!app.rects.contains_key("old-editor"));
+        app.rects.insert("current-editor".into(), rect);
+        app.select_workspace(0);
+        assert_eq!(app.rects["current-editor"], rect);
     }
     #[test]
     fn close_selects_next_then_previous_and_final_window() {

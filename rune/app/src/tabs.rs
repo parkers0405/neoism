@@ -16,6 +16,23 @@ pub enum TabKind {
     Database { path: String },
 }
 
+/// Exact close aliases precede fuzzy palette matches on every surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloseCommand { pub workspace: bool, pub discard: bool }
+impl CloseCommand {
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().strip_prefix(':').unwrap_or(text.trim());
+        let discard = text.ends_with('!');
+        let name = text.strip_suffix('!').unwrap_or(text);
+        let workspace = match name {
+            "q" | "quit" | "quite" | "close" => false,
+            "qa" | "qall" | "quitall" => true,
+            _ => return None,
+        };
+        Some(Self { workspace, discard })
+    }
+}
+
 pub struct Tab {
     pub id: u64,
     pub kind: TabKind,
@@ -99,10 +116,10 @@ impl App {
         let text = self.tabs[index].draft.text.trim().to_owned();
         if text.is_empty() { return; }
         if matches!(self.tabs[index].kind, TabKind::Agent { .. }) {
-            match text.trim_start_matches(':') {
-                "q" => { self.tabs[index].draft.clear(); self.close_tab(index); return; }
-                "qall" | "qa" => { self.tabs[index].draft.clear(); self.close_workspace(self.workspace_active); return; }
-                _ => {}
+            if let Some(command) = CloseCommand::parse(&text) {
+                self.tabs[index].draft.clear();
+                self.run_close_command(command);
+                return;
             }
         }
         self.tabs[index].draft.clear();
@@ -111,6 +128,16 @@ impl App {
             TabKind::Agent { session: Some(session_id) } => self.submit_prompt(&session_id, text),
             TabKind::Agent { session: None } => self.create_thread(index, text),
             TabKind::Editor { .. } | TabKind::Database { .. } => {}
+        }
+    }
+
+    pub fn run_close_command(&mut self, command: CloseCommand) {
+        if command.workspace {
+            self.close_workspace_with_discard(self.workspace_active, command.discard);
+        } else if command.discard {
+            self.close_tab_now(self.active);
+        } else {
+            self.close_tab(self.active);
         }
     }
 

@@ -10,7 +10,7 @@ trace=out.with_suffix('.jsonl'); trace.unlink(missing_ok=True)
 def active(): return json.loads(subprocess.check_output(['hyprctl','-j','activewindow']))
 def dispatch(value): subprocess.run(['hyprctl','dispatch',value],check=True,capture_output=True)
 previous=active(); window=None; fd=None
-command=shlex.join(['env','NEOISM_RUNE_OFFLINE=1','NEOISM_REDUCED_MOTION=0','timeout','20',a.binary,'--scene','tab-reorder','--native','--trace',str(trace)])+' > '+shlex.quote(str(out.with_suffix('.log')))+' 2>&1'
+command=shlex.join(['env','NEOISM_RUNE_OFFLINE=1','NEOISM_REDUCED_MOTION=0','timeout','30',a.binary,'--scene','tab-reorder','--native','--trace',str(trace)])+' > '+shlex.quote(str(out.with_suffix('.log')))+' 2>&1'
 dispatch(f'hl.dsp.exec_cmd({json.dumps(command)}, {{ workspace = "5" }})')
 def guard():
     if active().get('pid')!=window['pid']: raise RuntimeError('Focus changed; input stopped')
@@ -37,7 +37,14 @@ def button(value):
     for kind,code,v in [(1,0x110,value),(0,0,0)]: os.write(fd,struct.pack('llHHi',0,0,kind,code,v))
 def drag(source,target):
     x,y,w,h=tree()[source]; tx,ty,tw,th=tree()[target]
-    move(x+w/2,y+h/2); settle(); button(1); time.sleep(.1)
+    # Wait for native hover delivery before pressing. A compositor warp by itself
+    # does not guarantee that the freshly registered uinput device has reached Rune.
+    hovered = 'pane-close:'+source.split(':',1)[1] if source.startswith('pane-tab:') else 'workspace-close:'
+    for _ in range(10):
+        move(x+w/2,y+h/2); time.sleep(.1)
+        if any(k == hovered or (hovered == 'workspace-close:' and k.startswith(hovered)) for k in tree()): break
+    else: raise AssertionError(f'Native pointer did not hover {source}; no drag sent')
+    button(1); time.sleep(.1)
     for i in range(1,9): move(x+w/2+(tx+tw*.85-x-w/2)*i/8,y+h/2); time.sleep(.035)
     button(0); settle()
 def chord(*mods,key):
@@ -67,11 +74,11 @@ try:
     tabs=ordered('pane-tab:'); spaces=ordered('workspace-tab:')
     assert tabs==['pane-tab:1','pane-tab:2','pane-tab:3'],tabs
     drag(tabs[0],tabs[-1]); assert ordered('pane-tab:')==[tabs[1],tabs[2],tabs[0]],ordered('pane-tab:')
-    chord('alt','shift',key='Left'); assert ordered('pane-tab:')==[tabs[2],tabs[1],tabs[0]]
+    chord('alt','shift',key='Left'); assert ordered('pane-tab:')==[tabs[1],tabs[0],tabs[2]]
     drag(spaces[0],spaces[-1]); assert ordered('workspace-tab:')==[spaces[1],spaces[2],spaces[0]]
     chord('ctrl','alt','shift',key='Left'); assert ordered('workspace-tab:')==[spaces[1],spaces[0],spaces[2]]
     move(20,100); settle(); assert not any(k.startswith(('pane-close:','workspace-close:')) for k in tree()), (subprocess.check_output(['hyprctl','cursorpos']).decode(), active()['at'])
-    for kind,tab in [('agent',None),('splash','pane-tab:1')]:
+    for kind,tab in [('agent','pane-tab:3'),('splash','pane-tab:1')]:
         if tab:
             x,y,w,h=tree()[tab]; move(x+w/2,y+h/2); button(1); button(0); settle(); move(5,5); settle()
         t=tree(); hit=next(k for k in t if k.startswith(kind+'-wordmark:') and k.endswith('-hit-0')); letter=hit.replace('-hit-0','-letter-0')

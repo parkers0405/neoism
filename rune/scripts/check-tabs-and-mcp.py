@@ -40,9 +40,12 @@ def key(t,name,**mods):return {'t':t,'type':'key','name':name,**mods}
 idle=render('tabs-idle','tab-reorder')
 panes=slots(idle,'pane-tab:'); workspaces=slots(idle,'workspace-tab:')
 assert [n['key'] for n in panes]==['pane-tab:1','pane-tab:2','pane-tab:3']
+x,y,w,h=panes[0]['bounds']
+closed=render('inactive-close','tab-reorder',[{'t':.3,'type':'move','x':x+w/2,'y':y+h/2},{'t':.6,'type':'click','key':'pane-close:1'}])
+assert any(k.startswith('agent-wordmark:3') for k in closed) and 'pane-tab:1' not in closed, 'Closing an inactive tab must preserve the active content'
 moved=render('buffer-drag','tab-reorder',drag(panes[0],panes[-1]))
 assert [n['key'] for n in slots(moved,'pane-tab:')]==['pane-tab:2','pane-tab:3','pane-tab:1'], 'Pointer drag must reorder buffer tabs'
-assert any(k.startswith('agent-wordmark:3') for k in moved), 'Dragging an inactive tab must retain active content'
+assert any(k.startswith('splash-wordmark:1') for k in moved), 'Pressing a tab to drag must activate it, matching the reference'
 left=render('buffer-key-left','tab-reorder',[key(.3,'Left',shift=True,alt=True)])
 assert [n['key'] for n in slots(left,'pane-tab:')]==['pane-tab:1','pane-tab:3','pane-tab:2']
 right=render('buffer-key-right','tab-reorder',[key(.3,'Left',shift=True,alt=True),key(.6,'Right',shift=True,alt=True)])
@@ -57,7 +60,15 @@ assert names(keyboard,'workspace-tab:')==['Second','First','Third']
 # Alt+Up walks through buffer and workspace focus. Shift+Alt then targets that strip.
 keyboard=render('workspace-focused-key','tab-reorder',[key(.3,'Up',alt=True),key(.6,'Up',alt=True),key(.9,'Right',shift=True,alt=True)])
 assert names(keyboard,'workspace-tab:')==['Second','First','Third']
-print('PASS pointer reorder, outside drop, keyboard reorder and workspace identity',flush=True)
+overflow=render('tab-overflow', 'tab-overflow')
+# The last selected buffer must be fully revealed; Alt+9 must reveal its workspace.
+last=overflow['pane-tab:17']['bounds']; assert last[0]>=55 and last[0]+last[2]<=1253,last
+shifted=render('workspace-overflow', 'tab-overflow', [key(.5,'9',alt=True)])
+active=next(n for n in slots(shifted,'workspace-tab:') if 'Workspace 7' in n.get('name',''))
+x,y,w,h=active['bounds']; assert x>=55 and x+w<=1253,active
+first=render('buffer-overflow-wrap', 'tab-overflow', [key(.5,'Right',ctrl=True,shift=True)])
+x,y,w,h=first['pane-tab:1']['bounds']; assert x>=55 and x+w<=1253,(x,y,w,h)
+print('PASS pointer reorder, outside drop, keyboard reorder, overflow reveal and workspace identity',flush=True)
 
 picker=render('mcp-picker','mcp-icons')
 actions=render('mcp-actions','mcp-icons',[key(.4,'Enter')])

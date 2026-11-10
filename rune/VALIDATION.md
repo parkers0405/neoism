@@ -158,3 +158,52 @@ Validation after the build pause was lifted:
 Logs: `/tmp/neoism-rune-final-tests.log`, `/tmp/neoism-rune-full-headless.log`,
 `/tmp/neoism-rune-hover-check.log`, `/tmp/neoism-rune-tabs-mcp-check.log`, and
 `/tmp/neoism-rune-native-tabs-check.log`. Native traces are under `/tmp/neoism-rune-corrections/`.
+
+
+## Palette close regression and GPUiX tab motion
+
+The previous Agent-composer `q` check missed the command palette: Alt+P → `q` → Enter
+fuzzy-matched **Quit** and exited the native window. Reproduced that exit with Wayland
+keyboard input against the previous binary. Exact GPUiX aliases now resolve before fuzzy
+ranking: `q`/`quit`/`quite`/`close` close the tab, `qa`/`qall`/`quitall` close its workspace;
+optional `:` and explicit `!` are recognized. The palette shows the concrete close target.
+The Agent composer shares this parser. `q` on the last tab leaves Home; `qall` selects
+an adjacent workspace and exits only after closing the final workspace.
+
+The drag treatment now follows GPUiX's `TabSlide`: activate on press, hide the source
+while held, move a plain floating tab with the pointer, reorder immediately when its
+center crosses its logical slot boundary, and critically damp the neighboring slides.
+No insertion line or outlined ghost remains. Workspace ghosts use the same folder icon
+as their source. Overflow strips scroll to reveal keyboard-selected tabs and clip the
+chrome cursor. Switching workspaces preserves the window-scoped strip measurements.
+
+Validation:
+
+- **121 Rust tests pass**, including every exact close alias and workspace geometry retention.
+- `check-native-close.py`: real keyboard checks pass both offline and with the daemon
+  connected. Agent `q`, palette `q`, last-tab `q`, successive `qall` with neighboring
+  workspaces, and final-window `qall` all have their expected scopes.
+- `check-headless.py`: reference surfaces and input regressions pass, including new
+  palette `q` and `qall` checks.
+- `check-tab-motion.py`: both strips' frame traces show live reordering, intermediate
+  neighbor positions, no spring overshoot, hidden source, pointer-following ghost and
+  ghost removal on release. Rendered PNGs inspected in `/tmp/neoism-rune-tab-motion/`.
+- Native tab checks use an actual temporary uinput pointer. The harness waits for a
+  delivered hover before pressing, because a compositor cursor warp is not proof that
+  Rune received pointer motion. Drag/reorder chords and both wordmark hovers pass.
+
+Logs: `/tmp/neoism-rune-close-final-tests.log`, `/tmp/neoism-rune-native-close-offline.log`,
+`/tmp/neoism-rune-native-close-connected.log`, `/tmp/neoism-rune-close-headless.log`,
+`/tmp/neoism-rune-close-motion.log`, `/tmp/neoism-rune-native-tabs-final.log`.
+The older previews listed above have since closed. The installed GPUiX app is unchanged;
+full parity, longer workload checks, durable workspace restoration and cutover remain open.
+
+Updated preview: PID **3396019**, class `ai.neoism.rune.preview.close-motion`,
+`/tmp/neoism-rune-preview/neoism-rune-close-motion`, verified on **Hyprland workspace 4**.
+`check-tabs-and-mcp.py` also passes with the revised motion: reorder, outside drop,
+keyboard navigation, overflow reveal, and supplied MCP artwork in all three surfaces.
+
+A subsequent 30-second native wheel run stopped when desktop focus changed; the input
+guard correctly stopped sending wheel events. It is **not** a completed sustained-scroll
+measurement. The earlier short presentation samples remain the measured performance evidence.
+The native harness now accepts `--wheel-seconds` for a future uninterrupted longer capture.

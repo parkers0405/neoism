@@ -95,3 +95,9 @@ assert 'fn main() {' in text, 'Agent q must close only that tab'
 text = render('workspace-qall-adjacent', 'lsp', [chord(.3, 'w', ctrl=True, cmd=True, shift=True), chord(.6, 'a', alt=True), type_text(.9, 'qall'), key(1.2, 'Enter')])
 assert 'fn main() {' in text, 'qall must close the second workspace and restore the first'
 print('All headless checks passed.')
+
+text = render('palette-q-tab', 'lsp', [chord(.3, 'a', alt=True), chord(.5, 'p', alt=True), type_text(.7, 'q'), key(.9, 'Enter')])
+assert 'fn main() {' in text, 'Exact palette q closes only the Agent tab'
+text = render('palette-qall-adjacent', 'lsp', [chord(.3, 'w', ctrl=True, cmd=True, shift=True), chord(.5, 'p', alt=True), type_text(.7, 'qall'), key(.9, 'Enter')])
+assert 'fn main() {' in text, 'Exact palette qall restores the neighboring workspace'
+print('Exact palette close aliases passed.')

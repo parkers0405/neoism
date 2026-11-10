@@ -1,10 +1,10 @@
 //! The window side of Servers and Systems (`ChromeActionsController`'s server actions):
 //! connecting with a cancellable "Connecting" message, the forms' submit, removal with a
-//! confirmation, invites, and switching the window to the new connection.
+//! confirmation, invites, and opening the new connection.
 //!
-//! Rune keeps one connection per window: switching to another server stashes the local
-//! window's workspaces, opens the remote daemon's workspace (the SSH home workspace, or the
-//! one the daemon picks), and switching back to Local Server restores them.
+//! A connection belongs to a workspace: connecting to a server or an SSH system opens a new
+//! workspace tab on it (its own daemon socket, a cloud on its tab), next to the local ones,
+//! and picking one that is already open goes to its tab. Local Server goes to a local tab.
 
 use super::form::{Draft, Form, Kind};
 use super::{Connected, Operation, Selection};
@@ -39,26 +39,34 @@ pub enum Adopt {
     Resolve,
 }
 
+/// A workspace's server: which one, the SSH tunnel that reaches it (dropping it closes the
+/// connection), and whether the daemon still has to pick the workspace. It moves with its
+/// workspace (`workspace::State`); the default is the local daemon.
 #[derive(Default)]
-pub struct ServerState {
-    /// The window's server; `None` is Local Server.
+pub struct Link {
+    /// `None` is Local Server.
     pub current: Option<Selection>,
-    pending: Option<Pending>,
     tunnel: Option<crate::ssh_hosts::DaemonAttach>,
-    /// The local window's workspaces while it visits another server.
-    stash: Option<crate::session::Saved>,
-    pub confirm: Option<Confirm>,
     pub adopt: Option<Adopt>,
 }
 
+#[derive(Default)]
+pub struct ServerState {
+    /// The active workspace's server.
+    pub link: Link,
+    pending: Option<Pending>,
+    pub confirm: Option<Confirm>,
+}
+
 impl ServerState {
-    pub fn current_id(&self) -> &str { self.current.as_ref().map_or("local", |s| s.id.as_str()) }
-    pub fn remote(&self) -> bool { self.current.is_some() }
+    pub fn current_id(&self) -> &str { self.link.current.as_ref().map_or("local", |s| s.id.as_str()) }
+    /// Whether the active workspace is on another server.
+    pub fn remote(&self) -> bool { self.link.current.is_some() }
     pub fn connecting(&self) -> Option<&str> { self.pending.as_ref().map(|p| p.id.as_str()) }
-    /// The system this window is connected to over SSH, while its tunnel is up.
+    /// The system the active workspace is connected to over SSH, while its tunnel is up.
     pub fn system(&mut self) -> Option<String> {
-        let id = self.current.as_ref()?.system.clone()?;
-        let tunnel = self.tunnel.as_mut()?;
+        let id = self.link.current.as_ref()?.system.clone()?;
+        let tunnel = self.link.tunnel.as_mut()?;
         tunnel.is_running().then_some(id)
     }
 }
@@ -132,54 +140,46 @@ impl App {
         self.modal = None;
     }
 
-    /// Move the window to a verified connection.
+    /// Open a verified connection: a new workspace tab on that server, or the tab already
+    /// on it; Local Server is a local tab.
     fn switch_connection(&mut self, connected: Connected) {
         let Connected { selection, target, workspace, tunnel } = connected;
-        let remote = target.is_some();
-        // Leaving Local Server: keep its workspaces to come back to.
-        if remote && !self.server.remote() && self.server.stash.is_none() {
-            // Saved first: the snapshot stays the local window while it's away. (Never from a
-            // unit test, which would write the user's own session file.)
-            #[cfg(not(test))]
-            self.save_session(true);
-            self.server.stash = Some(self.capture_session());
-        }
-        crate::daemon::switch_target(target);
-        // The old tunnel closes once nothing dials it.
-        self.server.tunnel = tunnel;
-        self.server.current = (!selection.is_local()).then_some(selection);
-        self.reset_window();
-        if remote {
-            match workspace {
-                // The SSH home workspace (`prepareSshWorkspace`): created at the remote home.
-                Some((id, title)) => {
-                    self.workspace_id = id;
-                    self.workspace_name = title;
-                    self.cwd = "~".into();
-                    self.server.adopt = None;
-                }
-                None => self.server.adopt = Some(Adopt::Resolve),
+        let Some(target) = target else {
+            // Local Server: the nearest local workspace, or a new one.
+            match self.workspace_on(None) {
+                Some(index) => self.select_workspace(index),
+                None => self.new_workspace(),
             }
-        } else if let Some(saved) = self.server.stash.take() {
-            self.restore_session(saved);
+            return;
+        };
+        if let Some(index) = self.workspace_on(Some(&selection.id)) {
+            // Already open: its tab, and the tunnel just dialed for it closes again.
+            self.select_workspace(index);
+            return;
         }
+        let (id, title, cwd, adopt) = match workspace {
+            // The SSH home workspace (`prepareSshWorkspace`): created at the remote home.
+            Some((id, title)) => (id, title, "~".to_owned(), None),
+            // The daemon picks the workspace once it handshakes (`adopt_workspace`).
+            None => (crate::workspace::new_id(), selection.name.clone(), "~".to_owned(), Some(Adopt::Resolve)),
+        };
+        self.open_workspace(crate::workspace::Opening { id, title, cwd, target: Some(target), link: Link { current: Some(selection), tunnel, adopt } });
     }
 
-    /// A fresh window on the same renderer: the connection's workspaces replace this one's.
-    fn reset_window(&mut self) {
-        let mut fresh = App::new();
-        macro_rules! keep { ($($f:ident),*) => { $( std::mem::swap(&mut fresh.$f, &mut self.$f); )* } }
-        keep!(daemon, inbox, waker, images, pal, ty, wallpaper, window, background_previews, decoded_previews, wordmark, tools,
-            mcp_icons, keybindings, fps, fps_at, orbs, local_name, server, mode_pill, chip_scramble, cursor, composer, agent, model, effort,
-            session_writer);
-        fresh.connection = crate::app::Connection::Connecting;
-        fresh.open_tab(crate::tabs::TabKind::Home);
-        *self = fresh;
+    /// The workspace tab on server `id` (`None`: a local one), nearest the active tab first.
+    fn workspace_on(&self, id: Option<&str>) -> Option<usize> {
+        let on = |index: usize| -> Option<&str> {
+            if index == self.workspace_active { self.server.link.current.as_ref().map(|s| s.id.as_str()) }
+            else { self.workspaces[index].server.as_deref() }
+        };
+        let mut order: Vec<usize> = (0..self.workspaces.len()).collect();
+        order.sort_by_key(|index| index.abs_diff(self.workspace_active));
+        order.into_iter().find(|index| on(*index) == id)
     }
 
     /// The daemon picked this window's workspace (`InitialWorkspaceResolved`): open it.
     pub(crate) fn adopt_workspace(&mut self, workspace: &serde_json::Value) {
-        if self.server.adopt.take().is_none() { return; }
+        if self.server.link.adopt.take().is_none() { return; }
         let Some(id) = workspace["id"].as_str() else { return };
         self.workspace_id = id.to_owned();
         if let Some(title) = workspace["title"].as_str() { self.workspace_name = title.to_owned(); }
@@ -256,13 +256,13 @@ impl App {
 
     pub fn confirm_remove(&mut self) {
         let Some(confirm) = self.server.confirm.take() else { return };
-        let (current, result, mode) = match &confirm {
-            Confirm::Server(id) => (self.server.current_id() == id, super::remove(id), crate::palette::Mode::Servers),
-            Confirm::System(id) => (self.server.current.as_ref().and_then(|s| s.system.as_deref()) == Some(id), super::remove_system(id), crate::palette::Mode::Systems),
+        let (server, result, mode) = match &confirm {
+            Confirm::Server(id) => (id.clone(), super::remove(id), crate::palette::Mode::Servers),
+            Confirm::System(id) => (format!("system:{id}"), super::remove_system(id), crate::palette::Mode::Systems),
         };
         if let Err(error) = result { self.modal = Some(Modal::notice("Could not remove", &error)); return; }
-        // Removing the server this window uses goes back to Local Server.
-        if current { self.connect_server(Selection::local()); } else { self.open_picker(mode); }
+        // A removed server's workspace tab closes with it.
+        if !self.leave_server(&server) { self.open_picker(mode); }
     }
 
     /// Copy a Fast Server's invite (`server-invite`).
@@ -276,14 +276,30 @@ impl App {
     /// The Active switch (`system-enabled`): turning it on connects, off disconnects.
     pub fn set_system_active(&mut self, id: &str, name: &str, enabled: bool) {
         if let Err(error) = super::set_system_enabled(id, enabled) { self.modal = Some(Modal::notice("Systems", &error)); return; }
-        let here = self.server.current.as_ref().and_then(|s| s.system.as_deref()) == Some(id);
         if enabled { self.picker = None; self.connect_system(id, name); }
-        else if here { self.picker = None; self.connect_server(Selection::local()); }
+        else if self.leave_server(&format!("system:{id}")) { self.picker = None; }
     }
 
-    /// Disconnect (`system-disconnect`): back to Local Server when it's this window's system.
-    pub fn disconnect_system(&mut self, id: &str) {
-        if self.server.current.as_ref().and_then(|s| s.system.as_deref()) == Some(id) { self.connect_server(Selection::local()); }
+    /// Disconnect (`system-disconnect`): the system's workspace tab closes.
+    pub fn disconnect_system(&mut self, id: &str) { self.leave_server(&format!("system:{id}")); }
+
+    /// Close the workspace tab on server `id`, hanging up its connection (and its tunnel).
+    /// From that tab the window goes to a local one first. Returns whether a tab was open.
+    fn leave_server(&mut self, id: &str) -> bool {
+        let Some(index) = self.workspace_on(Some(id)) else { return false };
+        if index == self.workspace_active {
+            match self.workspace_on(None) {
+                Some(local) => self.select_workspace(local),
+                None => self.new_workspace(),
+            }
+        }
+        // Dropping the parked workspace drops its socket and tunnel.
+        let Some(index) = self.workspaces.iter().position(|w| w.server.as_deref() == Some(id)) else { return true };
+        if index == self.workspace_active { return true; }
+        self.workspaces.remove(index);
+        if index < self.workspace_active { self.workspace_active -= 1; }
+        self.rects.retain(|key, _| !key.starts_with("workspace-") && !key.starts_with("reorder:workspace:"));
+        true
     }
 }
 
@@ -308,9 +324,6 @@ pub fn operation(draft: &Draft) -> Result<Operation, String> {
 mod tests {
     use super::*;
 
-    /// The switching tests move the window-wide daemon target: one at a time.
-    static SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn the_form_picks_its_operation_and_validates() {
         let draft = |host: bool, fast: bool| Draft { host, fast, ..Draft::default() };
@@ -325,38 +338,63 @@ mod tests {
     }
 
     #[test]
-    fn visiting_a_server_stashes_the_local_window_and_coming_back_restores_it() {
-        let _serial = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+    fn a_server_opens_its_own_workspace_tab_and_the_local_one_stays() {
         let mut app = App::new();
         app.workspace_name = "local-ws".into();
-        let local_cwd = app.cwd.clone();
+        let local = (app.workspace_id.clone(), app.cwd.clone());
         let remote = Selection { id: "team".into(), name: "Team".into(), endpoint: "ws://team:9877/session".into(), ..Selection::default() };
         let target = crate::daemon::Target { url: remote.endpoint.clone(), ..Default::default() };
-        app.switch_connection(Connected { selection: remote, target: Some(target), workspace: None, tunnel: None });
+        app.switch_connection(Connected { selection: remote.clone(), target: Some(target.clone()), workspace: None, tunnel: None });
+        // A second tab, on the server, active; the local one is still there behind it.
+        assert_eq!((app.workspaces.len(), app.workspace_active), (2, 1));
         assert!(app.server.remote());
-        assert_eq!(app.server.adopt, Some(Adopt::Resolve));
-        assert_eq!(crate::daemon::current_target().map(|t| t.url).as_deref(), Some("ws://team:9877/session"));
-        // The daemon picks the workspace; the window opens it.
+        assert_eq!(app.server.link.adopt, Some(Adopt::Resolve));
+        assert_eq!((app.workspaces[0].server.as_deref(), app.workspaces[1].server.as_deref()), (None, Some("team")));
+        // The daemon picks the workspace; the tab becomes it.
         app.adopt_workspace(&serde_json::json!({"id": "w-remote", "title": "Team project", "root_dir": "/srv/project"}));
         assert_eq!((app.workspace_id.as_str(), app.workspace_name.as_str(), app.cwd.as_str()), ("w-remote", "Team project", "/srv/project"));
-        assert_eq!(app.server.adopt, None);
-        // Back to Local Server: the stashed window returns.
+        assert_eq!(app.server.link.adopt, None);
+        // Local Server: back to the local tab, untouched.
         app.switch_connection(Connected { selection: Selection::local(), target: None, workspace: None, tunnel: None });
+        assert_eq!((app.workspaces.len(), app.workspace_active), (2, 0));
         assert!(!app.server.remote());
-        assert_eq!(crate::daemon::current_target(), None);
-        assert_eq!((app.workspace_name.as_str(), app.cwd.as_str()), ("local-ws", local_cwd.as_str()));
+        assert_eq!((app.workspace_id.clone(), app.workspace_name.as_str(), app.cwd.clone()), (local.0, "local-ws", local.1));
+        // The same server again: its tab, not a third one.
+        app.switch_connection(Connected { selection: remote, target: Some(target), workspace: None, tunnel: None });
+        assert_eq!((app.workspaces.len(), app.workspace_active), (2, 1));
+        assert_eq!(app.cwd, "/srv/project");
     }
 
     #[test]
-    fn an_ssh_system_opens_its_home_workspace() {
-        let _serial = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+    fn an_ssh_system_opens_its_home_workspace_in_a_new_tab() {
         let mut app = App::new();
         let target = crate::daemon::Target { url: "ws://127.0.0.1:40000/session".into(), auth_token: Some("cred".into()), pairing_token: None };
         let system = Selection { id: "system:s1".into(), system: Some("s1".into()), ..Selection::default() };
         app.switch_connection(Connected { selection: system, target: Some(target), workspace: Some(("neoism-quick-ssh-home-x".into(), "box \u{b7} Home".into())), tunnel: None });
-        assert_eq!((app.workspace_id.as_str(), app.cwd.as_str(), app.server.adopt.clone()), ("neoism-quick-ssh-home-x", "~", None));
+        assert_eq!(app.workspaces.len(), 2);
+        assert_eq!((app.workspace_id.as_str(), app.workspace_name.as_str(), app.cwd.as_str(), app.server.link.adopt.clone()), ("neoism-quick-ssh-home-x", "box \u{b7} Home", "~", None));
+        // With only remote tabs left, Local Server opens a local one.
+        app.workspaces.remove(0);
+        app.workspace_active = 0;
         app.switch_connection(Connected { selection: Selection::local(), target: None, workspace: None, tunnel: None });
+        assert_eq!(app.workspaces.len(), 2);
         assert!(!app.server.remote());
+    }
+
+    #[test]
+    fn disconnecting_a_system_closes_its_tab_and_lands_on_a_local_one() {
+        let mut app = App::new();
+        let target = crate::daemon::Target { url: "ws://127.0.0.1:40000/session".into(), ..Default::default() };
+        let system = Selection { id: "system:s1".into(), system: Some("s1".into()), ..Selection::default() };
+        app.switch_connection(Connected { selection: system, target: Some(target), workspace: Some(("home-x".into(), "box".into())), tunnel: None });
+        assert_eq!((app.workspaces.len(), app.workspace_active), (2, 1));
+        app.disconnect_system("s1");
+        assert_eq!((app.workspaces.len(), app.workspace_active), (1, 0));
+        assert!(!app.server.remote());
+        assert!(app.workspaces[0].server.is_none());
+        // Nothing open on it: nothing closes.
+        app.disconnect_system("s1");
+        assert_eq!(app.workspaces.len(), 1);
     }
 
     #[test]

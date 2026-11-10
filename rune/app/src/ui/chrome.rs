@@ -191,9 +191,11 @@ fn workspace_tabs(app: &App) -> El {
         let press_identity = identity.clone();
         let close_identity = identity.clone();
         let hovered = app.workspace_hover.as_deref() == Some(identity.as_str());
+        // A workspace on a server or an SSH system wears a cloud, a local one its folder.
+        let remote = entry.server.is_some();
         let tab = row().key(format!("workspace-tab:{identity}")).h(TAB_ROW_H).px(14.0).gap(9.0).center_y()
             .fill(rgb(if active { p.bg } else { p.surface })).corners([6.0, 6.0, 0.0, 0.0])
-            .child(icon(app, glyph::FOLDER, 1.25, rgb(p.folder)))
+            .child(icon(app, if remote { glyph::CLOUD } else { glyph::FOLDER }, 1.25, rgb(p.folder)))
             .child(text(title).font(app.ty.tab()).color(rgb(if active { p.fg } else { p.dim })).truncate().max_w(180.0))
             .child_if(!hovered, || el().w(18.0).h(20.0))
             .child_if(hovered, || el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center()

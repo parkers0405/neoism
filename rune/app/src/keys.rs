@@ -261,6 +261,16 @@ impl App {
     }
 
     /// Where the window cursor belongs: the focus bar on a tab, or the focused field's caret.
+    /// The scrolled surface the cursor sits in and where that is scrolled to (`Cursor::carry`):
+    /// a file with the keyboard in it.
+    pub fn cursor_riding(&self) -> Option<(String, f32)> {
+        if self.attach.preview.is_some() || self.menu.is_some() || self.settings.is_some() || self.browser.is_some()
+            || self.finder.is_some() || self.project_menu.is_some() || self.picker.is_some() { return None; }
+        if self.focus != Focus::Content || !matches!(self.active_tab().kind, TabKind::Editor { .. }) { return None; }
+        let buffer = self.active_buffer().filter(|b| b.prompt.is_none())?;
+        Some((buffer.path.clone(), buffer.scroll.get().0))
+    }
+
     pub fn cursor_target(&self) -> Option<[f32; 4]> {
         // A full-window picture preview has no cursor.
         if self.attach.preview.is_some() { return None; }

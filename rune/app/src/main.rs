@@ -164,10 +164,12 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let skit = app.tick_effect();
     if skit { wake!("skit", std::time::Duration::ZERO); }
     // The cursor trails and blinks on its own schedule.
-    let cursor_was = (app.cursor.placed(), app.cursor.trail.quad());
     app.browser_follow(tx);
     app.settings_reveal(tx);
     let list_sliding = app.step_list_residual(clock);
+    // In a file the cursor is part of the text: it rides the scroll rather than chasing it.
+    let riding = app.cursor_riding();
+    app.cursor.carry(riding.as_ref().map(|(key, offset)| (key.as_str(), *offset)));
     let target = app.cursor_target();
     let moved_at = app.cursor.trail.moved_at;
     let cursor_wake = app.cursor.tick(target, std::time::Instant::now());
@@ -184,9 +186,9 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.keep_vsync(per_frame);
     let clip = app.cursor_clip();
     app.cursor.track_clip(clip, app.cursor.trail.moved_at != moved_at);
-    // The blink is a live opacity (`Cursor::blink`): only the block appearing, leaving or
-    // moving re-runs the views.
-    let caret_changed = cursor_was != (app.cursor.placed(), app.cursor.trail.quad());
+    // The blink is a live opacity and travel a live offset: only the block appearing, leaving,
+    // changing shape (a trail) or clip re-runs the views (`Cursor::place`).
+    let caret_changed = app.cursor.place(clip.filter(|_| !app.cursor.crossing()));
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     // While animating, the pill shows the presentation rate; at rest it holds the last one.
     // At most twice a second, and through the pill's live text: only its first reading mounts

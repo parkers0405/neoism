@@ -116,6 +116,20 @@ impl Default for Trail {
 
 impl Trail {
     pub fn quad(&self) -> [[f32; 2]; 4] { self.corners.map(|c| c.pos) }
+
+    /// Carry the cursor with what scrolled under it: the target and every corner move by
+    /// `by` at once, at rest or mid-trail, and no new trail starts.
+    pub fn shift(&mut self, by: [f32; 2]) {
+        for axis in 0..2 {
+            for corner in &mut self.corners {
+                corner.pos[axis] += by[axis];
+                corner.previous_destination[axis] += by[axis];
+            }
+            self.center[axis] += by[axis];
+            self.previous_center[axis] += by[axis];
+            self.jump_from[axis] += by[axis];
+        }
+    }
     pub fn animating(&self) -> bool { self.animating }
 
     /// Aim at `rect` (`[x, y, w, h]`); a changed target starts a trail from where it is now.
@@ -202,11 +216,32 @@ pub struct Cursor {
     /// The blink, as the block's live opacity: a half period repaints the block without
     /// re-running the views.
     pub blink: rune::Live<f32>,
+    /// Where the views last built the block (its quad's top-left corner), the quad's shape
+    /// from there, and how far it has travelled since without changing shape: a live offset,
+    /// so a cursor riding a scroll repaints alone (`Cursor::place`).
+    pub base: [f32; 2],
+    shape: Option<Drawn>,
+    pub offset: rune::Live<[f32; 2]>,
+    /// The scrolled surface the cursor sits in and its offset at the last tick (`Cursor::carry`).
+    riding: Option<(String, f32)>,
+    /// The quad's corner when it last moved while off its base: once it rests, the views run
+    /// once to put it back on whole points.
+    resting: Option<[f32; 2]>,
+}
+
+/// What the views drew the block from, besides its place.
+#[derive(Clone, Copy, PartialEq)]
+struct Drawn {
+    corners: [[f32; 2]; 4],
+    placed: bool,
+    animating: bool,
+    clip: Option<[f32; 4]>,
 }
 
 impl Default for Cursor {
     fn default() -> Cursor {
-        Cursor { caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, move_clip: None, clip: None, epoch: Instant::now(), visible: false, blink: rune::Live::new(1.0) }
+        Cursor { caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, move_clip: None, clip: None, epoch: Instant::now(), visible: false, blink: rune::Live::new(1.0),
+            base: [0.0; 2], shape: None, offset: rune::Live::new([0.0, 0.0]), riding: None, resting: None }
     }
 }
 
@@ -215,6 +250,45 @@ impl Cursor {
     pub fn track_clip(&mut self, clip: Option<[f32; 4]>, moved: bool) {
         if moved { self.move_clip = self.clip; }
         self.clip = clip;
+    }
+
+    /// The cursor sits in the scrolled surface `key`, now at `offset`. When that surface has
+    /// scrolled since the last tick the cursor rides along: it is part of the text, so it moves
+    /// with it at once instead of trailing after it a frame late on its springs.
+    pub fn carry(&mut self, key: Option<(&str, f32)>) {
+        let rode = match (&self.riding, key) {
+            (Some((was, from)), Some((key, to))) if was == key => from - to,
+            _ => 0.0,
+        };
+        self.riding = key.map(|(key, offset)| (key.to_owned(), offset));
+        if rode == 0.0 { return; }
+        self.trail.shift([0.0, rode]);
+        if let Some(shown) = &mut self.shown { shown[1] += rode; }
+    }
+
+    /// Settle how this frame draws the block. A quad that only travelled since the views last
+    /// built it (riding a scroll) moves on its live offset; a new shape, a cursor appearing
+    /// or leaving, a new clip, or the end of a trail re-runs the views. Returns whether they
+    /// must re-run.
+    pub fn place(&mut self, clip: Option<[f32; 4]>) -> bool {
+        let quad = self.trail.quad();
+        let origin = quad.iter().fold([f32::MAX; 2], |o, p| [o[0].min(p[0]), o[1].min(p[1])]);
+        let drawn = Drawn { corners: quad.map(|p| [p[0] - origin[0], p[1] - origin[1]]), placed: self.placed(), animating: self.trail.animating(), clip };
+        let same = self.shape.is_some_and(|was| was.placed == drawn.placed && was.animating == drawn.animating && was.clip == drawn.clip
+            && was.corners.iter().zip(&drawn.corners).all(|(a, b)| (a[0] - b[0]).abs() < 0.01 && (a[1] - b[1]).abs() < 0.01));
+        let travelled = [origin[0] - self.base[0], origin[1] - self.base[1]];
+        // At rest again after riding: one view run puts the block back on its own layout.
+        let rested = same && travelled != [0.0, 0.0] && self.resting == Some(origin);
+        self.resting = (travelled != [0.0, 0.0]).then_some(origin);
+        if same && !rested {
+            self.offset.set(travelled);
+            return false;
+        }
+        self.shape = Some(drawn);
+        self.base = origin;
+        self.resting = None;
+        self.offset.set([0.0, 0.0]);
+        true
     }
 
     /// Whether the move in flight is crossing from one clip region to another.
@@ -296,6 +370,54 @@ mod tests {
         t.tick(Instant::now());
         assert!(t.corners.iter().all(|c| c.length <= SHORT_ANIMATION_LENGTH + 1e-6));
     }
+
+    #[test]
+    fn a_cursor_in_a_scrolled_file_rides_the_scroll_without_a_trail() {
+        let mut cursor = Cursor::default();
+        let now = Instant::now();
+        cursor.carry(Some(("src/main.rs", 100.0)));
+        cursor.tick(Some([200.0, 300.0, 9.0, 23.0]), now);
+        let rest = cursor.trail.quad();
+        assert!(!cursor.trail.animating());
+        // The file scrolls 40 points down: the target moves 40 up, and so does the block, whole.
+        cursor.carry(Some(("src/main.rs", 140.0)));
+        cursor.tick(Some([200.0, 260.0, 9.0, 23.0]), now);
+        assert!(!cursor.trail.animating(), "no trail: it moved with the text");
+        for (was, is) in rest.iter().zip(cursor.trail.quad()) {
+            assert!((is[0] - was[0]).abs() < 0.01 && (is[1] - (was[1] - 40.0)).abs() < 0.01);
+        }
+        // Another file, or a cursor that moved in the text, is not a ride.
+        cursor.carry(Some(("src/other.rs", 0.0)));
+        cursor.tick(Some([200.0, 400.0, 9.0, 23.0]), now);
+        assert!(cursor.trail.animating(), "a real move still trails");
+    }
+
+    #[test]
+    fn a_riding_block_moves_on_its_live_offset_and_comes_home_once_at_rest() {
+        let mut cursor = Cursor::default();
+        let now = Instant::now();
+        cursor.carry(Some(("f", 0.0)));
+        cursor.tick(Some([200.0, 300.0, 9.0, 23.0]), now);
+        assert!(cursor.place(None), "first sight builds it");
+        assert!(!cursor.place(None), "nothing changed: nothing re-runs");
+        // Riding a scroll: the same shape somewhere else is a live offset, not a view run.
+        cursor.carry(Some(("f", 40.0)));
+        cursor.tick(Some([200.0, 260.0, 9.0, 23.0]), now);
+        assert!(!cursor.place(None));
+        assert_eq!(cursor.offset.get(), [0.0, -40.0]);
+        cursor.carry(Some(("f", 70.0)));
+        cursor.tick(Some([200.0, 230.0, 9.0, 23.0]), now);
+        assert!(!cursor.place(None));
+        assert_eq!(cursor.offset.get(), [0.0, -70.0]);
+        // Still for a frame: one view run puts the block back on its own layout.
+        assert!(cursor.place(None));
+        assert_eq!(cursor.offset.get(), [0.0, 0.0]);
+        assert_eq!(cursor.base, [200.0, 230.0]);
+        assert!(!cursor.place(None));
+        // A new clip is the views' business.
+        assert!(cursor.place(Some([0.0, 0.0, 10.0, 10.0])));
+    }
+
 }
 
 /// Text selection behind the hidden native caret.

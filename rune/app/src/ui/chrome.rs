@@ -74,10 +74,12 @@ fn cursor_in_overlay(app: &App) -> bool {
 /// The trailing cursor in the accent colour.
 fn cursor_quad(app: &App) -> El {
     let quad = app.cursor.trail.quad();
-    let (x0, y0) = quad.iter().fold((f32::MAX, f32::MAX), |(x, y), p| (x.min(p[0]), y.min(p[1])));
+    let (qx, qy) = quad.iter().fold((f32::MAX, f32::MAX), |(x, y), p| (x.min(p[0]), y.min(p[1])));
     let (x1, y1) = quad.iter().fold((f32::MIN, f32::MIN), |(x, y), p| (x.max(p[0]), y.max(p[1])));
-    let (w, h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
-    let points: Vec<[f32; 2]> = quad.iter().map(|p| [p[0] - x0, p[1] - y0]).collect();
+    let (w, h) = ((x1 - qx).max(1.0), (y1 - qy).max(1.0));
+    let points: Vec<[f32; 2]> = quad.iter().map(|p| [p[0] - qx, p[1] - qy]).collect();
+    // Built where `poll` last settled it; from there it rides a live offset (`Cursor::place`).
+    let [x0, y0] = app.cursor.base;
     let quad = rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent))).w(w).h(h);
     // Settled on an editor cell, the block shows its character in the background colour.
     let glyph = app.editor_cursor_glyph().filter(|_| !app.cursor.trail.animating());
@@ -85,7 +87,7 @@ fn cursor_quad(app: &App) -> El {
     // alone. Re-running the views for it cost a whole commit twice a second, a missed refresh
     // whenever something else was moving.
     let block = |x: f32, y: f32| el().key("window-cursor").w(w).h(h).absolute(x, y)
-        .live_opacity(&app.cursor.blink).instant_changes()
+        .live_opacity(&app.cursor.blink).live_offset(&app.cursor.offset).instant_changes()
         .child(quad)
         .child_if(glyph.is_some(), || text(glyph.clone().unwrap_or_default())
             .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0));

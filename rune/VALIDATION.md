@@ -287,3 +287,33 @@ Shift with a wheel) with GPUiX's hover scroll bar: along the table's bottom edge
 above the composer while the table runs on under it, draggable. Checked headlessly with a six
 column, thirty row fixture: hover, a sideways swipe, the bar above the composer, a drag.
 
+## Code and Markdown files (2026-11-10)
+
+Scrolling a file re-ran the views on every frame: the block cursor is drawn at the window's
+root, its place followed the text's scroll offset, and every new place was a commit (and a
+frame-late, spring-chased one: the cursor trailed after its own character). Each commit also
+rebuilt every mounted row, some 160 of them with their highlight spans.
+
+- The cursor rides the scroll: when the file under it scrolls, the trail and its target move
+  by the same distance at once (`Cursor::carry`), and a block that only travelled since the
+  views built it moves on a live offset (`Cursor::place`). Views re-run for a new shape (a
+  trail), a new clip, or once when a ride ends.
+- Each visual row is a memo keyed by its own text, wrap and highlights (hashed), the cursor
+  line, selection, search, yank flash, diagnostics, theme and type: a scroll's row-mount
+  commits and a cursor move build the rows that changed, and typing builds the line typed on.
+
+`rune/app/src/editor/vim_apply.rs` (1,370 lines) and `rune/README.md` on the headless output,
+UI-thread work per frame in ms (`NEOISM_RUNE_DRIVE` wheel, trackpad and `keys` steps):
+
+| Workload | Before: p50 / p95 | After: p50 / p95 |
+| --- | --- | --- |
+| Rust file, wheel | 4.0 to 4.4 / 8.2 to 10.9 (90 to 105 fps, every frame a commit) | 0.5 to 0.7 / 2.4 to 2.7 (144 fps, none) |
+| Rust file, trackpad | 4.1 / 6.3 | 0.6 / 2.3 |
+| Rust file, `j` held | 2.7 / 3.6 | 1.2 / 2.6 |
+| README, wheel | 2.1 to 2.3 / 3.6 to 3.7 | 0.6 to 0.8 / 2.2 to 2.6 |
+
+Typing still re-runs the views on every frame (the caret's hop is a new shape each frame) at
+about 2.8 ms, and each keystroke re-highlights the whole file in `poll` (2.4 ms in the 1,370
+line file); neither is addressed here. Measure with nothing else busy: rust-analyzer
+re-indexing after an edit doubled every number above.
+

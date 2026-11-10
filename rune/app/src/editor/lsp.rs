@@ -119,6 +119,8 @@ impl Completion {
 pub struct BufferLsp {
     pub status: Option<Status>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Bumped whenever `diagnostics` is replaced: code rows are cached by it.
+    pub diagnostics_rev: u64,
     /// The document revision last sent, and when the text first changed after it.
     synced: Option<u64>,
     changed_at: Option<Instant>,
@@ -464,6 +466,7 @@ impl App {
                 else {
                     return;
                 };
+                buffer.lsp.diagnostics_rev += 1;
                 buffer.lsp.diagnostics = items
                     .into_iter()
                     .map(|d| Diagnostic {

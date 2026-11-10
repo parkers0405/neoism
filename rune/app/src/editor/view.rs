@@ -260,6 +260,40 @@ fn layout(buffer: &Buffer, cols: usize) -> Rc<CodeLayout> {
     result
 }
 
+/// One visual row, cached until something it draws changes: its own text, wrap and
+/// highlights (hashed, so typing rebuilds the line typed on and not every row the window
+/// holds), whether the cursor's line is this one, the selection, search and yank flash on it,
+/// its diagnostics, the theme and the type. Rune keeps five viewports of rows mounted and
+/// builds each of them on every commit, and a scroll commits every time a row enters:
+/// uncached, that was some 160 rows of spans a commit.
+fn cached_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
+    use std::hash::{Hash, Hasher};
+    let doc = &buffer.doc;
+    let m = Metrics::of(app, buffer);
+    let cached = layout(buffer, m.cols);
+    let Some(&(index, segment, first, last)) = cached.rows.get(row_index) else { return el().h(m.line_h); };
+    let line = &doc.lines[index];
+    let (start, end) = (cached.offsets[index], cached.offsets[index] + line.len());
+    let mut text = std::collections::hash_map::DefaultHasher::new();
+    (line, index, first, last, segment.byte_start, segment.byte_end, segment.source_col, segment.visual_indent).hash(&mut text);
+    for (range, paint) in cached.marks[cached.marks.partition_point(|(r, _)| r.end <= start)..].iter().take_while(|(r, _)| r.start < end) {
+        (range.start.max(start) - start, range.end.min(end) - start).hash(&mut text);
+        match paint {
+            Paint::Kind(kind) => std::mem::discriminant(kind).hash(&mut text),
+            Paint::Color(c) => [c.r, c.g, c.b, c.a].map(f32::to_bits).hash(&mut text),
+        }
+    }
+    // A yank flash fades on the clock: its rows build every frame while it shows.
+    let flash = doc.yank_flash.as_ref().filter(|f| (f.start.line..=f.end.line).contains(&index) && f.started_at.elapsed().as_secs_f32() < YANK_FLASH_SECS)
+        .map(|f| f.started_at.elapsed().as_micros());
+    let version = (
+        (text.finish(), m.cols, m.gutter_w.to_bits(), buffer.lsp.diagnostics_rev),
+        (app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits()),
+        (index == doc.cursor_line, selection_on_line(doc, index), buffer.search_highlight.as_deref(), flash),
+    );
+    rune::memo(format!("code:{}:{}:{row_index}", app.active_tab().id, buffer.path), version, || code_row(app, buffer, row_index))
+}
+
 fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     let p = app.pal;
     let doc = &buffer.doc;
@@ -352,7 +386,7 @@ fn code(app: &App, buffer: &Buffer) -> El {
     let rows = col().key("code-rows").w_full().growth(rune::GrowthSpec::default())
         .virtual_rows(row_count, line_h,
             |_: &App, i| format!("visual:{i}").into(),
-            move |a: &App, i| a.buffers.get(&path).map_or_else(el, |b| code_row(a, b, i)))
+            move |a: &App, i| a.buffers.get(&path).map_or_else(el, |b| cached_row(a, b, i)))
         .virtual_rows_version(0u64);
     let tab = app.active_tab().id;
     let rows = rows.on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| { a.select_tab(tab); a.editor_drag(d, tx); })
@@ -366,7 +400,6 @@ fn code(app: &App, buffer: &Buffer) -> El {
         .on_hover_change(|a: &mut App, inside, _| { if !inside { a.lsp_pointer_leave(); } });
 
     let key = scroll_key(&app.workspace_id, &buffer.path);
-    let wheel_key = key.clone();
     let mirror = buffer.scroll.clone();
     let layout_path = buffer.path.clone();
     let wheel_path = buffer.path.clone();
@@ -376,21 +409,7 @@ fn code(app: &App, buffer: &Buffer) -> El {
         .on_layout(move |a: &mut App, r: [f32; 4]| {
             if let Some(b) = a.buffers.get_mut(&layout_path) { b.view_rect = Some(r); }
         })
-        .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
-            // Trackpads scroll directly; notches glide three lines each on the spring.
-            if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel editor dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
-            if e.dy == 0.0 { return false; }
-            let Some(b) = a.buffers.get_mut(&wheel_path) else { return false };
-            let popup = b.lsp.hover.is_some() || b.lsp.completion.is_some();
-            b.lsp.dismiss();
-            b.jump_spring = None;
-            b.wheel_target = None;
-            let mirror = b.scroll.clone();
-            let source: crate::ui::scroll::Source = std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) });
-            // A popup the wheel closed needs the view to re-run; otherwise nothing it reads moved.
-            if popup { crate::ui::scroll::take(&mut a.scrollers, &wheel_key, &e, 3.0 * line_h, source, tx) }
-            else { crate::ui::scroll::handle(&mut a.scrollers, &wheel_key, &e, 3.0 * line_h, source, tx) }
-        })
+        .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| a.editor_wheel(&wheel_path, e, tx))
         .child(rows)
 }
 
@@ -510,5 +529,26 @@ mod tests {
         assert_eq!(selection_on_line(&doc, 1), Some((0, 1)));
         doc.vim.visual_linewise = true;
         assert_eq!(selection_on_line(&doc, 1), Some((0, 5)));
+    }
+}
+
+impl App {
+    /// A wheel or trackpad delta over the file at `path`: trackpads scroll directly, notches
+    /// glide three lines each on the spring.
+    pub fn editor_wheel(&mut self, path: &str, e: WheelEvent, tx: &mut Tx) -> bool {
+        if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel editor dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
+        if e.dy == 0.0 { return false; }
+        let line_h = line_height(self);
+        let key = scroll_key(&self.workspace_id, path);
+        let Some(b) = self.buffers.get_mut(path) else { return false };
+        let popup = b.lsp.hover.is_some() || b.lsp.completion.is_some();
+        b.lsp.dismiss();
+        b.jump_spring = None;
+        b.wheel_target = None;
+        let mirror = b.scroll.clone();
+        let source: crate::ui::scroll::Source = std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) });
+        // A popup the wheel closed needs the view to re-run; otherwise nothing it reads moved.
+        if popup { crate::ui::scroll::take(&mut self.scrollers, &key, &e, 3.0 * line_h, source, tx) }
+        else { crate::ui::scroll::handle(&mut self.scrollers, &key, &e, 3.0 * line_h, source, tx) }
     }
 }

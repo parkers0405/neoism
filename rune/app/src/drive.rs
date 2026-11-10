@@ -8,8 +8,10 @@
 //! - `ready`: wait for the active conversation's first history page (at most 10 s)
 //! - `wait:<seconds>`
 //! - `wheel:<notches per second>:<seconds>`: mouse-wheel notches over the active
-//!   conversation; a negative rate scrolls down
+//!   conversation or file; a negative rate scrolls down
 //! - `touch:<points per second>:<seconds>`: trackpad deltas at 120 Hz; negative scrolls down
+//! - `keys:<text>:<per second>`: type `text` into the focused surface, a character at a time
+//!   (`jjjj` walks a file's cursor, as a held key does)
 //! - `prompt:<text>`: send `text` from the active composer (a real prompt)
 //! - `stream:<file>:<seconds>`: stream the file's text into the active conversation as a
 //!   reply, through the reducer the daemon's deltas take (nothing is sent to the daemon)
@@ -33,6 +35,7 @@ enum Step {
     Wait(f64),
     Wheel { rate: f64, seconds: f64 },
     Touch { speed: f64, seconds: f64 },
+    Keys { text: Vec<char>, rate: f64 },
     Prompt(String),
     Stream { text: String, bounds: Vec<usize>, seconds: f64 },
     Live,
@@ -62,6 +65,7 @@ impl Drive {
                 "wait" => Step::Wait(rest.parse().ok()?),
                 "wheel" => { let (rate, seconds) = pair()?; Step::Wheel { rate, seconds } }
                 "touch" => { let (speed, seconds) = pair()?; Step::Touch { speed, seconds } }
+                "keys" => { let (text, rate) = rest.rsplit_once(':')?; Step::Keys { text: text.chars().collect(), rate: rate.parse().ok()? } }
                 "prompt" => Step::Prompt(rest.to_owned()),
                 "stream" => {
                     let (path, seconds) = rest.rsplit_once(':')?;
@@ -97,6 +101,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Wait(s) => format!("wait:{s}"),
                 Step::Wheel { rate, seconds } => format!("wheel:{rate}:{seconds}"),
                 Step::Touch { speed, seconds } => format!("touch:{speed}:{seconds}"),
+                Step::Keys { text, rate } => format!("keys:{}:{rate}", text.len()),
                 Step::Prompt(_) => "prompt".to_owned(),
                 Step::Stream { seconds, .. } => format!("stream:{seconds}"),
                 Step::Live => "live".to_owned(),
@@ -110,19 +115,36 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         // How long the step still runs; `None` once it is over.
         let remaining = match step {
             Step::Ready => {
-                let loaded = active_session(app).and_then(|id| app.sessions.get(&id).map(|s| s.loaded)).unwrap_or(false);
+                let loaded = match &app.active_tab().kind {
+                    TabKind::Editor { path } => app.buffers.get(path).is_some_and(|b| b.loaded),
+                    _ => active_session(app).and_then(|id| app.sessions.get(&id).map(|s| s.loaded)).unwrap_or(false),
+                };
                 (!loaded && elapsed < 10.0).then_some(0.05)
+            }
+            Step::Keys { text, rate } => {
+                let due = ((elapsed * rate) as usize).min(text.len());
+                while (drive.sent as usize) < due {
+                    let key = rune::KeyEvent { key: rune::Key::Text(text[drive.sent as usize].to_string()), mods: Default::default() };
+                    drive.sent += 1;
+                    changed |= crate::keys::on_key(app, &key, tx);
+                }
+                (due < text.len()).then(|| ((drive.sent + 1) as f64 / rate - elapsed).max(0.0))
             }
             Step::Wait(seconds) => (elapsed < *seconds).then(|| seconds - elapsed),
             Step::Wheel { rate, seconds } | Step::Touch { speed: rate, seconds } => {
                 let precise = matches!(step, Step::Touch { .. });
                 let (hz, dy) = if precise { (TOUCH_HZ, (*rate / TOUCH_HZ) as f32) } else { (rate.abs(), 40.0 * rate.signum() as f32) };
                 let due = (elapsed.min(*seconds) * hz) as u64;
-                if let Some(id) = active_session(app) {
-                    let line_h = crate::editor::view::line_height(app);
-                    while drive.sent < due {
-                        drive.sent += 1;
-                        app.timeline_wheel(&id, WheelEvent::new(0.0, dy).precise(precise), line_h, tx);
+                let line_h = crate::editor::view::line_height(app);
+                let file = match &app.active_tab().kind { TabKind::Editor { path } => Some(path.clone()), _ => None };
+                let chat = active_session(app);
+                while drive.sent < due {
+                    drive.sent += 1;
+                    let e = WheelEvent::new(0.0, dy).precise(precise);
+                    match (&file, &chat) {
+                        (Some(path), _) => { app.editor_wheel(path, e, tx); }
+                        (_, Some(id)) => { app.timeline_wheel(id, e, line_h, tx); }
+                        _ => {}
                     }
                 }
                 (elapsed < *seconds).then(|| ((drive.sent + 1) as f64 / hz - elapsed).max(0.0))
@@ -194,7 +216,7 @@ mod tests {
         };
         let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; mark:end; quit").unwrap();
         let names: Vec<&str> = drive.steps.iter().map(|step| match step {
-            Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch",
+            Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
             Step::Prompt(_) => "prompt", Step::Stream { .. } => "stream", Step::Live => "live", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
         assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "mark", "quit"]);

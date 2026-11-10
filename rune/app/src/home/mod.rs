@@ -13,7 +13,7 @@ mod terminal;
 mod view;
 
 pub use blocks::Block;
-pub use terminal::Terminal;
+pub use terminal::{Terminal, program_title};
 pub use view::view;
 
 use composer::MenuKind;
@@ -398,6 +398,11 @@ impl App {
                 if let Some(tab_id) = tab {
                     if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.session = None; }
                     self.create_pty(tab_id);
+                }
+            }
+            PtyServer::SessionProgram { session_id, program } => {
+                if let Some(term) = self.terminals.values_mut().find(|t| t.shell.session.as_deref() == Some(&session_id)) {
+                    term.program = terminal::agent_program(&program);
                 }
             }
             PtyServer::SessionCwd { session_id, cwd } => {

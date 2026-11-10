@@ -12,7 +12,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.settings.is_some() { return app.settings_key(event); }
     // A full-screen program or running command in the Home pane owns the keyboard.
     if app.terminal_key(event) { return true; }
-    if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && editor_key(app, event, tx) {
+    if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && app.editor_key(event, tx) {
         return true;
     }
     if app.focus == Focus::Sidebar && app.active_tree().is_some() && tree_key(app, event) {
@@ -96,42 +96,6 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
         }
     }
     false
-}
-
-/// Vim normal-mode motions in an editor tab; the view follows the cursor on the scroll spring.
-fn editor_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
-    use crate::editor::Motion;
-    let m = event.mods;
-    let pending_g = std::mem::take(&mut app.pending_g);
-    let motion = match &event.key {
-        Key::Left => Motion::Left,
-        Key::Right => Motion::Right,
-        Key::Up => Motion::Up,
-        Key::Down => Motion::Down,
-        Key::Home => Motion::LineStart,
-        Key::End => Motion::LineEnd,
-        Key::PageDown => Motion::HalfPageDown,
-        Key::PageUp => Motion::HalfPageUp,
-        Key::Text(t) if m.ctrl && t == "d" => Motion::HalfPageDown,
-        Key::Text(t) if m.ctrl && t == "u" => Motion::HalfPageUp,
-        Key::Text(t) if !m.ctrl && !m.alt => match t.as_str() {
-            "h" => Motion::Left,
-            "l" => Motion::Right,
-            "k" => Motion::Up,
-            "j" => Motion::Down,
-            "0" => Motion::LineStart,
-            "$" => Motion::LineEnd,
-            "G" => Motion::Bottom,
-            "g" if pending_g => Motion::Top,
-            "g" => { app.pending_g = true; return true; }
-            _ => return false,
-        },
-        _ => return false,
-    };
-    // The view follows once the moved cursor cell has been laid out (lines wrap).
-    if app.editor_motion(motion) { app.editor_follow = true; }
-    let _ = tx;
-    true
 }
 
 /// Tree navigation while the file tree has focus.

@@ -298,27 +298,15 @@ impl App {
         }
     }
 
-    /// The header's document button: close the page and show `config.json` in an editor tab.
-    /// The config lives on this machine, so it is read directly rather than through the
-    /// workspace-scoped `Files` family.
+    /// The header's document button: close the page and edit `config.json` in an editor tab,
+    /// as the original does through the daemon's config document (saved with its revision).
     pub fn open_config_document(&mut self) {
         self.settings = None;
-        let file = crate::config::dir().join("config.json");
-        let key = file.display().to_string();
-        if let Some(index) = self.tabs.iter().position(|t| t.kind == crate::tabs::TabKind::Editor { path: key.clone() }) {
-            self.active = index;
-            return;
-        }
-        let (lines, error) = match std::fs::read_to_string(&file) {
-            Ok(text) => (text.split('\n').map(str::to_owned).collect(), None),
-            Err(e) => (Vec::new(), Some(format!("Could not read {key}: {e}"))),
-        };
-        self.buffers.insert(key.clone(), crate::editor::Buffer { path: key.clone(), lines, loaded: true, cursor: (0, 0), want_col: 0, error });
-        self.open_tab(crate::tabs::TabKind::Editor { path: key });
-        self.focus = crate::app::Focus::Content;
+        self.open_config_editor();
     }
 
     pub(crate) fn apply_config_reply(&mut self, message: &Value) {
+        self.apply_config_document_reply(message);
         let Some(settings) = &mut self.settings else { return };
         if let Some(config) = message.get("Config") {
             settings.values = config["value"].clone();

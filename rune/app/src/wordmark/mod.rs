@@ -12,7 +12,7 @@ mod animation;
 use crate::app::App;
 use crate::ui::theme::rgb;
 use animation::WordmarkAnimation;
-use rune::{El, Image, ImageCache, Shape, Tx, canvas, el};
+use rune::{El, Image, ImageCache, Live, Shape, Tx, canvas, el};
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 
@@ -26,12 +26,53 @@ const SHIMMER_PERIOD: f32 = 3.4;
 const BREATH_PERIOD: f32 = 4.6;
 
 /// One on-screen wordmark (splash or agent): its hover values and click animation.
-#[derive(Default)]
 pub struct Host {
     hover: [f32; LETTERS],
     pointer: Option<usize>,
     animation: WordmarkAnimation,
     created: Option<f64>,
+    /// The idle shimmer, breath and hover lift run on live bindings: each letter's lift, its
+    /// scale, and its glow's scale (the view binds them once; frames never re-run views).
+    lift: [Live<[f32; 2]>; LETTERS],
+    scale: [Live<f32>; LETTERS],
+    glow: [Live<f32>; LETTERS],
+    /// The drawn height, for the lift (set by the view).
+    height: std::cell::Cell<f32>,
+    splash: bool,
+}
+
+impl Default for Host {
+    fn default() -> Host {
+        Host {
+            hover: [0.0; LETTERS], pointer: None, animation: WordmarkAnimation::default(), created: None,
+            lift: std::array::from_fn(|_| Live::new([0.0, 0.0])),
+            scale: std::array::from_fn(|_| Live::new(1.0)),
+            glow: std::array::from_fn(|_| Live::new(1.0)),
+            height: std::cell::Cell::new(0.0),
+            splash: false,
+        }
+    }
+}
+
+impl Host {
+    /// Write this frame's shimmer, breath and hover into the bindings.
+    fn drive(&self, seconds: f32) {
+        let h = self.height.get();
+        for i in 0..LETTERS {
+            let hover = self.hover[i].clamp(0.0, 1.0);
+            let shimmer = (seconds / SHIMMER_PERIOD + i as f32 * 0.16) * TAU;
+            let scale = 1.0 + hover * HOVER_SCALE + shimmer.sin() * SHIMMER_AMP;
+            let glow = if self.splash {
+                let breath = ((seconds / BREATH_PERIOD * TAU).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+                1.0 + 0.05 * (0.05 + 0.13 * breath + hover * 0.4)
+            } else {
+                1.04 + hover * 0.05
+            };
+            self.lift[i].set([0.0, -hover * HOVER_LIFT * h]);
+            self.scale[i].set(scale);
+            self.glow[i].set(scale * glow);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -76,7 +117,7 @@ impl Wordmark {
 
     fn host(&mut self, key: &str) -> &mut Host {
         let clock = self.clock;
-        let host = self.hosts.entry(key.to_owned()).or_default();
+        let host = self.hosts.entry(key.to_owned()).or_insert_with(|| Host { splash: key.starts_with("splash"), ..Host::default() });
         host.created.get_or_insert(clock);
         host
     }
@@ -84,26 +125,33 @@ impl Wordmark {
 
 impl Wordmark {
     /// Advance the hosts actually drawn in visible panes, including unfocused splits.
-    pub fn tick(&mut self, visible: &[String], now: f64) -> bool {
+    /// Returns (moving, rebuild): `moving` while anything animates (keep frames coming; the
+    /// idle shimmer runs on live bindings), `rebuild` only when a view must re-run: a wordmark
+    /// that just appeared (to bind), or a click effect drawn as a canvas.
+    pub fn tick(&mut self, visible: &[String], now: f64) -> (bool, bool) {
         let dt = self.last_tick.map(|last| (now - last).clamp(0.0, 0.10) as f32).unwrap_or(0.0);
         self.clock = now;
         for (key, host) in &mut self.hosts {
             if !visible.contains(key) { host.pointer = None; host.hover = [0.0; LETTERS]; }
         }
-        if visible.is_empty() { self.last_tick = None; return false; }
+        if visible.is_empty() { self.last_tick = None; return (false, false); }
         self.last_tick = Some(now);
         let reduced = self.reduced;
         let alpha = 1.0 - (-HOVER_RATE * dt).exp();
-        let mut animating = !reduced;
+        let mut rebuild = false;
+        let mut effect = false;
         for key in visible {
+            let fresh = !self.hosts.contains_key(key);
             let host = self.host(key);
+            rebuild |= fresh;
             for (i, hover) in host.hover.iter_mut().enumerate() {
                 let target = if host.pointer == Some(i) { 1.0 } else { 0.0 };
                 *hover = if reduced { 0.0 } else { *hover + (target - *hover) * alpha };
             }
-            animating |= host.animation.is_active(now);
+            if !reduced { host.drive(host.created.map_or(0.0, |c| (now - c) as f32)); }
+            effect |= host.animation.is_active(now);
         }
-        animating
+        (!reduced || effect, rebuild || effect)
     }
 }
 
@@ -153,31 +201,30 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
     let show_original = frame.as_ref().is_none_or(|f| f.show_original());
     let mut root = el().key(key).w(width).h(height);
 
-    let mut letters = Vec::with_capacity(LETTERS);
-    for i in 0..LETTERS {
+    if let Some(host) = host { host.height.set(height); }
+    let slice = |i: usize| [i as f32 * width / LETTERS as f32, 0.0, width / LETTERS as f32, height];
+    // Click effects place their cells from the eased letter rects (static once reduced).
+    let letters: Vec<([f32; 4], f32)> = (0..LETTERS).map(|i| {
         let hover = if mark.reduced { 0.0 } else { host.map(|h| h.hover[i]).unwrap_or(0.0).clamp(0.0, 1.0) };
-        let rect = if mark.reduced { [i as f32 * width / 6.0, 0.0, width / 6.0, height] } else { letter_rect([0.0, 0.0, width, height], i, hover, seconds) };
-        letters.push((rect, hover));
-    }
+        (if mark.reduced { slice(i) } else { letter_rect([0.0, 0.0, width, height], i, hover, seconds) }, hover)
+    }).collect();
 
     if show_original {
-        for (i, &([x, y, w, h], hover)) in letters.iter().enumerate() {
-            let glow = if splash {
-                let breath = ((seconds / BREATH_PERIOD * TAU).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-                1.0 + 0.05 * (0.05 + 0.13 * breath + hover * 0.4)
-            } else {
-                1.04 + hover * 0.05
+        for i in 0..LETTERS {
+            let [x, y, w, h] = slice(i);
+            // Each part sits on its idle slice; the shimmer, breath and hover ride its bindings.
+            let image = |part: &str, scale: Option<&Live<f32>>| {
+                let mut part = el().key(format!("{key}-{part}-{i}")).absolute(x, y).w(w).h(h).pixels(mark.letters[i].pixels());
+                if let (Some(host), false) = (host, mark.reduced) {
+                    part = part.live_offset(&host.lift[i]);
+                    if let Some(scale) = scale { part = part.live_scale(scale); }
+                }
+                part
             };
-            let glow_rect = [x + w * (1.0 - glow) * 0.5, y + h * (1.0 - glow) * 0.5, w * glow, h * glow];
-            let image = |[x, y, w, h]: [f32; 4], part: &str| {
-                el().key(format!("{key}-{part}-{i}")).absolute(x, y).w(w).h(h).pixels(mark.letters[i].pixels())
-            };
+            let letter = image("letter", host.map(|h| &h.scale[i]));
+            let glow = image("glow", host.map(|h| &h.glow[i]));
             // Same paint order as `wordmarkImageOps`: agent glow under the letter, splash over it.
-            if splash {
-                root = root.child(image([x, y, w, h], "letter")).child(image(glow_rect, "glow"));
-            } else {
-                root = root.child(image(glow_rect, "glow")).child(image([x, y, w, h], "letter"));
-            }
+            root = if splash { root.child(letter).child(glow) } else { root.child(glow).child(letter) };
         }
     }
 
@@ -249,7 +296,7 @@ mod tests {
         mark.host(&key).pointer = Some(1);
         mark.tick(&[key.clone()], 0.0);
         mark.tick(&[key.clone()], 0.1);
-        assert!(!mark.tick(&[], 0.2));
+        assert_eq!(mark.tick(&[], 0.2), (false, false));
         assert!(mark.hosts[&key].pointer.is_none());
         assert_eq!(mark.hosts[&key].hover, [0.0; LETTERS]);
     }

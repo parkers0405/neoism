@@ -24,6 +24,7 @@ parser.add_argument('--keys', default='j' * 140)
 parser.add_argument('--wheel', action='store_true', help='Scroll up and down over the test window using /dev/uinput')
 parser.add_argument('--wheel-seconds', type=float, default=3, help='Duration of alternating native wheel input')
 parser.add_argument('--daemon-url', help='Use a scratch daemon instead of offline fixtures')
+parser.add_argument('--live', action='store_true', help='Connect to the running daemon (no offline fixtures); pair with --env NEOISM_RUNE_STATE_PATH=<copy>')
 parser.add_argument('--env', action='append', default=[], help='Extra KEY=VALUE for the test window')
 parser.add_argument('--terminal', action='store_true', help='Run bounded ANSI output in a scratch daemon terminal')
 args = parser.parse_args()
@@ -44,7 +45,7 @@ previous = active()
 environment = ['WAYLAND_DEBUG=1', *args.env]
 if args.daemon_url:
     environment.append('NEOISM_GPUIX_DAEMON_URL=' + args.daemon_url)
-else:
+elif not args.live:
     environment.append('NEOISM_RUNE_OFFLINE=1')
 command = shlex.join(['env', *environment, 'timeout', '--signal=INT', str(max(12, args.wheel_seconds + 5)), args.binary,
     '--scene', args.scene, '--native', '--trace', str(trace), *([] if args.natural else ['--frames', str(args.frames)])])

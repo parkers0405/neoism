@@ -70,6 +70,10 @@ pub struct App {
     pub question_hover: Option<(String, usize)>,
     /// The status line's mode pill transition (scramble and colour cross-fade).
     pub mode_pill: crate::ui::status::ModePill,
+    /// The composer chips' last labels (agent, model, thinking) and when each changed.
+    pub chip_scramble: [(String, f64); 3],
+    /// The first Esc of an Esc-Esc stop on a running chat.
+    pub esc_at: Option<std::time::Instant>,
     /// The hovered Systems/Servers category tab (or the settings back button).
     pub palette_category_hover: Option<usize>,
     /// Window recovery writes (`session.rs`), and whether the window closed its last workspace.
@@ -206,7 +210,7 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_default();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: None, question_hover: None, mode_pill: Default::default(), palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: None, question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
             daemon: None,
             inbox: None,
             images: None,

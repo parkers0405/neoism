@@ -8,6 +8,66 @@ use crate::ui::icon;
 use crate::ui::theme::{glyph, rgb};
 use rune::{Color, El, Tx, col, el, row, text};
 
+/// The agent chip's colour (`agent_chip_accent`): Build red, Plan yellow, others the accent.
+fn agent_accent(app: &App, label: &str) -> u32 {
+    let p = app.pal;
+    if label.eq_ignore_ascii_case("build") { p.red } else if label.eq_ignore_ascii_case("plan") { p.yellow } else { p.accent }
+}
+
+impl App {
+    /// Ctrl+C clears the composer, or with nothing typed stops the running chat; Esc twice
+    /// within a second stops it too. A selection still copies.
+    pub fn composer_interrupt_key(&mut self, e: &rune::KeyEvent) -> bool {
+        let i = self.active;
+        let session = match &self.tabs[i].kind { TabKind::Agent { session: Some(id) } => Some(id.clone()), _ => None };
+        let running = session.as_ref().is_some_and(|id| self.sessions.get(id).is_some_and(|s| s.streaming));
+        if crate::keys::ctrl_letter(e) == Some('c') && !e.mods.shift {
+            let draft = &self.tabs[i].draft;
+            if draft.anchor != draft.focus || self.selection.copy.selected.is_some() { return false; }
+            if !draft.text.is_empty() {
+                self.tabs[i].draft.clear();
+                self.composer_changed();
+                return true;
+            }
+            if let (true, Some(id)) = (running, &session) { self.stop(id); return true; }
+            return false;
+        }
+        if e.key == rune::Key::Escape && running && !e.mods.ctrl && !e.mods.alt {
+            let now = std::time::Instant::now();
+            if self.esc_at.take().is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(1)) {
+                if let Some(id) = &session { self.stop(id); }
+            } else {
+                self.esc_at = Some(now);
+            }
+            return true;
+        }
+        false
+    }
+
+    fn chip_index(kind: Kind) -> usize { match kind { Kind::Agent => 0, Kind::Model => 1, _ => 2 } }
+
+    /// Milliseconds into a chip's scramble, while it plays.
+    pub fn chip_scramble_ms(&self, kind: Kind) -> Option<f32> {
+        let (_, started) = &self.chip_scramble[Self::chip_index(kind)];
+        let ms = ((self.tools.clock - started) * 1000.0) as f32;
+        (ms >= 0.0 && ms < crate::ui::status::SCRAMBLE_MS).then_some(ms)
+    }
+
+    /// Start a chip's scramble when its value changes (the first value appears at rest).
+    /// Returns whether one is playing.
+    pub fn tick_chip_scramble(&mut self) -> bool {
+        let now = self.tools.clock;
+        let labels = [self.agent.clone(), self.model.clone(), self.effort.clone()];
+        for (slot, label) in self.chip_scramble.iter_mut().zip(labels) {
+            if slot.0 != label {
+                let first = slot.0.is_empty();
+                *slot = (label, if first { f64::NEG_INFINITY } else { now });
+            }
+        }
+        [Kind::Agent, Kind::Model, Kind::Thinking].iter().any(|k| self.chip_scramble_ms(*k).is_some())
+    }
+}
+
 /// The floating composer card with its chip row and path bar (`reference/09`).
 pub fn composer(app: &App, max_w: f32) -> El {
     let p = app.pal;
@@ -24,14 +84,18 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .color(rgb(p.fg)).w_full().min_h(26.0)
         .on_edit(move |s: &mut App| { s.select_tab(tab_id); let i = s.active; &mut s.tabs[i].draft })
         .on_input_change(move |s: &mut App, _: &mut Tx| { s.select_tab(tab_id); s.composer_changed(); })
-        .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || crate::keys::shortcut(s, e, tx) })
+        .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
         // An image on the clipboard attaches; text pastes as usual.
         .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_image(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_command(tx) { s.submit(); } });
     // Chips and their `/model` `/agent` `/think` aliases open the same pickers.
     // In a narrow split the chips give way (labels truncate) instead of widening the card.
+    // A chip whose value just changed scrambles into it (GPUiX's `render_scramble_text`).
     let chip = |label: String, color: Color, kind: Kind| row().gap(6.0).center_y().shrink()
-        .child(text(label).font(app.ty.composer()).color(color).truncate().shrink())
+        .child(match app.chip_scramble_ms(kind) {
+            Some(ms) => crate::ui::status::scramble_label(app.ty.composer(), app.ty.composer().size * 0.6, &label, color, ms),
+            None => text(label).font(app.ty.composer()).color(color).truncate().shrink(),
+        })
         .child(icon(app, glyph::CHEVRON_DOWN, 0.5, rgb(p.muted)))
         .on_press(move |s: &mut App| {
             s.select_tab(tab_id);
@@ -68,7 +132,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .child_opt(super::attach::composer_strip(app, tab_id))
         .child(input)
         .child(row().key("composer-chip-row").w_full().gap(26.0).center_y()
-            .child(chip(app.agent.clone(), rgb(p.red), Kind::Agent))
+            .child(chip(app.agent.clone(), rgb(agent_accent(app, &app.agent)), Kind::Agent))
             .child(row().gap(8.0).center_y().shrink()
                 .child(super::slash::provider_mark(app, 17.0 * app.ty.scale()))
                 .child(chip(app.model.clone(), rgb(p.blue), Kind::Model)))

@@ -101,7 +101,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
-    let mode_changing = app.tick_mode_pill();
+    let mode_changing = app.tick_mode_pill() | app.tick_chip_scramble();
     // Wheel and trackpad motion on every scroll view, stepped on the frame clock.
     let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx);
     let rail_bottom = app.rail_follow_bottom();

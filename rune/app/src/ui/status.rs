@@ -1,7 +1,7 @@
 //! The status line (`shared/src/panels/status_line.rs`): a 22 pt strip with a 2 pt top rule.
 //! Left, a mode pill whose rounded tail overlaps the cwd pill (surface text section, red folder
 //! section). Right, overlapping two-tone pills: branch (with `+added -deleted`), then FPS. Every
-//! label is bold, drawn twice 0.6 pt apart, over two dark extrusion copies.
+//! label is bold.
 
 use super::theme::rgb;
 use crate::app::App;
@@ -36,7 +36,6 @@ pub struct GitSummary {
 pub fn height(app: &App) -> f32 { HEIGHT * app.ty.scale() }
 
 struct Metrics {
-    s: f32,
     font: f32,
     pill_y: f32,
     pill_h: f32,
@@ -50,54 +49,41 @@ impl Metrics {
     fn icon_w(&self) -> f32 { self.font }
 }
 
-/// Bold text with the faux-bold copy and the two extrusion shadows (`draw_thick` + `extrude`).
+/// Bold label text (no faux-bold copy or extrusion shadows).
 fn thick(m: &Metrics, label: &str, family: Option<Family>, color: Color) -> El {
-    let style = || {
-        let style = TextStyle::new(m.font, 700.0);
-        match family { Some(family) => style.family(family), None => style.mono() }
-    };
-    let layer = |dx: f32, dy: f32, ink: Color| text(label.to_owned()).font(style()).color(ink).absolute(dx, dy);
-    let alpha = color.a;
-    el().child(layer(1.5 * m.s, 1.5 * m.s, Color { r: 0.003, g: 0.003, b: 0.005, a: alpha * 5.0 / 6.0 }))
-        .child(layer(0.75 * m.s, 0.75 * m.s, rgb(0x3e3e48)))
-        .child(layer(0.6 * m.s, 0.0, color))
-        .child(text(label.to_owned()).font(style()).color(color))
+    let style = TextStyle::new(m.font, 700.0);
+    let style = match family { Some(family) => style.family(family), None => style.mono() };
+    text(label.to_owned()).font(style).color(color)
 }
 
-/// The mode label mid-change (`render_scramble_label`): each letter shows a random capital in a
-/// cycling rainbow until it locks in turn, the last at the end of the transition.
+/// The mode label mid-change.
 fn scramble(m: &Metrics, label: &str, color: Color, t: f32, elapsed_ms: f32) -> El {
     if t >= 1.0 { return thick(m, label, None, color); }
+    scramble_label(TextStyle::new(m.font, 700.0).mono(), m.font * ADVANCE, label, color, elapsed_ms)
+}
+
+/// GPUiX's scramble (`render_scramble_text`): over `SCRAMBLE_MS` each letter cycles through
+/// symbols in a seven-colour rainbow, and they lock in left to right over the last 65%.
+/// `advance` is one monospace cell.
+pub const SCRAMBLE_MS: f32 = 320.0;
+const SCRAMBLE_GLYPHS: &[char] = &['#', '@', '%', '&', '*', '+', '?', '/', '~', '='];
+const SCRAMBLE_COLORS: [u32; 7] = [0xff5252, 0xffb84d, 0xffeb3b, 0x69f0ae, 0x4dd0e1, 0x6495ed, 0xba68c8];
+
+pub fn scramble_label(style: TextStyle, advance: f32, label: &str, color: Color, elapsed_ms: f32) -> El {
+    let progress = (elapsed_ms / SCRAMBLE_MS).clamp(0.0, 1.0);
+    if progress >= 1.0 { return text(label.to_owned()).font(style).color(color); }
     let chars: Vec<char> = label.chars().collect();
     let n = chars.len().max(1) as f32;
-    let seed = (elapsed_ms / 30.0) as u64;
+    let tick = (elapsed_ms / 34.0).floor() as usize;
     let mut out = row();
-    for (i, &target) in chars.iter().enumerate() {
-        let (ch, ink) = if t >= (i as f32 + 1.0) / n || target == ' ' {
-            (target, color)
-        } else {
-            let h = mix_seed(seed, i);
-            ((b'A' + (h % 26) as u8) as char, hsl((elapsed_ms * 0.6 + i as f32 * 47.0) % 360.0, 1.0, 0.65))
+    for (index, &target) in chars.iter().enumerate() {
+        let settled = progress >= 0.35 + 0.65 * (index as f32 + 1.0) / n || target.is_whitespace();
+        let (glyph, ink) = if settled { (target, color) } else {
+            (SCRAMBLE_GLYPHS[(tick + index * 3) % SCRAMBLE_GLYPHS.len()], rgb(SCRAMBLE_COLORS[(tick + index) % SCRAMBLE_COLORS.len()]))
         };
-        out = out.child(el().w(m.font * ADVANCE).child(thick(m, &ch.to_string(), None, ink)));
+        out = out.child(el().w(advance).child(text(glyph.to_string()).font(style.clone()).color(ink)));
     }
     out
-}
-
-fn mix_seed(seed: u64, idx: usize) -> u32 {
-    let mut h = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    h ^= h.rotate_right(27).wrapping_add(idx as u64 * 31);
-    h ^= h >> 33;
-    h as u32
-}
-
-fn hsl(h: f32, s: f32, l: f32) -> Color {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = h.rem_euclid(360.0) / 60.0;
-    let x = c * (1.0 - ((hp % 2.0) - 1.0).abs());
-    let (r, g, b) = match hp as i32 { 0 => (c, x, 0.0), 1 => (x, c, 0.0), 2 => (0.0, c, x), 3 => (0.0, x, c), 4 => (x, 0.0, c), _ => (c, 0.0, x) };
-    let m = l - c / 2.0;
-    Color { r: r + m, g: g + m, b: b + m, a: 1.0 }
 }
 
 /// Mode pill colour cross-fade and scramble duration (`TRANSITION_MS`).
@@ -191,7 +177,7 @@ pub fn view(app: &App) -> El {
     let s = app.ty.scale();
     let strip_h = HEIGHT * s;
     let pill_h = strip_h - PILL_VPAD * 2.0 * s;
-    let m = Metrics { s, font: FONT * s, pill_y: PILL_VPAD * s, pill_h, radius: pill_h / 2.0, pad: SECTION_PAD * s };
+    let m = Metrics { font: FONT * s, pill_y: PILL_VPAD * s, pill_h, radius: pill_h / 2.0, pad: SECTION_PAD * s };
     let r = m.radius;
     let tail = r * TAIL_OVERLAP;
     let breather = CHAIN_BREATHER * s;

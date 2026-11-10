@@ -165,11 +165,11 @@ fn workspace_tabs(app: &App) -> El {
         let close_identity = identity.clone();
         let hovered = app.workspace_hover.as_deref() == Some(identity.as_str());
         let tab = row().key(format!("workspace-tab:{identity}")).h(TAB_ROW_H).px(14.0).gap(9.0).center_y()
-            .fill(rgb(if active { p.bg } else { p.surface })).hover(rgb(p.hover)).corners([6.0, 6.0, 0.0, 0.0])
+            .fill(rgb(if active { p.bg } else { p.surface })).corners([6.0, 6.0, 0.0, 0.0])
             .child(icon(app, glyph::FOLDER, 1.25, rgb(p.folder)))
             .child(text(title).font(app.ty.tab()).color(rgb(if active { p.fg } else { p.dim })).truncate().max_w(180.0))
             .child_if(!hovered, || el().w(18.0).h(20.0))
-            .child_if(hovered, || el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center().hover(rgb(p.hover))
+            .child_if(hovered, || el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center()
                 .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
                 .on_press(move |a: &mut App| {
                     if let Some(index) = a.workspaces.iter().position(|w| w.id == close_identity) { a.close_workspace(index); }
@@ -186,7 +186,7 @@ fn workspace_tabs(app: &App) -> El {
         strip = strip.child(app.tab_slide(super::tab_drag::Source::Workspace(entry.id.clone()), tab));
     }
     let plus = app.workspaces.len();
-    strip.child(el().key("workspace-new").w(32.0).h(TAB_ROW_H).center().hover(rgb(p.hover))
+    strip.child(el().key("workspace-new").w(32.0).h(TAB_ROW_H).center()
         .child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
         .on_press(|a: &mut App| a.new_workspace())
         .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("workspace-tab:{plus}"), r); }))

@@ -271,12 +271,12 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
                 // An empty stretch (a blank line, or the newline of a multi-line selection)
                 // still shows a half-cell stub on the row where the line ends.
                 let band = if a < b { Some((x_of(a), x_of(b) - x_of(a))) } else if last && a >= line.len() { Some((x_of(line.len()), adv * 0.5)) } else { None };
-                if let Some((x, w)) = band { visual = visual.child(el().w(w).h(line_h).absolute(x, 0.0).fill(selection)); }
+                if let Some((x, w)) = band { visual = visual.child(el().key("selection").w(w).h(line_h).absolute(x, 0.0).fill(selection)); }
             }
             if let Some((flash, color)) = flash.filter(|(f, _)| (f.start.line..=f.end.line).contains(&index)) {
                 let from = if index == flash.start.line { flash.start.col } else { 0 }.min(line.len()).max(segment.byte_start);
                 let to = if index == flash.end.line { flash.end.col } else { line.len() }.min(line.len()).min(segment.byte_end);
-                if from < to { visual = visual.child(el().w((x_of(to) - x_of(from)).max(adv)).h(line_h).absolute(x_of(from), 0.0).fill(color)); }
+                if from < to { visual = visual.child(el().key("yank-flash").w((x_of(to) - x_of(from)).max(adv)).h(line_h).absolute(x_of(from), 0.0).fill(color)); }
             }
             let gutter = if first {
                 text(format!("{}", index + 1)).font(if current { app.ty.bold().lh(line_h) } else { font })
@@ -290,8 +290,10 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
             }).collect();
             let (piece, piece_spans) = expand_tabs(&line[segment.byte_start..segment.byte_end], segment.source_col, piece_spans);
             visual = visual
-                .child(row().w(m.gutter_w - adv).mr(adv).justify_end().child(gutter))
-                .child(rune::rich(piece, piece_spans).font(font).color(rgb(p.fg)).ml(segment.visual_indent as f32 * adv).grow(1.0).shrink());
+                // Keyed, so the selection / yank-flash bands appearing before them never re-pair
+                // the line number or the text with another child (a ghost number sliding by).
+                .child(row().key("gutter").w(m.gutter_w - adv).mr(adv).justify_end().child(gutter))
+                .child(rune::rich(piece, piece_spans).key("text").font(font).color(rgb(p.fg)).ml(segment.visual_indent as f32 * adv).grow(1.0).shrink());
             let marks = super::lsp_view::RowMarks {
                 buffer, index, line, first_row: first, last_row: last,
                 byte_start: segment.byte_start, byte_end: segment.byte_end, line_h, adv,

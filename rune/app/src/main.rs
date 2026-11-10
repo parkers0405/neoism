@@ -84,7 +84,10 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if let Some(wait) = app.save_session(false) { tx.wake_after(wait); }
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let visible_wordmarks = app.visible_wordmarks();
-    let animating = app.wordmark.tick(&visible_wordmarks, clock);
+    // The wordmark's idle motion runs on live bindings: frames keep coming without re-running
+    // the views; only a newly shown wordmark or a click effect rebuilds.
+    let (wordmark_moving, animating) = app.wordmark.tick(&visible_wordmarks, clock);
+    if wordmark_moving { tx.wake_after(std::time::Duration::ZERO); }
     if animating { tx.wake_after(std::time::Duration::ZERO); }
     // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap).
     app.tools.clock = clock;
@@ -133,7 +136,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = fps;
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || gliding || rail_changed
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

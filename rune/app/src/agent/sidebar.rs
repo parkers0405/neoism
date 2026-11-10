@@ -158,14 +158,15 @@ impl App {
             self.conv_follow.pending = false;
             return;
         };
-        let top = row[1] - list[1] + self.conv_follow.scroll.get().0;
+        let top = row[1] - list[1];
         self.conv_follow.apply_span(LIST_KEY, top, row[3], SCROLL_OFF_ROWS * row[3], tx);
     }
 
     /// The block cursor on the keyboard row: a 0.6 em block in the row's left padding, one
     /// title line tall.
     pub fn conversation_cursor(&self) -> Option<[f32; 4]> {
-        let r = self.rects.get("conv-row")?;
+        let row = self.rects.get(&format!("conv:{}", self.conv_selected))?;
+        let r = [row[0], row[1] - self.conv_follow.scroll.get().0, row[2], row[3]];
         let font = self.ty.body().size;
         let (w, h) = ((font * 0.6).max(2.0), font * 1.3);
         Some([r[0] + (17.0 - w) / 2.0, r[1] + (r[3] - h) / 2.0, w, h])
@@ -186,8 +187,12 @@ pub fn conversations(app: &App) -> El {
     let heading = |label: &'static str| text(label).font(app.ty.pixel(1.2)).color(rgb(p.fg)).ml(16.0).mt(22.0).mb(14.0);
     let focused = app.focus == crate::app::Focus::Sidebar;
     let keyboard_row = |index: usize, item: El| {
-        let item = item.on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("conv:{index}"), r); });
-        if focused && index == app.conv_selected { item.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("conv-row".into(), r); }) } else { item }
+        // Each row's place in the scrolled content (window y plus the scroll at layout time), so
+        // the cursor and follow stay exact while the list glides between layouts.
+        item.on_layout(move |a: &mut App, r: [f32; 4]| {
+            let offset = a.conv_follow.scroll.get().0;
+            a.rects.insert(format!("conv:{index}"), [r[0], r[1] + offset, r[2], r[3]]);
+        })
     };
     // A dashboard project folder (`render_project_row`): chevron in the 14 pt indent, the
     // tree's folder icon and colour, the name in the readable blue.

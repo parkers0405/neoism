@@ -7,6 +7,7 @@ mod activity;
 mod composer;
 pub(crate) mod family;
 mod header;
+mod projects;
 mod prose;
 mod sidebar;
 mod table;
@@ -20,7 +21,8 @@ pub use activity::Activity;
 pub use composer::overlay;
 pub use family::Families;
 pub use header::Step as HeaderStep;
-pub use sidebar::{catalog_scope, conversations};
+pub use projects::{ProjectMenu, view as project_menu};
+pub use sidebar::{ConvHeader, catalog_scope, conversations};
 pub use timeline::pane;
 
 use crate::app::App;

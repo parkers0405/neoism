@@ -286,6 +286,11 @@ pub fn new_id() -> String {
 }
 
 impl App {
+    /// The roots of this window's other workspaces (the project dropdown lists them).
+    pub fn window_roots(&self) -> Vec<String> {
+        self.workspaces.iter().filter_map(|e| e.state.as_ref()).map(|s| s.cwd.trim_end_matches('/').to_owned()).collect()
+    }
+
     fn swap_workspace(&mut self, index: usize) {
         if index == self.workspace_active || index >= self.workspaces.len() {
             return;

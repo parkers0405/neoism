@@ -107,6 +107,10 @@ pub struct App {
     pub tree_follow: crate::ui::follow::Follow,
     /// The conversations panel's keyboard row and its follow.
     pub conv_selected: usize,
+    /// The conversations panel's keyboard stop above the list (New chat or the directory row).
+    pub conv_header: Option<crate::agent::ConvHeader>,
+    /// The conversations panel's project dropdown, while open.
+    pub project_menu: Option<crate::agent::ProjectMenu>,
     pub conv_follow: crate::ui::follow::Follow,
     /// A `g` waiting for its second key (`gg`).
     pub pending_g: bool,
@@ -223,6 +227,8 @@ impl App {
             editor_follow: false,
             tree_follow: Default::default(),
             conv_selected: 0,
+            conv_header: None,
+            project_menu: None,
             conv_follow: Default::default(),
             pending_g: false,
             buffers: HashMap::new(),

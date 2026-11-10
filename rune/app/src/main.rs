@@ -281,6 +281,19 @@ fn main() {
                 let _ = home;
             }),
             // The `~` dashboard: chats from every project, grouped by folder.
+            // The panel's project dropdown under the directory row, over chats from three projects.
+            ("projects-menu", |s| {
+                s.threads = [("a", "Neoism Release", "/projects/neoism", 9), ("b", "Swift-Cursor", "/projects/neoism", 7),
+                    ("d", "Rune layout", "/projects/rune", 5), ("e", "Dotfiles", "/projects/dotfiles", 3)]
+                    .iter().map(|(id, title, dir, at)| serde_json::from_value(serde_json::json!({
+                        "session_id": id, "title": title, "directory": dir, "updated_at": 1_700_000_000_000u64 + at * 1000,
+                    })).unwrap()).collect();
+                s.sidebar = Some(app::Sidebar::Conversations);
+                s.focus = app::Focus::Sidebar;
+                s.tabs.iter_mut().for_each(|t| t.draft.focused = false);
+                s.conv_header = Some(agent::ConvHeader::Projects);
+                s.open_project_menu();
+            }),
             ("conversations-dashboard", |s| {
                 let home = std::env::var("HOME").unwrap_or_default();
                 s.cwd = home.clone();
@@ -322,6 +335,8 @@ fn main() {
                 }))).collect::<Result<_, _>>().expect("fixture threads");
                 s.sidebar = Some(app::Sidebar::Conversations);
                 s.focus = app::Focus::Sidebar;
+                // The opening composer would otherwise read as a click into it (sync_field_focus).
+                s.tabs.iter_mut().for_each(|t| t.draft.focused = false);
             }),
             // A Rust buffer with a live language server: diagnostics and the `K` hover card.
             ("lsp", |s| {

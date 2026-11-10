@@ -4,6 +4,7 @@
 pub mod mcp;
 
 mod activity;
+pub mod attach;
 mod composer;
 pub(crate) mod family;
 mod header;
@@ -180,6 +181,7 @@ impl App {
     }
 
     pub(crate) fn submit_prompt(&mut self, session_id: &str, text: String) {
+        let (attachments, echo) = self.take_attachments(session_id);
         let message_id = format!("msg_rune_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
         let session = self.sessions.entry(session_id.into()).or_default();
         session.messages.push(HistoryMessage {
@@ -201,7 +203,7 @@ impl App {
             detail: String::new(),
             todos: Vec::new(),
             usage: None,
-            attachments: Vec::new(),
+            attachments: echo,
             created_at: 0,
         });
         self.send_agent(AgentClientMessage::SubmitPrompt {
@@ -209,7 +211,7 @@ impl App {
             message_id,
             text,
             author: Some(self.local_name.clone()),
-            attachments: Vec::new(),
+            attachments,
             mode: Some(self.composer.selection.agent.clone()).filter(|a| !a.is_empty()),
             model: Some(self.composer.selection.model.clone()).filter(|m| !m.is_empty()),
             connection_id: None,

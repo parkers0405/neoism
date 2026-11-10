@@ -332,7 +332,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let p = app.pal;
     let key = format!("msg:{}", message.id);
     match message.kind {
-        HistoryMessageKind::User => super::user::view(app, &message.text, message.author.as_deref(), timeline_width(app))
+        HistoryMessageKind::User => super::user::view(app, &message.id, &message.text, &message.attachments, message.author.as_deref(), timeline_width(app))
             .key(key).pt(26.0),
         HistoryMessageKind::Reasoning => col().key(key).w_full().pt(24.0).gap(10.0)
             .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })
@@ -371,6 +371,10 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                         // One selection spans the whole transcript, not just this block.
                         .selection_group(false),
                 });
+            }
+            // Images the reply carries (`render_image_strip` under the text), left-aligned.
+            if let Some(strip) = super::attach::message_strip(app, &message.id, &message.attachments, timeline_width(app)) {
+                body = body.child(row().w_full().child(strip.justify_start()));
             }
             body.child_meta(app, message)
             })

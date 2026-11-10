@@ -2,7 +2,7 @@
 //! `shared/src/panels/finder`): one query over the daemon's `Search` family. Files mode is the
 //! compact 480 pt list; grep and git modes are 880 pt with a preview of the selected match.
 
-mod view;
+pub(crate) mod view;
 
 pub use view::view;
 

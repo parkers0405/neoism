@@ -21,7 +21,7 @@ const LIST_RATIO: f32 = 0.55;
 const INPUT_H: f32 = 40.0;
 const INPUT_FONT: f32 = 14.0;
 const INPUT_PAD_X: f32 = 14.0;
-const ROW_H: f32 = 32.0;
+pub(crate) const ROW_H: f32 = 32.0;
 const LIST_KEY: &str = "finder-results";
 
 impl App {
@@ -86,6 +86,9 @@ pub fn view(app: &App) -> El {
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
         .key("finder-query")
+        // One cursor: the window's block cursor (on the selected row, or here when the list is
+        // empty) stands in for Rune's thin caret, as in the composer.
+        .caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder(format!("{prefix}{}", finder.placeholder()), rgb(p.muted))
         .color(rgb(p.fg)).grow(1.0).shrink()
         .on_edit(|a: &mut App| &mut a.finder.as_mut().expect("finder open").query)
@@ -141,8 +144,9 @@ fn list(app: &App, finder: &Finder, width: f32, visible: usize) -> El {
         let hint = if finder.loading { "Searching..." } else if let Some(error) = &finder.error { error.as_str() } else if finder.query.text.trim().is_empty() && finder.mode == Mode::Grep { "Start typing to search" } else { "No matches" };
         return rows.child(row().h(ROW_H * s).transition(rune::Transition::none()).px(INPUT_PAD_X * s).center_y().child(text(hint.to_owned()).font(app.ty.sized(ROW_FONT)).color(rgb(p.muted))));
     }
-    let mut built = Vec::with_capacity(finder.hits.len());
-    for (index, hit) in finder.hits.iter().enumerate() {
+    let span = crate::ui::rows::span(finder.top, visible, finder.hits.len());
+    let mut built = Vec::with_capacity(span.len());
+    for (index, hit) in finder.hits.iter().enumerate().skip(span.start).take(span.len()) {
         let (dir, name) = split_path(hit.path());
         let (glyph, color) = icons::for_file(name);
         let mut line = row().key(format!("finder-row:{index}")).w_full().h(ROW_H * s).px(INPUT_PAD_X * s).center_y()
@@ -162,10 +166,10 @@ fn list(app: &App, finder: &Finder, width: f32, visible: usize) -> El {
                 .child(text(git_marker(*status)).font(font).color(rgb(git_color(app, *status))).ml(8.0 * s))
                 .child(text(format!("{}:{number}", short_path(path))).font(font).color(rgb(p.fg)).ml(8.0 * s).shrink().truncate()),
         };
-        built.push(line);
+        built.push((index, line));
     }
     let reset = format!("{:?}:{}", finder.mode, finder.query.text);
-    crate::ui::rows::view(LIST_KEY, &reset, width, ROW_H * s, visible, finder.top, Some(finder.selected), rgb(p.hover), 3.0, built)
+    crate::ui::rows::view(LIST_KEY, &reset, width, ROW_H * s, visible, finder.top, Some(finder.selected), rgb(p.hover), 3.0, finder.hits.len(), built)
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
         .on_wheel(|a: &mut App, e: rune::WheelEvent, tx: &mut Tx| a.finder_wheel(&e, tx))
 }

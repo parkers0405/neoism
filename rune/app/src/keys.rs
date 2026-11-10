@@ -233,6 +233,20 @@ fn focus_step(app: &mut App, previous: bool) {
 }
 
 impl App {
+    /// Step the open palette's or finder's list slide (`Residual`). Returns whether it moves.
+    pub fn step_list_residual(&mut self, clock: f64) -> bool {
+        let s = self.ty.scale();
+        let (reset, top, row_h) = if let Some(f) = &self.finder {
+            (format!("finder:{:?}:{}", f.mode, f.query.text), f.top, crate::finder::view::ROW_H * s)
+        } else if let Some(p) = &self.picker {
+            (format!("picker:{:?}:{}", p.mode, p.query.text), p.top, crate::palette::view::row_height(p.mode) * s)
+        } else {
+            self.list_residual = Default::default();
+            return false;
+        };
+        self.list_residual.step(&reset, top, row_h, clock)
+    }
+
     /// Where the window cursor belongs: the focus bar on a tab, or the focused field's caret.
     pub fn cursor_target(&self) -> Option<[f32; 4]> {
         use crate::ui::cursor::tab_bar;
@@ -254,7 +268,9 @@ impl App {
             let (font, row_h) = (font * s, r[3]);
             let w = (font * 0.6).max(2.0);
             let h = (row_h - 5.0 * s).max(font).min(row_h);
-            return Some([(r[0] + pad_x * s - w - 2.0 * s).max(r[0]), r[1] + (row_h - h) / 2.0, w, h]);
+            // Where the row is drawn: a window that just moved still slides it back into place.
+            let slide = if self.finder.is_some() || self.picker.is_some() { self.list_residual.value() } else { 0.0 };
+            return Some([(r[0] + pad_x * s - w - 2.0 * s).max(r[0]), r[1] + slide + (row_h - h) / 2.0, w, h]);
         }
         match self.focus {
             // The focused tab's rect by its id; the `+` slot past the last tab by its pane.

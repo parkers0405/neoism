@@ -49,6 +49,9 @@ pub struct Session {
     /// fix: a short page leaves the view at the top and would pull the whole history in).
     pub scrolled_up_at: Option<std::time::Instant>,
     pub older_at: Option<std::time::Instant>,
+    /// A page just landed: the next waits for a new gesture (a pause in upward scrolling or a
+    /// turn downward), so one fast flick or its coast loads one page, not a cascade.
+    pub older_spent: bool,
     /// Questions whose rows are in view: only their `question_tops` are current.
     pub visible_questions: std::collections::HashSet<String>,
     /// Each question's row offset in the transcript, from its last layout (the question rail).
@@ -150,7 +153,7 @@ impl App {
     pub fn request_older(&mut self, session_id: &str) {
         let Some(session) = self.sessions.get_mut(session_id) else { return };
         let Some(cursor) = session.older_cursor.clone() else { return };
-        if session.loading_older { return; }
+        if session.loading_older || session.older_spent { return; }
         // Only for someone scrolling up within a viewport of the top, and once per page: after
         // a page lands, the next needs a fresh upward wheel event (GPUiX's cascade fix).
         let now = std::time::Instant::now();
@@ -266,6 +269,7 @@ impl App {
                 }
             }
             AgentServerMessage::HistoryChunk { session_id, messages, next_cursor } => {
+                let scroller_key = format!("conversation:{session_id}");
                 // Task cards name their child sessions; seed the family so it can be walked.
                 if !self.families.is_child(&session_id) { self.families.seed_from_history(&session_id, &messages); }
                 let session = self.sessions.entry(session_id).or_default();
@@ -284,6 +288,9 @@ impl App {
                     session.messages = older;
                     session.older_cursor = next_cursor;
                     session.older_at = Some(std::time::Instant::now());
+                    session.older_spent = true;
+                    // The flick that asked for it stops here instead of coasting up into it.
+                    self.scrollers.stop(&scroller_key);
                     // A glide's target predates the page above: the next delta starts from
                     // where the anchored view now is.
                     session.wheel_target = None;

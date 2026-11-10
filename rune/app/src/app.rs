@@ -150,6 +150,8 @@ pub struct App {
     pub splash: crate::home::SplashState,
     /// The open centered picker (`Alt+P`, themes), above everything else.
     pub picker: Option<crate::palette::Picker>,
+    /// The palette's and finder's list slides, mirrored for the window cursor.
+    pub list_residual: crate::ui::rows::Residual,
     pub daemon: Option<Daemon>,
     pub inbox: Option<Inbox>,
     pub images: Option<ImageCache>,
@@ -225,6 +227,7 @@ impl App {
             mcp_icons: Default::default(),
             tools: Default::default(),
             picker: None,
+            list_residual: Default::default(),
             activity: None, replay: None,
             modal: None,
             pending_cd: None,

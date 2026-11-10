@@ -129,14 +129,19 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if skit { tx.wake_after(std::time::Duration::ZERO); }
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
+    let list_sliding = app.step_list_residual(clock);
     let target = app.cursor_target();
     let moved_at = app.cursor.trail.moved_at;
     let cursor_wake = app.cursor.tick(target, std::time::Instant::now());
     if let Some(delay) = cursor_wake { tx.wake_after(delay); }
+    if std::env::var_os("NEOISM_RUNE_TRACE_CURSOR").is_some() {
+        let q = app.cursor.trail.quad();
+        eprintln!("cursor {:.3} target {:?} quad {:?}", clock, target.map(|t| t.map(|v| (v * 10.0).round() / 10.0)), q.map(|c| c.map(|v| (v * 10.0).round() / 10.0)));
+    }
     // Everything the app steps itself once a frame (glides, the cursor trail, the yank flash,
     // the mode pill, the wordmark, the activity line, skits) keeps Rune drawing every vblank
     // while it runs; a poll wake alone is held to a 16.7 ms timer on Linux, i.e. 60 fps.
-    let per_frame = gliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || mode_changing
+    let per_frame = gliding || list_sliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || mode_changing
         || wordmark_moving || animating || busy || skit || edge_scrolling;
     let heartbeat_changed = app.keep_vsync(per_frame);
     let clip = app.cursor_clip();
@@ -211,10 +216,16 @@ fn main() {
             }),
             ("palette", |s| s.open_picker(palette::Mode::Commands)),
             // Forty file hits, for the finder's list and highlight springs.
+            // The real Alt+S: the daemon's file search over the working directory (`--live`).
+            ("finder", |s| {
+                if let Ok(dir) = std::env::current_dir() { s.cwd = dir.display().to_string(); }
+                s.open_finder(finder::Mode::Files);
+            }),
             ("finder-hits", |s| {
                 s.open_finder(finder::Mode::Files);
                 if let Some(f) = &mut s.finder {
-                    f.hits = (0..40).map(|i| finder::Hit::File { path: format!("src/module_{i:02}/file_{i:02}.rs") }).collect();
+                    let count = std::env::var("NEOISM_RUNE_FINDER_HITS").ok().and_then(|n| n.parse().ok()).unwrap_or(40);
+                    f.hits = (0..count).map(|i| finder::Hit::File { path: format!("src/module_{i:02}/file_{i:02}.rs") }).collect();
                     f.loading = false;
                 }
             }),

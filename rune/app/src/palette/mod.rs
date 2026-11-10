@@ -4,7 +4,7 @@
 mod backgrounds;
 pub(crate) mod commands;
 pub(crate) mod systems;
-mod view;
+pub(crate) mod view;
 
 pub use view::view;
 

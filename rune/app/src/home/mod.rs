@@ -74,7 +74,7 @@ impl App {
             MenuAction::AgentPanel => self.toggle_conversations(),
             MenuAction::CommandPalette => self.open_picker(crate::palette::Mode::Commands),
             MenuAction::NewTerminal => { self.open_tab(TabKind::Terminal); }
-            MenuAction::ChangeDirectory => self.open_picker(crate::palette::Mode::Directories),
+            MenuAction::ChangeDirectory => self.open_file_browser(crate::browser::Mode::ChooseDirectory),
             MenuAction::Notes => self.toggle_tree(crate::app::Sidebar::Notes),
             MenuAction::FileTree => self.toggle_file_tree(),
             MenuAction::Search => self.open_finder(crate::finder::Mode::Files),

@@ -29,16 +29,20 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(body)
         .child(super::status::view(app))
         .child(super::tab_drag::overlay(app))
+        // The cursor sits with what it marks: on a tab, a tree row or a caret it goes under the
+        // popups (LSP cards, the slash picker, modals) instead of showing through them.
+        .child_if(app.cursor.placed() && !cursor_in_overlay(app), || cursor_quad(app))
         .child(agent::overlay(app))
         .child(crate::editor::lsp_view::overlay(app))
         .child(crate::home::block_menu_overlay(app))
         .child_if(app.project_menu.is_some(), || agent::project_menu(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
         .child_if(app.finder.is_some(), || crate::finder::view(app))
+        .child_if(app.browser.is_some(), || crate::browser::view::view(app))
         .child_if(app.modal.is_some(), || super::modal::view(app))
         .child_if(app.menu.is_some(), || super::menu::view(app))
         .child_if(app.settings.is_some(), || crate::settings::view(app))
-        .child_if(app.cursor.placed(), || cursor_quad(app))
+        .child_if(app.cursor.placed() && cursor_in_overlay(app), || cursor_quad(app))
         .child_if(app.heartbeat.is_some(), || heartbeat(app))
 }
 
@@ -60,7 +64,13 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
     }
 }
 
-/// The trailing cursor, drawn over everything in the accent colour.
+/// Whether the cursor marks a row inside an overlay (the palette, finder, a menu, settings, the
+/// project menu): then it's drawn over them; otherwise under every popup.
+fn cursor_in_overlay(app: &App) -> bool {
+    app.picker.is_some() || app.finder.is_some() || app.browser.is_some() || app.menu.is_some() || app.settings.is_some() || app.project_menu.is_some()
+}
+
+/// The trailing cursor in the accent colour.
 fn cursor_quad(app: &App) -> El {
     let quad = app.cursor.trail.quad();
     let (x0, y0) = quad.iter().fold((f32::MAX, f32::MAX), |(x, y), p| (x.min(p[0]), y.min(p[1])));
@@ -126,8 +136,9 @@ fn rail(app: &App) -> El {
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(button("topbar-menu", glyph::MENU, app.menu.is_some(), |s| s.toggle_menu())
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("topbar-menu".into(), r); }))
-        .child(button("toggle-files", glyph::FOLDER, app.sidebar == Some(Sidebar::Files), |s| s.toggle_file_tree()))
-        .child(button("toggle-notes", glyph::FILE, app.sidebar == Some(Sidebar::Notes), |s| s.toggle_tree(Sidebar::Notes)))
+        // A click opens the panel beside what has the keyboard; only Alt+E / Alt+N move it in.
+        .child(button("toggle-files", glyph::FOLDER, app.sidebar == Some(Sidebar::Files), |s| s.click_tree(Sidebar::Files)))
+        .child(button("toggle-notes", glyph::FILE, app.sidebar == Some(Sidebar::Notes), |s| s.click_tree(Sidebar::Notes)))
         .child(button("toggle-conversations", glyph::SPARKLES, app.sidebar == Some(Sidebar::Conversations), |s| {
             s.toggle_conversations();
         }))

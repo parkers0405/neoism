@@ -99,7 +99,9 @@ pub fn view(app: &App) -> El {
     let s = app.ty.scale();
     let mut body = col().w_full().mt(10.0 * s);
     for line in modal.body.lines() {
-        body = body.child(el().h(LINE_H * s).center_y().child(text(line.to_owned()).font(app.ty.sized(BODY)).color(rgb(p.dim))));
+        // A long line wraps inside the card (on the same 19 pt lines) instead of running out of it.
+        body = body.child(el().w_full().min_h(LINE_H * s).center_y()
+            .child(text(line.to_owned()).font(app.ty.sized(BODY).lh(LINE_H * s)).color(rgb(p.dim)).wrap().w_full()));
     }
     let mut actions = col().w_full().mt(14.0 * s).border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border)).pt(8.0 * s);
     for (index, button) in modal.buttons.iter().enumerate() {

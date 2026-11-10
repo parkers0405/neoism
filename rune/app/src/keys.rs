@@ -8,6 +8,7 @@ use rune::{Key, KeyEvent, Tx};
 
 pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
+    if app.browser.is_some() { return app.browser_key(event, tx) || shortcut(app, event, tx); }
     if shortcut(app, event, tx) { return true; }
     if app.settings.is_some() { return app.settings_key(event); }
     // A full-screen program or running command in the Home pane owns the keyboard.
@@ -112,7 +113,7 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
             match t.to_lowercase().as_str() {
                 "a" => { app.open_tab(TabKind::Agent { session: None }); return true; }
                 "t" => { app.open_tab(TabKind::Terminal); return true; }
-                "d" => { app.open_picker(crate::palette::Mode::Directories); return true; }
+                "d" => { app.open_file_browser(crate::browser::Mode::ChooseDirectory); return true; }
                 "c" => {
                     app.toggle_conversations();
                     return true;
@@ -151,13 +152,22 @@ pub fn ctrl_letter(event: &KeyEvent) -> Option<char> {
 fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
     if event.mods.alt { return false; }
     let pending_g = std::mem::take(&mut app.pending_g);
+    let count = app.tree_count.take();
     let page = app.tree_page_rows();
+    // A count prefixes the next motion (`fuzzy` tree's `push_count_digit`); a leading 0 isn't one.
+    if let Key::Text(t) = &event.key && let Some(d) = t.chars().next().and_then(|c| c.to_digit(10)).filter(|_| t.chars().count() == 1) && !event.mods.ctrl {
+        if count.is_some() || d != 0 {
+            app.tree_count = Some(count.unwrap_or(0).saturating_mul(10).saturating_add(d as usize));
+            return true;
+        }
+    }
+    let times = count.unwrap_or(1) as isize;
     match &event.key {
         _ if ctrl_letter(event) == Some('d') => app.tree_move(page / 2),
         _ if ctrl_letter(event) == Some('u') => app.tree_move(-page / 2),
         _ if event.mods.ctrl => return false,
-        Key::Up => app.tree_move(-1),
-        Key::Down => app.tree_move(1),
+        Key::Up => app.tree_move(-times),
+        Key::Down => app.tree_move(times),
         Key::PageDown => app.tree_move(page),
         Key::PageUp => app.tree_move(-page),
         Key::Home => app.tree_move(isize::MIN / 2),
@@ -166,11 +176,11 @@ fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
         Key::Left => app.tree_collapse(),
         Key::Escape => app.focus = Focus::Content,
         Key::Text(t) => match t.as_str() {
-            "k" => app.tree_move(-1),
-            "j" => app.tree_move(1),
+            "k" => app.tree_move(-times),
+            "j" => app.tree_move(times),
             "l" | "o" => app.tree_activate(None),
             "h" => app.tree_collapse(),
-            "G" => app.tree_move(isize::MAX / 2),
+            "G" => match count { Some(row) => app.tree_go_to_row(row), None => app.tree_move(isize::MAX / 2) },
             "g" if pending_g => app.tree_move(isize::MIN / 2),
             "g" => app.pending_g = true,
             _ => return false,
@@ -259,6 +269,7 @@ impl App {
             let index = *settings.visible().get(settings.focused)?;
             return self.rects.get(&format!("settings-control:{index}")).map(|r| crate::settings::view::cursor_rect(self, *r));
         }
+        if self.browser.is_some() { return self.rects.get("browser-row").filter(|_| self.browser.as_ref().is_some_and(|b| b.selected.is_some())).map(|r| crate::tree::view::cursor_rect(self, *r)); }
         let row = if let Some(finder) = &self.finder { self.finder_row_rect(finder).map(|r| (r, 14.0, 13.0)) }
             else if self.project_menu.is_some() { self.project_menu_row_rect().map(|r| (r, 14.0, 13.0)) }
             else if let Some(picker) = &self.picker { self.palette_row_rect(picker).map(|r| (r, 10.0, 13.0)) }
@@ -296,6 +307,7 @@ impl App {
     pub fn cursor_clip(&self) -> Option<[f32; 4]> {
         if self.menu.is_some() || self.settings.is_some() { return None; }
         if self.finder.is_some() { return self.rects.get("finder-results").copied(); }
+        if self.browser.is_some() { return self.rects.get(crate::browser::view::LIST_KEY).copied(); }
         if self.picker.is_some() { return self.rects.get("picker-results").copied(); }
         if self.project_menu.is_some() { return self.project_menu_clip(); }
         match self.focus {
@@ -338,7 +350,7 @@ impl App {
         if self.block_filter_focused() && self.field_tab.is_none() && self.tabs.get(self.active).is_some_and(|t| t.draft.focused) {
             if let Some(filter) = active_id.and_then(|id| self.terminals.get_mut(&id)).and_then(|t| t.filter.as_mut()) { filter.1.focused = false; }
         }
-        let overlay = self.picker.is_some() || self.finder.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
+        let overlay = self.picker.is_some() || self.finder.is_some() || self.browser.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
             || self.block_filter_focused();
         let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. });
         let active = self.active;

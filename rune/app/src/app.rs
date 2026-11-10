@@ -128,6 +128,8 @@ pub struct App {
     pub conv_follow: crate::ui::follow::Follow,
     /// A `g` waiting for its second key (`gg`).
     pub pending_g: bool,
+    /// A vim count typed in the file tree (`12G`, `5j`).
+    pub tree_count: Option<usize>,
     /// Open files by workspace-relative path.
     pub buffers: HashMap<String, crate::editor::Buffer>,
     /// The open project finder (`Alt+S`).
@@ -150,6 +152,8 @@ pub struct App {
     pub splash: crate::home::SplashState,
     /// The open centered picker (`Alt+P`, themes), above everything else.
     pub picker: Option<crate::palette::Picker>,
+    /// The file browser modal (Change Directory, attaching a picture).
+    pub browser: Option<crate::browser::Browser>,
     /// The palette's and finder's list slides, mirrored for the window cursor.
     pub list_residual: crate::ui::rows::Residual,
     pub daemon: Option<Daemon>,
@@ -227,6 +231,7 @@ impl App {
             mcp_icons: Default::default(),
             tools: Default::default(),
             picker: None,
+            browser: None,
             list_residual: Default::default(),
             activity: None, replay: None,
             modal: None,
@@ -251,6 +256,7 @@ impl App {
             project_menu: None,
             conv_follow: Default::default(),
             pending_g: false,
+            tree_count: None,
             buffers: HashMap::new(),
             finder: None,
             local_name: crate::ui::orb::local_display_name(config.display_name.as_deref()),

@@ -46,6 +46,8 @@ pub struct Picker {
     pub wheel: f32,
     /// The open file's line count when the palette opened over an editor (line jumps).
     pub editor_lines: Option<usize>,
+    /// Rows in the focused file tree, which takes `N` / `:N` as a row.
+    pub tree_rows: Option<usize>,
     /// The Backgrounds catalog, read when the picker opens.
     pub backgrounds: Vec<backgrounds::Background>,
     /// Directory hits for the `cd` query, newest search only.
@@ -73,6 +75,8 @@ pub enum Target {
     Setting(systems::Setting),
     /// `N`, `:N` or `$` over a code or Markdown file: jump to that line (1-based).
     GoToLine(usize),
+    /// The same over the focused file tree: select that row.
+    GoToRow(usize),
 }
 
 /// How a row is drawn beyond its title: Systems/Servers detail text, status dot, the current
@@ -126,7 +130,7 @@ impl Picker {
             backgrounds::catalog(&dir, crate::config::background_image().as_deref())
         } else { Vec::new() };
         if mode == Mode::Directories { query.replace_text("cd "); }
-        Picker { mode, query, selected: 0, top: 0, wheel: 0.0, editor_lines: None, backgrounds, directories: Vec::new(), directory_request: 0,
+        Picker { mode, query, selected: 0, top: 0, wheel: 0.0, editor_lines: None, tree_rows: None, backgrounds, directories: Vec::new(), directory_request: 0,
             systems: Vec::new(), servers: Vec::new(), settings: None, back: None }
     }
 
@@ -137,6 +141,10 @@ impl Picker {
             if let Some(line) = self.editor_lines.and_then(|lines| go_to_line(query, lines)) {
                 return vec![Row { icon: Some(commands::Service::Neoism.icon()), title: format!("neoism: Go to Line {line}"),
                     shortcut: "", target: Target::GoToLine(line), look: Look::default() }];
+            }
+            if let Some(row) = self.tree_rows.and_then(|rows| go_to_line(query, rows)) {
+                return vec![Row { icon: Some(commands::Service::Neoism.icon()), title: format!("neoism: Go to Row {row}"),
+                    shortcut: "", target: Target::GoToRow(row), look: Look::default() }];
             }
             if let Some(command) = crate::tabs::CloseCommand::parse(query) {
                 let title = if command.workspace { "Close Workspace" } else { "Close Tab" };
@@ -207,7 +215,9 @@ impl App {
             picker.systems = systems::systems();
             picker.servers = systems::servers(&self.connection);
         }
-        if let crate::tabs::TabKind::Editor { path } = &self.active_tab().kind {
+        // Over the focused file tree, a number is a row; over a code file, a line.
+        picker.tree_rows = self.focused_tree_rows();
+        if let (None, crate::tabs::TabKind::Editor { path }) = (picker.tree_rows, &self.active_tab().kind) {
             picker.editor_lines = self.buffers.get(path).filter(|b| b.loaded).map(|b| b.doc.lines.len());
         }
         if mode == Mode::Themes {
@@ -314,6 +324,7 @@ impl App {
             }
             Target::Close(command) => self.run_close_command(command),
             Target::GoToLine(line) => self.editor_go_to_line(line),
+            Target::GoToRow(row) => self.tree_go_to_row(row),
             Target::Command(action) => self.run_action(action, tx),
             Target::Theme(name) => self.apply_theme(name),
             Target::Directory(index) => {

@@ -406,17 +406,8 @@ impl App {
         if self.workspace_closing.is_some() {
             return;
         }
-        if !discard && (self.buffers.values().any(|b| b.dirty())
-            || self.databases.values().any(|d| {
-                d.pending.is_some() || d.cell.is_some() || !d.changes().is_empty()
-            })
-            || self.tabs.iter().any(|t| !t.draft.text.trim().is_empty()))
-        {
-            self.modal = Some(crate::ui::modal::Modal {
-                title: "Workspace has unsaved changes".into(), body: "Save or discard the open edits and drafts before closing this workspace.".into(), buttons: vec![], selected: 0,
-            });
-            return;
-        }
+        // No unsaved-changes blocker: closing a workspace just closes it.
+        let _ = discard;
         if let Some(d) = &self.daemon {
             if self.connection != Connection::Connected {
                 return;
@@ -575,12 +566,12 @@ mod tests {
         assert!(app.quit_requested);
     }
     #[test]
-    fn workspace_close_preserves_unsent_drafts() {
+    fn workspace_close_never_blocks_on_drafts() {
         let mut app = App::new();
+        app.new_workspace();
         app.tabs[0].draft = rune::TextEdit::new("unsent");
-        app.close_workspace(0);
-        assert!(!app.quit_requested);
-        assert!(app.modal.is_some());
+        app.close_workspace(1);
+        assert!(app.modal.is_none());
     }
     #[test]
     fn replies_after_close_cannot_change_the_next_workspaces_buffer() {

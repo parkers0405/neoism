@@ -131,6 +131,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
     app.browser_follow(tx);
+    app.settings_reveal(tx);
     let list_sliding = app.step_list_residual(clock);
     let target = app.cursor_target();
     let moved_at = app.cursor.trail.moved_at;

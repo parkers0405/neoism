@@ -83,9 +83,16 @@ pub fn picker_card(app: &App) -> El {
             true
         });
 
+    let header_icon = picker.kind == Kind::McpActions;
+    if header_icon {
+        if let Some(name) = app.composer.mcp_server.as_ref() {
+            card = card.child(row_icon(app, Icon::Mcp(name.clone()), 18.0 * s).key("mcp-header-icon").absolute(14.0 * s, 6.0 * s));
+        }
+    }
+    let title_x = if header_icon { 40.0 } else { 14.0 } * s;
     // Header: title and esc; then the query row, or the activity in its place.
     card = card
-        .child(text(picker.title.clone()).font(mono(13.0 * s, true)).color(rgb(p.fg)).truncate().w(cw - 62.0 * s).absolute(14.0 * s, 9.0 * s))
+        .child(text(picker.title.clone()).font(mono(13.0 * s, true)).color(rgb(p.fg)).truncate().w(cw - title_x - 48.0 * s).absolute(title_x, 9.0 * s))
         .child(text("esc").font(mono(12.0 * s, false)).color(rgb(p.muted)).absolute(cw - 14.0 * s - width_of("esc", 12.0 * s), 9.0 * s)
             .on_press(|a: &mut App| { if !a.picker_back() { a.close_prompt_picker(); } }));
     if let Some(a) = &picker.activity {
@@ -130,8 +137,8 @@ pub fn picker_card(app: &App) -> El {
         if row.current {
             item = item.child(text("\u{2713}").font(mono(11.0 * s, false)).color(rgb(p.accent)).absolute(cw - 30.0 * s, 15.0 * s));
         }
-        if let Some(icon) = row.icon {
-            item = item.child(row_icon(app, icon, 18.0 * s).absolute(22.0 * s, (ROW_H - 18.0) * 0.5 * s));
+        if let Some(icon) = row.icon.clone() {
+            item = item.child(row_icon(app, icon, 18.0 * s).key(format!("picker-row-icon:{index}")).absolute(22.0 * s, (ROW_H - 18.0) * 0.5 * s));
         }
         let title_x = if row.icon.is_some() || grouped { 48.0 } else { 22.0 } * s;
         let footer_w = if row.footer.is_empty() { 0.0 } else { width_of(&row.footer, 11.0 * s) + 22.0 * s + if row.status.is_some() { 12.0 * s } else { 0.0 } };
@@ -216,6 +223,7 @@ pub fn provider_mark(app: &App, size: f32) -> El {
 
 fn row_icon(app: &App, icon: Icon, size: f32) -> El {
     match icon {
+        Icon::Mcp(name) => crate::agent::mcp::view(app, &name, &app.composer.mcp_status[&name], size),
         Icon::Provider(index) => {
             let image = app.images.as_ref().and_then(|images| app.composer.logos.image(images, index, logos::color(index, app.pal)));
             match image {

@@ -114,16 +114,17 @@ impl App {
         }
     }
 
-    /// Which wordmark (if any) the active tab shows: the Home splash before the first command,
-    /// or a new agent chat. Keys match the views (`wordmark::view` reads the kind from them).
-    pub fn visible_wordmark(&self) -> Option<&'static str> {
-        let tab = self.active_tab();
-        match &tab.kind {
-            // The splash heads the Home scrollback; it animates while it is on screen.
-            TabKind::Home => self.splash_on_screen().then_some("splash-wordmark"),
-            TabKind::Agent { session: None } => Some("agent-wordmark"),
-            TabKind::Agent { .. } | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } => None,
-        }
+    /// Animate every visible pane's wordmark using the exact key its view draws.
+    pub fn visible_wordmarks(&self) -> Vec<String> {
+        self.layout.panes().iter().filter_map(|pane| {
+            let id = pane.active_tab()?;
+            let tab = self.tabs.iter().find(|tab| tab.id == id)?;
+            match &tab.kind {
+                TabKind::Home if !self.splash.hidden.contains(&id) && self.terminals.get(&id).is_none_or(|t| !t.raw()) => Some(crate::wordmark::host_key("splash", id)),
+                TabKind::Agent { session: None } => Some(crate::wordmark::host_key("agent", id)),
+                _ => None,
+            }
+        }).collect()
     }
 
     /// Whether the active tab shows user messages (and so presence orbs).

@@ -12,6 +12,7 @@ pub mod orb;
 pub mod palettes;
 pub mod status;
 pub mod theme;
+pub mod tab_drag;
 
 use crate::app::App;
 use rune::{Color, El, text};

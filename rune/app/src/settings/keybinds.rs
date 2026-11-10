@@ -290,6 +290,12 @@ pub const KEYBINDS: &[KeybindDef] = &[
         "",
     ),
     kb("quit", "Quit", KeyGroup::Global, "super", "q", "", ""),
+    kbg("Previous tab (arrow)", KeyGroup::Global, "control | shift", "left", "control | shift", "left"),
+    kbg("Next tab (arrow)", KeyGroup::Global, "control | shift", "right", "control | shift", "right"),
+    kbg("Move focused tab left", KeyGroup::Global, "alt | shift", "left", "alt | shift", "left"),
+    kbg("Move focused tab right", KeyGroup::Global, "alt | shift", "right", "alt | shift", "right"),
+    kbg("Move workspace left", KeyGroup::Global, "control | alt | shift", "left", "control | alt | shift", "left"),
+    kbg("Move workspace right", KeyGroup::Global, "control | alt | shift", "right", "control | alt | shift", "right"),
     // ── Terminal ──
     kb(
         "copy",
@@ -337,6 +343,7 @@ pub const KEYBINDS: &[KeybindDef] = &[
     kbl("Append after / at line end", KeyGroup::Editor, "a / A"),
     kbl("Open line below / above", KeyGroup::Editor, "o / O"),
     kbl("Back to Normal mode", KeyGroup::Editor, "Esc"),
+    kbl("Close editor buffer", KeyGroup::Editor, "Space x"),
     kbl("Paste after / before", KeyGroup::Editor, "p / P"),
     kbl("Yank line", KeyGroup::Editor, "yy"),
     kbl("Delete line", KeyGroup::Editor, "dd"),

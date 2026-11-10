@@ -1,6 +1,8 @@
 //! The Neoism agent: conversation state fed by the daemon's `Agent` family, and its surfaces
 //! (sidebar, transcript, composer). References: `rune/reference/04..13*.png`.
 
+pub mod mcp;
+
 mod activity;
 mod composer;
 pub(crate) mod family;
@@ -187,6 +189,7 @@ impl App {
 
     pub fn load_fixture(&mut self, session_id: &str, title: &str, json: &str) {
         let messages: Vec<HistoryMessage> = serde_json::from_str(json).unwrap_or_default();
+        for message in &messages { self.mcp_icons.prepare_message(message); }
         let session = self.sessions.entry(session_id.into()).or_default();
         session.messages = messages;
         session.loaded = true;
@@ -203,6 +206,11 @@ impl App {
     }
 
     pub(crate) fn apply_agent(&mut self, message: AgentServerMessage) {
+        match &message {
+            AgentServerMessage::HistoryChunk { messages, .. } => for m in messages { self.mcp_icons.prepare_message(m); },
+            AgentServerMessage::MessageUpdated { message, .. } => self.mcp_icons.prepare_message(message),
+            _ => {}
+        }
         if self.families.note(&message) { return; }
         if self.apply_slash_event(&message) { return; }
         match message {

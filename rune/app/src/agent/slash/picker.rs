@@ -50,10 +50,11 @@ pub struct Row {
     pub status: Option<Status>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Icon {
     /// A provider mark from the logo atlas (`ui/ProviderLogo.tsx`).
     Provider(usize),
+    Mcp(String),
     Glyph(&'static str),
 }
 

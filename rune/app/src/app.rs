@@ -48,6 +48,9 @@ pub struct App {
     pub workspace_closing: Option<u64>,
     pub quit_requested: bool,
     pub tab_hover: Option<u64>,
+    pub workspace_hover: Option<String>,
+    pub tab_drag: Option<crate::ui::tab_drag::TabDrag>,
+    pub suppress_tab_press: bool,
     /// The live turn's animated status line ("Crafting . . . · 4.2s model").
     pub activity: Option<crate::agent::Activity>,
     pub replay: Option<crate::replay::Replay>,
@@ -139,6 +142,7 @@ pub struct App {
     pub wordmark: Wordmark,
     pub fps: Option<u32>,
     /// Tool rows: expansion, selected group children, spinner clock, service icons.
+    pub mcp_icons: crate::agent::mcp::Icons,
     pub tools: crate::agent::tools::ToolState,
     /// Home block terminals by tab id, and the tabs whose `CreatePty` is still in flight.
     pub terminals: HashMap<u64, Terminal>,
@@ -152,7 +156,7 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_default();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, tab_hover: None,
+            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, tab_hover: None, workspace_hover: None, tab_drag: None, suppress_tab_press: false,
             daemon: None,
             inbox: None,
             images: None,
@@ -177,6 +181,7 @@ impl App {
             effort: crate::agent::title_case(config.variant.as_deref().unwrap_or("medium")),
             wordmark: Wordmark::default(),
             fps: None,
+            mcp_icons: Default::default(),
             tools: Default::default(),
             picker: None,
             activity: None, replay: None,
@@ -216,7 +221,7 @@ impl App {
             pending_pty: Default::default(),
         };
         app.open_tab(TabKind::Home);
-        app.workspaces.push(crate::workspace::Entry { title: app.workspace_name.clone(), state: None });
+        app.workspaces.push(crate::workspace::Entry { id: app.workspace_id.clone(), title: app.workspace_name.clone(), state: None });
         app
     }
 

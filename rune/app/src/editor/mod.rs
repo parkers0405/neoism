@@ -33,6 +33,8 @@ pub struct Buffer {
     pub error: Option<String>,
     /// The open `:` / `/` prompt.
     pub prompt: Option<Prompt>,
+    /// Normal-mode Space leader, owned by the host rather than the Vim resolver.
+    leader_pending: bool,
     /// The lines a `WriteFile` in flight carries; they become the saved baseline on success.
     saving: Option<Vec<String>>,
     saving_request: Option<u64>,
@@ -65,7 +67,7 @@ pub const CONFIG_DOCUMENT: &str = "config.json";
 impl Buffer {
     fn new(path: String, scope: String, line: Option<u32>) -> Buffer {
         Buffer {
-            path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, saving: None, saving_request: None, close_after_save: None, message: None,
+            path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, leader_pending: false, saving: None, saving_request: None, close_after_save: None, message: None,
             initial_line: line.map(|l| l.saturating_sub(1) as usize),
             config: None,
             lsp: lsp::BufferLsp::default(),
@@ -222,8 +224,32 @@ impl App {
         self.buffers.get_mut(&path)
     }
 
+    /// Match the reference code editor's untimed Space leader. Insert mode and
+    /// pending Vim operators/find motions keep their ordinary space/x behavior.
+    fn editor_leader_key(&mut self, event: &rune::KeyEvent) -> bool {
+        use rune::Key as K;
+        let Some(buffer) = self.active_buffer_mut() else { return false };
+        if !buffer.loaded || buffer.prompt.is_some() || buffer.doc.mode != Mode::Normal {
+            buffer.leader_pending = false;
+            return false;
+        }
+        if event.key == K::Escape { buffer.leader_pending = false; return false; }
+        let plain = !event.mods.ctrl && !event.mods.alt && !event.mods.logo && !event.mods.cmd;
+        if plain && matches!(&event.key, K::Text(text) if text == " ") && buffer.doc.vim.pending.is_empty() {
+            buffer.leader_pending = true;
+            return true;
+        }
+        if !buffer.leader_pending || event.mods.ctrl || matches!(event.key, K::Left | K::Right | K::Up | K::Down | K::Backspace | K::PageUp | K::PageDown) { return false; }
+        buffer.leader_pending = false;
+        if plain && matches!(&event.key, K::Text(text) if text.eq_ignore_ascii_case("x")) {
+            self.close_tab(self.active);
+        }
+        true
+    }
+
     /// A key in the focused editor. Returns whether the editor took it.
     pub fn editor_key(&mut self, event: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+        if self.editor_leader_key(event) { return true; }
         let Some(key) = editor_key(event) else { return false };
         let rows = self.active_buffer().and_then(|b| b.view_rect).map_or(30, |r| (r[3] / view::line_height(self)).floor().max(1.0) as usize);
         let clipboard = self.clipboard.clone();
@@ -532,5 +558,52 @@ mod save_tests {
         assert!(app.tabs.iter().any(|t| t.id == id));
         app.run_modal_action(crate::ui::modal::Action::DiscardTab(id));
         assert!(!app.tabs.iter().any(|t| t.id == id));
+    }
+}
+
+#[cfg(test)]
+mod leader_tests {
+    use super::*;
+    fn event(key: rune::Key) -> rune::KeyEvent { rune::KeyEvent { key, mods: Default::default() } }
+    fn text(value: &str) -> rune::KeyEvent { event(rune::Key::Text(value.into())) }
+    fn editor() -> App {
+        let mut app = App::new();
+        app.open_file("leader.rs", None);
+        app.apply_opened_file("leader.rs", b"fn main() {}\n");
+        app
+    }
+    #[test]
+    fn space_x_closes_only_the_current_clean_buffer() {
+        let mut app = editor();
+        assert!(app.editor_leader_key(&text(" ")));
+        assert!(app.editor_leader_key(&text("x")));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab().kind, TabKind::Home);
+    }
+    #[test]
+    fn space_x_preserves_unsaved_text_and_escape_cancels_the_chord() {
+        let mut app = editor();
+        let b = app.active_buffer_mut().unwrap();
+        b.doc.insert_str_at_cursor("unsaved "); b.doc.mark_edited();
+        app.editor_leader_key(&text(" "));
+        app.editor_leader_key(&text("x"));
+        assert!(app.modal.is_some());
+        assert!(app.active_buffer().unwrap().doc.text_for_disk().contains("unsaved"));
+        app.modal = None;
+        app.editor_leader_key(&text(" "));
+        app.editor_leader_key(&event(rune::Key::Escape));
+        assert!(!app.editor_leader_key(&text("x")));
+    }
+    #[test]
+    fn insert_text_and_find_space_are_not_window_commands() {
+        let mut app = editor();
+        app.active_buffer_mut().unwrap().doc.mode = Mode::Insert;
+        assert!(!app.editor_leader_key(&text(" ")));
+        assert!(!app.editor_leader_key(&text("x")));
+        let b = app.active_buffer_mut().unwrap();
+        b.doc.mode = Mode::Normal;
+        b.doc.vim.feed('f', false);
+        assert!(!app.editor_leader_key(&text(" ")));
+        assert_eq!(app.tabs.len(), 2);
     }
 }

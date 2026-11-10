@@ -1,0 +1,34 @@
+[
+  {
+    "id": "custom-mcp-call",
+    "role": "Assistant",
+    "kind": "Tool",
+    "title": "Inspect test service",
+    "text": "MCP supplied artwork",
+    "status": "completed",
+    "tool": "mcp__custom_supplied__inspect",
+    "mcp": {
+      "server": "custom-supplied",
+      "presentation": {
+        "status": {
+          "status": "connected"
+        },
+        "configScope": "workspace",
+        "enabled": true,
+        "configWritable": true,
+        "serverInfo": {
+          "name": "test-service",
+          "icons": [
+            {
+              "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAALElEQVR4nGP4FaDxHxnz3FmFggnJMwwDA0jVgC4/HAwY+FgYeAMGPhYG3AAAtMuBH6sP094AAAAASUVORK5CYII="
+            }
+          ]
+        }
+      }
+    },
+    "lang": "",
+    "detail": "",
+    "todos": [],
+    "created_at": 0
+  }
+]

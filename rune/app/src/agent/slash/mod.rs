@@ -62,7 +62,7 @@ pub struct Composer {
     /// The helper row under the composer (`/hints`).
     pub hints_hidden: bool,
     /// Provider marks tinted for the current theme.
-    logos: logos::Logos,
+    pub(super) logos: logos::Logos,
     /// A running `/piss` … `/praise` skit and when its follow-up prompt is due.
     pub effect: Option<effects::Running>,
     /// Esc closed the `/` menu; it stays closed until the line stops being a command.

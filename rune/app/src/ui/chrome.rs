@@ -28,6 +28,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(super::wallpaper::view(app))
         .child(body)
         .child(super::status::view(app))
+        .child(super::tab_drag::overlay(app))
         .child(agent::overlay(app))
         .child(crate::editor::lsp_view::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
@@ -115,15 +116,31 @@ fn workspace_tabs(app: &App) -> El {
     for (index, entry) in app.workspaces.iter().enumerate() {
         let active = index == app.workspace_active;
         let title = if active { app.workspace_name.clone() } else { entry.title.clone() };
-        let tab = row().key(format!("workspace-tab:{index}")).h(TAB_ROW_H).px(14.0).gap(9.0).center_y()
+        let identity = entry.id.clone();
+        let drag_identity = identity.clone();
+        let hover_identity = identity.clone();
+        let press_identity = identity.clone();
+        let close_identity = identity.clone();
+        let hovered = app.workspace_hover.as_deref() == Some(identity.as_str());
+        let tab = row().key(format!("workspace-tab:{identity}")).h(TAB_ROW_H).px(14.0).gap(9.0).center_y()
             .fill(rgb(if active { p.bg } else { p.surface })).hover(rgb(p.hover)).corners([6.0, 6.0, 0.0, 0.0])
             .child(icon(app, glyph::FOLDER, 1.25, rgb(p.folder)))
             .child(text(title).font(app.ty.tab()).color(rgb(if active { p.fg } else { p.dim })).truncate().max_w(180.0))
-            .child(el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center().hover(rgb(p.hover))
+            .child_if(!hovered, || el().w(18.0).h(20.0))
+            .child_if(hovered, || el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center().hover(rgb(p.hover))
                 .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
-                .on_press(move |a: &mut App| a.close_workspace(index)))
-            .on_press(move |a: &mut App| a.select_workspace(index))
-            .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("workspace-tab:{index}"), r); });
+                .on_press(move |a: &mut App| {
+                    if let Some(index) = a.workspaces.iter().position(|w| w.id == close_identity) { a.close_workspace(index); }
+                }))
+            .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| {
+                if inside { a.workspace_hover = Some(hover_identity.clone()); } else if a.workspace_hover.as_deref() == Some(hover_identity.as_str()) { a.workspace_hover = None; }
+            })
+            .on_drag(move |a: &mut App, d: &mut rune::Drag, tx: &mut rune::Tx| a.drag_tab(super::tab_drag::Source::Workspace(drag_identity.clone()), d, tx))
+            .on_press(move |a: &mut App| { if !std::mem::take(&mut a.suppress_tab_press) { if let Some(index) = a.workspaces.iter().position(|w| w.id == press_identity) { a.select_workspace(index); } } })
+            .on_layout(move |a: &mut App, r: [f32; 4]| {
+                a.rects.insert(format!("workspace-tab:{index}"), r);
+                a.rects.insert(super::tab_drag::Source::Workspace(identity.clone()).rect_key(), r);
+            });
         strip = strip.child(tab);
     }
     let plus = app.workspaces.len();

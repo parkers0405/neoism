@@ -1,0 +1,40 @@
+{
+  "custom-supplied": {
+    "status": {
+      "status": "connected"
+    },
+    "configScope": "workspace",
+    "enabled": true,
+    "configWritable": true,
+    "serverInfo": {
+      "name": "test-service",
+      "icons": [
+        {
+          "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAALElEQVR4nGP4FaDxHxnz3FmFggnJMwwDA0jVgC4/HAwY+FgYeAMGPhYG3AAAtMuBH6sP094AAAAASUVORK5CYII="
+        }
+      ]
+    }
+  },
+  "firecrawl": {
+    "status": {
+      "status": "connected"
+    }
+  },
+  "webflow": {
+    "status": {
+      "status": "needs_auth"
+    },
+    "oauthCapable": true
+  },
+  "vercel": {
+    "status": {
+      "status": "disabled"
+    }
+  },
+  "local-tools": {
+    "status": {
+      "status": "failed",
+      "error": "Unavailable"
+    }
+  }
+}

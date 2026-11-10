@@ -432,7 +432,7 @@ impl App {
 
     // -- MCP -----------------------------------------------------------------------------
 
-    fn open_mcp(&mut self) {
+    pub(crate) fn open_mcp(&mut self) {
         let rows = catalog::mcp_servers(&self.composer.mcp_status);
         let mut picker = Picker::new(Kind::Mcp, "MCP servers", rows);
         picker.loading = true;
@@ -709,6 +709,7 @@ impl App {
                 false
             }
             Server::McpCatalog { status, .. } => {
+                if let Some(servers) = status.as_object() { for entry in servers.values() { self.mcp_icons.prepare(entry); } }
                 self.composer.mcp_status = status.clone();
                 if let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Mcp) {
                     picker.replace(catalog::mcp_servers(status));

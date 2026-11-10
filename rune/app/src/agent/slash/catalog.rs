@@ -151,7 +151,7 @@ pub fn mcp_servers(status: &Value) -> Vec<Row> {
             "hasCredentials": entry["hasCredentials"].as_bool().unwrap_or(false),
             "configWritable": writable,
         });
-        Row::new(name.clone(), description, footer, value.to_string()).status(Some(dot))
+        Row::new(name.clone(), description, footer, value.to_string()).status(Some(dot)).icon(Some(Icon::Mcp(name.clone())))
     }).collect()
 }
 

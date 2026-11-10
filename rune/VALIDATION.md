@@ -54,12 +54,15 @@ These temporary artifacts are reproducible with the scripts; they are not commit
 - A subsequent clean long-transcript wheel run used normal scheduling after Markdown memoization. Its active
   2.8–4.5 second interval recorded 204 presentations over 1.692 seconds with zero missed refreshes; the trace
   included 7,556 logical pixels of scroll. Capture: `native-report-natural.{jsonl,wayland.log}`.
+- Normal-scheduling follow-ups also passed: streaming recorded 456 presentations over 3.792 seconds (interval
+  1.0–4.8 s); terminal output recorded 288 over 2.392 seconds (interval 1.8–4.2 s). Both had zero missed refreshes.
+  The terminal workload's completion marker confirmed all 360 updates ran. Captures are
+  `native-streaming-natural.{jsonl,wayland.log}` and `native-tui-natural.{jsonl,wayland.log}`.
 
 ## Outstanding parity work
 
 The screenshot suite is a reproducible regression baseline, not an assertion that every reference pixel matches.
-Longer mixed workloads and normal-scheduling streaming/TUI runs remain to be measured. The 20,000-line first-open
-cost also remains visible in the trace.
+Longer mixed workloads remain to be measured. The 20,000-line first-open cost also remains visible in the trace.
 
 Rendered Markdown editing is deliberately deferred. Database filtering/schema detail and full rebinding coverage
 still need comparison with the reference. The installed launcher, release packaging, and GPUiX removal remain

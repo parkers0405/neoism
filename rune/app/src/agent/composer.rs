@@ -24,7 +24,9 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .color(rgb(p.fg)).w_full().min_h(26.0)
         .on_edit(move |s: &mut App| { s.select_tab(tab_id); let i = s.active; &mut s.tabs[i].draft })
         .on_input_change(move |s: &mut App, _: &mut Tx| { s.select_tab(tab_id); s.composer_changed(); })
-        .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.agent_composer_key(e, tx) || crate::keys::shortcut(s, e, tx) })
+        .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || crate::keys::shortcut(s, e, tx) })
+        // An image on the clipboard attaches; text pastes as usual.
+        .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_image(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_command(tx) { s.submit(); } });
     // Chips and their `/model` `/agent` `/think` aliases open the same pickers.
     // In a narrow split the chips give way (labels truncate) instead of widening the card.
@@ -46,10 +48,24 @@ pub fn composer(app: &App, max_w: f32) -> El {
                 _ => s.submit(),
             }
         });
+    // The paperclip: a button the send button's size, its glyph as large as the chips' text.
+    let attach = el().key("composer-attach").w(36.0).h(36.0).radius(8.0).center()
+        .fill(if app.composer_attach_hover == Some(tab_id) { rgb(p.hover) } else { rgb(p.hover).alpha(0.0) })
+        .child(icon(app, glyph::PAPERCLIP, 1.5, rgb(if app.composer_attach_hover == Some(tab_id) { p.fg } else { p.dim })))
+        .on_hover_change(move |s: &mut App, inside: bool, _: &mut Tx| {
+            if inside { s.composer_attach_hover = Some(tab_id); } else if s.composer_attach_hover == Some(tab_id) { s.composer_attach_hover = None; }
+        })
+        .on_press(move |s: &mut App| { s.select_tab(tab_id); s.request_attach(); });
     let card = col().key("agent-input-card")
         .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(format!("composer-card:{tab_id}"), r); }).w_full().radius(18.0).fill(rgb(p.bg)).border(1.0, rgb(p.border))
         .px(20.0).pt(16.0).pb(12.0).gap(22.0)
+        .on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
+            s.select_tab(tab_id);
+            s.attach_images(files.iter().map(|f| f.display().to_string()).collect());
+        })
         .child(stars(app))
+        // Attached images ride at the top of the card, over the text.
+        .child_opt(super::attach::composer_strip(app, tab_id))
         .child(input)
         .child(row().key("composer-chip-row").w_full().gap(26.0).center_y()
             .child(chip(app.agent.clone(), rgb(p.red), Kind::Agent))
@@ -58,7 +74,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
                 .child(chip(app.model.clone(), rgb(p.blue), Kind::Model)))
             .child(chip(app.effort.clone(), rgb(p.magenta), Kind::Thinking))
             .child(el().grow(1.0))
-            .child(icon(app, glyph::PAPERCLIP, 0.9, rgb(p.dim)))
+            .child(attach)
             .child(send));
     let footer = row().key("composer-footer").grow(1.0).shrink().h(32.0).px(18.0).center_y().justify_between()
         .fill(rgb(p.surface).alpha(0.7)).corners([0.0, 0.0, 12.0, 12.0])
@@ -96,6 +112,7 @@ pub fn overlay(app: &App) -> El {
     el().key("agent-overlay").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .child(super::slash::effect_layer(app))
         .child(super::slash::picker_card(app))
+        .child(super::attach::preview(app))
 }
 
 impl App {

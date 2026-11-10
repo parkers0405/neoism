@@ -7,6 +7,8 @@ use crate::tabs::TabKind;
 use rune::{Key, KeyEvent, Tx};
 
 pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    // The image preview is modal over everything.
+    if app.image_preview_key(event) { return true; }
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
     if app.browser.is_some() { return app.browser_key(event, tx) || shortcut(app, event, tx); }
     if shortcut(app, event, tx) { return true; }

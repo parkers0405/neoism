@@ -15,6 +15,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && app.editor_key(event, tx) {
         return true;
     }
+    if app.project_menu.is_some() && app.project_menu_key(event) { return true; }
     if app.focus == Focus::Sidebar && app.sidebar == Some(crate::app::Sidebar::Conversations) && app.conversation_key(event) {
         return true;
     }
@@ -237,6 +238,7 @@ impl App {
             return self.rects.get(&format!("settings-control:{index}")).map(|r| crate::settings::view::cursor_rect(self, *r));
         }
         let row = if let Some(finder) = &self.finder { self.finder_row_rect(finder).map(|r| (r, 14.0, 13.0)) }
+            else if self.project_menu.is_some() { self.project_menu_row_rect().map(|r| (r, 14.0, 13.0)) }
             else if let Some(picker) = &self.picker { self.palette_row_rect(picker).map(|r| (r, 10.0, 13.0)) }
             else { None };
         if let Some((r, pad_x, font)) = row {
@@ -251,7 +253,7 @@ impl App {
             Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == self.workspaces.len())),
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| crate::editor::view::cursor_rect(self, b)),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("tree-row").map(|r| crate::tree::view::cursor_rect(self, *r)),
-            Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) && !self.threads.is_empty() => self.conversation_cursor(),
+            Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) && (self.conv_header.is_some() || !self.threads.is_empty()) => self.conversation_cursor(),
             Focus::Sidebar | Focus::Content => self.cursor.caret_block(),
         }
     }
@@ -262,12 +264,14 @@ impl App {
         if self.menu.is_some() || self.settings.is_some() { return None; }
         if self.finder.is_some() { return self.rects.get("finder-results").copied(); }
         if self.picker.is_some() { return self.rects.get("picker-results").copied(); }
+        if self.project_menu.is_some() { return self.project_menu_clip(); }
         match self.focus {
             Focus::Buffers(_) => self.rects.get(&format!("pane-tab-strip:{}", self.layout.focus)).copied(),
             Focus::Workspaces(_) => self.rects.get("workspace-tabs").copied(),
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| b.view_rect),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("file-tree-rows").copied(),
-            Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) => self.rects.get("conversation-list").copied(),
+            // The header stops sit above the scrolled list: unclipped there.
+            Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) && self.conv_header.is_none() => self.rects.get("conversation-list").copied(),
             _ => None,
         }
     }

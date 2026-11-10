@@ -25,6 +25,14 @@ const LIST_KEY: &str = "conversation-list";
 /// Rows kept between the keyboard row and the list's edge (`side_panel::SCROLL_OFF_ROWS`).
 const SCROLL_OFF_ROWS: f32 = 3.0;
 
+/// The keyboard stops above the list (`select_new_chat` / `select_projects`): Up from the first
+/// row reaches the directory row, then New chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConvHeader {
+    NewChat,
+    Projects,
+}
+
 /// One keyboard stop in the panel: a project folder (dashboard only) or a conversation.
 pub enum ConvRow<'a> {
     Project { directory: String, label: String, open: bool },
@@ -44,6 +52,10 @@ fn project_name(directory: &str) -> String {
     if directory.is_empty() { return "Other chats".into(); }
     let trimmed = directory.trim_end_matches('/');
     trimmed.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(directory).to_owned()
+}
+
+fn header_rect_key(header: ConvHeader) -> &'static str {
+    match header { ConvHeader::NewChat => "conv-header:new-chat", ConvHeader::Projects => "conv-header:projects" }
 }
 
 impl App {
@@ -97,9 +109,26 @@ impl App {
         if !self.collapsed_projects.remove(directory) { self.collapsed_projects.insert(directory.to_owned()); }
     }
 
+    /// Step through New chat, the directory row and the list (`select_next` / `select_prev`):
+    /// the header stops sit above the first row; the list never wraps into them by itself.
     fn conversation_move(&mut self, delta: isize) {
         let count = self.conversation_rows().len();
+        match self.conv_header {
+            Some(ConvHeader::NewChat) if delta > 0 => { self.conv_header = Some(ConvHeader::Projects); return; }
+            Some(ConvHeader::Projects) if delta > 0 => {
+                if count == 0 { return; }
+                self.conv_header = None;
+                self.conv_selected = 0;
+                self.conv_follow.request();
+                return;
+            }
+            Some(ConvHeader::Projects) if delta < 0 => { self.conv_header = Some(ConvHeader::NewChat); return; }
+            Some(_) => return,
+            None if delta < 0 && (count == 0 || self.conv_selected == 0) => { self.conv_header = Some(ConvHeader::Projects); return; }
+            None => {}
+        }
         if count == 0 { return; }
+        // A long jump up (Home, gg, Ctrl+U) stops at the first row rather than the header.
         self.conv_selected = (self.conv_selected as isize).saturating_add(delta).clamp(0, count as isize - 1) as usize;
         self.conv_follow.request();
     }
@@ -138,6 +167,15 @@ impl App {
     }
 
     fn open_selected_conversation(&mut self) {
+        match self.conv_header {
+            Some(ConvHeader::NewChat) => {
+                self.open_tab(TabKind::Agent { session: None });
+                self.focus = crate::app::Focus::Content;
+                return;
+            }
+            Some(ConvHeader::Projects) => return self.open_project_menu(),
+            None => {}
+        }
         enum Pick { Project(String), Thread(String) }
         let pick = match self.conversation_rows().get(self.conv_selected) {
             Some(ConvRow::Project { directory, .. }) => Pick::Project(directory.clone()),
@@ -165,8 +203,14 @@ impl App {
     /// The block cursor on the keyboard row: a 0.6 em block in the row's left padding, one
     /// title line tall.
     pub fn conversation_cursor(&self) -> Option<[f32; 4]> {
-        let row = self.rects.get(&format!("conv:{}", self.conv_selected))?;
-        let r = [row[0], row[1] - self.conv_follow.scroll.get().0, row[2], row[3]];
+        let r = match self.conv_header {
+            // Header rows sit outside the scrolled list: their rects are window-space.
+            Some(header) => *self.rects.get(header_rect_key(header))?,
+            None => {
+                let row = self.rects.get(&format!("conv:{}", self.conv_selected))?;
+                [row[0], row[1] - self.conv_follow.scroll.get().0, row[2], row[3]]
+            }
+        };
         let font = self.ty.body().size;
         let (w, h) = ((font * 0.6).max(2.0), font * 1.3);
         Some([r[0] + (17.0 - w) / 2.0, r[1] + (r[3] - h) / 2.0, w, h])
@@ -199,7 +243,7 @@ pub fn conversations(app: &App) -> El {
     let project_row = |index: usize, directory: &str, label: &str, open: bool| {
         let s = app.ty.scale();
         let directory_owned = directory.to_owned();
-        let keyboard = focused && index == app.conv_selected;
+        let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
         let chevron = TextStyle::new(8.0 * s, 400.0).family(NERD);
         let folder = TextStyle::new(13.0 * s, 400.0).family(NERD);
         keyboard_row(index, row().key(format!("project:{directory}")).w_full().h(30.0 * s).px(17.0).center_y()
@@ -212,7 +256,7 @@ pub fn conversations(app: &App) -> El {
     let row_for = |index: usize, t: &ThreadSummary, nested: bool| {
         let id = t.session_id.clone();
         let open = matches!(&app.active_tab().kind, TabKind::Agent { session: Some(s) } if *s == t.session_id);
-        let keyboard = focused && index == app.conv_selected;
+        let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
         // Chats under a dashboard folder sit one 18 pt step in.
         let item = col().key(format!("thread:{}", t.session_id)).w_full().pl(17.0 + if nested { 18.0 * app.ty.scale() } else { 0.0 }).pr(17.0).py(6.0).gap(3.0);
         let item = keyboard_row(index, item);
@@ -224,6 +268,15 @@ pub fn conversations(app: &App) -> El {
                 .child(text(ago(t.updated_at)).font(app.ty.small()).color(rgb(p.muted)).mr(46.0)))
             .child(text(t.title.clone()).font(app.ty.body()).color(rgb(p.fg)).truncate().max_w(240.0))
             .on_press(move |s: &mut App| s.open_conversation(&id))
+    };
+    // New chat and the directory row: keyboard stops with the list's highlight, and window
+    // rects for the block cursor and the dropdown's anchor.
+    let header_row = |header: ConvHeader| {
+        let keyboard = focused && app.conv_header == Some(header);
+        row().w_full().h(36.0).px(16.0).center_y().radius(6.0)
+            .fill(if keyboard || (header == ConvHeader::Projects && app.project_menu.is_some()) { rgb(p.hover) } else { Color::TRANSPARENT })
+            .hover(rgb(p.hover))
+            .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(header_rect_key(header).into(), r); })
     };
     let mirror = app.conv_follow.scroll.clone();
     let mut list = col().w_full();
@@ -245,14 +298,19 @@ pub fn conversations(app: &App) -> El {
             .border_sides([0.0, 0.0, 1.5, 0.0], rgb(p.border))
             .child(text("Agent").font(app.ty.body()).color(rgb(p.fg))))
         .child(col().w_full().px(18.0).pt(12.0).gap(4.0)
-            .child(row().key("new-chat").w_full().h(36.0).px(16.0).gap(16.0).center_y().radius(6.0).hover(rgb(p.hover))
+            .child(header_row(ConvHeader::NewChat).key("new-chat").gap(16.0)
                 .child(icon(app, glyph::EDIT, 0.9, rgb(p.fg)))
                 .child(text("New chat").font(app.ty.body()).color(rgb(p.fg)))
-                .on_press(|s: &mut App| { s.open_tab(TabKind::Agent { session: None }); }))
-            .child(row().w_full().h(36.0).px(16.0).gap(16.0).center_y()
+                .on_press(|s: &mut App| { s.open_tab(TabKind::Agent { session: None }); s.focus = crate::app::Focus::Content; }))
+            .child(header_row(ConvHeader::Projects).key("project-directory").gap(16.0)
                 .child(icon(app, glyph::FOLDER, 0.9, rgb(p.folder)))
-                .child(text(app.workspace_name.clone()).font(app.ty.body()).color(rgb(p.fg)).grow(1.0))
-                .child(icon(app, glyph::CHEVRON_DOWN, 0.8, rgb(p.dim))))
+                .child(text(app.workspace_name.clone()).font(app.ty.body()).color(rgb(p.fg)).grow(1.0).truncate().shrink())
+                .child(icon(app, glyph::CHEVRON_DOWN, 0.8, rgb(p.dim)))
+                .on_press(|s: &mut App| {
+                    s.focus = crate::app::Focus::Sidebar;
+                    s.conv_header = Some(ConvHeader::Projects);
+                    if s.project_menu.is_some() { s.close_project_menu(); } else { s.open_project_menu(); }
+                }))
             .child(el().w_full().h(1.0).mt(6.0).fill(rgb(p.border))))
         .child(col().key(LIST_KEY).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false })
             .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))

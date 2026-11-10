@@ -63,7 +63,8 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let scroll_key = format!("conversation:{session_id}");
     let mirror = session.map(|s| s.scroll.clone()).unwrap_or_default();
     let wheel_id = session_id.to_owned();
-    let line_h = app.ty.body().line_px();
+    // A notch moves the same distance as in a code file (three code lines), on the same spring.
+    let line_h = crate::editor::view::line_height(app);
     let wheel_key = scroll_key.clone();
     let timeline = col().key(scroll_key).w_full().grow(1.0).shrink()
         .scroll(ScrollSpec { stick_bottom: true })

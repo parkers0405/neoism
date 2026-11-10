@@ -1,9 +1,11 @@
 //! Presence orbs (`shared/src/editor/crdt/presence_avatar.rs`): a person's profile picture is a
 //! round pixel-plasma grid seeded from their display name, so the same person wears the same orb
-//! everywhere. Cell geometry is fixed per orb; only colours flow, so each cell is a `Live` colour
-//! that `tick` repaints without re-running any view.
+//! everywhere. Cell geometry is fixed per orb; only colours flow. An orb is one picture
+//! (`rune::Pixels`) that `tick` repaints in place, so no view re-runs and it is a single
+//! element: a hundred-odd live-coloured cells per orb made user rows most of a transcript's
+//! elements, built and diffed again on every commit.
 
-use rune::{Color, El, Live, el};
+use rune::{El, Pixels, el};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::f32::consts::TAU;
@@ -97,23 +99,51 @@ fn hsl(h: f32, s: f32, l: f32) -> [f32; 3] {
     [r + m, g + m, b + m]
 }
 
-fn linear(c: [f32; 3]) -> Color {
-    let f = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
-    Color { r: f(c[0]), g: f(c[1]), b: f(c[2]), a: 1.0 }
-}
+/// Texels per point. Cell edges snap to half points, so they fall on whole texels, and on
+/// whole device pixels at a window scale of 2.
+const TEXELS: f32 = 2.0;
 
-/// One person's orb: its profile and a live colour per cell.
+/// One person's orb at one size: its cells as texel rects with their normalised centres, and
+/// the picture they are painted into.
 struct Orb {
     profile: Profile,
-    cells: Vec<(u32, u32, f32, f32, Live<Color>)>,
+    side: u32,
+    cells: Vec<([usize; 4], f32, f32)>,
+    pixels: Pixels,
 }
 
-/// Every orb shown so far, by seed, and the clock they flow on.
+impl Orb {
+    fn new(profile: Profile, side: u32, t: f32) -> Orb {
+        let edge = |k: u32| ((k as f32 * side as f32 / profile.grid as f32).round() as usize).min(side as usize);
+        let cells = profile.cells().into_iter().map(|(i, j, nx, ny)| ([edge(i), edge(j), edge(i + 1), edge(j + 1)], nx, ny)).collect();
+        let orb = Orb { profile, side, cells, pixels: Pixels::new() };
+        orb.paint(t);
+        orb
+    }
+
+    /// Paint every cell's colour at time `t`.
+    fn paint(&self, t: f32) { self.pixels.set(self.side, self.side, self.picture(t)); }
+
+    /// The orb at time `t` as RGBA texels; outside the disc stays clear.
+    fn picture(&self, t: f32) -> Vec<u8> {
+        let side = self.side as usize;
+        let mut rgba = vec![0u8; side * side * 4];
+        for ([x0, y0, x1, y1], nx, ny) in &self.cells {
+            let [r, g, b] = self.profile.color(*nx, *ny, t).map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+            for y in *y0..*y1 {
+                for texel in rgba[(y * side + x0) * 4..(y * side + x1) * 4].chunks_exact_mut(4) { texel.copy_from_slice(&[r, g, b, 255]); }
+            }
+        }
+        rgba
+    }
+}
+
+/// Every orb shown so far, by seed and size, and the clock they flow on.
 pub struct Orbs {
-    orbs: RefCell<HashMap<String, Rc<Orb>>>,
+    orbs: RefCell<HashMap<(String, u32), Rc<Orb>>>,
     epoch: Instant,
     /// When the colours last flowed: the plasma drifts at most ~2 rad/s, so it steps at
-    /// `STEP` rather than repainting the whole window every vblank for a few cells.
+    /// `STEP` rather than repainting every vblank.
     last: std::cell::Cell<Option<Instant>>,
 }
 
@@ -127,41 +157,29 @@ impl Default for Orbs {
 impl Orbs {
     fn seconds(&self) -> f32 { self.epoch.elapsed().as_secs_f32() }
 
-    fn orb(&self, seed: &str) -> Rc<Orb> {
-        if let Some(orb) = self.orbs.borrow().get(seed) { return orb.clone(); }
-        let profile = Profile::from_seed(seed);
-        let t = self.seconds();
-        let cells = profile.cells().into_iter().map(|(i, j, nx, ny)| (i, j, nx, ny, Live::new(linear(profile.color(nx, ny, t))))).collect();
-        let orb = Rc::new(Orb { profile, cells });
-        self.orbs.borrow_mut().insert(seed.to_owned(), orb.clone());
+    fn orb(&self, seed: &str, side: u32) -> Rc<Orb> {
+        let key = (seed.to_owned(), side);
+        if let Some(orb) = self.orbs.borrow().get(&key) { return orb.clone(); }
+        let orb = Rc::new(Orb::new(Profile::from_seed(seed), side, self.seconds()));
+        self.orbs.borrow_mut().insert(key, orb.clone());
         orb
     }
 
-    /// The orb for `seed`, `size` points square, its cells snapped to half points.
+    /// The orb for `seed`, `size` points square.
     pub fn view(&self, seed: &str, size: f32) -> El {
-        let orb = self.orb(seed);
-        let cell = size / orb.profile.grid as f32;
-        let edge = |k: u32| (k as f32 * cell * 2.0).round() / 2.0;
-        let mut root = el().w(size).h(size);
-        for (i, j, _, _, color) in &orb.cells {
-            let (x0, y0) = (edge(*i), edge(*j));
-            root = root.child(el().w(edge(i + 1) - x0).h(edge(j + 1) - y0).live_fill(color).absolute(x0, y0));
-        }
-        root
+        let orb = self.orb(seed, (size * TEXELS).round().max(1.0) as u32);
+        el().w(size).h(size).pixels(&orb.pixels)
     }
 
-    /// Flow every orb to now, at most every `STEP`. Only on-screen cells repaint. Returns when
-    /// to tick again, `None` with no orb.
+    /// Flow every orb to now, at most every `STEP`. Returns when to tick again, `None` with
+    /// no orb.
     pub fn tick(&self) -> Option<std::time::Duration> {
         if self.orbs.borrow().is_empty() { return None; }
         let now = Instant::now();
         if let Some(due) = self.last.get().map(|at| at + STEP).filter(|due| *due > now) { return Some(due - now); }
         self.last.set(Some(now));
         let t = self.seconds();
-        let orbs = self.orbs.borrow();
-        for orb in orbs.values() {
-            for (_, _, nx, ny, color) in &orb.cells { color.set(linear(orb.profile.color(*nx, *ny, t))); }
-        }
+        for orb in self.orbs.borrow().values() { orb.paint(t); }
         Some(STEP)
     }
 }
@@ -197,6 +215,33 @@ mod tests {
         let cells = a.cells();
         assert!(cells.len() < (a.grid * a.grid) as usize, "corners are cut");
         assert!(cells.iter().all(|c| c.2.hypot(c.3) <= 1.02));
+    }
+
+    #[test]
+    fn an_orb_is_one_picture_with_whole_texel_cells() {
+        let orb = Orb::new(Profile::from_seed("piss-desktop"), 56, 1.5);
+        let picture = orb.picture(1.5);
+        assert_eq!(picture.len(), 56 * 56 * 4);
+        let alpha = |x: usize, y: usize| picture[(y * 56 + x) * 4 + 3];
+        // The disc is opaque, the corners it cuts are clear.
+        assert_eq!(alpha(28, 28), 255);
+        assert_eq!(alpha(0, 0), 0);
+        assert_eq!(alpha(55, 55), 0);
+        // Cells tile the grid edge to edge on whole texels.
+        assert!(orb.cells.iter().all(|([x0, y0, x1, y1], _, _)| x0 < x1 && y0 < y1 && *x1 <= 56 && *y1 <= 56));
+        // The colours flow: another moment paints another picture of the same shape.
+        let later = orb.picture(2.5);
+        assert_ne!(picture, later);
+        assert!(picture.chunks_exact(4).zip(later.chunks_exact(4)).all(|(a, b)| a[3] == b[3]));
+    }
+
+    #[test]
+    fn one_picture_per_person_and_size() {
+        let orbs = Orbs::default();
+        let a = orbs.orb("Parker", 56);
+        assert!(Rc::ptr_eq(&a, &orbs.orb("Parker", 56)));
+        assert!(!Rc::ptr_eq(&a, &orbs.orb("Parker", 40)));
+        assert!(!Rc::ptr_eq(&a, &orbs.orb("Peer", 56)));
     }
 
     #[test]

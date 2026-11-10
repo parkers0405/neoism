@@ -9,6 +9,7 @@ mod session;
 mod config;
 mod daemon;
 mod database;
+mod drive;
 mod editor;
 mod finder;
 mod ghostty;
@@ -91,11 +92,21 @@ fn lsp_fixture(s: &mut App) {
 }
 
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
+    let started = std::time::Instant::now();
+    let rerun = poll_frame(app, clock, tx);
+    ui::fps::polled(started, rerun);
+    rerun
+}
+
+fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     static TRACE_POLL: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("NEOISM_RUNE_TRACE_POLL").is_some());
     let mut wakes: Vec<(&str, std::time::Duration)> = Vec::new();
     macro_rules! wake { ($name:expr, $d:expr) => {{ let d = $d; if *TRACE_POLL { wakes.push(($name, d)); } tx.wake_after(d); }} }
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
-    let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
+    let changed = drive::tick(app, clock, tx) | replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
+    // A streaming reply's text shows at most thirty times a second, however fast it arrives.
+    let (stream_due, stream_wait) = app.stream_pace.due(std::time::Instant::now());
+    if let Some(wait) = stream_wait { wake!("stream", wait); }
     if std::mem::take(&mut app.settle_pending) { tx.settle(); }
     if app.quit_requested {
         if !app.session_closed { app.save_session(true); }
@@ -112,10 +123,12 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let (wordmark_moving, animating) = app.wordmark.tick(&visible_wordmarks, clock);
     if wordmark_moving { wake!("wordmark", std::time::Duration::ZERO); }
     if animating { wake!("wordmark-effect", std::time::Duration::ZERO); }
-    // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap).
+    // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap), on live offsets.
     app.tools.clock = clock;
-    let spinning = app.running_tools();
-    if spinning { wake!("spinner", std::time::Duration::from_millis(45)); }
+    if app.running_tools() {
+        app.tools.spinner.tick(clock, app.ty.scale());
+        wake!("spinner", std::time::Duration::from_millis(45));
+    }
     // Presence orbs flow (at 30 Hz) while one is in view.
     if app.orbs_on_screen() && let Some(next) = app.orbs.tick() { wake!("orbs", next); }
     app.editor_follow_cursor(tx);
@@ -149,7 +162,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let skit = app.tick_effect();
     if skit { wake!("skit", std::time::Duration::ZERO); }
     // The cursor trails and blinks on its own schedule.
-    let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
+    let cursor_was = (app.cursor.placed(), app.cursor.trail.quad());
     app.browser_follow(tx);
     app.settings_reveal(tx);
     let list_sliding = app.step_list_residual(clock);
@@ -166,10 +179,12 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // while it runs; a poll wake alone is held to a 16.7 ms timer on Linux, i.e. 60 fps.
     let per_frame = gliding || list_sliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || mode_changing
         || wordmark_moving || animating || busy || skit || edge_scrolling;
-    let heartbeat_changed = app.keep_vsync(per_frame);
+    app.keep_vsync(per_frame);
     let clip = app.cursor_clip();
     app.cursor.track_clip(clip, app.cursor.trail.moved_at != moved_at);
-    let caret_changed = cursor_was != (app.cursor.visible, app.cursor.trail.quad());
+    // The blink is a live opacity (`Cursor::blink`): only the block appearing, leaving or
+    // moving re-runs the views.
+    let caret_changed = cursor_was != (app.cursor.placed(), app.cursor.trail.quad());
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     // While animating, the pill shows the presentation rate; at rest it holds the last one.
     // At most twice a second, and through the pill's live text: only its first reading mounts
@@ -187,14 +202,15 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    let rerun = heartbeat_changed || animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    let rerun = animating || changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
     // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
     if *TRACE_POLL && (rerun || !wakes.is_empty()) {
-        let terms = [("heartbeat", heartbeat_changed), ("animating", animating), ("changed", changed), ("spinning", spinning), ("fps", fps_changed), ("caret", caret_changed),
+        let terms = [("animating", animating), ("changed", changed), ("stream", stream_due), ("fps", fps_changed), ("caret", caret_changed),
             ("focus", focus_changed), ("panes", panes_changed), ("skit", skit), ("activity", activity_changed), ("flashing", flashing), ("mouse", mouse_changed), ("mode", mode_changing), ("rail", rail_bottom)];
         eprintln!("[poll] {:.3} rerun={} wakes={}", clock, terms.iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect::<Vec<_>>().join(","),
             wakes.iter().map(|(n, d)| format!("{n}:{:.1}", d.as_secs_f64() * 1000.0)).collect::<Vec<_>>().join(","));
     }
+    if rerun { app.stream_pace.ran(std::time::Instant::now()); }
     rerun
 }
 
@@ -537,8 +553,13 @@ fn main() {
     app = app.on_frame_encoded(move |frame| {
         ui::fps::record(frame.at());
         if trace {
-            eprintln!("[rune-frame] seq={} at_us={} outcome={:?} hz={:?}", frame.seq(),
-                frame.at().duration_since(origin).as_micros(), frame.outcome(), frame.refresh_hz());
+            // `mono_us` is CLOCK_MONOTONIC, the clock Wayland presentation feedback reports in;
+            // `work_us` runs from this frame's poll to the end of its encode (the UI thread's
+            // share of the frame), `poll_us` is the poll alone.
+            let (poll_us, work_us, rerun) = ui::fps::last_poll(frame.at());
+            eprintln!("[rune-frame] seq={} at_us={} mono_us={} poll_us={} work_us={} rerun={} outcome={:?} hz={:?}", frame.seq(),
+                frame.at().duration_since(origin).as_micros(), ui::fps::monotonic_us(frame.at()), poll_us, work_us, rerun,
+                frame.outcome(), frame.refresh_hz());
         }
     });
     app.run();

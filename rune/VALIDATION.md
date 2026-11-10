@@ -220,3 +220,48 @@ Every keystroke also re-wrapped the whole file (~150 ms), since the layout cache
   it changed wherever the others shifted to; highlighting stays whole-file (~2 ms here).
 
 121 Rust tests and `check-headless.py` pass.
+
+
+## Frame pacing in real chats (2026-11-10)
+
+The agent tab dropped frames whenever something moved. Measured on the 144 Hz panel with a
+real conversation loaded from the running daemon, real wheel input and compositor
+presentation times, the pulled branch scrolled at 89 to 123 fps (14 to 38% of refreshes
+missed) on a busy machine. The causes, in the order they were found:
+
+- The transcript's width handler re-ran the views on every frame of a scroll (about 4 ms
+  each): a layout handler inside a scroll view reports every frame.
+- The vsync heartbeat (every 300 ms) and the caret blink (every 530 ms) each re-ran the views.
+- A running tool's spinner re-ran them on every frame for as long as the tool ran.
+- Every commit rebuilt all mounted rows but finished replies: each tool card (re-parsing its
+  diff, twice over in the row list) and each question, whose orb was 100 to 150 live-coloured
+  elements. Orbs were most of a transcript's elements (1,354 layout nodes in `question-rail`
+  against 275 as pictures).
+- Every text delta of a streaming reply was its own commit.
+
+Same workloads on both builds (`rune/scripts/check-live-pacing.py`; the baseline is the
+pulled branch with only the test hooks added). UI-thread work per frame in ms, then refreshes
+missed on the real panel with the machine otherwise idle:
+
+| Workload | Before: p50 / p95 / max | After: p50 / p95 / max | Before missed | After missed |
+| --- | --- | --- | ---: | ---: |
+| Wheel scroll, long real chat | 1.8 / 3.3 / 4.8 | 0.4 / 1.0 / 3.5 | 0.3% | 0.7% |
+| Trackpad scroll | 1.2 / 3.3 / 6.9 | 0.4 / 1.0 / 3.8 | 0.8% | 0.0% |
+| Long live run, scrolling | 1.8 / 2.7 / 4.6 (every frame a commit) | 0.4 to 0.9 / 1.4 to 2.8 / 5.7 (none) | 0.0% | 0.0%, 0.0%, 2.2% |
+| Long live run, fast reply streaming | 2.8 / 4.2 to 5.4 / 7.6 to 35.7 | 0.7 / 3.6 / 6.1 | 2.3 to 6.9% | 0.4 to 0.9% |
+| Wheel and trackpad, all 24 cores busy | 0.7 to 2.5 / 4.9 to 5.9 / 11.3 | 0.6 / 1.3 to 1.7 / 6.1 | 12.7 to 22.4% | 6.2 to 8.5% |
+
+A real prompt (two `sleep` tool calls, a file read and a 600-word reply) re-ran the views
+1,003 and 683 times in its first two 14 s spans before and 68 and 11 after.
+
+The band of nothing between a streaming reply and "Crafting" was geometry, not pacing: the
+transcript kept a fixed 200 pt under its last row while the pinned line sits just above the
+composer, 41 pt lower than the row it stands for. The rows now end level with the composer's
+top (measured), with the same 41 pt of room after the last row at rest. The pinned line and
+the streaming row's own reveal are as they were.
+
+What remains: a commit still costs 2.5 to 4 ms in a long transcript (Rune's layout, apply and
+paint of the growing reply), so the heaviest streaming case misses a refresh a few times in
+ten seconds; the cursor trail and the wordmark effects still re-run the views while they
+play; and with every core saturated, scheduling alone drops frames no app change recovers.
+The headless output is more forgiving than the panel: judge by work per frame there.

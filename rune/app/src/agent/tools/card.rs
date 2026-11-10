@@ -145,12 +145,10 @@ fn indicator(cx: &Cx, m: &HistoryMessage) -> El {
     }
     if matches!(m.status.as_str(), "running" | "streaming") {
         let mut spinner = el().w(cx.pt(16.0)).h(cx.pt(20.0)).absolute(0.0, 0.0);
-        let phase = cx.app.tools.clock as f32 * 1.35;
-        for (trail, alpha) in [1.0, 0.65, 0.4, 0.2].into_iter().enumerate() {
-            let step = (phase * 8.0).floor() - trail as f32;
-            let (dx, dy) = orbit(step / 8.0, cx.pt(3.0));
+        // Each square rides its live orbit offset (`Spinner::tick`) from the orbit's centre.
+        for (square, alpha) in cx.app.tools.spinner.squares() {
             spinner = spinner.child(el().w(cx.pt(2.0)).h(cx.pt(2.0)).fill(Color::WHITE.alpha(alpha))
-                .absolute(cx.pt(7.0) + dx - cx.s, cx.pt(10.5) + dy - cx.s));
+                .absolute(cx.pt(7.0) - cx.s, cx.pt(10.5) - cx.s).live_offset(square));
         }
         return spinner;
     }
@@ -159,7 +157,7 @@ fn indicator(cx: &Cx, m: &HistoryMessage) -> El {
 }
 
 /// Position on a square orbit of half-size `half`; one lap per unit of `t`.
-fn orbit(t: f32, half: f32) -> (f32, f32) {
+pub(super) fn orbit(t: f32, half: f32) -> (f32, f32) {
     let p = t.rem_euclid(1.0) * 4.0;
     if p < 1.0 {
         (-half + p * 2.0 * half, -half)

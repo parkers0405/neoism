@@ -44,7 +44,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.menu.is_some(), || super::menu::view(app))
         .child_if(app.settings.is_some(), || crate::settings::view(app))
         .child_if(app.cursor.placed() && cursor_in_overlay(app), || cursor_quad(app))
-        .child_if(app.heartbeat.is_some(), || heartbeat(app))
+        .child(app.heartbeat.view())
 }
 
 /// Report the focused field's caret line (and its font) so `poll` can trail the block to it.
@@ -81,10 +81,11 @@ fn cursor_quad(app: &App) -> El {
     let quad = rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent))).w(w).h(h);
     // Settled on an editor cell, the block shows its character in the background colour.
     let glyph = app.editor_cursor_glyph().filter(|_| !app.cursor.trail.animating());
-    // Mounted while placed and blinking by opacity, at once: remounting each half period would
-    // replay the enter fade and repaint the window for most of every blink.
+    // Mounted while placed and blinking by a live opacity: a half period repaints the block
+    // alone. Re-running the views for it cost a whole commit twice a second, a missed refresh
+    // whenever something else was moving.
     let block = |x: f32, y: f32| el().key("window-cursor").w(w).h(h).absolute(x, y)
-        .opacity(if app.cursor.visible { 1.0 } else { 0.0 }).instant_changes()
+        .live_opacity(&app.cursor.blink).instant_changes()
         .child(quad)
         .child_if(glyph.is_some(), || text(glyph.clone().unwrap_or_default())
             .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0));
@@ -213,30 +214,66 @@ fn workspace_tabs(app: &App) -> El {
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-new".into(), r); }))
 }
 
-/// The invisible element that carries the vsync heartbeat (`App::heartbeat`).
-fn heartbeat(app: &App) -> El {
-    let Some((tween, _, generation)) = &app.heartbeat else { return el() };
-    el().key(format!("vsync-heartbeat:{generation}")).w(1.0).h(1.0).absolute(0.0, 0.0)
-        .fill(rune::Color::TRANSPARENT).live_opacity(tween).transition(rune::Transition::none())
+/// Keeps Rune drawing every vblank while the app steps a motion itself (`App::keep_vsync`).
+///
+/// Linux has no display link: a poll that only asks to wake again waits a timer frame
+/// (16.7 ms), so a glide stepped from `poll` would beat against a faster display. An invisible
+/// element's opacity rides a spring on this value; while the app moves, `poll` keeps giving it
+/// a new target, so Rune has motion to present on every refresh and polls once per frame. It
+/// is a live value: nothing re-runs the views to start, renew or stop it, and it comes to rest
+/// by itself shortly after the last motion.
+pub struct Heartbeat {
+    beat: rune::Live<f32>,
+    high: bool,
+    at: Option<std::time::Instant>,
+}
+
+impl Default for Heartbeat {
+    fn default() -> Heartbeat { Heartbeat { beat: rune::Live::new(0.0), high: false, at: None } }
+}
+
+impl Heartbeat {
+    /// How often a moving app retargets the spring, and the spring it rides: it is still far
+    /// from rest when the next target lands, and settles in a few frames after the last.
+    const BEAT: std::time::Duration = std::time::Duration::from_millis(120);
+    const SPRING: rune::Spring = rune::Spring::new(0.35, 0.0);
+
+    fn view(&self) -> El {
+        el().key("vsync-heartbeat").w(1.0).h(1.0).absolute(0.0, 0.0)
+            .fill(rune::Color::TRANSPARENT).live_opacity(self.beat.smooth(Self::SPRING)).transition(rune::Transition::none())
+    }
 }
 
 impl App {
-    /// Keep (or drop) the vsync heartbeat for an app-stepped motion. Returns whether the view
-    /// must re-run to bind a new one or unmount it.
-    pub fn keep_vsync(&mut self, moving: bool) -> bool {
-        const SPAN: std::time::Duration = std::time::Duration::from_millis(600);
+    /// Keep the vsync heartbeat going while an app-stepped motion runs.
+    pub fn keep_vsync(&mut self, moving: bool) {
+        if !moving { return; }
         let now = std::time::Instant::now();
-        match &self.heartbeat {
-            // Renewed well before it runs out, so no frame between two tracks goes undrawn.
-            Some((_, at, _)) if moving && now.duration_since(*at) < SPAN / 2 => false,
-            Some((_, at, _)) if !moving && now.duration_since(*at) < SPAN => false,
-            _ if moving => {
-                let generation = self.heartbeat.as_ref().map_or(0, |h| h.2 + 1);
-                self.heartbeat = Some((rune::Tween::linear(0.0, 1.0, SPAN), now, generation));
-                true
-            }
-            Some(_) => { self.heartbeat = None; true }
-            None => false,
-        }
+        let beat = &mut self.heartbeat;
+        if beat.at.is_some_and(|at| now.duration_since(at) < Heartbeat::BEAT) { return; }
+        beat.high = !beat.high;
+        beat.at = Some(now);
+        beat.beat.set(if beat.high { 1.0 } else { 0.0 });
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    #[test]
+    fn the_heartbeat_retargets_only_while_moving_and_at_most_once_a_beat() {
+        let mut app = App::new();
+        let rest = app.heartbeat.beat.get();
+        app.keep_vsync(false);
+        assert_eq!(app.heartbeat.beat.get(), rest, "at rest it stays at rest");
+        app.keep_vsync(true);
+        let first = app.heartbeat.beat.get();
+        assert_ne!(first, rest);
+        app.keep_vsync(true);
+        assert_eq!(app.heartbeat.beat.get(), first, "one target per beat");
+        app.heartbeat.at = Some(std::time::Instant::now() - Heartbeat::BEAT);
+        app.keep_vsync(true);
+        assert_eq!(app.heartbeat.beat.get(), rest, "the next beat swings back");
     }
 }

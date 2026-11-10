@@ -39,9 +39,48 @@ use serde_json::{Value, json};
 const OLDER_PAGE_TARGET_BYTES: usize = 160 * 1024;
 const HEAD_PAGE: u32 = 80;
 
+/// How often a streaming reply's new text re-runs the views.
+///
+/// A provider sends text as fast as it writes it, a delta every few milliseconds from a fast
+/// model, and each one applied its own commit: a commit a frame for as long as the reply ran.
+/// The text is applied as it arrives; the views show it at most `StreamPace::RATE` times a
+/// second (and at once with anything else that re-runs them).
+#[derive(Default)]
+pub struct StreamPace {
+    /// Text arrived that no view run has shown yet.
+    pub pending: bool,
+    shown: Option<std::time::Instant>,
+}
+
+impl StreamPace {
+    /// Thirty view runs a second: a new batch of words every 33 ms.
+    const INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+    /// Whether pending text is due a view run now, else how long until it is.
+    pub fn due(&self, now: std::time::Instant) -> (bool, Option<std::time::Duration>) {
+        if !self.pending { return (false, None); }
+        match self.shown.map(|shown| now.saturating_duration_since(shown)) {
+            Some(since) if since < Self::INTERVAL => (false, Some(Self::INTERVAL - since)),
+            _ => (true, None),
+        }
+    }
+
+    /// The views ran: whatever text was pending is on screen.
+    pub fn ran(&mut self, now: std::time::Instant) {
+        if std::mem::take(&mut self.pending) { self.shown = Some(now); }
+    }
+}
+
 #[derive(Default)]
 pub struct Session {
+    /// Each message's revision: bumped whenever anything about it changes. Transcript rows
+    /// are cached by it (`rune::memo`).
     pub message_versions: std::collections::HashMap<String, u64>,
+    /// Bumped whenever the transcript's row list may have changed (a message arrived or
+    /// changed; not a reply's text growing). With the message count it keys `rows`.
+    pub structure: u64,
+    /// The transcript's row list as last computed (`Session::row_items`).
+    pub rows: std::cell::RefCell<Option<(timeline::RowsKey, std::rc::Rc<Vec<timeline::RowItem>>)>>,
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
     /// The wheel or trackpad glide's target and when it was set (`follow::wheel_base`).
     pub wheel_target: Option<(f32, std::time::Instant)>,
@@ -77,9 +116,12 @@ pub struct Session {
 
 impl Session {
     fn note_message(&mut self, message: &HistoryMessage) {
-        let changed = self.messages.iter().find(|m| m.id == message.id)
-            .is_none_or(|old| old.text != message.text || old.status != message.status || old.kind != message.kind);
-        if changed { *self.message_versions.entry(message.id.clone()).or_default() += 1; }
+        // Any difference counts: a tool row draws its title, detail, todos and children too.
+        let changed = self.messages.iter().find(|m| m.id == message.id).is_none_or(|old| old != message);
+        if changed {
+            *self.message_versions.entry(message.id.clone()).or_default() += 1;
+            self.structure += 1;
+        }
     }
 }
 
@@ -313,8 +355,13 @@ impl App {
                 let session = self.sessions.entry(session_id).or_default();
                 *session.message_versions.entry(message_id.clone()).or_default() += 1;
                 if let Some(message) = session.messages.iter_mut().find(|m| m.id == message_id) {
+                    // A reply or a thought growing keeps the row list as it is; anything else
+                    // (tool output, or text short enough to still decide its row) may not.
+                    let prose = matches!(message.kind, HistoryMessageKind::Assistant | HistoryMessageKind::Reasoning) && message.text.len() >= 32;
+                    if !prose { session.structure += 1; }
                     message.text.push_str(&text);
                 } else {
+                    session.structure += 1;
                     let kind = match serde_json::to_value(&kind).ok().as_ref().and_then(Value::as_str) {
                         Some("Thinking") | Some("Reasoning") => HistoryMessageKind::Reasoning,
                         _ => HistoryMessageKind::Assistant,
@@ -395,5 +442,79 @@ mod cache_tests {
         let mut other = message; other.id = "b".into();
         session.note_message(&other);
         assert_eq!(session.message_versions["a"], version + 1);
+    }
+
+    fn tool(id: &str, status: &str, detail: &str) -> HistoryMessage {
+        serde_json::from_value(json!({"id": id, "role": "Assistant", "kind": "Tool", "tool": "bash", "title": "Bash", "status": status, "detail": detail})).unwrap()
+    }
+
+    #[test]
+    fn any_change_to_a_message_bumps_its_revision() {
+        let mut app = App::new();
+        let update = |app: &mut App, message: HistoryMessage| app.apply_agent(AgentServerMessage::MessageUpdated { session_id: "s".into(), message, parent_message_id: None });
+        update(&mut app, tool("t", "running", ""));
+        let first = app.sessions["s"].message_versions["t"];
+        // A tool row draws its detail too: a change there alone is a new revision.
+        update(&mut app, tool("t", "running", "line one"));
+        assert_eq!(app.sessions["s"].message_versions["t"], first + 1);
+        update(&mut app, tool("t", "running", "line one"));
+        assert_eq!(app.sessions["s"].message_versions["t"], first + 1);
+    }
+
+    #[test]
+    fn a_growing_reply_keeps_the_row_list_and_a_new_row_recomputes_it() {
+        let mut app = App::new();
+        let delta = |app: &mut App, text: &str| app.apply_agent(AgentServerMessage::ContentDelta {
+            session_id: "s".into(), message_id: "a".into(), parent_message_id: None, kind: neoism_protocol::agent::ContentKind::Text, text: text.into(),
+        });
+        delta(&mut app, "The scheduler presents on the display clock. ");
+        let key = |app: &App| { let s = &app.sessions["s"]; (s.structure, s.messages.len(), usize::MAX, false) };
+        let rows = app.sessions["s"].row_items(key(&app));
+        assert_eq!(*rows, vec![timeline::RowItem::Message(0)]);
+        // More text for the same reply: same key, the very same list.
+        delta(&mut app, "It never busy-waits.");
+        assert!(std::rc::Rc::ptr_eq(&rows, &app.sessions["s"].row_items(key(&app))));
+        // A tool call arrives: a new key and a new list.
+        app.apply_agent(AgentServerMessage::MessageUpdated { session_id: "s".into(), message: tool("t", "running", ""), parent_message_id: None });
+        let next = app.sessions["s"].row_items((key(&app).0, 2, 0, false));
+        assert_eq!(*next, vec![timeline::RowItem::Message(0), timeline::RowItem::Message(1)]);
+        // Its status changing may fold or unfold rows: the key moves again.
+        let structure = app.sessions["s"].structure;
+        app.apply_agent(AgentServerMessage::MessageUpdated { session_id: "s".into(), message: tool("t", "completed", ""), parent_message_id: None });
+        assert!(app.sessions["s"].structure > structure);
+    }
+
+    #[test]
+    fn streamed_text_re_runs_the_views_at_most_thirty_times_a_second() {
+        let mut pace = StreamPace::default();
+        let start = std::time::Instant::now();
+        assert_eq!(pace.due(start), (false, None), "nothing arrived");
+        pace.pending = true;
+        assert_eq!(pace.due(start), (true, None), "the first text shows at once");
+        pace.ran(start);
+        // More text right behind it waits out the interval, then shows.
+        pace.pending = true;
+        let soon = start + std::time::Duration::from_millis(10);
+        assert_eq!(pace.due(soon), (false, Some(std::time::Duration::from_millis(23))));
+        assert_eq!(pace.due(start + StreamPace::INTERVAL), (true, None));
+        // Anything else that runs the views shows the text with it.
+        pace.ran(soon);
+        assert_eq!(pace.due(soon), (false, None));
+    }
+
+    #[test]
+    fn deltas_wait_for_the_stream_pace_and_other_events_do_not() {
+        let mut app = App::new();
+        let inbox: crate::daemon::Inbox = Default::default();
+        app.inbox = Some(inbox.clone());
+        let delta = || crate::daemon::Inbound::Agent(Box::new(AgentServerMessage::ContentDelta {
+            session_id: "s".into(), message_id: "a".into(), parent_message_id: None, kind: neoism_protocol::agent::ContentKind::Text, text: "word ".into(),
+        }));
+        inbox.lock().unwrap().push_back(delta());
+        assert!(!app.drain_current(), "text alone does not re-run the views by itself");
+        assert!(app.stream_pace.pending);
+        assert_eq!(app.sessions["s"].messages[0].text, "word ", "but it is applied at once");
+        inbox.lock().unwrap().extend([delta(), crate::daemon::Inbound::Agent(Box::new(AgentServerMessage::SessionIdle { session_id: "s".into() }))]);
+        assert!(app.drain_current(), "any other event re-runs them now");
     }
 }

@@ -32,3 +32,29 @@ pub fn rate() -> Option<u32> {
     let median = gaps[gaps.len() / 2].as_secs_f64();
     Some((1.0 / median).round() as u32)
 }
+
+/// The last poll: when it started, how long it ran and whether it re-ran the views. Read by
+/// the frame trace (`NEOISM_RUNE_FRAME_TRACE=1`) to time the UI thread's share of a frame.
+static POLL: Mutex<Option<(Instant, Duration, bool)>> = Mutex::new(None);
+
+pub fn polled(started: Instant, rerun: bool) {
+    *POLL.lock().unwrap() = Some((started, started.elapsed(), rerun));
+}
+
+/// (poll µs, poll start to `encoded` µs, the poll re-ran the views) for the frame encoded at
+/// `encoded`; zeros when no poll ran since the frame before.
+pub fn last_poll(encoded: Instant) -> (u128, u128, bool) {
+    match POLL.lock().unwrap().take() {
+        Some((started, took, rerun)) => (took.as_micros(), encoded.saturating_duration_since(started).as_micros(), rerun),
+        None => (0, 0, false),
+    }
+}
+
+/// `at` on CLOCK_MONOTONIC in microseconds, the clock compositor presentation times use.
+pub fn monotonic_us(at: Instant) -> i128 {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `now` is a valid timespec for the call to fill.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    let now_us = now.tv_sec as i128 * 1_000_000 + now.tv_nsec as i128 / 1000;
+    now_us - at.elapsed().as_micros() as i128
+}

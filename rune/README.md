@@ -202,6 +202,20 @@ Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.
 - A head refresh of an already loaded transcript applies only the rows that changed.
 - Animations and scroll run on Rune's render thread; app-side work must not be on the per-frame path.
 - Measure missed vblanks from presentation timestamps (Hyprland reports `sequence=0`).
+- A frame that re-runs the views (a commit) costs several times one that does not, so nothing
+  that moves may need one. Ambient motion rides live values set from `poll`: the caret blink
+  (`Cursor::blink`), the tool spinner (`tools::Spinner`), the activity line, the orbs (one
+  `rune::Pixels` picture each) and the vsync heartbeat (`ui::chrome::Heartbeat`). `poll`
+  returns true only when the views would draw something different.
+- A layout handler on anything inside a scroll view fires on every frame of the scroll: it
+  says `Tx::live_only` unless it changed something a view reads (the transcript's width).
+- Rune keeps about five viewports of transcript rows mounted and builds each on every commit.
+  Every row kind is a `rune::memo` keyed by what it draws (`Session::message_versions`,
+  `ToolState::epoch`), and the row list itself is cached (`Session::row_items`): folding tool
+  runs parses their diffs. A memo is only reused whole when nothing in it holds a live
+  binding, which is why an orb is a picture and not a grid of live-coloured cells.
+- A streaming reply's text is applied as it arrives and shown at most thirty times a second
+  (`agent::StreamPace`), however fast the model writes.
 
 ## Running
 
@@ -251,6 +265,23 @@ python3 rune/scripts/check-trace.py /tmp/neoism-rune-verify/native-editor.jsonl 
 python3 rune/scripts/analyze-presentations.py /tmp/neoism-rune-verify/native-editor.wayland.log \
   --trim-seconds 2 --end-seconds 4.4
 ```
+
+Frame pacing against the real daemon, without taking the keyboard or pointer: the app runs a
+scripted workload on itself (`NEOISM_RUNE_DRIVE`, `app/src/drive.rs`) in a window on a headless
+Hyprland output, and the script reports UI-thread work per frame, view re-runs and missed
+refreshes for each marked span:
+
+```sh
+python3 rune/scripts/check-live-pacing.py --session <conversation id> \
+  --drive "ready;wait:2;mark:wheel;wheel:30:3;wheel:-30:3;mark:pad;touch:700:2;mark:end;quit"
+# A long agent run (every tool row live) with a fast reply streaming over it:
+python3 rune/scripts/check-live-pacing.py --session <conversation id> \
+  --drive "ready;wait:2;live;wait:1;mark:stream;stream:/path/to/reply.md:10;mark:end;quit"
+```
+
+`NEOISM_RUNE_FRAME_TRACE=1` prints each frame's `work_us` (poll start to encode end) and whether
+it re-ran the views; `NEOISM_RUNE_TRACE_POLL=1` names what re-ran them; `RUNE_COMMIT_BUDGET_MS=N`
+prints Rune's own breakdown of commits over `N` ms.
 
 The native checker requires this machine's Hyprland Lua dispatch API, `wtype`, and `/dev/uinput` access for
 wheel input. It stops sending input if focus changes. `--natural` exercises normal redraw scheduling;

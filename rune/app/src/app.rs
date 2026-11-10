@@ -61,11 +61,9 @@ pub struct App {
     /// The next commit lands every track (`Tx::settle`): a conversation's first page opens at
     /// its end instead of growing its rows in and gliding down to them.
     pub settle_pending: bool,
-    /// While an app-stepped motion runs (a wheel glide, a trackpad coast, a long jump), a
-    /// render-time track on an invisible element keeps Rune drawing every vblank, so `poll`
-    /// steps the motion once a frame. Without one, Linux has no display link and a poll wake
-    /// waits a timer frame (16.7 ms): glides beat against 144 Hz and drop frames.
-    pub heartbeat: Option<(rune::Tween<f32>, std::time::Instant, u64)>,
+    /// Keeps Rune drawing every vblank while the app steps a motion itself (a wheel glide, a
+    /// trackpad coast, the cursor trail), so `poll` steps it once a frame.
+    pub heartbeat: crate::ui::chrome::Heartbeat,
     /// The question-rail tick under the pointer: (conversation, tick).
     pub question_hover: Option<(String, usize)>,
     /// The status line's mode pill transition (scramble and colour cross-fade).
@@ -164,6 +162,10 @@ pub struct App {
     pub server: crate::servers::flow::ServerState,
     /// The palette's and finder's list slides, mirrored for the window cursor.
     pub list_residual: crate::ui::rows::Residual,
+    /// When a streaming reply's text last re-ran the views (`agent::StreamPace`).
+    pub stream_pace: crate::agent::StreamPace,
+    /// A scripted workload for frame-pacing checks (`NEOISM_RUNE_DRIVE`, `drive.rs`).
+    pub drive: Option<crate::drive::Drive>,
     pub daemon: Option<Daemon>,
     pub inbox: Option<Inbox>,
     pub images: Option<ImageCache>,
@@ -216,7 +218,9 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_default();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: None, question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            stream_pace: Default::default(),
+            drive: crate::drive::Drive::from_env(),
             daemon: None,
             inbox: None,
             images: None,
@@ -304,9 +308,15 @@ impl App {
     pub fn drain_current(&mut self) -> bool {
         let Some(inbox) = &self.inbox else { return false };
         let events: Vec<Inbound> = inbox.lock().unwrap().drain(..).collect();
-        let changed = !events.is_empty();
+        let mut changed = false;
         let owner = self.workspace_id.clone();
         for event in events {
+            // A reply's text is applied now and shown on the stream's own pace (`StreamPace`).
+            if matches!(&event, Inbound::Agent(message) if matches!(**message, neoism_protocol::agent::AgentServerMessage::ContentDelta { .. })) {
+                self.stream_pace.pending = true;
+            } else {
+                changed = true;
+            }
             self.apply(event);
             // Close acknowledgement may dispose this workspace and select its neighbour.
             // The remaining old-socket events must never be applied to that neighbour.

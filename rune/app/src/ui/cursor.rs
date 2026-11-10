@@ -199,11 +199,14 @@ pub struct Cursor {
     pub clip: Option<[f32; 4]>,
     epoch: Instant,
     pub visible: bool,
+    /// The blink, as the block's live opacity: a half period repaints the block without
+    /// re-running the views.
+    pub blink: rune::Live<f32>,
 }
 
 impl Default for Cursor {
     fn default() -> Cursor {
-        Cursor { caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, move_clip: None, clip: None, epoch: Instant::now(), visible: false }
+        Cursor { caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, move_clip: None, clip: None, epoch: Instant::now(), visible: false, blink: rune::Live::new(1.0) }
     }
 }
 
@@ -246,6 +249,7 @@ impl Cursor {
         }
         let moving = self.trail.tick(now);
         self.visible = self.trail.blink_visible(now, self.epoch);
+        self.blink.set(if self.visible { 1.0 } else { 0.0 });
         Some(if moving { Duration::ZERO } else { self.trail.next_blink(now, self.epoch) })
     }
 }

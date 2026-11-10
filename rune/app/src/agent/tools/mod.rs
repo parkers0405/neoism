@@ -43,22 +43,62 @@ pub struct ToolState {
     selected_child: HashMap<String, String>,
     /// Assistant text width, from the latest tool row layout.
     text_width: f32,
-    /// Frame clock (seconds) for the running spinner.
+    /// Bumped whenever the expansion, the selected children or the measured width change:
+    /// with a row's messages, everything a cached tool row was built from.
+    epoch: u64,
+    /// Frame clock (seconds), for the composer chips and the mode pill.
     pub clock: f64,
+    pub spinner: Spinner,
     pub icons: Icons,
+}
+
+/// The running spinner: four squares trailing each other round a square orbit, eight steps a
+/// lap. Their positions are live offsets every running row binds, so `poll` steps them and no
+/// view re-runs. (Re-running the views for it cost a whole commit on every frame of every
+/// tool call.)
+pub struct Spinner {
+    squares: [rune::Live<[f32; 2]>; 4],
+}
+
+impl Default for Spinner {
+    fn default() -> Spinner { Spinner { squares: std::array::from_fn(|_| rune::Live::new([0.0, 0.0])) } }
+}
+
+impl Spinner {
+    /// Laps per second.
+    const SPEED: f32 = 1.35;
+
+    /// Place the squares for `clock` (seconds) at the UI `scale`.
+    pub fn tick(&self, clock: f64, scale: f32) {
+        let step = (clock as f32 * Self::SPEED * 8.0).floor();
+        for (trail, square) in self.squares.iter().enumerate() {
+            let (dx, dy) = card::orbit((step - trail as f32) / 8.0, 3.0 * scale);
+            square.set([dx, dy]);
+        }
+    }
+
+    /// The squares, brightest first, with their opacities.
+    fn squares(&self) -> impl Iterator<Item = (&rune::Live<[f32; 2]>, f32)> {
+        self.squares.iter().zip([1.0, 0.65, 0.4, 0.2])
+    }
 }
 
 impl ToolState {
     pub fn expanded(&self, id: &str) -> bool { self.expanded.contains(id) }
 
+    /// What cached tool rows were built from, besides their messages.
+    pub fn epoch(&self) -> u64 { self.epoch }
+
     /// Open a row (or `"{id}:{n}"` diff section) without a press, e.g. for headless scenes.
-    pub fn expand(&mut self, id: &str) { self.expanded.insert(id.to_owned()); }
+    pub fn expand(&mut self, id: &str) { self.expanded.insert(id.to_owned()); self.epoch += 1; }
 
     fn toggle(&mut self, id: &str) {
         if !self.expanded.remove(id) { self.expanded.insert(id.to_owned()); }
+        self.epoch += 1;
     }
 
     fn toggle_child(&mut self, group: &str, child: &str) {
+        self.epoch += 1;
         if self.selected_child.get(group).is_some_and(|c| c == child) {
             self.selected_child.remove(group);
         } else {
@@ -118,7 +158,7 @@ pub fn row(app: &App, message: &HistoryMessage) -> El {
     col().key(format!("tool:{}", message.id)).w_full().pt(cx.pt(18.0))
         .child(el().w_full().h(height)
             .on_layout_tx(|a: &mut App, [_, _, w, _]: [f32; 4], tx: &mut Tx| {
-                if (a.tools.text_width - w).abs() > 0.5 { a.tools.text_width = w; } else { tx.live_only(); }
+                if (a.tools.text_width - w).abs() > 0.5 { a.tools.text_width = w; a.tools.epoch += 1; } else { tx.live_only(); }
             })
             .child(body.absolute(-cx.pt(TEXT_PAD_LEFT), 0.0)))
 }
@@ -149,6 +189,42 @@ fn accent(p: &Palette, status: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spinner_squares_trail_round_the_orbit_in_eight_steps() {
+        let spinner = Spinner::default();
+        let lap = 1.0 / Spinner::SPEED as f64;
+        spinner.tick(0.0, 1.0);
+        let start: Vec<[f32; 2]> = spinner.squares.iter().map(|s| s.get()).collect();
+        // The lead sits on the orbit (3 pt half-size); each square behind it is one step back.
+        assert_eq!(start[0], [-3.0, -3.0]);
+        spinner.tick(lap / 8.0 + 1e-4, 1.0);
+        let next: Vec<[f32; 2]> = spinner.squares.iter().map(|s| s.get()).collect();
+        assert_eq!(next[1], start[0]);
+        assert_eq!(next[2], start[1]);
+        // Within a step nothing moves, so nothing repaints; a lap later it is back.
+        spinner.tick(lap / 8.0 + 0.01, 1.0);
+        assert_eq!(spinner.squares[0].get(), next[0]);
+        spinner.tick(lap + 1e-4, 1.0);
+        assert_eq!(spinner.squares[0].get(), start[0]);
+        // The orbit scales with the UI.
+        spinner.tick(0.0, 2.0);
+        assert_eq!(spinner.squares[0].get(), [-6.0, -6.0]);
+    }
+
+    #[test]
+    fn tool_state_changes_bump_the_epoch_cached_rows_are_keyed_by() {
+        let mut tools = ToolState::default();
+        let epoch = tools.epoch();
+        tools.toggle("a");
+        assert!(tools.epoch() > epoch && tools.expanded("a"));
+        let epoch = tools.epoch();
+        tools.toggle_child("group", "child");
+        assert!(tools.epoch() > epoch);
+        let epoch = tools.epoch();
+        tools.expand("b");
+        assert!(tools.epoch() > epoch);
+    }
 
     #[test]
     fn titles_compact_their_arguments() {

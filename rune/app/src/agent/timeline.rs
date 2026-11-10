@@ -13,6 +13,10 @@ use rune_kit::markdown::{CodeFrame, Markdown, MarkdownStyle};
 use rune_kit::syntax::Syntax;
 
 pub const COLUMN_PAD_X: f32 = 102.0;
+/// The composer's height over the transcript's foot before its first layout reports it, and
+/// the room left under the last row at rest.
+const FOOT: f32 = 159.0;
+const REST_GAP: f32 = 41.0;
 
 /// Rune reports a wheel notch as 40 points; the original moves three text rows per notch.
 
@@ -37,16 +41,38 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     // The transcript's rows: only those in the mounted window (the viewport and up to two
     // viewports either side) are built, so a scroll frame or a streamed delta costs the rows on
     // screen, not the whole history (`virtual_rows`; heights are measured as rows mount).
-    let items = std::rc::Rc::new(row_items(messages, live_from, streaming && app.activity.is_some()));
+    let activity = streaming && app.activity.is_some();
+    let rows_key: RowsKey = (session.map_or(0, |s| s.structure), messages.len(), live_from, activity);
+    let items = session.map_or_else(Default::default, |s| s.row_items(rows_key));
     let (key_items, build_items, visible_items) = (items.clone(), items.clone(), items.clone());
     let (key_id, build_id, visible_id) = (session_id.to_owned(), session_id.to_owned(), session_id.to_owned());
-    let rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(200.0).gap(0.0)
+    // The scroll view runs on under the pinned composer: the rows end `foot` points above its
+    // bottom, level with the composer's top. At rest a breath of room follows the last row;
+    // while a turn streams the activity line's row is the last one and sits exactly where the
+    // pinned line draws, so the reply ends right above "Crafting" and never runs under it.
+    // (With a fixed 200 pt the row sat 41 pt above the pinned line: a band of nothing between
+    // the reply and "Crafting".)
+    let foot = match (app.rects.get(&format!("timeline-view:{tab_id}")), app.rects.get(&format!("composer-card:{tab_id}"))) {
+        (Some(view), Some(card)) => (view[1] + view[3] - (card[1] - 6.0)).max(0.0),
+        _ => FOOT,
+    };
+    let rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(if activity { foot } else { foot + REST_GAP }).gap(0.0)
         .growth(rune::GrowthSpec::default())
         .virtual_rows(items.len(), 120.0,
             move |a: &App, i| row_key(a, &key_id, key_items[i]).into(),
             move |a: &App, i| build_row(a, &build_id, build_items[i], tab_id))
+        // The keys only change with the row list: a commit that leaves it alone (a reply's
+        // text growing, the caret moving) doesn't ask every row for its key again.
+        .virtual_rows_version(rows_key)
         .on_visible_rows(move |a: &mut App, range: std::ops::Range<usize>| a.timeline_rows_visible(&visible_id, &visible_items, range))
-        .on_layout(move |a: &mut App, [_, _, w, _]: [f32; 4]| { if let Some(session) = a.sessions.get_mut(&width_id) { session.width = (w - 2.0 * pad).max(0.0); } })
+        // The rows move on every frame of a scroll; only a new width re-runs the views.
+        .on_layout_tx(move |a: &mut App, [_, _, w, _]: [f32; 4], tx: &mut Tx| {
+            let width = (w - 2.0 * pad).max(0.0);
+            match a.sessions.get_mut(&width_id) {
+                Some(session) if (session.width - width).abs() > 0.5 => session.width = width,
+                _ => tx.live_only(),
+            }
+        })
         // Press, hold and drag selects across the transcript; letting go copies it.
         .selection_group(true)
         // The composer keeps the keyboard through a press here: refocusing it afterwards
@@ -70,28 +96,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         .on_pointer_move_local(|a: &mut App, p: rune::PointerEvent, _: &mut Tx| {
             if a.selection.copy.dragging() { a.selection.pointer_y = Some(p.window_y); }
         })
-        .on_wheel(move |s: &mut App, e: WheelEvent, tx: &mut Tx| {
-            // Notches move three code lines; trackpads move with the original's reading gain
-            // and coast. Both glide on Rune's clock (`scroll_to_with`), retargeting mid-glide so
-            // consecutive deltas are one motion, and Rune keeps the reader's row in place as
-            // older pages prepend and estimated rows measure.
-            if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
-            let Some(session) = s.sessions.get_mut(&wheel_id) else { return false };
-            let (offset, _) = session.scroll.get();
-            // A pause in upward scrolling, or a turn down, starts a new gesture: it may load
-            // the next page.
-            let now = std::time::Instant::now();
-            if e.dy < 0.0 || session.scrolled_up_at.is_none_or(|at| now.duration_since(at) > std::time::Duration::from_millis(250)) {
-                session.older_spent = false;
-            }
-            if e.dy > 0.0 { session.scrolled_up_at = Some(now); }
-            // Heading up within a viewport of the top asks for the page above.
-            let near_top = e.dy > 0.0 && offset < session.viewport_h;
-            let mirror = session.scroll.clone();
-            let taken = crate::ui::scroll::handle(&mut s.scrollers, &format!("conversation:{wheel_id}"), &e, 3.0 * line_h, std::rc::Rc::new(move || mirror.get()), tx);
-            if near_top { s.request_older(&wheel_id); }
-            taken
-        })
+        .on_wheel(move |s: &mut App, e: WheelEvent, tx: &mut Tx| s.timeline_wheel(&wheel_id, e, line_h, tx))
         .child(rows);
     let mut pane = col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg))
         .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("agent-area:{tab_id}"), r); });
@@ -131,8 +136,24 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowItem {
     Message(usize),
-    Group(usize),
+    /// Messages `start..end` folded into one row.
+    Group(usize, usize),
     Activity,
+}
+
+/// What a session's row list was computed from: its structure revision, message count, live
+/// turn start and whether the activity line shows.
+pub type RowsKey = (u64, usize, usize, bool);
+
+impl super::Session {
+    /// The transcript's rows, computed again only when `key` changed. Folding runs reads every
+    /// tool call's diff, so on a long live turn this is not something to do per commit.
+    pub fn row_items(&self, key: RowsKey) -> std::rc::Rc<Vec<RowItem>> {
+        if let Some((cached, items)) = &*self.rows.borrow() && *cached == key { return items.clone(); }
+        let items = std::rc::Rc::new(row_items(&self.messages, key.2, key.3));
+        *self.rows.borrow_mut() = Some((key, items.clone()));
+        items
+    }
 }
 
 /// The transcript's rows in order: visible messages, runs of reads and settled edits folded
@@ -143,7 +164,7 @@ pub fn row_items(messages: &[HistoryMessage], live_from: usize, activity: bool) 
     while index < messages.len() {
         if !tools::visible(&messages[index], index, live_from) { index += 1; continue; }
         if let Some((end, _)) = tools::group_at(messages, index) {
-            items.push(RowItem::Group(index));
+            items.push(RowItem::Group(index, end));
             index = end;
             continue;
         }
@@ -158,7 +179,7 @@ fn row_key(app: &App, session_id: &str, item: RowItem) -> String {
     let messages = app.sessions.get(session_id).map(|s| s.messages.as_slice()).unwrap_or(&[]);
     match item {
         RowItem::Message(i) => messages.get(i).map_or_else(|| format!("row:{i}"), |m| format!("msg:{}", m.id)),
-        RowItem::Group(i) => messages.get(i).map_or_else(|| format!("group:{i}"), |m| format!("group:{}", m.id)),
+        RowItem::Group(i, _) => messages.get(i).map_or_else(|| format!("group:{i}"), |m| format!("group:{}", m.id)),
         RowItem::Activity => "activity".into(),
     }
 }
@@ -170,33 +191,86 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
         // Pinned above the composer, the line keeps its room here so text never runs under it.
         RowItem::Activity if app.activity_pinned => el().key("activity").w_full().h(app.activity_row_height()),
         RowItem::Activity => app.activity.as_ref().map_or_else(el, |activity| activity.view(app)),
-        RowItem::Group(start) => match tools::group_at(messages, start) {
-            Some((_, group)) => tools::row(app, &group),
+        RowItem::Group(start, end) => match messages.get(start..end) {
+            Some(members) => tool_row(app, session, tab_id, members, || match tools::group_at(messages, start) {
+                Some((_, group)) => tools::row(app, &group),
+                None => el(),
+            }),
             None => el(),
         },
         RowItem::Message(index) => {
             let Some(message) = messages.get(index) else { return el() };
             let last = index + 1 == messages.len();
-            let mut row = message_row(app, message, last && session.streaming);
-            if message.kind == HistoryMessageKind::User {
-                // Questions report where their row sits in the transcript while it is mounted;
-                // the rail reveals a row never mounted by its key instead.
-                let (sid, mid) = (session_id.to_owned(), message.id.clone());
-                // Bookkeeping only: it follows every frame of a scroll without committing.
-                row = row.on_layout_tx(move |a: &mut App, r: [f32; 4], tx: &mut Tx| {
-                    tx.live_only();
-                    let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
-                    let Some(session) = a.sessions.get_mut(&sid) else { return };
-                    let top = r[1] - view[1] + session.scroll.get().0;
-                    session.question_tops.insert(mid.clone(), top.max(0.0));
-                });
+            match message.kind {
+                HistoryMessageKind::User => user_row(app, session_id, session, message, tab_id),
+                HistoryMessageKind::Tool | HistoryMessageKind::Subtask =>
+                    tool_row(app, session, tab_id, std::slice::from_ref(message), || tools::row(app, message)),
+                _ => message_row(app, message, last && session.streaming),
             }
-            row
         }
     }
 }
 
+/// A tool call, or a folded run of them, cached until one of its messages or the tool rows'
+/// own state (expansion, the selected child, the measured width) changes. Rune keeps five
+/// viewports of rows mounted and builds each of them on every commit, so on a long live turn
+/// an uncached card was built, and its diff parsed, on every streamed word. Its spinner rides
+/// live values, so a running row needs no rebuild either.
+fn tool_row(app: &App, session: &super::Session, tab_id: u64, members: &[HistoryMessage], build: impl FnOnce() -> El) -> El {
+    let Some(first) = members.first() else { return el() };
+    let revisions: Vec<u64> = members.iter().map(|m| session.message_versions.get(&m.id).copied().unwrap_or(0)).collect();
+    let version = (revisions, app.tools.epoch(), app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits());
+    rune::memo(format!("tool:{tab_id}:{}", first.id), version, build)
+}
+
+/// A question's bubble, cached like a tool row: its text, sender, type and column width are
+/// all it is built from (its orb flows on live colours).
+fn user_row(app: &App, session_id: &str, session: &super::Session, message: &HistoryMessage, tab_id: u64) -> El {
+    let build = || {
+        let (sid, mid) = (session_id.to_owned(), message.id.clone());
+        message_row(app, message, false)
+            // Questions report where their row sits in the transcript while it is mounted; the
+            // rail reveals a row never mounted by its key instead. Bookkeeping only: it
+            // follows every frame of a scroll without committing.
+            .on_layout_tx(move |a: &mut App, r: [f32; 4], tx: &mut Tx| {
+                tx.live_only();
+                let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
+                let Some(session) = a.sessions.get_mut(&sid) else { return };
+                let top = r[1] - view[1] + session.scroll.get().0;
+                session.question_tops.insert(mid.clone(), top.max(0.0));
+            })
+    };
+    // A picture's thumbnail arrives after its row: those rows build every time.
+    if !message.attachments.is_empty() { return build(); }
+    let revision = session.message_versions.get(&message.id).copied().unwrap_or(0);
+    let version = (revision, &message.author, &app.local_name, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits());
+    // Keyed as the row is, so the question rail still finds it by `msg:<id>`.
+    rune::memo(format!("msg:{}", message.id), version, build)
+}
+
 impl App {
+    /// A wheel or trackpad delta over a conversation's transcript.
+    pub fn timeline_wheel(&mut self, session_id: &str, mut e: WheelEvent, line_h: f32, tx: &mut Tx) -> bool {
+        // GPUiX's readingScrollY applies a fixed 2x gain only to vertical trackpad input.
+        if e.precise && !e.mods.shift && e.dx.abs() <= e.dy.abs() { e.dy *= 2.0; }
+        if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
+        let Some(session) = self.sessions.get_mut(session_id) else { return false };
+        let (offset, _) = session.scroll.get();
+        // A pause in upward scrolling, or a turn down, starts a new gesture: it may load
+        // the next page.
+        let now = std::time::Instant::now();
+        if e.dy < 0.0 || session.scrolled_up_at.is_none_or(|at| now.duration_since(at) > std::time::Duration::from_millis(250)) {
+            session.older_spent = false;
+        }
+        if e.dy > 0.0 { session.scrolled_up_at = Some(now); }
+        // Heading up within a viewport of the top asks for the page above.
+        let near_top = e.dy > 0.0 && offset < session.viewport_h;
+        let mirror = session.scroll.clone();
+        let taken = crate::ui::scroll::handle(&mut self.scrollers, &format!("conversation:{session_id}"), &e, 3.0 * line_h, std::rc::Rc::new(move || mirror.get()), tx);
+        if near_top { self.request_older(session_id); }
+        taken
+    }
+
     /// The rows in view changed: load the older page when the first row shows, and light the
     /// question rail's tick for the question in view. Returns whether the view must re-run.
     fn timeline_rows_visible(&mut self, session_id: &str, items: &[RowItem], range: std::ops::Range<usize>) -> bool {

@@ -41,6 +41,8 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    /// The app clipboard: the last yank, also what `p` falls back to.
+    pub clipboard: Option<String>,
     /// The notes sidebar (the workspace's notes vault).
     pub notes: crate::tree::Tree,
     /// The open app menu (rail hamburger).
@@ -59,8 +61,6 @@ pub struct App {
     pub tree: crate::tree::Tree,
     /// The editor cursor moved: scroll it into view after its next layout.
     pub editor_follow: bool,
-    /// A `g` waiting for its second key (`gg`).
-    pub pending_g: bool,
     /// Open files by workspace-relative path.
     pub buffers: HashMap<String, crate::editor::Buffer>,
     /// The active editor's `(offset, max, viewport)`, mirrored from its scroll view.
@@ -154,6 +154,7 @@ impl App {
             wheel_target: None,
             tools: Default::default(),
             picker: None,
+            clipboard: None,
             notes: Default::default(),
             menu: None,
             settings: None,
@@ -163,7 +164,6 @@ impl App {
             decoded_previews: Default::default(),
             tree: Default::default(),
             editor_follow: false,
-            pending_g: false,
             buffers: HashMap::new(),
             editor_scroll: Default::default(),
             editor_rows: 30,
@@ -224,6 +224,13 @@ impl App {
                 self.apply_files(&message);
                 if let Some(listing) = message.get("DirListing") {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);
+                }
+                if let Some(written) = message.get("FileWritten") {
+                    self.apply_file_written(written["path"].as_str().unwrap_or_default());
+                }
+                if let Some(paths) = message["Changed"]["paths"].as_array() {
+                    let paths: Vec<String> = paths.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect();
+                    self.apply_files_changed(&paths);
                 }
                 if let Some(file) = message.get("FileContent") {
                     let path = file["path"].as_str().unwrap_or_default().to_owned();

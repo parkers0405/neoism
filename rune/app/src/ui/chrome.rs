@@ -61,8 +61,13 @@ fn cursor_quad(app: &App) -> El {
     let (x1, y1) = quad.iter().fold((f32::MIN, f32::MIN), |(x, y), p| (x.max(p[0]), y.max(p[1])));
     let (w, h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
     let points: Vec<[f32; 2]> = quad.iter().map(|p| [p[0] - x0, p[1] - y0]).collect();
-    rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent)))
-        .key("window-cursor").w(w).h(h).absolute(x0, y0)
+    let quad = rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent))).w(w).h(h);
+    // Settled on an editor cell, the block shows its character in the background colour.
+    let glyph = app.editor_cursor_glyph().filter(|_| !app.cursor.trail.animating());
+    el().key("window-cursor").w(w).h(h).absolute(x0, y0)
+        .child(quad)
+        .child_if(glyph.is_some(), || text(glyph.clone().unwrap_or_default())
+            .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0))
 }
 
 fn rail(app: &App) -> El {
@@ -133,7 +138,16 @@ fn pane_tabs(app: &App) -> El {
             .child(text(title).font(app.ty.tab()).color(fg).truncate().shrink())
             .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(format!("pane-tab:{index}"), r); })
             .on_press(move |s: &mut App| { s.active = index; s.focus = Focus::Content; });
-        if active {
+        let modified = match &tab.kind {
+            TabKind::Editor { path } => app.buffers.get(path).is_some_and(crate::editor::Buffer::dirty),
+            _ => false,
+        };
+        if modified {
+            // Unsaved: a yellow dot in a soft halo takes the close glyph's place (`buffer_tabs`).
+            item = item.child(el().w(18.0).h(18.0).center()
+                .child(el().w(12.0).h(12.0).radius(6.0).center().fill(rgb(p.yellow).alpha(0.22))
+                    .child(el().w(8.0).h(8.0).radius(4.0).fill(rgb(p.yellow)))));
+        } else if active {
             item = item.child(el().w(18.0).h(18.0).center()
                 .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
                 .on_press(move |s: &mut App| s.close_tab(index)));

@@ -21,6 +21,7 @@ pub enum Family {
     Pty,
     Files,
     Search,
+    Editor,
     Git,
     Config,
 }
@@ -33,6 +34,7 @@ impl Family {
             Family::Pty => "Pty",
             Family::Files => "Files",
             Family::Search => "Search",
+            Family::Editor => "Editor",
             Family::Git => "Git",
             Family::Config => "Config",
         }

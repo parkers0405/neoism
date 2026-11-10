@@ -394,6 +394,15 @@ impl App {
         (!ch.is_whitespace()).then(|| ch.to_string())
     }
 
+    /// Put the cursor on `line` (1-based) at its first non-blank, the view following it.
+    pub fn editor_go_to_line(&mut self, line: usize) {
+        let Some(buffer) = self.active_buffer_mut().filter(|b| b.loaded) else { return };
+        let line = line.saturating_sub(1).min(buffer.doc.lines.len().saturating_sub(1));
+        let col = vim::vim_first_non_blank(&buffer.doc.lines[line]);
+        buffer.doc.set_cursor(vim::Pos { line, col });
+        self.editor_follow = true;
+    }
+
     pub fn editor_mode(&self) -> Option<Mode> {
         self.active_buffer().filter(|b| b.loaded).map(|b| b.doc.mode)
     }

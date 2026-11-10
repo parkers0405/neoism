@@ -44,6 +44,8 @@ pub struct Picker {
     pub top: usize,
     /// Wheel distance not yet worth a whole row.
     pub wheel: f32,
+    /// The open file's line count when the palette opened over an editor (line jumps).
+    pub editor_lines: Option<usize>,
     /// The Backgrounds catalog, read when the picker opens.
     pub backgrounds: Vec<backgrounds::Background>,
     /// Directory hits for the `cd` query, newest search only.
@@ -69,6 +71,8 @@ pub enum Target {
     Server(usize),
     AddServer,
     Setting(systems::Setting),
+    /// `N`, `:N` or `$` over a code or Markdown file: jump to that line (1-based).
+    GoToLine(usize),
 }
 
 /// How a row is drawn beyond its title: Systems/Servers detail text, status dot, the current
@@ -88,6 +92,14 @@ pub struct Row {
     pub shortcut: &'static str,
     pub target: Target,
     pub look: Look,
+}
+
+/// A typed line jump: `N` or `:N` (clamped to the file) and `$` / `:$` for the last line.
+fn go_to_line(query: &str, lines: usize) -> Option<usize> {
+    let query = query.strip_prefix(':').unwrap_or(query).trim();
+    if query == "$" { return Some(lines.max(1)); }
+    let n: usize = query.parse().ok().filter(|_| query.chars().all(|c| c.is_ascii_digit()))?;
+    Some(n.clamp(1, lines.max(1)))
 }
 
 /// `nvchad_one` is "One Dark"; everything else title-cases its id.
@@ -114,7 +126,7 @@ impl Picker {
             backgrounds::catalog(&dir, crate::config::background_image().as_deref())
         } else { Vec::new() };
         if mode == Mode::Directories { query.replace_text("cd "); }
-        Picker { mode, query, selected: 0, top: 0, wheel: 0.0, backgrounds, directories: Vec::new(), directory_request: 0,
+        Picker { mode, query, selected: 0, top: 0, wheel: 0.0, editor_lines: None, backgrounds, directories: Vec::new(), directory_request: 0,
             systems: Vec::new(), servers: Vec::new(), settings: None, back: None }
     }
 
@@ -122,6 +134,10 @@ impl Picker {
     pub fn rows(&self) -> Vec<Row> {
         let query = self.query.text.trim();
         if self.mode == Mode::Commands {
+            if let Some(line) = self.editor_lines.and_then(|lines| go_to_line(query, lines)) {
+                return vec![Row { icon: Some(commands::Service::Neoism.icon()), title: format!("neoism: Go to Line {line}"),
+                    shortcut: "", target: Target::GoToLine(line), look: Look::default() }];
+            }
             if let Some(command) = crate::tabs::CloseCommand::parse(query) {
                 let title = if command.workspace { "Close Workspace" } else { "Close Tab" };
                 return vec![Row { icon: Some(commands::Service::Neoism.icon()),
@@ -190,6 +206,9 @@ impl App {
         if mode.categorized() {
             picker.systems = systems::systems();
             picker.servers = systems::servers(&self.connection);
+        }
+        if let crate::tabs::TabKind::Editor { path } = &self.active_tab().kind {
+            picker.editor_lines = self.buffers.get(path).filter(|b| b.loaded).map(|b| b.doc.lines.len());
         }
         if mode == Mode::Themes {
             picker.selected = PALETTES.iter().position(|p| std::ptr::eq(p, self.pal)).unwrap_or(0);
@@ -294,6 +313,7 @@ impl App {
                 self.desktop_only("Servers", &format!("Joining {name}"));
             }
             Target::Close(command) => self.run_close_command(command),
+            Target::GoToLine(line) => self.editor_go_to_line(line),
             Target::Command(action) => self.run_action(action, tx),
             Target::Theme(name) => self.apply_theme(name),
             Target::Directory(index) => {
@@ -429,6 +449,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_line_jumps() {
+        assert_eq!(go_to_line("12", 100), Some(12));
+        assert_eq!(go_to_line(":7", 100), Some(7));
+        assert_eq!(go_to_line("$", 100), Some(100));
+        assert_eq!(go_to_line(":$", 100), Some(100));
+        assert_eq!(go_to_line("999", 100), Some(100));
+        assert_eq!(go_to_line("0", 100), Some(1));
+        assert_eq!(go_to_line("q", 100), None);
+        assert_eq!(go_to_line("1a", 100), None);
+    }
 
     #[test]
     fn exact_close_aliases_never_choose_fuzzy_quit() {

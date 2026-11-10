@@ -135,7 +135,9 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
     let strip_key = format!("pane-tab-strip:{}:{pane_id}", app.workspace_id);
     let mirror = app.chrome_scroll.clone();
     let mirror_key = strip_key.clone();
+    let wheel_key = strip_key.clone();
     el().key(strip_key).w_full().h(TAB_ROW_H).scroll_x()
+        .on_wheel(move |a: &mut App, e: rune::WheelEvent, tx: &mut Tx| crate::ui::chrome::strip_wheel(a, &wheel_key, &e, tx))
         .on_scroll_offset(move |pos| { mirror.borrow_mut().insert(mirror_key.clone(), [pos.offset[0],pos.max[0]]); })
         .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("pane-tab-strip:{pane_id}"), r); })
         .child(tabs.child(new_tab))

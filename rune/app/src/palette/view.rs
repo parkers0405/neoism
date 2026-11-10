@@ -236,7 +236,10 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selecte
     let s = app.ty.scale();
     let look = &item.look;
     let row_h = row_height(picker.mode) * s;
+    // Hover moves the selection, which adds or drops the stripe: the row's contents land at
+    // once instead of re-pairing and sliding.
     let mut line = row().key(format!("picker-row:{index}")).w_full().h(row_h).px(10.0 * s).center_y()
+        .instant_changes()
         .radius(3.0 * s)
         // The gliding list highlight marks the selection.
         .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {

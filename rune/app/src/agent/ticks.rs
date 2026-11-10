@@ -76,6 +76,22 @@ impl Rail {
 
 /// `active_question_index`: the last question at the live edge, else the first whose row is in
 /// view, else the one above the view. `rows` are the questions' row indices in order.
+impl App {
+    /// Reaching the end lights the last question even when no row entered or left the window
+    /// on the way (short answers, questions close together). Returns whether it changed.
+    pub fn rail_follow_bottom(&mut self) -> bool {
+        let crate::tabs::TabKind::Agent { session: Some(id) } = self.active_tab().kind.clone() else { return false };
+        let Some(session) = self.sessions.get_mut(&id) else { return false };
+        let (offset, max) = session.scroll.get();
+        if max - offset > 1.0 { return false; }
+        let questions = session.messages.iter().filter(|m| m.kind == neoism_protocol::agent::HistoryMessageKind::User).count();
+        let last = questions.checked_sub(1);
+        if last.is_none() || session.rail_active == last { return false; }
+        session.rail_active = last;
+        true
+    }
+}
+
 pub fn active_index(rows: &[usize], visible: std::ops::Range<usize>, at_bottom: bool) -> Option<usize> {
     if at_bottom { return rows.len().checked_sub(1); }
     if let Some(i) = rows.iter().position(|r| visible.contains(r)) { return Some(i); }

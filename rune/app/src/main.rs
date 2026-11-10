@@ -103,6 +103,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let mode_changing = app.tick_mode_pill();
     // Wheel and trackpad motion on every scroll view, stepped on the frame clock.
     let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx);
+    let rail_bottom = app.rail_follow_bottom();
     if gliding { tx.wake_after(std::time::Duration::ZERO); }
     if mode_changing { tx.wake_after(std::time::Duration::ZERO); }
     let panes_changed = app.sync_panes();
@@ -155,7 +156,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         tx.wake_after(std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    heartbeat_changed || animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing
+    heartbeat_changed || animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

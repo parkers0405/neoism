@@ -13,6 +13,10 @@ use rune::{Color, El, Shape, Tx, WheelEvent, canvas, el, text};
 
 const TITLE_H: f32 = 54.0;
 const ROW_H: f32 = 46.0;
+/// The original picker's list scroll and cursor springs (`LIST_SCROLL_ANIMATION_LENGTH` and
+/// `CURSOR_ANIMATION_LENGTH`, 0.12 s to within 2%: ω = 4 / 0.12, a 2π/ω Rune spring).
+const LIST_SPRING: rune::Spring = rune::Spring::new(0.188, 0.0);
+const CURSOR_SPRING: rune::Spring = rune::Spring::new(0.188, 0.0);
 const RADIUS: f32 = 14.0;
 /// Geist Mono advances 0.6 em; used to wrap activity text and right-align footers.
 const ADVANCE: f32 = 0.6;
@@ -80,8 +84,17 @@ pub fn picker_card(app: &App) -> El {
     let mut card = el().key("prompt-picker").w(cw).h(height).fill(rgb(p.bg)).radius(RADIUS * s).border(s, rgb(p.border))
         .clip_rounded(RADIUS * s)
         .on_press(|_: &mut App| {})
-        .on_wheel(|a: &mut App, e: WheelEvent, _: &mut Tx| {
-            if let Some(picker) = a.composer.picker.as_mut() { picker.scroll(if e.dy < 0.0 { 1 } else { -1 }); }
+        .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
+            // Notches step a row each; trackpad distance adds up to whole rows. Either way the
+            // window slides on the list spring.
+            let Some(picker) = a.composer.picker.as_mut() else { return true };
+            let rows = if e.precise {
+                picker.wheel += e.dy;
+                let steps = (picker.wheel / (ROW_H * s)).trunc();
+                picker.wheel -= steps * ROW_H * s;
+                -steps as isize
+            } else if e.dy < 0.0 { 1 } else { -1 };
+            if rows != 0 { picker.scroll(rows); tx.animated(); }
             true
         });
 
@@ -116,29 +129,36 @@ pub fn picker_card(app: &App) -> El {
         card = card.child(query_row(app, picker, cw - 28.0 * s).absolute(14.0 * s, query_y));
     }
 
-    // Rows.
+    // Rows: a clipped viewport whose content slides by whole rows on the list spring as the
+    // window moves, and one highlight gliding between rows on the cursor spring (the original
+    // picker's `list_scroll` / `cursor_spring`, 0.12 s each). Rows near the window are built;
+    // a new query or kind starts both at rest.
     let rows = picker.rows();
     let grouped = rows.iter().any(|r| r.header && r.icon.is_some());
     let first = picker.top.min(rows.len().saturating_sub(visible));
-    for (slot, (index, row)) in rows.iter().enumerate().skip(first).take(visible).enumerate() {
-        let row_y = header_h + slot as f32 * ROW_H * s;
-        let mut item = el().key(format!("picker-row:{index}")).w(cw).h(ROW_H * s).absolute(0.0, row_y);
+    let row_h = ROW_H * s;
+    let reset = format!("{:?}:{}:{}", picker.kind, picker.query.text, picker.provider.as_deref().unwrap_or(""));
+    let mut content = el().key(format!("picker-rows:{reset}")).w(cw).h(rows.len() as f32 * row_h)
+        .absolute(0.0, 0.0).offset(0.0, -(first as f32) * row_h).offset_motion(LIST_SPRING)
+        .transition(rune::Transition::none());
+    if rows.get(picker.selected).is_some_and(|r| !r.header) {
+        content = content.child(el().key("picker-highlight").w(cw).h(row_h).absolute(0.0, 0.0)
+            .offset(0.0, picker.selected as f32 * row_h).offset_motion(CURSOR_SPRING)
+            .child(el().w(cw - 12.0 * s).h(row_h - 6.0 * s).radius(9.0 * s).fill(rgb(p.hover)).absolute(6.0 * s, 3.0 * s))
+            .child(el().w(3.0 * s).h(row_h - 18.0 * s).radius(2.0 * s).fill(rgb(p.accent)).absolute(10.0 * s, 9.0 * s)));
+    }
+    let span = first.saturating_sub(visible * 2)..(first + visible * 3).min(rows.len());
+    for (index, row) in rows.iter().enumerate().skip(span.start).take(span.len()) {
+        let mut item = el().key(format!("picker-row:{index}")).w(cw).h(row_h).absolute(0.0, index as f32 * row_h)
+            .transition(rune::Transition::none());
         if row.header {
             if !row.title.is_empty() {
                 let x = if row.icon.is_some() { 48.0 } else { 22.0 } * s;
                 item = item.child(text(row.title.clone()).font(mono(13.5 * s, true)).color(rgb(p.cyan)).truncate().w(cw - x - 22.0 * s).absolute(x, 16.0 * s));
             }
-            card = card.child(item);
+            content = content.child(item);
             continue;
         }
-        // Every row carries the fill and accent bar (clear unless selected), so its children
-        // keep their slots as the selection moves and nothing re-pairs and slides across.
-        let selected = index == picker.selected;
-        item = item
-            .child(el().key("fill").w(cw - 12.0 * s).h(ROW_H * s - 6.0 * s).radius(9.0 * s)
-                .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT }).absolute(6.0 * s, 3.0 * s))
-            .child(el().key("bar").w(3.0 * s).h(ROW_H * s - 18.0 * s).radius(2.0 * s)
-                .fill(if selected { rgb(p.accent) } else { Color::TRANSPARENT }).absolute(10.0 * s, 9.0 * s));
         if row.current {
             item = item.child(text("\u{2713}").font(mono(11.0 * s, false)).color(rgb(p.accent)).absolute(cw - 30.0 * s, 15.0 * s));
         }
@@ -163,13 +183,17 @@ pub fn picker_card(app: &App) -> El {
             item = item.child(text(row.footer.clone()).font(mono(11.0 * s, false)).color(rgb(p.muted)).absolute(footer_x, 15.0 * s));
         }
         let pick = index;
-        card = card.child(item
+        content = content.child(item
             // Only a moving pointer selects (`onMouseMove`): a row appearing under a resting
             // pointer must not steal the keyboard selection.
             .on_pointer_move(move |a: &mut App, _| {
                 if let Some(picker) = a.composer.picker.as_mut().filter(|p| p.selected != pick) { picker.selected = pick; }
             })
             .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker_row(Some(pick), tx)));
+    }
+    if !rows.is_empty() {
+        card = card.child(el().key("picker-list").w(cw).h(visible as f32 * row_h).absolute(0.0, header_h)
+            .clip_rounded(0.0).motion(rune::Spring::NONE).child(content));
     }
     if rows.is_empty() && visible > 0 {
         if picker.loading {

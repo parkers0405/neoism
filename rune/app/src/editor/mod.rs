@@ -545,19 +545,13 @@ impl App {
         let target = (top as f32 * line_h).clamp(0.0, max_offset);
         let Some(b) = self.active_buffer_mut() else { return };
         b.wheel_target = Some(target);
+        b.jump_spring = None;
         // Neovide's long-jump rule: the far part of a jump (`:1` from line 300, a goto-line)
-        // lands at once and only the last 1.25 viewports spring in, on Rune's clock from the
-        // next frame (a spring asked for in the same commit would replace the landing).
-        let reach = viewport * 1.25;
-        let far = target - offset;
-        if far.abs() > reach {
-            tx.scroll_to_instant(key, 0.0, target - reach * far.signum());
-            b.jump_spring = Some(target);
-            tx.wake_after(std::time::Duration::ZERO);
-        } else {
-            b.jump_spring = None;
-            tx.scroll_to_with(key, 0.0, target, view::SCROLL_SPRING);
-        }
+        // lands at once and only the last 1.25 viewports glide in, stepped on the frame clock
+        // (`ui/scroll.rs`) so it animates even in commits Rune would land at once.
+        let mirror = b.scroll.clone();
+        let source: crate::ui::scroll::Source = std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) });
+        self.scrollers.glide_to(&key, offset, target, viewport * 1.25, source, tx);
     }
 }
 

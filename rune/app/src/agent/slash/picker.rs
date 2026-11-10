@@ -116,6 +116,8 @@ pub struct Picker {
     pub last_provider: Option<String>,
     /// Rows that fit above the composer (`row_limit_for_space`), as the view last measured.
     pub limit: std::cell::Cell<usize>,
+    /// Trackpad distance not yet worth a whole row.
+    pub wheel: f32,
 }
 
 pub const MAX_ROWS: usize = 8;
@@ -127,7 +129,7 @@ impl Picker {
         let mut picker = Picker {
             kind, title: title.into(), placeholder: "Search".into(), query, rows: Vec::new(), filtered: Vec::new(),
             selected: 0, top: 0, loading: false, activity: None, provider: None, last_provider: None,
-            limit: std::cell::Cell::new(MAX_ROWS),
+            limit: std::cell::Cell::new(MAX_ROWS), wheel: 0.0,
         };
         picker.replace(rows);
         picker

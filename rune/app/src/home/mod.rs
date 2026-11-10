@@ -41,6 +41,19 @@ pub struct SplashState {
 }
 
 impl App {
+    /// Step every terminal's wheel glide one frame and place its scroll; true while moving.
+    pub fn step_terminal_glides(&mut self, clock: f64, tx: &mut Tx) -> bool {
+        let mut moving = false;
+        for (tab, term) in self.terminals.iter_mut() {
+            let Some(glide) = term.glide.as_mut() else { continue };
+            glide.target = glide.target.min(term.scroll.get().1);
+            let more = glide.step(clock);
+            tx.scroll_to_instant(format!("terminal-scroll:{tab}"), 0.0, glide.pos);
+            if more { moving = true; } else { term.glide = None; }
+        }
+        moving
+    }
+
     /// The Home splash is showing in the active tab (not scrolled off, not replaced by a grid).
     pub fn splash_on_screen(&self) -> bool {
         !self.splash.hidden.contains(&self.active_tab().id) && self.active_terminal().is_none_or(|t| !t.raw())
@@ -186,6 +199,7 @@ impl App {
         match term.shell.submission(&text) {
             Some(bytes) => {
                 term.wheel_target = None;
+                term.glide = None;
                 term.selected = None;
                 term.tick();
                 self.pty_input(&session_id, &bytes);
@@ -232,6 +246,7 @@ impl App {
         let Some(session_id) = term.shell.session.clone() else { return false };
         let bytes = term.shell.encode_key(&key.input());
         term.wheel_target = None;
+        term.glide = None;
         self.pty_input(&session_id, &bytes);
         !bytes.is_empty()
     }

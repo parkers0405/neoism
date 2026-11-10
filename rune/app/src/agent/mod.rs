@@ -40,6 +40,8 @@ pub struct Session {
     pub message_versions: std::collections::HashMap<String, u64>,
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
     pub wheel_target: Option<f32>,
+    /// A wheel notch's glide in flight (stepped on the frame clock).
+    pub glide: Option<crate::ui::follow::Glide>,
     pub width: f32,
     pub messages: Vec<HistoryMessage>,
     pub older_cursor: Option<String>,
@@ -111,7 +113,7 @@ impl App {
         let index = self.active;
         if !matches!(self.tabs[index].kind, TabKind::Agent { .. }) { return; }
         self.tabs[index].kind = TabKind::Agent { session: Some(session_id.to_owned()) };
-        if let Some(session) = self.sessions.get_mut(session_id) { session.wheel_target = None; }
+        if let Some(session) = self.sessions.get_mut(session_id) { session.wheel_target = None; session.glide = None; }
         self.load_session(session_id);
     }
 

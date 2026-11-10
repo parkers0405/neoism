@@ -49,6 +49,7 @@ pub fn view(app: &App) -> El {
                     if let Some(term) = a.terminals.get_mut(&tab_id) {
                         let max = term.scroll.get().1;
                         term.wheel_target = Some(max);
+                        term.glide = None;
                         tx.scroll_to_with(format!("terminal-scroll:{tab_id}"), 0.0, max, WHEEL_SPRING);
                     }
                 }))
@@ -91,7 +92,6 @@ fn history(app: &App, term: &Terminal, composer_h: f32) -> El {
         content = content.child(text(error.clone()).font(ink(app, 0.9, None)).color(rgb(p.red)).px(Cells::of(app).inset).py(12.0));
     }
     let mirror = term.scroll.clone();
-    let wheel_key = key.clone();
     let line_h = Cells::of(app).row;
     col().key(key).w_full().grow(1.0).shrink()
         .scroll(ScrollSpec { stick_bottom: true })
@@ -101,10 +101,12 @@ fn history(app: &App, term: &Terminal, composer_h: f32) -> El {
             if e.precise || e.dy == 0.0 { return false; }
             let Some(term) = a.terminals.get_mut(&tab_id) else { return false };
             let (offset, max) = term.scroll.get();
-            let base = term.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
+            // Stepped on the frame clock (`App::step_terminal_glides`): Rune lands scroll
+            // requests at once while the composer holds focus.
+            let base = term.glide.map_or(offset, |g| g.target);
             let target = (base - e.dy / NOTCH * 3.0 * line_h).clamp(0.0, max);
-            term.wheel_target = Some(target);
-            tx.scroll_to_with(wheel_key.clone(), 0.0, target, WHEEL_SPRING);
+            term.glide = Some(crate::ui::follow::Glide::retarget(term.glide, offset, target));
+            tx.wake_after(std::time::Duration::ZERO);
             tx.live_only();
             true
         })

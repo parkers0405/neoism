@@ -8,18 +8,32 @@ use crate::app::App;
 use crate::ui::theme::rgb;
 use crate::wordmark;
 use neoism_protocol::agent::{HistoryMessage, HistoryMessageKind};
-use rune::{Color, Cx, El, ScrollSpec, Spring, Tx, WheelEvent, col, el, row, text};
+use rune::{Color, Cx, El, ScrollSpec, Tx, WheelEvent, col, el, row, text};
 use rune_kit::markdown::{CodeFrame, Markdown, MarkdownStyle};
 use rune_kit::syntax::Syntax;
 
 pub const COLUMN_PAD_X: f32 = 102.0;
 
-/// The original wheel spring: critically damped, omega 16 (`timeline_scroll_policy.rs`), whose
-/// response time 2π/16 ≈ 0.39 s is a zero-bounce Rune spring of that duration.
-const WHEEL_SPRING: Spring = Spring::new(0.39, 0.0);
 /// Rune reports a wheel notch as 40 points; the original moves three text rows per notch.
 
 /// One agent tab: the wordmark home before the first prompt, then the transcript.
+impl App {
+    /// Step every chat's wheel glide one frame and place its scroll. Returns whether any is
+    /// still moving (the frame clock keeps running).
+    pub fn step_timeline_glides(&mut self, clock: f64, tx: &mut Tx) -> bool {
+        let mut moving = false;
+        for (id, session) in self.sessions.iter_mut() {
+            let Some(glide) = session.glide.as_mut() else { continue };
+            let max = session.scroll.get().1;
+            glide.target = glide.target.min(max);
+            let more = glide.step(clock);
+            tx.scroll_to_instant(format!("conversation:{id}"), 0.0, glide.pos);
+            if more { moving = true; } else { session.glide = None; }
+        }
+        moving
+    }
+}
+
 pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let p = app.pal;
     let tab_id = app.active_tab().id;
@@ -71,7 +85,6 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let wheel_id = session_id.to_owned();
     // A notch moves the same distance as in a code file (three code lines), on the same spring.
     let line_h = crate::editor::view::line_height(app);
-    let wheel_key = scroll_key.clone();
     let timeline = col().key(scroll_key).w_full().grow(1.0).shrink()
         .scroll(ScrollSpec { stick_bottom: true })
         .scroll_anchor()
@@ -87,10 +100,13 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             if e.precise || e.dy == 0.0 { return false; }
             let Some(session) = s.sessions.get_mut(&wheel_id) else { return false };
             let (offset, max) = session.scroll.get();
-            let base = session.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
+            // Rune lands scroll requests at once while the composer holds focus, so the glide
+            // is stepped here on the frame clock (`App::step_timeline_glides`), retargeting
+            // mid-flight so consecutive notches are one continuous motion.
+            let base = session.glide.map_or(offset, |g| g.target);
             let target = (base - e.dy / 40.0 * 3.0 * line_h).clamp(0.0, max);
-            session.wheel_target = Some(target);
-            tx.scroll_to_with(wheel_key.clone(), 0.0, target, WHEEL_SPRING);
+            session.glide = Some(crate::ui::follow::Glide::retarget(session.glide, offset, target));
+            tx.wake_after(std::time::Duration::ZERO);
             tx.live_only();
             true
         })

@@ -21,8 +21,6 @@ pub struct Terminal {
     pub scroll: Rc<Cell<(f32, f32)>>,
     /// Where notched wheel input is gliding the blocks to.
     pub wheel_target: Option<f32>,
-    /// A wheel notch's glide in flight (stepped on the frame clock).
-    pub glide: Option<crate::ui::follow::Glide>,
     /// When the current submission or command started (for `LONG_RUNNING`).
     pub busy_since: Option<Instant>,
     /// The block under the pointer, and the one clicked (tinted, as GPUiX selects).
@@ -86,7 +84,6 @@ impl Terminal {
             area: [0.0; 2],
             scroll: Rc::default(),
             wheel_target: None,
-            glide: None,
             busy_since: None,
             hovered: None,
             selected: None,

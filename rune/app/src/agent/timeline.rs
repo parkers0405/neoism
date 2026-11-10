@@ -76,20 +76,15 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             // consecutive deltas are one motion, and Rune keeps the reader's row in place as
             // older pages prepend and estimated rows measure.
             if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
-            if e.dy == 0.0 || (e.precise && e.dx.abs() > e.dy.abs()) { return false; }
             let Some(session) = s.sessions.get_mut(&wheel_id) else { return false };
-            let (offset, max) = session.scroll.get();
-            let now = std::time::Instant::now();
-            if e.dy > 0.0 { session.scrolled_up_at = Some(now); }
-            let delta = if e.precise { -e.dy * crate::ui::follow::TOUCHPAD_GAIN * crate::ui::follow::TRACKPAD_REACH } else { -e.dy / 40.0 * 3.0 * line_h };
-            let target = (crate::ui::follow::wheel_base(session.wheel_target, offset) + delta).clamp(0.0, max);
-            session.wheel_target = Some((target, now));
-            let spring = if e.precise { crate::ui::follow::TRACKPAD_SPRING } else { crate::ui::follow::SPRING };
-            tx.scroll_to_with(format!("conversation:{wheel_id}"), 0.0, target, spring);
+            let (offset, _) = session.scroll.get();
+            if e.dy > 0.0 { session.scrolled_up_at = Some(std::time::Instant::now()); }
             // Heading up within a viewport of the top asks for the page above.
-            if e.dy > 0.0 && target < session.viewport_h { s.request_older(&wheel_id); }
-            tx.live_only();
-            true
+            let near_top = e.dy > 0.0 && offset < session.viewport_h;
+            let mirror = session.scroll.clone();
+            let taken = crate::ui::scroll::handle(&mut s.scrollers, &format!("conversation:{wheel_id}"), &e, 3.0 * line_h, std::rc::Rc::new(move || mirror.get()), tx);
+            if near_top { s.request_older(&wheel_id); }
+            taken
         })
         .child(rows);
     let mut pane = col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg))

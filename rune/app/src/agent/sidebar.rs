@@ -173,7 +173,9 @@ impl App {
 
     /// `Alt+C`, the rail button and the splash "Agent panel" entry.
     pub fn toggle_conversations(&mut self) {
-        self.sidebar = if self.sidebar.is_some() { None } else { Some(crate::app::Sidebar::Conversations) };
+        // From the file or notes tree it switches to the agent panel; only the agent panel
+        // itself toggles closed.
+        self.sidebar = if self.sidebar == Some(crate::app::Sidebar::Conversations) { None } else { Some(crate::app::Sidebar::Conversations) };
         if self.sidebar.is_some() { self.refresh_threads(); }
     }
 }
@@ -212,7 +214,7 @@ pub fn conversations(app: &App) -> El {
         item.fill(if keyboard { rgb(p.hover) } else if open { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT })
             .hover(rgb(p.hover))
             .child(row().w_full().center_y().gap(8.0)
-                .child(icon(app, "\u{f0a1e}", 0.7, rgb(p.dim)))
+                .child(crate::ui::neoism_mark(app, app.ty.small().size, &format!("thread-mark:{}", t.session_id)))
                 .child(text("Neoism").font(app.ty.small()).color(rgb(p.dim)).grow(1.0))
                 .child(text(ago(t.updated_at)).font(app.ty.small()).color(rgb(p.muted)).mr(46.0)))
             .child(text(t.title.clone()).font(app.ty.body()).color(rgb(p.fg)).truncate().max_w(240.0))

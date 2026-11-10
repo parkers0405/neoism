@@ -47,6 +47,8 @@ pub struct App {
     pub workspace_ready: bool,
     pub workspace_closing: Option<u64>,
     pub quit_requested: bool,
+    /// The activity rail button under the pointer (its icon grows).
+    pub rail_hover: Option<&'static str>,
     /// The hovered Systems/Servers category tab (or the settings back button).
     pub palette_category_hover: Option<usize>,
     /// Window recovery writes (`session.rs`), and whether the window closed its last workspace.
@@ -165,7 +167,7 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_default();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, rail_hover: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
             daemon: None,
             inbox: None,
             images: None,

@@ -79,18 +79,34 @@ fn cursor_quad(app: &App) -> El {
     }
 }
 
+/// The rail icons' hover growth and press dip, on a quick critically damped spring.
+const RAIL_HOVER_SCALE: f32 = 1.14;
+const RAIL_PRESS_SCALE: f32 = 0.92;
+const RAIL_SPRING: rune::Spring = rune::Spring::new(0.22, 0.0);
+
 fn rail(app: &App) -> El {
     let p = app.pal;
+    // A hovered button's icon grows on a spring and dips while pressed.
+    let hovered = |key: &'static str| app.rail_hover == Some(key);
+    let track = |key: &'static str| move |a: &mut App, inside: bool, _: &mut rune::Tx| {
+        if inside { a.rail_hover = Some(key); } else if a.rail_hover == Some(key) { a.rail_hover = None; }
+    };
+    let grow = |key: &'static str, child: El| el().center().child(child)
+        .scale(if hovered(key) { RAIL_HOVER_SCALE } else { 1.0 }).scale_motion(RAIL_SPRING);
     let button = |key: &'static str, g: &'static str, active: bool, press: fn(&mut App)| {
         el().key(key).w(RAIL_W).h(51.5).center()
-            .child(icon(app, g, 2.0, if active { rgb(p.fg) } else { rgb(p.dim) }))
+            .child(grow(key, icon(app, g, 2.0, if active { rgb(p.fg) } else { rgb(p.dim) })))
             .hover(rgb(p.hover))
+            .press_scale(RAIL_PRESS_SCALE)
+            .on_hover_change(track(key))
             .on_press(press)
     };
     let servers = el().key("open-servers").w(RAIL_W).h(51.5).center()
-        .child(icon(app, glyph::SERVERS, 1.9, rgb(p.dim)))
+        .child(grow("open-servers", icon(app, glyph::SERVERS, 1.9, rgb(p.dim))))
         .child(el().w(6.0).h(6.0).radius(3.0).fill(rgb(p.green)).absolute(38.0, 13.0))
         .hover(rgb(p.hover))
+        .press_scale(RAIL_PRESS_SCALE)
+        .on_hover_change(track("open-servers"))
         // The server button opens Systems (`TopBarAction::OpenSystems`).
         .on_press(|s: &mut App| s.open_picker(crate::palette::Mode::Systems));
     col().key("activity-rail").w(RAIL_W).h_full().pt(6.5).fill(rgb(p.bg))

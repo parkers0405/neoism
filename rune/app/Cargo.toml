@@ -34,3 +34,7 @@ debug = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[patch.crates-io]
+# Wayland: an unchanged IME cursor rectangle is not committed every frame (see vendor/winit-compat/README.md).
+winit = { path = "../../vendor/winit-compat/winit-0.30.13" }

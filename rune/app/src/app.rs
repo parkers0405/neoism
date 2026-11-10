@@ -162,6 +162,11 @@ pub struct App {
     pub server: crate::servers::flow::ServerState,
     /// The palette's and finder's list slides, mirrored for the window cursor.
     pub list_residual: crate::ui::rows::Residual,
+    /// The open diagnostics popup over a status pill (`editor/diag_popup.rs`).
+    pub diag_popup: Option<crate::editor::diag_popup::DiagPopup>,
+    /// Code blocks whose Copy button was just pressed: their two labels' opacities and when
+    /// the button goes back to "Copy" (`agent::timeline`, `poll`).
+    pub copy_feedback: Vec<(rune::Live<f32>, rune::Live<f32>, std::time::Instant)>,
     /// When a streaming reply's text last re-ran the views (`agent::StreamPace`).
     pub stream_pace: crate::agent::StreamPace,
     /// A scripted workload for frame-pacing checks (`NEOISM_RUNE_DRIVE`, `drive.rs`).
@@ -219,6 +224,8 @@ impl App {
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
             workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            diag_popup: None,
+            copy_feedback: Vec::new(),
             stream_pace: Default::default(),
             drive: crate::drive::Drive::from_env(),
             daemon: None,

@@ -160,6 +160,8 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if busy { wake!("activity", std::time::Duration::ZERO); }
     // The finder searches once its query settles.
     if let Some(delay) = app.finder_tick(std::time::Instant::now()) { wake!("finder", delay); }
+    // A pressed Copy button reads "Copied" for a moment.
+    if let Some(wait) = app.copy_feedback_tick() { wake!("copied", wait); }
     // A `/piss` … `/praise` skit plays on the frame clock.
     let skit = app.tick_effect();
     if skit { wake!("skit", std::time::Duration::ZERO); }

@@ -84,7 +84,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .color(rgb(p.fg)).w_full().min_h(26.0)
         .on_edit(move |s: &mut App| { s.select_tab(tab_id); let i = s.active; &mut s.tabs[i].draft })
         .on_input_change(move |s: &mut App, _: &mut Tx| { s.select_tab(tab_id); s.composer_changed(); })
-        .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
+        .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.timeline_jump_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
         // An image on the clipboard attaches; text pastes as usual.
         .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_image(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_command(tx) { s.submit(); } });

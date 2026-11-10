@@ -209,39 +209,37 @@ pub fn view(app: &App) -> El {
                 .child(el().ml(gap).child(scramble(&m, mode, black, t, elapsed))))));
 
     // Right: pills chain leftward from the window edge; later pills sit on top.
-    // A `solid` pill (diagnostic counts) is one colour end to end with black text.
-    struct Pill<'a> { icon: (String, Option<Family>), icon_bg: u32, text: Vec<(String, u32)>, solid: bool, live: Option<&'a rune::LiveText> }
+    struct Pill<'a> { icon: (String, Option<Family>), icon_bg: u32, text: Vec<(String, u32)>, live: Option<&'a rune::LiveText> }
     let mut pills = Vec::new();
     if let Some(git) = &app.git {
         let mut parts = vec![(git.branch.clone(), p.blue)];
         if git.added > 0 { parts.push((format!(" +{}", git.added), p.green)); }
         if git.deleted > 0 { parts.push((format!(" -{}", git.deleted), p.red)); }
-        pills.push(Pill { icon: (GLYPH_BRANCH.into(), Some(super::theme::NERD)), icon_bg: p.blue, text: parts, solid: false, live: None });
+        pills.push(Pill { icon: (GLYPH_BRANCH.into(), Some(super::theme::NERD)), icon_bg: p.blue, text: parts, live: None });
     }
-    // Diagnostic counts, then the LSP pill: green attached, yellow warming, red none.
+    // The LSP pill: green attached, yellow warming, red none. The diagnostic counts are their
+    // own pills, left of the chain (below).
+    let mut counts = Vec::new();
     if let Some((lsp, errors, warns)) = crate::editor::lsp_view::status(app) {
-        if errors > 0 {
-            pills.push(Pill { icon: (GLYPH_ERROR.into(), Some(super::theme::NERD)), icon_bg: p.red, text: vec![(format!(" {errors}"), p.black)], solid: true, live: None });
-        }
-        if warns > 0 {
-            pills.push(Pill { icon: (GLYPH_WARN.into(), Some(super::theme::NERD)), icon_bg: p.yellow, text: vec![(format!(" {warns}"), p.black)], solid: true, live: None });
-        }
+        use crate::editor::lsp::Severity;
+        if errors > 0 { counts.push((Severity::Error, GLYPH_ERROR, errors, p.red)); }
+        if warns > 0 { counts.push((Severity::Warn, GLYPH_WARN, warns, p.yellow)); }
         if let Some(lsp) = lsp {
             let color = match lsp {
                 crate::editor::lsp::Status::Active => p.green,
                 crate::editor::lsp::Status::Initializing => p.yellow,
                 crate::editor::lsp::Status::Missing => p.red,
             };
-            pills.push(Pill { icon: (GLYPH_LSP.into(), Some(super::theme::NERD)), icon_bg: color, text: vec![(" LSP".into(), color)], solid: false, live: None });
+            pills.push(Pill { icon: (GLYPH_LSP.into(), Some(super::theme::NERD)), icon_bg: color, text: vec![(" LSP".into(), color)], live: None });
         }
     }
     if let Some(buffer) = app.active_buffer().filter(|b| b.loaded) {
         let label = format!(" {}/{}", buffer.doc.cursor_line + 1, buffer.doc.lines.len());
-        pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)], solid: false, live: None });
+        pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)], live: None });
     }
     if let Some(fps) = app.fps {
         // The reading is live text in a three-digit slot: a new one repaints the label only.
-        pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(fps_label(fps), p.cyan)], solid: false, live: Some(&app.fps_live) });
+        pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(fps_label(fps), p.cyan)], live: Some(&app.fps_live) });
     }
     let widths: Vec<(f32, f32)> = pills.iter().enumerate().map(|(i, pill)| {
         let icon_w = if pill.icon.1.is_some() { m.icon_w() } else { m.text_w(&pill.icon.0) };
@@ -260,10 +258,27 @@ pub fn view(app: &App) -> El {
         }
         let glyph = el().w(*icon_w).h(pill_h).center().child(thick(&m, &pill.icon.0, pill.icon.1, black));
         bar = bar
-            .child(section_right(&m, total - (x + icon_w + text_w), icon_w + text_w, rgb(if pill.solid { pill.icon_bg } else { p.surface }), [r, 0.0, 0.0, r])
+            .child(section_right(&m, total - (x + icon_w + text_w), icon_w + text_w, rgb(p.surface), [r, 0.0, 0.0, r])
                 .child(row_at(&m, icon_w + m.pad, label)))
             .child(section_right(&m, total - (x + icon_w), *icon_w, rgb(pill.icon_bg), [r, 0.0, 0.0, r]).child(glyph.absolute(0.0, 0.0)));
         x += icon_w + text_w - tail;
+    }
+    // Error and warning counts (`DiagPillSpec`): each its own rounded pill in its colour with
+    // black ink, 6 pt apart, left of the chain rather than links in it (a red link ran on
+    // under the next pill's cap). A press opens the list of them over the pill.
+    if !counts.is_empty() {
+        let inner = m.pad * 0.9;
+        let mut group = row().h(pill_h).gap(6.0 * s).pin(None, Some(m.pill_y), Some(total + m.pad), None);
+        for (severity, glyph, count, color) in counts {
+            let open = app.diag_popup.is_some_and(|popup| popup.severity == severity);
+            group = group.child(row().key(crate::editor::diag_popup::pill_key(severity)).h(pill_h).px(inner).radius(r).center_y()
+                .fill(rgb(color)).hover(black.alpha(if open { 0.0 } else { 0.12 }))
+                .child(thick(&m, glyph, Some(super::theme::NERD), black))
+                .child(el().ml(m.text_w(" ")).child(thick(&m, &count.to_string(), None, black)))
+                .on_layout(move |a: &mut App, rect: [f32; 4]| { a.rects.insert(crate::editor::diag_popup::pill_key(severity).into(), rect); })
+                .on_press(move |a: &mut App| a.toggle_diag_popup(severity)));
+        }
+        bar = bar.child(group);
     }
     bar
 }

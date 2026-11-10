@@ -129,15 +129,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             let id = session_id.to_owned();
             el().key("jump-latest").radius(4.0 * s).fill(rgb(p.surface))
                 .child(crate::home::action_button(app, format!("agent-jump-latest:{tab_id}"), crate::ui::feather::Icon::Down, false, None)
-                    .on_press_tx(move |a: &mut App, tx: &mut Tx| {
-                        let key = format!("conversation:{id}");
-                        // Whatever glide or coast was running ends; Rune glides to the end and
-                        // the view follows it again once it lands.
-                        a.scrollers.stop(&key);
-                        // The glide cuts to two viewports from the end: rows leave unreported.
-                        if let Some(session) = a.sessions.get_mut(&id) { session.forget_rows(); }
-                        tx.scroll_to_bottom(key);
-                    }))
+                    .on_press_tx(move |a: &mut App, tx: &mut Tx| a.jump_to_latest(&id, tx)))
                 .pin(None, None, Some((pad - 16.0).max(12.0)), Some(area[1] + area[3] - card[1] + 10.0 * s))
         }
         _ => el(),
@@ -295,6 +287,27 @@ fn user_row(app: &App, session_id: &str, session: &super::Session, message: &His
 }
 
 impl App {
+    /// Glide a conversation back to its newest message (the jump-to-latest button, Ctrl+D).
+    pub fn jump_to_latest(&mut self, session_id: &str, tx: &mut Tx) {
+        let key = format!("conversation:{session_id}");
+        // Whatever glide or coast was running ends; Rune glides to the end and the view
+        // follows it again once it lands.
+        self.scrollers.stop(&key);
+        // The glide cuts to two viewports from the end: rows leave unreported.
+        if let Some(session) = self.sessions.get_mut(session_id) { session.forget_rows(); }
+        tx.scroll_to_bottom(key);
+    }
+
+    /// Ctrl+D in a conversation is the jump-to-latest button. Returns whether the key was taken.
+    pub fn timeline_jump_key(&mut self, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
+        if crate::keys::ctrl_letter(event) != Some('d') || event.mods.shift || event.mods.alt { return false; }
+        let crate::tabs::TabKind::Agent { session: Some(id) } = self.active_tab().kind.clone() else { return false };
+        // The composer is a text field: its commits land at once unless told otherwise.
+        tx.animated();
+        self.jump_to_latest(&id, tx);
+        true
+    }
+
     /// A wheel or trackpad delta over a conversation's transcript.
     pub fn timeline_wheel(&mut self, session_id: &str, mut e: WheelEvent, line_h: f32, tx: &mut Tx) -> bool {
         // GPUiX's readingScrollY applies a fixed 2x gain only to vertical trackpad input.
@@ -460,10 +473,9 @@ fn code_frame(app: &App) -> impl Fn(El, &CodeFrame<'_>) -> El + 'static {
         }
         let source = frame.source.to_owned();
         col().w_full().radius(14.0).fill(rgb(p.surface).alpha(0.35)).border(1.0, rgb(p.border)).clip_rounded(14.0)
-            .child(row().w_full().h(38.0).px(22.0).center_y().justify_between().fill(rgb(p.surface).alpha(0.55))
+            .child(row().w_full().h(38.0).pl(22.0).pr(12.0).center_y().justify_between().fill(rgb(p.surface).alpha(0.55))
                 .child(text(frame.language.unwrap_or("text").to_owned()).font(ty.small()).color(rgb(p.yellow)))
-                .child(text("Copy").font(ty.small()).color(rgb(p.muted))
-                    .on_press_tx(move |_: &mut App, tx: &mut Tx| tx.copy(source.clone()))))
+                .child(copy_button(&p, ty, source)))
             .child(row().w_full().px(22.0).py(12.0).child(numbers).child(code.grow(1.0)))
     }
 }
@@ -534,6 +546,48 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             body.child_meta(app, message)
             }, &session_id, &format!("msg:{}", message.id), tab_id))
         }
+    }
+}
+
+/// How long a pressed Copy button reads "Copied".
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1400);
+
+/// A code block's Copy button: a press puts `source` on the clipboard and the label
+/// cross-fades to a green "Copied" for a moment. The two labels ride live opacities, so the
+/// feedback repaints the button alone (the block sits inside its reply's cached row).
+fn copy_button(p: &crate::ui::theme::Palette, ty: crate::ui::theme::Type, source: String) -> El {
+    let fade = rune::Spring::new(0.18, 0.0);
+    let (idle, done) = (rune::Live::new(1.0_f32), rune::Live::new(0.0_f32));
+    let label = |word: &str, color: Color, shown: &rune::Live<f32>| text(word.to_owned()).font(ty.small()).color(color)
+        .live_opacity(shown.smooth(fade));
+    let (pressed_idle, pressed_done) = (idle.clone(), done.clone());
+    // As wide as the longer word, so nothing around it moves; both words end at its right edge.
+    row().w(ty.small().size * 0.6 * 6.0 + 20.0).h(26.0).radius(6.0).center_y().hover(rgb(p.fg).alpha(0.085))
+        .child(row().center_y().justify_end().pr(10.0).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).child(label("Copy", rgb(p.muted), &idle)))
+        .child(row().center_y().justify_end().pr(10.0).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).child(label("Copied", rgb(p.green), &done)))
+        .on_press_tx(move |a: &mut App, tx: &mut Tx| {
+            tx.copy(source.clone());
+            if std::env::var_os("NEOISM_RUNE_TRACE_COPY").is_some() { eprintln!("copied code block ({} bytes)", source.len()); }
+            pressed_idle.set(0.0);
+            pressed_done.set(1.0);
+            a.copy_feedback.push((pressed_idle.clone(), pressed_done.clone(), std::time::Instant::now() + COPIED_FOR));
+            // Nothing a view reads changed; `poll` puts the label back.
+            tx.live_only();
+            tx.wake_after(COPIED_FOR);
+        })
+}
+
+impl App {
+    /// Put Copy buttons whose moment is over back to "Copy". Returns when to look again.
+    pub fn copy_feedback_tick(&mut self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        self.copy_feedback.retain(|(idle, done, until)| {
+            if *until > now { return true; }
+            idle.set(1.0);
+            done.set(0.0);
+            false
+        });
+        self.copy_feedback.iter().map(|(_, _, until)| until.saturating_duration_since(now)).min()
     }
 }
 

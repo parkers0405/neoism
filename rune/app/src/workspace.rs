@@ -99,6 +99,7 @@ use std::collections::{HashMap, VecDeque};
 
 /// Each workspace owns its socket and inbox: replies cannot cross workspace boundaries.
 pub struct Entry {
+    pub id: String,
     pub title: String,
     pub state: Option<State>,
 }
@@ -285,6 +286,7 @@ impl App {
             fresh.inbox = Some(inbox);
         }
         self.workspaces.push(Entry {
+            id: fresh.workspace_id.clone(),
             title: fresh.workspace_name.clone(),
             state: Some(State::from_app(fresh)),
         });
@@ -387,6 +389,7 @@ impl App {
         }
         self.rects.clear();
         self.tab_hover = None;
+        self.workspace_hover = None;
     }
 
     pub fn drain(&mut self) -> bool {

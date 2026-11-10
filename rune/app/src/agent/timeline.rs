@@ -27,7 +27,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let Some(session_id) = session else {
         return col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg)).items_center().justify_center()
             .on_layout(move |a: &mut App, r| { a.rects.insert(format!("agent-area:{tab_id}"), r); })
-            .child(wordmark::view(app, "agent-wordmark", 470.5_f32.min((available - 32.0).max(16.0))))
+            .child(wordmark::view(app, &wordmark::host_key("agent", tab_id), 470.5_f32.min((available - 32.0).max(16.0))))
             .child(el().h(47.0))
             .child(composer(app, 845.0_f32.min((available - 24.0).max(16.0))).key("agent-composer-shell"));
     };

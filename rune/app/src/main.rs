@@ -68,7 +68,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.sync_terminals(tx);
     if app.quit_requested { tx.quit(); return true; }
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
-    let animating = app.wordmark.tick(app.visible_wordmark(), clock);
+    let visible_wordmarks = app.visible_wordmarks();
+    let animating = app.wordmark.tick(&visible_wordmarks, clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }
     // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap).
     app.tools.clock = clock;
@@ -131,6 +132,25 @@ fn main() {
                 let i = s.active;
                 s.tabs[i].draft.replace_text("/");
                 s.composer_changed();
+            }),
+            ("mcp-icons", |s| {
+                s.open_tab(tabs::TabKind::Agent { session: None });
+                s.open_mcp();
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::McpCatalog {
+                    status: serde_json::from_str(include_str!("../fixtures/mcp-catalog.json")).unwrap(), directory: None,
+                });
+            }),
+            ("mcp-timeline", |s| {
+                s.load_fixture("mcp-icons", "Server-supplied artwork", include_str!("../fixtures/mcp-timeline.json"));
+                s.sessions.get_mut("mcp-icons").unwrap().live_from = Some(0);
+            }),
+            ("tab-reorder", |s| {
+                s.workspace_name = "First".into();
+                s.open_file("first.rs", None); s.apply_opened_file("first.rs", b"let first = 1;\n");
+                s.open_tab(tabs::TabKind::Agent { session: None });
+                s.new_workspace(); s.workspace_name = "Second".into();
+                s.new_workspace(); s.workspace_name = "Third".into();
+                s.select_workspace(0);
             }),
             ("splits", |s| {
                 s.split(panes::Axis::Horizontal);

@@ -115,3 +115,46 @@ Source changes after the last completed test compilation still need a build/test
 The new regression tests and syntax checks are saved, but the additional tests were not compiled/run after the
 build pause. Full parity, durable workspace restoration, remaining terminal/keybinding coverage, longer native
 workloads and the packaging/installed-binary cutover remain outstanding. GPUiX remains the shipping reference.
+
+
+## Current user corrections (build pause lifted)
+
+- [x] Space+x closes the current Normal-mode editor buffer, respecting unsaved edits.
+- [x] Home wordmark hover animates; preserve the working agent hover and animate unfocused visible panes.
+- [x] Tab and workspace close buttons appear only while hovered, without changing tab widths.
+- [x] Holding and dragging either tab row reorders its tabs; cancellation preserves order.
+- [x] Shift+Alt+Left/Right reorders the focused tab; workspace focus (or Ctrl as in the reference) targets workspaces.
+- [x] Restore MCP-supplied icons in /mcp, its actions header, and timeline tool calls; retain status indicators and bundled/fallback marks.
+- [x] Run Rust tests, headless geometry/input checks, native window checks, and refresh the preview on space 4.
+
+The user explicitly allowed Rust builds again after these corrections were reported.
+
+
+Validation after the build pause was lifted:
+
+- `build.sh test --release --quiet`: **119 tests passed**. Reorder tests preserve workspace
+  identities/drafts and pane boundaries; MCP tests exercise supplied PNG/JPEG, bounds/fallback,
+  catalog ingestion, history and nested tool compositions.
+- `check-headless.py`: all reference scenes and input regressions passed. Updated the identifier
+  double-click coordinate after the earlier geometry fix (the old coordinate hit parentheses), and
+  checked rebinding by its opened palette instead of expecting an off-screen shortcut row.
+- `check-hover-and-close.py`: Home/agent hover, both unfocused split hovers, hover-only close buttons,
+  and clean/dirty Space+x passed. Close-button placeholders keep strip geometry unchanged.
+- `check-tabs-and-mcp.py`: actual pointer drag and keyboard reorder passed for both strips; outside
+  drops preserve order. A custom orange/teal server image is checked by pixels in the picker,
+  actions header and timeline. This proves server-supplied artwork, independent of bundled brands.
+- `check-native-tabs.py`: native Hyprland window, real mouse-button/motion input and keyboard chords,
+  per-frame element trace. Both tab strips reorder, X disappears after hover, and Home/agent letters
+  grow on hover. Hyprland cursor warps alone do not deliver physical motion; the harness now emits
+  motion through its temporary uinput device. Screenshot: `/tmp/neoism-rune-corrections/native-tabs.png`.
+- Native `editor-stress` wheel run: normal redraw scheduling, 20,000 wrapped source lines in a split.
+  Cursor clipping passed across **1,202 frames**, scroll distance **2,419.64 pt**. The active interval
+  from 1.8–4.1 seconds had **276 presentations in 2.292 s**, **zero missed vblanks**, p95 **8.378 ms**
+  at 119.99 Hz. This remains a short sample, not proof against every intermittent stall.
+- Updated preview launched on **Hyprland workspace 4**, PID **3272412**, binary
+  `/tmp/neoism-rune-preview/neoism-rune-corrections`. The older preview has been left intact because
+  it may contain user drafts. The installed frontend and packaging have not been switched.
+
+Logs: `/tmp/neoism-rune-final-tests.log`, `/tmp/neoism-rune-full-headless.log`,
+`/tmp/neoism-rune-hover-check.log`, `/tmp/neoism-rune-tabs-mcp-check.log`, and
+`/tmp/neoism-rune-native-tabs-check.log`. Native traces are under `/tmp/neoism-rune-corrections/`.

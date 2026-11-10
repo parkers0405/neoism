@@ -2,7 +2,6 @@
 //! brand marks of MCP servers that ship one (`agent_pane/icon.rs`, `mcp_icon.rs`).
 
 use rune::{Image, ImageCache};
-use serde_json::Value;
 
 #[derive(Default)]
 pub struct Icons {
@@ -37,17 +36,10 @@ impl Icons {
         .or(self.neoism.as_ref())
     }
 
-    /// A branded MCP server's mark, from the row's `mcp` presentation.
-    pub fn mcp(&self, mcp: &Value) -> Option<&Image> {
-        let names = [mcp["presentation"]["brand"].as_str(), mcp["server"].as_str(), mcp["presentation"]["serverInfo"]["name"].as_str()];
-        names.into_iter().flatten().find_map(|name| {
-            match name.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-                "firecrawl" | "firecrawl-mcp" | "mcp-firecrawl" | "firecrawl-mcp-server" => self.firecrawl.as_ref(),
-                "webflow" | "webflow-mcp" | "mcp-webflow" | "webflow-mcp-server" => self.webflow.as_ref(),
-                _ => None,
-            }
-        })
+    pub fn mcp_brand(&self, name: &str) -> Option<&Image> {
+        match name { "firecrawl" => self.firecrawl.as_ref(), "webflow" => self.webflow.as_ref(), _ => None }
     }
+
 }
 
 /// The file tree's icon and colour for a file name (`file_tree/icons.rs`).

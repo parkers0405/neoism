@@ -51,6 +51,11 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.bound_shortcut(event, tx) { return true; }
     let m = event.mods;
     let alt_only = m.alt && !m.ctrl && !m.shift && !m.logo;
+    if m.alt && m.shift && !m.logo && matches!(event.key, Key::Left | Key::Right) {
+        app.move_chrome_tab(event.key == Key::Right, m.ctrl || matches!(app.focus, Focus::Workspaces(_)));
+        tx.animated();
+        return true;
+    }
     if let Key::Escape = event.key {
         if app.composer.picker.is_some() {
             if !app.picker_back() { app.close_prompt_picker(); }

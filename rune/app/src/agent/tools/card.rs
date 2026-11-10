@@ -182,7 +182,10 @@ fn symbol(cx: &Cx, m: &HistoryMessage) -> El {
     }
     let mcp = m.mcp.is_some() || m.tool == "execute" || m.tool.starts_with("mcp__");
     let glyph = if mcp {
-        if let Some(image) = m.mcp.as_ref().and_then(|v| icons.mcp(v)) { return image_slot(image); }
+        if let Some(value) = &m.mcp {
+            return crate::agent::mcp::view(cx.app, value["server"].as_str().unwrap_or_default(), &value["presentation"], cx.pt(18.0))
+                .key(format!("mcp-tool-icon:{}", m.id)).absolute(cx.pt(20.0), cx.pt(2.0));
+        }
         "\u{f1e6}"
     } else {
         let tool = if m.tool == "tool_group" { m.title.split_once('(').map_or(m.tool.as_str(), |(t, _)| t) } else { m.tool.as_str() };

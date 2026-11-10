@@ -83,29 +83,31 @@ impl Wordmark {
 }
 
 impl Wordmark {
-    /// Advance hover easing to frame time `now`. `visible` is the key of the wordmark on screen
-    /// (`"splash-wordmark"` / `"agent-wordmark"`), or `None`. Returns true while it animates:
-    /// the caller then rebuilds the view and asks for the next frame (`tx.wake_after(ZERO)`).
-    /// Like the original (`animating: !reduced`), a visible wordmark animates every frame
-    /// (shimmer, breathing); nothing runs while none is visible.
-    pub fn tick(&mut self, visible: Option<&str>, now: f64) -> bool {
+    /// Advance the hosts actually drawn in visible panes, including unfocused splits.
+    pub fn tick(&mut self, visible: &[String], now: f64) -> bool {
         let dt = self.last_tick.map(|last| (now - last).clamp(0.0, 0.10) as f32).unwrap_or(0.0);
         self.clock = now;
-        let Some(key) = visible else {
-            self.last_tick = None;
-            return false;
-        };
+        for (key, host) in &mut self.hosts {
+            if !visible.contains(key) { host.pointer = None; host.hover = [0.0; LETTERS]; }
+        }
+        if visible.is_empty() { self.last_tick = None; return false; }
         self.last_tick = Some(now);
         let reduced = self.reduced;
-        let host = self.host(key);
         let alpha = 1.0 - (-HOVER_RATE * dt).exp();
-        for (i, hover) in host.hover.iter_mut().enumerate() {
-            let target = if host.pointer == Some(i) { 1.0 } else { 0.0 };
-            *hover = if reduced { 0.0 } else { *hover + (target - *hover) * alpha };
+        let mut animating = !reduced;
+        for key in visible {
+            let host = self.host(key);
+            for (i, hover) in host.hover.iter_mut().enumerate() {
+                let target = if host.pointer == Some(i) { 1.0 } else { 0.0 };
+                *hover = if reduced { 0.0 } else { *hover + (target - *hover) * alpha };
+            }
+            animating |= host.animation.is_active(now);
         }
-        !reduced || host.animation.is_active(now)
+        animating
     }
 }
+
+pub fn host_key(kind: &str, tab: u64) -> String { format!("{kind}-wordmark:{tab}") }
 
 fn decode(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -136,7 +138,7 @@ fn letter_rect(rect: [f32; 4], index: usize, hover: f32, seconds: f32) -> [f32; 
     [center_x - lw * 0.5, center_y - lh * 0.5, lw, lh]
 }
 
-/// The wordmark at `width` points wide. `key` is `splash-wordmark` (Home) or `agent-wordmark`.
+/// The wordmark at `width` points wide, keyed per tab through `host_key`.
 pub fn view(app: &App, key: &str, width: f32) -> El {
     let mark = &app.wordmark;
     if mark.letters.is_empty() {
@@ -213,4 +215,42 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
         );
     }
     root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn splash_and_agent_in_separate_panes_both_ease_hover() {
+        let mut app = App::new();
+        let splash = host_key("splash", app.active_tab().id);
+        app.split(crate::panes::Axis::Horizontal);
+        app.open_tab(crate::tabs::TabKind::Agent { session: None });
+        let agent = host_key("agent", app.active_tab().id);
+        let visible = app.visible_wordmarks();
+        assert!(visible.contains(&splash) && visible.contains(&agent));
+        app.wordmark.host(&splash).pointer = Some(0);
+        app.wordmark.host(&agent).pointer = Some(3);
+        app.wordmark.tick(&visible, 0.0);
+        for frame in 1..=60 { app.wordmark.tick(&visible, frame as f64 / 120.0); }
+        assert!(app.wordmark.hosts[&splash].hover[0] > 0.99);
+        assert!(app.wordmark.hosts[&agent].hover[3] > 0.99);
+        assert_eq!(app.wordmark.hosts[&agent].hover[0], 0.0);
+        app.wordmark.host(&splash).pointer = None;
+        for frame in 61..=120 { app.wordmark.tick(&visible, frame as f64 / 120.0); }
+        assert!(app.wordmark.hosts[&splash].hover[0] < 0.01);
+        assert!(app.wordmark.hosts[&agent].hover[3] > 0.99);
+    }
+
+    #[test]
+    fn hidden_wordmarks_stop_ticking_and_clear_stale_pointer_state() {
+        let mut mark = Wordmark::default();
+        let key = host_key("agent", 2);
+        mark.host(&key).pointer = Some(1);
+        mark.tick(&[key.clone()], 0.0);
+        mark.tick(&[key.clone()], 0.1);
+        assert!(!mark.tick(&[], 0.2));
+        assert!(mark.hosts[&key].pointer.is_none());
+        assert_eq!(mark.hosts[&key].hover, [0.0; LETTERS]);
+    }
 }

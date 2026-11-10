@@ -260,7 +260,7 @@ fn splash(app: &App) -> El {
     let (inset_x, inset_y) = (40.0 * s, 8.0 * s);
     let Some(g) = layout(width - 2.0 * inset_x, height - 2.0 * inset_y, app.ty.size, s) else { return area };
     let [x, y, w, _] = g.wordmark;
-    area = area.child(wordmark::view(app, &format!("splash-wordmark:{tab}"), w).absolute(inset_x + x, inset_y + y)
+    area = area.child(wordmark::view(app, &wordmark::host_key("splash", tab), w).absolute(inset_x + x, inset_y + y)
         .on_visible(move |a: &mut App, visible: bool, _: &mut Tx| {
             if visible { a.splash.hidden.remove(&tab); } else { a.splash.hidden.insert(tab); }
         }));

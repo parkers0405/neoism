@@ -126,10 +126,11 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if let Some(delay) = app.cursor.tick(target, std::time::Instant::now()) { tx.wake_after(delay); }
     let caret_changed = cursor_was != (app.cursor.visible, app.cursor.trail.quad());
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
-    let fps = ui::fps::rate();
-    let fps_changed = app.fps != Some(fps);
+    // While animating, the pill shows the presentation rate; at rest it holds the last one.
+    let fps = ui::fps::rate().or(app.fps);
+    let fps_changed = fps.is_some() && app.fps != fps;
     if fps_changed {
-        app.fps = Some(fps);
+        app.fps = fps;
         tx.wake_after(std::time::Duration::from_millis(500));
     }
     animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || gliding || rail_changed

@@ -60,6 +60,12 @@ impl Metrics {
 }
 
 /// Soft-wrapped rows of one line (an empty line still takes a row).
+/// The columns lines wrap at once the view has a width (0 before), for row-wise j/k.
+pub fn wrap_cols(app: &App, buffer: &Buffer) -> usize {
+    if buffer.view_rect.is_none() { return 0; }
+    Metrics::of(app, buffer).cols
+}
+
 fn segments(line: &str, cols: usize) -> Vec<WrapSegment> {
     let mut segments = wrap_segments(line, cols, TAB);
     if segments.is_empty() {

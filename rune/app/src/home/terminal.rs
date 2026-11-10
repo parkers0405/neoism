@@ -36,6 +36,26 @@ pub struct Terminal {
     pub filter: Option<(u64, rune::TextEdit)>,
     /// Blocks whose output is collapsed.
     pub collapsed: std::collections::HashSet<u64>,
+    /// A coding-agent TUI running in the foreground (`claude`, `codex`, `opencode`): the tab
+    /// shows its logo and name until it exits (`SessionProgram`).
+    pub program: Option<&'static str>,
+}
+
+/// The agent TUIs whose tabs take their name and logo (`model.ts`, `SessionProgram`).
+pub fn agent_program(program: &str) -> Option<&'static str> {
+    let first = program.split_whitespace().next().unwrap_or("");
+    let name = first.rsplit(['/', '\\']).next().unwrap_or("").to_ascii_lowercase();
+    match name.as_str() {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        "opencode" => Some("opencode"),
+        _ => None,
+    }
+}
+
+/// The tab title for an agent TUI.
+pub fn program_title(program: &str) -> &'static str {
+    match program { "claude" => "Claude", "codex" => "Codex", "opencode" => "OpenCode", _ => "Terminal" }
 }
 
 impl Terminal {
@@ -72,6 +92,7 @@ impl Terminal {
             more: None,
             filter: None,
             collapsed: Default::default(),
+            program: None,
         }
     }
 
@@ -79,7 +100,13 @@ impl Terminal {
     /// visible changed.
     pub fn sync(&mut self) -> bool {
         let output = self.shell.sync();
+        let was = self.program;
         let busy = self.tick();
+        // The submitted command names the program before (or without) the daemon's report.
+        if self.program.is_none() && self.shell.busy() {
+            self.program = self.shell.live.as_ref().and_then(|block| agent_program(&block.command));
+        }
+        let busy = busy || was != self.program;
         let raw = self.raw();
         if raw && (output || self.screen.is_none()) {
             self.screen = self.shell.screen();
@@ -126,8 +153,23 @@ impl Terminal {
     pub fn tick(&mut self) -> bool {
         match (self.shell.busy(), self.busy_since) {
             (true, None) => { self.busy_since = Some(Instant::now()); true }
-            (false, Some(_)) => { self.busy_since = None; true }
+            // Back at the prompt: whatever program ran has exited.
+            (false, Some(_)) => { self.busy_since = None; self.program = None; true }
             (busy, _) => busy,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_tuis_are_recognised_by_their_program() {
+        assert_eq!(agent_program("/usr/local/bin/codex"), Some("codex"));
+        assert_eq!(agent_program("claude --resume"), Some("claude"));
+        assert_eq!(agent_program("opencode"), Some("opencode"));
+        assert_eq!(agent_program("zsh"), None);
+        assert_eq!(program_title("claude"), "Claude");
     }
 }

@@ -97,8 +97,14 @@ impl App {
     /// content is built (`render_tab`).
     pub fn active_tab(&self) -> &Tab { &self.tabs[self.render_tab.get().unwrap_or(self.active)] }
 
+    /// The agent TUI a Home/Terminal tab is running, if any.
+    pub fn tab_program(&self, tab: u64) -> Option<&'static str> {
+        self.terminals.get(&tab).and_then(|t| t.program)
+    }
+
     pub fn tab_title(&self, tab: &Tab) -> String {
         match &tab.kind {
+            TabKind::Home | TabKind::Terminal if let Some(program) = self.tab_program(tab.id) => crate::home::program_title(program).into(),
             TabKind::Home => "Home".into(),
             TabKind::Terminal => "Terminal".into(),
             TabKind::Database { path } if path.is_empty() => "Database".into(),

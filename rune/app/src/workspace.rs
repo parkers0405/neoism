@@ -142,6 +142,12 @@ pub struct State {
     splash: crate::home::SplashState,
 }
 impl State {
+    /// This parked workspace as recovery data (`session.rs`).
+    pub(crate) fn capture(&self) -> crate::session::SavedWorkspace {
+        crate::session::capture_workspace(&self.workspace_name, &self.cwd, &self.tabs, self.active, &self.layout,
+            self.sidebar, App::unsaved_buffers(&self.buffers))
+    }
+
     fn from_app(app: App) -> Self {
         Self {
             workspace_id: app.workspace_id,
@@ -378,6 +384,10 @@ impl App {
 
     fn finish_workspace_close(&mut self) {
         if self.workspaces.len() == 1 {
+            // Closing the last workspace on purpose leaves nothing to reopen next time.
+            if crate::session::enabled() { let _ = std::fs::remove_file(crate::session::path()); }
+            self.session_writer = Default::default();
+            self.session_closed = true;
             self.quit_requested = true;
             return;
         }

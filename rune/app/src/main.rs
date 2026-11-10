@@ -3,6 +3,7 @@
 
 mod agent;
 mod app;
+mod session;
 mod config;
 mod daemon;
 mod database;
@@ -47,6 +48,8 @@ fn setup(app: &mut App, waker: rune::Waker) {
         app.daemon = Some(daemon);
         app.inbox = Some(inbox);
     }
+    // Reopen the last window's workspaces before the daemon handshake registers them.
+    if session::enabled() && let Some(saved) = session::read() { app.restore_session(saved); }
 }
 
 /// `src/demo.rs` open with rust-analyzer attached and two diagnostics.
@@ -66,7 +69,12 @@ fn lsp_fixture(s: &mut App) {
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
     let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.sync_terminals(tx);
-    if app.quit_requested { tx.quit(); return true; }
+    if app.quit_requested {
+        if !app.session_closed { app.save_session(true); }
+        tx.quit();
+        return true;
+    }
+    if let Some(wait) = app.save_session(false) { tx.wake_after(wait); }
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let visible_wordmarks = app.visible_wordmarks();
     let animating = app.wordmark.tick(&visible_wordmarks, clock);

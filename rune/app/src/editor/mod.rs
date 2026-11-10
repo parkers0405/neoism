@@ -43,6 +43,8 @@ pub struct Buffer {
     pub message: Option<String>,
     /// Line to put the cursor on once the text arrives.
     initial_line: Option<usize>,
+    /// Unsaved text from the last session, laid over the file once it loads.
+    pub recovered: Option<String>,
     /// Set for the daemon's `config.json` document: saved through `Config` with this revision.
     config: Option<ConfigDocument>,
     /// Language-server status, diagnostics, hover and completion.
@@ -69,6 +71,7 @@ impl Buffer {
         Buffer {
             path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, leader_pending: false, saving: None, saving_request: None, close_after_save: None, message: None,
             initial_line: line.map(|l| l.saturating_sub(1) as usize),
+            recovered: None,
             config: None,
             lsp: lsp::BufferLsp::default(),
             mouse: mouse::Mouse::default(),
@@ -178,6 +181,11 @@ impl App {
         }
         buffer.code_cache.clear();
         buffer.doc = Document::from_text(&text);
+        if let Some(recovered) = buffer.recovered.take() {
+            // The disk text stays the saved baseline, so the recovered edits read as unsaved.
+            let edited = Document::from_text(&recovered).lines;
+            if edited != buffer.doc.lines { buffer.doc.lines = edited; buffer.doc.clamp_cursor(); buffer.doc.mark_edited(); }
+        }
         buffer.loaded = true;
         let opened = buffer.path.clone();
         if let Some(line) = buffer.initial_line.take() {

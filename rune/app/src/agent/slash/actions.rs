@@ -18,7 +18,7 @@ impl App {
     fn active_session(&self) -> Option<String> {
         match &self.active_tab().kind {
             TabKind::Agent { session } => session.clone(),
-            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } => None,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } => None,
         }
     }
 
@@ -175,13 +175,14 @@ impl App {
             },
             SlashAction::HandleReject(request_id) => if let Some(session_id) = need_session(self) { self.agent_send(Client::HandleReject { session_id, request_id }); },
             SlashAction::ToggleSkipPermissions | SlashAction::ShowGoal | SlashAction::SetGoal(_) | SlashAction::ClearGoal
-            | SlashAction::PauseGoal | SlashAction::ResumeGoal | SlashAction::OpenUsagePicker | SlashAction::ChangeDirectory(_) => {
+            | SlashAction::PauseGoal | SlashAction::ResumeGoal | SlashAction::ChangeDirectory(_) => {
                 // Server-side plugins; the daemon forwards the command text.
                 match session.clone() {
                     Some(session_id) => self.agent_send(Client::SlashCommand { session_id, text: text.to_owned() }),
                     None => self.notice("Commands", "Open a conversation first"),
                 }
             }
+            SlashAction::OpenUsagePicker => self.open_usage(),
             SlashAction::OpenDirectoryPicker => self.open_directory_picker(),
             SlashAction::ToggleInputHelp => {
                 self.composer.hints_hidden = !self.composer.hints_hidden;
@@ -243,7 +244,7 @@ impl App {
         self.focus_picker(picker);
     }
 
-    fn focus_picker(&mut self, picker: Picker) {
+    pub(super) fn focus_picker(&mut self, picker: Picker) {
         let i = self.active;
         self.tabs[i].draft.focused = picker.kind == Kind::Slash;
         self.composer.picker = Some(picker);
@@ -321,6 +322,7 @@ impl App {
             Kind::Agent => { self.set_agent(row.value); self.close_prompt_picker(); }
             Kind::Thinking => { self.set_thinking(row.value); self.close_prompt_picker(); }
             Kind::Session => { self.close_prompt_picker(); self.open_conversation(&row.value); }
+            Kind::Usage => { if row.value == "refresh" { self.open_usage(); } },
             Kind::Subagent => { self.close_prompt_picker(); self.view_session(&row.value); }
             Kind::Skill => { self.close_prompt_picker(); self.insert_into_composer(&format!("${} ", row.value)); }
             Kind::Mcp => self.open_mcp_actions(&row.value),

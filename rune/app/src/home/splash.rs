@@ -132,12 +132,20 @@ fn widest_button(s: f32) -> f32 {
 }
 
 /// Lay the splash out in a `width` x `height` area for the configured font size and UI scale.
-/// `None` when the area is too small to show it (the original's 24 column / 6 row floors).
+/// Below the full menu's 24 column / 6 row floor, retain a compact wordmark.
 pub fn layout(width: f32, height: f32, font_size: f32, ui_scale: f32) -> Option<Geometry> {
     let cell_h = font_size * 1.3;
     let cols = (width / (font_size * 0.6)).floor() as usize;
-    if cols < 24 { return None; }
-    let bands = adapt((height / cell_h).floor() as usize)?;
+    let bands = adapt((height / cell_h).floor() as usize);
+    if cols < 24 || bands.is_none() {
+        if width < 48.0 || height < 32.0 { return None; }
+        let w = (width - 16.0).min((height - 16.0) * WORDMARK_ASPECT);
+        let h = w / WORDMARK_ASPECT;
+        return Some(Geometry { wordmark: [(width-w)/2.0, (height-h)/2.0, w, h], buttons: Vec::new(),
+            label_font: LABEL_FONT, key_font: KEY_FONT, icon_font: ICON_FONT,
+            pad: PAD, icon_slot: ICON_SLOT, label_gap: LABEL_GAP, radius: RADIUS });
+    }
+    let bands = bands.unwrap();
 
     let band_top = bands.wordmark_row() as f32 * cell_h;
     let band_h = bands.wordmark as f32 * cell_h;
@@ -223,8 +231,10 @@ mod tests {
     }
 
     #[test]
-    fn tiny_panes_hide_the_splash() {
-        assert!(layout(100.0, 400.0, 15.0, 1.0).is_none());
-        assert!(layout(800.0, 60.0, 15.0, 1.0).is_none());
+    fn tiny_panes_keep_a_wordmark_without_squeezing_the_menu() {
+        let g = layout(100.0, 400.0, 15.0, 1.0).unwrap();
+        assert!(g.buttons.is_empty() && g.wordmark[2] > 0.0 && g.wordmark[2] <= 100.0);
+        assert!(layout(800.0, 60.0, 15.0, 1.0).is_some());
+        assert!(layout(24.0, 20.0, 15.0, 1.0).is_none());
     }
 }

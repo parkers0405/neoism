@@ -64,7 +64,7 @@ fn layout(picker: &Picker, width: f32, s: f32) -> Layout {
 
 /// The picker card, placed in window coordinates over the composer card.
 pub fn picker_card(app: &App) -> El {
-    let (Some(picker), Some(&composer)) = (app.composer.picker.as_ref(), app.rects.get("composer-card")) else { return el() };
+    let (Some(picker), Some(&composer)) = (app.composer.picker.as_ref(), app.rects.get(&format!("composer-card:{}", app.active_tab().id))) else { return el() };
     let p = app.pal;
     let s = app.ty.scale();
     let [cx, cy, cw, _] = composer;
@@ -241,7 +241,7 @@ fn linear(c: [f32; 4]) -> Color {
 
 /// The playing skit over the transcript, above the composer.
 pub fn effect_layer(app: &App) -> El {
-    let (Some(running), Some(&pane), Some(&composer)) = (app.composer.effect.as_ref(), app.rects.get("agent-pane"), app.rects.get("composer-card")) else { return el() };
+    let (Some(running), Some(&pane), Some(&composer)) = (app.composer.effect.as_ref(), app.rects.get(&format!("agent-area:{}", app.active_tab().id)), app.rects.get(&format!("composer-card:{}", app.active_tab().id))) else { return el() };
     let s = app.ty.scale();
     let rect = effects::scene_rect(pane, composer[1], s);
     let frame = effects::draw(running.effect, rect, running.elapsed(), s, &effects::Theme::new(app.pal));

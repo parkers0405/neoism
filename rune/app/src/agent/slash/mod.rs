@@ -5,6 +5,7 @@
 //! plays the fun `/piss` … `/praise` skits.
 
 mod actions;
+mod usage;
 mod catalog;
 pub mod effects;
 mod logos;
@@ -70,6 +71,7 @@ pub struct Composer {
     next_notice: u64,
     /// The `/cd` picker's newest directory search.
     pub directory_request: u64,
+    usage_request: Option<std::sync::mpsc::Receiver<Result<usage::Usage, String>>>,
 }
 
 impl Composer {

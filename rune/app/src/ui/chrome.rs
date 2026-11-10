@@ -24,10 +24,12 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
     track_caret(app, cx);
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
+        .on_paste(|a: &mut App, text, _| a.paste_content(text))
         .child(super::wallpaper::view(app))
         .child(body)
         .child(super::status::view(app))
         .child(agent::overlay(app))
+        .child(crate::editor::lsp_view::overlay(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
         .child_if(app.finder.is_some(), || crate::finder::view(app))
         .child_if(app.modal.is_some(), || super::modal::view(app))
@@ -44,7 +46,7 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
     } else {
         match app.active_tab().kind {
             TabKind::Agent { .. } => app.ty.composer().size,
-            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } => app.ty.small().size,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } => app.ty.small().size,
         }
     };
     app.cursor.caret_font.set(font);
@@ -96,7 +98,7 @@ fn rail(app: &App) -> El {
         .child(button("toggle-conversations", glyph::SPARKLES, app.sidebar == Some(Sidebar::Conversations), |s| {
             s.toggle_conversations();
         }))
-        .child(button("open-finder", glyph::SEARCH, false, |_| {}))
+        .child(button("open-finder", glyph::SEARCH, false, |a| a.open_finder(crate::finder::Mode::Files)))
         .child(servers)
 }
 

@@ -24,6 +24,7 @@ pub enum Family {
     Editor,
     Git,
     Config,
+    Database,
 }
 
 impl Family {
@@ -37,6 +38,7 @@ impl Family {
             Family::Editor => "Editor",
             Family::Git => "Git",
             Family::Config => "Config",
+            Family::Database => "Database",
         }
     }
 }
@@ -47,6 +49,8 @@ pub enum Inbound {
     Connected,
     Disconnected(String),
     Agent(Box<AgentServerMessage>),
+    Editor(Box<neoism_protocol::editor::EditorServerMessage>),
+    Database { request_id: u64, message: Result<Box<neoism_protocol::database::DatabaseReply>, String> },
     /// Everything else stays untyped until a view needs it.
     Reply { family: String, request_id: u64, message: Value },
 }
@@ -54,12 +58,13 @@ pub enum Inbound {
 pub type Inbox = Arc<Mutex<VecDeque<Inbound>>>;
 
 /// A request: its family, message, and the workspace it is scoped to (if any).
-type Outbound = (Family, Value, Option<String>);
+type Outbound = (u64, Family, Value, Option<String>);
 
 /// Cheap, cloneable sender the UI keeps in its state.
 #[derive(Clone)]
 pub struct Daemon {
     outbound: Sender<Outbound>,
+    sequence: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Daemon {
@@ -72,16 +77,22 @@ impl Daemon {
             .name("neoism-daemon".into())
             .spawn(move || run(rx, thread_inbox, wake))
             .expect("spawn daemon thread");
-        (Daemon { outbound }, inbox)
+        (Daemon { outbound, sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)) }, inbox)
     }
 
     pub fn send(&self, family: Family, message: Value) {
-        let _ = self.outbound.send((family, message, None));
+        self.request(family, message, None);
     }
 
     /// A request for one workspace (`Files`, `Search`, `Git`, `Editor`, `Database`).
     pub fn send_scoped(&self, family: Family, message: Value, workspace_root: &str) {
-        let _ = self.outbound.send((family, message, Some(workspace_root.to_owned())));
+        self.request(family, message, Some(workspace_root.to_owned()));
+    }
+
+    pub fn request(&self, family: Family, message: Value, scope: Option<String>) -> u64 {
+        let id = self.sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.outbound.send((id, family, message, scope));
+        id
     }
 
     pub fn agent(&self, message: &AgentClientMessage) {
@@ -153,7 +164,6 @@ fn push(inbox: &Inbox, wake: &dyn Fn(), event: Inbound) {
 }
 
 fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn()) {
-    let mut request_id: u64 = 0;
     loop {
         push(&inbox, &wake, Inbound::Connecting);
         let result = discover().and_then(|endpoint| connect(&endpoint));
@@ -173,8 +183,7 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn()) {
             // Writes first: user actions should not wait behind a read timeout.
             loop {
                 match rx.try_recv() {
-                    Ok((family, message, workspace_root)) => {
-                        request_id += 1;
+                    Ok((request_id, family, message, workspace_root)) => {
                         let mut envelope = json!({"request_id": request_id, "message": message});
                         if let Some(root) = workspace_root { envelope["workspace_root"] = json!(root); }
                         let frame = json!({ family.name(): envelope });
@@ -222,6 +231,12 @@ fn parse(text: &str) -> Option<Inbound> {
     let family = tag.strip_suffix("Reply").unwrap_or(tag).to_owned();
     let request_id = body["request_id"].as_u64().unwrap_or(0);
     let message = body.get("message").cloned().unwrap_or_else(|| json!({ tag.clone(): body.clone() }));
+    if family == "Database" {
+        return Some(Inbound::Database { request_id, message: serde_json::from_value(message).map(Box::new).map_err(|e| e.to_string()) });
+    }
+    if family == "Editor" {
+        if let Ok(typed) = serde_json::from_value(message.clone()) { return Some(Inbound::Editor(Box::new(typed))); }
+    }
     if family == "Agent" {
         if let Ok(typed) = serde_json::from_value::<AgentServerMessage>(message.clone()) {
             return Some(Inbound::Agent(Box::new(typed)));

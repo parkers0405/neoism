@@ -1,0 +1,158 @@
+[
+  {
+    "path": "terminal.copy-on-select",
+    "label": "Copy on select",
+    "description": "Copy terminal selections to the clipboard.",
+    "value_kind": "boolean",
+    "default": false,
+    "static_suggestions": [],
+    "runtime_suggestions": [],
+    "options": [],
+    "provider": null,
+    "constraints": {
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "placeholder": null,
+      "nullable": false
+    },
+    "accepted_kinds": [],
+    "extensible": false,
+    "category": "general",
+    "control": {
+      "kind": "toggle"
+    },
+    "settings_visible": true
+  },
+  {
+    "path": "terminal.hide-mouse-cursor-when-typing",
+    "label": "Hide mouse cursor when typing",
+    "description": "Hide the pointer while typing.",
+    "value_kind": "boolean",
+    "default": false,
+    "static_suggestions": [],
+    "runtime_suggestions": [],
+    "options": [],
+    "provider": null,
+    "constraints": {
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "placeholder": null,
+      "nullable": false
+    },
+    "accepted_kinds": [],
+    "extensible": false,
+    "category": "general",
+    "control": {
+      "kind": "toggle"
+    },
+    "settings_visible": true
+  },
+  {
+    "path": "terminal.option-as-alt",
+    "label": "Option as Alt",
+    "description": "Treat macOS Option keys as Alt.",
+    "value_kind": "string",
+    "default": "none",
+    "static_suggestions": [
+      "none",
+      "left",
+      "right",
+      "both"
+    ],
+    "runtime_suggestions": [],
+    "options": [
+      {
+        "value": "none",
+        "label": null,
+        "description": null
+      },
+      {
+        "value": "left",
+        "label": null,
+        "description": null
+      },
+      {
+        "value": "right",
+        "label": null,
+        "description": null
+      },
+      {
+        "value": "both",
+        "label": null,
+        "description": null
+      }
+    ],
+    "provider": null,
+    "constraints": {
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "placeholder": null,
+      "nullable": false
+    },
+    "accepted_kinds": [],
+    "extensible": false,
+    "category": "general",
+    "control": {
+      "kind": "select"
+    },
+    "settings_visible": true
+  },
+  {
+    "path": "terminal.use-fork",
+    "label": "Use fork",
+    "description": "Spawn new terminals with fork where supported.",
+    "value_kind": "boolean",
+    "default": true,
+    "static_suggestions": [],
+    "runtime_suggestions": [],
+    "options": [],
+    "provider": null,
+    "constraints": {
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "placeholder": null,
+      "nullable": false
+    },
+    "accepted_kinds": [],
+    "extensible": false,
+    "category": "general",
+    "control": {
+      "kind": "toggle"
+    },
+    "settings_visible": true
+  },
+  {
+    "path": "ui.confirm-before-quit",
+    "label": "Confirm before quit",
+    "description": "Ask before closing Neoism.",
+    "value_kind": "boolean",
+    "default": false,
+    "static_suggestions": [],
+    "runtime_suggestions": [],
+    "options": [],
+    "provider": null,
+    "constraints": {
+      "min": null,
+      "max": null,
+      "step": null,
+      "unit": null,
+      "placeholder": null,
+      "nullable": false
+    },
+    "accepted_kinds": [],
+    "extensible": false,
+    "category": "general",
+    "control": {
+      "kind": "toggle"
+    },
+    "settings_visible": true
+  }
+]

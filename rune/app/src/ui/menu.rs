@@ -70,8 +70,7 @@ impl App {
             Item::Themes => self.open_picker(crate::palette::Mode::Themes),
             Item::Backgrounds => self.open_picker(crate::palette::Mode::Backgrounds),
             Item::About => self.modal = Some(crate::ui::modal::Modal::about()),
-            // Not built yet in this frontend: the database and extensions pages.
-            Item::Database => {}
+            Item::Database => self.open_database(""),
         }
     }
 

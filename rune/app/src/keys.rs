@@ -39,9 +39,11 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 
 /// Window shortcuts. Text fields route their keys here first (`on_input_key`), so Alt chords
 /// never type into the composer.
-pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
+pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if app.capture_binding(event) { return true; }
     // An open menu owns its navigation keys before anything else.
     if app.menu.is_some() && app.menu_key(event) { return true; }
+    if app.bound_shortcut(event, tx) { return true; }
     let m = event.mods;
     let alt_only = m.alt && !m.ctrl && !m.shift && !m.logo;
     if let Key::Escape = event.key {
@@ -212,7 +214,7 @@ impl App {
         match self.focus {
             Focus::Buffers(i) => self.rects.get(&format!("pane-tab:{i}")).map(|r| tab_bar(*r, 16.0, scale, i == self.tabs.len())),
             Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == 1)),
-            Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.rects.get("editor-cursor").copied(),
+            Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| crate::editor::view::cursor_rect(self, b)),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("tree-row").map(|r| crate::tree::view::cursor_rect(self, *r)),
             Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) && !self.threads.is_empty() => self.conversation_cursor(),
             Focus::Sidebar | Focus::Content => self.cursor.caret_block(),
@@ -226,7 +228,7 @@ impl App {
         if self.finder.is_some() { return self.rects.get("finder-results").copied(); }
         if self.picker.is_some() { return self.rects.get("picker-results").copied(); }
         match self.focus {
-            Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.rects.get("editor-view").copied(),
+            Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| b.view_rect),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("file-tree-rows").copied(),
             Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) => self.rects.get("conversation-list").copied(),
             _ => None,
@@ -249,7 +251,7 @@ impl App {
         // An inline composer picker (`/model`, `/cd` …) types into its own query row.
         let inline_picker = self.composer.picker.as_ref().is_some_and(|p| p.kind != crate::agent::slash::Kind::Slash);
         let overlay = self.picker.is_some() || self.finder.is_some() || inline_picker;
-        let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. });
+        let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. });
         let active = self.active;
         let mut changed = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {

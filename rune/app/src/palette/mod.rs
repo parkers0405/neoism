@@ -2,7 +2,7 @@
 //! (`reference/14`, `23`, `24`). One query field, a ranked list, keyboard and pointer selection.
 
 mod backgrounds;
-mod commands;
+pub(crate) mod commands;
 mod view;
 
 pub use view::view;
@@ -153,7 +153,7 @@ impl App {
         }
     }
 
-    fn run_action(&mut self, action: Action, tx: &mut Tx) {
+    pub(crate) fn run_action(&mut self, action: Action, tx: &mut Tx) {
         let count = self.tabs.len();
         match action {
             Action::NewTab => { self.open_tab(TabKind::Home); }

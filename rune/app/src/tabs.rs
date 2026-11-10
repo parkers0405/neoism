@@ -13,6 +13,7 @@ pub enum TabKind {
     Agent { session: Option<String> },
     /// A file in the code editor (workspace-relative path).
     Editor { path: String },
+    Database { path: String },
 }
 
 pub struct Tab {
@@ -43,6 +44,9 @@ impl App {
         if index >= self.tabs.len() { return; }
         let removed = self.tabs.remove(index);
         self.close_terminal(removed.id);
+        if let TabKind::Editor { path } = &removed.kind {
+            if !self.tabs.iter().any(|t| t.kind == removed.kind) { self.lsp_close(path); }
+        }
         if !self.layout.remove(removed.id) {
             self.open_tab(TabKind::Home);
             return;
@@ -58,7 +62,8 @@ impl App {
         match &tab.kind {
             TabKind::Home => "Home".into(),
             TabKind::Terminal => "Terminal".into(),
-            TabKind::Editor { path } => path.rsplit('/').next().unwrap_or(path).to_owned(),
+            TabKind::Database { path } if path.is_empty() => "Database".into(),
+            TabKind::Database { path } | TabKind::Editor { path } => path.rsplit('/').next().unwrap_or(path).to_owned(),
             TabKind::Agent { session: None } => "Neoism".into(),
             TabKind::Agent { session: Some(id) } => self.threads.iter().find(|t| &t.session_id == id)
                 .map(|t| t.title.clone())
@@ -76,7 +81,7 @@ impl App {
             TabKind::Home | TabKind::Terminal => self.run_command(index, text),
             TabKind::Agent { session: Some(session_id) } => self.submit_prompt(&session_id, text),
             TabKind::Agent { session: None } => self.create_thread(index, text),
-            TabKind::Editor { .. } => {}
+            TabKind::Editor { .. } | TabKind::Database { .. } => {}
         }
     }
 
@@ -88,7 +93,7 @@ impl App {
             // The splash heads the Home scrollback; it animates while it is on screen.
             TabKind::Home => self.splash_on_screen().then_some("splash-wordmark"),
             TabKind::Agent { session: None } => Some("agent-wordmark"),
-            TabKind::Agent { .. } | TabKind::Terminal | TabKind::Editor { .. } => None,
+            TabKind::Agent { .. } | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } => None,
         }
     }
 

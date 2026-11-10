@@ -3,38 +3,27 @@
 //!
 //! - A mouse wheel notch moves three lines on a critically damped glide (0.39 s response, the
 //!   terminal's), and consecutive notches extend the same motion.
-//! - A trackpad tracks the fingers directly with pointer-style acceleration (slow drags are
-//!   precise, fast flicks travel), then coasts when they lift, decaying like a native
-//!   momentum scroll; touching again catches it.
+//! - Trackpad pixels apply directly and inject bounded, continuously decaying momentum,
+//!   matching GPUiX's timeline physics. Reading surfaces apply their fixed gain before this.
 //!
 //! The motion is stepped on the frame clock and placed with `Tx::scroll_to_instant` relative
 //! to where the view is each frame, so it animates even while a composer holds focus (Rune
 //! lands its own scroll requests at once then) and stays correct when the view shifts under it
 //! (older history prepended, rows measured).
 
-use rune::{GesturePhase, Tx, WheelEvent};
-use std::collections::{HashMap, VecDeque};
+use rune::{Tx, WheelEvent};
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
 
 /// A wheel notch, as Rune reports it, in points.
 const NOTCH: f32 = 40.0;
 /// The notch glide's response (2π/ω).
 const NOTCH_RESPONSE: f32 = 0.39;
-/// Trackpad acceleration: below `SLOW` pt/s the fingers move the content 1:1; by `FAST` it
-/// moves `MAX_GAIN` times as far.
-const SLOW: f32 = 250.0;
-const FAST: f32 = 2600.0;
-const MAX_GAIN: f32 = 2.4;
-/// Velocity averaged over the last `SAMPLE_WINDOW` seconds of the gesture starts the coast.
-const SAMPLE_WINDOW: f32 = 0.075;
-/// No trackpad event for this long means the fingers lifted (Wayland may not say so).
-const LIFT_GAP: f32 = 0.06;
-/// Momentum decays like a native coast: ×0.9975 per millisecond (time constant ≈ 0.4 s).
-const COAST_DECAY_PER_MS: f32 = 0.9975;
-/// Flicks slower than this don't coast; a coast below `COAST_STOP` ends.
-const COAST_MIN: f32 = 120.0;
-const COAST_STOP: f32 = 12.0;
+/// GPUiX's precision-trackpad velocity injection, bound, decay and stop threshold.
+const TRACKPAD_INJECTION: f32 = 7.0;
+const TRACKPAD_MAX: f32 = 2800.0;
+const TRACKPAD_TAU: f32 = 0.28;
+const TRACKPAD_STOP: f32 = 50.0;
 
 /// How a surface reads its scroll position: (offset, max).
 pub type Source = Rc<dyn Fn() -> (f32, f32)>;
@@ -44,11 +33,8 @@ pub struct Scroller {
     /// Notch glide: distance still to travel and the glide's velocity (pt/s).
     remaining: f32,
     vel: f32,
-    /// Trackpad: finger movement not yet applied, recent (time, distance) samples, and the
-    /// momentum velocity after the fingers lift.
+    /// Trackpad: direct movement not yet applied and continuously decaying velocity.
     pending: f32,
-    samples: VecDeque<(Instant, f32)>,
-    touching: Option<Instant>,
     coast: f32,
     clock: Option<f64>,
     source: Option<Source>,
@@ -60,61 +46,50 @@ pub struct Scroller {
 
 impl Scroller {
     pub fn moving(&self) -> bool {
-        self.remaining.abs() > 0.25 || self.vel.abs() > 2.0 || self.pending != 0.0 || self.coast != 0.0 || self.touching.is_some()
+        self.remaining.abs() > 0.25 || self.vel.abs() > 2.0 || self.pending != 0.0 || self.coast.abs() >= TRACKPAD_STOP
     }
 
     /// Feed a wheel event: `notch_px` is how far one notch travels on this surface.
     pub fn wheel(&mut self, e: &WheelEvent, notch_px: f32, source: Source) {
+        // Release events often have no delta. They must not cancel or restart the glide.
+        if e.dy == 0.0 { return; }
         self.source = Some(source);
         if e.precise {
-            let now = Instant::now();
-            // Fingers down: whatever was gliding or coasting is caught.
             self.remaining = 0.0;
             self.vel = 0.0;
-            self.coast = 0.0;
-            let dt = self.samples.back().map_or(1.0 / 120.0, |(t, _)| now.duration_since(*t).as_secs_f32().clamp(1.0 / 500.0, 0.1));
-            let speed = e.dy.abs() / dt;
-            let t = ((speed - SLOW) / (FAST - SLOW)).clamp(0.0, 1.0);
-            let gain = 1.0 + (MAX_GAIN - 1.0) * t * t * (3.0 - 2.0 * t);
-            let d = -e.dy * gain;
-            self.pending += d;
-            self.samples.push_back((now, d));
-            while self.samples.front().is_some_and(|(t, _)| now.duration_since(*t).as_secs_f32() > 0.2) { self.samples.pop_front(); }
-            self.touching = Some(now);
-            if e.phase == GesturePhase::Ended { self.lift(); }
+            let (reported, max) = self.source.as_ref().unwrap()();
+            let max = max.max(0.0);
+            let offset = (self.offset(reported) + self.pending).clamp(0.0, max);
+            let d = -e.dy;
+            self.pending += (offset + d).clamp(0.0, max) - offset;
+            // Include queued movement in the edge check: an event burst at an end must not
+            // build hidden velocity or eat the first movement back in the other direction.
+            if (d > 0.0 && offset < max - 0.5) || (d < 0.0 && offset > 0.5) {
+                self.coast = (self.coast + d * TRACKPAD_INJECTION).clamp(-TRACKPAD_MAX, TRACKPAD_MAX);
+            } else {
+                self.coast = 0.0;
+            }
         } else {
             self.coast = 0.0;
-            self.touching = None;
             self.remaining += -e.dy / NOTCH * notch_px;
         }
     }
 
-    /// The fingers lifted: carry the gesture's recent speed into a coast.
-    fn lift(&mut self) {
-        let Some(last) = self.samples.back().map(|(t, _)| *t) else { self.touching = None; return };
-        let recent: Vec<(Instant, f32)> = self.samples.iter().copied()
-            .filter(|(t, _)| last.duration_since(*t).as_secs_f32() <= SAMPLE_WINDOW).collect();
-        let span = recent.first().map_or(0.0, |(t, _)| last.duration_since(*t).as_secs_f32()).max(1.0 / 120.0);
-        let v = recent.iter().map(|(_, d)| d).sum::<f32>() / span;
-        // A gesture that stopped before lifting doesn't fling.
-        let stale = last.elapsed().as_secs_f32() > LIFT_GAP * 2.0;
-        self.coast = if v.abs() >= COAST_MIN && !stale { v } else { 0.0 };
-        self.samples.clear();
-        self.touching = None;
+    fn offset(&self, reported: f32) -> f32 {
+        // Unchanged since the last frame while a placement is pending: start from the placement.
+        // Moved some other way (history prepended, rows measured): follow the view.
+        match (self.placed, self.seen) {
+            (Some(placed), Some(seen)) if (reported - seen).abs() < 0.01 => placed,
+            _ => reported,
+        }
     }
 
     /// Advance to `clock`; the new offset to place, if it moves.
     pub fn step(&mut self, clock: f64) -> Option<f32> {
         let (reported, max) = self.source.as_ref()?();
-        // Unchanged since the last frame while a placement is pending: start from the placement.
-        // Moved some other way (history prepended, rows measured): follow the view.
-        let offset = match (self.placed, self.seen) {
-            (Some(placed), Some(seen)) if (reported - seen).abs() < 0.01 => placed,
-            _ => reported,
-        };
+        let offset = self.offset(reported);
         let dt = self.clock.map_or(1.0 / 120.0, |last| (clock - last).clamp(0.0, 0.05)) as f32;
         self.clock = Some(clock);
-        if self.touching.is_some_and(|t| t.elapsed().as_secs_f32() > LIFT_GAP) { self.lift(); }
         let mut by = std::mem::take(&mut self.pending);
         if self.remaining.abs() > 0.25 || self.vel.abs() > 2.0 {
             let omega = std::f32::consts::TAU / NOTCH_RESPONSE;
@@ -128,10 +103,11 @@ impl Scroller {
             }
             if self.remaining.abs() <= 0.25 && self.vel.abs() <= 2.0 { by += self.remaining; self.remaining = 0.0; self.vel = 0.0; }
         }
-        if self.coast != 0.0 {
+        if self.coast.abs() >= TRACKPAD_STOP {
+            self.coast *= (-dt / TRACKPAD_TAU).exp();
             by += self.coast * dt;
-            self.coast *= COAST_DECAY_PER_MS.powf(dt * 1000.0);
-            if self.coast.abs() < COAST_STOP { self.coast = 0.0; }
+        } else {
+            self.coast = 0.0;
         }
         if by == 0.0 { return None; }
         let target = (offset + by).clamp(0.0, max.max(0.0));
@@ -169,7 +145,6 @@ impl Scrollers {
         s.source = Some(source);
         s.pending = 0.0;
         s.coast = 0.0;
-        s.touching = None;
         s.remaining = target - start;
         s.placed = Some(start);
         s.seen = Some(offset);
@@ -228,12 +203,60 @@ mod tests {
     }
 
     #[test]
-    fn trackpad_accelerates_fast_strokes() {
-        let mut slow = Scroller::default();
-        slow.wheel(&WheelEvent::new(0.0, -1.0).precise(true), 60.0, source(0.0));
-        let mut fast = Scroller::default();
-        fast.wheel(&WheelEvent::new(0.0, -60.0).precise(true), 60.0, source(0.0));
-        assert!((slow.pending - 1.0).abs() < 0.01);
-        assert!(fast.pending > 60.0 * 1.5);
+    fn trackpad_direct_distance_does_not_depend_on_event_batching() {
+        for distance in [0.125, 17.0, 60.0] {
+            for parts in [1, 4] {
+                let mut s = Scroller { clock: Some(0.0), ..Scroller::default() };
+                for _ in 0..parts {
+                    s.wheel(&WheelEvent::new(0.0, -distance / parts as f32).precise(true), 60.0, source(1000.0));
+                }
+                assert_eq!(s.step(0.0), Some(1000.0 + distance));
+            }
+        }
+    }
+
+    #[test]
+    fn trackpad_glides_without_waiting_for_release_and_stops_without_a_tail() {
+        let mut s = Scroller { clock: Some(0.0), ..Scroller::default() };
+        s.wheel(&WheelEvent::new(0.0, -100.0).precise(true), 60.0, source(1000.0));
+        assert_eq!(s.step(0.0), Some(1100.0));
+        let dt = 1.0 / 120.0;
+        let expected = 1100.0 + 700.0 * (-dt / 0.28_f32).exp() * dt;
+        assert!((s.step(dt as f64).unwrap() - expected).abs() < 0.001);
+        s.wheel(&WheelEvent::new(0.0, 0.0).precise(true).phase(rune::GesturePhase::Ended), 60.0, source(1000.0));
+        assert!(s.step(2.0 * dt as f64).unwrap() > expected);
+        for frame in 3..240 { s.step(frame as f64 / 120.0); }
+        assert!(!s.moving());
+        assert_eq!(s.step(2.0), None);
+    }
+
+    #[test]
+    fn trackpad_velocity_is_bounded() {
+        let mut s = Scroller { clock: Some(0.0), ..Scroller::default() };
+        s.wheel(&WheelEvent::new(0.0, -1000.0).precise(true), 60.0, source(1000.0));
+        assert_eq!(s.step(0.0), Some(2000.0));
+        let dt = 1.0 / 120.0;
+        let expected = 2000.0 + 2800.0 * (-dt / 0.28_f32).exp() * dt;
+        assert!((s.step(dt as f64).unwrap() - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn trackpad_below_stop_threshold_only_moves_directly() {
+        let mut s = Scroller { clock: Some(0.0), ..Scroller::default() };
+        s.wheel(&WheelEvent::new(0.0, -7.0).precise(true), 60.0, source(1000.0));
+        assert_eq!(s.step(0.0), Some(1007.0));
+        assert!(!s.moving());
+        assert_eq!(s.step(1.0 / 120.0), None);
+    }
+
+    #[test]
+    fn trackpad_edge_bursts_do_not_delay_reversing() {
+        let mut s = Scroller { clock: Some(0.0), ..Scroller::default() };
+        for _ in 0..20 {
+            s.wheel(&WheelEvent::new(0.0, 100.0).precise(true), 60.0, source(0.0));
+        }
+        s.wheel(&WheelEvent::new(0.0, -10.0).precise(true), 60.0, source(0.0));
+        assert_eq!(s.step(0.0), Some(10.0));
+        assert!(s.step(1.0 / 120.0).unwrap() > 10.0);
     }
 }

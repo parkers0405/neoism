@@ -70,7 +70,18 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             continue;
         }
         let last = index + 1 == messages.len();
-        rows = rows.child(message_row(app, message, last && streaming));
+        let mut row = message_row(app, message, last && streaming);
+        if message.kind == HistoryMessageKind::User {
+            // Questions report where their row sits in the transcript for the rail.
+            let (sid, mid) = (session_id.to_owned(), message.id.clone());
+            row = row.on_layout(move |a: &mut App, r: [f32; 4]| {
+                let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
+                let Some(session) = a.sessions.get_mut(&sid) else { return };
+                let top = r[1] - view[1] + session.scroll.get().0;
+                session.question_tops.insert(mid.clone(), top.max(0.0));
+            });
+        }
+        rows = rows.child(row);
         index += 1;
     }
     if let Some(activity) = app.activity.as_ref().filter(|_| streaming) {
@@ -83,13 +94,17 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let scroll_key = format!("conversation:{session_id}");
     let mirror = session.map(|s| s.scroll.clone()).unwrap_or_default();
     let wheel_id = session_id.to_owned();
+    let view_id = session_id.to_owned();
     // A notch moves the same distance as in a code file (three code lines), on the same spring.
     let line_h = crate::editor::view::line_height(app);
     let timeline = col().key(scroll_key).w_full().grow(1.0).shrink()
         .scroll(ScrollSpec { stick_bottom: true })
         .scroll_anchor()
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1])))
-        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("timeline-view:{tab_id}"), r); })
+        .on_layout(move |a: &mut App, r: [f32; 4]| {
+            a.rects.insert(format!("timeline-view:{tab_id}"), r);
+            if let Some(session) = a.sessions.get_mut(&view_id) { session.viewport_h = r[3]; }
+        })
         .on_pointer_move_local(|a: &mut App, p: rune::PointerEvent, _: &mut Tx| {
             if a.selection.copy.dragging() { a.selection.pointer_y = Some(p.window_y); }
         })
@@ -116,7 +131,20 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     if let Some(header) = super::header::view(app, session_id) {
         pane = pane.child(col().w_full().px(pad).child(header));
     }
+    // The question rail sits in the transcript's right padding, over the scroll view.
+    let rail = match (app.rects.get(&format!("timeline-view:{tab_id}")), app.rects.get(&format!("agent-area:{tab_id}"))) {
+        (Some(view), Some(area)) => {
+            // The visible transcript: the scroll view runs on under the pinned composer.
+            let mut visible = *view;
+            if let Some(card) = app.rects.get(&format!("composer-card:{tab_id}")) {
+                visible[3] = (card[1] - 6.0 - view[1]).clamp(0.0, view[3]);
+            }
+            super::ticks::view(app, session_id, visible, *area, pad)
+        }
+        _ => el(),
+    };
     pane.child(timeline)
+        .child(rail)
         .child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
             .child(composer(app, f32::INFINITY)))
 }

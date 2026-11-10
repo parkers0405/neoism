@@ -11,7 +11,7 @@ const TAIL_H: f32 = 8.0;
 const LINE_H: f32 = 19.0;
 const FONT: f32 = 13.5;
 /// Apple #007AFF.
-const BLUE: u32 = 0x007aff;
+pub(super) const BLUE: u32 = 0x007aff;
 
 fn avatar_lane(width: f32, s: f32) -> f32 { ((ORB + 16.0) * s).min(width.max(0.0) * 0.4) }
 
@@ -40,7 +40,7 @@ fn tail_edges(right: f32, bottom: f32, s: f32, t: f32) -> [[f32; 2]; 2] {
 
 /// The tail patch replacing the capsule's lower-right quadrant, in a canvas whose origin is
 /// `(right - 22 s, bottom - 22 s)`.
-fn tail(s: f32, color: Color) -> El {
+pub(super) fn tail(s: f32, color: Color) -> El {
     const STEPS: usize = 32;
     let (w, h) = (25.0 * s, 27.0 * s);
     let (right, bottom) = (22.0 * s, 22.0 * s);

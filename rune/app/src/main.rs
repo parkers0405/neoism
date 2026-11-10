@@ -96,6 +96,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
     let mode_changing = app.tick_mode_pill();
+    let rail_changed = app.tick_question_rails();
     let gliding = app.step_timeline_glides(clock, tx) | app.step_terminal_glides(clock, tx);
     if gliding { tx.wake_after(std::time::Duration::ZERO); }
     if mode_changing { tx.wake_after(std::time::Duration::ZERO); }
@@ -131,7 +132,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || gliding
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || gliding || rail_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -343,6 +344,16 @@ fn main() {
                     item("pop", "method", "fn(&mut self) -> Option<T>"), item("capacity", "method", "fn(&self) -> usize"),
                     item("PUBLIC", "constant", "usize"),
                 ]}}));
+            }),
+            // Nine questions and answers: the question rail in the right gutter.
+            ("question-rail", |s| {
+                let messages: Vec<serde_json::Value> = (0..9).flat_map(|i| [
+                    serde_json::json!({"id": format!("u{i}"), "role": "User", "kind": "User",
+                        "text": format!("Question {i}: how does the **frame scheduler** keep `120 Hz` while the transcript streams and the wheel glides through long answers?")}),
+                    serde_json::json!({"id": format!("a{i}"), "role": "Assistant", "kind": "Assistant",
+                        "text": format!("## Answer {i}\n\n{}", "The scheduler presents on the display clock and never busy-waits. ".repeat(8))}),
+                ]).collect();
+                s.load_fixture("fixture-rail", "Question Rail", &serde_json::Value::Array(messages).to_string());
             }),
             ("tree-long", |s| {
                 let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();

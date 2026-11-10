@@ -375,6 +375,11 @@ impl App {
     /// background colour so the block reads as inverted text (the beam and prompt leave it).
     pub fn editor_cursor_glyph(&self) -> Option<String> {
         if self.focus != crate::app::Focus::Content { return None; }
+        // Only while the cursor sits on the editor cell: an overlay (palette, finder, menu,
+        // settings, modal) parks it on its own row, where the letter must not ride along.
+        let overlay = self.picker.is_some() || self.finder.is_some() || self.menu.is_some()
+            || self.settings.is_some() || self.modal.is_some();
+        if overlay { return None; }
         let buffer = self.active_buffer().filter(|b| b.loaded && b.prompt.is_none() && b.doc.mode != Mode::Insert)?;
         let ch = buffer.doc.lines.get(buffer.doc.cursor_line)?.get(buffer.doc.cursor_col..)?.chars().next()?;
         (!ch.is_whitespace()).then(|| ch.to_string())

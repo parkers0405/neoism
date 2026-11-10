@@ -97,9 +97,6 @@ pub struct App {
     /// The conversations panel's keyboard row and its follow.
     pub conv_selected: usize,
     pub conv_follow: crate::ui::follow::Follow,
-    /// The command palette's and finder's lists following the keyboard row.
-    pub palette_follow: crate::ui::follow::Follow,
-    pub finder_follow: crate::ui::follow::Follow,
     /// A `g` waiting for its second key (`gg`).
     pub pending_g: bool,
     /// Open files by workspace-relative path.
@@ -216,8 +213,6 @@ impl App {
             tree_follow: Default::default(),
             conv_selected: 0,
             conv_follow: Default::default(),
-            palette_follow: Default::default(),
-            finder_follow: Default::default(),
             pending_g: false,
             buffers: HashMap::new(),
             finder: None,

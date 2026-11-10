@@ -94,8 +94,6 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
-    app.palette_follow_selection(tx);
-    app.finder_follow_selection(tx);
     app.conversation_follow(tx);
     let panes_changed = app.sync_panes();
     // The directory-owning terminal's `cd` moves the workspace view with it.

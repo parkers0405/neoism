@@ -56,8 +56,6 @@ pub struct Follow {
     target: Option<(f32, Instant)>,
     /// A keyboard move asked for the row to be revealed on the next frame.
     pub pending: bool,
-    /// Wheel distance not yet worth a whole row (row-stepped lists).
-    wheel: f32,
 }
 
 impl Follow {
@@ -99,44 +97,8 @@ impl Follow {
         if teleport && (target - offset).abs() > viewport * 1.25 { tx.scroll_to_y(key.to_owned(), target); }
         else { tx.scroll_to_with(key.to_owned(), 0.0, target, spring); }
     }
-
-    /// A wheel notch over a row-stepped list (`scroll_pixels`): the distance accumulates into
-    /// whole rows and the list glides there on `spring`. Returns the new top row and the rows
-    /// that fit, so the caller can keep its selection inside them; `None` when nothing moved.
-    pub fn wheel_rows(&mut self, key: &str, dy: f32, row_h: f32, content_h: f32, spring: Spring, tx: &mut Tx) -> Option<(usize, usize)> {
-        let viewport = self.scroll.get().2;
-        if viewport <= 0.0 || row_h <= 0.0 || content_h <= viewport + 0.5 { return None; }
-        self.wheel += dy;
-        let mut rows = 0i64;
-        while self.wheel.abs() >= row_h {
-            let sign = self.wheel.signum();
-            self.wheel -= sign * row_h;
-            rows += if sign > 0.0 { -1 } else { 1 };
-        }
-        if rows == 0 { return None; }
-        let rows_fit = (viewport / row_h).floor().max(1.0) as usize;
-        let max_offset = (content_h - viewport).max(0.0);
-        let max_top = (max_offset / row_h).ceil() as i64;
-        let current_top = (self.base() / row_h).round() as i64;
-        let top = (current_top + rows).clamp(0, max_top);
-        if top != current_top {
-            let target = (top as f32 * row_h).clamp(0.0, max_offset);
-            self.set_target(target);
-            tx.scroll_to_with(key.to_owned(), 0.0, target, spring);
-        }
-        Some((top as usize, rows_fit))
-    }
 }
 
-/// The selection a wheel step leaves inside the rows `top..top + fit`, `scrolloff` rows from
-/// either edge (`clamp_selected_to_viewport`).
-pub fn clamp_into_view(selected: usize, count: usize, top: usize, fit: usize, scrolloff: usize) -> usize {
-    if count == 0 || fit == 0 { return selected; }
-    let scrolloff = scrolloff.min(fit.saturating_sub(1) / 2);
-    let first = (top + scrolloff).min(count - 1);
-    let last = (top + fit.saturating_sub(1).saturating_sub(scrolloff)).min(count - 1);
-    selected.clamp(first, last.max(first))
-}
 
 impl Follow {
     /// Reveal a span `top..top + h` of content (rows of uneven height) keeping `margin` points
@@ -171,15 +133,6 @@ mod tests {
         assert_eq!(reveal_top(3, 21, 200, 0, c), 0);
         // Near the end it stops at max_top.
         assert_eq!(reveal_top(215, 21, 200, 180, c), 199);
-    }
-
-    #[test]
-    fn a_wheel_step_keeps_the_selection_in_its_band() {
-        // 8 rows fit with 2 of scrolloff: the list moved to row 10, so row 3 is pulled to 12.
-        assert_eq!(clamp_into_view(3, 40, 10, 8, 2), 12);
-        assert_eq!(clamp_into_view(30, 40, 10, 8, 2), 15);
-        assert_eq!(clamp_into_view(13, 40, 10, 8, 2), 13);
-        assert_eq!(clamp_into_view(4, 5, 0, 8, 2), 4);
     }
 
     #[test]

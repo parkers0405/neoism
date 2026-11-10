@@ -226,8 +226,8 @@ impl App {
             let index = *settings.visible().get(settings.focused)?;
             return self.rects.get(&format!("settings-control:{index}")).map(|r| crate::settings::view::cursor_rect(self, *r));
         }
-        let row = if self.finder.is_some() { self.rects.get("finder-row").map(|r| (*r, 14.0, 13.0)) }
-            else if self.picker.is_some() { self.rects.get("picker-row").map(|r| (*r, 10.0, 13.0)) }
+        let row = if let Some(finder) = &self.finder { self.finder_row_rect(finder).map(|r| (r, 14.0, 13.0)) }
+            else if let Some(picker) = &self.picker { self.palette_row_rect(picker).map(|r| (r, 10.0, 13.0)) }
             else { None };
         if let Some((r, pad_x, font)) = row {
             let s = self.ty.scale();

@@ -40,6 +40,10 @@ pub struct Picker {
     pub mode: Mode,
     pub query: TextEdit,
     pub selected: usize,
+    /// The first visible row (`scroll_offset`): the list's window moves in whole rows.
+    pub top: usize,
+    /// Wheel distance not yet worth a whole row.
+    pub wheel: f32,
     /// The Backgrounds catalog, read when the picker opens.
     pub backgrounds: Vec<backgrounds::Background>,
     /// Directory hits for the `cd` query, newest search only.
@@ -96,6 +100,12 @@ pub fn theme_display_name(name: &str) -> String {
 }
 
 impl Picker {
+    /// Move the window so the selection sits inside its band (after a jump or a reset).
+    pub fn reveal(&mut self) {
+        let count = self.rows().len();
+        self.top = crate::ui::rows::follow_top(self.selected, count, count.min(view::MAX_ROWS), self.top, view::SCROLL_OFF_ROWS);
+    }
+
     fn new(mode: Mode) -> Picker {
         let mut query = TextEdit::new("");
         query.focused = true;
@@ -104,7 +114,7 @@ impl Picker {
             backgrounds::catalog(&dir, crate::config::background_image().as_deref())
         } else { Vec::new() };
         if mode == Mode::Directories { query.replace_text("cd "); }
-        Picker { mode, query, selected: 0, backgrounds, directories: Vec::new(), directory_request: 0,
+        Picker { mode, query, selected: 0, top: 0, wheel: 0.0, backgrounds, directories: Vec::new(), directory_request: 0,
             systems: Vec::new(), servers: Vec::new(), settings: None, back: None }
     }
 
@@ -183,6 +193,7 @@ impl App {
         }
         if mode == Mode::Themes {
             picker.selected = PALETTES.iter().position(|p| std::ptr::eq(p, self.pal)).unwrap_or(0);
+            picker.reveal();
         }
         self.picker = Some(picker);
         if mode == Mode::Directories { self.search_directories(); }
@@ -203,6 +214,7 @@ impl App {
         if picker.mode != Mode::Directories || req_id != picker.directory_request { return; }
         picker.directories = hits;
         picker.selected = 0;
+        picker.top = 0;
     }
 
     /// Switch the category header between Systems and Servers (click or `Ctrl+Tab`); Systems
@@ -216,6 +228,8 @@ impl App {
             picker.settings = None;
             picker.query.replace_text(&query);
             picker.selected = selected.min(picker.rows().len().saturating_sub(1));
+            picker.top = 0;
+            picker.reveal();
             return;
         }
         picker.mode = mode;
@@ -223,6 +237,7 @@ impl App {
         picker.back = None;
         picker.query.replace_text("");
         picker.selected = 0;
+        picker.top = 0;
         picker.systems = systems::systems();
         picker.servers = systems::servers(connection);
     }
@@ -234,6 +249,7 @@ impl App {
         picker.settings = Some(index);
         picker.query.replace_text("");
         picker.selected = 0;
+        picker.top = 0;
     }
 
     /// Managing SSH systems and joining other servers runs in the desktop host; say so rather
@@ -248,7 +264,7 @@ impl App {
         let count = picker.rows().len();
         if count == 0 { return; }
         picker.selected = (picker.selected as isize + delta).rem_euclid(count as isize) as usize;
-        self.palette_follow.request();
+        picker.top = crate::ui::rows::follow_top(picker.selected, count, count.min(view::MAX_ROWS), picker.top, view::SCROLL_OFF_ROWS);
     }
 
     /// Run the selected (or clicked) row and close the picker.

@@ -42,6 +42,10 @@ pub struct Finder {
     pub grep_mode: SearchGrepMode,
     pub hits: Vec<Hit>,
     pub selected: usize,
+    /// The first visible hit: the list's window moves in whole rows.
+    pub top: usize,
+    /// Wheel distance not yet worth a whole row.
+    pub wheel: f32,
     pub loading: bool,
     pub error: Option<String>,
     /// File text behind the preview, by path.
@@ -59,7 +63,7 @@ impl Finder {
     fn new(mode: Mode) -> Finder {
         let mut query = TextEdit::new("");
         query.focused = true;
-        Finder { accept_pending: false, mode, query, exact: false, grep_mode: SearchGrepMode::Fuzzy, hits: Vec::new(), selected: 0, loading: false, error: None, preview: None, request: 0, due: Some(Instant::now()) }
+        Finder { accept_pending: false, mode, query, exact: false, grep_mode: SearchGrepMode::Fuzzy, hits: Vec::new(), selected: 0, top: 0, wheel: 0.0, loading: false, error: None, preview: None, request: 0, due: Some(Instant::now()) }
     }
 
     pub fn placeholder(&self) -> &'static str {
@@ -114,7 +118,12 @@ impl App {
         if finder.hits.is_empty() { return; }
         let last = finder.hits.len() as isize - 1;
         finder.selected = (finder.selected as isize + delta).clamp(0, last) as usize;
-        self.finder_follow.request();
+        let count = finder.hits.len();
+        let selected = finder.selected;
+        let visible = self.finder_visible();
+        if let Some(finder) = &mut self.finder {
+            finder.top = crate::ui::rows::follow_top(selected, count, visible, finder.top, view::SCROLL_OFF_ROWS);
+        }
         self.request_preview();
     }
 
@@ -191,6 +200,7 @@ impl App {
         if req_id != finder.request { return; }
         finder.hits = hits;
         finder.selected = 0;
+        finder.top = 0;
         finder.loading = false;
         finder.error = None;
         let accept = std::mem::take(&mut finder.accept_pending);

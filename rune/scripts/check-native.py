@@ -21,6 +21,8 @@ parser.add_argument('--size', help='Resize only the test window, for example 624
 parser.add_argument('--frames', type=int, default=720)
 parser.add_argument('--natural', action='store_true', help='Use normal redraw scheduling instead of forcing every frame')
 parser.add_argument('--keys', default='j' * 140)
+parser.add_argument('--cwd', help='Working directory of the test window (the finder searches it)')
+parser.add_argument('--arrows', help='Arrow presses, e.g. DDDDUU (Down/Up), 180 ms apart')
 parser.add_argument('--wheel', action='store_true', help='Scroll up and down over the test window using /dev/uinput')
 parser.add_argument('--wheel-seconds', type=float, default=3, help='Duration of alternating native wheel input')
 parser.add_argument('--daemon-url', help='Use a scratch daemon instead of offline fixtures')
@@ -50,6 +52,8 @@ elif not args.live:
 command = shlex.join(['env', *environment, 'timeout', '--signal=INT', str(max(12, args.wheel_seconds + 5)), args.binary,
     '--scene', args.scene, '--native', '--trace', str(trace), *([] if args.natural else ['--frames', str(args.frames)])])
 command += ' > ' + shlex.quote(str(log)) + ' 2>&1'
+if args.cwd:
+    command = 'cd ' + shlex.quote(args.cwd) + ' && ' + command
 dispatch(f'hl.dsp.exec_cmd({json.dumps(command)}, {{ workspace = "{args.workspace}" }})')
 window = None
 for _ in range(80):
@@ -128,6 +132,13 @@ elif args.wheel:
         if created:
             fcntl.ioctl(fd, 0x5502)
         os.close(fd)
+elif args.arrows:
+    for c in args.arrows:
+        if c in 'DU':
+            send('-k', 'Down' if c == 'D' else 'Up')
+        else:
+            send(c)  # other characters are typed (a query), then given time to search
+        time.sleep(.18 if c in 'DU' else .6)
 else:
     for offset in range(0, len(args.keys), 5):
         send('-d', '18', args.keys[offset:offset + 5])

@@ -70,6 +70,9 @@ pub fn view(app: &App) -> El {
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
         .key("picker-query")
+        // One cursor: the window's block cursor (on the selected row, or here when the list is
+        // empty) stands in for Rune's thin caret, as in the composer.
+        .caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder(match picker.mode {
             Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...",
             Mode::Systems => "Search systems...", Mode::Servers => "Search servers...", Mode::SystemSettings => "",
@@ -199,11 +202,13 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
     let s = app.ty.scale();
     let p = app.pal;
     let row_h = row_height(picker.mode);
-    let mut built = Vec::with_capacity(rows.len());
-    for (index, item) in rows.iter().enumerate() {
+    let visible = rows.len().clamp(if picker.mode == Mode::SystemSettings { 0 } else { 1 }, MAX_ROWS);
+    let span = crate::ui::rows::span(picker.top, visible, rows.len());
+    let mut built = Vec::with_capacity(span.len());
+    for (index, item) in rows.iter().enumerate().skip(span.start).take(span.len()) {
         let selected = index == picker.selected;
         if item.look != super::Look::default() {
-            built.push(rich_row(app, picker, index, item, selected));
+            built.push((index, rich_row(app, picker, index, item, selected)));
             continue;
         }
         let mut line = row().key(format!("picker-row:{index}")).w_full().h(row_h * s).px(10.0 * s).gap(8.0 * s).center_y()
@@ -220,12 +225,11 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
         if !item.shortcut.is_empty() {
             line = line.child(text(item.shortcut).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().shrink());
         }
-        built.push(line);
+        built.push((index, line));
     }
-    let visible = rows.len().clamp(if picker.mode == Mode::SystemSettings { 0 } else { 1 }, MAX_ROWS);
     let reset = format!("{:?}:{}", picker.mode, picker.query.text);
     let selected = (!rows.is_empty()).then_some(picker.selected);
-    crate::ui::rows::view(LIST_KEY, &reset, width, row_h * s, visible, picker.top, selected, rgb(p.hover), 3.0 * s, built)
+    crate::ui::rows::view(LIST_KEY, &reset, width, row_h * s, visible, picker.top, selected, rgb(p.hover), 3.0 * s, rows.len(), built)
         .pb(4.0 * s)
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
         .on_wheel(|a: &mut App, e: rune::WheelEvent, tx: &mut Tx| a.palette_wheel(&e, tx))

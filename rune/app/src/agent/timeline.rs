@@ -78,7 +78,13 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
             let Some(session) = s.sessions.get_mut(&wheel_id) else { return false };
             let (offset, _) = session.scroll.get();
-            if e.dy > 0.0 { session.scrolled_up_at = Some(std::time::Instant::now()); }
+            // A pause in upward scrolling, or a turn down, starts a new gesture: it may load
+            // the next page.
+            let now = std::time::Instant::now();
+            if e.dy < 0.0 || session.scrolled_up_at.is_none_or(|at| now.duration_since(at) > std::time::Duration::from_millis(250)) {
+                session.older_spent = false;
+            }
+            if e.dy > 0.0 { session.scrolled_up_at = Some(now); }
             // Heading up within a viewport of the top asks for the page above.
             let near_top = e.dy > 0.0 && offset < session.viewport_h;
             let mirror = session.scroll.clone();

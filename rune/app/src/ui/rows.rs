@@ -40,13 +40,20 @@ pub fn wheel(acc: &mut f32, dy: f32, row_h: f32, top: usize, selected: usize, co
     (top, selected.clamp(low, high.max(low)))
 }
 
-/// The list viewport: `rows` (each `row_h` tall, in order) placed on content that slides to
+/// The rows worth building around a window at `top`: two windows above it and two below, so a
+/// slide of a few rows never shows a gap. A list of thousands of hits builds a few dozen rows;
+/// building them all made every frame of the cursor's trail re-lay out the whole list.
+pub fn span(top: usize, visible: usize, count: usize) -> std::ops::Range<usize> {
+    let visible = visible.max(1);
+    top.saturating_sub(2 * visible).min(count)..(top + 3 * visible).min(count)
+}
+
+/// The list viewport: `rows` (each `row_h` tall, by index, `count` in all) placed on content that slides to
 /// `top`, with the highlight gliding to `selected`. `reset` names the query, so a new one
 /// mounts fresh content at rest instead of sliding from the old position.
 #[allow(clippy::too_many_arguments)]
 pub fn view(key: &str, reset: &str, width: f32, row_h: f32, visible: usize, top: usize, selected: Option<usize>,
-    highlight: Color, radius: f32, rows: Vec<El>) -> El {
-    let count = rows.len();
+    highlight: Color, radius: f32, count: usize, rows: Vec<(usize, El)>) -> El {
     // Rows swap in place as the query changes, as the original's did: no enter/exit fade on
     // new content or rows, and the list's height follows its row count at once. Only the
     // scroll residual and the highlight glide.
@@ -57,15 +64,72 @@ pub fn view(key: &str, reset: &str, width: f32, row_h: f32, visible: usize, top:
         content = content.child(el().key("highlight").w(width).h(row_h).radius(radius).fill(highlight)
             .absolute(0.0, 0.0).offset(0.0, selected as f32 * row_h).offset_motion(CURSOR_SPRING));
     }
-    for (index, row) in rows.into_iter().enumerate() {
+    for (index, row) in rows {
         content = content.child(row.absolute(0.0, index as f32 * row_h).transition(rune::Transition::none()));
     }
     el().key(key.to_owned()).w(width).h(visible.max(1) as f32 * row_h).clip_rounded(0.0).motion(rune::Spring::NONE).child(content)
 }
 
+/// The list's slide as GPUiX drew it (`list_scroll_residual`): when the window's top row moves,
+/// the rows are still drawn where they were and spring back to their new place on the list's
+/// spring. The window cursor aims at the selected row as drawn, so when the selection pushes
+/// the window at the band's edge the cursor's target jumps a row and slides back with the list,
+/// and its corners trail as they do inside the window. Rune runs the content's own slide; this
+/// mirrors it for the cursor.
+#[derive(Default)]
+pub struct Residual {
+    reset: String,
+    top: usize,
+    value: f32,
+    vel: f32,
+    clock: Option<f64>,
+}
+
+impl Residual {
+    /// How far the selected row is drawn from its settled place, in points.
+    pub fn value(&self) -> f32 { self.value }
+
+    /// Follow the list's `top` (rows `row_h` tall) to `clock`; a new `reset` (query) starts at
+    /// rest, as the list does. Returns whether it still moves.
+    pub fn step(&mut self, reset: &str, top: usize, row_h: f32, clock: f64) -> bool {
+        if reset != self.reset {
+            *self = Residual { reset: reset.to_owned(), top, clock: Some(clock), ..Residual::default() };
+            return false;
+        }
+        if top != self.top {
+            self.value += (top as f32 - self.top as f32) * row_h;
+            self.top = top;
+        }
+        let dt = self.clock.map_or(0.0, |last| (clock - last).clamp(0.0, 0.05)) as f32;
+        self.clock = Some(clock);
+        if self.value == 0.0 && self.vel == 0.0 { return false; }
+        // Critically damped, as Rune's spring of the same duration.
+        let omega = std::f32::consts::TAU / LIST_SPRING.duration;
+        let (a, b) = (self.value, self.vel + omega * self.value);
+        let c = (-omega * dt).exp();
+        self.value = (a + b * dt) * c;
+        self.vel = (b - omega * (a + b * dt)) * c;
+        if self.value.abs() < 0.05 && self.vel.abs() < 1.0 { self.value = 0.0; self.vel = 0.0; return false; }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_residual_jumps_a_row_and_settles() {
+        let mut r = Residual::default();
+        r.step("q", 0, 30.0, 0.0);
+        r.step("q", 1, 30.0, 0.0);
+        assert_eq!(r.value(), 30.0);
+        let mut t = 0.0;
+        while r.step("q", 1, 30.0, t) { t += 1.0 / 120.0; assert!(t < 2.0); }
+        assert_eq!(r.value(), 0.0);
+        assert!(!r.step("other", 5, 30.0, t));
+        assert_eq!(r.value(), 0.0);
+    }
 
     #[test]
     fn the_window_moves_only_at_the_band() {

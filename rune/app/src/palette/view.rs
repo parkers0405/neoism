@@ -4,6 +4,8 @@
 use super::{Mode, Picker, Target, theme_display_name};
 use crate::app::App;
 use crate::ui::theme::{Palette, palette, rgb};
+use crate::ui::theme::NERD;
+use rune::tok::TextStyle;
 use rune::{Color, El, Key, KeyEvent, Tx, col, el, row, text};
 
 const WIDTH: f32 = 480.0;
@@ -12,6 +14,12 @@ const THEME_LIST_WIDTH: f32 = 300.0;
 const MARGIN_TOP: f32 = 80.0;
 const INPUT_H: f32 = 30.0;
 const ROW_H: f32 = 32.0;
+/// System settings rows hold a title and two description lines.
+const SETTING_ROW_H: f32 = 62.0;
+/// The Systems/Servers tab band (30 pt tabs plus 8) and the settings back header.
+const CATEGORY_H: f32 = 38.0;
+const SETTINGS_HEADER_H: f32 = 70.0;
+const SHORTCUT_FONT: f32 = 11.0;
 const MAX_ROWS: usize = 8;
 const LIST_KEY: &str = "picker-results";
 
@@ -20,7 +28,7 @@ impl App {
     pub fn palette_follow_selection(&mut self, tx: &mut Tx) {
         let Some(picker) = &self.picker else { return };
         let (selected, count) = (picker.selected, picker.rows().len());
-        let row_h = ROW_H * self.ty.scale();
+        let row_h = row_height(picker.mode) * self.ty.scale();
         self.palette_follow.apply(LIST_KEY, selected, row_h, count as f32 * row_h + 4.0 * self.ty.scale(), crate::ui::follow::Reveal::Margin(2), tx);
     }
 }
@@ -39,7 +47,10 @@ pub fn view(app: &App) -> El {
 
     let input = rune::text_input(&picker.query, app.ty.sized(14.0))
         .key("picker-query")
-        .placeholder(match picker.mode { Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...", Mode::Commands | Mode::Directories => "Type a command..." }, rgb(p.muted))
+        .placeholder(match picker.mode {
+            Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...",
+            Mode::Systems => "Search systems...", Mode::Servers => "Search servers...", Mode::SystemSettings => "",
+            Mode::Commands | Mode::Directories => "Type a command..." }, rgb(p.muted))
         .color(rgb(p.fg)).w_full()
         .on_edit(|a: &mut App| &mut a.picker.as_mut().expect("picker open").query)
         .on_input_change(|a: &mut App, _: &mut Tx| {
@@ -53,9 +64,16 @@ pub fn view(app: &App) -> El {
     } else {
         row().w_full().h(INPUT_H * s).px(10.0 * s).center_y().child(input)
     };
-    let header = col().w_full().padding(if themes { 6.0 * s } else { 0.0 })
-        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.surface))
-        .child(field);
+    // Settings have no query: the field stays mounted (it owns the keys) but takes no room.
+    let field = if picker.mode == Mode::SystemSettings { field.h(0.0).clip_rounded(0.0) } else { field };
+    let mut header = col().w_full().padding(if themes { 6.0 * s } else { 0.0 })
+        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.surface));
+    match picker.mode {
+        Mode::Systems | Mode::Servers => header = header.child(categories(app, picker.mode, width)),
+        Mode::SystemSettings => header = header.child(settings_header(app, picker, width)),
+        _ => {}
+    }
+    let header = header.child(field);
 
     let list = list(app, picker, &rows, if themes { (THEME_LIST_WIDTH * s).min(width * 0.45) } else { width });
     let body = if themes {
@@ -85,8 +103,65 @@ pub fn view(app: &App) -> El {
         .child(dialog)
 }
 
+/// `Systems` | `Servers` tabs (`render.rs`, the category header): up to 120 pt each, 4 pt apart,
+/// 30 tall, the active one filled and bold, a hovered one half filled.
+fn categories(app: &App, mode: Mode, width: f32) -> El {
+    let p = app.pal;
+    let s = app.ty.scale();
+    let gap = 4.0 * s;
+    let tab_w = ((width - gap) * 0.5).clamp(0.0, 120.0 * s);
+    let mut tabs = row().key("palette-categories").w_full().h(CATEGORY_H * s).gap(gap);
+    for (index, label, glyph, target) in [(0, "Systems", "\u{f108}", Mode::Systems), (1, "Servers", "\u{f233}", Mode::Servers)] {
+        let active = mode == target;
+        let hovered = app.palette_category_hover == Some(index);
+        let ink = rgb(if active || hovered { p.fg } else { p.dim });
+        let font = if active { app.ty.sized_bold(SHORTCUT_FONT) } else { app.ty.sized(SHORTCUT_FONT) };
+        tabs = tabs.child(row().key(format!("palette-category:{index}")).w(tab_w).h(30.0 * s).px(10.0 * s).gap(8.0 * s).center_y()
+            .radius(6.0 * s)
+            .fill(if active { rgb(p.hover) } else if hovered { rgb(p.hover).alpha(0.5) } else { Color::TRANSPARENT })
+            .child(el().w(14.0 * s).center().child(text(glyph).font(TextStyle::new(14.0 * s, 400.0).family(NERD)).color(ink)))
+            .child(text(label).font(font).color(ink).truncate().shrink())
+            .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
+                if inside { a.palette_category_hover = Some(index); } else if a.palette_category_hover == Some(index) { a.palette_category_hover = None; }
+            })
+            .on_press(move |a: &mut App| a.show_category(target)));
+    }
+    tabs
+}
+
+/// A system's settings header: a 96 × 30 back button ("← Systems") and the
+/// `name · address · status[ · Read only]` line under it.
+fn settings_header(app: &App, picker: &Picker, width: f32) -> El {
+    let p = app.pal;
+    let s = app.ty.scale();
+    let heading = picker.settings.and_then(|i| picker.systems.get(i)).map(|system| system.heading()).unwrap_or_default();
+    let hovered = app.palette_category_hover == Some(0);
+    col().key("palette-system-header").w(width).h(SETTINGS_HEADER_H * s)
+        .child(row().key("palette-system-back").w(96.0 * s).h(30.0 * s).px(8.0 * s).gap(8.0 * s).center_y().radius(6.0 * s)
+            .fill(if hovered { rgb(p.hover) } else { Color::TRANSPARENT })
+            .child(el().w(14.0 * s).center().child(text("\u{f060}").font(TextStyle::new(14.0 * s, 400.0).family(NERD)).color(rgb(p.fg))))
+            .child(text("Systems").font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.fg)))
+            .on_hover_change(|a: &mut App, inside: bool, _: &mut Tx| {
+                if inside { a.palette_category_hover = Some(0); } else if a.palette_category_hover == Some(0) { a.palette_category_hover = None; }
+            })
+            .on_press(|a: &mut App| a.show_category(Mode::Systems)))
+        .child(text(heading).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.fg)).truncate().mt(7.0 * s).w(width))
+}
+
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    let mode = app.picker.as_ref().map(|p| p.mode);
+    let empty = app.picker.as_ref().is_some_and(|p| p.query.text.is_empty());
     match event.key {
+        // Esc, or Backspace with nothing to delete, steps back from a system's settings.
+        Key::Escape | Key::Backspace if mode == Some(Mode::SystemSettings) && (event.key == Key::Escape || empty) => {
+            app.show_category(Mode::Systems);
+            true
+        }
+        // Ctrl+Tab switches the category (`category_switch_action`).
+        Key::Tab if event.mods.ctrl && !event.mods.alt && !event.mods.logo && matches!(mode, Some(Mode::Systems | Mode::Servers)) => {
+            app.show_category(if mode == Some(Mode::Systems) { Mode::Servers } else { Mode::Systems });
+            true
+        }
         Key::Escape => { app.picker = None; true }
         Key::Up => { app.move_picker(-1); true }
         Key::Down => { app.move_picker(1); true }
@@ -94,12 +169,19 @@ fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
+pub(crate) fn row_height(mode: Mode) -> f32 { if mode == Mode::SystemSettings { SETTING_ROW_H } else { ROW_H } }
+
 fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
     let s = app.ty.scale();
     let p = app.pal;
+    let row_h = row_height(picker.mode);
     let mut list = col().w_full();
     for (index, item) in rows.iter().enumerate() {
         let selected = index == picker.selected;
+        if item.look != super::Look::default() {
+            list = list.child(rich_row(app, picker, index, item, selected));
+            continue;
+        }
         let mut line = row().key(format!("picker-row:{index}")).w_full().h(ROW_H * s).px(10.0 * s).gap(8.0 * s).center_y()
             .radius(3.0 * s)
             .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT })
@@ -119,13 +201,70 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
         }
         list = list.child(line);
     }
-    let visible = rows.len().clamp(1, MAX_ROWS) as f32;
+    let visible = rows.len().clamp(if picker.mode == Mode::SystemSettings { 0 } else { 1 }, MAX_ROWS) as f32;
     let mirror = app.palette_follow.scroll.clone();
-    col().key(LIST_KEY).w(width).h(visible * ROW_H * s + 4.0 * s).pb(4.0 * s)
+    col().key(LIST_KEY).w(width).h(visible * row_h * s + 4.0 * s).pb(4.0 * s)
         .scroll(rune::ScrollSpec { stick_bottom: false })
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
         .child(list)
+}
+
+/// A Systems/Servers/settings row (`render.rs`): a status dot for servers, the title, the
+/// address/state detail 16 pt after it, a 3 pt green stripe on the window's own server and an
+/// accent one on a selected server; "+ Add" rows centre their title; settings rows carry two
+/// description lines and the Active switch.
+fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selected: bool) -> El {
+    use super::systems::ServerStatus;
+    let p = app.pal;
+    let s = app.ty.scale();
+    let look = &item.look;
+    let row_h = row_height(picker.mode) * s;
+    let mut line = row().key(format!("picker-row:{index}")).w_full().h(row_h).px(10.0 * s).center_y()
+        .radius(3.0 * s)
+        .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT })
+        .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
+            if let (true, Some(picker)) = (inside, &mut a.picker) { picker.selected = index; }
+        })
+        .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker(Some(index), tx));
+    if selected {
+        line = line.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("picker-row".into(), r); });
+    }
+    let stripe = if look.current { Some(p.green) } else if selected && look.dot.is_some() { Some(p.accent) } else { None };
+    if let Some(color) = stripe {
+        line = line.child(el().w(3.0 * s).h((row_h - 6.0 * s).max(2.0 * s)).absolute(0.0, 3.0 * s).fill(rgb(color)));
+    }
+    if let Some(status) = look.dot {
+        let (glyph, color) = match status {
+            ServerStatus::Online => ("\u{25cf}", p.green),
+            ServerStatus::Connecting => ("\u{25cf}", p.yellow),
+            ServerStatus::Offline => ("\u{25cf}", p.red),
+            ServerStatus::Unknown => ("\u{25cb}", p.muted),
+        };
+        line = line.child(el().w(13.0 * 0.8 * s).mr(6.0 * s).center().child(text(glyph).font(app.ty.sized(13.0)).color(rgb(color))));
+    }
+    let title = text(item.title.clone()).font(app.ty.sized(13.0)).color(rgb(p.fg)).truncate().shrink();
+    if look.centered {
+        return line.justify_center().child(title);
+    }
+    if look.description {
+        let toggle = (item.target == super::Target::Setting(super::systems::Setting::Active)).then(|| {
+            // The modal/Settings 40 × 22 track with a 16 pt knob; on while the system is Active.
+            let on = picker.settings.and_then(|i| picker.systems.get(i)).is_some_and(|system| system.enabled);
+            el().w(40.0 * s).h(22.0 * s).radius(11.0 * s).fill(rgb(if on { p.accent } else { p.border }))
+                .child(el().w(16.0 * s).h(16.0 * s).radius(8.0 * s).fill(rgb(if on { p.fg } else { p.dim }))
+                    .absolute(if on { 21.0 * s } else { 3.0 * s }, 3.0 * s))
+        });
+        let mut text_col = col().grow(1.0).shrink().h_full().pt(6.0 * s).gap(2.0 * s)
+            .child(title)
+            .child(text(item.shortcut).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).wrap().max_lines(2));
+        if toggle.is_some() { text_col = text_col.mr(12.0 * s); }
+        line = line.items_start().child(text_col);
+        if let Some(toggle) = toggle { line = line.child(el().h_full().center().child(toggle)); }
+        return line;
+    }
+    line.child(title)
+        .child(text(look.detail.clone()).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).ml(16.0 * s).mr(24.0 * s).truncate().shrink())
 }
 
 /// The previewed theme drawn in its own colours: name, hint, rule, then a syntax sample.

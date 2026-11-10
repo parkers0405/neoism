@@ -194,6 +194,16 @@ fn main() {
                 s.open_file("right.rs", None); s.apply_opened_file("right.rs", b"let right_value = 2;\n");
             }),
             ("about", |s| s.modal = Some(ui::modal::Modal::about())),
+            // Systems/Servers from the rail's server button, with fixed entries (not the
+            // desktop registries) so renders are reproducible.
+            ("systems", |s| { s.open_picker(palette::Mode::Systems); palette::systems_fixture(s); }),
+            ("servers", |s| { s.open_picker(palette::Mode::Servers); palette::systems_fixture(s); s.move_picker(1); }),
+            ("system-settings", |s| {
+                s.open_picker(palette::Mode::Systems);
+                palette::systems_fixture(s);
+                s.move_picker(1);
+                s.accept_picker_now(None);
+            }),
             // A long file and a long tree, for walking with held arrows.
             ("editor-long", |s| {
                 s.open_file("src/app.rs", None);

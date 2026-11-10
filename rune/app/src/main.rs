@@ -4,6 +4,7 @@
 mod agent;
 mod app;
 mod browser;
+mod collab;
 mod clipboard;
 mod session;
 mod config;
@@ -34,6 +35,18 @@ mod fast_servers;
 #[allow(dead_code)]
 #[path = "servers/service_process.rs"]
 mod service_process;
+// The shared Yrs replica and presence plane (`neoism-frontend/shared/src/editor/crdt`), as
+// every Neoism client compiles them; `cursor_style` is the one name they reach for outside.
+#[allow(dead_code, unused_imports)]
+#[path = "../../../neoism-frontend/shared/src/editor/crdt/mod.rs"]
+mod crdt;
+mod cursor_style {
+    /// Seconds since first use: the process clock rainbow carets and presence orbs share.
+    pub fn rainbow_now_seconds() -> f32 {
+        static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f32()
+    }
+}
 mod tabs;
 mod tree;
 mod ui;
@@ -146,6 +159,11 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The directory-owning terminal's `cd` moves the workspace view with it.
     let panes_changed = app.follow_main_terminal() || panes_changed;
     app.follow_tab_chrome(tx);
+    // Shared documents: send what was typed, carry out undo; then who is where.
+    let shared_changed = app.collab_flush();
+    let (presence_wake, presence_changed) = app.presence_tick();
+    if let Some(delay) = presence_wake { wake!("presence", delay); }
+    if let Some(delay) = app.peer_blink_tick() { wake!("peer-blink", delay); }
     let flashing = app.editor_tick();
     let mouse_changed = app.editor_mouse_tick(tx);
     // Edited buffers re-sync to the language servers once typing settles.
@@ -208,7 +226,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    let rerun = animating || changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    let rerun = animating || changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
     // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
     if *TRACE_POLL && (rerun || !wakes.is_empty()) {
         let terms = [("animating", animating), ("changed", changed), ("stream", stream_due), ("fps", fps_changed), ("caret", caret_changed),
@@ -504,6 +522,33 @@ fn main() {
                         "text": format!("## Answer {i}\n\n{}", "The scheduler presents on the display clock and never busy-waits. ".repeat(8))}),
                 ]).collect();
                 s.load_fixture("fixture-rail", "Question Rail", &serde_json::Value::Array(messages).to_string());
+            }),
+            // Company in a shared workspace: six people on the rail (four shown, this user first,
+            // "+2"), five in the open file (three orbs and "+2" on its tree row; a selection, an
+            // insert beam, a block and a rainbow caret in the editor), one in another file.
+            ("presence", |s| {
+                use neoism_protocol::crdt::{CrdtCursorPosition as At, CrdtPeerPresence, CrdtPresenceColor, CrdtSelectionRange};
+                let entries: Vec<_> = ["notes.md", "server.rs", "shared.rs"].iter().map(|name| serde_json::json!({"name": name, "is_dir": false})).collect();
+                s.apply_dir_listing("", &serde_json::Value::Array(entries));
+                s.sidebar = Some(app::Sidebar::Files);
+                s.open_file("shared.rs", None);
+                s.apply_opened_file("shared.rs", b"use std::collections::HashMap;\n\nfn main() {\n    let mut seen = HashMap::new();\n    for word in [\"shared\", \"edits\", \"shared\"] {\n        *seen.entry(word).or_insert(0) += 1;\n    }\n    println!(\"{seen:?}\");\n}\n");
+                let at = |line, column| At { line, column, offset: None };
+                let file = |name: &str| app::App::buffer_id(&format!("{}/{name}", s.cwd.trim_end_matches('/')));
+                let peer = |name: &str, buffer: String, color: [u8; 3], cursor: (u32, u32), selection: Option<((u32, u32), (u32, u32))>, insert: bool, rainbow: bool| CrdtPeerPresence {
+                    buffer_id: buffer, peer_id: format!("{}@scene", name.to_lowercase()), display_name: name.to_owned(), client_os: (name == "Grace").then(|| "windows".to_owned()),
+                    color: CrdtPresenceColor { r: color[0], g: color[1], b: color[2] }, cursor: at(cursor.0, cursor.1),
+                    selection: selection.map(|(a, b)| CrdtSelectionRange { anchor: at(a.0, a.1), head: at(b.0, b.1) }), insert, rainbow, updated_at_ms: 0,
+                };
+                s.collab.stage(vec![
+                    peer("Ada", file("shared.rs"), [0xe0, 0x6c, 0x75], (5, 24), Some(((4, 8), (5, 24))), false, false),
+                    peer("Bob", file("shared.rs"), [0x61, 0xaf, 0xef], (3, 17), None, true, false),
+                    peer("Cy", file("shared.rs"), [0xc6, 0x78, 0xdd], (7, 4), None, false, false),
+                    peer("Dee", file("shared.rs"), [0xe5, 0xc0, 0x7b], (0, 4), None, true, true),
+                    peer("Eli", file("shared.rs"), [0x56, 0xb6, 0xc2], (8, 1), None, true, false),
+                    peer("Grace", file("server.rs"), [0x98, 0xc3, 0x79], (0, 0), None, false, false),
+                ]);
+                s.peer_hover = Some("bob@scene".into());
             }),
             ("tree-long", |s| {
                 let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();

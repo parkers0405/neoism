@@ -21,7 +21,7 @@ pub use view::view;
 use crate::app::App;
 use crate::daemon::Family;
 use crate::tabs::TabKind;
-use document::{Document, Mode};
+pub use document::{Document, LineEnding, Mode};
 use input::{Key, Outcome, Prompt};
 
 pub struct Buffer {
@@ -37,8 +37,8 @@ pub struct Buffer {
     /// Normal-mode Space leader, owned by the host rather than the Vim resolver.
     leader_pending: bool,
     /// The lines a `WriteFile` in flight carries; they become the saved baseline on success.
-    saving: Option<Vec<String>>,
-    saving_request: Option<u64>,
+    pub(crate) saving: Option<Vec<String>>,
+    pub(crate) saving_request: Option<u64>,
     close_after_save: Option<u64>,
     /// A transient note under the code (`"file.rs" written`, errors).
     pub message: Option<String>,
@@ -65,6 +65,8 @@ pub struct Buffer {
     search_origin: Option<vim::Pos>,
     /// The pattern every visible occurrence of is banded (hlsearch), until `:noh`.
     pub search_highlight: Option<String>,
+    /// The file as a document every editor shares (`collab::doc`), once it has loaded.
+    pub shared: Option<crate::collab::doc::Binding>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +88,7 @@ impl Buffer {
             lsp: lsp::BufferLsp::default(),
             mouse: mouse::Mouse::default(),
             code_cache: Default::default(),
-            view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None, jump_spring: None, search_origin: None, search_highlight: None,
+            view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None, jump_spring: None, search_origin: None, search_highlight: None, shared: None,
         }
     }
 
@@ -100,7 +102,9 @@ impl Buffer {
     pub fn dirty(&self) -> bool { self.loaded && self.doc.is_dirty() }
 
     /// The absolute path the daemon and language servers know the file by.
-    fn host_path(&self) -> String {
+    pub fn is_config(&self) -> bool { self.config.is_some() }
+
+    pub(crate) fn host_path(&self) -> String {
         if self.path.starts_with('/') { self.path.clone() } else { format!("{}/{}", self.scope.trim_end_matches('/'), self.path) }
     }
 }
@@ -204,11 +208,19 @@ impl App {
             self.editor_follow = true;
         }
         self.lsp_sync(&opened);
+        self.collab_bind(&opened);
     }
 
     /// `FileWritten`: the save landed; what it carried is the new baseline.
     pub(crate) fn apply_file_written(&mut self, path: &str, request: u64) {
-        let Some(buffer) = self.buffers.values_mut().find(|b| (b.path == path || b.host_path() == path) && b.saving_request == Some(request)) else { return };
+        let Some(key) = self.buffers.iter().find(|(_, b)| (b.path == path || b.host_path() == path) && b.saving_request == Some(request)).map(|(key, _)| key.clone()) else { return };
+        self.save_landed(&key);
+    }
+
+    /// The save in flight for the buffer under `key` landed (a written file, or the daemon
+    /// saving the shared document).
+    pub(crate) fn save_landed(&mut self, key: &str) {
+        let Some(buffer) = self.buffers.get_mut(key) else { return };
         buffer.saving_request = None;
         if let Some(lines) = buffer.saving.take() {
             buffer.doc.mark_saved_lines(lines);
@@ -226,7 +238,8 @@ impl App {
     /// `Files Changed`: re-read clean open files under the changed paths.
     pub(crate) fn apply_files_changed(&mut self, paths: &[String]) {
         let stale: Vec<(String, String)> = self.buffers.values()
-            .filter(|b| b.loaded && !b.doc.is_dirty() && b.saving.is_none() && paths.iter().any(|p| *p == b.host_path() || *p == b.path))
+            // A shared document takes disk changes from the daemon, merged with unsaved edits.
+            .filter(|b| b.loaded && !b.doc.is_dirty() && b.saving.is_none() && !b.shared.as_ref().is_some_and(|s| s.is_seeded()) && paths.iter().any(|p| *p == b.host_path() || *p == b.path))
             .map(|b| (b.path.clone(), b.scope.clone()))
             .collect();
         for (path, scope) in stale { self.read_file(&path, &scope); }
@@ -395,6 +408,27 @@ impl App {
             return;
         }
         buffer.saving = Some(buffer.doc.lines.clone());
+        if let Some(binding) = buffer.shared.as_mut().filter(|b| b.is_seeded()) {
+            // The daemon owns a shared document and writes it itself, after every edit of ours
+            // queued ahead of the save on this socket (`DocumentController.save`).
+            let mut out = binding.flush(&mut buffer.doc);
+            let save = binding.save();
+            for message in out.drain(..) { if let Ok(value) = serde_json::to_value(&message) { daemon.send(Family::Crdt, value); } }
+            if let Ok(value) = serde_json::to_value(&save) { buffer.saving_request = Some(daemon.request(Family::Crdt, value, None)); }
+            return;
+        }
+        let key = buffer.path.clone();
+        self.write_file(&key);
+    }
+
+    /// Write the buffer's text to its file through `Files` (the save of a file that is not a
+    /// shared document, or one the daemon could not write).
+    pub(crate) fn write_file(&mut self, key: &str) {
+        let (Some(daemon), Some(buffer)) = (self.daemon.clone(), self.buffers.get_mut(key)) else { return };
+        let lines = buffer.saving.get_or_insert_with(|| buffer.doc.lines.clone()).clone();
+        let sep = match buffer.doc.line_ending { LineEnding::Lf => "\n", LineEnding::Crlf => "\r\n" };
+        let mut text = lines.join(sep);
+        if buffer.doc.trailing_newline { text.push_str(sep); }
         let (path, scope) = (buffer.path.clone(), buffer.scope.clone());
         buffer.saving_request = Some(daemon.request(Family::Files, serde_json::json!({"WriteFile": {"path": path, "bytes": text.as_bytes()}}), Some(scope)));
     }

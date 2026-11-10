@@ -197,6 +197,7 @@ pub struct State {
     splash: crate::home::SplashState,
     /// The workspace's server (and the tunnel to it).
     link: crate::servers::flow::Link,
+    collab: crate::collab::Collab,
 }
 impl State {
     /// This parked workspace as recovery data (`session.rs`).
@@ -245,6 +246,7 @@ impl State {
             databases: app.databases,
             splash: app.splash,
             link: app.server.link,
+            collab: app.collab,
         }
     }
     fn swap(&mut self, app: &mut App) {
@@ -286,6 +288,7 @@ impl State {
         std::mem::swap(&mut self.databases, &mut app.databases);
         std::mem::swap(&mut self.splash, &mut app.splash);
         std::mem::swap(&mut self.link, &mut app.server.link);
+        std::mem::swap(&mut self.collab, &mut app.collab);
     }
 }
 
@@ -328,6 +331,8 @@ impl App {
         if self.workspace_closing.is_some() || index >= self.workspaces.len() || index == self.workspace_active {
             return;
         }
+        // This user's cursor leaves the workspace they are switching away from.
+        self.presence_leave();
         self.swap_workspace(index);
         // This strip is window-scoped and may not relayout when selection changes.
         // Keep its measured bounds, including an in-flight workspace drag.
@@ -405,6 +410,12 @@ impl App {
         message: &serde_json::Value,
     ) {
         if let Some(resolved) = message.get("InitialWorkspaceResolved") { self.adopt_workspace(&resolved["workspace"]); }
+        // The daemon's record says whether the workspace is shared (`workspace.visibility`).
+        for record in ["InitialWorkspaceResolved", "HostWorkspaceUpserted"].iter().filter_map(|key| message.get(*key)).map(|m| &m["workspace"]) {
+            if record["id"].as_str() == Some(&self.workspace_id) && let Some(visibility) = record["visibility"].as_str() {
+                self.collab.shared = matches!(visibility, "shared" | "team");
+            }
+        }
         // A remote home workspace (`~`) reports where that is.
         if self.server.remote() && self.cwd == "~"
             && let Some(workspace) = message.get("HostWorkspaceUpserted").map(|m| &m["workspace"]).filter(|w| w["id"].as_str() == Some(&self.workspace_id))

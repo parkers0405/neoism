@@ -138,6 +138,12 @@ pub struct App {
     pub finder: Option<crate::finder::Finder>,
     /// This person's presence name (their orb seed and message author).
     pub local_name: String,
+    /// The active workspace's presence and shared-document plane (`collab`).
+    pub collab: crate::collab::Collab,
+    /// The rail orb under the pointer, whose name shows beside it.
+    pub peer_hover: Option<String>,
+    /// Other people's carets blink on this, lit for the first half of each half second.
+    pub peer_blink: rune::Live<f32>,
     /// Presence orbs (profile pictures) shown so far.
     pub orbs: crate::ui::orb::Orbs,
     /// Wakes the UI thread (poll) from views and background work.
@@ -290,6 +296,9 @@ impl App {
             buffers: HashMap::new(),
             finder: None,
             local_name: crate::ui::orb::local_display_name(config.display_name.as_deref()),
+            collab: crate::collab::Collab::new(&crate::ui::orb::local_display_name(config.display_name.as_deref())),
+            peer_hover: None,
+            peer_blink: rune::Live::new(1.0),
             orbs: Default::default(),
             waker: None,
             cursor: Default::default(),
@@ -321,6 +330,10 @@ impl App {
             // A reply's text is applied now and shown on the stream's own pace (`StreamPace`).
             if matches!(&event, Inbound::Agent(message) if matches!(**message, neoism_protocol::agent::AgentServerMessage::ContentDelta { .. })) {
                 self.stream_pace.pending = true;
+            } else if let Inbound::Crdt { request_id, message } = event {
+                // A heartbeat or our own echo changes nothing on screen.
+                changed |= self.apply_crdt(request_id, *message);
+                continue;
             } else {
                 changed = true;
             }
@@ -344,9 +357,11 @@ impl App {
                 self.connection = Connection::Connected;
                 self.workspace_ready = false;
                 self.register_workspace();
+                self.collab_reconnect();
             }
             Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
             Inbound::Agent(message) => self.apply_agent(*message),
+            Inbound::Crdt { request_id, message } => { self.apply_crdt(request_id, *message); }
             Inbound::Editor(message) => self.apply_editor_message(*message),
             // Live PTY output is uncorrelated (request 0); a reattach replays backlog under its request.
             Inbound::Reply { family, message, request_id } if family == "Pty" => {

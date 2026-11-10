@@ -64,6 +64,15 @@ pub struct Document {
     pending: Option<Snapshot>,
     /// Typing coalesces into one undo step until something breaks the group.
     grouping: bool,
+    /// The file is a shared document (`collab::doc`): undo and redo are the replica's, so they
+    /// revert this user's edits only. Requests queue here and the binding carries them out.
+    shared_history: bool,
+    history_requests: Vec<bool>,
+    /// Where undo steps ended since the binding last looked: the revision, and the text there
+    /// if it had changed since the boundary (or look) before, so edits either side of a
+    /// boundary land in their own steps even when one frame holds both.
+    history_breaks: Vec<(u64, Option<String>)>,
+    history_seen: u64,
 }
 
 /// Two-space, four-space or tab indentation, from the first indented lines.
@@ -109,6 +118,10 @@ impl Document {
             redo_stack: Vec::new(),
             pending: None,
             grouping: false,
+            shared_history: false,
+            history_requests: Vec::new(),
+            history_breaks: Vec::new(),
+            history_seen: 0,
         }
     }
 
@@ -128,7 +141,46 @@ impl Document {
         text
     }
 
+    /// The saved baseline as it sits on disk.
+    pub fn saved_text_for_disk(&self) -> String {
+        let sep = match self.line_ending { LineEnding::Lf => "\n", LineEnding::Crlf => "\r\n" };
+        let mut text = self.saved.join(sep);
+        if self.trailing_newline { text.push_str(sep); }
+        text
+    }
+
     pub fn is_dirty(&self) -> bool { self.lines != self.saved }
+
+    /// Back to the saved text, as one edit (a shared document's unsaved changes discarded).
+    pub fn revert_to_saved(&mut self) {
+        if !self.is_dirty() { return; }
+        self.lines = self.saved.clone();
+        self.clamp_cursor();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Hand undo and redo to the shared document's replica (or take them back).
+    pub fn set_shared_history(&mut self, shared: bool) {
+        self.shared_history = shared;
+        self.history_breaks.clear();
+        self.history_seen = self.revision;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.pending = None;
+        self.history_requests.clear();
+    }
+    /// Undo (`false`) and redo (`true`) asked for since the last call.
+    pub fn take_history_requests(&mut self) -> Vec<bool> { std::mem::take(&mut self.history_requests) }
+    pub fn take_history_breaks(&mut self) -> Vec<(u64, Option<String>)> {
+        self.history_seen = self.revision;
+        std::mem::take(&mut self.history_breaks)
+    }
+    fn history_break(&mut self) {
+        if !self.shared_history || self.history_breaks.last().is_some_and(|(at, _)| *at == self.revision) { return; }
+        let text = (self.revision != self.history_seen).then(|| self.text_for_disk());
+        self.history_breaks.push((self.revision, text));
+        self.history_seen = self.revision;
+    }
 
     /// A save of `lines` landed (edits made since stay dirty).
     pub fn mark_saved_lines(&mut self, lines: Vec<String>) { self.saved = lines; }
@@ -253,16 +305,18 @@ impl Document {
     fn snapshot(&self) -> Snapshot { Snapshot { lines: self.lines.clone(), cursor: self.cursor() } }
 
     /// End the current typing group so the next edit is its own undo step.
-    pub fn break_undo_group(&mut self) { self.grouping = false; }
+    pub fn break_undo_group(&mut self) { self.grouping = false; self.history_break(); }
 
     /// Remember the text before an edit (once per group).
     pub fn save_undo(&mut self) {
+        if self.shared_history { return; }
         if self.pending.is_none() { self.pending = Some(self.snapshot()); }
     }
 
     /// Close the edit: push its before-state if anything changed.
     pub fn commit_undo(&mut self) {
         if self.grouping { return; }
+        self.history_break();
         if let Some(before) = self.pending.take() {
             if before.lines != self.lines {
                 self.undo_stack.push(before);
@@ -292,6 +346,7 @@ impl Document {
 
     pub fn undo(&mut self) -> bool {
         self.end_insert_group();
+        if self.shared_history { self.history_requests.push(false); return true; }
         let Some(before) = self.undo_stack.pop() else { return false };
         self.redo_stack.push(self.snapshot());
         self.lines = before.lines;
@@ -302,6 +357,7 @@ impl Document {
 
     pub fn redo(&mut self) -> bool {
         self.end_insert_group();
+        if self.shared_history { self.history_requests.push(true); return true; }
         let Some(after) = self.redo_stack.pop() else { return false };
         self.undo_stack.push(self.snapshot());
         self.lines = after.lines;

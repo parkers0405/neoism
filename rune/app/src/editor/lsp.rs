@@ -295,6 +295,7 @@ impl App {
                 surface_id: Some(surface_of(path)),
             },
         );
+        self.collab_release(path);
         self.buffers.remove(path);
     }
 

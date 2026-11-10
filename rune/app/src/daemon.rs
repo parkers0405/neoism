@@ -25,6 +25,8 @@ pub enum Family {
     Git,
     Config,
     Database,
+    /// Shared documents and presence. Never scoped to a workspace root.
+    Crdt,
 }
 
 impl Family {
@@ -39,6 +41,7 @@ impl Family {
             Family::Git => "Git",
             Family::Config => "Config",
             Family::Database => "Database",
+            Family::Crdt => "Crdt",
         }
     }
 }
@@ -51,6 +54,8 @@ pub enum Inbound {
     Agent(Box<AgentServerMessage>),
     Editor(Box<neoism_protocol::editor::EditorServerMessage>),
     Database { request_id: u64, message: Result<Box<neoism_protocol::database::DatabaseReply>, String> },
+    /// A shared-document or presence message (`request_id` 0 for broadcasts).
+    Crdt { request_id: u64, message: Box<neoism_protocol::crdt::CrdtServerMessage> },
     /// Everything else stays untyped until a view needs it.
     Reply { family: String, request_id: u64, message: Value },
 }
@@ -313,6 +318,9 @@ fn parse(text: &str) -> Option<Inbound> {
     let message = body.get("message").cloned().unwrap_or_else(|| json!({ tag.clone(): body.clone() }));
     if family == "Database" {
         return Some(Inbound::Database { request_id, message: serde_json::from_value(message).map(Box::new).map_err(|e| e.to_string()) });
+    }
+    if family == "Crdt" {
+        if let Ok(typed) = serde_json::from_value(message.clone()) { return Some(Inbound::Crdt { request_id, message: Box::new(typed) }); }
     }
     if family == "Editor" {
         if let Ok(typed) = serde_json::from_value(message.clone()) { return Some(Inbound::Editor(Box::new(typed))); }

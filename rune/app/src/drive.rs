@@ -124,7 +124,9 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
             Step::Keys { text, rate } => {
                 let due = ((elapsed * rate) as usize).min(text.len());
                 while (drive.sent as usize) < due {
-                    let key = rune::KeyEvent { key: rune::Key::Text(text[drive.sent as usize].to_string()), mods: Default::default() };
+                    // `^` is Escape and `~` is Enter, so a script can leave insert mode and run `:w`.
+                    let key = match text[drive.sent as usize] { '^' => rune::Key::Escape, '~' => rune::Key::Enter, c => rune::Key::Text(c.to_string()) };
+                    let key = rune::KeyEvent { key, mods: Default::default() };
                     drive.sent += 1;
                     changed |= crate::keys::on_key(app, &key, tx);
                 }

@@ -197,6 +197,9 @@ and `McpFailed` events.
 Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.md`):
 
 - Never block the UI thread on daemon traffic. Parse WebSocket frames off the UI thread into typed events.
+- A file is a shared document the daemon owns (`collab/doc.rs`): edits go out as Yrs updates and come back
+  merged, saving asks the daemon to write it, and undo is the replica's. Never write a second path that
+  changes `Document::lines` behind the binding without bumping `revision`.
 - Page older history by bytes (~160 KiB of message text per page, 8-64 server messages, start at 24) and request
   it ahead of the viewport.
 - A head refresh of an already loaded transcript applies only the rows that changed.

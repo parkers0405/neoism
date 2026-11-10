@@ -286,6 +286,8 @@ fn cached_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     // A yank flash fades on the clock: its rows build every frame while it shows.
     let flash = doc.yank_flash.as_ref().filter(|f| (f.start.line..=f.end.line).contains(&index) && f.started_at.elapsed().as_secs_f32() < YANK_FLASH_SECS)
         .map(|f| f.started_at.elapsed().as_micros());
+    // Other people's carets and selections on this line (`collab::view`).
+    crate::collab::view::line_marks(app, buffer.shared.as_ref().map(|s| s.buffer_id.as_str()), index, line).hash(&mut text);
     let version = (
         (text.finish(), m.cols, m.gutter_w.to_bits(), buffer.lsp.diagnostics_rev),
         (app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits()),
@@ -374,6 +376,13 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
                 byte_start: segment.byte_start, byte_end: segment.byte_end, line_h, adv,
             };
             for mark in super::lsp_view::row_marks(app, &marks, x_of) { visual = visual.child(mark); }
+            let peers = crate::collab::view::line_marks(app, buffer.shared.as_ref().map(|s| s.buffer_id.as_str()), index, line);
+            if !peers.is_empty() {
+                let geometry = crate::collab::view::RowGeometry {
+                    x_of: &x_of, start: segment.byte_start, end: segment.byte_end, last, line_len: line.len(), line_h, adv, font: app.ty.size, top: row_index == 0,
+                };
+                for peer in &peers { visual = crate::collab::view::decorate(app, visual, peer, &geometry); }
+            }
     visual
 }
 

@@ -44,6 +44,10 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 thiserror = "2"
+# Shared documents and presence: the Yrs replica and presence plane every Neoism client uses
+# (`neoism-frontend/shared/src/editor/crdt`), compiled in by path.
+yrs = { version = "0.26", features = ["sync"] }
+web-time = "1.1"
 tracing = "0.1"
 
 [dev-dependencies]

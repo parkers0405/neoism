@@ -162,6 +162,8 @@ impl App {
 
     /// Whether the active tab shows user messages (and so presence orbs).
     pub fn orbs_on_screen(&self) -> bool {
+        // In company, the rail (and any file a peer is in) shows presence orbs.
+        if self.collab.anyone() { return true; }
         match &self.active_tab().kind {
             // A user row laid out within (or just above) the visible transcript: its orb sits
             // at the bubble's top, a tall bubble can hang down from above the view.

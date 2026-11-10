@@ -55,6 +55,12 @@ pub fn view(app: &App) -> El {
             .child(el().w(INDENT * s).center().child_opt(chevron.map(|c| text(c).font(chevron_font).color(rgb(p.muted)))))
             .child(el().w(FONT * s).center().child(text(glyph).font(icon_font).color(rgb(icon_color))))
             .child(text(item.entry.name.clone()).font(app.ty.sized(FONT)).color(rgb(label_color)).ml(ICON_GAP * s).truncate().shrink())
+            // The people with their cursor in this file, at the row's right end.
+            .child_opt((!item.entry.is_dir).then(|| {
+                let path = tree.open_path(&item.path);
+                let host = if path.starts_with('/') { path } else { format!("{}/{path}", app.cwd.trim_end_matches('/')) };
+                crate::collab::view::tree_row(app, &host).map(|orbs| row().grow(1.0).justify_end().child(orbs))
+            }).flatten())
             .on_press(move |a: &mut App| { a.focus = Focus::Sidebar; a.tree_activate(Some(index)); });
         if selected {
             line = line.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("tree-row".into(), r); });

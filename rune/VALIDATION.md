@@ -350,3 +350,39 @@ Covered by unit tests of the flow (a server tab beside the local one, the daemon
 workspace, the SSH home workspace, re-selecting, disconnecting). Not yet exercised against a
 second daemon or a real SSH system in this pass.
 
+
+## Multiplayer: presence and shared documents
+
+The Rune app had no multiplayer layer. It now speaks the daemon's `Crdt` family
+(`daemon::Family::Crdt`, typed `Inbound::Crdt`) with the Yrs replica and presence plane every
+Neoism client uses, compiled in by path (`neoism-frontend/shared/src/editor/crdt`).
+
+- **Shared documents** (`collab/doc.rs`, after `CodeDocBinding` and GPUiX's
+  `editor_collaboration.rs`). Every loaded file takes a lease (`AcquireBuffer`) and holds a
+  replica beside its `Document`. Local edits are one-span diffs sent as `Owned{ApplySync}`;
+  remote updates (collaborators, agents, disk changes the daemon merges) are spliced in with
+  the caret and visual anchor carried through. Undo and redo are the replica's, so they revert
+  this user's edits only; steps end where the editor ends them, including two commands in one
+  frame. `:w` asks the daemon to write the document (`SaveBuffer`), falling back to
+  `Files WriteFile` when it cannot. Typing before the first snapshot is rebased onto it. A
+  reconnect, or a daemon that forgot the document, re-acquires and replays what was never
+  acknowledged. A file closed with its changes discarded reverts the shared document when
+  nobody else is in it. The saved baseline stays the file as read, so a shared document with
+  someone else's unsaved changes shows as unsaved.
+- **Presence** (`collab/mod.rs`, after `PresenceController.ts`): on for a workspace on another
+  server, one the daemon marks shared or team, or with `NEOISM_RUNE_COLLABORATIVE=1`. Published
+  every 80 ms tick through the shared publisher (75 ms floor, 4 s heartbeat), peers pruned
+  after 10 s, the cursor withdrawn when the workspace tab is left.
+- **On screen** (`collab/view.rs`): everyone on the activity rail under the buttons, this user
+  first, four then "+N", the hovered name beside the rail; the people in a file as overlapping
+  orbs at the right of its tree row, three then "+N"; in the editor a beam (insert) or
+  translucent block caret in the person's colour with their orb and name flagged above it, and
+  their selection banded at 20%. Carets blink on a `Live` opacity and orbs are `Pixels`, so
+  neither commits.
+
+Checked: 16 unit tests (`collab::`), `check-presence.py` (headless `presence` scene, six staged
+people), and two real windows on a headless output against the running daemon
+(`NEOISM_RUNE_TRACE_COLLAB=1`): both converge while typing at once, each sees the other on the
+rail and in the file, a save by one lands on disk and clears the other's unsaved mark, and a
+write to the file by another program appears in both. Not yet run across two machines or
+against a GPUiX peer. Not ported: the Windows peer's "stink cloud" puffs on the orb.

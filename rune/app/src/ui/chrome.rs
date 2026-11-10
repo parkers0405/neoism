@@ -149,6 +149,8 @@ fn rail(app: &App) -> El {
         }))
         .child(button("open-finder", glyph::SEARCH, false, |a| a.open_finder(crate::finder::Mode::Files)))
         .child(servers)
+        // Everyone in a shared workspace, this user first (`collab::view`).
+        .children(crate::collab::view::rail(app))
 }
 
 fn sidebar(app: &App) -> El {

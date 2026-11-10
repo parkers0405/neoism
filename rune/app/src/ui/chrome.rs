@@ -31,6 +31,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(super::tab_drag::overlay(app))
         .child(agent::overlay(app))
         .child(crate::editor::lsp_view::overlay(app))
+        .child(crate::home::block_menu_overlay(app))
         .child_if(app.project_menu.is_some(), || agent::project_menu(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
         .child_if(app.finder.is_some(), || crate::finder::view(app))

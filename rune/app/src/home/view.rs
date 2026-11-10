@@ -55,9 +55,14 @@ pub fn view(app: &App) -> El {
                 }))
             .pin(None, None, Some(16.0 * s), Some(bottom)));
     }
-    // The actions menu goes last so it draws over every block after its own.
-    if let Some(menu) = block_menu(app, term) { pane = pane.child(menu); }
     pane
+}
+
+/// The active terminal's block actions menu, attached at the window root (an anchored overlay
+/// placed inside the pane would be positioned from the pane's corner).
+pub fn block_menu_overlay(app: &App) -> El {
+    let tab = app.active_tab().id;
+    app.terminals.get(&tab).and_then(|term| block_menu(app, term)).unwrap_or_else(el)
 }
 
 fn composer_height(app: &App) -> f32 {
@@ -100,6 +105,8 @@ fn history(app: &App, term: &Terminal, composer_h: f32) -> El {
             // Trackpads keep Rune's 1:1 scroll and fling; notches glide on the spring.
             if e.precise || e.dy == 0.0 { return false; }
             let Some(term) = a.terminals.get_mut(&tab_id) else { return false };
+            // An open block menu would drift from its toolbar: scrolling closes it.
+            term.more = None;
             let (offset, max) = term.scroll.get();
             // Stepped on the frame clock (`App::step_terminal_glides`): Rune lands scroll
             // requests at once while the composer holds focus.
@@ -230,6 +237,7 @@ fn actions(app: &App, term: &Terminal, block: &Block, home: &str, width: f32) ->
     let header_w = directory_label(&block.cwd, home).chars().count() as f32 * cells.cell * 0.9 + cells.inset;
     let filtering = term.filter.as_ref().is_some_and(|(f, _)| *f == id);
     row().key(format!("block-actions:{tab_id}:{id}")).gap(4.0 * s).padding(4.0 * s).radius(4.0 * s)
+        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("block-actions:{tab_id}:{id}"), r); })
         .fill(if header_w > width - 76.0 * s { rgb(app.pal.bg) } else { Color::TRANSPARENT })
         // Its menu is anchored here: once the toolbar scrolls out of view the menu closes rather
         // than losing its anchor.
@@ -287,9 +295,16 @@ fn block_menu(app: &App, term: &Terminal) -> Option<El> {
         ("Use command", BlockAction::Reuse),
         (if term.collapsed.contains(&id) { "Expand output" } else { "Collapse output" }, BlockAction::Collapse),
     ];
-    let mut menu = col().key(format!("block-action-menu:{tab_id}:{id}")).w(190.0 * s).padding(4.0 * s)
+    // Right-aligned 2 pt under the block's toolbar (its rect from the last layout), above it
+    // when the window has no room below.
+    let anchor = app.rects.get(&format!("block-actions:{tab_id}:{id}")).copied()?;
+    let (w, h) = (190.0 * s, items.len() as f32 * 30.0 * s + 8.0 * s);
+    let x = (anchor[0] + anchor[2] - w).clamp(8.0, (app.window[0] - w - 8.0).max(8.0));
+    let below = anchor[1] + anchor[3] + 2.0 * s;
+    let y = if below + h <= app.window[1] - 8.0 { below } else { (anchor[1] - 2.0 * s - h).max(8.0) };
+    let mut menu = col().key(format!("block-action-menu:{tab_id}:{id}")).w(w).padding(4.0 * s)
         .fill(rgb(p.surface)).border(1.0, rgb(p.border)).radius(5.0 * s)
-        .anchored(format!("block-actions:{tab_id}:{id}"), rune::Side::Bottom, rune::Align::End, 2.0 * s);
+        .absolute(x, y);
     for (index, (label, action)) in items.into_iter().enumerate() {
         menu = menu.child(row().key(format!("block-menu:{tab_id}:{id}:{index}")).w_full().h(30.0 * s).pl(8.0 * s).center_y()
             .radius(3.0 * s).hover(rgb(p.hover))

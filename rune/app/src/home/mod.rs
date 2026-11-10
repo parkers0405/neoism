@@ -14,7 +14,7 @@ mod view;
 
 pub use blocks::Block;
 pub use terminal::{Terminal, program_title};
-pub use view::view;
+pub use view::{block_menu_overlay, view};
 
 use composer::MenuKind;
 use input::TermKey;

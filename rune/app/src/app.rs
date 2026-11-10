@@ -303,7 +303,7 @@ impl App {
             pending_pty: Default::default(),
         };
         app.open_tab(TabKind::Home);
-        app.workspaces.push(crate::workspace::Entry { id: app.workspace_id.clone(), title: app.workspace_name.clone(), state: None });
+        app.workspaces.push(crate::workspace::Entry { id: app.workspace_id.clone(), title: app.workspace_name.clone(), server: None, state: None });
         app
     }
 

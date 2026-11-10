@@ -142,7 +142,20 @@ use std::collections::{HashMap, VecDeque};
 pub struct Entry {
     pub id: String,
     pub title: String,
+    /// The server this workspace is on (`servers::Selection::id`); `None` is the local daemon.
+    /// Its tab wears a cloud.
+    pub server: Option<String>,
     pub state: Option<State>,
+}
+
+/// A workspace to open in a new tab (`App::open_workspace`).
+pub struct Opening {
+    pub id: String,
+    pub title: String,
+    pub cwd: String,
+    /// The daemon it dials; `None` is the local one.
+    pub target: Option<crate::daemon::Target>,
+    pub link: crate::servers::flow::Link,
 }
 pub struct State {
     workspace_id: String,
@@ -182,6 +195,8 @@ pub struct State {
     pending_pty: VecDeque<u64>,
     databases: HashMap<String, crate::database::Database>,
     splash: crate::home::SplashState,
+    /// The workspace's server (and the tunnel to it).
+    link: crate::servers::flow::Link,
 }
 impl State {
     /// This parked workspace as recovery data (`session.rs`).
@@ -229,6 +244,7 @@ impl State {
             pending_pty: app.pending_pty,
             databases: app.databases,
             splash: app.splash,
+            link: app.server.link,
         }
     }
     fn swap(&mut self, app: &mut App) {
@@ -269,6 +285,7 @@ impl State {
         std::mem::swap(&mut self.pending_pty, &mut app.pending_pty);
         std::mem::swap(&mut self.databases, &mut app.databases);
         std::mem::swap(&mut self.splash, &mut app.splash);
+        std::mem::swap(&mut self.link, &mut app.server.link);
     }
 }
 
@@ -319,13 +336,28 @@ impl App {
         self.field_tab = None;
     }
 
+    /// A new local workspace tab, at the active one's directory (on a remote tab: home).
     pub fn new_workspace(&mut self) {
+        let (title, cwd) = if self.server.remote() {
+            let home = std::env::var("HOME").unwrap_or_default();
+            ("~".to_owned(), home)
+        } else { (self.workspace_name.clone(), self.cwd.clone()) };
+        self.open_workspace(Opening { id: new_id(), title, cwd, target: None, link: Default::default() });
+    }
+
+    /// Open a workspace in a new tab and go to it: its own daemon socket (to `target`), tabs
+    /// and state; the other tabs keep theirs.
+    pub fn open_workspace(&mut self, opening: Opening) {
         if self.workspace_closing.is_some() {
             return;
         }
+        let Opening { id, title, cwd, target, link } = opening;
+        let server = link.current.as_ref().map(|s| s.id.clone());
         let mut fresh = App::new();
-        fresh.cwd = self.cwd.clone();
-        fresh.workspace_name = self.workspace_name.clone();
+        fresh.workspace_id = id;
+        fresh.cwd = cwd;
+        fresh.workspace_name = title;
+        fresh.server.link = link;
         fresh.next_tab = self.next_tab;
         // Tab ids stay unique across the window (Rune element keys and scroll handles).
         fresh.tabs.clear();
@@ -338,13 +370,14 @@ impl App {
             .clone()
             .filter(|_| std::env::var_os("NEOISM_RUNE_OFFLINE").is_none())
         {
-            let (daemon, inbox) = Daemon::start(move || wake());
+            let (daemon, inbox) = Daemon::start_to(target, move || wake());
             fresh.daemon = Some(daemon);
             fresh.inbox = Some(inbox);
         }
         self.workspaces.push(Entry {
             id: fresh.workspace_id.clone(),
             title: fresh.workspace_name.clone(),
+            server,
             state: Some(State::from_app(fresh)),
         });
         self.select_workspace(self.workspaces.len() - 1);
@@ -352,7 +385,7 @@ impl App {
 
     pub(crate) fn register_workspace(&self) {
         // On another server the daemon picks the workspace first (`adopt_workspace`).
-        if self.server.adopt.is_some() {
+        if self.server.link.adopt.is_some() {
             if let Some(d) = &self.daemon { d.send(Family::Workspace, json!({"ResolveInitialWorkspace":{"preferred_host_id":null}})); }
             return;
         }

@@ -97,6 +97,8 @@ impl Type {
 pub mod glyph {
     pub const MENU: &str = "\u{f0c9}";
     pub const FOLDER: &str = "\u{f07b}";
+    /// A workspace on another server or an SSH system.
+    pub const CLOUD: &str = "\u{f0c2}";
     pub const FOLDER_OPEN: &str = "\u{f07c}";
     pub const FILE: &str = "\u{f15c}";
     pub const SPARKLES: &str = "\u{f0674}";

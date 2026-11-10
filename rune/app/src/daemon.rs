@@ -68,14 +68,18 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Start the connection thread. `wake` asks the UI thread to drain `inbox`.
-    pub fn start(wake: impl Fn() + Send + Sync + 'static) -> (Daemon, Inbox) {
+    /// Start a connection to the local daemon. `wake` asks the UI thread to drain `inbox`.
+    pub fn start(wake: impl Fn() + Send + Sync + 'static) -> (Daemon, Inbox) { Daemon::start_to(None, wake) }
+
+    /// Start a connection thread to `target` (`None`: the published local daemon). Each
+    /// workspace owns one, so a window can hold workspaces on several servers at once.
+    pub fn start_to(target: Option<Target>, wake: impl Fn() + Send + Sync + 'static) -> (Daemon, Inbox) {
         let inbox: Inbox = Arc::new(Mutex::new(VecDeque::new()));
         let (outbound, rx) = channel();
         let thread_inbox = inbox.clone();
         std::thread::Builder::new()
             .name("neoism-daemon".into())
-            .spawn(move || run(rx, thread_inbox, wake))
+            .spawn(move || run(rx, thread_inbox, wake, target))
             .expect("spawn daemon thread");
         (Daemon { outbound, sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)) }, inbox)
     }
@@ -117,21 +121,6 @@ pub struct Target {
     pub auth_token: Option<String>,
     pub pairing_token: Option<String>,
 }
-
-/// The window's server: `None` is the local daemon. Every workspace's connection thread dials
-/// it, and redials when `GENERATION` moves.
-static TARGET: Mutex<Option<Target>> = Mutex::new(None);
-static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Point every connection at `target` (`None`: back to the local daemon).
-pub fn switch_target(target: Option<Target>) {
-    *TARGET.lock().unwrap() = target;
-    GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-}
-
-pub fn current_target() -> Option<Target> { TARGET.lock().unwrap().clone() }
-
-fn generation() -> u64 { GENERATION.load(std::sync::atomic::Ordering::Acquire) }
 
 fn with_token(base: &str, token: Option<&str>) -> String {
     match token.filter(|t| !t.is_empty()) {
@@ -204,8 +193,8 @@ pub fn public_endpoint() -> Option<String> {
 
 /// The window's server, else the same discovery as the GPUiX client: an explicit URL, else
 /// the published local daemon.
-fn discover() -> Result<Endpoint, String> {
-    if let Some(target) = current_target() { return Ok(endpoint_for(&target)); }
+fn discover(target: Option<&Target>) -> Result<Endpoint, String> {
+    if let Some(target) = target { return Ok(endpoint_for(target)); }
     let token = std::env::var("NEOISM_DAEMON_TOKEN").ok().or_else(|| {
         std::fs::read_to_string(runtime_dir().join("neoism").join("daemon-token")).ok().map(|t| t.trim().to_owned())
     });
@@ -254,26 +243,15 @@ fn push(inbox: &Inbox, wake: &dyn Fn(), event: Inbound) {
     wake();
 }
 
-fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn()) {
-    let mut dialed = generation();
+fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Target>) {
     loop {
-        // A switched server: requests queued for the old one never reach the new one.
-        let current = generation();
-        if current != dialed {
-            dialed = current;
-            while rx.try_recv().is_ok() {}
-        }
         push(&inbox, &wake, Inbound::Connecting);
-        let result = discover().and_then(|endpoint| connect(&endpoint).map(|socket| (socket, endpoint.pairing_token)));
+        let result = discover(target.as_ref()).and_then(|endpoint| connect(&endpoint).map(|socket| (socket, endpoint.pairing_token)));
         let (mut socket, pairing_token) = match result {
             Ok(connected) => connected,
             Err(error) => {
                 push(&inbox, &wake, Inbound::Disconnected(error));
-                // Retry in two seconds, or at once when the window switches servers.
-                for _ in 0..20 {
-                    if generation() != dialed { break; }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
+                std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
         };
@@ -282,7 +260,6 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn()) {
             continue;
         }
         let reason = 'session: loop {
-            if generation() != dialed { let _ = socket.close(None); break 'session "Switching servers".to_owned(); }
             // Writes first: user actions should not wait behind a read timeout.
             loop {
                 match rx.try_recv() {

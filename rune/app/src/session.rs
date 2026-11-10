@@ -137,26 +137,33 @@ impl App {
     pub fn capture_session(&self) -> Saved {
         let active = capture_workspace(&self.workspace_name, &self.cwd, &self.tabs, self.active, &self.layout,
             self.sidebar, App::unsaved_buffers(&self.buffers));
-        let workspaces = if self.workspaces.is_empty() { vec![active] } else {
+        // Only local workspaces come back next launch: one on another server needs its
+        // connection (a tunnel, a password) made again.
+        let local = |i: usize| self.workspaces.get(i).is_some_and(|entry| entry.server.is_none());
+        let workspaces: Vec<SavedWorkspace> = if self.workspaces.is_empty() { vec![active] } else {
             let mut active = Some(active);
-            self.workspaces.iter().enumerate().filter_map(|(i, entry)| {
+            self.workspaces.iter().enumerate().filter(|(i, _)| local(*i)).filter_map(|(i, entry)| {
                 if i == self.workspace_active { active.take() } else { entry.state.as_ref().map(|s| s.saved()) }
             }).collect()
         };
-        Saved { version: VERSION, active: self.workspace_active.min(workspaces.len().saturating_sub(1)), workspaces }
+        // The active tab's place among the saved ones (a remote tab: the local one before it).
+        let before = (0..self.workspace_active.min(self.workspaces.len())).filter(|i| local(*i)).count();
+        Saved { version: VERSION, active: before.min(workspaces.len().saturating_sub(1)), workspaces }
     }
 
     /// Write the snapshot when it changed, at most once a second (`force` on quit). A throttled
     /// call returns how long until the window opens again, so the caller can wake then and the
     /// last change before going idle is still written.
     pub fn save_session(&mut self, force: bool) -> Option<Duration> {
-        // Visiting another server: the saved window stays the local one (stashed until back).
-        if !enabled() || self.server.remote() { return None; }
+        if !enabled() { return None; }
         if let Some(wait) = self.session_writer.at.map(|at| INTERVAL.saturating_sub(at.elapsed())).filter(|w| !force && !w.is_zero()) {
             return Some(wait);
         }
         self.session_writer.at = Some(Instant::now());
-        let Ok(raw) = serde_json::to_string(&self.capture_session()) else { return None };
+        let saved = self.capture_session();
+        // Nothing local is open (every tab is on a server): the last local window stays saved.
+        if saved.workspaces.is_empty() { return None; }
+        let Ok(raw) = serde_json::to_string(&saved) else { return None };
         if raw == self.session_writer.last { return None; }
         match write(&raw) {
             Ok(()) => self.session_writer.last = raw,

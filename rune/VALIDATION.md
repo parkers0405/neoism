@@ -331,3 +331,18 @@ re-indexing after an edit doubled every number above.
   cross-fades to a green "Copied" for 1.4 s on live opacities; it is a 26 pt button with a
   hover wash rather than a bare word.
 
+## Servers and SSH systems open their own workspace tab (2026-11-10)
+
+Connecting used to replace the window: one daemon target for every workspace, the local
+workspaces stashed until Local Server was picked again. A connection now belongs to a
+workspace (`servers::flow::Link`, moved with `workspace::State`): each daemon socket dials
+its own target (`Daemon::start_to`), connecting opens a new workspace tab on the server next
+to the local ones, picking a server that is already open goes to its tab, Local Server goes
+to a local tab, and disconnecting or removing a server closes its tab (and its tunnel). A
+tab on a server or an SSH system wears a cloud instead of a folder. Only local workspaces
+are written to the recovery snapshot.
+
+Covered by unit tests of the flow (a server tab beside the local one, the daemon's adopted
+workspace, the SSH home workspace, re-selecting, disconnecting). Not yet exercised against a
+second daemon or a real SSH system in this pass.
+

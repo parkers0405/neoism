@@ -335,6 +335,7 @@ fn code(app: &App, buffer: &Buffer) -> El {
         })
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Trackpads scroll directly; notches glide three lines each on the spring.
+            if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel editor dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
             if e.dy == 0.0 { return false; }
             let Some(b) = a.buffers.get_mut(&wheel_path) else { return false };
             let popup = b.lsp.hover.is_some() || b.lsp.completion.is_some();

@@ -14,9 +14,10 @@ pub fn record(at: Instant) {
     while frames.front().is_some_and(|t| at.duration_since(*t) > WINDOW) { frames.pop_front(); }
 }
 
-/// Gaps longer than this are the window resting (Rune draws nothing while nothing moves),
-/// not slow frames.
-const REST_GAP: Duration = Duration::from_millis(50);
+/// Gaps longer than this are the window resting or a slow ambient tick (the 30 Hz orbs, a
+/// caret blink), not slow frames: only runs of continuous motion count, so the pill reads the
+/// display rate a scroll or glide gets (a missed vblank at 144 Hz is 13.9 ms, still counted).
+const REST_GAP: Duration = Duration::from_millis(25);
 
 /// The rate the window presents at while it animates: one over the median spacing of the
 /// last second's consecutive frames, so a glide that runs on every 120 Hz vblank reads 120

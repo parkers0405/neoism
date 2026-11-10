@@ -10,6 +10,8 @@ const SHORT_ANIMATION_LENGTH: f32 = 0.04;
 const TRAIL_SIZE: f32 = 0.8;
 /// Half period: visible for one interval, hidden for the next.
 pub const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+/// How long the cursor may be targetless and still trail from its old place when it returns.
+const HIDDEN_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Default)]
 struct Spring {
@@ -188,17 +190,36 @@ pub struct Cursor {
     pub caret_font: std::cell::Cell<f32>,
     pub trail: Trail,
     shown: Option<[f32; 4]>,
+    /// When the target went away: a brief gap (focus moving into a field whose caret is not
+    /// measured yet) keeps the trail, so it still travels from where it was.
+    hidden_at: Option<Instant>,
+    /// The scroll view the cursor was clipped to when its current move began, and the one it
+    /// is in now: a move between two (a focus-zone change) crosses the chrome unclipped.
+    pub move_clip: Option<[f32; 4]>,
+    pub clip: Option<[f32; 4]>,
     epoch: Instant,
     pub visible: bool,
 }
 
 impl Default for Cursor {
     fn default() -> Cursor {
-        Cursor { caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, epoch: Instant::now(), visible: false }
+        Cursor { caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, move_clip: None, clip: None, epoch: Instant::now(), visible: false }
     }
 }
 
 impl Cursor {
+    /// Record the clip after a tick: a new move remembers the clip it started from.
+    pub fn track_clip(&mut self, clip: Option<[f32; 4]>, moved: bool) {
+        if moved { self.move_clip = self.clip; }
+        self.clip = clip;
+    }
+
+    /// Whether the move in flight is crossing from one clip region to another.
+    pub fn crossing(&self) -> bool { self.trail.animating() && self.move_clip != self.clip }
+
+    /// Whether there is a cursor to draw (lit or in its blink's dark half).
+    pub fn placed(&self) -> bool { self.shown.is_some() && self.hidden_at.is_none() }
+
     /// The text caret block, when a field is focused.
     pub fn caret_block(&self) -> Option<[f32; 4]> {
         self.caret_line.get().map(|line| block_for_caret(line, self.caret_font.get()))
@@ -208,15 +229,19 @@ impl Cursor {
     /// `None` when there is nothing to show.
     pub fn tick(&mut self, target: Option<[f32; 4]>, now: Instant) -> Option<Duration> {
         let Some(target) = target else {
-            self.shown = None;
+            self.hidden_at.get_or_insert(now);
             self.visible = false;
-            self.trail = Trail::default();
             return None;
         };
+        // Gone for longer than a frame or two: the cursor reappears in place, not trailing.
+        let fresh = self.shown.is_none() || self.hidden_at.take().is_some_and(|t| now.duration_since(t) > HIDDEN_GRACE);
+        if fresh {
+            self.trail = Trail::default();
+            self.shown = None;
+        }
         if self.shown != Some(target) {
-            let first = self.shown.is_none();
             self.trail.target(target);
-            if first { self.trail.snap(); }
+            if fresh { self.trail.snap(); }
             self.shown = Some(target);
         }
         let moving = self.trail.tick(now);

@@ -21,7 +21,7 @@ pub use icons::Icons;
 use crate::app::App;
 use crate::ui::theme::{Palette, rgb};
 use neoism_protocol::agent::HistoryMessage;
-use rune::{Color, El, Tx, el};
+use rune::{Color, El, Tx, col, el};
 use std::collections::{HashMap, HashSet};
 use text::Text;
 
@@ -114,11 +114,13 @@ pub fn row(app: &App, message: &HistoryMessage) -> El {
     let cx = Cx::new(app);
     let (body, height) = card::message(&cx, message, false);
     // The measured outer width is the assistant text width; the row hangs past it on both sides.
-    el().key(format!("tool:{}", message.id)).w_full().h(height).mt(cx.pt(18.0))
-        .on_layout_tx(|a: &mut App, [_, _, w, _]: [f32; 4], tx: &mut Tx| {
-            if (a.tools.text_width - w).abs() > 0.5 { a.tools.text_width = w; } else { tx.live_only(); }
-        })
-        .child(body.absolute(-cx.pt(TEXT_PAD_LEFT), 0.0))
+    // Spaced by padding, not margin: a virtual row's top margin is dropped from its height.
+    col().key(format!("tool:{}", message.id)).w_full().pt(cx.pt(18.0))
+        .child(el().w_full().h(height)
+            .on_layout_tx(|a: &mut App, [_, _, w, _]: [f32; 4], tx: &mut Tx| {
+                if (a.tools.text_width - w).abs() > 0.5 { a.tools.text_width = w; } else { tx.live_only(); }
+            })
+            .child(body.absolute(-cx.pt(TEXT_PAD_LEFT), 0.0)))
 }
 
 /// `Name(args)` reads `Name  args`; control characters become spaces.

@@ -47,16 +47,20 @@ pub fn wheel(acc: &mut f32, dy: f32, row_h: f32, top: usize, selected: usize, co
 pub fn view(key: &str, reset: &str, width: f32, row_h: f32, visible: usize, top: usize, selected: Option<usize>,
     highlight: Color, radius: f32, rows: Vec<El>) -> El {
     let count = rows.len();
+    // Rows swap in place as the query changes, as the original's did: no enter/exit fade on
+    // new content or rows, and the list's height follows its row count at once. Only the
+    // scroll residual and the highlight glide.
     let mut content = col().key(format!("{key}:content:{reset}")).w(width).h(count as f32 * row_h)
-        .absolute(0.0, 0.0).offset(0.0, -(top as f32) * row_h).offset_motion(LIST_SPRING);
+        .absolute(0.0, 0.0).offset(0.0, -(top as f32) * row_h).offset_motion(LIST_SPRING)
+        .transition(rune::Transition::none());
     if let Some(selected) = selected.filter(|s| *s < count) {
         content = content.child(el().key("highlight").w(width).h(row_h).radius(radius).fill(highlight)
             .absolute(0.0, 0.0).offset(0.0, selected as f32 * row_h).offset_motion(CURSOR_SPRING));
     }
     for (index, row) in rows.into_iter().enumerate() {
-        content = content.child(row.absolute(0.0, index as f32 * row_h));
+        content = content.child(row.absolute(0.0, index as f32 * row_h).transition(rune::Transition::none()));
     }
-    el().key(key.to_owned()).w(width).h(visible.max(1) as f32 * row_h).clip_rounded(0.0).child(content)
+    el().key(key.to_owned()).w(width).h(visible.max(1) as f32 * row_h).clip_rounded(0.0).instant_changes().child(content)
 }
 
 #[cfg(test)]

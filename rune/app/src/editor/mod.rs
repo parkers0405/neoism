@@ -55,6 +55,15 @@ pub struct Buffer {
     pub cursor_rect: Option<[f32; 4]>,
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
     pub wheel_target: Option<f32>,
+    /// A trackpad swipe's coast in flight (stepped on the frame clock).
+    /// A long jump's last stretch: the far part landed at once this frame, and the spring to
+    /// here starts on the next (`App::editor_jump_springs`).
+    pub jump_spring: Option<f32>,
+    /// Where the cursor stood when `/` or `?` opened: previews search from it and Escape
+    /// returns to it (`editor.search.start`).
+    search_origin: Option<vim::Pos>,
+    /// The pattern every visible occurrence of is banded (hlsearch), until `:noh`.
+    pub search_highlight: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,7 +85,7 @@ impl Buffer {
             lsp: lsp::BufferLsp::default(),
             mouse: mouse::Mouse::default(),
             code_cache: Default::default(),
-            view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None,
+            view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None, jump_spring: None, search_origin: None, search_highlight: None,
         }
     }
 
@@ -303,7 +312,11 @@ impl App {
         if self.lsp_key_before(&key) { return true; }
         let Some(buffer) = self.active_buffer_mut() else { return false };
         let before = (buffer.doc.cursor(), buffer.doc.revision);
+        let searching = buffer.prompt.as_ref().filter(|p| p.kind != ':').map(|p| p.text.clone());
+        // Enter searches from where the prompt opened, not from the previewed match.
+        if searching.is_some() && key == Key::Enter && let Some(origin) = buffer.search_origin { buffer.doc.set_cursor(origin); }
         let outcome = buffer.doc.key(key, &mut buffer.prompt, clipboard.as_deref());
+        buffer.search_step(searching, key);
         if (buffer.doc.cursor(), buffer.doc.revision) != before || std::mem::take(&mut buffer.doc.follow_cursor) {
             self.editor_follow = true;
         }
@@ -337,6 +350,9 @@ impl App {
                     b.doc.set_cursor(vim::Pos { line, col });
                 }
                 self.editor_follow = true;
+            }
+            "noh" | "nohlsearch" => {
+                if let Some(b) = self.active_buffer_mut() { b.search_highlight = None; }
             }
             other => {
                 if let Some(b) = self.active_buffer_mut() { b.message = Some(format!("E492: Not an editor command: {other}")); }
@@ -495,6 +511,17 @@ impl App {
     /// extends the glide's target rather than its mid-flight offset, so the view keeps up. A
     /// jump past 1.25 viewports teleports instead (the original's long-jump rule), so `gg` /
     /// `G` / search hits land at once rather than streaking.
+    /// Start the springs of long jumps that landed their far part last frame. Returns whether
+    /// one is still waiting.
+    pub fn editor_jump_springs(&mut self, tx: &mut rune::Tx) -> bool {
+        for buffer in self.buffers.values_mut() {
+            if let Some(target) = buffer.jump_spring.take() {
+                tx.scroll_to_with(view::scroll_key(&self.workspace_id, &buffer.path), 0.0, target, view::SCROLL_SPRING);
+            }
+        }
+        false
+    }
+
     pub fn editor_follow_cursor(&mut self, tx: &mut rune::Tx) {
         use crate::ui::follow::{Reveal, reveal_top};
         if !self.editor_follow { return; }
@@ -516,16 +543,35 @@ impl App {
         let top = reveal_top(row, rows_fit, max_top, current_top, Reveal::Center { edge: 4 });
         if top == current_top { return; }
         let target = (top as f32 * line_h).clamp(0.0, max_offset);
-        if let Some(b) = self.active_buffer_mut() { b.wheel_target = Some(target); }
-        if (target - offset).abs() > viewport * 1.25 {
-            tx.scroll_to_y(key, target);
+        let Some(b) = self.active_buffer_mut() else { return };
+        b.wheel_target = Some(target);
+        // Neovide's long-jump rule: the far part of a jump (`:1` from line 300, a goto-line)
+        // lands at once and only the last 1.25 viewports spring in, on Rune's clock from the
+        // next frame (a spring asked for in the same commit would replace the landing).
+        let reach = viewport * 1.25;
+        let far = target - offset;
+        if far.abs() > reach {
+            tx.scroll_to_instant(key, 0.0, target - reach * far.signum());
+            b.jump_spring = Some(target);
+            tx.wake_after(std::time::Duration::ZERO);
         } else {
+            b.jump_spring = None;
             tx.scroll_to_with(key, 0.0, target, view::SCROLL_SPRING);
         }
     }
 }
 
 impl App {
+    /// Yank the editor's Visual selection (`y`) when the editor holds the keyboard.
+    pub fn editor_yank_visual(&mut self) -> Option<String> {
+        if self.focus != crate::app::Focus::Content { return None; }
+        let b = self.active_buffer_mut().filter(|b| b.loaded && b.doc.mode == Mode::Visual)?;
+        match b.doc.key(Key::Char('y'), &mut b.prompt, None) {
+            Outcome::Yanked(text) => Some(text),
+            _ => None,
+        }
+    }
+
     pub fn paste_content(&mut self, text: &str) {
         if let Some(b) = self.active_buffer_mut() {
             if !b.loaded || b.error.is_some() { return; }
@@ -638,5 +684,49 @@ mod leader_tests {
         b.doc.vim.feed('f', false);
         assert!(!app.editor_leader_key(&text(" ")));
         assert_eq!(app.tabs.len(), 2);
+    }
+}
+
+impl Buffer {
+    /// Incremental search around one key (`editor.search.start/preview/cancel/commit`):
+    /// opening `/` or `?` remembers the cursor, each edit of the pattern bands its matches and
+    /// moves to the nearest one from there, Escape goes back, Enter keeps the bands.
+    fn search_step(&mut self, before: Option<String>, key: Key) {
+        let now = self.prompt.as_ref().filter(|p| p.kind != ':').map(|p| (p.text.clone(), p.kind == '?'));
+        match (before, now) {
+            (None, Some(_)) => self.search_origin = Some(self.doc.cursor()),
+            (Some(was), Some((text, backward))) if was != text => {
+                let Some(origin) = self.search_origin else { return };
+                if text.is_empty() {
+                    self.doc.set_cursor(origin);
+                    self.search_highlight = None;
+                } else {
+                    let found = if backward {
+                        vim::vim_search_backward(&self.doc.lines, vim::Pos { line: origin.line, col: origin.col + 1 }, &text, false)
+                    } else {
+                        // Strictly after a point just before the origin: a match under the
+                        // cursor counts.
+                        let start = if origin.col > 0 { vim::Pos { line: origin.line, col: origin.col - 1 } }
+                            else if origin.line > 0 { vim::Pos { line: origin.line - 1, col: usize::MAX } }
+                            else { vim::Pos { line: 0, col: 0 } };
+                        vim::vim_search_forward(&self.doc.lines, start, &text, false)
+                    };
+                    self.doc.set_cursor(found.unwrap_or(origin));
+                    self.search_highlight = Some(text);
+                }
+                self.doc.follow_cursor = true;
+            }
+            (Some(text), None) => {
+                let origin = self.search_origin.take();
+                if key == Key::Enter && !text.is_empty() {
+                    self.search_highlight = Some(text);
+                } else {
+                    if let Some(origin) = origin { self.doc.set_cursor(origin); }
+                    self.search_highlight = None;
+                    self.doc.follow_cursor = true;
+                }
+            }
+            _ => {}
+        }
     }
 }

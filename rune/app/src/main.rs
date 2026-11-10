@@ -77,6 +77,7 @@ fn lsp_fixture(s: &mut App) {
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
     let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.sync_terminals(tx);
+    if std::mem::take(&mut app.settle_pending) { tx.settle(); }
     if app.quit_requested {
         if !app.session_closed { app.save_session(true); }
         tx.quit();
@@ -94,13 +95,13 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.tools.clock = clock;
     let spinning = app.running_tools();
     if spinning { tx.wake_after(std::time::Duration::from_millis(45)); }
-    // Presence orbs flow every frame while a transcript with people in it is on screen.
-    if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
+    // Presence orbs flow (at 30 Hz) while one is in view.
+    if app.orbs_on_screen() && let Some(next) = app.orbs.tick() { tx.wake_after(next); }
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
     let mode_changing = app.tick_mode_pill();
-    let gliding = app.step_timeline_glides(clock, tx) | app.step_terminal_glides(clock, tx);
+    let gliding = app.step_terminal_glides(clock, tx) | app.editor_jump_springs(tx);
     if gliding { tx.wake_after(std::time::Duration::ZERO); }
     if mode_changing { tx.wake_after(std::time::Duration::ZERO); }
     let panes_changed = app.sync_panes();
@@ -114,7 +115,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if flashing { tx.wake_after(std::time::Duration::ZERO); }
     let focus_changed = app.sync_field_focus();
     // A selecting drag resting at the transcript's edge keeps scrolling it.
-    if app.timeline_edge_scroll(tx) { tx.wake_after(std::time::Duration::ZERO); }
+    let edge_scrolling = app.timeline_edge_scroll(tx);
+    if edge_scrolling { tx.wake_after(std::time::Duration::ZERO); }
     // The live turn's status line animates on live bindings; it rebuilds only on state changes.
     let (busy, activity_changed) = app.tick_activity();
     if busy { tx.wake_after(std::time::Duration::ZERO); }
@@ -126,7 +128,17 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
     let target = app.cursor_target();
-    if let Some(delay) = app.cursor.tick(target, std::time::Instant::now()) { tx.wake_after(delay); }
+    let moved_at = app.cursor.trail.moved_at;
+    let cursor_wake = app.cursor.tick(target, std::time::Instant::now());
+    if let Some(delay) = cursor_wake { tx.wake_after(delay); }
+    // Everything the app steps itself once a frame (glides, the cursor trail, the yank flash,
+    // the mode pill, the wordmark, the activity line, skits) keeps Rune drawing every vblank
+    // while it runs; a poll wake alone is held to a 16.7 ms timer on Linux, i.e. 60 fps.
+    let per_frame = gliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || mode_changing
+        || wordmark_moving || animating || busy || skit || edge_scrolling;
+    let heartbeat_changed = app.keep_vsync(per_frame);
+    let clip = app.cursor_clip();
+    app.cursor.track_clip(clip, app.cursor.trail.moved_at != moved_at);
     let caret_changed = cursor_was != (app.cursor.visible, app.cursor.trail.quad());
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     // While animating, the pill shows the presentation rate; at rest it holds the last one.
@@ -142,7 +154,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         tx.wake_after(std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing
+    heartbeat_changed || animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -207,6 +219,13 @@ fn main() {
             ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),
             ("backgrounds", |s| { s.open_picker(palette::Mode::Backgrounds); s.move_picker(2); }),
             // `NEOISM_RUNE_FIXTURE=history.json`: render any recorded history page.
+            // `NEOISM_RUNE_FILE=<path>`: a real file in the editor, for profiling it.
+            ("file", |s| {
+                let path = std::env::var("NEOISM_RUNE_FILE").unwrap_or_default();
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                s.open_file(&path, None);
+                s.apply_opened_file(&path, &bytes);
+            }),
             ("fixture", |s| {
                 let json = std::env::var("NEOISM_RUNE_FIXTURE").ok().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
                 s.load_fixture("fixture", "Fixture", &json);
@@ -440,3 +459,4 @@ fn main() {
     });
     app.run();
 }
+

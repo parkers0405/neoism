@@ -21,7 +21,7 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     let layout = &app.layout;
     if layout.pane_count() == 1 {
         let pane = layout.focused();
-        return area.child(tab_row(app, pane, true, false)).child(content(app, pane, true, cx));
+        return area.child(tab_row(app, pane, false)).child(content(app, pane, true, cx));
     }
     let s = app.ty.scale();
     let [_, _, w, h] = app.rects.get("panes-area").copied().unwrap_or([0.0, 0.0, app.window[0] - 56.0, app.window[1] - 84.0]);
@@ -38,7 +38,7 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
             // A press anywhere in a pane focuses it (surfaces that consume presses focus their
             // pane through their own handlers or the field-focus sync).
             .on_press(move |a: &mut App| a.focus_pane(id))
-            .child(tab_row(app, pane, focused, true))
+            .child(tab_row(app, pane, true))
             .child(content(app, pane, focused, cx));
         area = area.child(frame);
     }
@@ -63,7 +63,7 @@ fn divider_view(app: &App, divider: Divider) -> El {
 }
 
 /// A pane's tab strip. Only the focused pane's tabs carry the chrome cursor's rects.
-fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
+fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     let mut tabs = row().key(format!("pane-tabs:{}", pane.id)).w_full().h(TAB_ROW_H).fill(rgb(p.surface))
@@ -102,9 +102,10 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| { if inside { a.tab_hover = Some(tab_id); } else if a.tab_hover == Some(tab_id) { a.tab_hover = None; } })
             .on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| a.drag_tab(crate::ui::tab_drag::Source::Buffer(tab_id), d, tx))
             .on_press(move |a: &mut App| { if !std::mem::take(&mut a.suppress_tab_press) { a.select_tab(tab_id); a.focus = Focus::Content; } });
+        // By the tab's id, never its index: an index changes meaning when a tab elsewhere
+        // closes or moves without this rect changing (and so without this firing again).
         item = item.on_layout(move |a: &mut App, r: [f32; 4]| {
             a.rects.insert(crate::ui::tab_drag::Source::Buffer(tab_id).rect_key(), r);
-            if focused { a.rects.insert(format!("pane-tab:{index}"), r); }
         });
         let modified = match &tab.kind {
             TabKind::Editor { path } => app.buffers.get(path).is_some_and(crate::editor::Buffer::dirty),
@@ -125,13 +126,10 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
         if !modified && app.tab_hover != Some(tab_id) { item = item.child(el().w(18.0).h(18.0)); }
         tabs = tabs.child(app.tab_slide(crate::ui::tab_drag::Source::Buffer(tab_id), item));
     }
-    let plus = app.tabs.len();
     let mut new_tab = el().key(format!("pane-new:{pane_id}")).w(32.0).h(TAB_ROW_H).center()
         .child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
         .on_press(move |a: &mut App| { a.focus_pane(pane_id); a.open_tab(TabKind::Home); });
-    if focused {
-        new_tab = new_tab.on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("pane-tab:{plus}"), r); });
-    }
+    new_tab = new_tab.on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("pane-new:{pane_id}"), r); });
     let strip_key = format!("pane-tab-strip:{}:{pane_id}", app.workspace_id);
     let mirror = app.chrome_scroll.clone();
     let mirror_key = strip_key.clone();

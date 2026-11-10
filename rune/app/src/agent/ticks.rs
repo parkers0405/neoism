@@ -147,15 +147,18 @@ impl App {
     fn jump_to_question(&mut self, session_id: &str, index: usize, tx: &mut Tx) {
         let Some(question) = self.questions(session_id).get(index).cloned() else { return };
         let Some(session) = self.sessions.get_mut(session_id) else { return };
-        match question.top {
-            // A row laid out before glides there; one never mounted is revealed by key.
+        // A row in view glides to the top from where it was just laid out; any other (its
+        // stored offset may predate pages loaded above it) is revealed by its key.
+        let top = question.top.filter(|_| session.visible_questions.contains(&question.id));
+        match top {
             Some(top) => {
-                let (offset, max) = session.scroll.get();
-                session.glide = Some(crate::ui::follow::Glide::retarget(session.glide, offset, top.clamp(0.0, max)));
-                tx.wake_after(std::time::Duration::ZERO);
+                let (_, max) = session.scroll.get();
+                let top = top.clamp(0.0, max);
+                session.wheel_target = Some((top, std::time::Instant::now()));
+                tx.scroll_to_with(format!("conversation:{session_id}"), 0.0, top, crate::ui::follow::SPRING);
             }
             None => {
-                session.glide = None;
+                session.wheel_target = None;
                 tx.scroll_into_view_in(format!("conversation:{session_id}"), format!("msg:{}", question.id));
             }
         }

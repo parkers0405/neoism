@@ -104,7 +104,7 @@ pub fn view(app: &App) -> El {
             .child(preview(app, finder).grow(1.0).h((HEIGHT * 0.55 * s).max(shown * ROW_H * s)));
     }
 
-    let dialog = col().key("finder").w(width).fill(rgb(p.bg))
+    let dialog = col().key("finder").w(width).fill(rgb(p.bg)).instant_changes()
         .corners([RADIUS * s, RADIUS * s, 0.0, 0.0])
         .border(stroke, rgb(p.surface))
         .clip_rounded(RADIUS * s)
@@ -136,7 +136,7 @@ fn list(app: &App, finder: &Finder, width: f32, visible: usize) -> El {
     let rows = col().w(width);
     if finder.hits.is_empty() {
         let hint = if finder.loading { "Searching..." } else if let Some(error) = &finder.error { error.as_str() } else if finder.query.text.trim().is_empty() && finder.mode == Mode::Grep { "Start typing to search" } else { "No matches" };
-        return rows.child(row().h(ROW_H * s).px(INPUT_PAD_X * s).center_y().child(text(hint.to_owned()).font(app.ty.sized(ROW_FONT)).color(rgb(p.muted))));
+        return rows.child(row().h(ROW_H * s).transition(rune::Transition::none()).px(INPUT_PAD_X * s).center_y().child(text(hint.to_owned()).font(app.ty.sized(ROW_FONT)).color(rgb(p.muted))));
     }
     let mut built = Vec::with_capacity(finder.hits.len());
     for (index, hit) in finder.hits.iter().enumerate() {

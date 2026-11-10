@@ -21,6 +21,10 @@ pub enum Action {
     Close,
     DiscardTab(u64),
     SaveTab(u64),
+    /// Stop the server connection in progress.
+    CancelConnect,
+    /// Remove the server or system awaiting confirmation.
+    ConfirmRemove,
 }
 
 pub struct Button {
@@ -73,14 +77,24 @@ impl App {
             Action::Close => {},
             Action::DiscardTab(id) => { if let Some(i) = self.tabs.iter().position(|t| t.id == id) { self.close_tab_now(i); } }
             Action::SaveTab(id) => self.save_and_close(id),
+            Action::CancelConnect => self.cancel_connect(),
+            Action::ConfirmRemove => self.confirm_remove(),
         }
+    }
+
+    /// Esc, the close mark or a click outside: a connection in progress is cancelled with it.
+    pub fn dismiss_modal(&mut self) {
+        let cancels = self.modal.as_ref().is_some_and(|m| m.buttons.iter().any(|b| b.action == Action::CancelConnect));
+        self.modal = None;
+        self.server.confirm = None;
+        if cancels { self.cancel_connect(); }
     }
 
     pub fn modal_key(&mut self, event: &KeyEvent) -> bool {
         let Some(modal) = &mut self.modal else { return false };
         let count = modal.buttons.len().max(1);
         match event.key {
-            Key::Escape => self.modal = None,
+            Key::Escape => self.dismiss_modal(),
             Key::Up => modal.selected = (modal.selected + count - 1) % count,
             Key::Down | Key::Tab => modal.selected = (modal.selected + 1) % count,
             Key::Enter => {
@@ -120,12 +134,12 @@ pub fn view(app: &App) -> El {
             .child(text(modal.title.clone()).font(app.ty.sized_bold(TITLE)).color(rgb(p.fg)))
             .child(el().w(24.0 * s).h(24.0 * s).center()
                 .child(text("\u{00d7}").font(app.ty.sized(18.0)).color(rgb(p.muted)))
-                .on_press(|a: &mut App| a.modal = None)))
+                .on_press(|a: &mut App| a.dismiss_modal())))
         .child(body)
         .child(actions);
     col().key("modal-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).items_center()
         .pt(MARGIN_TOP * s)
-        .on_press(|a: &mut App| a.modal = None)
+        .on_press(|a: &mut App| a.dismiss_modal())
         .child(card)
 }
 

@@ -10,6 +10,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     // The image preview is modal over everything.
     if app.image_preview_key(event) { return true; }
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
+    if app.form.is_some() { return app.form_key(event, tx); }
     if app.browser.is_some() { return app.browser_key(event, tx) || shortcut(app, event, tx); }
     if shortcut(app, event, tx) { return true; }
     if app.settings.is_some() { return app.settings_key(event); }
@@ -354,7 +355,7 @@ impl App {
         if self.block_filter_focused() && self.field_tab.is_none() && self.tabs.get(self.active).is_some_and(|t| t.draft.focused) {
             if let Some(filter) = active_id.and_then(|id| self.terminals.get_mut(&id)).and_then(|t| t.filter.as_mut()) { filter.1.focused = false; }
         }
-        let overlay = self.picker.is_some() || self.finder.is_some() || self.browser.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
+        let overlay = self.picker.is_some() || self.finder.is_some() || self.browser.is_some() || self.form.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
             || self.block_filter_focused();
         let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. });
         let active = self.active;

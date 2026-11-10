@@ -17,7 +17,22 @@ mod keys;
 mod palette;
 mod replay;
 mod panes;
+mod servers;
 mod settings;
+// GPUiX's native server and SSH layers, compiled in as they are (`neoism-frontend/gpuix/native`);
+// they sit at the crate root because they name each other through `crate::`.
+#[allow(dead_code)]
+#[path = "../../../neoism-frontend/gpuix/native/src/ssh_hosts.rs"]
+mod ssh_hosts;
+#[allow(dead_code)]
+#[path = "../../../neoism-frontend/gpuix/native/src/system_registry.rs"]
+mod system_registry;
+#[allow(dead_code)]
+#[path = "../../../neoism-frontend/gpuix/native/src/fast_servers.rs"]
+mod fast_servers;
+#[allow(dead_code)]
+#[path = "servers/service_process.rs"]
+mod service_process;
 mod tabs;
 mod tree;
 mod ui;
@@ -77,10 +92,12 @@ fn lsp_fixture(s: &mut App) {
 
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
-    let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.take_picked_attachments() | app.sync_terminals(tx);
+    let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
     if std::mem::take(&mut app.settle_pending) { tx.settle(); }
     if app.quit_requested {
         if !app.session_closed { app.save_session(true); }
+        // Fast Servers this window hosts stop with it.
+        servers::shutdown();
         tx.quit();
         return true;
     }
@@ -289,6 +306,13 @@ fn main() {
             // desktop registries) so renders are reproducible.
             ("systems", |s| { s.open_picker(palette::Mode::Systems); palette::systems_fixture(s); }),
             ("servers", |s| { s.open_picker(palette::Mode::Servers); palette::systems_fixture(s); s.move_picker(1); }),
+            // The Add Server form (Host), its Join + Fast tunnel variant, and Add system.
+            ("server-form", |s| s.open_server_form()),
+            ("server-form-join", |s| {
+                s.open_server_form();
+                if let Some(form) = &mut s.form { let mut draft = form.draft().unwrap_or_default(); draft.host = false; draft.fast = true; *form = servers::form::Form::server(draft); }
+            }),
+            ("system-form", |s| s.open_system_form()),
             ("system-settings", |s| {
                 s.open_picker(palette::Mode::Systems);
                 palette::systems_fixture(s);

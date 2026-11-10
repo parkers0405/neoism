@@ -12,6 +12,8 @@ pub fn highlight(accent: Color) -> Color { accent.alpha(0.22) }
 #[derive(Default)]
 pub struct CopyOnRelease {
     dragging: bool,
+    /// The surface's current selection, for an explicit copy (Super+C / Ctrl+C).
+    pub selected: Option<String>,
 }
 
 impl CopyOnRelease {
@@ -21,6 +23,7 @@ impl CopyOnRelease {
     /// Feed an `on_selection_change`. When the drag that made a selection lets go, its text
     /// goes to the clipboard and comes back here; a code-made selection (Cmd+A) copies nothing.
     pub fn change(&mut self, change: &SelectionChange, tx: &mut Tx) -> Option<String> {
+        self.selected = change.selection().map(|s| s.text().to_owned()).filter(|t| !t.trim().is_empty());
         if change.dragging() {
             self.dragging = true;
             return None;

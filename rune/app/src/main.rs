@@ -3,6 +3,7 @@
 
 mod agent;
 mod app;
+mod clipboard;
 mod session;
 mod config;
 mod daemon;

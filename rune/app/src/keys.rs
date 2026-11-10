@@ -46,6 +46,16 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
     if app.capture_binding(event) { return true; }
+    // Super+V / Super+C, as the desktop binds them (fields keep their own Ctrl chords).
+    let m = event.mods;
+    if m.logo && !m.ctrl && !m.alt {
+        let letter = match &event.key { Key::Text(t) => t.to_lowercase(), Key::Command(c) => c.to_ascii_lowercase().to_string(), _ => String::new() };
+        match letter.as_str() {
+            "v" => { app.paste_chord(tx); return true; }
+            "c" => { app.copy_chord(tx); return true; }
+            _ => {}
+        }
+    }
     // An open menu owns its navigation keys before anything else.
     if app.menu.is_some() && app.menu_key(event) { return true; }
     if app.bound_shortcut(event, tx) { return true; }
@@ -273,6 +283,12 @@ impl App {
             .map(|(_, t)| t.id);
         if let Some(tab) = clicked {
             self.select_tab(tab);
+            self.focus = Focus::Content;
+        }
+        // A click into this tab's own composer while the keyboard was elsewhere (the sidebar,
+        // a tab row, the tree): the composer takes it, with the window cursor.
+        let own = self.tabs.get(self.active).filter(|t| t.draft.focused && self.field_tab != Some(t.id)).map(|t| t.id);
+        if own.is_some() && self.focus != Focus::Content && self.picker.is_none() && self.finder.is_none() {
             self.focus = Focus::Content;
         }
         // An inline composer picker (`/model`, `/cd` …) types into its own query row.

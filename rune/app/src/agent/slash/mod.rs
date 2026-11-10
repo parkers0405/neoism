@@ -4,7 +4,7 @@
 //! selects, `actions` runs choices against the daemon, `view` draws the card, and `effects`
 //! plays the fun `/piss` … `/praise` skits.
 
-mod actions;
+pub(crate) mod actions;
 mod usage;
 mod catalog;
 pub mod effects;

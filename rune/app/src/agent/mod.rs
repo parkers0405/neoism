@@ -42,9 +42,15 @@ const HEAD_PAGE: u32 = 80;
 pub struct Session {
     pub message_versions: std::collections::HashMap<String, u64>,
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
-    pub wheel_target: Option<f32>,
-    /// A wheel notch's glide in flight (stepped on the frame clock).
-    pub glide: Option<crate::ui::follow::Glide>,
+    /// The wheel or trackpad glide's target and when it was set (`follow::wheel_base`).
+    pub wheel_target: Option<(f32, std::time::Instant)>,
+    /// The user scrolled up the transcript just now, and when the last older page arrived:
+    /// older history loads while someone scrolls toward it, never on its own (GPUiX's cascade
+    /// fix: a short page leaves the view at the top and would pull the whole history in).
+    pub scrolled_up_at: Option<std::time::Instant>,
+    pub older_at: Option<std::time::Instant>,
+    /// Questions whose rows are in view: only their `question_tops` are current.
+    pub visible_questions: std::collections::HashSet<String>,
     /// Each question's row offset in the transcript, from its last layout (the question rail).
     pub question_tops: std::collections::HashMap<String, f32>,
     /// The question rail's lit tick, and the transcript viewport's height.
@@ -121,7 +127,7 @@ impl App {
         let index = self.active;
         if !matches!(self.tabs[index].kind, TabKind::Agent { .. }) { return; }
         self.tabs[index].kind = TabKind::Agent { session: Some(session_id.to_owned()) };
-        if let Some(session) = self.sessions.get_mut(session_id) { session.wheel_target = None; session.glide = None; }
+        if let Some(session) = self.sessions.get_mut(session_id) { session.wheel_target = None; }
         self.load_session(session_id);
     }
 
@@ -145,6 +151,12 @@ impl App {
         let Some(session) = self.sessions.get_mut(session_id) else { return };
         let Some(cursor) = session.older_cursor.clone() else { return };
         if session.loading_older { return; }
+        // Only for someone scrolling up within a viewport of the top, and once per page: after
+        // a page lands, the next needs a fresh upward wheel event (GPUiX's cascade fix).
+        let now = std::time::Instant::now();
+        let Some(scrolled) = session.scrolled_up_at.filter(|at| now.duration_since(*at) < std::time::Duration::from_millis(600)) else { return };
+        if session.older_at.is_some_and(|landed| scrolled <= landed) { return; }
+        if session.scroll.get().0 > session.viewport_h.max(1.0) { return; }
         session.loading_older = true;
         let limit = session.older_limit.max(8);
         self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: Some(cursor), limit: Some(limit) });
@@ -271,9 +283,15 @@ impl App {
                     older.append(&mut session.messages);
                     session.messages = older;
                     session.older_cursor = next_cursor;
+                    session.older_at = Some(std::time::Instant::now());
+                    // A glide's target predates the page above: the next delta starts from
+                    // where the anchored view now is.
+                    session.wheel_target = None;
+                    // Row offsets measured before the page are all off by its height.
+                    session.question_tops.clear();
                 } else {
                     merge_head(&mut session.messages, messages);
-                    if !session.loaded { session.older_cursor = next_cursor; }
+                    if !session.loaded { session.older_cursor = next_cursor; self.settle_pending = true; }
                     session.loaded = true;
                 }
             }

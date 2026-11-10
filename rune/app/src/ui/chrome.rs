@@ -38,7 +38,8 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.modal.is_some(), || super::modal::view(app))
         .child_if(app.menu.is_some(), || super::menu::view(app))
         .child_if(app.settings.is_some(), || crate::settings::view(app))
-        .child_if(app.cursor.visible, || cursor_quad(app))
+        .child_if(app.cursor.placed(), || cursor_quad(app))
+        .child_if(app.heartbeat.is_some(), || heartbeat(app))
 }
 
 /// Report the focused field's caret line (and its font) so `poll` can trail the block to it.
@@ -69,15 +70,25 @@ fn cursor_quad(app: &App) -> El {
     let quad = rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent))).w(w).h(h);
     // Settled on an editor cell, the block shows its character in the background colour.
     let glyph = app.editor_cursor_glyph().filter(|_| !app.cursor.trail.animating());
+    // Mounted while placed and blinking by opacity, at once: remounting each half period would
+    // replay the enter fade and repaint the window for most of every blink.
     let block = |x: f32, y: f32| el().key("window-cursor").w(w).h(h).absolute(x, y)
+        .opacity(if app.cursor.visible { 1.0 } else { 0.0 }).instant_changes()
         .child(quad)
         .child_if(glyph.is_some(), || text(glyph.clone().unwrap_or_default())
             .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0));
     // Inside a scroll view the block is clipped to it (its trail too), never over the chrome.
-    match app.cursor_clip() {
+    // Only a move between focus zones (Alt+Up from the composer to the tabs, a tab back down
+    // into the tree) crosses the chrome unclipped, like the original's window-wide canvas; a
+    // move inside one view (scrolling the cursor off it) stays clipped to it.
+    let clip = app.cursor_clip().filter(|_| !app.cursor.crossing());
+    // A blink is one frame on, one off: the default enter/exit fade would repaint the window
+    // for 0.2 s of every 0.53 s half period while the cursor sits still.
+    match clip {
         Some([cx0, cy0, cw, ch]) => el().key("window-cursor-clip").w(cw).h(ch).absolute(cx0, cy0).clip_rounded(0.0)
+            .transition(rune::Transition::none())
             .child(block(x0 - cx0, y0 - cy0)),
-        None => block(x0, y0),
+        None => block(x0, y0).transition(rune::Transition::none()),
     }
 }
 
@@ -180,14 +191,40 @@ fn workspace_tabs(app: &App) -> El {
             .on_drag(move |a: &mut App, d: &mut rune::Drag, tx: &mut rune::Tx| a.drag_tab(super::tab_drag::Source::Workspace(drag_identity.clone()), d, tx))
             .on_press(move |a: &mut App| { if !std::mem::take(&mut a.suppress_tab_press) { if let Some(index) = a.workspaces.iter().position(|w| w.id == press_identity) { a.select_workspace(index); } } })
             .on_layout(move |a: &mut App, r: [f32; 4]| {
-                a.rects.insert(format!("workspace-tab:{index}"), r);
                 a.rects.insert(super::tab_drag::Source::Workspace(identity.clone()).rect_key(), r);
             });
         strip = strip.child(app.tab_slide(super::tab_drag::Source::Workspace(entry.id.clone()), tab));
     }
-    let plus = app.workspaces.len();
     strip.child(el().key("workspace-new").w(32.0).h(TAB_ROW_H).center()
         .child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
         .on_press(|a: &mut App| a.new_workspace())
-        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("workspace-tab:{plus}"), r); }))
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-new".into(), r); }))
+}
+
+/// The invisible element that carries the vsync heartbeat (`App::heartbeat`).
+fn heartbeat(app: &App) -> El {
+    let Some((tween, _, generation)) = &app.heartbeat else { return el() };
+    el().key(format!("vsync-heartbeat:{generation}")).w(1.0).h(1.0).absolute(0.0, 0.0)
+        .fill(rune::Color::TRANSPARENT).live_opacity(tween).transition(rune::Transition::none())
+}
+
+impl App {
+    /// Keep (or drop) the vsync heartbeat for an app-stepped motion. Returns whether the view
+    /// must re-run to bind a new one or unmount it.
+    pub fn keep_vsync(&mut self, moving: bool) -> bool {
+        const SPAN: std::time::Duration = std::time::Duration::from_millis(600);
+        let now = std::time::Instant::now();
+        match &self.heartbeat {
+            // Renewed well before it runs out, so no frame between two tracks goes undrawn.
+            Some((_, at, _)) if moving && now.duration_since(*at) < SPAN / 2 => false,
+            Some((_, at, _)) if !moving && now.duration_since(*at) < SPAN => false,
+            _ if moving => {
+                let generation = self.heartbeat.as_ref().map_or(0, |h| h.2 + 1);
+                self.heartbeat = Some((rune::Tween::linear(0.0, 1.0, SPAN), now, generation));
+                true
+            }
+            Some(_) => { self.heartbeat = None; true }
+            None => false,
+        }
+    }
 }

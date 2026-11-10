@@ -196,7 +196,7 @@ impl App {
     pub fn activity_follows_end(&self, session_id: &str) -> bool {
         let Some(session) = self.sessions.get(session_id).filter(|s| s.streaming) else { return false };
         let (offset, max) = session.scroll.get();
-        max > 1.0 && max - offset <= 2.0 && session.glide.is_none()
+        max > 1.0 && max - offset <= 2.0 && crate::ui::follow::wheel_base(session.wheel_target, offset) == offset
     }
 
     /// The row the activity line takes (its top margin and line).

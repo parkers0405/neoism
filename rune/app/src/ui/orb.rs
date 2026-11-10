@@ -112,10 +112,16 @@ struct Orb {
 pub struct Orbs {
     orbs: RefCell<HashMap<String, Rc<Orb>>>,
     epoch: Instant,
+    /// When the colours last flowed: the plasma drifts at most ~2 rad/s, so it steps at
+    /// `STEP` rather than repainting the whole window every vblank for a few cells.
+    last: std::cell::Cell<Option<Instant>>,
 }
 
+/// The orbs' frame interval (30 Hz).
+pub const STEP: std::time::Duration = std::time::Duration::from_millis(33);
+
 impl Default for Orbs {
-    fn default() -> Orbs { Orbs { orbs: Default::default(), epoch: Instant::now() } }
+    fn default() -> Orbs { Orbs { orbs: Default::default(), epoch: Instant::now(), last: Default::default() } }
 }
 
 impl Orbs {
@@ -144,14 +150,19 @@ impl Orbs {
         root
     }
 
-    /// Flow every orb to now. Only on-screen cells repaint; returns whether any orb exists.
-    pub fn tick(&self) -> bool {
+    /// Flow every orb to now, at most every `STEP`. Only on-screen cells repaint. Returns when
+    /// to tick again, `None` with no orb.
+    pub fn tick(&self) -> Option<std::time::Duration> {
+        if self.orbs.borrow().is_empty() { return None; }
+        let now = Instant::now();
+        if let Some(due) = self.last.get().map(|at| at + STEP).filter(|due| *due > now) { return Some(due - now); }
+        self.last.set(Some(now));
         let t = self.seconds();
         let orbs = self.orbs.borrow();
         for orb in orbs.values() {
             for (_, _, nx, ny, color) in &orb.cells { color.set(linear(orb.profile.color(*nx, *ny, t))); }
         }
-        !orbs.is_empty()
+        Some(STEP)
     }
 }
 

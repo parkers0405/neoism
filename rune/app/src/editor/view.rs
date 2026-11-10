@@ -85,10 +85,41 @@ pub fn view(app: &App) -> El {
         code(app, buffer)
     };
     let mut page = col().key("editor").w_full().h_full().fill(app.surface(p.bg))
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("editor-page".into(), r); })
         .child(breadcrumb(app, &buffer.path))
         .child(body);
     if let Some(line) = command_line(app, buffer) { page = page.child(line); }
-    page
+    match prompt_dialog(app, buffer) { Some(dialog) => page.child(dialog), None => page }
+}
+
+/// The `/` `?` `:` prompt (`buffer-search-dialog`): a 600 pt card 80 pt below the editor's top,
+/// a 14 pt query with the mode's placeholder while empty. The window cursor trails into it.
+fn prompt_dialog(app: &App, buffer: &Buffer) -> Option<El> {
+    let prompt = buffer.prompt.as_ref()?;
+    let p = app.pal;
+    let s = app.ty.scale();
+    let font = app.ty.sized(14.0);
+    let width = app.rects.get("editor-page").map_or(600.0 * s, |r| (600.0 * s).min(r[2]));
+    let field = if prompt.text.is_empty() {
+        let placeholder = if prompt.kind == ':' { ":command".to_owned() } else { format!("{} Search in buffer\u{2026}", prompt.kind) };
+        row().center_y().child(caret(buffer, font.size)).child(text(placeholder).font(font).color(rgb(p.muted)))
+    } else {
+        row().center_y().child(text(prompt.text.clone()).font(font).color(rgb(p.fg))).child(caret(buffer, font.size))
+    };
+    let card = row().key("buffer-search-dialog").w(width).h(60.0 * s).padding(10.0 * s).fill(rgb(p.bg))
+        .border(2.0 * s, rgb(p.border)).radius(12.0 * s)
+        .child(row().w_full().h(40.0 * s).px(10.0 * s).center_y().clip_rounded(0.0).child(field));
+    Some(col().key("buffer-search-layer").pin(Some(0.0), Some(80.0 * s), Some(0.0), None).items_center().child(card))
+}
+
+/// The prompt's insertion point, reported for the window cursor to trail to.
+fn caret(buffer: &Buffer, font_size: f32) -> El {
+    let path = buffer.path.clone();
+    el().key("prompt-caret").w(1.0).h(font_size * 1.3)
+        .on_layout(move |a: &mut App, r: [f32; 4]| {
+            let block = [r[0], r[1], (font_size * 0.6).max(2.0), r[3]];
+            if let Some(b) = a.buffers.get_mut(&path) { b.cursor_rect = Some(block); }
+        })
 }
 
 fn breadcrumb(app: &App, path: &str) -> El {
@@ -109,20 +140,12 @@ fn breadcrumb(app: &App, path: &str) -> El {
     bar
 }
 
-/// The `:` / `/` prompt while open, else the last message (`"x" written`, `E37: …`).
+/// The last message (`"x" written`, `E37: …`).
 fn command_line(app: &App, buffer: &Buffer) -> Option<El> {
     let p = app.pal;
     let m = Metrics::of(app, buffer);
     let font = app.ty.code().lh(m.line_h);
     let line = row().key("editor-command").w_full().h(m.line_h).px(m.adv).center_y();
-    if let Some(prompt) = &buffer.prompt {
-        let shown = format!("{}{}", prompt.kind, prompt.text);
-        let x = m.adv + display_col_for_byte(&shown, shown.len(), TAB) as f32 * m.adv;
-        let path = buffer.path.clone();
-        let caret = el().w(m.caret(Mode::Insert)).h(m.line_h).absolute(x, 0.0)
-            .on_layout(move |a: &mut App, r: [f32; 4]| { if let Some(b) = a.buffers.get_mut(&path) { b.cursor_rect = Some(r); } });
-        return Some(line.child(text(shown).font(font).color(rgb(p.fg))).child(caret));
-    }
     // Keys of an unfinished command (`2d`, `"a`, `ci`) sit at the right, as vim's showcmd.
     let pending = buffer.doc.vim.pending.showcmd();
     if buffer.message.is_none() && pending.is_empty() { return None; }
@@ -272,6 +295,18 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     let selected = selection_on_line(doc, index);
             let x_of = |byte: usize| m.gutter_w + segment.visual_col(segment.source_col_for_byte(line, byte, TAB)) as f32 * adv;
             let mut visual = row().w_full().h(line_h).fill(if current && selected.is_none() { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT });
+            // hlsearch: every occurrence of the search pattern (case-sensitive, as `n`/`N`).
+            if let Some(pattern) = buffer.search_highlight.as_deref().filter(|p| !p.is_empty()) {
+                let band = rgb(p.yellow).alpha(0.30);
+                let mut from = 0;
+                while let Some(found) = line[from..].find(pattern) {
+                    let (a, b) = (from + found, from + found + pattern.len());
+                    from = b.max(a + 1);
+                    let (a, b) = (a.max(segment.byte_start), b.min(segment.byte_end));
+                    if a < b { visual = visual.child(el().w((x_of(b) - x_of(a)).max(adv)).h(line_h).absolute(x_of(a), 0.0).fill(band)); }
+                    if from >= line.len() { break; }
+                }
+            }
             if let Some((a, b)) = selected {
                 let (a, b) = (a.max(segment.byte_start), b.min(segment.byte_end));
                 // An empty stretch (a blank line, or the newline of a multi-line selection)
@@ -348,12 +383,16 @@ fn code(app: &App, buffer: &Buffer) -> El {
             let Some(b) = a.buffers.get_mut(&wheel_path) else { return false };
             let popup = b.lsp.hover.is_some() || b.lsp.completion.is_some();
             b.lsp.dismiss();
-            if e.precise { return false; }
             let (offset, max, _) = b.scroll.get();
+            if e.precise && e.dx.abs() > e.dy.abs() { return false; }
+            // Notches move three lines; trackpads move with the reading gain and coast. Both
+            // glide on Rune's clock, extending one target so consecutive deltas are one motion.
+            b.jump_spring = None;
             let base = b.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
-            let target = (base - e.dy / 40.0 * 3.0 * line_h).clamp(0.0, max);
+            let delta = if e.precise { -e.dy * crate::ui::follow::TOUCHPAD_GAIN * crate::ui::follow::TRACKPAD_REACH } else { -e.dy / 40.0 * 3.0 * line_h };
+            let target = (base + delta).clamp(0.0, max);
             b.wheel_target = Some(target);
-            tx.scroll_to_with(wheel_key.clone(), 0.0, target, SCROLL_SPRING);
+            tx.scroll_to_with(wheel_key.clone(), 0.0, target, if e.precise { crate::ui::follow::TRACKPAD_SPRING } else { SCROLL_SPRING });
             if !popup { tx.live_only(); }
             true
         })

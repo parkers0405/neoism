@@ -57,6 +57,14 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
             _ => {}
         }
     }
+    // Ctrl+Insert / Shift+Insert / Shift+Delete: the terminal-style chords, and what a Hyprland
+    // Super+C / Super+V bind sends as `send_shortcut` (the compositor keeps the Super itself).
+    match (&event.key, m.ctrl, m.shift, m.alt || m.logo) {
+        (Key::Insert, true, false, false) => { app.copy_chord(tx); return true; }
+        (Key::Insert, false, true, false) => { app.paste_chord(tx); return true; }
+        (Key::Delete, false, true, false) if app.focused_field_mut().is_some() => { app.cut_chord(tx); return true; }
+        _ => {}
+    }
     // An open menu owns its navigation keys before anything else.
     if app.menu.is_some() && app.menu_key(event) { return true; }
     if app.bound_shortcut(event, tx) { return true; }
@@ -249,8 +257,17 @@ impl App {
             return Some([(r[0] + pad_x * s - w - 2.0 * s).max(r[0]), r[1] + (row_h - h) / 2.0, w, h]);
         }
         match self.focus {
-            Focus::Buffers(i) => self.rects.get(&format!("pane-tab:{i}")).map(|r| tab_bar(*r, 16.0, scale, i == self.tabs.len())),
-            Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == self.workspaces.len())),
+            // The focused tab's rect by its id; the `+` slot past the last tab by its pane.
+            Focus::Buffers(i) => {
+                use crate::ui::tab_drag::Source;
+                let key = self.tabs.get(i).map_or_else(|| format!("pane-new:{}", self.layout.focus), |t| Source::Buffer(t.id).rect_key());
+                self.rects.get(&key).map(|r| tab_bar(*r, 16.0, scale, i >= self.tabs.len()))
+            }
+            Focus::Workspaces(i) => {
+                use crate::ui::tab_drag::Source;
+                let key = self.workspaces.get(i).map_or_else(|| "workspace-new".to_owned(), |w| Source::Workspace(w.id.clone()).rect_key());
+                self.rects.get(&key).map(|r| tab_bar(*r, 14.0, scale, i >= self.workspaces.len()))
+            }
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| crate::editor::view::cursor_rect(self, b)),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("tree-row").map(|r| crate::tree::view::cursor_rect(self, *r)),
             Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) && (self.conv_header.is_some() || !self.threads.is_empty()) => self.conversation_cursor(),

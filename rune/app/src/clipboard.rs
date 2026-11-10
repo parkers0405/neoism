@@ -39,9 +39,20 @@ impl App {
         });
     }
 
-    /// Super+C: the focused field's selection, else the transcript's.
+    /// Super+C: the focused field's selection, else a Visual selection in the editor (yanked,
+    /// as `y` would), else the transcript's.
     pub fn copy_chord(&mut self, tx: &mut Tx) {
         let from_field = self.focused_field_mut().map(|f| f.selected().to_owned()).filter(|t| !t.is_empty());
-        if let Some(text) = from_field.or_else(|| self.selection.copy.selected.clone()) { tx.copy(text); }
+        let text = from_field.or_else(|| self.editor_yank_visual()).or_else(|| self.selection.copy.selected.clone());
+        if let Some(text) = text { self.clipboard = Some(text.clone()); tx.copy(text); }
+    }
+
+    /// Shift+Delete: cut the focused field's selection.
+    pub fn cut_chord(&mut self, tx: &mut Tx) {
+        let Some(field) = self.focused_field_mut() else { return };
+        let text = field.selected().to_owned();
+        if text.is_empty() { return; }
+        field.paste("");
+        tx.copy(text);
     }
 }

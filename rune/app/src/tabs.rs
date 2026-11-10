@@ -163,8 +163,12 @@ impl App {
     /// Whether the active tab shows user messages (and so presence orbs).
     pub fn orbs_on_screen(&self) -> bool {
         match &self.active_tab().kind {
-            TabKind::Agent { session: Some(id) } => self.sessions.get(id)
-                .is_some_and(|s| s.messages.iter().any(|m| m.kind == neoism_protocol::agent::HistoryMessageKind::User)),
+            // A user row laid out within (or just above) the visible transcript: its orb sits
+            // at the bubble's top, a tall bubble can hang down from above the view.
+            TabKind::Agent { session: Some(id) } => self.sessions.get(id).is_some_and(|s| {
+                let (offset, view) = (s.scroll.get().0, s.viewport_h.max(1.0));
+                s.question_tops.values().any(|top| *top >= offset - view && *top <= offset + view)
+            }),
             _ => false,
         }
     }

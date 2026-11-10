@@ -17,23 +17,6 @@ pub const COLUMN_PAD_X: f32 = 102.0;
 /// Rune reports a wheel notch as 40 points; the original moves three text rows per notch.
 
 /// One agent tab: the wordmark home before the first prompt, then the transcript.
-impl App {
-    /// Step every chat's wheel glide one frame and place its scroll. Returns whether any is
-    /// still moving (the frame clock keeps running).
-    pub fn step_timeline_glides(&mut self, clock: f64, tx: &mut Tx) -> bool {
-        let mut moving = false;
-        for (id, session) in self.sessions.iter_mut() {
-            let Some(glide) = session.glide.as_mut() else { continue };
-            let max = session.scroll.get().1;
-            glide.target = glide.target.min(max);
-            let more = glide.step(clock);
-            tx.scroll_to_instant(format!("conversation:{id}"), 0.0, glide.pos);
-            if more { moving = true; } else { session.glide = None; }
-        }
-        moving
-    }
-}
-
 pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let p = app.pal;
     let tab_id = app.active_tab().id;
@@ -88,19 +71,23 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             if a.selection.copy.dragging() { a.selection.pointer_y = Some(p.window_y); }
         })
         .on_wheel(move |s: &mut App, e: WheelEvent, tx: &mut Tx| {
-            // Trackpads keep Rune's direct 1:1 scroll and fling; notches glide on the spring,
-            // retargeting mid-glide so consecutive notches are one continuous motion.
+            // Notches move three code lines; trackpads move with the original's reading gain
+            // and coast. Both glide on Rune's clock (`scroll_to_with`), retargeting mid-glide so
+            // consecutive deltas are one motion, and Rune keeps the reader's row in place as
+            // older pages prepend and estimated rows measure.
             if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
-            if e.precise || e.dy == 0.0 { return false; }
+            if e.dy == 0.0 || (e.precise && e.dx.abs() > e.dy.abs()) { return false; }
             let Some(session) = s.sessions.get_mut(&wheel_id) else { return false };
             let (offset, max) = session.scroll.get();
-            // Rune lands scroll requests at once while the composer holds focus, so the glide
-            // is stepped here on the frame clock (`App::step_timeline_glides`), retargeting
-            // mid-flight so consecutive notches are one continuous motion.
-            let base = session.glide.map_or(offset, |g| g.target);
-            let target = (base - e.dy / 40.0 * 3.0 * line_h).clamp(0.0, max);
-            session.glide = Some(crate::ui::follow::Glide::retarget(session.glide, offset, target));
-            tx.wake_after(std::time::Duration::ZERO);
+            let now = std::time::Instant::now();
+            if e.dy > 0.0 { session.scrolled_up_at = Some(now); }
+            let delta = if e.precise { -e.dy * crate::ui::follow::TOUCHPAD_GAIN * crate::ui::follow::TRACKPAD_REACH } else { -e.dy / 40.0 * 3.0 * line_h };
+            let target = (crate::ui::follow::wheel_base(session.wheel_target, offset) + delta).clamp(0.0, max);
+            session.wheel_target = Some((target, now));
+            let spring = if e.precise { crate::ui::follow::TRACKPAD_SPRING } else { crate::ui::follow::SPRING };
+            tx.scroll_to_with(format!("conversation:{wheel_id}"), 0.0, target, spring);
+            // Heading up within a viewport of the top asks for the page above.
+            if e.dy > 0.0 && target < session.viewport_h { s.request_older(&wheel_id); }
             tx.live_only();
             true
         })
@@ -194,7 +181,9 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
                 // Questions report where their row sits in the transcript while it is mounted;
                 // the rail reveals a row never mounted by its key instead.
                 let (sid, mid) = (session_id.to_owned(), message.id.clone());
-                row = row.on_layout(move |a: &mut App, r: [f32; 4]| {
+                // Bookkeeping only: it follows every frame of a scroll without committing.
+                row = row.on_layout_tx(move |a: &mut App, r: [f32; 4], tx: &mut Tx| {
+                    tx.live_only();
                     let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
                     let Some(session) = a.sessions.get_mut(&sid) else { return };
                     let top = r[1] - view[1] + session.scroll.get().0;
@@ -210,11 +199,17 @@ impl App {
     /// The rows in view changed: load the older page when the first row shows, and light the
     /// question rail's tick for the question in view. Returns whether the view must re-run.
     fn timeline_rows_visible(&mut self, session_id: &str, items: &[RowItem], range: std::ops::Range<usize>) -> bool {
+        // Only while someone scrolls up toward it (`request_older` checks): parked at the top,
+        // nothing loads by itself.
         if range.start == 0 { self.request_older(session_id); }
         let Some(session) = self.sessions.get_mut(session_id) else { return false };
         let (offset, max) = session.scroll.get();
         let rows: Vec<usize> = items.iter().enumerate().filter_map(|(row, item)| match item {
             RowItem::Message(i) if session.messages.get(*i).is_some_and(|m| m.kind == HistoryMessageKind::User) => Some(row),
+            _ => None,
+        }).collect();
+        session.visible_questions = rows.iter().filter(|r| range.contains(r)).filter_map(|r| match items[*r] {
+            RowItem::Message(i) => session.messages.get(i).map(|m| m.id.clone()),
             _ => None,
         }).collect();
         let active = super::ticks::active_index(&rows, range, max - offset <= 1.0);
@@ -337,8 +332,8 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let key = format!("msg:{}", message.id);
     match message.kind {
         HistoryMessageKind::User => super::user::view(app, &message.text, message.author.as_deref(), timeline_width(app))
-            .key(key).mt(26.0),
-        HistoryMessageKind::Reasoning => col().key(key).w_full().mt(24.0).gap(10.0)
+            .key(key).pt(26.0),
+        HistoryMessageKind::Reasoning => col().key(key).w_full().pt(24.0).gap(10.0)
             .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })
                 .font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)).selectable(true).selection_color(selection_color(app)))
             .child(text(first_line(&message.text)).font(app.ty.body().italic()).color(rgb(p.dim)).selectable(true).selection_color(selection_color(app))),
@@ -346,7 +341,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
         // Bound notices and compaction summaries to six source lines before layout: `max_lines`
         // alone leaves a many-paragraph text its full height, which breaks narrow transcripts.
         HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)
-            .font(app.ty.small()).color(rgb(p.muted)).mt(16.0).w_full().wrap().max_lines(6).truncate()
+            .font(app.ty.small()).color(rgb(p.muted)).pt(16.0).w_full().wrap().max_lines(6).truncate()
             .selectable(true).selection_color(selection_color(app)),
         HistoryMessageKind::Assistant => {
             let revision = match &app.active_tab().kind {
@@ -357,7 +352,8 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             rune::memo(format!("assistant:{}:{}", app.active_tab().id, message.id), version, || {
             // Pipe tables render as the original's data grid; everything else as markdown.
             let style = markdown_style(app);
-            let mut body = col().key(key).w_full().mt(24.0).gap(14.0);
+            // Padding, not margin: a virtual row's top margin is dropped from its measured height.
+            let mut body = col().key(key).w_full().pt(24.0).gap(14.0);
             for segment in super::table::segments(&message.text) {
                 body = body.child(match segment {
                     super::table::Segment::Table(rows) => super::table::view(app, &rows, timeline_width(app), &style),
@@ -367,6 +363,9 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                         .reveal(if streaming { 0.18 } else { 0.0 })
                         .code_frame(code_frame(app))
                         .selectable(true)
+                        // Links show a hand and open on click: web links in the browser, file
+                        // links (`path`, `path:12`, `path#L12`, `file://…`) in the editor.
+                        .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
                         .render(&style)
                         // One selection spans the whole transcript, not just this block.
                         .selection_group(false),
@@ -398,3 +397,53 @@ fn first_line(text: &str) -> String {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").trim_matches('*').to_owned()
 }
 
+
+impl App {
+    /// Follow a transcript link: a web or mail link opens in the default browser, anything else
+    /// is a file in the workspace (absolute, or relative to it), with an optional line.
+    pub fn open_link(&mut self, url: &str) {
+        let url = url.trim();
+        if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:") {
+            super::slash::actions::open_in_browser(url);
+            return;
+        }
+        let Some((path, line)) = file_link(url) else { return };
+        let path = if std::path::Path::new(&path).is_absolute() { path } else { format!("{}/{}", self.cwd.trim_end_matches('/'), path.trim_start_matches("./")) };
+        self.open_file(&path, line);
+    }
+}
+
+/// `path`, `path:12`, `path:12:3`, `path#L12` or `file:///path…` → (path, line).
+fn file_link(url: &str) -> Option<(String, Option<u32>)> {
+    let url = url.strip_prefix("file://").unwrap_or(url);
+    if url.is_empty() || url.contains("://") || url.starts_with('#') { return None; }
+    let url = url.replace("%20", " ");
+    if let Some((path, anchor)) = url.split_once("#L") {
+        let line = anchor.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse().ok());
+        return Some((path.to_owned(), line));
+    }
+    let mut parts = url.rsplitn(3, ':').collect::<Vec<_>>();
+    parts.reverse();
+    let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    Some(match parts.as_slice() {
+        [path, line, col] if numeric(line) && numeric(col) => ((*path).to_owned(), line.parse().ok()),
+        [head, a, b] if numeric(b) => (format!("{head}:{a}"), b.parse().ok()),
+        [path, line] if numeric(line) => ((*path).to_owned(), line.parse().ok()),
+        _ => (url.clone(), None),
+    })
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::file_link;
+
+    #[test]
+    fn file_links_carry_their_line() {
+        assert_eq!(file_link("src/main.rs"), Some(("src/main.rs".into(), None)));
+        assert_eq!(file_link("src/main.rs:42"), Some(("src/main.rs".into(), Some(42))));
+        assert_eq!(file_link("src/main.rs:42:7"), Some(("src/main.rs".into(), Some(42))));
+        assert_eq!(file_link("/abs/a.rs#L9-L12"), Some(("/abs/a.rs".into(), Some(9))));
+        assert_eq!(file_link("file:///abs/a.rs"), Some(("/abs/a.rs".into(), None)));
+        assert_eq!(file_link("ftp://x"), None);
+    }
+}

@@ -56,6 +56,14 @@ pub struct App {
     pub activity_pinned: bool,
     /// The field-focus sync has run once (a composer is focused before it does).
     pub field_synced: bool,
+    /// The next commit lands every track (`Tx::settle`): a conversation's first page opens at
+    /// its end instead of growing its rows in and gliding down to them.
+    pub settle_pending: bool,
+    /// While an app-stepped motion runs (a wheel glide, a trackpad coast, a long jump), a
+    /// render-time track on an invisible element keeps Rune drawing every vblank, so `poll`
+    /// steps the motion once a frame. Without one, Linux has no display link and a poll wake
+    /// waits a timer frame (16.7 ms): glides beat against 144 Hz and drop frames.
+    pub heartbeat: Option<(rune::Tween<f32>, std::time::Instant, u64)>,
     /// The question-rail tick under the pointer: (conversation, tick).
     pub question_hover: Option<(String, usize)>,
     /// The status line's mode pill transition (scramble and colour cross-fade).
@@ -186,7 +194,7 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_default();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, activity_pinned: false, field_synced: false, question_hover: None, mode_pill: Default::default(), palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: None, question_hover: None, mode_pill: Default::default(), palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
             daemon: None,
             inbox: None,
             images: None,

@@ -110,7 +110,7 @@ pub fn view(app: &App) -> El {
         list
     };
 
-    let dialog = col().key("picker").w(width).fill(rgb(p.bg))
+    let dialog = col().key("picker").w(width).fill(rgb(p.bg)).instant_changes()
         .corners([8.0 * s, 8.0 * s, 0.0, 0.0])
         .border(2.0 * s, rgb(p.surface))
         .clip_rounded(8.0 * s)

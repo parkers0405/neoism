@@ -158,7 +158,7 @@ impl App {
             + outside.signum() * (outside.abs() * 12.0).clamp(80.0, 1600.0) * dt)
             .clamp(0.0, max);
         tx.scroll_to(view::scroll_key(&self.workspace_id, &path), 0.0, target);
-        self.active_buffer_mut().unwrap().wheel_target = None;
+        { let b = self.active_buffer_mut().unwrap(); b.wheel_target = None; b.jump_spring = None; }
         if let Some((line, col)) = view::hit(
             self,
             point[0] - rect[0],

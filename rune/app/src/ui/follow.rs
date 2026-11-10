@@ -159,6 +159,24 @@ impl Glide {
     }
 }
 
+/// Trackpad gain on vertical reading surfaces (`ui/wheel.ts` `TOUCHPAD_SCROLL_GAIN`).
+pub const TOUCHPAD_GAIN: f32 = 2.0;
+
+/// The original precision-trackpad scroll (`scroll_timeline_pixels_with_inertia`) moved 1:1 and
+/// coasted on: each delta added `delta x 7` px/s of velocity that decayed with tau 0.28 s, i.e.
+/// about `7 x 0.28` more of the delta after the fingers lift. Here a trackpad delta extends the
+/// glide's target by that whole distance, and Rune glides there on its own clock
+/// (`Tx::scroll_to_with`): no app-stepped scroll, so virtual rows keep their anchor.
+pub const TRACKPAD_REACH: f32 = 1.0 + 7.0 * 0.28;
+/// The trackpad glide: quick enough to read as direct, long enough to carry the coast.
+pub const TRACKPAD_SPRING: Spring = Spring::new(0.28, 0.0);
+
+/// A wheel target still in flight (set within the last `TARGET_LIFE` and not reached), else
+/// where the view is: consecutive deltas extend one glide rather than restarting from mid-flight.
+pub fn wheel_base(target: Option<(f32, Instant)>, offset: f32) -> f32 {
+    target.filter(|(t, at)| at.elapsed().as_secs_f32() < TARGET_LIFE && (t - offset).abs() > 0.5).map_or(offset, |(t, _)| t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

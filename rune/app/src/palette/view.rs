@@ -20,37 +20,38 @@ const SETTING_ROW_H: f32 = 62.0;
 const CATEGORY_H: f32 = 38.0;
 const SETTINGS_HEADER_H: f32 = 70.0;
 const SHORTCUT_FONT: f32 = 11.0;
-const MAX_ROWS: usize = 8;
+pub(super) const MAX_ROWS: usize = 8;
 const LIST_KEY: &str = "picker-results";
 
 impl App {
-    /// Keep the palette's selected row `SCROLL_OFF_ROWS` (2) inside its list.
-    pub fn palette_follow_selection(&mut self, tx: &mut Tx) {
-        let Some(picker) = &self.picker else { return };
-        let (selected, count) = (picker.selected, picker.rows().len());
+    /// The selected row's settled rect (the list's window plus whole rows), so the cursor aims
+    /// where the row lands instead of chasing it through the slide.
+    pub fn palette_row_rect(&self, picker: &Picker) -> Option<[f32; 4]> {
+        let list = self.rects.get(LIST_KEY)?;
         let row_h = row_height(picker.mode) * self.ty.scale();
-        self.palette_follow.apply_with(LIST_KEY, selected, row_h, count as f32 * row_h + 4.0 * self.ty.scale(),
-            crate::ui::follow::Reveal::Margin(SCROLL_OFF_ROWS as i64), crate::ui::follow::LIST_SPRING, false, tx);
+        let slot = picker.selected.checked_sub(picker.top)?;
+        (slot < MAX_ROWS && picker.selected < picker.rows().len()).then(|| [list[0], list[1] + slot as f32 * row_h, list[2], row_h])
     }
 
-    /// A wheel notch over the list steps it by whole rows on the list spring and keeps the
-    /// selection inside the visible band (`command_palette::scroll_pixels`).
+    /// A wheel notch over the list steps its window a row and pulls the selection inside the
+    /// band (`command_palette::scroll_pixels`); trackpads also step by whole rows.
     fn palette_wheel(&mut self, e: &rune::WheelEvent, tx: &mut Tx) -> bool {
-        if e.precise || e.dy == 0.0 { return false; }
-        let Some((count, mode)) = self.picker.as_ref().map(|p| (p.rows().len(), p.mode)) else { return false };
-        let row_h = row_height(mode) * self.ty.scale();
-        let content_h = count as f32 * row_h + 4.0 * self.ty.scale();
-        let Some((top, fit)) = self.palette_follow.wheel_rows(LIST_KEY, e.dy, row_h, content_h, crate::ui::follow::LIST_SPRING, tx) else { return true };
+        if e.dy == 0.0 { return false; }
+        let Some(picker) = &mut self.picker else { return false };
+        let count = picker.rows().len();
+        let visible = count.min(MAX_ROWS);
+        let row_h = row_height(picker.mode) * self.ty.scale();
+        let (top, selected) = crate::ui::rows::wheel(&mut picker.wheel, e.dy, row_h, picker.top, picker.selected, count, visible, SCROLL_OFF_ROWS);
+        if (top, selected) == (picker.top, picker.selected) { return true; }
+        picker.top = top;
+        picker.selected = selected;
         tx.animated();
-        if let Some(picker) = &mut self.picker {
-            picker.selected = crate::ui::follow::clamp_into_view(picker.selected, count, top, fit, SCROLL_OFF_ROWS);
-        }
         true
     }
 }
 
 /// The palette's scrolloff (`command_palette::SCROLL_OFF_ROWS`).
-const SCROLL_OFF_ROWS: usize = 2;
+pub(super) const SCROLL_OFF_ROWS: usize = 2;
 /// The pane tab rows sit above the content the picker is placed in.
 const CHROME_TOP: f32 = 60.0;
 
@@ -73,7 +74,7 @@ pub fn view(app: &App) -> El {
         .color(rgb(p.fg)).w_full()
         .on_edit(|a: &mut App| &mut a.picker.as_mut().expect("picker open").query)
         .on_input_change(|a: &mut App, _: &mut Tx| {
-            if let Some(picker) = &mut a.picker { picker.selected = 0; }
+            if let Some(picker) = &mut a.picker { picker.selected = 0; picker.top = 0; }
             a.search_directories();
         })
         .on_input_key(keys)
@@ -195,18 +196,11 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
     let s = app.ty.scale();
     let p = app.pal;
     let row_h = row_height(picker.mode);
-    // The selection highlight is one element gliding between rows on the cursor spring; a
-    // new query keys a new one, so filtering lands it at once (`reset_motion`).
-    let mut list = col().w_full();
-    if !rows.is_empty() {
-        list = list.child(el().key(format!("picker-highlight:{:?}:{}", picker.mode, picker.query.text))
-            .w_full().h(row_h * s).radius(3.0 * s).fill(rgb(p.hover)).absolute(0.0, 0.0)
-            .offset(0.0, picker.selected as f32 * row_h * s).offset_motion(crate::ui::follow::CURSOR_SPRING));
-    }
+    let mut built = Vec::with_capacity(rows.len());
     for (index, item) in rows.iter().enumerate() {
         let selected = index == picker.selected;
         if item.look != super::Look::default() {
-            list = list.child(rich_row(app, picker, index, item, selected));
+            built.push(rich_row(app, picker, index, item, selected));
             continue;
         }
         let mut line = row().key(format!("picker-row:{index}")).w_full().h(row_h * s).px(10.0 * s).gap(8.0 * s).center_y()
@@ -214,9 +208,6 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
                 if let (true, Some(picker)) = (inside, &mut a.picker) { picker.selected = index; }
             })
             .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker(Some(index), tx));
-        if selected {
-            line = line.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("picker-row".into(), r); });
-        }
         if let Some(icon) = item.icon {
             line = line.child(text(icon).font(app.ty.icon_sized(13.0)).color(rgb(p.dim)));
         }
@@ -224,16 +215,15 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
         if !item.shortcut.is_empty() {
             line = line.child(text(item.shortcut).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().shrink());
         }
-        list = list.child(line);
+        built.push(line);
     }
-    let visible = rows.len().clamp(if picker.mode == Mode::SystemSettings { 0 } else { 1 }, MAX_ROWS) as f32;
-    let mirror = app.palette_follow.scroll.clone();
-    col().key(LIST_KEY).w(width).h(visible * row_h * s + 4.0 * s).pb(4.0 * s)
-        .scroll(rune::ScrollSpec { stick_bottom: false })
-        .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
+    let visible = rows.len().clamp(if picker.mode == Mode::SystemSettings { 0 } else { 1 }, MAX_ROWS);
+    let reset = format!("{:?}:{}", picker.mode, picker.query.text);
+    let selected = (!rows.is_empty()).then_some(picker.selected);
+    crate::ui::rows::view(LIST_KEY, &reset, width, row_h * s, visible, picker.top, selected, rgb(p.hover), 3.0 * s, built)
+        .pb(4.0 * s)
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
         .on_wheel(|a: &mut App, e: rune::WheelEvent, tx: &mut Tx| a.palette_wheel(&e, tx))
-        .child(list)
 }
 
 /// A Systems/Servers/settings row (`render.rs`): a status dot for servers, the title, the
@@ -249,14 +239,10 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selecte
     let mut line = row().key(format!("picker-row:{index}")).w_full().h(row_h).px(10.0 * s).center_y()
         .radius(3.0 * s)
         // The gliding list highlight marks the selection.
-        
         .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
             if let (true, Some(picker)) = (inside, &mut a.picker) { picker.selected = index; }
         })
         .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker(Some(index), tx));
-    if selected {
-        line = line.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("picker-row".into(), r); });
-    }
     let stripe = if look.current { Some(p.green) } else if selected && look.dot.is_some() { Some(p.accent) } else { None };
     if let Some(color) = stripe {
         line = line.child(el().w(3.0 * s).h((row_h - 6.0 * s).max(2.0 * s)).absolute(0.0, 3.0 * s).fill(rgb(color)));

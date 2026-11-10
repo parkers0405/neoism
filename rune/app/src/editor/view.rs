@@ -21,6 +21,31 @@ pub fn advance(app: &App) -> f32 { app.ty.size * 0.6 }
 
 pub fn scroll_key(path: &str) -> String { format!("editor:{path}") }
 
+fn gutter_width(app: &App, buffer: &Buffer) -> f32 {
+    let digits = buffer.lines.len().max(1).to_string().len().max(2);
+    (digits as f32 + 2.0) * advance(app)
+}
+
+/// Text columns beside the gutter (the view's width from its last layout).
+fn wrap_cols(app: &App, buffer: &Buffer) -> usize {
+    let adv = advance(app);
+    let view_w = app.rects.get("editor-view").map_or(900.0, |r| r[2]);
+    ((view_w - gutter_width(app, buffer) - adv) / adv).floor().max(12.0) as usize
+}
+
+/// The cursor's visual row (soft-wrapped rows counted), so the view can follow it without
+/// waiting a frame for layout.
+pub fn cursor_visual_row(app: &App, buffer: &Buffer) -> usize {
+    let cols = wrap_cols(app, buffer);
+    let (line, col) = buffer.cursor;
+    let above: usize = buffer.lines.iter().take(line).map(|l| super::wrap::wrap_segments(l, cols, TAB).len()).sum();
+    let Some(text) = buffer.lines.get(line) else { return above };
+    let byte = text.char_indices().nth(col).map_or(text.len(), |(b, _)| b);
+    let segments = super::wrap::wrap_segments(text, cols, TAB);
+    let within = segments.iter().position(|s| byte < s.byte_end).unwrap_or(segments.len().saturating_sub(1));
+    above + within
+}
+
 pub fn view(app: &App) -> El {
     let p = app.pal;
     let Some(buffer) = app.active_buffer() else { return el() };
@@ -79,11 +104,8 @@ fn code(app: &App, buffer: &Buffer) -> El {
     let font = app.ty.code().lh(line_h);
     let source = buffer.lines.join("\n");
     let marks = highlight(buffer.language(), &source);
-    let digits = buffer.lines.len().max(1).to_string().len().max(2);
-    let gutter_w = (digits as f32 + 2.0) * adv;
-    // Text columns available beside the gutter (the view's width from its last layout).
-    let view_w = app.rects.get("editor-view").map_or(900.0, |r| r[2]);
-    let cols = ((view_w - gutter_w - adv) / adv).floor().max(12.0) as usize;
+    let gutter_w = gutter_width(app, buffer);
+    let cols = wrap_cols(app, buffer);
 
     let mut rows = col().w_full().pb(line_h * 4.0);
     let mut start = 0usize;

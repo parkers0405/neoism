@@ -125,15 +125,26 @@ impl App {
 impl App {
     /// Scroll the editor so the cursor cell sits at least four lines inside the viewport, on the
     /// scroll spring. Uses laid-out rects, so wrapped lines count at their real height.
+    /// Keep the cursor `scrolloff` rows inside the view: the target is computed from the
+    /// cursor's row, and a held arrow keeps extending the spring's target rather than its
+    /// current (mid-glide) offset, so the view never falls behind.
     pub fn editor_follow_cursor(&mut self, tx: &mut rune::Tx) {
         if !std::mem::take(&mut self.editor_follow) { return; }
-        let (Some(cell), Some(view)) = (self.rects.get("editor-cursor").copied(), self.rects.get("editor-view").copied()) else { return };
-        let Some(key) = self.active_buffer().map(|b| view::scroll_key(&b.path)) else { return };
-        let margin = 4.0 * view::line_height(self);
-        let (offset, max, _) = self.editor_scroll.get();
-        let (top, bottom) = (cell[1] - view[1], cell[1] + cell[3] - view[1]);
-        let delta = if top < margin { top - margin } else if bottom > view[3] - margin { bottom - (view[3] - margin) } else { return };
-        let target = (offset + delta).clamp(0.0, max);
+        let Some(buffer) = self.active_buffer() else { return };
+        let key = view::scroll_key(&buffer.path);
+        let line_h = view::line_height(self);
+        let row = view::cursor_visual_row(self, buffer) as f32;
+        let (offset, max, viewport) = self.editor_scroll.get();
+        let viewport = if viewport > 0.0 { viewport } else { self.rects.get("editor-view").map_or(0.0, |r| r[3]) };
+        if viewport <= 0.0 { return; }
+        let margin = (4.0 * line_h).min(((viewport - line_h) / 2.0).max(0.0));
+        let base = self.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
+        let (top, bottom) = (row * line_h, (row + 1.0) * line_h);
+        let target = if top - margin < base { top - margin }
+            else if bottom + margin > base + viewport { bottom + margin - viewport }
+            else { return };
+        // The content may have grown since the last layout reported `max`.
+        let target = target.clamp(0.0, max.max(target));
         self.wheel_target = Some(target);
         tx.scroll_to_with(key, 0.0, target, view::SCROLL_SPRING);
     }

@@ -158,6 +158,7 @@ impl App {
         let count = tree.rows().len();
         if count == 0 { return; }
         tree.selected = (tree.selected as isize + delta).clamp(0, count as isize - 1) as usize;
+        self.tree_follow = true;
     }
 
     /// Open the selected file, or expand/collapse the selected folder.
@@ -186,6 +187,7 @@ impl App {
         if let Some(index) = rows.iter().position(|r| r.path == parent) {
             tree.selected = index;
             tree.open.remove(parent);
+            self.tree_follow = true;
         }
     }
 }

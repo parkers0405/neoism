@@ -1,13 +1,13 @@
 //! The window chrome around every surface, and the root view. Geometry follows
 //! `rune/reference/` at the reference window (1252x674 logical): 55.5 pt activity rail, two
-//! 30 pt tab rows, 23.5 pt status line.
+//! 30 pt tab rows (workspaces here, pane tabs in `panes`), 23.5 pt status line.
 
 use super::theme::{glyph, rgb};
 use super::{ChildIf, icon};
 use crate::agent;
-use crate::app::{App, Focus, Sidebar};
+use crate::app::{App, Sidebar};
 use crate::tabs::TabKind;
-use rune::{Color, Cx, El, col, el, row, text};
+use rune::{Cx, El, col, el, row, text};
 
 pub const RAIL_W: f32 = 55.5;
 pub const TAB_ROW_H: f32 = 30.0;
@@ -20,8 +20,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.sidebar.is_some(), || sidebar(app))
         .child(col().grow(1.0).shrink().h_full()
             .child(workspace_tabs(app))
-            .child(pane_tabs(app))
-            .child(content(app, cx)));
+            .child(crate::panes::view(app, cx)));
     track_caret(app, cx);
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
@@ -44,7 +43,7 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
     } else {
         match app.active_tab().kind {
             TabKind::Agent { .. } => app.ty.composer().size,
-            TabKind::Home | TabKind::Editor { .. } => app.ty.small().size,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } => app.ty.small().size,
         }
     };
     app.cursor.caret_font.set(font);
@@ -108,54 +107,4 @@ fn workspace_tabs(app: &App) -> El {
         .child(tab)
         .child(el().w(32.0).h(TAB_ROW_H).center().child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
             .on_layout(|s: &mut App, r: [f32; 4]| { s.rects.insert("workspace-tab:1".into(), r); }))
-}
-
-fn pane_tabs(app: &App) -> El {
-    let p = app.pal;
-    let mut tabs = row().key("pane-tabs").w_full().h(TAB_ROW_H).fill(rgb(p.surface))
-        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border));
-    for (index, tab) in app.tabs.iter().enumerate() {
-        let active = index == app.active;
-        let (g, color) = match &tab.kind {
-            TabKind::Home => (glyph::HOME, rgb(p.fg)),
-            TabKind::Agent { .. } => ("\u{f0a1e}", rgb(p.fg)),
-            TabKind::Editor { path } => {
-                let (glyph, color) = crate::ui::icons::for_file(path.rsplit('/').next().unwrap_or(path));
-                (glyph, rgb(color))
-            }
-        };
-        let title = app.tab_title(tab);
-        let fg = if active { rgb(p.fg) } else { rgb(p.muted) };
-        let mut item = row().key(format!("pane-tab:{}", tab.id)).h(TAB_ROW_H).px(16.0).gap(10.0).center_y()
-            .max_w(212.5)
-            .fill(if active { rgb(p.bg) } else { Color::TRANSPARENT })
-            .child(icon(app, g, 1.2, if active { color } else { rgb(p.muted) }))
-            .child(text(title).font(app.ty.tab()).color(fg).truncate().shrink())
-            .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(format!("pane-tab:{index}"), r); })
-            .on_press(move |s: &mut App| { s.active = index; s.focus = Focus::Content; });
-        if active {
-            item = item.child(el().w(18.0).h(18.0).center()
-                .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
-                .on_press(move |s: &mut App| s.close_tab(index)));
-        }
-        tabs = tabs.child(item);
-    }
-    let plus = app.tabs.len();
-    tabs.child(el().key("pane-new").w(32.0).h(TAB_ROW_H).center()
-        .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(format!("pane-tab:{plus}"), r); })
-        .child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
-        .on_press(|s: &mut App| { s.open_tab(TabKind::Home); }))
-}
-
-fn content(app: &App, cx: &mut Cx<App>) -> El {
-    let tab = app.active_tab();
-    match &tab.kind {
-        TabKind::Home => crate::home::view(app),
-        TabKind::Agent { session } => agent::pane(app, session.as_deref(), cx),
-        TabKind::Editor { .. } => crate::editor::view(app),
-    }
-    .key(format!("pane-content:{}", tab.id))
-    .grow(1.0)
-    .shrink()
-    .w_full()
 }

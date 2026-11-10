@@ -128,7 +128,16 @@ pub struct BufferLsp {
     pointer: Option<(usize, usize, [f32; 4], Instant)>,
     pointer_sent: bool,
     complete_at: Option<(Instant, Option<char>)>,
+    /// The pointer is over the hover card: it stays open to be read and scrolled.
+    pub over_card: bool,
+    /// The pointer left the word (or the card): the card closes then unless it comes back.
+    close_at: Option<Instant>,
+    /// The card's scroll (offset, max, viewport), for Up/Down after `K`.
+    pub hover_scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
 }
+
+/// How long the hover card waits for the pointer to reach it after leaving its word.
+pub const HOVER_GRACE: Duration = Duration::from_millis(300);
 
 impl BufferLsp {
     pub fn dismiss(&mut self) {
@@ -137,6 +146,17 @@ impl BufferLsp {
         self.pointer = None;
         self.pointer_sent = false;
         self.complete_at = None;
+        self.over_card = false;
+        self.close_at = None;
+    }
+
+    fn card_visible(&self) -> bool { self.hover.as_ref().is_some_and(|h| h.text.is_some()) }
+
+    /// The pointer entered or left the hover card.
+    pub fn pointer_on_card(&mut self, inside: bool) {
+        self.over_card = inside;
+        if inside { self.pointer = None; self.pointer_sent = false; self.close_at = None; }
+        else if self.card_visible() { self.close_at = Some(Instant::now() + HOVER_GRACE); }
     }
 
     /// The strongest diagnostic on `line`, for the gutter sign and the inline message.
@@ -293,6 +313,14 @@ impl App {
         }
         for path in due {
             self.lsp_sync(&path);
+        }
+        if let Some(b) = self.active_buffer_mut() {
+            match b.lsp.close_at {
+                Some(at) if b.lsp.over_card => { let _ = at; b.lsp.close_at = None; }
+                Some(at) if at <= now => { b.lsp.close_at = None; if b.lsp.pointer.is_none() || b.lsp.pointer_sent { b.lsp.hover = None; } }
+                Some(at) => next = Some(next.map_or(at - now, |n: Duration| n.min(at - now))),
+                None => {}
+            }
         }
         let hover = self.active_buffer_mut().and_then(|b| {
             if b.lsp.pointer_sent { return None; }
@@ -498,10 +526,13 @@ impl App {
         if b.lsp.completion.is_some() {
             return;
         }
-        if b.lsp.pointer.is_some_and(|p| p.0 == line && p.1 == col) {
+        if b.lsp.over_card || b.lsp.pointer.is_some_and(|p| p.0 == line && p.1 == col) {
             return;
         }
-        b.lsp.hover = None;
+        // A visible card survives the trip across other words toward it: it closes only if
+        // the pointer has not reached it within the grace period (or another word's hover
+        // replaces it after the usual dwell).
+        if b.lsp.card_visible() { b.lsp.close_at.get_or_insert(Instant::now() + HOVER_GRACE); } else { b.lsp.hover = None; }
         b.lsp.pointer_sent = false;
         b.lsp.pointer = Some((line, col, anchor, Instant::now()));
     }
@@ -510,6 +541,7 @@ impl App {
         if let Some(b) = self.active_buffer_mut() {
             b.lsp.pointer = None;
             b.lsp.pointer_sent = false;
+            if b.lsp.card_visible() && !b.lsp.over_card { b.lsp.close_at.get_or_insert(Instant::now() + HOVER_GRACE); }
         }
     }
 
@@ -553,6 +585,8 @@ impl App {
                 text: None,
                 anchor,
             });
+            buffer.lsp.close_at = None;
+            buffer.lsp.over_card = false;
         }
     }
 

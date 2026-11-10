@@ -262,15 +262,25 @@ fn hover_card(app: &App, contents: &str, cell: [f32; 4]) -> El {
         .on_layout(|a: &mut App, r: [f32; 4]| {
             a.rects.insert("lsp-hover".into(), r);
         })
-        .child(
+        .on_hover_change(|a: &mut App, inside: bool, tx: &mut rune::Tx| {
+            if let Some(b) = a.active_buffer_mut() { b.lsp.pointer_on_card(inside); }
+            if !inside { tx.wake_after(super::lsp::HOVER_GRACE); }
+        })
+        .child({
+            let mirror = app.active_buffer().map(|b| b.lsp.hover_scroll.clone()).unwrap_or_default();
             col()
+                .key(HOVER_SCROLL_KEY)
                 .padding(pad)
                 .scroll(rune::ScrollSpec {
                     stick_bottom: false,
                 })
-                .child(body),
-        )
+                .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
+                .child(body)
+        })
 }
+
+/// The hover card's scroll view, which Up/Down drive after `K`.
+pub const HOVER_SCROLL_KEY: &str = "lsp-hover-scroll";
 
 /// Nerd glyph and colour for a completion kind (`completion_menu::kind_icon` / `kind_color`).
 fn kind_mark(p: &Palette, kind: &str) -> (&'static str, u32) {

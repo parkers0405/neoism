@@ -95,7 +95,7 @@ impl Completion {
     /// The items matching what has been typed since `start`, in server order.
     pub fn visible<'a>(&'a self, prefix: &str) -> Vec<&'a EditorLspCompletionItem> {
         let needle = prefix.to_lowercase();
-        self.items
+        let matches = self.items
             .iter()
             .filter(|item| {
                 let key = item
@@ -103,16 +103,15 @@ impl Completion {
                     .as_deref()
                     .unwrap_or(&item.label)
                     .to_lowercase();
-                needle.is_empty() || key.starts_with(&needle) || fuzzy(&key, &needle)
+                // A prefix match only (`rebuild_completion_filter`): a finished word stops
+                // matching longer or unrelated names, so Enter makes a new line again.
+                needle.is_empty() || key.starts_with(&needle)
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // Nothing to offer when the one match is exactly what is already typed.
+        let exact = |item: &EditorLspCompletionItem| item.filter_text.as_deref().unwrap_or(&item.label).to_lowercase() == needle;
+        if !needle.is_empty() && matches.len() == 1 && exact(matches[0]) { Vec::new() } else { matches }
     }
-}
-
-/// `needle`'s chars appear in order in `key`.
-fn fuzzy(key: &str, needle: &str) -> bool {
-    let mut chars = key.chars();
-    needle.chars().all(|c| chars.any(|k| k == c))
 }
 
 /// A buffer's language-server state.
@@ -815,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_filters_by_prefix_then_fuzzy() {
+    fn completion_filters_by_prefix_and_hides_an_exact_lone_match() {
         let item = |label: &str| EditorLspCompletionItem {
             server_id: None,
             file_path: PathBuf::new(),
@@ -838,7 +837,10 @@ mod tests {
             selected: 0,
         };
         let names: Vec<&str> = c.visible("p").iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(names, ["push", "pop", "as_ptr"]);
+        // Prefix only (no fuzzy `as_ptr`), like GPUiX.
+        assert_eq!(names, ["push", "pop"]);
         assert_eq!(c.visible("pu").len(), 1);
+        // The finished word's own lone match closes the popup.
+        assert!(c.visible("push").is_empty());
     }
 }

@@ -89,7 +89,13 @@ pub fn view(app: &App) -> El {
     let (mode, mode_color) = match app.active_tab().kind {
         TabKind::Agent { .. } => ("AGENT", p.red),
         TabKind::Terminal => ("TERMINAL", p.green),
-        TabKind::Home | TabKind::Editor { .. } => ("NORMAL", p.blue),
+        TabKind::Editor { .. } if app.active_buffer().is_some_and(|b| b.prompt.is_some()) => ("COMMAND", p.green),
+        TabKind::Editor { .. } => match app.editor_mode() {
+            Some(crate::editor::document::Mode::Insert) => ("INSERT", p.magenta),
+            Some(crate::editor::document::Mode::Visual) => ("VISUAL", p.cyan),
+            _ => ("NORMAL", p.blue),
+        },
+        TabKind::Home => ("NORMAL", p.blue),
     };
     let mut bar = el().key("original-statusline").w_full().h(strip_h).fill(rgb(p.bg))
         .child(el().w_full().h((2.0 * s).max(2.0)).fill(rgb(p.surface)).absolute(0.0, 0.0));
@@ -121,7 +127,7 @@ pub fn view(app: &App) -> El {
         pills.push(Pill { icon: (GLYPH_BRANCH.into(), Some(super::theme::NERD)), icon_bg: p.blue, text: parts });
     }
     if let Some(buffer) = app.active_buffer().filter(|b| b.loaded) {
-        let label = format!(" {}/{}", buffer.cursor.0 + 1, buffer.lines.len());
+        let label = format!(" {}/{}", buffer.doc.cursor_line + 1, buffer.doc.lines.len());
         pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)] });
     }
     if let Some(fps) = app.fps {

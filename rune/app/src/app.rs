@@ -47,6 +47,8 @@ pub struct App {
     pub modal: Option<crate::ui::modal::Modal>,
     /// A `cd` waiting for the shell to confirm it (request id).
     pub pending_cd: Option<String>,
+    /// The app clipboard: the last yank, also what `p` falls back to.
+    pub clipboard: Option<String>,
     /// The notes sidebar (the workspace's notes vault).
     pub notes: crate::tree::Tree,
     /// The open app menu (rail hamburger).
@@ -178,6 +180,7 @@ impl App {
             activity: None,
             modal: None,
             pending_cd: None,
+            clipboard: None,
             notes: Default::default(),
             menu: None,
             settings: None,
@@ -251,6 +254,13 @@ impl App {
                 self.apply_files(&message);
                 if let Some(listing) = message.get("DirListing") {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);
+                }
+                if let Some(written) = message.get("FileWritten") {
+                    self.apply_file_written(written["path"].as_str().unwrap_or_default());
+                }
+                if let Some(paths) = message["Changed"]["paths"].as_array() {
+                    let paths: Vec<String> = paths.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect();
+                    self.apply_files_changed(&paths);
                 }
                 if let Some(file) = message.get("FileContent") {
                     let path = file["path"].as_str().unwrap_or_default().to_owned();

@@ -62,6 +62,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
     let panes_changed = app.sync_panes();
+    let flashing = app.editor_tick();
+    if flashing { tx.wake_after(std::time::Duration::ZERO); }
     let focus_changed = app.sync_field_focus();
     // The live turn's status line animates on live bindings; it rebuilds only on state changes.
     let (busy, activity_changed) = app.tick_activity();
@@ -83,7 +85,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

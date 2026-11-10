@@ -61,8 +61,13 @@ fn cursor_quad(app: &App) -> El {
     let (x1, y1) = quad.iter().fold((f32::MIN, f32::MIN), |(x, y), p| (x.max(p[0]), y.max(p[1])));
     let (w, h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
     let points: Vec<[f32; 2]> = quad.iter().map(|p| [p[0] - x0, p[1] - y0]).collect();
-    rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent)))
-        .key("window-cursor").w(w).h(h).absolute(x0, y0)
+    let quad = rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent))).w(w).h(h);
+    // Settled on an editor cell, the block shows its character in the background colour.
+    let glyph = app.editor_cursor_glyph().filter(|_| !app.cursor.trail.animating());
+    el().key("window-cursor").w(w).h(h).absolute(x0, y0)
+        .child(quad)
+        .child_if(glyph.is_some(), || text(glyph.clone().unwrap_or_default())
+            .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0))
 }
 
 fn rail(app: &App) -> El {

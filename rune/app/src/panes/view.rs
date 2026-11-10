@@ -94,7 +94,16 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
         if focused {
             item = item.on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("pane-tab:{index}"), r); });
         }
-        if selected {
+        let modified = match &tab.kind {
+            TabKind::Editor { path } => app.buffers.get(path).is_some_and(crate::editor::Buffer::dirty),
+            _ => false,
+        };
+        if modified {
+            // Unsaved: a yellow dot in a soft halo takes the close glyph's place (`buffer_tabs`).
+            item = item.child(el().w(18.0).h(18.0).center()
+                .child(el().w(12.0).h(12.0).radius(6.0).center().fill(rgb(p.yellow).alpha(0.22))
+                    .child(el().w(8.0).h(8.0).radius(4.0).fill(rgb(p.yellow)))));
+        } else if selected {
             item = item.child(el().w(18.0).h(18.0).center()
                 .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
                 .on_press(move |a: &mut App| {

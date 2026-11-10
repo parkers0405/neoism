@@ -42,6 +42,8 @@ pub struct Scroller {
     /// yet (the view still reads as before) is where the next step starts from.
     placed: Option<f32>,
     seen: Option<f32>,
+    /// The offset the last step started from.
+    from: f32,
 }
 
 impl Scroller {
@@ -110,6 +112,7 @@ impl Scroller {
             self.coast = 0.0;
         }
         if by == 0.0 { return None; }
+        self.from = offset;
         let target = (offset + by).clamp(0.0, max.max(0.0));
         self.placed = Some(target);
         self.seen = Some(reported);
@@ -123,14 +126,40 @@ impl Scroller {
     }
 }
 
+/// `NEOISM_RUNE_TRACE_SCROLL=1`: each stepped frame's reported offset, content end and placement.
+static TRACE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("NEOISM_RUNE_TRACE_SCROLL").is_some());
+
+/// A step a view's owner places itself (`Scrollers::own`): from this offset to that one.
+pub struct Move {
+    pub key: String,
+    pub from: f32,
+    pub to: f32,
+}
+
 /// Every scroll view's scroller, by its Rune key.
 #[derive(Default)]
-pub struct Scrollers(HashMap<String, Scroller>);
+pub struct Scrollers {
+    views: HashMap<String, Scroller>,
+    /// Views whose steps are handed to their owner instead of placed here (`Scrollers::own`).
+    owned: std::collections::HashSet<String>,
+    moves: Vec<Move>,
+}
 
 impl Scrollers {
     pub fn wheel(&mut self, key: &str, e: &WheelEvent, notch_px: f32, source: Source) {
-        self.0.entry(key.to_owned()).or_default().wheel(e, notch_px, source);
+        self.views.entry(key.to_owned()).or_default().wheel(e, notch_px, source);
     }
+
+    /// Hand this view's steps to its owner (`take_moves`) rather than placing them at an
+    /// absolute offset. A transcript holds a row in place instead: an offset placed in the
+    /// frame its rows are measured (an older page just landed) wins over Rune keeping the
+    /// reader's row where it was, and the view jumps by the difference.
+    pub fn own(&mut self, key: &str) {
+        if !self.owned.contains(key) { self.owned.insert(key.to_owned()); }
+    }
+
+    /// This frame's steps of owned views.
+    pub fn take_moves(&mut self) -> Vec<Move> { std::mem::take(&mut self.moves) }
 
     /// Glide a view to `target` (a cursor jump, a goto-line), the far part of a long trip cut
     /// at once so only the last `reach` points animate (Neovide's long-jump rule).
@@ -141,7 +170,7 @@ impl Scrollers {
             tx.scroll_to_instant(key.to_owned(), 0.0, near);
             near
         } else { offset };
-        let s = self.0.entry(key.to_owned()).or_default();
+        let s = self.views.entry(key.to_owned()).or_default();
         s.source = Some(source);
         s.pending = 0.0;
         s.coast = 0.0;
@@ -152,13 +181,20 @@ impl Scrollers {
     }
 
     /// Stop a view's motion (the app moved it itself: a jump, following new output).
-    pub fn stop(&mut self, key: &str) { self.0.remove(key); }
+    pub fn stop(&mut self, key: &str) { self.views.remove(key); }
 
     /// Step every moving view one frame. Returns whether any still moves.
     pub fn step(&mut self, clock: f64, tx: &mut Tx) -> bool {
         let mut any = false;
-        self.0.retain(|key, scroller| {
-            if let Some(to) = scroller.step(clock) { tx.scroll_to_instant(key.clone(), 0.0, to); }
+        let Scrollers { views, owned, moves } = self;
+        views.retain(|key, scroller| {
+            let to = scroller.step(clock);
+            if *TRACE { if let Some((offset, max)) = scroller.source.as_ref().map(|s| s()) { eprintln!("[scroll] {key} clock={clock:.4} offset={offset:.2} max={max:.2} to={to:?}"); } }
+            match to {
+                Some(to) if owned.contains(key) => moves.push(Move { key: key.clone(), from: scroller.from, to }),
+                Some(to) => tx.scroll_to_instant(key.clone(), 0.0, to),
+                None => {}
+            }
             let moving = scroller.moving();
             any |= moving;
             moving
@@ -258,5 +294,21 @@ mod tests {
         s.wheel(&WheelEvent::new(0.0, -10.0).precise(true), 60.0, source(0.0));
         assert_eq!(s.step(0.0), Some(10.0));
         assert!(s.step(1.0 / 120.0).unwrap() > 10.0);
+    }
+
+    #[test]
+    fn an_owned_views_steps_are_handed_over_not_placed() {
+        let mut scrollers = Scrollers::default();
+        let mut tx = Tx::default();
+        scrollers.own("transcript");
+        scrollers.wheel("transcript", &WheelEvent::new(0.0, 40.0), 60.0, source(1000.0));
+        scrollers.wheel("list", &WheelEvent::new(0.0, 40.0), 60.0, source(1000.0));
+        assert!(scrollers.step(1.0 / 144.0, &mut tx));
+        let moves = scrollers.take_moves();
+        assert_eq!(moves.len(), 1);
+        assert_eq!(moves[0].key, "transcript");
+        assert_eq!(moves[0].from, 1000.0);
+        assert!(moves[0].to < 1000.0, "a notch up moves toward the start");
+        assert!(scrollers.take_moves().is_empty());
     }
 }

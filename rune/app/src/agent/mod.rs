@@ -4,6 +4,7 @@
 pub mod mcp;
 
 mod activity;
+mod anchor;
 pub mod attach;
 mod composer;
 pub(crate) mod family;
@@ -84,20 +85,22 @@ pub struct Session {
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
     /// The wheel or trackpad glide's target and when it was set (`follow::wheel_base`).
     pub wheel_target: Option<(f32, std::time::Instant)>,
-    /// The user scrolled up the transcript just now, and when the last older page arrived:
-    /// older history loads while someone scrolls toward it, never on its own (GPUiX's cascade
-    /// fix: a short page leaves the view at the top and would pull the whole history in).
+    /// When the reader last moved up the transcript: older history loads ahead of someone
+    /// heading toward it, never on its own (`anchor.rs`).
     pub scrolled_up_at: Option<std::time::Instant>,
-    pub older_at: Option<std::time::Instant>,
-    /// A page just landed: the next waits for a new gesture (a pause in upward scrolling or a
-    /// turn downward), so one fast flick or its coast loads one page, not a cascade.
-    pub older_spent: bool,
+    /// Where each mounted row was last drawn (top below the viewport's top, height), the row
+    /// a moving view is held by, and its last placement (`anchor.rs`).
+    pub row_tops: std::collections::HashMap<String, (f32, f32)>,
+    pub anchor: Option<anchor::Anchor>,
+    pub placed: Option<anchor::Placed>,
     /// Questions whose rows are in view: only their `question_tops` are current.
     pub visible_questions: std::collections::HashSet<String>,
     /// Each question's row offset in the transcript, from its last layout (the question rail).
     pub question_tops: std::collections::HashMap<String, f32>,
     /// The question rail's lit tick, and the transcript viewport's height.
     pub rail_active: Option<usize>,
+    /// The transcript is scrolled away from its end: the jump-to-latest button shows.
+    pub away: bool,
     pub viewport_h: f32,
     pub width: f32,
     pub messages: Vec<HistoryMessage>,
@@ -191,21 +194,6 @@ impl App {
             session.status = None;
             self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
         }
-    }
-
-    pub fn request_older(&mut self, session_id: &str) {
-        let Some(session) = self.sessions.get_mut(session_id) else { return };
-        let Some(cursor) = session.older_cursor.clone() else { return };
-        if session.loading_older || session.older_spent { return; }
-        // Only for someone scrolling up within a viewport of the top, and once per page: after
-        // a page lands, the next needs a fresh upward wheel event (GPUiX's cascade fix).
-        let now = std::time::Instant::now();
-        let Some(scrolled) = session.scrolled_up_at.filter(|at| now.duration_since(*at) < std::time::Duration::from_millis(600)) else { return };
-        if session.older_at.is_some_and(|landed| scrolled <= landed) { return; }
-        if session.scroll.get().0 > session.viewport_h.max(1.0) { return; }
-        session.loading_older = true;
-        let limit = session.older_limit.max(8);
-        self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: Some(cursor), limit: Some(limit) });
     }
 
     /// The first prompt of a new conversation waits for `ThreadCreated`, then submits.
@@ -313,7 +301,6 @@ impl App {
                 }
             }
             AgentServerMessage::HistoryChunk { session_id, messages, next_cursor } => {
-                let scroller_key = format!("conversation:{session_id}");
                 // Task cards name their child sessions; seed the family so it can be walked.
                 if !self.families.is_child(&session_id) { self.families.seed_from_history(&session_id, &messages); }
                 let session = self.sessions.entry(session_id).or_default();
@@ -331,13 +318,9 @@ impl App {
                     older.append(&mut session.messages);
                     session.messages = older;
                     session.older_cursor = next_cursor;
-                    session.older_at = Some(std::time::Instant::now());
-                    session.older_spent = true;
-                    // The flick that asked for it stops here instead of coasting up into it.
-                    self.scrollers.stop(&scroller_key);
-                    // A glide's target predates the page above: the next delta starts from
-                    // where the anchored view now is.
-                    session.wheel_target = None;
+                    // The page lands above the reader and the view stays on its row: the
+                    // scroller holds a row, not an offset (`anchor.rs`), so whatever glide
+                    // or coast is running carries straight on.
                     // Row offsets measured before the page are all off by its height.
                     session.question_tops.clear();
                 } else {

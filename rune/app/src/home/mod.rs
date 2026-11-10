@@ -15,6 +15,7 @@ mod view;
 pub use blocks::Block;
 pub use terminal::{Terminal, program_title};
 pub use view::{block_menu_overlay, view};
+pub(crate) use view::action_button;
 
 use composer::MenuKind;
 use input::TermKey;

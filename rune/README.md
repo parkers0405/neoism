@@ -216,6 +216,11 @@ Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.
   binding, which is why an orb is a picture and not a grid of live-coloured cells.
 - A streaming reply's text is applied as it arrives and shown at most thirty times a second
   (`agent::StreamPace`), however fast the model writes.
+- A transcript is scrolled by holding one of its rows (`Tx::scroll_key_to`, `agent/anchor.rs`),
+  never by an absolute offset: Rune works a held row out again after an older page lands and
+  its rows are measured, and applies an offset as it was. Older history is asked for three
+  viewports before the reader reaches its start, while they head up; nothing stops, waits or
+  moves when it lands.
 
 ## Running
 

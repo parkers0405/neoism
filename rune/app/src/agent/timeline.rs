@@ -52,10 +52,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     // pinned line draws, so the reply ends right above "Crafting" and never runs under it.
     // (With a fixed 200 pt the row sat 41 pt above the pinned line: a band of nothing between
     // the reply and "Crafting".)
-    let foot = match (app.rects.get(&format!("timeline-view:{tab_id}")), app.rects.get(&format!("composer-card:{tab_id}"))) {
-        (Some(view), Some(card)) => (view[1] + view[3] - (card[1] - 6.0)).max(0.0),
-        _ => FOOT,
-    };
+    let foot = transcript_foot(app, tab_id);
     let rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(if activity { foot } else { foot + REST_GAP }).gap(0.0)
         .growth(rune::GrowthSpec::default())
         .virtual_rows(items.len(), 120.0,
@@ -124,11 +121,42 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         }
         _ => el(),
     };
+    // Away from the end, one press glides back to the newest message (the terminal's
+    // `block-jump-latest`), just above the composer's right edge.
+    let jump = match (session.filter(|s| s.away), app.rects.get(&format!("composer-card:{tab_id}")), app.rects.get(&format!("agent-area:{tab_id}"))) {
+        (Some(_), Some(card), Some(area)) => {
+            let s = app.ty.scale();
+            let id = session_id.to_owned();
+            el().key("jump-latest").radius(4.0 * s).fill(rgb(p.surface))
+                .child(crate::home::action_button(app, format!("agent-jump-latest:{tab_id}"), crate::ui::feather::Icon::Down, false, None)
+                    .on_press_tx(move |a: &mut App, tx: &mut Tx| {
+                        let key = format!("conversation:{id}");
+                        // Whatever glide or coast was running ends; Rune glides to the end and
+                        // the view follows it again once it lands.
+                        a.scrollers.stop(&key);
+                        // The glide cuts to two viewports from the end: rows leave unreported.
+                        if let Some(session) = a.sessions.get_mut(&id) { session.forget_rows(); }
+                        tx.scroll_to_bottom(key);
+                    }))
+                .pin(None, None, Some((pad - 16.0).max(12.0)), Some(area[1] + area[3] - card[1] + 10.0 * s))
+        }
+        _ => el(),
+    };
     pane.child(timeline)
         .child(pinned)
         .child(rail)
+        .child(jump)
         .child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
             .child(composer(app, f32::INFINITY)))
+}
+
+/// How far above the transcript viewport's bottom its content ends: the composer floats over
+/// that much of it.
+fn transcript_foot(app: &App, tab_id: u64) -> f32 {
+    match (app.rects.get(&format!("timeline-view:{tab_id}")), app.rects.get(&format!("composer-card:{tab_id}"))) {
+        (Some(view), Some(card)) => (view[1] + view[3] - (card[1] - 6.0)).max(0.0),
+        _ => FOOT,
+    }
 }
 
 /// One transcript row: a message, a folded run of tool calls starting at a message, or the
@@ -192,7 +220,7 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
         RowItem::Activity if app.activity_pinned => el().key("activity").w_full().h(app.activity_row_height()),
         RowItem::Activity => app.activity.as_ref().map_or_else(el, |activity| activity.view(app)),
         RowItem::Group(start, end) => match messages.get(start..end) {
-            Some(members) => tool_row(app, session, tab_id, members, || match tools::group_at(messages, start) {
+            Some(members) => tool_row(app, session_id, session, tab_id, members, || match tools::group_at(messages, start) {
                 Some((_, group)) => tools::row(app, &group),
                 None => el(),
             }),
@@ -204,8 +232,11 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
             match message.kind {
                 HistoryMessageKind::User => user_row(app, session_id, session, message, tab_id),
                 HistoryMessageKind::Tool | HistoryMessageKind::Subtask =>
-                    tool_row(app, session, tab_id, std::slice::from_ref(message), || tools::row(app, message)),
-                _ => message_row(app, message, last && session.streaming),
+                    tool_row(app, session_id, session, tab_id, std::slice::from_ref(message), || tools::row(app, message)),
+                // A reply's memo reports itself (under its own key); the plain rows here.
+                HistoryMessageKind::Assistant if !(message.text.trim().is_empty() && message.attachments.is_empty()) =>
+                    message_row(app, message, last && session.streaming),
+                _ => tracked(message_row(app, message, last && session.streaming), session_id, &format!("msg:{}", message.id), tab_id),
             }
         }
     }
@@ -216,11 +247,25 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
 /// viewports of rows mounted and builds each of them on every commit, so on a long live turn
 /// an uncached card was built, and its diff parsed, on every streamed word. Its spinner rides
 /// live values, so a running row needs no rebuild either.
-fn tool_row(app: &App, session: &super::Session, tab_id: u64, members: &[HistoryMessage], build: impl FnOnce() -> El) -> El {
+fn tool_row(app: &App, session_id: &str, session: &super::Session, tab_id: u64, members: &[HistoryMessage], build: impl FnOnce() -> El) -> El {
     let Some(first) = members.first() else { return el() };
     let revisions: Vec<u64> = members.iter().map(|m| session.message_versions.get(&m.id).copied().unwrap_or(0)).collect();
     let version = (revisions, app.tools.epoch(), app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits());
-    rune::memo(format!("tool:{tab_id}:{}", first.id), version, build)
+    // The list names the row by its row key, whatever the cached element is keyed.
+    let row = if members.len() > 1 { format!("group:{}", first.id) } else { format!("msg:{}", first.id) };
+    rune::memo(format!("tool:{tab_id}:{}", first.id), version, || tracked(build(), session_id, &row, tab_id))
+}
+
+/// Report where this row is drawn (`Session::row_at`): a moving transcript is held by one of
+/// its rows (`anchor.rs`). `key` is the row's key in the list (`row_key`), the name Rune finds
+/// it by. Bookkeeping only: it follows every frame of a scroll without committing.
+fn tracked(row: El, session_id: &str, key: &str, tab_id: u64) -> El {
+    let (sid, key) = (session_id.to_owned(), key.to_owned());
+    row.on_layout_tx(move |a: &mut App, r: [f32; 4], tx: &mut Tx| {
+        tx.live_only();
+        let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
+        if let Some(session) = a.sessions.get_mut(&sid) { session.row_at(&key, r[1] - view[1], r[3]); }
+    })
 }
 
 /// A question's bubble, cached like a tool row: its text, sender, type and column width are
@@ -238,6 +283,7 @@ fn user_row(app: &App, session_id: &str, session: &super::Session, message: &His
                 let Some(session) = a.sessions.get_mut(&sid) else { return };
                 let top = r[1] - view[1] + session.scroll.get().0;
                 session.question_tops.insert(mid.clone(), top.max(0.0));
+                session.row_at(&format!("msg:{mid}"), r[1] - view[1], r[3]);
             })
     };
     // A picture's thumbnail arrives after its row: those rows build every time.
@@ -254,20 +300,18 @@ impl App {
         // GPUiX's readingScrollY applies a fixed 2x gain only to vertical trackpad input.
         if e.precise && !e.mods.shift && e.dx.abs() <= e.dy.abs() { e.dy *= 2.0; }
         if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
+        // Shift turns a wheel sideways: Rune scrolls the wide table or code under the pointer.
+        if e.mods.shift && !e.precise { return false; }
         let Some(session) = self.sessions.get_mut(session_id) else { return false };
-        let (offset, _) = session.scroll.get();
-        // A pause in upward scrolling, or a turn down, starts a new gesture: it may load
-        // the next page.
-        let now = std::time::Instant::now();
-        if e.dy < 0.0 || session.scrolled_up_at.is_none_or(|at| now.duration_since(at) > std::time::Duration::from_millis(250)) {
-            session.older_spent = false;
-        }
-        if e.dy > 0.0 { session.scrolled_up_at = Some(now); }
-        // Heading up within a viewport of the top asks for the page above.
-        let near_top = e.dy > 0.0 && offset < session.viewport_h;
+        let up = e.dy > 0.0;
+        if up { session.scrolled_up_at = Some(std::time::Instant::now()); }
         let mirror = session.scroll.clone();
-        let taken = crate::ui::scroll::handle(&mut self.scrollers, &format!("conversation:{session_id}"), &e, 3.0 * line_h, std::rc::Rc::new(move || mirror.get()), tx);
-        if near_top { self.request_older(session_id); }
+        let key = format!("conversation:{session_id}");
+        // The transcript places the scroller's steps itself, by a row (`anchor.rs`).
+        self.scrollers.own(&key);
+        let taken = crate::ui::scroll::handle(&mut self.scrollers, &key, &e, 3.0 * line_h, std::rc::Rc::new(move || mirror.get()), tx);
+        // Heading up: the page above is asked for well before the reader gets there.
+        if up { self.request_older(session_id); }
         taken
     }
 
@@ -292,6 +336,28 @@ impl App {
         session.rail_active = active;
         true
     }
+}
+
+/// How far from the end the transcript must be for the jump-to-latest button to show, and how
+/// close for it to go: following a streaming reply the view trails its end by a few points.
+const AWAY_SHOW: f32 = 24.0;
+const AWAY_HIDE: f32 = 2.0;
+
+impl App {
+    /// Track whether the open conversation is scrolled away from its end. Returns whether the
+    /// jump-to-latest button appears or goes (the views re-run for that alone).
+    pub fn timeline_away_tick(&mut self) -> bool {
+        let crate::tabs::TabKind::Agent { session: Some(id) } = self.active_tab().kind.clone() else { return false };
+        let Some(session) = self.sessions.get_mut(&id) else { return false };
+        let (offset, max) = session.scroll.get();
+        let away = away_from_end(session.away, max - offset);
+        std::mem::replace(&mut session.away, away) != away
+    }
+}
+
+/// Whether the button shows `distance` points from the end, given whether it shows now.
+fn away_from_end(showing: bool, distance: f32) -> bool {
+    if showing { distance > AWAY_HIDE } else { distance > AWAY_SHOW }
 }
 
 /// The transcript's selection highlight.
@@ -426,8 +492,14 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                 crate::tabs::TabKind::Agent { session: Some(id) } => app.sessions.get(id).and_then(|s| s.message_versions.get(&message.id)).copied().unwrap_or(0),
                 _ => 0,
             };
-            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming);
-            rune::memo(format!("assistant:{}:{}", app.active_tab().id, message.id), version, || {
+            // A wide table's scroll bar holds above the composer: only a reply with a table is
+            // built from where that is.
+            let foot = if message.text.contains('|') { transcript_foot(app, app.active_tab().id) } else { 0.0 };
+            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming, foot.to_bits());
+            let tab_id = app.active_tab().id;
+            let memo_key = format!("assistant:{tab_id}:{}", message.id);
+            let session_id = match &app.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => id.clone(), _ => String::new() };
+            rune::memo(memo_key.clone(), version, || tracked({
             // Pipe tables render as the original's data grid; everything else as markdown.
             let style = markdown_style(app);
             // Padding, not margin: a virtual row's top margin is dropped from its measured height.
@@ -436,9 +508,9 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             // and growth spring per update kept the newest line dim and clipped.
             if streaming { body = body.instant_changes(); }
             // Leading newlines from the stream would open the reply with blank lines.
-            for segment in super::table::segments(message.text.trim_start_matches(['\n', '\r'])) {
+            for (n, segment) in super::table::segments(message.text.trim_start_matches(['\n', '\r'])).into_iter().enumerate() {
                 body = body.child(match segment {
-                    super::table::Segment::Table(rows) => super::table::view(app, &rows, timeline_width(app), &style),
+                    super::table::Segment::Table(rows) => super::table::view(app, &rows, timeline_width(app), &style, format!("table-x:{tab_id}:{}:{n}", message.id), foot),
                     super::table::Segment::Text(text) => Markdown::new(text.to_owned())
                         .highlights(prose::highlights(text, p))
                         .streaming(streaming)
@@ -460,7 +532,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                 body = body.child(row().w_full().child(strip.justify_start()));
             }
             body.child_meta(app, message)
-            })
+            }, &session_id, &format!("msg:{}", message.id), tab_id))
         }
     }
 }
@@ -526,6 +598,16 @@ fn file_link(url: &str) -> Option<(String, Option<u32>)> {
 #[cfg(test)]
 mod link_tests {
     use super::file_link;
+
+    #[test]
+    fn the_jump_button_shows_past_a_line_and_stays_until_the_end() {
+        use super::away_from_end;
+        assert!(!away_from_end(false, 0.0));
+        assert!(!away_from_end(false, 12.0), "trailing a streaming reply is not away");
+        assert!(away_from_end(false, 30.0));
+        assert!(away_from_end(true, 12.0), "once shown it stays until the end is reached");
+        assert!(!away_from_end(true, 1.0));
+    }
 
     #[test]
     fn file_links_carry_their_line() {

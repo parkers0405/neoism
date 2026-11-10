@@ -265,3 +265,25 @@ paint of the growing reply), so the heaviest streaming case misses a refresh a f
 ten seconds; the cursor trail and the wordmark effects still re-run the views while they
 play; and with every core saturated, scheduling alone drops frames no app change recovers.
 The headless output is more forgiving than the panel: judge by work per frame there.
+
+## History paging, jump to latest, wide tables (2026-11-10)
+
+Older history used to load only after the reader stopped near the top (one page per fresh
+gesture within a viewport of it), the flick was cut when the page landed, and the view then
+jumped: the page's rows are measured the frame after they land, Rune moves the offset to keep
+the reader's row, and the scroller's absolute offset for that frame was applied again on top
+(-19, +45, +76 and +234 pt over six pages of a real conversation).
+
+The transcript is now scrolled by a held row, and pages are asked for three viewports ahead of
+a reader heading up. One continuous nine second wheel scroll through the same conversation
+(`NEOISM_RUNE_TRACE_SCROLL=1`): 229 to 559 messages, eight pages, each landing with the reader
+1,900 to 3,200 pt from the start; the content's end moved in 28 frames and the view moved by
+anything but the scroll step in none. The reader reached the start only once the whole history
+was loaded.
+
+Away from the end, a jump-to-latest button sits above the composer's right edge (the
+terminal's `block-jump-latest`). A table wider than the message scrolls sideways (trackpad, or
+Shift with a wheel) with GPUiX's hover scroll bar: along the table's bottom edge, held just
+above the composer while the table runs on under it, draggable. Checked headlessly with a six
+column, thirty row fixture: hover, a sideways swipe, the bar above the composer, a drag.
+

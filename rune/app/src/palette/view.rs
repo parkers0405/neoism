@@ -289,8 +289,24 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selecte
         if let Some(toggle) = toggle { line = line.child(el().h_full().center().child(toggle)); }
         return line;
     }
-    line.child(title)
-        .child(text(look.detail.clone()).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).ml(16.0 * s).mr(24.0 * s).truncate().shrink())
+    // A saved or temporary server's buttons (`server_actions`): Edit / Remove, Copy invite /
+    // Stop hosting, or Leave, as 24 pt surface chips at the row's end.
+    let controls = match item.target {
+        super::Target::Server(server) => picker.servers.get(server).map(|s| (server, s.controls())),
+        _ => None,
+    };
+    let mut line = line.child(title)
+        .child(text(look.detail.clone()).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).ml(16.0 * s).mr(if controls.is_some() { 12.0 * s } else { 24.0 * s }).truncate().shrink());
+    if let Some((server, controls)) = controls.filter(|(_, c)| !c.is_empty()) {
+        line = line.child(el().grow(1.0));
+        for control in controls {
+            line = line.child(el().key(format!("server-control:{server}:{}", control.label())).w(control.width() * s).h(24.0 * s).ml(6.0 * s).center()
+                .radius(5.0 * s).fill(rgb(p.surface).alpha(0.94)).hover(rgb(p.hover))
+                .child(text(control.label()).font(app.ty.sized(11.0)).color(rgb(p.fg)))
+                .on_press_tx(move |a: &mut App, tx: &mut Tx| a.server_control(server, control, tx)));
+        }
+    }
+    line
 }
 
 /// The previewed theme drawn in its own colours: name, hint, rule, then a syntax sample.

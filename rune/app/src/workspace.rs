@@ -351,6 +351,11 @@ impl App {
     }
 
     pub(crate) fn register_workspace(&self) {
+        // On another server the daemon picks the workspace first (`adopt_workspace`).
+        if self.server.adopt.is_some() {
+            if let Some(d) = &self.daemon { d.send(Family::Workspace, json!({"ResolveInitialWorkspace":{"preferred_host_id":null}})); }
+            return;
+        }
         if let Some(d) = &self.daemon {
             d.send(Family::Workspace, json!({"CreateWorkspace":{"workspace_id":self.workspace_id,"title":self.workspace_name,"root_dir":self.cwd}}));
             d.send(Family::Workspace, json!({"SetWindowWorkspaces":{"workspace_ids":[self.workspace_id],"prune_empty":null}}));
@@ -366,6 +371,11 @@ impl App {
         request_id: u64,
         message: &serde_json::Value,
     ) {
+        if let Some(resolved) = message.get("InitialWorkspaceResolved") { self.adopt_workspace(&resolved["workspace"]); }
+        // A remote home workspace (`~`) reports where that is.
+        if self.server.remote() && self.cwd == "~"
+            && let Some(workspace) = message.get("HostWorkspaceUpserted").map(|m| &m["workspace"]).filter(|w| w["id"].as_str() == Some(&self.workspace_id))
+            && let Some(root) = workspace["root_dir"].as_str() { self.cwd = root.to_owned(); }
         if message["HostWorkspaceChanged"]["workspace_id"].as_str()
             == Some(&self.workspace_id)
             && !self.workspace_ready
@@ -425,7 +435,8 @@ impl App {
     fn finish_workspace_close(&mut self) {
         if self.workspaces.len() == 1 {
             // Closing the last workspace on purpose leaves nothing to reopen next time.
-            if crate::session::enabled() { let _ = std::fs::remove_file(crate::session::path()); }
+            // (Never from a unit test: `qall` there would delete the user's own session file.)
+            if crate::session::enabled() && !cfg!(test) { let _ = std::fs::remove_file(crate::session::path()); }
             self.session_writer = Default::default();
             self.session_closed = true;
             self.quit_requested = true;

@@ -74,6 +74,9 @@ pub fn strip_comments(source: &str) -> String {
 }
 
 pub fn git_branch() -> Option<String> {
+    // Unit tests build windows by the dozen: no `git` children (a child forked mid-test holds
+    // the registry tests' file locks until it execs).
+    if cfg!(test) { return None; }
     let output = std::process::Command::new("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()).filter(|b| !b.is_empty())
 }

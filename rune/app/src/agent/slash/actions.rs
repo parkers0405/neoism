@@ -175,14 +175,14 @@ impl App {
             },
             SlashAction::HandleReject(request_id) => if let Some(session_id) = need_session(self) { self.agent_send(Client::HandleReject { session_id, request_id }); },
             SlashAction::ToggleSkipPermissions | SlashAction::ShowGoal | SlashAction::SetGoal(_) | SlashAction::ClearGoal
-            | SlashAction::PauseGoal | SlashAction::ResumeGoal | SlashAction::OpenUsagePicker | SlashAction::ChangeDirectory(_)
-            | SlashAction::OpenDirectoryPicker => {
+            | SlashAction::PauseGoal | SlashAction::ResumeGoal | SlashAction::OpenUsagePicker | SlashAction::ChangeDirectory(_) => {
                 // Server-side plugins; the daemon forwards the command text.
                 match session.clone() {
                     Some(session_id) => self.agent_send(Client::SlashCommand { session_id, text: text.to_owned() }),
                     None => self.notice("Commands", "Open a conversation first"),
                 }
             }
+            SlashAction::OpenDirectoryPicker => self.open_directory_picker(),
             SlashAction::ToggleInputHelp => {
                 self.composer.hints_hidden = !self.composer.hints_hidden;
                 self.agent_send(Client::SetInputHelpVisible { visible: !self.composer.hints_hidden });
@@ -331,6 +331,67 @@ impl App {
             Kind::ConnectAuth => self.choose_auth_method(&row.value),
             Kind::ConnectConfirm => self.confirm_disconnect(row.value == "confirm_disconnect"),
             Kind::ConnectSecret | Kind::ConnectLabel => {}
+            Kind::Directory => {
+                self.close_prompt_picker();
+                self.change_session_directory(&row.value);
+            }
+        }
+    }
+
+    // -- /cd -----------------------------------------------------------------------------
+
+    /// `/cd` with no path (`open_directory_picker`): the session directory, home, then the
+    /// daemon's fuzzy directory search as the query changes.
+    fn open_directory_picker(&mut self) {
+        let picker = Picker::new(Kind::Directory, "Change directory", self.directory_rows(Vec::new()))
+            .placeholder("Path or fuzzy directory");
+        self.focus_picker(picker);
+    }
+
+    fn directory_rows(&self, hits: Vec<String>) -> Vec<Row> {
+        let query = self.composer.picker.as_ref().filter(|p| p.kind == Kind::Directory)
+            .map(|p| p.query.text.trim().to_owned()).unwrap_or_default();
+        let mut rows = Vec::new();
+        if query.is_empty() {
+            rows.push(Row::new(self.display_cwd(), "Current session directory", "current", self.cwd.clone()).current(true));
+            rows.push(Row::new("~/", "Home directory", "directory", "~"));
+        } else {
+            // A typed path is always offered as-is first, then the matches.
+            rows.push(Row::new(query.clone(), "Go to this path", "path", query.clone()));
+        }
+        rows.extend(hits.into_iter().filter(|h| *h != query).map(|h| Row::new(h.clone(), "", "directory", h)));
+        rows
+    }
+
+    /// The `/cd` query changed: ask the daemon for directories matching it.
+    pub(crate) fn directory_query_changed(&mut self) {
+        let Some(picker) = self.composer.picker.as_ref().filter(|p| p.kind == Kind::Directory) else { return };
+        let query = picker.query.text.trim().to_owned();
+        let rows = self.directory_rows(Vec::new());
+        if let Some(picker) = self.composer.picker.as_mut() { picker.replace(rows); }
+        if query.is_empty() { return; }
+        // Composer searches use their own id range so the palette's replies never cross.
+        self.composer.directory_request += 1;
+        let req_id = (1u64 << 40) + self.composer.directory_request;
+        let message = serde_json::json!({"SearchDirectories": {"req_id": req_id, "query": query, "cwd": ""}});
+        if let Some(daemon) = &self.daemon { daemon.send_scoped(crate::daemon::Family::Search, message, &self.cwd); }
+    }
+
+    /// Directory hits for the `/cd` picker; false when they belong to someone else.
+    pub(crate) fn apply_composer_directory_hits(&mut self, req_id: u64, hits: &[String]) -> bool {
+        if req_id != (1u64 << 40) + self.composer.directory_request { return false; }
+        if !self.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::Directory) { return true; }
+        let rows = self.directory_rows(hits.to_vec());
+        if let Some(picker) = self.composer.picker.as_mut() { picker.replace(rows); }
+        true
+    }
+
+    /// Point the conversation at `directory` (the daemon PATCHes the session and reports back).
+    fn change_session_directory(&mut self, directory: &str) {
+        let session = match &self.active_tab().kind { TabKind::Agent { session } => session.clone(), _ => None };
+        match session {
+            Some(session_id) => self.agent_send(Client::SlashCommand { session_id, text: format!("/cd {directory}") }),
+            None => self.notice("Directory", "Open a conversation first"),
         }
     }
 

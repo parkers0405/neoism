@@ -68,6 +68,8 @@ pub struct Composer {
     slash_dismissed: bool,
     next_request: u64,
     next_notice: u64,
+    /// The `/cd` picker's newest directory search.
+    pub directory_request: u64,
 }
 
 impl Composer {

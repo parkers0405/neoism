@@ -161,7 +161,9 @@ impl App {
 
     pub(crate) fn apply_search(&mut self, message: SearchServerMessage) {
         if let SearchServerMessage::SearchDirectoriesResult { req_id, hits } = message {
-            self.apply_directory_hits(req_id, hits.into_iter().map(|h| h.path).collect());
+            let hits: Vec<String> = hits.into_iter().map(|h| h.path).collect();
+            if self.apply_composer_directory_hits(req_id, &hits) { return; }
+            self.apply_directory_hits(req_id, hits);
             return;
         }
         let Some(finder) = &mut self.finder else { return };

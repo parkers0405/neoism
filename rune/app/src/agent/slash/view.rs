@@ -197,6 +197,7 @@ fn query_row(app: &App, picker: &Picker, width: f32) -> El {
         .on_edit(|a: &mut App| &mut a.composer.picker.as_mut().expect("picker open").query)
         .on_input_change(|a: &mut App, _: &mut Tx| {
             if let Some(picker) = a.composer.picker.as_mut() { let q = picker.query.text.clone(); picker.set_query(&q); }
+            a.directory_query_changed();
         })
         .on_input_key(|a: &mut App, e: &rune::KeyEvent, tx: &mut Tx| a.picker_key(e, tx))
         .on_submit(|a: &mut App, tx: &mut Tx| a.accept_picker_row(None, tx));

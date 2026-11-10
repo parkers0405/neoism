@@ -2,6 +2,7 @@
 
 pub mod chrome;
 pub mod cursor;
+pub mod feather;
 pub mod fps;
 pub mod follow;
 pub mod icons;

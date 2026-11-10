@@ -7,6 +7,7 @@ use super::splash::{MENU, layout};
 use super::{Block, Cells, Terminal};
 use crate::app::App;
 use crate::ghostty::Row;
+use crate::ui::feather::Icon;
 use crate::ui::theme::{NERD, Palette, rgb};
 use crate::wordmark;
 use rune::tok::TextStyle;
@@ -16,6 +17,10 @@ use rune::{Color, El, ScrollSpec, Span, Spring, Tx, WheelEvent, col, el, row, te
 const WHEEL_SPRING: Spring = Spring::new(0.39, 0.0);
 /// Rune reports a wheel notch as 40 points; terminals move three rows per notch.
 const NOTCH: f32 = 40.0;
+/// The filter row a filtered block adds under its command (`34 * s`).
+const FILTER_ROW: f32 = 34.0;
+/// `TerminalAction`: a 26 pt button holding a 16 pt icon, 5 pt corners.
+const ACTION: f32 = 26.0;
 
 pub fn view(app: &App) -> El {
     let p = app.pal;
@@ -29,9 +34,28 @@ pub fn view(app: &App) -> El {
     if term.raw() { return pane.child(super::grid::view(app, term)); }
     let composer_h = composer_height(app);
     let mut pane = pane.child(history(app, term, composer_h));
-    if !(term.shell.busy() && term.long_running()) {
+    let input = !(term.shell.busy() && term.long_running());
+    if input {
         pane = pane.child(composer(app, term, composer_h));
     }
+    // `block-jump-latest`: away from the bottom, one press glides back to the newest output.
+    let (offset, max) = term.scroll.get();
+    if max > 0.0 && offset < max - 1.0 {
+        let s = app.ty.scale();
+        let bottom = if input { composer_h } else { 0.0 } + 10.0 * s;
+        pane = pane.child(el().radius(4.0 * s).fill(rgb(p.surface))
+            .child(action_button(app, format!("block-jump-latest:{tab_id}"), Icon::Down, false, None)
+                .on_press_tx(move |a: &mut App, tx: &mut Tx| {
+                    if let Some(term) = a.terminals.get_mut(&tab_id) {
+                        let max = term.scroll.get().1;
+                        term.wheel_target = Some(max);
+                        tx.scroll_to_with(format!("terminal-scroll:{tab_id}"), 0.0, max, WHEEL_SPRING);
+                    }
+                }))
+            .pin(None, None, Some(16.0 * s), Some(bottom)));
+    }
+    // The actions menu goes last so it draws over every block after its own.
+    if let Some(menu) = block_menu(app, term) { pane = pane.child(menu); }
     pane
 }
 
@@ -99,10 +123,16 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
     let s = app.ty.scale();
     let width = term.area[0];
     let command: Vec<&str> = if block.background { Vec::new() } else { block.command.split('\n').collect() };
-    let output = row_h * (1.1 + 0.9 + 0.19 + command.len() as f32 + if block.lines.is_empty() { 0.0 } else { 0.5 });
+    // Collapsed or filtered blocks show only the rows they keep (`BlockTerminalView` layout).
+    let filtering = term.filter.as_ref().filter(|(id, _)| *id == block.id).map(|(_, query)| query);
+    let reduced = term.collapsed.contains(&block.id) || filtering.is_some_and(|q| !q.text.is_empty());
+    let shown: Vec<Row> = if reduced { term.visible_lines(block).into_iter().cloned().collect() } else { Vec::new() };
+    let lines: &[Row] = if reduced { &shown } else { &block.lines };
+    let filter_h = if filtering.is_some() { FILTER_ROW * s } else { 0.0 };
+    let output = row_h * (1.1 + 0.9 + 0.19 + command.len() as f32 + if lines.is_empty() { 0.0 } else { 0.5 }) + filter_h;
     // A truncated block says so in one muted row above the rows it kept.
-    let note = if block.truncated { row_h } else { 0.0 };
-    let height = output + note + block.lines.len() as f32 * row_h + row_h * if block.running() { 0.2 } else { 1.0 };
+    let note = if block.truncated && !reduced { row_h } else { 0.0 };
+    let height = output + note + lines.len() as f32 * row_h + row_h * if block.running() { 0.2 } else { 1.0 };
     let failed = block.failed();
     let selected = term.selected == Some(block.id);
     let block_id = block.id;
@@ -118,8 +148,10 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
     let label = if block.background { "Shell output".to_owned() } else { directory_label(&block.cwd, home) };
     let mut header = wash(el().w_full().h(output).fill(rgb(p.bg)), output).sticky_top(0.0)
         .child(text(label).font(ink(app, 0.9, None)).color(rgb(p.dim)).absolute(cells.inset, row_h * 1.1));
-    // The status hides under the pointer (where GPUiX shows the block's actions).
-    if !block.background && term.hovered != Some(block.id) && width > 260.0 * s {
+    // The status gives way to the block's actions while it is hovered, selected, filtered or
+    // its menu is open.
+    let engaged = [term.hovered, term.selected, term.more, term.filter.as_ref().map(|(id, _)| *id)].contains(&Some(block.id));
+    if !block.background && !engaged && width > 260.0 * s {
         let ms = block.elapsed_ms.unwrap_or_else(|| block.started.elapsed().as_millis() / 1000 * 1000);
         let duration = duration_label(ms);
         let (status, color) = if block.running() {
@@ -136,16 +168,23 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
         header = header.child(text((*line).to_owned()).selectable(true).font(ink(app, 1.0, None)).color(rgb(p.fg))
             .absolute(cells.inset, row_h * (2.19 + index as f32)));
     }
+    if !block.background && term.toolbar_block() == Some(block.id) {
+        header = header.child(actions(app, term, block, home, width));
+    }
+    if let Some(query) = filtering {
+        header = header.child(filter_row(app, tab_id, block_id, query, lines.len(), block.lines.len())
+            .pin(Some(cells.inset), Some(output - FILTER_ROW * s), Some(cells.inset), None));
+    }
     let body_h = height - output;
     let mut body = wash(el().w_full().h(body_h), body_h);
-    if block.truncated {
+    if block.truncated && !reduced {
         body = body.child(text(format!("Earlier output truncated; showing the last {} lines", block.lines.len()))
             .font(ink(app, 0.85, None)).color(rgb(p.muted)).absolute(cells.inset, 0.0));
     }
-    if !block.lines.is_empty() {
-        body = body.child(rows_view(app, &block.lines, cells, lift_for(p), true).absolute(cells.inset, note));
+    if !lines.is_empty() {
+        body = body.child(rows_view(app, lines, cells, lift_for(p), true).absolute(cells.inset, note));
     }
-    if let (Some((row, col)), true) = (block.cursor, block.running() && term.long_running()) {
+    if let (Some((row, col)), true, false) = (block.cursor, block.running() && term.long_running(), reduced) {
         body = body.child(el().w(cells.cell).h(row_h).fill(rgb(p.accent).alpha(0.45))
             .absolute(cells.inset + col as f32 * cells.cell, note + row as f32 * row_h));
     }
@@ -158,11 +197,96 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
         .on_press(move |a: &mut App| {
             a.select_tab(tab_id);
             if let Some(term) = a.terminals.get_mut(&tab_id) {
+                // A press outside an open menu only dismisses it.
+                if term.more.take().is_some() { return; }
                 term.selected = if term.selected == Some(block_id) { None } else { Some(block_id) };
             }
         })
         .child(header)
         .child(body)
+}
+
+/// A `TerminalAction`: the icon at 60% (95% hovered or active) over a faint 5 pt wash when
+/// active or hovered, in the accent when active unless the action names its own colour.
+pub(super) fn action_button(app: &App, key: String, icon: Icon, active: bool, color: Option<u32>) -> El {
+    let p = app.pal;
+    let s = app.ty.scale();
+    let ink = color.unwrap_or(if active { p.accent } else { p.fg });
+    el().key(key).w(ACTION * s).h(ACTION * s).radius(5.0 * s).center()
+        .fill(if active { rgb(p.fg).alpha(0.085 * 0.5) } else { Color::TRANSPARENT })
+        .hover(rgb(p.fg).alpha(0.085))
+        .child(crate::ui::feather::view(app, icon, 16.0 * s, ink).opacity(if active { 0.95 } else { 0.6 }))
+}
+
+/// The block's toolbar (`terminal-block-actions`): Filter output and Block actions, 16 pt from
+/// the right and 8 pt into the header, backed by the page when the header text runs under it.
+fn actions(app: &App, term: &Terminal, block: &Block, home: &str, width: f32) -> El {
+    let s = app.ty.scale();
+    let cells = Cells::of(app);
+    let tab_id = app.active_tab().id;
+    let id = block.id;
+    let header_w = directory_label(&block.cwd, home).chars().count() as f32 * cells.cell * 0.9 + cells.inset;
+    let filtering = term.filter.as_ref().is_some_and(|(f, _)| *f == id);
+    row().key(format!("block-actions:{tab_id}:{id}")).gap(4.0 * s).padding(4.0 * s).radius(4.0 * s)
+        .fill(if header_w > width - 76.0 * s { rgb(app.pal.bg) } else { Color::TRANSPARENT })
+        .child(action_button(app, format!("block-filter:{tab_id}:{id}"), Icon::Filter, filtering, None)
+            .on_press(move |a: &mut App| a.toggle_block_filter(tab_id, id)))
+        .child(action_button(app, format!("block-more:{tab_id}:{id}"), Icon::More, term.more == Some(id), None)
+            .on_press(move |a: &mut App| {
+                if let Some(term) = a.terminals.get_mut(&tab_id) { term.more = if term.more == Some(id) { None } else { Some(id) }; }
+            }))
+        .pin(None, Some(8.0 * s), Some(16.0 * s), None)
+}
+
+/// `block-output-filter`: the query field and the "shown / total lines" count.
+fn filter_row(app: &App, tab_id: u64, block_id: u64, query: &rune::TextEdit, shown: usize, total: usize) -> El {
+    let p = app.pal;
+    let s = app.ty.scale();
+    let input = rune::text_input(query, app.ty.sized(12.0))
+        .key(format!("block-filter-query:{tab_id}:{block_id}"))
+        .placeholder("Filter output...", rgb(p.muted))
+        .color(rgb(p.fg)).w_full()
+        .on_edit(move |a: &mut App| {
+            let term = a.terminals.get_mut(&tab_id).expect("filtered terminal");
+            &mut term.filter.as_mut().expect("filter open").1
+        })
+        .on_input_key(move |a: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
+            if e.key == rune::Key::Escape { a.close_block_filter(tab_id); return true; }
+            false
+        });
+    row().key(format!("block-output-filter:{tab_id}:{block_id}")).h(28.0 * s).gap(10.0 * s).center_y().fill(rgb(p.bg))
+        .child(el().grow(1.0).shrink().h(26.0 * s).pl(7.0 * s).center_y().radius(4.0 * s)
+            .fill(rgb(p.surface)).border(1.0, rgb(p.border)).child(input))
+        .child(text(format!("{shown} / {total} lines")).font(app.ty.sized(10.0)).color(rgb(p.muted)).w(90.0 * s))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockAction { CopyCommand, CopyOutput, CopyAll, Reuse, Collapse }
+
+/// `block-action-menu`: 190 pt under the toolbar, 30 pt rows of 11 pt text.
+fn block_menu(app: &App, term: &Terminal) -> Option<El> {
+    let id = term.more?;
+    term.shell.blocks.iter().chain(term.shell.live.iter()).find(|b| b.id == id)?;
+    let p = app.pal;
+    let s = app.ty.scale();
+    let tab_id = app.active_tab().id;
+    let items = [
+        ("Copy command", BlockAction::CopyCommand),
+        ("Copy output", BlockAction::CopyOutput),
+        ("Copy command and output", BlockAction::CopyAll),
+        ("Use command", BlockAction::Reuse),
+        (if term.collapsed.contains(&id) { "Expand output" } else { "Collapse output" }, BlockAction::Collapse),
+    ];
+    let mut menu = col().key(format!("block-action-menu:{tab_id}:{id}")).w(190.0 * s).padding(4.0 * s)
+        .fill(rgb(p.surface)).border(1.0, rgb(p.border)).radius(5.0 * s)
+        .anchored(format!("block-actions:{tab_id}:{id}"), rune::Side::Bottom, rune::Align::End, 2.0 * s);
+    for (index, (label, action)) in items.into_iter().enumerate() {
+        menu = menu.child(row().key(format!("block-menu:{tab_id}:{id}:{index}")).w_full().h(30.0 * s).pl(8.0 * s).center_y()
+            .radius(3.0 * s).hover(rgb(p.hover))
+            .child(text(label).font(app.ty.sized(11.0)).color(rgb(p.fg)))
+            .on_press_tx(move |a: &mut App, tx: &mut Tx| a.block_action(tab_id, id, action, tx)));
+    }
+    Some(menu)
 }
 
 fn el_fill(color: Color, h: f32) -> El { el().w_full().h(h).fill(color).absolute(0.0, 0.0) }
@@ -307,9 +431,15 @@ fn composer(app: &App, term: &Terminal, height: f32) -> El {
         .border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.fg).alpha(0.1))
         .opacity(if term.shell.busy() { 0.6 } else { 1.0 })
         .child(text(app.tab_cwd(tab)).font(ink(app, 0.9, None)).color(rgb(p.dim)).absolute(cells.inset, 13.0 * s))
-        .child(el().w(28.0 * s).h(28.0 * s).radius(6.0 * s).center()
-            .child(text("\u{f006}").font(TextStyle::new(app.ty.size, 400.0).family(NERD)).color(rgb(p.dim)))
-            .pin(None, Some(9.0 * s), Some(12.0 * s), None))
+        .child({
+            // `terminal-directory-authority`: filled yellow on the terminal that owns the
+            // working directory; elsewhere, an outline that hands ownership to this one.
+            let owner = app.main_terminal_tab() == Some(tab_id);
+            let icon = if owner { Icon::StarFilled } else { Icon::Star };
+            action_button(app, format!("terminal-directory-authority:{tab_id}"), icon, owner, owner.then_some(p.yellow))
+                .on_press(move |a: &mut App| { a.select_tab(tab_id); a.set_main_terminal(tab_id); })
+                .pin(None, Some(9.0 * s), Some(12.0 * s), None)
+        })
         .child(el().h(cells.row).pin(Some(cells.inset), Some(line_top), Some(cells.inset), None).child(input));
     let at_end = draft.anchor == draft.focus && draft.focus == draft.text.len();
     if term.composer.menu.is_none() && at_end && !term.shell.busy() {

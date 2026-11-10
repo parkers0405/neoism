@@ -53,6 +53,13 @@ fn setup(app: &mut App, waker: rune::Waker) {
 }
 
 /// `src/demo.rs` open with rust-analyzer attached and two diagnostics.
+/// Finished blocks for the terminal scenes: command, output lines, exit status.
+const TERMINAL_FIXTURE: [(&str, &[&str], i32); 3] = [
+    ("git status --short", &[" M rune/app/src/home/view.rs", " M rune/app/src/workspace.rs", "?? rune/app/src/home/actions.rs"], 0),
+    ("ls src", &["agent", "app.rs", "daemon.rs", "editor", "home", "keys.rs", "main.rs", "session.rs"], 0),
+    ("cargo test --release", &["running 132 tests", "test result: ok. 132 passed; 0 failed"], 0),
+];
+
 fn lsp_fixture(s: &mut App) {
     s.open_file("src/demo.rs", None);
     s.apply_opened_file("src/demo.rs", b"fn main() {\n    let mut items = Vec::new();\n    items.pu\n    println!(\"{}\", items.len());\n}\n");
@@ -91,6 +98,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.finder_follow_selection(tx);
     app.conversation_follow(tx);
     let panes_changed = app.sync_panes();
+    // The directory-owning terminal's `cd` moves the workspace view with it.
+    let panes_changed = app.follow_main_terminal() || panes_changed;
     app.follow_tab_chrome(tx);
     let flashing = app.editor_tick();
     let mouse_changed = app.editor_mouse_tick(tx);
@@ -194,6 +203,45 @@ fn main() {
                 s.open_file("right.rs", None); s.apply_opened_file("right.rs", b"let right_value = 2;\n");
             }),
             ("about", |s| s.modal = Some(ui::modal::Modal::about())),
+            // Terminal blocks with the toolbar on the newest (hovered), its actions menu, and a
+            // filtered block; the Home terminal owns the working directory (filled star).
+            ("terminal-actions", |s| {
+                s.fixture_blocks(&TERMINAL_FIXTURE);
+                let tab = s.active_tab().id;
+                if let Some(term) = s.terminals.get_mut(&tab) { term.hovered = Some(9002); term.more = Some(9002); }
+            }),
+            ("terminal-filter", |s| {
+                s.fixture_blocks(&TERMINAL_FIXTURE);
+                let tab = s.active_tab().id;
+                s.toggle_block_filter(tab, 9001);
+                if let Some(term) = s.terminals.get_mut(&tab) { term.filter.as_mut().unwrap().1.replace_text("rs"); }
+            }),
+            // A second terminal next to Home: Home keeps the directory until the star moves it.
+            ("terminal-owner", |s| {
+                s.fixture_blocks(&TERMINAL_FIXTURE[..1]);
+                let home = s.active_tab().id;
+                s.split(panes::Axis::Horizontal);
+                s.fixture_blocks(&TERMINAL_FIXTURE[1..2]);
+                let second = s.active_tab().id;
+                if let Some(term) = s.terminals.get_mut(&second) { term.shell.cwd = "/tmp".into(); }
+                s.set_main_terminal(second);
+                let _ = home;
+            }),
+            // The `~` dashboard: chats from every project, grouped by folder.
+            ("conversations-dashboard", |s| {
+                let home = std::env::var("HOME").unwrap_or_default();
+                s.cwd = home.clone();
+                s.workspace_name = "~".into();
+                s.threads = [("a", "Neoism Release", "/projects/neoism", 9), ("b", "Swift-Cursor", "/projects/neoism", 7),
+                    ("c", "Dotfiles cleanup", home.as_str(), 8), ("d", "Rune layout", "/projects/rune", 5), ("e", "Pinned plan", "/projects/rune", 1)]
+                    .iter().map(|(id, title, dir, at)| serde_json::from_value(serde_json::json!({
+                        "session_id": id, "title": title, "directory": dir, "updated_at": 1_700_000_000_000u64 + at * 1000, "pinned": *id == "e",
+                    })).unwrap()).collect();
+                s.collapsed_projects.insert("/projects/rune".into());
+                s.sidebar = Some(app::Sidebar::Conversations);
+                s.focus = app::Focus::Sidebar;
+                s.conv_selected = 1;
+            }),
             // A long file and a long tree, for walking with held arrows.
             ("editor-long", |s| {
                 s.open_file("src/app.rs", None);

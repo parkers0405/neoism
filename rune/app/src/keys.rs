@@ -265,7 +265,14 @@ impl App {
         }
         // An inline composer picker (`/model`, `/cd` …) types into its own query row.
         let inline_picker = self.composer.picker.as_ref().is_some_and(|p| p.kind != crate::agent::slash::Kind::Slash);
-        let overlay = self.picker.is_some() || self.finder.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some();
+        // A block's output filter types into its own field; a click back into the composer
+        // (focused since the last sync) takes the keyboard back from it.
+        let active_id = self.tabs.get(self.active).map(|t| t.id);
+        if self.block_filter_focused() && self.field_tab.is_none() && self.tabs.get(self.active).is_some_and(|t| t.draft.focused) {
+            if let Some(filter) = active_id.and_then(|id| self.terminals.get_mut(&id)).and_then(|t| t.filter.as_mut()) { filter.1.focused = false; }
+        }
+        let overlay = self.picker.is_some() || self.finder.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
+            || self.block_filter_focused();
         let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. });
         let active = self.active;
         let mut changed = false;

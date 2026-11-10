@@ -14,6 +14,8 @@ use crate::ui::theme::{NERD, Palette, rgb};
 use rune::tok::TextStyle;
 use rune::{Color, Drag, El, ScrollSpec, Span, Spring, Tx, WheelEvent, col, el, row, text};
 use rune_kit::syntax::{Highlight, Paint, Syntax, highlight};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::{cell::RefCell, rc::Rc};
 
 /// Critically damped, omega 16: the editor scroll spring (`rune/README.md`, Motion).
@@ -193,6 +195,9 @@ pub struct CodeCache(RefCell<Option<Rc<CodeLayout>>>);
 struct CodeLayout {
     revision: u64,
     cols: usize,
+    /// Each distinct line's wrap at `cols`, by the line's text hash: an edit re-wraps only the
+    /// lines it changed, wherever the rest have shifted to.
+    wraps: HashMap<u64, Rc<[WrapSegment]>>,
     marks: Rc<[Highlight]>,
     offsets: Vec<usize>,
     first: Vec<usize>,
@@ -202,19 +207,26 @@ impl CodeCache { pub fn clear(&self) { *self.0.borrow_mut() = None; } }
 fn layout(buffer: &Buffer, cols: usize) -> Rc<CodeLayout> {
     let mut slot = buffer.code_cache.0.borrow_mut();
     if let Some(c) = slot.as_ref().filter(|c| c.revision == buffer.doc.revision && c.cols == cols) { return c.clone(); }
-    let mut rows = Vec::new();
-    let mut first = Vec::new();
-    let mut offsets = Vec::new();
+    let previous = slot.take().filter(|c| c.cols == cols).map(|c| match Rc::try_unwrap(c) { Ok(c) => c.wraps, Err(c) => c.wraps.clone() });
+    let mut previous = previous.unwrap_or_default();
+    let mut wraps = HashMap::with_capacity(previous.len().max(buffer.doc.lines.len() / 2));
+    let mut rows = Vec::with_capacity(buffer.doc.lines.len());
+    let mut first = Vec::with_capacity(buffer.doc.lines.len());
+    let mut offsets = Vec::with_capacity(buffer.doc.lines.len());
     let mut offset = 0;
     for (i, line) in buffer.doc.lines.iter().enumerate() {
         offsets.push(offset); offset += line.len() + 1;
         first.push(rows.len());
-        let wrapped = segments(line, cols);
+        let hash = { let mut h = std::collections::hash_map::DefaultHasher::new(); line.hash(&mut h); h.finish() };
+        let wrapped = wraps.get(&hash).cloned()
+            .or_else(|| previous.remove(&hash))
+            .unwrap_or_else(|| segments(line, cols).into());
         let count = wrapped.len();
-        rows.extend(wrapped.into_iter().enumerate().map(|(n, s)| (i, s, n == 0, n + 1 == count)));
+        rows.extend(wrapped.iter().enumerate().map(|(n, s)| (i, *s, n == 0, n + 1 == count)));
+        wraps.insert(hash, wrapped);
     }
     let marks = highlight(buffer.language(), &buffer.doc.lines.join("\n"));
-    let result = Rc::new(CodeLayout { revision: buffer.doc.revision, cols, marks, offsets, first, rows });
+    let result = Rc::new(CodeLayout { revision: buffer.doc.revision, cols, wraps, marks, offsets, first, rows });
     *slot = Some(result.clone());
     result
 }
@@ -290,10 +302,12 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
 
 fn code(app: &App, buffer: &Buffer) -> El {
     let line_h = line_height(app);
-    let cached = layout(buffer, Metrics::of(app, buffer).cols);
+    // Until the view reports its width, wrapping at a guess would be thrown away a frame later
+    // (for a large file, the whole open cost twice): the first frame mounts no rows.
+    let row_count = if buffer.view_rect.is_some() { layout(buffer, Metrics::of(app, buffer).cols).rows.len() + 4 } else { 0 };
     let path = buffer.path.clone();
     let rows = col().key("code-rows").w_full().growth(rune::GrowthSpec::default())
-        .virtual_rows(cached.rows.len() + 4, line_h,
+        .virtual_rows(row_count, line_h,
             |_: &App, i| format!("visual:{i}").into(),
             move |a: &App, i| a.buffers.get(&path).map_or_else(el, |b| code_row(a, b, i)))
         .virtual_rows_version(0u64);

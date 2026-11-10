@@ -36,7 +36,7 @@ members = [
     "neoism-customization",
 ]
 # Browser workers stay outside normal workspace builds and native linking.
-exclude = ["neoism-frontend/interactive-artifacts", "neoism-frontend/servo-runtime", "neoism-frontend/cef-runtime", "vendor/blaze-compat/icu_collator_data-2.4.0", "vendor/blaze-compat/turso_core-0.8.3"]
+exclude = ["neoism-frontend/interactive-artifacts", "neoism-frontend/servo-runtime", "neoism-frontend/cef-runtime", "vendor/blaze-compat/icu_collator_data-2.4.0", "vendor/blaze-compat/turso_core-0.8.3", "vendor/winit-compat/winit-0.30.13"]
 resolver = "2"
 
 [patch.crates-io]

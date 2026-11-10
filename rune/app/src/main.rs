@@ -76,6 +76,9 @@ fn lsp_fixture(s: &mut App) {
 }
 
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
+    static TRACE_POLL: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("NEOISM_RUNE_TRACE_POLL").is_some());
+    let mut wakes: Vec<(&str, std::time::Duration)> = Vec::new();
+    macro_rules! wake { ($name:expr, $d:expr) => {{ let d = $d; if *TRACE_POLL { wakes.push(($name, d)); } tx.wake_after(d); }} }
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
     let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.take_picked_attachments() | app.sync_terminals(tx);
     if std::mem::take(&mut app.settle_pending) { tx.settle(); }
@@ -84,20 +87,20 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         tx.quit();
         return true;
     }
-    if let Some(wait) = app.save_session(false) { tx.wake_after(wait); }
+    if let Some(wait) = app.save_session(false) { wake!("session", wait); }
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let visible_wordmarks = app.visible_wordmarks();
     // The wordmark's idle motion runs on live bindings: frames keep coming without re-running
     // the views; only a newly shown wordmark or a click effect rebuilds.
     let (wordmark_moving, animating) = app.wordmark.tick(&visible_wordmarks, clock);
-    if wordmark_moving { tx.wake_after(std::time::Duration::ZERO); }
-    if animating { tx.wake_after(std::time::Duration::ZERO); }
+    if wordmark_moving { wake!("wordmark", std::time::Duration::ZERO); }
+    if animating { wake!("wordmark-effect", std::time::Duration::ZERO); }
     // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap).
     app.tools.clock = clock;
     let spinning = app.running_tools();
-    if spinning { tx.wake_after(std::time::Duration::from_millis(45)); }
+    if spinning { wake!("spinner", std::time::Duration::from_millis(45)); }
     // Presence orbs flow (at 30 Hz) while one is in view.
-    if app.orbs_on_screen() && let Some(next) = app.orbs.tick() { tx.wake_after(next); }
+    if app.orbs_on_screen() && let Some(next) = app.orbs.tick() { wake!("orbs", next); }
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
@@ -105,8 +108,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Wheel and trackpad motion on every scroll view, stepped on the frame clock.
     let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx);
     let rail_bottom = app.rail_follow_bottom();
-    if gliding { tx.wake_after(std::time::Duration::ZERO); }
-    if mode_changing { tx.wake_after(std::time::Duration::ZERO); }
+    if gliding { wake!("glide", std::time::Duration::ZERO); }
+    if mode_changing { wake!("mode", std::time::Duration::ZERO); }
     let panes_changed = app.sync_panes();
     // The directory-owning terminal's `cd` moves the workspace view with it.
     let panes_changed = app.follow_main_terminal() || panes_changed;
@@ -114,20 +117,20 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let flashing = app.editor_tick();
     let mouse_changed = app.editor_mouse_tick(tx);
     // Edited buffers re-sync to the language servers once typing settles.
-    if let Some(delay) = app.lsp_tick() { tx.wake_after(delay); }
-    if flashing { tx.wake_after(std::time::Duration::ZERO); }
+    if let Some(delay) = app.lsp_tick() { wake!("lsp", delay); }
+    if flashing { wake!("flash", std::time::Duration::ZERO); }
     let focus_changed = app.sync_field_focus();
     // A selecting drag resting at the transcript's edge keeps scrolling it.
     let edge_scrolling = app.timeline_edge_scroll(tx);
-    if edge_scrolling { tx.wake_after(std::time::Duration::ZERO); }
+    if edge_scrolling { wake!("edge", std::time::Duration::ZERO); }
     // The live turn's status line animates on live bindings; it rebuilds only on state changes.
     let (busy, activity_changed) = app.tick_activity();
-    if busy { tx.wake_after(std::time::Duration::ZERO); }
+    if busy { wake!("activity", std::time::Duration::ZERO); }
     // The finder searches once its query settles.
-    if let Some(delay) = app.finder_tick(std::time::Instant::now()) { tx.wake_after(delay); }
+    if let Some(delay) = app.finder_tick(std::time::Instant::now()) { wake!("finder", delay); }
     // A `/piss` … `/praise` skit plays on the frame clock.
     let skit = app.tick_effect();
-    if skit { tx.wake_after(std::time::Duration::ZERO); }
+    if skit { wake!("skit", std::time::Duration::ZERO); }
     // The cursor trails and blinks on its own schedule.
     let cursor_was = (app.cursor.visible, app.cursor.trail.quad());
     app.browser_follow(tx);
@@ -136,7 +139,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let target = app.cursor_target();
     let moved_at = app.cursor.trail.moved_at;
     let cursor_wake = app.cursor.tick(target, std::time::Instant::now());
-    if let Some(delay) = cursor_wake { tx.wake_after(delay); }
+    if let Some(delay) = cursor_wake { wake!("cursor", delay); }
     if std::env::var_os("NEOISM_RUNE_TRACE_CURSOR").is_some() {
         let q = app.cursor.trail.quad();
         eprintln!("cursor {:.3} target {:?} quad {:?}", clock, target.map(|t| t.map(|v| (v * 10.0).round() / 10.0)), q.map(|c| c.map(|v| (v * 10.0).round() / 10.0)));
@@ -162,9 +165,17 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps_at = Some(std::time::Instant::now());
     }
     if fps.is_some() && app.fps != fps && !due {
-        tx.wake_after(std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
+        wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    heartbeat_changed || animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom
+    let rerun = heartbeat_changed || animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
+    if *TRACE_POLL && (rerun || !wakes.is_empty()) {
+        let terms = [("heartbeat", heartbeat_changed), ("animating", animating), ("changed", changed), ("spinning", spinning), ("fps", fps_changed), ("caret", caret_changed),
+            ("focus", focus_changed), ("panes", panes_changed), ("skit", skit), ("activity", activity_changed), ("flashing", flashing), ("mouse", mouse_changed), ("mode", mode_changing), ("rail", rail_bottom)];
+        eprintln!("[poll] {:.3} rerun={} wakes={}", clock, terms.iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect::<Vec<_>>().join(","),
+            wakes.iter().map(|(n, d)| format!("{n}:{:.1}", d.as_secs_f64() * 1000.0)).collect::<Vec<_>>().join(","));
+    }
+    rerun
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

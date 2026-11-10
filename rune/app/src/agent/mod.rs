@@ -10,6 +10,7 @@ mod header;
 mod prose;
 mod sidebar;
 mod table;
+mod ticks;
 pub mod slash;
 mod user;
 pub mod timeline;
@@ -42,6 +43,11 @@ pub struct Session {
     pub wheel_target: Option<f32>,
     /// A wheel notch's glide in flight (stepped on the frame clock).
     pub glide: Option<crate::ui::follow::Glide>,
+    /// Each question's row offset in the transcript, from its last layout (the question rail).
+    pub question_tops: std::collections::HashMap<String, f32>,
+    /// The question rail's lit tick, and the transcript viewport's height.
+    pub rail_active: Option<usize>,
+    pub viewport_h: f32,
     pub width: f32,
     pub messages: Vec<HistoryMessage>,
     pub older_cursor: Option<String>,

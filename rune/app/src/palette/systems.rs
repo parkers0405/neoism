@@ -2,18 +2,15 @@
 //! server button and `workspace: Systems` / `workspace: Servers` open the palette on a
 //! category header. Systems lists this computer and the SSH computers saved in
 //! `systems.json`; Servers lists the daemon this window uses and the saved `servers.json`
-//! entries. Both registries are the desktop app's (`$XDG_CONFIG_HOME/neoism`) and are only
-//! read here: managing SSH systems and switching servers still lives in the desktop host.
+//! entries, Fast Servers this window hosts and invites it joined. Both registries are the
+//! desktop app's (`$XDG_CONFIG_HOME/neoism`); `crate::servers` reads and changes them.
 
 use crate::app::Connection;
-use serde::Deserialize;
-use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemStatus {
     Connected,
-    /// The desktop host's managed SSH connection in progress; Rune holds none yet.
-    #[allow(dead_code)]
+    /// The SSH connection in progress.
     Connecting,
     Disconnected,
 }
@@ -74,6 +71,47 @@ pub struct Server {
     /// The server this window is connected to.
     pub active: bool,
     pub status: ServerStatus,
+    /// A Fast Server hosted here or joined (not saved).
+    pub temporary: bool,
+    /// Hosted on this machine.
+    pub hosted: bool,
+}
+
+/// A server row's buttons (`PaletteServerEntry::controls`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    Edit,
+    Remove,
+    CopyInvite,
+    StopHosting,
+    Leave,
+}
+
+impl Control {
+    pub fn label(self) -> &'static str {
+        match self {
+            Control::Edit => "Edit",
+            Control::Remove => "Remove",
+            Control::CopyInvite => "Copy invite",
+            Control::StopHosting => "Stop hosting",
+            Control::Leave => "Leave",
+        }
+    }
+    /// The chip's width in points.
+    pub fn width(self) -> f32 {
+        match self { Control::Edit => 52.0, Control::Remove => 66.0, Control::CopyInvite => 88.0, Control::StopHosting => 96.0, Control::Leave => 56.0 }
+    }
+}
+
+impl Server {
+    pub fn controls(&self) -> Vec<Control> {
+        if self.local { return Vec::new(); }
+        match (self.temporary, self.hosted) {
+            (true, true) => vec![Control::CopyInvite, Control::StopHosting],
+            (true, false) => vec![Control::Leave],
+            _ => vec![Control::Edit, Control::Remove],
+        }
+    }
 }
 
 /// One row of a system's settings (`PaletteMode::SystemSettings`).
@@ -122,62 +160,45 @@ pub fn settings(system: &System) -> Vec<Setting> {
     out
 }
 
-/// The desktop registries' directory (`server_registry::registry_directory`).
-pub fn registry_directory() -> PathBuf {
-    if let Some(path) = std::env::var_os("NEOISM_CONFIG_HOME") { return path.into(); }
-    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
-        .join("neoism")
-}
+impl crate::app::App {
+    /// This computer first, then the saved SSH systems with their live state: Connected while
+    /// this window's tunnel to it is up, Connecting while one is being made.
+    pub fn palette_systems(&mut self) -> Vec<System> {
+        let here = self.server.system();
+        let connecting = self.server.connecting().and_then(|id| id.strip_prefix("system:")).map(str::to_owned);
+        let mut out = vec![System { id: "local".into(), name: "This computer".into(), address: "Local system".into(),
+            local: true, enabled: true, status: if self.server.remote() { SystemStatus::Disconnected } else { SystemStatus::Connected } }];
+        out.extend(crate::servers::systems().into_iter().map(|s| {
+            let status = if here.as_deref() == Some(s.id.as_str()) { SystemStatus::Connected }
+                else if connecting.as_deref() == Some(s.id.as_str()) { SystemStatus::Connecting }
+                else { SystemStatus::Disconnected };
+            System { id: s.id, name: s.name, address: s.target, local: false, enabled: s.enabled, status }
+        }));
+        out
+    }
 
-#[derive(Deserialize)]
-struct SavedSystem {
-    id: String,
-    name: String,
-    target: String,
-    #[serde(default = "enabled_by_default")]
-    enabled: bool,
-}
-
-fn enabled_by_default() -> bool { true }
-
-#[derive(Deserialize)]
-struct SavedServer {
-    id: String,
-    name: String,
-    endpoint: String,
-}
-
-fn read_list<T: for<'de> Deserialize<'de>>(file: &str, key: &str) -> Vec<T> {
-    let Ok(bytes) = std::fs::read(registry_directory().join(file)) else { return Vec::new() };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
-    value.get(key).and_then(|list| serde_json::from_value(list.clone()).ok()).unwrap_or_default()
-}
-
-/// This computer first, then the saved SSH systems. Rune holds no SSH connections, so saved
-/// systems read as Disconnected (or Deactivated).
-pub fn systems() -> Vec<System> {
-    let mut out = vec![System { id: "local".into(), name: "This computer".into(), address: "Local system".into(),
-        local: true, enabled: true, status: SystemStatus::Connected }];
-    out.extend(read_list::<SavedSystem>("systems.json", "systems").into_iter().map(|s| System {
-        id: s.id, name: s.name, address: s.target, local: false, enabled: s.enabled, status: SystemStatus::Disconnected,
-    }));
-    out
-}
-
-/// The local daemon this window uses, then the saved servers.
-pub fn servers(connection: &Connection) -> Vec<Server> {
-    let status = match connection {
-        Connection::Connected => ServerStatus::Online,
-        Connection::Connecting => ServerStatus::Connecting,
-        Connection::Disconnected(_) => ServerStatus::Offline,
-    };
-    let address = crate::daemon::public_endpoint().unwrap_or_else(|| "This computer".into());
-    let mut out = vec![Server { id: "local".into(), name: "Local Server".into(), address, local: true, active: true, status }];
-    out.extend(read_list::<SavedServer>("servers.json", "servers").into_iter().map(|s| Server {
-        id: s.id, name: s.name, address: s.endpoint, local: false, active: false, status: ServerStatus::Unknown,
-    }));
-    out
+    /// Local Server, then the saved servers and this window's temporary ones; the one this
+    /// window uses carries the live connection state.
+    pub fn palette_servers(&self) -> Vec<Server> {
+        let live = match &self.connection {
+            Connection::Connected => ServerStatus::Online,
+            Connection::Connecting => ServerStatus::Connecting,
+            Connection::Disconnected(_) => ServerStatus::Offline,
+        };
+        let current = self.server.current_id().to_owned();
+        let connecting = self.server.connecting().map(str::to_owned);
+        let status = |id: &str, online: Option<bool>| if id == current { live }
+            else if connecting.as_deref() == Some(id) { ServerStatus::Connecting }
+            else if online == Some(false) { ServerStatus::Offline } else { ServerStatus::Unknown };
+        let address = crate::daemon::public_endpoint().unwrap_or_else(|| "This computer".into());
+        let mut out = vec![Server { id: "local".into(), name: "Local Server".into(), address, local: true, active: current == "local",
+            status: status("local", None), temporary: false, hosted: false }];
+        out.extend(crate::servers::list().into_iter().map(|s| Server {
+            active: s.id == current, status: status(&s.id, s.online), id: s.id, name: s.name, address: s.address, local: false,
+            temporary: s.temporary, hosted: s.hosted,
+        }));
+        out
+    }
 }
 
 #[cfg(test)]
@@ -190,30 +211,28 @@ mod tests {
 
     #[test]
     fn settings_follow_the_system_state() {
-        assert_eq!(settings(&systems()[0]), vec![]);
+        let local = System { id: "local".into(), name: "This computer".into(), address: "Local system".into(), local: true, enabled: true, status: SystemStatus::Connected };
+        assert_eq!(settings(&local), vec![]);
         assert_eq!(settings(&remote(true, SystemStatus::Connected)), vec![Setting::Active, Setting::Disconnect, Setting::Ssh, Setting::Remove]);
         assert_eq!(settings(&remote(true, SystemStatus::Disconnected)), vec![Setting::Active, Setting::Connect, Setting::Ssh, Setting::Remove]);
         assert_eq!(settings(&remote(false, SystemStatus::Disconnected)), vec![Setting::Active, Setting::Ssh, Setting::Remove]);
         assert_eq!(remote(false, SystemStatus::Disconnected).detail(), "user@host \u{b7} Deactivated");
-        assert_eq!(systems()[0].heading(), "This computer \u{b7} Local system \u{b7} Connected \u{b7} Read only");
+        assert_eq!(local.heading(), "This computer \u{b7} Local system \u{b7} Connected \u{b7} Read only");
     }
 
     #[test]
-    fn registries_are_read_from_the_config_home() {
-        let dir = std::env::temp_dir().join(format!("neoism-rune-systems-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("systems.json"), br#"{"systems":[{"id":"a","name":"Build box","target":"me@box","ssh_args":[],"enabled":false}]}"#).unwrap();
-        std::fs::write(dir.join("servers.json"), br#"{"servers":[{"id":"s","name":"Team","endpoint":"ws://team:9877/session"}],"window_profiles":{}}"#).unwrap();
-        // SAFETY: tests in this module are the only readers of NEOISM_CONFIG_HOME.
-        unsafe { std::env::set_var("NEOISM_CONFIG_HOME", &dir); }
-        let systems = systems();
-        let servers = servers(&Connection::Connected);
-        unsafe { std::env::remove_var("NEOISM_CONFIG_HOME"); }
-        std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(systems.len(), 2);
-        assert_eq!((systems[1].name.as_str(), systems[1].state()), ("Build box", "Deactivated"));
-        assert_eq!(servers.len(), 2);
-        assert!(servers[0].active && servers[0].status == ServerStatus::Online);
-        assert_eq!((servers[1].name.as_str(), servers[1].status), ("Team", ServerStatus::Unknown));
+    fn server_rows_offer_their_controls() {
+        let server = |temporary, hosted| Server { id: "s".into(), name: "S".into(), address: String::new(), local: false, active: false,
+            status: ServerStatus::Unknown, temporary, hosted };
+        assert_eq!(server(false, false).controls(), vec![Control::Edit, Control::Remove]);
+        assert_eq!(server(true, true).controls(), vec![Control::CopyInvite, Control::StopHosting]);
+        assert_eq!(server(true, false).controls(), vec![Control::Leave]);
+    }
+
+    #[test]
+    fn local_server_is_listed_first_and_active() {
+        let app = crate::app::App::new();
+        let servers = app.palette_servers();
+        assert!(servers[0].local && servers[0].active);
     }
 }

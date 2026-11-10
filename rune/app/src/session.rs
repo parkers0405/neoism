@@ -150,7 +150,8 @@ impl App {
     /// call returns how long until the window opens again, so the caller can wake then and the
     /// last change before going idle is still written.
     pub fn save_session(&mut self, force: bool) -> Option<Duration> {
-        if !enabled() { return None; }
+        // Visiting another server: the saved window stays the local one (stashed until back).
+        if !enabled() || self.server.remote() { return None; }
         if let Some(wait) = self.session_writer.at.map(|at| INTERVAL.saturating_sub(at.elapsed())).filter(|w| !force && !w.is_zero()) {
             return Some(wait);
         }

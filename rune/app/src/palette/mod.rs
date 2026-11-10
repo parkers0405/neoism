@@ -212,8 +212,8 @@ impl App {
     pub fn open_picker(&mut self, mode: Mode) {
         let mut picker = Picker::new(mode);
         if mode.categorized() {
-            picker.systems = systems::systems();
-            picker.servers = systems::servers(&self.connection);
+            picker.systems = self.palette_systems();
+            picker.servers = self.palette_servers();
         }
         // Over the focused file tree, a number is a row; over a code file, a line.
         picker.tree_rows = self.focused_tree_rows();
@@ -249,8 +249,9 @@ impl App {
     /// Switch the category header between Systems and Servers (click or `Ctrl+Tab`); Systems
     /// from a system's settings goes back to the list where it was.
     pub fn show_category(&mut self, mode: Mode) {
-        let connection = &self.connection;
-        let Some(picker) = &mut self.picker else { return self.open_picker(mode) };
+        if self.picker.is_none() { return self.open_picker(mode); }
+        let (systems, servers) = (self.palette_systems(), self.palette_servers());
+        let Some(picker) = &mut self.picker else { return };
         if picker.mode == Mode::SystemSettings && mode == Mode::Systems {
             let (query, selected) = picker.back.take().unwrap_or_default();
             picker.mode = Mode::Systems;
@@ -267,8 +268,8 @@ impl App {
         picker.query.replace_text("");
         picker.selected = 0;
         picker.top = 0;
-        picker.systems = systems::systems();
-        picker.servers = systems::servers(connection);
+        picker.systems = systems;
+        picker.servers = servers;
     }
 
     fn open_system_settings(&mut self, index: usize) {
@@ -281,11 +282,33 @@ impl App {
         picker.top = 0;
     }
 
-    /// Managing SSH systems and joining other servers runs in the desktop host; say so rather
-    /// than pretend (`systems_desktop_modal_spec`).
-    fn desktop_only(&mut self, title: &str, what: &str) {
-        self.modal = Some(crate::ui::modal::Modal::notice(title, &format!(
-            "{what} is managed by the Neoism desktop app. This window lists the saved entries and connects to the local daemon only.")));
+    /// A system setting row (`SystemSettings`): Active, Disconnect, Connect, SSH, Remove.
+    fn run_setting(&mut self, setting: systems::Setting) {
+        let Some(system) = self.picker.as_ref().and_then(|p| p.settings.and_then(|i| p.systems.get(i))).cloned() else { return };
+        match setting {
+            systems::Setting::Active => {
+                self.set_system_active(&system.id, &system.name, !system.enabled);
+                // Still in the palette (deactivating a system this window doesn't use): refresh it.
+                if self.picker.is_some() {
+                    let systems = self.palette_systems();
+                    if let Some(picker) = &mut self.picker { picker.systems = systems; }
+                }
+            }
+            systems::Setting::Disconnect => { self.picker = None; self.disconnect_system(&system.id); }
+            systems::Setting::Connect | systems::Setting::Ssh => { self.picker = None; self.connect_system(&system.id, &system.name); }
+            systems::Setting::Remove => self.ask_remove(crate::servers::flow::Confirm::System(system.id)),
+        }
+    }
+
+    /// A server row's button (`EditServer`, `RemoveServer`, `CopyFastServerInvite`).
+    pub fn server_control(&mut self, index: usize, control: systems::Control, tx: &mut Tx) {
+        let Some(server) = self.picker.as_ref().and_then(|p| p.servers.get(index)).cloned() else { return };
+        match control {
+            systems::Control::Edit => { self.picker = None; self.open_edit_server(&server.id); }
+            systems::Control::CopyInvite => self.copy_invite(&server.id, tx),
+            systems::Control::Remove | systems::Control::StopHosting | systems::Control::Leave =>
+                self.ask_remove(crate::servers::flow::Confirm::Server(server.id)),
+        }
     }
 
     pub fn move_picker(&mut self, delta: isize) {
@@ -302,10 +325,7 @@ impl App {
         if let Some(picker) = &self.picker {
             match picker.rows().get(index.unwrap_or(picker.selected)).map(|r| r.target) {
                 Some(Target::System(i)) => return self.open_system_settings(i),
-                Some(Target::Setting(setting)) => {
-                    let name = picker.settings.and_then(|i| picker.systems.get(i)).map(|s| s.name.clone()).unwrap_or_default();
-                    return self.desktop_only(setting.title(), &format!("{name}'s connection"));
-                }
+                Some(Target::Setting(setting)) => return self.run_setting(setting),
                 _ => {}
             }
         }
@@ -314,13 +334,12 @@ impl App {
         let Some(row) = rows.get(index.unwrap_or(picker.selected)) else { return };
         match row.target {
             Target::System(_) | Target::Setting(_) => {}
-            Target::AddSystem => self.desktop_only("Add System", "Adding an SSH system"),
-            Target::AddServer => self.desktop_only("Add Server", "Adding a server"),
+            Target::AddSystem => self.open_system_form(),
+            Target::AddServer => self.open_server_form(),
             // The window's own server: nothing to switch to.
             Target::Server(i) if picker.servers.get(i).is_some_and(|s| s.active) => {}
             Target::Server(i) => {
-                let name = picker.servers.get(i).map(|s| s.name.clone()).unwrap_or_default();
-                self.desktop_only("Servers", &format!("Joining {name}"));
+                if let Some(server) = picker.servers.get(i) { self.select_server(&server.id.clone()); }
             }
             Target::Close(command) => self.run_close_command(command),
             Target::GoToLine(line) => self.editor_go_to_line(line),
@@ -442,8 +461,8 @@ pub fn systems_fixture(app: &mut App) {
         System { id: "pi".into(), name: "Raspberry Pi".into(), address: "pi@10.0.0.42".into(), local: false, enabled: false, status: SystemStatus::Disconnected },
     ];
     picker.servers = vec![
-        Server { id: "local".into(), name: "Local Server".into(), address: "ws://127.0.0.1:41783/session".into(), local: true, active: true, status: ServerStatus::Online },
-        Server { id: "team".into(), name: "Team server".into(), address: "ws://team.example:9877/session".into(), local: false, active: false, status: ServerStatus::Unknown },
+        Server { id: "local".into(), name: "Local Server".into(), address: "ws://127.0.0.1:41783/session".into(), local: true, active: true, status: ServerStatus::Online, temporary: false, hosted: false },
+        Server { id: "team".into(), name: "Team server".into(), address: "ws://team.example:9877/session".into(), local: false, active: false, status: ServerStatus::Unknown, temporary: false, hosted: false },
     ];
 }
 

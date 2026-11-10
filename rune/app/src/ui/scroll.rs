@@ -143,6 +143,8 @@ pub struct Scrollers {
     /// Views whose steps are handed to their owner instead of placed here (`Scrollers::own`).
     owned: std::collections::HashSet<String>,
     moves: Vec<Move>,
+    /// Views that scroll sideways (`Scrollers::sideways`): their steps place `x`.
+    across: std::collections::HashSet<String>,
 }
 
 impl Scrollers {
@@ -156,6 +158,15 @@ impl Scrollers {
     /// reader's row where it was, and the view jumps by the difference.
     pub fn own(&mut self, key: &str) {
         if !self.owned.contains(key) { self.owned.insert(key.to_owned()); }
+    }
+
+    /// A sideways delta for a horizontal view (a wide table), in points along it: the same
+    /// glide and trackpad momentum as a vertical one, placed on `x`.
+    pub fn sideways(&mut self, key: &str, delta: f32, precise: bool, notch_px: f32, source: Source, tx: &mut Tx) {
+        if delta == 0.0 { return; }
+        if !self.across.contains(key) { self.across.insert(key.to_owned()); }
+        self.wheel(key, &WheelEvent::new(0.0, delta).precise(precise), notch_px, source);
+        tx.wake_after(std::time::Duration::ZERO);
     }
 
     /// This frame's steps of owned views.
@@ -186,12 +197,13 @@ impl Scrollers {
     /// Step every moving view one frame. Returns whether any still moves.
     pub fn step(&mut self, clock: f64, tx: &mut Tx) -> bool {
         let mut any = false;
-        let Scrollers { views, owned, moves } = self;
+        let Scrollers { views, owned, moves, across } = self;
         views.retain(|key, scroller| {
             let to = scroller.step(clock);
             if *TRACE { if let Some((offset, max)) = scroller.source.as_ref().map(|s| s()) { eprintln!("[scroll] {key} clock={clock:.4} offset={offset:.2} max={max:.2} to={to:?}"); } }
             match to {
                 Some(to) if owned.contains(key) => moves.push(Move { key: key.clone(), from: scroller.from, to }),
+                Some(to) if across.contains(key) => tx.scroll_to_x(key.clone(), to),
                 Some(to) => tx.scroll_to_instant(key.clone(), 0.0, to),
                 None => {}
             }
@@ -310,5 +322,20 @@ mod tests {
         assert_eq!(moves[0].from, 1000.0);
         assert!(moves[0].to < 1000.0, "a notch up moves toward the start");
         assert!(scrollers.take_moves().is_empty());
+    }
+
+    #[test]
+    fn a_sideways_delta_glides_like_a_vertical_one() {
+        let mut scrollers = Scrollers::default();
+        let mut tx = Tx::default();
+        scrollers.sideways("table", -80.0, true, 60.0, source(100.0), &mut tx);
+        assert!(scrollers.across.contains("table"));
+        // The fingers' distance lands at once and momentum carries on after it.
+        assert_eq!(scrollers.views["table"].pending, 80.0);
+        assert!(scrollers.step(1.0 / 144.0, &mut tx));
+        assert!(scrollers.views["table"].coast > 0.0);
+        // No delta, no motion (a gesture's release event).
+        scrollers.sideways("other", 0.0, true, 60.0, source(0.0), &mut tx);
+        assert!(!scrollers.views.contains_key("other"));
     }
 }

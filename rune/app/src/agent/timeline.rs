@@ -300,7 +300,7 @@ impl App {
         // GPUiX's readingScrollY applies a fixed 2x gain only to vertical trackpad input.
         if e.precise && !e.mods.shift && e.dx.abs() <= e.dy.abs() { e.dy *= 2.0; }
         if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
-        // Shift turns a wheel sideways: Rune scrolls the wide table or code under the pointer.
+        // Shift turns a wheel sideways: a wide table under the pointer takes it (`table.rs`).
         if e.mods.shift && !e.precise { return false; }
         let Some(session) = self.sessions.get_mut(session_id) else { return false };
         let up = e.dy > 0.0;
@@ -510,7 +510,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             // Leading newlines from the stream would open the reply with blank lines.
             for (n, segment) in super::table::segments(message.text.trim_start_matches(['\n', '\r'])).into_iter().enumerate() {
                 body = body.child(match segment {
-                    super::table::Segment::Table(rows) => super::table::view(app, &rows, timeline_width(app), &style, format!("table-x:{tab_id}:{}:{n}", message.id), foot),
+                    super::table::Segment::Table(rows) => super::table::view(app, &rows, timeline_width(app), &style, format!("table-x:{tab_id}:{}:{n}", message.id), foot, &session_id),
                     super::table::Segment::Text(text) => Markdown::new(text.to_owned())
                         .highlights(prose::highlights(text, p))
                         .streaming(streaming)

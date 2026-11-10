@@ -89,8 +89,9 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
         let mut item = row().key(format!("pane-tab:{tab_id}")).h(TAB_ROW_H).px(16.0).gap(10.0).center_y()
             .max_w(212.5)
             .fill(if selected { rgb(p.bg) } else { Color::TRANSPARENT })
-            .child(icon(app, g, 1.2, if selected { color } else { rgb(p.muted) }))
+            .child(text(g).font(app.ty.icon_sized(13.0)).color(color))
             .child(text(app.tab_title(tab)).font(app.ty.tab()).color(fg).truncate().shrink())
+            .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| { if inside { a.tab_hover = Some(tab_id); } else if a.tab_hover == Some(tab_id) { a.tab_hover = None; } })
             .on_press(move |a: &mut App| { a.select_tab(tab_id); a.focus = Focus::Content; });
         if focused {
             item = item.on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("pane-tab:{index}"), r); });
@@ -99,18 +100,19 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
             TabKind::Editor { path } => app.buffers.get(path).is_some_and(crate::editor::Buffer::dirty),
             _ => false,
         };
-        if modified {
+        if modified && app.tab_hover != Some(tab_id) {
             // Unsaved: a yellow dot in a soft halo takes the close glyph's place (`buffer_tabs`).
             item = item.child(el().w(18.0).h(18.0).center()
                 .child(el().w(12.0).h(12.0).radius(6.0).center().fill(rgb(p.yellow).alpha(0.22))
                     .child(el().w(8.0).h(8.0).radius(4.0).fill(rgb(p.yellow)))));
-        } else if selected {
-            item = item.child(el().w(18.0).h(18.0).center()
+        } else if selected || app.tab_hover == Some(tab_id) {
+            item = item.child(el().key(format!("pane-close:{tab_id}")).w(18.0).h(18.0).center()
                 .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
                 .on_press(move |a: &mut App| {
                     if let Some(index) = a.tabs.iter().position(|t| t.id == tab_id) { a.close_tab(index); }
                 }));
         }
+        if !modified && !selected && app.tab_hover != Some(tab_id) { item = item.child(el().w(18.0).h(18.0)); }
         tabs = tabs.child(item);
     }
     let plus = app.tabs.len();

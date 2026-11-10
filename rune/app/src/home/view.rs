@@ -54,7 +54,7 @@ fn history(app: &App, term: &Terminal, composer_h: f32) -> El {
     let viewport_h = (term.area[1] - if term.shell.busy() && term.long_running() { 0.0 } else { composer_h }).max(0.0);
     let home = std::env::var("HOME").unwrap_or_default();
     // Home heads its scrollback with the splash; a plain Terminal tab starts at the prompt.
-    let mut content = col().w_full().min_h(viewport_h).justify_end();
+    let mut content = col().w_full().min_h(viewport_h).justify_end().selection_group(true);
     if app.active_tab().kind == crate::tabs::TabKind::Home {
         content = content.child(splash(app).h(viewport_h).w_full());
     }
@@ -133,7 +133,7 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
             .pin(None, Some(row_h * 1.1), Some(cells.inset), None));
     }
     for (index, line) in command.iter().enumerate() {
-        header = header.child(text((*line).to_owned()).font(ink(app, 1.0, None)).color(rgb(p.fg))
+        header = header.child(text((*line).to_owned()).selectable(true).font(ink(app, 1.0, None)).color(rgb(p.fg))
             .absolute(cells.inset, row_h * (2.19 + index as f32)));
     }
     let body_h = height - output;
@@ -143,7 +143,7 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
             .font(ink(app, 0.85, None)).color(rgb(p.muted)).absolute(cells.inset, 0.0));
     }
     if !block.lines.is_empty() {
-        body = body.child(rows_view(app, &block.lines, cells, lift_for(p)).absolute(cells.inset, note));
+        body = body.child(rows_view(app, &block.lines, cells, lift_for(p), true).absolute(cells.inset, note));
     }
     if let (Some((row, col)), true) = (block.cursor, block.running() && term.long_running()) {
         body = body.child(el().w(cells.cell).h(row_h).fill(rgb(p.accent).alpha(0.45))
@@ -156,6 +156,7 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
             }
         })
         .on_press(move |a: &mut App| {
+            a.select_tab(tab_id);
             if let Some(term) = a.terminals.get_mut(&tab_id) {
                 term.selected = if term.selected == Some(block_id) { None } else { Some(block_id) };
             }
@@ -182,7 +183,7 @@ fn directory_label(directory: &str, home: &str) -> String {
 
 /// Captured rows as one text element with a line per row, runs padded to their cell column,
 /// plus background rectangles. `lift` brightens low-contrast default-background ink.
-pub fn rows_view(app: &App, rows: &[Row], cells: Cells, lift: impl Fn(u32) -> u32) -> El {
+pub fn rows_view(app: &App, rows: &[Row], cells: Cells, lift: impl Fn(u32) -> u32, selectable: bool) -> El {
     let mut body = String::new();
     let mut spans = Vec::new();
     let mut fills = Vec::new();
@@ -214,7 +215,7 @@ pub fn rows_view(app: &App, rows: &[Row], cells: Cells, lift: impl Fn(u32) -> u3
         layer = layer.child(el().w(width as f32 * cells.cell).h(cells.row).fill(rgb(bg))
             .absolute(col as f32 * cells.cell, y as f32 * cells.row));
     }
-    layer.child(text(body).spans(spans).font(ink(app, 1.0, None)).color(rgb(app.pal.fg)).absolute(0.0, 0.0))
+    layer.child(text(body).selectable(selectable).spans(spans).font(ink(app, 1.0, None)).color(rgb(app.pal.fg)).absolute(0.0, 0.0))
 }
 
 /// `blockOutputForeground`: on dark themes, blend ink toward white until it reaches 4.5:1.
@@ -291,15 +292,16 @@ fn composer(app: &App, term: &Terminal, height: f32) -> El {
     let cells = Cells::of(app);
     let tab = app.active_tab();
     let draft = &tab.draft;
+    let tab_id = tab.id;
     let input = rune::text_input(draft, ink(app, 1.0, None))
         .key(format!("terminal-command:{}", tab.id))
         .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder("Enter a command", rgb(p.muted))
         .color(rgb(p.fg)).w_full()
-        .on_edit(|a: &mut App| { let i = a.active; &mut a.tabs[i].draft })
-        .on_input_change(|a: &mut App, _: &mut Tx| a.composer_edited())
-        .on_input_key(|a: &mut App, e: &rune::KeyEvent, tx: &mut Tx| a.terminal_composer_key(e, tx))
-        .on_submit(|a: &mut App, _: &mut Tx| a.submit());
+        .on_edit(move |a: &mut App| { a.select_tab(tab_id); let i = a.active; &mut a.tabs[i].draft })
+        .on_input_change(move |a: &mut App, _: &mut Tx| { a.select_tab(tab_id); a.composer_edited(); })
+        .on_input_key(move |a: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { a.select_tab(tab_id); a.terminal_composer_key(e, tx) })
+        .on_submit(move |a: &mut App, _: &mut Tx| { a.select_tab(tab_id); a.submit(); });
     let line_top = 28.0 * s + cells.row * 0.9;
     let mut card = el().key("terminal-block-input").w_full().h(height)
         .border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.fg).alpha(0.1))

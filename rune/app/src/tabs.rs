@@ -41,11 +41,33 @@ impl App {
 
     /// Close a tab; its pane closes with its last tab, and the last tab anywhere leaves a Home.
     pub fn close_tab(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let (dirty, can_save) = match &tab.kind {
+            TabKind::Editor { path } => (self.buffers.get(path).is_some_and(|b| b.dirty()), true),
+            TabKind::Database { path } => {
+                if let Some(db) = self.databases.get_mut(path) {
+                    if db.pending.is_some() { db.error = Some("Wait for the current database request before closing".into()); return; }
+                    (db.cell.is_some() || !db.changes().is_empty(), false)
+                } else { (false, false) }
+            }
+            _ => (false, false),
+        };
+        if dirty {
+            self.modal = Some(crate::ui::modal::Modal::unsaved(tab.id, &self.tab_title(tab), can_save));
+            return;
+        }
+        self.close_tab_now(index);
+    }
+
+    pub(crate) fn close_tab_now(&mut self, index: usize) {
         if index >= self.tabs.len() { return; }
         let removed = self.tabs.remove(index);
         self.close_terminal(removed.id);
         if let TabKind::Editor { path } = &removed.kind {
             if !self.tabs.iter().any(|t| t.kind == removed.kind) { self.lsp_close(path); }
+        }
+        if let TabKind::Database { path } = &removed.kind {
+            if !self.tabs.iter().any(|t| t.kind == removed.kind) { self.databases.remove(path); }
         }
         if !self.layout.remove(removed.id) {
             self.open_tab(TabKind::Home);
@@ -76,6 +98,13 @@ impl App {
         let index = self.active;
         let text = self.tabs[index].draft.text.trim().to_owned();
         if text.is_empty() { return; }
+        if matches!(self.tabs[index].kind, TabKind::Agent { .. }) {
+            match text.trim_start_matches(':') {
+                "q" => { self.tabs[index].draft.clear(); self.close_tab(index); return; }
+                "qall" | "qa" => { self.tabs[index].draft.clear(); self.close_workspace(self.workspace_active); return; }
+                _ => {}
+            }
+        }
         self.tabs[index].draft.clear();
         match self.tabs[index].kind.clone() {
             TabKind::Home | TabKind::Terminal => self.run_command(index, text),

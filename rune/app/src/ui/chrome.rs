@@ -111,14 +111,24 @@ fn sidebar(app: &App) -> El {
 
 fn workspace_tabs(app: &App) -> El {
     let p = app.pal;
-    let tab = row().key("workspace-tab").h(TAB_ROW_H).px(14.0).gap(9.0).center_y().fill(rgb(p.bg))
-        .corners([6.0, 6.0, 0.0, 0.0])
-        .child(icon(app, glyph::FOLDER, 1.25, rgb(p.folder)))
-        .child(text(app.workspace_name.clone()).font(app.ty.tab()).color(rgb(p.fg)))
-        .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)).ml(8.0))
-        .on_layout(|s: &mut App, r: [f32; 4]| { s.rects.insert("workspace-tab:0".into(), r); });
-    row().key("workspace-tabs").w_full().h(TAB_ROW_H).fill(rgb(p.surface)).items_end()
-        .child(tab)
-        .child(el().w(32.0).h(TAB_ROW_H).center().child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
-            .on_layout(|s: &mut App, r: [f32; 4]| { s.rects.insert("workspace-tab:1".into(), r); }))
+    let mut strip = row().key("workspace-tabs").w_full().h(TAB_ROW_H).fill(rgb(p.surface)).items_end();
+    for (index, entry) in app.workspaces.iter().enumerate() {
+        let active = index == app.workspace_active;
+        let title = if active { app.workspace_name.clone() } else { entry.title.clone() };
+        let tab = row().key(format!("workspace-tab:{index}")).h(TAB_ROW_H).px(14.0).gap(9.0).center_y()
+            .fill(rgb(if active { p.bg } else { p.surface })).hover(rgb(p.hover)).corners([6.0, 6.0, 0.0, 0.0])
+            .child(icon(app, glyph::FOLDER, 1.25, rgb(p.folder)))
+            .child(text(title).font(app.ty.tab()).color(rgb(if active { p.fg } else { p.dim })).truncate().max_w(180.0))
+            .child(el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center().hover(rgb(p.hover))
+                .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
+                .on_press(move |a: &mut App| a.close_workspace(index)))
+            .on_press(move |a: &mut App| a.select_workspace(index))
+            .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("workspace-tab:{index}"), r); });
+        strip = strip.child(tab);
+    }
+    let plus = app.workspaces.len();
+    strip.child(el().key("workspace-new").w(32.0).h(TAB_ROW_H).center().hover(rgb(p.hover))
+        .child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
+        .on_press(|a: &mut App| a.new_workspace())
+        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("workspace-tab:{plus}"), r); }))
 }

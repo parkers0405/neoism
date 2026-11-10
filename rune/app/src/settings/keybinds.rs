@@ -138,7 +138,7 @@ pub const KEYBINDS: &[KeybindDef] = &[
     ),
     kb(
         "createtab",
-        "New tab",
+        "New workspace",
         KeyGroup::Global,
         "super",
         "t",
@@ -147,7 +147,7 @@ pub const KEYBINDS: &[KeybindDef] = &[
     ),
     kb(
         "createworkspaceterminaltab",
-        "New workspace tab",
+        "New terminal tab",
         KeyGroup::Global,
         "",
         "",

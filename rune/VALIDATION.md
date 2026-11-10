@@ -64,6 +64,54 @@ These temporary artifacts are reproducible with the scripts; they are not commit
 The screenshot suite is a reproducible regression baseline, not an assertion that every reference pixel matches.
 Longer mixed workloads remain to be measured. The 20,000-line first-open cost also remains visible in the trace.
 
-Rendered Markdown editing is deliberately deferred. Database filtering/schema detail and full rebinding coverage
-still need comparison with the reference. The installed launcher, release packaging, and GPUiX removal remain
+Rendered Markdown editing is deliberately deferred. Database filtering/schema detail are implemented and checked
+against a scratch database; their full visual parity and complete rebinding coverage still need comparison with the reference. The installed launcher, release packaging, and GPUiX removal remain
 the separate cutover step, after parity is established.
+
+
+## Workspace, pointer and database follow-up (2026-11-09)
+
+The last completed build passed 106 Rust tests. The tests include save acknowledgements/failures, editing while
+saving, workspace draft/focus preservation, adjacent/final workspace close, and agent `q` versus `qall`.
+Headless input checks also exercised Ctrl+Shift+Left/Right, Ctrl+Shift+W, workspace `+`, Alt+1 restoration,
+closing an inactive tab through its hover X, and dirty-tab confirmation.
+
+Each workspace now owns a daemon socket/inbox and independent tabs, split layout, editor buffers, terminal
+state, conversations, sidebars and focus. Workspace creation/claim/switch use the existing protocol. Closing
+uses `CloseWindowWorkspace` and waits for its acknowledgement before selecting the neighbour or quitting the
+last window. It does not use the global `CloseHostWorkspace` operation. A separate ephemeral daemon verified
+creation, close acknowledgement, editor restoration and subsequent LSP hover.
+
+The scrolled mouse-hover bug was a coordinate-space mismatch: virtual rows rebase their local origin, so local
+pointer coordinates were interpreted as document coordinates. Mouse hit testing now derives document positions
+from window coordinates, the editor viewport and its scroll offset. A Rust reproducer previously requested line
+61 while Shift+K requested line 150. Both now request line 150. TypeScript, JavaScript and Python checks also
+returned identical nonempty documentation for mouse and keyboard hover at line 150. These tests used actual
+language servers through the daemon. Captures/replies are in `/tmp/neoism-rune-workspaces/hover-{ts,js,py}.*`.
+
+Inspection of those PNGs also found a second wrapping pass inside virtual code rows. Giving the prewrapped
+rich-text fragment the remaining row width prevents short comments from wrapping onto the following code line.
+Tab file glyphs now use the same font, mapping, size and colors as tree glyphs, including inactive tabs.
+
+Database checks inserted an untouched draft row into a scratch SQLite table and read back its generated id,
+`Untitled` default text and integer-zero default. The typed `done=1` filter returned only the `Second` row.
+Schema details, explicit NULL versus omitted/default columns and cell value types are represented in the UI.
+
+Rust builds were paused at the user's request. No Cargo, rustc or Rust linker was running when checked, and no
+new compilation was started after that request. The preview on Hyprland workspace 4 uses the last completed
+binary. The native keyboard test stopped when focus changed; it does **not** establish native navigation or
+final-window-close success. No new performance claim is based on these headless runs.
+
+Source changes after the last completed test compilation still need a build/test pass once builds are allowed:
+
+- Wait for the current finder query before Enter opens a result; cover immediate Enter against stale results.
+- Discard remaining old-socket replies after a workspace close acknowledgement selects another workspace;
+  cover an old file reply sharing the next workspace's path.
+- Prevent new workspace creation while its predecessor's close is pending and reject invalid close indices.
+- Select the owning pane immediately when reopening an already-open file/config/conversation.
+- Give confirmation modals keyboard ownership over focused composers.
+- Dismiss hover/completion on scrolling, including precise scrolling, and rebuild when a visible popup closes.
+
+The new regression tests and syntax checks are saved, but the additional tests were not compiled/run after the
+build pause. Full parity, durable workspace restoration, remaining terminal/keybinding coverage, longer native
+workloads and the packaging/installed-binary cutover remain outstanding. GPUiX remains the shipping reference.

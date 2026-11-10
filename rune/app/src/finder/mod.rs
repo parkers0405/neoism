@@ -48,6 +48,7 @@ pub struct Finder {
     pub preview: Option<(String, Vec<String>)>,
     request: u64,
     due: Option<Instant>,
+    accept_pending: bool,
 }
 
 const FILE_DEBOUNCE: Duration = Duration::from_millis(75);
@@ -58,7 +59,7 @@ impl Finder {
     fn new(mode: Mode) -> Finder {
         let mut query = TextEdit::new("");
         query.focused = true;
-        Finder { mode, query, exact: false, grep_mode: SearchGrepMode::Fuzzy, hits: Vec::new(), selected: 0, loading: false, error: None, preview: None, request: 0, due: Some(Instant::now()) }
+        Finder { accept_pending: false, mode, query, exact: false, grep_mode: SearchGrepMode::Fuzzy, hits: Vec::new(), selected: 0, loading: false, error: None, preview: None, request: 0, due: Some(Instant::now()) }
     }
 
     pub fn placeholder(&self) -> &'static str {
@@ -80,6 +81,7 @@ impl Finder {
 
     /// A query edit: search again after the mode's debounce.
     fn edited(&mut self) {
+        self.accept_pending = false;
         let delay = if self.mode == Mode::Grep { GREP_DEBOUNCE } else { FILE_DEBOUNCE };
         self.due = Some(Instant::now() + delay);
     }
@@ -123,6 +125,9 @@ impl App {
 
     /// Open the selected (or clicked) hit and close the finder.
     pub fn accept_finder(&mut self, index: Option<usize>) {
+        if let Some(f) = &mut self.finder {
+            if f.due.is_some() || f.loading { f.accept_pending = index.is_none(); return; }
+        }
         let Some(finder) = self.finder.take() else { return };
         let Some(hit) = finder.hits.get(index.unwrap_or(finder.selected)) else { return };
         let path = std::path::Path::new(&self.cwd).join(hit.path()).display().to_string();
@@ -188,7 +193,8 @@ impl App {
         finder.selected = 0;
         finder.loading = false;
         finder.error = None;
-        self.request_preview();
+        let accept = std::mem::take(&mut finder.accept_pending);
+        if accept { self.accept_finder(None); } else { self.request_preview(); }
     }
 
     /// Grep and git modes preview the selected hit's file.
@@ -225,5 +231,32 @@ pub fn git_marker(status: SearchGitStatus) -> &'static str {
         SearchGitStatus::Renamed => "R",
         SearchGitStatus::Untracked => "?",
         SearchGitStatus::Conflict => "!",
+    }
+}
+
+#[cfg(test)]
+mod fast_submit_tests {
+    use super::*;
+
+    #[test]
+    fn enter_waits_for_the_typed_query_instead_of_opening_a_stale_hit() {
+        let mut app = App::new();
+        app.open_finder(Mode::Files);
+        app.finder_tick(Instant::now() + Duration::from_secs(1));
+        app.apply_search(serde_json::from_value(serde_json::json!({"SearchFilesResult": {
+            "req_id": 1, "hits": [{"path":"wrong.txt","score":0}]
+        }})).unwrap());
+        app.finder.as_mut().unwrap().query = TextEdit::new("wanted.txt");
+        app.finder_edited();
+        app.accept_finder(None);
+        assert!(app.finder.is_some());
+        assert!(app.buffers.is_empty());
+        app.finder_tick(Instant::now() + Duration::from_secs(1));
+        app.apply_search(serde_json::from_value(serde_json::json!({"SearchFilesResult": {
+            "req_id": 2, "hits": [{"path":"wanted.txt","score":100}]
+        }})).unwrap());
+        assert!(app.finder.is_none());
+        assert!(app.buffers.contains_key("wanted.txt"));
+        assert!(!app.buffers.contains_key("wrong.txt"));
     }
 }

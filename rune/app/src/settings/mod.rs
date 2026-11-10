@@ -308,8 +308,8 @@ impl App {
         self.open_config_editor();
     }
 
-    pub(crate) fn apply_config_reply(&mut self, message: &Value) {
-        self.apply_config_document_reply(message);
+    pub(crate) fn apply_config_reply(&mut self, request_id: u64, message: &Value) {
+        self.apply_config_document_reply(request_id, message);
         if let Some(config) = message.get("Config") { self.keybindings = config["value"]["keybinds"]["keys"].clone(); }
         let Some(settings) = &mut self.settings else { return };
         if let Some(config) = message.get("Config") {

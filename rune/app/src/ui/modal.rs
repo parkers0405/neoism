@@ -19,6 +19,8 @@ const ACTION_H: f32 = 32.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Close,
+    DiscardTab(u64),
+    SaveTab(u64),
 }
 
 pub struct Button {
@@ -35,6 +37,13 @@ pub struct Modal {
 }
 
 impl Modal {
+    pub fn unsaved(tab: u64, title: &str, can_save: bool) -> Self {
+        let mut buttons = vec![Button { label: "Keep editing".into(), key: "Esc".into(), action: Action::Close }];
+        if can_save { buttons.push(Button { label: "Save and close".into(), key: String::new(), action: Action::SaveTab(tab) }); }
+        buttons.push(Button { label: "Discard changes and close".into(), key: String::new(), action: Action::DiscardTab(tab) });
+        Self { title: "Unsaved changes".into(), body: format!("{title} has changes that have not been saved."), buttons, selected: 0 }
+    }
+
     /// "About Neoism": the release version and the commit this build came from.
     pub fn about() -> Modal {
         let manifest = include_str!("../../../../Cargo.toml");
@@ -53,7 +62,12 @@ impl Modal {
 
 impl App {
     pub fn run_modal_action(&mut self, action: Action) {
-        match action { Action::Close => self.modal = None }
+        self.modal = None;
+        match action {
+            Action::Close => {},
+            Action::DiscardTab(id) => { if let Some(i) = self.tabs.iter().position(|t| t.id == id) { self.close_tab_now(i); } }
+            Action::SaveTab(id) => self.save_and_close(id),
+        }
     }
 
     pub fn modal_key(&mut self, event: &KeyEvent) -> bool {

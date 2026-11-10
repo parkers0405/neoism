@@ -156,14 +156,15 @@ impl App {
     pub(crate) fn run_action(&mut self, action: Action, tx: &mut Tx) {
         let count = self.tabs.len();
         match action {
+            Action::NewWorkspace => self.new_workspace(),
             Action::NewTab => { self.open_tab(TabKind::Home); }
             Action::CloseTab => self.close_tab(self.active),
             Action::CloseOtherTabs => {
                 let keep = self.tabs[self.active].id;
                 for index in (0..count).rev() {
-                    if self.tabs[index].id != keep { self.close_tab(index); }
+                    if self.tabs[index].id != keep { self.close_tab(index); if self.modal.is_some() { break; } }
                 }
-                self.active = 0;
+                if let Some(index) = self.tabs.iter().position(|t| t.id == keep) { self.select_tab(self.tabs[index].id); }
             }
             Action::NextTab => self.step_tab(true),
             Action::PreviousTab => self.step_tab(false),

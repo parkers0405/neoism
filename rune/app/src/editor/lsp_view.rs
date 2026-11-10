@@ -212,6 +212,7 @@ pub fn overlay(app: &App) -> El {
     ) else {
         return el();
     };
+    let cell = if buffer.lsp.completion.is_none() { buffer.lsp.hover.as_ref().and_then(|h| h.anchor).unwrap_or(cell) } else { cell };
     if let Some(view) = buffer.view_rect {
         if cell[1] + cell[3] <= view[1] || cell[1] >= view[1] + view[3] {
             return el();

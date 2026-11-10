@@ -1,12 +1,46 @@
 //! Workspace SQLite tables over the existing Database protocol. Drafts stay in their tab.
+mod controls;
 mod view;
 use crate::{app::App, daemon::Family, tabs::TabKind};
 use neoism_protocol::database::*;
 use rune::TextEdit;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 pub use view::view;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    Text,
+    Integer,
+    Real,
+    Null,
+    Default,
+}
+impl CellKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Integer => "integer",
+            Self::Real => "real",
+            Self::Null => "NULL",
+            Self::Default => "DEFAULT",
+        }
+    }
+}
+pub struct FilterPicker {
+    pub column: String,
+    pub values: Vec<DatabaseValueCount>,
+    pub selected: Vec<DatabaseValue>,
+    pub search: TextEdit,
+    pub truncated: bool,
+    pub loading: bool,
+}
+
 pub struct Database {
+    pub filters: BTreeMap<String, Vec<DatabaseValue>>,
+    pub filter_picker: Option<FilterPicker>,
+    pub show_schema: bool,
+    pub default_cells: BTreeSet<(usize, usize)>,
+    pub cell_kind: CellKind,
     pub path: String,
     pub scope: String,
     pub path_input: TextEdit,
@@ -30,6 +64,11 @@ pub struct Database {
 impl Database {
     fn new(path: &str, scope: &str) -> Self {
         Self {
+            filters: BTreeMap::new(),
+            filter_picker: None,
+            show_schema: false,
+            default_cells: BTreeSet::new(),
+            cell_kind: CellKind::Text,
             path: path.into(),
             scope: scope.into(),
             path_input: TextEdit::new(path),
@@ -66,7 +105,14 @@ impl Database {
                 if i >= self.original.len() {
                     return (!self.deleted[i]).then(|| DatabaseChange {
                         kind: DatabaseChangeKind::Insert,
-                        values: record(row),
+                        values: record(row)
+                            .into_iter()
+                            .filter(|(name, _)| {
+                                let column =
+                                    self.columns.iter().position(|c| c == name).unwrap();
+                                !self.default_cells.contains(&(i, column))
+                            })
+                            .collect(),
                         identity: None,
                         original: None,
                     });
@@ -207,7 +253,14 @@ impl App {
                 limit: 50,
                 offset: db.offset,
                 sort: db.sort.clone(),
-                filters: vec![],
+                filters: db
+                    .filters
+                    .iter()
+                    .map(|(column, values)| DatabaseFilter {
+                        column: column.clone(),
+                        values: values.clone(),
+                    })
+                    .collect(),
             },
         );
     }
@@ -222,6 +275,8 @@ impl App {
         db.table = Some(table.into());
         db.offset = 0;
         db.sort = None;
+        db.filters.clear();
+        db.filter_picker = None;
         self.database_browse(key);
     }
     pub fn database_page(&mut self, key: &str, next: bool) {
@@ -258,6 +313,90 @@ impl App {
         db.offset = 0;
         self.database_browse(key);
     }
+    pub fn database_add_row(&mut self, key: &str) {
+        let Some(db) = self.databases.get_mut(key) else {
+            return;
+        };
+        if !db.editable || db.pending.is_some() || db.cell.is_some() || db.uncertain {
+            return;
+        }
+        let r = db.rows.len();
+        db.default_cells
+            .extend((0..db.columns.len()).map(|c| (r, c)));
+        db.rows.push(vec![DatabaseValue::Null; db.columns.len()]);
+        db.deleted.push(false);
+    }
+    pub fn database_filter_open(&mut self, key: &str, column: &str) {
+        let Some(db) = self.databases.get_mut(key) else {
+            return;
+        };
+        if db.locked() || db.uncertain {
+            db.error = Some("Apply or discard changes before filtering".into());
+            return;
+        }
+        let Some(table) = db.table.clone() else {
+            return;
+        };
+        let filters = db
+            .filters
+            .iter()
+            .filter(|(name, _)| name.as_str() != column)
+            .map(|(column, values)| DatabaseFilter {
+                column: column.clone(),
+                values: values.clone(),
+            })
+            .collect();
+        let path = db.path.clone();
+        let mut search = TextEdit::new("");
+        search.focused = true;
+        db.filter_picker = Some(FilterPicker {
+            column: column.into(),
+            values: vec![],
+            selected: vec![],
+            search,
+            truncated: false,
+            loading: true,
+        });
+        self.database_request(
+            key,
+            DatabaseRequest::Values {
+                path,
+                table,
+                column: column.into(),
+                filters,
+            },
+        );
+    }
+    pub fn database_filter_apply(&mut self, key: &str, clear: bool) {
+        let Some(db) = self.databases.get_mut(key) else {
+            return;
+        };
+        if db.locked() || db.uncertain {
+            return;
+        }
+        let Some(picker) = db.filter_picker.take() else {
+            return;
+        };
+        if clear {
+            db.filters.remove(&picker.column);
+        } else {
+            db.filters.insert(picker.column, picker.selected);
+        }
+        db.offset = 0;
+        self.database_browse(key);
+    }
+    pub fn database_filter_clear(&mut self, key: &str, column: &str) {
+        let Some(db) = self.databases.get_mut(key) else {
+            return;
+        };
+        if db.locked() || db.uncertain {
+            return;
+        }
+        db.filters.remove(column);
+        db.offset = 0;
+        db.filter_picker = None;
+        self.database_browse(key);
+    }
     pub fn database_edit(&mut self, key: &str, row: usize, column: usize) {
         let Some(db) = self.databases.get_mut(key) else {
             return;
@@ -277,6 +416,16 @@ impl App {
             db.error = Some("Binary cells are read-only".into());
             return;
         }
+        db.cell_kind = if db.default_cells.contains(&(row, column)) {
+            CellKind::Default
+        } else {
+            match value {
+                DatabaseValue::Integer(_) => CellKind::Integer,
+                DatabaseValue::Real(_) => CellKind::Real,
+                DatabaseValue::Null => CellKind::Null,
+                _ => CellKind::Text,
+            }
+        };
         let mut edit = TextEdit::new(if matches!(value, DatabaseValue::Null) {
             String::new()
         } else {
@@ -293,14 +442,24 @@ impl App {
         let Some((r, c, edit)) = db.cell.take() else {
             return;
         };
-        let value = if null {
-            Ok(DatabaseValue::Null)
-        } else {
-            edited(&db.rows[r][c], &edit.text)
+        let kind = if null { CellKind::Null } else { db.cell_kind };
+        let value = match kind {
+            CellKind::Default if r < db.original.len() => {
+                Err("Defaults apply only to new rows".into())
+            }
+            CellKind::Null | CellKind::Default => Ok(DatabaseValue::Null),
+            CellKind::Integer => edited(&DatabaseValue::Integer("0".into()), &edit.text),
+            CellKind::Real => edited(&DatabaseValue::Real(0.0), &edit.text),
+            CellKind::Text => Ok(DatabaseValue::Text(edit.text.clone())),
         };
         match value {
             Ok(v) => {
                 db.rows[r][c] = v;
+                if kind == CellKind::Default {
+                    db.default_cells.insert((r, c));
+                } else {
+                    db.default_cells.remove(&(r, c));
+                }
                 db.error = None
             }
             Err(e) => {
@@ -342,12 +501,17 @@ impl App {
         db.rows = db.original.clone();
         db.deleted = vec![false; db.rows.len()];
         db.cell = None;
+        db.default_cells.clear();
         db.error = None;
         if std::mem::take(&mut db.uncertain) {
             self.database_browse(key);
         }
     }
-    pub fn apply_database_reply(&mut self, id: u64, message: Result<Box<DatabaseReply>, String>) {
+    pub fn apply_database_reply(
+        &mut self,
+        id: u64,
+        message: Result<Box<DatabaseReply>, String>,
+    ) {
         let Some(key) = self
             .databases
             .iter()
@@ -373,6 +537,8 @@ impl App {
                 total,
                 editable,
             }) => {
+                db.default_cells.clear();
+                db.cell = None;
                 db.columns = columns;
                 db.original = rows.clone();
                 db.rows = rows;
@@ -381,16 +547,56 @@ impl App {
                 db.editable = editable;
                 db.deleted = vec![false; db.rows.len()];
             }
+            Ok(DatabaseReply::Values { values, truncated }) => {
+                if let Some(picker) = &mut db.filter_picker {
+                    picker.selected =
+                        db.filters.get(&picker.column).cloned().unwrap_or_else(|| {
+                            values.iter().map(|v| v.value.clone()).collect()
+                        });
+                    picker.values = values;
+                    picker.truncated = truncated;
+                    picker.loading = false;
+                }
+            }
             Ok(DatabaseReply::Applied { .. }) => self.database_browse(&key),
             Ok(DatabaseReply::Error { message }) => db.error = Some(message),
             Err(e) => db.error = Some(format!("Invalid database response: {e}")),
-            _ => {}
+        }
+        if let Some(db) = self.databases.get_mut(&key) {
+            if db.error.is_some() {
+                if let Some(p) = &mut db.filter_picker {
+                    p.loading = false;
+                }
+            }
         }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inserted_defaults_are_omitted_but_explicit_null_is_sent() {
+        let mut db = Database::new("x.db", "/");
+        db.columns = vec!["id".into(), "title".into(), "done".into()];
+        db.rows = vec![vec![
+            DatabaseValue::Null,
+            DatabaseValue::Text("draft".into()),
+            DatabaseValue::Null,
+        ]];
+        db.deleted = vec![false];
+        db.default_cells.insert((0, 0));
+        let changes = db.changes();
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].values.contains_key("id"));
+        assert_eq!(changes[0].values["done"], DatabaseValue::Null);
+        assert_eq!(
+            changes[0].values["title"],
+            DatabaseValue::Text("draft".into())
+        );
+        db.deleted[0] = true;
+        assert!(db.changes().is_empty());
+    }
+
     #[test]
     fn integer_precision_and_null_are_preserved() {
         assert_eq!(
@@ -434,7 +640,7 @@ mod tests {
 pub fn fixture(app: &mut App) {
     let mut db = Database::new("fixture.sqlite", "/tmp");
     db.table = Some("tasks".into());
-    db.objects = serde_json::from_value(serde_json::json!([{"name":"tasks","kind":"table","sql":"CREATE TABLE tasks(id INTEGER PRIMARY KEY, title TEXT, done INTEGER)","columns":[],"indexes":[],"triggers":[]}])).unwrap();
+    db.objects = serde_json::from_value(serde_json::json!([{"name":"tasks","kind":"table","sql":"CREATE TABLE tasks(id INTEGER PRIMARY KEY, title TEXT, done INTEGER)","columns":[{"name":"id","data_type":"INTEGER","not_null":false,"default_value":null,"primary_key":1},{"name":"title","data_type":"TEXT","not_null":false,"default_value":"'Untitled'","primary_key":0},{"name":"done","data_type":"INTEGER","not_null":true,"default_value":"0","primary_key":0}],"indexes":[{"name":"tasks_title","unique":false,"columns":["title"]}],"triggers":[]}])).unwrap();
     db.columns = vec!["id".into(), "title".into(), "done".into()];
     db.rows = (0..12)
         .map(|i| {

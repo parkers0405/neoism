@@ -21,7 +21,7 @@ pub fn view(app: &App, term: &Terminal) -> El {
     let inset = if term.shell.alt() { 0.0 } else { cells.inset };
     let Some(screen) = &term.screen else { return el() };
     let mut grid = el().key("terminal-grid").w_full().h_full()
-        .child(rows_view(app, &screen.rows, cells, |c| c).absolute(0.0, 0.0));
+        .child(rows_view(app, &screen.rows, cells, |c| c, !term.shell.mouse_tracking()).absolute(0.0, 0.0));
     if let Some(cursor) = screen.cursor {
         let (w, h, dy) = match cursor.shape {
             CursorShape::Block => (cells.cell, cells.row, 0.0),

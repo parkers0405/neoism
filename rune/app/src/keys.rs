@@ -23,6 +23,10 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     }
     let m = event.mods;
     match (&event.key, app.focus) {
+        (Key::Enter, Focus::Workspaces(index)) => {
+            if index == app.workspaces.len() { app.new_workspace(); } else { app.select_workspace(index); }
+            true
+        }
         (Key::Enter, Focus::Buffers(index)) => {
             match app.tabs.get(index).map(|t| t.id) {
                 Some(tab) => app.select_tab(tab),
@@ -40,6 +44,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 /// Window shortcuts. Text fields route their keys here first (`on_input_key`), so Alt chords
 /// never type into the composer.
 pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
     if app.capture_binding(event) { return true; }
     // An open menu owns its navigation keys before anything else.
     if app.menu.is_some() && app.menu_key(event) { return true; }
@@ -60,6 +65,8 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if m.ctrl && !m.alt && !m.logo {
         let split = match &event.key {
             Key::Tab => { app.step_tab(!m.shift); return true; }
+            Key::Left if m.shift => { app.step_tab(false); return true; }
+            Key::Right if m.shift => { app.step_tab(true); return true; }
             // Ctrl chords arrive as `Command` keys.
             Key::Command(c) if m.shift => match c.to_ascii_lowercase() {
                 'r' => Some(Axis::Horizontal),
@@ -77,6 +84,7 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if alt_only {
         if let Key::Text(t) = &event.key {
+            if let Ok(n) = t.parse::<usize>() { if (1..=9).contains(&n) { app.select_workspace(n - 1); return true; } }
             match t.to_lowercase().as_str() {
                 "a" => { app.open_tab(TabKind::Agent { session: None }); return true; }
                 "t" => { app.open_tab(TabKind::Terminal); return true; }
@@ -151,7 +159,7 @@ fn focus_up(app: &mut App) {
     let focus = app.focus;
     app.focus = match focus {
         Focus::Workspaces(i) => Focus::Workspaces(i),
-        Focus::Buffers(_) => Focus::Workspaces(0),
+        Focus::Buffers(_) => Focus::Workspaces(app.workspace_active),
         Focus::Content if app.focus_split_toward(Direction::Up) => Focus::Content,
         Focus::Content | Focus::Sidebar => Focus::Buffers(app.active),
     };
@@ -180,7 +188,7 @@ fn focus_step(app: &mut App, previous: bool) {
             let count = slots.len();
             Focus::Buffers(slots[if previous { (at + count - 1) % count } else { (at + 1) % count }])
         }
-        Focus::Workspaces(i) => Focus::Workspaces(if i == 0 { 1 } else { 0 }),
+        Focus::Workspaces(i) => Focus::Workspaces(if previous { (i + app.workspaces.len()) % (app.workspaces.len() + 1) } else { (i + 1) % (app.workspaces.len() + 1) }),
         Focus::Content if app.focus_split_toward(if previous { Direction::Left } else { Direction::Right }) => Focus::Content,
         Focus::Content if previous && app.sidebar.is_some() => Focus::Sidebar,
         Focus::Sidebar if !previous => Focus::Content,
@@ -213,7 +221,7 @@ impl App {
         }
         match self.focus {
             Focus::Buffers(i) => self.rects.get(&format!("pane-tab:{i}")).map(|r| tab_bar(*r, 16.0, scale, i == self.tabs.len())),
-            Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == 1)),
+            Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == self.workspaces.len())),
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| crate::editor::view::cursor_rect(self, b)),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("tree-row").map(|r| crate::tree::view::cursor_rect(self, *r)),
             Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) && !self.threads.is_empty() => self.conversation_cursor(),
@@ -250,7 +258,7 @@ impl App {
         }
         // An inline composer picker (`/model`, `/cd` …) types into its own query row.
         let inline_picker = self.composer.picker.as_ref().is_some_and(|p| p.kind != crate::agent::slash::Kind::Slash);
-        let overlay = self.picker.is_some() || self.finder.is_some() || inline_picker;
+        let overlay = self.picker.is_some() || self.finder.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some();
         let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. });
         let active = self.active;
         let mut changed = false;

@@ -126,6 +126,7 @@ pub struct BufferLsp {
     pub hover: Option<Hover>,
     pub completion: Option<Completion>,
     pointer: Option<(usize, usize, [f32; 4], Instant)>,
+    pointer_sent: bool,
     complete_at: Option<(Instant, Option<char>)>,
 }
 
@@ -134,6 +135,7 @@ impl BufferLsp {
         self.hover = None;
         self.completion = None;
         self.pointer = None;
+        self.pointer_sent = false;
         self.complete_at = None;
     }
 
@@ -293,6 +295,7 @@ impl App {
             self.lsp_sync(&path);
         }
         let hover = self.active_buffer_mut().and_then(|b| {
+            if b.lsp.pointer_sent { return None; }
             let (line, col, anchor, time) = b.lsp.pointer?;
             let elapsed = time.elapsed();
             if elapsed < Duration::from_millis(350) {
@@ -302,7 +305,7 @@ impl App {
                 );
                 return None;
             }
-            b.lsp.pointer = None;
+            b.lsp.pointer_sent = true;
             Some((line, col, anchor))
         });
         if let Some((line, col, anchor)) = hover {
@@ -447,10 +450,12 @@ impl App {
                         continue;
                     };
                     if contents.trim().is_empty() {
+                        let explicit = hover.anchor.is_none();
                         buffer.lsp.hover = None;
-                        buffer.message = Some("No hover information".into());
+                        if explicit { buffer.message = Some("No hover information".into()); }
                     } else {
                         hover.text = Some(contents.clone());
+                        if buffer.message.as_deref() == Some("No hover information") { buffer.message = None; }
                     }
                 }
             }
@@ -490,19 +495,21 @@ impl App {
         let Some(b) = self.active_buffer_mut() else {
             return;
         };
-        if b.doc.mode == Mode::Insert || b.lsp.completion.is_some() {
+        if b.lsp.completion.is_some() {
             return;
         }
         if b.lsp.pointer.is_some_and(|p| p.0 == line && p.1 == col) {
             return;
         }
         b.lsp.hover = None;
+        b.lsp.pointer_sent = false;
         b.lsp.pointer = Some((line, col, anchor, Instant::now()));
     }
 
     pub(crate) fn lsp_pointer_leave(&mut self) {
         if let Some(b) = self.active_buffer_mut() {
             b.lsp.pointer = None;
+            b.lsp.pointer_sent = false;
         }
     }
 

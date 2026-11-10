@@ -96,6 +96,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
     let mode_changing = app.tick_mode_pill();
+    let gliding = app.step_timeline_glides(clock, tx) | app.step_terminal_glides(clock, tx);
+    if gliding { tx.wake_after(std::time::Duration::ZERO); }
     if mode_changing { tx.wake_after(std::time::Duration::ZERO); }
     let panes_changed = app.sync_panes();
     // The directory-owning terminal's `cd` moves the workspace view with it.
@@ -129,7 +131,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || gliding
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

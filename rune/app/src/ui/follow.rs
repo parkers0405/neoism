@@ -120,6 +120,45 @@ impl Follow {
     }
 }
 
+/// An app-stepped scroll glide: a critically damped spring of `SPRING`'s response, advanced
+/// on the frame clock and placed with `Tx::scroll_to_instant`, so it animates even in commits
+/// Rune would land at once (a focused composer under a chat).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Glide {
+    pub pos: f32,
+    pub vel: f32,
+    pub target: f32,
+    clock: Option<f64>,
+}
+
+impl Glide {
+    /// Aim at `target` from where the view is (`from`), keeping a running glide's speed.
+    pub fn retarget(current: Option<Glide>, from: f32, target: f32) -> Glide {
+        let (pos, vel, clock) = current.map_or((from, 0.0, None), |g| (g.pos, g.vel, g.clock));
+        Glide { pos, vel, target, clock }
+    }
+
+    /// Advance to `clock` (seconds); `false` once it has come to rest on its target.
+    pub fn step(&mut self, clock: f64) -> bool {
+        let dt = self.clock.map_or(1.0 / 120.0, |last| (clock - last).clamp(0.0, 0.05)) as f32;
+        self.clock = Some(clock);
+        // Response 0.39 s ⇒ ω = 2π / 0.39; critically damped, integrated in small substeps.
+        let omega = std::f32::consts::TAU / 0.39;
+        let steps = ((dt / 0.004).ceil() as usize).max(1);
+        let h = dt / steps as f32;
+        for _ in 0..steps {
+            let accel = -2.0 * omega * self.vel - omega * omega * (self.pos - self.target);
+            self.vel += accel * h;
+            self.pos += self.vel * h;
+        }
+        if (self.pos - self.target).abs() < 0.25 && self.vel.abs() < 2.0 {
+            self.pos = self.target;
+            return false;
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

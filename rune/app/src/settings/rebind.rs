@@ -6,10 +6,10 @@ use serde_json::{Value, json};
 
 fn action(name: &str) -> Option<Action> {
     Some(match name {
-        "createtab" => Action::NewTab,
+        "createtab" => Action::NewWorkspace,
         "closesplitortab" => Action::CloseTab,
-        "selectnexttab" => Action::NextTab,
-        "selectprevtab" => Action::PreviousTab,
+        "selectnexttab" | "selectnextbuffertab" => Action::NextTab,
+        "selectprevtab" | "selectprevbuffertab" => Action::PreviousTab,
         "splitright" => Action::SplitRight,
         "splitdown" => Action::SplitDown,
         "selectnextsplit" => Action::NextSplit,
@@ -31,6 +31,9 @@ pub fn supported(name: &str) -> bool {
                 | "openconfigeditor"
                 | "createworkspaceterminaltab"
                 | "paste"
+                | "copy"
+                | "createwindow"
+                | "togglefullscreen"
         )
 }
 fn default(def: &KeybindDef) -> (&str, &str) {
@@ -167,7 +170,9 @@ impl App {
         let chosen = KEYBINDS
             .iter()
             .find(|d| {
-                supported(d.action) && same(binding(&self.keybindings, d), (&mods, &key))
+                supported(d.action)
+                    && (!matches!(d.action, "selectnextbuffertab" | "selectprevbuffertab") || matches!(self.active_tab().kind, TabKind::Editor { .. }))
+                    && same(binding(&self.keybindings, d), (&mods, &key))
             })
             .map(|d| d.action);
         if let Some(name) = chosen {
@@ -183,6 +188,15 @@ impl App {
                     "createworkspaceterminaltab" => {
                         self.open_tab(TabKind::Terminal);
                     }
+                    "togglefullscreen" => tx.toggle_full_screen(),
+                    "createwindow" => {
+                        match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).current_dir(&self.cwd)
+                            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()) {
+                            Ok(mut child) => { std::thread::spawn(move || { let _ = child.wait(); }); },
+                            Err(error) => { self.modal = Some(crate::ui::modal::Modal { title: "Could not open window".into(), body: error.to_string(), buttons: vec![], selected: 0 }); }
+                        }
+                    }
+                    "copy" => self.copy_terminal_selection(tx),
                     "paste" => {
                         tx.request_paste();
                     }

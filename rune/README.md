@@ -228,6 +228,13 @@ Live checks covered Rust, TypeScript, JavaScript and Python. Clipboard paste, mo
 dragging beyond the editor edge, `/usage`, Database browsing/editing and shortcut rebinding are implemented.
 Markdown files intentionally use the code editor for now; Extensions remains removed.
 
+Workspace creation is wired to Ctrl+Shift+W and the top `+`; Alt+1..9 restores each workspace's own panes,
+drafts and focus. Ctrl+Shift+Left/Right steps tabs in the active pane. Agent `q` closes its tab; `qall` closes
+its workspace through the daemon, selects an adjacent workspace, and quits when the last workspace closes.
+Tab close buttons appear on hover and file icons share the tree's font and mapping. Dirty editor closes wait
+for a successful save acknowledgement or an explicit discard choice. See VALIDATION.md for the current build
+pause and source changes still awaiting compilation.
+
 Run the checks from the repository root:
 
 ```sh

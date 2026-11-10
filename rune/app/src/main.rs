@@ -66,6 +66,7 @@ fn lsp_fixture(s: &mut App) {
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
     let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.sync_terminals(tx);
+    if app.quit_requested { tx.quit(); return true; }
     // The wordmark eases hover, shimmers and plays click effects off the frame clock.
     let animating = app.wordmark.tick(app.visible_wordmark(), clock);
     if animating { tx.wake_after(std::time::Duration::ZERO); }

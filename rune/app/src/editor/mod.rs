@@ -35,6 +35,8 @@ pub struct Buffer {
     pub prompt: Option<Prompt>,
     /// The lines a `WriteFile` in flight carries; they become the saved baseline on success.
     saving: Option<Vec<String>>,
+    saving_request: Option<u64>,
+    close_after_save: Option<u64>,
     /// A transient note under the code (`"file.rs" written`, errors).
     pub message: Option<String>,
     /// Line to put the cursor on once the text arrives.
@@ -63,7 +65,7 @@ pub const CONFIG_DOCUMENT: &str = "config.json";
 impl Buffer {
     fn new(path: String, scope: String, line: Option<u32>) -> Buffer {
         Buffer {
-            path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, saving: None, message: None,
+            path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, saving: None, saving_request: None, close_after_save: None, message: None,
             initial_line: line.map(|l| l.saturating_sub(1) as usize),
             config: None,
             lsp: lsp::BufferLsp::default(),
@@ -131,7 +133,7 @@ impl App {
         if crate::database::is_path(path) { self.open_database(path); return; }
         let relative = std::path::Path::new(path).strip_prefix(&self.cwd).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_owned());
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Editor { path: relative.clone() }) {
-            self.active = index;
+            self.select_tab(self.tabs[index].id);
             if let (Some(line), Some(buffer)) = (line, self.buffers.get_mut(&relative)) {
                 buffer.doc.set_cursor(vim::Pos { line: line.saturating_sub(1) as usize, col: 0 });
                 buffer.doc.follow_cursor = true;
@@ -185,17 +187,20 @@ impl App {
     }
 
     /// `FileWritten`: the save landed; what it carried is the new baseline.
-    pub(crate) fn apply_file_written(&mut self, path: &str) {
-        let Some(buffer) = self.buffers.values_mut().find(|b| b.path == path || b.host_path() == path) else { return };
+    pub(crate) fn apply_file_written(&mut self, path: &str, request: u64) {
+        let Some(buffer) = self.buffers.values_mut().find(|b| (b.path == path || b.host_path() == path) && b.saving_request == Some(request)) else { return };
+        buffer.saving_request = None;
         if let Some(lines) = buffer.saving.take() {
             buffer.doc.mark_saved_lines(lines);
             buffer.message = Some(format!("\"{}\" written", buffer.name()));
         }
+        let close = buffer.close_after_save.take().filter(|_| !buffer.doc.is_dirty());
         let host = buffer.host_path();
         let scope = buffer.scope.clone();
         if let Some(daemon) = &self.daemon {
             daemon.send_scoped(Family::Editor, serde_json::json!({"DidSave": {"path": host}}), &scope);
         }
+        if let Some(id) = close { if let Some(i) = self.tabs.iter().position(|t| t.id == id) { self.close_tab_now(i); } }
     }
 
     /// `Files Changed`: re-read clean open files under the changed paths.
@@ -271,7 +276,7 @@ impl App {
         let index = self.active;
         match command {
             "w" | "write" => self.save_active(),
-            "wq" | "x" => { self.save_active(); self.close_tab(index); }
+            "wq" | "x" => self.save_and_close(self.tabs[index].id),
             "q" | "quit" => {
                 if self.active_buffer().is_some_and(Buffer::dirty) {
                     if let Some(b) = self.active_buffer_mut() { b.message = Some("E37: No write since last change (add ! to override)".into()); }
@@ -279,7 +284,7 @@ impl App {
                     self.close_tab(index);
                 }
             }
-            "q!" => self.close_tab(index),
+            "q!" => self.close_tab_now(index),
             _ if command.chars().all(|c| c.is_ascii_digit()) && !command.is_empty() => {
                 let line = command.parse::<usize>().unwrap_or(1).saturating_sub(1);
                 if let Some(b) = self.active_buffer_mut() {
@@ -294,10 +299,27 @@ impl App {
         }
     }
 
+    pub fn save_and_close(&mut self, tab: u64) {
+        self.select_tab(tab);
+        self.save_active();
+        if let Some(buffer) = self.active_buffer_mut().filter(|b| b.saving.is_some()) { buffer.close_after_save = Some(tab); }
+    }
+
+    pub(crate) fn editor_save_error(&mut self, request: Option<u64>, message: &str) {
+        for buffer in self.buffers.values_mut().filter(|b| b.saving.is_some() && request.is_none_or(|id| b.saving_request == Some(id))) {
+            buffer.saving = None; buffer.saving_request = None; buffer.close_after_save = None;
+            buffer.message = Some(format!("Write failed: {message}"));
+        }
+    }
+
     /// Write the active buffer over the daemon (`saveFile`'s host path).
     pub fn save_active(&mut self) {
+        let Some(daemon) = self.daemon.clone() else {
+            if let Some(b) = self.active_buffer_mut() { b.message = Some("Connect to the workspace daemon before saving".into()); }
+            return;
+        };
         let Some(buffer) = self.active_buffer_mut() else { return };
-        if !buffer.loaded || buffer.error.is_some() { return; }
+        if !buffer.loaded || buffer.error.is_some() || buffer.saving.is_some() { return; }
         let text = buffer.doc.text_for_disk();
         if let Some(config) = &buffer.config {
             if !config.writable {
@@ -306,14 +328,12 @@ impl App {
             }
             let message = serde_json::json!({"SaveConfigDocument": {"content": text, "expected_revision": config.revision}});
             buffer.saving = Some(buffer.doc.lines.clone());
-            if let Some(daemon) = &self.daemon { daemon.send(Family::Config, message); }
+            buffer.saving_request = Some(daemon.request(Family::Config, message, None));
             return;
         }
         buffer.saving = Some(buffer.doc.lines.clone());
         let (path, scope) = (buffer.path.clone(), buffer.scope.clone());
-        if let Some(daemon) = &self.daemon {
-            daemon.send_scoped(Family::Files, serde_json::json!({"WriteFile": {"path": path, "bytes": text.as_bytes()}}), &scope);
-        }
+        buffer.saving_request = Some(daemon.request(Family::Files, serde_json::json!({"WriteFile": {"path": path, "bytes": text.as_bytes()}}), Some(scope)));
     }
 
     /// Mode of the active editor, for the status pill and cursor shape.
@@ -363,7 +383,7 @@ impl App {
     pub fn open_config_editor(&mut self) {
         let key = CONFIG_DOCUMENT.to_owned();
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Editor { path: key.clone() }) {
-            self.active = index;
+            self.select_tab(self.tabs[index].id);
             return;
         }
         let mut buffer = Buffer::new(key.clone(), String::new(), None);
@@ -375,23 +395,29 @@ impl App {
     }
 
     /// `ConfigDocument` fills the config tab; `ConfigDocumentSaved` confirms a save.
-    pub(crate) fn apply_config_document_reply(&mut self, message: &serde_json::Value) {
+    pub(crate) fn apply_config_document_reply(&mut self, request_id: u64, message: &serde_json::Value) {
         let Some(buffer) = self.buffers.get_mut(CONFIG_DOCUMENT) else { return };
         let (document, saved) = match (message.get("ConfigDocument"), message.get("ConfigDocumentSaved")) {
             (Some(reply), _) => (&reply["document"], false),
             (_, Some(reply)) => (&reply["document"], true),
             _ => return,
         };
+        if saved && buffer.saving_request != Some(request_id) { return; }
         let revision = document["revision"].as_str().unwrap_or_default().to_owned();
         let writable = document["writable"].as_bool().unwrap_or(false);
         buffer.config = Some(ConfigDocument { revision, writable });
         if saved {
+            buffer.saving_request = None;
             if let Some(lines) = buffer.saving.take() { buffer.doc.mark_saved_lines(lines); }
             buffer.message = Some(format!("\"{}\" written", document["display_path"].as_str().unwrap_or("config.json")));
         } else if !buffer.loaded {
             buffer.code_cache.clear();
         buffer.doc = Document::from_text(document["content"].as_str().unwrap_or_default());
             buffer.loaded = true;
+        }
+        if saved {
+            let close = buffer.close_after_save.take().filter(|_| !buffer.doc.is_dirty());
+            if let Some(id) = close { if let Some(i) = self.tabs.iter().position(|t| t.id == id) { self.close_tab_now(i); } }
         }
     }
 
@@ -416,7 +442,7 @@ impl App {
         // Until the view has laid out once there is no height to aim within; try next frame.
         let Some(view) = self.active_buffer().and_then(|b| b.view_rect) else { return };
         let Some(buffer) = self.active_buffer().filter(|b| b.loaded) else { return };
-        let key = view::scroll_key(&buffer.path);
+        let key = view::scroll_key(&self.workspace_id, &buffer.path);
         let (row_y, content_h) = view::cursor_row_y(self, buffer);
         let offset = buffer.scroll.get().0;
         let base = buffer.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
@@ -455,5 +481,56 @@ impl App {
             } else { b.doc.key(Key::Char('p'), &mut b.prompt, Some(text)); }
             self.editor_follow = true;
         } else { self.terminal_paste(text); }
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    fn pending() -> (App, u64) {
+        let mut app = App::new();
+        app.open_file("save-check.rs", None);
+        app.apply_opened_file("save-check.rs", b"old\n");
+        let id = app.active_tab().id;
+        let b = app.active_buffer_mut().unwrap();
+        b.doc.insert_str_at_cursor("new "); b.doc.mark_edited();
+        b.saving = Some(b.doc.lines.clone()); b.saving_request = Some(42); b.close_after_save = Some(id);
+        (app, id)
+    }
+    #[test]
+    fn save_closes_only_after_matching_acknowledgement() {
+        let (mut app, id) = pending();
+        app.apply_file_written("save-check.rs", 41);
+        assert!(app.tabs.iter().any(|t| t.id == id));
+        assert!(app.active_buffer().unwrap().dirty());
+        app.apply_file_written("save-check.rs", 42);
+        assert!(!app.tabs.iter().any(|t| t.id == id));
+    }
+    #[test]
+    fn typing_during_write_keeps_the_new_changes_open() {
+        let (mut app, id) = pending();
+        let b = app.active_buffer_mut().unwrap();
+        b.doc.insert_str_at_cursor("later "); b.doc.mark_edited();
+        app.apply_file_written("save-check.rs", 42);
+        assert!(app.tabs.iter().any(|t| t.id == id));
+        assert!(app.active_buffer().unwrap().dirty());
+    }
+    #[test]
+    fn failed_save_preserves_buffer_and_clears_close_request() {
+        let (mut app, id) = pending();
+        app.editor_save_error(Some(42), "Permission denied");
+        let b = app.active_buffer().unwrap();
+        assert!(b.dirty()); assert!(b.saving.is_none()); assert!(b.close_after_save.is_none());
+        assert!(app.tabs.iter().any(|t| t.id == id));
+    }
+    #[test]
+    fn closing_a_dirty_tab_requires_a_choice() {
+        let (mut app, id) = pending();
+        app.close_tab(app.active);
+        assert!(app.modal.is_some()); assert!(app.tabs.iter().any(|t| t.id == id));
+        app.run_modal_action(crate::ui::modal::Action::Close);
+        assert!(app.tabs.iter().any(|t| t.id == id));
+        app.run_modal_action(crate::ui::modal::Action::DiscardTab(id));
+        assert!(!app.tabs.iter().any(|t| t.id == id));
     }
 }

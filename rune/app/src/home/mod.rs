@@ -73,8 +73,10 @@ impl App {
             MenuAction::AgentPanel => self.toggle_conversations(),
             MenuAction::CommandPalette => self.open_picker(crate::palette::Mode::Commands),
             MenuAction::NewTerminal => { self.open_tab(TabKind::Terminal); }
-            // Surfaces still being built: directory picker, notes, file tree, search.
-            MenuAction::ChangeDirectory | MenuAction::Notes | MenuAction::FileTree | MenuAction::Search => {}
+            MenuAction::ChangeDirectory => self.open_picker(crate::palette::Mode::Directories),
+            MenuAction::Notes => self.toggle_tree(crate::app::Sidebar::Notes),
+            MenuAction::FileTree => self.toggle_file_tree(),
+            MenuAction::Search => self.open_finder(crate::finder::Mode::Files),
         }
     }
 
@@ -111,7 +113,7 @@ impl App {
     }
 
     fn create_pty(&mut self, tab_id: u64) {
-        if self.daemon.is_none() || self.connection != Connection::Connected || self.pending_pty.contains(&tab_id) { return; }
+        if self.daemon.is_none() || self.connection != Connection::Connected || !self.workspace_ready || self.pending_pty.contains(&tab_id) { return; }
         let Some(term) = self.terminals.get_mut(&tab_id) else { return };
         let (cols, rows) = term.shell.size();
         let cwd = term.shell.cwd.clone();
@@ -132,6 +134,18 @@ impl App {
                 p.muted, p.red, p.green, p.yellow, p.blue, p.magenta, p.cyan, p.fg],
             fg: p.fg,
             bg: p.bg,
+        }
+    }
+
+    pub fn copy_terminal_selection(&self, tx: &mut Tx) {
+        if let Some(selection) = tx.text_selection() { let text = selection.text().to_owned(); tx.copy(text); return; }
+        let Some(term) = self.active_terminal() else { return };
+        if let Some(block) = term.shell.blocks.iter().chain(term.shell.live.iter()).find(|b| Some(b.id) == term.selected) {
+            tx.copy(block.lines.iter().map(|row| crate::ghostty::row_text(row)).collect::<Vec<_>>().join("\n"));
+        } else {
+            let draft = &self.active_tab().draft;
+            let (a,b) = (draft.anchor.min(draft.focus), draft.anchor.max(draft.focus));
+            if let Some(text) = draft.text.get(a..b).filter(|t| !t.is_empty()) { tx.copy(text.to_owned()); }
         }
     }
 

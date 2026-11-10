@@ -53,7 +53,8 @@ impl App {
             }
             return;
         }
-        let Some((line, col)) = view::hit(self, d.x, d.y) else {
+        let point = d.window_point();
+        let Some((line, col)) = view::hit_window(self, point[0], point[1], false) else {
             return;
         };
         self.focus = crate::app::Focus::Content;
@@ -156,7 +157,7 @@ impl App {
         let target = (offset
             + outside.signum() * (outside.abs() * 12.0).clamp(80.0, 1600.0) * dt)
             .clamp(0.0, max);
-        tx.scroll_to(view::scroll_key(&path), 0.0, target);
+        tx.scroll_to(view::scroll_key(&self.workspace_id, &path), 0.0, target);
         self.active_buffer_mut().unwrap().wheel_target = None;
         if let Some((line, col)) = view::hit(
             self,

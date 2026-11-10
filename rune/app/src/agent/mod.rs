@@ -80,7 +80,7 @@ impl App {
 
     pub fn open_conversation(&mut self, session_id: &str) {
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Agent { session: Some(session_id.into()) }) {
-            self.active = index;
+            self.select_tab(self.tabs[index].id);
             return;
         }
         self.open_tab(TabKind::Agent { session: Some(session_id.into()) });

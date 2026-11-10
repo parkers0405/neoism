@@ -68,4 +68,30 @@ assert 'neoism: New Tab' in text and 'Ctrl+Shift+O' in text, 'A captured shortcu
 text = render('drag-edge-scroll', 'editor-long', [{'t': .3, 'type': 'down', 'x': 440, 'y': 110}, {'t': .4, 'type': 'move', 'x': 440, 'y': 750}, {'t': 1.8, 'type': 'up', 'x': 440, 'y': 750}], realtime=True)
 positions = re.findall(r'(?m)^\s*(\d+)/(\d+)\s*$', text)
 assert 'VISUAL' in text and positions and int(positions[-1][0]) > 25, 'Dragging past the editor edge must extend selection beyond the initial viewport'
+text = render('scrolled-click', 'editor-long', [type_text(.3, '150G'), {'t': 1, 'type': 'click', 'x': 445, 'y': 350}])
+positions = re.findall(r'(?m)^\s*(\d+)/(\d+)\s*$', text)
+assert positions and int(positions[-1][0]) == 150, 'Click after virtual-row rebasing must target the visible line'
+text = render('database-schema', 'database', [{'t': .3, 'type': 'click', 'key': 'database-schema-toggle'}])
+assert 'PRIMARY KEY' in text and 'tasks_title' in text and 'DEFAULT 0' in text, 'Schema must expose constraints, defaults and indexes'
+text = render('database-insert-defaults', 'database', [{'t': .3, 'type': 'click', 'key': 'database-add-row'}])
+assert 'DEFAULT' in text and 'Apply (1)' in text, 'New rows must preserve column defaults until explicitly edited'
+text = render('dirty-close-cancel', 'lsp', [type_text(.3, 'Iunsaved '), key(.5, 'Escape'), {'t': .7, 'type': 'key', 'name': 'p', 'alt': True}, type_text(.9, 'Close Tab'), key(1.1, 'Enter')])
+assert 'Unsaved changes' in text and 'Keep editing' in text, 'Closing a modified buffer must preserve it pending a choice'
+print('Database, dirty-close and scrolled pointer checks passed.')
+
+chord = lambda t, name, **mods: {'t': t, 'type': 'key', 'name': name, **mods}
+text = render('tab-arrow-left', 'lsp', [chord(.3, 'a', alt=True), chord(.6, 'Left', ctrl=True, shift=True)])
+assert 'fn main() {' in text, 'Ctrl+Shift+Left must return to the previous editor tab'
+text = render('tab-arrow-right', 'lsp', [chord(.3, 'a', alt=True), chord(.6, 'Left', ctrl=True, shift=True), chord(.9, 'Right', ctrl=True, shift=True)])
+assert 'fn main() {' not in text, 'Ctrl+Shift+Right must activate the next tab'
+text = render('workspace-shortcut-restore', 'lsp', [chord(.3, 'w', ctrl=True, cmd=True, shift=True), chord(.7, '1', alt=True)])
+assert 'fn main() {' in text, 'Alt+1 must restore the first workspace after Ctrl+Shift+W'
+text = render('workspace-plus-new', 'lsp', [{'t': .3, 'type': 'click', 'key': 'workspace-new'}])
+assert 'fn main() {' not in text, 'Workspace plus must open a new workspace with its own content'
+text = render('workspace-plus-restore', 'lsp', [{'t': .3, 'type': 'click', 'key': 'workspace-new'}, chord(.7, '1', alt=True)])
+assert 'fn main() {' in text, 'Workspace plus must preserve the existing editor workspace'
+text = render('agent-q', 'lsp', [chord(.3, 'a', alt=True), type_text(.5, 'q'), key(.8, 'Enter')])
+assert 'fn main() {' in text, 'Agent q must close only that tab'
+text = render('workspace-qall-adjacent', 'lsp', [chord(.3, 'w', ctrl=True, cmd=True, shift=True), chord(.6, 'a', alt=True), type_text(.9, 'qall'), key(1.2, 'Enter')])
+assert 'fn main() {' in text, 'qall must close the second workspace and restore the first'
 print('All headless checks passed.')

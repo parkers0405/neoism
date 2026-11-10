@@ -29,7 +29,7 @@ pub const YANK_FLASH_SECS: f32 = 0.28;
 pub fn line_height(app: &App) -> f32 { (app.ty.size * 1.55).round() }
 pub fn advance(app: &App) -> f32 { app.ty.size * 0.6 }
 
-pub fn scroll_key(path: &str) -> String { format!("editor:{path}") }
+pub fn scroll_key(workspace: &str, path: &str) -> String { format!("editor:{workspace}:{path}") }
 
 /// The code grid's cell metrics, shared by drawing and mouse hit-testing.
 struct Metrics {
@@ -279,7 +279,7 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
             let (piece, piece_spans) = expand_tabs(&line[segment.byte_start..segment.byte_end], segment.source_col, piece_spans);
             visual = visual
                 .child(row().w(m.gutter_w - adv).mr(adv).justify_end().child(gutter))
-                .child(rune::rich(piece, piece_spans).font(font).color(rgb(p.fg)).ml(segment.visual_indent as f32 * adv).shrink());
+                .child(rune::rich(piece, piece_spans).font(font).color(rgb(p.fg)).ml(segment.visual_indent as f32 * adv).grow(1.0).shrink());
             let marks = super::lsp_view::RowMarks {
                 buffer, index, line, first_row: first, last_row: last,
                 byte_start: segment.byte_start, byte_end: segment.byte_end, line_h, adv,
@@ -301,14 +301,14 @@ fn code(app: &App, buffer: &Buffer) -> El {
     let rows = rows.on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| { a.select_tab(tab); a.editor_drag(d, tx); })
         .on_pointer_move_local(move |a: &mut App, p, tx| {
             if a.active_tab().id != tab { return; }
-            if let Some((line, col)) = hit(a, p.x, p.y) {
+            if let Some((line, col)) = hit_window(a, p.window_x, p.window_y, true) {
                 a.lsp_pointer(line, col, [p.window_x, p.window_y, 1.0, line_height(a)]);
                 tx.wake_after(std::time::Duration::from_millis(350));
-            }
+            } else { a.lsp_pointer_leave(); }
         })
         .on_hover_change(|a: &mut App, inside, _| { if !inside { a.lsp_pointer_leave(); } });
 
-    let key = scroll_key(&buffer.path);
+    let key = scroll_key(&app.workspace_id, &buffer.path);
     let wheel_key = key.clone();
     let mirror = buffer.scroll.clone();
     let layout_path = buffer.path.clone();
@@ -321,15 +321,17 @@ fn code(app: &App, buffer: &Buffer) -> El {
         })
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Trackpads scroll directly; notches glide three lines each on the spring.
-            if e.precise || e.dy == 0.0 { return false; }
+            if e.dy == 0.0 { return false; }
             let Some(b) = a.buffers.get_mut(&wheel_path) else { return false };
-            b.lsp.hover = None;
+            let popup = b.lsp.hover.is_some() || b.lsp.completion.is_some();
+            b.lsp.dismiss();
+            if e.precise { return false; }
             let (offset, max, _) = b.scroll.get();
             let base = b.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
             let target = (base - e.dy / 40.0 * 3.0 * line_h).clamp(0.0, max);
             b.wheel_target = Some(target);
             tx.scroll_to_with(wheel_key.clone(), 0.0, target, SCROLL_SPRING);
-            tx.live_only();
+            if !popup { tx.live_only(); }
             true
         })
         .child(rows)
@@ -361,6 +363,21 @@ pub fn cursor_rect(app: &App, buffer: &Buffer) -> Option<[f32; 4]> {
     Some([rect[0] + x, rect[1] + y - buffer.scroll.get().0, m.caret(buffer.doc.mode), m.line_h])
 }
 
+/// Virtual lists rebase their mounted container as rows enter/leave the window.
+/// Its local pointer coordinates therefore are not document coordinates. Derive
+/// document points from the fixed viewport and its actual scroll offset instead.
+pub(super) fn hit_window(app: &App, x: f32, y: f32, hover: bool) -> Option<(usize, usize)> {
+    let buffer = app.active_buffer()?;
+    let rect = buffer.view_rect?;
+    let local_x = x - rect[0];
+    let local_y = y - rect[1] + buffer.scroll.get().0;
+    if hover && (x < rect[0] || x >= rect[0] + rect[2] || y < rect[1] || y >= rect[1] + rect[3]
+        || local_x < Metrics::of(app, buffer).gutter_w) { return None; }
+    let pos = hit(app, local_x, local_y)?;
+    if hover && buffer.doc.lines[pos.0].get(pos.1..)?.chars().next().is_none_or(char::is_whitespace) { return None; }
+    Some(pos)
+}
+
 /// Hit testing shares the exact cached visual rows used by rendering and following.
 pub(super) fn hit(app: &App, x: f32, y: f32) -> Option<(usize, usize)> {
     let buffer = app.active_buffer()?;
@@ -378,6 +395,25 @@ pub(super) fn hit(app: &App, x: f32, y: f32) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_positions_follow_viewport_scroll_and_unicode_wraps() {
+        let mut app = App::new();
+        app.open_file("pointer.rs", None);
+        let source = (0..200).map(|i| format!("\tlet 日本語_{i} = value_{i}; // some wrapped content here\n")).collect::<String>();
+        app.apply_opened_file("pointer.rs", source.as_bytes());
+        app.active_buffer_mut().unwrap().view_rect = Some([355.5, 85.71, 268.5, 560.0]);
+        for line in [1, 60, 150, 199] {
+            let b = app.active_buffer_mut().unwrap();
+            b.doc.set_cursor(super::super::vim::Pos { line, col: 5 });
+            let b = app.active_buffer().unwrap();
+            let y = cursor_row_y(&app, b).0;
+            b.scroll.set(((y - 200.0).max(0.0), 50_000.0, 560.0));
+            let caret = cursor_rect(&app, b).unwrap();
+            assert_eq!(hit_window(&app, caret[0] + 2.0, caret[1] + 8.0, true), Some((line, 5)));
+        }
+        assert_eq!(hit_window(&app, 360.0, 100.0, true), None, "gutter is not an LSP target");
+    }
 
     #[test]
     fn scrolling_reuses_layout_but_text_and_wrap_changes_invalidate_it() {

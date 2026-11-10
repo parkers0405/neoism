@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::ChildIf;
 use crate::ui::theme::rgb;
 use rune::{El, Key, Tx, col, el, row, text};
 
@@ -131,15 +132,22 @@ pub fn view(app: &App) -> El {
         );
     if db.editable {
         let path = key.clone();
-        toolbar = toolbar.child(button("+ Row".into()).on_press(move |a: &mut App| {
-            if let Some(db) = a.databases.get_mut(&path) {
-                if db.pending.is_none() {
-                    db.rows.push(vec![DatabaseValue::Null; db.columns.len()]);
-                    db.deleted.push(false);
-                }
-            }
-        }));
+        toolbar = toolbar.child(
+            button("+ Row".into())
+                .key("database-add-row")
+                .on_press(move |a: &mut App| a.database_add_row(&path)),
+        );
     }
+    let path = key.clone();
+    toolbar = toolbar.child(
+        button(if db.show_schema { "Data" } else { "Schema" }.into())
+            .key("database-schema-toggle")
+            .on_press(move |a: &mut App| {
+                let db = a.databases.get_mut(&path).unwrap();
+                db.show_schema = !db.show_schema;
+            }),
+    );
+
     let col_w = 170.0 * s;
     let row_h = 25.0 * s;
     let mut header = row()
@@ -148,25 +156,49 @@ pub fn view(app: &App) -> El {
         .child(el().w(40.0 * s));
     for column in &db.columns {
         let (path, name) = (key.clone(), column.clone());
+        let (filter_path, filter_name) = (key.clone(), column.clone());
         let suffix = db
             .sort
             .as_ref()
             .filter(|sort| sort.column == *column)
             .map_or("", |sort| if sort.descending { " ↓" } else { " ↑" });
         header = header.child(
-            el().w(col_w)
+            row()
+                .w(col_w)
                 .h(30.0 * s)
                 .px(8.0 * s)
                 .center_y()
                 .border(1.0, rgb(p.border))
                 .hover(rgb(p.hover))
                 .child(
-                    text(format!("{column}{suffix}"))
-                        .font(font)
-                        .color(rgb(p.fg))
-                        .truncate(),
+                    el().grow(1.0)
+                        .h_full()
+                        .center_y()
+                        .child(
+                            text(format!("{column}{suffix}"))
+                                .font(font)
+                                .color(rgb(p.fg))
+                                .truncate(),
+                        )
+                        .on_press(move |a: &mut App| a.database_sort(&path, &name)),
                 )
-                .on_press(move |a: &mut App| a.database_sort(&path, &name)),
+                .child(
+                    el().key(format!("database-filter:{column}"))
+                        .w(25.0 * s)
+                        .h_full()
+                        .center()
+                        .hover(rgb(p.hover))
+                        .child(text("≡").font(font).color(rgb(
+                            if db.filters.contains_key(column) {
+                                p.accent
+                            } else {
+                                p.dim
+                            },
+                        )))
+                        .on_press(move |a: &mut App| {
+                            a.database_filter_open(&filter_path, &filter_name)
+                        }),
+                ),
         );
     }
     let mut grid = col()
@@ -221,16 +253,20 @@ pub fn view(app: &App) -> El {
                     .border(0.5 * s, rgb(p.border))
                     .hover(rgb(p.hover))
                     .child(
-                        text(display(value))
-                            .font(font)
-                            .color(rgb(if changed {
-                                p.yellow
-                            } else if matches!(value, DatabaseValue::Null) {
-                                p.muted
-                            } else {
-                                p.fg
-                            }))
-                            .truncate(),
+                        text(if db.default_cells.contains(&(r, c)) {
+                            "DEFAULT".into()
+                        } else {
+                            display(value)
+                        })
+                        .font(font)
+                        .color(rgb(if changed {
+                            p.yellow
+                        } else if matches!(value, DatabaseValue::Null) {
+                            p.muted
+                        } else {
+                            p.fg
+                        }))
+                        .truncate(),
                     )
                     .on_press(move |a: &mut App| a.database_edit(&path, r, c)),
             );
@@ -280,7 +316,12 @@ pub fn view(app: &App) -> El {
         .shrink()
         .h_full()
         .child(toolbar)
-        .child(col().w_full().grow(1.0).shrink().scroll_xy().child(grid))
+        .child_if(!db.filters.is_empty(), || controls::filters(app, db))
+        .child(if db.show_schema {
+            controls::schema(app, db)
+        } else {
+            col().w_full().grow(1.0).shrink().scroll_xy().child(grid)
+        })
         .child(footer);
     if let Some(error) = &db.error {
         body = body.child(
@@ -291,64 +332,11 @@ pub fn view(app: &App) -> El {
                 .py(8.0 * s),
         );
     }
+    if let Some(picker) = &db.filter_picker {
+        body = body.child(controls::filter_picker(app, db, picker));
+    }
     if let Some((r, c, edit)) = &db.cell {
-        let path = key.clone();
-        let path2 = key.clone();
-        let path3 = key.clone();
-        let path4 = key.clone();
-        body = body.child(
-            col()
-                .w_full()
-                .padding(12.0 * s)
-                .gap(8.0 * s)
-                .fill(rgb(p.surface))
-                .child(
-                    text(format!("Row {} · {}", r + 1, db.columns[*c]))
-                        .font(font)
-                        .color(rgb(p.dim)),
-                )
-                .child(
-                    rune::text_input(edit, font)
-                        .key("database-cell")
-                        .w_full()
-                        .h(32.0 * s)
-                        .color(rgb(p.fg))
-                        .on_edit(move |a: &mut App| {
-                            &mut a
-                                .databases
-                                .get_mut(&path)
-                                .unwrap()
-                                .cell
-                                .as_mut()
-                                .unwrap()
-                                .2
-                        })
-                        .on_input_key(
-                            move |a: &mut App, e: &rune::KeyEvent, _: &mut Tx| match e.key
-                            {
-                                Key::Enter => {
-                                    a.database_commit_cell(&path2, false);
-                                    true
-                                }
-                                Key::Escape => {
-                                    a.databases.get_mut(&path2).unwrap().cell = None;
-                                    true
-                                }
-                                _ => false,
-                            },
-                        ),
-                )
-                .child(
-                    row()
-                        .gap(8.0 * s)
-                        .child(button("Set value".into()).on_press(move |a: &mut App| {
-                            a.database_commit_cell(&path3, false)
-                        }))
-                        .child(button("Set NULL".into()).on_press(move |a: &mut App| {
-                            a.database_commit_cell(&path4, true)
-                        })),
-                ),
-        );
+        body = body.child(controls::cell(app, db, *r, *c, edit));
     }
     row().w_full().h_full().child(tables).child(body)
 }

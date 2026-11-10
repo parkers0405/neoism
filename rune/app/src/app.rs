@@ -41,6 +41,13 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    pub workspaces: Vec<crate::workspace::Entry>,
+    pub workspace_active: usize,
+    pub workspace_id: String,
+    pub workspace_ready: bool,
+    pub workspace_closing: Option<u64>,
+    pub quit_requested: bool,
+    pub tab_hover: Option<u64>,
     /// The live turn's animated status line ("Crafting . . . · 4.2s model").
     pub activity: Option<crate::agent::Activity>,
     pub replay: Option<crate::replay::Replay>,
@@ -145,6 +152,7 @@ impl App {
         let home = std::env::var("HOME").unwrap_or_default();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
+            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, tab_hover: None,
             daemon: None,
             inbox: None,
             images: None,
@@ -208,6 +216,7 @@ impl App {
             pending_pty: Default::default(),
         };
         app.open_tab(TabKind::Home);
+        app.workspaces.push(crate::workspace::Entry { title: app.workspace_name.clone(), state: None });
         app
     }
 
@@ -216,25 +225,34 @@ impl App {
         if !home.is_empty() && self.cwd.starts_with(&home) { format!("~{}", &self.cwd[home.len()..]) } else { self.cwd.clone() }
     }
 
-    pub fn drain(&mut self) -> bool {
+    pub fn drain_current(&mut self) -> bool {
         let Some(inbox) = &self.inbox else { return false };
         let events: Vec<Inbound> = inbox.lock().unwrap().drain(..).collect();
         let changed = !events.is_empty();
-        for event in events { self.apply(event); }
+        let owner = self.workspace_id.clone();
+        for event in events {
+            self.apply(event);
+            // Close acknowledgement may dispose this workspace and select its neighbour.
+            // The remaining old-socket events must never be applied to that neighbour.
+            if self.workspace_id != owner { break; }
+        }
         changed
     }
 
-    fn apply(&mut self, event: Inbound) {
+    pub(crate) fn apply(&mut self, event: Inbound) {
+        if let Inbound::Reply { family, request_id, message } = &event {
+            if matches!(family.as_str(), "Files" | "Config") {
+                if let Some(error) = message.get("Error") { self.editor_save_error(Some(*request_id), error["message"].as_str().unwrap_or("Save rejected")); }
+            }
+        }
         match event {
             Inbound::Connecting => self.connection = Connection::Connecting,
             Inbound::Connected => {
                 self.connection = Connection::Connected;
-                self.agent_connected();
-                self.terminals_connected();
-                self.watch_git();
-                self.lsp_reconnect();
+                self.workspace_ready = false;
+                self.register_workspace();
             }
-            Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.database_disconnected(); },
+            Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
             Inbound::Agent(message) => self.apply_agent(*message),
             Inbound::Editor(message) => self.apply_editor_message(*message),
             // Live PTY output is uncorrelated (request 0); a reattach replays backlog under its request.
@@ -247,13 +265,13 @@ impl App {
             Inbound::Reply { family, message, .. } if family == "Search" => {
                 if let Ok(typed) = serde_json::from_value(message) { self.apply_search(typed); }
             }
-            Inbound::Reply { family, message, .. } if family == "Files" => {
+            Inbound::Reply { family, message, request_id } if family == "Files" => {
                 self.apply_files(&message);
                 if let Some(listing) = message.get("DirListing") {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);
                 }
                 if let Some(written) = message.get("FileWritten") {
-                    self.apply_file_written(written["path"].as_str().unwrap_or_default());
+                    self.apply_file_written(written["path"].as_str().unwrap_or_default(), request_id);
                 }
                 if let Some(paths) = message["Changed"]["paths"].as_array() {
                     let paths: Vec<String> = paths.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect();
@@ -266,11 +284,12 @@ impl App {
                     self.apply_opened_file(&path, &bytes);
                 }
             }
-            Inbound::Reply { family, message, .. } if family == "Workspace" => {
+            Inbound::Reply { family, message, request_id } if family == "Workspace" => {
+                self.workspace_reply(request_id, &message);
                 if let Some(dir) = message["NotesVaultResolved"]["notes_vault_dir"].as_str() { self.apply_notes_vault(dir); }
             }
             Inbound::Database { request_id, message } => self.apply_database_reply(request_id, message),
-            Inbound::Reply { family, message, .. } if family == "Config" => self.apply_config_reply(&message),
+            Inbound::Reply { family, message, request_id } if family == "Config" => self.apply_config_reply(request_id, &message),
             Inbound::Reply { family, message, .. } if family == "Editor" => self.apply_editor_reply(message),
             Inbound::Reply { .. } => {}
         }

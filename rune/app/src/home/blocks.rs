@@ -162,6 +162,7 @@ impl Shell {
     pub fn running(&self) -> bool { self.running.is_some() }
     pub fn busy(&self) -> bool { self.pending || self.running.is_some() }
     /// A full-screen program owns the alternate screen.
+    pub fn mouse_tracking(&self) -> bool { self.vt.as_ref().is_some_and(Vt::mouse_tracking) }
     pub fn alt(&self) -> bool { self.vt.as_ref().is_some_and(|vt| vt.position().alt) }
     /// The program asked for application cursor keys (readline REPLs, editors).
     pub fn app_cursor(&self) -> bool { self.vt.as_ref().is_some_and(|vt| vt.mode(1)) }

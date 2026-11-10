@@ -129,11 +129,14 @@ pub fn picker_card(app: &App) -> El {
             card = card.child(item);
             continue;
         }
-        if index == picker.selected {
-            item = item
-                .child(el().w(cw - 12.0 * s).h(ROW_H * s - 6.0 * s).radius(9.0 * s).fill(rgb(p.hover)).absolute(6.0 * s, 3.0 * s))
-                .child(el().w(3.0 * s).h(ROW_H * s - 18.0 * s).radius(2.0 * s).fill(rgb(p.accent)).absolute(10.0 * s, 9.0 * s));
-        }
+        // Every row carries the fill and accent bar (clear unless selected), so its children
+        // keep their slots as the selection moves and nothing re-pairs and slides across.
+        let selected = index == picker.selected;
+        item = item
+            .child(el().key("fill").w(cw - 12.0 * s).h(ROW_H * s - 6.0 * s).radius(9.0 * s)
+                .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT }).absolute(6.0 * s, 3.0 * s))
+            .child(el().key("bar").w(3.0 * s).h(ROW_H * s - 18.0 * s).radius(2.0 * s)
+                .fill(if selected { rgb(p.accent) } else { Color::TRANSPARENT }).absolute(10.0 * s, 9.0 * s));
         if row.current {
             item = item.child(text("\u{2713}").font(mono(11.0 * s, false)).color(rgb(p.accent)).absolute(cw - 30.0 * s, 15.0 * s));
         }

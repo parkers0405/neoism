@@ -129,12 +129,30 @@ fn sidebar(app: &App) -> El {
     }
 }
 
+/// A vertical wheel over an overflowing tab strip scrolls it sideways (a horizontal wheel or
+/// trackpad keeps its own direction): notches glide on the follow spring, retargeting
+/// mid-glide; trackpads move 1:1.
+pub fn strip_wheel(app: &mut App, key: &str, e: &rune::WheelEvent, tx: &mut rune::Tx) -> bool {
+    let delta = if e.dx.abs() > e.dy.abs() { e.dx } else { e.dy };
+    let Some([offset, max]) = app.chrome_scroll.borrow().get(key).copied() else { return false };
+    if delta == 0.0 || max <= 0.0 { return false; }
+    let base = app.strip_target.as_ref().filter(|(k, t, at)| k == key && at.elapsed().as_secs_f32() < 0.6 && (t - offset).abs() > 0.5)
+        .map_or(offset, |(_, t, _)| *t);
+    let step = if e.precise { delta } else { delta / 40.0 * 96.0 };
+    let target = (base - step).clamp(0.0, max);
+    app.strip_target = Some((key.to_owned(), target, std::time::Instant::now()));
+    if e.precise { tx.scroll_to(key.to_owned(), target, 0.0); } else { tx.scroll_to_with(key.to_owned(), target, 0.0, crate::ui::follow::SPRING); }
+    tx.live_only();
+    true
+}
+
 fn workspace_tabs(app: &App) -> El {
     let p = app.pal;
     let mirror = app.chrome_scroll.clone();
     let mut strip = row().key("workspace-tabs").w_full().h(TAB_ROW_H).scroll_x()
         .on_scroll_offset(move |pos| { mirror.borrow_mut().insert("workspace-tabs".into(), [pos.offset[0],pos.max[0]]); })
-        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-tabs".into(), r); }).fill(rgb(p.surface)).items_end();
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-tabs".into(), r); }).fill(rgb(p.surface)).items_end()
+        .on_wheel(|a: &mut App, e: rune::WheelEvent, tx: &mut rune::Tx| strip_wheel(a, "workspace-tabs", &e, tx));
     for (index, entry) in app.workspaces.iter().enumerate() {
         let active = index == app.workspace_active;
         let title = if active { app.workspace_name.clone() } else { entry.title.clone() };

@@ -62,10 +62,12 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .child(row().gap(10.0).center_y()
             .child(icon(app, glyph::FOLDER, 0.85, rgb(p.dim)))
             .child(text(format!("{}/", app.display_cwd())).font(app.ty.small()).color(rgb(p.fg)).truncate().shrink()).shrink())
-        .child(row().gap(10.0).center_y()
-            .child_opt(app.context_label().map(|label| text(label).font(app.ty.small()).color(rgb(p.muted)).mr(18.0)))
-            .child(text("/").font(app.ty.small()).color(rgb(p.fg)))
-            .child(text("commands").font(app.ty.small()).color(rgb(p.muted))));
+        // The context label appears once a conversation reports usage; the group lands at once
+        // so `/ commands` never slides to make room for it.
+        .child(row().key("composer-footer-right").gap(10.0).center_y().instant_changes()
+            .child_opt(app.context_label().map(|label| text(label).key("context").font(app.ty.small()).color(rgb(p.muted)).mr(18.0)))
+            .child(text("/").key("slash").font(app.ty.small()).color(rgb(p.fg)))
+            .child(text("commands").key("commands").font(app.ty.small()).color(rgb(p.muted))));
     let column = col().w_full().max_w(max_w).child(card);
     if app.composer.hints_hidden { column } else { column.child(row().w_full().px(28.0).child(footer)) }
 }

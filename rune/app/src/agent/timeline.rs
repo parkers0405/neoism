@@ -344,6 +344,9 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
         HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)
             .font(app.ty.small()).color(rgb(p.muted)).pt(16.0).w_full().wrap().max_lines(6).truncate()
             .selectable(true).selection_color(selection_color(app)),
+        // A reply that hasn't streamed any text yet takes no room: no padded empty paragraph
+        // (a blank line) above where the text will start.
+        HistoryMessageKind::Assistant if message.text.trim().is_empty() && message.attachments.is_empty() => el().key(key).w_full().h(0.0),
         HistoryMessageKind::Assistant => {
             let revision = match &app.active_tab().kind {
                 crate::tabs::TabKind::Agent { session: Some(id) } => app.sessions.get(id).and_then(|s| s.message_versions.get(&message.id)).copied().unwrap_or(0),
@@ -355,13 +358,19 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             let style = markdown_style(app);
             // Padding, not margin: a virtual row's top margin is dropped from its measured height.
             let mut body = col().key(key).w_full().pt(24.0).gap(14.0);
-            for segment in super::table::segments(&message.text) {
+            // While it streams, new lines land at full ink and the row opens at once: a fade-in
+            // and growth spring per update kept the newest line dim and clipped.
+            if streaming { body = body.instant_changes(); }
+            // Leading newlines from the stream would open the reply with blank lines.
+            for segment in super::table::segments(message.text.trim_start_matches(['\n', '\r'])) {
                 body = body.child(match segment {
                     super::table::Segment::Table(rows) => super::table::view(app, &rows, timeline_width(app), &style),
                     super::table::Segment::Text(text) => Markdown::new(text.to_owned())
                         .highlights(prose::highlights(text, p))
                         .streaming(streaming)
-                        .reveal(if streaming { 0.18 } else { 0.0 })
+                        // Words land at full ink: a per-word fade kept the newest line half
+                        // transparent the whole time a reply streamed.
+                        .reveal(0.0)
                         .code_frame(code_frame(app))
                         .selectable(true)
                         // Links show a hand and open on click: web links in the browser, file

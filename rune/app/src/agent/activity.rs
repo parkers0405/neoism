@@ -170,7 +170,9 @@ impl Activity {
         }
         let time = text("\u{b7} 00.0s model \u{b7} subagents").font(app.ty.sized(13.0).italic()).color(rgb(p.muted))
             .live_text(&self.time).ml(8.0 * s);
-        row().key("activity").w_full().mt(18.0).center_y().child(letters).child(dots).child(time)
+        // Padding, not margin: a virtual row drops its top margin, which slid this line (and its
+        // dark glyph shadows) up over the reply's last line.
+        row().key("activity").w_full().pt(18.0).center_y().child(letters).child(dots).child(time)
     }
 }
 

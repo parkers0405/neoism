@@ -231,6 +231,12 @@ fn actions(app: &App, term: &Terminal, block: &Block, home: &str, width: f32) ->
     let filtering = term.filter.as_ref().is_some_and(|(f, _)| *f == id);
     row().key(format!("block-actions:{tab_id}:{id}")).gap(4.0 * s).padding(4.0 * s).radius(4.0 * s)
         .fill(if header_w > width - 76.0 * s { rgb(app.pal.bg) } else { Color::TRANSPARENT })
+        // Its menu is anchored here: once the toolbar scrolls out of view the menu closes rather
+        // than losing its anchor.
+        .on_visible(move |a: &mut App, visible: bool, _: &mut Tx| {
+            if visible { return; }
+            if let Some(term) = a.terminals.get_mut(&tab_id).filter(|t| t.more == Some(id)) { term.more = None; }
+        })
         .child(action_button(app, format!("block-filter:{tab_id}:{id}"), Icon::Filter, filtering, None)
             .on_press(move |a: &mut App| a.toggle_block_filter(tab_id, id)))
         .child(action_button(app, format!("block-more:{tab_id}:{id}"), Icon::More, term.more == Some(id), None)

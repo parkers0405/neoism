@@ -54,11 +54,12 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
     if m.ctrl && !m.alt && !m.logo {
         let split = match &event.key {
             Key::Tab => { app.step_tab(!m.shift); return true; }
-            Key::Text(t) if m.shift => match t.to_lowercase().as_str() {
-                "r" => Some(Axis::Horizontal),
-                "d" => Some(Axis::Vertical),
-                "[" | "{" => { app.focus_split(false); return true; }
-                "]" | "}" => { app.focus_split(true); return true; }
+            // Ctrl chords arrive as `Command` keys.
+            Key::Command(c) if m.shift => match c.to_ascii_lowercase() {
+                'r' => Some(Axis::Horizontal),
+                'd' => Some(Axis::Vertical),
+                '[' | '{' => { app.focus_split(false); return true; }
+                ']' | '}' => { app.focus_split(true); return true; }
                 _ => None,
             },
             _ => None,

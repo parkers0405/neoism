@@ -243,8 +243,9 @@ impl Layout {
         }
         self.flatten();
         if self.focus == id {
+            // Focus follows the space: the pane after the closed one, else the one before.
             let remaining: Vec<PaneId> = self.panes().iter().map(|p| p.id).collect();
-            self.focus = remaining[position.saturating_sub(1).min(remaining.len() - 1)];
+            self.focus = remaining[position.min(remaining.len() - 1)];
         }
     }
 
@@ -336,7 +337,7 @@ impl Layout {
     }
 
     /// `Ctrl+Alt+arrows`: move the focused pane's nearest split boundary on `axis` by `delta`
-    /// (positive grows the pane toward the right / bottom).
+    /// (the boundary moves with the arrow: negative is left / up).
     pub fn nudge(&mut self, axis: Axis, delta: f32) -> bool {
         let Some(mut path) = self.path_to(self.focus) else { return false };
         while let Some(index) = path.pop() {
@@ -344,7 +345,7 @@ impl Layout {
             if *a != axis { continue; }
             // The boundary after the pane, or the one before it for the last child.
             let gap = if index + 1 < children.len() { index } else { index - 1 };
-            let ratio = ratios[gap] + if gap == index { delta } else { -delta };
+            let ratio = ratios[gap] + delta;
             self.set_ratio(&path, gap, ratio);
             return true;
         }
@@ -423,5 +424,25 @@ mod tests {
         l.select(2);
         assert_eq!(l.focused().active_tab(), Some(2));
         assert_eq!(l.pane_count(), 2);
+    }
+
+    #[test]
+    fn closing_a_pane_focuses_the_one_that_takes_its_space_and_nudges_clamp() {
+        let mut l = Layout::new(1);
+        l.split(Axis::Horizontal, 2);
+        l.split(Axis::Vertical, 3);
+        // Close the upper right pane: the lower one grows into it and takes focus.
+        l.focus = l.pane_of(2).unwrap();
+        assert!(l.remove(2));
+        assert_eq!(l.focused().tabs, vec![3]);
+        assert_eq!(l.pane_count(), 2);
+        // The right pane's nearest horizontal boundary moves; ratios stay within 10..90%.
+        assert!(l.nudge(Axis::Horizontal, -0.03));
+        let Node::Split { ratios, .. } = &l.root else { panic!("split root") };
+        assert!((ratios[0] - 0.47).abs() < 1e-4);
+        for _ in 0..40 { l.nudge(Axis::Horizontal, 0.03); }
+        let Node::Split { ratios, .. } = &l.root else { panic!("split root") };
+        assert!((ratios[0] - MAX_RATIO).abs() < 1e-4);
+        assert!(!l.nudge(Axis::Vertical, 0.03));
     }
 }

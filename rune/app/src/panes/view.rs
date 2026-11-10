@@ -90,10 +90,7 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
             .max_w(212.5)
             .fill(if selected { rgb(p.bg) } else { Color::TRANSPARENT })
             .child(if matches!(tab.kind, TabKind::Agent { .. }) {
-                match app.tools.icons.agent(Some("neoism")) {
-                    Some(image) => el().key(format!("pane-tab-icon:{tab_id}")).w(13.0 * s).h(13.0 * s).pixels(image.pixels()),
-                    None => text("n").font(app.ty.tab()).color(color),
-                }
+                crate::ui::neoism_mark(app, 13.0 * s, &format!("pane-tab-icon:{tab_id}"))
             } else { text(g).font(app.ty.icon_sized(13.0)).color(color) })
             .child(text(app.tab_title(tab)).font(app.ty.tab()).color(fg).truncate().shrink())
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| { if inside { a.tab_hover = Some(tab_id); } else if a.tab_hover == Some(tab_id) { a.tab_hover = None; } })

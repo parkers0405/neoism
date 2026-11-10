@@ -274,7 +274,7 @@ impl App {
         b.remember(&current);
         match picked {
             Picked::Directory(path) => self.change_directory(&path),
-            Picked::Image(path) => self.attach_images(vec![path]),
+            Picked::Image(path) => { self.attach_images(vec![path]); }
         }
     }
 
@@ -349,9 +349,3 @@ mod tests {
     }
 }
 
-impl App {
-    /// Attach pictures to the active composer. (Replaced by the composer's own attachments.)
-    pub fn attach_images(&mut self, paths: Vec<String>) {
-        let _ = paths;
-    }
-}

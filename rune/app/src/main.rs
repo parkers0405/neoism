@@ -63,6 +63,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.tree_follow_selection(tx);
     app.palette_follow_selection(tx);
     app.finder_follow_selection(tx);
+    app.conversation_follow(tx);
     let panes_changed = app.sync_panes();
     let flashing = app.editor_tick();
     if flashing { tx.wake_after(std::time::Duration::ZERO); }
@@ -138,6 +139,13 @@ fn main() {
             ("editor-md", |s| {
                 s.open_file("README.md", None);
                 s.apply_opened_file("README.md", include_bytes!("../../README.md"));
+            }),
+            ("sidebar-long", |s| {
+                s.threads = (0..40).map(|i| serde_json::from_value(serde_json::json!({
+                    "session_id": format!("s{i}"), "title": format!("Conversation number {i}"), "pinned": i < 2,
+                }))).collect::<Result<_, _>>().expect("fixture threads");
+                s.sidebar = Some(app::Sidebar::Conversations);
+                s.focus = app::Focus::Sidebar;
             }),
             ("tree-long", |s| {
                 let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();

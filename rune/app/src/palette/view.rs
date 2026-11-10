@@ -164,7 +164,7 @@ fn settings_header(app: &App, picker: &Picker, width: f32) -> El {
                 if inside { a.palette_category_hover = Some(0); } else if a.palette_category_hover == Some(0) { a.palette_category_hover = None; }
             })
             .on_press(|a: &mut App| a.show_category(Mode::Systems)))
-        .child(text(heading).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.fg)).truncate().mt(7.0 * s).w(width))
+        .child(text(heading).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.fg)).truncate().mt(7.0 * s).px(8.0 * s).w(width))
 }
 
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

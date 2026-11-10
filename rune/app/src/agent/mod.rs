@@ -19,7 +19,7 @@ pub use activity::Activity;
 pub use composer::overlay;
 pub use family::Families;
 pub use header::Step as HeaderStep;
-pub use sidebar::conversations;
+pub use sidebar::{catalog_scope, conversations};
 pub use timeline::pane;
 
 use crate::app::App;
@@ -68,8 +68,11 @@ impl App {
         if let Some(daemon) = &self.daemon { daemon.agent(&message); }
     }
 
+    /// The conversation catalog for this root: one project's chats, or every project's at
+    /// the `~` / `/` dashboard (`workspace_catalog_scope`).
     pub fn refresh_threads(&self) {
-        self.send_agent(AgentClientMessage::ListThreads { directory: Some(self.cwd.clone()), limit: Some(50), cursor: None });
+        let directory = sidebar::catalog_scope(&self.cwd);
+        self.send_agent(AgentClientMessage::ListThreads { directory, limit: Some(50), cursor: None });
     }
 
     pub(crate) fn agent_connected(&mut self) {

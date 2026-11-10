@@ -65,6 +65,11 @@ pub struct App {
     pub modal: Option<crate::ui::modal::Modal>,
     /// A `cd` waiting for the shell to confirm it (request id).
     pub pending_cd: Option<String>,
+    /// The terminal tab whose directory the workspace follows (`mainTerminals`); `None` falls back
+    /// to the first eligible terminal.
+    pub main_terminal: Option<u64>,
+    /// Dashboard project folders the user closed in the conversations panel.
+    pub collapsed_projects: std::collections::HashSet<String>,
     /// The app clipboard: the last yank, also what `p` falls back to.
     pub clipboard: Option<String>,
     /// The notes sidebar (the workspace's notes vault).
@@ -194,6 +199,8 @@ impl App {
             activity: None, replay: None,
             modal: None,
             pending_cd: None,
+            main_terminal: None,
+            collapsed_projects: Default::default(),
             clipboard: None,
             notes: Default::default(),
             menu: None,

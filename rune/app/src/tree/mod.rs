@@ -156,7 +156,7 @@ impl App {
     /// Whole rows visible in the tree's scroll view (a page for PageUp/PageDown).
     pub fn tree_page_rows(&self) -> isize {
         let row_h = 26.0 * self.ty.scale();
-        ((self.tree_scroll.get().2 / row_h).floor() as isize - 1).max(1)
+        ((self.tree_follow.scroll.get().2 / row_h).floor() as isize - 1).max(1)
     }
 
     pub fn tree_move(&mut self, delta: isize) {
@@ -164,7 +164,7 @@ impl App {
         let count = tree.rows().len();
         if count == 0 { return; }
         tree.selected = (tree.selected as isize).saturating_add(delta).clamp(0, count as isize - 1) as usize;
-        self.tree_follow = true;
+        self.tree_follow.request();
     }
 
     /// Open the selected file, or expand/collapse the selected folder.
@@ -193,7 +193,7 @@ impl App {
         if let Some(index) = rows.iter().position(|r| r.path == parent) {
             tree.selected = index;
             tree.open.remove(parent);
-            self.tree_follow = true;
+            self.tree_follow.request();
         }
     }
 }

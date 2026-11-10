@@ -215,6 +215,19 @@ impl App {
         }
     }
 
+    /// The scroll view the cursor's target lives in: the cursor is clipped to it, so a row or
+    /// cell scrolled out of view never paints over the tab bar, breadcrumb or status line.
+    pub fn cursor_clip(&self) -> Option<[f32; 4]> {
+        if self.menu.is_some() || self.settings.is_some() { return None; }
+        if self.finder.is_some() { return self.rects.get("finder-results").copied(); }
+        if self.picker.is_some() { return self.rects.get("picker-results").copied(); }
+        match self.focus {
+            Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.rects.get("editor-view").copied(),
+            Focus::Sidebar if self.active_tree().is_some() => self.rects.get("file-tree-rows").copied(),
+            _ => None,
+        }
+    }
+
     /// Keyboard focus in text fields follows the app's focus zone: the active tab's composer
     /// holds it only while content has focus and no picker, finder or menu is open (the
     /// original moves the one cursor out of the field rather than leaving it typing).

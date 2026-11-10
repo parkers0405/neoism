@@ -24,10 +24,9 @@ pub enum Item {
     Database,
     Themes,
     Backgrounds,
-    Extensions,
 }
 
-pub const ITEMS: [Item; 6] = [Item::About, Item::Settings, Item::Database, Item::Themes, Item::Backgrounds, Item::Extensions];
+pub const ITEMS: [Item; 5] = [Item::About, Item::Settings, Item::Database, Item::Themes, Item::Backgrounds];
 
 impl Item {
     pub fn label(self) -> &'static str {
@@ -37,7 +36,6 @@ impl Item {
             Item::Database => "Database",
             Item::Themes => "Themes",
             Item::Backgrounds => "Backgrounds",
-            Item::Extensions => "Extensions",
         }
     }
 
@@ -48,7 +46,6 @@ impl Item {
             Item::Database => "\u{f1c0}",
             Item::Themes => "\u{f1fc}",
             Item::Backgrounds => "\u{f03e}",
-            Item::Extensions => "\u{f12e}",
         }
     }
 }
@@ -74,7 +71,7 @@ impl App {
             Item::Backgrounds => self.open_picker(crate::palette::Mode::Backgrounds),
             Item::About => self.modal = Some(crate::ui::modal::Modal::about()),
             // Not built yet in this frontend: the database and extensions pages.
-            Item::Database | Item::Extensions => {}
+            Item::Database => {}
         }
     }
 

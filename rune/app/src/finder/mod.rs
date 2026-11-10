@@ -112,6 +112,7 @@ impl App {
         if finder.hits.is_empty() { return; }
         let last = finder.hits.len() as isize - 1;
         finder.selected = (finder.selected as isize + delta).clamp(0, last) as usize;
+        self.finder_follow.request();
         self.request_preview();
     }
 

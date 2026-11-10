@@ -68,10 +68,10 @@ pub struct App {
     /// The editor cursor moved: scroll it into view after its next layout.
     pub editor_follow: bool,
     /// The file tree's scroll (offset, max, viewport) and its pending follow target.
-    pub tree_scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
-    /// The last follow target and when it was set (a glide still heading there).
-    pub tree_target: Option<(f32, std::time::Instant)>,
-    pub tree_follow: bool,
+    pub tree_follow: crate::ui::follow::Follow,
+    /// The command palette's and finder's lists following the keyboard row.
+    pub palette_follow: crate::ui::follow::Follow,
+    pub finder_follow: crate::ui::follow::Follow,
     /// A `g` waiting for its second key (`gg`).
     pub pending_g: bool,
     /// Open files by workspace-relative path.
@@ -190,9 +190,9 @@ impl App {
             decoded_previews: Default::default(),
             tree: Default::default(),
             editor_follow: false,
-            tree_scroll: Default::default(),
-            tree_target: None,
-            tree_follow: false,
+            tree_follow: Default::default(),
+            palette_follow: Default::default(),
+            finder_follow: Default::default(),
             pending_g: false,
             buffers: HashMap::new(),
             editor_scroll: Default::default(),

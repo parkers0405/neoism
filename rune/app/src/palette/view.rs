@@ -13,6 +13,17 @@ const MARGIN_TOP: f32 = 80.0;
 const INPUT_H: f32 = 30.0;
 const ROW_H: f32 = 32.0;
 const MAX_ROWS: usize = 8;
+const LIST_KEY: &str = "picker-results";
+
+impl App {
+    /// Keep the palette's selected row `SCROLL_OFF_ROWS` (2) inside its list.
+    pub fn palette_follow_selection(&mut self, tx: &mut Tx) {
+        let Some(picker) = &self.picker else { return };
+        let (selected, count) = (picker.selected, picker.rows().len());
+        let row_h = ROW_H * self.ty.scale();
+        self.palette_follow.apply(LIST_KEY, selected, row_h, count as f32 * row_h + 4.0 * self.ty.scale(), crate::ui::follow::Reveal::Margin(2), tx);
+    }
+}
 /// The pane tab rows sit above the content the picker is placed in.
 const CHROME_TOP: f32 = 60.0;
 
@@ -109,8 +120,11 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
         list = list.child(line);
     }
     let visible = rows.len().clamp(1, MAX_ROWS) as f32;
-    col().key("picker-results").w(width).h(visible * ROW_H * s + 4.0 * s).pb(4.0 * s)
+    let mirror = app.palette_follow.scroll.clone();
+    col().key(LIST_KEY).w(width).h(visible * ROW_H * s + 4.0 * s).pb(4.0 * s)
         .scroll(rune::ScrollSpec { stick_bottom: false })
+        .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
         .child(list)
 }
 

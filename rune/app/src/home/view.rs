@@ -15,8 +15,6 @@ use rune::{Color, El, ScrollSpec, Span, Spring, Tx, WheelEvent, col, el, row, te
 
 /// The agent timeline's wheel glide: critically damped, omega 16.
 const WHEEL_SPRING: Spring = Spring::new(0.39, 0.0);
-/// Rune reports a wheel notch as 40 points; terminals move three rows per notch.
-const NOTCH: f32 = 40.0;
 /// The filter row a filtered block adds under its command (`34 * s`).
 const FILTER_ROW: f32 = 34.0;
 /// `TerminalAction`: a 26 pt button holding a 16 pt icon, 5 pt corners.
@@ -49,7 +47,7 @@ pub fn view(app: &App) -> El {
                     if let Some(term) = a.terminals.get_mut(&tab_id) {
                         let max = term.scroll.get().1;
                         term.wheel_target = Some(max);
-                        term.glide = None;
+                        a.scrollers.stop(&format!("terminal-scroll:{tab_id}"));
                         tx.scroll_to_with(format!("terminal-scroll:{tab_id}"), 0.0, max, WHEEL_SPRING);
                     }
                 }))
@@ -102,20 +100,11 @@ fn history(app: &App, term: &Terminal, composer_h: f32) -> El {
         .scroll(ScrollSpec { stick_bottom: true })
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1])))
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
-            // Trackpads keep Rune's 1:1 scroll and fling; notches glide on the spring.
-            if e.precise || e.dy == 0.0 { return false; }
             let Some(term) = a.terminals.get_mut(&tab_id) else { return false };
             // An open block menu would drift from its toolbar: scrolling closes it.
             term.more = None;
-            let (offset, max) = term.scroll.get();
-            // Stepped on the frame clock (`App::step_terminal_glides`): Rune lands scroll
-            // requests at once while the composer holds focus.
-            let base = term.glide.map_or(offset, |g| g.target);
-            let target = (base - e.dy / NOTCH * 3.0 * line_h).clamp(0.0, max);
-            term.glide = Some(crate::ui::follow::Glide::retarget(term.glide, offset, target));
-            tx.wake_after(std::time::Duration::ZERO);
-            tx.live_only();
-            true
+            let mirror = term.scroll.clone();
+            crate::ui::scroll::handle(&mut a.scrollers, &format!("terminal-scroll:{tab_id}"), &e, 3.0 * line_h, std::rc::Rc::new(move || mirror.get()), tx)
         })
         .child(content)
 }

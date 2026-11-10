@@ -383,18 +383,13 @@ fn code(app: &App, buffer: &Buffer) -> El {
             let Some(b) = a.buffers.get_mut(&wheel_path) else { return false };
             let popup = b.lsp.hover.is_some() || b.lsp.completion.is_some();
             b.lsp.dismiss();
-            let (offset, max, _) = b.scroll.get();
-            if e.precise && e.dx.abs() > e.dy.abs() { return false; }
-            // Notches move three lines; trackpads move with the reading gain and coast. Both
-            // glide on Rune's clock, extending one target so consecutive deltas are one motion.
             b.jump_spring = None;
-            let base = b.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
-            let delta = if e.precise { -e.dy * crate::ui::follow::TOUCHPAD_GAIN * crate::ui::follow::TRACKPAD_REACH } else { -e.dy / 40.0 * 3.0 * line_h };
-            let target = (base + delta).clamp(0.0, max);
-            b.wheel_target = Some(target);
-            tx.scroll_to_with(wheel_key.clone(), 0.0, target, if e.precise { crate::ui::follow::TRACKPAD_SPRING } else { SCROLL_SPRING });
-            if !popup { tx.live_only(); }
-            true
+            b.wheel_target = None;
+            let mirror = b.scroll.clone();
+            let source: crate::ui::scroll::Source = std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) });
+            // A popup the wheel closed needs the view to re-run; otherwise nothing it reads moved.
+            if popup { crate::ui::scroll::take(&mut a.scrollers, &wheel_key, &e, 3.0 * line_h, source, tx) }
+            else { crate::ui::scroll::handle(&mut a.scrollers, &wheel_key, &e, 3.0 * line_h, source, tx) }
         })
         .child(rows)
 }

@@ -279,6 +279,7 @@ pub fn conversations(app: &App) -> El {
             .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(header_rect_key(header).into(), r); })
     };
     let mirror = app.conv_follow.scroll.clone();
+    let notch = 3.0 * crate::editor::view::line_height(app);
     let mut list = col().w_full();
     let rows = app.conversation_rows();
     let dashboard = app.conversations_dashboard();
@@ -315,5 +316,10 @@ pub fn conversations(app: &App) -> El {
         .child(col().key(LIST_KEY).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false })
             .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
+            // The shared wheel/trackpad feel (`ui/scroll.rs`).
+            .on_wheel(move |a: &mut App, e: rune::WheelEvent, tx: &mut rune::Tx| {
+                let mirror = a.conv_follow.scroll.clone();
+                crate::ui::scroll::handle(&mut a.scrollers, LIST_KEY, &e, notch, std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) }), tx)
+            })
             .child(list))
 }

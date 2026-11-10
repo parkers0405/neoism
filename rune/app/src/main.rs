@@ -101,7 +101,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
     let mode_changing = app.tick_mode_pill();
-    let gliding = app.step_terminal_glides(clock, tx) | app.editor_jump_springs(tx);
+    // Wheel and trackpad motion on every scroll view, stepped on the frame clock.
+    let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx);
     if gliding { tx.wake_after(std::time::Duration::ZERO); }
     if mode_changing { tx.wake_after(std::time::Duration::ZERO); }
     let panes_changed = app.sync_panes();

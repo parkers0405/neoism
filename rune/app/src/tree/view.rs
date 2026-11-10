@@ -62,6 +62,7 @@ pub fn view(app: &App) -> El {
         list = list.child(line);
     }
     let mirror = app.tree_follow.scroll.clone();
+    let notch = 3.0 * crate::editor::view::line_height(app);
     col().key("file-tree").w_full().h_full().fill(app.surface(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(row().w_full().h(HEADER_H * s).px(16.0 * s).center_y()
@@ -69,6 +70,11 @@ pub fn view(app: &App) -> El {
         .child(col().key(SCROLL_KEY).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false })
             .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(SCROLL_KEY.into(), r); })
+            // The shared wheel/trackpad feel (`ui/scroll.rs`).
+            .on_wheel(move |a: &mut App, e: rune::WheelEvent, tx: &mut rune::Tx| {
+                let mirror = a.tree_follow.scroll.clone();
+                crate::ui::scroll::handle(&mut a.scrollers, SCROLL_KEY, &e, notch, std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) }), tx)
+            })
             .child(list))
 }
 

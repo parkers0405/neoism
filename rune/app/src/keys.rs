@@ -291,10 +291,12 @@ impl App {
         }
         // A click into this tab's own composer while the keyboard was elsewhere (the sidebar,
         // a tab row, the tree): the composer takes it, with the window cursor.
+        // (Not on the first sync: a composer starts out focused before any sync has run.)
         let own = self.tabs.get(self.active).filter(|t| t.draft.focused && self.field_tab != Some(t.id)).map(|t| t.id);
-        if own.is_some() && self.focus != Focus::Content && self.picker.is_none() && self.finder.is_none() {
+        if self.field_synced && own.is_some() && self.focus != Focus::Content && self.picker.is_none() && self.finder.is_none() {
             self.focus = Focus::Content;
         }
+        self.field_synced = true;
         // An inline composer picker (`/model`, `/cd` …) types into its own query row.
         let inline_picker = self.composer.picker.as_ref().is_some_and(|p| p.kind != crate::agent::slash::Kind::Slash);
         // A block's output filter types into its own field; a click back into the composer

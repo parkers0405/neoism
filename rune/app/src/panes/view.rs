@@ -12,16 +12,19 @@ use crate::ui::theme::{glyph, rgb};
 use rune::{Color, Cursor, Cx, Drag, El, Phase, Tx, col, el, row, text};
 
 pub const TAB_ROW_H: f32 = 30.0;
-const GAP: f32 = 4.0;
+pub const GAP: f32 = 4.0;
 const FRAME_RADIUS: f32 = 14.0;
 
 pub fn view(app: &App, cx: &mut Cx<App>) -> El {
     let area = col().key("panes").w_full().grow(1.0).shrink()
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("panes-area".into(), r); });
-    let layout = &app.layout;
+    // A dragged tab over a drop zone shows the layout its release would give.
+    let drag = app.tab_drag.as_ref().filter(|d| d.splitting());
+    let layout = drag.and_then(|d| d.preview()).unwrap_or(&app.layout);
     if layout.pane_count() == 1 {
         let pane = layout.focused();
-        return area.child(tab_row(app, pane, false)).child(content(app, pane, true, cx));
+        let area = area.child(tab_row(app, pane, false)).child(content(app, pane, true, cx));
+        return match drag_anchor(app, layout, true) { Some(anchor) => area.child(anchor), None => area };
     }
     let s = app.ty.scale();
     let [_, _, w, h] = app.rects.get("panes-area").copied().unwrap_or([0.0, 0.0, app.window[0] - 56.0, app.window[1] - 84.0]);
@@ -40,12 +43,32 @@ pub fn view(app: &App, cx: &mut Cx<App>) -> El {
             .on_press(move |a: &mut App| a.focus_pane(id))
             .child(tab_row(app, pane, true))
             .child(content(app, pane, focused, cx));
+        // Panes ease to a previewed drop and back; every other layout change lands at once.
+        let frame = if drag.is_some() { frame.motion(crate::ui::tab_drag::PREVIEW) } else { frame };
         area = area.child(frame);
     }
     for divider in dividers {
         area = area.child(divider_view(app, divider));
     }
+    if let Some(anchor) = drag_anchor(app, layout, false) { area = area.child(anchor); }
     area
+}
+
+/// The hidden stand-in a dragged tab leaves on the key path it was pressed on (see
+/// `TabDrag::anchor`).
+fn anchor_tab(tab: u64) -> El {
+    el().key(format!("pane-tab:{tab}")).w(0.0).h(0.0).opacity(0.0)
+        .on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| a.drag_tab(crate::ui::tab_drag::Source::Buffer(tab), d, tx))
+}
+
+/// The stand-in's whole chain, when the previewed layout has no strip on the pressed path: the
+/// tab's pane closed, or the panes went from one unframed pane to framed ones (or back).
+fn drag_anchor(app: &App, layout: &super::Layout, unframed: bool) -> Option<El> {
+    let (tab, home, framed) = app.tab_drag.as_ref()?.anchor()?;
+    if framed != unframed && layout.pane(home).is_some() { return None; }
+    let strip = el().key(format!("pane-tab-strip:{}:{home}", app.workspace_id)).w(0.0).h(0.0)
+        .child(row().key(format!("pane-tabs:{home}")).child(anchor_tab(tab)));
+    Some(if framed { el().key(format!("pane:{home}")).w(0.0).h(0.0).absolute(0.0, 0.0).child(strip) } else { strip.absolute(0.0, 0.0) })
 }
 
 fn divider_view(app: &App, divider: Divider) -> El {
@@ -125,6 +148,10 @@ fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
         }
         if !modified && app.tab_hover != Some(tab_id) { item = item.child(el().w(18.0).h(18.0)); }
         tabs = tabs.child(app.tab_slide(crate::ui::tab_drag::Source::Buffer(tab_id), item));
+    }
+    // The dragged tab is previewed in another pane: its stand-in stays in this strip.
+    if let Some((tab, home, was_framed)) = app.tab_drag.as_ref().and_then(|d| d.anchor()) {
+        if home == pane_id && was_framed == framed && !pane.tabs.contains(&tab) { tabs = tabs.child(anchor_tab(tab)); }
     }
     let mut new_tab = el().key(format!("pane-new:{pane_id}")).w(32.0).h(TAB_ROW_H).center()
         .child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))

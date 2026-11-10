@@ -123,6 +123,10 @@ workloads and the packaging/installed-binary cutover remain outstanding. GPUiX r
 - [x] Home wordmark hover animates; preserve the working agent hover and animate unfocused visible panes.
 - [x] Tab and workspace close buttons appear only while hovered, without changing tab widths.
 - [x] Holding and dragging either tab row reorders its tabs; cancellation preserves order.
+- [x] A buffer tab dragged off its strip previews its drop in the panes and commits it on release:
+  a pane's edge (a quarter of it on each side) splits that side, its centre or tab strip adopts
+  the tab, a lone tab cannot split its own pane, Escape or leaving the zone restores the layout
+  (`check-tab-drop.py`).
 - [x] Shift+Alt+Left/Right reorders the focused tab; workspace focus (or Ctrl as in the reference) targets workspaces.
 - [x] Restore MCP-supplied icons in /mcp, its actions header, and timeline tool calls; retain status indicators and bundled/fallback marks.
 - [x] Run Rust tests, headless geometry/input checks, native window checks, and refresh the preview on space 4.

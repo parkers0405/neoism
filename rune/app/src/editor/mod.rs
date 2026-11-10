@@ -289,6 +289,15 @@ impl App {
             }
         }
         buffer.doc.page_rows = rows;
+        // With the hover card open (`K`), Up/Down scroll it instead of moving the cursor.
+        if matches!(key, Key::Up | Key::Down) && let Some(b) = self.active_buffer()
+            && b.lsp.hover.as_ref().is_some_and(|h| h.text.is_some()) && b.lsp.completion.is_none() {
+            let (offset, max, _) = b.lsp.hover_scroll.get();
+            let step = 3.0 * 20.0 * self.ty.scale();
+            let target = (offset + if key == Key::Down { step } else { -step }).clamp(0.0, max);
+            tx.scroll_to_with(super::editor::lsp_view::HOVER_SCROLL_KEY, 0.0, target, view::SCROLL_SPRING);
+            return true;
+        }
         if self.lsp_key_before(&key) { return true; }
         let Some(buffer) = self.active_buffer_mut() else { return false };
         let before = (buffer.doc.cursor(), buffer.doc.revision);

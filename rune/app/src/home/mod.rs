@@ -2,6 +2,7 @@
 //! (`reference/01..03`, motion `home-terminal-scroll`). Full-screen programs and REPLs get
 //! Ghostty's grid; keys then go straight to the PTY through Ghostty's encoders.
 
+mod actions;
 mod blocks;
 mod composer;
 mod grid;

@@ -1,6 +1,11 @@
 //! The workspace root: where the finder, tree, git watch and new conversations look. An explicit
-//! directory change goes through the Home shell first (`ChangeTerminalDirectory`), and the root
-//! follows the directory the host confirms (`model.changeWorkspaceDirectory`).
+//! directory change goes through the main terminal first (`ChangeTerminalDirectory`), and the
+//! root follows the directory the host confirms (`model.changeWorkspaceDirectory`).
+//!
+//! One terminal per workspace owns the working directory (`mainTerminalSurface`): the one the
+//! user starred, else the first Home or Terminal tab with a shell. While it is the active tab,
+//! a `cd` inside it moves this window's view of the workspace (tree, notes, conversations, git,
+//! paths) with it (`followMainTerminal`); the host's declared root is left alone.
 
 use crate::app::App;
 use crate::daemon::Family;
@@ -8,17 +13,45 @@ use crate::tabs::TabKind;
 use neoism_protocol::pty::ClientMessage as PtyClient;
 
 impl App {
+    /// Terminal tabs that can own the directory: Home and Terminal tabs with a live shell.
+    fn directory_terminals(&self) -> impl Iterator<Item = u64> + '_ {
+        self.tabs.iter()
+            .filter(|t| matches!(t.kind, TabKind::Home | TabKind::Terminal))
+            .filter(|t| self.terminals.get(&t.id).is_some_and(|term| term.shell.session.is_some()))
+            .map(|t| t.id)
+    }
+
+    /// The terminal that owns the working directory (`mainTerminalSurface`).
+    pub fn main_terminal_tab(&self) -> Option<u64> {
+        let mut eligible = self.directory_terminals();
+        let first = eligible.next();
+        let remembered = self.main_terminal.filter(|id| Some(*id) == first || self.directory_terminals().any(|t| t == *id));
+        remembered.or(first)
+    }
+
+    /// The star: make this terminal own the working directory (`setMainTerminal`).
+    pub fn set_main_terminal(&mut self, tab_id: u64) {
+        if self.pending_cd.is_some() || !self.directory_terminals().any(|t| t == tab_id) { return; }
+        self.main_terminal = Some(tab_id);
+        self.follow_main_terminal();
+    }
+
+    /// While the owning terminal is the active tab, its shell's directory is the workspace
+    /// view's root. Returns whether the root moved.
+    pub fn follow_main_terminal(&mut self) -> bool {
+        let active = self.active_tab().id;
+        if self.pending_cd.is_some() || self.main_terminal_tab() != Some(active) { return false; }
+        let Some(cwd) = self.terminals.get(&active).map(|t| t.shell.cwd.trim_end_matches('/').to_owned()) else { return false };
+        if !cwd.starts_with('/') || cwd == self.cwd || cwd.chars().any(char::is_control) { return false; }
+        self.view_workspace_root(&cwd);
+        true
+    }
+
     /// `cd` the workspace to `path` (absolute).
     pub fn change_directory(&mut self, path: &str) {
-        let session = self
-            .tabs
-            .iter()
-            .filter(|t| t.kind == TabKind::Home)
-            .find_map(|t| {
-                self.terminals
-                    .get(&t.id)
-                    .and_then(|term| term.shell.session.clone())
-            });
+        let session = self.main_terminal_tab()
+            .and_then(|id| self.terminals.get(&id))
+            .and_then(|term| term.shell.session.clone());
         let (Some(session_id), Some(daemon)) = (session, &self.daemon) else {
             self.set_workspace_root(path);
             return;
@@ -56,12 +89,24 @@ impl App {
         }
     }
 
-    /// Move everything workspace-scoped to `root`.
+    /// Move everything workspace-scoped to `root` and declare it to the host.
     pub fn set_workspace_root(&mut self, root: &str) {
         let root = root.trim_end_matches('/').to_owned();
         if root == self.cwd {
             return;
         }
+        self.view_workspace_root(&root);
+        if self.workspace_ready {
+            if let Some(d) = &self.daemon {
+                d.send(Family::Workspace, serde_json::json!({"SetWorkspaceRoot":{"workspace_id":self.workspace_id,"root_dir":self.cwd}}));
+            }
+        }
+    }
+
+    /// This window's view of the workspace moves to `root`: name, tree, notes, conversations and
+    /// git (`activateWorkspace` over `workspaceView`). Nothing is sent to the host.
+    fn view_workspace_root(&mut self, root: &str) {
+        let root = root.trim_end_matches('/').to_owned();
         let home = std::env::var("HOME").unwrap_or_default();
         self.workspace_name = if root == home {
             "~".into()
@@ -72,17 +117,13 @@ impl App {
                 .unwrap_or_else(|| root.clone())
         };
         self.cwd = root;
-        if self.workspace_ready {
-            if let Some(d) = &self.daemon {
-                d.send(Family::Workspace, serde_json::json!({"SetWorkspaceRoot":{"workspace_id":self.workspace_id,"root_dir":self.cwd}}));
-            }
-        }
         self.tree = Default::default();
-        if self.sidebar == Some(crate::app::Sidebar::Files) {
-            self.sidebar = None;
-            self.toggle_file_tree();
-        }
         self.notes = Default::default();
+        // An open tree or notes panel lists the new root at once.
+        if let Some(sidebar @ (crate::app::Sidebar::Files | crate::app::Sidebar::Notes)) = self.sidebar {
+            self.sidebar = None;
+            self.toggle_tree(sidebar);
+        }
         self.refresh_threads();
         self.watch_git();
     }
@@ -109,6 +150,7 @@ pub struct State {
     workspace_closing: Option<u64>,
     activity: Option<crate::agent::Activity>,
     pending_cd: Option<String>,
+    main_terminal: Option<u64>,
     notes: crate::tree::Tree,
     tree: crate::tree::Tree,
     editor_follow: bool,
@@ -155,6 +197,7 @@ impl State {
             workspace_closing: app.workspace_closing,
             activity: app.activity,
             pending_cd: app.pending_cd,
+            main_terminal: app.main_terminal,
             notes: app.notes,
             tree: app.tree,
             editor_follow: app.editor_follow,
@@ -194,6 +237,7 @@ impl State {
         std::mem::swap(&mut self.workspace_closing, &mut app.workspace_closing);
         std::mem::swap(&mut self.activity, &mut app.activity);
         std::mem::swap(&mut self.pending_cd, &mut app.pending_cd);
+        std::mem::swap(&mut self.main_terminal, &mut app.main_terminal);
         std::mem::swap(&mut self.notes, &mut app.notes);
         std::mem::swap(&mut self.tree, &mut app.tree);
         std::mem::swap(&mut self.editor_follow, &mut app.editor_follow);

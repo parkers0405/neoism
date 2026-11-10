@@ -261,6 +261,8 @@ impl App {
 
     /// Where the window cursor belongs: the focus bar on a tab, or the focused field's caret.
     pub fn cursor_target(&self) -> Option<[f32; 4]> {
+        // A full-window picture preview has no cursor.
+        if self.attach.preview.is_some() { return None; }
         use crate::ui::cursor::tab_bar;
         let scale = 1.0;
         // An open finder or palette parks the cursor on its selected row; the query field keeps

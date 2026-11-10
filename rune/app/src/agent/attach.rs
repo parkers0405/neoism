@@ -118,22 +118,9 @@ fn history_bytes(url: &str) -> Option<Vec<u8>> {
 impl App {
     /// The paperclip: choose images to attach. A worker runs the desktop's picker so the window
     /// keeps drawing; `poll` attaches what it returns.
+    /// The paperclip: GPUiX's file browser in its picture mode.
     pub fn request_attach(&mut self) {
-        let (picked, wake, dir) = (self.attach.picked.clone(), self.waker.clone(), self.cwd.clone());
-        std::thread::spawn(move || {
-            let output = std::process::Command::new("zenity")
-                .args(["--file-selection", "--multiple", "--separator=\n", "--title=Attach files"])
-                .arg(format!("--filename={}/", dir.trim_end_matches('/')))
-                .arg("--file-filter=Images | *.png *.jpg *.jpeg *.gif *.webp *.bmp *.PNG *.JPG *.JPEG")
-                .arg("--file-filter=All files | *")
-                .output();
-            let Ok(output) = output else { return };
-            if !output.status.success() { return; }
-            let paths: Vec<String> = String::from_utf8_lossy(&output.stdout).lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
-            if paths.is_empty() { return; }
-            picked.lock().unwrap().extend(paths);
-            if let Some(wake) = wake { wake(); }
-        });
+        self.open_file_browser(crate::browser::Mode::AttachImage);
     }
 
     /// Attach files to the active composer (the picker's, a browser's or a drop's choice).

@@ -116,14 +116,26 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     false
 }
 
+/// The letter of a Ctrl chord. Rune delivers Ctrl chords as `Command` keys; some layouts send
+/// the letter as text, or its control code (`\u{4}` for Ctrl+D).
+pub fn ctrl_letter(event: &KeyEvent) -> Option<char> {
+    if !event.mods.ctrl || event.mods.alt { return None; }
+    let c = match &event.key {
+        Key::Command(c) => *c,
+        Key::Text(t) => t.chars().next()?,
+        _ => return None,
+    };
+    Some(if (c as u32) < 0x20 { (c as u8 + b'a' - 1) as char } else { c.to_ascii_lowercase() })
+}
+
 /// Tree navigation while the file tree has focus.
 fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
     if event.mods.alt { return false; }
     let pending_g = std::mem::take(&mut app.pending_g);
     let page = app.tree_page_rows();
     match &event.key {
-        Key::Text(t) if event.mods.ctrl && t == "d" => app.tree_move(page / 2),
-        Key::Text(t) if event.mods.ctrl && t == "u" => app.tree_move(-page / 2),
+        _ if ctrl_letter(event) == Some('d') => app.tree_move(page / 2),
+        _ if ctrl_letter(event) == Some('u') => app.tree_move(-page / 2),
         _ if event.mods.ctrl => return false,
         Key::Up => app.tree_move(-1),
         Key::Down => app.tree_move(1),
@@ -282,5 +294,35 @@ impl App {
         }
         self.field_tab = want.then(|| self.tabs.get(active).map(|t| t.id)).flatten();
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::Mods;
+
+    fn ctrl(key: Key) -> KeyEvent { KeyEvent { key, mods: Mods { ctrl: true, cmd: true, ..Mods::default() } } }
+
+    #[test]
+    fn ctrl_chords_read_as_letters_however_they_arrive() {
+        assert_eq!(ctrl_letter(&ctrl(Key::Command('d'))), Some('d'));
+        assert_eq!(ctrl_letter(&ctrl(Key::Text("U".into()))), Some('u'));
+        assert_eq!(ctrl_letter(&ctrl(Key::Text("\u{4}".into()))), Some('d'));
+        assert_eq!(ctrl_letter(&KeyEvent { key: Key::Command('d'), mods: Mods::default() }), None);
+    }
+
+    #[test]
+    fn ctrl_d_and_u_page_the_tree() {
+        let mut app = App::new();
+        let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("f{i:02}"), "is_dir": false})).collect();
+        app.apply_dir_listing("", &serde_json::Value::Array(entries));
+        app.sidebar = Some(crate::app::Sidebar::Files);
+        app.tree_follow.scroll.set((0.0, 0.0, 26.0 * 21.0 * app.ty.scale()));
+        assert!(tree_key(&mut app, &ctrl(Key::Command('d'))));
+        let half = app.active_tree().unwrap().selected;
+        assert!(half >= 5, "Ctrl+D moved half a page, got {half}");
+        assert!(tree_key(&mut app, &ctrl(Key::Command('u'))));
+        assert_eq!(app.active_tree().unwrap().selected, 0);
     }
 }

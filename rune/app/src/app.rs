@@ -193,6 +193,8 @@ pub struct App {
     pub effort: String,
     pub wordmark: Wordmark,
     pub fps: Option<u32>,
+    /// The FPS pill's reading: live text, so a new reading never re-runs the views.
+    pub fps_live: rune::LiveText,
     /// When the FPS pill last changed (it refreshes at most twice a second).
     pub fps_at: Option<std::time::Instant>,
     /// Tool rows: expansion, selected group children, spinner clock, service icons.
@@ -237,6 +239,7 @@ impl App {
             effort: crate::agent::title_case(config.variant.as_deref().unwrap_or("medium")),
             wordmark: Wordmark::default(),
             fps: None,
+            fps_live: rune::LiveText::new(""),
             fps_at: None,
             mcp_icons: Default::default(),
             tools: Default::default(),

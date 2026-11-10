@@ -35,6 +35,9 @@ pub struct GitSummary {
 
 pub fn height(app: &App) -> f32 { HEIGHT * app.ty.scale() }
 
+/// The FPS pill's label, three digits wide so a new reading never resizes the pill chain.
+pub fn fps_label(fps: u32) -> String { format!(" {fps:>3}") }
+
 struct Metrics {
     font: f32,
     pill_y: f32,
@@ -207,21 +210,21 @@ pub fn view(app: &App) -> El {
 
     // Right: pills chain leftward from the window edge; later pills sit on top.
     // A `solid` pill (diagnostic counts) is one colour end to end with black text.
-    struct Pill { icon: (String, Option<Family>), icon_bg: u32, text: Vec<(String, u32)>, solid: bool }
+    struct Pill<'a> { icon: (String, Option<Family>), icon_bg: u32, text: Vec<(String, u32)>, solid: bool, live: Option<&'a rune::LiveText> }
     let mut pills = Vec::new();
     if let Some(git) = &app.git {
         let mut parts = vec![(git.branch.clone(), p.blue)];
         if git.added > 0 { parts.push((format!(" +{}", git.added), p.green)); }
         if git.deleted > 0 { parts.push((format!(" -{}", git.deleted), p.red)); }
-        pills.push(Pill { icon: (GLYPH_BRANCH.into(), Some(super::theme::NERD)), icon_bg: p.blue, text: parts, solid: false });
+        pills.push(Pill { icon: (GLYPH_BRANCH.into(), Some(super::theme::NERD)), icon_bg: p.blue, text: parts, solid: false, live: None });
     }
     // Diagnostic counts, then the LSP pill: green attached, yellow warming, red none.
     if let Some((lsp, errors, warns)) = crate::editor::lsp_view::status(app) {
         if errors > 0 {
-            pills.push(Pill { icon: (GLYPH_ERROR.into(), Some(super::theme::NERD)), icon_bg: p.red, text: vec![(format!(" {errors}"), p.black)], solid: true });
+            pills.push(Pill { icon: (GLYPH_ERROR.into(), Some(super::theme::NERD)), icon_bg: p.red, text: vec![(format!(" {errors}"), p.black)], solid: true, live: None });
         }
         if warns > 0 {
-            pills.push(Pill { icon: (GLYPH_WARN.into(), Some(super::theme::NERD)), icon_bg: p.yellow, text: vec![(format!(" {warns}"), p.black)], solid: true });
+            pills.push(Pill { icon: (GLYPH_WARN.into(), Some(super::theme::NERD)), icon_bg: p.yellow, text: vec![(format!(" {warns}"), p.black)], solid: true, live: None });
         }
         if let Some(lsp) = lsp {
             let color = match lsp {
@@ -229,15 +232,16 @@ pub fn view(app: &App) -> El {
                 crate::editor::lsp::Status::Initializing => p.yellow,
                 crate::editor::lsp::Status::Missing => p.red,
             };
-            pills.push(Pill { icon: (GLYPH_LSP.into(), Some(super::theme::NERD)), icon_bg: color, text: vec![(" LSP".into(), color)], solid: false });
+            pills.push(Pill { icon: (GLYPH_LSP.into(), Some(super::theme::NERD)), icon_bg: color, text: vec![(" LSP".into(), color)], solid: false, live: None });
         }
     }
     if let Some(buffer) = app.active_buffer().filter(|b| b.loaded) {
         let label = format!(" {}/{}", buffer.doc.cursor_line + 1, buffer.doc.lines.len());
-        pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)], solid: false });
+        pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)], solid: false, live: None });
     }
     if let Some(fps) = app.fps {
-        pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(format!(" {fps}"), p.cyan)], solid: false });
+        // The reading is live text in a three-digit slot: a new one repaints the label only.
+        pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(fps_label(fps), p.cyan)], solid: false, live: Some(&app.fps_live) });
     }
     let widths: Vec<(f32, f32)> = pills.iter().enumerate().map(|(i, pill)| {
         let icon_w = if pill.icon.1.is_some() { m.icon_w() } else { m.text_w(&pill.icon.0) };
@@ -251,7 +255,8 @@ pub fn view(app: &App) -> El {
     for (pill, (icon_w, text_w)) in pills.iter().zip(&widths) {
         let mut label = row().h(pill_h).center_y();
         for (part, color) in &pill.text {
-            label = label.child(thick(&m, part, None, rgb(*color)));
+            let part = thick(&m, part, None, rgb(*color));
+            label = label.child(match pill.live { Some(live) => part.live_text(live), None => part });
         }
         let glyph = el().w(*icon_w).h(pill_h).center().child(thick(&m, &pill.icon.0, pill.icon.1, black));
         bar = bar

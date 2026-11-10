@@ -155,14 +155,17 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let caret_changed = cursor_was != (app.cursor.visible, app.cursor.trail.quad());
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     // While animating, the pill shows the presentation rate; at rest it holds the last one.
-    // At most twice a second: each change re-runs the views, and the measured rate wobbles by
-    // a frame or two every frame while something animates.
+    // At most twice a second, and through the pill's live text: only its first reading mounts
+    // the pill (a view run); later readings repaint the label without re-running anything or
+    // moving the pill chain (the label is three digits wide).
     let fps = ui::fps::rate().or(app.fps);
     let due = app.fps_at.is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(500));
-    let fps_changed = fps.is_some() && app.fps != fps && due;
-    if fps_changed {
+    let fps_moved = fps.is_some() && app.fps != fps && due;
+    let fps_changed = fps_moved && app.fps.is_none();
+    if fps_moved {
         app.fps = fps;
         app.fps_at = Some(std::time::Instant::now());
+        app.fps_live.set(ui::status::fps_label(fps.unwrap_or(0)));
     }
     if fps.is_some() && app.fps != fps && !due {
         wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));

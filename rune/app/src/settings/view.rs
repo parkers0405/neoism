@@ -41,7 +41,7 @@ pub fn view(app: &App) -> El {
         .on_press(|_: &mut App| {})
         .child(header(app, settings, s))
         .child(el().w_full().h(s).fill(rgb(p.border)))
-        .child(row().w_full().grow(1.0).shrink()
+        .child(row().w_full().grow(1.0).shrink().min_h(0.0)
             .child_if(!compact, || sidebar(app, settings, s))
             .child_if(!compact, || el().w(s).h_full().fill(rgb(p.border)))
             .child(content(app, settings, s)));
@@ -119,10 +119,27 @@ fn content(app: &App, settings: &Settings, s: f32) -> El {
     if settings.category == Category::Keybinds && !settings.searching() {
         rows = rows.child(keybind_rows(app, settings, s));
     }
-    col().key(format!("settings-rows:{}", settings.category.label())).grow(1.0).shrink().h_full()
+    let key = scroll_key(settings);
+    let mirror = settings.scroll.clone();
+    let notch = 3.0 * crate::editor::view::line_height(app);
+    let wheel_key = key.clone();
+    let layout_key = key.clone();
+    // Constrained to the page so it scrolls, with the editor's wheel and trackpad feel.
+    col().key(key).grow(1.0).shrink().h_full().min_h(0.0)
         .scroll(ScrollSpec { stick_bottom: false })
+        .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
+        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(layout_key.clone(), r); })
+        .on_wheel(move |a: &mut App, e: rune::WheelEvent, tx: &mut Tx| {
+            let Some(settings) = &mut a.settings else { return false };
+            settings.dropdown = None;
+            let m = settings.scroll.clone();
+            crate::ui::scroll::take(&mut a.scrollers, &wheel_key, &e, notch, std::rc::Rc::new(move || { let (o, max, _) = m.get(); (o, max) }), tx)
+        })
         .child(rows)
 }
+
+/// The page's scroll view key (one per category, so each opens at its top).
+pub fn scroll_key(settings: &Settings) -> String { format!("settings-rows:{}", settings.category.label()) }
 
 fn setting_row(app: &App, settings: &Settings, index: usize, focused: bool, s: f32) -> El {
     let p = app.pal;

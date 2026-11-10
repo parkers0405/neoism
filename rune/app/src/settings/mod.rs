@@ -58,7 +58,7 @@ impl Category {
             Category::Ui => "\u{f108}",
             Category::Presence => "\u{f0c0}",
             Category::Keybinds => "\u{f11c}",
-            Category::Agent => "\u{f544}",
+            Category::Agent => "\u{f06a9}",
             Category::Platform => "\u{f17a}",
             Category::Developer => "\u{f188}",
         }
@@ -194,13 +194,16 @@ pub struct Settings {
     pub loading: bool,
     pub rebinding: Option<usize>,
     pub binding_error: Option<String>,
+    /// The page's scroll (offset, max, viewport), and a keyboard move to reveal.
+    pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
+    pub reveal: bool,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
         let mut search = TextEdit::new("");
         search.focused = true;
-        Settings { rows: Vec::new(), values: Value::Null, category: Category::General, search, focused: 0, dropdown: None, editing: None, loading: true, rebinding: None, binding_error: None }
+        Settings { rows: Vec::new(), values: Value::Null, category: Category::General, search, focused: 0, dropdown: None, editing: None, loading: true, rebinding: None, binding_error: None, scroll: Default::default(), reveal: false }
     }
 }
 
@@ -376,6 +379,25 @@ impl App {
     }
 
     /// Keys while the page is open. Returns whether the page took the key.
+    /// After a keyboard move, glide the page so the focused row's control is in view (a row's
+    /// height of room above and below), on the shared scroll engine.
+    pub fn settings_reveal(&mut self, tx: &mut rune::Tx) {
+        let Some(settings) = self.settings.as_mut().filter(|s| s.reveal) else { return };
+        settings.reveal = false;
+        let Some(&index) = settings.visible().get(settings.focused) else { return };
+        let key = view::scroll_key(settings);
+        let (Some(control), Some(page)) = (self.rects.get(&format!("settings-control:{index}")).copied(), self.rects.get(&key).copied()) else { return };
+        let (offset, max, _) = settings.scroll.get();
+        let room = 60.0 * self.ty.scale();
+        let top = control[1] - page[1];
+        let bottom = top + control[3];
+        let target = if top < room { offset + top - room } else if bottom > page[3] - room { offset + bottom - (page[3] - room) } else { return };
+        let target = target.clamp(0.0, max.max(0.0));
+        let mirror = settings.scroll.clone();
+        let source: crate::ui::scroll::Source = std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) });
+        self.scrollers.glide_to(&key, offset, target, page[3] * 1.25, source, tx);
+    }
+
     pub fn settings_key(&mut self, event: &rune::KeyEvent) -> bool {
         use rune::Key;
         let Some(settings) = &mut self.settings else { return false };
@@ -402,8 +424,8 @@ impl App {
         let categories = settings.categories();
         let at = categories.iter().position(|c| *c == settings.category).unwrap_or(0);
         match event.key {
-            Key::Up => settings.focused = settings.focused.saturating_sub(1),
-            Key::Down => settings.focused = (settings.focused + 1).min(visible.len().saturating_sub(1)),
+            Key::Up => { settings.focused = settings.focused.saturating_sub(1); settings.reveal = true; }
+            Key::Down => { settings.focused = (settings.focused + 1).min(visible.len().saturating_sub(1)); settings.reveal = true; }
             Key::Left if !settings.searching() => { settings.category = categories[(at + categories.len() - 1) % categories.len()]; settings.focused = 0; }
             Key::Right if !settings.searching() => { settings.category = categories[(at + 1) % categories.len()]; settings.focused = 0; }
             Key::Enter => if let Some(&index) = visible.get(settings.focused) { self.toggle_setting(index) },

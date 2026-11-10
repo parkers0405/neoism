@@ -12,6 +12,7 @@ pub mod wallpaper;
 pub mod orb;
 pub mod palettes;
 pub mod rows;
+pub mod selection;
 pub mod status;
 pub mod theme;
 pub mod tab_drag;

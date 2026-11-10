@@ -156,6 +156,7 @@ fn hover_style(app: &App) -> MarkdownStyle {
     let code_bg = mix(rgb(p.surface), rgb(p.fg), 0.06);
     MarkdownStyle::neutral(true)
         .text(rgb(p.fg))
+        .selection(crate::ui::selection::highlight(rgb(p.accent)))
         .muted(rgb(p.dim))
         .link(rgb(p.blue))
         .inline_code_bg(code_bg)
@@ -249,7 +250,8 @@ fn hover_card(app: &App, contents: &str, cell: [f32; 4]) -> El {
         .copied()
         .unwrap_or([0.0, 0.0, max_w, 0.0]);
     let (x, y) = place(app, cell, w, h);
-    let body = Markdown::new(contents.trim().to_owned()).render(&hover_style(app));
+    // Press, hold and drag selects in the card; letting go copies it.
+    let body = Markdown::new(contents.trim().to_owned()).selectable(true).render(&hover_style(app));
     col()
         .key("lsp-hover")
         .max_w(max_w)
@@ -261,6 +263,12 @@ fn hover_card(app: &App, contents: &str, cell: [f32; 4]) -> El {
         .clip_rounded(MENU_RADIUS * s)
         .on_layout(|a: &mut App, r: [f32; 4]| {
             a.rects.insert("lsp-hover".into(), r);
+        })
+        .on_selection_change(|a: &mut App, change: &rune::SelectionChange, tx: &mut rune::Tx| {
+            if let Some(b) = a.active_buffer_mut() {
+                b.lsp.selection_changed(change, tx);
+                if !b.lsp.selection.dragging() && !b.lsp.over_card { tx.wake_after(super::lsp::HOVER_GRACE); }
+            }
         })
         .on_hover_change(|a: &mut App, inside: bool, tx: &mut rune::Tx| {
             if let Some(b) = a.active_buffer_mut() { b.lsp.pointer_on_card(inside); }

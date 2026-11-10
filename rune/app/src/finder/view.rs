@@ -104,7 +104,7 @@ pub fn view(app: &App) -> El {
             .child(preview(app, finder).grow(1.0).h((HEIGHT * 0.55 * s).max(shown * ROW_H * s)));
     }
 
-    let dialog = col().key("finder").w(width).fill(rgb(p.bg)).instant_changes()
+    let dialog = col().key("finder").w(width).fill(rgb(p.bg)).motion(rune::Spring::NONE)
         .corners([RADIUS * s, RADIUS * s, 0.0, 0.0])
         .border(stroke, rgb(p.surface))
         .clip_rounded(RADIUS * s)

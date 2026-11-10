@@ -60,7 +60,7 @@ pub fn view(key: &str, reset: &str, width: f32, row_h: f32, visible: usize, top:
     for (index, row) in rows.into_iter().enumerate() {
         content = content.child(row.absolute(0.0, index as f32 * row_h).transition(rune::Transition::none()));
     }
-    el().key(key.to_owned()).w(width).h(visible.max(1) as f32 * row_h).clip_rounded(0.0).instant_changes().child(content)
+    el().key(key.to_owned()).w(width).h(visible.max(1) as f32 * row_h).clip_rounded(0.0).motion(rune::Spring::NONE).child(content)
 }
 
 #[cfg(test)]

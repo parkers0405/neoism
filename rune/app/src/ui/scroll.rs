@@ -52,6 +52,10 @@ pub struct Scroller {
     coast: f32,
     clock: Option<f64>,
     source: Option<Source>,
+    /// The offset last placed and what the view reported then: a placement Rune hasn't applied
+    /// yet (the view still reads as before) is where the next step starts from.
+    placed: Option<f32>,
+    seen: Option<f32>,
 }
 
 impl Scroller {
@@ -101,7 +105,13 @@ impl Scroller {
 
     /// Advance to `clock`; the new offset to place, if it moves.
     pub fn step(&mut self, clock: f64) -> Option<f32> {
-        let (offset, max) = self.source.as_ref()?();
+        let (reported, max) = self.source.as_ref()?();
+        // Unchanged since the last frame while a placement is pending: start from the placement.
+        // Moved some other way (history prepended, rows measured): follow the view.
+        let offset = match (self.placed, self.seen) {
+            (Some(placed), Some(seen)) if (reported - seen).abs() < 0.01 => placed,
+            _ => reported,
+        };
         let dt = self.clock.map_or(1.0 / 120.0, |last| (clock - last).clamp(0.0, 0.05)) as f32;
         self.clock = Some(clock);
         if self.touching.is_some_and(|t| t.elapsed().as_secs_f32() > LIFT_GAP) { self.lift(); }
@@ -125,6 +135,8 @@ impl Scroller {
         }
         if by == 0.0 { return None; }
         let target = (offset + by).clamp(0.0, max.max(0.0));
+        self.placed = Some(target);
+        self.seen = Some(reported);
         // At an end, whatever pushes past it stops.
         if (target <= 0.0 && by < 0.0) || (target >= max && by > 0.0) {
             self.remaining = 0.0;
@@ -142,6 +154,26 @@ pub struct Scrollers(HashMap<String, Scroller>);
 impl Scrollers {
     pub fn wheel(&mut self, key: &str, e: &WheelEvent, notch_px: f32, source: Source) {
         self.0.entry(key.to_owned()).or_default().wheel(e, notch_px, source);
+    }
+
+    /// Glide a view to `target` (a cursor jump, a goto-line), the far part of a long trip cut
+    /// at once so only the last `reach` points animate (Neovide's long-jump rule).
+    pub fn glide_to(&mut self, key: &str, offset: f32, target: f32, reach: f32, source: Source, tx: &mut Tx) {
+        let far = target - offset;
+        let start = if far.abs() > reach {
+            let near = target - reach * far.signum();
+            tx.scroll_to_instant(key.to_owned(), 0.0, near);
+            near
+        } else { offset };
+        let s = self.0.entry(key.to_owned()).or_default();
+        s.source = Some(source);
+        s.pending = 0.0;
+        s.coast = 0.0;
+        s.touching = None;
+        s.remaining = target - start;
+        s.placed = Some(start);
+        s.seen = Some(offset);
+        tx.wake_after(std::time::Duration::ZERO);
     }
 
     /// Stop a view's motion (the app moved it itself: a jump, following new output).

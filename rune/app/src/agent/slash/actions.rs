@@ -70,8 +70,9 @@ impl App {
     pub fn agent_composer_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
         let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Slash) else { return false };
         match event.key {
-            Key::Up => picker.step(-1),
-            Key::Down => picker.step(1),
+            // Keys arrive through a text field (an instant commit): the slide must animate.
+            Key::Up => { tx.animated(); picker.step(-1) }
+            Key::Down => { tx.animated(); picker.step(1) }
             Key::Escape => {
                 self.composer.picker = None;
                 self.composer.slash_dismissed = true;
@@ -420,8 +421,9 @@ impl App {
     pub fn picker_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
         let Some(picker) = self.composer.picker.as_mut() else { return false };
         match event.key {
-            Key::Up => picker.step(-1),
-            Key::Down => picker.step(1),
+            // Keys arrive through a text field (an instant commit): the slide must animate.
+            Key::Up => { tx.animated(); picker.step(-1) }
+            Key::Down => { tx.animated(); picker.step(1) }
             Key::Escape => { if !self.picker_back() { self.close_prompt_picker(); } }
             Key::Backspace if picker.query.text.is_empty() => { if !self.picker_back() { return false; } }
             Key::Enter => self.accept_picker_row(None, tx),

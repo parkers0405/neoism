@@ -22,7 +22,8 @@ const PREVIEW_LINES: usize = 4;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Question {
     pub id: String,
-    pub top: f32,
+    /// The content offset of its row, once that row has been laid out.
+    pub top: Option<f32>,
 }
 
 /// The rail's track in window points and its tick count (`TimelineQuestionRailFrame`).
@@ -73,12 +74,12 @@ impl Rail {
     }
 }
 
-/// `active_question_index`: the last question at the live edge, else the first whose row starts
-/// in view, else the one above the view.
-pub fn active_index(questions: &[Question], scroll_top: f32, viewport_h: f32, at_bottom: bool) -> Option<usize> {
-    if at_bottom { return questions.len().checked_sub(1); }
-    let next = questions.partition_point(|q| q.top < scroll_top);
-    if questions.get(next).is_some_and(|q| q.top < scroll_top + viewport_h) { Some(next) } else { next.checked_sub(1) }
+/// `active_question_index`: the last question at the live edge, else the first whose row is in
+/// view, else the one above the view. `rows` are the questions' row indices in order.
+pub fn active_index(rows: &[usize], visible: std::ops::Range<usize>, at_bottom: bool) -> Option<usize> {
+    if at_bottom { return rows.len().checked_sub(1); }
+    if let Some(i) = rows.iter().position(|r| visible.contains(r)) { return Some(i); }
+    rows.iter().rposition(|r| *r < visible.start)
 }
 
 /// `compact_question_preview`: the message's plain text (Markdown dropped) on one line.
@@ -137,33 +138,27 @@ impl App {
     pub(super) fn questions(&self, session_id: &str) -> Vec<Question> {
         let Some(session) = self.sessions.get(session_id) else { return Vec::new() };
         session.messages.iter().filter(|m| m.kind == HistoryMessageKind::User)
-            .filter_map(|m| session.question_tops.get(&m.id).map(|top| Question { id: m.id.clone(), top: *top }))
+            .map(|m| Question { id: m.id.clone(), top: session.question_tops.get(&m.id).copied() })
             .collect()
     }
 
-    /// Keep each conversation's lit tick in step with its scroll (wheel glides scroll without
-    /// rebuilding the view). Returns whether one changed.
-    pub fn tick_question_rails(&mut self) -> bool {
-        let ids: Vec<String> = self.sessions.keys().cloned().collect();
-        let mut changed = false;
-        for id in ids {
-            let questions = self.questions(&id);
-            let Some(session) = self.sessions.get_mut(&id) else { continue };
-            let (offset, max) = session.scroll.get();
-            let active = active_index(&questions, offset, session.viewport_h, max - offset <= 1.0);
-            if session.rail_active != active { session.rail_active = active; changed = true; }
-        }
-        changed
-    }
 
     /// Bring question `index` to the top of the view on the wheel's glide.
     fn jump_to_question(&mut self, session_id: &str, index: usize, tx: &mut Tx) {
         let Some(question) = self.questions(session_id).get(index).cloned() else { return };
         let Some(session) = self.sessions.get_mut(session_id) else { return };
-        let (offset, max) = session.scroll.get();
-        let target = question.top.clamp(0.0, max);
-        session.glide = Some(crate::ui::follow::Glide::retarget(session.glide, offset, target));
-        tx.wake_after(std::time::Duration::ZERO);
+        match question.top {
+            // A row laid out before glides there; one never mounted is revealed by key.
+            Some(top) => {
+                let (offset, max) = session.scroll.get();
+                session.glide = Some(crate::ui::follow::Glide::retarget(session.glide, offset, top.clamp(0.0, max)));
+                tx.wake_after(std::time::Duration::ZERO);
+            }
+            None => {
+                session.glide = None;
+                tx.scroll_into_view_in(format!("conversation:{session_id}"), format!("msg:{}", question.id));
+            }
+        }
     }
 }
 
@@ -253,8 +248,6 @@ fn preview(app: &App, session_id: &str, questions: &[Question], rail: &Rail, ind
 mod tests {
     use super::*;
 
-    fn q(top: f32) -> Question { Question { id: String::new(), top } }
-
     #[test]
     fn ticks_are_evenly_spaced_and_hit_by_nearest() {
         let rail = Rail::new([400.0, 100.0, 20.0, 160.0], 1.0, 3).unwrap();
@@ -279,11 +272,12 @@ mod tests {
 
     #[test]
     fn the_lit_question_follows_the_view() {
-        let qs = [q(0.0), q(500.0), q(1200.0)];
-        assert_eq!(active_index(&qs, 0.0, 400.0, true), Some(2));
-        assert_eq!(active_index(&qs, 300.0, 400.0, false), Some(1));
-        assert_eq!(active_index(&qs, 600.0, 400.0, false), Some(1));
-        assert_eq!(active_index(&qs, 1100.0, 400.0, false), Some(2));
+        // Questions sit on rows 0, 4 and 9.
+        let rows = [0, 4, 9];
+        assert_eq!(active_index(&rows, 0..3, true), Some(2));
+        assert_eq!(active_index(&rows, 2..6, false), Some(1));
+        assert_eq!(active_index(&rows, 5..8, false), Some(1));
+        assert_eq!(active_index(&rows, 8..12, false), Some(2));
     }
 
     #[test]

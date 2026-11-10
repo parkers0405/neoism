@@ -167,6 +167,8 @@ pub struct App {
     pub effort: String,
     pub wordmark: Wordmark,
     pub fps: Option<u32>,
+    /// When the FPS pill last changed (it refreshes at most twice a second).
+    pub fps_at: Option<std::time::Instant>,
     /// Tool rows: expansion, selected group children, spinner clock, service icons.
     pub mcp_icons: crate::agent::mcp::Icons,
     pub tools: crate::agent::tools::ToolState,
@@ -207,6 +209,7 @@ impl App {
             effort: crate::agent::title_case(config.variant.as_deref().unwrap_or("medium")),
             wordmark: Wordmark::default(),
             fps: None,
+            fps_at: None,
             mcp_icons: Default::default(),
             tools: Default::default(),
             picker: None,

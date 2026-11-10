@@ -51,46 +51,25 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let live_from = session.and_then(|s| s.live_from).unwrap_or(usize::MAX);
     let pad = if available >= 700.0 { COLUMN_PAD_X } else { 24.0 };
     let width_id = session_id.to_owned();
-    let mut rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(200.0).gap(0.0)
+    // The transcript's rows: only those in the mounted window (the viewport and up to two
+    // viewports either side) are built, so a scroll frame or a streamed delta costs the rows on
+    // screen, not the whole history (`virtual_rows`; heights are measured as rows mount).
+    let items = std::rc::Rc::new(row_items(messages, live_from, streaming && app.activity.is_some()));
+    let (key_items, build_items, visible_items) = (items.clone(), items.clone(), items.clone());
+    let (key_id, build_id, visible_id) = (session_id.to_owned(), session_id.to_owned(), session_id.to_owned());
+    let rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(200.0).gap(0.0)
+        .growth(rune::GrowthSpec::default())
+        .virtual_rows(items.len(), 120.0,
+            move |a: &App, i| row_key(a, &key_id, key_items[i]).into(),
+            move |a: &App, i| build_row(a, &build_id, build_items[i], tab_id))
+        .on_visible_rows(move |a: &mut App, range: std::ops::Range<usize>| a.timeline_rows_visible(&visible_id, &visible_items, range))
         .on_layout(move |a: &mut App, [_, _, w, _]: [f32; 4]| { if let Some(session) = a.sessions.get_mut(&width_id) { session.width = (w - 2.0 * pad).max(0.0); } })
-        // Press, hold and drag selects across the whole transcript; letting go copies it.
+        // Press, hold and drag selects across the transcript; letting go copies it.
         .selection_group(true)
         // The composer keeps the keyboard through a press here: refocusing it afterwards
         // would clear the selection being made.
         .preserve_focus_on_press(true)
         .on_selection_change(|a: &mut App, change: &rune::SelectionChange, tx: &mut Tx| a.timeline_selection_changed(change, tx));
-    let mut index = 0;
-    while index < messages.len() {
-        let message = &messages[index];
-        if !tools::visible(message, index, live_from) { index += 1; continue; }
-        // Runs of reads and of settled edits fold into one row.
-        if let Some((end, group)) = tools::group_at(messages, index) {
-            rows = rows.child(tools::row(app, &group));
-            index = end;
-            continue;
-        }
-        let last = index + 1 == messages.len();
-        let mut row = message_row(app, message, last && streaming);
-        if message.kind == HistoryMessageKind::User {
-            // Questions report where their row sits in the transcript for the rail.
-            let (sid, mid) = (session_id.to_owned(), message.id.clone());
-            row = row.on_layout(move |a: &mut App, r: [f32; 4]| {
-                let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
-                let Some(session) = a.sessions.get_mut(&sid) else { return };
-                let top = r[1] - view[1] + session.scroll.get().0;
-                session.question_tops.insert(mid.clone(), top.max(0.0));
-            });
-        }
-        rows = rows.child(row);
-        index += 1;
-    }
-    if let Some(activity) = app.activity.as_ref().filter(|_| streaming) {
-        rows = rows.child(activity.view(app));
-    }
-    let id = session_id.to_owned();
-    // Older history pages load when this sentinel near the top comes into view.
-    let sentinel = el().key("older-sentinel").w_full().h(1.0)
-        .on_visible(move |s: &mut App, visible: bool, _: &mut Tx| if visible { s.request_older(&id); });
     let scroll_key = format!("conversation:{session_id}");
     let mirror = session.map(|s| s.scroll.clone()).unwrap_or_default();
     let wheel_id = session_id.to_owned();
@@ -125,7 +104,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
             tx.live_only();
             true
         })
-        .child(col().w_full().child(sentinel).child(rows));
+        .child(rows);
     let mut pane = col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg))
         .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("agent-area:{tab_id}"), r); });
     if let Some(header) = super::header::view(app, session_id) {
@@ -147,6 +126,90 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         .child(rail)
         .child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
             .child(composer(app, f32::INFINITY)))
+}
+
+/// One transcript row: a message, a folded run of tool calls starting at a message, or the
+/// live turn's activity line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowItem {
+    Message(usize),
+    Group(usize),
+    Activity,
+}
+
+/// The transcript's rows in order: visible messages, runs of reads and settled edits folded
+/// into one row (`tools::group_at`), then the activity line while a turn streams.
+pub fn row_items(messages: &[HistoryMessage], live_from: usize, activity: bool) -> Vec<RowItem> {
+    let mut items = Vec::with_capacity(messages.len() + 1);
+    let mut index = 0;
+    while index < messages.len() {
+        if !tools::visible(&messages[index], index, live_from) { index += 1; continue; }
+        if let Some((end, _)) = tools::group_at(messages, index) {
+            items.push(RowItem::Group(index));
+            index = end;
+            continue;
+        }
+        items.push(RowItem::Message(index));
+        index += 1;
+    }
+    if activity { items.push(RowItem::Activity); }
+    items
+}
+
+fn row_key(app: &App, session_id: &str, item: RowItem) -> String {
+    let messages = app.sessions.get(session_id).map(|s| s.messages.as_slice()).unwrap_or(&[]);
+    match item {
+        RowItem::Message(i) => messages.get(i).map_or_else(|| format!("row:{i}"), |m| format!("msg:{}", m.id)),
+        RowItem::Group(i) => messages.get(i).map_or_else(|| format!("group:{i}"), |m| format!("group:{}", m.id)),
+        RowItem::Activity => "activity".into(),
+    }
+}
+
+fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
+    let Some(session) = app.sessions.get(session_id) else { return el() };
+    let messages = session.messages.as_slice();
+    match item {
+        RowItem::Activity => app.activity.as_ref().map_or_else(el, |activity| activity.view(app)),
+        RowItem::Group(start) => match tools::group_at(messages, start) {
+            Some((_, group)) => tools::row(app, &group),
+            None => el(),
+        },
+        RowItem::Message(index) => {
+            let Some(message) = messages.get(index) else { return el() };
+            let last = index + 1 == messages.len();
+            let mut row = message_row(app, message, last && session.streaming);
+            if message.kind == HistoryMessageKind::User {
+                // Questions report where their row sits in the transcript while it is mounted;
+                // the rail reveals a row never mounted by its key instead.
+                let (sid, mid) = (session_id.to_owned(), message.id.clone());
+                row = row.on_layout(move |a: &mut App, r: [f32; 4]| {
+                    let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
+                    let Some(session) = a.sessions.get_mut(&sid) else { return };
+                    let top = r[1] - view[1] + session.scroll.get().0;
+                    session.question_tops.insert(mid.clone(), top.max(0.0));
+                });
+            }
+            row
+        }
+    }
+}
+
+impl App {
+    /// The rows in view changed: load the older page when the first row shows, and light the
+    /// question rail's tick for the question in view. Returns whether the view must re-run.
+    fn timeline_rows_visible(&mut self, session_id: &str, items: &[RowItem], range: std::ops::Range<usize>) -> bool {
+        if range.start == 0 { self.request_older(session_id); }
+        let Some(session) = self.sessions.get_mut(session_id) else { return false };
+        let (offset, max) = session.scroll.get();
+        let rows: Vec<usize> = items.iter().enumerate().filter_map(|(row, item)| match item {
+            RowItem::Message(i) if session.messages.get(*i).is_some_and(|m| m.kind == HistoryMessageKind::User) => Some(row),
+            _ => None,
+        }).collect();
+        let active = super::ticks::active_index(&rows, range, max - offset <= 1.0);
+        if session.rail_active == active { return false; }
+        session.rail_active = active;
+        true
+    }
 }
 
 /// The transcript's selection highlight.

@@ -1,8 +1,14 @@
 //! Code editor tabs (`reference/18-editor-code.png`, motion `editor-scroll-cursor`): a file read
-//! over the daemon's `Files` family, drawn with a breadcrumb, a line-number gutter, the current
-//! line lit, syntax colour, and the window block cursor on the caret cell. Motions are vim's.
+//! over the daemon's `Files` family into a vim-driven document, drawn with a breadcrumb, a gutter,
+//! the current line lit, syntax colour, and the window cursor on the caret (block in normal mode,
+//! beam in insert). Saving is the original's host path: `Files WriteFile` then `Editor DidSave`;
+//! clean buffers reload when the daemon reports their file changed on disk.
 
+pub mod document;
+pub mod input;
 pub mod view;
+mod vim;
+mod vim_apply;
 mod wrap;
 
 pub use view::view;
@@ -10,22 +16,45 @@ pub use view::view;
 use crate::app::App;
 use crate::daemon::Family;
 use crate::tabs::TabKind;
+use document::{Document, Mode};
+use input::{Key, Outcome, Prompt};
 
 pub struct Buffer {
-    /// Workspace-relative path.
+    /// Path as the daemon is asked for it (workspace-relative, or absolute for notes).
     pub path: String,
-    pub lines: Vec<String>,
+    /// The workspace root the file's requests are scoped to.
+    pub scope: String,
+    pub doc: Document,
     pub loaded: bool,
-    pub cursor: (usize, usize),
-    /// Column the cursor wants on vertical moves (vim's `curswant`).
-    pub want_col: usize,
     pub error: Option<String>,
+    /// The open `:` / `/` prompt.
+    pub prompt: Option<Prompt>,
+    /// The lines a `WriteFile` in flight carries; they become the saved baseline on success.
+    saving: Option<Vec<String>>,
+    /// A transient note under the code (`"file.rs" written`, errors).
+    pub message: Option<String>,
+    /// Line to put the cursor on once the text arrives.
+    initial_line: Option<usize>,
+    /// Set for the daemon's `config.json` document: saved through `Config` with this revision.
+    config: Option<ConfigDocument>,
 }
 
+#[derive(Clone, Debug)]
+struct ConfigDocument {
+    revision: String,
+    writable: bool,
+}
+
+/// The tab key of the config document buffer.
+pub const CONFIG_DOCUMENT: &str = "config.json";
+
 impl Buffer {
-    fn new(path: String, line: Option<u32>) -> Buffer {
-        let row = line.map_or(0, |l| l.saturating_sub(1) as usize);
-        Buffer { path, lines: Vec::new(), loaded: false, cursor: (row, 0), want_col: 0, error: None }
+    fn new(path: String, scope: String, line: Option<u32>) -> Buffer {
+        Buffer {
+            path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, saving: None, message: None,
+            initial_line: line.map(|l| l.saturating_sub(1) as usize),
+            config: None,
+        }
     }
 
     pub fn language(&self) -> Option<&str> {
@@ -33,47 +62,46 @@ impl Buffer {
         name.rsplit_once('.').map(|(_, ext)| ext)
     }
 
-    fn clamp(&mut self) {
-        let last = self.lines.len().saturating_sub(1);
-        self.cursor.0 = self.cursor.0.min(last);
-        let len = self.lines.get(self.cursor.0).map_or(0, |l| l.chars().count());
-        self.cursor.1 = self.want_col.min(len.saturating_sub(1));
-    }
+    pub fn name(&self) -> &str { self.path.rsplit('/').next().unwrap_or(&self.path) }
 
-    /// Vim normal-mode motion; returns whether the cursor moved.
-    pub fn motion(&mut self, motion: Motion, page: usize) -> bool {
-        let before = self.cursor;
-        let last = self.lines.len().saturating_sub(1);
-        let (row, col) = self.cursor;
-        match motion {
-            Motion::Left => { self.want_col = col.saturating_sub(1); }
-            Motion::Right => { self.want_col = col + 1; }
-            Motion::Up => self.cursor.0 = row.saturating_sub(1),
-            Motion::Down => self.cursor.0 = (row + 1).min(last),
-            Motion::HalfPageUp => self.cursor.0 = row.saturating_sub(page / 2),
-            Motion::HalfPageDown => self.cursor.0 = (row + page / 2).min(last),
-            Motion::Top => { self.cursor.0 = 0; self.want_col = 0; }
-            Motion::Bottom => { self.cursor.0 = last; self.want_col = 0; }
-            Motion::LineStart => self.want_col = 0,
-            Motion::LineEnd => self.want_col = usize::MAX,
-        }
-        self.clamp();
-        self.cursor != before
+    pub fn dirty(&self) -> bool { self.loaded && self.doc.is_dirty() }
+
+    /// The absolute path the daemon and language servers know the file by.
+    fn host_path(&self) -> String {
+        if self.path.starts_with('/') { self.path.clone() } else { format!("{}/{}", self.scope.trim_end_matches('/'), self.path) }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Motion {
-    Left,
-    Right,
-    Up,
-    Down,
-    HalfPageUp,
-    HalfPageDown,
-    Top,
-    Bottom,
-    LineStart,
-    LineEnd,
+/// Map a window key to an editor key.
+fn editor_key(event: &rune::KeyEvent) -> Option<Key> {
+    use rune::Key as K;
+    let m = event.mods;
+    if m.alt || m.logo { return None; }
+    Some(match &event.key {
+        K::Escape => Key::Esc,
+        K::Enter => Key::Enter,
+        K::Backspace => Key::Backspace,
+        K::Delete => Key::Delete,
+        K::Tab => Key::Tab,
+        K::Left => Key::Left,
+        K::Right => Key::Right,
+        K::Up => Key::Up,
+        K::Down => Key::Down,
+        K::Home => Key::Home,
+        K::End => Key::End,
+        K::Text(t) if m.ctrl => {
+            // Some layouts deliver the control code (`\u{4}` for Ctrl+D) rather than the letter.
+            let c = t.chars().next()?;
+            Key::Ctrl(if (c as u32) < 0x20 { (c as u8 + b'a' - 1) as char } else { c.to_ascii_lowercase() })
+        }
+        K::Text(t) => {
+            let mut chars = t.chars();
+            let c = chars.next()?;
+            if chars.next().is_some() { return None; }
+            Key::Char(c)
+        }
+        _ => return None,
+    })
 }
 
 impl App {
@@ -83,18 +111,29 @@ impl App {
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Editor { path: relative.clone() }) {
             self.active = index;
             if let (Some(line), Some(buffer)) = (line, self.buffers.get_mut(&relative)) {
-                buffer.cursor.0 = line.saturating_sub(1) as usize;
-                buffer.clamp();
+                buffer.doc.set_cursor(vim::Pos { line: line.saturating_sub(1) as usize, col: 0 });
+                buffer.doc.follow_cursor = true;
+                self.editor_follow = true;
             }
             return;
         }
-        self.buffers.insert(relative.clone(), Buffer::new(relative.clone(), line));
+        // Notes live outside the workspace: their requests are scoped to the vault.
+        let scope = self.notes.root.clone().filter(|root| relative.starts_with(root.as_str())).unwrap_or_else(|| self.cwd.clone());
+        self.buffers.insert(relative.clone(), Buffer::new(relative.clone(), scope.clone(), line));
         self.open_tab(TabKind::Editor { path: relative.clone() });
         self.focus = crate::app::Focus::Content;
-        // Notes live outside the workspace: their reads are scoped to the vault.
-        let scope = self.notes.root.clone().filter(|root| relative.starts_with(root.as_str())).unwrap_or_else(|| self.cwd.clone());
+        self.read_file(&relative, &scope);
+        // The daemon watches only directories a client has listed: list the file's folder so
+        // on-disk changes (agents, formatters, git) come back as `Files Changed` and reload it.
+        let parent = relative.rsplit_once('/').map_or("", |(dir, _)| dir);
         if let Some(daemon) = &self.daemon {
-            daemon.send_scoped(Family::Files, serde_json::json!({"ReadFile": {"path": relative}}), &scope);
+            daemon.send_scoped(Family::Files, serde_json::json!({"ListDir": {"path": parent}}), &scope);
+        }
+    }
+
+    fn read_file(&self, path: &str, scope: &str) {
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Files, serde_json::json!({"ReadFile": {"path": path}}), scope);
         }
     }
 
@@ -102,11 +141,45 @@ impl App {
         let Some(buffer) = self.buffers.get_mut(path) else { return };
         if bytes.iter().take(8192).any(|b| *b == 0) {
             buffer.error = Some("Binary file".into());
-        } else {
-            buffer.lines = String::from_utf8_lossy(bytes).split('\n').map(|l| l.trim_end_matches('\r').to_owned()).collect();
+            buffer.loaded = true;
+            return;
         }
+        let text = String::from_utf8_lossy(bytes);
+        if buffer.loaded {
+            // A refresh after an on-disk change: only a clean buffer takes it.
+            if !buffer.doc.is_dirty() { buffer.doc.replace_from_disk(&text); }
+            return;
+        }
+        buffer.doc = Document::from_text(&text);
         buffer.loaded = true;
-        buffer.clamp();
+        if let Some(line) = buffer.initial_line.take() {
+            let col = vim::vim_first_non_blank(buffer.doc.lines.get(line).map_or("", String::as_str));
+            buffer.doc.set_cursor(vim::Pos { line, col });
+            self.editor_follow = true;
+        }
+    }
+
+    /// `FileWritten`: the save landed; what it carried is the new baseline.
+    pub(crate) fn apply_file_written(&mut self, path: &str) {
+        let Some(buffer) = self.buffers.values_mut().find(|b| b.path == path || b.host_path() == path) else { return };
+        if let Some(lines) = buffer.saving.take() {
+            buffer.doc.mark_saved_lines(lines);
+            buffer.message = Some(format!("\"{}\" written", buffer.name()));
+        }
+        let host = buffer.host_path();
+        let scope = buffer.scope.clone();
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Editor, serde_json::json!({"DidSave": {"path": host}}), &scope);
+        }
+    }
+
+    /// `Files Changed`: re-read clean open files under the changed paths.
+    pub(crate) fn apply_files_changed(&mut self, paths: &[String]) {
+        let stale: Vec<(String, String)> = self.buffers.values()
+            .filter(|b| b.loaded && !b.doc.is_dirty() && b.saving.is_none() && paths.iter().any(|p| *p == b.host_path() || *p == b.path))
+            .map(|b| (b.path.clone(), b.scope.clone()))
+            .collect();
+        for (path, scope) in stale { self.read_file(&path, &scope); }
     }
 
     /// The active editor tab's buffer.
@@ -114,56 +187,198 @@ impl App {
         match &self.active_tab().kind { TabKind::Editor { path } => self.buffers.get(path), _ => None }
     }
 
-    pub fn editor_motion(&mut self, motion: Motion) -> bool {
-        let page = self.editor_rows;
-        let TabKind::Editor { path } = self.active_tab().kind.clone() else { return false };
-        let Some(buffer) = self.buffers.get_mut(&path) else { return false };
-        buffer.motion(motion, page)
+    fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        let TabKind::Editor { path } = self.active_tab().kind.clone() else { return None };
+        self.buffers.get_mut(&path)
+    }
+
+    /// A key in the focused editor. Returns whether the editor took it.
+    pub fn editor_key(&mut self, event: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+        let Some(key) = editor_key(event) else { return false };
+        let rows = self.editor_rows;
+        let clipboard = self.clipboard.clone();
+        let Some(buffer) = self.active_buffer_mut() else { return false };
+        if !buffer.loaded || buffer.error.is_some() { return false; }
+        buffer.message = None;
+        if key == Key::Ctrl('s') {
+            // Ctrl+S saves from any mode, as the original's editor does.
+            self.save_active();
+            return true;
+        }
+        buffer.doc.page_rows = rows;
+        let before = (buffer.doc.cursor(), buffer.doc.revision);
+        let outcome = buffer.doc.key(key, &mut buffer.prompt, clipboard.as_deref());
+        if (buffer.doc.cursor(), buffer.doc.revision) != before || std::mem::take(&mut buffer.doc.follow_cursor) {
+            self.editor_follow = true;
+        }
+        match outcome {
+            Outcome::Handled => true,
+            Outcome::Unhandled => false,
+            Outcome::Yanked(text) => { tx.copy(text.clone()); self.clipboard = Some(text); true }
+            Outcome::Command(command) => { self.editor_command(&command); true }
+        }
+    }
+
+    /// Ex commands: `:w`, `:q`, `:wq` / `:x`, `:q!`, `:N` (go to line).
+    fn editor_command(&mut self, command: &str) {
+        let index = self.active;
+        match command {
+            "w" | "write" => self.save_active(),
+            "wq" | "x" => { self.save_active(); self.close_tab(index); }
+            "q" | "quit" => {
+                if self.active_buffer().is_some_and(Buffer::dirty) {
+                    if let Some(b) = self.active_buffer_mut() { b.message = Some("E37: No write since last change (add ! to override)".into()); }
+                } else {
+                    self.close_tab(index);
+                }
+            }
+            "q!" => self.close_tab(index),
+            _ if command.chars().all(|c| c.is_ascii_digit()) && !command.is_empty() => {
+                let line = command.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                if let Some(b) = self.active_buffer_mut() {
+                    let col = vim::vim_first_non_blank(b.doc.lines.get(line).map_or("", String::as_str));
+                    b.doc.set_cursor(vim::Pos { line, col });
+                }
+                self.editor_follow = true;
+            }
+            other => {
+                if let Some(b) = self.active_buffer_mut() { b.message = Some(format!("E492: Not an editor command: {other}")); }
+            }
+        }
+    }
+
+    /// Write the active buffer over the daemon (`saveFile`'s host path).
+    pub fn save_active(&mut self) {
+        let Some(buffer) = self.active_buffer_mut() else { return };
+        if !buffer.loaded || buffer.error.is_some() { return; }
+        let text = buffer.doc.text_for_disk();
+        if let Some(config) = &buffer.config {
+            if !config.writable {
+                buffer.message = Some("The daemon config document is read-only".into());
+                return;
+            }
+            let message = serde_json::json!({"SaveConfigDocument": {"content": text, "expected_revision": config.revision}});
+            buffer.saving = Some(buffer.doc.lines.clone());
+            if let Some(daemon) = &self.daemon { daemon.send(Family::Config, message); }
+            return;
+        }
+        buffer.saving = Some(buffer.doc.lines.clone());
+        let (path, scope) = (buffer.path.clone(), buffer.scope.clone());
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Files, serde_json::json!({"WriteFile": {"path": path, "bytes": text.as_bytes()}}), &scope);
+        }
+    }
+
+    /// Mode of the active editor, for the status pill and cursor shape.
+    /// The character under the focused editor's block cursor, which the cursor redraws in the
+    /// background colour so the block reads as inverted text (the beam and prompt leave it).
+    pub fn editor_cursor_glyph(&self) -> Option<String> {
+        if self.focus != crate::app::Focus::Content { return None; }
+        let buffer = self.active_buffer().filter(|b| b.loaded && b.prompt.is_none() && b.doc.mode != Mode::Insert)?;
+        let ch = buffer.doc.lines.get(buffer.doc.cursor_line)?.get(buffer.doc.cursor_col..)?.chars().next()?;
+        (!ch.is_whitespace()).then(|| ch.to_string())
+    }
+
+    pub fn editor_mode(&self) -> Option<Mode> {
+        self.active_buffer().filter(|b| b.loaded).map(|b| b.doc.mode)
+    }
+
+    /// Place the cursor from a click at `(line, byte col)`; a drag extends a visual selection.
+    pub fn editor_click(&mut self, line: usize, col: usize, drag: bool) {
+        let Some(buffer) = self.active_buffer_mut() else { return };
+        buffer.prompt = None;
+        let doc = &mut buffer.doc;
+        let pos = vim::Pos { line, col };
+        if drag && doc.mode != Mode::Visual && pos == doc.cursor() { return; }
+        // A click ends the typing group (one undo step per stretch of typing), as moving does.
+        if doc.mode == Mode::Insert { doc.end_insert_group(); }
+        if drag {
+            if doc.mode == Mode::Insert { doc.mode = Mode::Normal; }
+            if doc.mode != Mode::Visual {
+                doc.visual_anchor = Some(doc.cursor());
+                doc.mode = Mode::Visual;
+                doc.vim.visual_linewise = false;
+                doc.vim.visual_block = false;
+            }
+        } else if doc.mode == Mode::Visual {
+            doc.mode = Mode::Normal;
+            doc.visual_anchor = None;
+        }
+        doc.set_cursor(pos);
+        if doc.mode == Mode::Normal { doc.snap_normal_cursor(); }
+        doc.clear_vertical_goal();
     }
 }
 
 impl App {
+    /// Ask the daemon for its config document (created if absent) to edit in a tab.
+    pub fn open_config_editor(&mut self) {
+        let key = CONFIG_DOCUMENT.to_owned();
+        if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Editor { path: key.clone() }) {
+            self.active = index;
+            return;
+        }
+        let mut buffer = Buffer::new(key.clone(), String::new(), None);
+        buffer.config = Some(ConfigDocument { revision: String::new(), writable: false });
+        self.buffers.insert(key.clone(), buffer);
+        self.open_tab(TabKind::Editor { path: key });
+        self.focus = crate::app::Focus::Content;
+        if let Some(daemon) = &self.daemon { daemon.send(Family::Config, serde_json::json!("EnsureConfigDocument")); }
+    }
+
+    /// `ConfigDocument` fills the config tab; `ConfigDocumentSaved` confirms a save.
+    pub(crate) fn apply_config_document_reply(&mut self, message: &serde_json::Value) {
+        let Some(buffer) = self.buffers.get_mut(CONFIG_DOCUMENT) else { return };
+        let (document, saved) = match (message.get("ConfigDocument"), message.get("ConfigDocumentSaved")) {
+            (Some(reply), _) => (&reply["document"], false),
+            (_, Some(reply)) => (&reply["document"], true),
+            _ => return,
+        };
+        let revision = document["revision"].as_str().unwrap_or_default().to_owned();
+        let writable = document["writable"].as_bool().unwrap_or(false);
+        buffer.config = Some(ConfigDocument { revision, writable });
+        if saved {
+            if let Some(lines) = buffer.saving.take() { buffer.doc.mark_saved_lines(lines); }
+            buffer.message = Some(format!("\"{}\" written", document["display_path"].as_str().unwrap_or("config.json")));
+        } else if !buffer.loaded {
+            buffer.doc = Document::from_text(document["content"].as_str().unwrap_or_default());
+            buffer.loaded = true;
+        }
+    }
+
+    /// Step the yank flash: true while the band is fading (redraw next frame), dropping it once
+    /// it has run its course.
+    pub fn editor_tick(&mut self) -> bool {
+        let Some(buffer) = self.active_buffer_mut() else { return false };
+        let Some(flash) = &buffer.doc.yank_flash else { return false };
+        if flash.started_at.elapsed().as_secs_f32() < view::YANK_FLASH_SECS { return true; }
+        buffer.doc.yank_flash = None;
+        true
+    }
+
     /// Scroll the editor so the cursor cell sits at least four lines inside the viewport, on the
-    /// scroll spring. Uses laid-out rects, so wrapped lines count at their real height.
+    /// scroll spring. A jump past 1.25 viewports teleports instead of gliding (the original's
+    /// long-jump rule), so `gg` / `G` / search hits land at once rather than streaking.
     pub fn editor_follow_cursor(&mut self, tx: &mut rune::Tx) {
-        if !std::mem::take(&mut self.editor_follow) { return; }
-        let (Some(cell), Some(view)) = (self.rects.get("editor-cursor").copied(), self.rects.get("editor-view").copied()) else { return };
-        let Some(key) = self.active_buffer().map(|b| view::scroll_key(&b.path)) else { return };
-        let margin = 4.0 * view::line_height(self);
-        let (offset, max, _) = self.editor_scroll.get();
-        let (top, bottom) = (cell[1] - view[1], cell[1] + cell[3] - view[1]);
+        if !self.editor_follow { return; }
+        // Until the view has laid out once there is no height to aim within; try next frame.
+        let Some(view) = self.rects.get("editor-view").copied() else { return };
+        let Some(buffer) = self.active_buffer().filter(|b| b.loaded) else { return };
+        let key = view::scroll_key(&buffer.path);
+        let (row_y, content_h) = view::cursor_row_y(self, &buffer.doc);
+        self.editor_follow = false;
+        let line_h = view::line_height(self);
+        let margin = 4.0 * line_h;
+        let max = (content_h - view[3]).max(0.0);
+        let offset = self.editor_scroll.get().0;
+        let (top, bottom) = (row_y - offset, row_y + line_h - offset);
         let delta = if top < margin { top - margin } else if bottom > view[3] - margin { bottom - (view[3] - margin) } else { return };
         let target = (offset + delta).clamp(0.0, max);
         self.wheel_target = Some(target);
-        tx.scroll_to_with(key, 0.0, target, view::SCROLL_SPRING);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn buffer() -> Buffer {
-        let mut b = Buffer::new("a.rs".into(), None);
-        b.lines = vec!["fn main() {".into(), "".into(), "    println!();".into(), "}".into()];
-        b.loaded = true;
-        b
-    }
-
-    #[test]
-    fn vertical_moves_keep_the_wanted_column() {
-        let mut b = buffer();
-        b.motion(Motion::Right, 20);
-        b.motion(Motion::Right, 20);
-        b.motion(Motion::Right, 20);
-        assert_eq!(b.cursor, (0, 3));
-        b.motion(Motion::Down, 20);
-        assert_eq!(b.cursor, (1, 0), "an empty line holds column 0");
-        b.motion(Motion::Down, 20);
-        assert_eq!(b.cursor, (2, 3), "and the next line gets the column back");
-        b.motion(Motion::Bottom, 20);
-        assert_eq!(b.cursor, (3, 0));
-        b.motion(Motion::LineEnd, 20);
-        assert_eq!(b.cursor, (3, 0));
+        if delta.abs() > view[3] * 1.25 {
+            tx.scroll_to_y(key, target);
+        } else {
+            tx.scroll_to_with(key, 0.0, target, view::SCROLL_SPRING);
+        }
     }
 }

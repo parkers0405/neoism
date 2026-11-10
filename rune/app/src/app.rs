@@ -111,7 +111,14 @@ pub struct App {
     pub threads: Vec<ThreadSummary>,
     pub sessions: HashMap<String, Session>,
     pub tabs: Vec<Tab>,
+    /// Index of the focused pane's active tab.
     pub active: usize,
+    /// The split panes and the tabs each one holds.
+    pub layout: crate::panes::Layout,
+    /// The tab an unfocused pane is drawing while its content is built (see `active_tab`).
+    pub render_tab: std::cell::Cell<Option<usize>>,
+    /// The tab whose composer `sync_field_focus` last left focused.
+    pub field_tab: Option<u64>,
     pub next_tab: u64,
     pub sidebar: Option<Sidebar>,
     /// The `/` commands, the pickers above the composer, and the model/agent/effort choice.
@@ -152,6 +159,9 @@ impl App {
             sessions: HashMap::new(),
             tabs: Vec::new(),
             active: 0,
+            layout: Default::default(),
+            render_tab: Default::default(),
+            field_tab: None,
             next_tab: 1,
             sidebar: None,
             composer: crate::agent::slash::Composer::new(config.model.as_deref(), config.variant.as_deref()),

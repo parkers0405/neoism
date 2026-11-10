@@ -7,6 +7,8 @@ use rune::TextEdit;
 pub enum TabKind {
     /// Welcome splash with the Home block terminal under it.
     Home,
+    /// A plain terminal (`Alt+T`): the block terminal without the splash.
+    Terminal,
     /// An agent conversation; `None` until the first prompt creates the thread.
     Agent { session: Option<String> },
     /// A file in the code editor (workspace-relative path).
@@ -25,26 +27,37 @@ impl App {
     pub fn open_tab(&mut self, kind: TabKind) -> usize {
         let id = self.next_tab;
         self.next_tab += 1;
+        let terminal = matches!(kind, TabKind::Home | TabKind::Terminal);
+        // The new tab's composer takes the keyboard from whichever field had it.
+        self.tabs.iter_mut().for_each(|t| t.draft.focused = false);
         self.tabs.push(Tab { id, kind, draft: TextEdit::new(""), pending_prompt: None });
         self.active = self.tabs.len() - 1;
         self.tabs[self.active].draft.focused = true;
-        if matches!(self.tabs[self.active].kind, TabKind::Home) { self.open_terminal(id); }
+        self.layout.open(id);
+        if terminal { self.open_terminal(id); }
         self.active
     }
 
+    /// Close a tab; its pane closes with its last tab, and the last tab anywhere leaves a Home.
     pub fn close_tab(&mut self, index: usize) {
         if index >= self.tabs.len() { return; }
         let removed = self.tabs.remove(index);
         self.close_terminal(removed.id);
-        if self.tabs.is_empty() { self.open_tab(TabKind::Home); }
-        self.active = self.active.min(self.tabs.len() - 1);
+        if !self.layout.remove(removed.id) {
+            self.open_tab(TabKind::Home);
+            return;
+        }
+        self.show_focused_pane();
     }
 
-    pub fn active_tab(&self) -> &Tab { &self.tabs[self.active] }
+    /// The tab being drawn: the focused pane's active tab, or an unfocused pane's while its
+    /// content is built (`render_tab`).
+    pub fn active_tab(&self) -> &Tab { &self.tabs[self.render_tab.get().unwrap_or(self.active)] }
 
     pub fn tab_title(&self, tab: &Tab) -> String {
         match &tab.kind {
             TabKind::Home => "Home".into(),
+            TabKind::Terminal => "Terminal".into(),
             TabKind::Editor { path } => path.rsplit('/').next().unwrap_or(path).to_owned(),
             TabKind::Agent { session: None } => "Neoism".into(),
             TabKind::Agent { session: Some(id) } => self.threads.iter().find(|t| &t.session_id == id)
@@ -60,7 +73,7 @@ impl App {
         if text.is_empty() { return; }
         self.tabs[index].draft.clear();
         match self.tabs[index].kind.clone() {
-            TabKind::Home => self.run_command(index, text),
+            TabKind::Home | TabKind::Terminal => self.run_command(index, text),
             TabKind::Agent { session: Some(session_id) } => self.submit_prompt(&session_id, text),
             TabKind::Agent { session: None } => self.create_thread(index, text),
             TabKind::Editor { .. } => {}
@@ -75,7 +88,7 @@ impl App {
             // The splash heads the Home scrollback; it animates while it is on screen.
             TabKind::Home => self.splash_on_screen().then_some("splash-wordmark"),
             TabKind::Agent { session: None } => Some("agent-wordmark"),
-            TabKind::Agent { .. } | TabKind::Editor { .. } => None,
+            TabKind::Agent { .. } | TabKind::Terminal | TabKind::Editor { .. } => None,
         }
     }
 

@@ -2,6 +2,7 @@
 //! source of truth: `neoism-frontend/chrome-navigation.ts`).
 
 use crate::app::{App, Focus};
+use crate::panes::{Axis, Direction};
 use crate::tabs::TabKind;
 use rune::{Key, KeyEvent, Tx};
 
@@ -20,7 +21,10 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     let m = event.mods;
     match (&event.key, app.focus) {
         (Key::Enter, Focus::Buffers(index)) => {
-            if index < app.tabs.len() { app.active = index; } else { app.open_tab(TabKind::Home); }
+            match app.tabs.get(index).map(|t| t.id) {
+                Some(tab) => app.select_tab(tab),
+                None => { app.open_tab(TabKind::Home); }
+            }
             true
         }
         (Key::Left, Focus::Buffers(_) | Focus::Workspaces(_)) if !m.alt => { focus_step(app, true); true }
@@ -48,11 +52,29 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool {
             _ => {}
         }
     }
+    if m.ctrl && !m.alt && !m.logo {
+        let split = match &event.key {
+            Key::Tab => { app.step_tab(!m.shift); return true; }
+            // Ctrl chords arrive as `Command` keys.
+            Key::Command(c) if m.shift => match c.to_ascii_lowercase() {
+                'r' => Some(Axis::Horizontal),
+                'd' => Some(Axis::Vertical),
+                '[' | '{' => { app.focus_split(false); return true; }
+                ']' | '}' => { app.focus_split(true); return true; }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(axis) = split { app.split(axis); return true; }
+    }
+    if m.ctrl && m.alt && !m.shift && !m.logo {
+        if let Some(direction) = arrow(&event.key) { app.nudge_split(direction); return true; }
+    }
     if alt_only {
         if let Key::Text(t) = &event.key {
             match t.to_lowercase().as_str() {
                 "a" => { app.open_tab(TabKind::Agent { session: None }); return true; }
-                "t" => { app.open_tab(TabKind::Home); return true; }
+                "t" => { app.open_tab(TabKind::Terminal); return true; }
                 "d" => { app.open_picker(crate::palette::Mode::Directories); return true; }
                 "c" => {
                     app.toggle_conversations();
@@ -145,10 +167,23 @@ fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
     true
 }
 
+fn arrow(key: &Key) -> Option<Direction> {
+    match key {
+        Key::Left => Some(Direction::Left),
+        Key::Right => Some(Direction::Right),
+        Key::Up => Some(Direction::Up),
+        Key::Down => Some(Direction::Down),
+        _ => None,
+    }
+}
+
+/// Content climbs to the pane above first, then to the focused pane's tab row.
 fn focus_up(app: &mut App) {
-    app.focus = match app.focus {
+    let focus = app.focus;
+    app.focus = match focus {
         Focus::Workspaces(i) => Focus::Workspaces(i),
         Focus::Buffers(_) => Focus::Workspaces(0),
+        Focus::Content if app.focus_split_toward(Direction::Up) => Focus::Content,
         Focus::Content | Focus::Sidebar => Focus::Buffers(app.active),
     };
 }
@@ -156,20 +191,28 @@ fn focus_up(app: &mut App) {
 fn focus_down(app: &mut App) {
     app.focus = match app.focus {
         Focus::Workspaces(_) => Focus::Buffers(app.active),
+        Focus::Content => { app.focus_split_toward(Direction::Down); Focus::Content }
         _ => Focus::Content,
     };
 }
 
-/// Left/Right on a tab row steps with wrapping through the `+` slot; `Alt+Left` from the first
-/// tab enters the sidebar; in content `Alt+Left/Right` moves between sidebar and content.
+/// Left/Right on a tab row steps with wrapping through the focused pane's tabs and its `+` slot
+/// (`Buffers(tabs.len())`); `Alt+Left` from the first tab enters the sidebar; in content
+/// `Alt+Left/Right` moves between panes, and past the leftmost pane into the sidebar.
 fn focus_step(app: &mut App, previous: bool) {
-    app.focus = match app.focus {
-        Focus::Buffers(0) if previous && app.sidebar.is_some() => Focus::Sidebar,
+    let plus = app.tabs.len();
+    let mut slots = app.pane_tab_indices();
+    slots.push(plus);
+    let focus = app.focus;
+    app.focus = match focus {
+        Focus::Buffers(i) if previous && slots.first() == Some(&i) && app.sidebar.is_some() => Focus::Sidebar,
         Focus::Buffers(i) => {
-            let count = app.tabs.len() + 1;
-            Focus::Buffers(if previous { (i + count - 1) % count } else { (i + 1) % count })
+            let at = slots.iter().position(|s| *s == i).unwrap_or(0);
+            let count = slots.len();
+            Focus::Buffers(slots[if previous { (at + count - 1) % count } else { (at + 1) % count }])
         }
         Focus::Workspaces(i) => Focus::Workspaces(if i == 0 { 1 } else { 0 }),
+        Focus::Content if app.focus_split_toward(if previous { Direction::Left } else { Direction::Right }) => Focus::Content,
         Focus::Content if previous && app.sidebar.is_some() => Focus::Sidebar,
         Focus::Sidebar if !previous => Focus::Content,
         other => other,
@@ -212,6 +255,15 @@ impl App {
     /// holds it only while content has focus and no picker, finder or menu is open (the
     /// original moves the one cursor out of the field rather than leaving it typing).
     pub fn sync_field_focus(&mut self) -> bool {
+        // A click into another pane's composer focused its field: that pane takes focus. (A
+        // field left focused from the last sync is just a tab `active` moved away from.)
+        let clicked = self.tabs.iter().enumerate()
+            .find(|(i, t)| *i != self.active && t.draft.focused && self.field_tab != Some(t.id))
+            .map(|(_, t)| t.id);
+        if let Some(tab) = clicked {
+            self.select_tab(tab);
+            self.focus = Focus::Content;
+        }
         let overlay = self.picker.is_some() || self.finder.is_some();
         let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. });
         let active = self.active;
@@ -220,6 +272,7 @@ impl App {
             let focused = want && index == active;
             if tab.draft.focused != focused { tab.draft.focused = focused; changed = true; }
         }
+        self.field_tab = want.then(|| self.tabs.get(active).map(|t| t.id)).flatten();
         changed
     }
 }

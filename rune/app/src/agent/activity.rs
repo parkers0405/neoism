@@ -191,6 +191,17 @@ impl App {
         })
     }
 
+    /// The transcript is scrolled to its end and overflows its view (`activity_geometry`'s
+    /// `following`): the activity line then holds the bottom row instead of riding the content.
+    pub fn activity_follows_end(&self, session_id: &str) -> bool {
+        let Some(session) = self.sessions.get(session_id).filter(|s| s.streaming) else { return false };
+        let (offset, max) = session.scroll.get();
+        max > 1.0 && max - offset <= 2.0 && session.glide.is_none()
+    }
+
+    /// The row the activity line takes (its top margin and line).
+    pub fn activity_row_height(&self) -> f32 { 18.0 + LINE_H * self.ty.scale() }
+
     /// Keep the activity line in step with the active conversation. Returns whether it
     /// animates (so the frame clock keeps running) and whether its structure changed.
     pub fn tick_activity(&mut self) -> (bool, bool) {
@@ -207,7 +218,11 @@ impl App {
             }
         };
         if let Some(activity) = &self.activity { activity.tick(self.pal, self.ty.scale()); }
-        (self.activity.is_some(), structure)
+        // Following the end of an overflowing transcript, the line pins above the composer.
+        let pinned = self.activity.is_some() && session.as_deref().is_some_and(|id| self.activity_follows_end(id));
+        let flipped = pinned != self.activity_pinned;
+        self.activity_pinned = pinned;
+        (self.activity.is_some(), structure || flipped)
     }
 }
 

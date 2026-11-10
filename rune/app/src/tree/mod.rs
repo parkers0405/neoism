@@ -153,11 +153,17 @@ impl App {
         Some((sidebar, self.tree_of(sidebar)))
     }
 
+    /// Whole rows visible in the tree's scroll view (a page for PageUp/PageDown).
+    pub fn tree_page_rows(&self) -> isize {
+        let row_h = 26.0 * self.ty.scale();
+        ((self.tree_scroll.get().2 / row_h).floor() as isize - 1).max(1)
+    }
+
     pub fn tree_move(&mut self, delta: isize) {
         let Some((_, tree)) = self.sidebar_tree() else { return };
         let count = tree.rows().len();
         if count == 0 { return; }
-        tree.selected = (tree.selected as isize + delta).clamp(0, count as isize - 1) as usize;
+        tree.selected = (tree.selected as isize).saturating_add(delta).clamp(0, count as isize - 1) as usize;
         self.tree_follow = true;
     }
 

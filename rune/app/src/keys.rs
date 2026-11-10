@@ -88,6 +88,8 @@ fn editor_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Down => Motion::Down,
         Key::Home => Motion::LineStart,
         Key::End => Motion::LineEnd,
+        Key::PageDown => Motion::HalfPageDown,
+        Key::PageUp => Motion::HalfPageUp,
         Key::Text(t) if m.ctrl && t == "d" => Motion::HalfPageDown,
         Key::Text(t) if m.ctrl && t == "u" => Motion::HalfPageUp,
         Key::Text(t) if !m.ctrl && !m.alt => match t.as_str() {
@@ -112,10 +114,19 @@ fn editor_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 
 /// Tree navigation while the file tree has focus.
 fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
-    if event.mods.ctrl || event.mods.alt { return false; }
+    if event.mods.alt { return false; }
+    let pending_g = std::mem::take(&mut app.pending_g);
+    let page = app.tree_page_rows();
     match &event.key {
+        Key::Text(t) if event.mods.ctrl && t == "d" => app.tree_move(page / 2),
+        Key::Text(t) if event.mods.ctrl && t == "u" => app.tree_move(-page / 2),
+        _ if event.mods.ctrl => return false,
         Key::Up => app.tree_move(-1),
         Key::Down => app.tree_move(1),
+        Key::PageDown => app.tree_move(page),
+        Key::PageUp => app.tree_move(-page),
+        Key::Home => app.tree_move(isize::MIN / 2),
+        Key::End => app.tree_move(isize::MAX / 2),
         Key::Right | Key::Enter => app.tree_activate(None),
         Key::Left => app.tree_collapse(),
         Key::Escape => app.focus = Focus::Content,
@@ -124,6 +135,9 @@ fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
             "j" => app.tree_move(1),
             "l" | "o" => app.tree_activate(None),
             "h" => app.tree_collapse(),
+            "G" => app.tree_move(isize::MAX / 2),
+            "g" if pending_g => app.tree_move(isize::MIN / 2),
+            "g" => app.pending_g = true,
             _ => return false,
         },
         _ => return false,

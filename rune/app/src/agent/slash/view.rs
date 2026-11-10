@@ -68,12 +68,14 @@ pub fn picker_card(app: &App) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     let [cx, cy, cw, _] = composer;
-    // As many rows as fit between the window top (8 pt) and 6 pt above the composer.
-    let fit = (((cy - 8.0 * s - 6.0 * s - TITLE_H * s) / (ROW_H * s)).floor().max(1.0) as usize).min(MAX_ROWS);
+    // As many rows as fit between the agent pane's top (8 pt under its tab row, never over the
+    // chrome) and 6 pt above the composer.
+    let top = app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s;
+    let fit = (((cy - top - 6.0 * s - TITLE_H * s) / (ROW_H * s)).floor().max(1.0) as usize).min(MAX_ROWS);
     picker.limit.set(fit);
     let Layout { header_h, activity, visible } = layout(picker, cw, s);
     let height = header_h + visible as f32 * ROW_H * s;
-    let y = (cy - height - 6.0 * s).max(8.0 * s);
+    let y = (cy - height - 6.0 * s).max(top);
 
     let mut card = el().key("prompt-picker").w(cw).h(height).fill(rgb(p.bg)).radius(RADIUS * s).border(s, rgb(p.border))
         .clip_rounded(RADIUS * s)

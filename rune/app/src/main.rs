@@ -11,6 +11,7 @@ mod ghostty;
 mod home;
 mod keys;
 mod palette;
+mod panes;
 mod settings;
 mod tabs;
 mod tree;
@@ -60,6 +61,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
+    let panes_changed = app.sync_panes();
     let focus_changed = app.sync_field_focus();
     // The live turn's status line animates on live bindings; it rebuilds only on state changes.
     let (busy, activity_changed) = app.tick_activity();
@@ -81,7 +83,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps = Some(fps);
         tx.wake_after(std::time::Duration::from_millis(500));
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || skit || activity_changed
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -104,6 +106,11 @@ fn main() {
                 let i = s.active;
                 s.tabs[i].draft.replace_text("/");
                 s.composer_changed();
+            }),
+            ("splits", |s| {
+                s.split(panes::Axis::Horizontal);
+                s.open_tab(tabs::TabKind::Agent { session: None });
+                s.split(panes::Axis::Vertical);
             }),
             ("palette", |s| s.open_picker(palette::Mode::Commands)),
             ("themes", |s| { s.open_picker(palette::Mode::Themes); s.move_picker(2); }),

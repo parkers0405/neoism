@@ -73,14 +73,18 @@ impl App {
             MenuAction::Agent => { self.open_tab(TabKind::Agent { session: None }); }
             MenuAction::AgentPanel => self.toggle_conversations(),
             MenuAction::CommandPalette => self.open_picker(crate::palette::Mode::Commands),
-            MenuAction::NewTerminal => { self.open_tab(TabKind::Home); }
+            MenuAction::NewTerminal => { self.open_tab(TabKind::Terminal); }
             // Surfaces still being built: directory picker, notes, file tree, search.
             MenuAction::ChangeDirectory | MenuAction::Notes | MenuAction::FileTree | MenuAction::Search => {}
         }
     }
 
     pub(crate) fn open_terminal(&mut self, tab_id: u64) {
-        self.terminals.insert(tab_id, Terminal::new(self.cwd.clone(), self.terminal_colors()));
+        let mut term = Terminal::new(self.cwd.clone(), self.terminal_colors());
+        // A plain Terminal tab follows `terminal.block-ui`; Home is always blocks.
+        term.grid = self.tabs.iter().any(|t| t.id == tab_id && t.kind == TabKind::Terminal)
+            && crate::config::read()["terminal"]["block-ui"] == serde_json::Value::Bool(false);
+        self.terminals.insert(tab_id, term);
         self.create_pty(tab_id);
     }
 
@@ -112,9 +116,10 @@ impl App {
         let Some(term) = self.terminals.get_mut(&tab_id) else { return };
         let (cols, rows) = term.shell.size();
         let cwd = term.shell.cwd.clone();
+        let presentation = if term.grid { Presentation::Grid } else { Presentation::Blocks };
         // The composer's ghost text and history menu read the shell's history file.
         let history = !std::mem::replace(&mut term.composer.history_requested, true);
-        self.send_pty(PtyClient::CreatePty { cwd: Some(cwd), cols, rows, shell: None, shell_args: None, presentation: Some(Presentation::Blocks) });
+        self.send_pty(PtyClient::CreatePty { cwd: Some(cwd), cols, rows, shell: None, shell_args: None, presentation: Some(presentation) });
         self.pending_pty.push_back(tab_id);
         if let (true, Some(daemon)) = (history, &self.daemon) {
             daemon.send_scoped(Family::Files, json!({"ReadShellHistory": {"max_entries": 1000}}), &self.cwd);
@@ -137,14 +142,14 @@ impl App {
     }
 
     fn active_terminal(&self) -> Option<&Terminal> {
-        let tab = self.tabs.get(self.active)?;
-        if tab.kind != TabKind::Home { return None; }
+        let tab = self.active_tab();
+        if !matches!(tab.kind, TabKind::Home | TabKind::Terminal) { return None; }
         self.terminals.get(&tab.id)
     }
 
     fn active_terminal_mut(&mut self) -> Option<&mut Terminal> {
         let tab = self.tabs.get(self.active)?;
-        if tab.kind != TabKind::Home { return None; }
+        if !matches!(tab.kind, TabKind::Home | TabKind::Terminal) { return None; }
         self.terminals.get_mut(&tab.id)
     }
 

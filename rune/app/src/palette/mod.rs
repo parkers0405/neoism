@@ -164,8 +164,13 @@ impl App {
                 }
                 self.active = 0;
             }
-            Action::NextTab => self.active = (self.active + 1) % count,
-            Action::PreviousTab => self.active = (self.active + count - 1) % count,
+            Action::NextTab => self.step_tab(true),
+            Action::PreviousTab => self.step_tab(false),
+            Action::SplitRight => self.split(crate::panes::Axis::Horizontal),
+            Action::SplitDown => self.split(crate::panes::Axis::Vertical),
+            Action::NextSplit => { self.focus_split(true); }
+            Action::PreviousSplit => { self.focus_split(false); }
+            Action::CloseSplitOrTab => self.close_tab(self.active),
             Action::IncreaseFontSize => self.set_font_size(self.ty.size + 1.0),
             Action::DecreaseFontSize => self.set_font_size(self.ty.size - 1.0),
             Action::ResetFontSize => self.set_font_size(crate::config::DEFAULT_FONT_SIZE),

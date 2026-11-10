@@ -28,6 +28,8 @@ pub struct Terminal {
     pub selected: Option<u64>,
     /// The grid as of the last sync, while the pane shows it.
     pub screen: Option<Screen>,
+    /// A grid-presentation shell (`terminal.block-ui: false`): always Ghostty's grid.
+    pub grid: bool,
 }
 
 impl Terminal {
@@ -42,6 +44,7 @@ impl Terminal {
             hovered: None,
             selected: None,
             screen: None,
+            grid: false,
         }
     }
 
@@ -74,7 +77,8 @@ impl Terminal {
     /// at a marked prompt at all.
     pub fn raw(&self) -> bool {
         let shell = &self.shell;
-        shell.error.is_some()
+        self.grid
+            || shell.error.is_some()
             || shell.alt()
             || shell.running() && shell.app_cursor()
             || shell.pending() && self.long_running()

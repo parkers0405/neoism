@@ -384,6 +384,12 @@ fn main() {
                 }
                 s.apply_editor_reply(serde_json::json!({"LspHoverResult": {"seq": 7, "line": 1, "character": 24,
                     "contents": "```rust\nalloc::vec::Vec\n\npub struct Vec<T, A = Global>\n```\n\n---\n\nA contiguous growable array type, written as `Vec<T>`, short for 'vector'."}}));
+                // `NEOISM_RUNE_LONG_HOVER=1`: a card taller than its limit, with links (wheel and clicks).
+                if std::env::var_os("NEOISM_RUNE_LONG_HOVER").is_some() {
+                    let mut text = String::from("```rust\npub struct Vec<T>\n```\n\nSee [the Vec docs](https://doc.rust-lang.org/std/vec/struct.Vec.html).\n\n");
+                    for i in 0..60 { text.push_str(&format!("Paragraph {i} of the documentation, long enough to wrap in the card.\n\n")); }
+                    s.apply_editor_reply(serde_json::json!({"LspHoverResult": {"seq": 7, "line": 1, "character": 24, "contents": text}}));
+                }
             }),
             // The real daemon: open the launch directory's `src/main.rs` (language servers attach).
             ("lsp-live", |s| s.open_file("src/main.rs", Some(2))),

@@ -251,7 +251,13 @@ fn hover_card(app: &App, contents: &str, cell: [f32; 4]) -> El {
         .unwrap_or([0.0, 0.0, max_w, 0.0]);
     let (x, y) = place(app, cell, w, h);
     // Press, hold and drag selects in the card; letting go copies it.
-    let body = Markdown::new(contents.trim().to_owned()).selectable(true).render(&hover_style(app));
+    // Links open like the transcript's: web links in the browser, file links in the editor.
+    let body = Markdown::new(contents.trim().to_owned()).selectable(true)
+        .on_link_tx(|a: &mut App, url: &str, _: &mut rune::Tx| {
+            if let Some(b) = a.active_buffer_mut() { b.lsp.dismiss(); }
+            a.open_link(url);
+        })
+        .render(&hover_style(app));
     col()
         .key("lsp-hover")
         .max_w(max_w)
@@ -276,13 +282,26 @@ fn hover_card(app: &App, contents: &str, cell: [f32; 4]) -> El {
         })
         .child({
             let mirror = app.active_buffer().map(|b| b.lsp.hover_scroll.clone()).unwrap_or_default();
+            let source_mirror = mirror.clone();
+            // Shrinks to the card's height limit so a long card scrolls inside it, with the
+            // editor's wheel and trackpad feel; the wheel never reaches the code under it.
             col()
                 .key(HOVER_SCROLL_KEY)
+                .w_full()
+                .shrink()
+                .min_h(0.0)
                 .padding(pad)
                 .scroll(rune::ScrollSpec {
                     stick_bottom: false,
                 })
                 .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
+                .on_wheel(move |a: &mut App, e: rune::WheelEvent, tx: &mut rune::Tx| {
+                    let m = source_mirror.clone();
+                    let source: crate::ui::scroll::Source = std::rc::Rc::new(move || { let (o, max, _) = m.get(); (o, max) });
+                    let notch = 3.0 * crate::editor::view::line_height(a);
+                    crate::ui::scroll::handle(&mut a.scrollers, HOVER_SCROLL_KEY, &e, notch, source, tx);
+                    true
+                })
                 .child(body)
         })
 }

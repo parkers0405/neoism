@@ -707,13 +707,15 @@ impl App {
         false
     }
 
-    /// After the editor took `key`: open, refresh or close the completion popup.
-    pub(crate) fn lsp_key_after(&mut self, key: &super::input::Key) {
+    /// After the editor took `key`: open, refresh or close the completion popup. Only text typed
+    /// in insert mode asks for completions (VS Code, nvim-cmp): the `A`, `o` or `i` that entered
+    /// insert mode is a command, not a word being typed.
+    pub(crate) fn lsp_key_after(&mut self, key: &super::input::Key, was_inserting: bool) {
         use super::input::Key;
         let Some(buffer) = self.active_buffer_mut() else {
             return;
         };
-        if buffer.doc.mode != Mode::Insert {
+        if buffer.doc.mode != Mode::Insert || !was_inserting {
             buffer.lsp.completion = None;
             buffer.lsp.complete_at = None;
             return;

@@ -15,6 +15,9 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && app.editor_key(event, tx) {
         return true;
     }
+    if app.focus == Focus::Sidebar && app.sidebar == Some(crate::app::Sidebar::Conversations) && app.conversation_key(event) {
+        return true;
+    }
     if app.focus == Focus::Sidebar && app.active_tree().is_some() && tree_key(app, event) {
         return true;
     }
@@ -211,6 +214,7 @@ impl App {
             Focus::Workspaces(i) => self.rects.get(&format!("workspace-tab:{i}")).map(|r| tab_bar(*r, 14.0, scale, i == 1)),
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.rects.get("editor-cursor").copied(),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("tree-row").map(|r| crate::tree::view::cursor_rect(self, *r)),
+            Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) && !self.threads.is_empty() => self.conversation_cursor(),
             Focus::Sidebar | Focus::Content => self.cursor.caret_block(),
         }
     }
@@ -224,6 +228,7 @@ impl App {
         match self.focus {
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.rects.get("editor-view").copied(),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("file-tree-rows").copied(),
+            Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) => self.rects.get("conversation-list").copied(),
             _ => None,
         }
     }

@@ -87,6 +87,26 @@ impl Follow {
     }
 }
 
+impl Follow {
+    /// Reveal a span `top..top + h` of content (rows of uneven height) keeping `margin` points
+    /// to either edge where the view allows.
+    pub fn apply_span(&mut self, key: &str, top: f32, h: f32, margin: f32, tx: &mut Tx) {
+        if !self.pending { return; }
+        let (offset, max, viewport) = self.scroll.get();
+        if viewport <= 0.0 { return; }
+        self.pending = false;
+        let margin = margin.min(((viewport - h) / 2.0).max(0.0));
+        let base = self.base();
+        let target = if top - margin < base { top - margin }
+            else if top + h + margin > base + viewport { top + h + margin - viewport }
+            else { return };
+        let target = target.clamp(0.0, max.max(0.0));
+        self.set_target(target);
+        if (target - offset).abs() > viewport * 1.25 { tx.scroll_to_y(key.to_owned(), target); }
+        else { tx.scroll_to_with(key.to_owned(), 0.0, target, SPRING); }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

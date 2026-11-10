@@ -69,6 +69,9 @@ pub struct App {
     pub editor_follow: bool,
     /// The file tree's scroll (offset, max, viewport) and its pending follow target.
     pub tree_follow: crate::ui::follow::Follow,
+    /// The conversations panel's keyboard row and its follow.
+    pub conv_selected: usize,
+    pub conv_follow: crate::ui::follow::Follow,
     /// The command palette's and finder's lists following the keyboard row.
     pub palette_follow: crate::ui::follow::Follow,
     pub finder_follow: crate::ui::follow::Follow,
@@ -191,6 +194,8 @@ impl App {
             tree: Default::default(),
             editor_follow: false,
             tree_follow: Default::default(),
+            conv_selected: 0,
+            conv_follow: Default::default(),
             palette_follow: Default::default(),
             finder_follow: Default::default(),
             pending_g: false,

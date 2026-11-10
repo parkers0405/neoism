@@ -64,10 +64,16 @@ fn cursor_quad(app: &App) -> El {
     let quad = rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent))).w(w).h(h);
     // Settled on an editor cell, the block shows its character in the background colour.
     let glyph = app.editor_cursor_glyph().filter(|_| !app.cursor.trail.animating());
-    el().key("window-cursor").w(w).h(h).absolute(x0, y0)
+    let block = |x: f32, y: f32| el().key("window-cursor").w(w).h(h).absolute(x, y)
         .child(quad)
         .child_if(glyph.is_some(), || text(glyph.clone().unwrap_or_default())
-            .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0))
+            .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0));
+    // Inside a scroll view the block is clipped to it (its trail too), never over the chrome.
+    match app.cursor_clip() {
+        Some([cx0, cy0, cw, ch]) => el().key("window-cursor-clip").w(cw).h(ch).absolute(cx0, cy0).clip_rounded(0.0)
+            .child(block(x0 - cx0, y0 - cy0)),
+        None => block(x0, y0),
+    }
 }
 
 fn rail(app: &App) -> El {

@@ -3,6 +3,7 @@
 pub mod chrome;
 pub mod cursor;
 pub mod fps;
+pub mod follow;
 pub mod icons;
 pub mod menu;
 pub mod modal;

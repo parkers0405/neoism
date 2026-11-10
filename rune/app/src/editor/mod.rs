@@ -362,6 +362,7 @@ impl App {
     /// jump past 1.25 viewports teleports instead (the original's long-jump rule), so `gg` /
     /// `G` / search hits land at once rather than streaking.
     pub fn editor_follow_cursor(&mut self, tx: &mut rune::Tx) {
+        use crate::ui::follow::{Reveal, reveal_top};
         if !self.editor_follow { return; }
         // Until the view has laid out once there is no height to aim within; try next frame.
         let Some(view) = self.rects.get("editor-view").copied() else { return };
@@ -370,16 +371,19 @@ impl App {
         let (row_y, content_h) = view::cursor_row_y(self, &buffer.doc);
         self.editor_follow = false;
         let line_h = view::line_height(self);
-        let margin = (4.0 * line_h).min(((view[3] - line_h) / 2.0).max(0.0));
-        let max = (content_h - view[3]).max(0.0);
+        let viewport = view[3];
+        let max_offset = (content_h - viewport).max(0.0);
         let offset = self.editor_scroll.get().0;
         let base = self.wheel_target.filter(|t| (t - offset).abs() > 0.5).unwrap_or(offset);
-        let (top, bottom) = (row_y - base, row_y + line_h - base);
-        let delta = if top < margin { top - margin } else if bottom > view[3] - margin { bottom - (view[3] - margin) } else { return };
-        let target = (base + delta).clamp(0.0, max);
-        let delta = target - offset;
+        let rows_fit = (viewport / line_h).floor().max(1.0) as i64;
+        let max_top = (max_offset / line_h).ceil() as i64;
+        let current_top = (base / line_h).round() as i64;
+        let row = (row_y / line_h).round() as i64;
+        let top = reveal_top(row, rows_fit, max_top, current_top, Reveal::Center { edge: 4 });
+        if top == current_top { return; }
+        let target = (top as f32 * line_h).clamp(0.0, max_offset);
         self.wheel_target = Some(target);
-        if delta.abs() > view[3] * 1.25 {
+        if (target - offset).abs() > viewport * 1.25 {
             tx.scroll_to_y(key, target);
         } else {
             tx.scroll_to_with(key, 0.0, target, view::SCROLL_SPRING);

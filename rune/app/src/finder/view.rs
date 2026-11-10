@@ -22,6 +22,17 @@ const INPUT_H: f32 = 40.0;
 const INPUT_FONT: f32 = 14.0;
 const INPUT_PAD_X: f32 = 14.0;
 const ROW_H: f32 = 32.0;
+const LIST_KEY: &str = "finder-results";
+
+impl App {
+    /// Keep the finder's selected hit `SCROLL_OFF_ROWS` (4) inside its list.
+    pub fn finder_follow_selection(&mut self, tx: &mut Tx) {
+        let Some(finder) = &self.finder else { return };
+        let (selected, count) = (finder.selected, finder.hits.len());
+        let row_h = ROW_H * self.ty.scale();
+        self.finder_follow.apply(LIST_KEY, selected, row_h, count as f32 * row_h, crate::ui::follow::Reveal::Margin(4), tx);
+    }
+}
 const ROW_FONT: f32 = 13.0;
 const COMPACT_ROWS: usize = 8;
 const PREVIEW_LINE_H: f32 = 20.0;
@@ -128,7 +139,11 @@ fn list(app: &App, finder: &Finder, width: f32) -> El {
         };
         rows = rows.child(line);
     }
-    col().key("finder-results").w(width).scroll(rune::ScrollSpec { stick_bottom: false }).child(rows)
+    let mirror = app.finder_follow.scroll.clone();
+    col().key(LIST_KEY).w(width).scroll(rune::ScrollSpec { stick_bottom: false })
+        .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
+        .child(rows)
 }
 
 /// The selected hit's file around its line, the line itself highlighted.

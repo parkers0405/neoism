@@ -6,6 +6,7 @@ use crate::app::{App, Focus};
 use crate::ui::icons;
 use crate::ui::theme::{NERD, rgb};
 use rune::tok::TextStyle;
+use crate::ui::follow::Reveal;
 use rune::{Color, El, ScrollSpec, col, el, row, text};
 
 const ROW_H: f32 = 26.0;
@@ -15,26 +16,16 @@ const FONT: f32 = 13.0;
 const ICON_GAP: f32 = 8.0;
 const HEADER_H: f32 = 36.0;
 const SCROLL_KEY: &str = "file-tree-rows";
-/// Rows kept between the selection and the view's edge while stepping.
-const SCROLLOFF: f32 = 3.0;
+/// Rows kept between the selection and the view's edge (`file_tree::SCROLL_OFF_ROWS`).
+const SCROLLOFF: i64 = 4;
 
 impl App {
     /// Keep the selected row in view as the keyboard walks the tree (held arrows included).
     pub fn tree_follow_selection(&mut self, tx: &mut rune::Tx) {
-        if !std::mem::take(&mut self.tree_follow) { return; }
         let Some(tree) = self.active_tree() else { return };
+        let (selected, count) = (tree.selected, tree.rows().len());
         let row_h = ROW_H * self.ty.scale();
-        let (offset, max, viewport) = self.tree_scroll.get();
-        if viewport <= 0.0 { return; }
-        let margin = (SCROLLOFF * row_h).min(((viewport - row_h) / 2.0).max(0.0));
-        let base = self.tree_target.filter(|(t, at)| at.elapsed().as_secs_f32() < 0.4 && (t - offset).abs() > 0.5).map_or(offset, |(t, _)| t);
-        let (top, bottom) = (tree.selected as f32 * row_h, (tree.selected as f32 + 1.0) * row_h);
-        let target = if top - margin < base { top - margin }
-            else if bottom + margin > base + viewport { bottom + margin - viewport }
-            else { return };
-        let target = target.clamp(0.0, max.max(0.0));
-        self.tree_target = Some((target, std::time::Instant::now()));
-        tx.scroll_to_with(SCROLL_KEY, 0.0, target, crate::editor::view::SCROLL_SPRING);
+        self.tree_follow.apply(SCROLL_KEY, selected, row_h, count as f32 * row_h, Reveal::Margin(SCROLLOFF), tx);
     }
 }
 
@@ -70,13 +61,14 @@ pub fn view(app: &App) -> El {
         }
         list = list.child(line);
     }
-    let mirror = app.tree_scroll.clone();
+    let mirror = app.tree_follow.scroll.clone();
     col().key("file-tree").w_full().h_full().fill(app.surface(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child(row().w_full().h(HEADER_H * s).px(16.0 * s).center_y()
             .child(text(if app.sidebar == Some(crate::app::Sidebar::Notes) { "Notes" } else { "File Tree" }).font(app.ty.sized_bold(14.0)).color(rgb(p.fg))))
         .child(col().key(SCROLL_KEY).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false })
             .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
+            .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(SCROLL_KEY.into(), r); })
             .child(list))
 }
 

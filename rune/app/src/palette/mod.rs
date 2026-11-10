@@ -130,6 +130,7 @@ impl App {
         let count = picker.rows().len();
         if count == 0 { return; }
         picker.selected = (picker.selected as isize + delta).rem_euclid(count as isize) as usize;
+        self.palette_follow.request();
     }
 
     /// Run the selected (or clicked) row and close the picker.

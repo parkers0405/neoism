@@ -61,6 +61,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
+    app.palette_follow_selection(tx);
+    app.finder_follow_selection(tx);
     let panes_changed = app.sync_panes();
     let flashing = app.editor_tick();
     if flashing { tx.wake_after(std::time::Duration::ZERO); }
@@ -132,6 +134,10 @@ fn main() {
                 let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();
                 s.apply_dir_listing("", &serde_json::Value::Array(entries));
                 s.sidebar = Some(app::Sidebar::Files);
+            }),
+            ("editor-md", |s| {
+                s.open_file("README.md", None);
+                s.apply_opened_file("README.md", include_bytes!("../../README.md"));
             }),
             ("tree-long", |s| {
                 let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();

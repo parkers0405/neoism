@@ -72,6 +72,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         .on_wheel(move |s: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Trackpads keep Rune's direct 1:1 scroll and fling; notches glide on the spring,
             // retargeting mid-glide so consecutive notches are one continuous motion.
+            if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
             if e.precise || e.dy == 0.0 { return false; }
             let Some(session) = s.sessions.get_mut(&wheel_id) else { return false };
             let (offset, max) = session.scroll.get();

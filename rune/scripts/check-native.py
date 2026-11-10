@@ -24,6 +24,7 @@ parser.add_argument('--keys', default='j' * 140)
 parser.add_argument('--wheel', action='store_true', help='Scroll up and down over the test window using /dev/uinput')
 parser.add_argument('--wheel-seconds', type=float, default=3, help='Duration of alternating native wheel input')
 parser.add_argument('--daemon-url', help='Use a scratch daemon instead of offline fixtures')
+parser.add_argument('--env', action='append', default=[], help='Extra KEY=VALUE for the test window')
 parser.add_argument('--terminal', action='store_true', help='Run bounded ANSI output in a scratch daemon terminal')
 args = parser.parse_args()
 if args.terminal and not args.daemon_url:
@@ -40,7 +41,7 @@ def dispatch(value):
     subprocess.run(['hyprctl', 'dispatch', value], check=True, capture_output=True)
 
 previous = active()
-environment = ['WAYLAND_DEBUG=1']
+environment = ['WAYLAND_DEBUG=1', *args.env]
 if args.daemon_url:
     environment.append('NEOISM_GPUIX_DAEMON_URL=' + args.daemon_url)
 else:

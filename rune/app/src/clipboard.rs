@@ -30,6 +30,10 @@ impl App {
     /// Super+V: the clipboard's text into the focused field, else the editor or terminal.
     pub fn paste_chord(&mut self, tx: &mut Tx) {
         tx.read_clipboard(|a: &mut App, content, _tx| {
+            // An image into the agent composer attaches (`attach_clipboard_image`).
+            let field = a.focused_field_mut().map(|f| f as *const TextEdit);
+            let composing = a.tabs.get(a.active).is_some_and(|t| field == Some(&t.draft as *const TextEdit));
+            if composing && a.paste_image(&content) { return; }
             let text = content.text().to_owned();
             if text.is_empty() { return; }
             match a.focused_field_mut() {

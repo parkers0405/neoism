@@ -51,17 +51,26 @@ pub(super) fn tail(s: f32, color: Color) -> El {
 }
 
 /// The full-width row for one user message in a `width` point column.
-pub fn view(app: &App, message: &str, author: Option<&str>, width: f32) -> El {
+pub fn view(app: &App, id: &str, message: &str, attachments: &[neoism_protocol::agent::HistoryAttachment], author: Option<&str>, width: f32) -> El {
     let s = app.ty.scale();
     let blue = crate::ui::theme::rgb(BLUE);
     let lane = avatar_lane(width, s);
     let max_w = max_width(width, s);
     let pad = pad_x(width, s);
     let radius = 22.0 * s;
-    let body = col().max_w(max_w).shrink().px(pad).py(PAD_Y * s).radius(radius).fill(blue)
-        .child(text(message.to_owned()).font(app.ty.sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap()
+    // Images sit at the top of the bubble (`render_user_message`); their `[imageN]` anchors
+    // leave the text.
+    let strip = super::attach::message_strip(app, id, attachments, (max_w - 2.0 * pad).max(1.0));
+    let message = if strip.is_some() { super::attach::display_text(message) } else { message.to_owned() };
+    let mut body = col().max_w(max_w).shrink().px(pad).py(PAD_Y * s).radius(radius).fill(blue).gap(14.0 * s);
+    let body_has_strip = strip.is_some();
+    if let Some(strip) = strip { body = body.child(row().w_full().justify_end().child(strip)); }
+    if !message.is_empty() || attachments.is_empty() {
+        let has_strip = body_has_strip;
+        body = body.child(text(message).font(app.ty.sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap().w_full_if(has_strip)
             // White over the blue bubble: the accent highlight would vanish into it.
             .selectable(true).selection_color(Color::WHITE.alpha(0.3)));
+    }
     // The tail hangs off the body's lower-right corner; it overlaps the capsule's own rounding.
     let bubble = el().shrink()
         .child(tail(s, blue).pin(None, None, Some(-3.0 * s), Some(-5.0 * s)))
@@ -72,6 +81,10 @@ pub fn view(app: &App, message: &str, author: Option<&str>, width: f32) -> El {
         .child(bubble)
         .child(row().w(lane).justify_end().child(app.orbs.view(&seed, orb.min(lane * 0.7))))
 }
+
+/// `w_full` only beside an image strip: alone, the text hugs its own width.
+trait FullIf { fn w_full_if(self, on: bool) -> Self; }
+impl FullIf for El { fn w_full_if(self, on: bool) -> El { if on { self.w_full() } else { self } } }
 
 #[cfg(test)]
 mod tests {

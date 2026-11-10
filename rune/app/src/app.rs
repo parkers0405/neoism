@@ -175,6 +175,10 @@ pub struct App {
     pub sidebar: Option<Sidebar>,
     /// The `/` commands, the pickers above the composer, and the model/agent/effort choice.
     pub composer: crate::agent::slash::Composer,
+    /// Composer attachments and the image preview (`agent::attach`).
+    pub attach: crate::agent::attach::Attachments,
+    /// The composer whose paperclip the pointer is over.
+    pub composer_attach_hover: Option<u64>,
     pub focus: Focus,
     pub agent: String,
     pub model: String,
@@ -216,6 +220,8 @@ impl App {
             field_tab: None,
             next_tab: 1,
             sidebar: None,
+            attach: Default::default(),
+            composer_attach_hover: None,
             composer: crate::agent::slash::Composer::new(config.model.as_deref(), config.variant.as_deref()),
             focus: Focus::Content,
             agent: "Build".into(),

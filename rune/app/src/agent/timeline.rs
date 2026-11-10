@@ -404,6 +404,8 @@ impl App {
     /// is a file in the workspace (absolute, or relative to it), with an optional line.
     pub fn open_link(&mut self, url: &str) {
         let url = url.trim();
+        // Tests: report the link instead of opening it.
+        if std::env::var_os("NEOISM_RUNE_TRACE_LINK").is_some() { eprintln!("open link {url}"); return; }
         if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:") {
             super::slash::actions::open_in_browser(url);
             return;

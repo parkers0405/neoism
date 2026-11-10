@@ -25,6 +25,8 @@ pub enum Kind {
     Session,
     Skill,
     Subagent,
+    /// `/cd`: the session directory, home, and the daemon's fuzzy directory hits.
+    Directory,
 }
 
 impl Kind {
@@ -177,7 +179,8 @@ impl Picker {
 
     fn refilter_with(&mut self, query: &str) {
         let needle = query.trim().to_lowercase();
-        if needle.is_empty() || self.kind.is_entry() {
+        // Directory rows are the daemon's own fuzzy hits for the query; never filter them again.
+        if needle.is_empty() || self.kind.is_entry() || self.kind == Kind::Directory {
             self.filtered = self.rows.clone();
             return;
         }

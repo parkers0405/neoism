@@ -228,7 +228,9 @@ impl App {
             self.select_tab(tab);
             self.focus = Focus::Content;
         }
-        let overlay = self.picker.is_some() || self.finder.is_some();
+        // An inline composer picker (`/model`, `/cd` …) types into its own query row.
+        let inline_picker = self.composer.picker.as_ref().is_some_and(|p| p.kind != crate::agent::slash::Kind::Slash);
+        let overlay = self.picker.is_some() || self.finder.is_some() || inline_picker;
         let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. });
         let active = self.active;
         let mut changed = false;

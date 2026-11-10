@@ -13,6 +13,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.form.is_some() { return app.form_key(event, tx); }
     if app.browser.is_some() { return app.browser_key(event, tx) || shortcut(app, event, tx); }
     if shortcut(app, event, tx) { return true; }
+    if app.diag_popup.is_some() && app.diag_popup_key(event) { return true; }
     if app.settings.is_some() { return app.settings_key(event); }
     // A full-screen program or running command in the Home pane owns the keyboard.
     if app.terminal_key(event) { return true; }
@@ -20,6 +21,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if app.project_menu.is_some() && app.project_menu_key(event) { return true; }
+    if app.focus == Focus::Content && app.timeline_jump_key(event, tx) { return true; }
     if app.focus == Focus::Sidebar && app.sidebar == Some(crate::app::Sidebar::Conversations) && app.conversation_key(event) {
         return true;
     }

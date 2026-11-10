@@ -317,3 +317,17 @@ about 2.8 ms, and each keystroke re-highlights the whole file in `poll` (2.4 ms 
 line file); neither is addressed here. Measure with nothing else busy: rust-analyzer
 re-indexing after an edit doubled every number above.
 
+## Status pills, diagnostics popup, Ctrl+D, Copy (2026-11-10)
+
+- The error and warning counts are their own rounded pills left of the status chain
+  (`DiagPillSpec`), 6 pt apart. As links in the chain a solid red or yellow section ran on
+  under the next pill's cap. A press opens the diagnostics popup over the pill
+  (`editor/diag_popup.rs`, after `panels/diagnostics_popup.rs`): the severity's diagnostics
+  with their lines, Up/Down, Enter or a click to go to the line, Escape or a click outside to
+  close. Checked headlessly in the `lsp` scene: both popups, and Enter moving the cursor from
+  line 2 to the error's line 3. Long messages truncate; the original scrolls them sideways.
+- Ctrl+D in a conversation is the jump-to-latest button.
+- A code block's Copy button copies (`Tx::copy`, traced with `NEOISM_RUNE_TRACE_COPY`) and
+  cross-fades to a green "Copied" for 1.4 s on live opacities; it is a 26 pt button with a
+  hover wash rather than a bare word.
+

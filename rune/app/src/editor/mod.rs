@@ -9,6 +9,7 @@ pub mod input;
 mod mouse;
 mod completion;
 pub mod lsp;
+pub mod diag_popup;
 pub mod lsp_view;
 pub mod view;
 pub(crate) mod vim;

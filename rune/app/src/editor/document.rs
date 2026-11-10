@@ -49,6 +49,8 @@ pub struct Document {
     pub follow_cursor: bool,
     /// Rows the view shows (for `Ctrl+d` / `Ctrl+u`), set by the host.
     pub page_rows: usize,
+    /// The view's wrap width in columns (0 = unknown): j/k step through wrapped rows.
+    pub wrap_cols: usize,
     pub vim: VimState,
     pub yank_flash: Option<YankFlash>,
     /// Indent unit inserted by `>>` and auto-indent.
@@ -98,6 +100,7 @@ impl Document {
             revision: 0,
             follow_cursor: false,
             page_rows: 30,
+            wrap_cols: 0,
             vim: VimState::default(),
             yank_flash: None,
             line_ending,

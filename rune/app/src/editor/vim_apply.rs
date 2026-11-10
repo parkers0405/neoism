@@ -342,7 +342,50 @@ impl Document {
         VimApplied::motion()
     }
 
+    /// One step up or down through the screen rows of soft-wrapped lines (vim's `gj`/`gk`):
+    /// a wrapped line's continuation is a row of its own, and the on-screen column holds.
+    /// Returns false when wrapping is unknown or off, for the plain line step.
+    fn vim_move_visual(&mut self, delta: isize) -> bool {
+        use super::wrap::{TAB_DISPLAY_WIDTH as TAB, WrapSegment, byte_for_display_col, wrap_segments};
+        if self.wrap_cols == 0 { return false; }
+        let cols = self.wrap_cols;
+        let rows = |line: &str| -> Vec<WrapSegment> {
+            let mut s = wrap_segments(line, cols, TAB);
+            if s.is_empty() { s.push(WrapSegment { byte_start: 0, byte_end: line.len(), source_col: 0, source_end_col: 0, visual_indent: 0 }); }
+            s
+        };
+        let here = rows(&self.lines[self.cursor_line]);
+        let at = here.iter().position(|s| self.cursor_col < s.byte_end).unwrap_or(here.len() - 1);
+        let seg = here[at];
+        let goal = self.goal_visual_col.unwrap_or_else(|| seg.visual_col(seg.source_col_for_byte(&self.lines[self.cursor_line], self.cursor_col, TAB)));
+        let (line, seg) = if delta > 0 {
+            if at + 1 < here.len() { (self.cursor_line, here[at + 1]) }
+            else if self.cursor_line + 1 < self.lines.len() { (self.cursor_line + 1, rows(&self.lines[self.cursor_line + 1])[0]) }
+            else { return true; }
+        } else if at > 0 {
+            (self.cursor_line, here[at - 1])
+        } else if self.cursor_line > 0 {
+            let above = rows(&self.lines[self.cursor_line - 1]);
+            (self.cursor_line - 1, *above.last().expect("a line has a row"))
+        } else {
+            return true;
+        };
+        let text = &self.lines[line];
+        let byte = byte_for_display_col(text, seg.source_col_at_visual(goal), TAB).clamp(seg.byte_start, seg.byte_end);
+        // A continuation row ends where the next begins: stay on this row's last character.
+        let last_row = seg.byte_end >= text.len();
+        let byte = if !last_row && byte >= seg.byte_end { prev_char_boundary(text, seg.byte_end) } else { byte };
+        self.cursor_line = line;
+        self.cursor_col = byte;
+        self.goal_visual_col = Some(goal);
+        if self.mode == Mode::Normal && !text.is_empty() && self.cursor_col >= text.len() {
+            self.cursor_col = prev_char_boundary(text, text.len());
+        }
+        true
+    }
+
     fn vim_move_vertical(&mut self, delta: isize) {
+        if self.vim_move_visual(delta) { return; }
         let goal = self
             .goal_visual_col
             .unwrap_or_else(|| char_col(&self.lines[self.cursor_line], self.cursor_col));

@@ -260,6 +260,7 @@ impl App {
         if self.editor_leader_key(event) { return true; }
         let Some(key) = editor_key(event) else { return false };
         let rows = self.active_buffer().and_then(|b| b.view_rect).map_or(30, |r| (r[3] / view::line_height(self)).floor().max(1.0) as usize);
+        let wrap_cols = self.active_buffer().map_or(0, |b| view::wrap_cols(self, b));
         let clipboard = self.clipboard.clone();
         let Some(buffer) = self.active_buffer_mut() else { return false };
         if !buffer.loaded || buffer.error.is_some() { return false; }
@@ -289,6 +290,7 @@ impl App {
             }
         }
         buffer.doc.page_rows = rows;
+        buffer.doc.wrap_cols = wrap_cols;
         // With the hover card open (`K`), Up/Down scroll it instead of moving the cursor.
         if matches!(key, Key::Up | Key::Down) && let Some(b) = self.active_buffer()
             && b.lsp.hover.as_ref().is_some_and(|h| h.text.is_some()) && b.lsp.completion.is_none() {

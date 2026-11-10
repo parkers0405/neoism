@@ -59,6 +59,7 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Presence orbs flow every frame while a transcript with people in it is on screen.
     if app.orbs_on_screen() && app.orbs.tick() { tx.wake_after(std::time::Duration::ZERO); }
     app.editor_follow_cursor(tx);
+    app.tree_follow_selection(tx);
     let focus_changed = app.sync_field_focus();
     // The live turn's status line animates on live bindings; it rebuilds only on state changes.
     let (busy, activity_changed) = app.tick_activity();
@@ -115,6 +116,20 @@ fn main() {
             ("app-menu", |s| { s.toggle_menu(); if let Some(m) = &mut s.menu { m.selected = 1; } }),
             ("settings", |s| s.open_settings()),
             ("about", |s| s.modal = Some(ui::modal::Modal::about())),
+            // A long file and a long tree, for walking with held arrows.
+            ("editor-long", |s| {
+                s.open_file("src/app.rs", None);
+                s.apply_opened_file("src/app.rs", include_bytes!("app.rs"));
+                let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();
+                s.apply_dir_listing("", &serde_json::Value::Array(entries));
+                s.sidebar = Some(app::Sidebar::Files);
+            }),
+            ("tree-long", |s| {
+                let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();
+                s.apply_dir_listing("", &serde_json::Value::Array(entries));
+                s.sidebar = Some(app::Sidebar::Files);
+                s.focus = app::Focus::Sidebar;
+            }),
             // A live turn mid-stream: the animated "Crafting . . ." status line.
             ("activity", |s| {
                 s.load_fixture("fixture-activity", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"));

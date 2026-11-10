@@ -122,7 +122,17 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         }
         _ => el(),
     };
+    // Following the end, the activity line holds the bottom row just above the composer while
+    // the streamed text scrolls up under it (`activity_geometry`).
+    let pinned = match (app.activity.as_ref().filter(|_| app.activity_pinned), app.rects.get(&format!("composer-card:{tab_id}")), app.rects.get(&format!("agent-area:{tab_id}"))) {
+        (Some(activity), Some(card), Some(area)) => {
+            let top = card[1] - area[1] - app.activity_row_height() - 6.0;
+            col().key("activity-pinned").pin(Some(pad), Some(top.max(0.0)), Some(pad), None).child(activity.view(app))
+        }
+        _ => el(),
+    };
     pane.child(timeline)
+        .child(pinned)
         .child(rail)
         .child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
             .child(composer(app, f32::INFINITY)))
@@ -169,6 +179,8 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
     let Some(session) = app.sessions.get(session_id) else { return el() };
     let messages = session.messages.as_slice();
     match item {
+        // Pinned above the composer, the line keeps its room here so text never runs under it.
+        RowItem::Activity if app.activity_pinned => el().key("activity").w_full().h(app.activity_row_height()),
         RowItem::Activity => app.activity.as_ref().map_or_else(el, |activity| activity.view(app)),
         RowItem::Group(start) => match tools::group_at(messages, start) {
             Some((_, group)) => tools::row(app, &group),
@@ -215,8 +227,8 @@ impl App {
 /// The transcript's selection highlight.
 pub(super) fn selection_color(app: &App) -> Color { crate::ui::selection::highlight(rgb(app.pal.accent)) }
 
-/// A drag that selects near the top or bottom edge scrolls the transcript
-/// (`scroll_for_drag_edge`): within 32 pt of an edge, up to 22 pt a frame, faster closer in.
+/// A selecting drag carried past the transcript's top or bottom edge scrolls it, up to 22 pt a
+/// frame, faster the further out (reaching full speed 32 pt beyond the edge).
 const EDGE_ZONE: f32 = 32.0;
 const EDGE_STEP: f32 = 22.0;
 
@@ -248,10 +260,12 @@ impl App {
         let (offset, max) = session.scroll.get();
         // The composer floats over the transcript's foot: the visible bottom is its top.
         let bottom = self.rects.get(&format!("composer-card:{tab}")).map_or(top + h, |c| (c[1] - 6.0).min(top + h));
-        let above = (top + EDGE_ZONE) - y;
-        let below = y - (bottom - EDGE_ZONE);
-        let delta = if above > 0.0 { -(above / EDGE_ZONE).clamp(0.05, 1.0) * EDGE_STEP }
-            else if below > 0.0 { (below / EDGE_ZONE).clamp(0.05, 1.0) * EDGE_STEP }
+        // Only a drag carried past the visible transcript scrolls it (as a browser does); a
+        // press resting inside, however near an edge, never moves the page.
+        let above = top - y;
+        let below = y - bottom;
+        let delta = if above > 0.0 { -(above / EDGE_ZONE).clamp(0.1, 1.0) * EDGE_STEP }
+            else if below > 0.0 { (below / EDGE_ZONE).clamp(0.1, 1.0) * EDGE_STEP }
             else { return false };
         let next = (offset + delta).clamp(0.0, max);
         if (next - offset).abs() < 0.5 { return false; }

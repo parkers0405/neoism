@@ -100,7 +100,6 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
     let mode_changing = app.tick_mode_pill();
-    let rail_changed = app.tick_question_rails();
     let gliding = app.step_timeline_glides(clock, tx) | app.step_terminal_glides(clock, tx);
     if gliding { tx.wake_after(std::time::Duration::ZERO); }
     if mode_changing { tx.wake_after(std::time::Duration::ZERO); }
@@ -131,13 +130,19 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let caret_changed = cursor_was != (app.cursor.visible, app.cursor.trail.quad());
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     // While animating, the pill shows the presentation rate; at rest it holds the last one.
+    // At most twice a second: each change re-runs the views, and the measured rate wobbles by
+    // a frame or two every frame while something animates.
     let fps = ui::fps::rate().or(app.fps);
-    let fps_changed = fps.is_some() && app.fps != fps;
+    let due = app.fps_at.is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(500));
+    let fps_changed = fps.is_some() && app.fps != fps && due;
     if fps_changed {
         app.fps = fps;
-        tx.wake_after(std::time::Duration::from_millis(500));
+        app.fps_at = Some(std::time::Instant::now());
     }
-    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_changed
+    if fps.is_some() && app.fps != fps && !due {
+        tx.wake_after(std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
+    }
+    animating || changed || spinning || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing
 }
 
 fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {

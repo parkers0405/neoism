@@ -158,6 +158,10 @@ pub struct App {
     pub picker: Option<crate::palette::Picker>,
     /// The file browser modal (Change Directory, attaching a picture).
     pub browser: Option<crate::browser::Browser>,
+    /// The open form (Add / Edit Server, Add system).
+    pub form: Option<crate::servers::form::Form>,
+    /// The window's server and any connection in progress (kept across a server switch).
+    pub server: crate::servers::flow::ServerState,
     /// The palette's and finder's list slides, mirrored for the window cursor.
     pub list_residual: crate::ui::rows::Residual,
     pub daemon: Option<Daemon>,
@@ -242,6 +246,8 @@ impl App {
             tools: Default::default(),
             picker: None,
             browser: None,
+            form: None,
+            server: Default::default(),
             list_residual: Default::default(),
             activity: None, replay: None,
             modal: None,

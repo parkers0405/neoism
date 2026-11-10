@@ -89,7 +89,13 @@ fn tab_row(app: &App, pane: &Pane, focused: bool, framed: bool) -> El {
         let mut item = row().key(format!("pane-tab:{tab_id}")).h(TAB_ROW_H).px(16.0).gap(10.0).center_y()
             .max_w(212.5)
             .fill(if selected { rgb(p.bg) } else { Color::TRANSPARENT })
-            .child(if matches!(tab.kind, TabKind::Agent { .. }) {
+            .child(if let Some(program) = app.tab_program(tab_id).filter(|_| matches!(tab.kind, TabKind::Home | TabKind::Terminal)) {
+                // A coding-agent TUI shows its own logo until it exits.
+                match app.tools.icons.agent(Some(program)) {
+                    Some(image) => el().key(format!("pane-tab-icon:{tab_id}:{program}")).w(13.0 * s).h(13.0 * s).pixels(image.pixels()),
+                    None => text(g).font(app.ty.icon_sized(13.0)).color(color),
+                }
+            } else if matches!(tab.kind, TabKind::Agent { .. }) {
                 match app.tools.icons.agent(Some("neoism")) {
                     Some(image) => el().key(format!("pane-tab-icon:{tab_id}")).w(13.0 * s).h(13.0 * s).pixels(image.pixels()),
                     None => text("n").font(app.ty.tab()).color(color),

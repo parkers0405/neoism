@@ -233,6 +233,31 @@ fn main() {
                 if let Some(term) = s.terminals.get_mut(&tab) { term.filter.as_mut().unwrap().1.replace_text("rs"); }
             }),
             // A second terminal next to Home: Home keeps the directory until the star moves it.
+            // A full-screen program with coloured rows (status bar, selection, panels).
+            ("terminal-tui", |s| {
+                let tab = s.active_tab().id;
+                let Some(term) = s.terminals.get_mut(&tab) else { return };
+                term.shell.session = Some(format!("fixture-{tab}"));
+                term.shell.ready = true;
+                let mut out = String::from("\x1b[?1049h\x1b[2J\x1b[H\x1b[44;97m Codex  ~/projects/neoism                              model: gpt-6.1 \x1b[0m\r\n");
+                for i in 0..14 {
+                    let bg = if i == 5 { "\x1b[48;5;238m" } else if i % 4 == 0 { "\x1b[48;5;235m" } else { "" };
+                    out.push_str(&format!("{bg}  {i:>2}  line of program output with \x1b[32mcolour\x1b[39m and a \x1b[43;30m tag \x1b[0m{bg}   \x1b[0m\r\n"));
+                }
+                out.push_str("\x1b[42;30m NORMAL \x1b[0m\x1b[48;5;236m  main.rs  \x1b[0m");
+                term.shell.feed(out.as_bytes(), None);
+            }),
+            // Plain finished blocks: hovering one swaps its status for the toolbar.
+            ("terminal-scroll", |s| s.fixture_blocks(&TERMINAL_FIXTURE)),
+            // A Home tab running Codex next to a Terminal running Claude Code: logos and names.
+            ("terminal-agent-tabs", |s| {
+                s.fixture_blocks(&TERMINAL_FIXTURE[..1]);
+                let home = s.active_tab().id;
+                if let Some(term) = s.terminals.get_mut(&home) { term.program = Some("codex"); }
+                s.open_tab(tabs::TabKind::Terminal);
+                let terminal = s.active_tab().id;
+                if let Some(term) = s.terminals.get_mut(&terminal) { term.program = Some("claude"); }
+            }),
             ("terminal-owner", |s| {
                 s.fixture_blocks(&TERMINAL_FIXTURE[..1]);
                 let home = s.active_tab().id;

@@ -140,14 +140,14 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
     let tint = (failed || selected).then_some(if failed { p.red } else { p.accent });
     // Tinted blocks wash the whole block and carry a 2 pt bar on the left.
     let wash = |el: El, h: f32| match tint {
-        Some(tint) => el.child(el_fill(rgb(tint).alpha(0.06), h)).child(el_bar(rgb(tint), 2.0 * s, h)),
+        Some(tint) => el.child(el_fill(rgb(tint).alpha(0.06), h).key("wash")).child(el_bar(rgb(tint), 2.0 * s, h).key("bar")),
         None => el,
     };
     // The header (directory, status, command) sticks to the top while its output scrolls
     // under it, as GPUiX's sticky header did; the block's end pushes it out.
     let label = if block.background { "Shell output".to_owned() } else { directory_label(&block.cwd, home) };
     let mut header = wash(el().w_full().h(output).fill(rgb(p.bg)), output).sticky_top(0.0)
-        .child(text(label).font(ink(app, 0.9, None)).color(rgb(p.dim)).absolute(cells.inset, row_h * 1.1));
+        .child(text(label).key("cwd").font(ink(app, 0.9, None)).color(rgb(p.dim)).absolute(cells.inset, row_h * 1.1));
     // The status gives way to the block's actions while it is hovered, selected, filtered or
     // its menu is open.
     let engaged = [term.hovered, term.selected, term.more, term.filter.as_ref().map(|(id, _)| *id)].contains(&Some(block.id));
@@ -161,31 +161,31 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
         } else {
             (duration, p.muted)
         };
-        header = header.child(text(status).font(ink(app, 0.9, None)).color(rgb(color))
+        header = header.child(text(status).key("status").font(ink(app, 0.9, None)).color(rgb(color))
             .pin(None, Some(row_h * 1.1), Some(cells.inset), None));
     }
     for (index, line) in command.iter().enumerate() {
-        header = header.child(text((*line).to_owned()).selectable(true).font(ink(app, 1.0, None)).color(rgb(p.fg))
+        header = header.child(text((*line).to_owned()).key(format!("command:{index}")).selectable(true).font(ink(app, 1.0, None)).color(rgb(p.fg))
             .absolute(cells.inset, row_h * (2.19 + index as f32)));
     }
     if !block.background && term.toolbar_block() == Some(block.id) {
-        header = header.child(actions(app, term, block, home, width));
+        header = header.child(actions(app, term, block, home, width).key("actions"));
     }
     if let Some(query) = filtering {
-        header = header.child(filter_row(app, tab_id, block_id, query, lines.len(), block.lines.len())
+        header = header.child(filter_row(app, tab_id, block_id, query, lines.len(), block.lines.len()).key("filter")
             .pin(Some(cells.inset), Some(output - FILTER_ROW * s), Some(cells.inset), None));
     }
     let body_h = height - output;
     let mut body = wash(el().w_full().h(body_h), body_h);
     if block.truncated && !reduced {
         body = body.child(text(format!("Earlier output truncated; showing the last {} lines", block.lines.len()))
-            .font(ink(app, 0.85, None)).color(rgb(p.muted)).absolute(cells.inset, 0.0));
+            .key("truncated").font(ink(app, 0.85, None)).color(rgb(p.muted)).absolute(cells.inset, 0.0));
     }
     if !lines.is_empty() {
-        body = body.child(rows_view(app, lines, cells, lift_for(p), true).absolute(cells.inset, note));
+        body = body.child(rows_view(app, lines, cells, lift_for(p), true).key("rows").absolute(cells.inset, note));
     }
     if let (Some((row, col)), true, false) = (block.cursor, block.running() && term.long_running(), reduced) {
-        body = body.child(el().w(cells.cell).h(row_h).fill(rgb(p.accent).alpha(0.45))
+        body = body.child(el().key("cursor").w(cells.cell).h(row_h).fill(rgb(p.accent).alpha(0.45))
             .absolute(cells.inset + col as f32 * cells.cell, note + row as f32 * row_h));
     }
     col().key(format!("terminal-block:{}", block.id)).w_full().h(height)
@@ -244,6 +244,8 @@ fn filter_row(app: &App, tab_id: u64, block_id: u64, query: &rune::TextEdit, sho
     let s = app.ty.scale();
     let input = rune::text_input(query, app.ty.sized(12.0))
         .key(format!("block-filter-query:{tab_id}:{block_id}"))
+        // Only the window's block cursor marks the caret, as in the composer.
+        .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder("Filter output...", rgb(p.muted))
         .color(rgb(p.fg)).w_full()
         .on_edit(move |a: &mut App| {
@@ -334,12 +336,22 @@ pub fn rows_view(app: &App, rows: &[Row], cells: Cells, lift: impl Fn(u32) -> u3
             }
         }
     }
-    let mut layer = el().w_full().h(rows.len() as f32 * cells.row);
-    for (col, y, width, bg) in fills {
-        layer = layer.child(el().w(width as f32 * cells.cell).h(cells.row).fill(rgb(bg))
-            .absolute(col as f32 * cells.cell, y as f32 * cells.row));
+    // Screen content lands at once: scrolling a program redraws rows, and nothing in them may
+    // glide or fade between frames. Backgrounds are one canvas, so no cell is an element that
+    // could re-pair with another's and tween its place or colour.
+    let height = rows.len() as f32 * cells.row;
+    let mut layer = el().key("grid-rows").w_full().h(height).instant_changes();
+    if !fills.is_empty() {
+        let width = fills.iter().map(|(col, _, w, _)| (col + w) as f32 * cells.cell).fold(cells.cell, f32::max);
+        let mut shape = rune::Shape::new().view_box(width, height.max(cells.row));
+        for (col, y, w, bg) in fills {
+            let (x0, y0) = (col as f32 * cells.cell, y as f32 * cells.row);
+            let (x1, y1) = (x0 + w as f32 * cells.cell, y0 + cells.row);
+            shape = shape.fill(vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]], rgb(bg));
+        }
+        layer = layer.child(rune::canvas(shape).key("grid-fills").w(width).h(height.max(cells.row)).absolute(0.0, 0.0));
     }
-    layer.child(text(body).selectable(selectable).spans(spans).font(ink(app, 1.0, None)).color(rgb(app.pal.fg)).absolute(0.0, 0.0))
+    layer.child(text(body).key("grid-text").selectable(selectable).spans(spans).font(ink(app, 1.0, None)).color(rgb(app.pal.fg)).absolute(0.0, 0.0))
 }
 
 /// `blockOutputForeground`: on dark themes, blend ink toward white until it reaches 4.5:1.

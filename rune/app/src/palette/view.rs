@@ -66,6 +66,9 @@ pub fn view(app: &App) -> El {
     let width = (if themes { THEME_WIDTH } else { WIDTH } * s).min((app.window[0] - 16.0).max(1.0));
 
     let input = rune::text_input(&picker.query, app.ty.sized(14.0))
+        // Keys through this field (list arrows, wheel-free navigation) commit animated: without
+        // it Rune lands every change in the commit at once, cutting the slides mid-list.
+        .animate_edit_layout()
         .key("picker-query")
         .placeholder(match picker.mode {
             Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...",
@@ -204,8 +207,10 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
             continue;
         }
         let mut line = row().key(format!("picker-row:{index}")).w_full().h(row_h * s).px(10.0 * s).gap(8.0 * s).center_y()
-            .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
-                if let (true, Some(picker)) = (inside, &mut a.picker) { picker.selected = index; }
+            // Only a moving pointer selects (`onMouseMove`): rows sliding under a resting
+            // pointer must not take the keyboard's selection.
+            .on_pointer_move(move |a: &mut App, _| {
+                if let Some(picker) = a.picker.as_mut().filter(|p| p.selected != index) { picker.selected = index; }
             })
             .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker(Some(index), tx));
         if let Some(icon) = item.icon {
@@ -242,8 +247,9 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selecte
         .instant_changes()
         .radius(3.0 * s)
         // The gliding list highlight marks the selection.
-        .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
-            if let (true, Some(picker)) = (inside, &mut a.picker) { picker.selected = index; }
+        // Only a moving pointer selects: rows sliding under a resting pointer keep the selection.
+        .on_pointer_move(move |a: &mut App, _| {
+            if let Some(picker) = a.picker.as_mut().filter(|p| p.selected != index) { picker.selected = index; }
         })
         .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker(Some(index), tx));
     let stripe = if look.current { Some(p.green) } else if selected && look.dot.is_some() { Some(p.accent) } else { None };

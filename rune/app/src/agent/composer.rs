@@ -15,6 +15,9 @@ pub fn composer(app: &App, max_w: f32) -> El {
     let tab_id = tab.id;
     let streaming = matches!(&tab.kind, TabKind::Agent { session: Some(id) } if app.sessions.get(id).is_some_and(|s| s.streaming));
     let input = rune::text_input(&tab.draft, app.ty.composer())
+        // Keys through this field (list arrows, wheel-free navigation) commit animated: without
+        // it Rune lands every change in the commit at once, cutting the slides mid-list.
+        .animate_edit_layout()
         .key(format!("composer:{}", tab.id))
         .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder("Ask anything", rgb(p.dim))

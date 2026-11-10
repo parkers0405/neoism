@@ -226,6 +226,9 @@ fn query_row(app: &App, picker: &Picker, width: f32) -> El {
         };
     }
     let mut input = rune::text_input(&picker.query, mono(13.0 * s, false))
+        // Keys through this field (list arrows, wheel-free navigation) commit animated: without
+        // it Rune lands every change in the commit at once, cutting the slides mid-list.
+        .animate_edit_layout()
         .key("prompt-picker-query")
         .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder(picker.placeholder.clone(), rgb(p.muted))

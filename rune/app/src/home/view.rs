@@ -442,6 +442,9 @@ fn composer(app: &App, term: &Terminal, height: f32) -> El {
     let draft = &tab.draft;
     let tab_id = tab.id;
     let input = rune::text_input(draft, ink(app, 1.0, None))
+        // Keys through this field (list arrows, wheel-free navigation) commit animated: without
+        // it Rune lands every change in the commit at once, cutting the slides mid-list.
+        .animate_edit_layout()
         .key(format!("terminal-command:{}", tab.id))
         .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder("Enter a command", rgb(p.muted))

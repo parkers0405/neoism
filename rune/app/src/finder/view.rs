@@ -82,6 +82,9 @@ pub fn view(app: &App) -> El {
 
     let prefix = match finder.mode { Mode::Files => "", Mode::Grep => "/ ", Mode::Git => "git " };
     let input = rune::text_input(&finder.query, app.ty.sized(INPUT_FONT))
+        // Keys through this field (list arrows, wheel-free navigation) commit animated: without
+        // it Rune lands every change in the commit at once, cutting the slides mid-list.
+        .animate_edit_layout()
         .key("finder-query")
         .placeholder(format!("{prefix}{}", finder.placeholder()), rgb(p.muted))
         .color(rgb(p.fg)).grow(1.0).shrink()
@@ -144,7 +147,8 @@ fn list(app: &App, finder: &Finder, width: f32, visible: usize) -> El {
         let (glyph, color) = icons::for_file(name);
         let mut line = row().key(format!("finder-row:{index}")).w_full().h(ROW_H * s).px(INPUT_PAD_X * s).center_y()
             .child(el().w(ROW_FONT * s).center().child(text(glyph).font(TextStyle::new(ROW_FONT * s, 400.0).family(NERD)).color(rgb(color))))
-            .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| if inside { a.select_finder(index) })
+            // Only a moving pointer selects: hits sliding under a resting pointer keep the selection.
+            .on_pointer_move(move |a: &mut App, _| if a.finder.as_ref().is_some_and(|f| f.selected != index) { a.select_finder(index) })
             .on_press(move |a: &mut App| a.accept_finder(Some(index)));
         let font = app.ty.sized(ROW_FONT);
         line = match hit {

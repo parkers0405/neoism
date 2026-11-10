@@ -77,7 +77,7 @@ fn lsp_fixture(s: &mut App) {
 
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
-    let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.sync_terminals(tx);
+    let changed = replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.take_picked_attachments() | app.sync_terminals(tx);
     if std::mem::take(&mut app.settle_pending) { tx.settle(); }
     if app.quit_requested {
         if !app.session_closed { app.save_session(true); }
@@ -181,6 +181,28 @@ fn main() {
         scenes: &[
             ("welcome", |_| {}),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
+            // A sent message with an image and another waiting in the composer;
+            // `NEOISM_RUNE_PREVIEW=1` opens the sent one full-window.
+            ("agent-attach", |s| {
+                s.load_fixture("attach", "Attachments", "[]");
+                let png = |w: u32, h: u32, tint: u8| {
+                    let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 255 / w) as u8, (y * 255 / h) as u8, tint, 255]));
+                    let mut out = std::io::Cursor::new(Vec::new());
+                    img.write_to(&mut out, image::ImageFormat::Png).expect("png");
+                    out.into_inner()
+                };
+                s.attach_bytes("diagram.png", "image/png", png(480, 300, 200));
+                let i = s.active;
+                let text = format!("{}what does this diagram show?", s.tabs[i].draft.text);
+                s.tabs[i].draft.replace_text(text);
+                s.submit();
+                s.attach_bytes("screenshot.png", "image/png", png(300, 420, 60));
+                if std::env::var_os("NEOISM_RUNE_PREVIEW").is_some() {
+                    s.attach.preview = Some(agent::attach::Preview { key: "history:".to_owned(), name: "diagram.png".into() });
+                    let id = s.sessions.get("attach").and_then(|x| x.messages.last()).map(|m| m.id.clone()).unwrap_or_default();
+                    if let Some(p) = &mut s.attach.preview { p.key = format!("history:{id}:0"); }
+                }
+            }),
             ("sidebar", |s| s.sidebar = Some(app::Sidebar::Conversations)),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });

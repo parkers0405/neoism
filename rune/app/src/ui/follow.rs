@@ -13,6 +13,11 @@ use std::time::Instant;
 
 /// The original scroll spring: critically damped, ~0.39 s.
 pub const SPRING: Spring = Spring::new(0.39, 0.0);
+/// Menu lists (`command_palette` / `finder` `LIST_SCROLL_ANIMATION_LENGTH` = 0.30 s): a
+/// critically damped spring of omega 4 / 0.30, i.e. a zero-bounce Rune spring of 2π/omega.
+pub const LIST_SPRING: Spring = Spring::new(0.471, 0.0);
+/// Their selection highlight (`CURSOR_ANIMATION_LENGTH` = 0.12 s): omega 4 / 0.12.
+pub const CURSOR_SPRING: Spring = Spring::new(0.188, 0.0);
 /// How long a set target still counts as the glide's destination.
 const TARGET_LIFE: f32 = 0.6;
 
@@ -51,6 +56,8 @@ pub struct Follow {
     target: Option<(f32, Instant)>,
     /// A keyboard move asked for the row to be revealed on the next frame.
     pub pending: bool,
+    /// Wheel distance not yet worth a whole row (row-stepped lists).
+    wheel: f32,
 }
 
 impl Follow {
@@ -69,6 +76,13 @@ impl Follow {
     /// Reveal `row` (uniform `row_h` rows, `content_h` tall) in the scroll view `key`, if a move
     /// asked for it. Waits (stays pending) until the view has a height.
     pub fn apply(&mut self, key: &str, row: usize, row_h: f32, content_h: f32, reveal: Reveal, tx: &mut Tx) {
+        self.apply_with(key, row, row_h, content_h, reveal, SPRING, true, tx);
+    }
+
+    /// [`Self::apply`] on `spring`; without `teleport` even a long jump glides (the menus'
+    /// list springs accumulate whole rows however far the selection went).
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_with(&mut self, key: &str, row: usize, row_h: f32, content_h: f32, reveal: Reveal, spring: Spring, teleport: bool, tx: &mut Tx) {
         if !self.pending || row_h <= 0.0 { return; }
         let (offset, _, viewport) = self.scroll.get();
         if viewport <= 0.0 { return; }
@@ -82,9 +96,46 @@ impl Follow {
         if top == current_top { return; }
         let target = (top as f32 * row_h).clamp(0.0, max_offset);
         self.set_target(target);
-        if (target - offset).abs() > viewport * 1.25 { tx.scroll_to_y(key.to_owned(), target); }
-        else { tx.scroll_to_with(key.to_owned(), 0.0, target, SPRING); }
+        if teleport && (target - offset).abs() > viewport * 1.25 { tx.scroll_to_y(key.to_owned(), target); }
+        else { tx.scroll_to_with(key.to_owned(), 0.0, target, spring); }
     }
+
+    /// A wheel notch over a row-stepped list (`scroll_pixels`): the distance accumulates into
+    /// whole rows and the list glides there on `spring`. Returns the new top row and the rows
+    /// that fit, so the caller can keep its selection inside them; `None` when nothing moved.
+    pub fn wheel_rows(&mut self, key: &str, dy: f32, row_h: f32, content_h: f32, spring: Spring, tx: &mut Tx) -> Option<(usize, usize)> {
+        let viewport = self.scroll.get().2;
+        if viewport <= 0.0 || row_h <= 0.0 || content_h <= viewport + 0.5 { return None; }
+        self.wheel += dy;
+        let mut rows = 0i64;
+        while self.wheel.abs() >= row_h {
+            let sign = self.wheel.signum();
+            self.wheel -= sign * row_h;
+            rows += if sign > 0.0 { -1 } else { 1 };
+        }
+        if rows == 0 { return None; }
+        let rows_fit = (viewport / row_h).floor().max(1.0) as usize;
+        let max_offset = (content_h - viewport).max(0.0);
+        let max_top = (max_offset / row_h).ceil() as i64;
+        let current_top = (self.base() / row_h).round() as i64;
+        let top = (current_top + rows).clamp(0, max_top);
+        if top != current_top {
+            let target = (top as f32 * row_h).clamp(0.0, max_offset);
+            self.set_target(target);
+            tx.scroll_to_with(key.to_owned(), 0.0, target, spring);
+        }
+        Some((top as usize, rows_fit))
+    }
+}
+
+/// The selection a wheel step leaves inside the rows `top..top + fit`, `scrolloff` rows from
+/// either edge (`clamp_selected_to_viewport`).
+pub fn clamp_into_view(selected: usize, count: usize, top: usize, fit: usize, scrolloff: usize) -> usize {
+    if count == 0 || fit == 0 { return selected; }
+    let scrolloff = scrolloff.min(fit.saturating_sub(1) / 2);
+    let first = (top + scrolloff).min(count - 1);
+    let last = (top + fit.saturating_sub(1).saturating_sub(scrolloff)).min(count - 1);
+    selected.clamp(first, last.max(first))
 }
 
 impl Follow {
@@ -120,6 +171,15 @@ mod tests {
         assert_eq!(reveal_top(3, 21, 200, 0, c), 0);
         // Near the end it stops at max_top.
         assert_eq!(reveal_top(215, 21, 200, 180, c), 199);
+    }
+
+    #[test]
+    fn a_wheel_step_keeps_the_selection_in_its_band() {
+        // 8 rows fit with 2 of scrolloff: the list moved to row 10, so row 3 is pulled to 12.
+        assert_eq!(clamp_into_view(3, 40, 10, 8, 2), 12);
+        assert_eq!(clamp_into_view(30, 40, 10, 8, 2), 15);
+        assert_eq!(clamp_into_view(13, 40, 10, 8, 2), 13);
+        assert_eq!(clamp_into_view(4, 5, 0, 8, 2), 4);
     }
 
     #[test]

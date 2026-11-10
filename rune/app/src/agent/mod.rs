@@ -89,6 +89,9 @@ impl App {
         self.load_session(session_id);
     }
 
+    /// A restored conversation tab (`session.rs`) loads like an opened one.
+    pub(crate) fn load_session_history(&mut self, session_id: &str) { self.load_session(session_id); }
+
     /// Fetch a session's newest page and follow its stream, once.
     fn load_session(&mut self, session_id: &str) {
         let session = self.sessions.entry(session_id.into()).or_default();

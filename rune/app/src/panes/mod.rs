@@ -99,6 +99,9 @@ impl Default for Layout {
 }
 
 impl Layout {
+    /// A restored tree (`session.rs`): `next` must exceed every pane id in it.
+    pub fn from_parts(root: Node, focus: PaneId, next: PaneId) -> Layout { Layout { root, focus, next } }
+
     #[cfg(test)]
     pub fn new(first_tab: u64) -> Layout {
         let mut layout = Layout::default();

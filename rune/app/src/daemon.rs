@@ -120,6 +120,16 @@ fn unsafe_uid() -> u32 {
         .unwrap_or(0)
 }
 
+/// The daemon address without credentials (`publicEndpoint`), for the Servers list.
+pub fn public_endpoint() -> Option<String> {
+    if let Ok(url) = std::env::var("NEOISM_GPUIX_DAEMON_URL") {
+        return Some(url.split(['?', '#']).next().unwrap_or(&url).to_owned());
+    }
+    let published = std::fs::read_to_string(runtime_dir().join("neoism").join("daemon-endpoint.json")).ok()?;
+    let record: Value = serde_json::from_str(&published).ok()?;
+    Some(format!("ws://{}/session", record["address"].as_str()?))
+}
+
 /// Same discovery as the GPUiX client: an explicit URL, else the published local daemon.
 fn discover() -> Result<Endpoint, String> {
     let token = std::env::var("NEOISM_DAEMON_TOKEN").ok().or_else(|| {

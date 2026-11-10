@@ -44,6 +44,12 @@ impl Modal {
         Self { title: "Unsaved changes".into(), body: format!("{title} has changes that have not been saved."), buttons, selected: 0 }
     }
 
+    /// A message with a single Close button.
+    pub fn notice(title: &str, body: &str) -> Modal {
+        Modal { title: title.into(), body: body.into(),
+            buttons: vec![Button { label: "Close".into(), key: "Esc".into(), action: Action::Close }], selected: 0 }
+    }
+
     /// "About Neoism": the release version and the commit this build came from.
     pub fn about() -> Modal {
         let manifest = include_str!("../../../../Cargo.toml");

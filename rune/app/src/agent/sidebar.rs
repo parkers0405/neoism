@@ -471,6 +471,54 @@ mod family_tests {
     }
 
     #[test]
+    fn a_sub_agent_that_stops_is_done_in_the_sidebar_and_on_its_task_card() {
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        app.apply_agent(family(1, ["outstanding"; 4]));
+        // The card that launched `b`, still turning.
+        let card: neoism_protocol::agent::HistoryMessage = serde_json::from_value(serde_json::json!({
+            "id": "card-b", "role": "Assistant", "kind": "Tool", "tool": "task", "title": "Explore", "status": "running", "text": "", "detail": "task_id: b"})).unwrap();
+        app.apply_agent(M::MessageUpdated { session_id: "root".into(), message: card, parent_message_id: None });
+        assert!(app.families.working_now("b"));
+        // While it works, its conversation shows the activity line though no turn of its own
+        // was announced; an old child named only by a card never does.
+        app.open_child("root", "b");
+        assert_eq!(app.activity_state("b"), Some(crate::agent::activity::State::Generating));
+        // Its session goes idle before any family snapshot says it finished.
+        app.apply_agent(M::SessionIdle { session_id: "b".into() });
+        assert!(!app.families.working_now("b"));
+        assert_eq!(app.families.member("b").unwrap().status, "completed");
+        assert_eq!(app.sessions["root"].messages[0].status, "completed", "its task card stops turning");
+        assert_eq!(app.activity_state("b"), None);
+        // Background tasks of the family show their own line, with or without a turn.
+        app.background_jobs.insert("root".into(), 2);
+        assert_eq!(app.activity_state("root"), Some(crate::agent::activity::State::Background));
+        // The catalog starting over forgets what it said was running.
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        app.apply_agent(M::CatalogReset { directory: None });
+        assert_eq!(app.activity_of(&app.threads[0]), "idle");
+        assert!(!app.families.working_now("a"));
+    }
+
+    #[test]
+    fn one_tab_shows_a_conversation_and_its_sub_agents() {
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        app.apply_agent(family(1, ["outstanding"; 4]));
+        app.open_conversation("root");
+        let tabs = app.tabs.len();
+        app.open_child("root", "a");
+        // Back to the conversation from the sidebar: the same tab, not a second one.
+        app.open_conversation("root");
+        assert_eq!(app.tabs.len(), tabs);
+        assert_eq!(app.active_tab().kind, TabKind::Agent { session: Some("root".into()) });
+        app.open_child("root", "c");
+        app.open_child("root", "a1");
+        assert_eq!(app.tabs.len(), tabs);
+        assert_eq!(app.active_tab().kind, TabKind::Agent { session: Some("a1".into()) });
+    }
+
+    #[test]
     fn a_child_only_named_by_an_old_task_card_is_not_listed() {
         let mut app = App::new();
         app.load_fixture("root", "Root", "[]");

@@ -167,6 +167,8 @@ pub struct App {
     pub prefetching: std::collections::HashSet<String>,
     /// How many child rows the sidebar listed at the last frame.
     pub family_rows: usize,
+    /// Background tasks still running, by family root (`RuntimeSnapshot.running_background_tasks`).
+    pub background_jobs: std::collections::HashMap<String, usize>,
     pub header_hover: Option<crate::agent::HeaderStep>,
     /// Branch and line counts from the daemon's Git `RepoStatus` watch.
     pub git: Option<crate::ui::status::GitSummary>,
@@ -321,6 +323,7 @@ impl App {
             stream_owner: Default::default(),
             prefetching: Default::default(),
             family_rows: 0,
+            background_jobs: Default::default(),
             header_hover: None,
             // The local branch until the daemon's Git watch reports counts.
             git: crate::config::git_branch().map(|branch| crate::ui::status::GitSummary { branch, ..Default::default() }),

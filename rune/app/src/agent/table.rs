@@ -139,6 +139,7 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
     let place = std::rc::Rc::new(std::cell::Cell::new((0.0_f32, 0.0_f32)));
     let (mirror, source) = (place.clone(), place);
     let (wheel_key, session, line_h) = (scroll_key.clone(), session.to_owned(), crate::editor::view::line_height(app));
+    let wheeled = app.table_active.as_ref().is_some_and(|(key, _)| *key == scroll_key);
     let viewport = el().key(scroll_key.clone()).w_full().scroll_x()
         .on_scroll_offset(move |at| {
             mirror.set((at.offset[0], at.max[0]));
@@ -149,6 +150,8 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
         // Shift with a wheel) gets the same reading gain, glide and momentum. Left to Rune's
         // built-in viewport scrolling, both moved at half the speed with none of it.
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
+            // The wheel is turning over this table: its bar shows, whatever hover says.
+            a.table_active = Some((wheel_key.clone(), std::time::Instant::now()));
             let sideways = if e.precise { e.dx.abs() > e.dy.abs() } else { e.mods.shift };
             if !sideways { return a.timeline_wheel(&session, e, line_h, tx); }
             let delta = if e.dx.abs() > e.dy.abs() { e.dx } else { e.dy };
@@ -180,7 +183,11 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
         });
     // Laid over the grid's last rows, held above the composer while the table runs under it,
     // and shown while the pointer is over the table.
-    let bar = el().w_full().h(BAR_H * s).mt(-BAR_H * s).sticky_bottom(foot + 2.0 * s).group_opacity(0.0, 1.0).child(strip);
+    // Shown while the pointer is over the table, and while the wheel turns over it: a scroll
+    // holds hover on what was under the pointer when it began, so a table that slides under
+    // the pointer mid-scroll would otherwise keep its bar hidden until the scroll stops.
+    let bar = el().w_full().h(BAR_H * s).mt(-BAR_H * s).sticky_bottom(foot + 2.0 * s);
+    let bar = if wheeled { bar.opacity(1.0) } else { bar.group_opacity(0.0, 1.0) }.child(strip);
     col().w_full().py(BLOCK_PAD_Y * s).hover_group().child(viewport).child(bar)
 }
 

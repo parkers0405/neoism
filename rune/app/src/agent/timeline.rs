@@ -154,10 +154,16 @@ fn composer_top(app: &App, tab_id: u64) -> Option<f32> {
 /// How far above the transcript viewport's bottom its content ends: the composer floats over
 /// that much of it.
 fn transcript_foot(app: &App, tab_id: u64) -> f32 {
-    match (app.rects.get(&format!("timeline-view:{tab_id}")), composer_top(app, tab_id)) {
-        (Some(view), Some(top)) => (view[1] + view[3] - (top - 6.0)).max(0.0),
-        _ => FOOT,
-    }
+    let Some(top) = composer_top(app, tab_id) else { return FOOT };
+    // Measured from the transcript's own view and from the pane the input bar is pinned to the
+    // bottom of, whichever says more: one of the two can be a frame behind the other while the
+    // window changes size, and a foot that comes out short lets a table's scroll bar (and the
+    // transcript's last row) settle underneath the input bar.
+    let below = |key: &str| app.rects.get(&format!("{key}:{tab_id}")).map(|r| r[1] + r[3] - (top - 6.0));
+    let Some(foot) = [below("timeline-view"), below("agent-area")].into_iter().flatten().reduce(f32::max) else { return FOOT };
+    // And never less than the input bar is tall.
+    let card = app.rects.get(&format!("composer-card:{tab_id}")).filter(|card| (card[1] - top).abs() < 0.5).map_or(0.0, |card| card[3]);
+    foot.max(card + 6.0).max(0.0)
 }
 
 /// One transcript row: a message, a folded run of tool calls starting at a message, or the
@@ -516,7 +522,10 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             // A wide table's scroll bar holds above the composer: only a reply with a table is
             // built from where that is.
             let foot = if message.text.contains('|') { transcript_foot(app, app.active_tab().id) } else { 0.0 };
-            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming, foot.to_bits());
+            // The table the wheel is over shows its bar: this message's, if it is one of its own.
+            let wheeled = app.table_active.as_ref().map(|(key, _)| key.as_str())
+                .filter(|key| key.starts_with(&format!("table-x:{}:{}:", app.active_tab().id, message.id))).map(str::to_owned);
+            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming, foot.to_bits(), wheeled);
             let tab_id = app.active_tab().id;
             let memo_key = format!("assistant:{tab_id}:{}", message.id);
             let session_id = match &app.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => id.clone(), _ => String::new() };
@@ -680,5 +689,19 @@ mod link_tests {
         assert_eq!(file_link("/abs/a.rs#L9-L12"), Some(("/abs/a.rs".into(), Some(9))));
         assert_eq!(file_link("file:///abs/a.rs"), Some(("/abs/a.rs".into(), None)));
         assert_eq!(file_link("ftp://x"), None);
+    }
+}
+
+impl App {
+    /// Per frame: the table whose bar the wheel is showing lets go a moment after the wheel
+    /// stops (hover has resolved by then and takes over). Returns whether the views need
+    /// building for a change, and whether to look again.
+    pub(crate) fn table_tick(&mut self) -> (bool, bool) {
+        const LINGER: std::time::Duration = std::time::Duration::from_millis(900);
+        if self.table_active.as_ref().is_some_and(|(_, at)| at.elapsed() > LINGER) { self.table_active = None; }
+        let now = self.table_active.as_ref().map(|(key, _)| key.clone());
+        let changed = now != self.table_seen;
+        self.table_seen = now;
+        (changed, self.table_active.is_some())
     }
 }

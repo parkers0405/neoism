@@ -69,8 +69,8 @@ impl App {
     pub fn follow_main_terminal(&mut self) -> bool {
         let active = self.active_tab().id;
         if self.pending_cd.is_some() || self.main_terminal_tab() != Some(active) { return false; }
-        let Some(cwd) = self.terminals.get(&active).map(|t| t.shell.cwd.trim_end_matches('/').to_owned()) else { return false };
-        if !crate::startup::absolute(&cwd) || cwd == self.cwd || cwd.chars().any(char::is_control) { return false; }
+        let Some(cwd) = self.terminals.get(&active).map(|t| shell_directory(&t.shell.cwd, &self.cwd)) else { return false };
+        if !crate::startup::absolute(&cwd) || same_directory(&cwd, &self.cwd) || cwd.chars().any(char::is_control) { return false; }
         self.view_workspace_root(&cwd);
         true
     }
@@ -156,6 +156,52 @@ impl App {
         self.refresh_threads();
         self.watch_git();
     }
+}
+
+/// Whether `path` is a Windows drive path (`C:\Users`, `c:/work`).
+fn drive_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b.get(2).is_none_or(|c| matches!(c, b'\\' | b'/'))
+}
+
+/// A shell's reported directory as the workspace names directories.
+///
+/// A shell says where it is with a `file://` URL (OSC 7). On Windows that is
+/// `file://host/C:/Users/me`, whose path reads `/C:/Users/me`, and a POSIX-flavoured shell
+/// (Git Bash, MSYS) says `/c/Users/me`. Both are absolute, neither is a folder the Windows
+/// daemon can open: taken as the workspace's root they emptied the file tree, the notes and
+/// the conversation list, and left every new shell and prompt with nowhere to run, a moment
+/// after the window had shown them. On a workspace whose root is a drive path they are read
+/// back as that drive path (`C:\Users\me`).
+fn shell_directory(reported: &str, workspace: &str) -> String {
+    let reported = reported.trim();
+    if !drive_path(workspace) {
+        let trimmed = reported.trim_end_matches('/');
+        return if trimmed.is_empty() && reported.starts_with('/') { "/".to_owned() } else { trimmed.to_owned() };
+    }
+    let b = reported.as_bytes();
+    let drive = if b.first() == Some(&b'/') && drive_path(&reported[1..]) {
+        // `/C:/Users/me`
+        Some((b[1] as char, &reported[3..]))
+    } else if drive_path(reported) {
+        Some((b[0] as char, &reported[2..]))
+    } else if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b.get(2).is_none_or(|c| *c == b'/') {
+        // `/c/Users/me`
+        Some((b[1] as char, &reported[2..]))
+    } else { None };
+    let Some((letter, rest)) = drive else { return reported.trim_end_matches(['/', '\\']).to_owned() };
+    let rest = rest.replace('/', "\\");
+    let rest = rest.trim_matches('\\');
+    format!("{}:\\{rest}", letter.to_ascii_uppercase())
+}
+
+/// Whether two spellings name one directory: exactly, or on Windows without regard to case,
+/// separator or a trailing separator.
+fn same_directory(a: &str, b: &str) -> bool {
+    if a == b { return true; }
+    if !drive_path(a) || !drive_path(b) { return false; }
+    let fold = |p: &str| p.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    fold(a) == fold(b)
 }
 
 use crate::agent::Session;
@@ -795,5 +841,37 @@ mod tests {
         assert!(app.drain_current());
         assert_eq!(app.workspace_id, next);
         assert!(!app.buffers["shared.txt"].loaded);
+    }
+
+    #[test]
+    fn a_windows_shells_directory_is_read_as_a_drive_path() {
+        let workspace = "C:\\Users\\me";
+        // OSC 7 on Windows, PowerShell or cmd: `file://host/C:/Users/me/proj`.
+        assert_eq!(shell_directory("/C:/Users/me/proj", workspace), "C:\\Users\\me\\proj");
+        // Git Bash / MSYS.
+        assert_eq!(shell_directory("/c/Users/me/proj/", workspace), "C:\\Users\\me\\proj");
+        assert_eq!(shell_directory("c:/Users/me", workspace), "C:\\Users\\me");
+        assert_eq!(shell_directory("/d", workspace), "D:\\");
+        // The same folder spelled another way is not a move.
+        assert!(same_directory(&shell_directory("/c:/users/ME/", workspace), workspace));
+        assert!(!same_directory("C:\\Users\\me\\proj", workspace));
+        // A POSIX workspace is left exactly as it was: `/c/data` is a real folder there.
+        assert_eq!(shell_directory("/c/data/", "/home/me"), "/c/data");
+        assert_eq!(shell_directory("/", "/home/me"), "/");
+        assert!(!same_directory("/home/Me", "/home/me"));
+    }
+
+    #[test]
+    fn a_windows_shell_reporting_its_folder_does_not_empty_the_workspace() {
+        let mut app = App::new();
+        app.cwd = "C:\\Users\\me".into();
+        let home = app.active_tab().id;
+        app.terminals.get_mut(&home).unwrap().shell.session = Some("shell".into());
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/C:/Users/me".into();
+        assert!(!app.follow_main_terminal(), "the same folder: nothing is reset");
+        assert_eq!(app.cwd, "C:\\Users\\me");
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/C:/Users/me/proj".into();
+        assert!(app.follow_main_terminal());
+        assert_eq!(app.cwd, "C:\\Users\\me\\proj", "a real cd moves to a path the daemon can open");
     }
 }

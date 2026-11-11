@@ -7,6 +7,9 @@ mod activity;
 mod anchor;
 pub mod attach;
 mod composer;
+pub(crate) mod prompts;
+#[path = "../../../../neoism-frontend/shared/src/panels/agent_pane/question_policy.rs"]
+mod question_policy;
 pub(crate) mod family;
 mod header;
 mod projects;
@@ -603,6 +606,7 @@ impl App {
     }
 
     pub(crate) fn apply_agent(&mut self, message: AgentServerMessage) {
+        if self.apply_prompt_event(&message) { return; }
         match &message {
             AgentServerMessage::HistoryChunk { messages, .. } => for m in messages { self.mcp_icons.prepare_message(m); },
             AgentServerMessage::MessageUpdated { message, .. } => self.mcp_icons.prepare_message(message),
@@ -671,13 +675,11 @@ impl App {
             self.preload_family_history();
             return;
         }
-        // A sub-agent's own session going idle, or its task card settling, is it stopping,
-        // whether or not a family snapshot says so yet.
+        // Only child lifecycle events stop a sub-agent. A task call can complete merely
+        // because a launch or follow-up was queued while the child continues running.
         let stopped = match &message {
             AgentServerMessage::SessionIdle { session_id } if self.families.is_child(session_id) => Some((session_id.clone(), false)),
             AgentServerMessage::StreamingState { session_id, state: StreamingState::Idle, .. } if self.families.is_child(session_id) => Some((session_id.clone(), false)),
-            AgentServerMessage::MessageUpdated { message: m, .. } if m.tool == "task" && matches!(m.status.as_str(), "completed" | "error" | "failed" | "cancelled") =>
-                family::task_id(&m.detail, &m.text).map(|child| (child, m.status != "completed")),
             _ => None,
         };
         if let Some((child, failed)) = stopped && self.families.finish(&child, failed) { self.settle_task_cards(); }
@@ -840,6 +842,9 @@ impl App {
             AgentServerMessage::SessionIdle { session_id, .. } => {
                 if let Some(session) = self.sessions.get_mut(&session_id) { session.compacting = false; }
                 self.set_streaming(&session_id, false);
+                // The session stream and whole-family catalog are independent. Recover a
+                // missed catalog idle event without hiding genuinely active background work.
+                self.refresh_threads();
             },
             // The agent service (re)started its catalog: on a cold start it comes up after the
             // daemon, and whatever was asked before it did went unanswered. Ask again.
@@ -847,6 +852,10 @@ impl App {
                 // What the old catalog said was running is only still running if the new one
                 // says so again.
                 self.thread_activity.clear();
+                for thread in &mut self.threads {
+                    thread.catalog_activity = None;
+                    thread.busy = false;
+                }
                 self.background_jobs.clear();
                 self.background_job_versions.clear();
                 self.families.catalog_reset();

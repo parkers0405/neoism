@@ -34,6 +34,7 @@ impl App {
     /// the socket is a new one.
     pub(crate) fn agent_resync(&mut self, reconnected: bool) {
         if reconnected {
+            self.composer.prompts.reconnect();
             // Whatever was asked on the old socket and not answered never will be: an older
             // page still marked as on its way would never be asked for again.
             for session in self.sessions.values_mut() { session.loading_older = false; }
@@ -74,6 +75,7 @@ impl App {
     /// The daemon's stream from the agent for `session_id` broke and was opened again: what
     /// its family said in between is in its history only.
     pub(crate) fn agent_stream_resumed(&mut self, session_id: &str) {
+        self.composer.prompts.reconnect();
         let root = self.families.root_of(session_id).to_owned();
         let open = self.open_conversations();
         let family: Vec<String> = self.sessions.keys().filter(|id| self.families.root_of(id) == root).cloned().collect();

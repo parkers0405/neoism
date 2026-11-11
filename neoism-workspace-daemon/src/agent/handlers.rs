@@ -2011,6 +2011,18 @@ pub(crate) async fn push_runtime_snapshot(inner: Arc<AgentInner>, session_id: St
 }
 
 pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: String) {
+    for session_id in interaction_family(&inner, session_id).await {
+        let path = format!(
+            "/v2/interactions/questions?sessionId={}",
+            percent_encode(&session_id)
+        );
+        let Ok(value) = http_get_json(&inner, &path).await else { continue; };
+        let Some(requests) = value.as_array() else { continue; };
+        let _ = inner.tx.send(AgentServerMessage::QuestionsUpdated { session_id, requests: requests.clone() });
+    }
+}
+
+async fn interaction_family(inner: &AgentInner, session_id: String) -> std::collections::BTreeSet<String> {
     let mut sessions = std::collections::BTreeSet::from([session_id.clone()]);
     // Runtime already exposes the current execution family. Only expand a root attach;
     // attaching a child must not hydrate its siblings into the child's scope.
@@ -2024,39 +2036,26 @@ pub(crate) async fn push_pending_questions(inner: Arc<AgentInner>, session_id: S
             }
         }
     }
-    for session_id in sessions {
-        let path = format!(
-            "/v2/interactions/questions?sessionId={}",
-            percent_encode(&session_id)
-        );
-        let Ok(value) = http_get_json(&inner, &path).await else {
-            // Failed or malformed polls are not authoritative empty snapshots.
-            continue;
-        };
-        let Some(requests) = value.as_array() else {
-            continue;
-        };
-        let _ = inner.tx.send(AgentServerMessage::QuestionsUpdated {
-            session_id,
-            requests: requests.clone(),
-        });
-    }
+    sessions
 }
 
 pub(crate) async fn push_pending_permissions(inner: Arc<AgentInner>, session_id: String) {
-    let path = format!(
-        "/v2/interactions/permissions?sessionId={}",
-        percent_encode(&session_id)
-    );
-    let Ok(value) = http_get_json(&inner, &path).await else {
-        return;
-    };
-    for request in value.as_array().into_iter().flatten() {
-        forward_agent_server_event(
-            &inner.tx,
-            &session_id,
-            json!({ "type": "permission.asked", "properties": request }),
+    for session_id in interaction_family(&inner, session_id).await {
+        let path = format!(
+            "/v2/interactions/permissions?sessionId={}",
+            percent_encode(&session_id)
         );
+        let Ok(value) = http_get_json(&inner, &path).await else { continue; };
+        let Some(requests) = value.as_array() else { continue; };
+        let _ = inner.tx.send(AgentServerMessage::PermissionsUpdated { session_id: session_id.clone(), requests: requests.clone() });
+        // Keep the live-shaped events for older clients that do not read snapshots.
+        for request in requests {
+            forward_agent_server_event(
+                &inner.tx,
+                &session_id,
+                json!({ "type": "permission.asked", "properties": request }),
+            );
+        }
     }
 }
 

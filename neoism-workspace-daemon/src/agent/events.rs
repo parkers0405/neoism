@@ -59,6 +59,10 @@ fn event_source_session<'a>(event: &'a Value, bound_session_id: &'a str) -> &'a 
         .unwrap_or(bound_session_id)
 }
 
+/// `SessionEvent.kind` sent once a session's stream from the agent is open again after
+/// it broke (an agent restart, a network drop, a machine that slept).
+pub(crate) const STREAM_RESUMED: &str = "stream.resumed";
+
 pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) -> bool {
     // Idempotent: re-binding while a stream is already running is a
     // no-op (the existing handle keeps draining).
@@ -196,6 +200,14 @@ async fn run_event_stream_inner(
                 .await;
             }
         } else if connected_once {
+            // What the agent published while this stream was down never reached the
+            // client, and a live tail does not replay it: the client reconciles its
+            // transcripts from history. Older clients ignore the unknown kind.
+            let _ = inner.tx.send(AgentServerMessage::SessionEvent {
+                session_id: session_id.clone(),
+                kind: STREAM_RESUMED.to_owned(),
+                properties: Value::Object(Default::default()),
+            });
             push_session_running_state(inner.clone(), session_id.clone()).await;
             push_runtime_snapshot(inner.clone(), session_id.clone()).await;
             push_todo_snapshot(inner.clone(), session_id.clone()).await;

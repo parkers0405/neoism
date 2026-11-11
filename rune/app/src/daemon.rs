@@ -425,6 +425,7 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Arc<Mutex<
                                 break 'session ack["reason"].as_str().map_or_else(|| "The daemon refused the connection".to_owned(), |why| format!("The daemon refused the connection: {why}"));
                             }
                             acknowledged = true;
+                            if target.is_none() { crate::startup::daemon_answered(); }
                             live = Liveness::new(Instant::now(), SystemTime::now());
                             push(&inbox, &wake, Inbound::Connected { again: std::mem::replace(&mut connected_before, true) });
                         }

@@ -237,6 +237,15 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
             let Some(message) = messages.get(index) else { return el() };
             let last = index + 1 == messages.len();
             match message.kind {
+                HistoryMessageKind::Compaction => {
+                    let tail = &messages[index + 1..];
+                    let end = tail.iter().position(|m| m.tool == "compaction_boundary").unwrap_or(tail.len());
+                    let failed = tail[..end].iter().any(|m| m.kind == HistoryMessageKind::System && m.title == "Agent error");
+                    let label = if failed { "Compaction failed" }
+                        else if end == tail.len() && session.compacting { "Compacting…" }
+                        else { "Compacted" };
+                    tracked(compaction_divider(app, message, label), session_id, &format!("msg:{}", message.id), tab_id)
+                }
                 HistoryMessageKind::User => user_row(app, session_id, session, message, tab_id),
                 HistoryMessageKind::Tool | HistoryMessageKind::Subtask =>
                     tool_row(app, session_id, session, tab_id, std::slice::from_ref(message), || tools::row(app, message)),
@@ -495,6 +504,13 @@ fn code_frame(app: &App) -> impl Fn(El, &CodeFrame<'_>) -> El + 'static {
     }
 }
 
+fn compaction_divider(app: &App, message: &HistoryMessage, label: &str) -> El {
+    row().key(format!("msg:{}", message.id)).w_full().py(20.0).gap(14.0).center_y()
+        .child(el().grow(1.0).h(1.0).fill(rgb(app.pal.border)))
+        .child(text(label.to_owned()).font(app.ty.small()).color(rgb(app.pal.muted)))
+        .child(el().grow(1.0).h(1.0).fill(rgb(app.pal.border)))
+}
+
 fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let p = app.pal;
     let key = format!("msg:{}", message.id);
@@ -506,9 +522,10 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                 .font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)).selectable(true).selection_color(selection_color(app)))
             .child(text(first_line(&message.text)).font(app.ty.body().italic()).color(rgb(p.dim)).selectable(true).selection_color(selection_color(app))),
         HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tools::row(app, message),
-        // Bound notices and compaction summaries to six source lines before layout: `max_lines`
+        HistoryMessageKind::Compaction => compaction_divider(app, message, "Compacted"),
+        // Bound notices to six source lines before layout: `max_lines`
         // alone leaves a many-paragraph text its full height, which breaks narrow transcripts.
-        HistoryMessageKind::System | HistoryMessageKind::Compaction => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)
+        HistoryMessageKind::System => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)
             .font(app.ty.small()).color(rgb(p.muted)).pt(16.0).w_full().wrap().max_lines(6).truncate()
             .selectable(true).selection_color(selection_color(app)),
         // A reply that hasn't streamed any text yet takes no room: no padded empty paragraph
@@ -525,7 +542,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             // The table the wheel is over shows its bar: this message's, if it is one of its own.
             let wheeled = app.table_active.as_ref().map(|(key, _)| key.as_str())
                 .filter(|key| key.starts_with(&format!("table-x:{}:{}:", app.active_tab().id, message.id))).map(str::to_owned);
-            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming, foot.to_bits(), wheeled);
+            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming, foot.to_bits(), wheeled, app.table_hover.clone());
             let tab_id = app.active_tab().id;
             let memo_key = format!("assistant:{tab_id}:{}", message.id);
             let session_id = match &app.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => id.clone(), _ => String::new() };

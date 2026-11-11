@@ -126,10 +126,9 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let (stream_due, stream_wait) = app.stream_pace.due(std::time::Instant::now());
     if let Some(wait) = stream_wait { wake!("stream", wait); }
     if std::mem::take(&mut app.settle_pending) { tx.settle(); }
+    app.poll_closing_connections(tx);
     if app.quit_requested {
         if !app.session_closed { app.save_session(true); }
-        // Fast Servers this window hosts stop with it.
-        servers::shutdown();
         tx.quit();
         return true;
     }
@@ -601,6 +600,15 @@ fn main() {
             }),
             // A live turn mid-stream: the animated "Crafting . . ." status line.
             ("streaming", replay::start),
+            ("compaction", |s| {
+                use neoism_protocol::agent::{AgentServerMessage as M, CompactionPhase, BackgroundJobRuntime};
+                s.load_fixture("compact", "Compacting conversation", r#"[{"id":"reply","role":"Assistant","kind":"Assistant","text":"Earlier conversation."}]"#);
+                s.apply_agent(M::Compaction { session_id: "compact".into(), phase: CompactionPhase::Started,
+                    run_continues: None, text: None, reason: None });
+                s.apply_agent(M::BackgroundTasksUpdated { session_id: "compact".into(), epoch: "fixture".into(), revision: 1,
+                    tasks: vec![BackgroundJobRuntime { job_id: "job".into(), session_id: "compact".into(), started_at: 1 }] });
+                s.sidebar = Some(app::Sidebar::Conversations);
+            }),
             ("activity", |s| {
                 s.load_fixture("fixture-activity", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"));
                 if let Some(session) = s.sessions.get_mut("fixture-activity") {
@@ -641,7 +649,9 @@ fn main() {
     rune::set_app_id(Box::leak(app_id.into_boxed_str()));
     // The app draws its own title band: macOS keeps its traffic lights in it and Windows its
     // caption buttons; on Linux the compositor's frame stays and there is no band.
-    let mut app = rune::App::new(spec).titlebar(rune::Titlebar::new(ui::chrome::TITLEBAR_H)).init(App::new);
+    let mut app = rune::App::new(spec).titlebar(rune::Titlebar::new(ui::chrome::TITLEBAR_H)).init(App::new)
+        .on_close(|app, _| app.close_window_resources())
+        .on_quit(|app, _| app.close_window_resources());
     // Encoded frame callbacks measure submission cadence only. They are not compositor
     // presentation timestamps and cannot establish missed-vblank parity (see rune/README.md).
     let trace = std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1");

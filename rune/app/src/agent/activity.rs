@@ -16,6 +16,7 @@ const LINE_H: f32 = 26.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
+    Compacting,
     Thinking,
     Working,
     Generating,
@@ -27,6 +28,7 @@ pub enum State {
 impl State {
     pub fn label(self) -> &'static str {
         match self {
+            State::Compacting => "Compacting",
             State::Thinking => "Pondering",
             State::Working => "Tinkering",
             State::Generating => "Crafting",
@@ -39,7 +41,7 @@ impl State {
         match self {
             State::Thinking => Some("thinking"),
             State::Working => Some("tools"),
-            State::Generating | State::Background => None,
+            State::Compacting | State::Generating | State::Background => None,
             State::WaitingSubagents => Some("subagents"),
         }
     }
@@ -47,6 +49,7 @@ impl State {
     /// The state's accent (`streaming_status_accent`).
     fn accent(self, p: &Palette) -> u32 {
         match self {
+            State::Compacting => p.green,
             State::Thinking => p.magenta,
             State::Working | State::WaitingSubagents => p.yellow,
             State::Generating | State::Background => p.accent,
@@ -192,6 +195,7 @@ impl App {
     /// The live turn's state from its newest rows: reasoning → Pondering, a running tool →
     /// Tinkering (sub-agent tasks → Sub-agents working), otherwise Crafting.
     pub fn activity_state(&self, session_id: &str) -> Option<State> {
+        if self.sessions.get(session_id).is_some_and(|s| s.compacting) { return Some(State::Compacting); }
         let background = (self.background_count(session_id) > 0).then_some(State::Background);
         let Some(session) = self.sessions.get(session_id).filter(|_| self.session_live(session_id)) else { return background };
         let from = session.live_from.unwrap_or(0);

@@ -63,13 +63,17 @@ pub enum Inbound {
 pub type Inbox = Arc<Mutex<VecDeque<Inbound>>>;
 
 /// A request: its family, message, and the workspace it is scoped to (if any).
-type Outbound = (u64, Family, Value, Option<String>);
+enum Outbound {
+    Request(u64, Family, Value, Option<String>),
+    Close(u64, String, Sender<()>),
+}
 
 /// Cheap, cloneable sender the UI keeps in its state.
 #[derive(Clone)]
 pub struct Daemon {
     outbound: Sender<Outbound>,
     sequence: Arc<std::sync::atomic::AtomicU64>,
+    _lifetime: Arc<()>,
 }
 
 impl Daemon {
@@ -82,11 +86,13 @@ impl Daemon {
         let inbox: Inbox = Arc::new(Mutex::new(VecDeque::new()));
         let (outbound, rx) = channel();
         let thread_inbox = inbox.clone();
+        let lifetime = Arc::new(());
+        let alive = Arc::downgrade(&lifetime);
         std::thread::Builder::new()
             .name("neoism-daemon".into())
-            .spawn(move || run(rx, thread_inbox, wake, target))
+            .spawn(move || run(rx, thread_inbox, wake, target, alive))
             .expect("spawn daemon thread");
-        (Daemon { outbound, sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)) }, inbox)
+        (Daemon { outbound, sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)), _lifetime: lifetime }, inbox)
     }
 
     pub fn send(&self, family: Family, message: Value) {
@@ -100,8 +106,16 @@ impl Daemon {
 
     pub fn request(&self, family: Family, message: Value, scope: Option<String>) -> u64 {
         let id = self.sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.outbound.send((id, family, message, scope));
+        let _ = self.outbound.send(Outbound::Request(id, family, message, scope));
         id
+    }
+
+    /// Flush earlier terminal closes, release this socket's workspace claim, then disconnect.
+    pub fn close(&self, workspace: &str) -> Receiver<()> {
+        let (done, rx) = channel();
+        let id = self.sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.outbound.send(Outbound::Close(id, workspace.to_owned(), done));
+        rx
     }
 
     pub fn agent(&self, message: &AgentClientMessage) {
@@ -220,6 +234,7 @@ fn connect(endpoint: &Endpoint) -> Result<Socket, String> {
     let stream = addrs.iter().find_map(|a| TcpStream::connect_timeout(a, Duration::from_secs(8)).ok())
         .ok_or_else(|| format!("Daemon connection failed: could not reach {host}:{port}"))?;
     stream.set_nodelay(true).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     // The handshake gets its own deadline; the session then polls on a short read timeout.
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let mut config = tungstenite::protocol::WebSocketConfig::default();
@@ -240,13 +255,14 @@ fn push(inbox: &Inbox, wake: &dyn Fn(), event: Inbound) {
     wake();
 }
 
-fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Target>) {
-    loop {
+fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Target>, alive: std::sync::Weak<()>) {
+    while alive.strong_count() > 0 {
         push(&inbox, &wake, Inbound::Connecting);
         let result = discover(target.as_ref()).and_then(|endpoint| connect(&endpoint).map(|socket| (socket, endpoint.pairing_token)));
         let (mut socket, pairing_token) = match result {
             Ok(connected) => connected,
             Err(error) => {
+                if alive.strong_count() == 0 { return; }
                 // Nothing answered locally: bring up this installation's own daemon, then
                 // keep looking for the endpoint it publishes.
                 let error = match target.as_ref() {
@@ -266,7 +282,12 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Tar
             // Writes first: user actions should not wait behind a read timeout.
             loop {
                 match rx.try_recv() {
-                    Ok((request_id, family, message, workspace_root)) => {
+                    Ok(Outbound::Close(id, workspace, done)) => {
+                        close_socket(&mut socket, id, &workspace);
+                        let _ = done.send(());
+                        return;
+                    }
+                    Ok(Outbound::Request(request_id, family, message, workspace_root)) => {
                         let mut envelope = json!({"request_id": request_id, "message": message});
                         if let Some(root) = workspace_root { envelope["workspace_root"] = json!(root); }
                         let frame = json!({ family.name(): envelope });
@@ -296,6 +317,24 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Tar
         push(&inbox, &wake, Inbound::Disconnected(reason));
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// A reply is the barrier: dropping the socket before it can lose the close request.
+fn close_socket(socket: &mut Socket, id: u64, workspace: &str) {
+    let frame = json!({"Workspace":{"request_id":id,"message":{"CloseWindowWorkspace":{"workspace_id":workspace}}}});
+    if socket.send(Message::text(frame.to_string())).is_err() { return; }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        match socket.read() {
+            Ok(Message::Text(text)) => {
+                if matches!(parse(text.as_str()), Some(Inbound::Reply { request_id, family, .. }) if request_id == id && family == "Workspace") { break; }
+            }
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Ok(Message::Close(_)) | Err(_) => break,
+            _ => {}
+        }
+    }
+    let _ = socket.close(None);
 }
 
 /// `{"AgentReply": {"request_id": n, "message": {...}}}` and its siblings.
@@ -329,4 +368,41 @@ fn parse(text: &str) -> Option<Inbound> {
         }
     }
     Some(Inbound::Reply { family, request_id, message })
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn closing_a_join_flushes_terminal_close_and_waits_for_workspace_reply() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/session", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut socket = tungstenite::accept(tcp).unwrap();
+            socket.read().unwrap(); // Hello
+            socket.send(Message::text(r#"{"WorkspaceReply":{"request_id":0,"message":{"HelloAck":{}}}}"#)).unwrap();
+            let terminal: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert!(terminal["Pty"]["message"].get("ClosePty").is_some());
+            let close: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(close["Workspace"]["message"]["CloseWindowWorkspace"]["workspace_id"], "joined");
+            let id = close["Workspace"]["request_id"].as_u64().unwrap();
+            socket.send(Message::text(json!({"WorkspaceReply":{"request_id":id,"message":{"HostWorkspaceTree":{}}}}).to_string())).unwrap();
+            assert!(matches!(socket.read(), Ok(Message::Close(_))));
+        });
+        let (daemon, inbox) = Daemon::start_to(Some(Target { url, ..Default::default() }), || {});
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if inbox.lock().unwrap().iter().any(|e| matches!(e, Inbound::Connected)) { break; }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        daemon.send(Family::Pty, json!({"ClosePty":{"session_id":"owned-shell"}}));
+        let done = daemon.close("joined");
+        drop(daemon);
+        done.recv_timeout(Duration::from_secs(3)).unwrap();
+        server.join().unwrap();
+    }
 }

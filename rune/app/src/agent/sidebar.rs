@@ -491,8 +491,12 @@ mod family_tests {
         assert_eq!(app.sessions["root"].messages[0].status, "completed", "its task card stops turning");
         assert_eq!(app.activity_state("b"), None);
         // Background tasks of the family show their own line, with or without a turn.
-        app.background_jobs.insert("root".into(), 2);
+        app.apply_agent(M::BackgroundTasksUpdated { session_id: "root".into(), epoch: "jobs".into(), revision: 1,
+            tasks: vec![neoism_protocol::agent::BackgroundJobRuntime { job_id: "job".into(), session_id: "root".into(), started_at: 1 }] });
+        assert_eq!(app.activity_of(&app.threads[0]), "background");
         assert_eq!(app.activity_state("root"), Some(crate::agent::activity::State::Background));
+        app.apply_agent(M::BackgroundTasksUpdated { session_id: "root".into(), epoch: "jobs".into(), revision: 2, tasks: vec![] });
+        assert_eq!(app.background_count("root"), 0);
         // The catalog starting over forgets what it said was running.
         app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
         app.apply_agent(M::CatalogReset { directory: None });
@@ -504,6 +508,37 @@ mod family_tests {
     /// the turn that launched it ends first, it finishes later, the conversation's next
     /// execution no longer lists it, and every later update or history page still carries the
     /// launching card as `running`.
+    #[test]
+    fn runtime_outstanding_keeps_a_background_child_live_and_its_trace_visible() {
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        app.apply_agent(family(1, ["outstanding"; 4]));
+        let runtime = |revision, status: &str| M::RuntimeSnapshot {
+            session_id: "root".into(),
+            snapshot: serde_json::from_value(serde_json::json!({
+                "rootSessionId": "root", "familyRevision": revision,
+                "branchesAuthoritative": true,
+                "branches": [{"sessionId": "a", "parentSessionId": "root", "status": status}]
+            })).unwrap(),
+        };
+        app.apply_agent(runtime(1, "outstanding"));
+        app.apply_agent(M::SessionIdle { session_id: "root".into() });
+        assert!(app.families.working_now("a"));
+        assert_eq!(app.families.stopped("a"), None);
+        app.open_child("root", "a");
+        assert!(app.session_live("a"));
+        assert_eq!(app.sessions["a"].live_from, Some(0));
+        app.apply_agent(M::ContentDelta {
+            session_id: "a".into(), message_id: "answer".into(), parent_message_id: None,
+            kind: neoism_protocol::agent::ContentKind::Text, text: "Exploring the project".into(),
+        });
+        assert_eq!(app.sessions["a"].messages[0].text, "Exploring the project");
+        app.apply_agent(runtime(2, "completed"));
+        assert!(!app.session_live("a"));
+        app.apply_agent(runtime(1, "outstanding"));
+        assert!(!app.session_live("a"));
+    }
+
     #[test]
     fn a_background_sub_agent_that_finished_stays_finished() {
         let mut app = App::new();

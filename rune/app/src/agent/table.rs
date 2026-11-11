@@ -90,7 +90,7 @@ fn looks_like_file_ref(cell: &str) -> bool {
 /// `scroll_key` names its sideways scroll; `foot` is how far above the transcript viewport's
 /// bottom the composer's top sits (the scroll bar holds there while the table runs on
 /// underneath).
-pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, scroll_key: String, foot: f32, session: &str) -> El {
+pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, scroll_key: String, _foot: f32, session: &str) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -133,7 +133,7 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
     let track = (width - 2.0 * s).max(1.0);
     let (thumb_w, travel) = thumb(track, width, content, s);
     // The thumb follows the scroll as a live offset: no view re-runs for it.
-    let thumb_x = rune::Live::new([0.0_f32, 0.0]);
+    let thumb_x = app.table_offsets.borrow_mut().entry(format!("{scroll_key}:thumb")).or_insert_with(|| rune::Live::new([0.0, 0.0])).clone();
     let follow = thumb_x.clone();
     // Where the table is scrolled to, for the shared scroller (`ui/scroll.rs`).
     let place = std::rc::Rc::new(std::cell::Cell::new((0.0_f32, 0.0_f32)));
@@ -164,9 +164,12 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
     let rail_y = (BAR_H - RAIL_H) * s / 2.0;
     let pill = |w: f32, color: rune::Color| el().w(w).h(RAIL_H * s).radius(RAIL_H * s / 2.0).fill(color);
     let grabbed = thumb_x.clone();
-    // The strip is its own hover group: over it the rail, a backing and the accent thumb show;
-    // over the rest of the table only the resting thumb does.
-    let strip = el().key(format!("{scroll_key}:bar")).w(track).h(BAR_H * s).ml(1.0 * s).hover_group()
+    let hover_key = format!("{scroll_key}:hover");
+    let bar_offset = app.table_offsets.borrow_mut().entry(scroll_key.clone()).or_insert_with(|| rune::Live::new([0.0, 0.0])).clone();
+    let hover_id = hover_key.clone();
+    let hovered = app.table_hover.as_deref() == Some(hover_id.as_str());
+    // The table and floating strip share hover, including after releasing a drag.
+    let strip = el().key(format!("{scroll_key}:bar")).w(track).h(BAR_H * s).ml(1.0 * s).hover_group_shared(hover_key.clone())
         .child(el().w_full().h((BAR_H - 4.0) * s).absolute(0.0, 2.0 * s).radius(4.0 * s).fill(rgb(p.surface).alpha(0.94)).group_opacity(0.0, 1.0))
         .child(pill(track, rgb(p.border).alpha(0.72)).absolute(0.0, rail_y).group_opacity(0.0, 1.0))
         .child(pill(thumb_w, rgb(p.fg).alpha(0.78)).absolute(0.0, rail_y).live_offset(&thumb_x)
@@ -186,9 +189,24 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
     // Shown while the pointer is over the table, and while the wheel turns over it: a scroll
     // holds hover on what was under the pointer when it began, so a table that slides under
     // the pointer mid-scroll would otherwise keep its bar hidden until the scroll stops.
-    let bar = el().w_full().h(BAR_H * s).mt(-BAR_H * s).sticky_bottom(foot + 2.0 * s);
-    let bar = if wheeled { bar.opacity(1.0) } else { bar.group_opacity(0.0, 1.0) }.child(strip);
-    col().w_full().py(BLOCK_PAD_Y * s).hover_group().child(viewport).child(bar)
+    let bar = el().w_full().h(BAR_H * s).mt(-BAR_H * s).live_offset(&bar_offset);
+    let bar = bar.opacity(if wheeled || hovered { 1.0 } else { 0.0 }).child(strip);
+    let tab = app.active_tab().id;
+    col().key(hover_key.clone()).w_full().py(BLOCK_PAD_Y * s).hover_group_shared(hover_key).child(viewport).child(bar)
+        .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
+            if inside { a.table_hover = Some(hover_id.clone()); }
+            else if a.table_hover.as_deref() == Some(hover_id.as_str()) { a.table_hover = None; }
+        })
+        .on_layout_tx(move |a: &mut App, r: [f32; 4], tx: &mut Tx| {
+            tx.live_only();
+            let natural_bottom = r[1] + r[3] - BLOCK_PAD_Y * s;
+            let visible_bottom = a.rects.get(&format!("composer-card:{tab}"))
+                .map(|card| card[1] - 8.0 * s)
+                .or_else(|| a.rects.get(&format!("timeline-view:{tab}")).map(|view| view[1] + view[3]))
+                .unwrap_or(natural_bottom);
+            let bottom = visible_bottom.min(natural_bottom).max(r[1] + (BLOCK_PAD_Y + BAR_H) * s);
+            bar_offset.set([0.0, bottom - natural_bottom]);
+        })
 }
 
 #[cfg(test)]

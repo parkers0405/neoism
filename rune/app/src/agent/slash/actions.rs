@@ -287,7 +287,7 @@ impl App {
     /// The chip labels: title-cased ids (`Openai/Gpt-6.1-Sol`, `Build`, `Medium`).
     pub(crate) fn sync_chips(&mut self) {
         let s = &self.composer.selection;
-        if !s.model.is_empty() { self.model = crate::agent::title_case(&s.model); }
+        self.model = if s.model.is_empty() { "Select model".into() } else { crate::agent::title_case(&s.model) };
         self.agent = crate::agent::title_case(if s.agent.is_empty() { "build" } else { &s.agent });
         self.effort = crate::agent::title_case(if s.thinking.is_empty() { "default" } else { &s.thinking });
     }

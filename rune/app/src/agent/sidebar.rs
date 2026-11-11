@@ -276,6 +276,8 @@ pub fn conversations(app: &App) -> El {
     };
     let row_for = |index: usize, t: &ThreadSummary, nested: bool| {
         let id = t.session_id.clone();
+        // A title cut short slides to show the rest while the pointer is on its row.
+        let (title_key, title_w) = (format!("thread:{}", t.session_id), crate::ui::marquee::natural(&t.title, app.ty.body()));
         let open = matches!(&app.active_tab().kind, TabKind::Agent { session: Some(s) } if *s == t.session_id);
         let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
         // Chats under a dashboard folder sit one 18 pt step in.
@@ -292,7 +294,8 @@ pub fn conversations(app: &App) -> El {
                 .child(text("Neoism").font(app.ty.small()).color(rgb(p.dim)).grow(1.0))
                 .child(text(ago(t.updated_at)).font(app.ty.small()).color(rgb(p.muted)).mr(if busy.is_some() { 20.0 } else { 46.0 }))
                 .children(busy.map(|color| loader(app, color).mr(8.0))))
-            .child(text(t.title.clone()).font(app.ty.body()).color(rgb(p.fg)).truncate().max_w(240.0))
+            .child(app.title(&title_key, t.title.clone(), app.ty.body(), rgb(p.fg), Some(240.0)))
+            .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| a.title_hover(&title_key, title_w, inside))
             .on_press(move |s: &mut App| s.open_conversation(&id))
     };
     // A sub-agent under its conversation (`render_subagent_row`): one 24 pt step in per level,
@@ -326,6 +329,7 @@ pub fn conversations(app: &App) -> El {
             Some(image) => el().key(format!("child-mark:{}", m.id)).w(app.ty.small().size).h(app.ty.small().size).pixels(image.pixels()),
             None => crate::ui::neoism_mark(app, app.ty.small().size, &format!("child-mark:{}", m.id)),
         };
+        let (title_key, title_w) = (format!("child:{}", m.id), crate::ui::marquee::natural(&m.title, app.ty.body()));
         let status = match dot {
             None => loader(app, p.fg),
             Some(color) => el().w(10.0 * s).h(10.0 * s).center().child(el().w(7.0 * s).h(7.0 * s).radius(3.5 * s).fill(rgb(color))),
@@ -340,7 +344,8 @@ pub fn conversations(app: &App) -> El {
                 .child(text(m.agent.clone().unwrap_or_else(|| "Sub-agent".into())).font(app.ty.small()).color(rgb(p.dim)).grow(1.0).truncate().shrink())
                 .child(text(label).font(app.ty.small()).color(rgb(p.muted)).mr(20.0))
                 .child(status.mr(8.0)))
-            .child(text(m.title.clone()).font(app.ty.body()).color(rgb(if viewed { p.accent } else { p.fg })).truncate().max_w(240.0))
+            .child(app.title(&title_key, m.title.clone(), app.ty.body(), rgb(if viewed { p.accent } else { p.fg }), Some(240.0)))
+            .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| a.title_hover(&title_key, title_w, inside))
             .on_press(move |a: &mut App| a.open_child(&root, &id))
     };
     // New chat and the directory row: keyboard stops with the list's highlight, and window

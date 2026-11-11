@@ -109,6 +109,9 @@ fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
         };
         let fg = if selected { rgb(p.fg) } else { rgb(p.muted) };
         let tab_id = *tab_id;
+        // A title cut short slides to show the rest while the pointer is on its tab.
+        let (title, title_key) = (app.tab_title(tab), format!("pane-tab:{tab_id}"));
+        let (title_w, hover_key) = (crate::ui::marquee::natural(&title, app.ty.tab()), title_key.clone());
         let mut item = row().key(format!("pane-tab:{tab_id}")).h(TAB_ROW_H).px(16.0).gap(10.0).center_y()
             .max_w(212.5)
             .fill(if selected { rgb(p.bg) } else { Color::TRANSPARENT })
@@ -121,8 +124,11 @@ fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
             } else if matches!(tab.kind, TabKind::Agent { .. }) {
                 crate::ui::neoism_mark(app, 13.0 * s, &format!("pane-tab-icon:{tab_id}"))
             } else { text(g).font(app.ty.icon_sized(13.0)).color(color) })
-            .child(text(app.tab_title(tab)).font(app.ty.tab()).color(fg).truncate().shrink())
-            .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| { if inside { a.tab_hover = Some(tab_id); } else if a.tab_hover == Some(tab_id) { a.tab_hover = None; } })
+            .child(app.title(&title_key, title, app.ty.tab(), fg, None))
+            .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| {
+                if inside { a.tab_hover = Some(tab_id); } else if a.tab_hover == Some(tab_id) { a.tab_hover = None; }
+                a.title_hover(&hover_key, title_w, inside);
+            })
             .on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| a.drag_tab(crate::ui::tab_drag::Source::Buffer(tab_id), d, tx))
             .on_press(move |a: &mut App| { if !std::mem::take(&mut a.suppress_tab_press) { a.select_tab(tab_id); a.focus = Focus::Content; } });
         // By the tab's id, never its index: an index changes meaning when a tab elsewhere

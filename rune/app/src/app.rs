@@ -93,6 +93,8 @@ pub struct App {
     pub resources_closed: bool,
     pub closing_connections: Vec<crate::workspace::ClosingConnection>,
     pub tab_hover: Option<u64>,
+    /// The hovered title that slides to show its whole text (`ui/marquee.rs`).
+    pub marquee: crate::ui::marquee::Marquee,
     pub workspace_hover: Option<String>,
     pub chrome_reveal: Vec<String>,
     /// A tab strip's wheel glide target (strip key, offset, when set).
@@ -257,7 +259,7 @@ impl App {
         let home = crate::startup::home();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), chip_scramble_moving: false, star_twinkle: std::array::from_fn(|_| rune::Live::new(0.5)), table_offsets: Default::default(), table_hover: None, table_active: None, table_seen: None, catalog_asked: None, esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, resources_closed: false, closing_connections: Vec::new(), tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            marquee: Default::default(), workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), chip_scramble_moving: false, star_twinkle: std::array::from_fn(|_| rune::Live::new(0.5)), table_offsets: Default::default(), table_hover: None, table_active: None, table_seen: None, catalog_asked: None, esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, resources_closed: false, closing_connections: Vec::new(), tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
             diag_popup: None,
             copy_feedback: Vec::new(),
             stream_pace: Default::default(),

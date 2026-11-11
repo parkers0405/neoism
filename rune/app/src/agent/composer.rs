@@ -64,7 +64,9 @@ impl App {
                 *slot = (label, if first { f64::NEG_INFINITY } else { now });
             }
         }
-        [Kind::Agent, Kind::Model, Kind::Thinking].iter().any(|k| self.chip_scramble_ms(*k).is_some())
+        let moving = [Kind::Agent, Kind::Model, Kind::Thinking].iter().any(|k| self.chip_scramble_ms(*k).is_some());
+        // One more tick after the last scramble ends, so the chips are drawn at rest.
+        moving | std::mem::replace(&mut self.chip_scramble_moving, moving)
     }
 }
 

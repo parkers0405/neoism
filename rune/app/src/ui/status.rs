@@ -99,6 +99,9 @@ pub struct ModePill {
     from: u32,
     /// Frame-clock seconds when the mode last changed.
     started: f64,
+    /// The transition was still running at the last tick: the tick after it ends draws the
+    /// pill at rest (without it the last letter stays scrambled until something else redraws).
+    moving: bool,
 }
 
 impl App {
@@ -126,9 +129,10 @@ impl App {
             // The very first mode appears at rest.
             let first = self.mode_pill.mode.is_empty();
             let from = self.mode_pill_color();
-            self.mode_pill = ModePill { mode, from, started: if first { f64::NEG_INFINITY } else { self.tools.clock } };
+            self.mode_pill = ModePill { mode, from, started: if first { f64::NEG_INFINITY } else { self.tools.clock }, moving: true };
         }
-        self.mode_pill_elapsed() < TRANSITION_MS
+        let moving = self.mode_pill_elapsed() < TRANSITION_MS;
+        moving | std::mem::replace(&mut self.mode_pill.moving, moving)
     }
 
     /// Milliseconds since the mode last changed, on the frame clock.

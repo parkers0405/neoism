@@ -141,7 +141,7 @@ fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
                     .child(el().w(8.0).h(8.0).radius(4.0).fill(rgb(p.yellow)))));
         } else if app.tab_hover == Some(tab_id) {
             item = item.child(el().key(format!("pane-close:{tab_id}")).w(18.0).h(18.0).center()
-                .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
+                .child(icon(app, glyph::CLOSE, 0.6, rgb(p.red)))
                 .on_press(move |a: &mut App| {
                     if let Some(index) = a.tabs.iter().position(|t| t.id == tab_id) { a.close_tab(index); }
                 }));

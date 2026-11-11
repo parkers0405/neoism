@@ -215,10 +215,12 @@ fn workspace_tabs(app: &App) -> El {
         let hovered = app.workspace_hover.as_deref() == Some(identity.as_str());
         // A workspace on a server or an SSH system wears a cloud, a local one its folder.
         let remote = entry.server.is_some();
+        let title_key = format!("workspace-tab:{identity}");
+        let (title_w, hover_key) = (super::marquee::natural(&title, app.ty.tab()), title_key.clone());
         let tab = row().key(format!("workspace-tab:{identity}")).h(TAB_ROW_H).px(14.0).gap(9.0).center_y()
             .fill(rgb(if active { p.bg } else { p.surface })).corners([6.0, 6.0, 0.0, 0.0])
             .child(icon(app, if remote { glyph::CLOUD } else { glyph::FOLDER }, 1.25, rgb(p.folder)))
-            .child(text(title).font(app.ty.tab()).color(rgb(if active { p.fg } else { p.dim })).truncate().max_w(180.0))
+            .child(app.title(&title_key, title, app.ty.tab(), rgb(if active { p.fg } else { p.dim }), Some(180.0)))
             .child_if(!hovered, || el().w(18.0).h(20.0))
             .child_if(hovered, || el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center()
                 .child(icon(app, glyph::CLOSE, 0.6, rgb(p.red)))
@@ -227,6 +229,7 @@ fn workspace_tabs(app: &App) -> El {
                 }))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| {
                 if inside { a.workspace_hover = Some(hover_identity.clone()); } else if a.workspace_hover.as_deref() == Some(hover_identity.as_str()) { a.workspace_hover = None; }
+                a.title_hover(&hover_key, title_w, inside);
             })
             .on_drag(move |a: &mut App, d: &mut rune::Drag, tx: &mut rune::Tx| a.drag_tab(super::tab_drag::Source::Workspace(drag_identity.clone()), d, tx))
             .on_press(move |a: &mut App| { if !std::mem::take(&mut a.suppress_tab_press) { if let Some(index) = a.workspaces.iter().position(|w| w.id == press_identity) { a.select_workspace(index); } } })

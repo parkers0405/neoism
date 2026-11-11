@@ -6,6 +6,7 @@ pub mod feather;
 pub mod fps;
 pub mod follow;
 pub mod icons;
+pub mod marquee;
 pub mod menu;
 pub mod modal;
 pub mod wallpaper;

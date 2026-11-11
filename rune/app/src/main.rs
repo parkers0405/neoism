@@ -148,6 +148,10 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     }
     // A chat table under the turning wheel shows its scroll bar.
     let (table_changed, table_held) = app.table_tick();
+    // A hovered title too long for its tab or row slides to show the rest.
+    let (marquee_wake, marquee_changed, marquee_moving) = app.marquee_tick(clock);
+    if let Some(delay) = marquee_wake { wake!("marquee", delay); }
+    let table_changed = table_changed | marquee_changed;
     if table_held { wake!("table-bar", std::time::Duration::from_millis(300)); }
     // The input bar's stars sparkle while one is on screen (live opacities, ten steps a second).
     if app.tick_stars(clock) { wake!("stars", std::time::Duration::from_millis(100)); }
@@ -218,7 +222,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // the mode pill, the wordmark, the activity line, skits) keeps Rune drawing every vblank
     // while it runs; a poll wake alone is held to a 16.7 ms timer on Linux, i.e. 60 fps.
     let per_frame = gliding || list_sliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || mode_changing
-        || wordmark_moving || animating || busy || skit || edge_scrolling;
+        || wordmark_moving || animating || busy || skit || edge_scrolling || marquee_moving;
     app.keep_vsync(per_frame);
     let clip = app.cursor_clip();
     app.cursor.track_clip(clip, app.cursor.trail.moved_at != moved_at);

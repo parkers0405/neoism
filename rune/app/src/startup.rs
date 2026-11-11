@@ -162,16 +162,33 @@ fn wait_for_start(since: Duration, exited: bool) -> bool {
     if exited { since < RESTART_PAUSE } else { since < START_GRACE }
 }
 
+/// Since when no local daemon has answered (`None`: one has, since the last time none did).
+static UNANSWERED: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// A local daemon completed its handshake.
+pub fn daemon_answered() { *UNANSWERED.lock().unwrap() = None; }
+
+/// Whether the daemon this process started is to be replaced: it still runs, and nothing has
+/// answered for the whole start grace. It is stuck, and while it lives it holds the
+/// ownership lock, so every daemon started beside it exits at once. Only a daemon this
+/// process started is ever stopped: its identity is certain.
+fn stuck(unanswered: Duration, exited: bool) -> bool { !exited && unanswered >= START_GRACE }
+
 /// No local daemon answered: start the bundled one, detached, so it outlives this window and
 /// serves the next. A daemon chosen explicitly (`--daemon`, `NEOISM_GPUIX_DAEMON_URL`) is
 /// never replaced. Returns what went wrong, if the daemon could not be started.
 pub fn ensure_local_daemon() -> Result<(), String> {
     if std::env::var_os("NEOISM_GPUIX_DAEMON_URL").is_some() || std::env::var_os("NEOISM_RUNE_NO_DAEMON").is_some() { return Ok(()); }
+    let unanswered = UNANSWERED.lock().unwrap().get_or_insert_with(Instant::now).elapsed();
     let mut started = STARTED.lock().unwrap();
     if let Some((child, at)) = started.as_mut() {
         // `try_wait` also reaps it. An error says nothing about it: treat it as running.
         let exited = matches!(child.try_wait(), Ok(Some(_)));
-        if wait_for_start(at.elapsed(), exited) { return Ok(()); }
+        if stuck(unanswered.min(at.elapsed()), exited) {
+            let _ = child.kill();
+            let _ = child.wait();
+            *UNANSWERED.lock().unwrap() = Some(Instant::now());
+        } else if wait_for_start(at.elapsed(), exited) || !exited { return Ok(()); }
     }
     let binary = daemon_executable().ok_or("The workspace daemon is missing from this installation. Reinstall the complete Neoism bundle.")?;
     let directory = std::env::current_dir().ok().filter(|d| !launcher_directory(d)).or_else(dirs::home_dir).unwrap_or_default();
@@ -227,5 +244,10 @@ mod tests {
         // Exited (another daemon held the lock on its way out): again in a moment, not minutes.
         assert!(wait_for_start(Duration::from_secs(1), true));
         assert!(!wait_for_start(RESTART_PAUSE, true));
+        // Running, and nothing has answered for the whole grace: it is stuck and replaced. A
+        // moment without an answer (one failed dial of a daemon hours old) never does that.
+        assert!(stuck(START_GRACE, false));
+        assert!(!stuck(Duration::from_secs(10), false));
+        assert!(!stuck(START_GRACE, true));
     }
 }

@@ -424,12 +424,16 @@ impl App {
                 let index = self.tabs.iter().position(|t| t.id == tab_id);
                 if let (Some(value), Some(index)) = (preview, index) { self.set_draft(index, value); }
             }
-            PtyServer::PtyClosed { session_id, .. } => {
+            PtyServer::PtyClosed { session_id, exit_code } => {
                 let tab = self.terminals.iter().find(|(_, t)| t.shell.session.as_deref() == Some(&session_id)).map(|(id, _)| *id);
                 if let Some(tab_id) = tab {
                     if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.session = None; }
-                    // A shell that exited (`exit`, crash) is replaced so Home always has a prompt.
-                    self.create_pty(tab_id);
+                    match self.tabs.iter().position(|t| t.id == tab_id).filter(|_| exit_code.is_some()) {
+                        // The shell exited (`exit`, Ctrl+D): its tab closes, as its close button does.
+                        Some(index) => self.close_tab_now(index),
+                        // The session was lost without the shell exiting: the tab gets a new one.
+                        None => self.create_pty(tab_id),
+                    }
                 }
             }
             PtyServer::TerminalDirectoryChanged { request_id, directory, .. } => self.directory_changed(&request_id, Some(&directory)),

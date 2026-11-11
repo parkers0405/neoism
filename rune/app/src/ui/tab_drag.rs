@@ -284,7 +284,7 @@ pub fn overlay(app: &App) -> El {
         el().w(18.0).h(18.0).center().child(el().w(12.0).h(12.0).radius(6.0).center().fill(rgb(app.pal.yellow).alpha(0.22))
             .child(el().w(8.0).h(8.0).radius(4.0).fill(rgb(app.pal.yellow))))
     } else {
-        el().w(18.0).h(18.0).center().child(super::icon(app, glyph::CLOSE, 0.6, rgb(app.pal.muted)))
+        el().w(18.0).h(18.0).center().child(super::icon(app, glyph::CLOSE, 0.6, rgb(app.pal.red)))
     };
     el().key("tab-drag-layer").w_full().h_full().absolute(0.0, 0.0).motion(Spring::NONE)
         .child(row().key("tab-drag-preview").w(drag.size[0]).h(drag.size[1])

@@ -201,7 +201,7 @@ fn workspace_tabs(app: &App) -> El {
             .child(text(title).font(app.ty.tab()).color(rgb(if active { p.fg } else { p.dim })).truncate().max_w(180.0))
             .child_if(!hovered, || el().w(18.0).h(20.0))
             .child_if(hovered, || el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center()
-                .child(icon(app, glyph::CLOSE, 0.6, rgb(p.muted)))
+                .child(icon(app, glyph::CLOSE, 0.6, rgb(p.red)))
                 .on_press(move |a: &mut App| {
                     if let Some(index) = a.workspaces.iter().position(|w| w.id == close_identity) { a.close_workspace(index); }
                 }))

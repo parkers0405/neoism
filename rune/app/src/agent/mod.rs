@@ -324,7 +324,9 @@ impl App {
                     // Row offsets measured before the page are all off by its height.
                     session.question_tops.clear();
                 } else {
-                    merge_head(&mut session.messages, messages);
+                    // The page's order is the conversation's: rows that arrived in another
+                    // order (a reply's empty text part ahead of its thinking) take it.
+                    if merge_head(&mut session.messages, messages) { session.structure += 1; }
                     if !session.loaded { session.older_cursor = next_cursor; self.settle_pending = true; }
                     session.loaded = true;
                 }
@@ -349,7 +351,7 @@ impl App {
                         Some("Thinking") | Some("Reasoning") => HistoryMessageKind::Reasoning,
                         _ => HistoryMessageKind::Assistant,
                     };
-                    session.messages.push(HistoryMessage {
+                    insert_new(&mut session.messages, HistoryMessage {
                         id: message_id, role: Role::Assistant, kind, author: None, title: String::new(), text,
                         status: String::new(), tool: String::new(), agent_kind: None, tool_batch_id: None, mcp: None,
                         composition_children: Vec::new(), output_kind: None, lang: String::new(), line_offset: None,
@@ -381,22 +383,65 @@ fn message_bytes(message: &HistoryMessage) -> usize {
         + message.composition_children.iter().map(message_bytes).sum::<usize>()
 }
 
+/// A reply's text part before any of it has arrived. The daemon creates it when the turn
+/// starts, ahead of the thinking and tool rows it then lists before it.
+fn placeholder(message: &HistoryMessage) -> bool {
+    matches!(message.role, Role::Assistant) && matches!(message.kind, HistoryMessageKind::Assistant) && message.text.is_empty() && message.tool.is_empty()
+}
+
+/// A row seen for the first time goes last, but ahead of a reply that has not started: the
+/// thinking that arrives after the empty reply part is shown before it, as the history has it.
+fn insert_new(messages: &mut Vec<HistoryMessage>, message: HistoryMessage) {
+    let mut at = messages.len();
+    if !placeholder(&message) { while at > 0 && placeholder(&messages[at - 1]) { at -= 1; } }
+    messages.insert(at, message);
+}
+
 fn upsert(messages: &mut Vec<HistoryMessage>, message: HistoryMessage) {
     if let Some(existing) = messages.iter_mut().find(|m| m.id == message.id) {
         *existing = message;
     } else {
-        messages.push(message);
+        insert_new(messages, message);
     }
 }
 
-/// Head refresh: rows the page knows replace their old copies; rows it doesn't know stay where
-/// they were; new rows land after the last known row (the GPUiX `mergeHistoryHead` contract).
-fn merge_head(messages: &mut Vec<HistoryMessage>, page: Vec<HistoryMessage>) {
+/// Head refresh (the GPUiX `mergeHistoryHead` contract): rows the page knows take its copies
+/// and its order, in the places those rows held; rows it doesn't know stay where they were;
+/// rows new with the page land after the row the page puts before them. Returns whether any
+/// row moved or arrived.
+fn merge_head(messages: &mut Vec<HistoryMessage>, page: Vec<HistoryMessage>) -> bool {
     if messages.is_empty() {
         *messages = page;
-        return;
+        return false;
     }
-    for message in page { upsert(messages, message); }
+    let paged: std::collections::HashSet<&str> = page.iter().map(|m| m.id.as_str()).collect();
+    let slots: Vec<usize> = messages.iter().enumerate().filter(|(_, m)| paged.contains(m.id.as_str())).map(|(i, _)| i).collect();
+    let held: std::collections::HashSet<String> = slots.iter().map(|i| messages[*i].id.clone()).collect();
+    let mut moved = false;
+    let mut slot = slots.iter();
+    let mut arrivals: Vec<(Option<String>, HistoryMessage)> = Vec::new();
+    let mut previous: Option<String> = None;
+    for message in page {
+        let id = message.id.clone();
+        if held.contains(&id) {
+            let at = *slot.next().expect("one slot per held row");
+            moved |= messages[at].id != id;
+            messages[at] = message;
+        } else {
+            arrivals.push((previous.clone(), message));
+        }
+        previous = Some(id);
+    }
+    for (after, message) in arrivals {
+        moved = true;
+        let at = match after.and_then(|id| messages.iter().position(|m| m.id == id)) {
+            Some(index) => index + 1,
+            // The page starts with it: ahead of the page's first held row, else last.
+            None => slots.first().copied().unwrap_or(messages.len()),
+        };
+        messages.insert(at.min(messages.len()), message);
+    }
+    moved
 }
 
 pub(crate) fn title_case(model: &str) -> String {
@@ -465,6 +510,35 @@ mod cache_tests {
         let structure = app.sessions["s"].structure;
         app.apply_agent(AgentServerMessage::MessageUpdated { session_id: "s".into(), message: tool("t", "completed", ""), parent_message_id: None });
         assert!(app.sessions["s"].structure > structure);
+    }
+
+    #[test]
+    fn thinking_is_shown_before_the_reply_it_precedes_while_streaming_and_once_settled() {
+        let mut app = App::new();
+        let message = |id: &str, kind: &str, role: &str, text: &str| -> HistoryMessage { serde_json::from_value(json!({"id": id, "role": role, "kind": kind, "text": text})).unwrap() };
+        let update = |app: &mut App, m: HistoryMessage| app.apply_agent(AgentServerMessage::MessageUpdated { session_id: "s".into(), message: m, parent_message_id: None });
+        let order = |app: &App| app.sessions["s"].messages.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        // As the daemon sends a turn: the prompt, the reply's empty text part, then the thinking.
+        update(&mut app, message("user", "User", "User", "oq"));
+        update(&mut app, message("reply", "Assistant", "Assistant", ""));
+        update(&mut app, message("think", "Reasoning", "Assistant", ""));
+        assert_eq!(order(&app), ["user", "think", "reply"]);
+        app.apply_agent(AgentServerMessage::ContentDelta { session_id: "s".into(), message_id: "reply".into(), parent_message_id: None, kind: neoism_protocol::agent::ContentKind::Text, text: "What would you like me to do?".into() });
+        // Once the reply has text, what follows it follows it.
+        update(&mut app, message("usage", "System", "System", "8145 tokens"));
+        assert_eq!(order(&app), ["user", "think", "reply", "usage"]);
+        // Rows that did arrive out of order take the settled history's order.
+        let session = app.sessions.get_mut("s").unwrap();
+        session.loaded = true;
+        session.messages.swap(1, 2);
+        session.messages.push(message("local", "System", "System", "only here"));
+        let structure = session.structure;
+        app.apply_agent(AgentServerMessage::HistoryChunk { session_id: "s".into(), next_cursor: None, messages: vec![
+            message("user", "User", "User", "oq"), message("think", "Reasoning", "Assistant", "**Seeking clarification**"), message("reply", "Assistant", "Assistant", "What would you like me to do?"),
+            message("usage", "System", "System", "8145 tokens"), message("late", "System", "System", "new with the page"),
+        ] });
+        assert_eq!(order(&app), ["user", "think", "reply", "usage", "late", "local"]);
+        assert!(app.sessions["s"].structure > structure, "the row list is rebuilt");
     }
 
     #[test]

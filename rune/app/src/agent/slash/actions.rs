@@ -269,19 +269,50 @@ impl App {
             let thinking = Some(self.composer.selection.thinking.clone()).filter(|t| !t.is_empty());
             self.agent_send(Client::SetModel { session_id, model, connection_id: None, thinking });
         }
+        self.remember_composer_selection();
         self.sync_chips();
     }
 
     fn set_agent(&mut self, agent: String) {
         self.composer.selection.agent = agent.clone();
         if let Some(session_id) = self.active_session() { self.agent_send(Client::SetAgent { session_id, agent }); }
+        self.remember_composer_selection();
         self.sync_chips();
     }
 
     fn set_thinking(&mut self, thinking: String) {
         self.composer.selection.thinking = thinking.clone();
         if let Some(session_id) = self.active_session() { self.agent_send(Client::SetThinkingMode { session_id, thinking }); }
+        self.remember_composer_selection();
         self.sync_chips();
+    }
+
+    /// Selection belongs to a conversation, or to an unsent tab until it gets one.
+    fn remember_composer_selection(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        if let TabKind::Agent { session: Some(id) } = &tab.kind {
+            self.sessions.entry(id.clone()).or_default().selection = Some(self.composer.selection.clone());
+        } else if matches!(tab.kind, TabKind::Agent { session: None }) {
+            tab.selection = Some(self.composer.selection.clone());
+        }
+    }
+
+    pub(crate) fn restore_composer_selection(&mut self) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else { return false };
+        let TabKind::Agent { session } = &tab.kind else { self.composer.selection_owner = None; return false };
+        let owner = (tab.id, session.clone());
+        if self.composer.selection_owner.as_ref() == Some(&owner) { return false; }
+        let selection = match session {
+            Some(id) => self.sessions.get(id).and_then(|s| s.selection.clone()).unwrap_or_default(),
+            None => tab.selection.clone().unwrap_or_else(|| self.composer.defaults.clone()),
+        };
+        let session = session.clone();
+        self.composer.selection = selection;
+        self.composer.selection_owner = Some(owner);
+        self.composer.picker = None;
+        self.sync_chips();
+        if let Some(session_id) = session { self.agent_send(Client::SwitchThread { session_id }); }
+        true
     }
 
     /// The chip labels: title-cased ids (`Openai/Gpt-6.1-Sol`, `Build`, `Medium`).
@@ -689,23 +720,28 @@ impl App {
                 true
             }
             Server::ConfigDefaults { agent, model, thinking, input_help_visible, .. } => {
-                let s = &mut self.composer.selection;
+                let s = &mut self.composer.defaults;
                 if let Some(agent) = agent { s.agent = agent.clone(); }
                 if let Some(model) = model.as_ref().filter(|_| s.model.is_empty()) { s.model = model.clone(); }
                 if let Some(thinking) = thinking { s.thinking = thinking.clone(); }
                 if let Some(visible) = input_help_visible { self.composer.hints_hidden = !visible; }
-                self.sync_chips();
+                if self.active_session().is_none() && self.tabs.get(self.active).is_some_and(|t| t.selection.is_none()) {
+                    self.composer.selection = self.composer.defaults.clone();
+                    self.sync_chips();
+                }
                 true
             }
             Server::ProviderState { session_id, model, provider_id, agent, thinking, authoritative, .. } => {
+                let s = self.sessions.entry(session_id.clone()).or_default().selection.get_or_insert_with(Default::default);
+                if let Some(model) = model {
+                    let provider = provider_id.clone().unwrap_or_default();
+                    s.model = if provider.is_empty() || model.starts_with(&format!("{provider}/")) { model.clone() } else { format!("{provider}/{model}") };
+                }
+                if let Some(agent) = agent { s.agent = agent.clone(); }
+                if let Some(thinking) = thinking { s.thinking = thinking.clone(); } else if *authoritative { s.thinking.clear(); }
+                let selection = s.clone();
                 if self.active_session().as_deref() == Some(session_id.as_str()) {
-                    let s = &mut self.composer.selection;
-                    if let Some(model) = model {
-                        let provider = provider_id.clone().unwrap_or_default();
-                        s.model = if provider.is_empty() || model.contains('/') { model.clone() } else { format!("{provider}/{model}") };
-                    }
-                    if let Some(agent) = agent { s.agent = agent.clone(); }
-                    if let Some(thinking) = thinking { s.thinking = thinking.clone(); } else if *authoritative { s.thinking.clear(); }
+                    self.composer.selection = selection;
                     self.sync_chips();
                 }
                 false
@@ -836,5 +872,65 @@ impl App {
 pub(crate) fn open_in_browser(url: &str) {
     if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:") {
         let _ = crate::cli::open_external(url);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    fn provider(id: &str, provider: &str, model: &str, thinking: Option<&str>) -> Server {
+        Server::ProviderState { session_id: id.into(), authoritative: true, provider_id: Some(provider.into()),
+            model: Some(model.into()), connection_id: None, agent: Some("build".into()), thinking: thinking.map(str::to_owned), context_limit: Some(200000) }
+    }
+    #[test]
+    fn tab_selection_and_late_provider_replies_remain_session_scoped() {
+        let mut app = App::new();
+        let a = app.open_tab(TabKind::Agent { session: Some("a".into()) });
+        let a = app.tabs[a].id;
+        app.apply_agent(provider("a", "openai", "gpt-6.1-sol", Some("high")));
+        let b = app.open_tab(TabKind::Agent { session: Some("b".into()) });
+        let b = app.tabs[b].id;
+        app.apply_agent(provider("b", "openrouter", "anthropic/claude-sonnet-4.5", Some("low")));
+        assert_eq!(app.composer.selection.model, "openrouter/anthropic/claude-sonnet-4.5");
+        app.select_tab(a);
+        assert_eq!(app.composer.selection.model, "openai/gpt-6.1-sol");
+        assert_eq!(app.effort, "High");
+        app.apply_agent(provider("b", "openrouter", "anthropic/claude-sonnet-4.5", None));
+        assert_eq!(app.model, "Openai/Gpt-6.1-Sol");
+        assert_eq!(app.effort, "High");
+        app.set_thinking("medium".into());
+        app.select_tab(b);
+        assert_eq!(app.effort, "Default");
+        app.select_tab(a);
+        assert_eq!(app.effort, "Medium");
+        app.new_workspace();
+        app.open_tab(TabKind::Agent { session: Some("c".into()) });
+        app.apply_agent(provider("c", "openrouter", "anthropic/claude-sonnet-4.5", Some("low")));
+        app.select_workspace(0);
+        app.sync_field_focus();
+        app.sync_panes();
+        assert_eq!(app.active_tab().id, a);
+        assert_eq!(app.composer.selection.model, "openai/gpt-6.1-sol");
+        assert_eq!(app.effort, "Medium");
+        app.open_selection(Kind::Thinking);
+        assert_eq!(app.composer.picker.as_ref().unwrap().selected_row().unwrap().value, "medium");
+    }
+    #[test]
+    fn unsent_tabs_keep_their_own_prompt_settings() {
+        let mut app = App::new();
+        let a = app.open_tab(TabKind::Agent { session: None });
+        let a = app.tabs[a].id;
+        app.set_model("openai/gpt-6.1-sol".into());
+        app.set_thinking("high".into());
+        let b = app.open_tab(TabKind::Agent { session: None });
+        let b = app.tabs[b].id;
+        app.set_model("openrouter/anthropic/claude-sonnet-4.5".into());
+        app.set_agent("plan".into());
+        app.select_tab(a);
+        assert_eq!(app.composer.selection.model, "openai/gpt-6.1-sol");
+        assert_eq!(app.effort, "High");
+        app.select_tab(b);
+        assert_eq!(app.agent, "Plan");
+        assert_eq!(app.composer.selection.model, "openrouter/anthropic/claude-sonnet-4.5");
     }
 }

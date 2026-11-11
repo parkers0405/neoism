@@ -52,7 +52,8 @@ impl State {
             State::Compacting => p.green,
             State::Thinking => p.magenta,
             State::Working | State::WaitingSubagents => p.yellow,
-            State::Generating | State::Background => p.accent,
+            State::Generating => p.accent,
+            State::Background => p.red,
         }
     }
 }

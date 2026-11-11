@@ -121,6 +121,7 @@ pub struct Session {
     pub streaming: bool,
     pub status: Option<String>,
     pub compacting: bool,
+    pub selection: Option<slash::Selection>,
     /// First message of a turn that streamed while open here; its tool and thinking rows stay
     /// visible. Reloaded history shows finished turns as prompt, answer and footer only.
     pub live_from: Option<usize>,
@@ -368,6 +369,7 @@ impl App {
         let index = self.active;
         if !matches!(self.tabs[index].kind, TabKind::Agent { .. }) { return; }
         self.tabs[index].kind = TabKind::Agent { session: Some(session_id.to_owned()) };
+        self.restore_composer_selection();
         // A sub-agent still at work shows its trace from the start when opened
         // (`retain_inflight_child_trace`): its tools and thinking are the content.
         let working = self.families.working_now(session_id);
@@ -517,6 +519,7 @@ impl App {
                     self.tabs[index].kind = TabKind::Agent { session: Some(session_id.clone()) };
                     let prompt = self.tabs[index].pending_prompt.take().unwrap_or_default();
                     let session = self.sessions.entry(session_id.clone()).or_default();
+                    session.selection = self.tabs[index].selection.clone().or_else(|| Some(self.composer.selection.clone()));
                     session.loaded = true;
                     // Follow the new conversation's stream before the first prompt goes out, so
                     // its streaming state, deltas and tool rows arrive live.
@@ -654,15 +657,8 @@ impl App {
                     self.agent_connected();
                 }
             }
-            AgentServerMessage::ProviderState { session_id, model: Some(model), provider_id, context_limit, .. } => {
-                if let Some(limit) = context_limit.filter(|l| *l > 0) { self.sessions.entry(session_id.clone()).or_default().context_limit = Some(limit); }
-                // A sub-agent on another model reports it too: the composer names the model of
-                // the conversation being viewed, not of whichever spoke last.
-                let viewed = matches!(&self.tabs.get(self.active).map(|t| &t.kind), Some(TabKind::Agent { session: Some(id) }) if *id == session_id);
-                if viewed || !self.families.is_child(&session_id) {
-                    let provider = provider_id.unwrap_or_default();
-                    self.model = title_case(&if provider.is_empty() || model.contains('/') { model } else { format!("{provider}/{model}") });
-                }
+            AgentServerMessage::ProviderState { session_id, context_limit, .. } => {
+                if let Some(limit) = context_limit.filter(|l| *l > 0) { self.sessions.entry(session_id).or_default().context_limit = Some(limit); }
             }
             _ => {}
         }

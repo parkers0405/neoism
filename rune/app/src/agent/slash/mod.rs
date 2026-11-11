@@ -51,6 +51,8 @@ struct ConnectFlow {
 pub struct Composer {
     pub picker: Option<Picker>,
     pub selection: Selection,
+    pub defaults: Selection,
+    pub selection_owner: Option<(u64, Option<String>)>,
     /// Recently chosen models, newest first.
     pub recent_models: Vec<String>,
     providers: Vec<ProviderInfo>,
@@ -83,14 +85,11 @@ impl Composer {
     }
 
     pub fn new(model: Option<&str>, thinking: Option<&str>) -> Composer {
-        Composer {
-            selection: Selection {
-                model: model.unwrap_or_default().to_owned(),
-                agent: "build".into(),
-                thinking: thinking.unwrap_or("medium").to_owned(),
-            },
-            ..Composer::default()
-        }
+        let selection = Selection {
+            model: model.unwrap_or_default().to_owned(), agent: "build".into(),
+            thinking: thinking.unwrap_or("medium").to_owned(),
+        };
+        Composer { defaults: selection.clone(), selection, ..Composer::default() }
     }
 
     fn request_id(&mut self, prefix: &str) -> String {

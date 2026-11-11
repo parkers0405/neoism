@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(panes[0].tabs, vec![10, 11]);
         assert_eq!(panes[0].active, 1);
         assert_eq!(layout.focused().tabs, vec![12]);
-        let tabs: Vec<Tab> = [10, 11, 12].iter().map(|id| Tab { id: *id, kind: TabKind::Home, draft: rune::TextEdit::new(""), pending_prompt: None }).collect();
+        let tabs: Vec<Tab> = [10, 11, 12].iter().map(|id| Tab { id: *id, kind: TabKind::Home, draft: rune::TextEdit::new(""), pending_prompt: None, selection: None }).collect();
         let back = capture_workspace("w", "/", &tabs, 2, &layout, None, BTreeMap::new());
         assert_eq!(back.layout, saved);
     }

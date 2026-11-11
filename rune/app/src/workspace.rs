@@ -351,6 +351,9 @@ impl App {
         self.rects.retain(|key, _| key.starts_with("workspace-") || key.starts_with("reorder:workspace:"));
         self.tab_hover = None;
         self.field_tab = None;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            if index != self.active { tab.draft.focused = false; }
+        }
     }
 
     /// A new local workspace tab, at the active one's directory (on a remote tab: home).

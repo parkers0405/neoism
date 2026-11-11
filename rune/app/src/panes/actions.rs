@@ -12,7 +12,13 @@ impl App {
     /// Point `active` at the focused pane's tab.
     pub(crate) fn show_focused_pane(&mut self) {
         let Some(tab) = self.layout.focused().active_tab() else { return };
-        if let Some(index) = self.tabs.iter().position(|t| t.id == tab) { self.active = index; }
+        if let Some(index) = self.tabs.iter().position(|t| t.id == tab) {
+            if self.active != index {
+                for t in &mut self.tabs { if t.id != tab { t.draft.focused = false; } }
+            }
+            self.active = index;
+        }
+        self.restore_composer_selection();
     }
 
     /// Show a tab (by id) in its pane and focus that pane.
@@ -83,8 +89,9 @@ impl App {
     /// its pane and focus the pane, so the layout always agrees with `active`.
     pub fn sync_panes(&mut self) -> bool {
         let Some(tab) = self.tabs.get(self.active).map(|t| t.id) else { return false };
+        let selection_changed = self.restore_composer_selection();
         let focused = self.layout.focused();
-        if focused.active_tab() == Some(tab) { return false; }
+        if focused.active_tab() == Some(tab) { return selection_changed; }
         if self.layout.pane_of(tab).is_none() { self.layout.open(tab); }
         self.layout.select(tab);
         true

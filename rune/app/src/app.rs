@@ -359,6 +359,7 @@ impl App {
                 self.workspace_ready = false;
                 self.register_workspace();
                 self.collab_reconnect();
+                self.tree_reconnected();
             }
             Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
             Inbound::Agent(message) => self.apply_agent(*message),

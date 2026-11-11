@@ -91,6 +91,9 @@ impl Tree {
     }
 }
 
+/// Marks the notes vault as asked for, among the directories asked for.
+const RESOLVE: &str = "\0resolve-notes-vault";
+
 impl App {
     fn tree_of(&mut self, sidebar: Sidebar) -> &mut Tree {
         if sidebar == Sidebar::Notes { &mut self.notes } else { &mut self.tree }
@@ -109,6 +112,29 @@ impl App {
         if let Some(daemon) = &self.daemon {
             daemon.send_scoped(Family::Files, serde_json::json!({"ListDir": {"path": path}}), &scope);
         }
+    }
+
+    /// Per frame: a tree that is showing with nothing listed asks for its listing. A sidebar
+    /// restored with the window was never opened by a click, and a request made before the
+    /// daemon answered was never heard.
+    pub(crate) fn tree_ensure_listed(&mut self) {
+        if self.connection != crate::app::Connection::Connected || !self.workspace_ready { return; }
+        let Some(sidebar) = self.sidebar.filter(|s| matches!(s, Sidebar::Files | Sidebar::Notes)) else { return };
+        if self.tree_of(sidebar).loaded() { return; }
+        if sidebar == Sidebar::Notes && self.notes.root.is_none() {
+            // The vault is resolved per workspace; its listing follows `NotesVaultResolved`.
+            if self.notes.requested.insert(RESOLVE.to_owned()) && let Some(daemon) = &self.daemon {
+                daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": self.cwd}}));
+            }
+            return;
+        }
+        self.list_dir(sidebar, "");
+    }
+
+    /// The connection came back: whatever was asked on the old one is asked again on demand.
+    pub(crate) fn tree_reconnected(&mut self) {
+        self.tree.requested.clear();
+        self.notes.requested.clear();
     }
 
     /// `Alt+E` / `Alt+N` and the rail buttons: show a tree sidebar (focused) or hide it.

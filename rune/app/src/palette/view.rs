@@ -223,7 +223,7 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
         }
         line = line.child(text(item.title.clone()).font(app.ty.sized(13.0)).color(rgb(p.fg)).truncate().grow(1.0).shrink());
         if !item.shortcut.is_empty() {
-            line = line.child(text(item.shortcut).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().shrink());
+            line = line.child(text(crate::startup::keys_label(item.shortcut).into_owned()).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().shrink());
         }
         built.push((index, line));
     }
@@ -283,7 +283,7 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selecte
         });
         let mut text_col = col().grow(1.0).shrink().h_full().pt(6.0 * s).gap(2.0 * s)
             .child(title)
-            .child(text(item.shortcut).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).wrap().max_lines(2));
+            .child(text(crate::startup::keys_label(item.shortcut).into_owned()).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).wrap().max_lines(2));
         if toggle.is_some() { text_col = text_col.mr(12.0 * s); }
         line = line.items_start().child(text_col);
         if let Some(toggle) = toggle { line = line.child(el().h_full().center().child(toggle)); }

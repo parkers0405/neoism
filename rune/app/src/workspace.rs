@@ -333,6 +333,7 @@ impl App {
         }
         // This user's cursor leaves the workspace they are switching away from.
         self.presence_leave();
+        self.editor_hidden();
         self.swap_workspace(index);
         // This strip is window-scoped and may not relayout when selection changes.
         // Keep its measured bounds, including an in-flight workspace drag.

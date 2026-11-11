@@ -12,6 +12,9 @@ use rune::{Cx, El, col, el, row, text};
 pub const RAIL_W: f32 = 55.5;
 pub const TAB_ROW_H: f32 = 30.0;
 pub const SIDEBAR_W: f32 = 300.0;
+/// The band the app draws for the window's own controls where it replaces the system title
+/// bar: the macOS traffic lights at its leading end, the Windows caption buttons at its trailing.
+pub const TITLEBAR_H: f32 = 30.0;
 
 pub fn root(app: &App, cx: &mut Cx<App>) -> El {
     let p = app.pal;
@@ -26,6 +29,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
         .on_paste(|a: &mut App, text, _| a.paste_content(text))
         .child(super::wallpaper::view(app))
+        .children(titlebar(app, cx))
         .child(body)
         .child(super::status::view(app))
         .child(super::tab_drag::overlay(app))
@@ -111,6 +115,22 @@ fn cursor_quad(app: &App) -> El {
 const RAIL_HOVER_SCALE: f32 = 1.14;
 const RAIL_PRESS_SCALE: f32 = 0.92;
 const RAIL_SPRING: rune::Spring = rune::Spring::new(0.22, 0.0);
+
+/// The window's title band, while the window has controls of its own to hold: the workspace's
+/// name between them, and the whole band drags the window. In full screen, and on Linux where
+/// the compositor frames the window, the controls are gone and so is the band.
+fn titlebar(app: &App, cx: &mut Cx<App>) -> Option<El> {
+    let p = app.pal;
+    let insets = cx.chrome_insets();
+    if insets.height <= 0.0 || (insets.leading <= 0.0 && insets.trailing <= 0.0) { return None; }
+    cx.caption_color(rgb(p.fg));
+    Some(row().key("titlebar").w_full().h(insets.height).fill(rgb(p.surface)).center_y().window_drag()
+        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
+        .pl(insets.leading + 12.0).pr(insets.trailing + 12.0)
+        .child(el().grow(1.0))
+        .child(text(app.workspace_name.clone()).font(app.ty.sized(12.0)).color(rgb(p.muted)).truncate().shrink())
+        .child(el().grow(1.0)))
+}
 
 fn rail(app: &App) -> El {
     let p = app.pal;

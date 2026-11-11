@@ -1,6 +1,6 @@
 # winit compatibility patches
 
-`winit-0.30.13` is the crates.io release with one change, used by the Rune frontend
+`winit-0.30.13` is the crates.io release with two changes, used by the Rune frontend
 (`rune/app/Cargo.toml`, `[patch.crates-io]`).
 
 ## Wayland: an unchanged IME cursor rectangle is not committed again
@@ -17,3 +17,16 @@ field focused (the agent composer) the window committed, heard `done`, re-ran it
 drew a frame on every vblank, forever: ~1.5 ms of CPU per 8.3 ms at rest plus a present per
 vblank, measured with `WAYLAND_DEBUG=1` (one `done` per frame) and Rune's commit log
 (`why=["input"]` every frame). With the cache the window rests between caret blinks.
+
+## macOS: Option is Alt
+
+`src/platform_impl/macos/window_delegate.rs`: a window's `option_as_alt` defaults to
+`OptionAsAlt::Both` instead of `None`.
+
+Why: every Alt shortcut the app has (Alt+E, Alt+A, Alt+N, Alt+C, Alt+1..9, ...) is Option on a
+Mac. With the stock default, Option plus a letter types that letter's alternate character
+(Option+A arrives as "å") and Option+E, N, U, I and ` are dead keys that produce no key event at
+all, so those chords could not be heard. With this default the key arrives as the letter with
+Alt held, on every layout. The cost is the one terminals with "Option as Alt" accept: Option no
+longer types accented or special characters inside Neoism. Rune has no setting for it at the
+pinned revision; `WindowExtMacOS::set_option_as_alt` still changes it per window.

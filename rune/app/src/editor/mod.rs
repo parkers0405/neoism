@@ -60,6 +60,13 @@ pub struct Buffer {
     /// A long jump's last stretch: the far part landed at once this frame, and the spring to
     /// here starts on the next (`App::editor_jump_springs`).
     pub jump_spring: Option<f32>,
+    /// The scroll offset to come back to. A tab that is not showing has no scroll view; the
+    /// one built when it shows again starts at the top and is put back here.
+    pub kept_scroll: f32,
+    /// The file was on screen at the last frame.
+    pub shown: bool,
+    /// Frames left of putting `kept_scroll` back after the tab showed again.
+    pub restoring: u8,
     /// Where the cursor stood when `/` or `?` opened: previews search from it and Escape
     /// returns to it (`editor.search.start`).
     search_origin: Option<vim::Pos>,
@@ -88,7 +95,7 @@ impl Buffer {
             lsp: lsp::BufferLsp::default(),
             mouse: mouse::Mouse::default(),
             code_cache: Default::default(),
-            view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None, jump_spring: None, search_origin: None, search_highlight: None, shared: None,
+            view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None, jump_spring: None, kept_scroll: 0.0, shown: false, restoring: 0, search_origin: None, search_highlight: None, shared: None,
         }
     }
 
@@ -243,6 +250,40 @@ impl App {
             .map(|b| (b.path.clone(), b.scope.clone()))
             .collect();
         for (path, scope) in stale { self.read_file(&path, &scope); }
+    }
+
+    /// Per frame: remember where each showing file is scrolled, and put a file that just came
+    /// back on screen (another tab or workspace was showing) where it was left. Returns whether
+    /// a position is still being put back.
+    pub(crate) fn editor_keep_scroll(&mut self, tx: &mut rune::Tx) -> bool {
+        /// A rebuilt scroll view takes its offset once its rows are laid out, a frame or two on.
+        const FRAMES: u8 = 3;
+        let showing: Vec<String> = self.layout.panes().iter().filter_map(|pane| pane.active_tab())
+            .filter_map(|id| self.tabs.iter().find(|t| t.id == id))
+            .filter_map(|tab| match &tab.kind { TabKind::Editor { path } => Some(path.clone()), _ => None })
+            .collect();
+        let workspace = self.workspace_id.clone();
+        let mut restoring = false;
+        for (path, buffer) in self.buffers.iter_mut() {
+            let shown = buffer.loaded && showing.contains(path);
+            if shown && !buffer.shown && buffer.kept_scroll > 0.5 { buffer.restoring = FRAMES; }
+            buffer.shown = shown;
+            if !shown { continue; }
+            if buffer.restoring > 0 {
+                buffer.restoring -= 1;
+                buffer.wheel_target = None;
+                tx.scroll_to_instant(view::scroll_key(&workspace, path), 0.0, buffer.kept_scroll);
+                restoring = true;
+            } else {
+                buffer.kept_scroll = buffer.scroll.get().0;
+            }
+        }
+        restoring
+    }
+
+    /// The window is leaving this workspace: none of its files are on screen any more.
+    pub(crate) fn editor_hidden(&mut self) {
+        for buffer in self.buffers.values_mut() { buffer.shown = false; }
     }
 
     /// The active editor tab's buffer.

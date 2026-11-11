@@ -161,6 +161,10 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if gliding { wake!("glide", std::time::Duration::ZERO); }
     if mode_changing { wake!("mode", std::time::Duration::ZERO); }
     let panes_changed = app.sync_panes();
+    // A file that just came back on screen goes back to where it was scrolled.
+    let scroll_restoring = app.editor_keep_scroll(tx);
+    if scroll_restoring { wake!("scroll-restore", std::time::Duration::ZERO); }
+    app.tree_ensure_listed();
     // The directory-owning terminal's `cd` moves the workspace view with it.
     let panes_changed = app.follow_main_terminal() || panes_changed;
     app.follow_tab_chrome(tx);
@@ -231,7 +235,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    let rerun = animating || changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    let rerun = animating || changed || scroll_restoring || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
     // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
     if *TRACE_POLL && (rerun || !wakes.is_empty()) {
         let terms = [("animating", animating), ("changed", changed), ("stream", stream_due), ("fps", fps_changed), ("caret", caret_changed),
@@ -605,7 +609,9 @@ fn main() {
     // A distinct id per instance lets several builds run side by side (and be found by class).
     let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
     rune::set_app_id(Box::leak(app_id.into_boxed_str()));
-    let mut app = rune::App::new(spec).init(App::new);
+    // The app draws its own title band: macOS keeps its traffic lights in it and Windows its
+    // caption buttons; on Linux the compositor's frame stays and there is no band.
+    let mut app = rune::App::new(spec).titlebar(rune::Titlebar::new(ui::chrome::TITLEBAR_H)).init(App::new);
     // Encoded frame callbacks measure submission cadence only. They are not compositor
     // presentation timestamps and cannot establish missed-vblank parity (see rune/README.md).
     let trace = std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1");

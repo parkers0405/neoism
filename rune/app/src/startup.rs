@@ -21,6 +21,11 @@ pub fn hostname() -> String {
     from_files().or_else(from_env).or_else(from_command).map(|name| name.trim().to_owned()).unwrap_or_default()
 }
 
+/// A shortcut as this system's keyboard names it: Alt is Option on a Mac.
+pub fn keys_label(keys: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(target_os = "macos") && keys.contains("Alt") { keys.replace("Alt", "Option").into() } else { keys.into() }
+}
+
 /// Whether a path on the daemon's machine is absolute: `/home/me`, `C:\Users\me` or a UNC
 /// share. The daemon may run on Windows whatever this machine is.
 pub fn absolute(path: &str) -> bool {

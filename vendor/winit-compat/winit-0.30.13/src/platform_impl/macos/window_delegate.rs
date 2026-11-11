@@ -72,7 +72,8 @@ impl Default for PlatformSpecificWindowAttributes {
             has_shadow: true,
             accepts_first_mouse: true,
             tabbing_identifier: None,
-            option_as_alt: Default::default(),
+            // Neoism: Option is Alt (see vendor/winit-compat/README.md).
+            option_as_alt: OptionAsAlt::Both,
             borderless_game: false,
         }
     }

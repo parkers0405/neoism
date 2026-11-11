@@ -421,7 +421,7 @@ fn splash(app: &App) -> El {
             .fill(if hovered { rgb(p.hover).alpha(0.95) } else { Color::TRANSPARENT })
             .child(el().w(g.icon_slot).center().child(text(item.icon).font(TextStyle::new(g.icon_font, 400.0).family(NERD)).color(ink)))
             .child(text(item.label).font(TextStyle::new(g.label_font, 700.0).mono()).color(ink).ml(g.label_gap).grow(1.0).truncate().shrink())
-            .child(text(format!("[{}]", item.keys)).font(TextStyle::new(g.key_font, 700.0).mono()).color(rgb(p.green)))
+            .child(text(format!("[{}]", crate::startup::keys_label(item.keys))).font(TextStyle::new(g.key_font, 700.0).mono()).color(rgb(p.green)))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
                 if inside { a.splash.hover = Some((tab, index)); } else if a.splash.hover == Some((tab, index)) { a.splash.hover = None; }
             })

@@ -127,7 +127,7 @@ fn text_width(text: &str, font: f32) -> f32 { text.chars().count() as f32 * font
 fn widest_button(s: f32) -> f32 {
     MENU.iter().map(|item| {
         PAD * s + ICON_SLOT * s + LABEL_GAP * s + text_width(item.label, LABEL_FONT * s)
-            + KEY_GAP * s + text_width(&format!("[{}]", item.keys), KEY_FONT * s) + PAD * s
+            + KEY_GAP * s + text_width(&format!("[{}]", crate::startup::keys_label(item.keys)), KEY_FONT * s) + PAD * s
     }).fold(0.0, f32::max)
 }
 

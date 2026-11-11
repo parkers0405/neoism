@@ -80,7 +80,7 @@ impl Tree {
         let path = path.trim_end_matches('/');
         match &self.root {
             Some(root) => path.strip_prefix(root.as_str()).map(|rest| rest.trim_start_matches('/').to_owned()),
-            None if path.starts_with('/') => None,
+            None if crate::startup::absolute(path) => None,
             None => Some(match path.trim_start_matches("./") { "." => String::new(), rest => rest.to_owned() }),
         }
     }

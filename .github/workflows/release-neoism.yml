@@ -1,4 +1,4 @@
-name: Release Neoism GPUIX
+name: Release Neoism
 on:
   push:
     tags: ['v*.*.*']
@@ -92,8 +92,6 @@ jobs:
       # attempt without interrupting the other jobs in its original run.
       cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' && inputs.platform == matrix.platform }}
     env:
-      # Keep the unfinished iPhone/iPad device preview out of published bundles.
-      NEOISM_GPUIX_DEVICE_PREVIEW: '0'
       CARGO_BUILD_JOBS: 2
       CARGO_TERM_COLOR: always
       CARGO_PROFILE_RELEASE_DEBUG: 0
@@ -126,50 +124,34 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libfontconfig1-dev libfreetype-dev libgbm-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libwayland-dev libasound2-dev libvulkan-dev
+      # The app is its own workspace on the toolchain Rune pins (rune/app/rust-toolchain.toml).
+      - name: Install the app's Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
-          # The dedicated native/service caches below already retain targets.
+          # The dedicated service/app caches below already retain targets.
           # Duplicating them here evicts other platforms from the shared quota.
           cache-targets: false
           workspaces: |
             . -> target
-            neoism-frontend/gpuix/native -> target/gpuix-core-cargo
-          shared-key: gpuix-release-${{ matrix.asset }}
+            rune/app -> target
+          shared-key: neoism-release-${{ matrix.asset }}
           cache-on-failure: true
-      - uses: actions/cache/restore@v4
-        id: native-cache
-        with:
-          path: |
-            neoism-frontend/gpuix/artifacts/gpuix-rustup
-            target/gpuix-native-vsync
-            target/gpuix-core-cargo
-          # A fresh key retains compilation completed since the previous retry.
-          key: gpuix-native-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/*') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            gpuix-native-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/*') }}-
-            gpuix-native-${{ matrix.asset }}-
-            gpuix-display-${{ matrix.asset }}-
       - uses: actions/cache/restore@v4
         id: service-cache
         with:
           path: target/release
           key: gpuix-services-${{ matrix.asset }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: gpuix-services-${{ matrix.asset }}-
-      # One earlier retry saved services together with the native paths. Cache
-      # versions include the complete path list, so recover that snapshot once
-      # when no separate service cache exists, then save the split caches below.
-      - name: Recover compilation from the transitional combined cache
-        id: combined-cache
-        if: steps.service-cache.outputs.cache-matched-key == ''
-        uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v4
+        id: app-cache
         with:
-          path: |
-            neoism-frontend/gpuix/artifacts/gpuix-rustup
-            target/gpuix-native-vsync
-            target/gpuix-core-cargo
-            target/release
-          key: gpuix-combined-migration-${{ matrix.asset }}-${{ github.run_id }}
-          restore-keys: gpuix-native-${{ matrix.asset }}-
+          path: rune/app/target
+          # A fresh key retains compilation completed since the previous retry.
+          key: rune-app-${{ matrix.asset }}-${{ hashFiles('rune/app/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            rune-app-${{ matrix.asset }}-${{ hashFiles('rune/app/Cargo.lock') }}-
+            rune-app-${{ matrix.asset }}-
       - uses: actions/cache/restore@v4
         id: zig-cache
         with:
@@ -180,28 +162,17 @@ jobs:
       - name: Reuse unchanged source from restored compilation
         env:
           SERVICE_CACHE_KEY: ${{ steps.service-cache.outputs.cache-matched-key }}
-          NATIVE_CACHE_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
-          COMBINED_CACHE_KEY: ${{ steps.combined-cache.outputs.cache-matched-key }}
         run: python scripts/restore-cached-source-times.py
       - name: Report actual compilation cache reuse
         shell: bash
         env:
-          NATIVE_CACHE: ${{ steps.native-cache.outputs.cache-matched-key }}
+          APP_CACHE: ${{ steps.app-cache.outputs.cache-matched-key }}
           SERVICE_CACHE: ${{ steps.service-cache.outputs.cache-matched-key }}
         run: |
-          printf 'Cache scope: %s\nNative cache: %s\nService cache: %s\n' "$GITHUB_REF" "${NATIVE_CACHE:-MISS (cold build)}" "${SERVICE_CACHE:-MISS (cold build)}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Restore verified native display binding
-        id: binding-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: neoism-frontend/gpuix/artifacts/gpuix-display-*
-          # The loader also verifies the pin and artifact hash before reuse.
-          # Include build flags/tooling so a differently built binding cannot
-          # silently stand in for this workflow's production configuration.
-          key: gpuix-binding-${{ matrix.asset }}-${{ hashFiles('neoism-frontend/gpuix/native/gpuix-pin.json', 'neoism-frontend/gpuix/native/patches/*', 'neoism-frontend/gpuix/scripts/build-display-binding.ts', 'neoism-frontend/gpuix/src/display-binding.ts', '.cargo/config.toml', '.github/workflows/release-neoism.yml') }}
-      - name: Build, test, and package native app and services
+          printf 'Cache scope: %s\nApp cache: %s\nService cache: %s\n' "$GITHUB_REF" "${APP_CACHE:-MISS (cold build)}" "${SERVICE_CACHE:-MISS (cold build)}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Build, test, and package the app and services
         id: bundle
-        run: node scripts/build-gpuix-release.mjs
+        run: python scripts/build-rune-release.py
       - name: Build and validate Windows MSI and updater transactions
         if: runner.os == 'Windows'
         shell: pwsh
@@ -242,27 +213,17 @@ jobs:
           flags=()
           if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease --latest=false); fi
           gh release edit "$RELEASE_TAG" --draft=false "${flags[@]}"
-      - name: Retain verified display binding for installer retries
-        if: always() && steps.bundle.outcome == 'success' && steps.binding-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: neoism-frontend/gpuix/artifacts/gpuix-display-*
-          key: ${{ steps.binding-cache.outputs.cache-primary-key }}
       - name: Record source freshness for complete and partial compilation
         if: always()
         env:
-          NATIVE_CACHE_SAVE_KEY: ${{ steps.native-cache.outputs.cache-primary-key }}
           SERVICE_CACHE_SAVE_KEY: ${{ steps.service-cache.outputs.cache-primary-key }}
         run: python scripts/restore-cached-source-times.py --save
-      - name: Save native compilation progress even if later checks fail
-        if: always() && steps.native-cache.outputs.cache-primary-key != ''
+      - name: Save app compilation progress even if later checks fail
+        if: always() && steps.app-cache.outputs.cache-primary-key != ''
         uses: actions/cache/save@v4
         with:
-          path: |
-            neoism-frontend/gpuix/artifacts/gpuix-rustup
-            target/gpuix-native-vsync
-            target/gpuix-core-cargo
-          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+          path: rune/app/target
+          key: ${{ steps.app-cache.outputs.cache-primary-key }}
       - name: Save service compilation progress
         if: always() && steps.service-cache.outputs.cache-primary-key != ''
         uses: actions/cache/save@v4

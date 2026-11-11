@@ -105,7 +105,7 @@ impl Buffer {
     pub fn is_config(&self) -> bool { self.config.is_some() }
 
     pub(crate) fn host_path(&self) -> String {
-        if self.path.starts_with('/') { self.path.clone() } else { format!("{}/{}", self.scope.trim_end_matches('/'), self.path) }
+        if crate::startup::absolute(&self.path) { self.path.clone() } else { format!("{}/{}", self.scope.trim_end_matches('/'), self.path) }
     }
 }
 

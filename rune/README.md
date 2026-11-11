@@ -43,8 +43,11 @@ and the existing services must keep building unchanged until the cutover.
 7. **Editor, file tree, finder, palette, notes, agent panel, plain terminal** - in that order.
 8. **Parity pass** - screenshot every reference surface in both apps, diff, fix. Frame trace both apps with the
    same scenarios (`scripts/analyze-gpuix-frames.py` method: presentation timestamps, not counters).
-9. **Cutover** - switch the installed `neoism` binary to the Rune app, delete `neoism-frontend/gpuix`, the
-   GPUiX pins/patches and the Sugarloaf painter paths, update packaging and release scripts.
+9. **Cutover** - the release ships this app as `neoism` on Linux, macOS and Windows
+   (`scripts/build-rune-release.py`, `scripts/package-rune-release.py`, `release-neoism.yml`): it answers the
+   command line the installers and deployed updaters call (`src/cli.rs`), starts the bundled workspace daemon
+   when none is running (`src/startup.rs`), and keeps the bundle layout those updaters validate. Still to do:
+   delete `neoism-frontend/gpuix`, the GPUiX pins/patches and the Sugarloaf painter paths.
 
 Do not delete GPUiX or Sugarloaf before step 9: the current app is the visual and behavioral reference.
 

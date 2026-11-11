@@ -454,7 +454,7 @@ impl App {
 
     pub fn tab_cwd(&self, tab: &Tab) -> String {
         let cwd = self.terminals.get(&tab.id).map(|t| t.shell.cwd.as_str()).unwrap_or(&self.cwd);
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = crate::startup::home();
         if !home.is_empty() && cwd.starts_with(&home) { format!("~{}", &cwd[home.len()..]) } else { cwd.to_owned() }
     }
 }

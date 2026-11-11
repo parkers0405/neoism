@@ -90,7 +90,7 @@ impl App {
     /// The project rows (`openProjectPicker`): `~`, then the current root, the window's other
     /// roots and the projects chats live in (newest first), then "Add workspace…" on `~`.
     pub fn project_rows(&self) -> Vec<ProjectRow> {
-        let home = trimmed(&std::env::var("HOME").unwrap_or_default());
+        let home = trimmed(&crate::startup::home());
         let current = trimmed(&self.cwd);
         let mut rows = vec![ProjectRow {
             value: ALL_PROJECTS.into(), title: "~".into(),
@@ -135,7 +135,7 @@ impl App {
     pub fn activate_project(&mut self, value: &str) {
         self.project_menu = None;
         if value == ALL_PROJECTS {
-            if let Ok(home) = std::env::var("HOME") { self.set_workspace_root(&home); }
+            { let home = crate::startup::home(); if !home.is_empty() { self.set_workspace_root(&home); } }
         } else if value == ADD_WORKSPACE {
             self.open_file_browser(crate::browser::Mode::ChooseDirectory);
         } else if let Some(path) = value.strip_prefix("project:") {

@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn home_and_root_are_the_dashboard() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = crate::startup::home();
         assert_eq!(crate::agent::catalog_scope(&home), None);
         assert_eq!(crate::agent::catalog_scope("/"), None);
         assert_eq!(crate::agent::catalog_scope("/work/app/"), Some("/work/app".into()));

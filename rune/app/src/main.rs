@@ -1,9 +1,11 @@
 //! Neoism on Rune: a native daemon client that draws every surface with Rune elements.
 //! See `rune/README.md` for the plan, the look and the motion this must match.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod agent;
 mod app;
 mod browser;
+mod cli;
 mod collab;
 mod clipboard;
 mod session;
@@ -47,6 +49,7 @@ mod cursor_style {
         EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f32()
     }
 }
+mod startup;
 mod tabs;
 mod tree;
 mod ui;
@@ -81,6 +84,8 @@ fn setup(app: &mut App, waker: rune::Waker) {
     }
     // Reopen the last window's workspaces before the daemon handshake registers them.
     if session::enabled() && let Some(saved) = session::read() { app.restore_session(saved); }
+    // `neoism file.rs`: the files named on the command line open in the first workspace.
+    for file in startup::files() { app.open_file(&file.to_string_lossy(), None); }
 }
 
 /// `src/demo.rs` open with rust-analyzer attached and two diagnostics.
@@ -243,6 +248,10 @@ fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn main() {
+    // `neoism --version`, `neoism update` and the rest answer before any window or daemon.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let launch = match cli::dispatch(&args) { Ok(launch) => launch, Err(code) => std::process::exit(code) };
+    startup::apply(&launch);
     let spec = AppSpec::<App> {
         fonts: FONTS,
         families: ("Geist Mono", "Geist Mono"),
@@ -437,7 +446,7 @@ fn main() {
                 s.open_project_menu();
             }),
             ("conversations-dashboard", |s| {
-                let home = std::env::var("HOME").unwrap_or_default();
+                let home = crate::startup::home();
                 s.cwd = home.clone();
                 s.workspace_name = "~".into();
                 s.threads = [("a", "Neoism Release", "/projects/neoism", 9), ("b", "Swift-Cursor", "/projects/neoism", 7),

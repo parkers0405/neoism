@@ -191,7 +191,7 @@ impl App {
 
     /// `+ Add Server`: host this project, or join (`beginServer`).
     pub fn open_server_form(&mut self) {
-        let directory = if self.server.remote() { std::env::var("HOME").unwrap_or_default() } else { self.cwd.clone() };
+        let directory = if self.server.remote() { crate::startup::home() } else { self.cwd.clone() };
         self.form = Some(Form::server(Draft { host: true, directory, ..Draft::default() }));
     }
 

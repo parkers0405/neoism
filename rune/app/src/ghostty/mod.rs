@@ -116,10 +116,15 @@ fn library_path() -> Option<PathBuf> {
         std::env::var_os("NEOISM_GPUIX_GHOSTTY").map(PathBuf::from),
         exe_dir.as_ref().map(|d| d.join(name)),
         exe_dir.as_ref().map(|d| d.join("web/native").join(name)),
+        // A macOS app keeps its libraries under Contents/Resources.
+        exe_dir.as_ref().map(|d| d.join("../Resources/web/native").join(name)),
         Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../neoism-frontend/gpuix/artifacts")).join(name)),
     ];
     candidates.into_iter().flatten().find(|p| p.exists())
 }
+
+/// The terminal engine is installed and loads (`neoism --neoism-verify-runtime`).
+pub fn verify() -> Result<(), String> { api().map(|_| ()) }
 
 fn api() -> Result<Rc<GhosttyApi>, String> {
     API.with(|slot| {

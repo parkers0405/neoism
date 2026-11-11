@@ -58,7 +58,7 @@ pub fn view(app: &App) -> El {
             // The people with their cursor in this file, at the row's right end.
             .child_opt((!item.entry.is_dir).then(|| {
                 let path = tree.open_path(&item.path);
-                let host = if path.starts_with('/') { path } else { format!("{}/{path}", app.cwd.trim_end_matches('/')) };
+                let host = if crate::startup::absolute(&path) { path } else { format!("{}/{path}", app.cwd.trim_end_matches('/')) };
                 crate::collab::view::tree_row(app, &host).map(|orbs| row().grow(1.0).justify_end().child(orbs))
             }).flatten())
             .on_press(move |a: &mut App| { a.focus = Focus::Sidebar; a.tree_activate(Some(index)); });

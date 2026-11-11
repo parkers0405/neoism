@@ -197,7 +197,7 @@ pub fn identity(author: Option<&str>, local: &str) -> (String, String) {
 /// `NEOISM_DISPLAY_NAME`, then `presence.display-name`, then the host name (`presence.rs`).
 pub fn local_display_name(config_name: Option<&str>) -> String {
     let env = std::env::var("NEOISM_DISPLAY_NAME").ok();
-    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).unwrap_or_default();
+    let host = crate::startup::hostname();
     [env.as_deref(), config_name, Some(host.trim())].into_iter().flatten().map(str::trim)
         .find(|name| !name.is_empty()).map(|name| name.chars().take(32).collect()).unwrap_or_else(|| "neoism".into())
 }

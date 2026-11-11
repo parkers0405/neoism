@@ -227,7 +227,7 @@ impl App {
     pub fn new() -> App {
         let config = crate::config::load();
         let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = crate::startup::home();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
             workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), chip_scramble_moving: false, esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
@@ -318,7 +318,7 @@ impl App {
     }
 
     pub fn display_cwd(&self) -> String {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = crate::startup::home();
         if !home.is_empty() && self.cwd.starts_with(&home) { format!("~{}", &self.cwd[home.len()..]) } else { self.cwd.clone() }
     }
 

@@ -241,6 +241,9 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
         RowItem::Message(index) => {
             let Some(message) = messages.get(index) else { return el() };
             let last = index + 1 == messages.len();
+            // A sub-agent at work is streaming too, though no turn of its own is announced: its
+            // reply lands as a streaming one does, not eased and faded in word by word.
+            let streaming = last && (session.streaming || app.families.working_now(session_id));
             match message.kind {
                 HistoryMessageKind::Compaction => {
                     let tail = &messages[index + 1..];
@@ -256,8 +259,8 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
                     tool_row(app, session_id, session, tab_id, std::slice::from_ref(message), || tools::row(app, message)),
                 // A reply's memo reports itself (under its own key); the plain rows here.
                 HistoryMessageKind::Assistant if !(message.text.trim().is_empty() && message.attachments.is_empty()) =>
-                    message_row(app, message, last && session.streaming),
-                _ => tracked(message_row(app, message, last && session.streaming), session_id, &format!("msg:{}", message.id), tab_id),
+                    message_row(app, message, streaming),
+                _ => tracked(message_row(app, message, streaming), session_id, &format!("msg:{}", message.id), tab_id),
             }
         }
     }

@@ -129,7 +129,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
             s.select_tab(tab_id);
             s.attach_images(files.iter().map(|f| f.display().to_string()).collect());
         })
-        .child(stars(app))
+        .child(stars(app, tab_id))
         // Attached images ride at the top of the card, over the text.
         .child_opt(super::attach::composer_strip(app, tab_id))
         .child(input)
@@ -157,20 +157,43 @@ pub fn composer(app: &App, max_w: f32) -> El {
     if app.composer.hints_hidden { column } else { column.child(row().w_full().px(28.0).child(footer)) }
 }
 
-/// Faint stars inside the composer card. Deterministic positions; twinkle is a later pass.
-fn stars(app: &App) -> El {
+/// Faint stars inside the composer card: spread over the card's own size (and clipped to its
+/// corners), each twinkling on one of a few shared phases (`App::tick_stars`), so the field
+/// sparkles without re-running a view.
+fn stars(app: &App, tab_id: u64) -> El {
     let p = app.pal;
-    let mut layer = el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+    let [_, _, w, h] = app.rects.get(&format!("composer-card:{tab_id}")).copied().unwrap_or([0.0, 0.0, 820.0, 112.0]);
+    let (w, h) = ((w - 8.0).max(40.0), (h - 8.0).max(24.0));
+    let mut layer = el().key("composer-stars").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).clip_rounded(18.0);
     let mut seed: u32 = 0x9e37_79b9;
-    for i in 0..48 {
+    // About one star per 1,900 square points, as the reference card has.
+    let count = ((w * h / 1900.0) as usize).clamp(18, 72);
+    for i in 0..count {
         seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
         let x = (seed % 1000) as f32 / 1000.0;
         let y = ((seed >> 10) % 1000) as f32 / 1000.0;
         let size = if i % 7 == 0 { 2.0 } else { 1.2 };
-        layer = layer.child(el().w(size).h(size).radius(size / 2.0).fill(rgb(p.fg).alpha(0.35))
-            .absolute(x * 1000.0 % 820.0, y * 90.0));
+        layer = layer.child(el().w(size).h(size).radius(size / 2.0).fill(rgb(p.fg).alpha(if i % 7 == 0 { 0.85 } else { 0.6 }))
+            .absolute(4.0 + x * w, 4.0 + y * h).live_opacity(&app.star_twinkle[i % app.star_twinkle.len()]));
     }
     layer
+}
+
+impl App {
+    /// Step the stars' twinkle: each phase swells and fades on its own period, with a brief
+    /// bright glint near its peak. Returns whether an input bar is on screen to sparkle.
+    pub(crate) fn tick_stars(&self, clock: f64) -> bool {
+        let showing = self.layout.panes().iter().filter_map(|pane| pane.active_tab())
+            .any(|id| self.tabs.iter().any(|t| t.id == id && matches!(t.kind, TabKind::Agent { .. })));
+        if !showing { return false; }
+        for (i, phase) in self.star_twinkle.iter().enumerate() {
+            let t = clock as f32 * (0.55 + 0.17 * i as f32) + i as f32 * 1.9;
+            let swell = 0.5 + 0.5 * t.sin();
+            let glint = (0.5 + 0.5 * (t * 2.3 + 0.7).sin()).powi(8);
+            phase.set((0.22 + 0.48 * swell + 0.55 * glint).min(1.0));
+        }
+        true
+    }
 }
 
 /// What floats over the agent pane: the picker card above the composer, and a playing skit.

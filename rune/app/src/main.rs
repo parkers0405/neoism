@@ -147,6 +147,11 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.tools.spinner.tick(clock, app.ty.scale());
         wake!("spinner", std::time::Duration::from_millis(45));
     }
+    // A chat table under the turning wheel shows its scroll bar.
+    let (table_changed, table_held) = app.table_tick();
+    if table_held { wake!("table-bar", std::time::Duration::from_millis(300)); }
+    // The input bar's stars sparkle while one is on screen (live opacities, ten steps a second).
+    if app.tick_stars(clock) { wake!("stars", std::time::Duration::from_millis(100)); }
     // Presence orbs flow (at 30 Hz) while one is in view.
     if app.orbs_on_screen() && let Some(next) = app.orbs.tick() { wake!("orbs", next); }
     app.editor_follow_cursor(tx);
@@ -238,7 +243,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    let rerun = animating || changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    let rerun = animating || changed || table_changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
     // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
     if *TRACE_POLL && (rerun || !wakes.is_empty()) {
         let terms = [("animating", animating), ("changed", changed), ("stream", stream_due), ("fps", fps_changed), ("caret", caret_changed),

@@ -71,6 +71,14 @@ pub struct App {
     /// The composer chips' last labels (agent, model, thinking) and when each changed.
     pub chip_scramble: [(String, f64); 3],
     pub chip_scramble_moving: bool,
+    /// The input bar's stars twinkle on these few phases (live opacities).
+    pub star_twinkle: [rune::Live<f32>; 6],
+    /// The chat table the wheel was last turned over, and when. Hover is held on whatever was
+    /// under the pointer when a scroll began, so a table that slides under it mid-scroll is not
+    /// "hovered": its scroll bar shows by this instead (`agent/table.rs`).
+    pub table_active: Option<(String, std::time::Instant)>,
+    /// The table the views were last built for.
+    pub table_seen: Option<String>,
     /// When the conversation list and defaults were last asked for again after a catalog reset.
     pub catalog_asked: Option<std::time::Instant>,
     /// The first Esc of an Esc-Esc stop on a running chat.
@@ -244,7 +252,7 @@ impl App {
         let home = crate::startup::home();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), chip_scramble_moving: false, catalog_asked: None, esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), chip_scramble_moving: false, star_twinkle: std::array::from_fn(|_| rune::Live::new(0.5)), table_active: None, table_seen: None, catalog_asked: None, esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
             diag_popup: None,
             copy_feedback: Vec::new(),
             stream_pace: Default::default(),

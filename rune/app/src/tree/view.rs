@@ -16,6 +16,9 @@ const FONT: f32 = 13.0;
 const ICON_GAP: f32 = 8.0;
 const HEADER_H: f32 = 36.0;
 const SCROLL_KEY: &str = "file-tree-rows";
+/// The Notes header's buttons (Material Design: file-plus, folder-plus).
+const NEW_NOTE: &str = "\u{f0752}";
+const NEW_FOLDER: &str = "\u{f0257}";
 /// Rows kept between the selection and the view's edge (`file_tree::SCROLL_OFF_ROWS`).
 const SCROLLOFF: i64 = 4;
 
@@ -71,8 +74,22 @@ pub fn view(app: &App) -> El {
     let notch = 3.0 * crate::editor::view::line_height(app);
     col().key("file-tree").w_full().h_full().fill(app.surface(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
-        .child(row().w_full().h(HEADER_H * s).px(16.0 * s).center_y()
-            .child(text(if app.sidebar == Some(crate::app::Sidebar::Notes) { "Notes" } else { "File Tree" }).font(app.ty.sized_bold(14.0)).color(rgb(p.fg))))
+        .child({
+            let notes = app.sidebar == Some(crate::app::Sidebar::Notes);
+            let mut header = row().w_full().h(HEADER_H * s).pl(16.0 * s).pr(8.0 * s).center_y()
+                .child(text(if notes { "Notes" } else { "File Tree" }).font(app.ty.sized_bold(14.0)).color(rgb(p.fg)));
+            // Notes are made here: a new note or a new folder beside the selection.
+            if notes && app.notes.root.is_some() {
+                let button = |key: &'static str, glyph: &'static str, folder: bool| el().key(key).w(26.0 * s).h(26.0 * s).radius(6.0 * s).center()
+                    .cursor(rune::Cursor::Pointer).hover(rgb(p.fg).alpha(0.085))
+                    .child(text(glyph).font(TextStyle::new(15.0 * s, 400.0).family(NERD)).color(rgb(p.dim)))
+                    .on_press(move |a: &mut App| a.notes_create(folder));
+                header = header.child(row().grow(1.0).justify_end().gap(2.0 * s)
+                    .child(button("notes-new-note", NEW_NOTE, false))
+                    .child(button("notes-new-folder", NEW_FOLDER, true)));
+            }
+            header
+        })
         .child(col().key(SCROLL_KEY).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false })
             .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(SCROLL_KEY.into(), r); })

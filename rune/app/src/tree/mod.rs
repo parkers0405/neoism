@@ -35,6 +35,11 @@ pub struct Tree {
     pub open: HashSet<String>,
     requested: HashSet<String>,
     pub selected: usize,
+    /// The note or folder being created (its folder, name, and whether it is a folder), until
+    /// the daemon says it exists.
+    creating: Option<(String, String, bool)>,
+    /// The row to put the selection on once its folder's listing arrives.
+    select_after: Option<String>,
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -89,6 +94,20 @@ impl Tree {
     pub fn open_path(&self, path: &str) -> String {
         match &self.root { Some(root) => format!("{root}/{path}"), None => path.to_owned() }
     }
+}
+
+/// A vault file that is bookkeeping, not a note.
+fn vault_bookkeeping(name: &str) -> bool { name.to_ascii_lowercase().ends_with(".json") }
+
+/// `stem` + `ext`, numbered (`Untitled 2.md`) until no entry in `taken` (lower case) has it.
+fn free_name(taken: &HashSet<String>, stem: &str, ext: &str) -> String {
+    let mut name = format!("{stem}{ext}");
+    let mut n = 2;
+    while taken.contains(&name.to_lowercase()) {
+        name = format!("{stem} {n}{ext}");
+        n += 1;
+    }
+    name
 }
 
 /// Marks the notes vault as asked for, among the directories asked for.
@@ -173,12 +192,60 @@ impl App {
     }
 
     pub(crate) fn apply_dir_listing(&mut self, path: &str, entries: &serde_json::Value) {
-        let entries: Vec<Entry> = entries.as_array().into_iter().flatten().filter_map(|e| {
+        let mut entries: Vec<Entry> = entries.as_array().into_iter().flatten().filter_map(|e| {
             Some(Entry { name: e["name"].as_str()?.to_owned(), is_dir: e["is_dir"].as_bool().unwrap_or(false) })
         }).collect();
         // A notes tree claims only replies under its resolved vault; the rest are the workspace's.
-        let tree = if self.notes.root.is_some() && self.notes.own(path).is_some() { &mut self.notes } else { &mut self.tree };
+        let notes = self.notes.root.is_some() && self.notes.own(path).is_some();
+        // A vault's JSON files are its bookkeeping (`project.json`, notebook metadata), not notes.
+        if notes { entries.retain(|e| e.is_dir || !vault_bookkeeping(&e.name)); }
+        let tree = if notes { &mut self.notes } else { &mut self.tree };
         if let Some(dir) = tree.own(path) { tree.set_listing(dir, entries); }
+        // A note or folder just made takes the selection once it is listed.
+        if let Some(made) = tree.select_after.take() {
+            match tree.rows().iter().position(|row| row.path == made) {
+                Some(index) => { tree.selected = index; self.tree_follow.request(); }
+                None => tree.select_after = Some(made),
+            }
+        }
+    }
+
+    /// The Notes header's `+` buttons: a new note (`Untitled.md`) or folder (`New Folder`)
+    /// beside the selection: inside the selected folder when it is open, else next to the
+    /// selected row, else at the vault's root. A name already taken gets a number. The note
+    /// opens once the daemon has made it.
+    pub fn notes_create(&mut self, folder: bool) {
+        let Some(root) = self.notes.root.clone() else { return };
+        let tree = &self.notes;
+        let dir = match tree.rows().get(tree.selected) {
+            Some(row) if row.entry.is_dir && tree.open.contains(&row.path) => row.path.clone(),
+            Some(row) => row.path.rsplit_once('/').map(|(parent, _)| parent.to_owned()).unwrap_or_default(),
+            None => String::new(),
+        };
+        let taken: HashSet<String> = tree.listings.get(&dir).into_iter().flatten().map(|e| e.name.to_lowercase()).collect();
+        let name = free_name(&taken, if folder { "New Folder" } else { "Untitled" }, if folder { "" } else { ".md" });
+        let kind = if folder { "CreateDir" } else { "CreateFile" };
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Files, serde_json::json!({ kind: {"dir": dir, "name": name} }), &root);
+        }
+        self.notes.creating = Some((dir, name, folder));
+    }
+
+    /// `FileCreated`: the note or folder asked for exists. Its folder is listed again with it
+    /// selected, and a note opens for writing.
+    pub(crate) fn apply_file_created(&mut self, path: &str, is_dir: bool) {
+        let path = path.trim_start_matches("./");
+        let Some((dir, name, folder)) = self.notes.creating.clone() else { return };
+        if join(&dir, &name) != path || folder != is_dir { return; }
+        self.notes.creating = None;
+        self.notes.requested.remove(&dir);
+        self.notes.select_after = Some(path.to_owned());
+        if !dir.is_empty() { self.notes.open.insert(dir.clone()); }
+        self.list_dir(Sidebar::Notes, &dir);
+        if !is_dir {
+            let file = self.notes.open_path(path);
+            self.open_file(&file, None);
+        }
     }
 
     fn sidebar_tree(&mut self) -> Option<(Sidebar, &mut Tree)> {
@@ -275,5 +342,37 @@ mod tests {
         assert_eq!(files.own("src"), Some("src".into()));
         assert_eq!(files.own("/vault/a"), None);
         assert_eq!(notes.request_path("a"), "/vault/a");
+    }
+
+    #[test]
+    fn a_vault_hides_its_json_and_a_new_note_takes_a_free_name_and_the_selection() {
+        let mut app = App::new();
+        app.notes.root = Some("/vault".into());
+        app.sidebar = Some(Sidebar::Notes);
+        let entry = |name: &str, is_dir: bool| serde_json::json!({"name": name, "is_dir": is_dir});
+        app.apply_dir_listing("/vault", &serde_json::json!([entry("project.json", false), entry("Untitled.md", false), entry("Ideas", true), entry("data.json", true)]));
+        let names: Vec<String> = app.notes.rows().iter().map(|r| r.path.clone()).collect();
+        assert_eq!(names, ["data.json", "Ideas", "Untitled.md"], "JSON files are hidden; a folder is a folder whatever its name");
+        // The workspace's own tree still lists JSON.
+        app.apply_dir_listing(".", &serde_json::json!([entry("package.json", false)]));
+        assert_eq!(app.tree.rows().len(), 1);
+        // A new note beside the selection: `Untitled.md` is taken.
+        app.notes.selected = 2;
+        app.notes_create(false);
+        assert_eq!(app.notes.creating, Some((String::new(), "Untitled 2.md".into(), false)));
+        // Someone else's file being created is not ours.
+        app.apply_file_created("other.md", false);
+        assert!(app.notes.creating.is_some());
+        app.apply_file_created("Untitled 2.md", false);
+        assert!(app.notes.creating.is_none());
+        assert!(app.tabs.iter().any(|t| t.kind == crate::tabs::TabKind::Editor { path: "/vault/Untitled 2.md".into() }), "the note opens");
+        app.apply_dir_listing("/vault", &serde_json::json!([entry("Untitled.md", false), entry("Untitled 2.md", false), entry("Ideas", true)]));
+        assert_eq!(app.notes.rows()[app.notes.selected].path, "Untitled 2.md");
+        // A folder made inside an open folder lands there.
+        app.notes.selected = 0;
+        app.notes.open.insert("Ideas".into());
+        app.apply_dir_listing("/vault/Ideas", &serde_json::json!([entry("New Folder", true)]));
+        app.notes_create(true);
+        assert_eq!(app.notes.creating, Some(("Ideas".into(), "New Folder 2".into(), true)));
     }
 }

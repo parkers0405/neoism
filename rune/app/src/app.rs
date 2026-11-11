@@ -436,6 +436,9 @@ impl App {
                 if let Some(listing) = message.get("DirListing") {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);
                 }
+                if let Some(created) = message.get("FileCreated") {
+                    self.apply_file_created(created["path"].as_str().unwrap_or_default(), created["is_dir"].as_bool().unwrap_or(false));
+                }
                 if let Some(written) = message.get("FileWritten") {
                     self.apply_file_written(written["path"].as_str().unwrap_or_default(), request_id);
                 }

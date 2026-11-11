@@ -162,7 +162,10 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if mode_changing { wake!("mode", std::time::Duration::ZERO); }
     let panes_changed = app.sync_panes();
     // A file that just came back on screen goes back to where it was scrolled.
-    let scroll_restoring = app.editor_keep_scroll(tx);
+    let scroll_restoring = app.editor_keep_scroll(tx) | app.conversations_keep_scroll(tx);
+    // Sub-agents that finished a moment ago leave the conversations sidebar on time.
+    let (family_wake, family_changed) = app.family_rows_tick();
+    if let Some(delay) = family_wake { wake!("family-rows", delay); }
     if scroll_restoring { wake!("scroll-restore", std::time::Duration::ZERO); }
     app.tree_ensure_listed();
     // The directory-owning terminal's `cd` moves the workspace view with it.
@@ -235,7 +238,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    let rerun = animating || changed || scroll_restoring || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    let rerun = animating || changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
     // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
     if *TRACE_POLL && (rerun || !wakes.is_empty()) {
         let terms = [("animating", animating), ("changed", changed), ("stream", stream_due), ("fps", fps_changed), ("caret", caret_changed),
@@ -563,6 +566,27 @@ fn main() {
                     peer("Grace", file("server.rs"), [0x98, 0xc3, 0x79], (0, 0), None, false, false),
                 ]);
                 s.peer_hover = Some("bob@scene".into());
+            }),
+            // The conversations sidebar with a family at work: the root's loader, three
+            // sub-agents under it (working, waiting on approval, just finished) on their line,
+            // and a nested one a level further in.
+            ("family", |s| {
+                use neoism_protocol::agent::AgentServerMessage as M;
+                s.load_fixture("root-a", "Refactor the frame scheduler", "[]");
+                s.load_fixture("root-b", "Why does the tree flicker on resize", "[]");
+                s.sidebar = Some(app::Sidebar::Conversations);
+                s.apply_agent(M::CatalogActivity { session_id: "root-a".into(), activity: "running".into() });
+                let branch = |id: &str, parent: &str, status: &str, title: &str, agent: &str, pending: bool| serde_json::json!({
+                    "sessionId": id, "parentSessionId": parent, "status": status, "title": title, "agent": agent, "permissionPending": pending });
+                let family = |revision: u64, last: &str| M::CatalogFamily { session_id: "root-a".into(), snapshot: serde_json::json!({
+                    "rootSessionId": "root-a", "familyRevision": revision, "branches": [
+                        branch("child-1", "root-a", "outstanding", "Explore the pacing code", "explore", false),
+                        branch("child-1a", "child-1", "outstanding", "Read the scroll spring", "explore", false),
+                        branch("child-2", "root-a", "outstanding", "Patch the present loop", "build", true),
+                        branch("child-3", "root-a", last, "Summarise the trace", "general", false),
+                    ] }) };
+                s.apply_agent(family(1, "outstanding"));
+                s.apply_agent(family(2, "completed"));
             }),
             ("tree-long", |s| {
                 let entries: Vec<_> = (0..80).map(|i| serde_json::json!({"name": format!("file_{i:02}.rs"), "is_dir": false})).collect();

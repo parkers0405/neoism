@@ -130,7 +130,8 @@ fn header(cx: &Cx, m: &HistoryMessage, spec: Header) -> El {
     let id = m.id.clone();
     // Only the Task row navigates (`hit_rects.rs`): diff sections and group children don't.
     let task = (m.tool == "task").then(|| crate::agent::family::task_id(&m.detail, &m.text)).flatten();
-    let hit = el().w(w).h(cx.pt(HEADER_H)).absolute(0.0, 0.0).on_press(move |a: &mut App| match &task {
+    // A card that opens (its detail, or its sub-agent) shows the hand.
+    let hit = el().w(w).h(cx.pt(HEADER_H)).absolute(0.0, 0.0).cursor(rune::Cursor::Pointer).on_press(move |a: &mut App| match &task {
         Some(session) => a.view_session(session),
         None => a.tools.toggle(&id),
     });

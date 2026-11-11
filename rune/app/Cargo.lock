@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-service-api"
-version = "0.7.148"
+version = "0.7.149-nightly.20261110.1"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -2214,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.148"
+version = "0.7.149-nightly.20261110.1"
 dependencies = [
  "serde",
  "serde_json",

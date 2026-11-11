@@ -19,6 +19,27 @@ pub struct ClosingConnection {
     deadline: std::time::Instant,
 }
 
+// Workers retain remote tunnels while the window is already gone. The main thread joins
+// them only after Rune has destroyed the native windows and returned from its event loop.
+static WINDOW_CLEANUP: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+fn defer_window_cleanup(pending: Vec<ClosingConnection>) {
+    let worker = std::thread::spawn(move || {
+        for closing in pending {
+            let _ = closing.done.recv_timeout(closing.deadline.saturating_duration_since(std::time::Instant::now()));
+        }
+    });
+    let mut workers = WINDOW_CLEANUP.lock().unwrap();
+    workers.retain(|worker| !worker.is_finished());
+    workers.push(worker);
+}
+
+pub fn finish_window_cleanup() {
+    let workers = std::mem::take(&mut *WINDOW_CLEANUP.lock().unwrap());
+    for worker in workers { let _ = worker.join(); }
+    crate::servers::shutdown();
+}
+
 impl App {
     /// Terminal tabs that can own the directory: Home and Terminal tabs with a live shell.
     fn directory_terminals(&self) -> impl Iterator<Item = u64> + '_ {
@@ -517,18 +538,16 @@ impl App {
         if std::mem::replace(&mut self.resources_closed, true) { return; }
         if !self.session_closed { self.save_session(true); }
         let active = self.workspace_active;
-        let mut pending = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut pending = std::mem::take(&mut self.closing_connections);
         for index in 0..self.workspaces.len() {
             self.swap_workspace(index);
-            if let Some(done) = self.release_workspace() { pending.push(done); }
+            if let Some(done) = self.release_workspace() {
+                pending.push(ClosingConnection { done, _link: std::mem::take(&mut self.server.link), deadline });
+            }
         }
         self.swap_workspace(active);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        for done in pending { let _ = done.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())); }
-        for closing in self.closing_connections.drain(..) {
-            let _ = closing.done.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
-        }
-        crate::servers::shutdown();
+        defer_window_cleanup(pending);
     }
 
     fn finish_workspace_close(&mut self) {
@@ -611,6 +630,25 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_close_does_not_wait_for_a_stalled_cleanup_ack() {
+        let mut app = crate::app::App::new();
+        app.session_closed = true;
+        let (ack, done) = std::sync::mpsc::channel();
+        app.closing_connections.push(super::ClosingConnection {
+            done, _link: Default::default(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+        });
+        let started = std::time::Instant::now();
+        app.close_window_resources();
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        assert!(app.resources_closed);
+        assert!(app.closing_connections.is_empty());
+        // The cleanup receiver still exists after returning to the window manager.
+        ack.send(()).unwrap();
+        app.close_window_resources(); // Rune may also invoke the quit hook.
+    }
+
     #[test]
     fn workspace_chips_follow_the_restored_prompt_selection() {
         let mut app = crate::app::App::new();

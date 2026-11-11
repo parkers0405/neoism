@@ -699,5 +699,6 @@ fn main() {
         }
     });
     app.run();
+    workspace::finish_window_cleanup();
 }
 

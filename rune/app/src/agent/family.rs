@@ -46,6 +46,12 @@ pub struct Families {
     live: std::collections::HashSet<String>,
     /// When a child seen at work finished.
     ended: HashMap<String, std::time::Instant>,
+    /// Children known to have stopped, and whether they failed. This outlives the roster row:
+    /// the family's next execution no longer lists the child, and the card that launched a
+    /// background sub-agent says `running` for good. With it, the family revision the stop
+    /// was seen at: only a later snapshot says the child is at work again (the two snapshot
+    /// streams lag each other, and one can still be repeating an older revision).
+    stopped: HashMap<String, (bool, Option<u64>)>,
 }
 
 /// A finished child stays in the sidebar this long after it was seen to finish, a failed one
@@ -105,12 +111,24 @@ impl Families {
     /// family saying so yet. Returns whether that changed anything.
     pub fn finish(&mut self, session: &str, failed: bool) -> bool {
         let Some(root) = self.roots.get(session).cloned() else { return false };
-        let Some(member) = self.rosters.get_mut(&root).and_then(|rows| rows.iter_mut().find(|m| m.id == session)) else { return false };
-        if !member.working() { return false; }
-        member.status = if failed { "failed" } else { "completed" }.into();
-        if self.live.contains(session) { self.ended.insert(session.to_owned(), std::time::Instant::now()); }
+        let member = self.rosters.get_mut(&root).and_then(|rows| rows.iter_mut().find(|m| m.id == session));
+        let working = member.as_ref().is_some_and(|m| m.working());
+        if !working && self.stopped.contains_key(session) { return false; }
+        if let Some(member) = member.filter(|m| m.working()) { member.status = if failed { "failed" } else { "completed" }.into(); }
+        self.mark_stopped(session, failed);
         true
     }
+
+    fn mark_stopped(&mut self, session: &str, failed: bool) {
+        let root = self.root_of(session).to_owned();
+        let seen = ["CatalogFamily", "RuntimeSnapshot"].iter().filter_map(|source| self.versions.get(&format!("{root}:{source}"))).map(|v| v.revision).max();
+        let since = self.stopped.get(session).and_then(|(_, since)| *since).max(seen);
+        self.stopped.insert(session.to_owned(), (failed, since));
+        if self.live.contains(session) { self.ended.entry(session.to_owned()).or_insert_with(std::time::Instant::now); }
+    }
+
+    /// Whether `session` is known to have stopped, and if so whether it failed.
+    pub fn stopped(&self, session: &str) -> Option<bool> { self.stopped.get(session).map(|(failed, _)| *failed) }
 
     /// The catalog started over (`CatalogReset`): its next snapshots are a fresh baseline,
     /// whatever their revision, and only the families it names again are still at work.
@@ -118,12 +136,7 @@ impl Families {
         self.versions.retain(|key, _| !key.ends_with(":CatalogFamily"));
         let stale: Vec<String> = self.rosters.values().flatten().filter(|m| m.working() && self.live.contains(&m.id)).map(|m| m.id.clone()).collect();
         for id in stale { self.finish(&id, false); }
-    }
-
-    /// Every sub-agent known to have stopped: `(parent, child, failed)`.
-    pub fn finished(&self) -> Vec<(String, String, bool)> {
-        self.rosters.values().flatten().filter(|m| !m.working() && self.live.contains(&m.id))
-            .map(|m| (m.parent.clone(), m.id.clone(), m.status == "failed")).collect()
+        for (_, since) in self.stopped.values_mut() { *since = None; }
     }
 
     /// When the next lingering child leaves the sidebar.
@@ -178,7 +191,7 @@ impl Families {
                 let revision = snapshot["familyRevision"].as_u64().unwrap_or(0);
                 let execution = snapshot.get("executionId").cloned().filter(|v| !v.is_null());
                 if !self.accept_version(&root, "CatalogFamily", execution, revision) { return false; }
-                self.merge(&root, branches, true, false)
+                self.merge(&root, branches, Some(revision), false)
             }
             AgentServerMessage::RuntimeSnapshot { snapshot, .. } => self.note_runtime(snapshot),
             AgentServerMessage::SubagentUpdate { session_id, status, title, agent, started_at, parent_session_id, root_session_id, .. } => {
@@ -194,7 +207,7 @@ impl Families {
                     SubagentStatus::Failed => "failed",
                 };
                 let branch = Branch { id: session_id.clone(), parent, title: title.clone(), agent: agent.clone(), status: Some(status.into()), started_at: *started_at };
-                self.merge(&root, vec![branch], false, false)
+                self.merge(&root, vec![branch], None, false)
             }
             AgentServerMessage::SubagentMetadata { session_id, title, agent, parent_session_id } => {
                 // Metadata may rename a known row but never creates one.
@@ -203,7 +216,7 @@ impl Families {
                 let root = parent.as_deref().map(|p| self.root_of(p).to_owned()).or_else(|| self.roots.get(session_id).cloned());
                 let Some(root) = root else { return false };
                 let branch = Branch { id: session_id.clone(), parent, title: title.clone(), agent: agent.clone(), status: None, started_at: None };
-                self.merge(&root, vec![branch], false, true)
+                self.merge(&root, vec![branch], None, true)
             }
             _ => false,
         }
@@ -216,7 +229,7 @@ impl Families {
             id: b.session_id.clone(), parent: Some(b.parent_session_id.clone()).filter(|p| !p.is_empty()),
             title: None, agent: None, status: Some(b.status.clone()), started_at: b.started_at,
         }).collect();
-        self.merge(&root, branches, snapshot.branches_authoritative, false)
+        self.merge(&root, branches, snapshot.branches_authoritative.then_some(snapshot.family_revision), false)
     }
 
     /// Children named by `task` cards in a history page (`task_id: <id>` lines), so an old
@@ -224,10 +237,12 @@ impl Families {
     pub fn seed_from_history(&mut self, root: &str, messages: &[HistoryMessage]) -> bool {
         let branches: Vec<Branch> = messages.iter().filter(|m| m.tool == "task").filter_map(|m| {
             let id = task_id(&m.detail, &m.text)?;
-            Some(Branch { id, parent: Some(root.to_owned()), title: Some(m.title.trim().to_owned()).filter(|t| !t.is_empty()), agent: None, status: None, started_at: None })
+            // The card's own title names a child nothing else has named yet.
+            let title = Some(m.title.trim().to_owned()).filter(|t| !t.is_empty() && !self.roots.contains_key(&id));
+            Some(Branch { id, parent: Some(root.to_owned()), title, agent: None, status: None, started_at: None })
         }).collect();
         if branches.is_empty() { return false; }
-        self.merge(root, branches, false, false)
+        self.merge(root, branches, None, false)
     }
 
     fn accept_version(&mut self, root: &str, source: &str, execution: Option<Value>, revision: u64) -> bool {
@@ -244,27 +259,45 @@ impl Families {
         true
     }
 
-    fn merge(&mut self, root: &str, incoming: Vec<Branch>, authoritative: bool, metadata_only: bool) -> bool {
+    /// `snapshot` is the family revision of a snapshot that lists every child of the current
+    /// execution; `None` for word about single children.
+    fn merge(&mut self, root: &str, incoming: Vec<Branch>, snapshot: Option<u64>, metadata_only: bool) -> bool {
+        let authoritative = snapshot.is_some();
         let previous = self.rosters.get(root).cloned().unwrap_or_default();
-        let mut rows: Vec<Member> = if authoritative { Vec::new() } else { previous.clone() };
+        // A family snapshot lists one execution's children. One it no longer lists has stopped,
+        // and stays a member: its conversation is still part of this one.
+        let mut rows = previous.clone();
+        if authoritative {
+            let unlisted: Vec<String> = rows.iter().filter(|m| m.working() && !incoming.iter().any(|b| b.id == m.id)).map(|m| m.id.clone()).collect();
+            for row in rows.iter_mut().filter(|m| unlisted.contains(&m.id)) { row.status = "completed".into(); }
+            for id in unlisted { self.mark_stopped(&id, false); }
+        }
         for branch in incoming {
             if branch.id.is_empty() || branch.id == root { continue; }
             let parent = branch.parent.or_else(|| self.parents.get(&branch.id).cloned()).unwrap_or_else(|| root.to_owned());
             self.parents.insert(branch.id.clone(), parent.clone());
             self.roots.insert(branch.id.clone(), root.to_owned());
             let old = previous.iter().find(|m| m.id == branch.id);
-            // Seen at work, or seen to stop working: what the sidebar's child rows go by.
-            if let Some(status) = branch.status.as_deref().map(str::to_lowercase) {
-                if matches!(status.as_str(), "running" | "blocked") {
+            // Seen at work, or seen to stop working: what the sidebar's child rows go by. Once
+            // a child stopped, only a family snapshot says it is at work again: a late part or
+            // status update of its last step, or the card that launched it, does not.
+            let mut status = branch.status.map(|s| s.to_lowercase());
+            match status.as_deref() {
+                Some("running" | "blocked") if self.stopped.get(&branch.id).is_some_and(|(_, since)| !authoritative || since.is_some_and(|since| snapshot <= Some(since))) => status = None,
+                Some("running" | "blocked") => {
                     self.live.insert(branch.id.clone());
                     self.ended.remove(&branch.id);
-                } else if self.live.contains(&branch.id) && old.is_some_and(Member::working) {
-                    self.ended.insert(branch.id.clone(), std::time::Instant::now());
+                    self.stopped.remove(&branch.id);
                 }
+                Some(other) => { let failed = other == "failed"; self.mark_stopped(&branch.id, failed); }
+                None => {}
             }
+            // A row with no word of its own (named by a task card, or by metadata) is as it was
+            // last known; one never seen at work is not at work.
+            let known = || match self.stopped.get(&branch.id) { Some((true, _)) => "failed", _ => "completed" }.to_owned();
             let row = Member {
                 title: branch.title.filter(|t| !t.is_empty()).or_else(|| old.map(|o| o.title.clone())).unwrap_or_else(|| branch.id.clone()),
-                status: branch.status.map(|s| s.to_lowercase()).or_else(|| old.map(|o| o.status.clone())).unwrap_or_else(|| "running".into()),
+                status: status.or_else(|| old.map(|o| o.status.clone())).unwrap_or_else(known),
                 agent: branch.agent.or_else(|| old.and_then(|o| o.agent.clone())),
                 started_at: branch.started_at.or_else(|| old.and_then(|o| o.started_at)),
                 depth: 1,

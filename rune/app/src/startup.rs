@@ -63,7 +63,7 @@ pub fn absolute(path: &str) -> bool {
 /// A directory a desktop launcher starts programs in rather than one the user chose: the
 /// filesystem root, the inside of a macOS app, or (Windows) the system folders and the
 /// program's own folder.
-fn launcher_directory(dir: &Path) -> bool {
+pub(crate) fn launcher_directory(dir: &Path) -> bool {
     if dir.parent().is_none() { return cfg!(any(target_os = "macos", windows)); }
     if cfg!(target_os = "macos") && dir.to_string_lossy().contains(".app/Contents") { return true; }
     if cfg!(windows) {

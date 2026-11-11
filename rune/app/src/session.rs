@@ -184,7 +184,9 @@ impl App {
     }
 
     fn restore_workspace(&mut self, saved: SavedWorkspace) {
-        if !saved.cwd.is_empty() && std::path::Path::new(&saved.cwd).is_dir() {
+        // A saved window may remember a launcher's folder (`/`, the app bundle, System32) from
+        // before the app mapped those to home: it is not a project either (`recoveredStartupDirectory`).
+        if !saved.cwd.is_empty() && std::path::Path::new(&saved.cwd).is_dir() && !crate::startup::launcher_directory(std::path::Path::new(&saved.cwd)) {
             self.cwd = saved.cwd;
             self.workspace_name = saved.name;
         }

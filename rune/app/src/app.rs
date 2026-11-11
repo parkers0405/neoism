@@ -131,6 +131,10 @@ pub struct App {
     /// row's own click is skipped then).
     pub tree_dnd: Option<crate::tree::drag::TreeDrag>,
     pub tree_press_suppressed: bool,
+    /// A folder the main terminal reported, being confirmed with the daemon before the
+    /// workspace moves there (request id, folder), and the last one it refused.
+    pub root_probe: Option<(u64, String)>,
+    pub root_refused: Option<String>,
     /// The open Settings page.
     pub settings: Option<crate::settings::Settings>,
     pub keybindings: serde_json::Value,
@@ -328,6 +332,8 @@ impl App {
             prompt: None,
             tree_dnd: None,
             tree_press_suppressed: false,
+            root_probe: None,
+            root_refused: None,
             settings: None,
             databases: HashMap::new(),
             keybindings: crate::config::read()["keybinds"]["keys"].clone(),
@@ -443,6 +449,7 @@ impl App {
                 if let Ok(typed) = serde_json::from_value(message) { self.apply_search(typed); }
             }
             Inbound::Reply { family, message, request_id } if family == "Files" => {
+                if self.root_probe_reply(request_id, &message) { return; }
                 self.apply_files(&message);
                 if let Some(listing) = message.get("DirListing") {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);

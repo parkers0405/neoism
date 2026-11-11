@@ -49,6 +49,7 @@ struct ConnectFlow {
 /// Composer state the slash system owns.
 #[derive(Default)]
 pub struct Composer {
+    pub prompts: super::prompts::Prompts,
     pub picker: Option<Picker>,
     pub selection: Selection,
     pub defaults: Selection,

@@ -530,6 +530,9 @@ pub fn apply_agent_event_to_pane_with_history_kind(
         } => {
             pane.note_permission_replied(&request_id, Some(&session_id));
         }
+        // The authoritative pending list is the Rune client's; this pane keeps following the
+        // per-request PermissionRequest / PermissionRemoved edges it always has.
+        AgentServerMessage::PermissionsUpdated { .. } => {}
         AgentServerMessage::PermissionReplyFailed { request_id, error } => {
             pane.permission_reply_failed(&request_id, error);
         }
@@ -1420,6 +1423,7 @@ pub fn agent_event_session_id(
         | AgentServerMessage::Notice { session_id, .. }
         | AgentServerMessage::ToolUseRequest { session_id, .. }
         | AgentServerMessage::PermissionRemoved { session_id, .. }
+        | AgentServerMessage::PermissionsUpdated { session_id, .. }
         | AgentServerMessage::ToolUseResult { session_id, .. }
         | AgentServerMessage::QuestionAsked { session_id, .. }
         | AgentServerMessage::QuestionsUpdated { session_id, .. }

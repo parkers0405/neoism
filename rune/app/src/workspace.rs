@@ -12,6 +12,13 @@ use crate::daemon::Family;
 use crate::tabs::TabKind;
 use neoism_protocol::pty::ClientMessage as PtyClient;
 
+/// Keep an SSH tunnel alive until its close request has reached the server.
+pub struct ClosingConnection {
+    done: std::sync::mpsc::Receiver<()>,
+    _link: crate::servers::flow::Link,
+    deadline: std::time::Instant,
+}
+
 impl App {
     /// Terminal tabs that can own the directory: Home and Terminal tabs with a live shell.
     fn directory_terminals(&self) -> impl Iterator<Item = u64> + '_ {
@@ -325,6 +332,9 @@ impl App {
         self.workspaces[old].state = Some(incoming);
         self.workspace_active = index;
         self.render_tab.set(None);
+        // Labels are window fields; the actual prompt selection belongs to the workspace.
+        // Refresh them with the incoming composer before the next frame draws its chips.
+        self.sync_chips();
     }
 
     pub fn select_workspace(&mut self, index: usize) {
@@ -474,18 +484,48 @@ impl App {
         }
         // No unsaved-changes blocker: closing a workspace just closes it.
         let _ = discard;
-        if let Some(d) = &self.daemon {
-            if self.connection != Connection::Connected {
-                return;
-            }
-            self.workspace_closing = Some(d.request(
-                Family::Workspace,
-                json!({"CloseWindowWorkspace":{"workspace_id":self.workspace_id}}),
-                None,
-            ));
-        } else {
-            self.finish_workspace_close();
+        let pending = self.release_workspace();
+        if let Some(done) = pending {
+            self.closing_connections.push(ClosingConnection { done, _link: std::mem::take(&mut self.server.link),
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(2) });
         }
+        self.finish_workspace_close();
+    }
+
+    /// Close only resources owned by this view. The daemon decides whether the workspace
+    /// itself is private and can be retired, or is shared and must survive our departure.
+    fn release_workspace(&mut self) -> Option<std::sync::mpsc::Receiver<()>> {
+        let tabs: Vec<_> = self.terminals.keys().copied().collect();
+        for tab in tabs { self.close_terminal(tab); }
+        let tabs: Vec<_> = self.tabs.iter().map(|tab| tab.id).collect();
+        for tab in tabs { self.forget_table_state(tab); }
+        self.daemon.take().map(|daemon| daemon.close(&self.workspace_id))
+    }
+
+    pub fn poll_closing_connections(&mut self, tx: &mut rune::Tx) {
+        self.closing_connections.retain(|closing| {
+            closing.deadline > std::time::Instant::now()
+                && matches!(closing.done.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
+        });
+        if !self.closing_connections.is_empty() { tx.wake_after(std::time::Duration::from_millis(50)); }
+    }
+
+    pub fn close_window_resources(&mut self) {
+        if std::mem::replace(&mut self.resources_closed, true) { return; }
+        if !self.session_closed { self.save_session(true); }
+        let active = self.workspace_active;
+        let mut pending = Vec::new();
+        for index in 0..self.workspaces.len() {
+            self.swap_workspace(index);
+            if let Some(done) = self.release_workspace() { pending.push(done); }
+        }
+        self.swap_workspace(active);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        for done in pending { let _ = done.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())); }
+        for closing in self.closing_connections.drain(..) {
+            let _ = closing.done.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+        }
+        crate::servers::shutdown();
     }
 
     fn finish_workspace_close(&mut self) {
@@ -568,6 +608,33 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_chips_follow_the_restored_prompt_selection() {
+        let mut app = crate::app::App::new();
+        app.open_tab(crate::tabs::TabKind::Agent { session: None });
+        app.composer.selection = crate::agent::slash::Selection {
+            model: "openai/gpt-6.1-sol".into(), agent: "build".into(), thinking: "high".into(),
+        };
+        app.sync_chips();
+        let first = (app.model.clone(), app.agent.clone(), app.effort.clone());
+        app.new_workspace();
+        app.open_tab(crate::tabs::TabKind::Agent { session: None });
+        app.composer.selection = crate::agent::slash::Selection {
+            model: "openrouter/anthropic/claude".into(), agent: "plan".into(), thinking: "medium".into(),
+        };
+        app.sync_chips();
+        let second = (app.model.clone(), app.agent.clone(), app.effort.clone());
+        app.select_workspace(0);
+        assert_eq!((app.model.clone(), app.agent.clone(), app.effort.clone()), first);
+        assert_eq!(app.composer.selection.model, "openai/gpt-6.1-sol");
+        app.select_workspace(1);
+        assert_eq!((app.model.clone(), app.agent.clone(), app.effort.clone()), second);
+        app.composer.selection.model.clear();
+        app.select_workspace(0);
+        app.select_workspace(1);
+        assert_eq!(app.model, "Select model");
+    }
+
     use super::*;
     #[test]
     fn switching_preserves_drafts_panes_focus_and_unique_ids() {

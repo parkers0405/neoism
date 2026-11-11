@@ -74,6 +74,8 @@ impl StreamPace {
 
 #[derive(Default)]
 pub struct Session {
+    /// Streaming parts share their assistant message's identity even when delivered out of order.
+    pub part_parents: std::collections::HashMap<String, String>,
     /// Each message's revision: bumped whenever anything about it changes. Transcript rows
     /// are cached by it (`rune::memo`).
     pub message_versions: std::collections::HashMap<String, u64>,
@@ -118,6 +120,7 @@ pub struct Session {
     pub older_limit: u32,
     pub streaming: bool,
     pub status: Option<String>,
+    pub compacting: bool,
     /// First message of a turn that streamed while open here; its tool and thinking rows stay
     /// visible. Reloaded history shows finished turns as prompt, answer and footer only.
     pub live_from: Option<usize>,
@@ -131,6 +134,25 @@ pub struct Session {
 }
 
 impl Session {
+    fn order_stream_parts(&mut self, part: &str, parent: Option<String>) {
+        if let Some(parent) = parent { self.part_parents.insert(part.to_owned(), parent); }
+        let Some(parent) = self.part_parents.get(part) else { return };
+        let slots: Vec<usize> = self.messages.iter().enumerate().filter(|(_, m)|
+            self.part_parents.get(&m.id) == Some(parent)
+                && matches!(m.kind, HistoryMessageKind::Reasoning | HistoryMessageKind::Assistant))
+            .map(|(i, _)| i).collect();
+        if slots.windows(2).all(|pair| self.messages[pair[0]].kind == HistoryMessageKind::Reasoning
+            || self.messages[pair[1]].kind != HistoryMessageKind::Reasoning) { return; }
+        let mut rows: Vec<_> = slots.iter().map(|&i| self.messages[i].clone()).collect();
+        rows.sort_by_key(|m| m.kind != HistoryMessageKind::Reasoning);
+        let mut changed = false;
+        for (i, row) in slots.into_iter().zip(rows) {
+            changed |= self.messages[i].id != row.id;
+            self.messages[i] = row;
+        }
+        if changed { self.structure += 1; self.rebase_live(); }
+    }
+
     /// Find the live turn again after rows were added or moved. With no anchor yet (the turn
     /// began before its prompt arrived), the first prompt at or after the old index becomes it.
     fn rebase_live(&mut self) {
@@ -212,6 +234,15 @@ impl App {
     /// A restored conversation tab (`session.rs`) loads like an opened one.
     pub(crate) fn load_session_history(&mut self, session_id: &str) { self.load_session(session_id); }
 
+    pub(crate) fn release_closed_agent(&mut self, session_id: &str) {
+        let root = self.families.root_of(session_id).to_owned();
+        if self.tabs.iter().any(|tab| matches!(&tab.kind, TabKind::Agent { session: Some(id) } if self.families.root_of(id) == root)) { return; }
+        if let Some(owner) = self.stream_owner.remove(&root) {
+            self.send_agent(AgentClientMessage::StopStream { session_id: owner });
+        }
+        self.sessions.retain(|id, _| self.families.root_of(id) != root);
+    }
+
     /// Fetch a session's newest page and follow its stream, once.
     fn load_session(&mut self, session_id: &str) {
         let session = self.sessions.entry(session_id.into()).or_default();
@@ -268,6 +299,14 @@ impl App {
         }
     }
 
+    fn update_background_jobs(&mut self, root: String, count: usize, epoch: Option<&str>, revision: Option<u64>) {
+        if let (Some(epoch), Some(revision)) = (epoch, revision) {
+            if self.background_job_versions.get(&root).is_some_and(|(old, rev)| old == epoch && *rev > revision) { return; }
+            self.background_job_versions.insert(root.clone(), (epoch.to_owned(), revision));
+        }
+        self.background_jobs.insert(root, count);
+    }
+
     /// Whether any conversation the sidebar lists is at work (its loader is turning).
     pub fn sidebar_running(&self) -> bool {
         self.threads.iter().any(|t| self.activity_of(t) != "idle") || self.families.sidebar_count() > 0
@@ -276,9 +315,10 @@ impl App {
     /// What a conversation is doing, by the catalog: the live word, else the one its row came
     /// with, else the older `busy` flag.
     pub fn activity_of<'a>(&'a self, thread: &'a ThreadSummary) -> &'a str {
-        self.thread_activity.get(&thread.session_id).map(String::as_str)
+        let activity = self.thread_activity.get(&thread.session_id).map(String::as_str)
             .or(thread.catalog_activity.as_deref())
-            .unwrap_or(if thread.busy { "running" } else { "idle" })
+            .unwrap_or(if thread.busy { "running" } else { "idle" });
+        if activity != "permission" && self.background_count(&thread.session_id) > 0 { "background" } else { activity }
     }
 
     /// Per frame: remember where each showing transcript is scrolled and put one that just came
@@ -441,11 +481,14 @@ impl App {
             _ => {}
         }
         // The runtime snapshot also counts the family's background tasks (when it reports them).
-        if let AgentServerMessage::RuntimeSnapshot { snapshot, .. } = &message
+        if let AgentServerMessage::RuntimeSnapshot { session_id, snapshot } = &message
             && let Some(jobs) = &snapshot.running_background_tasks
         {
-            let root = if snapshot.root_session_id.is_empty() { jobs.first().map(|j| j.session_id.clone()).unwrap_or_default() } else { snapshot.root_session_id.clone() };
-            if !root.is_empty() { self.background_jobs.insert(root, jobs.len()); }
+            let root = if snapshot.root_session_id.is_empty() { self.families.root_of(session_id).to_owned() } else { snapshot.root_session_id.clone() };
+            if !root.is_empty() { self.update_background_jobs(root, jobs.len(), snapshot.background_jobs_epoch.as_deref(), snapshot.background_jobs_revision); }
+        }
+        if let AgentServerMessage::BackgroundTasksUpdated { session_id, epoch, revision, tasks } = &message {
+            self.update_background_jobs(self.families.root_of(session_id).to_owned(), tasks.len(), Some(epoch), Some(*revision));
         }
         if self.families.note(&message) {
             // A family gained or changed a member: its chats are fetched ahead of a click, and
@@ -478,6 +521,7 @@ impl App {
                     // Follow the new conversation's stream before the first prompt goes out, so
                     // its streaming state, deltas and tool rows arrive live.
                     self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.clone() });
+                    self.stream_owner.insert(session_id.clone(), session_id.clone());
                     self.send_agent(AgentClientMessage::ResumeStream { session_id: session_id.clone() });
                     self.submit_prompt(&session_id, prompt);
                 }
@@ -494,6 +538,7 @@ impl App {
                 if !self.families.is_child(&session_id) { self.families.seed_from_history(&session_id, &messages); }
                 self.prefetching.remove(&session_id);
                 let mut messages = messages;
+                identify_anonymous_rows(&mut messages);
                 let session = self.sessions.entry(session_id).or_default();
                 for message in &mut messages { settle_task_card(&self.families, message, session.streaming); }
                 for message in &messages { session.note_message(message); }
@@ -528,15 +573,18 @@ impl App {
                 // The next sub-agent chat waiting to be fetched ahead.
                 self.preload_family_history();
             }
-            AgentServerMessage::MessageUpdated { session_id, mut message, .. } => {
+            AgentServerMessage::MessageUpdated { session_id, mut message, parent_message_id } => {
                 let session = self.sessions.entry(session_id).or_default();
+                let part = message.id.clone();
                 settle_task_card(&self.families, &mut message, session.streaming);
                 session.note_message(&message);
                 upsert(&mut session.messages, message);
+                session.order_stream_parts(&part, parent_message_id);
                 session.rebase_live();
             }
-            AgentServerMessage::ContentDelta { session_id, message_id, text, kind, .. } => {
+            AgentServerMessage::ContentDelta { session_id, message_id, text, kind, parent_message_id } => {
                 let session = self.sessions.entry(session_id).or_default();
+                let part = message_id.clone();
                 *session.message_versions.entry(message_id.clone()).or_default() += 1;
                 if let Some(message) = session.messages.iter_mut().find(|m| m.id == message_id) {
                     // A reply or a thought growing keeps the row list as it is; anything else
@@ -557,8 +605,19 @@ impl App {
                         detail: String::new(), todos: Vec::new(), usage: None, attachments: Vec::new(), created_at: 0,
                     });
                 }
+                session.order_stream_parts(&part, parent_message_id);
+            }
+            AgentServerMessage::Compaction { session_id, phase, .. } => {
+                let ended = matches!(phase, neoism_protocol::agent::CompactionPhase::Ended);
+                self.sessions.entry(session_id.clone()).or_default().compacting = !ended;
+                if ended {
+                    self.send_agent(AgentClientMessage::GetHistory { session_id, cursor: None, limit: Some(HEAD_PAGE) });
+                }
             }
             AgentServerMessage::StreamingState { session_id, state, label } => {
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    session.compacting = matches!(state, StreamingState::Compacting);
+                }
                 self.set_streaming(&session_id, !matches!(state, StreamingState::Idle));
                 if let Some(session) = self.sessions.get_mut(&session_id) { session.status = label; }
             }
@@ -576,13 +635,18 @@ impl App {
                     if session.messages.len() != before { session.structure += 1; session.rebase_live(); }
                 }
             }
-            AgentServerMessage::SessionIdle { session_id, .. } => self.set_streaming(&session_id, false),
+            AgentServerMessage::SessionIdle { session_id, .. } => {
+                if let Some(session) = self.sessions.get_mut(&session_id) { session.compacting = false; }
+                self.set_streaming(&session_id, false);
+            },
             // The agent service (re)started its catalog: on a cold start it comes up after the
             // daemon, and whatever was asked before it did went unanswered. Ask again.
             AgentServerMessage::CatalogReset { .. } => {
                 // What the old catalog said was running is only still running if the new one
                 // says so again.
                 self.thread_activity.clear();
+                self.background_jobs.clear();
+                self.background_job_versions.clear();
                 self.families.catalog_reset();
                 self.settle_task_cards();
                 if self.catalog_asked.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(2)) {
@@ -632,11 +696,46 @@ fn upsert(messages: &mut Vec<HistoryMessage>, message: HistoryMessage) {
     }
 }
 
+/// Some server-generated system rows have no part ID (notably compaction notices).
+/// Give them an identity relative to the preceding real row, rather than conflating
+/// every anonymous notice or making them compete for the same held slot.
+fn identify_anonymous_rows(rows: &mut [HistoryMessage]) {
+    use std::hash::{Hash, Hasher};
+    let mut anchor = String::new();
+    let mut occurrence = 0;
+    for row in rows {
+        if !row.id.is_empty() {
+            if !row.id.starts_with("history-anonymous:") { anchor = row.id.clone(); occurrence = 0; }
+            continue;
+        }
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        row.text.hash(&mut hash);
+        row.title.hash(&mut hash);
+        row.id = format!("history-anonymous:{anchor}:{}:{occurrence}", hash.finish());
+        occurrence += 1;
+    }
+}
+
 /// Head refresh (the GPUiX `mergeHistoryHead` contract): rows the page knows take its copies
 /// and its order, in the places those rows held; rows it doesn't know stay where they were;
 /// rows new with the page land after the row the page puts before them. Returns whether any
 /// row moved or arrived.
-fn merge_head(messages: &mut Vec<HistoryMessage>, page: Vec<HistoryMessage>) -> bool {
+fn merge_head(messages: &mut Vec<HistoryMessage>, mut page: Vec<HistoryMessage>) -> bool {
+    identify_anonymous_rows(messages);
+    identify_anonymous_rows(&mut page);
+    // Compaction refreshes can repeat a part ID. Keep its first position and latest
+    // snapshot, as a normal MessageUpdated would, before assigning held-row slots.
+    let mut unique = Vec::<HistoryMessage>::with_capacity(page.len());
+    let mut positions = std::collections::HashMap::<String, usize>::new();
+    for message in page {
+        if let Some(&at) = positions.get(&message.id) { unique[at] = message; }
+        else { positions.insert(message.id.clone(), unique.len()); unique.push(message); }
+    }
+    let page = unique;
+    let mut seen = std::collections::HashSet::new();
+    let before = messages.len();
+    messages.retain(|m| seen.insert(m.id.clone()));
+    let deduplicated = messages.len() != before;
     if messages.is_empty() {
         *messages = page;
         return false;
@@ -644,7 +743,7 @@ fn merge_head(messages: &mut Vec<HistoryMessage>, page: Vec<HistoryMessage>) -> 
     let paged: std::collections::HashSet<&str> = page.iter().map(|m| m.id.as_str()).collect();
     let slots: Vec<usize> = messages.iter().enumerate().filter(|(_, m)| paged.contains(m.id.as_str())).map(|(i, _)| i).collect();
     let held: std::collections::HashSet<String> = slots.iter().map(|i| messages[*i].id.clone()).collect();
-    let mut moved = false;
+    let mut moved = deduplicated;
     let mut slot = slots.iter();
     let mut arrivals: Vec<(Option<String>, HistoryMessage)> = Vec::new();
     let mut previous: Option<String> = None;
@@ -681,6 +780,61 @@ pub(crate) fn title_case(model: &str) -> String {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    #[test]
+    fn compaction_notices_without_ids_keep_their_separate_positions() {
+        let row = |id: &str, text: &str| serde_json::from_value::<HistoryMessage>(json!({"id":id,"role":"System","kind":"System","text":text})).unwrap();
+        let page = vec![row("reply", "reply"), row("", "Compacting"), row("compact1", "summary"), row("", "Compacting"), row("compact2", "summary")];
+        let mut rows = Vec::new();
+        merge_head(&mut rows, page.clone());
+        merge_head(&mut rows, page);
+        assert_eq!(rows.len(), 5);
+        assert_ne!(rows[1].id, rows[3].id);
+        assert_eq!(rows[2].id, "compact1");
+        assert_eq!(rows[4].id, "compact2");
+    }
+
+    #[test]
+    fn repeated_compaction_rows_merge_once_without_losing_unpaged_history() {
+        let row = |id: &str, text: &str| serde_json::from_value::<HistoryMessage>(json!({"id":id,"role":"Assistant","kind":"Assistant","text":text})).unwrap();
+        let mut rows = vec![row("older", "old"), row("summary", "before"), row("tail", "tail")];
+        merge_head(&mut rows, vec![row("summary", "partial"), row("summary", "finished"), row("new", "first"), row("new", "last")]);
+        assert_eq!(rows.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["older", "summary", "new", "tail"]);
+        assert_eq!(rows[1].text, "finished");
+        assert_eq!(rows[2].text, "last");
+    }
+
+    #[test]
+    fn compaction_activity_ends_without_stopping_a_continuing_turn() {
+        use neoism_protocol::agent::CompactionPhase;
+        let mut app = App::new();
+        app.sessions.entry("s".into()).or_default().streaming = true;
+        for phase in [CompactionPhase::Started, CompactionPhase::Delta] {
+            app.apply_agent(AgentServerMessage::Compaction { session_id: "s".into(), phase, run_continues: None, text: None, reason: None });
+            assert_eq!(app.activity_state("s"), Some(activity::State::Compacting));
+        }
+        app.apply_agent(AgentServerMessage::Compaction { session_id: "s".into(), phase: CompactionPhase::Ended, run_continues: Some(true), text: None, reason: None });
+        assert_ne!(app.activity_state("s"), Some(activity::State::Compacting));
+        assert!(app.sessions["s"].streaming);
+    }
+
+    #[test]
+    fn late_thinking_precedes_its_streaming_reply_without_crossing_steps() {
+        let mut app = App::new();
+        let delta = |app: &mut App, id: &str, parent: &str, kind, text: &str| app.apply_agent(AgentServerMessage::ContentDelta {
+            session_id: "s".into(), message_id: id.into(), parent_message_id: Some(parent.into()), kind, text: text.into(),
+        });
+        use neoism_protocol::agent::ContentKind;
+        delta(&mut app, "earlier", "step1", ContentKind::Text, "Previous reply");
+        delta(&mut app, "reply", "step2", ContentKind::Text, "Already streaming");
+        delta(&mut app, "thinking", "step2", ContentKind::Reasoning, "Planning");
+        let order = |app: &App| app.sessions["s"].messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(",");
+        assert_eq!(order(&app), "earlier,thinking,reply");
+        let structure = app.sessions["s"].structure;
+        delta(&mut app, "reply", "step2", ContentKind::Text, " more text");
+        assert_eq!(order(&app), "earlier,thinking,reply");
+        assert!(app.sessions["s"].structure >= structure);
+    }
+
     #[test]
     fn unchanged_history_keeps_other_message_versions() {
         let message: HistoryMessage = serde_json::from_value(json!({"id":"a", "role":"Assistant", "kind":"Assistant", "text":"first"})).unwrap();

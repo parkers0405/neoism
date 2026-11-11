@@ -80,6 +80,8 @@ impl App {
         if index >= self.tabs.len() { return; }
         let removed = self.tabs.remove(index);
         self.close_terminal(removed.id);
+        self.forget_table_state(removed.id);
+        if let TabKind::Agent { session: Some(id) } = &removed.kind { self.release_closed_agent(id); }
         if let TabKind::Editor { path } = &removed.kind {
             if !self.tabs.iter().any(|t| t.kind == removed.kind) { self.lsp_close(path); }
         }
@@ -91,6 +93,12 @@ impl App {
             return;
         }
         self.show_focused_pane();
+    }
+
+    pub(crate) fn forget_table_state(&mut self, tab_id: u64) {
+        let prefix = format!("table-x:{tab_id}:");
+        self.table_offsets.borrow_mut().retain(|key, _| !key.starts_with(&prefix));
+        if self.table_hover.as_ref().is_some_and(|key| key.starts_with(&prefix)) { self.table_hover = None; }
     }
 
     /// The tab being drawn: the focused pane's active tab, or an unfocused pane's while its

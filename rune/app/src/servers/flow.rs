@@ -288,18 +288,7 @@ impl App {
     /// From that tab the window goes to a local one first. Returns whether a tab was open.
     fn leave_server(&mut self, id: &str) -> bool {
         let Some(index) = self.workspace_on(Some(id)) else { return false };
-        if index == self.workspace_active {
-            match self.workspace_on(None) {
-                Some(local) => self.select_workspace(local),
-                None => self.new_workspace(),
-            }
-        }
-        // Dropping the parked workspace drops its socket and tunnel.
-        let Some(index) = self.workspaces.iter().position(|w| w.server.as_deref() == Some(id)) else { return true };
-        if index == self.workspace_active { return true; }
-        self.workspaces.remove(index);
-        if index < self.workspace_active { self.workspace_active -= 1; }
-        self.rects.retain(|key, _| !key.starts_with("workspace-") && !key.starts_with("reorder:workspace:"));
+        self.close_workspace(index);
         true
     }
 }

@@ -281,7 +281,11 @@ impl Families {
             // Seen at work, or seen to stop working: what the sidebar's child rows go by. Once
             // a child stopped, only a family snapshot says it is at work again: a late part or
             // status update of its last step, or the card that launched it, does not.
-            let mut status = branch.status.map(|s| s.to_lowercase());
+            let mut status = branch.status.map(|s| match s.to_lowercase().as_str() {
+                // Both catalog and runtime snapshots use this lifecycle value.
+                "outstanding" => "running".to_owned(),
+                other => other.to_owned(),
+            });
             match status.as_deref() {
                 Some("running" | "blocked") if self.stopped.get(&branch.id).is_some_and(|(_, since)| !authoritative || since.is_some_and(|since| snapshot <= Some(since))) => status = None,
                 Some("running" | "blocked") => {

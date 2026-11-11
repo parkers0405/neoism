@@ -401,7 +401,8 @@ impl App {
             }
         }
         match event {
-            Inbound::Connecting => self.connection = Connection::Connecting,
+            // A retry keeps saying why the last attempt failed (the status line shows it).
+            Inbound::Connecting => if !matches!(self.connection, Connection::Disconnected(_)) { self.connection = Connection::Connecting },
             Inbound::Connected { again } => {
                 self.connection = Connection::Connected;
                 self.workspace_ready = false;

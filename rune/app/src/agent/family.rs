@@ -41,6 +41,21 @@ pub struct Families {
     roots: HashMap<String, String>,
     rosters: HashMap<String, Vec<Member>>,
     versions: HashMap<String, Version>,
+    /// Children seen at work during this run of the app. A child only named by an old task
+    /// card was never seen running and is not listed in the sidebar.
+    live: std::collections::HashSet<String>,
+    /// When a child seen at work finished.
+    ended: HashMap<String, std::time::Instant>,
+}
+
+/// A finished child stays in the sidebar this long after it was seen to finish, a failed one
+/// longer (`side_panel.rs` completed / stopped linger).
+const DONE_LINGER: std::time::Duration = std::time::Duration::from_secs(7);
+const FAILED_LINGER: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Member {
+    pub fn working(&self) -> bool { matches!(self.status.as_str(), "running" | "blocked") }
+    fn linger(&self) -> std::time::Duration { if self.status == "failed" { FAILED_LINGER } else { DONE_LINGER } }
 }
 
 /// One incoming branch, from a snapshot or a lifecycle update.
@@ -71,6 +86,25 @@ impl Families {
 
     pub fn roster(&self, root: &str) -> &[Member] {
         self.rosters.get(root).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The children the conversations sidebar lists under `root`: the ones at work, and the
+    /// ones seen to finish a moment ago (`CatalogFamily` rows in the original).
+    pub fn sidebar_children(&self, root: &str) -> Vec<&Member> {
+        self.roster(root).iter().filter(|m| self.live.contains(&m.id)
+            && (m.working() || self.ended.get(&m.id).is_some_and(|at| at.elapsed() < m.linger()))).collect()
+    }
+
+    /// When the next lingering child leaves the sidebar.
+    pub fn next_expiry(&self) -> Option<std::time::Duration> {
+        self.rosters.values().flatten().filter(|m| !m.working())
+            .filter_map(|m| self.ended.get(&m.id).map(|at| m.linger().saturating_sub(at.elapsed())))
+            .filter(|left| !left.is_zero()).min()
+    }
+
+    /// How many children the sidebar lists in all (it re-runs when this changes).
+    pub fn sidebar_count(&self) -> usize {
+        self.rosters.keys().map(|root| self.sidebar_children(root).len()).sum()
     }
 
     pub fn member(&self, session: &str) -> Option<&Member> {
@@ -188,6 +222,15 @@ impl Families {
             self.parents.insert(branch.id.clone(), parent.clone());
             self.roots.insert(branch.id.clone(), root.to_owned());
             let old = previous.iter().find(|m| m.id == branch.id);
+            // Seen at work, or seen to stop working: what the sidebar's child rows go by.
+            if let Some(status) = branch.status.as_deref().map(str::to_lowercase) {
+                if matches!(status.as_str(), "running" | "blocked") {
+                    self.live.insert(branch.id.clone());
+                    self.ended.remove(&branch.id);
+                } else if self.live.contains(&branch.id) && old.is_some_and(Member::working) {
+                    self.ended.insert(branch.id.clone(), std::time::Instant::now());
+                }
+            }
             let row = Member {
                 title: branch.title.filter(|t| !t.is_empty()).or_else(|| old.map(|o| o.title.clone())).unwrap_or_else(|| branch.id.clone()),
                 status: branch.status.map(|s| s.to_lowercase()).or_else(|| old.map(|o| o.status.clone())).unwrap_or_else(|| "running".into()),

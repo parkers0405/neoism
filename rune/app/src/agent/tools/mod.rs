@@ -78,7 +78,7 @@ impl Spinner {
     }
 
     /// The squares, brightest first, with their opacities.
-    fn squares(&self) -> impl Iterator<Item = (&rune::Live<[f32; 2]>, f32)> {
+    pub(crate) fn squares(&self) -> impl Iterator<Item = (&rune::Live<[f32; 2]>, f32)> {
         self.squares.iter().zip([1.0, 0.65, 0.4, 0.2])
     }
 }
@@ -119,6 +119,8 @@ fn is_running(status: &str) -> bool { matches!(status, "running" | "streaming") 
 impl App {
     /// Whether the open conversation shows a running tool (its spinner needs frames).
     pub fn running_tools(&self) -> bool {
+        // The conversations sidebar shows the same loader beside every running chat.
+        if self.sidebar == Some(crate::app::Sidebar::Conversations) && self.sidebar_running() { return true; }
         let crate::tabs::TabKind::Agent { session: Some(id) } = &self.active_tab().kind else { return false };
         self.sessions.get(id).is_some_and(|s| animating(&s.messages, s.live_from.unwrap_or(usize::MAX)))
     }

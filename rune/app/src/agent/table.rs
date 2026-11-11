@@ -116,6 +116,8 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
             let cell_style = style.clone().text(rgb(color));
             let mut cell = col().w(*w).px(CELL_PAD_X * s).py(ROW_PAD_Y * s).min_h(LINE_H * s + 2.0 * ROW_PAD_Y * s)
                 .child(Markdown::new(text.clone()).highlights(super::prose::highlights(&text, p)).selectable(true)
+                    // A link in a cell opens like one in prose: the browser, or the file.
+                    .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
                     .render(&cell_style).selection_group(false));
             if c > 0 { cell = cell.border_sides([0.0, 0.0, 0.0, 1.0 * s], border); }
             line = line.child(cell);

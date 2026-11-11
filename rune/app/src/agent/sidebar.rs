@@ -37,6 +37,10 @@ pub enum ConvHeader {
 pub enum ConvRow<'a> {
     Project { directory: String, label: String, open: bool },
     Thread { thread: &'a ThreadSummary, nested: bool },
+    /// A sub-agent of the conversation above it, while it works and for a moment after.
+    /// `last`: no later sibling under the same parent. `through`: the levels above it whose
+    /// own line still runs on past this row to a later sibling.
+    Child { member: &'a super::family::Member, root: &'a str, nested: bool, last: bool, through: Vec<usize> },
 }
 
 /// The catalog directory for a workspace root (`workspace_catalog_scope`): the home directory
@@ -65,10 +69,24 @@ impl App {
     /// The panel's rows in order. In a project: pinned, then recent. On the dashboard: pinned
     /// from every project, then a folder per project (`~` first, then most recent activity), each
     /// expanded to its chats unless collapsed (`session_rows`).
-    pub fn conversation_rows(&self) -> Vec<ConvRow<'_>> {
+    pub fn conversation_rows<'a>(&'a self) -> Vec<ConvRow<'a>> {
         let (pinned, recent): (Vec<&ThreadSummary>, Vec<&ThreadSummary>) = self.threads.iter().partition(|t| t.pinned);
+        // A conversation's sub-agents follow it, in the family's order.
+        let with_children = |rows: &mut Vec<ConvRow<'a>>, thread: &'a ThreadSummary, nested: bool| {
+            rows.push(ConvRow::Thread { thread, nested });
+            let children = self.families.sidebar_children(&thread.session_id);
+            // A level's line runs on while a later row sits at that level before the family
+            // climbs back above it.
+            let runs_on = |from: usize, level: usize| children[from + 1..].iter().take_while(|m| m.depth >= level).any(|m| m.depth == level);
+            for (i, member) in children.iter().enumerate() {
+                let through = (1..member.depth).filter(|level| runs_on(i, *level)).collect();
+                rows.push(ConvRow::Child { member, root: &thread.session_id, nested, last: !runs_on(i, member.depth), through });
+            }
+        };
         if !self.conversations_dashboard() {
-            return pinned.into_iter().chain(recent).map(|thread| ConvRow::Thread { thread, nested: false }).collect();
+            let mut rows = Vec::new();
+            for thread in pinned.into_iter().chain(recent) { with_children(&mut rows, thread, false); }
+            return rows;
         }
         let home = crate::startup::home();
         let home = home.trim_end_matches('/').to_owned();
@@ -84,7 +102,8 @@ impl App {
         groups.sort_by(|(a, ea), (b, eb)| (*b == home).cmp(&(*a == home)).then(latest(eb).cmp(&latest(ea))).then(a.cmp(b)));
         let mut names: std::collections::HashMap<String, usize> = Default::default();
         for (directory, _) in &groups { *names.entry(project_name(directory)).or_default() += 1; }
-        let mut rows: Vec<ConvRow> = pinned.into_iter().map(|thread| ConvRow::Thread { thread, nested: false }).collect();
+        let mut rows: Vec<ConvRow> = Vec::new();
+        for thread in pinned { with_children(&mut rows, thread, false); }
         for (directory, mut entries) in groups {
             let open = !self.collapsed_projects.contains(&directory);
             let label = if !home.is_empty() && directory == home { "~".to_owned() }
@@ -93,7 +112,7 @@ impl App {
             rows.push(ConvRow::Project { directory, label, open });
             if open {
                 entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                rows.extend(entries.into_iter().map(|thread| ConvRow::Thread { thread, nested: true }));
+                for thread in entries { with_children(&mut rows, thread, true); }
             }
         }
         rows
@@ -176,15 +195,17 @@ impl App {
             Some(ConvHeader::Projects) => return self.open_project_menu(),
             None => {}
         }
-        enum Pick { Project(String), Thread(String) }
+        enum Pick { Project(String), Thread(String), Child(String, String) }
         let pick = match self.conversation_rows().get(self.conv_selected) {
             Some(ConvRow::Project { directory, .. }) => Pick::Project(directory.clone()),
             Some(ConvRow::Thread { thread, .. }) => Pick::Thread(thread.session_id.clone()),
+            Some(ConvRow::Child { member, root, .. }) => Pick::Child((*root).to_owned(), member.id.clone()),
             None => return,
         };
         match pick {
             Pick::Project(directory) => self.toggle_project(&directory),
             Pick::Thread(id) => self.open_conversation(&id),
+            Pick::Child(root, child) => self.open_child(&root, &child),
         }
     }
 
@@ -260,14 +281,67 @@ pub fn conversations(app: &App) -> El {
         // Chats under a dashboard folder sit one 18 pt step in.
         let item = col().key(format!("thread:{}", t.session_id)).w_full().pl(17.0 + if nested { 18.0 * app.ty.scale() } else { 0.0 }).pr(17.0).py(6.0).gap(3.0);
         let item = keyboard_row(index, item);
+        // A conversation at work turns the loader in the row's trailing slot: the theme's ink
+        // while it runs, red for background work, yellow while it waits on a permission.
+        let activity = app.activity_of(t);
+        let busy = match activity { "running" => Some(p.fg), "background" => Some(p.red), "permission" => Some(p.yellow), _ => None };
         item.fill(if keyboard { rgb(p.hover) } else if open { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT })
             .hover(rgb(p.hover))
             .child(row().w_full().center_y().gap(8.0)
                 .child(crate::ui::neoism_mark(app, app.ty.small().size, &format!("thread-mark:{}", t.session_id)))
                 .child(text("Neoism").font(app.ty.small()).color(rgb(p.dim)).grow(1.0))
-                .child(text(ago(t.updated_at)).font(app.ty.small()).color(rgb(p.muted)).mr(46.0)))
+                .child(text(ago(t.updated_at)).font(app.ty.small()).color(rgb(p.muted)).mr(if busy.is_some() { 20.0 } else { 46.0 }))
+                .children(busy.map(|color| loader(app, color).mr(8.0))))
             .child(text(t.title.clone()).font(app.ty.body()).color(rgb(p.fg)).truncate().max_w(240.0))
             .on_press(move |s: &mut App| s.open_conversation(&id))
+    };
+    // A sub-agent under its conversation (`render_subagent_row`): one 24 pt step in per level,
+    // joined to the row above by a line that turns in to its title; the last one ends the line.
+    let child_row = |index: usize, m: &super::family::Member, root: &str, nested: bool, last: bool, through: &[usize]| {
+        let s = app.ty.scale();
+        let (root, id) = (root.to_owned(), m.id.clone());
+        let viewed = matches!(&app.active_tab().kind, TabKind::Agent { session: Some(session) } if *session == m.id);
+        let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
+        let base = 17.0 + if nested { 18.0 * s } else { 0.0 };
+        let indent = base + 24.0 * s * m.depth as f32;
+        // The connector: down from the row above to this row's elbow, then across to the
+        // title; on down to the next sibling unless this is the last. A level above whose
+        // line has further to go passes straight through.
+        let (stroke, elbow, radius) = ((2.0 * s).round().max(2.0), 29.5 * s, 5.0 * s);
+        let line_x = |depth: usize| base + 24.0 * s * depth as f32 - 19.0 * s;
+        let ink = rgb(p.fg).alpha(0.55);
+        let mut lines = vec![el().key("family-line").w(13.0 * s).h(elbow).absolute(line_x(m.depth), 0.0)
+            .border_sides([0.0, 0.0, stroke, stroke], ink).corners([0.0, 0.0, 0.0, radius])];
+        if !last { lines.push(el().key("family-line-on").w(stroke).pin(Some(line_x(m.depth)), Some(elbow - radius), None, Some(0.0)).fill(ink)); }
+        for level in through {
+            lines.push(el().key(format!("family-line-through:{level}")).w(stroke).pin(Some(line_x(*level)), Some(0.0), None, Some(0.0)).fill(ink));
+        }
+        let (label, dot) = match m.status.as_str() {
+            "running" => ("working", None),
+            "blocked" => ("needs approval", Some(p.yellow)),
+            "failed" => ("stopped", Some(p.red)),
+            _ => ("done", Some(p.green)),
+        };
+        let mark = match app.tools.icons.agent(m.agent.as_deref()) {
+            Some(image) => el().key(format!("child-mark:{}", m.id)).w(app.ty.small().size).h(app.ty.small().size).pixels(image.pixels()),
+            None => crate::ui::neoism_mark(app, app.ty.small().size, &format!("child-mark:{}", m.id)),
+        };
+        let status = match dot {
+            None => loader(app, p.fg),
+            Some(color) => el().w(10.0 * s).h(10.0 * s).center().child(el().w(7.0 * s).h(7.0 * s).radius(3.5 * s).fill(rgb(color))),
+        };
+        let item = col().key(format!("child:{}", m.id)).w_full().pl(indent).pr(17.0).py(6.0).gap(3.0);
+        keyboard_row(index, item)
+            .fill(if keyboard { rgb(p.hover) } else if viewed { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT })
+            .hover(rgb(p.hover))
+            .children(lines)
+            .child(row().w_full().center_y().gap(8.0)
+                .child(mark)
+                .child(text(m.agent.clone().unwrap_or_else(|| "Sub-agent".into())).font(app.ty.small()).color(rgb(p.dim)).grow(1.0).truncate().shrink())
+                .child(text(label).font(app.ty.small()).color(rgb(p.muted)).mr(20.0))
+                .child(status.mr(8.0)))
+            .child(text(m.title.clone()).font(app.ty.body()).color(rgb(if viewed { p.accent } else { p.fg })).truncate().max_w(240.0))
+            .on_press(move |a: &mut App| a.open_child(&root, &id))
     };
     // New chat and the directory row: keyboard stops with the list's highlight, and window
     // rects for the block cursor and the dropdown's anchor.
@@ -283,7 +357,15 @@ pub fn conversations(app: &App) -> El {
     let mut list = col().w_full();
     let rows = app.conversation_rows();
     let dashboard = app.conversations_dashboard();
-    let pinned = rows.iter().take_while(|r| matches!(r, ConvRow::Thread { thread, .. } if thread.pinned)).count();
+    // Pinned conversations lead the list, each with its sub-agents.
+    let mut pinned = 0;
+    for (index, row) in rows.iter().enumerate() {
+        match row {
+            ConvRow::Thread { thread, .. } if thread.pinned => pinned = index + 1,
+            ConvRow::Child { .. } if pinned == index => pinned = index + 1,
+            _ => break,
+        }
+    }
     if pinned > 0 { list = list.child(heading("Pinned")); }
     for (index, entry) in rows.iter().enumerate() {
         // In a project the rest are "Recent"; the dashboard's folders head their own chats.
@@ -291,6 +373,7 @@ pub fn conversations(app: &App) -> El {
         list = list.child(match entry {
             ConvRow::Project { directory, label, open } => project_row(index, directory, label, *open),
             ConvRow::Thread { thread, nested } => row_for(index, thread, *nested),
+            ConvRow::Child { member, root, nested, last, through } => child_row(index, member, root, *nested, *last, through),
         });
     }
     if pinned == rows.len() && !dashboard { list = list.child(heading("Recent")); }
@@ -322,4 +405,97 @@ pub fn conversations(app: &App) -> El {
                 crate::ui::scroll::handle(&mut a.scrollers, LIST_KEY, &e, notch, std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) }), tx)
             })
             .child(list))
+}
+
+/// The four-square orbit a running conversation turns (`draw_status_spinner`): the same live
+/// squares the tool cards ride (`tools::Spinner`), so every loader is in step and none commits.
+fn loader(app: &App, color: u32) -> El {
+    let s = app.ty.scale();
+    let mut spinner = el().w(10.0 * s).h(10.0 * s);
+    for (square, alpha) in app.tools.spinner.squares() {
+        spinner = spinner.child(el().w(2.0 * s).h(2.0 * s).fill(rgb(color).alpha(alpha)).absolute(4.0 * s, 4.0 * s).live_offset(square));
+    }
+    spinner
+}
+
+impl App {
+    /// Open a sub-agent in its conversation's own tab, in place of the conversation: the tab
+    /// that shows the family, else a new one. The sub-agent already showing goes back to the
+    /// conversation (`openThread` on the viewed child).
+    pub fn open_child(&mut self, root: &str, child: &str) {
+        let family = |kind: &TabKind| matches!(kind, TabKind::Agent { session: Some(id) } if self.families.root_of(id) == root || id == root);
+        let tab = self.tabs.iter().find(|t| family(&t.kind)).map(|t| t.id);
+        match tab {
+            Some(id) => self.select_tab(id),
+            None => self.open_conversation(root),
+        }
+        let viewing = matches!(&self.tabs[self.active].kind, TabKind::Agent { session: Some(id) } if id == child);
+        self.view_session(if viewing { root } else { child });
+        self.focus = crate::app::Focus::Content;
+    }
+}
+
+#[cfg(test)]
+mod family_tests {
+    use super::*;
+    use neoism_protocol::agent::AgentServerMessage as M;
+
+    fn family(revision: u64, statuses: [&str; 4]) -> M {
+        let branch = |id: &str, parent: &str, status: &str| serde_json::json!({"sessionId": id, "parentSessionId": parent, "status": status, "title": id, "agent": "explore"});
+        M::CatalogFamily { session_id: "root".into(), snapshot: serde_json::json!({"rootSessionId": "root", "familyRevision": revision, "branches": [
+            branch("a", "root", statuses[0]), branch("a1", "a", statuses[1]), branch("b", "root", statuses[2]), branch("c", "root", statuses[3]),
+        ]}) }
+    }
+
+    #[test]
+    fn sub_agents_at_work_are_listed_under_their_conversation_on_their_lines() {
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        app.load_fixture("other", "Other", "[]");
+        app.apply_agent(family(1, ["outstanding"; 4]));
+        let shape = |app: &App| app.conversation_rows().iter().map(|row| match row {
+            ConvRow::Thread { thread, .. } => thread.session_id.clone(),
+            ConvRow::Child { member, last, through, .. } => format!("{}:{}{}{:?}", member.id, member.depth, if *last { "L" } else { "-" }, through),
+            ConvRow::Project { .. } => "project".into(),
+        }).collect::<Vec<_>>();
+        // `a1` is the last under `a`, while `a`'s own level runs on through it to `b` and `c`.
+        assert_eq!(shape(&app), ["root", "a:1-[]", "a1:2L[1]", "b:1-[]", "c:1L[]", "other"]);
+        // One finishes: it lingers; the catalog's word for the root drives its loader.
+        app.apply_agent(family(2, ["outstanding", "outstanding", "completed", "outstanding"]));
+        assert_eq!(shape(&app).len(), 6, "a sub-agent seen to finish stays a moment");
+        assert!(app.families.next_expiry().is_some());
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        assert_eq!(app.activity_of(&app.threads[0]), "running");
+        assert_eq!(app.activity_of(&app.threads[1]), "idle");
+        assert!(app.sidebar_running());
+    }
+
+    #[test]
+    fn a_child_only_named_by_an_old_task_card_is_not_listed() {
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        let card: neoism_protocol::agent::HistoryMessage = serde_json::from_value(serde_json::json!({
+            "id": "t", "role": "Assistant", "kind": "Tool", "tool": "task", "title": "Explore", "text": "", "detail": "task_id: old-child"})).unwrap();
+        assert!(app.families.seed_from_history("root", &[card]));
+        assert_eq!(app.families.roster("root").len(), 1, "it can still be opened from its card");
+        assert_eq!(app.conversation_rows().len(), 1, "but it was never seen at work");
+    }
+
+    #[test]
+    fn opening_a_sub_agent_reuses_its_conversations_tab_and_clicking_it_again_goes_back() {
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        app.apply_agent(family(1, ["outstanding"; 4]));
+        app.open_conversation("root");
+        let tabs = app.tabs.len();
+        app.open_child("root", "b");
+        assert_eq!(app.tabs.len(), tabs, "in place, in the family's tab");
+        assert_eq!(app.active_tab().kind, TabKind::Agent { session: Some("b".into()) });
+        // A sub-agent still at work shows its whole trace.
+        assert_eq!(app.sessions["b"].live_from, Some(0));
+        app.open_child("root", "b");
+        assert_eq!(app.active_tab().kind, TabKind::Agent { session: Some("root".into()) });
+        // One stream for the family, on the session it was first resumed on.
+        assert_eq!(app.stream_owner.len(), 1);
+    }
 }

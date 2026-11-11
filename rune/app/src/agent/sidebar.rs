@@ -500,6 +500,68 @@ mod family_tests {
         assert!(!app.families.working_now("a"));
     }
 
+    /// The order a real background sub-agent's events arrive in (traced against the daemon):
+    /// the turn that launched it ends first, it finishes later, the conversation's next
+    /// execution no longer lists it, and every later update or history page still carries the
+    /// launching card as `running`.
+    #[test]
+    fn a_background_sub_agent_that_finished_stays_finished() {
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        let card = || -> neoism_protocol::agent::HistoryMessage { serde_json::from_value(serde_json::json!({
+            "id": "card", "role": "Assistant", "kind": "Tool", "tool": "task", "title": "Task(@explore · Count files)", "status": "running",
+            "text": "{\"background\":true}", "detail": "task_id: kid (use this to check or continue the subagent)"})).unwrap() };
+        let snapshot = |revision: u64, status: Option<&str>| M::CatalogFamily { session_id: "root".into(), snapshot: serde_json::json!({
+            "rootSessionId": "root", "familyRevision": revision, "executionId": if revision < 4 { "one" } else { "two" },
+            "branches": status.map(|status| serde_json::json!({"sessionId": "kid", "parentSessionId": "root", "title": "Count files (@explore subagent)", "agent": "explore", "status": status})).into_iter().collect::<Vec<_>>()}) };
+        let page = |app: &mut App| app.apply_agent(M::HistoryChunk { session_id: "root".into(), messages: vec![card()], next_cursor: None });
+        let child_rows = |app: &App| app.conversation_rows().len() - 1;
+
+        app.apply_agent(M::StreamingState { session_id: "root".into(), state: neoism_protocol::agent::StreamingState::Working, label: None });
+        app.apply_agent(M::MessageUpdated { session_id: "root".into(), message: card(), parent_message_id: None });
+        assert_eq!(app.sessions["root"].messages[0].status, "running", "launched, not named by the family yet");
+        app.apply_agent(snapshot(2, Some("outstanding")));
+        // The launching turn ends; its page is fetched again while the child works on.
+        app.apply_agent(M::SessionIdle { session_id: "root".into() });
+        page(&mut app);
+        assert!(app.families.working_now("kid"));
+        assert_eq!(app.sessions["root"].messages[0].status, "running");
+        assert_eq!(child_rows(&app), 1);
+
+        // The child goes idle, and a snapshot of the revision before still calls it at work.
+        app.apply_agent(M::SessionIdle { session_id: "kid".into() });
+        app.apply_agent(snapshot(2, Some("outstanding")));
+        assert!(!app.families.working_now("kid"), "a repeated older snapshot does not start it again");
+        app.apply_agent(snapshot(3, Some("completed")));
+        assert_eq!(app.sessions["root"].messages[0].status, "completed");
+        // The parent answers in a new execution that lists no children, and its page comes again.
+        app.apply_agent(snapshot(4, None));
+        app.apply_agent(M::StreamingState { session_id: "root".into(), state: neoism_protocol::agent::StreamingState::Working, label: None });
+        app.apply_agent(M::MessageUpdated { session_id: "root".into(), message: card(), parent_message_id: None });
+        app.apply_agent(M::SessionIdle { session_id: "root".into() });
+        page(&mut app);
+        assert!(!app.families.working_now("kid"));
+        let kid = app.families.member("kid").unwrap();
+        assert_eq!((kid.status.as_str(), kid.title.as_str(), kid.agent.as_deref()), ("completed", "Count files (@explore subagent)", Some("explore")));
+        assert_eq!(app.sessions["root"].messages[0].status, "completed", "the card the server never settles");
+        assert_eq!(app.activity_state("root"), None);
+        // Run again by a later execution, it is at work again.
+        app.apply_agent(snapshot(5, Some("outstanding")));
+        assert!(app.families.working_now("kid"));
+    }
+
+    /// A conversation opened later: its old cards still say `running`, and nothing is.
+    #[test]
+    fn an_old_background_task_card_is_not_running() {
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        let card: neoism_protocol::agent::HistoryMessage = serde_json::from_value(serde_json::json!({
+            "id": "card", "role": "Assistant", "kind": "Tool", "tool": "task", "title": "Task(@explore · Count files)", "status": "running", "text": "", "detail": "task_id: kid"})).unwrap();
+        app.apply_agent(M::HistoryChunk { session_id: "root".into(), messages: vec![card], next_cursor: None });
+        assert_eq!(app.sessions["root"].messages[0].status, "completed");
+        assert_eq!(app.conversation_rows().len(), 1);
+    }
+
     #[test]
     fn one_tab_shows_a_conversation_and_its_sub_agents() {
         let mut app = App::new();

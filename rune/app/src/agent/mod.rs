@@ -155,6 +155,22 @@ impl Session {
     }
 }
 
+/// A task card that says its sub-agent is at work, when it is not, says how it ended. The
+/// server never settles the card of a background sub-agent: it reads `running` in every
+/// update and history page from then on. A child nothing has said anything about yet is left
+/// alone while its conversation's turn is live (the card arrives before the child is named).
+fn settle_task_card(families: &family::Families, message: &mut HistoryMessage, live_turn: bool) -> bool {
+    if message.tool != "task" || !matches!(message.status.as_str(), "" | "pending" | "running" | "streaming") { return false; }
+    let Some(child) = family::task_id(&message.detail, &message.text) else { return false };
+    let failed = match families.stopped(&child) {
+        Some(failed) => failed,
+        None if live_turn || families.working_now(&child) => return false,
+        None => false,
+    };
+    message.status = if failed { "error" } else { "completed" }.into();
+    true
+}
+
 impl App {
     fn send_agent(&self, message: AgentClientMessage) {
         if let Some(daemon) = &self.daemon { daemon.agent(&message); }
@@ -238,14 +254,12 @@ impl App {
     /// arrives with the parent's next step, which can be long after: until then it would keep
     /// turning its loader beside a sub-agent the sidebar already shows as done.
     pub(crate) fn settle_task_cards(&mut self) {
-        for (parent, child, failed) in self.families.finished() {
-            let Some(session) = self.sessions.get_mut(&parent) else { continue };
+        let families = &self.families;
+        for session in self.sessions.values_mut() {
+            let streaming = session.streaming;
             let mut changed = Vec::new();
-            for message in session.messages.iter_mut().filter(|m| m.tool == "task" && matches!(m.status.as_str(), "" | "pending" | "running" | "streaming")) {
-                if family::task_id(&message.detail, &message.text).as_deref() == Some(child.as_str()) {
-                    message.status = if failed { "error" } else { "completed" }.into();
-                    changed.push(message.id.clone());
-                }
+            for message in session.messages.iter_mut() {
+                if settle_task_card(families, message, streaming) { changed.push(message.id.clone()); }
             }
             for id in changed {
                 *session.message_versions.entry(id).or_default() += 1;
@@ -344,6 +358,7 @@ impl App {
         } else {
             session.status = None;
             self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
+            self.settle_task_cards();
         }
     }
 
@@ -478,7 +493,9 @@ impl App {
                 // Task cards name their child sessions; seed the family so it can be walked.
                 if !self.families.is_child(&session_id) { self.families.seed_from_history(&session_id, &messages); }
                 self.prefetching.remove(&session_id);
+                let mut messages = messages;
                 let session = self.sessions.entry(session_id).or_default();
+                for message in &mut messages { settle_task_card(&self.families, message, session.streaming); }
                 for message in &messages { session.note_message(message); }
                 if session.loading_older {
                     // Size the next page from this one (bytes per server message).
@@ -511,8 +528,9 @@ impl App {
                 // The next sub-agent chat waiting to be fetched ahead.
                 self.preload_family_history();
             }
-            AgentServerMessage::MessageUpdated { session_id, message, .. } => {
+            AgentServerMessage::MessageUpdated { session_id, mut message, .. } => {
                 let session = self.sessions.entry(session_id).or_default();
+                settle_task_card(&self.families, &mut message, session.streaming);
                 session.note_message(&message);
                 upsert(&mut session.messages, message);
                 session.rebase_live();

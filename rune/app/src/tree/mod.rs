@@ -111,6 +111,17 @@ fn free_name(taken: &HashSet<String>, stem: &str, ext: &str) -> String {
     name
 }
 
+/// The folder to ask the daemon about for the notes vault. Notes always open the default
+/// vault: a vault linked to the project (`.neoism/workspace.json`) is not followed. The
+/// daemon answers with the default vault for a folder that links none, and the filesystem
+/// root of the workspace's drive never does, whatever daemon version is asked.
+fn default_vault_probe(cwd: &str) -> String {
+    let bytes = cwd.as_bytes();
+    if cwd.starts_with('/') { return "/".to_owned(); }
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' { return format!("{}\\", &cwd[..2]); }
+    cwd.to_owned()
+}
+
 /// Marks the notes vault as asked for, among the directories asked for.
 const RESOLVE: &str = "\0resolve-notes-vault";
 
@@ -144,7 +155,7 @@ impl App {
         if sidebar == Sidebar::Notes && self.notes.root.is_none() {
             // The vault is resolved per workspace; its listing follows `NotesVaultResolved`.
             if self.notes.requested.insert(RESOLVE.to_owned()) && let Some(daemon) = &self.daemon {
-                daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": self.cwd}}));
+                daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": default_vault_probe(&self.cwd)}}));
             }
             return;
         }
@@ -170,7 +181,7 @@ impl App {
             Sidebar::Notes if self.notes.root.is_none() => {
                 // The vault is resolved per workspace; its listing follows `NotesVaultResolved`.
                 if let Some(daemon) = &self.daemon {
-                    daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": self.cwd}}));
+                    daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": default_vault_probe(&self.cwd)}}));
                 }
             }
             _ if !self.tree_of(sidebar).loaded() => self.list_dir(sidebar, ""),
@@ -427,5 +438,14 @@ mod tests {
         app.apply_dir_listing("/vault/Ideas", &serde_json::json!([entry("New Folder", true)]));
         app.notes_create(true);
         assert_eq!(app.notes.creating, Some(("Ideas".into(), "New Folder 2".into(), true)));
+    }
+
+    #[test]
+    fn notes_ask_for_the_default_vault_whatever_the_project_links() {
+        assert_eq!(default_vault_probe("/home/me/projects/linked"), "/");
+        assert_eq!(default_vault_probe("C:\\Users\\me\\linked"), "C:\\");
+        assert_eq!(default_vault_probe("d:/work"), "d:\\");
+        // A remote home not resolved yet is asked as it stands.
+        assert_eq!(default_vault_probe("~"), "~");
     }
 }

@@ -9,13 +9,13 @@ use rune::tok::TextStyle;
 use crate::ui::follow::Reveal;
 use rune::{Color, El, ScrollSpec, col, el, row, text};
 
-const ROW_H: f32 = 26.0;
+pub(crate) const ROW_H: f32 = 26.0;
 const PAD_X: f32 = 12.0;
 const INDENT: f32 = 14.0;
 const FONT: f32 = 13.0;
 const ICON_GAP: f32 = 8.0;
-const HEADER_H: f32 = 36.0;
-const SCROLL_KEY: &str = "file-tree-rows";
+pub(crate) const HEADER_H: f32 = 36.0;
+pub(crate) const SCROLL_KEY: &str = "file-tree-rows";
 /// The Notes header's buttons (Material Design: file-plus, folder-plus).
 const NEW_NOTE: &str = "\u{f0752}";
 const NEW_FOLDER: &str = "\u{f0257}";
@@ -38,8 +38,12 @@ pub fn view(app: &App) -> El {
     let Some(tree) = app.active_tree() else { return el() };
     let rows = tree.rows();
     let focused = app.focus == Focus::Sidebar;
+    let notes = app.sidebar == Some(crate::app::Sidebar::Notes);
     let mut list = col().w_full();
     for (index, item) in rows.iter().enumerate() {
+        // While something is dragged: the lifted row dims, the folder it would land in is
+        // tinted and shivers (`tree/drag.rs`).
+        let (lifted, landing) = app.tree_drag_row(notes, &item.path);
         let selected = index == tree.selected;
         let open = item.entry.is_dir && tree.open.contains(&item.path);
         let (glyph, icon_color) = if item.entry.is_dir {
@@ -53,8 +57,9 @@ pub fn view(app: &App) -> El {
         let chevron_font = TextStyle::new((INDENT - 6.0) * s, 400.0).family(NERD);
         let mut line = row().key(format!("tree:{}", item.path)).w_full().h(ROW_H * s)
             .pl(PAD_X * s + item.depth as f32 * INDENT * s).pr(PAD_X * s).center_y()
-            .fill(if selected && focused { rgb(p.hover) } else { Color::TRANSPARENT })
+            .fill(if landing.is_some() { rgb(p.accent).alpha(0.22) } else if selected && focused { rgb(p.hover) } else { Color::TRANSPARENT })
             .hover(rgb(p.hover).alpha(0.5))
+            .opacity(if lifted { 0.35 } else { 1.0 })
             .child(el().w(INDENT * s).center().child_opt(chevron.map(|c| text(c).font(chevron_font).color(rgb(p.muted)))))
             .child(el().w(FONT * s).center().child(text(glyph).font(icon_font).color(rgb(icon_color))))
             .child(text(item.entry.name.clone()).font(app.ty.sized(FONT)).color(rgb(label_color)).ml(ICON_GAP * s).truncate().shrink())
@@ -64,7 +69,15 @@ pub fn view(app: &App) -> El {
                 let host = if crate::startup::absolute(&path) { path } else { format!("{}/{path}", app.cwd.trim_end_matches('/')) };
                 crate::collab::view::tree_row(app, &host).map(|orbs| row().grow(1.0).justify_end().child(orbs))
             }).flatten())
-            .on_press(move |a: &mut App| { a.focus = Focus::Sidebar; a.tree_activate(Some(index)); });
+            .on_press(move |a: &mut App| {
+                // The release that ends a drag is not a click on the row it started on.
+                if std::mem::take(&mut a.tree_press_suppressed) { return; }
+                a.focus = Focus::Sidebar;
+                a.tree_activate(Some(index));
+            })
+            .on_drag(move |a: &mut App, d: &mut rune::Drag, tx: &mut rune::Tx| a.tree_drag(index, d, tx))
+            .on_secondary_press(move |a: &mut App, at: rune::PointerPress, _: &mut rune::Tx| a.open_tree_context(Some(index), [at.x, at.y]));
+        if let Some(shiver) = landing { line = line.live_offset(shiver); }
         if selected {
             line = line.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("tree-row".into(), r); });
         }
@@ -98,7 +111,12 @@ pub fn view(app: &App) -> El {
                 let mirror = a.tree_follow.scroll.clone();
                 crate::ui::scroll::handle(&mut a.scrollers, SCROLL_KEY, &e, notch, std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) }), tx)
             })
-            .child(list))
+            // Right-click on the blank space under the rows: the tree's own menu.
+            .on_secondary_press(|a: &mut App, at: rune::PointerPress, _: &mut rune::Tx| a.open_tree_context(None, [at.x, at.y]))
+            .child(list)
+            // A drop here lands in the root: the whole panel says so (`tree-root-drop`).
+            .child_opt(app.tree_drag_root(notes).then(|| el().key("tree-root-drop").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .fill(rgb(p.accent).alpha(0.14)).border(s.max(1.0), rgb(p.accent)))))
 }
 
 /// The keyboard cursor on the selected row (`file_tree::keyboard_cursor_rect`): a 0.6 em block in

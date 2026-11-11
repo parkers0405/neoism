@@ -75,6 +75,8 @@ pub enum Target {
     Setting(systems::Setting),
     /// `N`, `:N` or `$` over a code or Markdown file: jump to that line (1-based).
     GoToLine(usize),
+    /// `w` / `write` in a file: save it; `wq` / `x`: save it and close its tab.
+    Write { close: bool },
     /// The same over the focused file tree: select that row.
     GoToRow(usize),
 }
@@ -145,6 +147,11 @@ impl Picker {
             if let Some(row) = self.tree_rows.and_then(|rows| go_to_line(query, rows)) {
                 return vec![Row { icon: Some(commands::Service::Neoism.icon()), title: format!("neoism: Go to Row {row}"),
                     shortcut: "", target: Target::GoToRow(row), look: Look::default() }];
+            }
+            if let Some(close) = self.editor_lines.and_then(|_| write_command(query)) {
+                return vec![Row { icon: Some(commands::Service::Neoism.icon()),
+                    title: format!("neoism: {}", if close { "Write and Close" } else { "Write File" }),
+                    shortcut: "", target: Target::Write { close }, look: Look::default() }];
             }
             if let Some(command) = crate::tabs::CloseCommand::parse(query) {
                 let title = if command.workspace { "Close Workspace" } else { "Close Tab" };
@@ -342,6 +349,17 @@ impl App {
                 if let Some(server) = picker.servers.get(i) { self.select_server(&server.id.clone()); }
             }
             Target::Close(command) => self.run_close_command(command),
+            Target::Write { close } => {
+                let tab = self.tabs[self.active].id;
+                if close {
+                    self.save_and_close(tab);
+                    // Nothing to write: it closes at once (a save in flight closes it when it lands).
+                    if self.active_buffer().is_some_and(|b| b.saving.is_none() && !b.dirty())
+                        && let Some(index) = self.tabs.iter().position(|t| t.id == tab) { self.close_tab(index); }
+                } else {
+                    self.save_active();
+                }
+            }
             Target::GoToLine(line) => self.editor_go_to_line(line),
             Target::GoToRow(row) => self.tree_go_to_row(row),
             Target::Command(action) => self.run_action(action, tx),
@@ -477,6 +495,15 @@ impl App {
     }
 }
 
+/// `w` / `write` (save) or `wq` / `x` (save and close), with or without the leading colon.
+fn write_command(query: &str) -> Option<bool> {
+    match query.trim().strip_prefix(':').unwrap_or(query.trim()) {
+        "w" | "write" => Some(false),
+        "wq" | "x" => Some(true),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +518,22 @@ mod tests {
         assert_eq!(go_to_line("0", 100), Some(1));
         assert_eq!(go_to_line("q", 100), None);
         assert_eq!(go_to_line("1a", 100), None);
+    }
+
+    #[test]
+    fn write_commands_are_offered_in_a_file_only() {
+        let mut picker = Picker::new(Mode::Commands);
+        picker.query.replace_text("w");
+        assert!(picker.rows().iter().all(|r| !matches!(r.target, Target::Write { .. })), "not outside a file");
+        picker.editor_lines = Some(40);
+        for (typed, close) in [("w", false), (":w", false), ("write", false), ("wq", true), (":x", true)] {
+            picker.query.replace_text(typed);
+            let rows = picker.rows();
+            assert_eq!(rows.len(), 1, "{typed}");
+            assert_eq!(rows[0].target, Target::Write { close });
+        }
+        picker.query.replace_text("wrap");
+        assert!(picker.rows().iter().all(|r| !matches!(r.target, Target::Write { .. })));
     }
 
     #[test]

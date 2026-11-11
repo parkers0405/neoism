@@ -372,6 +372,8 @@ impl App {
         let before = (buffer.doc.cursor(), buffer.doc.revision);
         let was_inserting = buffer.doc.mode == Mode::Insert;
         let searching = buffer.prompt.as_ref().filter(|p| p.kind != ':').map(|p| p.text.clone());
+        // Escape with nothing else to dismiss puts the search's highlights away (`:noh`).
+        if key == Key::Esc && buffer.prompt.is_none() && buffer.doc.mode != Mode::Insert { buffer.search_highlight = None; }
         // Enter searches from where the prompt opened, not from the previewed match.
         if searching.is_some() && key == Key::Enter && let Some(origin) = buffer.search_origin { buffer.doc.set_cursor(origin); }
         let outcome = buffer.doc.key(key, &mut buffer.prompt, clipboard.as_deref());

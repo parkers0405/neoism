@@ -168,6 +168,10 @@ impl Session {
         }
     }
 
+    /// Whether the transcript is only now coming on screen: not shown a frame ago, or still
+    /// being put where it was left (`App::conversations_keep_scroll`).
+    pub(crate) fn arriving(&self) -> bool { !self.shown || self.restoring > 0 }
+
     fn note_message(&mut self, message: &HistoryMessage) {
         // Any difference counts: a tool row draws its title, detail, todos and children too.
         let changed = self.messages.iter().find(|m| m.id == message.id).is_none_or(|old| old != message);
@@ -334,13 +338,17 @@ impl App {
         let mut restoring = false;
         for (id, session) in self.sessions.iter_mut() {
             let shown = session.loaded && showing.contains(id);
-            if shown && !session.shown && session.kept_scroll.is_some() { session.restoring = FRAMES; }
+            if shown && !session.shown { session.restoring = FRAMES; }
             session.shown = shown;
             if !shown { continue; }
             if session.restoring > 0 {
                 session.restoring -= 1;
                 session.wheel_target = None;
-                if let Some(offset) = session.kept_scroll { tx.scroll_to_instant(format!("conversation:{id}"), 0.0, offset); }
+                // Left at its end, it comes back at its end, wherever that is now.
+                match session.kept_scroll {
+                    Some(offset) => tx.scroll_to_instant(format!("conversation:{id}"), 0.0, offset),
+                    None => tx.scroll_to_bottom_instant(format!("conversation:{id}")),
+                }
                 restoring = true;
             } else {
                 let (offset, max) = session.scroll.get();

@@ -78,6 +78,11 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         // would clear the selection being made.
         .preserve_focus_on_press(true)
         .on_selection_change(|a: &mut App, change: &rune::SelectionChange, tx: &mut Tx| a.timeline_selection_changed(change, tx));
+    // A transcript coming on screen (opened, or come back to from another tab, a sub-agent or
+    // another workspace) is as it stands, at once. Its rows otherwise open on the stack's
+    // spring at a limited speed, which is how a reply streams in: everything that arrived
+    // while it was away would play back, the view scrolling down after it for seconds.
+    let rows = if session.is_none_or(|s| s.arriving()) { rows.instant_changes() } else { rows };
     let scroll_key = format!("conversation:{session_id}");
     let mirror = session.map(|s| s.scroll.clone()).unwrap_or_default();
     let wheel_id = session_id.to_owned();

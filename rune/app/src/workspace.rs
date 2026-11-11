@@ -71,7 +71,36 @@ impl App {
         if self.pending_cd.is_some() || self.main_terminal_tab() != Some(active) { return false; }
         let Some(cwd) = self.terminals.get(&active).map(|t| shell_directory(&t.shell.cwd, &self.cwd)) else { return false };
         if !crate::startup::absolute(&cwd) || same_directory(&cwd, &self.cwd) || cwd.chars().any(char::is_control) { return false; }
-        self.view_workspace_root(&cwd);
+        if self.root_refused.as_deref() == Some(cwd.as_str()) { return false; }
+        // What a shell says is a claim, not a folder: an `ssh` or a container inside the
+        // terminal reports a directory of another machine, and a shell may spell its own in
+        // a way the daemon cannot open. The workspace only moves to a folder the daemon
+        // confirms it has (`root_probe_reply`); until then, and if it refuses, it stays.
+        let Some(daemon) = &self.daemon else {
+            self.view_workspace_root(&cwd);
+            return true;
+        };
+        if self.root_probe.as_ref().is_none_or(|(_, asked)| asked != &cwd) {
+            let id = daemon.request(Family::Files, serde_json::json!({"Stat": {"path": "."}}), Some(cwd.clone()));
+            self.root_probe = Some((id, cwd));
+        }
+        false
+    }
+
+    /// The daemon's answer about a folder the main terminal reported. Returns whether the
+    /// reply was that answer.
+    pub(crate) fn root_probe_reply(&mut self, request_id: u64, message: &serde_json::Value) -> bool {
+        let Some((_, root)) = self.root_probe.take_if(|(asked, _)| *asked == request_id) else { return false };
+        if message.get("Stat").is_some() {
+            self.root_refused = None;
+            // Only if that terminal still owns the directory and is still there.
+            let active = self.active_tab().id;
+            let still = self.main_terminal_tab() == Some(active)
+                && self.terminals.get(&active).is_some_and(|t| same_directory(&shell_directory(&t.shell.cwd, &self.cwd), &root) || shell_directory(&t.shell.cwd, &self.cwd) == root);
+            if still && self.pending_cd.is_none() { self.view_workspace_root(&root); }
+        } else {
+            self.root_refused = Some(root);
+        }
         true
     }
 
@@ -134,7 +163,8 @@ impl App {
     /// This window's view of the workspace moves to `root`: name, tree, notes, conversations and
     /// git (`activateWorkspace` over `workspaceView`). Nothing is sent to the host.
     fn view_workspace_root(&mut self, root: &str) {
-        let root = root.trim_end_matches('/').to_owned();
+        // `/` is a folder too: trimmed to nothing it left the workspace with no root at all.
+        let root = match root.trim_end_matches('/') { "" if root.starts_with('/') => "/".to_owned(), trimmed => trimmed.to_owned() };
         let home = crate::startup::home();
         self.workspace_name = if root == home {
             "~".into()
@@ -873,5 +903,46 @@ mod tests {
         app.terminals.get_mut(&home).unwrap().shell.cwd = "/C:/Users/me/proj".into();
         assert!(app.follow_main_terminal());
         assert_eq!(app.cwd, "C:\\Users\\me\\proj", "a real cd moves to a path the daemon can open");
+    }
+
+    #[test]
+    fn the_workspace_moves_only_to_a_folder_the_daemon_has() {
+        let mut app = App::new();
+        app.cwd = "/home/me".into();
+        let (daemon, _inbox) = Daemon::start_to(Some(crate::daemon::Target { url: "ws://127.0.0.1:9/session".into(), ..Default::default() }), || {});
+        app.daemon = Some(daemon);
+        let home = app.active_tab().id;
+        app.terminals.get_mut(&home).unwrap().shell.session = Some("shell".into());
+        // `ssh box` in the terminal: its shell reports a folder of that machine.
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/srv/app".into();
+        assert!(!app.follow_main_terminal(), "asked first, not taken on trust");
+        assert_eq!(app.cwd, "/home/me");
+        let (id, asked) = app.root_probe.clone().expect("the daemon is asked");
+        assert_eq!(asked, "/srv/app");
+        assert!(!app.follow_main_terminal());
+        assert_eq!(app.root_probe.as_ref().map(|p| p.0), Some(id), "asked once");
+        // The daemon has no such folder: the workspace stays, and is not asked again.
+        assert!(app.root_probe_reply(id, &json!({"Error": {"message": "workspace_root is not a directory: /srv/app"}})));
+        assert_eq!(app.cwd, "/home/me");
+        assert!(!app.follow_main_terminal());
+        assert!(app.root_probe.is_none());
+        // A real `cd`: confirmed, then followed.
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/home/me/proj".into();
+        assert!(!app.follow_main_terminal());
+        let (id, _) = app.root_probe.clone().unwrap();
+        assert!(app.root_probe_reply(id, &json!({"Stat": {"entry": {}}})));
+        assert_eq!(app.cwd, "/home/me/proj");
+        // Another reply is not ours.
+        assert!(!app.root_probe_reply(id + 100, &json!({"Stat": {}})));
+    }
+
+    #[test]
+    fn the_filesystem_root_stays_a_root() {
+        let mut app = App::new();
+        let home = app.active_tab().id;
+        app.terminals.get_mut(&home).unwrap().shell.session = Some("shell".into());
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/".into();
+        assert!(app.follow_main_terminal());
+        assert_eq!(app.cwd, "/");
     }
 }

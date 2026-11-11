@@ -183,7 +183,8 @@ impl App {
         let Some(id) = workspace["id"].as_str() else { return };
         self.workspace_id = id.to_owned();
         if let Some(title) = workspace["title"].as_str() { self.workspace_name = title.to_owned(); }
-        self.cwd = workspace["root_dir"].as_str().unwrap_or("~").to_owned();
+        let root = workspace["root_dir"].as_str().unwrap_or("~").to_owned();
+        self.resolve_root(&root);
         self.register_workspace();
     }
 

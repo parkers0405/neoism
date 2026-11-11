@@ -99,7 +99,13 @@ pub(crate) fn launch_persistent_host(
                 tail.replace(secret, "[redacted]")
             } else { tail };
             let tail: String = tail.chars().filter(|c| !c.is_control() || *c == '\n').collect();
-            Err(io::Error::other(format!("{reason}: {}", tail.trim())))
+            // The daemon says why it stopped on its last lines; its first are routine startup
+            // notes, and a form has room for a few lines, not a log.
+            let why: Vec<&str> = tail.lines().map(str::trim).filter(|line| !line.is_empty())
+                .filter(|line| line.starts_with("Error") || line.contains(" ERROR ") || line.contains(" WARN ")).collect();
+            let shown = if why.is_empty() { tail.trim().lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n") }
+                else { why[why.len().saturating_sub(3)..].join("\n") };
+            Err(io::Error::other(format!("{reason}: {shown}")))
         }
     }
 }

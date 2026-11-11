@@ -20,6 +20,13 @@
 //!   reply, through the reducer the daemon's deltas take (nothing is sent to the daemon)
 //! - `live`: show the active conversation's whole loaded history as the live turn, so every
 //!   tool call, edit and thought in it is a row (a long agent run's transcript)
+//! - `hold`: remember the active conversation; `stream` goes to it whatever tab shows
+//! - `tab:<index>`: show the tab at this place in the strip
+//! - `hover:<index>`: rest the pointer on the tab at this place in the strip (its title slides);
+//!   `hover:chat` rests it on the sidebar row with the longest title
+//! - `child`: open the first sub-agent at work under the active conversation (waits a minute for one)
+//! - `rows`: log the active conversation's rows (kind, id tail, text length)
+//! - `watch:<seconds>`: log the held (or active) conversation's scroll offset every frame
 //! - `mark:<name>`
 //! - `quit`
 //!
@@ -48,6 +55,12 @@ enum Step {
     Sidebar,
     Stream { text: String, bounds: Vec<usize>, seconds: f64 },
     Live,
+    Hold,
+    Tab(usize),
+    Hover(Option<usize>),
+    Child,
+    Rows,
+    Watch(f64),
     Mark(String),
     Quit,
 }
@@ -57,6 +70,8 @@ pub struct Drive {
     /// When the current step started (frame clock) and how many deltas it has sent.
     started: Option<f64>,
     sent: u64,
+    /// The conversation `hold` remembered.
+    held: Option<String>,
 }
 
 /// Trackpad deltas arrive at about this rate.
@@ -88,12 +103,18 @@ impl Drive {
                     Step::Stream { text, bounds, seconds: seconds.parse().ok()? }
                 }
                 "live" => Step::Live,
+                "hold" => Step::Hold,
+                "tab" => Step::Tab(rest.parse().ok()?),
+                "hover" => Step::Hover(rest.parse().ok()),
+                "watch" => Step::Watch(rest.parse().ok()?),
+                "child" => Step::Child,
+                "rows" => Step::Rows,
                 "mark" => Step::Mark(rest.to_owned()),
                 "quit" => Step::Quit,
                 _ => return None,
             })
         }).collect();
-        (!steps.is_empty()).then_some(Drive { steps, started: None, sent: 0 })
+        (!steps.is_empty()).then_some(Drive { steps, started: None, sent: 0, held: None })
     }
 }
 
@@ -124,6 +145,12 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Sidebar => "sidebar".to_owned(),
                 Step::Stream { seconds, .. } => format!("stream:{seconds}"),
                 Step::Live => "live".to_owned(),
+                Step::Hold => "hold".to_owned(),
+                Step::Tab(index) => format!("tab:{index}"),
+                Step::Hover(index) => format!("hover:{index:?}"),
+                Step::Watch(s) => format!("watch:{s}"),
+                Step::Child => "child".to_owned(),
+                Step::Rows => "rows".to_owned(),
                 Step::Mark(name) => format!("mark:{name}"),
                 Step::Quit => "quit".to_owned(),
             };
@@ -186,7 +213,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
             Step::Stream { text, bounds, seconds } => {
                 // Deltas land a hundred times a second, as a fast model's do.
                 const DELTA_HZ: f64 = 100.0;
-                let Some(id) = active_session(app) else { drive.steps.pop_front(); drive.started = None; continue };
+                let Some(id) = drive.held.clone().or_else(|| active_session(app)) else { drive.steps.pop_front(); drive.started = None; continue };
                 let message_id = format!("drive-stream-{started:.3}");
                 if fresh {
                     app.apply_agent(AgentServerMessage::StreamingState { session_id: id.clone(), state: StreamingState::Generating, label: None });
@@ -234,6 +261,47 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 changed = true;
                 None
             }
+            Step::Hold => { drive.held = active_session(app); None }
+            Step::Tab(index) => {
+                if let Some(id) = app.tabs.get(*index).map(|t| t.id) { app.select_tab(id); }
+                changed = true;
+                None
+            }
+            Step::Hover(index) => {
+                let title = match index {
+                    Some(index) => app.tabs.get(*index).map(|tab| (format!("pane-tab:{}", tab.id), crate::ui::marquee::natural(&app.tab_title(tab), app.ty.tab()))),
+                    None => app.threads.iter().max_by_key(|t| t.title.chars().count())
+                        .map(|t| (format!("thread:{}", t.session_id), crate::ui::marquee::natural(&t.title, app.ty.body()))),
+                };
+                if let Some((key, width)) = title {
+                    app.title_hover(&key, width, true);
+                }
+                changed = true;
+                None
+            }
+            Step::Child => {
+                let found = active_session(app).and_then(|root| {
+                    let child = app.families.roster(&root).iter().find(|m| app.families.working_now(&m.id)).map(|m| m.id.clone())?;
+                    Some((root, child))
+                });
+                match found {
+                    Some((root, child)) => { app.open_child(&root, &child); changed = true; None }
+                    None if elapsed < 60.0 => Some(0.1),
+                    None => None,
+                }
+            }
+            Step::Rows => {
+                if let Some(session) = active_session(app).and_then(|id| app.sessions.get(&id)) {
+                    let rows: Vec<String> = session.messages.iter().map(|m| format!("{:?}:{}:{}", m.kind, &m.id[m.id.len().saturating_sub(4)..], m.text.len())).collect();
+                    eprintln!("[drive] rows streaming={} live_from={:?} {}", session.streaming, session.live_from, rows.join(" "));
+                }
+                None
+            }
+            Step::Watch(seconds) => {
+                let (offset, end) = drive.held.clone().or_else(|| active_session(app)).and_then(|id| app.sessions.get(&id).map(|s| s.scroll.get())).unwrap_or_default();
+                eprintln!("[drive] watching t={elapsed:.4} offset={offset:.1} end={end:.1}");
+                (elapsed < *seconds).then_some(1.0 / 240.0)
+            }
             Step::Mark(_) => None,
             Step::Quit => { app.quit_requested = true; None }
         };
@@ -263,7 +331,8 @@ mod tests {
         let names: Vec<&str> = drive.steps.iter().map(|step| match step {
             Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
             Step::Prompt(_) => "prompt", Step::Host(_) => "host",
-            Step::JoinSystem(_) => "system", Step::JoinServer(_) => "server", Step::Fixture(_) => "fixture", Step::Sidebar => "sidebar", Step::Stream { .. } => "stream", Step::Live => "live", Step::Mark(_) => "mark", Step::Quit => "quit",
+            Step::JoinSystem(_) => "system", Step::JoinServer(_) => "server", Step::Fixture(_) => "fixture", Step::Sidebar => "sidebar", Step::Stream { .. } => "stream", Step::Live => "live",
+            Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
         assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "mark", "quit"]);
         assert!(matches!(&drive.steps[2], Step::Wheel { rate, seconds } if *rate == -30.0 && *seconds == 2.0));

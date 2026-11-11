@@ -142,11 +142,25 @@ fn daemon_args(directory: &str, env: impl Fn(&str) -> bool) -> Vec<String> {
     args
 }
 
-/// When this process last started a daemon. One window's reconnect loop per workspace would
+/// The daemon this process started, and when. One window's reconnect loop per workspace would
 /// otherwise start one each; the daemon also holds its own ownership lock.
-static STARTED: Mutex<Option<Instant>> = Mutex::new(None);
-/// A daemon gets this long to publish its endpoint before another start is tried.
+static STARTED: Mutex<Option<(std::process::Child, Instant)>> = Mutex::new(None);
+/// A daemon still running gets this long to publish its endpoint before another is started.
 const START_GRACE: Duration = Duration::from_secs(if cfg!(windows) { 240 } else { 120 });
+/// One that exited is started again no sooner than this.
+const RESTART_PAUSE: Duration = Duration::from_secs(3);
+
+/// Whether a daemon started `since` ago, running or `exited`, is still to be waited for.
+///
+/// A daemon that finds another holding the ownership lock exits at once and without error,
+/// expecting that one's endpoint to be used. After an update, or when the last window of the
+/// old version has just closed, that other daemon is on its way out: it is gone a moment
+/// later, and nothing is listening. Waiting out the whole start grace then left the window
+/// connected to nothing for minutes (no files, no notes, no shell, no agent) until the app
+/// was restarted. A daemon that has exited is not starting: it is started again.
+fn wait_for_start(since: Duration, exited: bool) -> bool {
+    if exited { since < RESTART_PAUSE } else { since < START_GRACE }
+}
 
 /// No local daemon answered: start the bundled one, detached, so it outlives this window and
 /// serves the next. A daemon chosen explicitly (`--daemon`, `NEOISM_GPUIX_DAEMON_URL`) is
@@ -154,7 +168,11 @@ const START_GRACE: Duration = Duration::from_secs(if cfg!(windows) { 240 } else 
 pub fn ensure_local_daemon() -> Result<(), String> {
     if std::env::var_os("NEOISM_GPUIX_DAEMON_URL").is_some() || std::env::var_os("NEOISM_RUNE_NO_DAEMON").is_some() { return Ok(()); }
     let mut started = STARTED.lock().unwrap();
-    if started.is_some_and(|at| at.elapsed() < START_GRACE) { return Ok(()); }
+    if let Some((child, at)) = started.as_mut() {
+        // `try_wait` also reaps it. An error says nothing about it: treat it as running.
+        let exited = matches!(child.try_wait(), Ok(Some(_)));
+        if wait_for_start(at.elapsed(), exited) { return Ok(()); }
+    }
     let binary = daemon_executable().ok_or("The workspace daemon is missing from this installation. Reinstall the complete Neoism bundle.")?;
     let directory = std::env::current_dir().ok().filter(|d| !launcher_directory(d)).or_else(dirs::home_dir).unwrap_or_default();
     let directory = directory.display().to_string();
@@ -172,8 +190,8 @@ pub fn ensure_local_daemon() -> Result<(), String> {
         // itself, leaves the daemon (and the shells and agents it runs) alone.
         command.process_group(0);
     }
-    command.spawn().map_err(|e| format!("Could not start the workspace daemon ({}): {e}", binary.display()))?;
-    *started = Some(Instant::now());
+    let child = command.spawn().map_err(|e| format!("Could not start the workspace daemon ({}): {e}", binary.display()))?;
+    *started = Some((child, Instant::now()));
     Ok(())
 }
 
@@ -199,5 +217,15 @@ mod tests {
         assert!(absolute("/home/me") && absolute(r"C:\Users\me") && absolute("c:/Users/me") && absolute(r"\\server\share"));
         assert!(!absolute("src/main.rs") && !absolute("C:relative") && !absolute(""));
         assert_eq!(strip_verbatim(PathBuf::from(r"\\?\UNC\server\share")), PathBuf::from(r"\\?\UNC\server\share"));
+    }
+
+    #[test]
+    fn a_daemon_that_exited_is_started_again_and_one_starting_is_waited_for() {
+        // Still running: it may be minutes from publishing its endpoint (a first Windows run).
+        assert!(wait_for_start(Duration::from_secs(60), false));
+        assert!(!wait_for_start(START_GRACE, false));
+        // Exited (another daemon held the lock on its way out): again in a moment, not minutes.
+        assert!(wait_for_start(Duration::from_secs(1), true));
+        assert!(!wait_for_start(RESTART_PAUSE, true));
     }
 }

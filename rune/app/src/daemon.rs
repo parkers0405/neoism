@@ -330,6 +330,12 @@ impl Liveness {
     }
 }
 
+/// What a window says while its local daemon is coming up (the status line shows it).
+pub const STARTING: &str = "Starting the workspace daemon";
+
+/// How long a daemon that accepted the socket may take to acknowledge `Hello`.
+const HANDSHAKE: Duration = Duration::from_secs(30);
+
 fn pong_nonce(event: &Inbound) -> Option<u64> {
     let Inbound::Reply { family, message, .. } = event else { return None };
     if family != "Workspace" { return None; }
@@ -357,7 +363,13 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Arc<Mutex<
                 // Nothing answered locally: bring up this installation's own daemon, then
                 // keep looking for the endpoint it publishes.
                 let error = match target.as_ref() {
-                    None => crate::startup::ensure_local_daemon().err().unwrap_or(error),
+                    // Started, or still coming up: say that, not that nothing answered.
+                    None => match crate::startup::ensure_local_daemon() {
+                        // A daemon named explicitly is never started here: its own error stands.
+                        Ok(()) if std::env::var_os("NEOISM_GPUIX_DAEMON_URL").is_some() || std::env::var_os("NEOISM_RUNE_NO_DAEMON").is_some() => error,
+                        Ok(()) => STARTING.to_owned(),
+                        Err(why) => why,
+                    },
                     Some(_) => error,
                 };
                 push(&inbox, &wake, Inbound::Disconnected(error));
@@ -370,6 +382,10 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Arc<Mutex<
             continue;
         }
         let mut live = Liveness::new(Instant::now(), SystemTime::now());
+        // Until the daemon acknowledges the handshake nothing is asked of it: one still
+        // starting (minutes, on a first Windows run) answers when it is ready, or not at all.
+        let greeted = Instant::now();
+        let mut acknowledged = false;
         let reason = 'session: loop {
             // Writes first: user actions should not wait behind a read timeout.
             loop {
@@ -401,7 +417,15 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Arc<Mutex<
                             if live.answered(nonce, Instant::now()) { push(&inbox, &wake, Inbound::Woke); }
                             continue;
                         }
-                        if matches!(&event, Inbound::Reply { family, message, .. } if family == "Workspace" && message.get("HelloAck").is_some()) {
+                        if let Inbound::Reply { family, message, .. } = &event && family == "Workspace" && let Some(ack) = message.get("HelloAck") {
+                            // A refused handshake (a token read while the daemon was replacing
+                            // it) is not a connection: the daemon hangs up, and the next
+                            // attempt reads the credentials again.
+                            if ack["accepted"].as_bool() == Some(false) {
+                                break 'session ack["reason"].as_str().map_or_else(|| "The daemon refused the connection".to_owned(), |why| format!("The daemon refused the connection: {why}"));
+                            }
+                            acknowledged = true;
+                            live = Liveness::new(Instant::now(), SystemTime::now());
                             push(&inbox, &wake, Inbound::Connected { again: std::mem::replace(&mut connected_before, true) });
                         }
                         push(&inbox, &wake, event);
@@ -411,6 +435,10 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Arc<Mutex<
                 Ok(_) => live.heard(Instant::now()),
                 Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
                 Err(e) => break 'session format!("Daemon disconnected: {e}"),
+            }
+            if !acknowledged {
+                if greeted.elapsed() >= HANDSHAKE { break 'session "The daemon did not complete its handshake".into(); }
+                continue;
             }
             match live.tick(Instant::now(), SystemTime::now()) {
                 Beat::Quiet => {}

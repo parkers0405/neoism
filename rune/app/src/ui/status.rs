@@ -242,6 +242,20 @@ pub fn view(app: &App) -> El {
         let label = format!(" {}/{}", buffer.doc.cursor_line + 1, buffer.doc.lines.len());
         pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)], live: None });
     }
+    // No daemon behind the window: nothing lists, runs or sends, and the reason is the only
+    // thing that says why (it was silent: an empty tree and a prompt that went nowhere).
+    if app.daemon.is_some() {
+        use crate::app::Connection;
+        // Only a failure that lasts is said: connecting takes a moment on every start.
+        let notice = match &app.connection {
+            Connection::Disconnected(reason) if reason == crate::daemon::STARTING => Some((format!(" {reason}"), p.yellow)),
+            Connection::Disconnected(reason) => Some((format!(" {}", reason.chars().take(72).collect::<String>()), p.red)),
+            _ => None,
+        };
+        if let Some((label, color)) = notice {
+            pills.push(Pill { icon: ("DAEMON".into(), None), icon_bg: color, text: vec![(label, color)], live: None });
+        }
+    }
     if let Some(fps) = app.fps {
         // The reading is live text in a three-digit slot: a new one repaints the label only.
         pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(fps_label(fps), p.cyan)], live: Some(&app.fps_live) });

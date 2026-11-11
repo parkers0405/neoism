@@ -15,6 +15,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if shortcut(app, event, tx) { return true; }
     if app.diag_popup.is_some() && app.diag_popup_key(event) { return true; }
     if app.settings.is_some() { return app.settings_key(event); }
+    if app.git_panel_key(event, tx) { return true; }
     // A full-screen program or running command in the Home pane owns the keyboard.
     if app.terminal_key(event) { return true; }
     if app.focus == Focus::Content && matches!(app.active_tab().kind, TabKind::Editor { .. }) && app.editor_key(event, tx) {
@@ -212,7 +213,7 @@ fn focus_up(app: &mut App) {
         Focus::Workspaces(i) => Focus::Workspaces(i),
         Focus::Buffers(_) => Focus::Workspaces(app.workspace_active),
         Focus::Content if app.focus_split_toward(Direction::Up) => Focus::Content,
-        Focus::Content | Focus::Sidebar => Focus::Buffers(app.active),
+        Focus::Content | Focus::Sidebar | Focus::Details => Focus::Buffers(app.active),
     };
 }
 
@@ -242,6 +243,8 @@ fn focus_step(app: &mut App, previous: bool) {
         Focus::Workspaces(i) => Focus::Workspaces(if previous { (i + app.workspaces.len()) % (app.workspaces.len() + 1) } else { (i + 1) % (app.workspaces.len() + 1) }),
         Focus::Content if app.focus_split_toward(if previous { Direction::Left } else { Direction::Right }) => Focus::Content,
         Focus::Content if previous && app.sidebar.is_some() => Focus::Sidebar,
+        Focus::Content if !previous && app.git_panel.open => Focus::Details,
+        Focus::Details if previous => Focus::Content,
         Focus::Sidebar if !previous => Focus::Content,
         other => other,
     };
@@ -315,7 +318,7 @@ impl App {
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| crate::editor::view::cursor_rect(self, b)),
             Focus::Sidebar if self.active_tree().is_some() => self.rects.get("tree-row").map(|r| crate::tree::view::cursor_rect(self, *r)),
             Focus::Sidebar if self.sidebar == Some(crate::app::Sidebar::Conversations) && (self.conv_header.is_some() || !self.threads.is_empty()) => self.conversation_cursor(),
-            Focus::Sidebar | Focus::Content => self.cursor.caret_block(),
+            Focus::Details | Focus::Sidebar | Focus::Content => self.cursor.caret_block(),
         }
     }
 
@@ -359,6 +362,9 @@ impl App {
             self.focus = Focus::Content;
         }
         self.field_synced = true;
+        if self.focus != Focus::Details || !self.git_panel.open {
+            self.git_panel.message.focused = false;
+        }
         // An inline composer picker (`/model`, `/cd` …) types into its own query row.
         let inline_picker = self.composer.picker.as_ref().is_some_and(|p| p.kind != crate::agent::slash::Kind::Slash);
         // A block's output filter types into its own field; a click back into the composer
@@ -369,7 +375,7 @@ impl App {
         }
         let overlay = self.picker.is_some() || self.finder.is_some() || self.browser.is_some() || self.form.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
             || self.block_filter_focused();
-        let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. });
+        let want = self.focus == Focus::Content && !overlay && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff);
         let active = self.active;
         let mut changed = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {

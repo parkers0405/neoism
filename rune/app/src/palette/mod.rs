@@ -390,6 +390,7 @@ impl App {
             Action::SearchFiles => self.open_finder(crate::finder::Mode::Files),
             Action::SearchWords => self.open_finder(crate::finder::Mode::Grep),
             Action::SearchGitChanges => self.open_finder(crate::finder::Mode::Git),
+            Action::ToggleGitPanel => self.toggle_git_panel(),
             Action::OpenAgent => { self.open_tab(TabKind::Agent { session: None }); }
             Action::ToggleConversations => self.toggle_conversations(),
             Action::Quit => tx.quit(),

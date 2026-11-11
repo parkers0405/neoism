@@ -50,6 +50,7 @@ pub enum SavedTab {
     Agent { session: Option<String>, #[serde(default)] draft: String },
     Editor { path: String },
     Database { path: String },
+    GitDiff,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -121,6 +122,7 @@ pub fn capture_workspace(name: &str, cwd: &str, tabs: &[Tab], active: usize, lay
             TabKind::Agent { session } => SavedTab::Agent { session: session.clone(), draft },
             TabKind::Editor { path } => SavedTab::Editor { path: path.clone() },
             TabKind::Database { path } => SavedTab::Database { path: path.clone() },
+            TabKind::GitDiff => SavedTab::GitDiff,
         }
     }).collect();
     let sidebar = sidebar.map(|s| match s { Sidebar::Conversations => "conversations", Sidebar::Files => "files", Sidebar::Notes => "notes" }.to_owned());
@@ -210,6 +212,12 @@ impl App {
                 }
                 SavedTab::Database { path } => {
                     self.open_database(&path);
+                    ids.push(self.tabs.last().map(|t| t.id));
+                    continue;
+                }
+                SavedTab::GitDiff => {
+                    self.open_tab(TabKind::GitDiff);
+                    self.git_panel.open = true;
                     ids.push(self.tabs.last().map(|t| t.id));
                     continue;
                 }

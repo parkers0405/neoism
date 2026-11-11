@@ -23,7 +23,8 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.sidebar.is_some(), || sidebar(app))
         .child(col().grow(1.0).shrink().h_full()
             .child(workspace_tabs(app))
-            .child(crate::panes::view(app, cx)));
+            .child(crate::panes::view(app, cx)))
+        .child_if(app.git_panel.open, || crate::git::view(app));
     track_caret(app, cx);
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
@@ -60,7 +61,7 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
     } else {
         match app.active_tab().kind {
             TabKind::Agent { .. } => app.ty.composer().size,
-            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } => app.ty.small().size,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => app.ty.small().size,
         }
     };
     app.cursor.caret_font.set(font);

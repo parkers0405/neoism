@@ -145,6 +145,7 @@ impl App {
                 .unwrap_or_else(|| root.clone())
         };
         self.cwd = root;
+        self.reset_git_panel();
         self.tree = Default::default();
         self.notes = Default::default();
         // An open tree or notes panel lists the new root at once.
@@ -188,6 +189,7 @@ pub struct Opening {
 pub struct State {
     workspace_id: String,
     workspace_ready: bool,
+    agent_resync_due: bool,
     workspace_closing: Option<u64>,
     activity: Option<crate::agent::Activity>,
     pending_cd: Option<String>,
@@ -204,6 +206,7 @@ pub struct State {
     families: crate::agent::Families,
     header_hover: Option<crate::agent::HeaderStep>,
     git: Option<crate::ui::status::GitSummary>,
+    git_panel: crate::git::State,
     picker: Option<crate::palette::Picker>,
     daemon: Option<Daemon>,
     inbox: Option<Inbox>,
@@ -238,6 +241,7 @@ impl State {
         Self {
             workspace_id: app.workspace_id,
             workspace_ready: app.workspace_ready,
+            agent_resync_due: app.agent_resync_due,
             workspace_closing: app.workspace_closing,
             activity: app.activity,
             pending_cd: app.pending_cd,
@@ -254,6 +258,7 @@ impl State {
             families: app.families,
             header_hover: app.header_hover,
             git: app.git,
+            git_panel: app.git_panel,
             picker: app.picker,
             daemon: app.daemon,
             inbox: app.inbox,
@@ -280,6 +285,7 @@ impl State {
     fn swap(&mut self, app: &mut App) {
         std::mem::swap(&mut self.workspace_id, &mut app.workspace_id);
         std::mem::swap(&mut self.workspace_ready, &mut app.workspace_ready);
+        std::mem::swap(&mut self.agent_resync_due, &mut app.agent_resync_due);
         std::mem::swap(&mut self.workspace_closing, &mut app.workspace_closing);
         std::mem::swap(&mut self.activity, &mut app.activity);
         std::mem::swap(&mut self.pending_cd, &mut app.pending_cd);
@@ -296,6 +302,7 @@ impl State {
         std::mem::swap(&mut self.families, &mut app.families);
         std::mem::swap(&mut self.header_hover, &mut app.header_hover);
         std::mem::swap(&mut self.git, &mut app.git);
+        std::mem::swap(&mut self.git_panel, &mut app.git_panel);
         std::mem::swap(&mut self.picker, &mut app.picker);
         std::mem::swap(&mut self.daemon, &mut app.daemon);
         std::mem::swap(&mut self.inbox, &mut app.inbox);
@@ -472,6 +479,7 @@ impl App {
         {
             self.workspace_ready = true;
             self.agent_connected();
+            if std::mem::take(&mut self.agent_resync_due) { self.agent_resync(true); }
             self.terminals_connected();
             self.watch_git();
             self.lsp_reconnect();
@@ -630,6 +638,19 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_panel_belongs_to_its_workspace() {
+        let mut app = crate::app::App::new();
+        crate::git::fixture(&mut app, false);
+        assert!(app.git_panel.open);
+        app.new_workspace();
+        assert!(!app.git_panel.open);
+        app.select_workspace(0);
+        assert!(app.git_panel.open);
+        app.select_workspace(1);
+        assert!(!app.git_panel.open);
+    }
+
     #[test]
     fn window_close_does_not_wait_for_a_stalled_cleanup_ack() {
         let mut app = crate::app::App::new();

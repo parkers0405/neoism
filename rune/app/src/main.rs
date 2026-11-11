@@ -4,6 +4,7 @@
 
 mod agent;
 mod app;
+mod git;
 mod browser;
 mod cli;
 mod collab;
@@ -276,6 +277,9 @@ fn main() {
         on_key: Some(on_key),
         scenes: &[
             ("welcome", |_| {}),
+            ("git-panel", |s| git::fixture(s, false)),
+            ("git-review", |s| git::fixture(s, true)),
+            ("git-review-long", git::long_fixture),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
             // A sent message with an image and another waiting in the composer;
             // `NEOISM_RUNE_PREVIEW=1` opens the sent one full-window.
@@ -646,6 +650,20 @@ fn main() {
                     session.streaming = true;
                 }
             }),
+            ("thinking-wrap", |s| {
+                s.load_fixture("fixture-thinking", "Thinking line wrapping", include_str!("../fixtures/thinking-timeline.json"));
+                s.sessions.get_mut("fixture-thinking").unwrap().live_from = Some(0);
+            }),
+            ("queued", |s| {
+                s.load_fixture("fixture-queued", "Queued steering messages", include_str!("../fixtures/code-timeline.json"));
+                if let Some(session) = s.sessions.get_mut("fixture-queued") {
+                    session.live_from = Some(session.messages.len());
+                    session.streaming = true;
+                }
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::QueueUpdate {
+                    session_id: "fixture-queued".into(), count: 2, preview: None, started_at: None,
+                });
+            }),
             // The first installed background behind the Home splash (no config is written).
             ("wallpaper", |s| {
                 let image = std::fs::read_dir(config::dir().join("bg")).ok()
@@ -701,4 +719,3 @@ fn main() {
     app.run();
     workspace::finish_window_cleanup();
 }
-

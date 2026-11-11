@@ -75,6 +75,7 @@ pub struct Activity {
     pub state: State,
     /// Background tasks running when the line was built (it is rebuilt when this changes).
     pub background: usize,
+    pub queued: u32,
     glyphs: Vec<Glyph>,
     dots: Vec<Dot>,
     time: LiveText,
@@ -100,7 +101,7 @@ impl Activity {
             target, shown: LiveText::new(target.to_string()), offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE),
         }).collect();
         let dots = (0..3).map(|_| Dot { offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE) }).collect();
-        Activity { state, background: 0, glyphs, dots, time: LiveText::new(""), changed: Instant::now(), turn }
+        Activity { state, background: 0, queued: 0, glyphs, dots, time: LiveText::new(""), changed: Instant::now(), turn }
     }
 
     /// Advance every glyph, dot and the timer to `now` (seconds on the frame clock).
@@ -182,13 +183,19 @@ impl Activity {
         // Padding, not margin: a virtual row drops its top margin, which slid this line (and its
         // dark glyph shadows) up over the reply's last line.
         let line = row().w_full().center_y().child(letters).child(dots).child(time);
+        let queued = (self.queued > 0).then(|| {
+            let label = if self.queued == 1 { "Queued".into() } else { format!("Queued x{}", self.queued) };
+            let branch = if self.background > 0 { "\u{251c}\u{2500}" } else { "\u{2570}\u{2500}" };
+            text(format!("{branch} {label}")).key("activity-queued").font(app.ty.sized(13.0).italic()).color(rgb(p.accent))
+                .h(LINE_H * s).pl(3.3 * s)
+        });
         // Under it, how many background tasks are still running (`╰─ 2 background tasks running`).
         let background = (self.background > 0).then(|| {
             let noun = if self.background == 1 { "task" } else { "tasks" };
             text(format!("\u{2570}\u{2500} {} background {noun} running", self.background)).font(app.ty.sized(13.0)).color(rgb(p.muted))
                 .h(LINE_H * s).pl(3.3 * s)
         });
-        rune::col().key("activity").w_full().pt(18.0).child(line).children(background)
+        rune::col().key("activity").w_full().pt(18.0).child(line).children(queued).children(background)
     }
 }
 
@@ -235,8 +242,8 @@ impl App {
 
     /// The row the activity line takes (its top margin and line).
     pub fn activity_row_height(&self) -> f32 {
-        let lines = 1.0 + f32::from(u8::from(self.activity.as_ref().is_some_and(|a| a.background > 0)));
-        18.0 + LINE_H * self.ty.scale() * lines
+        let lines = self.activity.as_ref().map_or(1, |a| 1 + usize::from(a.queued > 0) + usize::from(a.background > 0));
+        18.0 + LINE_H * self.ty.scale() * lines as f32
     }
 
     /// Keep the activity line in step with the active conversation. Returns whether it
@@ -245,15 +252,17 @@ impl App {
         let session = match &self.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => Some(id.clone()), _ => None };
         let state = session.as_deref().and_then(|id| self.activity_state(id));
         let background = session.as_deref().map_or(0, |id| self.background_count(id));
+        let queued = session.as_deref().and_then(|id| self.sessions.get(id)).map_or(0, |s| s.queued_prompts);
         let structure = match (state, &self.activity) {
             (None, None) => false,
             (None, Some(_)) => { self.activity = None; true }
-            (Some(state), Some(current)) if current.state == state && current.background == background => false,
+            (Some(state), Some(current)) if current.state == state && current.background == background && current.queued == queued => false,
             (Some(state), current) => {
                 // The same word keeps its letters where they are; only a new one scrambles in.
                 let (turn, changed) = current.as_ref().map_or_else(|| (Instant::now(), None), |c| (c.turn, (c.state == state).then_some(c.changed)));
                 let mut activity = Activity::new(state, turn);
                 activity.background = background;
+                activity.queued = queued;
                 if let Some(changed) = changed { activity.changed = changed; }
                 self.activity = Some(activity);
                 true
@@ -271,6 +280,48 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_snapshots_update_the_activity_and_reserved_space_per_conversation() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        let mut app = App::new();
+        app.load_fixture("active", "Steering", "[]");
+        app.sessions.get_mut("active").unwrap().streaming = true;
+        app.tick_activity();
+        let base = app.activity_row_height();
+        let extra = LINE_H * app.ty.scale();
+        let update = |session: &str, count| M::QueueUpdate {
+            session_id: session.into(), count, preview: None, started_at: None,
+        };
+
+        app.apply_agent(update("active", 1));
+        assert!(app.tick_activity().1);
+        assert_eq!(app.activity.as_ref().unwrap().queued, 1);
+        assert_eq!(app.activity_row_height(), base + extra);
+        let revision = app.sessions["active"].structure;
+        app.apply_agent(update("active", 1));
+        assert!(!app.tick_activity().1);
+        assert_eq!(app.sessions["active"].structure, revision);
+
+        app.apply_agent(M::SessionEvent { session_id: "active".into(), kind: "session.queue.updated".into(),
+            properties: serde_json::json!({"queue": {"count": 2}, "action": "enqueued"}) });
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().queued, 2);
+        assert_eq!(app.activity_row_height(), base + extra);
+        app.apply_agent(update("other", 8));
+        assert!(!app.tick_activity().1);
+        assert_eq!(app.activity.as_ref().unwrap().queued, 2);
+
+        app.apply_agent(update("active", 0));
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().queued, 0);
+        assert_eq!(app.activity_row_height(), base);
+        app.apply_agent(M::SessionIdle { session_id: "active".into() });
+        app.tick_activity();
+        app.apply_agent(update("active", 1));
+        app.tick_activity();
+        assert!(app.activity.is_none(), "waiting work must not resurrect a completed turn's loader");
+    }
 
     #[test]
     fn labels_and_elapsed() {

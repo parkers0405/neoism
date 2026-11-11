@@ -10,7 +10,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use tungstenite::{Message, WebSocket};
 
 /// Wire families the daemon multiplexes over one socket.
@@ -49,8 +49,12 @@ impl Family {
 #[derive(Debug)]
 pub enum Inbound {
     Connecting,
-    Connected,
+    /// The handshake completed. `again`: this thread had a connection before, so everything
+    /// the old socket was following (streams, requests in flight) has to be asked for again.
+    Connected { again: bool },
     Disconnected(String),
+    /// The machine slept and woke, and the connection it had before is still answering.
+    Woke,
     Agent(Box<AgentServerMessage>),
     Editor(Box<neoism_protocol::editor::EditorServerMessage>),
     Database { request_id: u64, message: Result<Box<neoism_protocol::database::DatabaseReply>, String> },
@@ -73,6 +77,8 @@ enum Outbound {
 pub struct Daemon {
     outbound: Sender<Outbound>,
     sequence: Arc<std::sync::atomic::AtomicU64>,
+    /// Where the thread dials next (`retarget`); `None` is the published local daemon.
+    target: Arc<Mutex<Option<Target>>>,
     _lifetime: Arc<()>,
 }
 
@@ -88,12 +94,18 @@ impl Daemon {
         let thread_inbox = inbox.clone();
         let lifetime = Arc::new(());
         let alive = Arc::downgrade(&lifetime);
+        let target = Arc::new(Mutex::new(target));
+        let dial = target.clone();
         std::thread::Builder::new()
             .name("neoism-daemon".into())
-            .spawn(move || run(rx, thread_inbox, wake, target, alive))
+            .spawn(move || run(rx, thread_inbox, wake, dial, alive))
             .expect("spawn daemon thread");
-        (Daemon { outbound, sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)), _lifetime: lifetime }, inbox)
+        (Daemon { outbound, sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)), target, _lifetime: lifetime }, inbox)
     }
+
+    /// The server moved (an SSH tunnel dialed again lands on another local port): the next
+    /// connection attempt goes to `target`.
+    pub fn retarget(&self, target: Target) { *self.target.lock().unwrap() = Some(target); }
 
     pub fn send(&self, family: Family, message: Value) {
         self.request(family, message, None);
@@ -162,9 +174,9 @@ pub fn probe(target: &Target, timeout: Duration) -> Result<(), String> {
     let mut socket = connect(&endpoint)?;
     let hello = json!({"Workspace": {"request_id": 0, "message": {"Hello": {"token": endpoint.pairing_token, "client_name": "neoism-rune"}}}});
     socket.send(Message::text(hello.to_string())).map_err(|e| format!("Server handshake failed: {e}"))?;
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
     loop {
-        if std::time::Instant::now() >= deadline { return Err("The selected server did not complete its handshake".into()); }
+        if Instant::now() >= deadline { return Err("The selected server did not complete its handshake".into()); }
         match socket.read() {
             Ok(Message::Text(text)) => {
                 let value: Value = serde_json::from_str(text.as_str()).unwrap_or(Value::Null);
@@ -180,7 +192,7 @@ pub fn probe(target: &Target, timeout: Duration) -> Result<(), String> {
                 return Err(reason.unwrap_or_else(|| "The server rejected the connection".into()));
             }
             Ok(_) => {}
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
             Err(e) => return Err(format!("Server disconnected: {e}")),
         }
     }
@@ -250,14 +262,93 @@ fn connect(endpoint: &Endpoint) -> Result<Socket, String> {
     Ok(socket)
 }
 
+/// Whether the connection still answers, and whether the machine slept.
+///
+/// A socket to another machine does not notice that machine going away, or this one sleeping
+/// through its end of the conversation: reads go quiet and writes are accepted into a buffer
+/// nothing drains. So a quiet connection is asked (`Workspace::Ping`), and one that does not
+/// answer is dialed again. A lid that closed and opened shows as the wall clock leaving this
+/// thread behind: the connection is asked at once, on a short deadline, instead of waiting
+/// out the quiet.
+struct Liveness {
+    heard: Instant,
+    /// The ping in flight: its nonce and when it stops being worth waiting for.
+    asked: Option<(u64, Instant)>,
+    /// The ping in flight was sent because the machine woke.
+    waking: bool,
+    wall: SystemTime,
+    nonce: u64,
+}
+
+#[derive(Debug, PartialEq)]
+enum Beat { Quiet, Ping(u64), Dead }
+
+impl Liveness {
+    /// Nothing heard for this long: ask.
+    const QUIET: Duration = Duration::from_secs(10);
+    /// How long an answer may take over a slow link.
+    const ANSWER: Duration = Duration::from_secs(8);
+    /// The wall clock moved this far between two turns of the loop: the machine slept.
+    const SLEPT: Duration = Duration::from_secs(5);
+    /// How long an answer may take after waking. A local daemon answers in a millisecond; a
+    /// link that is still coming back is dialed again, which waits for it just the same.
+    const WAKE_ANSWER: Duration = Duration::from_secs(4);
+
+    fn new(now: Instant, wall: SystemTime) -> Self { Liveness { heard: now, asked: None, waking: false, wall, nonce: 0 } }
+
+    fn tick(&mut self, now: Instant, wall: SystemTime) -> Beat {
+        let gap = wall.duration_since(self.wall).unwrap_or_default();
+        self.wall = wall;
+        if gap >= Self::SLEPT {
+            self.nonce += 1;
+            self.waking = true;
+            self.asked = Some((self.nonce, now + Self::WAKE_ANSWER));
+            return Beat::Ping(self.nonce);
+        }
+        match self.asked {
+            Some((_, deadline)) if now >= deadline => Beat::Dead,
+            Some(_) => Beat::Quiet,
+            None if now.saturating_duration_since(self.heard) >= Self::QUIET => {
+                self.nonce += 1;
+                self.asked = Some((self.nonce, now + Self::ANSWER));
+                Beat::Ping(self.nonce)
+            }
+            None => Beat::Quiet,
+        }
+    }
+
+    /// Anything arrived: the connection is not quiet. What was already buffered when the
+    /// machine went to sleep arrives too, so only the answer itself settles a ping.
+    fn heard(&mut self, now: Instant) { self.heard = now; }
+
+    /// The answer to ping `nonce`. Returns whether it was asked because the machine woke.
+    fn answered(&mut self, nonce: u64, now: Instant) -> bool {
+        self.heard = now;
+        if self.asked.is_none_or(|(asked, _)| asked != nonce) { return false; }
+        self.asked = None;
+        std::mem::take(&mut self.waking)
+    }
+}
+
+fn pong_nonce(event: &Inbound) -> Option<u64> {
+    let Inbound::Reply { family, message, .. } = event else { return None };
+    if family != "Workspace" { return None; }
+    message.get("Pong")?.get("nonce")?.as_str()?.strip_prefix("rune-")?.parse().ok()
+}
+
 fn push(inbox: &Inbox, wake: &dyn Fn(), event: Inbound) {
+    if matches!(event, Inbound::Connected { .. } | Inbound::Disconnected(_) | Inbound::Woke) && std::env::var_os("NEOISM_RUNE_TRACE_DAEMON").is_some() {
+        eprintln!("[daemon] link {event:?}");
+    }
     inbox.lock().unwrap().push_back(event);
     wake();
 }
 
-fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Target>, alive: std::sync::Weak<()>) {
+fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Arc<Mutex<Option<Target>>>, alive: std::sync::Weak<()>) {
+    let mut connected_before = false;
     while alive.strong_count() > 0 {
         push(&inbox, &wake, Inbound::Connecting);
+        let target = target.lock().unwrap().clone();
         let result = discover(target.as_ref()).and_then(|endpoint| connect(&endpoint).map(|socket| (socket, endpoint.pairing_token)));
         let (mut socket, pairing_token) = match result {
             Ok(connected) => connected,
@@ -278,6 +369,7 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Tar
         if socket.send(Message::text(hello.to_string())).is_err() {
             continue;
         }
+        let mut live = Liveness::new(Instant::now(), SystemTime::now());
         let reason = 'session: loop {
             // Writes first: user actions should not wait behind a read timeout.
             loop {
@@ -301,17 +393,32 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Tar
             }
             match socket.read() {
                 Ok(Message::Text(text)) => {
+                    live.heard(Instant::now());
                     if let Some(event) = parse(text.as_str()) {
+                        // A ping's answer is this thread's business: the window is told only
+                        // when it means the machine woke with its connection intact.
+                        if let Some(nonce) = pong_nonce(&event) {
+                            if live.answered(nonce, Instant::now()) { push(&inbox, &wake, Inbound::Woke); }
+                            continue;
+                        }
                         if matches!(&event, Inbound::Reply { family, message, .. } if family == "Workspace" && message.get("HelloAck").is_some()) {
-                            push(&inbox, &wake, Inbound::Connected);
+                            push(&inbox, &wake, Inbound::Connected { again: std::mem::replace(&mut connected_before, true) });
                         }
                         push(&inbox, &wake, event);
                     }
                 }
                 Ok(Message::Close(_)) => break 'session "Daemon closed the connection".into(),
-                Ok(_) => {}
-                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Ok(_) => live.heard(Instant::now()),
+                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
                 Err(e) => break 'session format!("Daemon disconnected: {e}"),
+            }
+            match live.tick(Instant::now(), SystemTime::now()) {
+                Beat::Quiet => {}
+                Beat::Ping(nonce) => {
+                    let ping = json!({"Workspace": {"request_id": 0, "message": {"Ping": {"nonce": format!("rune-{nonce}")}}}});
+                    if let Err(e) = socket.send(Message::text(ping.to_string())) { break 'session format!("Daemon write failed: {e}"); }
+                }
+                Beat::Dead => break 'session "Daemon stopped answering".into(),
             }
         };
         push(&inbox, &wake, Inbound::Disconnected(reason));
@@ -323,13 +430,13 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Tar
 fn close_socket(socket: &mut Socket, id: u64, workspace: &str) {
     let frame = json!({"Workspace":{"request_id":id,"message":{"CloseWindowWorkspace":{"workspace_id":workspace}}}});
     if socket.send(Message::text(frame.to_string())).is_err() { return; }
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while std::time::Instant::now() < deadline {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
         match socket.read() {
             Ok(Message::Text(text)) => {
                 if matches!(parse(text.as_str()), Some(Inbound::Reply { request_id, family, .. }) if request_id == id && family == "Workspace") { break; }
             }
-            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {}
         }
@@ -393,10 +500,10 @@ mod cleanup_tests {
             assert!(matches!(socket.read(), Ok(Message::Close(_))));
         });
         let (daemon, inbox) = Daemon::start_to(Some(Target { url, ..Default::default() }), || {});
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if inbox.lock().unwrap().iter().any(|e| matches!(e, Inbound::Connected)) { break; }
-            assert!(std::time::Instant::now() < deadline);
+            if inbox.lock().unwrap().iter().any(|e| matches!(e, Inbound::Connected { .. })) { break; }
+            assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
         }
         daemon.send(Family::Pty, json!({"ClosePty":{"session_id":"owned-shell"}}));
@@ -404,5 +511,103 @@ mod cleanup_tests {
         drop(daemon);
         done.recv_timeout(Duration::from_secs(3)).unwrap();
         server.join().unwrap();
+    }
+
+    /// A daemon that hangs up (it restarted, the queue to this window overflowed while the
+    /// machine slept) is dialed again, and the window is told the socket is a new one.
+    #[test]
+    fn a_dropped_connection_comes_back_marked_as_a_new_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/session", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for round in 0..2 {
+                let (tcp, _) = listener.accept().unwrap();
+                tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut socket = tungstenite::accept(tcp).unwrap();
+                socket.read().unwrap(); // Hello
+                socket.send(Message::text(r#"{"WorkspaceReply":{"request_id":0,"message":{"HelloAck":{}}}}"#)).unwrap();
+                if round == 0 { drop(socket); continue; }
+                // A request made while there was no connection is sent on the new one.
+                let queued: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                assert!(queued["Agent"]["message"].get("ResumeStream").is_some());
+            }
+        });
+        let (daemon, inbox) = Daemon::start_to(Some(Target { url, ..Default::default() }), || {});
+        let wait = |want: bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let found = { let mut inbox = inbox.lock().unwrap(); let at = inbox.iter().position(|e| matches!(e, Inbound::Connected { again } if *again == want)); at.map(|at| inbox.drain(..=at).count()) };
+                if found.is_some() { break; }
+                assert!(Instant::now() < deadline, "no Connected {{ again: {want} }}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait(false);
+        daemon.send(Family::Agent, json!({"ResumeStream":{"session_id":"s"}}));
+        wait(true);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_quiet_connection_is_asked_and_one_that_does_not_answer_is_dead() {
+        let start = Instant::now();
+        let wall = SystemTime::now();
+        let at = |seconds: f32| start + Duration::from_secs_f32(seconds);
+        let mut live = Liveness::new(start, wall);
+        // The loop turns every few milliseconds; here every 100 ms, up to `until` seconds.
+        // Returns what the turns said besides `Quiet`.
+        let mut turned = 0u32;
+        let mut run = |live: &mut Liveness, until: f32| {
+            let mut said = Vec::new();
+            while (turned as f32) / 10.0 < until {
+                turned += 1;
+                let passed = Duration::from_millis(u64::from(turned) * 100);
+                match live.tick(start + passed, wall + passed) { Beat::Quiet => {} beat => said.push((turned, beat)) }
+            }
+            said
+        };
+        // Traffic keeps it from being asked at all.
+        assert_eq!(run(&mut live, 8.0), []);
+        live.heard(at(8.0));
+        assert_eq!(run(&mut live, 17.9), []);
+        // Ten quiet seconds: asked once, then waited for.
+        assert_eq!(run(&mut live, 20.0), [(180, Beat::Ping(1))]);
+        // Whatever else arrives meanwhile is not the answer: only the answer is.
+        live.heard(at(21.0));
+        assert_eq!(run(&mut live, 25.0), []);
+        assert!(!live.answered(1, at(25.0)), "answered, and not because of a wake");
+        // The next one is never answered: eight seconds, then dead.
+        assert_eq!(run(&mut live, 42.9), [(350, Beat::Ping(2))]);
+        assert_eq!(run(&mut live, 43.0), [(430, Beat::Dead)]);
+    }
+
+    #[test]
+    fn waking_from_sleep_asks_at_once_and_says_so_when_answered() {
+        let start = Instant::now();
+        let wall = SystemTime::now();
+        let mut live = Liveness::new(start, wall);
+        assert_eq!(live.tick(start + Duration::from_millis(8), wall + Duration::from_millis(8)), Beat::Quiet);
+        // The lid closes for an hour: the wall clock moves, this thread's clock barely does.
+        let woke = start + Duration::from_millis(16);
+        let wall = wall + Duration::from_secs(3600);
+        assert_eq!(live.tick(woke, wall), Beat::Ping(1));
+        // What was buffered before the sleep arrives first and proves nothing.
+        live.heard(woke);
+        assert_eq!(live.tick(woke + Duration::from_secs(1), wall + Duration::from_secs(1)), Beat::Quiet);
+        assert!(live.answered(1, woke + Duration::from_secs(1)), "the window is told it woke");
+        assert!(!live.answered(1, woke + Duration::from_secs(1)), "once");
+        // A link that is gone does not answer: dead within the short deadline, not the long one.
+        let mut live = Liveness::new(start, wall);
+        assert_eq!(live.tick(woke, wall + Duration::from_secs(60)), Beat::Ping(1));
+        assert_eq!(live.tick(woke + Duration::from_secs(3), wall + Duration::from_secs(63)), Beat::Quiet);
+        assert_eq!(live.tick(woke + Liveness::WAKE_ANSWER, wall + Duration::from_secs(64)), Beat::Dead);
+    }
+
+    #[test]
+    fn a_pong_is_recognised_by_its_nonce() {
+        let pong = parse(r#"{"WorkspaceReply":{"request_id":0,"message":{"Pong":{"nonce":"rune-7"}}}}"#).unwrap();
+        assert_eq!(pong_nonce(&pong), Some(7));
+        let other = parse(r#"{"WorkspaceReply":{"request_id":0,"message":{"HelloAck":{}}}}"#).unwrap();
+        assert_eq!(pong_nonce(&other), None);
     }
 }

@@ -18,7 +18,7 @@ impl App {
     fn active_session(&self) -> Option<String> {
         match &self.active_tab().kind {
             TabKind::Agent { session } => session.clone(),
-            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } => None,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => None,
         }
     }
 

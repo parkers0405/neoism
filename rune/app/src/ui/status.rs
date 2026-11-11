@@ -111,6 +111,7 @@ impl App {
         match self.active_tab().kind {
             TabKind::Agent { .. } => ("AGENT", p.red),
             TabKind::Database { .. } => ("DATABASE", p.blue),
+            TabKind::GitDiff => ("DIFF", p.blue),
             TabKind::Terminal => ("TERMINAL", p.green),
             TabKind::Editor { .. } if self.active_buffer().is_some_and(|b| b.prompt.is_some()) => ("COMMAND", p.green),
             TabKind::Editor { .. } => match self.editor_mode() {
@@ -265,6 +266,12 @@ pub fn view(app: &App) -> El {
             .child(section_right(&m, total - (x + icon_w + text_w), icon_w + text_w, rgb(p.surface), [r, 0.0, 0.0, r])
                 .child(row_at(&m, icon_w + m.pad, label)))
             .child(section_right(&m, total - (x + icon_w), *icon_w, rgb(pill.icon_bg), [r, 0.0, 0.0, r]).child(glyph.absolute(0.0, 0.0)));
+        if pill.icon.0 == GLYPH_BRANCH {
+            bar = bar.child(el().key("git-status-toggle").w(icon_w + text_w).h(pill_h)
+                .pin(None, Some(m.pill_y), Some(total - (x + icon_w + text_w)), None)
+                .cursor(rune::Cursor::Pointer).hover(rgb(p.fg).alpha(0.08))
+                .on_press(|a: &mut App| a.toggle_git_panel()));
+        }
         x += icon_w + text_w - tail;
     }
     // Error and warning counts (`DiagPillSpec`): each its own rounded pill in its colour with

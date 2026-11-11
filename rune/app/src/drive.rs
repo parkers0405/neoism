@@ -37,6 +37,8 @@ enum Step {
     Touch { speed: f64, seconds: f64 },
     Keys { text: Vec<char>, rate: f64 },
     Prompt(String),
+    /// Host a server on a folder, as submitting the Host form does.
+    Host(String),
     Stream { text: String, bounds: Vec<usize>, seconds: f64 },
     Live,
     Mark(String),
@@ -67,6 +69,7 @@ impl Drive {
                 "touch" => { let (speed, seconds) = pair()?; Step::Touch { speed, seconds } }
                 "keys" => { let (text, rate) = rest.rsplit_once(':')?; Step::Keys { text: text.chars().collect(), rate: rate.parse().ok()? } }
                 "prompt" => Step::Prompt(rest.to_owned()),
+                "host" => Step::Host(rest.to_owned()),
                 "stream" => {
                     let (path, seconds) = rest.rsplit_once(':')?;
                     let text = std::fs::read_to_string(path).ok()?;
@@ -103,6 +106,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Touch { speed, seconds } => format!("touch:{speed}:{seconds}"),
                 Step::Keys { text, rate } => format!("keys:{}:{rate}", text.len()),
                 Step::Prompt(_) => "prompt".to_owned(),
+                Step::Host(_) => "host".to_owned(),
                 Step::Stream { seconds, .. } => format!("stream:{seconds}"),
                 Step::Live => "live".to_owned(),
                 Step::Mark(name) => format!("mark:{name}"),
@@ -155,6 +159,12 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 let index = app.active;
                 app.tabs[index].draft.replace_text(text.clone());
                 app.submit();
+                changed = true;
+                None
+            }
+            Step::Host(directory) => {
+                app.form = Some(crate::servers::form::Form::server(crate::servers::form::Draft { host: true, directory: directory.clone(), ..Default::default() }));
+                app.submit_form(tx);
                 changed = true;
                 None
             }
@@ -219,7 +229,7 @@ mod tests {
         let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; mark:end; quit").unwrap();
         let names: Vec<&str> = drive.steps.iter().map(|step| match step {
             Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
-            Step::Prompt(_) => "prompt", Step::Stream { .. } => "stream", Step::Live => "live", Step::Mark(_) => "mark", Step::Quit => "quit",
+            Step::Prompt(_) => "prompt", Step::Host(_) => "host", Step::Stream { .. } => "stream", Step::Live => "live", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
         assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "mark", "quit"]);
         assert!(matches!(&drive.steps[2], Step::Wheel { rate, seconds } if *rate == -30.0 && *seconds == 2.0));

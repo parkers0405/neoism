@@ -399,6 +399,20 @@ impl App {
                 if live { self.pty_input(&session_id, &replies); }
             }
             // The daemon restarted (or reaped the shell): a reattach finds nothing, so start over.
+            // The shell could not start: the tab it was for stops waiting (the next PTY made
+            // must not land in it) and asks again, in the workspace root if its own folder was
+            // the problem.
+            PtyServer::Error { message } if message.starts_with("failed to spawn pty") => {
+                if let Some(tab_id) = self.pending_pty.pop_front() {
+                    let root = self.cwd.clone();
+                    let retry = self.terminals.get_mut(&tab_id).is_some_and(|term| {
+                        let elsewhere = term.shell.cwd != root && crate::startup::absolute(&root);
+                        if elsewhere { term.shell.cwd = root.clone(); }
+                        elsewhere
+                    });
+                    if retry { self.create_pty(tab_id); }
+                }
+            }
             PtyServer::Error { message } => {
                 let tab = self.terminals.iter()
                     .find(|(_, t)| t.shell.session.as_ref().is_some_and(|id| message == format!("unknown session {id}") || message == format!("No such PTY: {id}")))

@@ -252,6 +252,7 @@ fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn main() {
+    startup::record_crashes();
     // `neoism --version`, `neoism update` and the rest answer before any window or daemon.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch = match cli::dispatch(&args) { Ok(launch) => launch, Err(code) => std::process::exit(code) };

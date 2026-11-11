@@ -129,6 +129,15 @@ fn expand_home(raw: &str) -> Result<PathBuf, String> {
     Ok(if raw == "~" { home()? } else if let Some(rest) = raw.strip_prefix("~/") { home()?.join(rest) } else { PathBuf::from(raw) })
 }
 
+/// Where this machine's agent server listens: the environment's choice, else the endpoint the
+/// local daemon published beside its own.
+fn local_agent_server() -> Option<String> {
+    if let Ok(server) = std::env::var("NEOISM_AGENT_SERVER").or_else(|_| std::env::var("NEOISM_SERVER")) { return Some(server); }
+    let published = neoism_agent_service_api::daemon_credential::canonical_daemon_token_path().with_file_name("agent-endpoint.json");
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(published).ok()?).ok()?;
+    Some(format!("http://{}", record["address"].as_str()?))
+}
+
 fn host(spec: &HostedServerSpec, password: Option<&str>) -> Result<(), String> {
     std::fs::create_dir_all(&spec.state_dir).map_err(|e| e.to_string())?;
     let mut command = std::process::Command::new(crate::service_process::standalone_executable().map_err(|e| e.to_string())?);
@@ -136,6 +145,9 @@ fn host(spec: &HostedServerSpec, password: Option<&str>) -> Result<(), String> {
         .arg(&spec.state_dir).arg("--workspace").arg(&spec.workspace_dir);
     command.env_remove("NEOISM_FAST_READINESS_NONCE").env("NEOISM_REQUIRE_AUTH", if spec.require_auth { "1" } else { "0" });
     if let Some(password) = password { command.env("NEOISM_DAEMON_TOKEN", password); } else { command.env_remove("NEOISM_DAEMON_TOKEN"); }
+    // The hosted daemon shares this machine's agent. The local daemon may have put it on
+    // another port than the default (`--auto-agent-port`): say where it is.
+    if let Some(agent) = local_agent_server() { command.env("NEOISM_AGENT_SERVER", &agent).env("NEOISM_SERVER", &agent); }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -216,7 +228,7 @@ pub fn run(operation: Operation) -> Result<Selection, String> {
             Ok(selection)
         }
         Operation::HostFast { directory, name, password } => {
-            let agent = std::env::var("NEOISM_AGENT_SERVER").unwrap_or_else(|_| "http://127.0.0.1:4096".into());
+            let agent = local_agent_server().unwrap_or_else(|| "http://127.0.0.1:4096".into());
             let hosted = crate::fast_servers::create_fast_server(directory, optional(&name).map(str::to_owned), optional(&password).map(str::to_owned), agent)?;
             let selection = fast_selection(&hosted);
             store().fast.insert(hosted.id.clone(), hosted);

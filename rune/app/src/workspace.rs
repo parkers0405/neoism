@@ -389,6 +389,16 @@ impl App {
         self.select_workspace(self.workspaces.len() - 1);
     }
 
+    /// A workspace on another server opens before its folder is known (`~` stands in): the
+    /// daemon has now said where it is. The terminals opened meanwhile start there too, since
+    /// no shell can start in a folder named `~`.
+    pub(crate) fn resolve_root(&mut self, root: &str) {
+        self.cwd = root.to_owned();
+        for term in self.terminals.values_mut() {
+            if term.shell.cwd == "~" && term.shell.session.is_none() { term.shell.cwd = root.to_owned(); }
+        }
+    }
+
     pub(crate) fn register_workspace(&self) {
         // On another server the daemon picks the workspace first (`adopt_workspace`).
         if self.server.link.adopt.is_some() {
@@ -420,7 +430,7 @@ impl App {
         // A remote home workspace (`~`) reports where that is.
         if self.server.remote() && self.cwd == "~"
             && let Some(workspace) = message.get("HostWorkspaceUpserted").map(|m| &m["workspace"]).filter(|w| w["id"].as_str() == Some(&self.workspace_id))
-            && let Some(root) = workspace["root_dir"].as_str() { self.cwd = root.to_owned(); }
+            && let Some(root) = workspace["root_dir"].as_str() { let root = root.to_owned(); self.resolve_root(&root); }
         if message["HostWorkspaceChanged"]["workspace_id"].as_str()
             == Some(&self.workspace_id)
             && !self.workspace_ready

@@ -21,6 +21,33 @@ pub fn hostname() -> String {
     from_files().or_else(from_env).or_else(from_command).map(|name| name.trim().to_owned()).unwrap_or_default()
 }
 
+/// Where a crash is written down: an installed app has no terminal to print to, so a panic
+/// would otherwise leave nothing behind (`$XDG_STATE_HOME/neoism/crash.log`, beside the
+/// daemon's log).
+pub fn crash_log() -> Option<PathBuf> {
+    let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".local/state")))?;
+    Some(state.join("neoism").join("crash.log"))
+}
+
+/// Keep a record of any panic: what it said, where, the build, and the stack.
+pub fn record_crashes() {
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(path) = crash_log() {
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let thread = std::thread::current();
+                let _ = writeln!(file, "--- neoism {} ({}) on {} at unix {at}, thread {}\n{info}\n{}",
+                    crate::cli::VERSION, option_env!("GIT_HASH").unwrap_or("dev"), std::env::consts::OS, thread.name().unwrap_or("?"),
+                    std::backtrace::Backtrace::force_capture());
+            }
+        }
+        report(info);
+    }));
+}
+
 /// A shortcut as this system's keyboard names it: Alt is Option on a Mac.
 pub fn keys_label(keys: &str) -> std::borrow::Cow<'_, str> {
     if cfg!(target_os = "macos") && keys.contains("Alt") { keys.replace("Alt", "Option").into() } else { keys.into() }

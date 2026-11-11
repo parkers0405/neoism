@@ -99,7 +99,18 @@ fn osc_event(payload: &[u8]) -> Option<ShellEvent> {
     }
     let url = value.strip_prefix("7;file://")?;
     let path = &url[url.find('/')?..];
-    Some(ShellEvent::Directory(percent_decode(path)))
+    Some(ShellEvent::Directory(local_path(percent_decode(path))))
+}
+
+/// A `file://` URL's path as a path. On Windows the URL is `file://host/C:/Users/me`, whose
+/// path part reads `/C:/Users/me`: no folder is called that, and a shell started there (or a
+/// workspace rooted there) has nowhere to be. It is `C:\Users\me`.
+fn local_path(path: String) -> String {
+    let b = path.as_bytes();
+    let drive = b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' && b.get(3).is_none_or(|c| matches!(c, b'/' | b'\\'));
+    if !drive { return path; }
+    let rest = path[3..].replace('/', "\\");
+    format!("{}:\\{}", (b[1] as char).to_ascii_uppercase(), rest.trim_matches('\\'))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -127,5 +138,13 @@ mod tests {
         events.feed(b"\x1b]133;A\x07$ \x1b]133;B\x1b\\ls\r\n\x1b]133;C\x07out\x1b]133;D;2\x07\x1b]7;file://host/tmp/a%20b\x07\x1b[2J", |_, e| seen.push(e));
         assert_eq!(seen, vec![ShellEvent::Prompt, ShellEvent::Input, ShellEvent::Start, ShellEvent::End(Some(2)),
             ShellEvent::Directory("/tmp/a b".into()), ShellEvent::Clear]);
+    }
+
+    #[test]
+    fn a_windows_directory_url_is_a_drive_path() {
+        assert_eq!(local_path("/C:/Users/me/My Docs".into()), "C:\\Users\\me\\My Docs");
+        assert_eq!(local_path("/d:/".into()), "D:\\");
+        assert_eq!(local_path("/tmp/a b".into()), "/tmp/a b");
+        assert_eq!(local_path("/c/data".into()), "/c/data", "a POSIX folder named by one letter is left alone");
     }
 }

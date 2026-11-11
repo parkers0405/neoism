@@ -62,11 +62,8 @@ fn fetch() -> Result<Usage, String> {
     let configured = std::env::var("NEOISM_AGENT_SERVER")
         .or_else(|_| std::env::var("NEOISM_SERVER"))
         .ok();
-    let published = std::env::var_os("XDG_RUNTIME_DIR")
-        .and_then(|r| {
-            std::fs::read(std::path::PathBuf::from(r).join("neoism/agent-endpoint.json"))
-                .ok()
-        })
+    // Beside the daemon's own endpoint, wherever this system keeps it.
+    let published = std::fs::read(neoism_agent_service_api::daemon_credential::canonical_daemon_token_path().with_file_name("agent-endpoint.json")).ok()
         .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
         .and_then(|record| record["address"].as_str().map(|a| format!("http://{a}")));
     let endpoint = configured
@@ -82,7 +79,7 @@ fn fetch() -> Result<Usage, String> {
     if !address.ip().is_loopback() || address.port() == 0 {
         return Err("Agent endpoint must be local".into());
     }
-    let output = std::process::Command::new("curl")
+    let output = crate::cli::quiet("curl")
         .args([
             "--silent",
             "--show-error",

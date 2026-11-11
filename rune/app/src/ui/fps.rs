@@ -51,10 +51,18 @@ pub fn last_poll(encoded: Instant) -> (u128, u128, bool) {
 }
 
 /// `at` on CLOCK_MONOTONIC in microseconds, the clock compositor presentation times use.
+#[cfg(target_os = "linux")]
 pub fn monotonic_us(at: Instant) -> i128 {
     let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: `now` is a valid timespec for the call to fill.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
     let now_us = now.tv_sec as i128 * 1_000_000 + now.tv_nsec as i128 / 1000;
     now_us - at.elapsed().as_micros() as i128
+}
+
+/// Elsewhere there is no compositor clock to line up with: microseconds since the first call.
+#[cfg(not(target_os = "linux"))]
+pub fn monotonic_us(at: Instant) -> i128 {
+    static ORIGIN: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+    at.saturating_duration_since(*ORIGIN).as_micros() as i128
 }

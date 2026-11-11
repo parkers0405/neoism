@@ -145,7 +145,7 @@ fn wait_for_process_exit(pid:u32,timeout:Duration)->Result<(),Error>{let end=Ins
     }
     #[test]
     #[cfg(all(unix, not(target_os="macos")))]
-    fn legacy_installer_keeps_gpuix_runtime() {
+    fn legacy_installer_keeps_native_runtime() {
         let Some(payload)=std::env::var_os("NEOISM_TEST_UPDATE_PAYLOAD") else { return; };
         // Keep the deployed .2 validator's contract even when the current
         // installer stops requiring the retired browser UI. Only a marker is needed.
@@ -158,9 +158,10 @@ fn wait_for_process_exit(pid:u32,timeout:Duration)->Result<(),Error>{let end=Ins
         std::fs::write(target.path().join("unrelated-note"),"keep me").unwrap();
         macos_update::install_unix_loose(&executable,Path::new(&payload)).unwrap();
         // The owned-stack transaction copies web and shared docs, but deliberately
-        // does not copy root-level GPUIX libs.
-        assert!(!target.path().join("libneoism_gpuix_core.so").exists());
-        assert!(target.path().join("web/native/libneoism_gpuix_core.so").is_file());
+        // does not copy root-level libraries: the app finds its terminal engine under
+        // web/native, where the transaction puts it.
+        assert!(!target.path().join("libghostty-vt.so").exists());
+        assert!(target.path().join("web/native/libghostty-vt.so").is_file());
         for required in ["resources/docs/api/docs/index.html", "resources/docs/api/docs/reference/index.html", "resources/docs/content.json"] {
             assert!(target.path().join(required).is_file(), "portable update must transport {required}");
         }

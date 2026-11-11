@@ -43,7 +43,7 @@ pub enum ConvRow<'a> {
 /// and the filesystem root are the all-projects dashboard (`None`).
 pub fn catalog_scope(root: &str) -> Option<String> {
     let root = root.trim_end_matches('/');
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = crate::startup::home();
     let home = home.trim_end_matches('/');
     (!root.is_empty() && root != home).then(|| root.to_owned())
 }
@@ -70,7 +70,7 @@ impl App {
         if !self.conversations_dashboard() {
             return pinned.into_iter().chain(recent).map(|thread| ConvRow::Thread { thread, nested: false }).collect();
         }
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = crate::startup::home();
         let home = home.trim_end_matches('/').to_owned();
         let mut groups: Vec<(String, Vec<&ThreadSummary>)> = Vec::new();
         for thread in recent {

@@ -9,7 +9,7 @@ Categories=System;TerminalEmulator;Development;
 Name=Neoism
 GenericName=Terminal-first editor workspace
 Comment=A hardware-accelerated terminal-first editor workspace
-StartupWMClass=ai.neoism.gpuix
+StartupWMClass=ai.neoism.rune
 Actions=New;
 
 [Desktop Action New]

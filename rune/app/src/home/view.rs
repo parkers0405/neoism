@@ -80,7 +80,7 @@ fn history(app: &App, term: &Terminal, composer_h: f32) -> El {
     let tab_id = app.active_tab().id;
     let key = format!("terminal-scroll:{tab_id}");
     let viewport_h = (term.area[1] - if term.shell.busy() && term.long_running() { 0.0 } else { composer_h }).max(0.0);
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = crate::startup::home();
     // Home heads its scrollback with the splash; a plain Terminal tab starts at the prompt.
     let mut content = col().w_full().min_h(viewport_h).justify_end().selection_group(true);
     if app.active_tab().kind == crate::tabs::TabKind::Home {

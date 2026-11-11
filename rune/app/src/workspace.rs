@@ -42,7 +42,7 @@ impl App {
         let active = self.active_tab().id;
         if self.pending_cd.is_some() || self.main_terminal_tab() != Some(active) { return false; }
         let Some(cwd) = self.terminals.get(&active).map(|t| t.shell.cwd.trim_end_matches('/').to_owned()) else { return false };
-        if !cwd.starts_with('/') || cwd == self.cwd || cwd.chars().any(char::is_control) { return false; }
+        if !crate::startup::absolute(&cwd) || cwd == self.cwd || cwd.chars().any(char::is_control) { return false; }
         self.view_workspace_root(&cwd);
         true
     }
@@ -107,7 +107,7 @@ impl App {
     /// git (`activateWorkspace` over `workspaceView`). Nothing is sent to the host.
     fn view_workspace_root(&mut self, root: &str) {
         let root = root.trim_end_matches('/').to_owned();
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = crate::startup::home();
         self.workspace_name = if root == home {
             "~".into()
         } else {
@@ -344,7 +344,7 @@ impl App {
     /// A new local workspace tab, at the active one's directory (on a remote tab: home).
     pub fn new_workspace(&mut self) {
         let (title, cwd) = if self.server.remote() {
-            let home = std::env::var("HOME").unwrap_or_default();
+            let home = crate::startup::home();
             ("~".to_owned(), home)
         } else { (self.workspace_name.clone(), self.cwd.clone()) };
         self.open_workspace(Opening { id: new_id(), title, cwd, target: None, link: Default::default() });

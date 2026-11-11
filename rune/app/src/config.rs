@@ -15,11 +15,10 @@ pub struct Config {
     pub variant: Option<String>,
 }
 
-/// `~/.config/neoism` (or `NEOISM_CONFIG_HOME`).
+/// The config directory the daemon, the agent and the server list all use: `~/.config/neoism`
+/// (`%USERPROFILE%\AppData\Local\neoism` on Windows), or `NEOISM_CONFIG_HOME`.
 pub fn dir() -> std::path::PathBuf {
-    std::env::var_os("NEOISM_CONFIG_HOME").map(std::path::PathBuf::from)
-        .or_else(|| dirs::config_dir().map(|d| d.join("neoism")))
-        .unwrap_or_default()
+    neoism_agent_service_api::server_registry::registry_directory()
 }
 
 pub fn read() -> Value {
@@ -34,10 +33,7 @@ pub fn background_image() -> Option<String> {
 }
 
 pub fn load() -> Config {
-    let path = std::env::var_os("NEOISM_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::config_dir().map(|d| d.join("neoism")))
-        .map(|d| d.join("config.json"));
+    let path = Some(dir().join("config.json"));
     let value: Value = path
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&strip_comments(&s)).ok())
@@ -77,6 +73,10 @@ pub fn git_branch() -> Option<String> {
     // Unit tests build windows by the dozen: no `git` children (a child forked mid-test holds
     // the registry tests' file locks until it execs).
     if cfg!(test) { return None; }
-    let output = std::process::Command::new("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).output().ok()?;
+    // A Mac without the developer tools answers `git` with an install prompt: only ask git
+    // where there is a repository to ask about.
+    let mut dir = std::env::current_dir().ok()?;
+    while !dir.join(".git").exists() { if !dir.pop() { return None; } }
+    let output = crate::cli::quiet("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()).filter(|b| !b.is_empty())
 }

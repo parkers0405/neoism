@@ -172,26 +172,18 @@ pub fn probe(target: &Target, timeout: Duration) -> Result<(), String> {
     }
 }
 
-fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("neoism-{}", unsafe_uid())))
-}
-
-fn unsafe_uid() -> u32 {
-    // The token directory name only needs the numeric uid the shell already uses.
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok()))
-        .unwrap_or(0)
-}
+/// Where the local daemon publishes its endpoint and token: the one path the daemon, the agent
+/// and every client agree on (`daemon_credential::canonical_daemon_token_path`), which differs
+/// per system.
+fn token_file() -> PathBuf { neoism_agent_service_api::daemon_credential::canonical_daemon_token_path() }
+fn endpoint_file() -> PathBuf { token_file().with_file_name("daemon-endpoint.json") }
 
 /// The daemon address without credentials (`publicEndpoint`), for the Servers list.
 pub fn public_endpoint() -> Option<String> {
     if let Ok(url) = std::env::var("NEOISM_GPUIX_DAEMON_URL") {
         return Some(url.split(['?', '#']).next().unwrap_or(&url).to_owned());
     }
-    let published = std::fs::read_to_string(runtime_dir().join("neoism").join("daemon-endpoint.json")).ok()?;
+    let published = std::fs::read_to_string(endpoint_file()).ok()?;
     let record: Value = serde_json::from_str(&published).ok()?;
     Some(format!("ws://{}/session", record["address"].as_str()?))
 }
@@ -201,12 +193,12 @@ pub fn public_endpoint() -> Option<String> {
 fn discover(target: Option<&Target>) -> Result<Endpoint, String> {
     if let Some(target) = target { return Ok(endpoint_for(target)); }
     let token = std::env::var("NEOISM_DAEMON_TOKEN").ok().or_else(|| {
-        std::fs::read_to_string(runtime_dir().join("neoism").join("daemon-token")).ok().map(|t| t.trim().to_owned())
+        std::fs::read_to_string(token_file()).ok().map(|t| t.trim().to_owned())
     });
     let base = if let Ok(url) = std::env::var("NEOISM_GPUIX_DAEMON_URL") {
         url
     } else {
-        let published = std::fs::read_to_string(runtime_dir().join("neoism").join("daemon-endpoint.json"))
+        let published = std::fs::read_to_string(endpoint_file())
             .map_err(|_| "No local daemon is running (no daemon-endpoint.json)".to_owned())?;
         let record: Value = serde_json::from_str(&published).map_err(|e| e.to_string())?;
         let address = record["address"].as_str().ok_or("Published daemon has no address")?;
@@ -255,6 +247,12 @@ fn run(rx: Receiver<Outbound>, inbox: Inbox, wake: impl Fn(), target: Option<Tar
         let (mut socket, pairing_token) = match result {
             Ok(connected) => connected,
             Err(error) => {
+                // Nothing answered locally: bring up this installation's own daemon, then
+                // keep looking for the endpoint it publishes.
+                let error = match target.as_ref() {
+                    None => crate::startup::ensure_local_daemon().err().unwrap_or(error),
+                    Some(_) => error,
+                };
                 push(&inbox, &wake, Inbound::Disconnected(error));
                 std::thread::sleep(Duration::from_secs(2));
                 continue;

@@ -121,7 +121,7 @@ pub fn picker_card(app: &App) -> El {
         if let Some(url) = a.url.clone() {
             let link_y = header_h - if a.show_input { 22.0 * s } else { 0.0 } - 24.0 * s;
             card = card.child(text("Open sign-in page").font(mono(12.0 * s, false)).color(rgb(p.accent)).absolute(14.0 * s, link_y + 3.0 * s)
-                .on_press(move |_: &mut App| { let _ = std::process::Command::new("xdg-open").arg(&url).spawn(); }));
+                .on_press(move |_: &mut App| { let _ = crate::cli::open_external(&url); }));
         }
     }
     if picker.activity.as_ref().is_none_or(|a| a.show_input) {

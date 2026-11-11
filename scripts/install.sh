@@ -86,7 +86,7 @@ payload="$tmp/neoism-${goos}-${goarch}"
 for b in "${BINARIES[@]}"; do
   [ -f "$payload/$b" ] && [ -x "$payload/$b" ] || err "binary '$b' not found in $asset"
 done
-[ -f "$payload/install-bundle.sh" ] || err "GPUIX bundle installer is missing; this is not a migrated release"
+[ -f "$payload/install-bundle.sh" ] || err "The bundle installer is missing from $asset"
 # The downloaded archive was checksum-verified above. Its installer validates
 # all binaries, libraries, and Agent GUI assets before replacing installed files.
 bash "$payload/install-bundle.sh" "$payload" "${NEOISM_PREFIX:-$HOME/.local}" "$BIN_DIR"

@@ -42,7 +42,7 @@ pub struct Collab {
 
 fn peer_id() -> String {
     let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".into());
-    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).unwrap_or_default();
+    let host = crate::startup::hostname();
     let host = host.trim();
     // A second window on one machine is its own participant when asked to be (two-window tests).
     let suffix = std::env::var("NEOISM_RUNE_PEER_SUFFIX").map(|s| format!("-{s}")).unwrap_or_default();

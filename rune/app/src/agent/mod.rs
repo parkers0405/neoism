@@ -294,6 +294,16 @@ impl App {
         }
     }
 
+    /// Ask the daemon for a conversation's settings (`SwitchThread`), which also binds its
+    /// stream: one already followed is only asked, another is followed properly.
+    pub(crate) fn switch_conversation(&mut self, session_id: &str) {
+        if self.stream_owner.get(session_id).is_some_and(|owner| owner == session_id) {
+            self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.into() });
+        } else {
+            self.follow_family(session_id);
+        }
+    }
+
     /// The conversation `root` is followed: the streams bound to its sub-agents before that
     /// (opened first, or before anything said whose they were) would repeat its events.
     fn drop_child_streams(&mut self, root: &str) {

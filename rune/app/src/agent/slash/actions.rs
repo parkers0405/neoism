@@ -23,6 +23,8 @@ impl App {
     }
 
     fn agent_send(&self, message: Client) {
+        #[cfg(test)]
+        self.agent_sent.borrow_mut().push(serde_json::to_string(&message).unwrap_or_default());
         if let Some(daemon) = &self.daemon { daemon.agent(&message); }
     }
 
@@ -311,7 +313,10 @@ impl App {
         self.composer.selection_owner = Some(owner);
         self.composer.picker = None;
         self.sync_chips();
-        if let Some(session_id) = session { self.agent_send(Client::SwitchThread { session_id }); }
+        // The conversation's own settings come back with the switch. A sub-agent has no input
+        // bar, and switching the daemon to it binds a second stream to it beside its
+        // conversation's: every word of its reply then streamed twice.
+        if let Some(session_id) = session.filter(|id| !self.families.is_child(id)) { self.switch_conversation(&session_id); }
         true
     }
 

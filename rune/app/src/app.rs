@@ -177,6 +177,11 @@ pub struct App {
     /// The session each family's one event stream was resumed on. A stream covers the whole
     /// family: a second one would deliver every event twice.
     pub stream_owner: std::collections::HashMap<String, String>,
+    /// Sub-agents with a stream of their own beside the one that follows their family.
+    pub stream_extra: std::collections::HashSet<String>,
+    /// What was sent to the agent, for tests to read.
+    #[cfg(test)]
+    pub agent_sent: std::cell::RefCell<Vec<String>>,
     /// Child conversations whose history is being fetched ahead of a click.
     pub prefetching: std::collections::HashSet<String>,
     /// How many child rows the sidebar listed at the last frame.
@@ -336,6 +341,9 @@ impl App {
             families: Default::default(),
             thread_activity: Default::default(),
             stream_owner: Default::default(),
+            stream_extra: Default::default(),
+            #[cfg(test)]
+            agent_sent: Default::default(),
             prefetching: Default::default(),
             family_rows: 0,
             background_job_versions: Default::default(), background_jobs: Default::default(),

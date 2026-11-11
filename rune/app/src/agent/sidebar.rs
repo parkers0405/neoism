@@ -452,6 +452,48 @@ mod family_tests {
         ]}) }
     }
 
+    /// How many `kind` messages for `session` went to the agent.
+    fn sent(app: &App, kind: &str, session: &str) -> usize {
+        app.agent_sent.borrow().iter().filter(|m| m.contains(kind) && m.contains(&format!("\"{session}\""))).count()
+    }
+
+    /// The daemon binds a stream to a session on `SwitchThread` and on `ResumeStream`, and a
+    /// conversation's stream already carries its sub-agents: a second one doubled every word
+    /// of a sub-agent's reply while it streamed.
+    #[test]
+    fn a_sub_agent_of_a_followed_conversation_gets_no_stream_of_its_own() {
+        let mut app = App::new();
+        app.open_conversation("root");
+        assert_eq!((sent(&app, "SwitchThread", "root"), sent(&app, "ResumeStream", "root")), (1, 1));
+        app.apply_agent(family(1, ["outstanding"; 4]));
+        // Opened while it works, before its history was fetched ahead.
+        app.sessions.remove("b");
+        app.open_child("root", "b");
+        assert_eq!(app.active_tab().kind, TabKind::Agent { session: Some("b".into()) });
+        assert_eq!(sent(&app, "SwitchThread", "b") + sent(&app, "ResumeStream", "b"), 0);
+        assert!(sent(&app, "GetHistory", "b") >= 1, "its history is still asked for");
+        assert_eq!(sent(&app, "StopStream", "b"), 0);
+    }
+
+    #[test]
+    fn a_sub_agent_followed_first_gives_way_to_its_conversation() {
+        let mut app = App::new();
+        // A restored tab on a sub-agent: nothing says yet whose it is.
+        app.open_conversation("b");
+        assert_eq!((sent(&app, "SwitchThread", "b"), sent(&app, "ResumeStream", "b")), (1, 1));
+        app.apply_agent(family(1, ["outstanding"; 4]));
+        assert_eq!(app.stream_owner.get("root").map(String::as_str), Some("b"), "the family's only stream so far");
+        // Another sub-agent of the same conversation is not on `b`'s stream.
+        app.open_conversation("c");
+        assert_eq!(sent(&app, "ResumeStream", "c"), 1);
+        // The conversation itself: its stream carries them all, theirs stop.
+        app.open_conversation("root");
+        assert_eq!(sent(&app, "ResumeStream", "root"), 1);
+        assert_eq!((sent(&app, "StopStream", "b"), sent(&app, "StopStream", "c")), (1, 1));
+        assert_eq!(app.stream_owner.get("root").map(String::as_str), Some("root"));
+        assert!(app.stream_extra.is_empty());
+    }
+
     #[test]
     fn sub_agents_at_work_are_listed_under_their_conversation_on_their_lines() {
         let mut app = App::new();

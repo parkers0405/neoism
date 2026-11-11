@@ -25,7 +25,7 @@
 //! - `hover:<index>`: rest the pointer on the tab at this place in the strip (its title slides);
 //!   `hover:chat` rests it on the sidebar row with the longest title
 //! - `child`: open the first sub-agent at work under the active conversation (waits a minute for one)
-//! - `rows`: log the active conversation's rows (kind, id tail, text length)
+//! - `rows`: log the active conversation's id and rows (kind, id, text length, text hash)
 //! - `watch:<seconds>`: log the held (or active) conversation's scroll offset every frame
 //! - `mark:<name>`
 //! - `quit`
@@ -190,6 +190,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                     drive.sent += 1;
                     let e = WheelEvent::new(0.0, dy).precise(precise);
                     match (&file, &chat) {
+                        _ if app.active_tab().kind == TabKind::GitDiff => { app.git_review_wheel(&e, tx); }
                         (Some(path), _) => { app.editor_wheel(path, e, tx); }
                         (_, Some(id)) => { app.timeline_wheel(id, e, line_h, tx); }
                         _ => {}
@@ -291,9 +292,12 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 }
             }
             Step::Rows => {
-                if let Some(session) = active_session(app).and_then(|id| app.sessions.get(&id)) {
-                    let rows: Vec<String> = session.messages.iter().map(|m| format!("{:?}:{}:{}", m.kind, &m.id[m.id.len().saturating_sub(4)..], m.text.len())).collect();
-                    eprintln!("[drive] rows streaming={} live_from={:?} {}", session.streaming, session.live_from, rows.join(" "));
+                if let Some((id, session)) = active_session(app).and_then(|id| app.sessions.get(&id).map(|s| (id, s))) {
+                    // Each row's kind, id, text length and a hash of its text: two windows on
+                    // the same conversation can be compared row for row (`check-sleep-resume.py`).
+                    let hash = |text: &str| { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); text.hash(&mut h); h.finish() & 0xffff_ffff };
+                    let rows: Vec<String> = session.messages.iter().map(|m| format!("{:?}:{}:{}:{:08x}", m.kind, m.id, m.text.len(), hash(&m.text))).collect();
+                    eprintln!("[drive] rows session={id} streaming={} live_from={:?} connection={:?} {}", session.streaming, session.live_from, app.connection, rows.join(" "));
                 }
                 None
             }

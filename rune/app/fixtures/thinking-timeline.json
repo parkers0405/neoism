@@ -1,0 +1,9 @@
+[
+  {
+    "id": "reasoning-wrap",
+    "role": "Assistant",
+    "kind": "Reasoning",
+    "title": "Checking how long thinking titles and reasoning previews fit inside a narrow conversation pane without running beyond its right edge",
+    "text": "I will check the available timeline width before laying out this reasoning preview. A long thought should continue on the next visual line instead of disappearing beyond the pane, and the title above it needs the same wrapping behavior. This must remain readable when the conversation shares the window with a sidebar or another split pane. The following content should stay below the thought rather than overlapping the extra lines."
+  }
+]

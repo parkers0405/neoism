@@ -222,6 +222,9 @@ Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.
   binding, which is why an orb is a picture and not a grid of live-coloured cells.
 - A streaming reply's text is applied as it arrives and shown at most thirty times a second
   (`agent::StreamPace`), however fast the model writes.
+- A reply is drawn a heading's worth at a time, each piece a memo keyed by its own text
+  (`prose::chunks`): while it streams only the last piece is parsed, highlighted and built.
+  As one Markdown document a 50 KB reply cost 2.5 ms of every streaming commit.
 - The window cursor is drawn at the root, over everything: in a file it rides the scroll
   (`Cursor::carry`) and travels on a live offset (`Cursor::place`), so scrolling under it
   commits nothing. Code rows are memos keyed by their own content (`editor/view.rs`,
@@ -231,6 +234,37 @@ Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.
   its rows are measured, and applies an offset as it was. Older history is asked for three
   viewports before the reader reaches its start, while they head up; nothing stops, waits or
   moves when it lands.
+
+## Sleep, wake and lost connections
+
+Closing the lid must cost nothing: on opening it, every conversation (and every sub-agent) is
+where its agent is now, without replaying what was missed, and with all of it in the history.
+
+- **Noticing** (`daemon.rs`, `Liveness`): a socket to another machine does not report that
+  machine going away, or this one sleeping. A connection quiet for 10 s is asked
+  (`Workspace::Ping`) and dialed again if it does not answer within 8 s. The wall clock jumping
+  5 s past the connection thread is a wake: it asks at once, on a 4 s deadline. A connection
+  that answers after a wake reports `Inbound::Woke`; a new socket reports
+  `Inbound::Connected { again: true }`.
+- **Coming back** (`agent/resync.rs`): the daemon keeps event streams per socket, so a new
+  socket follows each open conversation's family again (`ResumeStream` only: `SwitchThread`
+  would also reset its settings). A stream is a live tail: it opens with the reply being
+  written, whole, and continues from there. Each open transcript takes its newest history page
+  over what is loaded (`merge_head`, only changed rows re-render); sub-agents fetched ahead
+  are refreshed a few at a time or when opened. A page that shares no row with what was
+  loaded (hours away from a remote agent) replaces the transcript and older history pages in
+  above it. A history page never shortens text that has streamed since it was read.
+- **SSH** (`servers/flow.rs`, `tunnel_lost`): the tunnel's `ssh` dies with the link. The same
+  recipe is dialed again and the connection re-pointed at it (`Daemon::retarget`).
+- **Daemon**: when its own stream from the agent breaks and reopens it sends
+  `SessionEvent { kind: "stream.resumed" }`, and the app refreshes that family's transcripts.
+- **Agent server** (`session_loop.rs`): after the host wakes, a provider stream that stays
+  silent for 30 s is retried instead of waiting out the 5 minute idle watchdog (whose clock
+  does not run during suspend); only while no tool call of the step has run.
+
+`python3 rune/scripts/check-sleep-resume.py sleep wake away subagent` does this to a real
+window mid-reply (the app stopped, its link gone dark) and compares the transcript it ends
+with, row for row, against the same conversation opened fresh.
 
 ## Running
 

@@ -495,6 +495,40 @@ mod family_tests {
     }
 
     #[test]
+    fn refreshed_catalog_stops_a_completed_chat_despite_stale_tool_states() {
+        let mut app = App::new();
+        app.load_fixture("root", "Stash Changes and Update", "[]");
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        assert!(app.sidebar_running());
+        assert!(app.session_live("root"));
+
+        // The idle event was missed, but the next catalog refresh reports completion.
+        let mut threads = app.threads.clone();
+        threads[0].catalog_activity = Some("idle".into());
+        threads[0].busy = true; // The legacy flag must not beat catalog evidence.
+        app.apply_agent(M::ThreadList { threads, requested_cursor: None, next_cursor: None });
+        assert_eq!(app.activity_of(&app.threads[0]), "idle");
+        assert!(!app.sidebar_running());
+        assert!(!app.session_live("root"));
+
+        // A late tool update and its derived streaming verb cannot restart the turn.
+        let tool = serde_json::from_value(serde_json::json!({
+            "id": "tool", "role": "Assistant", "kind": "Tool", "tool": "bash", "status": "running"
+        })).unwrap();
+        app.apply_agent(M::MessageUpdated { session_id: "root".into(), message: tool, parent_message_id: None });
+        app.apply_agent(M::StreamingState { session_id: "root".into(), state: neoism_protocol::agent::StreamingState::Working, label: None });
+        assert_eq!(app.activity_state("root"), None);
+        assert!(!app.sidebar_running());
+        assert!(!app.session_live("root"));
+
+        // Genuine new work still starts normally, including its timeline activity.
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        assert!(app.sidebar_running());
+        assert!(app.session_live("root"));
+        assert!(app.activity_state("root").is_some());
+    }
+
+    #[test]
     fn sub_agents_at_work_are_listed_under_their_conversation_on_their_lines() {
         let mut app = App::new();
         app.load_fixture("root", "Root", "[]");

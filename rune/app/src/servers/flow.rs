@@ -48,6 +48,23 @@ pub struct Link {
     pub current: Option<Selection>,
     tunnel: Option<crate::ssh_hosts::DaemonAttach>,
     pub adopt: Option<Adopt>,
+    /// The tunnel being dialed again after it was lost (`App::tunnel_lost`).
+    redial: Option<Redial>,
+}
+
+/// A lost SSH tunnel on its way back: how often the daemon behind it failed to answer, the
+/// dial in progress, and when the next may start.
+#[derive(Default)]
+struct Redial {
+    failures: u32,
+    attempts: u32,
+    retry_at: Option<std::time::Instant>,
+    dialing: Option<std::sync::mpsc::Receiver<Result<crate::ssh_hosts::DaemonAttach, String>>>,
+}
+
+impl Link {
+    /// The daemon answered on this link: whatever was being recovered has been.
+    pub(crate) fn answered(&mut self) { self.redial = None; }
 }
 
 #[derive(Default)]
@@ -88,6 +105,59 @@ impl App {
         self.modal = Some(busy(title, body));
     }
 
+    /// The connection to this workspace's daemon dropped, or could not be made again. Over
+    /// SSH that is the tunnel: after a sleep or a network change its `ssh` has exited, or
+    /// soon will (it notices a dead link within its keepalive), and the forwarded port goes
+    /// nowhere. The same recipe is dialed again (`SelectedSshReconnect`) and the connection
+    /// pointed at the new tunnel; the remote daemon and everything it runs were never down.
+    pub(crate) fn tunnel_lost(&mut self) {
+        let link = &mut self.server.link;
+        let Some(tunnel) = link.tunnel.as_mut() else { return };
+        let redial = link.redial.get_or_insert_with(Redial::default);
+        redial.failures += 1;
+        if redial.dialing.is_some() || redial.retry_at.is_some_and(|at| std::time::Instant::now() < at) { return; }
+        // A tunnel whose `ssh` still runs gets one more try: a dropped socket is not always
+        // a dropped link.
+        if tunnel.is_running() && redial.failures < 2 { return; }
+        let (alias, args) = (tunnel.alias.clone(), tunnel.ssh_args.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wake = self.waker.clone();
+        std::thread::Builder::new().name("neoism-tunnel".into()).spawn(move || {
+            let _ = tx.send(crate::ssh_hosts::attach_workspace_over_ssh(&alias, args).map_err(|e| e.to_string()));
+            if let Some(wake) = wake { wake(); }
+        }).ok();
+        redial.dialing = Some(rx);
+    }
+
+    /// A tunnel dialed again is up: the daemon connection dials through it from its next
+    /// attempt, and the old `ssh` goes with the old tunnel.
+    fn poll_tunnel(&mut self) {
+        let link = &mut self.server.link;
+        let Some(redial) = link.redial.as_mut() else { return };
+        let Some(dialing) = &redial.dialing else { return };
+        let result = match dialing.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("Tunnel worker stopped".into()),
+        };
+        redial.dialing = None;
+        match result {
+            Ok(attach) => {
+                let target = crate::daemon::Target { url: attach.daemon_url.clone(), auth_token: Some(attach.credential.clone()), pairing_token: None };
+                if let Some(daemon) = &self.daemon { daemon.retarget(target); }
+                link.tunnel = Some(attach);
+                redial.failures = 0;
+                redial.attempts = 0;
+            }
+            Err(_) => {
+                // The network is not back yet: again shortly, then less often (0.5 s to 15 s).
+                redial.attempts += 1;
+                let wait = std::time::Duration::from_millis(500 * 2u64.pow(redial.attempts.min(6) - 1)).min(std::time::Duration::from_secs(15));
+                redial.retry_at = Some(std::time::Instant::now() + wait);
+            }
+        }
+    }
+
     /// Dial a server (or a system, or Local Server) and switch to it once it answers.
     pub fn connect_server(&mut self, selection: Selection) {
         if selection.id == self.server.current_id() && selection.system.is_none() { return; }
@@ -112,6 +182,7 @@ impl App {
 
     /// The background job finished: switch, or say why not. Returns whether anything changed.
     pub fn poll_server(&mut self) -> bool {
+        self.poll_tunnel();
         let Some(pending) = &self.server.pending else { return false };
         let result = match pending.rx.try_recv() {
             Ok(result) => result,
@@ -163,7 +234,7 @@ impl App {
             // The daemon picks the workspace once it handshakes (`adopt_workspace`).
             None => (crate::workspace::new_id(), selection.name.clone(), "~".to_owned(), Some(Adopt::Resolve)),
         };
-        self.open_workspace(crate::workspace::Opening { id, title, cwd, target: Some(target), link: Link { current: Some(selection), tunnel, adopt } });
+        self.open_workspace(crate::workspace::Opening { id, title, cwd, target: Some(target), link: Link { current: Some(selection), tunnel, adopt, redial: None } });
     }
 
     /// The workspace tab on server `id` (`None`: a local one), nearest the active tab first.

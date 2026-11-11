@@ -100,6 +100,7 @@ fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
         let (g, color) = match &tab.kind {
             TabKind::Home => (glyph::HOME, rgb(p.fg)),
             TabKind::Database { .. } => ("\u{f1c0}", rgb(p.blue)),
+            TabKind::GitDiff => ("\u{e725}", rgb(p.blue)),
             TabKind::Terminal => ("\u{f489}", rgb(p.accent)),
             TabKind::Agent { .. } => ("\u{f0a1e}", rgb(p.fg)),
             TabKind::Editor { path } => {
@@ -187,6 +188,7 @@ fn content(app: &App, pane: &Pane, focused: bool, cx: &mut Cx<App>) -> El {
         TabKind::Agent { session } => agent::pane(app, session.as_deref(), cx),
         TabKind::Editor { .. } => crate::editor::view(app),
         TabKind::Database { .. } => crate::database::view(app),
+        TabKind::GitDiff => crate::git::review(app),
     }
     .key(format!("pane-content:{}", tab.id))
     .grow(1.0)

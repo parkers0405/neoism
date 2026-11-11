@@ -200,6 +200,8 @@ fn settle_task_card(families: &family::Families, message: &mut HistoryMessage, l
 
 impl App {
     fn send_agent(&self, message: AgentClientMessage) {
+        #[cfg(test)]
+        self.agent_sent.borrow_mut().push(serde_json::to_string(&message).unwrap_or_default());
         if let Some(daemon) = &self.daemon { daemon.agent(&message); }
     }
 
@@ -245,6 +247,11 @@ impl App {
         if let Some(owner) = self.stream_owner.remove(&root) {
             self.send_agent(AgentClientMessage::StopStream { session_id: owner });
         }
+        let extra: Vec<String> = self.stream_extra.iter().filter(|id| self.families.root_of(id) == root).cloned().collect();
+        for id in extra {
+            self.stream_extra.remove(&id);
+            self.send_agent(AgentClientMessage::StopStream { session_id: id });
+        }
         self.sessions.retain(|id, _| self.families.root_of(id) != root);
     }
 
@@ -253,16 +260,64 @@ impl App {
         let session = self.sessions.entry(session_id.into()).or_default();
         if session.loaded { self.preload_family_history(); return; }
         session.older_limit = 24;
-        self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.into() });
+        self.follow_family(session_id);
         self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
-        // One stream carries a whole family (the agent sends every descendant's events on it):
-        // a second, resumed on a child, would deliver each of them twice.
-        let root = self.families.root_of(session_id).to_owned();
-        if !self.stream_owner.contains_key(&root) {
-            self.stream_owner.insert(root, session_id.to_owned());
-            self.send_agent(AgentClientMessage::ResumeStream { session_id: session_id.into() });
-        }
         self.preload_family_history();
+    }
+
+    /// Follow the stream that carries `session_id`'s events. One stream carries a whole family
+    /// (the agent sends every descendant's events on its conversation's), and the daemon binds
+    /// a stream to a session on `SwitchThread` as much as on `ResumeStream`: either one, sent
+    /// for a sub-agent whose conversation is already followed, delivers each of the
+    /// sub-agent's events twice. Its reply then streamed with every word doubled.
+    fn follow_family(&mut self, session_id: &str) {
+        let root = self.families.root_of(session_id).to_owned();
+        let owner = self.stream_owner.get(&root).cloned();
+        match owner {
+            // The conversation itself is followed, which covers this session; or this session
+            // is the one already followed.
+            Some(owner) if owner == root || owner == session_id => {}
+            // Only a sub-agent of it is, and this is another one: the first one's stream does
+            // not carry it.
+            Some(_) if session_id != root => {
+                self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.into() });
+                self.send_agent(AgentClientMessage::ResumeStream { session_id: session_id.into() });
+                self.stream_extra.insert(session_id.to_owned());
+            }
+            // The conversation, or the first of the family to open.
+            _ => {
+                self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.into() });
+                self.send_agent(AgentClientMessage::ResumeStream { session_id: session_id.into() });
+                if let Some(previous) = self.stream_owner.insert(root.clone(), session_id.to_owned()) { self.stream_extra.insert(previous); }
+                if session_id == root { self.drop_child_streams(&root); }
+            }
+        }
+    }
+
+    /// The conversation `root` is followed: the streams bound to its sub-agents before that
+    /// (opened first, or before anything said whose they were) would repeat its events.
+    fn drop_child_streams(&mut self, root: &str) {
+        let extra: Vec<String> = self.stream_extra.iter().filter(|id| id.as_str() != root && self.families.root_of(id) == root).cloned().collect();
+        for id in extra {
+            self.stream_extra.remove(&id);
+            self.send_agent(AgentClientMessage::StopStream { session_id: id });
+        }
+    }
+
+    /// The families changed: a session followed as a conversation of its own may have turned
+    /// out to be a sub-agent of one that is followed too.
+    fn fold_streams(&mut self) {
+        let children: Vec<String> = self.stream_owner.keys().filter(|key| self.families.root_of(key) != key.as_str()).cloned().collect();
+        for key in children {
+            let Some(owner) = self.stream_owner.remove(&key) else { continue };
+            let root = self.families.root_of(&key).to_owned();
+            match self.stream_owner.get(&root) {
+                Some(_) => { self.stream_extra.insert(owner); }
+                None => { self.stream_owner.insert(root.clone(), owner); }
+            }
+        }
+        let followed: Vec<String> = self.stream_owner.iter().filter(|(root, owner)| root == owner).map(|(root, _)| root.clone()).collect();
+        for root in followed { self.drop_child_streams(&root); }
     }
 
     /// Fetch the history of every sub-agent in the families that are open, ahead of a click
@@ -504,6 +559,7 @@ impl App {
             // A family gained or changed a member: its chats are fetched ahead of a click, and
             // a sub-agent that stopped settles the card that launched it.
             self.settle_task_cards();
+            self.fold_streams();
             self.preload_family_history();
             return;
         }
@@ -546,7 +602,7 @@ impl App {
             }
             AgentServerMessage::HistoryChunk { session_id, messages, next_cursor } => {
                 // Task cards name their child sessions; seed the family so it can be walked.
-                if !self.families.is_child(&session_id) { self.families.seed_from_history(&session_id, &messages); }
+                if !self.families.is_child(&session_id) && self.families.seed_from_history(&session_id, &messages) { self.fold_streams(); }
                 self.prefetching.remove(&session_id);
                 let mut messages = messages;
                 identify_anonymous_rows(&mut messages);

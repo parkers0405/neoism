@@ -25,6 +25,7 @@
 //! - `hover:<index>`: rest the pointer on the tab at this place in the strip (its title slides);
 //!   `hover:chat` rests it on the sidebar row with the longest title
 //! - `child`: open the first sub-agent at work under the active conversation (waits a minute for one)
+//! - `treemenu:<row>`: open the right-click menu on that row of the showing file or notes tree
 //! - `rows`: log the active conversation's id and rows (kind, id, text length, text hash)
 //! - `watch:<seconds>`: log the held (or active) conversation's scroll offset every frame
 //! - `mark:<name>`
@@ -42,6 +43,7 @@ use std::time::Duration;
 
 enum Step {
     Ready,
+    TreeMenu(usize),
     Wait(f64),
     Wheel { rate: f64, seconds: f64 },
     Touch { speed: f64, seconds: f64 },
@@ -109,6 +111,7 @@ impl Drive {
                 "watch" => Step::Watch(rest.parse().ok()?),
                 "child" => Step::Child,
                 "rows" => Step::Rows,
+                "treemenu" => Step::TreeMenu(rest.parse().ok()?),
                 "mark" => Step::Mark(rest.to_owned()),
                 "quit" => Step::Quit,
                 _ => return None,
@@ -151,6 +154,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Watch(s) => format!("watch:{s}"),
                 Step::Child => "child".to_owned(),
                 Step::Rows => "rows".to_owned(),
+                Step::TreeMenu(row) => format!("treemenu:{row}"),
                 Step::Mark(name) => format!("mark:{name}"),
                 Step::Quit => "quit".to_owned(),
             };
@@ -306,6 +310,13 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 eprintln!("[drive] watching t={elapsed:.4} offset={offset:.1} end={end:.1}");
                 (elapsed < *seconds).then_some(1.0 / 240.0)
             }
+            Step::TreeMenu(index) => {
+                // Where the row is drawn: beside the rail, under the sidebar header.
+                let y = 96.0 + 26.0 * *index as f32;
+                app.open_tree_context(Some(*index), [150.0, y * app.ty.scale()]);
+                changed = true;
+                None
+            }
             Step::Mark(_) => None,
             Step::Quit => { app.quit_requested = true; None }
         };
@@ -336,7 +347,7 @@ mod tests {
             Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
             Step::Prompt(_) => "prompt", Step::Host(_) => "host",
             Step::JoinSystem(_) => "system", Step::JoinServer(_) => "server", Step::Fixture(_) => "fixture", Step::Sidebar => "sidebar", Step::Stream { .. } => "stream", Step::Live => "live",
-            Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::Mark(_) => "mark", Step::Quit => "quit",
+            Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::TreeMenu(_) => "treemenu", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
         assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "mark", "quit"]);
         assert!(matches!(&drive.steps[2], Step::Wheel { rate, seconds } if *rate == -30.0 && *seconds == 2.0));

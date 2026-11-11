@@ -3,6 +3,7 @@
 //! `notes_sidebar.rs`). Listed lazily over the daemon's `Files` family, folders first, expanded in
 //! place. Keys: j/k or arrows move, l/Right/Enter open or expand, h/Left collapse.
 
+pub mod drag;
 pub mod view;
 
 pub use view::view;
@@ -42,7 +43,7 @@ pub struct Tree {
     select_after: Option<String>,
 }
 
-fn join(dir: &str, name: &str) -> String {
+pub(crate) fn join(dir: &str, name: &str) -> String {
     if dir.is_empty() { name.to_owned() } else { format!("{dir}/{name}") }
 }
 
@@ -114,7 +115,7 @@ fn free_name(taken: &HashSet<String>, stem: &str, ext: &str) -> String {
 const RESOLVE: &str = "\0resolve-notes-vault";
 
 impl App {
-    fn tree_of(&mut self, sidebar: Sidebar) -> &mut Tree {
+    pub(crate) fn tree_of(&mut self, sidebar: Sidebar) -> &mut Tree {
         if sidebar == Sidebar::Notes { &mut self.notes } else { &mut self.tree }
     }
 
@@ -123,7 +124,7 @@ impl App {
         match self.sidebar { Some(Sidebar::Files) => Some(&self.tree), Some(Sidebar::Notes) => Some(&self.notes), _ => None }
     }
 
-    fn list_dir(&mut self, sidebar: Sidebar, dir: &str) {
+    pub(crate) fn list_dir(&mut self, sidebar: Sidebar, dir: &str) {
         let tree = self.tree_of(sidebar);
         if !tree.requested.insert(dir.to_owned()) { return; }
         let path = tree.request_path(dir);
@@ -231,20 +232,72 @@ impl App {
         self.notes.creating = Some((dir, name, folder));
     }
 
+    /// Make `name` in `dir` of a tree (the right-click menu's New File / New Folder).
+    pub(crate) fn tree_create(&mut self, notes: bool, dir: &str, name: &str, folder: bool) {
+        let sidebar = if notes { Sidebar::Notes } else { Sidebar::Files };
+        let Some(root) = self.tree_root(notes) else { return };
+        let kind = if folder { "CreateDir" } else { "CreateFile" };
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Files, serde_json::json!({ kind: {"dir": dir, "name": name} }), &root);
+        }
+        self.tree_of(sidebar).creating = Some((dir.to_owned(), name.to_owned(), folder));
+    }
+
+    /// The folder a tree's requests are scoped to: the vault, or the workspace.
+    pub(crate) fn tree_root(&self, notes: bool) -> Option<String> {
+        if notes { self.notes.root.clone() } else { Some(self.cwd.clone()) }
+    }
+
+    /// Rename or move `from` to `to` (both relative to the tree's root).
+    pub(crate) fn tree_move_path(&mut self, notes: bool, from: &str, to: &str) {
+        let Some(root) = self.tree_root(notes) else { return };
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Files, serde_json::json!({"Rename": {"from": from, "to": to}}), &root);
+        }
+        let tree = if notes { &mut self.notes } else { &mut self.tree };
+        // Where it lands is shown (its folder opened) and it keeps the selection.
+        let folder = to.rsplit_once('/').map_or("", |(dir, _)| dir);
+        if !folder.is_empty() { tree.open.insert(folder.to_owned()); }
+        tree.select_after = Some(to.to_owned());
+    }
+
+    /// `Renamed` / `Deleted`: the folders that held the entry are listed again, in whichever
+    /// tree shows them (a path does not say which tree asked; listing both costs a request).
+    pub(crate) fn apply_tree_changed(&mut self, paths: &[&str]) {
+        for sidebar in [Sidebar::Files, Sidebar::Notes] {
+            for path in paths {
+                let path = path.trim_start_matches("./");
+                let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir).to_owned();
+                let tree = self.tree_of(sidebar);
+                // A folder that is gone takes its listings and open state with it.
+                tree.listings.retain(|listed, _| listed != path && !listed.starts_with(&format!("{path}/")));
+                tree.open.retain(|open| open != path && !open.starts_with(&format!("{path}/")));
+                if !tree.listings.contains_key(&dir) { continue; }
+                tree.requested.remove(&dir);
+                self.list_dir(sidebar, &dir);
+            }
+            let tree = self.tree_of(sidebar);
+            let count = tree.rows().len();
+            tree.selected = tree.selected.min(count.saturating_sub(1));
+        }
+    }
+
     /// `FileCreated`: the note or folder asked for exists. Its folder is listed again with it
     /// selected, and a note opens for writing.
     pub(crate) fn apply_file_created(&mut self, path: &str, is_dir: bool) {
         let path = path.trim_start_matches("./");
-        let Some((dir, name, folder)) = self.notes.creating.clone() else { return };
-        if join(&dir, &name) != path || folder != is_dir { return; }
-        self.notes.creating = None;
-        self.notes.requested.remove(&dir);
-        self.notes.select_after = Some(path.to_owned());
-        if !dir.is_empty() { self.notes.open.insert(dir.clone()); }
-        self.list_dir(Sidebar::Notes, &dir);
-        if !is_dir {
-            let file = self.notes.open_path(path);
-            self.open_file(&file, None);
+        for sidebar in [Sidebar::Notes, Sidebar::Files] {
+            let tree = self.tree_of(sidebar);
+            let Some((dir, name, folder)) = tree.creating.clone() else { continue };
+            if join(&dir, &name) != path || folder != is_dir { continue; }
+            tree.creating = None;
+            tree.requested.remove(&dir);
+            tree.select_after = Some(path.to_owned());
+            if !dir.is_empty() { tree.open.insert(dir.clone()); }
+            let file = tree.open_path(path);
+            self.list_dir(sidebar, &dir);
+            if !is_dir { self.open_file(&file, None); }
+            return;
         }
     }
 

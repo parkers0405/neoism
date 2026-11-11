@@ -124,6 +124,13 @@ pub struct App {
     pub notes: crate::tree::Tree,
     /// The open app menu (rail hamburger).
     pub menu: Option<crate::ui::menu::Menu>,
+    /// The open right-click menu, and the name-or-confirm card one of its rows opened.
+    pub context: Option<crate::ui::context::Menu>,
+    pub prompt: Option<crate::ui::context::Prompt>,
+    /// A tree row being dragged to another folder, and whether its release was a drop (the
+    /// row's own click is skipped then).
+    pub tree_dnd: Option<crate::tree::drag::TreeDrag>,
+    pub tree_press_suppressed: bool,
     /// The open Settings page.
     pub settings: Option<crate::settings::Settings>,
     pub keybindings: serde_json::Value,
@@ -317,6 +324,10 @@ impl App {
             clipboard: None,
             notes: Default::default(),
             menu: None,
+            context: None,
+            prompt: None,
+            tree_dnd: None,
+            tree_press_suppressed: false,
             settings: None,
             databases: HashMap::new(),
             keybindings: crate::config::read()["keybinds"]["keys"].clone(),
@@ -435,6 +446,12 @@ impl App {
                 self.apply_files(&message);
                 if let Some(listing) = message.get("DirListing") {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);
+                }
+                if let Some(renamed) = message.get("Renamed") {
+                    self.apply_tree_changed(&[renamed["from"].as_str().unwrap_or_default(), renamed["to"].as_str().unwrap_or_default()]);
+                }
+                if let Some(deleted) = message.get("Deleted") {
+                    self.apply_tree_changed(&[deleted["path"].as_str().unwrap_or_default()]);
                 }
                 if let Some(created) = message.get("FileCreated") {
                     self.apply_file_created(created["path"].as_str().unwrap_or_default(), created["is_dir"].as_bool().unwrap_or(false));

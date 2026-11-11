@@ -6,6 +6,9 @@
 //! on stderr as it starts (CLOCK_MONOTONIC, the clock presentation feedback uses):
 //!
 //! - `ready`: wait for the active conversation's first history page (at most 10 s)
+//! - `system:<saved id>` / `server:<saved id>`: join a real remote workspace
+//! - `fixture:<file>`: load a transcript fixture for matched local/remote comparisons
+//! - `sidebar`: show the conversation sidebar
 //! - `wait:<seconds>`
 //! - `wheel:<notches per second>:<seconds>`: mouse-wheel notches over the active
 //!   conversation or file; a negative rate scrolls down
@@ -39,6 +42,10 @@ enum Step {
     Prompt(String),
     /// Host a server on a folder, as submitting the Host form does.
     Host(String),
+    JoinSystem(String),
+    JoinServer(String),
+    Fixture(String),
+    Sidebar,
     Stream { text: String, bounds: Vec<usize>, seconds: f64 },
     Live,
     Mark(String),
@@ -70,6 +77,10 @@ impl Drive {
                 "keys" => { let (text, rate) = rest.rsplit_once(':')?; Step::Keys { text: text.chars().collect(), rate: rate.parse().ok()? } }
                 "prompt" => Step::Prompt(rest.to_owned()),
                 "host" => Step::Host(rest.to_owned()),
+                "system" => Step::JoinSystem(rest.to_owned()),
+                "server" => Step::JoinServer(rest.to_owned()),
+                "fixture" => Step::Fixture(std::fs::read_to_string(rest).ok()?),
+                "sidebar" => Step::Sidebar,
                 "stream" => {
                     let (path, seconds) = rest.rsplit_once(':')?;
                     let text = std::fs::read_to_string(path).ok()?;
@@ -107,6 +118,10 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Keys { text, rate } => format!("keys:{}:{rate}", text.len()),
                 Step::Prompt(_) => "prompt".to_owned(),
                 Step::Host(_) => "host".to_owned(),
+                Step::JoinSystem(_) => "join-system".to_owned(),
+                Step::JoinServer(_) => "join-server".to_owned(),
+                Step::Fixture(_) => "fixture".to_owned(),
+                Step::Sidebar => "sidebar".to_owned(),
                 Step::Stream { seconds, .. } => format!("stream:{seconds}"),
                 Step::Live => "live".to_owned(),
                 Step::Mark(name) => format!("mark:{name}"),
@@ -114,7 +129,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
             };
             // How much history is loaded says what a span was measured against.
             let (messages, (offset, end)) = active_session(app).and_then(|id| app.sessions.get(&id).map(|s| (s.messages.len(), s.scroll.get()))).unwrap_or_default();
-            eprintln!("[drive] {name} mono_us={} messages={messages} offset={offset:.1} end={end:.1}", crate::ui::fps::monotonic_us(std::time::Instant::now()));
+            eprintln!("[drive] {name} mono_us={} messages={messages} offset={offset:.1} end={end:.1} threads={}", crate::ui::fps::monotonic_us(std::time::Instant::now()), app.threads.len());
         }
         // How long the step still runs; `None` once it is over.
         let remaining = match step {
@@ -196,6 +211,24 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                     Some(1.0 / DELTA_HZ)
                 }
             }
+            Step::JoinSystem(id) | Step::JoinServer(id) => {
+                if fresh {
+                    match step {
+                        Step::JoinSystem(_) => app.connect_system(id, "Pacing check"),
+                        _ => app.select_server(id),
+                    }
+                    changed = true;
+                }
+                if app.server.remote() && app.workspace_ready { None }
+                else if elapsed >= 30.0 { eprintln!("[drive] join failed or timed out"); app.quit_requested = true; None }
+                else { Some(0.05) }
+            }
+            Step::Sidebar => { app.sidebar = Some(crate::app::Sidebar::Conversations); changed = true; None }
+            Step::Fixture(json) => {
+                app.load_fixture("pacing-fixture", "Pacing fixture", json);
+                changed = true;
+                None
+            }
             Step::Live => {
                 if let Some(session) = active_session(app).and_then(|id| app.sessions.get_mut(&id)) { session.live_from = Some(0); }
                 changed = true;
@@ -229,7 +262,8 @@ mod tests {
         let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; mark:end; quit").unwrap();
         let names: Vec<&str> = drive.steps.iter().map(|step| match step {
             Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
-            Step::Prompt(_) => "prompt", Step::Host(_) => "host", Step::Stream { .. } => "stream", Step::Live => "live", Step::Mark(_) => "mark", Step::Quit => "quit",
+            Step::Prompt(_) => "prompt", Step::Host(_) => "host",
+            Step::JoinSystem(_) => "system", Step::JoinServer(_) => "server", Step::Fixture(_) => "fixture", Step::Sidebar => "sidebar", Step::Stream { .. } => "stream", Step::Live => "live", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
         assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "mark", "quit"]);
         assert!(matches!(&drive.steps[2], Step::Wheel { rate, seconds } if *rate == -30.0 && *seconds == 2.0));

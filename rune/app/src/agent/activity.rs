@@ -20,6 +20,8 @@ pub enum State {
     Working,
     Generating,
     WaitingSubagents,
+    /// No turn is running, but background tasks of the conversation are.
+    Background,
 }
 
 impl State {
@@ -29,6 +31,7 @@ impl State {
             State::Working => "Tinkering",
             State::Generating => "Crafting",
             State::WaitingSubagents => "Sub-agents working",
+            State::Background => "Background",
         }
     }
 
@@ -36,7 +39,7 @@ impl State {
         match self {
             State::Thinking => Some("thinking"),
             State::Working => Some("tools"),
-            State::Generating => None,
+            State::Generating | State::Background => None,
             State::WaitingSubagents => Some("subagents"),
         }
     }
@@ -46,7 +49,7 @@ impl State {
         match self {
             State::Thinking => p.magenta,
             State::Working | State::WaitingSubagents => p.yellow,
-            State::Generating => p.accent,
+            State::Generating | State::Background => p.accent,
         }
     }
 }
@@ -66,6 +69,8 @@ struct Dot {
 /// One running status line. Rebuilt when the state changes; ticked every frame.
 pub struct Activity {
     pub state: State,
+    /// Background tasks running when the line was built (it is rebuilt when this changes).
+    pub background: usize,
     glyphs: Vec<Glyph>,
     dots: Vec<Dot>,
     time: LiveText,
@@ -91,7 +96,7 @@ impl Activity {
             target, shown: LiveText::new(target.to_string()), offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE),
         }).collect();
         let dots = (0..3).map(|_| Dot { offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE) }).collect();
-        Activity { state, glyphs, dots, time: LiveText::new(""), changed: Instant::now(), turn }
+        Activity { state, background: 0, glyphs, dots, time: LiveText::new(""), changed: Instant::now(), turn }
     }
 
     /// Advance every glyph, dot and the timer to `now` (seconds on the frame clock).
@@ -172,7 +177,14 @@ impl Activity {
             .live_text(&self.time).ml(8.0 * s);
         // Padding, not margin: a virtual row drops its top margin, which slid this line (and its
         // dark glyph shadows) up over the reply's last line.
-        row().key("activity").w_full().pt(18.0).center_y().child(letters).child(dots).child(time)
+        let line = row().w_full().center_y().child(letters).child(dots).child(time);
+        // Under it, how many background tasks are still running (`╰─ 2 background tasks running`).
+        let background = (self.background > 0).then(|| {
+            let noun = if self.background == 1 { "task" } else { "tasks" };
+            text(format!("\u{2570}\u{2500} {} background {noun} running", self.background)).font(app.ty.sized(13.0)).color(rgb(p.muted))
+                .h(LINE_H * s).pl(3.3 * s)
+        });
+        rune::col().key("activity").w_full().pt(18.0).child(line).children(background)
     }
 }
 
@@ -180,42 +192,65 @@ impl App {
     /// The live turn's state from its newest rows: reasoning → Pondering, a running tool →
     /// Tinkering (sub-agent tasks → Sub-agents working), otherwise Crafting.
     pub fn activity_state(&self, session_id: &str) -> Option<State> {
-        let session = self.sessions.get(session_id).filter(|s| s.streaming)?;
+        let background = (self.background_count(session_id) > 0).then_some(State::Background);
+        let Some(session) = self.sessions.get(session_id).filter(|_| self.session_live(session_id)) else { return background };
         let from = session.live_from.unwrap_or(0);
         let running = |s: &str| matches!(s, "" | "running" | "pending");
         let live = &session.messages[from.min(session.messages.len())..];
-        Some(match live.last() {
-            Some(m) if m.kind == HistoryMessageKind::Reasoning => State::Thinking,
-            Some(m) if matches!(m.kind, HistoryMessageKind::Tool | HistoryMessageKind::Subtask) && running(&m.status) => {
-                if m.tool == "task" { State::WaitingSubagents } else { State::Working }
-            }
-            _ => State::Generating,
-        })
+        match live.last() {
+            Some(m) if m.kind == HistoryMessageKind::Reasoning => Some(State::Thinking),
+            // Waiting on sub-agents says nothing here: their rows in the sidebar and their
+            // task cards already do.
+            Some(m) if matches!(m.kind, HistoryMessageKind::Tool | HistoryMessageKind::Subtask) && running(&m.status) && m.tool == "task" => background,
+            Some(m) if matches!(m.kind, HistoryMessageKind::Tool | HistoryMessageKind::Subtask) && running(&m.status) => Some(State::Working),
+            _ => Some(State::Generating),
+        }
+    }
+
+    /// A turn is running in this conversation: its own, or (a sub-agent being viewed) the work
+    /// its family says it is still doing (`viewed_subagent_outstanding`). A sub-agent's turn
+    /// is reported through its family, not always as a streaming state of its own.
+    pub fn session_live(&self, session_id: &str) -> bool {
+        self.sessions.get(session_id).is_some_and(|s| s.streaming)
+            || (self.families.working_now(session_id) && self.families.member(session_id).is_some_and(|m| m.status == "running"))
+    }
+
+    /// Background tasks still running in the conversation's family (`RuntimeSnapshot`).
+    pub fn background_count(&self, session_id: &str) -> usize {
+        self.background_jobs.get(self.families.root_of(session_id)).copied().unwrap_or(0)
     }
 
     /// The transcript is scrolled to its end and overflows its view (`activity_geometry`'s
     /// `following`): the activity line then holds the bottom row instead of riding the content.
     pub fn activity_follows_end(&self, session_id: &str) -> bool {
-        let Some(session) = self.sessions.get(session_id).filter(|s| s.streaming) else { return false };
+        let Some(session) = self.sessions.get(session_id).filter(|_| self.session_live(session_id)) else { return false };
         let (offset, max) = session.scroll.get();
         max > 1.0 && max - offset <= 2.0 && crate::ui::follow::wheel_base(session.wheel_target, offset) == offset
     }
 
     /// The row the activity line takes (its top margin and line).
-    pub fn activity_row_height(&self) -> f32 { 18.0 + LINE_H * self.ty.scale() }
+    pub fn activity_row_height(&self) -> f32 {
+        let lines = 1.0 + f32::from(u8::from(self.activity.as_ref().is_some_and(|a| a.background > 0)));
+        18.0 + LINE_H * self.ty.scale() * lines
+    }
 
     /// Keep the activity line in step with the active conversation. Returns whether it
     /// animates (so the frame clock keeps running) and whether its structure changed.
     pub fn tick_activity(&mut self) -> (bool, bool) {
         let session = match &self.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => Some(id.clone()), _ => None };
         let state = session.as_deref().and_then(|id| self.activity_state(id));
+        let background = session.as_deref().map_or(0, |id| self.background_count(id));
         let structure = match (state, &self.activity) {
             (None, None) => false,
             (None, Some(_)) => { self.activity = None; true }
-            (Some(state), Some(current)) if current.state == state => false,
+            (Some(state), Some(current)) if current.state == state && current.background == background => false,
             (Some(state), current) => {
-                let turn = current.as_ref().map_or_else(Instant::now, |c| c.turn);
-                self.activity = Some(Activity::new(state, turn));
+                // The same word keeps its letters where they are; only a new one scrambles in.
+                let (turn, changed) = current.as_ref().map_or_else(|| (Instant::now(), None), |c| (c.turn, (c.state == state).then_some(c.changed)));
+                let mut activity = Activity::new(state, turn);
+                activity.background = background;
+                if let Some(changed) = changed { activity.changed = changed; }
+                self.activity = Some(activity);
                 true
             }
         };

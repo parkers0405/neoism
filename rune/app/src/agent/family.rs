@@ -95,6 +95,37 @@ impl Families {
             && (m.working() || self.ended.get(&m.id).is_some_and(|at| at.elapsed() < m.linger()))).collect()
     }
 
+    /// Whether `session` is a sub-agent seen at work in this run and not yet seen to stop. A
+    /// child only named by an old task card has no known state and is not "working".
+    pub fn working_now(&self, session: &str) -> bool {
+        self.live.contains(session) && self.member(session).is_some_and(Member::working)
+    }
+
+    /// A sub-agent stopped (its session went idle, or its task card settled) without the
+    /// family saying so yet. Returns whether that changed anything.
+    pub fn finish(&mut self, session: &str, failed: bool) -> bool {
+        let Some(root) = self.roots.get(session).cloned() else { return false };
+        let Some(member) = self.rosters.get_mut(&root).and_then(|rows| rows.iter_mut().find(|m| m.id == session)) else { return false };
+        if !member.working() { return false; }
+        member.status = if failed { "failed" } else { "completed" }.into();
+        if self.live.contains(session) { self.ended.insert(session.to_owned(), std::time::Instant::now()); }
+        true
+    }
+
+    /// The catalog started over (`CatalogReset`): its next snapshots are a fresh baseline,
+    /// whatever their revision, and only the families it names again are still at work.
+    pub fn catalog_reset(&mut self) {
+        self.versions.retain(|key, _| !key.ends_with(":CatalogFamily"));
+        let stale: Vec<String> = self.rosters.values().flatten().filter(|m| m.working() && self.live.contains(&m.id)).map(|m| m.id.clone()).collect();
+        for id in stale { self.finish(&id, false); }
+    }
+
+    /// Every sub-agent known to have stopped: `(parent, child, failed)`.
+    pub fn finished(&self) -> Vec<(String, String, bool)> {
+        self.rosters.values().flatten().filter(|m| !m.working() && self.live.contains(&m.id))
+            .map(|m| (m.parent.clone(), m.id.clone(), m.status == "failed")).collect()
+    }
+
     /// When the next lingering child leaves the sidebar.
     pub fn next_expiry(&self) -> Option<std::time::Duration> {
         self.rosters.values().flatten().filter(|m| !m.working())

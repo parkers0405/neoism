@@ -180,6 +180,15 @@ impl App {
             self.select_tab(self.tabs[index].id);
             return;
         }
+        // A tab already showing this conversation's family (one of its sub-agents, or the
+        // conversation while a sub-agent is asked for) switches in place: one tab per family.
+        let root = self.families.root_of(session_id).to_owned();
+        let family = self.tabs.iter().find(|t| matches!(&t.kind, TabKind::Agent { session: Some(id) } if self.families.root_of(id) == root)).map(|t| t.id);
+        if let Some(tab) = family {
+            self.select_tab(tab);
+            self.view_session(session_id);
+            return;
+        }
         self.open_tab(TabKind::Agent { session: Some(session_id.into()) });
         self.load_session(session_id);
     }
@@ -222,6 +231,26 @@ impl App {
             self.prefetching.insert(id.clone());
             self.sessions.entry(id.clone()).or_default().older_limit = 24;
             self.send_agent(AgentClientMessage::GetHistory { session_id: id, cursor: None, limit: Some(PAGE) });
+        }
+    }
+
+    /// A sub-agent that stopped settles the task card that launched it. The card's own update
+    /// arrives with the parent's next step, which can be long after: until then it would keep
+    /// turning its loader beside a sub-agent the sidebar already shows as done.
+    pub(crate) fn settle_task_cards(&mut self) {
+        for (parent, child, failed) in self.families.finished() {
+            let Some(session) = self.sessions.get_mut(&parent) else { continue };
+            let mut changed = Vec::new();
+            for message in session.messages.iter_mut().filter(|m| m.tool == "task" && matches!(m.status.as_str(), "" | "pending" | "running" | "streaming")) {
+                if family::task_id(&message.detail, &message.text).as_deref() == Some(child.as_str()) {
+                    message.status = if failed { "error" } else { "completed" }.into();
+                    changed.push(message.id.clone());
+                }
+            }
+            for id in changed {
+                *session.message_versions.entry(id).or_default() += 1;
+                session.structure += 1;
+            }
         }
     }
 
@@ -287,7 +316,7 @@ impl App {
         self.tabs[index].kind = TabKind::Agent { session: Some(session_id.to_owned()) };
         // A sub-agent still at work shows its trace from the start when opened
         // (`retain_inflight_child_trace`): its tools and thinking are the content.
-        let working = self.families.member(session_id).is_some_and(|m| m.working());
+        let working = self.families.working_now(session_id);
         let session = self.sessions.entry(session_id.to_owned()).or_default();
         session.wheel_target = None;
         if working && session.live_from.is_none() {
@@ -396,11 +425,30 @@ impl App {
             AgentServerMessage::MessageUpdated { message, .. } => self.mcp_icons.prepare_message(message),
             _ => {}
         }
+        // The runtime snapshot also counts the family's background tasks (when it reports them).
+        if let AgentServerMessage::RuntimeSnapshot { snapshot, .. } = &message
+            && let Some(jobs) = &snapshot.running_background_tasks
+        {
+            let root = if snapshot.root_session_id.is_empty() { jobs.first().map(|j| j.session_id.clone()).unwrap_or_default() } else { snapshot.root_session_id.clone() };
+            if !root.is_empty() { self.background_jobs.insert(root, jobs.len()); }
+        }
         if self.families.note(&message) {
-            // A family gained or changed a member: its chats are fetched ahead of a click.
+            // A family gained or changed a member: its chats are fetched ahead of a click, and
+            // a sub-agent that stopped settles the card that launched it.
+            self.settle_task_cards();
             self.preload_family_history();
             return;
         }
+        // A sub-agent's own session going idle, or its task card settling, is it stopping,
+        // whether or not a family snapshot says so yet.
+        let stopped = match &message {
+            AgentServerMessage::SessionIdle { session_id } if self.families.is_child(session_id) => Some((session_id.clone(), false)),
+            AgentServerMessage::StreamingState { session_id, state: StreamingState::Idle, .. } if self.families.is_child(session_id) => Some((session_id.clone(), false)),
+            AgentServerMessage::MessageUpdated { message: m, .. } if m.tool == "task" && matches!(m.status.as_str(), "completed" | "error" | "failed" | "cancelled") =>
+                family::task_id(&m.detail, &m.text).map(|child| (child, m.status != "completed")),
+            _ => None,
+        };
+        if let Some((child, failed)) = stopped && self.families.finish(&child, failed) { self.settle_task_cards(); }
         if self.apply_slash_event(&message) { return; }
         match message {
             AgentServerMessage::ThreadList { threads, requested_cursor, .. } => {
@@ -514,6 +562,11 @@ impl App {
             // The agent service (re)started its catalog: on a cold start it comes up after the
             // daemon, and whatever was asked before it did went unanswered. Ask again.
             AgentServerMessage::CatalogReset { .. } => {
+                // What the old catalog said was running is only still running if the new one
+                // says so again.
+                self.thread_activity.clear();
+                self.families.catalog_reset();
+                self.settle_task_cards();
                 if self.catalog_asked.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(2)) {
                     self.catalog_asked = Some(std::time::Instant::now());
                     self.agent_connected();

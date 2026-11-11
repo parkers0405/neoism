@@ -34,14 +34,16 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     };
     let session = app.sessions.get(session_id);
     let messages = session.map(|s| s.messages.as_slice()).unwrap_or(&[]);
-    let streaming = session.is_some_and(|s| s.streaming);
     let live_from = session.and_then(|s| s.live_from).unwrap_or(usize::MAX);
     let pad = if available >= 700.0 { COLUMN_PAD_X } else { 24.0 };
     let width_id = session_id.to_owned();
     // The transcript's rows: only those in the mounted window (the viewport and up to two
     // viewports either side) are built, so a scroll frame or a streamed delta costs the rows on
     // screen, not the whole history (`virtual_rows`; heights are measured as rows mount).
-    let activity = streaming && app.activity.is_some();
+    // The activity line: a running turn, a sub-agent still at work, or background tasks.
+    let activity = app.activity.is_some() && app.activity_state(session_id).is_some();
+    // A sub-agent's conversation is read, not written to: no input bar under it.
+    let child = app.families.is_child(session_id);
     let rows_key: RowsKey = (session.map_or(0, |s| s.structure), messages.len(), live_from, activity);
     let items = session.map_or_else(Default::default, |s| s.row_items(rows_key));
     let (key_items, build_items, visible_items) = (items.clone(), items.clone(), items.clone());
@@ -105,8 +107,8 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         (Some(view), Some(area)) => {
             // The visible transcript: the scroll view runs on under the pinned composer.
             let mut visible = *view;
-            if let Some(card) = app.rects.get(&format!("composer-card:{tab_id}")) {
-                visible[3] = (card[1] - 6.0 - view[1]).clamp(0.0, view[3]);
+            if let Some(top) = composer_top(app, tab_id) {
+                visible[3] = (top - 6.0 - view[1]).clamp(0.0, view[3]);
             }
             super::ticks::view(app, session_id, visible, *area, pad)
         }
@@ -114,39 +116,46 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     };
     // Following the end, the activity line holds the bottom row just above the composer while
     // the streamed text scrolls up under it (`activity_geometry`).
-    let pinned = match (app.activity.as_ref().filter(|_| app.activity_pinned), app.rects.get(&format!("composer-card:{tab_id}")), app.rects.get(&format!("agent-area:{tab_id}"))) {
-        (Some(activity), Some(card), Some(area)) => {
-            let top = card[1] - area[1] - app.activity_row_height() - 6.0;
+    let pinned = match (app.activity.as_ref().filter(|_| app.activity_pinned), composer_top(app, tab_id), app.rects.get(&format!("agent-area:{tab_id}"))) {
+        (Some(activity), Some(card_top), Some(area)) => {
+            let top = card_top - area[1] - app.activity_row_height() - 6.0;
             col().key("activity-pinned").pin(Some(pad), Some(top.max(0.0)), Some(pad), None).child(activity.view(app))
         }
         _ => el(),
     };
     // Away from the end, one press glides back to the newest message (the terminal's
     // `block-jump-latest`), just above the composer's right edge.
-    let jump = match (session.filter(|s| s.away), app.rects.get(&format!("composer-card:{tab_id}")), app.rects.get(&format!("agent-area:{tab_id}"))) {
-        (Some(_), Some(card), Some(area)) => {
+    let jump = match (session.filter(|s| s.away), composer_top(app, tab_id), app.rects.get(&format!("agent-area:{tab_id}"))) {
+        (Some(_), Some(card_top), Some(area)) => {
             let s = app.ty.scale();
             let id = session_id.to_owned();
             el().key("jump-latest").radius(4.0 * s).fill(rgb(p.surface))
                 .child(crate::home::action_button(app, format!("agent-jump-latest:{tab_id}"), crate::ui::feather::Icon::Down, false, None)
                     .on_press_tx(move |a: &mut App, tx: &mut Tx| a.jump_to_latest(&id, tx)))
-                .pin(None, None, Some((pad - 16.0).max(12.0)), Some(area[1] + area[3] - card[1] + 10.0 * s))
+                .pin(None, None, Some((pad - 16.0).max(12.0)), Some(area[1] + area[3] - card_top + 10.0 * s))
         }
         _ => el(),
     };
-    pane.child(timeline)
-        .child(pinned)
-        .child(rail)
-        .child(jump)
-        .child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
-            .child(composer(app, f32::INFINITY)))
+    let pane = pane.child(timeline).child(pinned).child(rail).child(jump);
+    if child { return pane; }
+    pane.child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
+        .child(composer(app, f32::INFINITY)))
+}
+
+/// The window y the transcript is visible down to: the input bar's top, or (a sub-agent's
+/// conversation has no input bar) the pane's bottom.
+fn composer_top(app: &App, tab_id: u64) -> Option<f32> {
+    let child = app.tabs.iter().find(|t| t.id == tab_id)
+        .is_some_and(|t| matches!(&t.kind, crate::tabs::TabKind::Agent { session: Some(id) } if app.families.is_child(id)));
+    if child { return app.rects.get(&format!("agent-area:{tab_id}")).map(|area| area[1] + area[3]); }
+    app.rects.get(&format!("composer-card:{tab_id}")).map(|card| card[1])
 }
 
 /// How far above the transcript viewport's bottom its content ends: the composer floats over
 /// that much of it.
 fn transcript_foot(app: &App, tab_id: u64) -> f32 {
-    match (app.rects.get(&format!("timeline-view:{tab_id}")), app.rects.get(&format!("composer-card:{tab_id}"))) {
-        (Some(view), Some(card)) => (view[1] + view[3] - (card[1] - 6.0)).max(0.0),
+    match (app.rects.get(&format!("timeline-view:{tab_id}")), composer_top(app, tab_id)) {
+        (Some(view), Some(top)) => (view[1] + view[3] - (top - 6.0)).max(0.0),
         _ => FOOT,
     }
 }
@@ -408,7 +417,7 @@ impl App {
         let Some(session) = self.sessions.get(id) else { return false };
         let (offset, max) = session.scroll.get();
         // The composer floats over the transcript's foot: the visible bottom is its top.
-        let bottom = self.rects.get(&format!("composer-card:{tab}")).map_or(top + h, |c| (c[1] - 6.0).min(top + h));
+        let bottom = composer_top(self, tab).map_or(top + h, |card_top| (card_top - 6.0).min(top + h));
         // Only a drag carried past the visible transcript scrolls it (as a browser does); a
         // press resting inside, however near an edge, never moves the page.
         let above = top - y;

@@ -600,6 +600,32 @@ fn main() {
             }),
             // A live turn mid-stream: the animated "Crafting . . ." status line.
             ("streaming", replay::start),
+            ("composer-switch", |s| {
+                use neoism_protocol::agent::AgentServerMessage as M;
+                let provider = |id: &str, provider: &str, model: &str, thinking: &str| M::ProviderState {
+                    session_id: id.into(), authoritative: true, provider_id: Some(provider.into()), model: Some(model.into()),
+                    connection_id: None, agent: Some("build".into()), thinking: Some(thinking.into()), context_limit: None,
+                };
+                s.workspace_name = "Alpha".into();
+                s.load_fixture("openai-tab", "OpenAI tab", "[]");
+                let first = s.active_tab().id;
+                s.apply_agent(provider("openai-tab", "openai", "gpt-6.1-sol", "high"));
+                s.load_fixture("router-tab", "Router tab", "[]");
+                s.apply_agent(provider("router-tab", "openrouter", "anthropic/claude-sonnet-4.5", "low"));
+                s.select_tab(first);
+                // A late reply for the other tab must not replace the visible chips.
+                s.apply_agent(provider("router-tab", "openrouter", "anthropic/claude-sonnet-4.5", "medium"));
+                s.new_workspace();
+                s.workspace_name = "Beta".into();
+                s.load_fixture("remote-tab", "Other workspace", "[]");
+                s.apply_agent(provider("remote-tab", "openrouter", "anthropic/claude-sonnet-4.5", "low"));
+            }),
+            ("background-task", |s| {
+                use neoism_protocol::agent::{AgentServerMessage as M, BackgroundJobRuntime};
+                s.load_fixture("background", "Background task", "[]");
+                s.apply_agent(M::BackgroundTasksUpdated { session_id: "background".into(), epoch: "fixture".into(), revision: 1,
+                    tasks: vec![BackgroundJobRuntime { job_id: "job".into(), session_id: "background".into(), started_at: 1 }] });
+            }),
             ("compaction", |s| {
                 use neoism_protocol::agent::{AgentServerMessage as M, CompactionPhase, BackgroundJobRuntime};
                 s.load_fixture("compact", "Compacting conversation", r#"[{"id":"reply","role":"Assistant","kind":"Assistant","text":"Earlier conversation."}]"#);

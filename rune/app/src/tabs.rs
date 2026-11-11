@@ -39,6 +39,7 @@ pub struct Tab {
     pub draft: TextEdit,
     /// Prompt waiting for `ThreadCreated` on a new conversation.
     pub pending_prompt: Option<String>,
+    pub selection: Option<crate::agent::slash::Selection>,
 }
 
 impl App {
@@ -48,10 +49,11 @@ impl App {
         let terminal = matches!(kind, TabKind::Home | TabKind::Terminal);
         // The new tab's composer takes the keyboard from whichever field had it.
         self.tabs.iter_mut().for_each(|t| t.draft.focused = false);
-        self.tabs.push(Tab { id, kind, draft: TextEdit::new(""), pending_prompt: None });
+        self.tabs.push(Tab { id, kind, draft: TextEdit::new(""), pending_prompt: None, selection: None });
         self.active = self.tabs.len() - 1;
         self.tabs[self.active].draft.focused = true;
         self.layout.open(id);
+        self.restore_composer_selection();
         if terminal { self.open_terminal(id); }
         self.active
     }

@@ -40,7 +40,12 @@ pub fn group_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, His
     patch_stack_at(messages, start).or_else(|| read_group_at(messages, start))
 }
 
-fn patch_stack_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, HistoryMessage)> {
+/// Row-list discovery must not serialize patch payloads or summarize offscreen search results.
+pub fn group_end(messages: &[HistoryMessage], start: usize) -> Option<usize> {
+    patch_stack_end(messages, start).or_else(|| read_group_end(messages, start))
+}
+
+fn patch_stack_end(messages: &[HistoryMessage], start: usize) -> Option<usize> {
     let mut end = start;
     while messages.get(end).is_some_and(|m| {
         m.kind == HistoryMessageKind::Tool
@@ -51,9 +56,11 @@ fn patch_stack_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, H
     }) {
         end += 1;
     }
-    if end < start + 2 {
-        return None;
-    }
+    (end >= start + 2).then_some(end)
+}
+
+fn patch_stack_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, HistoryMessage)> {
+    let end = patch_stack_end(messages, start)?;
     let calls: Vec<_> = messages[start..end].iter().map(|m| serde_json::json!({
         "id": m.id, "title": m.title, "text": m.text, "tool": m.tool, "detail": m.detail,
     })).collect();
@@ -62,7 +69,7 @@ fn patch_stack_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, H
     Some((end, synthetic(first, first.id.clone(), format!("Patched files \u{b7} {} calls", end - start), String::new(), "completed", "apply_patch", detail)))
 }
 
-fn read_group_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, HistoryMessage)> {
+fn read_group_end(messages: &[HistoryMessage], start: usize) -> Option<usize> {
     let first = messages.get(start).filter(|m| groupable_read(m))?;
     let batch = first.tool_batch_id.as_deref().filter(|b| !b.trim().is_empty());
     let family = read_family(&first.tool);
@@ -72,6 +79,11 @@ fn read_group_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, Hi
     }) {
         end += 1;
     }
+    Some(end)
+}
+
+fn read_group_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, HistoryMessage)> {
+    let end = read_group_end(messages, start)?;
     Some((end, read_group(&messages[start..end])))
 }
 
@@ -188,6 +200,32 @@ mod tests {
         assert_eq!(group.title, "Read: 2 files");
         assert_eq!(group.text, "src/a.rs\nsrc/b.rs");
         assert_eq!(group.id, "a..");
+        assert_eq!(group_end(&messages, 0), Some(2));
+        assert_eq!(group_end(&messages, 2), Some(3));
+        assert_eq!(crate::agent::timeline::row_items(&messages, 0, false), vec![
+            crate::agent::timeline::RowItem::Group(0, 2), crate::agent::timeline::RowItem::Group(2, 3),
+        ]);
+    }
+
+    #[test]
+    fn patch_boundaries_preserve_payloads_and_exclude_unsettled_or_empty_edits() {
+        let mut messages = vec![tool("a", "apply_patch", "Edit a", ""), tool("b", "apply_patch", "Edit b", "")];
+        for message in &mut messages {
+            message.detail = format!("*** Begin Patch\n*** Update File: {}.rs\n@@\n-old\n+new\n*** End Patch", message.id);
+        }
+        assert_eq!(group_end(&messages, 0), Some(2));
+        assert_eq!(crate::agent::timeline::row_items(&messages, 0, false), vec![crate::agent::timeline::RowItem::Group(0, 2)]);
+        let (_, group) = group_at(&messages, 0).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&group.detail).unwrap();
+        assert_eq!(payload["calls"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["calls"][1]["detail"], messages[1].detail);
+        messages[1].status = "running".into();
+        assert_eq!(group_end(&messages, 0), None);
+        assert!(group_at(&messages, 0).is_none());
+        messages[1].status = "completed".into();
+        messages[1].detail.clear();
+        assert_eq!(group_end(&messages, 0), None);
+        assert!(group_at(&messages, 0).is_none());
     }
 
     #[test]

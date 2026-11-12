@@ -549,7 +549,9 @@ impl App {
         self.send_agent(AgentClientMessage::CancelInflight { session_id: session_id.into() });
     }
 
-    pub(crate) fn apply_agent(&mut self, message: AgentServerMessage) {
+    /// Conservatively request views, except for events explicitly ignored by this dispatch.
+    /// Content deltas are paced separately by the inbox drain.
+    pub(crate) fn apply_agent(&mut self, message: AgentServerMessage) -> bool {
         match &message {
             AgentServerMessage::HistoryChunk { messages, .. } => for m in messages { self.mcp_icons.prepare_message(m); },
             AgentServerMessage::MessageUpdated { message, .. } => self.mcp_icons.prepare_message(message),
@@ -571,7 +573,7 @@ impl App {
             self.settle_task_cards();
             self.fold_streams();
             self.preload_family_history();
-            return;
+            return true;
         }
         // A sub-agent's own session going idle, or its task card settling, is it stopping,
         // whether or not a family snapshot says so yet.
@@ -583,7 +585,7 @@ impl App {
             _ => None,
         };
         if let Some((child, failed)) = stopped && self.families.finish(&child, failed) { self.settle_task_cards(); }
-        if self.apply_slash_event(&message) { return; }
+        if self.apply_slash_event(&message) { return true; }
         match message {
             AgentServerMessage::ThreadList { threads, requested_cursor, .. } => {
                 if requested_cursor.is_none() { self.threads = threads; } else { self.threads.extend(threads); }
@@ -734,8 +736,15 @@ impl App {
             AgentServerMessage::ProviderState { session_id, context_limit, .. } => {
                 if let Some(limit) = context_limit.filter(|l| *l > 0) { self.sessions.entry(session_id).or_default().context_limit = Some(limit); }
             }
+            // These carry no state consumed by Rune, including the family and slash
+            // handlers above. Keep unclassified events conservative, not ignored.
+            AgentServerMessage::SessionEvent { .. }
+            | AgentServerMessage::MessageStart { .. }
+            | AgentServerMessage::MessageEnd { .. }
+            | AgentServerMessage::ThreadSwitched { .. } => return false,
             _ => {}
         }
+        true
     }
 }
 
@@ -1033,6 +1042,37 @@ mod cache_tests {
     }
 
     #[test]
+    fn ignored_agent_events_do_not_invalidate_views() {
+        let mut app = App::new();
+        let inbox: crate::daemon::Inbox = Default::default();
+        app.inbox = Some(inbox.clone());
+        let ignored = || [
+            AgentServerMessage::SessionEvent { session_id: "s".into(), kind: "message.updated".into(), properties: json!({}) },
+            AgentServerMessage::MessageStart { session_id: "s".into(), role: Role::Assistant, message_id: "a".into() },
+            AgentServerMessage::MessageEnd { session_id: "s".into(), message_id: "a".into(), stop_reason: "end_turn".into() },
+            AgentServerMessage::ThreadSwitched { session_id: "s".into() },
+        ];
+        let inbound = |message| crate::daemon::Inbound::Agent(Box::new(message));
+        for message in ignored() {
+            inbox.lock().unwrap().push_back(inbound(message));
+            assert!(!app.drain_current(), "an ignored event must not re-run the views");
+            assert!(!app.stream_pace.pending, "ignored events must not schedule a text commit either");
+        }
+        assert!(app.sessions.is_empty(), "ignored lifecycle events create no transcript state");
+        assert!(inbox.lock().unwrap().is_empty());
+
+        // Ignored events on either side must not mask a legitimate visible change.
+        let mut queue = inbox.lock().unwrap();
+        queue.extend(ignored().into_iter().map(inbound));
+        queue.push_back(inbound(AgentServerMessage::CatalogActivity { session_id: "s".into(), activity: "running".into() }));
+        queue.extend(ignored().into_iter().map(inbound));
+        drop(queue);
+        assert!(app.drain_current());
+        assert_eq!(app.thread_activity["s"], "running");
+        assert!(!app.drain_current(), "the inbox has been drained");
+    }
+
+    #[test]
     fn deltas_wait_for_the_stream_pace_and_other_events_do_not() {
         let mut app = App::new();
         let inbox: crate::daemon::Inbox = Default::default();
@@ -1045,6 +1085,6 @@ mod cache_tests {
         assert!(app.stream_pace.pending);
         assert_eq!(app.sessions["s"].messages[0].text, "word ", "but it is applied at once");
         inbox.lock().unwrap().extend([delta(), crate::daemon::Inbound::Agent(Box::new(AgentServerMessage::SessionIdle { session_id: "s".into() }))]);
-        assert!(app.drain_current(), "any other event re-runs them now");
+        assert!(app.drain_current(), "a visible state event re-runs them now");
     }
 }

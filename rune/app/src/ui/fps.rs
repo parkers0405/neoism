@@ -50,6 +50,37 @@ pub fn last_poll(encoded: Instant) -> (u128, u128, bool) {
     }
 }
 
+#[cfg(feature = "frame-profile")]
+thread_local! {
+    static CPU_START: std::cell::Cell<Option<(Instant, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(feature = "frame-profile")]
+pub fn profile_start() {
+    CPU_START.set(Some((Instant::now(), rune::thread_cpu_ms())));
+    // Match the existing work_us interval, rather than accumulate phases across frames.
+    rune::take_frame_phases();
+}
+
+#[cfg(feature = "frame-profile")]
+pub fn profile_frame(frame: &rune::FrameEncoded) {
+    // Rune invokes this hook after presenting, although frame.at() predates present.
+    // Use matching callback endpoints for wall/CPU comparisons, before trace I/O.
+    let cpu = rune::thread_cpu_ms();
+    let now = Instant::now();
+    let timing = CPU_START.replace(None).map(|(at, start)| (now.duration_since(at).as_secs_f64() * 1000.0, cpu - start));
+    let phases = rune::take_frame_phases();
+    eprintln!("[rune-phases] {}", serde_json::json!({
+        "seq": frame.seq(), "cpu_ms": timing.map(|t| t.1), "wall_ms": timing.map(|t| t.0),
+        "after_encode_ms": now.saturating_duration_since(frame.at()).as_secs_f64() * 1000.0,
+        "update_ms": frame.update_ms(), "encode_ms": frame.encode_ms(),
+        "view_ms": phases[0], "commit_ms": phases[1], "layout_ms": phases[2],
+        "text_ms": phases[3], "paint_ms": phases[4], "apply_ms": phases[5],
+        "view_cpu_ms": phases[6], "commit_cpu_ms": phases[7], "layout_cpu_ms": phases[8],
+        "text_cpu_ms": phases[9], "paint_cpu_ms": phases[10], "apply_cpu_ms": phases[11],
+    }));
+}
+
 /// `at` on CLOCK_MONOTONIC in microseconds, the clock compositor presentation times use.
 #[cfg(target_os = "linux")]
 pub fn monotonic_us(at: Instant) -> i128 {

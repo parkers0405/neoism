@@ -8,12 +8,13 @@ import argparse
 import json
 import os
 from pathlib import Path
+from rune_paths import default_binary
 import shlex
 import subprocess
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--binary', default='/tmp/neoism-rune-target/release/neoism-rune')
+parser.add_argument('--binary', default=default_binary())
 parser.add_argument('--output', default='/tmp/neoism-rune-verify/native-editor')
 parser.add_argument('--scene', default='editor-long')
 parser.add_argument('--workspace', type=int, default=5)

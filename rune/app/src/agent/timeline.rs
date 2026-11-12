@@ -203,7 +203,7 @@ pub fn row_items(messages: &[HistoryMessage], live_from: usize, activity: bool) 
     let mut index = 0;
     while index < messages.len() {
         if !tools::visible(&messages[index], index, live_from) { index += 1; continue; }
-        if let Some((end, _)) = tools::group_at(messages, index) {
+        if let Some(end) = tools::group_end(messages, index) {
             items.push(RowItem::Group(index, end));
             index = end;
             continue;

@@ -111,6 +111,8 @@ fn lsp_fixture(s: &mut App) {
 
 fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let started = std::time::Instant::now();
+    #[cfg(feature = "frame-profile")]
+    ui::fps::profile_start();
     let rerun = poll_frame(app, clock, tx);
     ui::fps::polled(started, rerun);
     rerun
@@ -687,6 +689,8 @@ fn main() {
     let trace = std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1");
     let origin = std::time::Instant::now();
     app = app.on_frame_encoded(move |frame| {
+        #[cfg(feature = "frame-profile")]
+        if trace { ui::fps::profile_frame(frame); }
         ui::fps::record(frame.at());
         if trace {
             // `mono_us` is CLOCK_MONOTONIC, the clock Wayland presentation feedback reports in;
@@ -701,4 +705,3 @@ fn main() {
     app.run();
     workspace::finish_window_cleanup();
 }
-

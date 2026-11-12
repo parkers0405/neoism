@@ -1,0 +1,31 @@
+# Live conversation frame-pacing investigation
+
+## Workload and version
+
+The reported failure is a growing conversation receiving agent text, tool results and status updates, with the physical 144 Hz display falling toward 70 FPS. Scrolling settled history is not an adequate acceptance test. The installed binary was `0.7.149-nightly.20261111.7`, while the main checkout was `0.7.149-nightly.20261111.1`. A matching-release diagnostic worktree was created at `/tmp/neoism-nightly7-frame-profile` from tag `v0.7.149-nightly.20261111.7` (`792978f13`); the installed binary was not replaced.
+
+## Captures and limits
+
+- `/tmp/neoism-rune-verify/home-chat-growing-now.log`: installed `.7`, stationary mirror of the live home conversation. Recorded bad one-second stretches and a 172 ms poll-to-encode interval. Diagnostic compilation and other agent compilation were running, so this does not isolate application work from resource contention. The original checker excluded long gaps from its FPS calculation; those historical FPS summaries are not whole-span throughput.
+- `/tmp/neoism-rune-verify/home-chat-growing-nightly7-phases.log`: matching `.7` profiling build after cleanup, no diagnostic compilation. Held 144 FPS, but the transcript stayed at 229 messages with no poll rebuild requests during the marked interval. This is a quiet baseline, not evidence that active agent churn is fixed.
+- `/tmp/neoism-rune-verify/home-chat-growing-replay-nightly7.log`: local continuous Markdown replay through the normal delta handler in the loaded conversation. Approximately 142-144 FPS in each one-second interval, 435 commit frames in 15 seconds; work p95 3.29 ms, max 6.78 ms. It exercises growing text, not the full mixture of tool results, family updates and concurrent builds. It predates the app-side fixes in the diagnostic worktree.
+- `/tmp/neoism-rune-verify/home-chat-growing-replay-nightly7-patched.log`: incomplete presentation coverage in the latter half of the replay; not usable as a successful continuous-rendering acceptance check.
+- `/tmp/neoism-rune-verify/home-chat-resumed-real-work.log`: after the user authorized a follow-up, the original FireRed conversation resumed its actual unfinished work. The patched `.7` build observed 45 seconds of real activity: loaded messages 234 -> 250, 557 session events, 78 content deltas, 58 message updates, 15 family updates, 15 activity updates, 8 runtime snapshots and 1 background-task update. Whole-span observed throughput was 143.6 FPS, the lowest complete one-second span was 138 FPS, and the largest presentation gap was 13.9 ms. Poll-to-encode work p95 was 1.97 ms and max 5.83 ms. This validates one real active interval, not all heavier workloads or a controlled attribution of the improvement.
+
+The profiling feature records matching wall/CPU intervals from poll start to callback entry after present, plus Rune's nested phase timings. Commit includes view/layout/text/apply; these times must not be added together. Wall minus CPU includes scheduling and blocking, not exclusively GPU waits. Surface acquisition can precede the measured interval. Tracing itself adds overhead.
+
+The checker now reports observed FPS over the entire marked interval, including pauses, and labels short-gap missed-refresh counts separately. It also records the binary version and path in the capture. Use one-second spans when diagnosing intermittent drops; a whole-run average is insufficient.
+
+## Resource pressure
+
+`/tmp` was a 16 GB tmpfs. The shared Rune build target occupied 6.7 GB and the disposable diagnostic worktree's language-server target approximately 1.3 GB. The user reported a shell `write failed: disk quota exceeded`, and matching-release linking failed with a bus error. Moving build output off tmpfs was followed by successful linking, but the snapshots do not prove the exact quota or linker failure cause.
+
+With no compilers active, the shared target was moved to `/home/parkersettle/.cache/neoism-rune-target` and the old `/tmp/neoism-rune-target` path retained as a symlink. Only the disposable worktree's separate target was cleaned. `/tmp` usage fell to roughly 4.6 GB with 11 GB free. Available memory increased from roughly 8 GB to 15 GB and occupied swap fell from roughly 22 GB to 10 GB. Build/checker defaults now use the persistent cache directory, respecting `XDG_CACHE_HOME`, `CARGO_TARGET_DIR` and explicit checker binary overrides.
+
+## Implemented changes and checks
+
+The event dispatcher now reports whether ignored events require invalidation instead of making every non-text event rebuild the view. Classification happens after handlers have had a chance to consume the event. The `.7` port preserves queue actions, prompt events and stream-resume handling, which do not exist in the older checkout in the same form. Row-list discovery now uses group boundaries without constructing synthetic patch/read messages; visible group rendering retains the same payload construction and grouping eligibility checks. Diff eligibility still uses the existing cached diff parser, and whole-history scans have not all been eliminated.
+
+All 79 agent tests in the main checkout and all 104 existing agent tests in the matching `.7` worktree passed. The main checkout includes regressions for ignored-event invalidation and patch-group boundary/content preservation. The `.7` suite also covers prompt queues and reconnect behavior. Installed and patched `tool-cards-open` headless PNGs match pixel-for-pixel outside the dynamic FPS footer. Shell/Python syntax, build-path overrides and checker help were checked. The installed app was not replaced or restarted; its only immediate change is reduced host resource pressure.
+
+Continue checking longer/heavier real agent activity, including concurrent agent build load, without the profiler's own compilation running. Retain event counts, loaded transcript size, per-second presentation throughput and CPU/phase timings. Do not declare the intermittent slowdown universally solved from the quiet baseline, text-only replay, or one successful active interval.

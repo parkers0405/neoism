@@ -2,9 +2,10 @@
 """Check exact tab/workspace close commands in a bounded, isolated native Rune window."""
 import argparse, json, os, shlex, signal, subprocess, time
 from pathlib import Path
+from rune_paths import default_binary
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--connected',action='store_true',help='Use the local daemon for workspace close acknowledgments')
-p.add_argument('--binary',default='/tmp/neoism-rune-target/release/neoism-rune')
+p.add_argument('--binary',default=default_binary())
 p.add_argument('--output',default='/tmp/neoism-rune-corrections/native-close')
 a=p.parse_args(); out=Path(a.output).absolute(); out.parent.mkdir(parents=True,exist_ok=True)
 trace=out.with_suffix('.jsonl'); trace.unlink(missing_ok=True)

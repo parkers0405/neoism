@@ -4,11 +4,12 @@ import argparse
 import json
 import os
 from pathlib import Path
+from rune_paths import default_binary
 import subprocess
 from PIL import Image
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--binary', default='/tmp/neoism-rune-target/release/neoism-rune')
+parser.add_argument('--binary', default=default_binary())
 parser.add_argument('--output', default='/tmp/neoism-rune-tabs-mcp')
 args = parser.parse_args()
 out = Path(args.output); out.mkdir(parents=True, exist_ok=True)

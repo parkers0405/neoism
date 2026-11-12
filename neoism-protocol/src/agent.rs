@@ -749,6 +749,12 @@ pub enum AgentServerMessage {
         session_id: String,
         request_id: String,
     },
+    /// Authoritative pending permissions for one session, including an empty list.
+    /// Requests have the agent server's permission.asked payload shape.
+    PermissionsUpdated {
+        session_id: String,
+        requests: Vec<serde_json::Value>,
+    },
     /// A permission reply POST failed. The picker becomes interactive again.
     PermissionReplyFailed {
         request_id: String,

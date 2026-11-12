@@ -72,9 +72,12 @@ struct Dot {
 
 /// One running status line. Rebuilt when the state changes; ticked every frame.
 pub struct Activity {
+    /// The conversation the line is for: a clock of its own is never carried to another.
+    session: String,
     pub state: State,
     /// Background tasks running when the line was built (it is rebuilt when this changes).
     pub background: usize,
+    pub queued: u32,
     glyphs: Vec<Glyph>,
     dots: Vec<Dot>,
     time: LiveText,
@@ -87,6 +90,15 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
     Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
 }
 
+/// The instant a server timestamp (milliseconds since the epoch) stands for on this clock.
+/// `None` for a timestamp that is not a plausible start of running work.
+pub fn instant_from_epoch_millis(epoch_millis: u64) -> Option<Instant> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+    let elapsed = std::time::Duration::from_millis(now.saturating_sub(epoch_millis));
+    if epoch_millis == 0 || elapsed > std::time::Duration::from_secs(30 * 24 * 3600) { return None; }
+    Instant::now().checked_sub(elapsed)
+}
+
 pub fn format_elapsed(seconds: f32) -> String {
     let seconds = seconds.max(0.0);
     if seconds < 60.0 { format!("{seconds:.1}s") }
@@ -95,12 +107,12 @@ pub fn format_elapsed(seconds: f32) -> String {
 }
 
 impl Activity {
-    pub fn new(state: State, turn: Instant) -> Activity {
+    pub fn new(session: &str, state: State, turn: Instant) -> Activity {
         let glyphs = state.label().chars().map(|target| Glyph {
             target, shown: LiveText::new(target.to_string()), offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE),
         }).collect();
         let dots = (0..3).map(|_| Dot { offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE) }).collect();
-        Activity { state, background: 0, glyphs, dots, time: LiveText::new(""), changed: Instant::now(), turn }
+        Activity { session: session.to_owned(), state, background: 0, queued: 0, glyphs, dots, time: LiveText::new(""), changed: Instant::now(), turn }
     }
 
     /// Advance every glyph, dot and the timer to `now` (seconds on the frame clock).
@@ -182,13 +194,19 @@ impl Activity {
         // Padding, not margin: a virtual row drops its top margin, which slid this line (and its
         // dark glyph shadows) up over the reply's last line.
         let line = row().w_full().center_y().child(letters).child(dots).child(time);
+        let queued = (self.queued > 0).then(|| {
+            let label = if self.queued == 1 { "Queued".into() } else { format!("Queued x{}", self.queued) };
+            let branch = if self.background > 0 { "\u{251c}\u{2500}" } else { "\u{2570}\u{2500}" };
+            text(format!("{branch} {label}")).key("activity-queued").font(app.ty.sized(13.0).italic()).color(rgb(p.accent))
+                .h(LINE_H * s).pl(3.3 * s)
+        });
         // Under it, how many background tasks are still running (`╰─ 2 background tasks running`).
         let background = (self.background > 0).then(|| {
             let noun = if self.background == 1 { "task" } else { "tasks" };
             text(format!("\u{2570}\u{2500} {} background {noun} running", self.background)).font(app.ty.sized(13.0)).color(rgb(p.muted))
                 .h(LINE_H * s).pl(3.3 * s)
         });
-        rune::col().key("activity").w_full().pt(18.0).child(line).children(background)
+        rune::col().key("activity").w_full().pt(18.0).child(line).children(queued).children(background)
     }
 }
 
@@ -220,6 +238,14 @@ impl App {
             || (self.families.working_now(session_id) && self.families.member(session_id).is_some_and(|m| m.status == "running"))
     }
 
+    /// When the conversation's running turn began: its own turn's start, or (a sub-agent whose
+    /// turn is reported through its family) the start its family gives.
+    fn turn_started(&self, session_id: &str) -> Option<Instant> {
+        self.sessions.get(session_id).and_then(|s| s.turn_started).or_else(|| {
+            self.families.member(session_id).filter(|m| m.working()).and_then(|m| m.started_at).and_then(instant_from_epoch_millis)
+        })
+    }
+
     /// Background tasks still running in the conversation's family (`RuntimeSnapshot`).
     pub fn background_count(&self, session_id: &str) -> usize {
         self.background_jobs.get(self.families.root_of(session_id)).copied().unwrap_or(0)
@@ -235,8 +261,8 @@ impl App {
 
     /// The row the activity line takes (its top margin and line).
     pub fn activity_row_height(&self) -> f32 {
-        let lines = 1.0 + f32::from(u8::from(self.activity.as_ref().is_some_and(|a| a.background > 0)));
-        18.0 + LINE_H * self.ty.scale() * lines
+        let lines = self.activity.as_ref().map_or(1, |a| 1 + usize::from(a.queued > 0) + usize::from(a.background > 0));
+        18.0 + LINE_H * self.ty.scale() * lines as f32
     }
 
     /// Keep the activity line in step with the active conversation. Returns whether it
@@ -245,15 +271,27 @@ impl App {
         let session = match &self.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => Some(id.clone()), _ => None };
         let state = session.as_deref().and_then(|id| self.activity_state(id));
         let background = session.as_deref().map_or(0, |id| self.background_count(id));
-        let structure = match (state, &self.activity) {
+        let queued = session.as_deref().and_then(|id| self.sessions.get(id)).map_or(0, |s| s.queued_prompts);
+        let id = session.as_deref().unwrap_or_default();
+        // The timer counts from the turn's start, which the conversation holds: the line comes
+        // and goes (another tab, a wait on sub-agents) without the clock starting over. Work
+        // with no turn of its own (background tasks) keeps the line's clock while it stands.
+        let turn = self.turn_started(id)
+            .or_else(|| self.activity.as_ref().filter(|a| a.session == id).map(|a| a.turn))
+            .unwrap_or_else(Instant::now);
+        let structure = match (state, &mut self.activity) {
             (None, None) => false,
             (None, Some(_)) => { self.activity = None; true }
-            (Some(state), Some(current)) if current.state == state && current.background == background => false,
+            (Some(state), Some(current)) if current.session == id && current.state == state && current.background == background && current.queued == queued => {
+                current.turn = turn;
+                false
+            }
             (Some(state), current) => {
                 // The same word keeps its letters where they are; only a new one scrambles in.
-                let (turn, changed) = current.as_ref().map_or_else(|| (Instant::now(), None), |c| (c.turn, (c.state == state).then_some(c.changed)));
-                let mut activity = Activity::new(state, turn);
+                let changed = current.as_ref().filter(|c| c.session == id && c.state == state).map(|c| c.changed);
+                let mut activity = Activity::new(id, state, turn);
                 activity.background = background;
+                activity.queued = queued;
                 if let Some(changed) = changed { activity.changed = changed; }
                 self.activity = Some(activity);
                 true
@@ -271,6 +309,88 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_snapshots_update_the_activity_and_reserved_space_per_conversation() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        let mut app = App::new();
+        app.load_fixture("active", "Steering", "[]");
+        app.sessions.get_mut("active").unwrap().streaming = true;
+        app.tick_activity();
+        let base = app.activity_row_height();
+        let extra = LINE_H * app.ty.scale();
+        let update = |session: &str, count| M::QueueUpdate {
+            session_id: session.into(), count, preview: None, started_at: None,
+        };
+
+        app.apply_agent(update("active", 1));
+        assert!(app.tick_activity().1);
+        assert_eq!(app.activity.as_ref().unwrap().queued, 1);
+        assert_eq!(app.activity_row_height(), base + extra);
+        let revision = app.sessions["active"].structure;
+        app.apply_agent(update("active", 1));
+        assert!(!app.tick_activity().1);
+        assert_eq!(app.sessions["active"].structure, revision);
+
+        app.apply_agent(M::SessionEvent { session_id: "active".into(), kind: "session.queue.updated".into(),
+            properties: serde_json::json!({"queue": {"count": 2}, "action": "enqueued"}) });
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().queued, 2);
+        assert_eq!(app.activity_row_height(), base + extra);
+        app.apply_agent(update("other", 8));
+        assert!(!app.tick_activity().1);
+        assert_eq!(app.activity.as_ref().unwrap().queued, 2);
+
+        app.apply_agent(update("active", 0));
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().queued, 0);
+        assert_eq!(app.activity_row_height(), base);
+        app.apply_agent(M::SessionIdle { session_id: "active".into() });
+        app.tick_activity();
+        app.apply_agent(update("active", 1));
+        app.tick_activity();
+        assert!(app.activity.is_none(), "waiting work must not resurrect a completed turn's loader");
+    }
+
+    #[test]
+    fn the_timer_counts_the_whole_turn_not_the_time_on_screen() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        use std::time::Duration;
+        let mut app = App::new();
+        app.load_fixture("a", "A", include_str!("../../fixtures/tools-timeline.json"));
+        let last = app.sessions.get_mut("a").unwrap().messages.last_mut().unwrap();
+        (last.kind, last.tool, last.status) = (HistoryMessageKind::Tool, "task".into(), "running".into());
+        app.load_fixture("b", "B", "[]");
+        let ago = |secs| Instant::now() - Duration::from_secs(secs);
+        let elapsed = |app: &App| app.activity.as_ref().unwrap().turn.elapsed().as_secs();
+        for (id, secs) in [("a", 300), ("b", 40)] {
+            let session = app.sessions.get_mut(id).unwrap();
+            session.streaming = true;
+            session.turn_started = Some(ago(secs));
+        }
+        // Waiting on sub-agents hides the line; the turn's clock is the conversation's.
+        app.view_session("a");
+        app.sessions.get_mut("a").unwrap().live_from = Some(0);
+        app.tick_activity();
+        assert!(app.activity.is_none());
+        app.sessions.get_mut("a").unwrap().messages.last_mut().unwrap().status = "completed".into();
+        app.tick_activity();
+        assert_eq!(elapsed(&app), 300, "the wait on sub-agents is part of the turn");
+        // Another running conversation shows its own clock, and coming back resumes this one.
+        app.view_session("b");
+        app.tick_activity();
+        assert_eq!(elapsed(&app), 40);
+        app.view_session("a");
+        app.tick_activity();
+        assert_eq!(elapsed(&app), 300);
+        // The server's start time wins, and the turn's end clears the clock.
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        app.apply_agent(M::QueueUpdate { session_id: "a".into(), count: 0, preview: None, started_at: Some(now - 90_000) });
+        app.tick_activity();
+        assert_eq!(elapsed(&app), 90);
+        app.apply_agent(M::SessionIdle { session_id: "a".into() });
+        assert!(app.sessions["a"].turn_started.is_none());
+    }
 
     #[test]
     fn labels_and_elapsed() {

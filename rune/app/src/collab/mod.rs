@@ -288,6 +288,7 @@ impl App {
         }
         let Some(id) = doc::buffer_of(&message) else { return false };
         let Some(key) = self.buffers.iter().find(|(_, b)| b.shared.as_ref().is_some_and(|s| s.buffer_id == id)).map(|(key, _)| key.clone()) else { return false };
+        let visible = self.active_buffer().is_some_and(|b| b.path == key);
         let buffer = self.buffers.get_mut(&key).expect("found above");
         let own_save = request_id != 0 && buffer.saving_request == Some(request_id);
         if own_save && matches!(message, In::Error { .. }) {
@@ -298,6 +299,11 @@ impl App {
         let binding = buffer.shared.as_mut().expect("found above");
         let seeded = binding.is_seeded();
         let outcome = binding.event(&message, &mut buffer.doc);
+        if let Some((first, last)) = outcome.external_rows {
+            // A new remote change replaces the old landing, never queues it for a hidden tab.
+            if let Some(old) = buffer.external_edit.take() { old.tick(false, old.revision); }
+            if visible { buffer.external_edit = Some(crate::editor::external_edit::Flash::new(first, last, buffer.doc.revision)); }
+        }
         if trace() && (outcome.changed || outcome.saved || outcome.reacquire || outcome.error.is_some() || !seeded) {
             let kind = match &message { In::Snapshot { .. } | In::SnapshotFallback { .. } => "snapshot", In::Sync { .. } => "sync", In::Update { .. } => "update", In::Saved { .. } => "saved", In::Error { .. } => "error", _ => "other" };
             eprintln!("[collab] {kind} {id} seeded={}->{} changed={} saved={} reacquire={} send={} error={:?} dirty={} text={:?}", seeded, binding.is_seeded(), outcome.changed, outcome.saved,

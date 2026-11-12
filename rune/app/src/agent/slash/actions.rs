@@ -18,7 +18,7 @@ impl App {
     fn active_session(&self) -> Option<String> {
         match &self.active_tab().kind {
             TabKind::Agent { session } => session.clone(),
-            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } => None,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => None,
         }
     }
 
@@ -70,6 +70,7 @@ impl App {
 
     /// Keys the composer routes here first. True when the `/` menu used it.
     pub fn agent_composer_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
+        if self.has_prompt() { return self.prompt_key(event); }
         let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Slash) else { return false };
         match event.key {
             // Keys arrive through a text field (an instant commit): the slide must animate.

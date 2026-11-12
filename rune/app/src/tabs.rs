@@ -14,6 +14,29 @@ pub enum TabKind {
     /// A file in the code editor (workspace-relative path).
     Editor { path: String },
     Database { path: String },
+    GitDiff,
+}
+
+#[cfg(test)]
+mod git_tests {
+    use super::*;
+
+    #[test]
+    fn file_review_reuses_a_tab_and_does_not_own_other_tabs_keyboard() {
+        let mut app = App::new();
+        let home = app.active_tab().id;
+        app.open_git_review("first.rs");
+        assert_eq!(app.active_tab().kind, TabKind::GitDiff);
+        let review = app.active_tab().id;
+        app.select_tab(home);
+        assert!(!app.git_panel_key(&rune::KeyEvent { key: rune::Key::Text("x".into()), mods: Default::default() }, &mut rune::Tx::default()));
+        app.open_git_review("second.rs");
+        assert_eq!(app.active_tab().id, review);
+        assert_eq!(app.tabs.len(), 2);
+        app.close_tab_now(app.active);
+        assert_eq!(app.active_tab().id, home);
+        assert!(!app.git_panel.review_open());
+    }
 }
 
 /// Exact close aliases precede fuzzy palette matches on every surface.
@@ -81,6 +104,7 @@ impl App {
     pub(crate) fn close_tab_now(&mut self, index: usize) {
         if index >= self.tabs.len() { return; }
         let removed = self.tabs.remove(index);
+        if removed.kind == TabKind::GitDiff { self.clear_git_review(); }
         self.close_terminal(removed.id);
         self.forget_table_state(removed.id);
         if let TabKind::Agent { session: Some(id) } = &removed.kind { self.release_closed_agent(id); }
@@ -117,6 +141,7 @@ impl App {
             TabKind::Home | TabKind::Terminal if let Some(program) = self.tab_program(tab.id) => crate::home::program_title(program).into(),
             TabKind::Home => "Home".into(),
             TabKind::Terminal => "Terminal".into(),
+            TabKind::GitDiff => "Git Diff".into(),
             TabKind::Database { path } if path.is_empty() => "Database".into(),
             TabKind::Database { path } | TabKind::Editor { path } => path.rsplit('/').next().unwrap_or(path).to_owned(),
             TabKind::Agent { session: None } => "Neoism".into(),
@@ -143,7 +168,7 @@ impl App {
             TabKind::Home | TabKind::Terminal => self.run_command(index, text),
             TabKind::Agent { session: Some(session_id) } => self.submit_prompt(&session_id, text),
             TabKind::Agent { session: None } => self.create_thread(index, text),
-            TabKind::Editor { .. } | TabKind::Database { .. } => {}
+            TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => {}
         }
     }
 

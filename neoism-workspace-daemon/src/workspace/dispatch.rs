@@ -207,9 +207,11 @@ fn handle_inner(
         },
         WorkspaceClientMessage::ResolveNotesVault { root_dir } => {
             DispatchOutcome::just(if root_dir.is_absolute() {
+                // Notes open the default vault only: a vault linked to the project is
+                // not followed, whichever folder asks.
                 vec![WorkspaceServerMessage::NotesVaultResolved {
-                    linked_vault_dir: resolve_linked_vault_dir(&root_dir),
-                    notes_vault_dir: resolve_notes_vault_dir(&root_dir),
+                    linked_vault_dir: None,
+                    notes_vault_dir: neoism_workspace_index::default_notes_workspace().notes_workspace_dir(),
                 }]
             } else {
                 vec![err("notes directory must be absolute".into())]

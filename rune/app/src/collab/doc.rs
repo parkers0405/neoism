@@ -137,6 +137,8 @@ pub struct Outcome {
     pub send: Vec<Out>,
     /// The document's text changed.
     pub changed: bool,
+    /// Post-edit logical rows, only for an actual inbound change after hydration.
+    pub external_rows: Option<(usize, usize)>,
     /// The daemon saved the file and nothing of ours is still in flight.
     pub saved: bool,
     /// The daemon no longer knows this document or lease: acquire it again.
@@ -287,6 +289,14 @@ impl Binding {
         let text = self.replica.text();
         if let Some(delta) = diff(&self.shadow, &text) {
             set_text(doc, &text, Caret::Carry(&delta));
+            let first = pos_at(doc, delta.start).line;
+            // Exclusive inserted end: a newline must not light the untouched next row.
+            // Pure deletions still mark their surviving landing row (including EOF).
+            let start_row = text[..delta.start].bytes().filter(|&b| b == b'\n').count();
+            let end_row = start_row + delta.inserted.bytes().filter(|&b| b == b'\n').count();
+            let last = end_row.saturating_sub(usize::from(delta.inserted.ends_with('\n')))
+                .min(doc.lines.len().saturating_sub(1));
+            outcome.external_rows = Some((first, last.max(first)));
             outcome.changed = true;
         }
         self.shadow = text;
@@ -385,6 +395,34 @@ mod tests {
 
     fn deliver(binding: &mut Binding, doc: &mut Document, messages: &[In]) -> Vec<Out> {
         messages.iter().flat_map(|m| binding.event(m, doc).send).collect()
+    }
+
+    #[test]
+    fn external_edit_ranges_skip_hydration_echoes_and_duplicate_updates() {
+        for (old, new, rows) in [
+            ("a\nb\nc", "a\nB\nC", (1, 2)),
+            ("a\nb\nc", "a\nc", (1, 1)),
+            ("a\nb", "a\n", (1, 1)),
+            ("a", "", (0, 0)),
+            ("a\nz", "a\n\n\nz", (1, 2)),
+            ("a\n", "a\n\n\n", (1, 2)),
+            ("hé\r\nz", "hé\r\n😀\r\nz", (1, 1)),
+        ] {
+            let hub = Hub::new(old);
+            let mut doc = Document::from_text("stale disk read");
+            let mut binding = Binding::new(1024, ID.into(), &doc);
+            assert!(binding.event(&hub.snapshot(), &mut doc).external_rows.is_none());
+            let d = diff(old, new).unwrap();
+            let update = hub.doc.apply_local_edit(CrdtTextEdit::Replace { index: d.utf16_start, len: d.utf16_removed, content: d.inserted }).unwrap();
+            let message = In::Sync { envelope: CrdtSyncEnvelope { buffer_id: ID.into(), origin_client_id: update.origin_client_id, update_v1: update.update_v1, state_vector_v1: update.state_vector_v1 } };
+            let outcome = binding.event(&message, &mut doc);
+            assert_eq!(doc.text_for_disk(), new);
+            assert_eq!(outcome.external_rows, Some(rows), "{old:?} -> {new:?}");
+            assert!(binding.event(&message, &mut doc).external_rows.is_none());
+            doc.type_text("local");
+            let sent = binding.flush(&mut doc);
+            for echo in hub.accept(&sent) { assert!(binding.event(&echo, &mut doc).external_rows.is_none()); }
+        }
     }
 
     #[test]

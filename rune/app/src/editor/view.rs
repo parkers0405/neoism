@@ -275,6 +275,8 @@ fn cached_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     let line = &doc.lines[index];
     let (start, end) = (cached.offsets[index], cached.offsets[index] + line.len());
     let mut text = std::collections::hash_map::DefaultHasher::new();
+    buffer.external_edit.as_ref().filter(|f| (f.first..=f.last).contains(&index))
+        .map(|f| (f.first, f.last, f.revision)).hash(&mut text);
     (line, index, first, last, segment.byte_start, segment.byte_end, segment.source_col, segment.visual_indent).hash(&mut text);
     for (range, paint) in cached.marks[cached.marks.partition_point(|(r, _)| r.end <= start)..].iter().take_while(|(r, _)| r.start < end) {
         (range.start.max(start) - start, range.end.min(end) - start).hash(&mut text);
@@ -331,6 +333,11 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     let selected = selection_on_line(doc, index);
             let x_of = |byte: usize| m.gutter_w + segment.visual_col(segment.source_col_for_byte(line, byte, TAB)) as f32 * adv;
             let mut visual = row().w_full().h(line_h).fill(if current && selected.is_none() { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT });
+            if let Some(flash) = buffer.external_edit.as_ref().filter(|f| (f.first..=f.last).contains(&index)) {
+                // Full affected rows, including blank/deletion landings and every wrap segment.
+                visual = visual.child(el().key("external-edit").pin(Some(m.gutter_w), Some(0.0), Some(0.0), None)
+                    .h(line_h).fill(rgb(p.accent).alpha(0.30)).live_opacity(&flash.opacity).live_offset(&flash.offset));
+            }
             // hlsearch: every occurrence of the search pattern (case-sensitive, as `n`/`N`).
             if let Some(pattern) = buffer.search_highlight.as_deref().filter(|p| !p.is_empty()) {
                 let band = rgb(p.yellow).alpha(0.30);

@@ -7,10 +7,14 @@ mod activity;
 mod anchor;
 pub mod attach;
 mod composer;
+pub(crate) mod prompts;
+#[path = "../../../../neoism-frontend/shared/src/panels/agent_pane/question_policy.rs"]
+mod question_policy;
 pub(crate) mod family;
 mod header;
 mod projects;
 mod prose;
+mod resync;
 mod sidebar;
 mod table;
 mod ticks;
@@ -114,11 +118,21 @@ pub struct Session {
     pub viewport_h: f32,
     pub width: f32,
     pub messages: Vec<HistoryMessage>,
+    /// Unconfirmed echoes, retained for queued admission and server-echo reconciliation.
+    pub pending_prompts: std::collections::HashMap<String, HistoryMessage>,
     pub older_cursor: Option<String>,
     pub loaded: bool,
+    /// What is loaded may be behind the conversation (the window was away from it): its
+    /// newest page is on its way, or is fetched when it is next wanted (`resync.rs`).
+    pub resync: bool,
     pub loading_older: bool,
     pub older_limit: u32,
     pub streaming: bool,
+    /// When the running turn began: the server's time when it reports one (`QueueUpdate`),
+    /// else when this client saw it start. It belongs to the conversation, not to the status
+    /// line, so the timer counts the whole turn whether or not it is on screen.
+    pub turn_started: Option<std::time::Instant>,
+    pub queued_prompts: u32,
     pub status: Option<String>,
     pub compacting: bool,
     pub selection: Option<slash::Selection>,
@@ -135,6 +149,15 @@ pub struct Session {
 }
 
 impl Session {
+    fn hide_pending_prompts(&mut self) {
+        let before = self.messages.len();
+        self.messages.retain(|m| !self.pending_prompts.contains_key(&m.id));
+        if self.messages.len() != before {
+            self.structure += 1;
+            self.rebase_live();
+        }
+    }
+
     fn order_stream_parts(&mut self, part: &str, parent: Option<String>) {
         if let Some(parent) = parent { self.part_parents.insert(part.to_owned(), parent); }
         let Some(parent) = self.part_parents.get(part) else { return };
@@ -166,6 +189,34 @@ impl Session {
             if self.live_anchor.is_none() { self.live_anchor = Some(self.messages[index].id.clone()); }
             if index != from { self.live_from = Some(index); self.structure += 1; }
         }
+    }
+
+    /// Replace the transcript with the conversation's newest page (`resync.rs`): it shows
+    /// its end, and older history loads from `older_cursor` as on a first load. Prompts typed
+    /// here that the page does not know yet (still on their way) stay last.
+    fn restart_at(&mut self, mut page: Vec<HistoryMessage>, older_cursor: Option<String>) {
+        let known: std::collections::HashSet<&str> = page.iter().map(|m| m.id.as_str()).collect();
+        let unsent = self.messages.iter().rev().take_while(|m| m.id.starts_with("msg_rune_")).filter(|m| !known.contains(m.id.as_str())).count();
+        let at = self.messages.len() - unsent;
+        page.extend(self.messages.drain(at..));
+        self.messages = page;
+        self.older_cursor = older_cursor;
+        self.older_limit = 24;
+        self.loading_older = false;
+        self.structure += 1;
+        // A turn at work keeps showing its trace, from its prompt.
+        self.live_anchor = None;
+        self.live_from = self.live_from.map(|_| self.messages.iter().rposition(|m| m.kind == HistoryMessageKind::User).unwrap_or(0));
+        self.rebase_live();
+        // Nothing measured against the old rows holds; the view goes to the end.
+        self.row_tops.clear();
+        self.question_tops.clear();
+        self.visible_questions.clear();
+        self.anchor = None;
+        self.placed = None;
+        self.wheel_target = None;
+        self.kept_scroll = None;
+        self.restoring = 3;
     }
 
     /// Whether the transcript is only now coming on screen: not shown a frame ago, or still
@@ -258,7 +309,12 @@ impl App {
     /// Fetch a session's newest page and follow its stream, once.
     fn load_session(&mut self, session_id: &str) {
         let session = self.sessions.entry(session_id.into()).or_default();
-        if session.loaded { self.preload_family_history(); return; }
+        if session.loaded {
+            // Loaded before the window was away and not caught up since: now it is wanted.
+            if session.resync && !self.prefetching.contains(session_id) { self.refresh_transcript(session_id); }
+            self.preload_family_history();
+            return;
+        }
         session.older_limit = 24;
         self.follow_family(session_id);
         self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
@@ -339,14 +395,15 @@ impl App {
         let mut wanted = Vec::new();
         for root in roots {
             for member in self.families.roster(&root) {
-                let known = self.sessions.get(&member.id).is_some_and(|s| s.loaded) || self.prefetching.contains(&member.id);
+                let known = self.sessions.get(&member.id).is_some_and(|s| s.loaded && (!s.resync || s.loading_older)) || self.prefetching.contains(&member.id);
                 if !known && !wanted.contains(&member.id) { wanted.push(member.id.clone()); }
             }
         }
         for id in wanted {
             if self.prefetching.len() >= IN_FLIGHT { break; }
             self.prefetching.insert(id.clone());
-            self.sessions.entry(id.clone()).or_default().older_limit = 24;
+            let session = self.sessions.entry(id.clone()).or_default();
+            if !session.loaded { session.older_limit = 24; }
             self.send_agent(AgentClientMessage::GetHistory { session_id: id, cursor: None, limit: Some(PAGE) });
         }
     }
@@ -382,8 +439,8 @@ impl App {
         self.threads.iter().any(|t| self.activity_of(t) != "idle") || self.families.sidebar_count() > 0
     }
 
-    /// What a conversation is doing, by the catalog: the live word, else the one its row came
-    /// with, else the older `busy` flag.
+    /// What a conversation is doing, by the latest catalog event or list snapshot, else the
+    /// one its row came with, else the older `busy` flag.
     pub fn activity_of<'a>(&'a self, thread: &'a ThreadSummary) -> &'a str {
         let activity = self.thread_activity.get(&thread.session_id).map(String::as_str)
             .or(thread.catalog_activity.as_deref())
@@ -465,6 +522,7 @@ impl App {
         if session.streaming == streaming { return; }
         session.streaming = streaming;
         if streaming {
+            session.turn_started.get_or_insert_with(std::time::Instant::now);
             if session.live_from.is_none() {
                 let from = session.messages.iter().rposition(|m| m.kind == HistoryMessageKind::User).unwrap_or(session.messages.len());
                 session.live_from = Some(from);
@@ -472,6 +530,7 @@ impl App {
             }
         } else {
             session.status = None;
+            session.turn_started = None;
             self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
             self.settle_task_cards();
         }
@@ -495,7 +554,7 @@ impl App {
         let (attachments, echo) = self.take_attachments(session_id);
         let message_id = format!("msg_rune_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
         let session = self.sessions.entry(session_id.into()).or_default();
-        session.messages.push(HistoryMessage {
+        let echo = HistoryMessage {
             id: message_id.clone(),
             role: Role::User,
             kind: HistoryMessageKind::User,
@@ -516,7 +575,10 @@ impl App {
             usage: None,
             attachments: echo,
             created_at: 0,
-        });
+        };
+        // Idle sends keep their immediate bubble. Busy steers wait for consumption.
+        if !session.streaming && session.queued_prompts == 0 { session.messages.push(echo.clone()); }
+        session.pending_prompts.insert(message_id.clone(), echo);
         self.send_agent(AgentClientMessage::SubmitPrompt {
             session_id: session_id.into(),
             message_id,
@@ -552,10 +614,57 @@ impl App {
     /// Conservatively request views, except for events explicitly ignored by this dispatch.
     /// Content deltas are paced separately by the inbox drain.
     pub(crate) fn apply_agent(&mut self, message: AgentServerMessage) -> bool {
+        if self.apply_prompt_event(&message) { return true; }
         match &message {
             AgentServerMessage::HistoryChunk { messages, .. } => for m in messages { self.mcp_icons.prepare_message(m); },
             AgentServerMessage::MessageUpdated { message, .. } => self.mcp_icons.prepare_message(message),
             _ => {}
+        }
+        // Live queue events retain their full admission envelope; reconnect hydration uses
+        // the typed snapshot. Both describe waiting work, not messages already consumed.
+        let queue = match &message {
+            AgentServerMessage::QueueUpdate { session_id, count, started_at, .. } => {
+                let session = self.sessions.entry(session_id.clone()).or_default();
+                match started_at.and_then(activity::instant_from_epoch_millis) {
+                    Some(started) => session.turn_started = Some(started),
+                    None if !session.streaming => session.turn_started = None,
+                    None => {}
+                }
+                Some((session_id, *count))
+            }
+            AgentServerMessage::SessionEvent { session_id, kind, properties } if kind == "session.queue.updated" =>
+                properties["queue"]["count"].as_u64().and_then(|n| u32::try_from(n).ok()).map(|count| (session_id, count)),
+            _ => None,
+        };
+        if let AgentServerMessage::SessionEvent { session_id, kind, properties } = &message {
+            if kind == "session.queue.updated" {
+                let session = self.sessions.entry(session_id.clone()).or_default();
+                match properties["action"].as_str() {
+                    Some("dequeue") => {
+                        let id = properties["messageID"].as_str()
+                            .or_else(|| properties["messageId"].as_str())
+                            .or_else(|| properties["request"]["messageID"].as_str())
+                            .or_else(|| properties["request"]["messageId"].as_str());
+                        if let Some(prompt) = id.and_then(|id| session.pending_prompts.remove(id)) {
+                            session.note_message(&prompt);
+                            upsert(&mut session.messages, prompt);
+                            session.rebase_live();
+                        }
+                    }
+                    Some("clear") => { session.hide_pending_prompts(); session.pending_prompts.clear(); }
+                    _ => {},
+                }
+            }
+        }
+        if let Some((session_id, count)) = queue {
+            let session = self.sessions.entry(session_id.clone()).or_default();
+            // The server can enqueue a send before this client has observed its busy status.
+            if count > 0 { session.hide_pending_prompts(); }
+            if session.queued_prompts != count {
+                session.queued_prompts = count;
+                session.structure += 1; // Remeasure the virtual activity row when its child appears/disappears.
+            }
+            return;
         }
         // The runtime snapshot also counts the family's background tasks (when it reports them).
         if let AgentServerMessage::RuntimeSnapshot { session_id, snapshot } = &message
@@ -567,6 +676,13 @@ impl App {
         if let AgentServerMessage::BackgroundTasksUpdated { session_id, epoch, revision, tasks } = &message {
             self.update_background_jobs(self.families.root_of(session_id).to_owned(), tasks.len(), Some(epoch), Some(*revision));
         }
+        // The daemon found its stream from the agent again: what was said in between is in
+        // the history only.
+        if let AgentServerMessage::SessionEvent { session_id, kind, .. } = &message && kind == "stream.resumed" {
+            let session_id = session_id.clone();
+            self.agent_stream_resumed(&session_id);
+            return;
+        }
         if self.families.note(&message) {
             // A family gained or changed a member: its chats are fetched ahead of a click, and
             // a sub-agent that stopped settles the card that launched it.
@@ -575,19 +691,26 @@ impl App {
             self.preload_family_history();
             return true;
         }
-        // A sub-agent's own session going idle, or its task card settling, is it stopping,
-        // whether or not a family snapshot says so yet.
+        // Only child lifecycle events stop a sub-agent. A task call can complete merely
+        // because a launch or follow-up was queued while the child continues running.
         let stopped = match &message {
             AgentServerMessage::SessionIdle { session_id } if self.families.is_child(session_id) => Some((session_id.clone(), false)),
             AgentServerMessage::StreamingState { session_id, state: StreamingState::Idle, .. } if self.families.is_child(session_id) => Some((session_id.clone(), false)),
-            AgentServerMessage::MessageUpdated { message: m, .. } if m.tool == "task" && matches!(m.status.as_str(), "completed" | "error" | "failed" | "cancelled") =>
-                family::task_id(&m.detail, &m.text).map(|child| (child, m.status != "completed")),
             _ => None,
         };
         if let Some((child, failed)) = stopped && self.families.finish(&child, failed) { self.settle_task_cards(); }
         if self.apply_slash_event(&message) { return true; }
         match message {
             AgentServerMessage::ThreadList { threads, requested_cursor, .. } => {
+                // A refreshed catalog is newer evidence than a cached activity event. In
+                // particular, recover from a missed idle event instead of keeping its loader
+                // alive forever. Legacy rows without catalog activity do not replace it.
+                for thread in &threads {
+                    if let Some(activity) = &thread.catalog_activity {
+                        self.set_streaming(&thread.session_id, activity == "running");
+                        self.thread_activity.insert(thread.session_id.clone(), activity.clone());
+                    }
+                }
                 if requested_cursor.is_none() { self.threads = threads; } else { self.threads.extend(threads); }
             }
             AgentServerMessage::ThreadCreated { session_id, .. } => {
@@ -618,9 +741,14 @@ impl App {
                 self.prefetching.remove(&session_id);
                 let mut messages = messages;
                 identify_anonymous_rows(&mut messages);
+                let id = session_id.clone();
                 let session = self.sessions.entry(session_id).or_default();
+                let older = session.loading_older;
                 for message in &mut messages { settle_task_card(&self.families, message, session.streaming); }
-                for message in &messages { session.note_message(message); }
+                for message in &messages {
+                    session.pending_prompts.remove(&message.id);
+                    session.note_message(message);
+                }
                 if session.loading_older {
                     // Size the next page from this one (bytes per server message).
                     let bytes: usize = messages.iter().map(message_bytes).sum();
@@ -641,6 +769,12 @@ impl App {
                     session.question_tops.clear();
                     // And every row's index by its length: the live turn is found again.
                     session.rebase_live();
+                } else if std::mem::take(&mut session.resync) && session.loaded && !messages.is_empty() && !overlaps(&session.messages, &messages) {
+                    // The window was away for more than a page: laid over what is loaded,
+                    // this one would leave a hole between the two. The transcript starts
+                    // again at the conversation's end, and everything before it (what was
+                    // loaded included) pages in above as it is scrolled to.
+                    session.restart_at(messages, next_cursor);
                 } else {
                     // The page's order is the conversation's: rows that arrived in another
                     // order (a reply's empty text part ahead of its thinking) take it.
@@ -649,12 +783,15 @@ impl App {
                     if !session.loaded { session.older_cursor = next_cursor; self.settle_pending = true; }
                     session.loaded = true;
                 }
+                // A refresh that waited for this older page (the two answers look alike).
+                if older && session.resync { self.refresh_transcript(&id); }
                 // The next sub-agent chat waiting to be fetched ahead.
                 self.preload_family_history();
             }
             AgentServerMessage::MessageUpdated { session_id, mut message, parent_message_id } => {
                 let session = self.sessions.entry(session_id).or_default();
                 let part = message.id.clone();
+                session.pending_prompts.remove(&message.id);
                 settle_task_card(&self.families, &mut message, session.streaming);
                 session.note_message(&message);
                 upsert(&mut session.messages, message);
@@ -694,10 +831,14 @@ impl App {
                 }
             }
             AgentServerMessage::StreamingState { session_id, state, label } => {
+                // Tool/reasoning parts can emit a derived streaming verb after the turn
+                // ended. They describe its timeline, not whether the catalog is at work.
+                let streaming = !matches!(state, StreamingState::Idle)
+                    && self.thread_activity.get(&session_id).is_none_or(|activity| activity == "running");
                 if let Some(session) = self.sessions.get_mut(&session_id) {
-                    session.compacting = matches!(state, StreamingState::Compacting);
+                    session.compacting = streaming && matches!(state, StreamingState::Compacting);
                 }
-                self.set_streaming(&session_id, !matches!(state, StreamingState::Idle));
+                self.set_streaming(&session_id, streaming);
                 if let Some(session) = self.sessions.get_mut(&session_id) { session.status = label; }
             }
             // The daemon reports a conversation's turn as catalog activity (`running` / `idle`).
@@ -717,6 +858,9 @@ impl App {
             AgentServerMessage::SessionIdle { session_id, .. } => {
                 if let Some(session) = self.sessions.get_mut(&session_id) { session.compacting = false; }
                 self.set_streaming(&session_id, false);
+                // The session stream and whole-family catalog are independent. Recover a
+                // missed catalog idle event without hiding genuinely active background work.
+                self.refresh_threads();
             },
             // The agent service (re)started its catalog: on a cold start it comes up after the
             // daemon, and whatever was asked before it did went unanswered. Ask again.
@@ -724,6 +868,10 @@ impl App {
                 // What the old catalog said was running is only still running if the new one
                 // says so again.
                 self.thread_activity.clear();
+                for thread in &mut self.threads {
+                    thread.catalog_activity = None;
+                    thread.busy = false;
+                }
                 self.background_jobs.clear();
                 self.background_job_versions.clear();
                 self.families.catalog_reset();
@@ -763,7 +911,9 @@ fn placeholder(message: &HistoryMessage) -> bool {
 /// thinking that arrives after the empty reply part is shown before it, as the history has it.
 fn insert_new(messages: &mut Vec<HistoryMessage>, message: HistoryMessage) {
     let mut at = messages.len();
-    if !placeholder(&message) { while at > 0 && placeholder(&messages[at - 1]) { at -= 1; } }
+    if !placeholder(&message) && message.kind != HistoryMessageKind::User {
+        while at > 0 && placeholder(&messages[at - 1]) { at -= 1; }
+    }
     messages.insert(at, message);
 }
 
@@ -792,6 +942,23 @@ fn identify_anonymous_rows(rows: &mut [HistoryMessage]) {
         row.title.hash(&mut hash);
         row.id = format!("history-anonymous:{anchor}:{}:{occurrence}", hash.finish());
         occurrence += 1;
+    }
+}
+
+/// Whether any row of `page` is one the transcript already holds.
+fn overlaps(messages: &[HistoryMessage], page: &[HistoryMessage]) -> bool {
+    let held: std::collections::HashSet<&str> = messages.iter().map(|m| m.id.as_str()).collect();
+    page.iter().any(|m| held.contains(m.id.as_str()))
+}
+
+/// A history page is read from the store a moment before or after the stream's events for
+/// the same reply: its copy of a reply still being written can be shorter than what has
+/// streamed. The text never goes back to it (the words after would be appended to less than
+/// what came before them).
+fn keep_streamed_text(old: &HistoryMessage, new: &mut HistoryMessage) {
+    if matches!(new.kind, HistoryMessageKind::Assistant | HistoryMessageKind::Reasoning) && new.tool.is_empty()
+        && old.text.len() > new.text.len() && old.text.starts_with(new.text.as_str()) {
+        new.text = old.text.clone();
     }
 }
 
@@ -826,11 +993,14 @@ fn merge_head(messages: &mut Vec<HistoryMessage>, mut page: Vec<HistoryMessage>)
     let mut slot = slots.iter();
     let mut arrivals: Vec<(Option<String>, HistoryMessage)> = Vec::new();
     let mut previous: Option<String> = None;
-    for message in page {
+    let streamed: std::collections::HashMap<String, HistoryMessage> = messages.iter().filter(|m| held.contains(&m.id) && !m.text.is_empty()
+        && matches!(m.kind, HistoryMessageKind::Assistant | HistoryMessageKind::Reasoning)).map(|m| (m.id.clone(), m.clone())).collect();
+    for mut message in page {
         let id = message.id.clone();
         if held.contains(&id) {
             let at = *slot.next().expect("one slot per held row");
             moved |= messages[at].id != id;
+            if let Some(old) = streamed.get(&id) { keep_streamed_text(old, &mut message); }
             messages[at] = message;
         } else {
             arrivals.push((previous.clone(), message));
@@ -854,6 +1024,93 @@ pub(crate) fn title_case(model: &str) -> String {
         let mut c = w.chars();
         c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
     }).collect::<Vec<_>>().join("-")).collect::<Vec<_>>().join("/")
+}
+
+#[cfg(test)]
+mod prompt_queue_tests {
+    use super::*;
+
+    #[test]
+    fn idle_sends_echo_immediately_but_server_queued_sends_wait_for_consumption() {
+        let mut app = App::new();
+        app.load_fixture("queue", "Admission race", "[]");
+        app.submit_prompt("queue", "An ordinary idle send".into());
+        assert_eq!(app.sessions["queue"].messages.len(), 1);
+        let confirmed = app.sessions["queue"].messages[0].clone();
+        app.apply_agent(AgentServerMessage::MessageUpdated {
+            session_id: "queue".into(), message: confirmed.clone(), parent_message_id: None,
+        });
+        assert_eq!(app.sessions["queue"].messages.len(), 1);
+
+        app.submit_prompt("queue", "The server is busy before this client knows".into());
+        assert_eq!(app.sessions["queue"].messages.len(), 2);
+        let raced = app.sessions["queue"].messages[1].clone();
+        app.apply_agent(AgentServerMessage::SessionEvent {
+            session_id: "queue".into(), kind: "session.queue.updated".into(),
+            properties: json!({"action":"enqueue", "request":{"messageId":raced.id}, "queue":{"count":1}}),
+        });
+        assert_eq!(app.sessions["queue"].messages.len(), 1, "an authoritative queue snapshot must retract the unconsumed echo");
+        let mut reply = confirmed.clone();
+        reply.id = "current-reply".into();
+        reply.role = Role::Assistant;
+        reply.kind = HistoryMessageKind::Assistant;
+        reply.text = "Finish the active turn first".into();
+        app.apply_agent(AgentServerMessage::MessageUpdated { session_id: "queue".into(), message: reply, parent_message_id: None });
+        app.apply_agent(AgentServerMessage::SessionEvent {
+            session_id: "queue".into(), kind: "session.queue.updated".into(),
+            properties: json!({"action":"dequeue", "messageId":raced.id, "queue":{"count":0}}),
+        });
+        let ids: Vec<_> = app.sessions["queue"].messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, [confirmed.id.as_str(), "current-reply", raced.id.as_str()]);
+    }
+
+    #[test]
+    fn queued_prompts_enter_the_transcript_only_when_consumed_and_in_consumption_order() {
+        let mut app = App::new();
+        app.load_fixture("queue", "Queued turns", r#"[{"id":"old-reply","role":"Assistant","kind":"Assistant","text":""}]"#);
+        app.sessions.get_mut("queue").unwrap().streaming = true;
+        app.submit_prompt("queue", "First steer".into());
+        app.submit_prompt("queue", "Second steer".into());
+        let first = app.sessions["queue"].pending_prompts.values().find(|p| p.text == "First steer").unwrap().clone();
+        let second = app.sessions["queue"].pending_prompts.values().find(|p| p.text == "Second steer").unwrap().clone();
+        let event = |action: &str, id: &str, count| AgentServerMessage::SessionEvent {
+            session_id: "queue".into(), kind: "session.queue.updated".into(),
+            properties: json!({"action": action, "request": {"messageId": id}, "queue": {"count": count}}),
+        };
+        app.apply_agent(event("enqueue", &first.id, 2));
+        app.apply_agent(AgentServerMessage::SessionEvent {
+            session_id: "queue".into(), kind: "session.prompt.admitted".into(),
+            properties: json!({"request": {"messageId": first.id}}),
+        });
+        assert_eq!(app.sessions["queue"].messages.len(), 1, "admission and queue snapshots must not create a bubble");
+
+        // Consumption, not submission order, decides where the bubble belongs. Keep the
+        // old reply's placeholder ahead of it so a late final chunk cannot cross turns.
+        app.apply_agent(event("dequeue", &second.id, 1));
+        let ids = |app: &App| app.sessions["queue"].messages.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&app), vec!["old-reply".to_owned(), second.id.clone()]);
+        let update = |message| AgentServerMessage::MessageUpdated { session_id: "queue".into(), message, parent_message_id: None };
+        app.apply_agent(update(second.clone()));
+        assert_eq!(app.sessions["queue"].messages.len(), 2, "the server echo must merge with the dequeued row");
+        let mut old_reply = app.sessions["queue"].messages[0].clone();
+        old_reply.text = "The old turn's final output".into();
+        app.apply_agent(update(old_reply));
+        let mut next_reply = app.sessions["queue"].messages[0].clone();
+        next_reply.id = "next-reply".into();
+        next_reply.text = "Answer to the consumed steer".into();
+        app.apply_agent(update(next_reply));
+        // A real user part may beat the dequeue event. Neither event may duplicate it.
+        app.apply_agent(update(first.clone()));
+        app.apply_agent(event("dequeue", &first.id, 0));
+        assert_eq!(ids(&app), vec!["old-reply".to_owned(), second.id, "next-reply".to_owned(), first.id]);
+        assert!(app.sessions["queue"].pending_prompts.is_empty());
+
+        app.submit_prompt("queue", "Cleared steer".into());
+        let cleared = app.sessions["queue"].pending_prompts.keys().next().unwrap().clone();
+        app.apply_agent(event("clear", "", 0));
+        app.apply_agent(event("dequeue", &cleared, 0));
+        assert_eq!(app.sessions["queue"].messages.len(), 4, "a cleared steer must not become a transcript message");
+    }
 }
 
 #[cfg(test)]

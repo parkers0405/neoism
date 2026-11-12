@@ -4,6 +4,7 @@
 
 mod agent;
 mod app;
+mod git;
 mod browser;
 mod cli;
 mod collab;
@@ -175,6 +176,9 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let scroll_restoring = app.editor_keep_scroll(tx) | app.conversations_keep_scroll(tx);
     // Sub-agents that finished a moment ago leave the conversations sidebar on time.
     let (family_wake, family_changed) = app.family_rows_tick();
+    // A tree row being dragged: its target folder shivers and springs open on the frame clock.
+    let (tree_dragging, tree_drag_changed) = app.tree_drag_tick();
+    if tree_dragging { wake!("tree-drag", std::time::Duration::ZERO); }
     if let Some(delay) = family_wake { wake!("family-rows", delay); }
     if scroll_restoring { wake!("scroll-restore", std::time::Duration::ZERO); }
     app.tree_ensure_listed();
@@ -187,6 +191,8 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if let Some(delay) = presence_wake { wake!("presence", delay); }
     if let Some(delay) = app.peer_blink_tick() { wake!("peer-blink", delay); }
     let flashing = app.editor_tick();
+    let external_landing = app.external_edit_tick();
+    if external_landing { wake!("external-edit", std::time::Duration::ZERO); }
     let mouse_changed = app.editor_mouse_tick(tx);
     // Edited buffers re-sync to the language servers once typing settles.
     if let Some(delay) = app.lsp_tick() { wake!("lsp", delay); }
@@ -223,7 +229,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // Everything the app steps itself once a frame (glides, the cursor trail, the yank flash,
     // the mode pill, the wordmark, the activity line, skits) keeps Rune drawing every vblank
     // while it runs; a poll wake alone is held to a 16.7 ms timer on Linux, i.e. 60 fps.
-    let per_frame = gliding || list_sliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || mode_changing
+    let per_frame = gliding || list_sliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || external_landing || mode_changing
         || wordmark_moving || animating || busy || skit || edge_scrolling || marquee_moving;
     app.keep_vsync(per_frame);
     let clip = app.cursor_clip();
@@ -248,7 +254,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    let rerun = animating || changed || table_changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    let rerun = animating || changed || tree_drag_changed || table_changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
     // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
     if *TRACE_POLL && (rerun || !wakes.is_empty()) {
         let terms = [("animating", animating), ("changed", changed), ("stream", stream_due), ("fps", fps_changed), ("caret", caret_changed),
@@ -278,6 +284,9 @@ fn main() {
         on_key: Some(on_key),
         scenes: &[
             ("welcome", |_| {}),
+            ("git-panel", |s| git::fixture(s, false)),
+            ("git-review", |s| git::fixture(s, true)),
+            ("git-review-long", git::long_fixture),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
             // A sent message with an image and another waiting in the composer;
             // `NEOISM_RUNE_PREVIEW=1` opens the sent one full-window.
@@ -430,6 +439,15 @@ fn main() {
             }),
             // Plain finished blocks: hovering one swaps its status for the toolbar.
             ("terminal-scroll", |s| s.fixture_blocks(&TERMINAL_FIXTURE)),
+            ("agent-permission", |s| {
+                s.load_fixture("root", "Subagent permission", "[]");
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::CatalogFamily { session_id: "root".into(), snapshot: serde_json::json!({"rootSessionId":"root","familyRevision":1,"branches":[{"sessionId":"child","parentSessionId":"root","title":"Explore","status":"outstanding"}]}) });
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::ToolUseRequest { session_id:"child".into(), request_id:"p".into(), tool:"bash".into(), title:"Run cargo check?".into(), patterns:vec!["cargo check *".into()], args:serde_json::Value::Null, source_agent:Some("explore".into()) });
+            }),
+            ("agent-question", |s| {
+                s.load_fixture("root", "Model question", "[]");
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::QuestionAsked { session_id:"root".into(), request:serde_json::json!({"id":"q","questions":[{"question":"Which environment should I deploy to?","options":[{"label":"Staging","description":"Validate before release"},{"label":"Production","description":"Deploy to users"}]},{"question":"Any release notes?"}]}) });
+            }),
             // A Home tab running Codex next to a Terminal running Claude Code: logos and names.
             ("terminal-agent-tabs", |s| {
                 s.fixture_blocks(&TERMINAL_FIXTURE[..1]);
@@ -498,6 +516,8 @@ fn main() {
                 s.open_file("README.md", None);
                 s.apply_opened_file("README.md", include_bytes!("../../README.md"));
             }),
+            ("external-edit", |s| editor::external_edit::fixture(s, false)),
+            ("external-edit-md", |s| editor::external_edit::fixture(s, true)),
             ("sidebar-long", |s| {
                 s.threads = (0..40).map(|i| serde_json::from_value(serde_json::json!({
                     "session_id": format!("s{i}"), "title": format!("Conversation number {i}"), "pinned": i < 2,
@@ -647,6 +667,20 @@ fn main() {
                     session.live_from = Some(session.messages.len());
                     session.streaming = true;
                 }
+            }),
+            ("thinking-wrap", |s| {
+                s.load_fixture("fixture-thinking", "Thinking line wrapping", include_str!("../fixtures/thinking-timeline.json"));
+                s.sessions.get_mut("fixture-thinking").unwrap().live_from = Some(0);
+            }),
+            ("queued", |s| {
+                s.load_fixture("fixture-queued", "Queued steering messages", include_str!("../fixtures/code-timeline.json"));
+                if let Some(session) = s.sessions.get_mut("fixture-queued") {
+                    session.live_from = Some(session.messages.len());
+                    session.streaming = true;
+                }
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::QueueUpdate {
+                    session_id: "fixture-queued".into(), count: 2, preview: None, started_at: None,
+                });
             }),
             // The first installed background behind the Home splash (no config is written).
             ("wallpaper", |s| {

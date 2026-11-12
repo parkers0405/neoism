@@ -186,7 +186,11 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
         body = body.child(el().key("cursor").w(cells.cell).h(row_h).fill(rgb(p.accent).alpha(0.45))
             .absolute(cells.inset + col as f32 * cells.cell, note + row as f32 * row_h));
     }
-    col().key(format!("terminal-block:{}", block.id)).w_full().h(height)
+    // Follow-bottom measures the final block extent, not its in-flight layout spring. A last
+    // output burst (or trimmed capture on completion) must land with that extent; otherwise
+    // the scroll offset jumps ahead while this tall block elastically catches up. Keep the
+    // viewport/composer and wheel motion outside this boundary, and hover colours inside it.
+    col().key(format!("terminal-block:{}", block.id)).w_full().h(height).instant_changes()
         .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
             if let Some(term) = a.terminals.get_mut(&tab_id) {
                 if inside { term.hovered = Some(block_id); } else if term.hovered == Some(block_id) { term.hovered = None; }
@@ -523,4 +527,47 @@ fn menu_view(app: &App, menu: &Menu, space: f32) -> El {
     let mut list = col().w_full().padding(4.0 * s);
     for line in rows { list = list.child(line); }
     el().key("terminal-suggestions").border(1.0, rgb(p.border)).radius(5.0 * s).fill(rgb(p.bg)).child(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::{Cx, Env, Runtime};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn completion_keeps_the_block_tail_near_the_viewport_bottom() {
+        let mut app = App::new();
+        let id = app.active_tab().id;
+        let mut term = Terminal::new("/tmp".into(), app.terminal_colors());
+        assert!(term.shell.error.is_none(), "{:?}", term.shell.error);
+        term.area = [800.0, 600.0];
+        term.shell.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07sleep 1\r\n\x1b]133;C\x07", None);
+        term.sync();
+        term.busy_since = Some(Instant::now() - Duration::from_secs(1));
+        let block_key = format!("terminal-block:{}", term.shell.live.as_ref().unwrap().id);
+        app.terminals.insert(id, term);
+        let composer_h = composer_height(&app);
+        let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| view(a), (800.0, 600.0), Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        rt.update(move |a, _| {
+            let term = a.terminals.get_mut(&id).unwrap();
+            // A PTY packet can contain the final large output burst and OSC 133 completion.
+            // Its new scroll extent and its drawn block must agree on the very first frame.
+            for _ in 0..80 { term.shell.feed(b"output\r\n", None); }
+            term.shell.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07", None);
+            term.sync();
+        });
+        let mut viewport_animates = false;
+        for frame in 0..120 {
+            rt.frame(1.0 / 120.0);
+            let elements = rt.elements();
+            let viewport = elements.iter().find(|e| e.key.as_deref() == Some(&format!("terminal-scroll:{id}"))).unwrap();
+            let block = elements.iter().find(|e| e.key.as_deref() == Some(block_key.as_str())).unwrap();
+            let gap = viewport.rect[1] + viewport.rect[3] - block.rect[1] - block.rect[3];
+            assert!(gap.abs() < 40.0, "frame {frame}: tail gap {gap}, viewport {:?}, block {:?}", viewport.rect, block.rect);
+            viewport_animates |= viewport.rect[3] > 600.0 - composer_h + 1.0 && viewport.rect[3] < 599.0;
+        }
+        assert!(viewport_animates, "completion must keep the viewport/composer layout animation");
+    }
 }

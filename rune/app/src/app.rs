@@ -34,6 +34,7 @@ pub enum Sidebar {
 pub enum Focus {
     Content,
     Sidebar,
+    Details,
     Buffers(usize),
     Workspaces(usize),
 }
@@ -45,6 +46,9 @@ pub struct App {
     pub workspace_active: usize,
     pub workspace_id: String,
     pub workspace_ready: bool,
+    /// The connection is a new one after a lost one: once the workspace is registered on it,
+    /// the conversations are followed and brought up to date again (`agent/resync.rs`).
+    pub agent_resync_due: bool,
     pub workspace_closing: Option<u64>,
     pub quit_requested: bool,
     /// The agent transcript's selecting drag, and the text its last release copied.
@@ -120,6 +124,17 @@ pub struct App {
     pub notes: crate::tree::Tree,
     /// The open app menu (rail hamburger).
     pub menu: Option<crate::ui::menu::Menu>,
+    /// The open right-click menu, and the name-or-confirm card one of its rows opened.
+    pub context: Option<crate::ui::context::Menu>,
+    pub prompt: Option<crate::ui::context::Prompt>,
+    /// A tree row being dragged to another folder, and whether its release was a drop (the
+    /// row's own click is skipped then).
+    pub tree_dnd: Option<crate::tree::drag::TreeDrag>,
+    pub tree_press_suppressed: bool,
+    /// A folder the main terminal reported, being confirmed with the daemon before the
+    /// workspace moves there (request id, folder), and the last one it refused.
+    pub root_probe: Option<(u64, String)>,
+    pub root_refused: Option<String>,
     /// The open Settings page.
     pub settings: Option<crate::settings::Settings>,
     pub keybindings: serde_json::Value,
@@ -192,6 +207,7 @@ pub struct App {
     pub header_hover: Option<crate::agent::HeaderStep>,
     /// Branch and line counts from the daemon's Git `RepoStatus` watch.
     pub git: Option<crate::ui::status::GitSummary>,
+    pub git_panel: crate::git::State,
     pub splash: crate::home::SplashState,
     /// The open centered picker (`Alt+P`, themes), above everything else.
     pub picker: Option<crate::palette::Picker>,
@@ -264,7 +280,7 @@ impl App {
         let home = crate::startup::home();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
-            marquee: Default::default(), workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), chip_scramble_moving: false, star_twinkle: std::array::from_fn(|_| rune::Live::new(0.5)), table_offsets: Default::default(), table_hover: None, table_active: None, table_seen: None, catalog_asked: None, esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, resources_closed: false, closing_connections: Vec::new(), tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
+            marquee: Default::default(), workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, agent_resync_due: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), chip_scramble_moving: false, star_twinkle: std::array::from_fn(|_| rune::Live::new(0.5)), table_offsets: Default::default(), table_hover: None, table_active: None, table_seen: None, catalog_asked: None, esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, resources_closed: false, closing_connections: Vec::new(), tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
             diag_popup: None,
             copy_feedback: Vec::new(),
             stream_pace: Default::default(),
@@ -312,6 +328,12 @@ impl App {
             clipboard: None,
             notes: Default::default(),
             menu: None,
+            context: None,
+            prompt: None,
+            tree_dnd: None,
+            tree_press_suppressed: false,
+            root_probe: None,
+            root_refused: None,
             settings: None,
             databases: HashMap::new(),
             keybindings: crate::config::read()["keybinds"]["keys"].clone(),
@@ -350,6 +372,7 @@ impl App {
             header_hover: None,
             // The local branch until the daemon's Git watch reports counts.
             git: crate::config::git_branch().map(|branch| crate::ui::status::GitSummary { branch, ..Default::default() }),
+            git_panel: Default::default(),
             splash: Default::default(),
             terminals: HashMap::new(),
             pending_pty: Default::default(),
@@ -399,15 +422,22 @@ impl App {
             }
         }
         match event {
-            Inbound::Connecting => self.connection = Connection::Connecting,
-            Inbound::Connected => {
+            // A retry keeps saying why the last attempt failed (the status line shows it).
+            Inbound::Connecting => if !matches!(self.connection, Connection::Disconnected(_)) { self.connection = Connection::Connecting },
+            Inbound::Connected { again } => {
                 self.connection = Connection::Connected;
                 self.workspace_ready = false;
+                self.agent_resync_due |= again;
+                self.server.link.answered();
                 self.register_workspace();
                 self.collab_reconnect();
                 self.tree_reconnected();
+                self.git_connected();
             }
-            Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
+            // The lid opened on a connection that survived it: nothing was lost on the way
+            // here, but the agent behind the daemon may have moved on meanwhile.
+            Inbound::Woke => self.agent_resync(false),
+            Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.tunnel_lost(); self.git_disconnected(); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
             Inbound::Agent(message) => { self.apply_agent(*message); }
             Inbound::Crdt { request_id, message } => { self.apply_crdt(request_id, *message); }
             Inbound::Editor(message) => self.apply_editor_message(*message),
@@ -415,16 +445,27 @@ impl App {
             Inbound::Reply { family, message, request_id } if family == "Pty" => {
                 if let Ok(typed) = serde_json::from_value::<PtyServer>(message) { self.apply_pty(typed, request_id == 0); }
             }
-            Inbound::Reply { family, message, .. } if family == "Git" => {
+            Inbound::Reply { family, message, request_id } if family == "Git" => {
                 if let Some(status) = message.get("RepoStatus") { self.apply_git_status(status); }
+                if let Ok(typed) = serde_json::from_value(message) { self.apply_git_panel(typed, request_id); }
             }
             Inbound::Reply { family, message, .. } if family == "Search" => {
                 if let Ok(typed) = serde_json::from_value(message) { self.apply_search(typed); }
             }
             Inbound::Reply { family, message, request_id } if family == "Files" => {
+                if self.root_probe_reply(request_id, &message) { return; }
                 self.apply_files(&message);
                 if let Some(listing) = message.get("DirListing") {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);
+                }
+                if let Some(renamed) = message.get("Renamed") {
+                    self.apply_tree_changed(&[renamed["from"].as_str().unwrap_or_default(), renamed["to"].as_str().unwrap_or_default()]);
+                }
+                if let Some(deleted) = message.get("Deleted") {
+                    self.apply_tree_changed(&[deleted["path"].as_str().unwrap_or_default()]);
+                }
+                if let Some(created) = message.get("FileCreated") {
+                    self.apply_file_created(created["path"].as_str().unwrap_or_default(), created["is_dir"].as_bool().unwrap_or(false));
                 }
                 if let Some(written) = message.get("FileWritten") {
                     self.apply_file_written(written["path"].as_str().unwrap_or_default(), request_id);
@@ -461,6 +502,7 @@ impl App {
     fn apply_git_status(&mut self, status: &serde_json::Value) {
         if status["token"] != GIT_WATCH_TOKEN { return; }
         let Ok(snapshot) = serde_json::from_value::<GitRepoStatus>(status["snapshot"].clone()) else { return };
+        if snapshot.workspace_root != self.cwd { return; }
         if snapshot.error.is_some() { return; }
         self.git = snapshot.branch.filter(|_| snapshot.repo_root.is_some()).map(|branch| GitSummary {
             branch,

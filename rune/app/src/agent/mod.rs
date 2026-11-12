@@ -128,6 +128,10 @@ pub struct Session {
     pub loading_older: bool,
     pub older_limit: u32,
     pub streaming: bool,
+    /// When the running turn began: the server's time when it reports one (`QueueUpdate`),
+    /// else when this client saw it start. It belongs to the conversation, not to the status
+    /// line, so the timer counts the whole turn whether or not it is on screen.
+    pub turn_started: Option<std::time::Instant>,
     pub queued_prompts: u32,
     pub status: Option<String>,
     pub compacting: bool,
@@ -518,6 +522,7 @@ impl App {
         if session.streaming == streaming { return; }
         session.streaming = streaming;
         if streaming {
+            session.turn_started.get_or_insert_with(std::time::Instant::now);
             if session.live_from.is_none() {
                 let from = session.messages.iter().rposition(|m| m.kind == HistoryMessageKind::User).unwrap_or(session.messages.len());
                 session.live_from = Some(from);
@@ -525,6 +530,7 @@ impl App {
             }
         } else {
             session.status = None;
+            session.turn_started = None;
             self.send_agent(AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: None, limit: Some(HEAD_PAGE) });
             self.settle_task_cards();
         }
@@ -615,7 +621,15 @@ impl App {
         // Live queue events retain their full admission envelope; reconnect hydration uses
         // the typed snapshot. Both describe waiting work, not messages already consumed.
         let queue = match &message {
-            AgentServerMessage::QueueUpdate { session_id, count, .. } => Some((session_id, *count)),
+            AgentServerMessage::QueueUpdate { session_id, count, started_at, .. } => {
+                let session = self.sessions.entry(session_id.clone()).or_default();
+                match started_at.and_then(activity::instant_from_epoch_millis) {
+                    Some(started) => session.turn_started = Some(started),
+                    None if !session.streaming => session.turn_started = None,
+                    None => {}
+                }
+                Some((session_id, *count))
+            }
             AgentServerMessage::SessionEvent { session_id, kind, properties } if kind == "session.queue.updated" =>
                 properties["queue"]["count"].as_u64().and_then(|n| u32::try_from(n).ok()).map(|count| (session_id, count)),
             _ => None,

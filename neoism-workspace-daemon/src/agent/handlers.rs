@@ -373,6 +373,7 @@ pub(crate) async fn fetch_thread_page(
     let filtered_dir = directory.as_deref().filter(|d| !d.is_empty());
     let take = limit.unwrap_or(24).max(1) as usize;
     let path = session_list_path(filtered_dir, take, cursor.as_deref());
+    let activity_generation = inner.activity_evidence.begin_list();
     match http_get_json(&inner, &path).await {
         Ok(value) => {
             let mut threads = thread_summaries_from_sessions(&value, take);
@@ -389,11 +390,13 @@ pub(crate) async fn fetch_thread_page(
                 .and_then(|cursor| cursor.get("next"))
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            let _ = inner.tx.send(AgentServerMessage::ThreadList {
+            inner.activity_evidence.publish_list(
+                &inner.tx,
+                activity_generation,
                 threads,
-                requested_cursor: cursor,
+                cursor,
                 next_cursor,
-            });
+            );
         }
         Err(err) => {
             let _ = inner.tx.send(AgentServerMessage::ThreadListFailed {

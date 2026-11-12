@@ -661,7 +661,15 @@ impl App {
         self.workspace_hover = None;
     }
 
-    pub fn drain(&mut self) -> bool {
+    /// Reserve the rest of the frame for input, animation and rendering. One event may
+    /// exceed this soft deadline; queued events are never dropped to meet it.
+    pub fn drain(&mut self) -> (bool, bool) {
+        self.drain_budgeted(std::time::Instant::now() + std::time::Duration::from_millis(1), 256)
+    }
+
+    fn drain_budgeted(&mut self, deadline: std::time::Instant, limit: usize) -> (bool, bool) {
+        static TRACE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("NEOISM_RUNE_TRACE_POLL").is_some());
+        let started = std::time::Instant::now();
         let ids: Vec<String> = self
             .workspaces
             .iter()
@@ -674,10 +682,20 @@ impl App {
                 }
             })
             .collect();
+        if ids.is_empty() { return (false, false); }
+        let mut next = self.inbox_next.as_ref().and_then(|id| ids.iter().position(|candidate| candidate == id))
+            .unwrap_or(self.workspace_active.min(ids.len() - 1));
         let mut changed = false;
-        for id in ids {
+        let mut applied = 0;
+        let mut empty = 0;
+        // Keep at least one event progressing even if scheduling used up this slice already.
+        while applied < limit && empty < ids.len() && (applied == 0 || std::time::Instant::now() < deadline) {
+            let id = &ids[next];
+            next = (next + 1) % ids.len();
+            self.inbox_next = Some(ids[next].clone());
             let original = self.workspace_id.clone();
-            let Some(i) = self.workspace_index(&id) else {
+            let Some(i) = self.workspace_index(id) else {
+                empty += 1;
                 continue;
             };
             let inbox = if i == self.workspace_active {
@@ -688,16 +706,35 @@ impl App {
                     .as_ref()
                     .and_then(|s| s.inbox.as_ref())
             };
-            if inbox.is_none_or(|inbox| inbox.lock().unwrap().is_empty()) {
+            let Some(inbox) = inbox.cloned() else { empty += 1; continue };
+            let Some(first) = inbox.lock().unwrap().pop_front() else {
+                empty += 1;
                 continue;
-            }
+            };
+            empty = 0;
             self.swap_workspace(i);
-            changed |= self.drain_current();
+            let mut event = first;
+            for turn in 0..16 {
+                changed |= self.apply_inbound(event);
+                applied += 1;
+                // A close acknowledgement can select a different workspace. Never apply
+                // the closed socket's remaining events to that workspace.
+                if self.workspace_id != *id || applied >= limit || std::time::Instant::now() >= deadline || turn == 15 { break; }
+                let Some(queued) = inbox.lock().unwrap().pop_front() else { break };
+                event = queued;
+            }
             if let Some(i) = self.workspace_index(&original) {
                 self.swap_workspace(i);
             }
         }
-        changed
+        let remaining: usize = self.workspaces.iter().enumerate().map(|(i, entry)| {
+            let inbox = if i == self.workspace_active { self.inbox.as_ref() } else { entry.state.as_ref().and_then(|state| state.inbox.as_ref()) };
+            inbox.map_or(0, |inbox| inbox.lock().unwrap().len())
+        }).sum();
+        if *TRACE && (applied > 0 || remaining > 0) {
+            eprintln!("[inbox] events={applied} remaining={remaining} elapsed_us={}", started.elapsed().as_micros());
+        }
+        (changed, remaining > 0)
     }
 
     fn workspace_index(&self, id: &str) -> Option<usize> {
@@ -774,6 +811,78 @@ mod tests {
     }
 
     use super::*;
+
+    fn delta(text: &str) -> crate::daemon::Inbound {
+        crate::daemon::Inbound::Agent(Box::new(neoism_protocol::agent::AgentServerMessage::ContentDelta {
+            session_id: "s".into(), message_id: "reply".into(), text: text.into(),
+            kind: neoism_protocol::agent::ContentKind::Text, parent_message_id: Some("turn".into()),
+        }))
+    }
+
+    #[test]
+    fn event_slices_rotate_workspaces_without_reordering_or_switching_the_view() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        use crate::daemon::Inbound;
+        let inbox = |events| std::sync::Arc::new(std::sync::Mutex::new(VecDeque::from(events)));
+        let idle = || Inbound::Agent(Box::new(M::SessionIdle { session_id: "s".into() }));
+        let mut app = App::new();
+        let canonical = serde_json::from_value(json!({"id":"reply", "role":"Assistant", "kind":"Assistant", "text":"ab!"})).unwrap();
+        let first = inbox(vec![delta("a"), delta("b"), Inbound::Agent(Box::new(M::MessageUpdated {
+            session_id: "s".into(), message: canonical, parent_message_id: Some("turn".into()),
+        })), delta("c"), idle()]);
+        app.inbox = Some(first.clone());
+        app.sessions.entry("s".into()).or_default().streaming = true;
+        app.new_workspace();
+        let selected = app.workspace_id.clone();
+        let second = inbox(vec![delta("x"), delta("y"), idle()]);
+        app.inbox = Some(second.clone());
+        app.sessions.entry("s".into()).or_default().streaming = true;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert_eq!(app.drain_budgeted(deadline, 1), (false, true));
+        assert_eq!(app.sessions["s"].messages[0].text, "x");
+        assert_eq!(app.drain_budgeted(deadline, 1), (false, true));
+        assert_eq!(app.workspaces[0].state.as_ref().unwrap().sessions["s"].messages[0].text, "a");
+        for _ in 0..6 {
+            app.drain_budgeted(deadline, 1);
+            assert_eq!(app.workspace_id, selected);
+        }
+        let background = &app.workspaces[0].state.as_ref().unwrap().sessions["s"];
+        assert_eq!(background.messages[0].text, "ab!c");
+        assert!(!background.streaming);
+        assert_eq!(app.sessions["s"].messages[0].text, "xy");
+        assert!(!app.sessions["s"].streaming);
+        assert!(first.lock().unwrap().is_empty());
+        assert!(second.lock().unwrap().is_empty());
+        assert_eq!(app.drain_budgeted(deadline, 1), (false, false));
+    }
+
+    #[test]
+    fn elapsed_slice_yields_and_preserves_new_arrivals_behind_the_backlog() {
+        let mut app = App::new();
+        let inbox = std::sync::Arc::new(std::sync::Mutex::new(VecDeque::from([delta("a"), delta("b")])));
+        app.inbox = Some(inbox.clone());
+        // An expired deadline deterministically permits one event, then yields.
+        assert_eq!(app.drain_budgeted(std::time::Instant::now(), 256), (false, true));
+        assert_eq!(app.sessions["s"].messages[0].text, "a");
+        inbox.lock().unwrap().push_back(delta("c"));
+        assert_eq!(app.drain_budgeted(std::time::Instant::now(), 256), (false, true));
+        assert_eq!(app.sessions["s"].messages[0].text, "ab");
+        assert_eq!(app.drain_budgeted(std::time::Instant::now(), 256), (false, false));
+        assert_eq!(app.sessions["s"].messages[0].text, "abc");
+    }
+
+    #[test]
+    fn ignored_event_backlogs_still_request_a_follow_up_poll() {
+        let mut app = App::new();
+        let event = || crate::daemon::Inbound::Agent(Box::new(neoism_protocol::agent::AgentServerMessage::SessionEvent {
+            session_id: "s".into(), kind: "ignored.test".into(), properties: json!({}),
+        }));
+        app.inbox = Some(std::sync::Arc::new(std::sync::Mutex::new(VecDeque::from([event(), event()]))));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert_eq!(app.drain_budgeted(deadline, 1), (false, true));
+        assert_eq!(app.drain_budgeted(deadline, 1), (false, false));
+    }
+
     #[test]
     fn switching_preserves_drafts_panes_focus_and_unique_ids() {
         let mut app = App::new();
@@ -868,7 +977,7 @@ mod tests {
                 },
             ],
         ))));
-        assert!(app.drain_current());
+        assert!(app.drain_budgeted(std::time::Instant::now() + std::time::Duration::from_secs(10), 64).0);
         assert_eq!(app.workspace_id, next);
         assert!(!app.buffers["shared.txt"].loaded);
     }

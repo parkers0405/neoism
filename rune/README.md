@@ -200,6 +200,8 @@ and `McpFailed` events.
 Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.md`):
 
 - Never block the UI thread on daemon traffic. Parse WebSocket frames off the UI thread into typed events.
+- Apply inbox events with a shared 1 ms soft budget across the window, at most 256 events per poll and 16 per workspace turn. Resume round-robin on the next poll, retaining FIFO order and explicitly waking while any queue remains. A single handler may exceed the deadline; the budget cannot preempt it. `NEOISM_RUNE_TRACE_POLL=1` reports applied events, remaining queue depth and drain time as `[inbox]` records.
+- Live message mutations use the session's ID-to-position index. Content-only changes reuse it; replacing, reordering or removing history invalidates it. Length changes and mismatched cached IDs are checked too, but any new same-length structural mutation must explicitly invalidate message positions.
 - A file is a shared document the daemon owns (`collab/doc.rs`): edits go out as Yrs updates and come back
   merged, saving asks the daemon to write it, and undo is the replica's. Never write a second path that
   changes `Document::lines` behind the binding without bumping `revision`.

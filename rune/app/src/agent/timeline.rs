@@ -304,7 +304,14 @@ fn user_row(app: &App, session_id: &str, session: &super::Session, message: &His
             .on_layout_tx(move |a: &mut App, r: [f32; 4], tx: &mut Tx| {
                 tx.live_only();
                 let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
+                let bottom = composer_top(a, tab_id).unwrap_or(view[1] + view[3]);
                 let Some(session) = a.sessions.get_mut(&sid) else { return };
+                if r[3] > 26.0 && r[1] + 26.0 < bottom && r[1] + r[3] > view[1]
+                    && let Some((id, visible)) = &mut session.activity_reveal
+                    && *id == mid && visible.is_none()
+                {
+                    *visible = Some(std::time::Instant::now());
+                }
                 let top = r[1] - view[1] + session.scroll.get().0;
                 session.question_tops.insert(mid.clone(), top.max(0.0));
                 session.row_at(&format!("msg:{mid}"), r[1] - view[1], r[3]);

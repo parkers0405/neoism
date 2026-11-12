@@ -124,7 +124,10 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let mut wakes: Vec<(&str, std::time::Duration)> = Vec::new();
     macro_rules! wake { ($name:expr, $d:expr) => {{ let d = $d; if *TRACE_POLL { wakes.push(($name, d)); } tx.wake_after(d); }} }
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
-    let changed = drive::tick(app, clock, tx) | replay::tick(app, clock, tx) | app.poll_usage() | app.drain() | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
+    let changed = drive::tick(app, clock, tx) | replay::tick(app, clock, tx) | app.poll_usage();
+    let (inbound_changed, inbound_pending) = app.drain();
+    let changed = changed | inbound_changed | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
+    if inbound_pending { wake!("inbox", std::time::Duration::ZERO); }
     // A streaming reply's text shows at most thirty times a second, however fast it arrives.
     let (stream_due, stream_wait) = app.stream_pace.due(std::time::Instant::now());
     if let Some(wait) = stream_wait { wake!("stream", wait); }
@@ -624,8 +627,16 @@ fn main() {
                 s.sidebar = Some(app::Sidebar::Files);
                 s.focus = app::Focus::Sidebar;
             }),
+            ("tree-git", tree::git::fixture),
             // A live turn mid-stream: the animated "Crafting . . ." status line.
             ("streaming", replay::start),
+            ("optimistic-send", |s| {
+                s.load_fixture("fixture-send", "Optimistic send", "[]");
+                s.submit_prompt("fixture-send", "Show my message before Crafting appears.".into());
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::CatalogActivity {
+                    session_id: "fixture-send".into(), activity: "running".into(),
+                });
+            }),
             ("composer-switch", |s| {
                 use neoism_protocol::agent::AgentServerMessage as M;
                 let provider = |id: &str, provider: &str, model: &str, thinking: &str| M::ProviderState {

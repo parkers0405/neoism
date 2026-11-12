@@ -697,6 +697,8 @@ pub(crate) struct AgentInner {
     stream_handles: Mutex<HashMap<String, JoinHandle<()>>>,
     /// Orders status hydration against live evidence and overlapping polls.
     status_evidence: events::SessionStatusEvidence,
+    /// Fences catalog list activity against events received during the read.
+    activity_evidence: events::CatalogActivityEvidence,
     /// Per-session in-flight HTTP request handles (prompts, etc.).
     /// `CancelInflight` / `Cancel` aborts the matching entry so the
     /// request stops attempting retries.
@@ -756,6 +758,7 @@ impl AgentSession {
                     .filter(|token| !token.trim().is_empty()),
                 stream_handles: Mutex::new(HashMap::new()),
                 status_evidence: events::SessionStatusEvidence::default(),
+                activity_evidence: events::CatalogActivityEvidence::default(),
                 inflight: Mutex::new(HashMap::new()),
             }),
         }

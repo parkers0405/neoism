@@ -80,6 +80,8 @@ impl StreamPace {
 pub struct Session {
     /// Streaming parts share their assistant message's identity even when delivered out of order.
     pub part_parents: std::collections::HashMap<String, String>,
+    /// Text growth cannot reorder siblings. Recheck after structure, length or parent changes.
+    pub(crate) part_order_cache: Option<(u64, usize, String)>,
     /// Each message's revision: bumped whenever anything about it changes. Transcript rows
     /// are cached by it (`rune::memo`).
     pub message_versions: std::collections::HashMap<String, u64>,
@@ -118,8 +120,13 @@ pub struct Session {
     pub viewport_h: f32,
     pub width: f32,
     pub messages: Vec<HistoryMessage>,
+    /// Lazy, bounded to loaded rows. Length catches append-only callers (echoes/notices);
+    /// same-length replacements and reorders must call `invalidate_message_positions`.
+    message_positions: Option<(usize, std::collections::HashMap<String, usize>)>,
     /// Unconfirmed echoes, retained for queued admission and server-echo reconciliation.
     pub pending_prompts: std::collections::HashMap<String, HistoryMessage>,
+    /// An idle send's bubble must reach the viewport before its activity line is revealed.
+    pub activity_reveal: Option<(String, Option<std::time::Instant>)>,
     pub older_cursor: Option<String>,
     pub loaded: bool,
     /// What is loaded may be behind the conversation (the window was away from it): its
@@ -149,24 +156,63 @@ pub struct Session {
 }
 
 impl Session {
+    fn invalidate_message_positions(&mut self) {
+        self.message_positions = None;
+        self.part_order_cache = None;
+    }
+
+    fn message_position(&mut self, id: &str) -> Option<usize> {
+        let valid = self.message_positions.as_ref().is_some_and(|(len, positions)|
+            *len == self.messages.len() && positions.get(id).is_none_or(|&at|
+                self.messages.get(at).is_some_and(|m| m.id == id)));
+        if !valid {
+            let mut positions = std::collections::HashMap::with_capacity(self.messages.len());
+            for (at, message) in self.messages.iter().enumerate() {
+                // Match the old first-row lookup even if a page contains duplicate IDs.
+                positions.entry(message.id.clone()).or_insert(at);
+            }
+            self.message_positions = Some((self.messages.len(), positions));
+        }
+        self.message_positions.as_ref().unwrap().1.get(id).copied()
+    }
+
+    fn upsert_message(&mut self, message: HistoryMessage) {
+        if let Some(at) = self.message_position(&message.id) {
+            self.messages[at] = message;
+        } else {
+            insert_new(&mut self.messages, message);
+            self.invalidate_message_positions();
+        }
+    }
+
     fn hide_pending_prompts(&mut self) {
         let before = self.messages.len();
         self.messages.retain(|m| !self.pending_prompts.contains_key(&m.id));
         if self.messages.len() != before {
+            self.invalidate_message_positions();
             self.structure += 1;
             self.rebase_live();
         }
     }
 
     fn order_stream_parts(&mut self, part: &str, parent: Option<String>) {
-        if let Some(parent) = parent { self.part_parents.insert(part.to_owned(), parent); }
+        if let Some(parent) = parent && self.part_parents.get(part) != Some(&parent) {
+            self.part_parents.insert(part.to_owned(), parent);
+            self.part_order_cache = None;
+        }
         let Some(parent) = self.part_parents.get(part) else { return };
+        if self.part_order_cache.as_ref().is_some_and(|(revision, len, checked)|
+            *revision == self.structure && *len == self.messages.len() && checked == parent) { return; }
+        let parent = parent.clone();
         let slots: Vec<usize> = self.messages.iter().enumerate().filter(|(_, m)|
-            self.part_parents.get(&m.id) == Some(parent)
+            self.part_parents.get(&m.id) == Some(&parent)
                 && matches!(m.kind, HistoryMessageKind::Reasoning | HistoryMessageKind::Assistant))
             .map(|(i, _)| i).collect();
         if slots.windows(2).all(|pair| self.messages[pair[0]].kind == HistoryMessageKind::Reasoning
-            || self.messages[pair[1]].kind != HistoryMessageKind::Reasoning) { return; }
+            || self.messages[pair[1]].kind != HistoryMessageKind::Reasoning) {
+            self.part_order_cache = Some((self.structure, self.messages.len(), parent));
+            return;
+        }
         let mut rows: Vec<_> = slots.iter().map(|&i| self.messages[i].clone()).collect();
         rows.sort_by_key(|m| m.kind != HistoryMessageKind::Reasoning);
         let mut changed = false;
@@ -174,15 +220,16 @@ impl Session {
             changed |= self.messages[i].id != row.id;
             self.messages[i] = row;
         }
-        if changed { self.structure += 1; self.rebase_live(); }
+        if changed { self.invalidate_message_positions(); self.structure += 1; self.rebase_live(); }
+        self.part_order_cache = Some((self.structure, self.messages.len(), parent));
     }
 
     /// Find the live turn again after rows were added or moved. With no anchor yet (the turn
     /// began before its prompt arrived), the first prompt at or after the old index becomes it.
     fn rebase_live(&mut self) {
         let Some(from) = self.live_from else { return };
-        let found = match &self.live_anchor {
-            Some(id) => self.messages.iter().position(|m| &m.id == id),
+        let found = match self.live_anchor.clone() {
+            Some(id) => self.message_position(&id),
             None => self.messages.iter().enumerate().skip(from).find(|(_, m)| m.kind == HistoryMessageKind::User).map(|(i, _)| i),
         };
         if let Some(index) = found {
@@ -200,6 +247,9 @@ impl Session {
         let at = self.messages.len() - unsent;
         page.extend(self.messages.drain(at..));
         self.messages = page;
+        self.invalidate_message_positions();
+        let loaded: std::collections::HashSet<&str> = self.messages.iter().map(|m| m.id.as_str()).collect();
+        self.part_parents.retain(|id, _| loaded.contains(id.as_str()));
         self.older_cursor = older_cursor;
         self.older_limit = 24;
         self.loading_older = false;
@@ -225,8 +275,18 @@ impl Session {
 
     fn note_message(&mut self, message: &HistoryMessage) {
         // Any difference counts: a tool row draws its title, detail, todos and children too.
-        let changed = self.messages.iter().find(|m| m.id == message.id).is_none_or(|old| old != message);
+        let at = self.message_position(&message.id);
+        let changed = at.is_none_or(|at| self.messages[at] != *message);
         if changed {
+            // Content-only snapshots cannot change sibling ordering. Carry the parent's
+            // checked revision forward rather than rescanning the transcript per snapshot.
+            let same_kind = at.is_some_and(|at| self.messages[at].kind == message.kind);
+            if same_kind {
+                if let Some((revision, len, _)) = &mut self.part_order_cache
+                    && *revision == self.structure && *len == self.messages.len() {
+                    *revision += 1;
+                }
+            } else { self.part_order_cache = None; }
             *self.message_versions.entry(message.id.clone()).or_default() += 1;
             self.structure += 1;
         }
@@ -439,13 +499,16 @@ impl App {
         self.threads.iter().any(|t| self.activity_of(t) != "idle") || self.families.sidebar_count() > 0
     }
 
-    /// What a conversation is doing, by the latest catalog event or list snapshot, else the
-    /// one its row came with, else the older `busy` flag.
+    /// The catalog already combines foreground work, permissions and background jobs.
+    /// Session-stream job counts can lag it and are only a fallback for legacy rows.
     pub fn activity_of<'a>(&'a self, thread: &'a ThreadSummary) -> &'a str {
-        let activity = self.thread_activity.get(&thread.session_id).map(String::as_str)
+        self.thread_activity.get(&thread.session_id).map(String::as_str)
             .or(thread.catalog_activity.as_deref())
-            .unwrap_or(if thread.busy { "running" } else { "idle" });
-        if activity != "permission" && self.background_count(&thread.session_id) > 0 { "background" } else { activity }
+            .unwrap_or_else(|| {
+                if thread.busy { "running" }
+                else if self.background_count(&thread.session_id) > 0 { "background" }
+                else { "idle" }
+            })
     }
 
     /// Per frame: remember where each showing transcript is scrolled and put one that just came
@@ -519,6 +582,7 @@ impl App {
         // A sub-agent starting before any of its rows arrived is still a turn seen live.
         if streaming && self.families.is_child(session_id) { self.sessions.entry(session_id.to_owned()).or_default(); }
         let Some(session) = self.sessions.get_mut(session_id) else { return };
+        if !streaming { session.activity_reveal = None; }
         if session.streaming == streaming { return; }
         session.streaming = streaming;
         if streaming {
@@ -577,7 +641,10 @@ impl App {
             created_at: 0,
         };
         // Idle sends keep their immediate bubble. Busy steers wait for consumption.
-        if !session.streaming && session.queued_prompts == 0 { session.messages.push(echo.clone()); }
+        if !session.streaming && session.queued_prompts == 0 {
+            session.messages.push(echo.clone());
+            session.activity_reveal = Some((message_id.clone(), None));
+        }
         session.pending_prompts.insert(message_id.clone(), echo);
         self.send_agent(AgentClientMessage::SubmitPrompt {
             session_id: session_id.into(),
@@ -598,6 +665,8 @@ impl App {
         for message in &messages { self.mcp_icons.prepare_message(message); }
         let session = self.sessions.entry(session_id.into()).or_default();
         session.messages = messages;
+        session.invalidate_message_positions();
+        session.part_parents.clear();
         session.loaded = true;
         self.threads.push(ThreadSummary {
             session_id: session_id.into(), title: title.into(), directory: Some(self.cwd.clone()), model: None, agent: None,
@@ -647,7 +716,7 @@ impl App {
                             .or_else(|| properties["request"]["messageId"].as_str());
                         if let Some(prompt) = id.and_then(|id| session.pending_prompts.remove(id)) {
                             session.note_message(&prompt);
-                            upsert(&mut session.messages, prompt);
+                            session.upsert_message(prompt);
                             session.rebase_live();
                         }
                     }
@@ -686,19 +755,15 @@ impl App {
         if self.families.note(&message) {
             // A family gained or changed a member: its chats are fetched ahead of a click, and
             // a sub-agent that stopped settles the card that launched it.
+            let stopped: Vec<String> = self.sessions.keys().filter(|id| self.families.stopped(id).is_some()).cloned().collect();
+            for id in stopped { self.set_streaming(&id, false); }
             self.settle_task_cards();
             self.fold_streams();
             self.preload_family_history();
             return true;
         }
-        // Only child lifecycle events stop a sub-agent. A task call can complete merely
-        // because a launch or follow-up was queued while the child continues running.
-        let stopped = match &message {
-            AgentServerMessage::SessionIdle { session_id } if self.families.is_child(session_id) => Some((session_id.clone(), false)),
-            AgentServerMessage::StreamingState { session_id, state: StreamingState::Idle, .. } if self.families.is_child(session_id) => Some((session_id.clone(), false)),
-            _ => None,
-        };
-        if let Some((child, failed)) = stopped && self.families.finish(&child, failed) { self.settle_task_cards(); }
+        // Session idle ends a turn, not a child's task lifecycle: a follow-up may already be
+        // queued. Only the family/lifecycle events above finish the sidebar child.
         if self.apply_slash_event(&message) { return true; }
         match message {
             AgentServerMessage::ThreadList { threads, requested_cursor, .. } => {
@@ -761,6 +826,7 @@ impl App {
                     let mut older: Vec<HistoryMessage> = messages.into_iter().filter(|m| !known.contains(&m.id)).collect();
                     older.append(&mut session.messages);
                     session.messages = older;
+                    session.invalidate_message_positions();
                     session.older_cursor = next_cursor;
                     // The page lands above the reader and the view stays on its row: the
                     // scroller holds a row, not an offset (`anchor.rs`), so whatever glide
@@ -779,6 +845,7 @@ impl App {
                     // The page's order is the conversation's: rows that arrived in another
                     // order (a reply's empty text part ahead of its thinking) take it.
                     if merge_head(&mut session.messages, messages) { session.structure += 1; }
+                    session.invalidate_message_positions();
                     session.rebase_live();
                     if !session.loaded { session.older_cursor = next_cursor; self.settle_pending = true; }
                     session.loaded = true;
@@ -793,16 +860,19 @@ impl App {
                 let part = message.id.clone();
                 session.pending_prompts.remove(&message.id);
                 settle_task_card(&self.families, &mut message, session.streaming);
+                let rebase = session.message_position(&message.id)
+                    .is_none_or(|at| session.messages[at].kind != message.kind);
                 session.note_message(&message);
-                upsert(&mut session.messages, message);
+                session.upsert_message(message);
                 session.order_stream_parts(&part, parent_message_id);
-                session.rebase_live();
+                if rebase { session.rebase_live(); }
             }
             AgentServerMessage::ContentDelta { session_id, message_id, text, kind, parent_message_id } => {
                 let session = self.sessions.entry(session_id).or_default();
                 let part = message_id.clone();
                 *session.message_versions.entry(message_id.clone()).or_default() += 1;
-                if let Some(message) = session.messages.iter_mut().find(|m| m.id == message_id) {
+                if let Some(at) = session.message_position(&message_id) {
+                    let message = &mut session.messages[at];
                     // A reply or a thought growing keeps the row list as it is; anything else
                     // (tool output, or text short enough to still decide its row) may not.
                     let prose = matches!(message.kind, HistoryMessageKind::Assistant | HistoryMessageKind::Reasoning) && message.text.len() >= 32;
@@ -820,6 +890,7 @@ impl App {
                         composition_children: Vec::new(), output_kind: None, lang: String::new(), line_offset: None,
                         detail: String::new(), todos: Vec::new(), usage: None, attachments: Vec::new(), created_at: 0,
                     });
+                    session.invalidate_message_positions();
                 }
                 session.order_stream_parts(&part, parent_message_id);
             }
@@ -834,7 +905,7 @@ impl App {
                 // Tool/reasoning parts can emit a derived streaming verb after the turn
                 // ended. They describe its timeline, not whether the catalog is at work.
                 let streaming = !matches!(state, StreamingState::Idle)
-                    && self.thread_activity.get(&session_id).is_none_or(|activity| activity == "running");
+                    && self.thread_activity.get(&session_id).is_none_or(|activity| activity == "running" && self.session_live(&session_id));
                 if let Some(session) = self.sessions.get_mut(&session_id) {
                     session.compacting = streaming && matches!(state, StreamingState::Compacting);
                 }
@@ -850,9 +921,11 @@ impl App {
             // A part was withdrawn (a retried step): its row goes.
             AgentServerMessage::PartRemoved { session_id, part_id } => {
                 if let Some(session) = self.sessions.get_mut(&session_id) {
+                    session.part_parents.remove(&part_id);
+                    session.part_order_cache = None;
                     let before = session.messages.len();
                     session.messages.retain(|m| m.id != part_id);
-                    if session.messages.len() != before { session.structure += 1; session.rebase_live(); }
+                    if session.messages.len() != before { session.invalidate_message_positions(); session.structure += 1; session.rebase_live(); }
                 }
             }
             AgentServerMessage::SessionIdle { session_id, .. } => {
@@ -915,14 +988,6 @@ fn insert_new(messages: &mut Vec<HistoryMessage>, message: HistoryMessage) {
         while at > 0 && placeholder(&messages[at - 1]) { at -= 1; }
     }
     messages.insert(at, message);
-}
-
-fn upsert(messages: &mut Vec<HistoryMessage>, message: HistoryMessage) {
-    if let Some(existing) = messages.iter_mut().find(|m| m.id == message.id) {
-        *existing = message;
-    } else {
-        insert_new(messages, message);
-    }
 }
 
 /// Some server-generated system rows have no part ID (notably compaction notices).
@@ -1024,6 +1089,112 @@ pub(crate) fn title_case(model: &str) -> String {
         let mut c = w.chars();
         c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
     }).collect::<Vec<_>>().join("-")).collect::<Vec<_>>().join("/")
+}
+
+#[cfg(test)]
+mod message_lookup_tests {
+    use super::*;
+    use neoism_protocol::agent::ContentKind;
+
+    fn row(id: &str, text: &str) -> HistoryMessage {
+        serde_json::from_value(json!({"id":id,"role":"Assistant","kind":"Assistant","text":text})).unwrap()
+    }
+
+    fn update(app: &mut App, id: &str, text: &str) {
+        app.apply_agent(AgentServerMessage::MessageUpdated {
+            session_id: "indexed".into(), message: row(id, text), parent_message_id: None,
+        });
+    }
+
+    fn delta(app: &mut App, id: &str, text: &str) {
+        app.apply_agent(AgentServerMessage::ContentDelta {
+            session_id: "indexed".into(), message_id: id.into(), text: text.into(),
+            kind: ContentKind::Text, parent_message_id: None,
+        });
+    }
+
+    fn history(app: &mut App, rows: Vec<HistoryMessage>) {
+        app.apply_agent(AgentServerMessage::HistoryChunk {
+            session_id: "indexed".into(), messages: rows, next_cursor: None,
+        });
+    }
+
+    fn texts(app: &App) -> Vec<(&str, &str)> {
+        app.sessions["indexed"].messages.iter().map(|m| (m.id.as_str(), m.text.as_str())).collect()
+    }
+
+    #[test]
+    fn indexed_mutations_follow_older_prepend_and_same_length_head_reorder() {
+        let mut app = App::new();
+        history(&mut app, vec![row("a", "a"), row("b", "b")]);
+        delta(&mut app, "a", "1"); // Warm the old positions.
+        app.sessions.get_mut("indexed").unwrap().loading_older = true;
+        history(&mut app, vec![row("older", "old")]);
+        update(&mut app, "b", "updated b");
+        delta(&mut app, "a", "2");
+        assert_eq!(texts(&app), [("older", "old"), ("a", "a12"), ("b", "updated b")]);
+        history(&mut app, vec![row("b", "updated b"), row("a", "a12")]);
+        delta(&mut app, "a", "3");
+        update(&mut app, "b", "full b");
+        assert_eq!(texts(&app), [("older", "old"), ("b", "full b"), ("a", "a123")]);
+    }
+
+    #[test]
+    fn indexed_mutations_survive_removal_id_reuse_and_restart() {
+        let mut app = App::new();
+        history(&mut app, vec![row("a", "a"), row("b", "b"), row("c", "c")]);
+        delta(&mut app, "b", "1");
+        app.apply_agent(AgentServerMessage::PartRemoved { session_id: "indexed".into(), part_id: "a".into() });
+        delta(&mut app, "b", "2");
+        update(&mut app, "a", "reused");
+        delta(&mut app, "a", "!");
+        assert_eq!(texts(&app), [("b", "b12"), ("c", "c"), ("a", "reused!")]);
+        // Same count, different identities and positions. A disconnected head refresh
+        // takes restart_at, discarding the previously indexed rows.
+        app.sessions.get_mut("indexed").unwrap().resync = true;
+        history(&mut app, vec![row("x", "x"), row("y", "y"), row("z", "z")]);
+        update(&mut app, "a", "new incarnation");
+        delta(&mut app, "y", "!");
+        assert_eq!(texts(&app), [("x", "x"), ("y", "y!"), ("z", "z"), ("a", "new incarnation")]);
+    }
+
+    #[test]
+    fn fixture_replacement_and_placeholder_insertion_update_the_right_rows() {
+        let mut app = App::new();
+        history(&mut app, vec![row("a", "a"), row("b", "b")]);
+        delta(&mut app, "a", "1");
+        let fixture = serde_json::to_string(&vec![row("b", "fixture b"), row("a", "fixture a")]).unwrap();
+        app.load_fixture("indexed", "Index replacement", &fixture);
+        delta(&mut app, "a", "!");
+        update(&mut app, "b", "full b");
+        update(&mut app, "empty", "");
+        update(&mut app, "new", "before placeholder");
+        delta(&mut app, "empty", "reply");
+        assert_eq!(texts(&app), [("b", "full b"), ("a", "fixture a!"), ("new", "before placeholder"), ("empty", "reply")]);
+    }
+
+    #[test]
+    fn indexed_updates_follow_hidden_echo_and_queue_consumption() {
+        let mut app = App::new();
+        history(&mut app, vec![row("answer", "answer")]);
+        app.submit_prompt("indexed", "queued echo".into());
+        let echo = app.sessions["indexed"].pending_prompts.values().next().unwrap().clone();
+        delta(&mut app, "answer", "1");
+        // Admission hides the optimistic bubble; later consumption reinserts it.
+        app.sessions.get_mut("indexed").unwrap().hide_pending_prompts();
+        delta(&mut app, "answer", "2");
+        app.apply_agent(AgentServerMessage::SessionEvent {
+            session_id: "indexed".into(), kind: "session.queue.updated".into(),
+            properties: json!({"action":"dequeue", "messageID":echo.id, "queue":{"count":0}}),
+        });
+        let mut confirmed = echo.clone();
+        confirmed.text = "confirmed echo".into();
+        app.apply_agent(AgentServerMessage::MessageUpdated {
+            session_id: "indexed".into(), message: confirmed, parent_message_id: None,
+        });
+        delta(&mut app, "answer", "3");
+        assert_eq!(texts(&app), [("answer", "answer123"), (echo.id.as_str(), "confirmed echo")]);
+    }
 }
 
 #[cfg(test)]
@@ -1169,6 +1340,31 @@ mod cache_tests {
         delta(&mut app, "reply", "step2", ContentKind::Text, " more text");
         assert_eq!(order(&app), "earlier,thinking,reply");
         assert!(app.sessions["s"].structure >= structure);
+    }
+
+    #[test]
+    fn streaming_order_rechecks_late_parent_bindings_and_reloaded_history() {
+        use neoism_protocol::agent::ContentKind;
+        let mut app = App::new();
+        let delta = |app: &mut App, id: &str, parent: &str, kind, text: &str| app.apply_agent(AgentServerMessage::ContentDelta {
+            session_id: "s".into(), message_id: id.into(), parent_message_id: Some(parent.into()), kind, text: text.into(),
+        });
+        let text = "A sufficiently long streaming part whose text already has a stable row. ";
+        delta(&mut app, "reply", "step1", ContentKind::Text, text);
+        delta(&mut app, "thinking", "step2", ContentKind::Reasoning, text);
+        delta(&mut app, "reply", "step1", ContentKind::Text, "more");
+        let order = |app: &App| app.sessions["s"].messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(",");
+        assert_eq!(order(&app), "reply,thinking");
+        delta(&mut app, "thinking", "step1", ContentKind::Reasoning, "continued");
+        assert_eq!(order(&app), "thinking,reply");
+
+        // A history refresh may replace the ordering without changing IDs or row count.
+        let mut page = app.sessions["s"].messages.clone();
+        page.reverse();
+        app.sessions.get_mut("s").unwrap().restart_at(page, None);
+        delta(&mut app, "reply", "step1", ContentKind::Text, " after reload");
+        assert_eq!(order(&app), "thinking,reply");
+        assert!(app.sessions["s"].messages[1].text.ends_with("more after reload"));
     }
 
     #[test]

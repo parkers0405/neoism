@@ -65,7 +65,7 @@ jobs:
             [[ "$GITHUB_SHA" == "$(git rev-parse HEAD)" ]] || exit 1
           fi
           flags=()
-          if [[ "$tag" == *-* ]]; then flags+=(--prerelease --latest=false); fi
+          if [[ "$tag" == *-* ]]; then flags+=(--prerelease --latest=false); else flags+=(--prerelease=false --latest); fi
           gh release view "$tag" || gh release create "$tag" --verify-tag --draft --generate-notes "${flags[@]}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -211,7 +211,7 @@ jobs:
           if [[ "$ASSET" == windows-* ]]; then assets+=(release/Neoism-x86_64.msi release/Neoism-x86_64.msi.sha256); fi
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           flags=()
-          if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease --latest=false); fi
+          if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease --latest=false); else flags+=(--prerelease=false --latest); fi
           gh release edit "$RELEASE_TAG" --draft=false "${flags[@]}"
       - name: Record source freshness for complete and partial compilation
         if: always()

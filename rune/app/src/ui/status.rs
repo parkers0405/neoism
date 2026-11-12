@@ -111,6 +111,7 @@ impl App {
         match self.active_tab().kind {
             TabKind::Agent { .. } => ("AGENT", p.red),
             TabKind::Database { .. } => ("DATABASE", p.blue),
+            TabKind::GitDiff => ("DIFF", p.blue),
             TabKind::Terminal => ("TERMINAL", p.green),
             TabKind::Editor { .. } if self.active_buffer().is_some_and(|b| b.prompt.is_some()) => ("COMMAND", p.green),
             TabKind::Editor { .. } => match self.editor_mode() {
@@ -241,6 +242,20 @@ pub fn view(app: &App) -> El {
         let label = format!(" {}/{}", buffer.doc.cursor_line + 1, buffer.doc.lines.len());
         pills.push(Pill { icon: (GLYPH_LINES.into(), Some(super::theme::NERD)), icon_bg: p.green, text: vec![(label, p.green)], live: None });
     }
+    // No daemon behind the window: nothing lists, runs or sends, and the reason is the only
+    // thing that says why (it was silent: an empty tree and a prompt that went nowhere).
+    if app.daemon.is_some() {
+        use crate::app::Connection;
+        // Only a failure that lasts is said: connecting takes a moment on every start.
+        let notice = match &app.connection {
+            Connection::Disconnected(reason) if reason == crate::daemon::STARTING => Some((format!(" {reason}"), p.yellow)),
+            Connection::Disconnected(reason) => Some((format!(" {}", reason.chars().take(72).collect::<String>()), p.red)),
+            _ => None,
+        };
+        if let Some((label, color)) = notice {
+            pills.push(Pill { icon: ("DAEMON".into(), None), icon_bg: color, text: vec![(label, color)], live: None });
+        }
+    }
     if let Some(fps) = app.fps {
         // The reading is live text in a three-digit slot: a new one repaints the label only.
         pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(fps_label(fps), p.cyan)], live: Some(&app.fps_live) });
@@ -265,6 +280,12 @@ pub fn view(app: &App) -> El {
             .child(section_right(&m, total - (x + icon_w + text_w), icon_w + text_w, rgb(p.surface), [r, 0.0, 0.0, r])
                 .child(row_at(&m, icon_w + m.pad, label)))
             .child(section_right(&m, total - (x + icon_w), *icon_w, rgb(pill.icon_bg), [r, 0.0, 0.0, r]).child(glyph.absolute(0.0, 0.0)));
+        if pill.icon.0 == GLYPH_BRANCH {
+            bar = bar.child(el().key("git-status-toggle").w(icon_w + text_w).h(pill_h)
+                .pin(None, Some(m.pill_y), Some(total - (x + icon_w + text_w)), None)
+                .cursor(rune::Cursor::Pointer).hover(rgb(p.fg).alpha(0.08))
+                .on_press(|a: &mut App| a.toggle_git_panel()));
+        }
         x += icon_w + text_w - tail;
     }
     // Error and warning counts (`DiagPillSpec`): each its own rounded pill in its colour with

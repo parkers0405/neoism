@@ -69,9 +69,38 @@ impl App {
     pub fn follow_main_terminal(&mut self) -> bool {
         let active = self.active_tab().id;
         if self.pending_cd.is_some() || self.main_terminal_tab() != Some(active) { return false; }
-        let Some(cwd) = self.terminals.get(&active).map(|t| t.shell.cwd.trim_end_matches('/').to_owned()) else { return false };
-        if !crate::startup::absolute(&cwd) || cwd == self.cwd || cwd.chars().any(char::is_control) { return false; }
-        self.view_workspace_root(&cwd);
+        let Some(cwd) = self.terminals.get(&active).map(|t| shell_directory(&t.shell.cwd, &self.cwd)) else { return false };
+        if !crate::startup::absolute(&cwd) || same_directory(&cwd, &self.cwd) || cwd.chars().any(char::is_control) { return false; }
+        if self.root_refused.as_deref() == Some(cwd.as_str()) { return false; }
+        // What a shell says is a claim, not a folder: an `ssh` or a container inside the
+        // terminal reports a directory of another machine, and a shell may spell its own in
+        // a way the daemon cannot open. The workspace only moves to a folder the daemon
+        // confirms it has (`root_probe_reply`); until then, and if it refuses, it stays.
+        let Some(daemon) = &self.daemon else {
+            self.view_workspace_root(&cwd);
+            return true;
+        };
+        if self.root_probe.as_ref().is_none_or(|(_, asked)| asked != &cwd) {
+            let id = daemon.request(Family::Files, serde_json::json!({"Stat": {"path": "."}}), Some(cwd.clone()));
+            self.root_probe = Some((id, cwd));
+        }
+        false
+    }
+
+    /// The daemon's answer about a folder the main terminal reported. Returns whether the
+    /// reply was that answer.
+    pub(crate) fn root_probe_reply(&mut self, request_id: u64, message: &serde_json::Value) -> bool {
+        let Some((_, root)) = self.root_probe.take_if(|(asked, _)| *asked == request_id) else { return false };
+        if message.get("Stat").is_some() {
+            self.root_refused = None;
+            // Only if that terminal still owns the directory and is still there.
+            let active = self.active_tab().id;
+            let still = self.main_terminal_tab() == Some(active)
+                && self.terminals.get(&active).is_some_and(|t| same_directory(&shell_directory(&t.shell.cwd, &self.cwd), &root) || shell_directory(&t.shell.cwd, &self.cwd) == root);
+            if still && self.pending_cd.is_none() { self.view_workspace_root(&root); }
+        } else {
+            self.root_refused = Some(root);
+        }
         true
     }
 
@@ -134,7 +163,8 @@ impl App {
     /// This window's view of the workspace moves to `root`: name, tree, notes, conversations and
     /// git (`activateWorkspace` over `workspaceView`). Nothing is sent to the host.
     fn view_workspace_root(&mut self, root: &str) {
-        let root = root.trim_end_matches('/').to_owned();
+        // `/` is a folder too: trimmed to nothing it left the workspace with no root at all.
+        let root = match root.trim_end_matches('/') { "" if root.starts_with('/') => "/".to_owned(), trimmed => trimmed.to_owned() };
         let home = crate::startup::home();
         self.workspace_name = if root == home {
             "~".into()
@@ -145,6 +175,7 @@ impl App {
                 .unwrap_or_else(|| root.clone())
         };
         self.cwd = root;
+        self.reset_git_panel();
         self.tree = Default::default();
         self.notes = Default::default();
         // An open tree or notes panel lists the new root at once.
@@ -155,6 +186,52 @@ impl App {
         self.refresh_threads();
         self.watch_git();
     }
+}
+
+/// Whether `path` is a Windows drive path (`C:\Users`, `c:/work`).
+fn drive_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b.get(2).is_none_or(|c| matches!(c, b'\\' | b'/'))
+}
+
+/// A shell's reported directory as the workspace names directories.
+///
+/// A shell says where it is with a `file://` URL (OSC 7). On Windows that is
+/// `file://host/C:/Users/me`, whose path reads `/C:/Users/me`, and a POSIX-flavoured shell
+/// (Git Bash, MSYS) says `/c/Users/me`. Both are absolute, neither is a folder the Windows
+/// daemon can open: taken as the workspace's root they emptied the file tree, the notes and
+/// the conversation list, and left every new shell and prompt with nowhere to run, a moment
+/// after the window had shown them. On a workspace whose root is a drive path they are read
+/// back as that drive path (`C:\Users\me`).
+fn shell_directory(reported: &str, workspace: &str) -> String {
+    let reported = reported.trim();
+    if !drive_path(workspace) {
+        let trimmed = reported.trim_end_matches('/');
+        return if trimmed.is_empty() && reported.starts_with('/') { "/".to_owned() } else { trimmed.to_owned() };
+    }
+    let b = reported.as_bytes();
+    let drive = if b.first() == Some(&b'/') && drive_path(&reported[1..]) {
+        // `/C:/Users/me`
+        Some((b[1] as char, &reported[3..]))
+    } else if drive_path(reported) {
+        Some((b[0] as char, &reported[2..]))
+    } else if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b.get(2).is_none_or(|c| *c == b'/') {
+        // `/c/Users/me`
+        Some((b[1] as char, &reported[2..]))
+    } else { None };
+    let Some((letter, rest)) = drive else { return reported.trim_end_matches(['/', '\\']).to_owned() };
+    let rest = rest.replace('/', "\\");
+    let rest = rest.trim_matches('\\');
+    format!("{}:\\{rest}", letter.to_ascii_uppercase())
+}
+
+/// Whether two spellings name one directory: exactly, or on Windows without regard to case,
+/// separator or a trailing separator.
+fn same_directory(a: &str, b: &str) -> bool {
+    if a == b { return true; }
+    if !drive_path(a) || !drive_path(b) { return false; }
+    let fold = |p: &str| p.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    fold(a) == fold(b)
 }
 
 use crate::agent::Session;
@@ -188,6 +265,7 @@ pub struct Opening {
 pub struct State {
     workspace_id: String,
     workspace_ready: bool,
+    agent_resync_due: bool,
     workspace_closing: Option<u64>,
     activity: Option<crate::agent::Activity>,
     pending_cd: Option<String>,
@@ -204,6 +282,7 @@ pub struct State {
     families: crate::agent::Families,
     header_hover: Option<crate::agent::HeaderStep>,
     git: Option<crate::ui::status::GitSummary>,
+    git_panel: crate::git::State,
     picker: Option<crate::palette::Picker>,
     daemon: Option<Daemon>,
     inbox: Option<Inbox>,
@@ -238,6 +317,7 @@ impl State {
         Self {
             workspace_id: app.workspace_id,
             workspace_ready: app.workspace_ready,
+            agent_resync_due: app.agent_resync_due,
             workspace_closing: app.workspace_closing,
             activity: app.activity,
             pending_cd: app.pending_cd,
@@ -254,6 +334,7 @@ impl State {
             families: app.families,
             header_hover: app.header_hover,
             git: app.git,
+            git_panel: app.git_panel,
             picker: app.picker,
             daemon: app.daemon,
             inbox: app.inbox,
@@ -280,6 +361,7 @@ impl State {
     fn swap(&mut self, app: &mut App) {
         std::mem::swap(&mut self.workspace_id, &mut app.workspace_id);
         std::mem::swap(&mut self.workspace_ready, &mut app.workspace_ready);
+        std::mem::swap(&mut self.agent_resync_due, &mut app.agent_resync_due);
         std::mem::swap(&mut self.workspace_closing, &mut app.workspace_closing);
         std::mem::swap(&mut self.activity, &mut app.activity);
         std::mem::swap(&mut self.pending_cd, &mut app.pending_cd);
@@ -296,6 +378,7 @@ impl State {
         std::mem::swap(&mut self.families, &mut app.families);
         std::mem::swap(&mut self.header_hover, &mut app.header_hover);
         std::mem::swap(&mut self.git, &mut app.git);
+        std::mem::swap(&mut self.git_panel, &mut app.git_panel);
         std::mem::swap(&mut self.picker, &mut app.picker);
         std::mem::swap(&mut self.daemon, &mut app.daemon);
         std::mem::swap(&mut self.inbox, &mut app.inbox);
@@ -472,6 +555,7 @@ impl App {
         {
             self.workspace_ready = true;
             self.agent_connected();
+            if std::mem::take(&mut self.agent_resync_due) { self.agent_resync(true); }
             self.terminals_connected();
             self.watch_git();
             self.lsp_reconnect();
@@ -631,6 +715,19 @@ impl App {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn git_panel_belongs_to_its_workspace() {
+        let mut app = crate::app::App::new();
+        crate::git::fixture(&mut app, false);
+        assert!(app.git_panel.open);
+        app.new_workspace();
+        assert!(!app.git_panel.open);
+        app.select_workspace(0);
+        assert!(app.git_panel.open);
+        app.select_workspace(1);
+        assert!(!app.git_panel.open);
+    }
+
+    #[test]
     fn window_close_does_not_wait_for_a_stalled_cleanup_ack() {
         let mut app = crate::app::App::new();
         app.session_closed = true;
@@ -774,5 +871,78 @@ mod tests {
         assert!(app.drain_current());
         assert_eq!(app.workspace_id, next);
         assert!(!app.buffers["shared.txt"].loaded);
+    }
+
+    #[test]
+    fn a_windows_shells_directory_is_read_as_a_drive_path() {
+        let workspace = "C:\\Users\\me";
+        // OSC 7 on Windows, PowerShell or cmd: `file://host/C:/Users/me/proj`.
+        assert_eq!(shell_directory("/C:/Users/me/proj", workspace), "C:\\Users\\me\\proj");
+        // Git Bash / MSYS.
+        assert_eq!(shell_directory("/c/Users/me/proj/", workspace), "C:\\Users\\me\\proj");
+        assert_eq!(shell_directory("c:/Users/me", workspace), "C:\\Users\\me");
+        assert_eq!(shell_directory("/d", workspace), "D:\\");
+        // The same folder spelled another way is not a move.
+        assert!(same_directory(&shell_directory("/c:/users/ME/", workspace), workspace));
+        assert!(!same_directory("C:\\Users\\me\\proj", workspace));
+        // A POSIX workspace is left exactly as it was: `/c/data` is a real folder there.
+        assert_eq!(shell_directory("/c/data/", "/home/me"), "/c/data");
+        assert_eq!(shell_directory("/", "/home/me"), "/");
+        assert!(!same_directory("/home/Me", "/home/me"));
+    }
+
+    #[test]
+    fn a_windows_shell_reporting_its_folder_does_not_empty_the_workspace() {
+        let mut app = App::new();
+        app.cwd = "C:\\Users\\me".into();
+        let home = app.active_tab().id;
+        app.terminals.get_mut(&home).unwrap().shell.session = Some("shell".into());
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/C:/Users/me".into();
+        assert!(!app.follow_main_terminal(), "the same folder: nothing is reset");
+        assert_eq!(app.cwd, "C:\\Users\\me");
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/C:/Users/me/proj".into();
+        assert!(app.follow_main_terminal());
+        assert_eq!(app.cwd, "C:\\Users\\me\\proj", "a real cd moves to a path the daemon can open");
+    }
+
+    #[test]
+    fn the_workspace_moves_only_to_a_folder_the_daemon_has() {
+        let mut app = App::new();
+        app.cwd = "/home/me".into();
+        let (daemon, _inbox) = Daemon::start_to(Some(crate::daemon::Target { url: "ws://127.0.0.1:9/session".into(), ..Default::default() }), || {});
+        app.daemon = Some(daemon);
+        let home = app.active_tab().id;
+        app.terminals.get_mut(&home).unwrap().shell.session = Some("shell".into());
+        // `ssh box` in the terminal: its shell reports a folder of that machine.
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/srv/app".into();
+        assert!(!app.follow_main_terminal(), "asked first, not taken on trust");
+        assert_eq!(app.cwd, "/home/me");
+        let (id, asked) = app.root_probe.clone().expect("the daemon is asked");
+        assert_eq!(asked, "/srv/app");
+        assert!(!app.follow_main_terminal());
+        assert_eq!(app.root_probe.as_ref().map(|p| p.0), Some(id), "asked once");
+        // The daemon has no such folder: the workspace stays, and is not asked again.
+        assert!(app.root_probe_reply(id, &json!({"Error": {"message": "workspace_root is not a directory: /srv/app"}})));
+        assert_eq!(app.cwd, "/home/me");
+        assert!(!app.follow_main_terminal());
+        assert!(app.root_probe.is_none());
+        // A real `cd`: confirmed, then followed.
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/home/me/proj".into();
+        assert!(!app.follow_main_terminal());
+        let (id, _) = app.root_probe.clone().unwrap();
+        assert!(app.root_probe_reply(id, &json!({"Stat": {"entry": {}}})));
+        assert_eq!(app.cwd, "/home/me/proj");
+        // Another reply is not ours.
+        assert!(!app.root_probe_reply(id + 100, &json!({"Stat": {}})));
+    }
+
+    #[test]
+    fn the_filesystem_root_stays_a_root() {
+        let mut app = App::new();
+        let home = app.active_tab().id;
+        app.terminals.get_mut(&home).unwrap().shell.session = Some("shell".into());
+        app.terminals.get_mut(&home).unwrap().shell.cwd = "/".into();
+        assert!(app.follow_main_terminal());
+        assert_eq!(app.cwd, "/");
     }
 }

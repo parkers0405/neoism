@@ -24,7 +24,8 @@ use crate::provider_stream_message::{
     finish_provider_stream_success, finish_provider_stream_with_error,
 };
 use crate::session_loop::{
-    next_provider_stream_event, provider_stream_idle_timeout, ProviderEventPoll,
+    next_provider_stream_event_or_wake, provider_stream_idle_timeout, provider_stream_wake_grace,
+    ProviderEventPoll,
 };
 use crate::session_retry;
 use crate::state::AppState;
@@ -173,11 +174,15 @@ pub(crate) async fn run_provider_stream_step(
     );
     let mut saw_progress = false;
     let idle_timeout = provider_stream_idle_timeout();
+    let wake_grace = provider_stream_wake_grace();
     loop {
-        let event = match next_provider_stream_event(
+        // Giving up early on a stream that is in fact alive costs a re-streamed step,
+        // which is only an option while no tool call of this step has run.
+        let event = match next_provider_stream_event_or_wake(
             &mut provider_events,
             cancellation,
             idle_timeout,
+            provider_stream_timeout_is_retryable(&stream_state).then_some(wake_grace),
         )
         .await
         {
@@ -220,11 +225,18 @@ pub(crate) async fn run_provider_stream_step(
                 })?;
                 return Err(ProviderStreamStepError::finalized("Session aborted"));
             }
-            ProviderEventPoll::TimedOut => {
-                let message = format!(
-                    "Provider stream timed out after {} ms without an event",
-                    idle_timeout.as_millis()
-                );
+            poll @ (ProviderEventPoll::TimedOut | ProviderEventPoll::SilentAfterWake) => {
+                let message = if matches!(poll, ProviderEventPoll::SilentAfterWake) {
+                    format!(
+                        "Provider stream was silent for {} ms after the host woke from sleep",
+                        wake_grace.as_millis()
+                    )
+                } else {
+                    format!(
+                        "Provider stream timed out after {} ms without an event",
+                        idle_timeout.as_millis()
+                    )
+                };
                 let tool_calls_started =
                     !provider_stream_timeout_is_retryable(&stream_state);
                 tracing::warn!(

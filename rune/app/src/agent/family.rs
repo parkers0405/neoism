@@ -155,12 +155,14 @@ impl Families {
         self.roster(self.root_of(session)).iter().find(|m| m.id == session)
     }
 
-    /// Header links for viewing `viewed`: previous sibling (or the root), next sibling, no wrap.
+    /// Header links target active siblings (or the root), never historical children.
     pub fn navigation<'a>(&'a self, viewed: &'a str) -> Navigation<'a> {
         let root = self.root_of(viewed);
         if viewed.is_empty() || root == viewed { return Navigation::default(); }
         let mut previous = root;
-        let mut rows = self.roster(root).iter().filter(|m| !m.id.is_empty() && m.id != root);
+        // Keep the viewed row as a position marker even if it has just finished.
+        let mut rows = self.roster(root).iter().filter(|m| !m.id.is_empty() && m.id != root
+            && (m.id == viewed || self.working_now(&m.id)));
         while let Some(row) = rows.next() {
             if row.id == viewed {
                 let next = rows.find(|m| m.id != viewed).map(|m| m.id.as_str());
@@ -359,12 +361,18 @@ mod tests {
     }
 
     #[test]
-    fn navigation_follows_roster_order_without_wrapping() {
-        let f = family();
+    fn navigation_follows_active_roster_order_without_wrapping() {
+        let mut f = family();
         assert_eq!(f.navigation("first"), Navigation { previous: Some("main"), next: Some("nested"), previous_is_main: true });
-        assert_eq!(f.navigation("nested"), Navigation { previous: Some("first"), next: Some("last"), previous_is_main: false });
+        assert_eq!(f.navigation("nested"), Navigation { previous: Some("main"), next: Some("last"), previous_is_main: true });
         assert_eq!(f.navigation("last"), Navigation { previous: Some("nested"), next: None, previous_is_main: false });
         assert_eq!(f.navigation("main"), Navigation::default());
+        f.finish("nested", false);
+        assert_eq!(f.navigation("first").next, Some("last"));
+        assert_eq!(f.navigation("last"), Navigation { previous: Some("main"), next: None, previous_is_main: true });
+        assert_eq!(f.navigation("nested"), Navigation { previous: Some("main"), next: Some("last"), previous_is_main: true });
+        f.finish("last", true);
+        assert_eq!(f.navigation("nested"), Navigation { previous: Some("main"), next: None, previous_is_main: true });
     }
 
     #[test]

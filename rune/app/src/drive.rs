@@ -25,7 +25,8 @@
 //! - `hover:<index>`: rest the pointer on the tab at this place in the strip (its title slides);
 //!   `hover:chat` rests it on the sidebar row with the longest title
 //! - `child`: open the first sub-agent at work under the active conversation (waits a minute for one)
-//! - `rows`: log the active conversation's rows (kind, id tail, text length)
+//! - `treemenu:<row>`: open the right-click menu on that row of the showing file or notes tree
+//! - `rows`: log the active conversation's id and rows (kind, id, text length, text hash)
 //! - `watch:<seconds>`: log the held (or active) conversation's scroll offset every frame
 //! - `mark:<name>`
 //! - `quit`
@@ -42,6 +43,7 @@ use std::time::Duration;
 
 enum Step {
     Ready,
+    TreeMenu(usize),
     Wait(f64),
     Wheel { rate: f64, seconds: f64 },
     Touch { speed: f64, seconds: f64 },
@@ -109,6 +111,7 @@ impl Drive {
                 "watch" => Step::Watch(rest.parse().ok()?),
                 "child" => Step::Child,
                 "rows" => Step::Rows,
+                "treemenu" => Step::TreeMenu(rest.parse().ok()?),
                 "mark" => Step::Mark(rest.to_owned()),
                 "quit" => Step::Quit,
                 _ => return None,
@@ -151,6 +154,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Watch(s) => format!("watch:{s}"),
                 Step::Child => "child".to_owned(),
                 Step::Rows => "rows".to_owned(),
+                Step::TreeMenu(row) => format!("treemenu:{row}"),
                 Step::Mark(name) => format!("mark:{name}"),
                 Step::Quit => "quit".to_owned(),
             };
@@ -190,6 +194,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                     drive.sent += 1;
                     let e = WheelEvent::new(0.0, dy).precise(precise);
                     match (&file, &chat) {
+                        _ if app.active_tab().kind == TabKind::GitDiff => { app.git_review_wheel(&e, tx); }
                         (Some(path), _) => { app.editor_wheel(path, e, tx); }
                         (_, Some(id)) => { app.timeline_wheel(id, e, line_h, tx); }
                         _ => {}
@@ -291,9 +296,12 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 }
             }
             Step::Rows => {
-                if let Some(session) = active_session(app).and_then(|id| app.sessions.get(&id)) {
-                    let rows: Vec<String> = session.messages.iter().map(|m| format!("{:?}:{}:{}", m.kind, &m.id[m.id.len().saturating_sub(4)..], m.text.len())).collect();
-                    eprintln!("[drive] rows streaming={} live_from={:?} {}", session.streaming, session.live_from, rows.join(" "));
+                if let Some((id, session)) = active_session(app).and_then(|id| app.sessions.get(&id).map(|s| (id, s))) {
+                    // Each row's kind, id, text length and a hash of its text: two windows on
+                    // the same conversation can be compared row for row (`check-sleep-resume.py`).
+                    let hash = |text: &str| { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); text.hash(&mut h); h.finish() & 0xffff_ffff };
+                    let rows: Vec<String> = session.messages.iter().map(|m| format!("{:?}:{}:{}:{:08x}", m.kind, m.id, m.text.len(), hash(&m.text))).collect();
+                    eprintln!("[drive] rows session={id} streaming={} live_from={:?} connection={:?} {}", session.streaming, session.live_from, app.connection, rows.join(" "));
                 }
                 None
             }
@@ -301,6 +309,13 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 let (offset, end) = drive.held.clone().or_else(|| active_session(app)).and_then(|id| app.sessions.get(&id).map(|s| s.scroll.get())).unwrap_or_default();
                 eprintln!("[drive] watching t={elapsed:.4} offset={offset:.1} end={end:.1}");
                 (elapsed < *seconds).then_some(1.0 / 240.0)
+            }
+            Step::TreeMenu(index) => {
+                // Where the row is drawn: beside the rail, under the sidebar header.
+                let y = 96.0 + 26.0 * *index as f32;
+                app.open_tree_context(Some(*index), [150.0, y * app.ty.scale()]);
+                changed = true;
+                None
             }
             Step::Mark(_) => None,
             Step::Quit => { app.quit_requested = true; None }
@@ -332,7 +347,7 @@ mod tests {
             Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
             Step::Prompt(_) => "prompt", Step::Host(_) => "host",
             Step::JoinSystem(_) => "system", Step::JoinServer(_) => "server", Step::Fixture(_) => "fixture", Step::Sidebar => "sidebar", Step::Stream { .. } => "stream", Step::Live => "live",
-            Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::Mark(_) => "mark", Step::Quit => "quit",
+            Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::TreeMenu(_) => "treemenu", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
         assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "mark", "quit"]);
         assert!(matches!(&drive.steps[2], Step::Wheel { rate, seconds } if *rate == -30.0 && *seconds == 2.0));

@@ -10,6 +10,9 @@ impl App {
     /// The text field that holds the keyboard, if any: an overlay's query first, then the
     /// active tab's composer.
     pub fn focused_field_mut(&mut self) -> Option<&mut TextEdit> {
+        if self.git_panel.open && self.focus == crate::app::Focus::Details && self.git_panel.message.focused {
+            return Some(&mut self.git_panel.message);
+        }
         enum Field { Palette, Finder, Composer, Filter(u64), Draft(usize) }
         let tab = self.active_tab().id;
         let field = if self.picker.as_ref().is_some_and(|p| p.query.focused) { Field::Palette }

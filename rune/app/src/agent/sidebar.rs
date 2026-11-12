@@ -296,7 +296,9 @@ pub fn conversations(app: &App) -> El {
                 .children(busy.map(|color| loader(app, color).mr(8.0))))
             .child(app.title(&title_key, t.title.clone(), app.ty.body(), rgb(p.fg), Some(240.0)))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| a.title_hover(&title_key, title_w, inside))
-            .on_press(move |s: &mut App| s.open_conversation(&id))
+            .on_press({ let id = id.clone(); move |s: &mut App| s.open_conversation(&id) })
+            // Right-click: pin, rename or delete the chat (`ui/context.rs`).
+            .on_secondary_press(move |a: &mut App, at: rune::PointerPress, _: &mut rune::Tx| a.open_chat_context(&id, [at.x, at.y]))
     };
     // A sub-agent under its conversation (`render_subagent_row`): one 24 pt step in per level,
     // joined to the row above by a line that turns in to its title; the last one ends the line.
@@ -492,6 +494,87 @@ mod family_tests {
         assert_eq!((sent(&app, "StopStream", "b"), sent(&app, "StopStream", "c")), (1, 1));
         assert_eq!(app.stream_owner.get("root").map(String::as_str), Some("root"));
         assert!(app.stream_extra.is_empty());
+    }
+
+    #[test]
+    fn completed_follow_up_tool_does_not_stop_the_running_child() {
+        let mut app = App::new();
+        app.load_fixture("root", "Parent", "[]");
+        app.apply_agent(M::CatalogFamily { session_id: "root".into(), snapshot: serde_json::json!({
+            "rootSessionId":"root", "familyRevision":1,
+            "branches":[{"sessionId":"child", "parentSessionId":"root", "status":"outstanding"}]
+        }) });
+        app.open_child("root", "child");
+        for status in ["completed", "error"] {
+            app.apply_agent(M::MessageUpdated { session_id: "root".into(), parent_message_id: None,
+                message: serde_json::from_value(serde_json::json!({
+                    "id":"follow-up", "role":"Assistant", "kind":"Tool", "tool":"task",
+                    "status":status, "text":"Follow-up queued", "detail":"task_id: child"
+                })).unwrap() });
+            assert!(app.families.working_now("child"));
+            assert!(app.families.sidebar_children("root").iter().any(|m| m.id == "child"));
+            assert!(app.session_live("child"));
+        }
+        app.apply_agent(M::SessionIdle { session_id: "child".into() });
+        assert!(!app.families.working_now("child"));
+    }
+
+    #[test]
+    fn session_completion_refreshes_sidebar_and_catalog_reset_drops_stale_row_flags() {
+        let mut app = App::new();
+        app.load_fixture("root", "Finished conversation", "[]");
+        app.threads[0].catalog_activity = Some("running".into());
+        app.threads[0].busy = true;
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        app.agent_sent.borrow_mut().clear();
+        app.apply_agent(M::SessionIdle { session_id: "root".into() });
+        assert!(app.agent_sent.borrow().iter().any(|m| m.contains("ListThreads")), "completion must reconcile the independent sidebar catalog");
+        let mut threads = app.threads.clone();
+        threads[0].catalog_activity = Some("idle".into());
+        app.apply_agent(M::ThreadList { threads, requested_cursor: None, next_cursor: None });
+        assert!(!app.sidebar_running());
+
+        app.threads[0].catalog_activity = Some("running".into());
+        app.threads[0].busy = true;
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        app.apply_agent(M::CatalogReset { directory: None });
+        assert!(!app.sidebar_running(), "reset must not fall back to a stale thread row");
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        assert!(app.sidebar_running(), "fresh catalog activity must still start the loader");
+    }
+
+    #[test]
+    fn refreshed_catalog_stops_a_completed_chat_despite_stale_tool_states() {
+        let mut app = App::new();
+        app.load_fixture("root", "Stash Changes and Update", "[]");
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        assert!(app.sidebar_running());
+        assert!(app.session_live("root"));
+
+        // The idle event was missed, but the next catalog refresh reports completion.
+        let mut threads = app.threads.clone();
+        threads[0].catalog_activity = Some("idle".into());
+        threads[0].busy = true; // The legacy flag must not beat catalog evidence.
+        app.apply_agent(M::ThreadList { threads, requested_cursor: None, next_cursor: None });
+        assert_eq!(app.activity_of(&app.threads[0]), "idle");
+        assert!(!app.sidebar_running());
+        assert!(!app.session_live("root"));
+
+        // A late tool update and its derived streaming verb cannot restart the turn.
+        let tool = serde_json::from_value(serde_json::json!({
+            "id": "tool", "role": "Assistant", "kind": "Tool", "tool": "bash", "status": "running"
+        })).unwrap();
+        app.apply_agent(M::MessageUpdated { session_id: "root".into(), message: tool, parent_message_id: None });
+        app.apply_agent(M::StreamingState { session_id: "root".into(), state: neoism_protocol::agent::StreamingState::Working, label: None });
+        assert_eq!(app.activity_state("root"), None);
+        assert!(!app.sidebar_running());
+        assert!(!app.session_live("root"));
+
+        // Genuine new work still starts normally, including its timeline activity.
+        app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
+        assert!(app.sidebar_running());
+        assert!(app.session_live("root"));
+        assert!(app.activity_state("root").is_some());
     }
 
     #[test]

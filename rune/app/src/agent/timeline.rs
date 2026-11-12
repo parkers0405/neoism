@@ -527,8 +527,8 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             .key(key).pt(26.0),
         HistoryMessageKind::Reasoning => col().key(key).w_full().pt(24.0).gap(10.0)
             .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })
-                .font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)).selectable(true).selection_color(selection_color(app)))
-            .child(text(first_line(&message.text)).font(app.ty.body().italic()).color(rgb(p.dim)).selectable(true).selection_color(selection_color(app))),
+                .w_full().wrap().font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)).selectable(true).selection_color(selection_color(app)))
+            .child(text(first_line(&message.text)).w_full().wrap().font(app.ty.body().italic()).color(rgb(p.dim)).selectable(true).selection_color(selection_color(app))),
         HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tools::row(app, message),
         HistoryMessageKind::Compaction => compaction_divider(app, message, "Compacted"),
         // Bound notices to six source lines before layout: `max_lines`
@@ -558,29 +558,43 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             // Pipe tables render as the original's data grid; everything else as markdown.
             let style = markdown_style(app);
             // Padding, not margin: a virtual row's top margin is dropped from its measured height.
-            let mut body = col().key(key).w_full().pt(24.0).gap(14.0);
+            let mut body = col().key(key).w_full().pt(24.0).gap(BLOCK_GAP);
             // While it streams, new lines land at full ink and the row opens at once: a fade-in
             // and growth spring per update kept the newest line dim and clipped.
             if streaming { body = body.instant_changes(); }
             // Leading newlines from the stream would open the reply with blank lines.
-            for (n, segment) in super::table::segments(message.text.trim_start_matches(['\n', '\r'])).into_iter().enumerate() {
-                body = body.child(match segment {
-                    super::table::Segment::Table(rows) => super::table::view(app, &rows, timeline_width(app), &style, format!("table-x:{tab_id}:{}:{n}", message.id), foot, &session_id),
-                    super::table::Segment::Text(text) => Markdown::new(text.to_owned())
-                        .highlights(prose::highlights(text, p))
-                        .streaming(streaming)
-                        // Words land at full ink: a per-word fade kept the newest line half
-                        // transparent the whole time a reply streamed.
-                        .reveal(0.0)
-                        .code_frame(code_frame(app))
-                        .selectable(true)
-                        // Links show a hand and open on click: web links in the browser, file
-                        // links (`path`, `path:12`, `path#L12`, `file://…`) in the editor.
-                        .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
-                        .render(&style)
-                        // One selection spans the whole transcript, not just this block.
-                        .selection_group(false),
-                });
+            let segments = super::table::segments(message.text.trim_start_matches(['\n', '\r']));
+            let last_segment = segments.len().saturating_sub(1);
+            let look = (app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits());
+            for (n, segment) in segments.into_iter().enumerate() {
+                match segment {
+                    super::table::Segment::Table(rows) => body = body.child(super::table::view(app, &rows, timeline_width(app), &style, format!("table-x:{tab_id}:{}:{n}", message.id), foot, &session_id)),
+                    // Prose is drawn a heading's worth at a time, each piece cached by its own
+                    // text: a reply still arriving builds its last piece only (`prose::chunks`).
+                    super::table::Segment::Text(text) => {
+                        let pieces = prose::chunks(text);
+                        let last_piece = pieces.len() - 1;
+                        for (k, (piece, space)) in pieces.into_iter().enumerate() {
+                            let arriving = streaming && n == last_segment && k == last_piece;
+                            let block = rune::memo(format!("md:{n}:{k}"), (piece, look, arriving), || Markdown::new(piece.to_owned())
+                                .highlights(prose::highlights(piece, p))
+                                .streaming(arriving)
+                                // Words land at full ink: a per-word fade kept the newest line half
+                                // transparent the whole time a reply streamed.
+                                .reveal(0.0)
+                                .code_frame(code_frame(app))
+                                .selectable(true)
+                                // Links show a hand and open on click: web links in the browser, file
+                                // links (`path`, `path:12`, `path#L12`, `file://…`) in the editor.
+                                .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
+                                .render(&style)
+                                // One selection spans the whole transcript, not just this block.
+                                .selection_group(false));
+                            // The column's own gap is 14; a heading is owed more above it.
+                            body = body.child(if space > BLOCK_GAP { col().w_full().pt(space - BLOCK_GAP).child(block) } else { block });
+                        }
+                    }
+                }
             }
             // Images the reply carries (`render_image_strip` under the text), left-aligned.
             if let Some(strip) = super::attach::message_strip(app, &message.id, &message.attachments, timeline_width(app)) {
@@ -591,6 +605,9 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
         }
     }
 }
+
+/// The space between a reply's blocks (prose, tables, images).
+const BLOCK_GAP: f32 = 14.0;
 
 /// How long a pressed Copy button reads "Copied".
 const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1400);
@@ -690,6 +707,38 @@ fn file_link(url: &str) -> Option<(String, Option<u32>)> {
         [path, line] if numeric(line) => ((*path).to_owned(), line.parse().ok()),
         _ => (url.clone(), None),
     })
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_wraps_to_the_available_width_without_overlapping() {
+        let mut wide_height = 0.0;
+        for width in [720.0, 320.0] {
+            let mut app = App::new();
+            app.load_fixture("thinking", "Thinking", include_str!("../../fixtures/thinking-timeline.json"));
+            let message = &app.sessions["thinking"].messages[0];
+            let (title, body) = (message.title.clone(), first_line(&message.text));
+            let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
+                col().w_full().h_full().instant_changes()
+                    .child(message_row(a, &a.sessions["thinking"].messages[0], true))
+            }, (width, 1200.0), rune::Env::new(true, 1.0));
+            for _ in 0..3 { rt.frame(1.0 / 120.0); }
+            let elements = rt.elements();
+            let title = elements.iter().find(|e| e.text.as_deref() == Some(&title)).unwrap();
+            let body = elements.iter().find(|e| e.text.as_deref() == Some(&body)).unwrap();
+            for element in [title, body] {
+                assert!(element.rect[0] >= -0.5 && element.rect[0] + element.rect[2] <= width + 0.5,
+                    "reasoning must stay within {width}px: {:?}", element.rect);
+                assert!(element.rect[3] > 30.0, "long reasoning must occupy multiple visual lines");
+            }
+            assert!(body.rect[1] >= title.rect[1] + title.rect[3], "wrapped title must not overlap its preview");
+            if width == 720.0 { wide_height = body.rect[3]; }
+            else { assert!(body.rect[3] > wide_height, "narrow panes must reflow reasoning onto more lines"); }
+        }
+    }
 }
 
 #[cfg(test)]

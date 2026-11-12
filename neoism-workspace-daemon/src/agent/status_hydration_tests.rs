@@ -109,9 +109,14 @@ async fn reconnect_recovers_family_questions_empty_snapshots_and_permissions() {
                     _ => json!([]),
                 })
             }}))
-        .route("/v2/interactions/permissions", axum::routing::get(|| async {
-            axum::Json(json!([{"id":"p","sessionId":"root","title":"Allow read?","permission":"read"}]))
-        }));
+        .route("/v2/interactions/permissions", axum::routing::get(
+            |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                axum::Json(match query.get("sessionId").map(String::as_str) {
+                    Some("child") => json!([{"id":"p","sessionId":"child","title":"Allow read?","permission":"read"}]),
+                    Some("invalid") => Value::Null,
+                    _ => json!([]),
+                })
+            }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -123,8 +128,8 @@ async fn reconnect_recovers_family_questions_empty_snapshots_and_permissions() {
     let inner = session.inner.clone();
     let stream = tokio::spawn(async move { events::run_event_stream(inner, "root".into()).await });
     tokio::time::timeout(Duration::from_secs(10), async {
-        let (mut root, mut initial_child, mut recovered_child, mut permission) = (false, false, false, false);
-        while !(root && initial_child && recovered_child && permission) {
+        let (mut root, mut initial_child, mut recovered_child, mut permission, mut empty_permissions, mut child_permissions) = (false, false, false, false, false, false);
+        while !(root && initial_child && recovered_child && permission && empty_permissions && child_permissions) {
             match rx.recv().await.unwrap() {
                 AgentServerMessage::QuestionsUpdated { session_id, requests } => {
                     match session_id.as_str() {
@@ -140,7 +145,14 @@ async fn reconnect_recovers_family_questions_empty_snapshots_and_permissions() {
                         _ => panic!("malformed snapshot must not clear pending questions"),
                     }
                 }
-                AgentServerMessage::ToolUseRequest { request_id, .. } if request_id == "p" => permission = true,
+                AgentServerMessage::ToolUseRequest { session_id, request_id, .. } if request_id == "p" => {
+                    assert_eq!(session_id, "child"); permission = true;
+                }
+                AgentServerMessage::PermissionsUpdated { session_id, requests } => match session_id.as_str() {
+                    "root" => { assert!(requests.is_empty()); empty_permissions = true; }
+                    "child" => { assert_eq!(requests[0]["id"], "p"); child_permissions = true; }
+                    _ => panic!("malformed permission poll must not clear pending requests"),
+                },
                 _ => {}
             }
         }

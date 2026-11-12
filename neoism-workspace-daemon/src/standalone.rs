@@ -437,7 +437,8 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
     // if that owner disappears, association retries/fails without taking over.
     if owns_agent_server(nonce.as_deref()) {
         if cli.auto_agent_port {
-            crate::agent::ensure_managed_agent_server_started(workspaces.clone()).await?;
+            // Never a reason to exit: files, notes and terminals do not depend on it.
+            crate::agent::start_managed_agent_server(workspaces.clone()).await;
         } else {
             crate::agent::ensure_agent_server_started(workspaces.clone());
         }

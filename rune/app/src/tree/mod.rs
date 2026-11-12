@@ -3,6 +3,7 @@
 //! `notes_sidebar.rs`). Listed lazily over the daemon's `Files` family, folders first, expanded in
 //! place. Keys: j/k or arrows move, l/Right/Enter open or expand, h/Left collapse.
 
+pub mod drag;
 pub mod view;
 
 pub use view::view;
@@ -35,9 +36,14 @@ pub struct Tree {
     pub open: HashSet<String>,
     requested: HashSet<String>,
     pub selected: usize,
+    /// The note or folder being created (its folder, name, and whether it is a folder), until
+    /// the daemon says it exists.
+    creating: Option<(String, String, bool)>,
+    /// The row to put the selection on once its folder's listing arrives.
+    select_after: Option<String>,
 }
 
-fn join(dir: &str, name: &str) -> String {
+pub(crate) fn join(dir: &str, name: &str) -> String {
     if dir.is_empty() { name.to_owned() } else { format!("{dir}/{name}") }
 }
 
@@ -91,11 +97,36 @@ impl Tree {
     }
 }
 
+/// A vault file that is bookkeeping, not a note.
+fn vault_bookkeeping(name: &str) -> bool { name.to_ascii_lowercase().ends_with(".json") }
+
+/// `stem` + `ext`, numbered (`Untitled 2.md`) until no entry in `taken` (lower case) has it.
+fn free_name(taken: &HashSet<String>, stem: &str, ext: &str) -> String {
+    let mut name = format!("{stem}{ext}");
+    let mut n = 2;
+    while taken.contains(&name.to_lowercase()) {
+        name = format!("{stem} {n}{ext}");
+        n += 1;
+    }
+    name
+}
+
+/// The folder to ask the daemon about for the notes vault. Notes always open the default
+/// vault: a vault linked to the project (`.neoism/workspace.json`) is not followed. The
+/// daemon answers with the default vault for a folder that links none, and the filesystem
+/// root of the workspace's drive never does, whatever daemon version is asked.
+fn default_vault_probe(cwd: &str) -> String {
+    let bytes = cwd.as_bytes();
+    if cwd.starts_with('/') { return "/".to_owned(); }
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' { return format!("{}\\", &cwd[..2]); }
+    cwd.to_owned()
+}
+
 /// Marks the notes vault as asked for, among the directories asked for.
 const RESOLVE: &str = "\0resolve-notes-vault";
 
 impl App {
-    fn tree_of(&mut self, sidebar: Sidebar) -> &mut Tree {
+    pub(crate) fn tree_of(&mut self, sidebar: Sidebar) -> &mut Tree {
         if sidebar == Sidebar::Notes { &mut self.notes } else { &mut self.tree }
     }
 
@@ -104,7 +135,7 @@ impl App {
         match self.sidebar { Some(Sidebar::Files) => Some(&self.tree), Some(Sidebar::Notes) => Some(&self.notes), _ => None }
     }
 
-    fn list_dir(&mut self, sidebar: Sidebar, dir: &str) {
+    pub(crate) fn list_dir(&mut self, sidebar: Sidebar, dir: &str) {
         let tree = self.tree_of(sidebar);
         if !tree.requested.insert(dir.to_owned()) { return; }
         let path = tree.request_path(dir);
@@ -124,7 +155,7 @@ impl App {
         if sidebar == Sidebar::Notes && self.notes.root.is_none() {
             // The vault is resolved per workspace; its listing follows `NotesVaultResolved`.
             if self.notes.requested.insert(RESOLVE.to_owned()) && let Some(daemon) = &self.daemon {
-                daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": self.cwd}}));
+                daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": default_vault_probe(&self.cwd)}}));
             }
             return;
         }
@@ -150,7 +181,7 @@ impl App {
             Sidebar::Notes if self.notes.root.is_none() => {
                 // The vault is resolved per workspace; its listing follows `NotesVaultResolved`.
                 if let Some(daemon) = &self.daemon {
-                    daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": self.cwd}}));
+                    daemon.send(Family::Workspace, serde_json::json!({"ResolveNotesVault": {"root_dir": default_vault_probe(&self.cwd)}}));
                 }
             }
             _ if !self.tree_of(sidebar).loaded() => self.list_dir(sidebar, ""),
@@ -173,12 +204,112 @@ impl App {
     }
 
     pub(crate) fn apply_dir_listing(&mut self, path: &str, entries: &serde_json::Value) {
-        let entries: Vec<Entry> = entries.as_array().into_iter().flatten().filter_map(|e| {
+        let mut entries: Vec<Entry> = entries.as_array().into_iter().flatten().filter_map(|e| {
             Some(Entry { name: e["name"].as_str()?.to_owned(), is_dir: e["is_dir"].as_bool().unwrap_or(false) })
         }).collect();
         // A notes tree claims only replies under its resolved vault; the rest are the workspace's.
-        let tree = if self.notes.root.is_some() && self.notes.own(path).is_some() { &mut self.notes } else { &mut self.tree };
+        let notes = self.notes.root.is_some() && self.notes.own(path).is_some();
+        // A vault's JSON files are its bookkeeping (`project.json`, notebook metadata), not notes.
+        if notes { entries.retain(|e| e.is_dir || !vault_bookkeeping(&e.name)); }
+        let tree = if notes { &mut self.notes } else { &mut self.tree };
         if let Some(dir) = tree.own(path) { tree.set_listing(dir, entries); }
+        // A note or folder just made takes the selection once it is listed.
+        if let Some(made) = tree.select_after.take() {
+            match tree.rows().iter().position(|row| row.path == made) {
+                Some(index) => { tree.selected = index; self.tree_follow.request(); }
+                None => tree.select_after = Some(made),
+            }
+        }
+    }
+
+    /// The Notes header's `+` buttons: a new note (`Untitled.md`) or folder (`New Folder`)
+    /// beside the selection: inside the selected folder when it is open, else next to the
+    /// selected row, else at the vault's root. A name already taken gets a number. The note
+    /// opens once the daemon has made it.
+    pub fn notes_create(&mut self, folder: bool) {
+        let Some(root) = self.notes.root.clone() else { return };
+        let tree = &self.notes;
+        let dir = match tree.rows().get(tree.selected) {
+            Some(row) if row.entry.is_dir && tree.open.contains(&row.path) => row.path.clone(),
+            Some(row) => row.path.rsplit_once('/').map(|(parent, _)| parent.to_owned()).unwrap_or_default(),
+            None => String::new(),
+        };
+        let taken: HashSet<String> = tree.listings.get(&dir).into_iter().flatten().map(|e| e.name.to_lowercase()).collect();
+        let name = free_name(&taken, if folder { "New Folder" } else { "Untitled" }, if folder { "" } else { ".md" });
+        let kind = if folder { "CreateDir" } else { "CreateFile" };
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Files, serde_json::json!({ kind: {"dir": dir, "name": name} }), &root);
+        }
+        self.notes.creating = Some((dir, name, folder));
+    }
+
+    /// Make `name` in `dir` of a tree (the right-click menu's New File / New Folder).
+    pub(crate) fn tree_create(&mut self, notes: bool, dir: &str, name: &str, folder: bool) {
+        let sidebar = if notes { Sidebar::Notes } else { Sidebar::Files };
+        let Some(root) = self.tree_root(notes) else { return };
+        let kind = if folder { "CreateDir" } else { "CreateFile" };
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Files, serde_json::json!({ kind: {"dir": dir, "name": name} }), &root);
+        }
+        self.tree_of(sidebar).creating = Some((dir.to_owned(), name.to_owned(), folder));
+    }
+
+    /// The folder a tree's requests are scoped to: the vault, or the workspace.
+    pub(crate) fn tree_root(&self, notes: bool) -> Option<String> {
+        if notes { self.notes.root.clone() } else { Some(self.cwd.clone()) }
+    }
+
+    /// Rename or move `from` to `to` (both relative to the tree's root).
+    pub(crate) fn tree_move_path(&mut self, notes: bool, from: &str, to: &str) {
+        let Some(root) = self.tree_root(notes) else { return };
+        if let Some(daemon) = &self.daemon {
+            daemon.send_scoped(Family::Files, serde_json::json!({"Rename": {"from": from, "to": to}}), &root);
+        }
+        let tree = if notes { &mut self.notes } else { &mut self.tree };
+        // Where it lands is shown (its folder opened) and it keeps the selection.
+        let folder = to.rsplit_once('/').map_or("", |(dir, _)| dir);
+        if !folder.is_empty() { tree.open.insert(folder.to_owned()); }
+        tree.select_after = Some(to.to_owned());
+    }
+
+    /// `Renamed` / `Deleted`: the folders that held the entry are listed again, in whichever
+    /// tree shows them (a path does not say which tree asked; listing both costs a request).
+    pub(crate) fn apply_tree_changed(&mut self, paths: &[&str]) {
+        for sidebar in [Sidebar::Files, Sidebar::Notes] {
+            for path in paths {
+                let path = path.trim_start_matches("./");
+                let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir).to_owned();
+                let tree = self.tree_of(sidebar);
+                // A folder that is gone takes its listings and open state with it.
+                tree.listings.retain(|listed, _| listed != path && !listed.starts_with(&format!("{path}/")));
+                tree.open.retain(|open| open != path && !open.starts_with(&format!("{path}/")));
+                if !tree.listings.contains_key(&dir) { continue; }
+                tree.requested.remove(&dir);
+                self.list_dir(sidebar, &dir);
+            }
+            let tree = self.tree_of(sidebar);
+            let count = tree.rows().len();
+            tree.selected = tree.selected.min(count.saturating_sub(1));
+        }
+    }
+
+    /// `FileCreated`: the note or folder asked for exists. Its folder is listed again with it
+    /// selected, and a note opens for writing.
+    pub(crate) fn apply_file_created(&mut self, path: &str, is_dir: bool) {
+        let path = path.trim_start_matches("./");
+        for sidebar in [Sidebar::Notes, Sidebar::Files] {
+            let tree = self.tree_of(sidebar);
+            let Some((dir, name, folder)) = tree.creating.clone() else { continue };
+            if join(&dir, &name) != path || folder != is_dir { continue; }
+            tree.creating = None;
+            tree.requested.remove(&dir);
+            tree.select_after = Some(path.to_owned());
+            if !dir.is_empty() { tree.open.insert(dir.clone()); }
+            let file = tree.open_path(path);
+            self.list_dir(sidebar, &dir);
+            if !is_dir { self.open_file(&file, None); }
+            return;
+        }
     }
 
     fn sidebar_tree(&mut self) -> Option<(Sidebar, &mut Tree)> {
@@ -275,5 +406,46 @@ mod tests {
         assert_eq!(files.own("src"), Some("src".into()));
         assert_eq!(files.own("/vault/a"), None);
         assert_eq!(notes.request_path("a"), "/vault/a");
+    }
+
+    #[test]
+    fn a_vault_hides_its_json_and_a_new_note_takes_a_free_name_and_the_selection() {
+        let mut app = App::new();
+        app.notes.root = Some("/vault".into());
+        app.sidebar = Some(Sidebar::Notes);
+        let entry = |name: &str, is_dir: bool| serde_json::json!({"name": name, "is_dir": is_dir});
+        app.apply_dir_listing("/vault", &serde_json::json!([entry("project.json", false), entry("Untitled.md", false), entry("Ideas", true), entry("data.json", true)]));
+        let names: Vec<String> = app.notes.rows().iter().map(|r| r.path.clone()).collect();
+        assert_eq!(names, ["data.json", "Ideas", "Untitled.md"], "JSON files are hidden; a folder is a folder whatever its name");
+        // The workspace's own tree still lists JSON.
+        app.apply_dir_listing(".", &serde_json::json!([entry("package.json", false)]));
+        assert_eq!(app.tree.rows().len(), 1);
+        // A new note beside the selection: `Untitled.md` is taken.
+        app.notes.selected = 2;
+        app.notes_create(false);
+        assert_eq!(app.notes.creating, Some((String::new(), "Untitled 2.md".into(), false)));
+        // Someone else's file being created is not ours.
+        app.apply_file_created("other.md", false);
+        assert!(app.notes.creating.is_some());
+        app.apply_file_created("Untitled 2.md", false);
+        assert!(app.notes.creating.is_none());
+        assert!(app.tabs.iter().any(|t| t.kind == crate::tabs::TabKind::Editor { path: "/vault/Untitled 2.md".into() }), "the note opens");
+        app.apply_dir_listing("/vault", &serde_json::json!([entry("Untitled.md", false), entry("Untitled 2.md", false), entry("Ideas", true)]));
+        assert_eq!(app.notes.rows()[app.notes.selected].path, "Untitled 2.md");
+        // A folder made inside an open folder lands there.
+        app.notes.selected = 0;
+        app.notes.open.insert("Ideas".into());
+        app.apply_dir_listing("/vault/Ideas", &serde_json::json!([entry("New Folder", true)]));
+        app.notes_create(true);
+        assert_eq!(app.notes.creating, Some(("Ideas".into(), "New Folder 2".into(), true)));
+    }
+
+    #[test]
+    fn notes_ask_for_the_default_vault_whatever_the_project_links() {
+        assert_eq!(default_vault_probe("/home/me/projects/linked"), "/");
+        assert_eq!(default_vault_probe("C:\\Users\\me\\linked"), "C:\\");
+        assert_eq!(default_vault_probe("d:/work"), "d:\\");
+        // A remote home not resolved yet is asked as it stands.
+        assert_eq!(default_vault_probe("~"), "~");
     }
 }

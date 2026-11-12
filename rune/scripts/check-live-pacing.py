@@ -30,6 +30,7 @@ p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDes
 p.add_argument('--binary', default=default_binary())
 p.add_argument('--drive', required=True, help='NEOISM_RUNE_DRIVE script; end it with `quit`')
 p.add_argument('--session', help='Conversation to open (omit for a new chat)')
+p.add_argument('--scene', help='Measure an offline Rune scene instead of a live conversation')
 p.add_argument('--cwd', default=os.getcwd(), help='Workspace directory of the test window')
 p.add_argument('--out', default='/tmp/neoism-rune-verify/live-pacing')
 p.add_argument('--output', default='neoperf', help='Headless output to use (created and removed if missing)')
@@ -37,6 +38,8 @@ p.add_argument('--physical', action='store_true', help='Use a temporary workspac
 p.add_argument('--mode', help='Require this existing output mode; never reconfigure other displays')
 p.add_argument('--timeout', type=int, default=90)
 p.add_argument('--trace-events', action='store_true', help='Include poll causes and daemon message kinds (no message bodies)')
+p.add_argument('--rune-trace', action='store_true', help="Also write Rune's per-frame trace (<out>.jsonl): why each frame drew, its CPU time, the tracks it touched")
+p.add_argument('--env', action='append', default=[], help='Extra KEY=VALUE for the test window (RUNE_COMMIT_BUDGET_MS=4)')
 p.add_argument('--span', type=float, default=0, help='Also split each span into pieces this many seconds long')
 a = p.parse_args()
 version = subprocess.run([a.binary, '--version'], check=True, capture_output=True, text=True).stdout.strip()
@@ -64,7 +67,7 @@ try:
     if a.mode and a.mode != actual_mode: raise SystemExit(f'output is {actual_mode}, requested {a.mode}; no display settings changed')
     a.mode = actual_mode
     if a.physical:
-        occupied = {w['id'] for w in json.loads(hypr('-j', 'workspaces'))}
+        occupied = {w['id'] for w in json.loads(hypr('-j', 'workspaces')) if 'id' in w}
         workspace = next(i for i in range(90, 1000) if i not in occupied)
     else: workspace = out['activeWorkspace']['id']
 
@@ -76,8 +79,15 @@ try:
         'tabs': [{'kind': 'home', 'draft': ''}, {'kind': 'agent', 'session': a.session, 'draft': ''}],
         'layout': {'kind': 'pane', 'tabs': [0, 1], 'active': 1, 'focused': True}, 'active': 1, 'sidebar': None, 'unsaved': {}}]}))
     env = [f'NEOISM_RUNE_STATE_PATH={state}', f'NEOISM_RUNE_APP_ID={app_id}', 'NEOISM_RUNE_FRAME_TRACE=1', 'WAYLAND_DEBUG=1', f'NEOISM_RUNE_DRIVE={a.drive}']
+    scene_args = []
+    if a.scene:
+        env = [item for item in env if not item.startswith('NEOISM_RUNE_STATE_PATH=')]
+        env += ['NEOISM_RUNE_OFFLINE=1', 'NEOISM_RUNE_NO_RESTORE=1']
+        scene_args = ['--scene', a.scene, '--native']
+    if a.rune_trace: scene_args += ['--native', '--trace', str(base.with_suffix('.jsonl'))]
+    env += a.env
     if a.trace_events: env += ['NEOISM_RUNE_TRACE_POLL=1', 'NEOISM_RUNE_TRACE_DAEMON=1']
-    command = f'cd {shlex.quote(a.cwd)} && ' + shlex.join(['env', *env, 'timeout', '--signal=INT', str(a.timeout), a.binary]) + f' >> {shlex.quote(str(log))} 2>&1'
+    command = f'cd {shlex.quote(a.cwd)} && ' + shlex.join(['env', *env, 'timeout', '--signal=INT', str(a.timeout), a.binary, *scene_args]) + f' >> {shlex.quote(str(log))} 2>&1'
     destination = str(workspace) + ('' if a.physical else ' silent')
     hypr('dispatch', f'hl.dsp.exec_cmd({json.dumps(command)}, {{ workspace = {json.dumps(destination)} }})')
     pid = None

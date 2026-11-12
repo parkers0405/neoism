@@ -18,7 +18,7 @@ fn action(name: &str) -> Option<Action> {
         "decreasefontsize" => Action::DecreaseFontSize,
         "resetfontsize" => Action::ResetFontSize,
         "quit" => Action::Quit,
-        "togglegitdiffpanel" => Action::SearchGitChanges,
+        "togglegitdiffpanel" => Action::ToggleGitPanel,
         _ => return None,
     })
 }

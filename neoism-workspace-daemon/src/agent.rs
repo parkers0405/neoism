@@ -147,6 +147,45 @@ pub(crate) async fn ensure_managed_agent_server_started(
     Ok(())
 }
 
+/// Start the managed Agent server without ever failing the daemon for it.
+///
+/// The Agent has its own ownership lock and port. When another owner holds the lock and is
+/// not answering yet (still starting, shutting down, stuck), or the port cannot be bound,
+/// `ensure_managed_agent_server_started` returns an error; daemon startup used to return it
+/// and exit, taking files, notes and terminals down with the chats. Local editing and
+/// terminals must survive an unavailable Agent: it is retried here for a short while (later
+/// sockets capture its address when they open), then the daemon serves without it and keeps
+/// trying in the background.
+pub(crate) async fn start_managed_agent_server(workspaces: crate::workspace::WorkspaceManager) {
+    const PATIENCE: Duration = Duration::from_secs(20);
+    let began = std::time::Instant::now();
+    let mut warned = false;
+    loop {
+        let error = match ensure_managed_agent_server_started(workspaces.clone()).await {
+            Ok(()) => return,
+            Err(error) => error,
+        };
+        if !warned {
+            tracing::warn!(%error, "managed Agent server is not available yet; retrying");
+            warned = true;
+        }
+        if began.elapsed() >= PATIENCE {
+            tracing::error!(%error, "managed Agent server still unavailable; serving files and terminals without it and retrying in the background");
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if ensure_managed_agent_server_started(workspaces.clone()).await.is_ok() {
+                        tracing::info!("managed Agent server started after a delayed start");
+                        return;
+                    }
+                }
+            });
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// Spawn the embedded `neoism-agent-server` on `127.0.0.1:4096` if
 /// `NEOISM_AGENT_SERVER` points at a local host and the daemon hasn't
 /// already booted one. Safe to call repeatedly — the first call wins.

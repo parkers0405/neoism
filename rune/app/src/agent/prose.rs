@@ -382,6 +382,54 @@ fn looks_like_codeish_word(token: &str) -> bool {
         || token.contains("~/.config/")
 }
 
+/// A reply's text cut before each top-level heading, with the space each piece is owed above
+/// it. A long reply is drawn as these pieces, each cached by its own text (`timeline.rs`):
+/// while it streams only the last one changes, so only that one is parsed, highlighted and
+/// built again, however long the reply has grown. As one document the whole of it was, thirty
+/// times a second (a 50 KB reply with a dozen code blocks: 2.5 ms of every such commit).
+///
+/// A heading at the start of a line always opens a new top-level block (it ends a list, a
+/// quote and a paragraph alike), so the pieces draw as the whole did. The space above each is
+/// what the Markdown kit puts above a heading inside a document: the larger of the heading's
+/// own top margin (28, 24, 20 by level) and the bottom margin of what precedes it (24 under
+/// a code block or an image, 32 under a rule; nothing else is taller than a heading's).
+/// Reference-style link definitions resolve across the whole text, so a reply that has any
+/// stays whole.
+pub fn chunks(source: &str) -> Vec<(&str, f32)> {
+    let mut out = Vec::new();
+    let (mut start, mut space, mut offset, mut in_fence) = (0, 0.0, 0, false);
+    // The bottom margin of the last non-blank line's block, as far as it can exceed a heading's top.
+    let mut above = 0.0_f32;
+    let mut content = false;
+    let mut after_blank = true;
+    fn continue_offset(offset: &mut usize, line: &str) { *offset += line.len(); }
+    for line in source.split_inclusive('\n') {
+        let fence = { let t = line.trim_start(); t.starts_with("```") || t.starts_with("~~~") };
+        if fence { in_fence = !in_fence; }
+        if !in_fence && !fence {
+            if line.starts_with('[') && line.contains("]: ") { return vec![(source, 0.0)]; }
+            let level = line.bytes().take_while(|b| *b == b'#').count();
+            if content && (1..=6).contains(&level) && line.as_bytes().get(level).is_some_and(|b| *b == b' ' || *b == b'\n') {
+                out.push((&source[start..offset], space));
+                start = offset;
+                space = match level { 1 => 28.0_f32, 2 => 24.0, _ => 20.0 }.max(above);
+            }
+        }
+        let shown = line.trim();
+        if shown.is_empty() { after_blank = true; continue_offset(&mut offset, line); continue; }
+        {
+            content = true;
+            // Dashes right under a paragraph underline it (a heading); after a blank line they rule.
+            let rule = after_blank && !in_fence && !fence && shown.len() >= 3 && [b'-', b'*', b'_'].iter().any(|c| shown.bytes().all(|b| b == *c || b == b' ') && shown.bytes().filter(|b| b == c).count() >= 3);
+            above = if rule { 32.0 } else if (fence && !in_fence && !line.starts_with([' ', '\t'])) || (!in_fence && shown.starts_with("![")) { 24.0 } else { 0.0 };
+            after_blank = false;
+        }
+        continue_offset(&mut offset, line);
+    }
+    out.push((&source[start..], space));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +443,22 @@ mod tests {
         }
         let marks = highlights("see `src/main.rs` now", p);
         assert!(marks.iter().any(|(r, _)| &"see `src/main.rs` now"[r.clone()] == "src/main.rs"));
+    }
+
+    #[test]
+    fn a_reply_is_cut_before_each_heading_outside_code() {
+        let source = "Intro line.\n\n## One\ntext\n\n```sh\n# not a heading\n```\n\n### Two\n- item\n\n---\n\n# Three\nend";
+        let pieces = chunks(source);
+        assert_eq!(pieces.iter().map(|(text, _)| *text).collect::<String>(), source, "nothing is lost or repeated");
+        let heads: Vec<(&str, f32)> = pieces.iter().map(|(text, space)| (text.lines().next().unwrap(), *space)).collect();
+        // The space above is the heading's own, or more under a code block (24) or a rule (32).
+        assert_eq!(heads, [("Intro line.", 0.0), ("## One", 24.0), ("### Two", 24.0), ("# Three", 32.0)]);
+        // A reply that opens with a heading is not cut ahead of it; `#hashtag` is no heading.
+        assert_eq!(chunks("# Title\nbody\n#tag\n").len(), 1);
+        // Reference links are defined anywhere in the text: it stays whole.
+        assert_eq!(chunks("See [a][1].\n\n## More\n\n[1]: https://example.com\n").len(), 1);
+        // A piece settles once the next begins: text arriving later never changes it.
+        let grown = format!("{source} more\n\n## Four\nlater");
+        assert_eq!(chunks(&grown)[..3], pieces[..3]);
     }
 }

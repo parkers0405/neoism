@@ -15,8 +15,8 @@ fn agent_accent(app: &App, label: &str) -> u32 {
 }
 
 impl App {
-    /// Ctrl+C clears the composer, or with nothing typed stops the running chat; Esc twice
-    /// within a second stops it too. A selection still copies.
+    /// Ctrl+C clears the composer, or with nothing typed stops the running chat. Esc stops
+    /// at once when work is queued, otherwise twice within a second. A selection still copies.
     pub fn composer_interrupt_key(&mut self, e: &rune::KeyEvent) -> bool {
         let i = self.active;
         let session = match &self.tabs[i].kind { TabKind::Agent { session: Some(id) } => Some(id.clone()), _ => None };
@@ -34,7 +34,10 @@ impl App {
         }
         if e.key == rune::Key::Escape && running && !e.mods.ctrl && !e.mods.alt {
             let now = std::time::Instant::now();
-            if self.esc_at.take().is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(1)) {
+            let twice = self.esc_at.take().is_some_and(|at| now.duration_since(at) < std::time::Duration::from_secs(1));
+            let queued = session.as_ref().is_some_and(|id| self.sessions.get(id).is_some_and(|s| s.queued_prompts > 0));
+            if queued || twice {
+                // Interrupt only the active run; the server hands off to the queued steer.
                 if let Some(id) = &session { self.stop(id); }
             } else {
                 self.esc_at = Some(now);
@@ -70,12 +73,47 @@ impl App {
     }
 }
 
+#[cfg(test)]
+mod interrupt_tests {
+    use super::*;
+
+    #[test]
+    fn one_escape_interrupts_the_run_without_clearing_its_queued_steers_or_draft() {
+        use crate::daemon::{Daemon, Target};
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/session", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut socket = tungstenite::accept(tcp).unwrap();
+            socket.read().unwrap(); // Hello
+            socket.send(tungstenite::Message::text(r#"{"WorkspaceReply":{"request_id":0,"message":{"HelloAck":{}}}}"#)).unwrap();
+            let request: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(request["Agent"]["message"], serde_json::json!({"CancelInflight": {"session_id": "steer"}}));
+        });
+        let mut app = App::new();
+        app.load_fixture("steer", "Steering", "[]");
+        app.sessions.get_mut("steer").unwrap().streaming = true;
+        app.apply_agent(neoism_protocol::agent::AgentServerMessage::QueueUpdate {
+            session_id: "steer".into(), count: 2, preview: None, started_at: None,
+        });
+        app.tabs[app.active].draft.text = "An unfinished draft".into();
+        let (daemon, _inbox) = Daemon::start_to(Some(Target { url, ..Default::default() }), || {});
+        app.daemon = Some(daemon);
+        assert!(app.composer_interrupt_key(&rune::KeyEvent { key: rune::Key::Escape, mods: Default::default() }));
+        assert_eq!(app.sessions["steer"].queued_prompts, 2);
+        assert_eq!(app.active_tab().draft.text, "An unfinished draft");
+        server.join().unwrap();
+    }
+}
+
 /// The floating composer card with its chip row and path bar (`reference/09`).
 pub fn composer(app: &App, max_w: f32) -> El {
     let p = app.pal;
     let tab = app.active_tab();
     let tab_id = tab.id;
-    let streaming = matches!(&tab.kind, TabKind::Agent { session: Some(id) } if app.sessions.get(id).is_some_and(|s| s.streaming));
+    let streaming = !app.has_prompt() && matches!(&tab.kind, TabKind::Agent { session: Some(id) } if app.sessions.get(id).is_some_and(|s| s.streaming));
     let input = rune::text_input(&tab.draft, app.ty.composer())
         // Keys through this field (list arrows, wheel-free navigation) commit animated: without
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
@@ -84,12 +122,12 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder("Ask anything", rgb(p.dim))
         .color(rgb(p.fg)).w_full().min_h(26.0)
-        .on_edit(move |s: &mut App| { s.select_tab(tab_id); let i = s.active; &mut s.tabs[i].draft })
-        .on_input_change(move |s: &mut App, _: &mut Tx| { s.select_tab(tab_id); s.composer_changed(); })
+        .on_edit(move |s: &mut App| { s.select_tab(tab_id); s.composer_edit() })
+        .on_input_change(move |s: &mut App, _: &mut Tx| { s.select_tab(tab_id); if !s.pending_prompt_changed() { s.composer_changed(); } })
         .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.timeline_jump_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
         // An image on the clipboard attaches; text pastes as usual.
         .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_image(content) })
-        .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_command(tx) { s.submit(); } });
+        .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_pending_prompt() && !s.submit_command(tx) { s.submit(); } });
     // Chips and their `/model` `/agent` `/think` aliases open the same pickers.
     // In a narrow split the chips give way (labels truncate) instead of widening the card.
     // A chip whose value just changed scrambles into it (GPUiX's `render_scramble_text`).
@@ -108,6 +146,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .child(icon(app, if streaming { glyph::STOP } else { glyph::ARROW_UP }, 0.9, if streaming { rgb(p.bg) } else { rgb(p.fg) }))
         .on_press(move |s: &mut App| {
             s.select_tab(tab_id);
+            if s.submit_pending_prompt() { return; }
             let i = s.active;
             match s.tabs[i].kind.clone() {
                 TabKind::Agent { session: Some(id) } if s.sessions.get(&id).is_some_and(|x| x.streaming) => s.stop(&id),
@@ -200,7 +239,7 @@ impl App {
 pub fn overlay(app: &App) -> El {
     el().key("agent-overlay").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .child(super::slash::effect_layer(app))
-        .child(super::slash::picker_card(app))
+        .child(if app.has_prompt() { super::prompts::card(app) } else { super::slash::picker_card(app) })
         .child(super::attach::preview(app))
 }
 

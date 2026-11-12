@@ -23,7 +23,8 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.sidebar.is_some(), || sidebar(app))
         .child(col().grow(1.0).shrink().h_full()
             .child(workspace_tabs(app))
-            .child(crate::panes::view(app, cx)));
+            .child(crate::panes::view(app, cx)))
+        .child_if(app.git_panel.open, || crate::git::view(app));
     track_caret(app, cx);
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
@@ -47,6 +48,9 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.form.is_some(), || crate::servers::form::view(app))
         .child_if(app.modal.is_some(), || super::modal::view(app))
         .child_if(app.menu.is_some(), || super::menu::view(app))
+        .child_if(app.tree_dnd.is_some(), || crate::tree::drag::ghost(app))
+        .child_if(app.context.is_some(), || super::context::menu_view(app))
+        .child_if(app.prompt.is_some(), || super::context::prompt_view(app))
         .child_if(app.settings.is_some(), || crate::settings::view(app))
         .child_if(app.cursor.placed() && cursor_in_overlay(app), || cursor_quad(app))
         .child(app.heartbeat.view())
@@ -60,7 +64,7 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
     } else {
         match app.active_tab().kind {
             TabKind::Agent { .. } => app.ty.composer().size,
-            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } => app.ty.small().size,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => app.ty.small().size,
         }
     };
     app.cursor.caret_font.set(font);

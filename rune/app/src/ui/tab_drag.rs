@@ -190,6 +190,7 @@ impl App {
                         TabKind::Terminal => ("\u{f489}", self.pal.accent),
                         TabKind::Agent { .. } => ("\u{f0a1e}", self.pal.fg),
                         TabKind::Database { .. } => ("\u{f1c0}", self.pal.blue),
+                        TabKind::GitDiff => ("\u{e725}", self.pal.blue),
                     };
                     (self.tab_title(tab), icon)
                 }

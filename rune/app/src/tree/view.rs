@@ -46,12 +46,14 @@ pub fn view(app: &App) -> El {
         let (lifted, landing) = app.tree_drag_row(notes, &item.path);
         let selected = index == tree.selected;
         let open = item.entry.is_dir && tree.open.contains(&item.path);
-        let (glyph, icon_color) = if item.entry.is_dir {
+        let (glyph, mut icon_color) = if item.entry.is_dir {
             (if open { icons::FOLDER_OPEN } else { icons::FOLDER_CLOSED }, p.folder)
         } else {
             icons::for_file(&item.entry.name)
         };
-        let label_color = if item.entry.is_dir || selected { p.fg } else { p.dim };
+        let git = tree.git_statuses.get(&item.path).map(|status| super::git::decoration(*status, p));
+        let label_color = git.map_or_else(|| if item.entry.is_dir || selected { p.fg } else { p.dim }, |(_, color)| color);
+        if item.entry.is_dir && let Some((_, color)) = git { icon_color = color; }
         let chevron = item.entry.is_dir.then(|| if open { "\u{f078}" } else { "\u{f054}" });
         let icon_font = TextStyle::new(FONT * s, 400.0).family(NERD);
         let chevron_font = TextStyle::new((INDENT - 6.0) * s, 400.0).family(NERD);
@@ -62,13 +64,15 @@ pub fn view(app: &App) -> El {
             .opacity(if lifted { 0.35 } else { 1.0 })
             .child(el().w(INDENT * s).center().child_opt(chevron.map(|c| text(c).font(chevron_font).color(rgb(p.muted)))))
             .child(el().w(FONT * s).center().child(text(glyph).font(icon_font).color(rgb(icon_color))))
-            .child(text(item.entry.name.clone()).font(app.ty.sized(FONT)).color(rgb(label_color)).ml(ICON_GAP * s).truncate().shrink())
+            .child(text(item.entry.name.clone()).font(app.ty.sized(FONT)).color(rgb(label_color)).ml(ICON_GAP * s).truncate().grow(1.0).shrink())
             // The people with their cursor in this file, at the row's right end.
             .child_opt((!item.entry.is_dir).then(|| {
                 let path = tree.open_path(&item.path);
                 let host = if crate::startup::absolute(&path) { path } else { format!("{}/{path}", app.cwd.trim_end_matches('/')) };
-                crate::collab::view::tree_row(app, &host).map(|orbs| row().grow(1.0).justify_end().child(orbs))
+                crate::collab::view::tree_row(app, &host)
             }).flatten())
+            .child_opt(git.map(|(marker, color)| row().pl(8.0 * s)
+                .child(text(marker).font(app.ty.sized_bold(FONT * 0.9)).color(rgb(color)))))
             .on_press(move |a: &mut App| {
                 // The release that ends a drag is not a click on the row it started on.
                 if std::mem::take(&mut a.tree_press_suppressed) { return; }

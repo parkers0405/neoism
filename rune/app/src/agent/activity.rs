@@ -81,6 +81,7 @@ pub struct Activity {
     glyphs: Vec<Glyph>,
     dots: Vec<Dot>,
     time: LiveText,
+    opacity: Live<f32>,
     changed: Instant,
     turn: Instant,
 }
@@ -112,7 +113,7 @@ impl Activity {
             target, shown: LiveText::new(target.to_string()), offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE),
         }).collect();
         let dots = (0..3).map(|_| Dot { offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE) }).collect();
-        Activity { session: session.to_owned(), state, background: 0, queued: 0, glyphs, dots, time: LiveText::new(""), changed: Instant::now(), turn }
+        Activity { session: session.to_owned(), state, background: 0, queued: 0, glyphs, dots, time: LiveText::new(""), opacity: Live::new(1.0), changed: Instant::now(), turn }
     }
 
     /// Advance every glyph, dot and the timer to `now` (seconds on the frame clock).
@@ -206,7 +207,7 @@ impl Activity {
             text(format!("\u{2570}\u{2500} {} background {noun} running", self.background)).font(app.ty.sized(13.0)).color(rgb(p.muted))
                 .h(LINE_H * s).pl(3.3 * s)
         });
-        rune::col().key("activity").w_full().pt(18.0).child(line).children(queued).children(background)
+        rune::col().key("activity").w_full().pt(18.0).live_opacity(&self.opacity).child(line).children(queued).children(background)
     }
 }
 
@@ -248,7 +249,10 @@ impl App {
 
     /// Background tasks still running in the conversation's family (`RuntimeSnapshot`).
     pub fn background_count(&self, session_id: &str) -> usize {
-        self.background_jobs.get(self.families.root_of(session_id)).copied().unwrap_or(0)
+        let root = self.families.root_of(session_id);
+        let activity = self.thread_activity.get(root).map(String::as_str);
+        if activity == Some("idle") { return 0; }
+        self.background_jobs.get(root).copied().unwrap_or(0)
     }
 
     /// The transcript is scrolled to its end and overflows its view (`activity_geometry`'s
@@ -297,7 +301,20 @@ impl App {
                 true
             }
         };
-        if let Some(activity) = &self.activity { activity.tick(self.pal, self.ty.scale()); }
+        let mut revealed = true;
+        if let Some(session) = self.sessions.get_mut(id)
+            && let Some((prompt, visible)) = &session.activity_reveal
+        {
+            // Keep the row's space, but let the bubble paint first. A reply already arriving
+            // takes precedence; only the initial idle-send indicator is staggered.
+            let responding = session.messages.last().is_some_and(|m| m.id != *prompt && m.kind != HistoryMessageKind::User);
+            revealed = responding || visible.is_some_and(|at| at.elapsed() >= std::time::Duration::from_millis(80));
+            if revealed { session.activity_reveal = None; }
+        }
+        if let Some(activity) = &self.activity {
+            activity.opacity.set(if revealed { 1.0 } else { 0.0 });
+            activity.tick(self.pal, self.ty.scale());
+        }
         // Following the end of an overflowing transcript, the line pins above the composer.
         let pinned = self.activity.is_some() && session.as_deref().is_some_and(|id| self.activity_follows_end(id));
         let flipped = pinned != self.activity_pinned;
@@ -309,6 +326,55 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_send_reveals_activity_just_after_its_bubble_without_relayout() {
+        use std::time::Duration;
+        let mut app = App::new();
+        app.load_fixture("send", "Send", "[]");
+        app.submit_prompt("send", "Hello".into());
+        assert_eq!(app.sessions["send"].messages.last().unwrap().text, "Hello");
+        app.set_streaming("send", true);
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 0.0);
+        let height = app.activity_row_height();
+        // No layout yet: even an additional poll must not reveal the status first.
+        assert!(!app.tick_activity().1);
+        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 0.0);
+        let visible = &mut app.sessions.get_mut("send").unwrap().activity_reveal.as_mut().unwrap().1;
+        *visible = Some(Instant::now() + Duration::from_secs(1));
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 0.0);
+        app.sessions.get_mut("send").unwrap().activity_reveal.as_mut().unwrap().1 = Some(Instant::now() - Duration::from_millis(100));
+        assert!(!app.tick_activity().1, "reveal only repaints the live opacity");
+        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 1.0);
+        assert_eq!(app.activity_row_height(), height);
+        assert!(app.sessions["send"].activity_reveal.is_none());
+        // Steering a running turn must not hide an already visible indicator.
+        app.submit_prompt("send", "Follow up".into());
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 1.0);
+    }
+
+    #[test]
+    fn a_fast_reply_or_idle_cancels_the_initial_activity_delay() {
+        use neoism_protocol::agent::{AgentServerMessage as M, ContentKind};
+        let mut app = App::new();
+        app.load_fixture("send", "Send", "[]");
+        app.submit_prompt("send", "Hello".into());
+        app.set_streaming("send", true);
+        app.apply_agent(M::ContentDelta { session_id: "send".into(), message_id: "reply".into(),
+            text: "Hi".into(), kind: ContentKind::Text, parent_message_id: None });
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 1.0);
+        assert!(app.sessions["send"].activity_reveal.is_none());
+        app.set_streaming("send", false);
+        app.submit_prompt("send", "Again".into());
+        app.apply_agent(M::SessionIdle { session_id: "send".into() });
+        app.tick_activity();
+        assert!(app.sessions["send"].activity_reveal.is_none());
+        assert!(app.activity.is_none());
+    }
 
     #[test]
     fn queue_snapshots_update_the_activity_and_reserved_space_per_conversation() {

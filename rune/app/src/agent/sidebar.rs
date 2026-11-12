@@ -516,6 +516,11 @@ mod family_tests {
             assert!(app.session_live("child"));
         }
         app.apply_agent(M::SessionIdle { session_id: "child".into() });
+        assert!(app.families.working_now("child"), "a turn boundary does not finish the task");
+        app.apply_agent(M::CatalogFamily { session_id: "root".into(), snapshot: serde_json::json!({
+            "rootSessionId":"root", "familyRevision":2,
+            "branches":[{"sessionId":"child", "parentSessionId":"root", "status":"completed"}]
+        }) });
         assert!(!app.families.working_now("child"));
     }
 
@@ -528,6 +533,8 @@ mod family_tests {
         app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
         app.agent_sent.borrow_mut().clear();
         app.apply_agent(M::SessionIdle { session_id: "root".into() });
+        app.apply_agent(M::StreamingState { session_id: "root".into(), state: neoism_protocol::agent::StreamingState::Working, label: None });
+        assert_eq!(app.activity_state("root"), None, "a late verb cannot restart Crafting while catalog reconciliation is in flight");
         assert!(app.agent_sent.borrow().iter().any(|m| m.contains("ListThreads")), "completion must reconcile the independent sidebar catalog");
         let mut threads = app.threads.clone();
         threads[0].catalog_activity = Some("idle".into());
@@ -541,6 +548,44 @@ mod family_tests {
         assert!(!app.sidebar_running(), "reset must not fall back to a stale thread row");
         app.apply_agent(M::CatalogActivity { session_id: "root".into(), activity: "running".into() });
         assert!(app.sidebar_running(), "fresh catalog activity must still start the loader");
+    }
+
+    #[test]
+    fn catalog_activity_wins_over_stale_background_counts_per_conversation() {
+        let mut app = App::new();
+        app.load_fixture("release", "Neoism Release", "[]");
+        app.load_fixture("diagnosing", "Diagnosing frames", "[]");
+        app.load_fixture("optimistic", "Show optimistic message", "[]");
+        let jobs = |revision, tasks| M::BackgroundTasksUpdated {
+            session_id: "release".into(), epoch: "jobs".into(), revision, tasks,
+        };
+        let job = neoism_protocol::agent::BackgroundJobRuntime {
+            job_id: "job".into(), session_id: "release".into(), started_at: 1,
+        };
+        app.apply_agent(jobs(1, vec![job.clone()]));
+        assert_eq!(app.activity_of(&app.threads[0]), "background", "legacy fallback");
+
+        // A catalog refresh sees completion before the session stream catches up.
+        let mut threads = app.threads.clone();
+        threads[0].catalog_activity = Some("idle".into());
+        threads[1].catalog_activity = Some("idle".into());
+        threads[2].catalog_activity = Some("running".into());
+        app.apply_agent(M::ThreadList { threads, requested_cursor: None, next_cursor: None });
+        let activities = |app: &App| app.threads.iter().map(|t| app.activity_of(t).to_owned()).collect::<Vec<_>>();
+        assert_eq!(activities(&app), ["idle", "idle", "running"]);
+        assert_eq!(app.activity_state("release"), None, "stale background counts cannot keep the conversation activity alive either");
+        assert!(!app.session_live("diagnosing"));
+        assert!(app.session_live("optimistic"));
+
+        // Foreground work takes precedence even when a background job really is running.
+        for activity in ["running", "permission", "background", "idle"] {
+            app.apply_agent(M::CatalogActivity { session_id: "release".into(), activity: activity.into() });
+            assert_eq!(app.activity_of(&app.threads[0]), activity);
+        }
+        app.apply_agent(jobs(2, vec![]));
+        app.apply_agent(jobs(1, vec![job]));
+        assert_eq!(app.background_count("release"), 0, "an older job snapshot cannot revive completed work");
+        assert_eq!(activities(&app), ["idle", "idle", "running"]);
     }
 
     #[test]
@@ -614,8 +659,10 @@ mod family_tests {
         // was announced; an old child named only by a card never does.
         app.open_child("root", "b");
         assert_eq!(app.activity_state("b"), Some(crate::agent::activity::State::Generating));
-        // Its session goes idle before any family snapshot says it finished.
+        // A turn ending is not the child ending; the next lifecycle snapshot settles it.
         app.apply_agent(M::SessionIdle { session_id: "b".into() });
+        assert!(app.families.working_now("b"));
+        app.apply_agent(family(2, ["outstanding", "outstanding", "completed", "outstanding"]));
         assert!(!app.families.working_now("b"));
         assert_eq!(app.families.member("b").unwrap().status, "completed");
         assert_eq!(app.sessions["root"].messages[0].status, "completed", "its task card stops turning");
@@ -670,6 +717,44 @@ mod family_tests {
     }
 
     #[test]
+    fn child_lifecycle_orders_both_streams_and_reopens_for_follow_up() {
+        use neoism_protocol::agent::{StreamingState, SubagentStatus};
+        let mut app = App::new();
+        app.load_fixture("root", "Root", "[]");
+        app.apply_agent(family(2, ["outstanding"; 4]));
+        app.open_child("root", "a");
+        app.apply_agent(M::StreamingState { session_id: "a".into(), state: StreamingState::Working, label: None });
+        let runtime = |revision, status| M::RuntimeSnapshot {
+            session_id: "root".into(), snapshot: serde_json::from_value(serde_json::json!({
+                "rootSessionId":"root", "familyRevision":revision, "branchesAuthoritative":true,
+                "branches":[{"sessionId":"a", "parentSessionId":"root", "status":status}]
+            })).unwrap(),
+        };
+        let lifecycle = |revision, status| M::SubagentUpdate {
+            session_id: "a".into(), status, title: None, agent: None, current_tool: None, started_at: None,
+            parent_session_id: Some("root".into()), root_session_id: Some("root".into()),
+            execution_id: None, family_revision: Some(revision),
+        };
+        app.apply_agent(runtime(1, "completed"));
+        assert!(app.session_live("a"), "an older runtime response cannot finish a newer catalog child");
+        app.apply_agent(lifecycle(3, SubagentStatus::Completed));
+        assert!(!app.session_live("a"), "lifecycle completion clears the child's own streaming flag");
+        assert_eq!(app.activity_state("a"), None);
+        assert!(app.families.working_now("b"), "a single-child lifecycle event must not finish siblings");
+
+        app.apply_agent(family(4, ["outstanding"; 4]));
+        assert!(app.session_live("a"), "new follow-up work must leave the completed state");
+        app.apply_agent(lifecycle(3, SubagentStatus::Completed));
+        app.apply_agent(runtime(3, "completed"));
+        assert!(app.session_live("a"), "late completion of the previous turn must not finish its follow-up");
+        app.apply_agent(lifecycle(5, SubagentStatus::Completed));
+        assert!(!app.session_live("a"));
+        app.apply_agent(lifecycle(6, SubagentStatus::Running));
+        assert!(app.session_live("a"), "a versioned follow-up event may also reopen the child");
+        assert!(app.families.working_now("b"));
+    }
+
+    #[test]
     fn a_background_sub_agent_that_finished_stays_finished() {
         let mut app = App::new();
         app.load_fixture("root", "Root", "[]");
@@ -693,11 +778,13 @@ mod family_tests {
         assert_eq!(app.sessions["root"].messages[0].status, "running");
         assert_eq!(child_rows(&app), 1);
 
-        // The child goes idle, and a snapshot of the revision before still calls it at work.
+        // The child goes idle before its lifecycle completes.
         app.apply_agent(M::SessionIdle { session_id: "kid".into() });
         app.apply_agent(snapshot(2, Some("outstanding")));
-        assert!(!app.families.working_now("kid"), "a repeated older snapshot does not start it again");
+        assert!(app.families.working_now("kid"));
         app.apply_agent(snapshot(3, Some("completed")));
+        app.apply_agent(snapshot(2, Some("outstanding")));
+        assert!(!app.families.working_now("kid"), "a repeated older snapshot does not start it again");
         assert_eq!(app.sessions["root"].messages[0].status, "completed");
         // The parent answers in a new execution that lists no children, and its page comes again.
         app.apply_agent(snapshot(4, None));

@@ -6,6 +6,107 @@ fn busy() -> Value {
 }
 
 #[tokio::test]
+async fn catalog_activity_during_list_wins_but_later_list_can_recover_missed_events() {
+    for (snapshot, live) in [
+        ("running", "idle"),
+        ("idle", "running"),
+        ("running", "background"),
+        ("running", "permission"),
+    ] {
+        let fetched = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let fetched_handler = fetched.clone();
+        let release_handler = release.clone();
+        let app = axum::Router::new().route("/v2/health", axum::routing::get(|| async {
+            axum::Json(json!({"healthy":true,"version":"test","providerCredentialStore":"test"}))
+        })).route("/v2/sessions", axum::routing::get(move || {
+            let fetched = fetched_handler.clone();
+            let release = release_handler.clone();
+            async move {
+                fetched.notify_one();
+                release.notified().await;
+                axum::Json(json!({"items":[
+                    {"id":"root", "title":"Retained metadata", "catalogActivity":snapshot},
+                    {"id":"other", "catalogActivity":"background"}
+                ], "cursor":{"next":"next-page"}}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (tx, mut rx) = reply_queue::channel();
+        let mut session = AgentSession::spawn(Some("test".into()), String::new(), tx);
+        let inner = Arc::get_mut(&mut session.inner).unwrap();
+        inner.agent_server = format!("http://{address}");
+        inner.agent_http = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            for in_flight_event in [true, false] {
+                let inner = session.inner.clone();
+                let list = tokio::spawn(async move {
+                    handlers::fetch_thread_page(inner, None, None, Some("requested-page".into())).await;
+                });
+                fetched.notified().await;
+                if in_flight_event {
+                    session.inner.activity_evidence.forward(&session.inner.tx, json!({
+                        "type":"session.catalog.activity",
+                        "properties":{"sessionID":"root", "activity":live}
+                    }));
+                    assert!(matches!(rx.recv().await.unwrap(), AgentServerMessage::CatalogActivity {
+                        session_id, activity
+                    } if session_id == "root" && activity == live));
+                }
+                release.notify_one();
+                list.await.unwrap();
+                let AgentServerMessage::ThreadList { threads, requested_cursor, next_cursor } = rx.recv().await.unwrap() else {
+                    panic!("expected catalog list");
+                };
+                let root = threads.iter().find(|thread| thread.session_id == "root").unwrap();
+                let expected = if in_flight_event { live } else { snapshot };
+                assert_eq!(root.catalog_activity.as_deref(), Some(expected));
+                assert_eq!(root.busy, expected == "running");
+                assert_eq!(root.title, "Retained metadata");
+                assert_eq!(threads.iter().find(|thread| thread.session_id == "other").unwrap().catalog_activity.as_deref(), Some("background"));
+                assert_eq!(requested_cursor.as_deref(), Some("requested-page"));
+                assert_eq!(next_cursor.as_deref(), Some("next-page"));
+                assert!(rx.try_recv().is_err());
+            }
+        }).await;
+        server.abort();
+        result.expect("catalog list race test timed out");
+    }
+}
+
+#[test]
+fn catalog_activity_newer_list_wins_per_row_over_older_response() {
+    let evidence = events::CatalogActivityEvidence::default();
+    let (tx, mut rx) = reply_queue::channel();
+    let old = evidence.begin_list();
+    let new = evidence.begin_list();
+    let newer = handlers::thread_summaries_from_sessions(&json!({"items":[
+        {"id":"root", "catalogActivity":"idle"},
+        {"id":"other", "catalogActivity":"running"}
+    ]}), 24);
+    evidence.publish_list(&tx, new, newer, None, None);
+    let _ = rx.try_recv().unwrap();
+    let older = handlers::thread_summaries_from_sessions(&json!({"items":[
+        {"id":"root", "catalogActivity":"running"},
+        {"id":"other", "catalogActivity":"idle"},
+        {"id":"older-page-only", "catalogActivity":"permission"}
+    ]}), 24);
+    evidence.publish_list(&tx, old, older, Some("page".into()), None);
+    let AgentServerMessage::ThreadList { threads, requested_cursor, .. } = rx.try_recv().unwrap() else {
+        panic!("expected catalog list");
+    };
+    for (id, expected) in [("root", "idle"), ("other", "running"), ("older-page-only", "permission")] {
+        let row = threads.iter().find(|row| row.session_id == id).unwrap();
+        assert_eq!(row.catalog_activity.as_deref(), Some(expected));
+        assert_eq!(row.busy, expected == "running");
+    }
+    assert_eq!(requested_cursor.as_deref(), Some("page"));
+}
+
+#[tokio::test]
 async fn attaching_stream_forwards_output_while_interactions_are_loading() {
     use futures::StreamExt;
     let fetched = Arc::new(tokio::sync::Notify::new());

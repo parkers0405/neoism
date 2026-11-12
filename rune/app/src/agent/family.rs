@@ -26,8 +26,8 @@ pub struct Navigation<'a> {
     pub previous_is_main: bool,
 }
 
-/// Snapshot ordering per root and source: an older revision of the same execution is stale,
-/// and a catalog execution that was replaced never comes back.
+/// Source bookkeeping for the shared family revision fence; a replaced catalog execution
+/// never comes back, even if it arrives on a different stream.
 #[derive(Clone, Debug, Default)]
 struct Version {
     execution: Option<Value>,
@@ -121,7 +121,7 @@ impl Families {
 
     fn mark_stopped(&mut self, session: &str, failed: bool) {
         let root = self.root_of(session).to_owned();
-        let seen = ["CatalogFamily", "RuntimeSnapshot"].iter().filter_map(|source| self.versions.get(&format!("{root}:{source}"))).map(|v| v.revision).max();
+        let seen = self.latest_revision(&root);
         let since = self.stopped.get(session).and_then(|(_, since)| *since).max(seen);
         self.stopped.insert(session.to_owned(), (failed, since));
         if self.live.contains(session) { self.ended.entry(session.to_owned()).or_insert_with(std::time::Instant::now); }
@@ -133,7 +133,7 @@ impl Families {
     /// The catalog started over (`CatalogReset`): its next snapshots are a fresh baseline,
     /// whatever their revision, and only the families it names again are still at work.
     pub fn catalog_reset(&mut self) {
-        self.versions.retain(|key, _| !key.ends_with(":CatalogFamily"));
+        self.versions.clear();
         let stale: Vec<String> = self.rosters.values().flatten().filter(|m| m.working() && self.live.contains(&m.id)).map(|m| m.id.clone()).collect();
         for id in stale { self.finish(&id, false); }
         for (_, since) in self.stopped.values_mut() { *since = None; }
@@ -193,15 +193,17 @@ impl Families {
                 let revision = snapshot["familyRevision"].as_u64().unwrap_or(0);
                 let execution = snapshot.get("executionId").cloned().filter(|v| !v.is_null());
                 if !self.accept_version(&root, "CatalogFamily", execution, revision) { return false; }
-                self.merge(&root, branches, Some(revision), false)
+                self.merge(&root, branches, Some(revision), true, false)
             }
             AgentServerMessage::RuntimeSnapshot { snapshot, .. } => self.note_runtime(snapshot),
-            AgentServerMessage::SubagentUpdate { session_id, status, title, agent, started_at, parent_session_id, root_session_id, .. } => {
+            AgentServerMessage::SubagentUpdate { session_id, status, title, agent, started_at, parent_session_id, root_session_id, family_revision, .. } => {
                 let parent = parent_session_id.clone().filter(|p| !p.is_empty()).or_else(|| self.parents.get(session_id).cloned());
                 let root = root_session_id.clone().filter(|r| !r.is_empty())
                     .or_else(|| parent.as_deref().map(|p| self.root_of(p).to_owned()))
                     .or_else(|| self.roots.get(session_id).cloned());
                 let Some(root) = root else { return false };
+                if let Some(revision) = family_revision
+                    && !self.accept_version(&root, "SubagentUpdate", None, *revision) { return false; }
                 let status = match status {
                     SubagentStatus::Running => "running",
                     SubagentStatus::Blocked => "blocked",
@@ -209,7 +211,7 @@ impl Families {
                     SubagentStatus::Failed => "failed",
                 };
                 let branch = Branch { id: session_id.clone(), parent, title: title.clone(), agent: agent.clone(), status: Some(status.into()), started_at: *started_at };
-                self.merge(&root, vec![branch], None, false)
+                self.merge(&root, vec![branch], *family_revision, false, false)
             }
             AgentServerMessage::SubagentMetadata { session_id, title, agent, parent_session_id } => {
                 // Metadata may rename a known row but never creates one.
@@ -218,7 +220,7 @@ impl Families {
                 let root = parent.as_deref().map(|p| self.root_of(p).to_owned()).or_else(|| self.roots.get(session_id).cloned());
                 let Some(root) = root else { return false };
                 let branch = Branch { id: session_id.clone(), parent, title: title.clone(), agent: agent.clone(), status: None, started_at: None };
-                self.merge(&root, vec![branch], None, true)
+                self.merge(&root, vec![branch], None, false, true)
             }
             _ => false,
         }
@@ -231,7 +233,7 @@ impl Families {
             id: b.session_id.clone(), parent: Some(b.parent_session_id.clone()).filter(|p| !p.is_empty()),
             title: None, agent: None, status: Some(b.status.clone()), started_at: b.started_at,
         }).collect();
-        self.merge(&root, branches, snapshot.branches_authoritative.then_some(snapshot.family_revision), false)
+        self.merge(&root, branches, snapshot.branches_authoritative.then_some(snapshot.family_revision), snapshot.branches_authoritative, false)
     }
 
     /// Children named by `task` cards in a history page (`task_id: <id>` lines), so an old
@@ -244,10 +246,18 @@ impl Families {
             Some(Branch { id, parent: Some(root.to_owned()), title, agent: None, status: None, started_at: None })
         }).collect();
         if branches.is_empty() { return false; }
-        self.merge(root, branches, None, false)
+        self.merge(root, branches, None, false, false)
+    }
+
+    fn latest_revision(&self, root: &str) -> Option<u64> {
+        ["CatalogFamily", "RuntimeSnapshot", "SubagentUpdate"].iter()
+            .filter_map(|source| self.versions.get(&format!("{root}:{source}"))).map(|v| v.revision).max()
     }
 
     fn accept_version(&mut self, root: &str, source: &str, execution: Option<Value>, revision: u64) -> bool {
+        // Both streams and terminal lifecycle events use the same family revision. Comparing
+        // only within a source lets a delayed runtime snapshot finish a newer catalog child.
+        if self.latest_revision(root).is_some_and(|seen| revision < seen) { return false; }
         let previous = self.versions.entry(format!("{root}:{source}")).or_default();
         let catalog = source == "CatalogFamily";
         let same_execution = previous.execution == execution;
@@ -261,15 +271,14 @@ impl Families {
         true
     }
 
-    /// `snapshot` is the family revision of a snapshot that lists every child of the current
-    /// execution; `None` for word about single children.
-    fn merge(&mut self, root: &str, incoming: Vec<Branch>, snapshot: Option<u64>, metadata_only: bool) -> bool {
+    /// Versioned lifecycle events may update one child; only full snapshots retire omitted children.
+    fn merge(&mut self, root: &str, incoming: Vec<Branch>, snapshot: Option<u64>, full_snapshot: bool, metadata_only: bool) -> bool {
         let authoritative = snapshot.is_some();
         let previous = self.rosters.get(root).cloned().unwrap_or_default();
         // A family snapshot lists one execution's children. One it no longer lists has stopped,
         // and stays a member: its conversation is still part of this one.
         let mut rows = previous.clone();
-        if authoritative {
+        if full_snapshot {
             let unlisted: Vec<String> = rows.iter().filter(|m| m.working() && !incoming.iter().any(|b| b.id == m.id)).map(|m| m.id.clone()).collect();
             for row in rows.iter_mut().filter(|m| unlisted.contains(&m.id)) { row.status = "completed".into(); }
             for id in unlisted { self.mark_stopped(&id, false); }
@@ -281,7 +290,7 @@ impl Families {
             self.roots.insert(branch.id.clone(), root.to_owned());
             let old = previous.iter().find(|m| m.id == branch.id);
             // Seen at work, or seen to stop working: what the sidebar's child rows go by. Once
-            // a child stopped, only a family snapshot says it is at work again: a late part or
+            // a child stopped, only newer versioned lifecycle evidence starts it again: a late part or
             // status update of its last step, or the card that launched it, does not.
             let mut status = branch.status.map(|s| match s.to_lowercase().as_str() {
                 // Both catalog and runtime snapshots use this lifecycle value.

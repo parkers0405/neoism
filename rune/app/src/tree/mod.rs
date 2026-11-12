@@ -4,6 +4,7 @@
 //! place. Keys: j/k or arrows move, l/Right/Enter open or expand, h/Left collapse.
 
 pub mod drag;
+pub(crate) mod git;
 pub mod view;
 
 pub use view::view;
@@ -33,6 +34,9 @@ pub struct Tree {
     pub root: Option<String>,
     /// Listings by directory relative to the root ("" is the root).
     listings: HashMap<String, Vec<Entry>>,
+    git_statuses: HashMap<String, neoism_protocol::git::GitChangeStatus>,
+    /// Deleted children absent from disk, indexed once per Git snapshot.
+    git_deleted: HashMap<String, Vec<Entry>>,
     pub open: HashSet<String>,
     requested: HashSet<String>,
     pub selected: usize,
@@ -56,7 +60,15 @@ impl Tree {
     }
 
     fn push_rows(&self, dir: &str, depth: usize, rows: &mut Vec<Row>) {
-        let Some(entries) = self.listings.get(dir) else { return };
+        let entries = self.listings.get(dir).map(Vec::as_slice).unwrap_or_default();
+        let mut merged;
+        let entries = if let Some(deleted) = self.git_deleted.get(dir) {
+            merged = entries.to_vec();
+            let seen: HashSet<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+            merged.extend(deleted.iter().filter(|entry| !seen.contains(entry.name.as_str())).cloned());
+            merged.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+            merged.as_slice()
+        } else { entries };
         for entry in entries {
             let path = join(dir, &entry.name);
             let open = entry.is_dir && self.open.contains(&path);

@@ -1,10 +1,11 @@
 //! The app answers `--version` with the release it shipped in: the root workspace's version,
 //! which the release tag, the updater and the installers all compare against.
-use std::path::Path;
+use std::path::PathBuf;
 
 fn main() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-    println!("cargo:rerun-if-changed={}", manifest.display());
+    // A shared target can reuse this executable across worktrees; resolve the current root at runtime.
+    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo manifest directory")).join("../../Cargo.toml");
+    println!("cargo:rerun-if-changed=../../Cargo.toml");
     println!("cargo:rerun-if-env-changed=NEOISM_VERSION");
     let from_workspace = std::fs::read_to_string(&manifest).ok().and_then(|text| {
         let mut in_package = false;

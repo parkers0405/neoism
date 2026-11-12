@@ -3,6 +3,81 @@ use super::*;
 // -- SSE event-stream proxy -------------------------------------------------
 
 #[derive(Default)]
+pub(crate) struct CatalogActivityEvidence {
+    state: Mutex<CatalogActivityState>,
+}
+
+#[derive(Default)]
+struct CatalogActivityState {
+    generation: u64,
+    activities: HashMap<String, (u64, Option<String>, bool)>,
+}
+
+impl CatalogActivityEvidence {
+    /// Capture before HTTP; events already seen must not prevent REST recovery
+    /// of a transition missed while the catalog stream was disconnected.
+    /// Published newer requests also supersede older responses, per row.
+    pub(crate) fn begin_list(&self) -> u64 {
+        let mut state = self.state.lock();
+        state.generation += 1;
+        state.generation
+    }
+
+    pub(crate) fn publish_list(
+        &self,
+        tx: &AgentReplySender,
+        generation: u64,
+        mut threads: Vec<ThreadSummary>,
+        requested_cursor: Option<String>,
+        next_cursor: Option<String>,
+    ) {
+        let mut state = self.state.lock();
+        for thread in &mut threads {
+            if let Some((observed, activity, busy)) =
+                state.activities.get(&thread.session_id)
+            {
+                if *observed > generation {
+                    thread.catalog_activity = activity.clone();
+                    thread.busy = *busy;
+                    continue;
+                }
+            }
+            state.activities.insert(
+                thread.session_id.clone(),
+                (generation, thread.catalog_activity.clone(), thread.busy),
+            );
+        }
+        // Validation/overlay and publication must be atomic with live forwarding.
+        let _ = tx.send(AgentServerMessage::ThreadList {
+            threads,
+            requested_cursor,
+            next_cursor,
+        });
+    }
+
+    pub(crate) fn forward(&self, tx: &AgentReplySender, event: Value) {
+        let mut state = self.state.lock();
+        if event.get("type").and_then(Value::as_str) == Some("session.catalog.activity") {
+            let properties = &event["properties"];
+            if let (Some(session_id), Some(activity)) = (
+                properties["sessionID"].as_str(),
+                properties["activity"].as_str(),
+            ) {
+                if matches!(activity, "idle" | "running" | "background" | "permission") {
+                    state.generation += 1;
+                    let generation = state.generation;
+                    state.activities.insert(
+                        session_id.to_owned(),
+                        (generation, Some(activity.to_owned()), activity == "running"),
+                    );
+                }
+            }
+        }
+        forward_catalog_event(tx, event);
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct SessionStatusEvidence {
     generations: Mutex<HashMap<String, u64>>,
 }
@@ -282,7 +357,7 @@ async fn run_event_stream_inner(
                         if let Ok(value) = serde_json::from_str::<Value>(payload) {
                             let event = normalize_v2_event(value);
                             if catalog {
-                                forward_catalog_event(&inner.tx, event);
+                                inner.activity_evidence.forward(&inner.tx, event);
                             } else if !hydrated && event.get("type").and_then(Value::as_str)
                                 .is_some_and(|kind| kind.starts_with("question.") || kind.starts_with("permission."))
                             {
@@ -579,18 +654,34 @@ pub(crate) fn forward_agent_server_event(
                 if let Some(task) =
                     neoism_ui::panels::agent_pane::stream_events::task_status_from_parent_part(part)
                 {
-                    let _ = tx.send(AgentServerMessage::SubagentUpdate {
-                        session_id: task.session_id,
-                        status: protocol_subagent_status(&task.status),
-                        title: task.title,
-                        agent: task.agent,
-                        current_tool: None,
-                        started_at: task.started_at,
-                        parent_session_id: Some(source_session.clone()),
-                        root_session_id: None,
-                        execution_id: None,
-                        family_revision: None,
-                    });
+                    let terminal = |status: &str| {
+                        matches!(status, "completed" | "error" | "failed" | "cancelled" | "canceled")
+                    };
+                    if terminal(&task.status)
+                        || part["state"]["status"].as_str().is_some_and(terminal)
+                    {
+                        // A terminal parent Task can acknowledge queued work or
+                        // replay an old result. Neither finishes nor revives a child.
+                        let _ = tx.send(AgentServerMessage::SubagentMetadata {
+                            session_id: task.session_id,
+                            title: task.title,
+                            agent: task.agent,
+                            parent_session_id: Some(source_session.clone()),
+                        });
+                    } else {
+                        let _ = tx.send(AgentServerMessage::SubagentUpdate {
+                            session_id: task.session_id,
+                            status: protocol_part_activity_status(&task.status),
+                            title: task.title,
+                            agent: task.agent,
+                            current_tool: None,
+                            started_at: task.started_at,
+                            parent_session_id: Some(source_session.clone()),
+                            root_session_id: None,
+                            execution_id: None,
+                            family_revision: None,
+                        });
+                    }
                 }
                 // Family streams carry child-only tool/reasoning/text parts
                 // with the child's session id. Classify all part kinds through
@@ -601,8 +692,8 @@ pub(crate) fn forward_agent_server_event(
                             session_id: source_session.clone(),
                             // A completed tool is not a completed child. Part
                             // updates are activity evidence only; terminal
-                            // child lifecycle comes from the parent task,
-                            // runtime snapshot, or subtask.completed event.
+                            // child lifecycle comes from a versioned runtime
+                            // snapshot or subtask.completed event.
                             status: protocol_part_activity_status(&activity.status),
                             title: None,
                             agent: None,
@@ -1037,47 +1128,8 @@ pub(crate) fn forward_agent_server_event(
                 output: output.clone(),
                 error,
             });
-            // Some provider/tool paths emit only `tool.completed` for a
-            // foreground Task result and no later `message.part.updated` or
-            // `session.subtask.completed`. An explicit terminal status in the
-            // Task output is authoritative for that child. `status: running`
-            // remains nonterminal because background Task calls finish as soon
-            // as they launch their child.
-            if tool == "task" {
-                if let Some(output) = output.as_deref() {
-                    let task_id =
-                        neoism_ui::panels::agent_pane::stream_events::task_id_from_output(
-                            output,
-                        );
-                    let task_status =
-                        neoism_ui::panels::agent_pane::stream_events::task_status_from_output(
-                            output,
-                        )
-                        .map(
-                            neoism_ui::panels::agent_pane::stream_events::normalize_subagent_status,
-                        );
-                    if let (Some(task_id), Some(task_status @ ("completed" | "error"))) =
-                        (task_id, task_status)
-                    {
-                        let _ = tx.send(AgentServerMessage::SubagentUpdate {
-                            session_id: task_id,
-                            status: if task_status == "completed" {
-                                SubagentStatus::Completed
-                            } else {
-                                SubagentStatus::Failed
-                            },
-                            title: None,
-                            agent: None,
-                            current_tool: None,
-                            started_at: None,
-                            parent_session_id: Some(bound_session_id.to_string()),
-                            root_session_id: None,
-                            execution_id: None,
-                            family_revision: None,
-                        });
-                    }
-                }
-            }
+            // A parent Task result can acknowledge a queued follow-up; only
+            // subtask lifecycle events/runtime snapshots may finish the child.
             return;
         }
         "edit.proposed" => {
@@ -1209,17 +1261,6 @@ pub(crate) fn forward_agent_server_event(
         kind: event_type,
         properties,
     });
-}
-
-fn protocol_subagent_status(status: &str) -> SubagentStatus {
-    match status {
-        "blocked" | "waiting_permission" | "waiting-permission" | "retry" => {
-            SubagentStatus::Blocked
-        }
-        "completed" => SubagentStatus::Completed,
-        "error" | "failed" | "cancelled" | "canceled" => SubagentStatus::Failed,
-        _ => SubagentStatus::Running,
-    }
 }
 
 fn protocol_part_activity_status(status: &str) -> SubagentStatus {
@@ -1639,6 +1680,38 @@ mod tests {
     }
 
     #[test]
+    fn parent_task_terminal_parts_are_metadata_not_child_lifecycle() {
+        for (status, background, runtime_status) in [
+            ("completed", false, "completed"),
+            ("error", false, "error"),
+            ("completed", true, "running"),
+        ] {
+            let (tx, mut rx) = reply_queue::channel();
+            forward_agent_server_event(&tx, "root", json!({
+                "type":"message.part.updated",
+                "properties":{"sessionID":"root", "part":{
+                    "id":"task-part", "messageID":"parent-message", "type":"tool", "tool":"task",
+                    "state":{
+                        "status":status, "title":"Follow-up", "time":{"start":100},
+                        "metadata":{"sessionId":"child", "agent":"explore", "background":background},
+                        "output":format!("task_id: child\nstatus: {runtime_status}\nFollow-up queued")
+                    }
+                }}
+            }));
+            assert!(matches!(rx.try_recv().unwrap(), AgentServerMessage::SubagentMetadata {
+                session_id, title: Some(title),
+                agent: Some(agent), parent_session_id: Some(parent), ..
+            } if session_id == "child" && title == "Follow-up" && agent == "explore" && parent == "root"));
+            assert!(matches!(rx.try_recv().unwrap(), AgentServerMessage::MessageUpdated {
+                session_id, ..
+            } if session_id == "root"));
+            while let Ok(message) = rx.try_recv() {
+                assert!(!matches!(message, AgentServerMessage::SubagentUpdate { .. }));
+            }
+        }
+    }
+
+    #[test]
     fn parent_task_part_discovers_child_and_tracks_running_lifecycle() {
         let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
@@ -2006,7 +2079,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_task_tool_result_synthesizes_child_completion() {
+    fn terminal_task_tool_result_does_not_synthesize_child_completion() {
         let (tx, mut rx) = reply_queue::channel();
         forward_agent_server_event(
             &tx,
@@ -2025,14 +2098,6 @@ mod tests {
         assert!(matches!(
             rx.try_recv().unwrap(),
             AgentServerMessage::ToolUseResult { tool, .. } if tool == "task"
-        ));
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            AgentServerMessage::SubagentUpdate {
-                session_id,
-                status: SubagentStatus::Completed,
-                ..
-            } if session_id == "child"
         ));
         assert!(rx.try_recv().is_err());
     }

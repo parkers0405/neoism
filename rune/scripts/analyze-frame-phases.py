@@ -20,15 +20,19 @@ a = p.parse_args()
 
 frames, phases, marks = {}, {}, []
 pending_events = Counter()
+pending_drains = []
 message_counts = {}
 frame = re.compile(r'\[rune-frame\] seq=(\d+) at_us=\d+ mono_us=(-?\d+) poll_us=(\d+) work_us=(\d+) rerun=(\w+)')
 mark = re.compile(r'\[drive\] mark:(\S+) mono_us=(-?\d+) messages=(\d+)')
 event = re.compile(r'\[daemon\] AgentReply (\w+) ')
+drain = re.compile(r'\[inbox\] events=(\d+) remaining=(\d+) elapsed_us=(\d+)')
 for line in a.log.read_text(errors='replace').splitlines():
     if m := frame.match(line):
         seq, mono, poll, work = map(int, m.groups()[:4])
         frames[seq] = dict(seq=seq, mono=mono, poll_ms=poll / 1000, work_ms=work / 1000, poll_rerun=m[5] == 'true')
         frames[seq]['events'] = dict(pending_events)
+        frames[seq]['drains'] = pending_drains
+        pending_drains = []
         pending_events.clear()
     elif line.startswith('[rune-phases] '):
         row = json.loads(line[len('[rune-phases] '):])
@@ -38,6 +42,8 @@ for line in a.log.read_text(errors='replace').splitlines():
         message_counts[int(m[2])] = int(m[3])
     elif m := event.match(line):
         pending_events[m[1]] += 1
+    elif m := drain.match(line):
+        pending_drains.append(tuple(map(int, m.groups())))
 
 rows = []
 for seq, f in frames.items():
@@ -68,6 +74,12 @@ for (name, start), (_, end) in zip(marks, marks[1:]):
         events.update(r['events'])
     # Native event trace lines have no clock; associate them with the next encoded frame.
     print('  traced agent events: ' + (', '.join(f'{k}={n}' for k, n in events.most_common()) or 'none (enable --trace-events to observe delivery)'))
+    drains = [d for r in span for d in r['drains']]
+    if drains:
+        elapsed = [d[2] / 1000 for d in drains]
+        print(f'  inbox: {sum(d[0] for d in drains)} applied, peak remaining {max(d[1] for d in drains)}, '
+              f'last remaining {drains[-1][1]}, deferred polls {sum(d[1] > 0 for d in drains)}; '
+              f'drain ms p95 {percentile(elapsed, .95):.2f} max {max(elapsed):.2f}')
     for key in ['work_ms', 'poll_ms', 'wall_ms', 'cpu_ms', 'off_cpu_ms', 'commit_ms', 'paint_ms', 'other_cpu_ms', 'encode_ms', 'after_encode_ms']:
         span_values = [r[key] for r in span if r[key] is not None]
         if not span_values:

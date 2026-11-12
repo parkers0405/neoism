@@ -30,6 +30,7 @@ p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDes
 p.add_argument('--binary', default=default_binary())
 p.add_argument('--drive', required=True, help='NEOISM_RUNE_DRIVE script; end it with `quit`')
 p.add_argument('--session', help='Conversation to open (omit for a new chat)')
+p.add_argument('--window-state', type=Path, help='copy saved workspaces to include background workspace traffic in the capture')
 p.add_argument('--scene', help='Measure an offline Rune scene instead of a live conversation')
 p.add_argument('--cwd', default=os.getcwd(), help='Workspace directory of the test window')
 p.add_argument('--out', default='/tmp/neoism-rune-verify/live-pacing')
@@ -42,6 +43,8 @@ p.add_argument('--rune-trace', action='store_true', help="Also write Rune's per-
 p.add_argument('--env', action='append', default=[], help='Extra KEY=VALUE for the test window (RUNE_COMMIT_BUDGET_MS=4)')
 p.add_argument('--span', type=float, default=0, help='Also split each span into pieces this many seconds long')
 a = p.parse_args()
+if a.window_state and (not a.session or a.scene):
+    p.error('--window-state requires --session and cannot be used with --scene')
 version = subprocess.run([a.binary, '--version'], check=True, capture_output=True, text=True).stdout.strip()
 print(f'Capturing {version} ({Path(a.binary).resolve()})', flush=True)
 
@@ -75,9 +78,28 @@ try:
     log, state = base.with_suffix('.log'), base.with_suffix('.state.json')
     log.write_text('[capture] ' + json.dumps({'binary': str(Path(a.binary).resolve()), 'version': version, 'mode': a.mode, 'physical': a.physical, 'drive': a.drive}) + '\n')
     app_id = f'ai.neoism.rune.pacing{os.getpid()}'
-    state.write_text(json.dumps({'version': 1, 'active': 0, 'workspaces': [{'name': Path(a.cwd).name, 'cwd': a.cwd,
+    window = {'version': 1, 'active': 0, 'workspaces': [{'name': Path(a.cwd).name, 'cwd': a.cwd,
         'tabs': [{'kind': 'home', 'draft': ''}, {'kind': 'agent', 'session': a.session, 'draft': ''}],
-        'layout': {'kind': 'pane', 'tabs': [0, 1], 'active': 1, 'focused': True}, 'active': 1, 'sidebar': None, 'unsaved': {}}]}))
+        'layout': {'kind': 'pane', 'tabs': [0, 1], 'active': 1, 'focused': True}, 'active': 1, 'sidebar': None, 'unsaved': {}}]}
+    if a.window_state:
+        saved = json.loads(a.window_state.read_text())
+        if saved.get('version') != 1:
+            raise SystemExit('unsupported --window-state version')
+        selected = next((i for i, w in enumerate(saved['workspaces']) if w['cwd'] == a.cwd and not w.get('target')), None)
+        if selected is None:
+            selected = len(saved['workspaces'])
+            saved['workspaces'].append(window['workspaces'][0])
+        selected_workspace = saved['workspaces'][selected]
+        tabs = selected_workspace['tabs']
+        active = next((i for i, tab in enumerate(tabs) if tab.get('kind') == 'agent' and tab.get('session') == a.session), None)
+        if active is None:
+            active = len(tabs)
+            tabs.append({'kind': 'agent', 'session': a.session, 'draft': ''})
+        selected_workspace['active'] = active
+        selected_workspace['layout'] = {'kind': 'pane', 'tabs': list(range(len(tabs))), 'active': active, 'focused': True}
+        saved['active'] = selected
+        window = saved
+    state.write_text(json.dumps(window))
     env = [f'NEOISM_RUNE_STATE_PATH={state}', f'NEOISM_RUNE_APP_ID={app_id}', 'NEOISM_RUNE_FRAME_TRACE=1', 'WAYLAND_DEBUG=1', f'NEOISM_RUNE_DRIVE={a.drive}']
     scene_args = []
     if a.scene:

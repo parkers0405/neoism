@@ -44,6 +44,8 @@ const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 pub struct App {
     pub workspaces: Vec<crate::workspace::Entry>,
     pub workspace_active: usize,
+    /// Window-wide round-robin cursor; deliberately not swapped with workspace state.
+    pub(crate) inbox_next: Option<String>,
     pub workspace_id: String,
     pub workspace_ready: bool,
     /// The connection is a new one after a lost one: once the workspace is registered on it,
@@ -287,6 +289,7 @@ impl App {
             drive: crate::drive::Drive::from_env(),
             daemon: None,
             inbox: None,
+            inbox_next: None,
             images: None,
             connection: Connection::Connecting,
             pal: palette(&config.theme),
@@ -387,27 +390,28 @@ impl App {
         if !home.is_empty() && self.cwd.starts_with(&home) { format!("~{}", &self.cwd[home.len()..]) } else { self.cwd.clone() }
     }
 
+    pub(crate) fn apply_inbound(&mut self, event: Inbound) -> bool {
+        match event {
+            Inbound::Agent(message) => {
+                let delta = matches!(*message, neoism_protocol::agent::AgentServerMessage::ContentDelta { .. });
+                let applied = self.apply_agent(*message);
+                if delta { self.stream_pace.pending = true; }
+                applied && !delta
+            }
+            Inbound::Crdt { request_id, message } => self.apply_crdt(request_id, *message),
+            event => { self.apply(event); true }
+        }
+    }
+
+    /// Event-handler tests consume their fixture synchronously; native polling uses `drain`.
+    #[cfg(test)]
     pub fn drain_current(&mut self) -> bool {
         let Some(inbox) = &self.inbox else { return false };
         let events: Vec<Inbound> = inbox.lock().unwrap().drain(..).collect();
         let mut changed = false;
         let owner = self.workspace_id.clone();
         for event in events {
-            // A reply's text is applied now and shown on the stream's own pace (`StreamPace`).
-            if let Inbound::Agent(message) = event {
-                let delta = matches!(*message, neoism_protocol::agent::AgentServerMessage::ContentDelta { .. });
-                let applied = self.apply_agent(*message);
-                if delta { self.stream_pace.pending = true; } else { changed |= applied; }
-                if self.workspace_id != owner { break; }
-                continue;
-            } else if let Inbound::Crdt { request_id, message } = event {
-                // A heartbeat or our own echo changes nothing on screen.
-                changed |= self.apply_crdt(request_id, *message);
-                continue;
-            } else {
-                changed = true;
-            }
-            self.apply(event);
+            changed |= self.apply_inbound(event);
             // Close acknowledgement may dispose this workspace and select its neighbour.
             // The remaining old-socket events must never be applied to that neighbour.
             if self.workspace_id != owner { break; }
@@ -504,6 +508,7 @@ impl App {
         let Ok(snapshot) = serde_json::from_value::<GitRepoStatus>(status["snapshot"].clone()) else { return };
         if snapshot.workspace_root != self.cwd { return; }
         if snapshot.error.is_some() { return; }
+        self.tree.apply_git(&snapshot);
         self.git = snapshot.branch.filter(|_| snapshot.repo_root.is_some()).map(|branch| GitSummary {
             branch,
             added: snapshot.files.iter().map(|f| u64::from(f.additions)).sum(),

@@ -10,8 +10,8 @@ it restores the previous window afterward unless the user switched away. Existin
 display modes and scales are never changed.
 
 Reported per `mark:` span, from the app's frame trace and Wayland presentation feedback:
-UI-thread work per frame (poll start to encode end), how many frames re-ran the views, and
-missed refreshes while frames were flowing, plus longer gaps (idle time or stalls).
+UI-thread elapsed time per frame (poll start to encode end), how many polls requested a view rebuild,
+observed presentations per second across the entire span, short-gap missed refreshes, and longer gaps.
 Use --physical to assess missed refreshes: a headless output can forgive late frames
 a physical panel would drop. Longer gaps need input/motion context to distinguish
 intentional rest from a stall.
@@ -24,9 +24,10 @@ intentional rest from a stall.
 """
 import argparse, json, os, re, shlex, subprocess, time
 from pathlib import Path
+from rune_paths import default_binary
 
 p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-p.add_argument('--binary', default='/tmp/neoism-rune-target/release/neoism-rune')
+p.add_argument('--binary', default=default_binary())
 p.add_argument('--drive', required=True, help='NEOISM_RUNE_DRIVE script; end it with `quit`')
 p.add_argument('--session', help='Conversation to open (omit for a new chat)')
 p.add_argument('--cwd', default=os.getcwd(), help='Workspace directory of the test window')
@@ -38,6 +39,8 @@ p.add_argument('--timeout', type=int, default=90)
 p.add_argument('--trace-events', action='store_true', help='Include poll causes and daemon message kinds (no message bodies)')
 p.add_argument('--span', type=float, default=0, help='Also split each span into pieces this many seconds long')
 a = p.parse_args()
+version = subprocess.run([a.binary, '--version'], check=True, capture_output=True, text=True).stdout.strip()
+print(f'Capturing {version} ({Path(a.binary).resolve()})', flush=True)
 
 def hypr(*args): return subprocess.run(['hyprctl', *args], check=True, capture_output=True, text=True).stdout
 def monitors(): return {m['name']: m for m in json.loads(hypr('-j', 'monitors'))}
@@ -67,13 +70,14 @@ try:
 
     base = Path(a.out).absolute(); base.parent.mkdir(parents=True, exist_ok=True)
     log, state = base.with_suffix('.log'), base.with_suffix('.state.json')
+    log.write_text('[capture] ' + json.dumps({'binary': str(Path(a.binary).resolve()), 'version': version, 'mode': a.mode, 'physical': a.physical, 'drive': a.drive}) + '\n')
     app_id = f'ai.neoism.rune.pacing{os.getpid()}'
     state.write_text(json.dumps({'version': 1, 'active': 0, 'workspaces': [{'name': Path(a.cwd).name, 'cwd': a.cwd,
         'tabs': [{'kind': 'home', 'draft': ''}, {'kind': 'agent', 'session': a.session, 'draft': ''}],
         'layout': {'kind': 'pane', 'tabs': [0, 1], 'active': 1, 'focused': True}, 'active': 1, 'sidebar': None, 'unsaved': {}}]}))
     env = [f'NEOISM_RUNE_STATE_PATH={state}', f'NEOISM_RUNE_APP_ID={app_id}', 'NEOISM_RUNE_FRAME_TRACE=1', 'WAYLAND_DEBUG=1', f'NEOISM_RUNE_DRIVE={a.drive}']
     if a.trace_events: env += ['NEOISM_RUNE_TRACE_POLL=1', 'NEOISM_RUNE_TRACE_DAEMON=1']
-    command = f'cd {shlex.quote(a.cwd)} && ' + shlex.join(['env', *env, 'timeout', '--signal=INT', str(a.timeout), a.binary]) + f' > {shlex.quote(str(log))} 2>&1'
+    command = f'cd {shlex.quote(a.cwd)} && ' + shlex.join(['env', *env, 'timeout', '--signal=INT', str(a.timeout), a.binary]) + f' >> {shlex.quote(str(log))} 2>&1'
     destination = str(workspace) + ('' if a.physical else ' silent')
     hypr('dispatch', f'hl.dsp.exec_cmd({json.dumps(command)}, {{ workspace = {json.dumps(destination)} }})')
     pid = None
@@ -106,16 +110,17 @@ refresh = 1 / float(a.mode.split('@')[1])
 def percentile(values, q): values = sorted(values); return values[int(q * (len(values) - 1))] if values else 0.0
 def report(name, start, end):
     span = [f for f in frames if start <= f[0] <= end]
-    if len(span) < 3: return
+    if end - start < refresh: return
     work = [f[1] for f in span if f[1] > 0]
     times = [t for t in shown if start <= t <= end]
     all_gaps = [b - a for a, b in zip(times, times[1:])]
     gaps = [gap for gap in all_gaps if gap < 3.5 * refresh]
     long_gaps = [gap for gap in all_gaps if gap >= 3.5 * refresh]
     missed = sum(max(0, round(gap / refresh) - 1) for gap in gaps)
-    print(f'{name:>18}: {len(span):5d} frames, {sum(f[2] for f in span):4d} view re-runs | work ms p50 {percentile(work, .5):.2f} p95 {percentile(work, .95):.2f} '
-          f'p99 {percentile(work, .99):.2f} max {max(work, default=0):.2f} | missed {missed}/{len(gaps) + missed} ({100 * missed / max(1, len(gaps) + missed):.1f}%)'
-          f' at {len(gaps) / max(1e-9, sum(gaps)):.1f} fps | long gaps {len(long_gaps)}, max gap {1000 * max(all_gaps, default=0):.1f} ms')
+    print(f'{name:>18}: {len(span):5d} frames, {sum(f[2] for f in span):4d} poll rebuilds | work ms p50 {percentile(work, .5):.2f} p95 {percentile(work, .95):.2f} '
+          f'p99 {percentile(work, .99):.2f} max {max(work, default=0):.2f} | observed {len(times) / (end - start):.1f} fps'
+          f' | short-gap missed {missed}/{len(gaps) + missed} ({100 * missed / max(1, len(gaps) + missed):.1f}%)'
+          f' | long gaps {len(long_gaps)}, max gap {1000 * max(all_gaps, default=0):.1f} ms')
 
 print(f'{len(frames)} frames, {len(shown)} presentations; log {log}')
 for (name, start), (_, end) in zip(marks, marks[1:]):

@@ -4,8 +4,9 @@ release commits it, the centre and another pane's tab strip adopt the tab, a lon
 split its own pane, and leaving the zone or cancelling leaves the layout as it was."""
 import argparse,json,os,subprocess
 from pathlib import Path
+from rune_paths import default_binary
 p=argparse.ArgumentParser(description=__doc__)
-p.add_argument('--binary',default='/tmp/neoism-rune-target/release/neoism-rune')
+p.add_argument('--binary',default=default_binary())
 p.add_argument('--output',default='/tmp/neoism-rune-tab-drop')
 a=p.parse_args(); out=Path(a.output); out.mkdir(parents=True,exist_ok=True)
 W,H=1252,674

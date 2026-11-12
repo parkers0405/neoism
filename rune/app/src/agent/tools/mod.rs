@@ -15,7 +15,7 @@ mod shell;
 mod text;
 mod todos;
 
-pub use group::{group_at, visible};
+pub use group::{group_at, group_end, visible};
 pub use icons::Icons;
 
 use crate::app::App;

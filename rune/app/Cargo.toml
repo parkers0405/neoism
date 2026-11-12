@@ -12,6 +12,10 @@ description = "Neoism frontend built natively on Rune"
 name = "neoism-rune"
 path = "src/main.rs"
 
+[features]
+# Opt-in CPU/wall phase timings for native frame traces; not enabled in shipped builds.
+frame-profile = ["rune/frame-profile"]
+
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb" }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb", features = ["markdown"] }

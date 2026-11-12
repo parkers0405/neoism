@@ -371,8 +371,12 @@ impl App {
         let owner = self.workspace_id.clone();
         for event in events {
             // A reply's text is applied now and shown on the stream's own pace (`StreamPace`).
-            if matches!(&event, Inbound::Agent(message) if matches!(**message, neoism_protocol::agent::AgentServerMessage::ContentDelta { .. })) {
-                self.stream_pace.pending = true;
+            if let Inbound::Agent(message) = event {
+                let delta = matches!(*message, neoism_protocol::agent::AgentServerMessage::ContentDelta { .. });
+                let applied = self.apply_agent(*message);
+                if delta { self.stream_pace.pending = true; } else { changed |= applied; }
+                if self.workspace_id != owner { break; }
+                continue;
             } else if let Inbound::Crdt { request_id, message } = event {
                 // A heartbeat or our own echo changes nothing on screen.
                 changed |= self.apply_crdt(request_id, *message);
@@ -404,7 +408,7 @@ impl App {
                 self.tree_reconnected();
             }
             Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
-            Inbound::Agent(message) => self.apply_agent(*message),
+            Inbound::Agent(message) => { self.apply_agent(*message); }
             Inbound::Crdt { request_id, message } => { self.apply_crdt(request_id, *message); }
             Inbound::Editor(message) => self.apply_editor_message(*message),
             // Live PTY output is uncorrelated (request 0); a reattach replays backlog under its request.

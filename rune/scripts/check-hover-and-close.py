@@ -4,10 +4,11 @@ import argparse
 import json
 import os
 from pathlib import Path
+from rune_paths import default_binary
 import subprocess
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--binary', default='/tmp/neoism-rune-target/release/neoism-rune')
+parser.add_argument('--binary', default=default_binary())
 parser.add_argument('--output', default='/tmp/neoism-rune-hover-regressions')
 args = parser.parse_args()
 out = Path(args.output)

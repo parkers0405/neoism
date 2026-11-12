@@ -236,12 +236,13 @@ Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.
 
 ```sh
 rune/app/build.sh build --release
-/tmp/neoism-rune-target/release/neoism-rune  # connects to the running local daemon
-NEOISM_RUNE_OFFLINE=1 /tmp/neoism-rune-target/release/neoism-rune \
+RUNE_TARGET="${CARGO_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/neoism-rune-target}"
+"$RUNE_TARGET/release/neoism-rune"  # connects to the running local daemon
+NEOISM_RUNE_OFFLINE=1 "$RUNE_TARGET/release/neoism-rune" \
   --scene editor-long --snap /tmp/editor.png --size 1252x674 --scale 2 --at 2
 ```
 
-The build helper selects Rune's pinned toolchain. Set `CARGO_TARGET_DIR` to override its default output directory.
+The build helper selects Rune's pinned toolchain and keeps build output in `${XDG_CACHE_HOME:-$HOME/.cache}/neoism-rune-target`, not RAM-backed `/tmp`. Set `CARGO_TARGET_DIR` to override it; relative overrides resolve from `rune/app`.
 Use `--list-scenes` for reproducible surfaces, `--tree` for element/accessibility inspection, and `--trace`
 for per-frame geometry. Native windows do not replay `--script` in the pinned Rune version; the native checker
 sends actual input to its own focused test window.
@@ -294,9 +295,9 @@ python3 rune/scripts/check-live-pacing.py --session <conversation id> \
   --drive "ready;wait:2;live;wait:1;mark:stream;stream:/path/to/reply.md:10;mark:end;quit"
 ```
 
-`NEOISM_RUNE_FRAME_TRACE=1` prints each frame's `work_us` (poll start to encode end) and whether
-it re-ran the views; `NEOISM_RUNE_TRACE_POLL=1` names what re-ran them; `RUNE_COMMIT_BUDGET_MS=N`
-prints Rune's own breakdown of commits over `N` ms.
+`NEOISM_RUNE_FRAME_TRACE=1` prints each frame's `work_us` (elapsed wall time from poll start to encode end) and whether the poll requested a view rebuild; `NEOISM_RUNE_TRACE_POLL=1` names those requests. Rune can also commit independently of the poll, for example when scrolling changes the virtual row window. `RUNE_COMMIT_BUDGET_MS=N` prints Rune's own breakdown of commits over `N` ms.
+
+For native CPU versus wall-time measurements, build with `rune/app/build.sh build --release --features frame-profile`, run the same pacing checker, then run `python3 rune/scripts/analyze-frame-phases.py /path/to/capture.log`. This opt-in build adds `[rune-phases]` records for commit, layout, text, paint and apply work. Commit includes several nested phases, so do not sum them. Total `wall_ms` and `cpu_ms` both end at callback entry, after present; `work_us` ends earlier, at encode completion. Wall time minus thread CPU includes blocking and scheduler preemption; it is not a GPU timing measurement. Surface acquisition can occur before the poll and is not necessarily inside this interval. Normal builds leave phase profiling disabled.
 
 The native checker requires this machine's Hyprland Lua dispatch API, `wtype`, and `/dev/uinput` access for
 wheel input. It stops sending input if focus changes. `--natural` exercises normal redraw scheduling;

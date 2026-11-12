@@ -2,8 +2,9 @@
 """Check tab drag/chords and wordmark hover in a bounded, isolated native Rune window."""
 import argparse, fcntl, json, os, shlex, signal, struct, subprocess, time
 from pathlib import Path
+from rune_paths import default_binary
 p=argparse.ArgumentParser(description=__doc__)
-p.add_argument('--binary',default='/tmp/neoism-rune-target/release/neoism-rune')
+p.add_argument('--binary',default=default_binary())
 p.add_argument('--output',default='/tmp/neoism-rune-corrections/native-tabs')
 a=p.parse_args(); out=Path(a.output).absolute(); out.parent.mkdir(parents=True,exist_ok=True)
 trace=out.with_suffix('.jsonl'); trace.unlink(missing_ok=True)

@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.149" date="2026-11-12">
+      <description>
+        <p>Stable native Rune frontend for Linux, macOS and Windows, including editor and terminal panes, agent conversations, Notes, Git changes, reconnect recovery, and bounded event processing.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.149</url>
+    </release>
     <release version="0.7.142" date="2026-10-26">
       <description>
         <p>Faster chat readiness and history previews, queued-prompt handoff, derived search-index recovery, and new separately built browser-control source and extensions.</p>

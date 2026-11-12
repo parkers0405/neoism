@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.149] - 2026-11-12
+
+### Stable Rune frontend
+
+- Promotes the native Rune frontend from nightly to stable on Linux, macOS, and Windows, replacing the previous default frontend while retaining the workspace daemon and agent services.
+- Includes the code editor, terminal tabs and split panes, agent conversations and sub-agent navigation, image attachments, settings, Notes, Git changes and file-tree decorations, workspace/server selection, and collaboration surfaces developed on `rune-frontend`.
+- Includes reconnect and sleep recovery, queued-prompt handling, Windows workspace-directory fixes, virtualized transcripts, bounded rotating inbox processing, and catalog/live-activity revision fences from the completed nightly series.
+- Preserves opt-in frame profiling and the shared-documentation API contract validation. The release version and stable update channel are rebuilt into each platform's artifacts; nightly binaries are not relabeled.
+
+This release promotes the application source shipped in `v0.7.149-nightly.20261111.10`. All three nightly platform builds and the daemon image passed; local Rune testing recorded 395 passes and one intermittent reconnect-test timeout, with the isolated reconnect retry passing, and all 12 daemon status-hydration tests passed. Stable binaries still require their own production packaging checks. Existing database upgrade and rollback cautions remain applicable; no exhaustive frontend parity or live cross-platform validation is implied.
+
 ## [0.7.142] - 2026-10-26
 
 ### Chat readiness, index recovery, and browser control

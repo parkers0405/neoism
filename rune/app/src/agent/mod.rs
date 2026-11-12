@@ -664,7 +664,7 @@ impl App {
                 session.queued_prompts = count;
                 session.structure += 1; // Remeasure the virtual activity row when its child appears/disappears.
             }
-            return;
+            return true;
         }
         // The runtime snapshot also counts the family's background tasks (when it reports them).
         if let AgentServerMessage::RuntimeSnapshot { session_id, snapshot } = &message
@@ -681,7 +681,7 @@ impl App {
         if let AgentServerMessage::SessionEvent { session_id, kind, .. } = &message && kind == "stream.resumed" {
             let session_id = session_id.clone();
             self.agent_stream_resumed(&session_id);
-            return;
+            return true;
         }
         if self.families.note(&message) {
             // A family gained or changed a member: its chats are fetched ahead of a click, and
@@ -1327,6 +1327,31 @@ mod cache_tests {
         assert!(app.drain_current());
         assert_eq!(app.thread_activity["s"], "running");
         assert!(!app.drain_current(), "the inbox has been drained");
+    }
+
+    #[test]
+    fn queue_resume_and_prompt_events_still_invalidate_views() {
+        let mut app = App::new();
+        let inbox: crate::daemon::Inbox = Default::default();
+        app.inbox = Some(inbox.clone());
+        for message in [
+            AgentServerMessage::SessionEvent {
+                session_id: "s".into(), kind: "session.queue.updated".into(),
+                properties: json!({"queue":{"count":1}}),
+            },
+            AgentServerMessage::SessionEvent {
+                session_id: "s".into(), kind: "stream.resumed".into(), properties: json!({}),
+            },
+            AgentServerMessage::QuestionAsked {
+                session_id: "s".into(), request: json!({"id":"q","questions":[{"question":"Continue?"}]}),
+            },
+        ] {
+            inbox.lock().unwrap().push_back(crate::daemon::Inbound::Agent(Box::new(message)));
+            assert!(app.drain_current(), "handled state events must still update the UI");
+            assert!(!app.stream_pace.pending);
+        }
+        assert_eq!(app.sessions["s"].queued_prompts, 1);
+        assert!(!app.drain_current());
     }
 
     #[test]

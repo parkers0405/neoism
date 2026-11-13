@@ -69,6 +69,7 @@ COPY --from=builder /src/target/release/neoism-agent /usr/local/bin/neoism-agent
 RUN neoism-workspace-daemon --version && neoism-agent --version
 USER neoism
 ENV NEOISM_DAEMON_ADDR=0.0.0.0:9876 \
+    NEOISM_AGENT_HEADLESS=true \
     NEOISM_DAEMON_DATA_DIR=/var/lib/neoism/data \
     NEOISM_CONFIG_DIR=/var/lib/neoism/config \
     NEOISM_WORKSPACES_DIR=/var/lib/neoism/workspaces \

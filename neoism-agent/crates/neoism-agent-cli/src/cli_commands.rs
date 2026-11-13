@@ -9,6 +9,14 @@ use crate::{
 
 pub(super) async fn auth(command: AuthCommand) -> anyhow::Result<()> {
     match command {
+        AuthCommand::Login(args) => {
+            neoism_agent_server::auth_cli::auth_login(
+                args,
+                &neoism_agent_server::standard_services(),
+            )
+            .await
+            .map_err(anyhow::Error::msg)
+        }
         AuthCommand::Methods { server } => {
             get_and_print(server, "/v2/providers/auth-methods", None, false).await
         }
@@ -72,7 +80,7 @@ pub(super) async fn auth(command: AuthCommand) -> anyhow::Result<()> {
             let saved = response_json(
                 client
                     .post(format!("{server}/v2/providers/openai/oauth/callback"))
-                    .json(&json!({ "method": method }))
+                    .json(&json!({ "method": method, "attemptId": authorization.get("attemptId") }))
                     .send()
                     .await?,
             )
@@ -84,6 +92,14 @@ pub(super) async fn auth(command: AuthCommand) -> anyhow::Result<()> {
 
 pub(super) async fn mcp(command: McpCommand) -> anyhow::Result<()> {
     match command {
+        McpCommand::Auth(args) => {
+            neoism_agent_server::auth_cli::mcp_auth(
+                args,
+                &neoism_agent_server::standard_services(),
+            )
+            .await
+            .map_err(anyhow::Error::msg)
+        }
         McpCommand::Status { server, dir } => {
             get_and_print(server, "/v2/plugins/dev.neoism.mcp", dir.as_deref(), false)
                 .await

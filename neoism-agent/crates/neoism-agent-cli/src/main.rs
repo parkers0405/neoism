@@ -262,6 +262,8 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum AuthCommand {
+    /// Connect any model provider, including remote/device OAuth.
+    Login(neoism_agent_server::auth_cli::AuthLoginArgs),
     Methods {
         #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,
@@ -295,6 +297,8 @@ enum AuthCommand {
 
 #[derive(Debug, Subcommand)]
 enum McpCommand {
+    /// Authenticate an MCP server using a browser on this or another computer.
+    Auth(neoism_agent_server::auth_cli::McpAuthArgs),
     Status {
         #[arg(long, default_value = DEFAULT_SERVER)]
         server: String,

@@ -26,6 +26,7 @@ ENV HOME=/var/lib/neoism/home \
     XDG_DATA_HOME=/var/lib/neoism/data \
     NEOISM_AGENT_STATE_DIR=/var/lib/neoism/state/neoism-agent \
     NEOISM_AGENT_AUTH_PATH=/var/lib/neoism/state/neoism-agent/auth.json \
+    NEOISM_AGENT_HEADLESS=true \
     TERM=xterm-256color \
     SHELL=/bin/bash
 USER 10001:10001

@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.151" date="2026-11-13">
+      <description>
+        <p>Remote and headless provider authentication, scoped MCP OAuth callbacks, secure CLI token handling, Docker headless defaults, and isolated hosting validation tooling.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.151</url>
+    </release>
     <release version="0.7.150" date="2026-11-13">
       <description>
         <p>Rune Agent history, activity, tool cards and slash panels; editor Git integration; Neoism themes and wordmark flames; Agent lifecycle recovery and native embedding APIs.</p>

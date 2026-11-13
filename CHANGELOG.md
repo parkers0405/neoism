@@ -2,6 +2,15 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.151] - 2026-11-13
+
+### Remote authentication and Docker hosting
+
+- Adds headless device authorization for supported provider flows, explicit remote CLI credential handling, and headless defaults in daemon/worker Docker images.
+- Scopes worker provider authentication to permitted operations and credentials; MCP callbacks bind to one-time state before plugin loading and reject forged workspace directories.
+- Supports trusted public MCP callback bases, omits query secrets from request spans, and disables callback caching/referrer forwarding.
+- Includes remote authentication documentation and the isolated Docker release/recovery validation harness. Recorded v0.7.150 tests remain labeled with that version, not presented as live validation of the new image.
+
 ## [0.7.150] - 2026-11-13
 
 ### Rune and Agent update

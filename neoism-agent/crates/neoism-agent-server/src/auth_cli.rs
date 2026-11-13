@@ -45,7 +45,7 @@ enum AuthCommand {
 }
 
 #[derive(Debug, Args)]
-struct AuthLoginArgs {
+pub struct AuthLoginArgs {
     /// Provider ID or alias. `codex` selects OpenAI ChatGPT OAuth.
     provider: String,
     /// Authentication method index, kind, or label.
@@ -92,7 +92,7 @@ enum McpCommand {
 }
 
 #[derive(Debug, Args)]
-struct McpAuthArgs {
+pub struct McpAuthArgs {
     #[command(subcommand)]
     command: Option<McpAuthCommand>,
     /// MCP server name. Omit it to use `neoism mcp auth list`.
@@ -150,6 +150,8 @@ struct AuthMethod {
 struct Authorization {
     url: String,
     instructions: String,
+    #[serde(default, rename = "attemptId")]
+    attempt_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,7 +234,7 @@ async fn run_auth(
     }
 }
 
-async fn auth_login(
+pub async fn auth_login(
     mut args: AuthLoginArgs,
     services: &neoism_agent_service_api::AgentServices,
 ) -> Result<(), String> {
@@ -277,7 +279,7 @@ async fn auth_login(
             let authorization: Authorization = post_json::<Option<Authorization>>(
                 &args.output.server,
                 &format!("/v2/providers/{provider}/oauth/authorize"),
-                &json!({ "method": index, "inputs": {} }),
+                &json!({ "method": index, "inputs": { "headless": if args.no_open || remote_server(&args.output.server) { "true" } else { "false" } } }),
             )
             .await?
             .ok_or_else(|| {
@@ -293,10 +295,10 @@ async fn auth_login(
                 return Ok(());
             }
             eprintln!("\nWaiting for authorization...");
-            let saved: bool = post_json(
+            let saved: Value = post_json(
                 &args.output.server,
                 &format!("/v2/providers/{provider}/oauth/callback"),
-                &json!({ "method": index, "code": args.code }),
+                &json!({ "method": index, "code": args.code, "attemptId": authorization.attempt_id }),
             )
             .await?;
             print_result(
@@ -361,17 +363,24 @@ async fn run_mcp(
 ) -> Result<(), String> {
     match command {
         McpCommand::List(output) => mcp_list(output, false).await,
-        McpCommand::Auth(args) => match args.command {
-            Some(McpAuthCommand::List(output)) => mcp_list(output, true).await,
-            None => {
-                let name = args.name.ok_or_else(|| {
-                    "an MCP server name is required; use `neoism mcp auth list` to list servers"
-                        .to_string()
-                })?;
-                mcp_authenticate(name, args.no_open, args.output, services).await
-            }
-        },
+        McpCommand::Auth(args) => mcp_auth(args, services).await,
         McpCommand::Logout(args) => mcp_logout(args).await,
+    }
+}
+
+pub async fn mcp_auth(
+    args: McpAuthArgs,
+    services: &neoism_agent_service_api::AgentServices,
+) -> Result<(), String> {
+    match args.command {
+        Some(McpAuthCommand::List(output)) => mcp_list(output, true).await,
+        None => {
+            let name = args.name.ok_or_else(|| {
+                "an MCP server name is required; use `neoism mcp auth list` to list servers"
+                    .to_string()
+            })?;
+            mcp_authenticate(name, args.no_open, args.output, services).await
+        }
     }
 }
 
@@ -497,6 +506,9 @@ fn provider_id(provider: &str) -> &str {
 }
 
 fn auth_kind(auth: Option<&Value>) -> &'static str {
+    if auth == Some(&Value::Bool(true)) {
+        return "connected";
+    }
     match auth
         .and_then(|value| value.get("type"))
         .and_then(Value::as_str)
@@ -629,8 +641,7 @@ fn print_json(value: &impl serde::Serialize) -> Result<(), String> {
 
 async fn get_json<T: DeserializeOwned>(server: &str, path: &str) -> Result<T, String> {
     response_json(
-        reqwest::Client::new()
-            .get(format!("{}{path}", normalize_server(server)))
+        auth_request(reqwest::Method::GET, server, path)?
             .send()
             .await,
     )
@@ -643,8 +654,7 @@ async fn post_json<T: DeserializeOwned>(
     body: &Value,
 ) -> Result<T, String> {
     response_json(
-        reqwest::Client::new()
-            .post(format!("{}{path}", normalize_server(server)))
+        auth_request(reqwest::Method::POST, server, path)?
             .json(body)
             .send()
             .await,
@@ -658,8 +668,7 @@ async fn put_json<T: DeserializeOwned>(
     body: &Value,
 ) -> Result<T, String> {
     response_json(
-        reqwest::Client::new()
-            .put(format!("{}{path}", normalize_server(server)))
+        auth_request(reqwest::Method::PUT, server, path)?
             .json(body)
             .send()
             .await,
@@ -669,8 +678,7 @@ async fn put_json<T: DeserializeOwned>(
 
 async fn delete_json<T: DeserializeOwned>(server: &str, path: &str) -> Result<T, String> {
     response_json(
-        reqwest::Client::new()
-            .delete(format!("{}{path}", normalize_server(server)))
+        auth_request(reqwest::Method::DELETE, server, path)?
             .send()
             .await,
     )
@@ -691,8 +699,42 @@ async fn response_json<T: DeserializeOwned>(
         .map_err(|error| format!("invalid Agent response: {error}"))
 }
 
+fn auth_request(
+    method: reqwest::Method,
+    server: &str,
+    path: &str,
+) -> Result<reqwest::RequestBuilder, String> {
+    let url = reqwest::Url::parse(server).map_err(|_| "invalid Agent server URL".to_string())?;
+    let remote = remote_server(server);
+    let token = std::env::var("NEOISM_SERVER_TOKEN").ok().or_else(|| {
+        if remote {
+            None
+        } else {
+            std::env::var("NEOISM_AGENT_TOKEN").ok()
+        }
+    });
+    if remote && url.scheme() != "https" {
+        return Err("remote authentication requires HTTPS; use a localhost tunnel for HTTP".into());
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())?;
+    let request = client.request(method, format!("{}{path}", normalize_server(server)));
+    Ok(match token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    })
+}
+
 fn normalize_server(server: &str) -> String {
     server.trim_end_matches('/').to_string()
+}
+
+fn remote_server(server: &str) -> bool {
+    reqwest::Url::parse(server).ok().is_some_and(|url| {
+        !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]" | "::1"))
+    })
 }
 
 fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
@@ -711,6 +753,54 @@ fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn provider_login_completes_the_returned_attempt_and_accepts_connection_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (path, response) in [
+                ("/v2/providers/auth-methods", json!({"example": [{"type": "oauth", "label": "Device"}]})),
+                ("/v2/providers/example/oauth/authorize", json!({"url": "https://example.invalid/device", "instructions": "Enter code", "attemptId": "attempt-scoped"})),
+                ("/v2/providers/example/oauth/callback", json!({"id": "connection-created", "providerId": "example"})),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let (header_end, length) = loop {
+                    let mut buffer = [0; 4096];
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers.lines().find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                        }).unwrap_or(0);
+                        if bytes.len() >= end + 4 + length { break (end + 4, length); }
+                    }
+                };
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                assert!(headers.lines().next().unwrap().contains(path));
+                if path.ends_with("/authorize") {
+                    let body: Value = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                    assert_eq!(body["inputs"]["headless"], "true");
+                } else if path.ends_with("/callback") {
+                    let body: Value = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                    assert_eq!(body["attemptId"], "attempt-scoped");
+                }
+                let body = response.to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        auth_login(AuthLoginArgs {
+            provider: "example".into(), method: None, key: None, code: None,
+            no_open: true, no_wait: false,
+            output: OutputArgs { server: server_url, json: true },
+        }, &crate::standard_services()).await.unwrap();
+        server.await.unwrap();
+    }
 
     #[test]
     fn browser_launcher_honors_injected_path_and_reports_missing_launcher() {

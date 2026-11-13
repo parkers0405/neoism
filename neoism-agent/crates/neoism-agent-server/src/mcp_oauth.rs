@@ -4,8 +4,10 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
+#[cfg(test)]
+use neoism_agent_core::{Id, IdKind};
 use neoism_agent_core::{
-    Id, IdKind, McpAuthStartResponse, McpConfig, McpOAuthConfig, McpOAuthSetting,
+    McpAuthStartResponse, McpConfig, McpOAuthConfig, McpOAuthSetting,
     McpStatus,
 };
 use rand::{distributions::Alphanumeric, Rng};
@@ -90,7 +92,7 @@ pub(crate) async fn auth_start_with_config(
         }
         uri.to_string()
     } else {
-        default_redirect_uri.clone()
+        public_redirect_uri(name)?.unwrap_or_else(|| default_redirect_uri.clone())
     };
     let existing = stored_client_info(name, url, auth_store).await?;
     // Registrations are bound to their redirect URI. Legacy registrations did
@@ -115,7 +117,9 @@ pub(crate) async fn auth_start_with_config(
     let client =
         oauth_client_credentials(name, url, oauth, &endpoints, auth_store, true).await?;
     let authorization_url = endpoints.authorization_url;
-    let state = Id::ascending(IdKind::Entry).to_string();
+    // This nonce is also the admission capability for the browser-only
+    // callback. Do not use timestamp-ordered resource identifiers here.
+    let state = random_oauth_string(64);
     let code_verifier = random_oauth_string(64);
     let code_challenge = pkce_challenge(&code_verifier);
     let mut params = vec![
@@ -533,10 +537,32 @@ fn redirect_uri(name: &str, oauth: &McpOAuthConfig) -> String {
         let server = std::env::var("NEOISM_SERVER")
             .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
         format!(
-            "{}/v2/plugins/dev.neoism.mcp/{name}/auth/callback",
-            server.trim_end_matches('/')
+            "{}/v2/plugins/dev.neoism.mcp/{}/auth/callback",
+            server.trim_end_matches('/'), form_escape(name).replace('+', "%20")
         )
     })
+}
+
+// Trusted worker/controller configuration only. Never infer this from Host or
+// X-Forwarded-* headers supplied by a browser/client. Includes a gateway's
+// workspace/generation prefix when needed; contains no worker credentials.
+fn public_redirect_uri(name: &str) -> anyhow::Result<Option<String>> {
+    std::env::var("NEOISM_AGENT_MCP_OAUTH_PUBLIC_BASE_URL").ok()
+        .map(|base| public_callback_uri(&base, name)).transpose()
+}
+
+fn public_callback_uri(base: &str, name: &str) -> anyhow::Result<String> {
+    let mut uri = reqwest::Url::parse(base).context("invalid MCP OAuth public base URL")?;
+    let loopback = matches!(uri.host_str(), Some("localhost" | "127.0.0.1" | "[::1]" | "::1"));
+    if !(uri.scheme() == "https" || (uri.scheme() == "http" && loopback))
+        || uri.host_str().is_none() || !uri.username().is_empty() || uri.password().is_some()
+        || uri.query().is_some() || uri.fragment().is_some()
+    {
+        return Err(anyhow!("MCP OAuth public base URL requires HTTPS (HTTP only on loopback), without credentials, query or fragment"));
+    }
+    uri.path_segments_mut().map_err(|_| anyhow!("invalid MCP OAuth public base path"))?
+        .pop_if_empty().extend(["v2", "plugins", "dev.neoism.mcp", name, "auth", "callback"]);
+    Ok(uri.to_string())
 }
 
 #[cfg(test)]
@@ -557,6 +583,20 @@ fn is_peer_callback_uri(uri: &reqwest::Url, name: &str) -> bool {
 #[cfg(test)]
 mod callback_uri_tests {
     use super::*;
+
+    #[test]
+    fn hosted_public_callback_preserves_gateway_scope_and_encodes_name() {
+        assert_eq!(
+            public_callback_uri("https://gateway.example/workspaces/w/generations/3/", "team + one/two").unwrap(),
+            "https://gateway.example/workspaces/w/generations/3/v2/plugins/dev.neoism.mcp/team%20+%20one%2Ftwo/auth/callback"
+        );
+        assert!(public_callback_uri("http://127.0.0.1:4096", "test").is_ok());
+        assert_eq!(public_callback_uri("https://gateway.example/workspaces/w", "a&b").unwrap(),
+            "https://gateway.example/workspaces/w/v2/plugins/dev.neoism.mcp/a&b/auth/callback");
+        for base in ["http://gateway.example", "https://user:secret@gateway.example", "https://gateway.example/?token=secret", "https://gateway.example/#fragment", "file:///workspace"] {
+            assert!(public_callback_uri(base, "test").is_err(), "{base}");
+        }
+    }
 
     #[test]
     fn peer_callback_matches_encoded_server_names_without_losing_scope() {

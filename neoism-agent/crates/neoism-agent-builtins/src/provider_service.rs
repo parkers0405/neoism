@@ -169,8 +169,14 @@ impl ProviderPlatform {
                 Ok(Value::Bool(true))
             }
             ProviderRouteAction::OAuthAuthorize => {
-                let input: ProviderAuthorizeRequest =
+                let mut input: ProviderAuthorizeRequest =
                     serde_json::from_value(request.body)?;
+                if request.hosted
+                    || std::env::var("NEOISM_AGENT_HEADLESS")
+                        .is_ok_and(|value| value == "1" || value == "true")
+                {
+                    input.inputs.insert("headless".into(), "true".into());
+                }
                 let providers = self.catalog.providers().await?;
                 let attempt_id = opaque_attempt_id();
                 let expires_at = crate::now_millis().saturating_add(10 * 60 * 1000);

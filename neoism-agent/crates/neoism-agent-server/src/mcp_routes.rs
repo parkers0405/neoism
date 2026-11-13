@@ -291,8 +291,16 @@ pub(crate) async fn mcp_auth_callback_get(
     let auth_store = request_store
         .for_attempt(&attempt)
         .map_err(|error| ApiError::forbidden(error.to_string()))?;
-    let directory = query.directory.unwrap_or_else(|| attempt.directory.clone());
-    let plugins = state.refreshed_plugin_snapshot(&directory).await;
+    // Neither a browser query nor an authenticated callback may change the
+    // directory captured by the authorized start request.
+    if query.directory.as_deref().is_some_and(|directory| directory != attempt.directory) {
+        return Err(ApiError::bad_request("MCP OAuth callback directory mismatch"));
+    }
+    let directory = scoped_directory(&state, Some(attempt.directory.clone()), &HeaderMap::new())?;
+    let plugins = state
+        .try_plugin_snapshot_for_tenant(&auth_store.scope().tenant_id, &directory)
+        .await
+        .map_err(ApiError::bad_request)?;
     mcp::auth_callback_with_attempt(
         &plugins.config().mcp,
         &name,

@@ -48,7 +48,9 @@ pub async fn authorize(
 ) -> anyhow::Result<Option<ProviderAuthAuthorization>> {
     let method = select_method(provider_id, method, providers)?;
     if provider_id == "xai" && matches!(method.kind, ProviderAuthMethodKind::OAuth) {
-        if provider_auth_xai::is_headless_method(&method.label) {
+        if provider_auth_xai::is_headless_method(&method.label)
+            || inputs.get("headless").is_some_and(|value| value == "true")
+        {
             return provider_auth_xai::authorize_xai_device(pending_key, pending)
                 .await
                 .map(Some);
@@ -74,6 +76,9 @@ pub async fn authorize(
         }
         ProviderAuthMethodKind::OAuth => {
             if provider_id == "openai" && method.label.contains("browser") {
+                if inputs.get("headless").is_some_and(|value| value == "true") {
+                    return authorize_openai_headless(pending_key, pending).await.map(Some);
+                }
                 return authorize_openai_browser(pending_key, pending)
                     .await
                     .map(Some);
@@ -111,7 +116,11 @@ pub async fn callback(
 ) -> anyhow::Result<AuthInfo> {
     let method = select_method(provider_id, method, providers)?;
     if provider_id == "xai" && matches!(method.kind, ProviderAuthMethodKind::OAuth) {
-        let auth = if provider_auth_xai::is_headless_method(&method.label) {
+        let device_flow = matches!(
+            pending.read().await.get(pending_key),
+            Some(ProviderOAuthPending::XaiDevice { .. })
+        );
+        let auth = if provider_auth_xai::is_headless_method(&method.label) || device_flow {
             provider_auth_xai::poll_xai_device(pending_key, pending).await?
         } else {
             let code = code

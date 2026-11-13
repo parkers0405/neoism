@@ -205,7 +205,10 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
                         target: "neoism_agent::perf",
                         "http_request",
                         method = %request.method(),
-                        uri = %request.uri(),
+                        // OAuth browser redirects contain codes and state in
+                        // their query. Request spans must never record those
+                        // admission capabilities (or other query secrets).
+                        uri = %request.uri().path(),
                     )
                 })
                 .on_request(DefaultOnRequest::new().level(Level::TRACE))
@@ -308,6 +311,40 @@ async fn plugin_route_dispatch(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Response {
+    // Browser callbacks must resolve their scope/directory from one-time state
+    // BEFORE loading any plugin generation. The browser has no worker bearer
+    // token, and its query must never select an arbitrary workspace directory.
+    if request.method() == Method::GET {
+        if let Some(name) = mcp_callback_name(request.uri().path()) {
+            let query = match axum::extract::Query::try_from_uri(request.uri()) {
+                Ok(query) => query,
+                Err(error) => return error.into_response(),
+            };
+            let claims = request
+                .extensions()
+                .get::<crate::caller::CallerClaims>()
+                .cloned()
+                .map(axum::extract::Extension);
+            let mut response = crate::mcp_routes::mcp_auth_callback_get(
+                State(state),
+                claims,
+                axum::extract::Path(name),
+                query,
+                request.headers().clone(),
+            )
+            .await
+            .into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+            response.headers_mut().insert(
+                "referrer-policy",
+                HeaderValue::from_static("no-referrer"),
+            );
+            return response;
+        }
+    }
     let tenant_id = request
         .extensions()
         .get::<crate::caller::CallerClaims>()
@@ -1111,6 +1148,8 @@ async fn authenticate_request(
                     .uri()
                     .path()
                     .starts_with("/v2/plugins/dev.neoism.workflows")
+                    || (provider_auth_path(request.uri().path())
+                        && worker_scope_allows(&claims, &request))
                     || claims.resolved.as_ref().is_some_and(|resolved| {
                         resolved
                             .scopes
@@ -1498,15 +1537,25 @@ fn mutation_requires_session_control(request: &Request<Body>) -> bool {
 
 fn is_mcp_oauth_callback_get(request: &Request<Body>) -> bool {
     request.method() == Method::GET
-        && request
-            .uri()
-            .path()
-            .starts_with("/v2/plugins/dev.neoism.mcp/")
-        && request.uri().path().ends_with("/auth/callback")
+        && mcp_callback_name(request.uri().path()).is_some()
         && url::form_urlencoded::parse(
             request.uri().query().unwrap_or_default().as_bytes(),
         )
         .any(|(key, value)| key == "state" && !value.is_empty())
+}
+
+fn mcp_callback_name(path: &str) -> Option<String> {
+    let name = path
+        .strip_prefix("/v2/plugins/dev.neoism.mcp/")?
+        .strip_suffix("/auth/callback")?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    // Decode one path segment, preserving literal '+' (not query whitespace).
+    let encoded = format!("name={}", name.replace('+', "%2B").replace('&', "%26"));
+    url::form_urlencoded::parse(encoded.as_bytes())
+        .next()
+        .map(|(_, name)| name.into_owned())
 }
 
 fn is_ticketed_pty_connect(request: &Request<Body>) -> bool {
@@ -1561,6 +1610,16 @@ mod ticket_auth_tests {
             .body(Body::empty())
             .unwrap();
         assert!(!is_mcp_oauth_callback_get(&post));
+        for path in [
+            "/v2/plugins/dev.neoism.mcp//auth/callback?state=nonce",
+            "/v2/plugins/dev.neoism.mcp/a/other/auth/callback?state=nonce",
+            "/v2/plugins/dev.example/a/auth/callback?state=nonce",
+        ] {
+            assert!(!is_mcp_oauth_callback_get(&request(path)));
+        }
+        assert_eq!(mcp_callback_name("/v2/plugins/dev.neoism.mcp/team%20%2B%20one%2Ftwo/auth/callback").as_deref(), Some("team + one/two"));
+        assert_eq!(mcp_callback_name("/v2/plugins/dev.neoism.mcp/a&b/auth/callback").as_deref(), Some("a&b"));
+        assert_eq!(mcp_callback_name("/v2/plugins/dev.neoism.mcp/a%26b/auth/callback").as_deref(), Some("a&b"));
     }
 }
 
@@ -1608,6 +1667,11 @@ fn worker_scope_allows(
         return true;
     }
     let path = request.uri().path();
+    if provider_auth_path(path) {
+        // These handlers use the worker's tenant/workspace credential store,
+        // not installation credentials. Read-only tokens cannot manage auth.
+        return has("agent:use");
+    }
     if hosted_restricted_path(path)
         && !path.starts_with("/v2/plugins/dev.neoism.workflows")
     {
@@ -1699,6 +1763,17 @@ fn hosted_restricted_path(path: &str) -> bool {
             && (path.ends_with("/auth") || path.contains("/oauth/")))
 }
 
+fn provider_auth_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/v2/providers/") else {
+        return false;
+    };
+    let Some((provider, operation)) = rest.split_once('/') else {
+        return false;
+    };
+    !provider.is_empty()
+        && matches!(operation, "auth" | "oauth/authorize" | "oauth/callback")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationClass {
     Standard,
@@ -1752,6 +1827,18 @@ fn requires_directory_scope(path: &str) -> bool {
 #[cfg(test)]
 mod hosted_plugin_authorization_tests {
     use super::*;
+
+    #[test]
+    fn worker_provider_auth_exception_is_narrow() {
+        for path in ["/v2/providers/openai/auth", "/v2/providers/openai/oauth/authorize", "/v2/providers/openai/oauth/callback"] {
+            assert!(provider_auth_path(path));
+            // Shared control-plane classification is unchanged.
+            assert!(hosted_restricted_path(path));
+        }
+        for path in ["/v2/config", "/v2/identity", "/v2/providers/openai/oauth/unknown", "/v2/providers//auth", "/v2/providers/openai/extra/auth"] {
+            assert!(!provider_auth_path(path));
+        }
+    }
 
     #[test]
     fn session_projects_discovery_authorizes_each_root_not_a_request_directory() {

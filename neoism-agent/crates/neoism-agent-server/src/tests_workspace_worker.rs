@@ -119,6 +119,74 @@ fn signed_for(
 }
 
 #[tokio::test]
+async fn worker_browser_mcp_callback_is_state_bound_without_bearer_or_directory_input() {
+    use neoism_agent_service_api::{CredentialScope, McpConnectionRef, McpOAuthAttempt};
+    let root = std::env::temp_dir().join(format!("worker-mcp-callback-{}", neoism_agent_core::new_session_id()));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(workspace.join(".agent")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_url = format!("http://{}/token", listener.local_addr().unwrap());
+    let token_server = tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().route("/token", axum::routing::post(|body: String| async move {
+            let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
+            assert_eq!(form["code_verifier"], "private-pkce-verifier");
+            assert_eq!(form["redirect_uri"], "https://gateway.example/workspaces/workspace-a/callback");
+            axum::Json(json!({"access_token": "worker-secret", "token_type": "Bearer"}))
+        }))).await.unwrap();
+    });
+    std::fs::write(workspace.join(".agent/agent.json"), serde_json::to_vec(&json!({
+        "mcp": {"remote": {"type": "remote", "url": "https://mcp.example/mcp", "oauth": {
+            "clientId": "client", "authorizationUrl": "https://auth.example/authorize", "tokenUrl": token_url
+        }}}
+    })).unwrap()).unwrap();
+    let key = WorkspaceWorkerSigningKey::new([38u8; 32]).unwrap();
+    let binding = binding(&workspace, key.clone(), 1);
+    let services = services(&root, &binding);
+    let store = services.mcp_credentials.clone();
+    let scope = CredentialScope { tenant_id: binding.tenant_id().into(), workspace_id: Some(binding.workspace_id().into()) };
+    let connection = McpConnectionRef { connection_id: "remote".into(), server_url: "https://mcp.example/mcp".into() };
+    let attempt = McpOAuthAttempt {
+        scope: scope.clone(), connection: connection.clone(), state: "browser-state".into(),
+        code_verifier: "private-pkce-verifier".into(),
+        redirect_uri: "https://gateway.example/workspaces/workspace-a/callback".into(),
+        directory: workspace.to_string_lossy().into_owned(), expires_at: (now_millis() / 1000) as u64 + 60,
+    };
+    store.put_attempt(attempt.clone()).await.unwrap();
+    let state = AppState::open_database_with_services(root.join("agent.db"), services).await.unwrap();
+    let app = crate::app_router::app(state);
+    for scopes in [&["agent:use"][..], &["workspace:admin"][..]] {
+        let response = app.clone().oneshot(signed_for(
+            &key, &binding, binding.root(), scopes, Method::GET,
+            "/v2/providers/openai/auth", None,
+        )).await.unwrap();
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(app.clone().oneshot(signed_for(
+        &key, &binding, binding.root(), &["agent:read"], Method::GET,
+        "/v2/providers/openai/auth", None,
+    )).await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(app.clone().oneshot(signed(
+        &key, &binding, Method::GET, "/v2/identity", None,
+    )).await.unwrap().status(), StatusCode::FORBIDDEN);
+    let path = "/v2/plugins/dev.neoism.mcp/remote/auth/callback?code=code&state=browser-state";
+    let response = app.clone().oneshot(request(Method::GET, path, None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(store.get(&scope, &connection).await.unwrap().unwrap().tokens.unwrap().access_token, "worker-secret");
+    assert!(store.get(&CredentialScope::local(), &connection).await.is_err());
+    assert_eq!(app.clone().oneshot(request(Method::GET, path, None)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    store.put_attempt(attempt).await.unwrap();
+    // A forged directory must be rejected before plugin generation/config IO.
+    let response = app.clone().oneshot(request(Method::GET, &format!("{path}&directory=/outside-worker"), None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(app.oneshot(request(Method::GET, "/v2/plugins/dev.neoism.mcp/remote/auth/callback?code=code&state=unknown", None)).await.unwrap().status(), StatusCode::BAD_REQUEST);
+    token_server.abort();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn worker_http_shares_one_root_and_restores_logical_sessions() {
     let root = std::env::temp_dir().join(format!(
         "neoism-worker-http-{}",

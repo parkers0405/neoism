@@ -275,6 +275,7 @@ fn cached_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     let line = &doc.lines[index];
     let (start, end) = (cached.offsets[index], cached.offsets[index] + line.len());
     let mut text = std::collections::hash_map::DefaultHasher::new();
+    buffer.git.marks(doc).get(index).hash(&mut text);
     buffer.external_edit.as_ref().filter(|f| (f.first..=f.last).contains(&index))
         .map(|f| (f.first, f.last, f.revision)).hash(&mut text);
     (line, index, first, last, segment.byte_start, segment.byte_end, segment.source_col, segment.visual_indent).hash(&mut text);
@@ -333,6 +334,15 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     let selected = selection_on_line(doc, index);
             let x_of = |byte: usize| m.gutter_w + segment.visual_col(segment.source_col_for_byte(line, byte, TAB)) as f32 * adv;
             let mut visual = row().w_full().h(line_h).fill(if current && selected.is_none() { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT });
+            if let Some(mark) = buffer.git.marks(doc).get(index) {
+                if mark.added || mark.modified {
+                    let color = rgb(if mark.added { p.green } else { p.yellow });
+                    visual = visual.child(el().key("git-change").absolute(0.0, 0.0).w(3.0).h(line_h).fill(color));
+                }
+                if mark.deleted && last {
+                    visual = visual.child(el().key("git-deletion").absolute(0.0, line_h - 3.0).w(adv).h(3.0).fill(rgb(p.red)));
+                }
+            }
             if let Some(flash) = buffer.external_edit.as_ref().filter(|f| (f.first..=f.last).contains(&index)) {
                 // Full affected rows, including blank/deletion landings and every wrap segment.
                 visual = visual.child(el().key("external-edit").pin(Some(m.gutter_w), Some(0.0), Some(0.0), None)

@@ -60,6 +60,8 @@ pub struct Tab {
     pub id: u64,
     pub kind: TabKind,
     pub draft: TextEdit,
+    /// Full text behind compact paste pills, retained for the draft's undo history.
+    pub pastes: std::collections::HashMap<String, String>,
     /// Prompt waiting for `ThreadCreated` on a new conversation.
     pub pending_prompt: Option<String>,
     pub selection: Option<crate::agent::slash::Selection>,
@@ -72,7 +74,7 @@ impl App {
         let terminal = matches!(kind, TabKind::Home | TabKind::Terminal);
         // The new tab's composer takes the keyboard from whichever field had it.
         self.tabs.iter_mut().for_each(|t| t.draft.focused = false);
-        self.tabs.push(Tab { id, kind, draft: TextEdit::new(""), pending_prompt: None, selection: None });
+        self.tabs.push(Tab { id, kind, draft: TextEdit::new(""), pastes: Default::default(), pending_prompt: None, selection: None });
         self.active = self.tabs.len() - 1;
         self.tabs[self.active].draft.focused = true;
         self.layout.open(id);
@@ -104,6 +106,7 @@ impl App {
     pub(crate) fn close_tab_now(&mut self, index: usize) {
         if index >= self.tabs.len() { return; }
         let removed = self.tabs.remove(index);
+        self.attach.pending.remove(&removed.id);
         if removed.kind == TabKind::GitDiff { self.clear_git_review(); }
         self.close_terminal(removed.id);
         self.forget_table_state(removed.id);
@@ -154,7 +157,7 @@ impl App {
 
     pub fn submit(&mut self) {
         let index = self.active;
-        let text = self.tabs[index].draft.text.trim().to_owned();
+        let text = self.expanded_composer_text(index).trim().to_owned();
         if text.is_empty() { return; }
         if matches!(self.tabs[index].kind, TabKind::Agent { .. }) {
             if let Some(command) = CloseCommand::parse(&text) {
@@ -163,7 +166,9 @@ impl App {
                 return;
             }
         }
+        self.prepare_composer_submit(index);
         self.tabs[index].draft.clear();
+        self.tabs[index].pastes.clear();
         match self.tabs[index].kind.clone() {
             TabKind::Home | TabKind::Terminal => self.run_command(index, text),
             TabKind::Agent { session: Some(session_id) } => self.submit_prompt(&session_id, text),

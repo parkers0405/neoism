@@ -8,6 +8,7 @@
 //! screen; `tick` stops asking for frames as soon as no wordmark is visible.
 
 mod animation;
+pub mod fire;
 
 use crate::app::App;
 use crate::ui::theme::rgb;
@@ -77,6 +78,7 @@ impl Host {
 
 #[derive(Default)]
 pub struct Wordmark {
+    pub fire_enabled: bool,
     pub letters: Vec<Image>,
     /// Width / height of the whole artwork.
     pub aspect: f32,
@@ -124,12 +126,20 @@ impl Wordmark {
 }
 
 impl Wordmark {
+    pub fn replay(&mut self, key: &str) {
+        if self.reduced { return; }
+        let clock = self.clock;
+        let host = self.host(key);
+        host.animation.replay(clock);
+    }
+
     /// Advance the hosts actually drawn in visible panes, including unfocused splits.
     /// Returns (moving, rebuild): `moving` while anything animates (keep frames coming; the
     /// idle shimmer runs on live bindings), `rebuild` only when a view must re-run: a wordmark
     /// that just appeared (to bind), or a click effect drawn as a canvas.
     pub fn tick(&mut self, visible: &[String], now: f64) -> (bool, bool) {
         let dt = self.last_tick.map(|last| (now - last).clamp(0.0, 0.10) as f32).unwrap_or(0.0);
+        let previous = self.clock;
         self.clock = now;
         for (key, host) in &mut self.hosts {
             if !visible.contains(key) { host.pointer = None; host.hover = [0.0; LETTERS]; }
@@ -138,7 +148,7 @@ impl Wordmark {
         self.last_tick = Some(now);
         let reduced = self.reduced;
         let alpha = 1.0 - (-HOVER_RATE * dt).exp();
-        let mut rebuild = false;
+        let mut rebuild = self.fire_enabled && !reduced && (now * 16.0).floor() != (previous * 16.0).floor();
         let mut effect = false;
         for key in visible {
             let fresh = !self.hosts.contains_key(key);
@@ -150,6 +160,7 @@ impl Wordmark {
             }
             if !reduced { host.drive(host.created.map_or(0.0, |c| (now - c) as f32)); }
             effect |= host.animation.is_active(now);
+            rebuild |= host.animation.is_active(previous) && !host.animation.is_active(now);
         }
         (!reduced || effect, rebuild || effect)
     }
@@ -199,7 +210,8 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
     let seconds = host.and_then(|h| h.created).map(|c| (clock - c) as f32).unwrap_or(0.0);
     let frame = host.and_then(|h| h.animation.frame(clock));
     let show_original = frame.as_ref().is_none_or(|f| f.show_original());
-    let mut root = el().key(key).w(width).h(height);
+    // This subtree supplies its own frame-by-frame motion; a second layout spring detaches flames.
+    let mut root = el().key(key).w(width).h(height).instant_changes();
 
     if let Some(host) = host { host.height.set(height); }
     let slice = |i: usize| [i as f32 * width / LETTERS as f32, 0.0, width / LETTERS as f32, height];
@@ -242,6 +254,16 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
         root = root.child(canvas(shape).key(format!("{key}-effect")).absolute(clip[0], clip[1]).w(clip[2]).h(clip[3]));
     }
 
+    if mark.fire_enabled && !mark.reduced {
+        let age = seconds;
+        // Keep this canvas in one coordinate space through the click/settle/idle handoff.
+        let clip = [-width, -height * 4.0, width * 3.0, height * 9.0];
+        let mut shape = Shape::new().view_box(clip[2], clip[3]);
+        fire::draw(age, &letters, &mut shape, [clip[0], clip[1]], crate::ui::fire::colors(app.pal), frame);
+        root = root.child(canvas(shape).key(format!("{key}-fire"))
+            .absolute(clip[0], clip[1]).w(clip[2]).h(clip[3]));
+    }
+
     // Hover and click targets are the idle slices, as the original hit-tests them; they sit
     // on top so moving letters never steal the pointer.
     let owned = key.to_owned();
@@ -255,9 +277,7 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
                     if inside { host.pointer = Some(i); } else if host.pointer == Some(i) { host.pointer = None; }
                 })
                 .on_press(move |s: &mut App| {
-                    if s.wordmark.reduced { return; }
-                    let clock = s.wordmark.clock;
-                    s.wordmark.host(&press_key).animation.replay(clock);
+                    s.wordmark.replay(&press_key);
                 }),
         );
     }
@@ -267,6 +287,40 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn both_wordmarks_keep_the_original_click_rotation_with_flames_enabled() {
+        for kind in ["splash", "agent"] {
+            let mut mark = Wordmark::default();
+            mark.fire_enabled = true;
+            let key = host_key(kind, 1);
+            let mut seen = Vec::new();
+            for _ in 0..animation::Effect::ALL.len() {
+                mark.replay(&key);
+                seen.push(mark.hosts[&key].animation.frame(0.1).unwrap().effect);
+            }
+            for effect in animation::Effect::ALL {
+                assert!(seen.contains(&effect), "{kind} lost {effect:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn flames_only_rebuild_when_enabled_and_keep_animating_without_clicks() {
+        let mut mark = Wordmark::default();
+        let key = host_key("splash", 1);
+        let visible = [key.clone()];
+        mark.tick(&visible, 0.0);
+        assert_eq!(mark.tick(&visible, 1.0), (true, false));
+        mark.fire_enabled = true;
+        assert_eq!(mark.tick(&visible, 2.0), (true, true));
+        assert_eq!(mark.tick(&visible, 30.0), (true, true), "fire must not expire after one click effect");
+        mark.fire_enabled = false;
+        assert_eq!(mark.tick(&visible, 31.0), (true, false));
+        mark.fire_enabled = true;
+        mark.reduced = true;
+        assert_eq!(mark.tick(&visible, 32.0), (false, false));
+    }
+
     #[test]
     fn splash_and_agent_in_separate_panes_both_ease_hover() {
         let mut app = App::new();

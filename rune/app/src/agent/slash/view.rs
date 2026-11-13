@@ -72,6 +72,9 @@ pub fn picker_card(app: &App) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     let [cx, cy, cw, _] = composer;
+    if picker.kind == Kind::Usage { return super::usage::view(app, composer); }
+    if picker.kind == Kind::Tasks { return super::tasks::view(app, composer); }
+    if picker.kind == Kind::Goals { return super::goals::view(app, composer); }
     // As many rows as fit between the agent pane's top (8 pt under its tab row, never over the
     // chrome) and 6 pt above the composer.
     let top = app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s;
@@ -209,7 +212,7 @@ pub fn picker_card(app: &App) -> El {
     let scrim = el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .on_press(|a: &mut App| a.close_prompt_picker());
     let layer = el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
-    let layer = if picker.kind == Kind::Slash { layer } else { layer.child(scrim) };
+    let layer = if picker.kind == Kind::Slash || picker.mention.is_some() { layer } else { layer.child(scrim) };
     layer.child(card.absolute(cx, y))
 }
 
@@ -217,6 +220,10 @@ pub fn picker_card(app: &App) -> El {
 fn query_row(app: &App, picker: &Picker, width: f32) -> El {
     let p = app.pal;
     let s = app.ty.scale();
+    if picker.mention.is_some() {
+        return text(if picker.query.text.is_empty() { "Type a skill name".into() } else { format!("${}", picker.query.text) })
+            .font(mono(13.0 * s, false)).color(rgb(p.blue)).w(width).truncate();
+    }
     if picker.kind == Kind::Slash {
         let query = app.active_tab().draft.text.trim_start_matches('/').to_owned();
         return if query.is_empty() {

@@ -31,7 +31,25 @@ pub fn panel_bg(p: &Palette) -> u32 {
 }
 
 pub fn palette(name: &str) -> &'static Palette {
+    let name = if name == "pastel_dark" { "neoism_dark" } else { name };
     PALETTES.iter().find(|p| p.name == name).unwrap_or(&PALETTES[0])
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    #[test]
+    fn neoism_theme_aliases_preserve_colors_and_identity() {
+        let dark = palette("neoism_dark");
+        assert!(std::ptr::eq(dark, palette("pastel_dark")));
+        assert_eq!(dark.bg, 0x000000);
+        assert_eq!(palette("pastelDark").bg, 0x131a21);
+        assert_ne!(dark.name, palette("pastelDark").name);
+        assert_eq!(*palette("neoism_light"), Palette { name: "neoism_light", ..*palette("one_light") });
+        assert_eq!(PALETTES.iter().filter(|p| p.name == "neoism_dark").count(), 1);
+        assert!(!PALETTES.iter().any(|p| p.name == "pastel_dark"));
+    }
 }
 
 pub const ICONS: Family = Family::Named("Cascadia Code NF");

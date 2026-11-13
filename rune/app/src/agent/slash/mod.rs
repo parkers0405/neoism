@@ -6,6 +6,9 @@
 
 pub(crate) mod actions;
 mod usage;
+mod tasks;
+mod goals;
+mod panel;
 mod catalog;
 pub mod effects;
 mod logos;
@@ -14,6 +17,7 @@ mod plan;
 mod view;
 
 pub use picker::{Kind, Picker};
+pub(crate) use goals::Goal;
 pub use view::{effect_layer, picker_card, provider_mark};
 
 use catalog::{AuthMethod, ConnectProvider};

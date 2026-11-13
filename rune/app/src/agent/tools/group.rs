@@ -1,14 +1,11 @@
-//! Which tool rows the transcript shows, and how runs of them fold into one row: consecutive
-//! reads/searches of one batch become a `Read: 3 files` group, two or more settled edits become a
-//! `Patched files · N calls` stack. Ported from `timeline/{layout,read_group,patch_group}.rs`.
+//! Compact context-gathering runs, without losing the original calls or transcript boundaries.
 
-use super::diff;
 use neoism_protocol::agent::{HistoryMessage, HistoryMessageKind, HistoryOutputKind};
-use std::collections::HashSet;
 
-/// Settled turns (before `live_from`) show prompts and answers only; the live turn shows its
-/// whole trace. Checklists and direct shell commands are content and always stay.
+/// Show the live turn's trace; settled turns retain messages and explicit user content.
 pub fn visible(message: &HistoryMessage, index: usize, live_from: usize) -> bool {
+    if message.kind == HistoryMessageKind::Reasoning && message.text.trim().is_empty()
+        && matches!(message.title.trim(), "" | "Thinking") { return false; }
     let tool = message.tool.as_str();
     if message.text.trim_start().starts_with("Subagent finished.")
         || (tool == "background_task_result" && message.id.starts_with("background-task-"))
@@ -37,103 +34,46 @@ pub fn is_todos(message: &HistoryMessage) -> bool {
 
 /// The row starting at `start` when it folds a run: `(end exclusive, synthetic message)`.
 pub fn group_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, HistoryMessage)> {
-    patch_stack_at(messages, start).or_else(|| read_group_at(messages, start))
+    let end = group_end(messages, start)?;
+    let calls: Vec<_> = messages[start..end].iter().filter(|m| groupable_read(m)).cloned().collect();
+    Some((end, read_group(&calls)))
 }
 
-/// Row-list discovery must not serialize patch payloads or summarize offscreen search results.
+/// Row-list discovery only checks metadata, never parses output or diff payloads.
 pub fn group_end(messages: &[HistoryMessage], start: usize) -> Option<usize> {
-    patch_stack_end(messages, start).or_else(|| read_group_end(messages, start))
-}
-
-fn patch_stack_end(messages: &[HistoryMessage], start: usize) -> Option<usize> {
-    let mut end = start;
-    while messages.get(end).is_some_and(|m| {
-        m.kind == HistoryMessageKind::Tool
-            && diff::is_edit_tool(&m.tool)
-            && matches!(m.status.as_str(), "completed" | "success" | "done")
-            && !is_todos(m)
-            && !diff::sections(&m.tool, &m.status, &m.title, &m.text, &m.detail).is_empty()
-    }) {
-        end += 1;
-    }
-    (end >= start + 2).then_some(end)
-}
-
-fn patch_stack_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, HistoryMessage)> {
-    let end = patch_stack_end(messages, start)?;
-    let calls: Vec<_> = messages[start..end].iter().map(|m| serde_json::json!({
-        "id": m.id, "title": m.title, "text": m.text, "tool": m.tool, "detail": m.detail,
-    })).collect();
-    let first = &messages[start];
-    let detail = serde_json::json!({"neoismToolDetail": "patchStack", "calls": calls}).to_string();
-    Some((end, synthetic(first, first.id.clone(), format!("Patched files \u{b7} {} calls", end - start), String::new(), "completed", "apply_patch", detail)))
-}
-
-fn read_group_end(messages: &[HistoryMessage], start: usize) -> Option<usize> {
-    let first = messages.get(start).filter(|m| groupable_read(m))?;
-    let batch = first.tool_batch_id.as_deref().filter(|b| !b.trim().is_empty());
-    let family = read_family(&first.tool);
-    let mut end = start;
-    while messages.get(end).is_some_and(|m| {
-        groupable_read(m) && read_family(&m.tool) == family && m.tool_batch_id.as_deref().filter(|b| !b.trim().is_empty()) == batch
-    }) {
-        end += 1;
+    messages.get(start).filter(|m| groupable_read(m))?;
+    let mut end = start + 1;
+    for (index, message) in messages.iter().enumerate().skip(start + 1) {
+        if groupable_read(message) {
+            end = index + 1;
+        } else if !visible(message, index, 0)
+            || (message.kind == HistoryMessageKind::Assistant && message.text.trim().is_empty() && message.attachments.is_empty()) {
+            continue;
+        } else { break; }
     }
     Some(end)
 }
 
-fn read_group_at(messages: &[HistoryMessage], start: usize) -> Option<(usize, HistoryMessage)> {
-    let end = read_group_end(messages, start)?;
-    Some((end, read_group(&messages[start..end])))
-}
-
-/// A run of reads/searches as one message (also used for a lone read inside a composition).
+/// Count calls, not matching files. Original messages remain available to child disclosures.
 pub fn read_group(tools: &[HistoryMessage]) -> HistoryMessage {
-    let family = read_family(&tools[0].tool).unwrap_or("Search");
-    let mut labels = Vec::new();
-    let mut seen = HashSet::new();
-    let mut file_results = family == "Read";
-    let clean = |s: &str| s.replace(['\r', '\n', '\t'], " ");
+    let (mut reads, mut searches, mut lists) = (0, 0, 0);
     for tool in tools {
-        match family {
-            "Grep" => {
-                let mut native = false;
-                for line in tool.detail.lines() {
-                    if line.starts_with("Grep:") {
-                        native = true;
-                        file_results = true;
-                    } else if native && !line.starts_with(char::is_whitespace) {
-                        if let Some(path) = line.strip_suffix(':').filter(|p| !p.is_empty()) {
-                            if seen.insert(path.to_owned()) { labels.push(clean(path)); }
-                        }
-                    }
-                }
-            }
-            "Glob" => {
-                let mut lines = tool.detail.lines();
-                if lines.next().is_some_and(|l| l.starts_with("Glob ")) {
-                    file_results = true;
-                    for path in lines.filter(|l| !l.is_empty() && *l != "No files found") {
-                        if seen.insert(path.to_owned()) { labels.push(clean(path)); }
-                    }
-                }
-            }
-            _ => {
-                let label = read_label(tool);
-                if seen.insert(label.clone()) { labels.push(label); }
-            }
+        match read_family(&tool.tool) {
+            Some("Read") => reads += 1,
+            Some("List") => lists += 1,
+            _ => searches += 1,
         }
     }
-    if matches!(family, "Grep" | "Glob") && !file_results {
-        labels = tools.iter().map(read_label).collect();
-    }
-    let count = if file_results { labels.len() } else { tools.len() };
-    let unit = if file_results { "file" } else { "search" };
-    let title = format!("{family}: {count} {unit}{}", if count == 1 { "" } else { "s" });
-    if labels.is_empty() { labels.push("No matching files".into()); }
+    let counts = [(reads, "read", "reads"), (searches, "search", "searches"), (lists, "list", "lists")]
+        .into_iter().filter(|(n, ..)| *n > 0)
+        .map(|(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
+        .collect::<Vec<_>>().join(", ");
     let settled = tools.iter().all(|t| matches!(t.status.trim().to_ascii_lowercase().as_str(), "completed" | "success" | "done"));
+    let title = format!("{} context · {counts}", if settled { "Gathered" } else { "Gathering" });
     let first = &tools[0];
-    synthetic(first, format!("{}..", first.id), title, labels.join("\n"), if settled { "completed" } else { "running" }, "tool_group", String::new())
+    let mut result = synthetic(first, format!("{}..", first.id), title, String::new(), if settled { "completed" } else { "running" }, "tool_group", String::new());
+    result.composition_children = tools.to_vec();
+    result
 }
 
 fn groupable_read(m: &HistoryMessage) -> bool {
@@ -141,7 +81,9 @@ fn groupable_read(m: &HistoryMessage) -> bool {
         && !is_todos(m)
         && m.todos.is_empty()
         && m.attachments.is_empty()
-        && !matches!(m.status.trim().to_ascii_lowercase().as_str(), "error" | "failed" | "stopped" | "aborted")
+        && m.composition_children.is_empty()
+        && visible(m, 0, 0)
+        && matches!(m.status.trim().to_ascii_lowercase().as_str(), "pending" | "running" | "streaming" | "completed" | "success" | "done")
         && read_family(&m.tool).is_some()
 }
 
@@ -157,12 +99,13 @@ pub fn read_family(tool: &str) -> Option<&'static str> {
     }
 }
 
-fn read_label(m: &HistoryMessage) -> String {
+pub(super) fn read_label(m: &HistoryMessage) -> String {
     let title = m.title.trim();
     if title.is_empty() {
         return m.tool.clone();
     }
-    title.split_once('(').and_then(|(_, target)| target.strip_suffix(')')).unwrap_or(title).replace(['\r', '\n', '\t'], " ")
+    let target = title.split_once('(').and_then(|(_, target)| target.strip_suffix(')')).unwrap_or(title).replace(['\r', '\n', '\t'], " ");
+    format!("{} · {target}", read_family(&m.tool).unwrap_or("Tool"))
 }
 
 fn synthetic(base: &HistoryMessage, id: String, title: String, text: String, status: &str, tool: &str, detail: String) -> HistoryMessage {
@@ -193,32 +136,53 @@ mod tests {
     }
 
     #[test]
-    fn reads_of_one_batch_fold_into_a_file_count() {
-        let messages = vec![tool("a", "read", "Read(src/a.rs)", "b1"), tool("b", "read", "Read(src/b.rs)", "b1"), tool("c", "read", "Read(src/c.rs)", "b2")];
+    fn empty_streaming_parts_do_not_split_context_calls() {
+        let mut empty = tool("empty", "", "", "");
+        empty.kind = HistoryMessageKind::Assistant;
+        let mut thinking = empty.clone();
+        thinking.kind = HistoryMessageKind::Reasoning;
+        thinking.title = "Thinking".into();
+        let calls = vec![tool("a", "read", "Read(a)", ""), empty,
+            tool("b", "grep", "Grep(b)", ""), thinking, tool("c", "read", "Read(c)", "")];
+        let (end, group) = group_at(&calls, 0).unwrap();
+        assert_eq!(end, 5);
+        assert_eq!(group.title, "Gathered context · 2 reads, 1 search");
+        assert_eq!(crate::agent::timeline::row_items(&calls, 0, false), vec![crate::agent::timeline::RowItem::Group(0, 5)]);
+    }
+
+    #[test]
+    fn mixed_context_calls_fold_across_batches_without_deduplicating_calls() {
+        let messages = vec![
+            tool("a", "read", "Read(src/a.rs)", "b1"),
+            tool("b", "glob", "Glob(**/*.rs)", "b2"),
+            tool("c", "grep", "Grep(symbol)", ""),
+            tool("d", "list", "List(src)", "b3"),
+            tool("e", "search", "Search(docs)", ""),
+            tool("f", "read", "Read(src/a.rs)", "b4"),
+        ];
         let (end, group) = group_at(&messages, 0).unwrap();
-        assert_eq!(end, 2);
-        assert_eq!(group.title, "Read: 2 files");
-        assert_eq!(group.text, "src/a.rs\nsrc/b.rs");
+        assert_eq!(end, 6);
+        assert_eq!(group.title, "Gathered context · 2 reads, 3 searches, 1 list");
+        assert_eq!(group.composition_children.len(), messages.len());
         assert_eq!(group.id, "a..");
-        assert_eq!(group_end(&messages, 0), Some(2));
-        assert_eq!(group_end(&messages, 2), Some(3));
+        assert_eq!(group_end(&messages, 0), Some(end));
+        assert_eq!(read_label(&group.composition_children[1]), "Glob · **/*.rs");
         assert_eq!(crate::agent::timeline::row_items(&messages, 0, false), vec![
-            crate::agent::timeline::RowItem::Group(0, 2), crate::agent::timeline::RowItem::Group(2, 3),
+            crate::agent::timeline::RowItem::Group(0, 6),
         ]);
     }
 
     #[test]
-    fn patch_boundaries_preserve_payloads_and_exclude_unsettled_or_empty_edits() {
+    fn patches_stay_individual_and_preserve_payloads() {
         let mut messages = vec![tool("a", "apply_patch", "Edit a", ""), tool("b", "apply_patch", "Edit b", "")];
         for message in &mut messages {
             message.detail = format!("*** Begin Patch\n*** Update File: {}.rs\n@@\n-old\n+new\n*** End Patch", message.id);
         }
-        assert_eq!(group_end(&messages, 0), Some(2));
-        assert_eq!(crate::agent::timeline::row_items(&messages, 0, false), vec![crate::agent::timeline::RowItem::Group(0, 2)]);
-        let (_, group) = group_at(&messages, 0).unwrap();
-        let payload: serde_json::Value = serde_json::from_str(&group.detail).unwrap();
-        assert_eq!(payload["calls"].as_array().unwrap().len(), 2);
-        assert_eq!(payload["calls"][1]["detail"], messages[1].detail);
+        assert_eq!(crate::agent::timeline::row_items(&messages, 0, false), vec![
+            crate::agent::timeline::RowItem::Message(0), crate::agent::timeline::RowItem::Message(1),
+        ]);
+        assert_eq!(group_end(&messages, 0), None);
+        assert!(group_at(&messages, 0).is_none());
         messages[1].status = "running".into();
         assert_eq!(group_end(&messages, 0), None);
         assert!(group_at(&messages, 0).is_none());
@@ -237,5 +201,64 @@ mod tests {
         todos.output_kind = Some(HistoryOutputKind::Todos);
         todos.todos = vec![serde_json::from_value(serde_json::json!({"status": "pending", "content": "x"})).unwrap()];
         assert!(visible(&todos, 0, 5));
+        for kind in [HistoryMessageKind::Reasoning, HistoryMessageKind::Subtask, HistoryMessageKind::Tool] {
+            let message = HistoryMessage { kind, ..read.clone() };
+            assert!(!visible(&message, 0, usize::MAX));
+            assert!(visible(&message, 0, 0));
+        }
+        todos.todos.clear();
+        assert!(!visible(&todos, 0, 5));
+    }
+
+    #[test]
+    fn internal_entries_remain_hidden_without_splitting_context_runs() {
+        for (id, name, text) in [
+            ("todos-snapshot", "read", ""),
+            ("background-task-1", "background_task_result", ""),
+            ("x", "compaction_reasoning", ""),
+            ("x", "compaction_summary", ""),
+            ("x", "read", "Subagent finished. Internal summary"),
+        ] {
+            let mut hidden = tool(id, name, "Internal", "");
+            hidden.text = text.into();
+            assert!(!visible(&hidden, 0, 0));
+            let messages = vec![tool("a", "read", "Read(a)", ""), hidden, tool("b", "read", "Read(b)", "")];
+            assert_eq!(group_end(&messages, 0), Some(3));
+            assert_eq!(group_at(&messages, 0).unwrap().1.composition_children.len(), 2);
+        }
+    }
+
+    #[test]
+    fn errors_and_non_context_boundaries_are_never_absorbed() {
+        let read = tool("a", "read", "Read(a)", "");
+        let mut boundaries = vec![tool("shell", "bash", "Bash(pwd)", ""), tool("patch", "apply_patch", "Edit", "")];
+        for status in ["error", "failed", "stopped", "aborted", "interrupted", "cancelled", "canceled"] {
+            boundaries.push(HistoryMessage { status: status.into(), ..read.clone() });
+        }
+        for kind in [HistoryMessageKind::Assistant, HistoryMessageKind::User, HistoryMessageKind::Reasoning] {
+            boundaries.push(HistoryMessage { kind, text: "A meaningful transcript boundary".into(), ..read.clone() });
+        }
+        boundaries.push(HistoryMessage { composition_children: vec![read.clone()], ..read.clone() });
+        for boundary in boundaries {
+            let messages = vec![read.clone(), boundary, read.clone()];
+            assert_eq!(group_end(&messages, 0), Some(1));
+            assert!(group_at(&messages, 1).is_none());
+            assert_eq!(group_end(&messages, 2), Some(3));
+        }
+    }
+
+    #[test]
+    fn active_context_preserves_original_output_status_and_identity() {
+        let mut read = tool("a", "read", "Read(a)", "one");
+        read.text = "summary".into();
+        read.detail = "first\nsecond\tfull output".into();
+        let mut grep = tool("b", "grep", "Grep(needle)", "two");
+        grep.status = "running".into();
+        let (_, group) = group_at(&[read.clone(), grep.clone()], 0).unwrap();
+        assert_eq!(group.status, "running");
+        assert_eq!(group.title, "Gathering context · 1 read, 1 search");
+        for (original, child) in [read, grep].iter().zip(&group.composition_children) {
+            assert_eq!(serde_json::to_value(original).unwrap(), serde_json::to_value(child).unwrap());
+        }
     }
 }

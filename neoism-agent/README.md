@@ -11,6 +11,7 @@ Local hosting keeps the runtime and workspace execution on your machine; inferen
 - Use the [TypeScript SDK](sdk/typescript/README.md) to connect your application to the Agent API, manage sessions, and consume streaming events.
 - Write [native Rust or supervised process plugins](../docs/plugins.md) to add tools, hooks, providers, and integrations. `@neoism/plugin` supplies the TypeScript process-plugin authoring API.
 - Embed `neoism-agent-server` in a Rust host, or deploy it with `neoism-agent serve`.
+- Use `EmbeddedAgent::open(EmbeddedOptions::new(database, services))` for an owned, listener-free host. `request()` dispatches through the existing API router, including authentication and streaming; `close().await` retires all cloned handles. This uses the same runtime as the server, not a separate conversation engine. See the [hosting guides](../vendor/neoism-docs/content/Hosting/Overview.md).
 - Consult the [Agent reference](../docs/agent-plugins.md) for extension contracts, capability discovery, permissions, and lifecycle details.
 
 ## Crates

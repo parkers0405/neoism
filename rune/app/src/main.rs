@@ -127,12 +127,18 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let changed = drive::tick(app, clock, tx) | replay::tick(app, clock, tx) | app.poll_usage();
     let (inbound_changed, inbound_pending) = app.drain();
     let changed = changed | inbound_changed | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
+    let (goal_wait, goal_changed) = app.goals_tick();
+    if let Some(wait) = goal_wait { wake!("goal-age", wait); }
+    let changed = changed | goal_changed;
     if inbound_pending { wake!("inbox", std::time::Duration::ZERO); }
     // A streaming reply's text shows at most thirty times a second, however fast it arrives.
     let (stream_due, stream_wait) = app.stream_pace.due(std::time::Instant::now());
     if let Some(wait) = stream_wait { wake!("stream", wait); }
     if std::mem::take(&mut app.settle_pending) { tx.settle(); }
     app.poll_closing_connections(tx);
+    if app.picker.as_ref().is_some_and(|p| p.mode == palette::Mode::Servers) {
+        wake!("server-list", std::time::Duration::from_secs(1));
+    }
     if app.quit_requested {
         if !app.session_closed { app.save_session(true); }
         tx.quit();
@@ -148,7 +154,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if animating { wake!("wordmark-effect", std::time::Duration::ZERO); }
     // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap), on live offsets.
     app.tools.clock = clock;
-    if app.running_tools() {
+    if app.running_tools() || app.server.progress().is_some() {
         app.tools.spinner.tick(clock, app.ty.scale());
         wake!("spinner", std::time::Duration::from_millis(45));
     }
@@ -217,6 +223,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // The cursor trails and blinks on its own schedule.
     app.browser_follow(tx);
     app.settings_reveal(tx);
+    app.poll_config_reload(tx);
     let list_sliding = app.step_list_residual(clock);
     // In a file the cursor is part of the text: it rides the scroll rather than chasing it.
     let riding = app.cursor_riding();
@@ -257,7 +264,8 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if fps.is_some() && app.fps != fps && !due {
         wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
-    let rerun = animating || changed || tree_drag_changed || table_changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    let images_changed = app.inline_images_changed();
+    let rerun = images_changed || animating || changed || tree_drag_changed || table_changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
     // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
     if *TRACE_POLL && (rerun || !wakes.is_empty()) {
         let terms = [("animating", animating), ("changed", changed), ("stream", stream_due), ("fps", fps_changed), ("caret", caret_changed),
@@ -287,10 +295,74 @@ fn main() {
         on_key: Some(on_key),
         scenes: &[
             ("welcome", |_| {}),
+            ("timeline-inline-image", |s| {
+                let source = concat!("An inline local preview:\n\n![NEOISM preview](", env!("CARGO_MANIFEST_DIR"), "/assets/splash/neoism-wordmark.png)");
+                for image in s.markdown_images(source).values() { let _ = image.wait(); }
+                s.load_fixture("inline-image", "Inline image preview", &serde_json::json!([{
+                    "id": "inline-image", "role": "Assistant", "kind": "Assistant", "text": source,
+                }]).to_string());
+            }),
+            ("welcome-fire", |s| {
+                s.wordmark.fire_enabled = true;
+            }),
+            ("welcome-fire-click", |s| {
+                s.wordmark.fire_enabled = true;
+                let key = wordmark::host_key("splash", s.active_tab().id);
+                s.wordmark.replay(&key);
+            }),
+            ("welcome-fire-light", |s| {
+                s.pal = ui::theme::palette("neoism_light");
+                if let Some(images) = &s.images {
+                    s.wordmark.load(images, s.pal.fg);
+                    for letter in &s.wordmark.letters { let _ = letter.wait(); }
+                }
+                s.wordmark.fire_enabled = true;
+            }),
+            ("welcome-fire-themed", |s| {
+                s.pal = ui::theme::palette("catppuccin_mocha");
+                if let Some(images) = &s.images {
+                    s.wordmark.load(images, s.pal.fg);
+                    for letter in &s.wordmark.letters { let _ = letter.wait(); }
+                }
+                s.wordmark.fire_enabled = true;
+            }),
             ("git-panel", |s| git::fixture(s, false)),
             ("git-review", |s| git::fixture(s, true)),
             ("git-review-long", git::long_fixture),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
+            ("usage", |s| s.usage_fixture("accounts")),
+            ("usage-loading", |s| s.usage_fixture("loading")),
+            ("usage-empty", |s| s.usage_fixture("empty")),
+            ("usage-error", |s| s.usage_fixture("error")),
+            ("tasks", |s| s.fixture_tasks("multiline")),
+            ("tasks-empty", |s| s.fixture_tasks("empty")),
+            ("tasks-long", |s| s.fixture_tasks("long")),
+            ("goals", |s| s.fixture_goals("active")),
+            ("goals-paused", |s| s.fixture_goals("paused")),
+            ("goals-complete", |s| s.fixture_goals("complete")),
+            ("goals-empty", |s| s.fixture_goals("empty")),
+            ("goals-loading", |s| s.fixture_goals("loading")),
+            ("composer-tokens", |s| {
+                s.open_tab(tabs::TabKind::Agent { session: None });
+                s.insert_skill_pill("review", None);
+                s.paste_composer_text(&"A substantial pasted block with Unicode λ and preserved line breaks.\n".repeat(100));
+                s.tabs[s.active].draft.paste(" Explain this.");
+                let img = image::RgbaImage::from_pixel(64, 40, image::Rgba([40, 100, 220, 255]));
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                img.write_to(&mut bytes, image::ImageFormat::Png).expect("png");
+                s.attach_bytes("picture.png", "image/png", bytes.into_inner());
+            }),
+            ("skills-mention", |s| {
+                s.open_tab(tabs::TabKind::Agent { session: None });
+                s.tabs[s.active].draft.paste("Please use $rev");
+                s.composer_changed();
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::SkillCatalog {
+                    skills: serde_json::from_value(serde_json::json!([
+                        {"name":"review", "description":"Review changes for bugs and regressions"},
+                        {"name":"release", "description":"Prepare a release"}
+                    ])).expect("skills fixture"),
+                });
+            }),
             // A sent message with an image and another waiting in the composer;
             // `NEOISM_RUNE_PREVIEW=1` opens the sent one full-window.
             ("agent-attach", |s| {
@@ -302,9 +374,13 @@ fn main() {
                     out.into_inner()
                 };
                 s.attach_bytes("diagram.png", "image/png", png(480, 300, 200));
+                if std::env::var_os("NEOISM_RUNE_PHOTO_STACK").is_some() {
+                    for n in 1..4 {
+                        s.attach_bytes(&format!("photo-{n}.png"), "image/png", png(420, 420, n * 60));
+                    }
+                }
                 let i = s.active;
-                let text = format!("{}what does this diagram show?", s.tabs[i].draft.text);
-                s.tabs[i].draft.replace_text(text);
+                s.tabs[i].draft.paste("what does this diagram show?");
                 s.submit();
                 s.attach_bytes("screenshot.png", "image/png", png(300, 420, 60));
                 if std::env::var_os("NEOISM_RUNE_PREVIEW").is_some() {
@@ -401,6 +477,12 @@ fn main() {
             ("servers", |s| { s.open_picker(palette::Mode::Servers); palette::systems_fixture(s); s.move_picker(1); }),
             // The Add Server form (Host), its Join + Fast tunnel variant, and Add system.
             ("server-form", |s| s.open_server_form()),
+            ("server-creating", servers::flow::progress_fixture),
+            ("server-ready", |s| {
+                let invite = "https://example.opentunnel.net/";
+                s.server.ready_invite = Some(invite.into());
+                s.modal = Some(ui::modal::Modal::fast_server_ready("Team project", invite));
+            }),
             ("server-form-join", |s| {
                 s.open_server_form();
                 if let Some(form) = &mut s.form { let mut draft = form.draft().unwrap_or_default(); draft.host = false; draft.fast = true; *form = servers::form::Form::server(draft); }
@@ -521,6 +603,8 @@ fn main() {
             }),
             ("external-edit", |s| editor::external_edit::fixture(s, false)),
             ("external-edit-md", |s| editor::external_edit::fixture(s, true)),
+            ("editor-git", |s| editor::git::fixture(s, false)),
+            ("editor-git-md", |s| editor::git::fixture(s, true)),
             ("sidebar-long", |s| {
                 s.threads = (0..40).map(|i| serde_json::from_value(serde_json::json!({
                     "session_id": format!("s{i}"), "title": format!("Conversation number {i}"), "pinned": i < 2,
@@ -637,6 +721,27 @@ fn main() {
                     session_id: "fixture-send".into(), activity: "running".into(),
                 });
             }),
+            ("background-restored", |s| {
+                use neoism_protocol::agent::{AgentRuntimeSnapshot, AgentServerMessage as M, BackgroundJobRuntime};
+                s.load_fixture("fixture-background", "Restored background work", include_str!("../fixtures/tools-timeline.json"));
+                s.apply_agent(M::CatalogActivity { session_id: "fixture-background".into(), activity: "background".into() });
+                s.apply_agent(M::RuntimeSnapshot {
+                    session_id: "fixture-background".into(),
+                    snapshot: AgentRuntimeSnapshot {
+                        root_session_id: "fixture-background".into(),
+                        running_background_tasks: Some(vec![BackgroundJobRuntime {
+                            job_id: "fixture-job".into(), session_id: "fixture-background".into(), started_at: 1,
+                        }]),
+                        ..Default::default()
+                    },
+                });
+            }),
+            ("background-attaching", |s| {
+                use neoism_protocol::agent::AgentServerMessage as M;
+                s.apply_agent(M::CatalogActivity { session_id: "fixture-background".into(), activity: "background".into() });
+                s.open_conversation("fixture-background");
+                s.apply_agent(M::HistoryChunk { session_id: "fixture-background".into(), messages: vec![], next_cursor: None });
+            }),
             ("composer-switch", |s| {
                 use neoism_protocol::agent::AgentServerMessage as M;
                 let provider = |id: &str, provider: &str, model: &str, thinking: &str| M::ProviderState {
@@ -679,9 +784,31 @@ fn main() {
                     session.streaming = true;
                 }
             }),
+            ("remote-activity", |s| {
+                use neoism_protocol::agent::AgentServerMessage as M;
+                s.apply_agent(M::CatalogActivity { session_id: "remote-run".into(), activity: "running".into() });
+                s.open_conversation("remote-run");
+                s.apply_agent(M::HistoryChunk { session_id: "remote-run".into(), next_cursor: None,
+                    messages: serde_json::from_value(serde_json::json!([
+                        {"id": "prompt", "kind": "User", "role": "User", "text": "Check the remote workspace."},
+                        {"id": "thought", "kind": "Reasoning", "role": "Assistant", "text": "Inspecting the workspace and planning the next steps."}
+                    ])).unwrap() });
+            }),
             ("thinking-wrap", |s| {
                 s.load_fixture("fixture-thinking", "Thinking line wrapping", include_str!("../fixtures/thinking-timeline.json"));
                 s.sessions.get_mut("fixture-thinking").unwrap().live_from = Some(0);
+            }),
+            ("work-transcript", |s| {
+                s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));
+                s.sessions.get_mut("fixture-work").unwrap().streaming = true;
+                s.sessions.get_mut("fixture-work").unwrap().live_from = Some(0);
+            }),
+            ("work-transcript-expanded", |s| {
+                s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));
+                s.sessions.get_mut("fixture-work").unwrap().streaming = true;
+                s.sessions.get_mut("fixture-work").unwrap().live_from = Some(0);
+                s.tools.expand("work-read..");
+                s.tools.expand("work-read");
             }),
             ("queued", |s| {
                 s.load_fixture("fixture-queued", "Queued steering messages", include_str!("../fixtures/code-timeline.json"));

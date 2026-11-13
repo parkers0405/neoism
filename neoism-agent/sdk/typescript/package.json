@@ -7,6 +7,8 @@
   ],
   "scripts": {
     "build": "tsc -b",
+    "native:build": "node scripts/build-native.mjs",
+    "test:embedded": "npm run build && node scripts/embedded.test.mjs",
     "clean": "tsc -b --clean",
     "contract:print": "cargo run --quiet --manifest-path ../../../Cargo.toml -p neoism-agent -- openapi",
     "contract:check": "bash ../../scripts/openapi.sh check",

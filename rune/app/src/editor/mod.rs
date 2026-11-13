@@ -16,6 +16,7 @@ pub(crate) mod vim;
 mod vim_apply;
 mod wrap;
 pub(crate) mod external_edit;
+pub(crate) mod git;
 
 pub use view::view;
 
@@ -76,6 +77,7 @@ pub struct Buffer {
     /// The file as a document every editor shares (`collab::doc`), once it has loaded.
     pub shared: Option<crate::collab::doc::Binding>,
     pub external_edit: Option<external_edit::Flash>,
+    pub(crate) git: git::State,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +100,7 @@ impl Buffer {
             mouse: mouse::Mouse::default(),
             code_cache: Default::default(),
             external_edit: None,
+            git: Default::default(),
             view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None, jump_spring: None, kept_scroll: 0.0, shown: false, restoring: 0, search_origin: None, search_highlight: None, shared: None,
         }
     }
@@ -176,6 +179,7 @@ impl App {
         self.open_tab(TabKind::Editor { path: relative.clone() });
         self.focus = crate::app::Focus::Content;
         self.read_file(&relative, &scope);
+        self.request_editor_git_base(&relative);
         // The daemon watches only directories a client has listed: list the file's folder so
         // on-disk changes (agents, formatters, git) come back as `Files Changed` and reload it.
         let parent = relative.rsplit_once('/').map_or("", |(dir, _)| dir);
@@ -318,6 +322,8 @@ impl App {
         buffer.leader_pending = false;
         if plain && matches!(&event.key, K::Text(text) if text.eq_ignore_ascii_case("x")) {
             self.close_tab(self.active);
+        } else if plain && matches!(&event.key, K::Text(text) if text.eq_ignore_ascii_case("h")) {
+            self.split(crate::panes::Axis::Vertical);
         }
         true
     }
@@ -734,6 +740,22 @@ mod leader_tests {
         assert!(app.editor_leader_key(&text("x")));
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_tab().kind, TabKind::Home);
+    }
+    #[test]
+    fn space_h_opens_a_plain_terminal_below_the_current_editor() {
+        let mut app = editor();
+        let original = app.active_tab().id;
+        assert!(app.editor_leader_key(&text(" ")));
+        assert!(app.editor_leader_key(&text("h")));
+        assert_eq!(app.active_tab().kind, TabKind::Terminal);
+        assert!(app.tabs[app.active].draft.focused);
+        let crate::panes::Node::Split { axis, children, .. } = &app.layout.root else { panic!("expected split") };
+        assert_eq!(*axis, crate::panes::Axis::Vertical);
+        let crate::panes::Node::Pane(top) = &children[0] else { panic!("expected editor pane") };
+        let crate::panes::Node::Pane(bottom) = &children[1] else { panic!("expected terminal pane") };
+        assert_eq!(top.active_tab(), Some(original));
+        assert_eq!(bottom.active_tab(), Some(app.active_tab().id));
+        assert_eq!(app.layout.focus, bottom.id);
     }
     #[test]
     fn space_x_preserves_unsaved_text_and_escape_cancels_the_chord() {

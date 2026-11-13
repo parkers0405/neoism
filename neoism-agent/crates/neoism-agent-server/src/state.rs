@@ -77,7 +77,12 @@ pub(crate) struct InnerState {
     pub(crate) workflow_notify: Arc<Notify>,
     pub(crate) workflow_scheduler_started: AtomicBool,
     events: EventBus,
-    event_writer: mpsc::UnboundedSender<EventPayload>,
+    event_writer: std::sync::Mutex<Option<mpsc::UnboundedSender<EventPayload>>>,
+    event_writer_handle: Mutex<Option<tokio::task::JoinHandle<Result<(), String>>>>,
+    retired: AtomicBool,
+    shutdown_lock: Mutex<Option<String>>,
+    /// Shutdown waits for admitted transactional event writes before reopening is safe.
+    event_commits: RwLock<()>,
     /// Wire-monotone sequence allocator for broadcast events, seeded from
     /// the durable log's high-water mark so live and replayed events share
     /// one cursor space.
@@ -94,6 +99,9 @@ struct ExecutionLeaseControl {
 
 impl Drop for InnerState {
     fn drop(&mut self) {
+        if let Some(handle) = self.event_writer_handle.get_mut().take() {
+            handle.abort();
+        }
         if let Ok(handle) = self.execution_lease_handle.get_mut() {
             if let Some(handle) = handle.take() {
                 handle.abort();
@@ -167,6 +175,11 @@ mod hosting;
 mod catalog_family_tests;
 #[cfg(test)]
 mod session_descendant_tests;
+#[cfg(test)]
+mod event_writer_lifecycle_tests;
+#[cfg(test)]
+mod run_handoff_tests;
+mod run_recovery;
 
 #[derive(Clone)]
 pub(crate) struct SessionStore {
@@ -1056,6 +1069,7 @@ impl AppState {
         let utilities = crate::utility_runtime::UtilityRuntime::new(&services);
         let recovery_started = crate::perf::now();
         let phase_started = crate::perf::now();
+        store.prepare_run_recovery().await?;
         let permission_approvals = store.list_permission_approvals().await?;
         tracing::info!(
             target: "neoism_agent::perf",
@@ -1156,7 +1170,11 @@ impl AppState {
                 workflow_notify: Arc::new(Notify::new()),
                 workflow_scheduler_started: AtomicBool::new(false),
                 events,
-                event_writer,
+                event_writer: std::sync::Mutex::new(Some(event_writer)),
+                event_writer_handle: Mutex::new(None),
+                retired: AtomicBool::new(false),
+                shutdown_lock: Mutex::new(None),
+                event_commits: RwLock::new(()),
                 event_sequence: std::sync::atomic::AtomicU64::new(event_sequence_seed),
                 event_order: std::sync::Mutex::new(live_messages::LiveMessages::default()),
             }),
@@ -1209,8 +1227,9 @@ impl AppState {
             .lock()
             .expect("execution lease handle poisoned") = Some(lease_handle);
         let durable_store = state.inner.store.clone();
-        let durable_state = state.clone();
-        tokio::spawn(async move {
+        let durable_state = Arc::downgrade(&state.inner);
+        let writer_handle = tokio::spawn(async move {
+            let mut failure = None;
             // Persistence only. Delivery happens synchronously in `publish` so
             // subscribers receive every event in publish order — a committed
             // part snapshot must never lag behind live deltas published after
@@ -1222,9 +1241,14 @@ impl AppState {
                             .tenant_for_event(&event)
                             .await
                             .unwrap_or_else(|_| "local".to_string());
-                        for runtime in
-                            durable_state.inner.workspace_runtimes.runtimes().await
-                        {
+                        // Never retain the state (and its sender) while waiting
+                        // for the next event or doing durable IO.
+                        let runtimes = if let Some(inner) = durable_state.upgrade() {
+                            inner.workspace_runtimes.runtimes().await
+                        } else {
+                            Vec::new()
+                        };
+                        for runtime in runtimes {
                             if runtime.tenant_id == tenant_id {
                                 crate::plugin::publish_event(&runtime.snapshot(), &event);
                             }
@@ -1232,10 +1256,13 @@ impl AppState {
                     }
                     Err(error) => {
                         tracing::error!(event = %event.kind, %error, "failed to durably commit event");
+                        failure.get_or_insert_with(|| error.to_string());
                     }
                 }
             }
+            failure.map_or(Ok(()), Err)
         });
+        *state.inner.event_writer_handle.lock().await = Some(writer_handle);
         let resume_started = crate::perf::now();
         let phase_started = crate::perf::now();
         if let Err(error) = crate::session_queue::resume_prompt_queues(state.clone()).await {
@@ -1289,6 +1316,14 @@ impl AppState {
 
     pub fn services(&self) -> &AgentServices {
         &self.inner.services
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        self.inner.retired.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn begin_shutdown(&self) {
+        self.inner.retired.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn management_enabled(&self) -> bool {
@@ -1639,6 +1674,73 @@ impl AppState {
     pub async fn shutdown(
         &self,
     ) -> Result<(), neoism_agent_plugin_api::PluginRuntimeError> {
+        // Serialize the whole shutdown, including joins: a concurrent caller
+        // must not return while another caller is still draining the writer.
+        let mut shutdown_failure = self.inner.shutdown_lock.lock().await;
+        if let Some(error) = shutdown_failure.as_ref() {
+            return Err(neoism_agent_plugin_api::PluginRuntimeError::new(error.clone()));
+        }
+        {
+            let mut sender = self
+                .inner
+                .event_writer
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            self.inner.retired.store(true, Ordering::SeqCst);
+            // No sender clones escape this lock. Dropping it closes admission
+            // without discarding anything already queued in the receiver.
+            sender.take();
+        }
+        self.inner.events.close();
+        let commits = self.inner.event_commits.write().await;
+        let claimed_runs = self.inner.store.claimed_run_ids().await.map_err(|error| {
+            neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string())
+        })?;
+        self.inner.store.suspend_prompt_runs().await.map_err(|error| {
+            neoism_agent_plugin_api::PluginRuntimeError::new(error.to_string())
+        })?;
+        drop(commits);
+        for run in self
+            .inner
+            .session_coordinator
+            .active_runs()
+            .await
+            .into_values()
+        {
+            run.cancel.store(true, Ordering::SeqCst);
+        }
+        // A replacement may reopen this database as soon as close returns.
+        // Claimed model turns must stop writing before that ownership handoff.
+        if tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while self.inner.session_coordinator.active_runs().await.values()
+                .any(|run| claimed_runs.contains(&run.id))
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.is_err() {
+            let error = "model turns did not stop during shutdown".to_string();
+            *shutdown_failure = Some(error.clone());
+            return Err(neoism_agent_plugin_api::PluginRuntimeError::new(error));
+        }
+        {
+            let _commits = self.inner.event_commits.write().await;
+        }
+        {
+            let mut writer = self.inner.event_writer_handle.lock().await;
+            let result = if let Some(handle) = writer.as_mut() {
+                // Keep ownership in InnerState across the await, even if this
+                // shutdown future is cancelled. Drop can still abort the task.
+                handle.await.unwrap_or_else(|error| Err(error.to_string()))
+            } else {
+                Ok(())
+            };
+            writer.take();
+            if let Err(error) = result {
+                let error = format!("durable event writer failed: {error}");
+                *shutdown_failure = Some(error.clone());
+                return Err(neoism_agent_plugin_api::PluginRuntimeError::new(error));
+            }
+        }
         self.inner.native_agents.shutdown().await;
         if let Some(worker) = self.inner.store._event_compactor.as_ref() {
             worker.shutdown().await;
@@ -1648,17 +1750,6 @@ impl AppState {
         }
         if let Some(worker) = self.inner.store._search_worker.as_ref() {
             worker.shutdown().await;
-        }
-        if self.inner.services.workspace_worker.is_some() {
-            for run in self
-                .inner
-                .session_coordinator
-                .active_runs()
-                .await
-                .into_values()
-            {
-                run.cancel.store(true, Ordering::SeqCst);
-            }
         }
         self.inner
             .execution_lease_control
@@ -1730,6 +1821,9 @@ impl AppState {
             .event_order
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.inner.retired.load(Ordering::SeqCst) {
+            return;
+        }
         if event.sequence.is_none() {
             event.sequence = Some(
                 self.inner
@@ -1760,9 +1854,17 @@ impl AppState {
         // delivery through the durable writer made committed events
         // (reasoning/tool part snapshots) lag behind live token deltas
         // published after them, so subscribers saw parts out of order.
+        let sender = self
+            .inner
+            .event_writer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let Some(sender) = sender.as_ref() else {
+            return;
+        };
         let mut event = event;
         self.stamp_and_broadcast(&mut event);
-        if let Err(error) = self.inner.event_writer.send(event) {
+        if let Err(error) = sender.send(event) {
             tracing::error!(event = %error.0.kind, "durable event writer stopped");
         }
     }
@@ -1781,6 +1883,7 @@ impl AppState {
         &self,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let _commit = self.event_commit_guard().await?;
         let mut event = event;
         self.allocate_event_sequence(&mut event);
         self.inner.store.append_event(&event).await?;
@@ -1795,6 +1898,9 @@ impl AppState {
     }
 
     pub(crate) fn publish_committed(&self, event: EventPayload) {
+        if self.inner.retired.load(Ordering::SeqCst) {
+            return;
+        }
         let state = self.clone();
         let hook_event = event.clone();
         tokio::spawn(async move {
@@ -1814,11 +1920,25 @@ impl AppState {
         self.stamp_and_broadcast(&mut event);
     }
 
+    async fn event_commit_guard(&self) -> anyhow::Result<tokio::sync::RwLockReadGuard<'_, ()>> {
+        anyhow::ensure!(
+            !self.inner.retired.load(Ordering::SeqCst),
+            "agent state is retired"
+        );
+        let guard = self.inner.event_commits.read().await;
+        anyhow::ensure!(
+            !self.inner.retired.load(Ordering::SeqCst),
+            "agent state is retired"
+        );
+        Ok(guard)
+    }
+
     pub(crate) async fn update_session_with_event(
         &self,
         info: &SessionInfo,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let _commit = self.event_commit_guard().await?;
         let mut event = event;
         self.allocate_event_sequence(&mut event);
         self.inner
@@ -1862,6 +1982,7 @@ impl AppState {
         event: EventPayload,
         queue_id: Option<&str>,
     ) -> anyhow::Result<()> {
+        let _commit = self.event_commit_guard().await?;
         let mut event = event;
         self.allocate_event_sequence(&mut event);
         self.inner
@@ -1895,6 +2016,7 @@ impl AppState {
         message: &MessageWithParts,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let _commit = self.event_commit_guard().await?;
         let mut event = event;
         self.allocate_event_sequence(&mut event);
         self.inner
@@ -1930,6 +2052,7 @@ impl AppState {
         epoch: &crate::context_epoch::ContextEpoch,
         event: EventPayload,
     ) -> anyhow::Result<()> {
+        let _commit = self.event_commit_guard().await?;
         let mut event = event;
         self.allocate_event_sequence(&mut event);
         self.inner
@@ -1970,6 +2093,7 @@ impl AppState {
         delivery: &str,
         event: EventPayload,
     ) -> anyhow::Result<usize> {
+        let _commit = self.event_commit_guard().await?;
         let mut event = event;
         self.allocate_event_sequence(&mut event);
         self.inner
@@ -2715,6 +2839,34 @@ impl SessionStore {
                 updated INTEGER NOT NULL,
                 error_json TEXT,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS session_run_inputs (
+                run_id TEXT PRIMARY KEY,
+                admission_id TEXT NOT NULL UNIQUE,
+                request_json TEXT NOT NULL,
+                delivery TEXT NOT NULL,
+                saved_message_id TEXT,
+                FOREIGN KEY(run_id) REFERENCES session_runs(id) ON DELETE CASCADE
+            )
+            "#,
+                Vec::new(),
+            )
+            .await?;
+        self.db
+            .execute(
+                r#"
+            CREATE TABLE IF NOT EXISTS session_run_claims (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                run_id TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
             )
             "#,
                 Vec::new(),
@@ -5424,13 +5576,16 @@ impl SessionStore {
 
     pub(crate) async fn handoff_prompt_admission(&self, id: &str, session_id: &str, run_id: &str) -> anyhow::Result<()> {
         let now = store_i64(crate::now_millis());
-        // start_session_run's store write is best effort. Confirm durable run
-        // ownership in the SAME transaction that retires this recovery token.
+        // Preserve the exact admitted input before removing it from the visible
+        // queue. This is recovery evidence, not permission to replay effects.
+        // Every write is conditional on the admission still belonging to this
+        // session; a cancelled/duplicate handoff must not revive a finished run.
         let changed = self.db.execute_transaction_with_results(vec![
-            ("INSERT INTO session_runs (id, session_id, status, created, updated, error_json) VALUES (?, ?, 'running', ?, ?, NULL) ON CONFLICT(id) DO UPDATE SET status = 'running', updated = excluded.updated, error_json = NULL".to_string(), vec![text(run_id), text(session_id), int(now), int(now)]),
-            ("DELETE FROM prompt_queue WHERE id = ? AND session_id = ? AND kind = 'prompt'".to_string(), vec![text(id), text(session_id)]),
+            ("INSERT INTO session_runs (id, session_id, status, created, updated, error_json) SELECT ?, session_id, 'running', ?, ?, NULL FROM prompt_queue WHERE id = ? AND session_id = ? AND kind = 'prompt' ON CONFLICT(id) DO NOTHING".to_string(), vec![text(run_id), int(now), int(now), text(id), text(session_id)]),
+            ("INSERT INTO session_run_inputs (run_id, admission_id, request_json, delivery, saved_message_id) SELECT ?, q.id, q.request_json, q.delivery, q.saved_message_id FROM prompt_queue q JOIN session_runs r ON r.id = ? AND r.session_id = q.session_id AND r.status = 'running' WHERE q.id = ? AND q.session_id = ? AND q.kind = 'prompt'".to_string(), vec![text(run_id), text(run_id), text(id), text(session_id)]),
+            ("DELETE FROM prompt_queue WHERE id = ? AND session_id = ? AND kind = 'prompt' AND EXISTS (SELECT 1 FROM session_run_inputs WHERE run_id = ? AND admission_id = prompt_queue.id)".to_string(), vec![text(id), text(session_id), text(run_id)]),
         ]).await?;
-        anyhow::ensure!(changed.get(1) == Some(&1), "Prompt admission was cancelled or handed off");
+        anyhow::ensure!(changed.get(2) == Some(&1), "Prompt admission was cancelled or handed off");
         Ok(())
     }
 
@@ -6341,21 +6496,12 @@ impl SessionStore {
         status: &str,
         error: Option<Value>,
     ) -> anyhow::Result<()> {
-        self.db
-            .execute(
-                r#"
-            UPDATE session_runs
-            SET status = ?, updated = ?, error_json = ?
-            WHERE id = ?
-            "#,
-                vec![
-                    text(status),
-                    int(store_i64(crate::now_millis())),
-                    opt_text(error.map(|value| value.to_string())),
-                    text(run_id),
-                ],
-            )
-            .await?;
+        // Shutdown suspension wins over later cancellation cleanup. A terminal
+        // commit releases only this generation's claim, never a successor's.
+        self.db.execute_transaction(vec![
+            ("DELETE FROM session_run_claims WHERE run_id = ? AND EXISTS (SELECT 1 FROM session_runs WHERE id = ? AND status != 'suspended')".into(), vec![text(run_id), text(run_id)]),
+            ("UPDATE session_runs SET status = ?, updated = ?, error_json = ? WHERE id = ? AND status != 'suspended'".into(), vec![text(status), int(store_i64(crate::now_millis())), opt_text(error.map(|value| value.to_string())), text(run_id)]),
+        ]).await?;
         Ok(())
     }
 

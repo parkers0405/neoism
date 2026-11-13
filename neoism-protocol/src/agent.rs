@@ -131,6 +131,11 @@ pub enum AgentClientMessage {
         #[serde(default)]
         directory: Option<String>,
     },
+    /// Fetch the session goal without modifying it.
+    GetGoal {
+        session_id: String,
+        request_id: String,
+    },
     /// Replay the persisted message timeline for a session. Useful
     /// for restoring chrome state on reload. The reply is one or
     /// more [`AgentServerMessage::HistoryChunk`] messages.
@@ -208,6 +213,11 @@ pub enum AgentClientMessage {
     /// restore file snapshots captured by edit tools.
     UndoSession {
         session_id: String,
+    },
+    /// Ordered optimistic history edit, acknowledged with an authoritative head page.
+    EditSessionHistory {
+        session_id: String,
+        redo: bool,
     },
     /// Restore the next reverted user turn and its file snapshots.
     RedoSession {
@@ -647,6 +657,13 @@ pub enum AgentServerMessage {
     ThreadListFailed {
         message: String,
     },
+    /// Correlated goal response, including failures, to `GetGoal`.
+    GoalSnapshot {
+        session_id: String,
+        request_id: String,
+        goal: Option<serde_json::Value>,
+        error: Option<String>,
+    },
     /// Streaming history page. Emitted in response to
     /// [`AgentClientMessage::GetHistory`]; `next_cursor` is the
     /// opaque token to feed back for the following page (`None`
@@ -655,6 +672,13 @@ pub enum AgentServerMessage {
         session_id: String,
         messages: Vec<HistoryMessage>,
         #[serde(default)]
+        next_cursor: Option<String>,
+    },
+    /// `error` rejects the mutation; a missing page alone means the follow-up read failed.
+    SessionHistoryEdited {
+        session_id: String,
+        error: Option<String>,
+        messages: Option<Vec<HistoryMessage>>,
         next_cursor: Option<String>,
     },
     /// Raw passthrough of an agent-server SSE event whose kind isn't

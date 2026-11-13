@@ -131,8 +131,10 @@ impl Terminal {
     /// at a marked prompt at all.
     pub fn raw(&self) -> bool {
         let shell = &self.shell;
+        // Errors are rendered in the block history. A failed engine has no screen to draw;
+        // routing it to the grid would hide both the diagnostic and the Home splash.
+        if shell.error.is_some() { return false; }
         self.grid
-            || shell.error.is_some()
             || shell.alt()
             || shell.running() && shell.app_cursor()
             || shell.pending() && self.long_running()
@@ -163,6 +165,17 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_errors_keep_the_diagnostic_history_visible() {
+        let app = crate::app::App::new();
+        let mut term = Terminal::new("/".into(), app.terminal_colors());
+        term.shell.error = Some("Could not load terminal engine".into());
+        term.screen = None;
+        assert!(!term.raw(), "an absent grid must not hide the error and Home splash");
+        term.grid = true;
+        assert!(!term.raw(), "plain grid terminals must show errors too");
+    }
 
     #[test]
     fn agent_tuis_are_recognised_by_their_program() {

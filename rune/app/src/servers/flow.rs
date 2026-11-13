@@ -73,6 +73,10 @@ pub struct ServerState {
     pub link: Link,
     pending: Option<Pending>,
     pub confirm: Option<Confirm>,
+    pub ready_invite: Option<String>,
+    list_check: Option<std::time::Instant>,
+    progress_hidden: bool,
+    progress: Option<(String, String)>,
 }
 
 impl ServerState {
@@ -80,6 +84,9 @@ impl ServerState {
     /// Whether the active workspace is on another server.
     pub fn remote(&self) -> bool { self.link.current.is_some() }
     pub fn connecting(&self) -> Option<&str> { self.pending.as_ref().map(|p| p.id.as_str()) }
+    pub fn progress(&self) -> Option<(&str, &str)> {
+        self.progress.as_ref().filter(|_| !self.progress_hidden).map(|(title, body)| (title.as_str(), body.as_str()))
+    }
     /// The system the active workspace is connected to over SSH, while its tunnel is up.
     pub fn system(&mut self) -> Option<String> {
         let id = self.link.current.as_ref()?.system.clone()?;
@@ -88,13 +95,10 @@ impl ServerState {
     }
 }
 
-fn busy(title: &str, body: &str) -> Modal {
-    Modal { title: title.into(), body: body.into(),
-        buttons: vec![Button { label: "Cancel".into(), key: "Esc".into(), action: Action::CancelConnect }], selected: 0 }
-}
-
 impl App {
     fn start_job(&mut self, id: String, title: &str, body: &str, job: impl FnOnce() -> Result<Outcome, String> + Send + 'static) {
+        if self.server.pending.is_some() { return; }
+        self.server.progress_hidden = false;
         let (tx, rx) = std::sync::mpsc::channel();
         let wake = self.waker.clone();
         std::thread::Builder::new().name("neoism-server".into()).spawn(move || {
@@ -102,7 +106,7 @@ impl App {
             if let Some(wake) = wake { wake(); }
         }).ok();
         self.server.pending = Some(Pending { id, rx, draft: None });
-        self.modal = Some(busy(title, body));
+        self.server.progress = Some((title.into(), body.into()));
     }
 
     /// The connection to this workspace's daemon dropped, or could not be made again. Over
@@ -183,16 +187,31 @@ impl App {
     /// The background job finished: switch, or say why not. Returns whether anything changed.
     pub fn poll_server(&mut self) -> bool {
         self.poll_tunnel();
-        let Some(pending) = &self.server.pending else { return false };
+        let checking = self.picker.as_ref().is_some_and(|p| p.mode == crate::palette::Mode::Servers);
+        let changed = if checking && self.server.list_check.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1)) {
+            self.server.list_check = Some(std::time::Instant::now());
+            self.refresh_server_picker()
+        } else { false };
+        let Some(pending) = &self.server.pending else { return changed };
         let result = match pending.rx.try_recv() {
             Ok(result) => result,
-            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Empty) => return changed,
             Err(TryRecvError::Disconnected) => Err("Server worker stopped".into()),
         };
         let draft = self.server.pending.take().and_then(|p| p.draft);
-        if matches!(self.modal.as_ref().map(|m| m.buttons.first().map(|b| b.action)), Some(Some(Action::CancelConnect))) { self.modal = None; }
+        self.server.progress = None;
         match result {
-            Ok(Outcome::Connected(connected)) => self.switch_connection(connected),
+            Ok(Outcome::Connected(connected)) => {
+                let invite = draft.as_ref().filter(|d| d.host && d.fast).and(connected.selection.invite.clone());
+                let name = connected.selection.name.clone();
+                self.switch_connection(connected);
+                if let Some(invite) = invite {
+                    self.picker = None;
+                    self.modal = Some(Modal::fast_server_ready(&name, &invite));
+                    self.server.ready_invite = Some(invite);
+                }
+                self.refresh_server_picker();
+            }
             Err(error) => match draft {
                 Some(draft) => {
                     let mut form = Form::server(draft);
@@ -208,7 +227,27 @@ impl App {
     /// Cancel the connection in progress: its result is dropped (a late tunnel closes with it).
     pub fn cancel_connect(&mut self) {
         self.server.pending = None;
+        self.server.progress = None;
         self.modal = None;
+    }
+
+    fn refresh_server_picker(&mut self) -> bool {
+        if !self.picker.as_ref().is_some_and(|p| p.mode == crate::palette::Mode::Servers) { return false; }
+        let servers = self.palette_servers();
+        let picker = self.picker.as_mut().unwrap();
+        if picker.servers == servers { return false; }
+        let selected = picker.rows().get(picker.selected).and_then(|row| match row.target {
+            crate::palette::Target::Server(i) => picker.servers.get(i).map(|s| s.id.clone()),
+            _ => None,
+        });
+        picker.servers = servers;
+        let rows = picker.rows();
+        picker.selected = selected.and_then(|id| rows.iter().position(|row| match row.target {
+            crate::palette::Target::Server(i) => picker.servers[i].id == id,
+            _ => false,
+        })).unwrap_or_else(|| picker.selected.min(rows.len().saturating_sub(1)));
+        picker.reveal();
+        true
     }
 
     /// Open a verified connection: a new workspace tab on that server, or the tab already
@@ -254,6 +293,10 @@ impl App {
         let Some(id) = workspace["id"].as_str() else { return };
         self.workspace_id = id.to_owned();
         if let Some(title) = workspace["title"].as_str() { self.workspace_name = title.to_owned(); }
+        // The strip must stop using the temporary ID too, before selection or reordering.
+        let entry = &mut self.workspaces[self.workspace_active];
+        entry.id = self.workspace_id.clone();
+        entry.title = self.workspace_name.clone();
         let root = workspace["root_dir"].as_str().unwrap_or("~").to_owned();
         self.resolve_root(&root);
         self.register_workspace();
@@ -282,6 +325,7 @@ impl App {
     /// Submit the open form (`form-submit`): a system saves at once; a server operation runs in
     /// the background and its server is then dialled.
     pub fn submit_form(&mut self, _tx: &mut rune::Tx) {
+        if self.server.pending.is_some() { return; }
         let Some(form) = &mut self.form else { return };
         match &form.kind {
             Kind::System => {
@@ -298,7 +342,7 @@ impl App {
                     Ok(operation) => operation,
                     Err(error) => { form.error = Some(error); return; }
                 };
-                let (title, body) = (if draft.host { "Starting server" } else { "Joining server" },
+                let (title, body) = (if draft.host && draft.fast { "Creating Fast Server" } else if draft.host { "Starting server" } else { "Joining server" },
                     if draft.fast { "Preparing the Fast Server connection\u{2026}" } else { "Preparing the workspace connection\u{2026}" });
                 self.form = None;
                 self.start_job("server-form".into(), title, body, move || {
@@ -364,6 +408,28 @@ impl App {
     }
 }
 
+/// Non-blocking connection progress, using the exact conversation sidebar loader.
+pub fn progress_view(app: &App) -> rune::El {
+    use crate::ui::theme::rgb;
+    use rune::{col, el, row, text};
+    let Some((title, body)) = app.server.progress() else { return rune::el() };
+    let s = app.ty.scale();
+    row().key("server-progress").pin(None, Some(72.0 * s), Some(16.0 * s), None)
+        .w((340.0 * s).min((app.window[0] - 32.0).max(0.0))).padding(14.0 * s).gap(12.0 * s).center_y()
+        .fill(rgb(app.pal.surface)).border(1.0, rgb(app.pal.border)).radius(10.0 * s)
+        .child(crate::agent::loader(app, app.pal.fg))
+        .child(col().grow(1.0).shrink().gap(5.0 * s)
+            .child(text(title.to_owned()).font(app.ty.sized_bold(13.0)).color(rgb(app.pal.fg)).wrap().w_full())
+            .child(text(body.to_owned()).font(app.ty.sized(11.0)).color(rgb(app.pal.dim)).wrap().w_full()))
+        .child(el().key("hide-server-progress").w(24.0 * s).h(24.0 * s).center()
+            .child(text("\u{00d7}").font(app.ty.sized(18.0)).color(rgb(app.pal.muted)))
+            .on_press(|a: &mut App| a.server.progress_hidden = true))
+}
+
+pub fn progress_fixture(app: &mut App) {
+    app.server.progress = Some(("Creating Fast Server".into(), "Preparing the Fast Server connection...".into()));
+}
+
 /// `serverFormOperation`: validate the draft and pick the operation.
 pub fn operation(draft: &Draft) -> Result<Operation, String> {
     let (name, password) = (draft.name.trim().to_owned(), draft.password.clone());
@@ -427,6 +493,27 @@ mod tests {
     }
 
     #[test]
+    fn an_adopted_server_workspace_can_reorder_and_switch_tabs() {
+        let mut app = App::new();
+        let local = app.workspace_id.clone();
+        let remote = Selection { id: "team".into(), name: "Team".into(), ..Selection::default() };
+        app.switch_connection(Connected { selection: remote, target: Some(Default::default()), workspace: None, tunnel: None });
+        app.adopt_workspace(&serde_json::json!({"id": "w-remote", "title": "Team project", "root_dir": "/srv/project"}));
+        app.tabs[0].draft.replace_text("remote draft");
+
+        // Moving any tab used to panic: the active tab still had its temporary ID.
+        assert!(app.reorder_workspace_tab(&local, "w-remote", true));
+        assert_eq!(app.workspace_active, 0);
+        assert_eq!(app.workspaces[0].id, app.workspace_id);
+        assert_eq!(app.workspaces[0].title, "Team project");
+        app.select_workspace(1);
+        assert_eq!(app.workspace_id, local);
+        app.select_workspace(0);
+        assert_eq!(app.workspace_id, "w-remote");
+        assert_eq!(app.active_tab().draft.text, "remote draft");
+    }
+
+    #[test]
     fn an_ssh_system_opens_its_home_workspace_in_a_new_tab() {
         let mut app = App::new();
         let target = crate::daemon::Target { url: "ws://127.0.0.1:40000/session".into(), auth_token: Some("cred".into()), pairing_token: None };
@@ -459,14 +546,45 @@ mod tests {
     }
 
     #[test]
+    fn fast_creation_is_nonblocking_then_offers_a_copyable_invite() {
+        let mut app = App::new();
+        let invite = "https://example.opentunnel.net/";
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.server.pending = Some(Pending { id: "server-form".into(), rx,
+            draft: Some(Draft { host: true, fast: true, ..Draft::default() }) });
+        app.server.progress = Some(("Creating Fast Server".into(), "Preparing connection".into()));
+        assert!(app.modal.is_none());
+        assert_eq!(app.server.progress().map(|p| p.0), Some("Creating Fast Server"));
+        assert!(!app.poll_server());
+        // Hiding the toast never drops the worker or its eventual ready dialog.
+        app.server.progress_hidden = true;
+        assert!(app.server.progress().is_none());
+        assert_eq!(app.server.connecting(), Some("server-form"));
+        assert!(tx.send(Ok(Outcome::Connected(Connected { selection: Selection { id: "fast-test".into(), name: "Team".into(),
+            temporary: true, hosted: true, invite: Some(invite.into()), ..Selection::default() },
+            target: Some(Default::default()), workspace: None, tunnel: None }))).is_ok());
+        assert!(app.poll_server());
+        assert!(app.server.progress().is_none());
+        assert_eq!(app.modal.as_ref().unwrap().title, "Fast Server ready");
+        let mut tx = rune::Tx::default();
+        app.modal_key(&rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() }, &mut tx);
+        assert_eq!(app.clipboard.as_deref(), Some(invite));
+        assert_eq!(app.modal.as_ref().unwrap().buttons[0].label, "Invite copied");
+        app.modal_key(&rune::KeyEvent { key: rune::Key::Escape, mods: Default::default() }, &mut tx);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
     fn an_unreachable_server_reports_and_keeps_the_window() {
         let mut app = App::new();
         let id = app.workspace_id.clone();
         app.connect_server(Selection { id: "x".into(), name: "Nowhere".into(), endpoint: "ws://127.0.0.1:1/session".into(), ..Selection::default() });
         assert_eq!(app.server.connecting(), Some("x"));
+        assert!(app.modal.is_none());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !app.poll_server() { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
         assert_eq!(app.modal.as_ref().map(|m| m.title.as_str()), Some("Could not connect"));
+        assert!(app.server.progress().is_none());
         assert_eq!(app.workspace_id, id);
         assert!(!app.server.remote());
     }

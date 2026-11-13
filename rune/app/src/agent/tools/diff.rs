@@ -48,7 +48,7 @@ pub struct Diagnostic {
 pub struct Section {
     /// Display path; `A `, `D `, `M `, `R ` prefixes mark created/deleted/modified/moved files.
     pub path: String,
-    /// The real file, empty for non-file sections (compose source, audit notices).
+    /// The real file, empty for non-file sections (compose source).
     pub link_target: String,
     pub additions: u32,
     pub deletions: u32,
@@ -135,12 +135,6 @@ fn parse(tool: &str, title: &str, text: &str, detail: &str) -> Vec<Section> {
             sections = input_sections(&value["input"], metadata, fallback_path(metadata, title).as_deref());
         }
         attach_diagnostics(&mut sections, metadata);
-        if let Some(notice) = value["compositionNotice"].as_str().filter(|s| !s.trim().is_empty()) {
-            let rows = notice.lines().map(|line| Row::context(None, None, line)).collect();
-            let mut section = from_rows("Audit notice".into(), rows);
-            section.link_target.clear();
-            sections.push(section);
-        }
     }
     if sections.is_empty() {
         let fallback = fallback_path(&Value::Null, title).unwrap_or_else(|| "patch".into());

@@ -37,6 +37,7 @@ struct State {
     next_receiver: u64,
     receivers: BTreeMap<u64, u64>,
     senders: usize,
+    closed: bool,
 }
 
 struct Entry {
@@ -59,6 +60,7 @@ impl EventBus {
                     next_receiver: 0,
                     receivers: BTreeMap::new(),
                     senders: 1,
+                    closed: false,
                 }),
                 changed: Notify::new(),
             }),
@@ -86,7 +88,7 @@ impl EventBus {
     ) -> Result<usize, SendError<EventPayload>> {
         let mut state = self.shared.state.lock().unwrap();
         let count = state.receivers.len();
-        if count == 0 {
+        if state.closed || count == 0 {
             return Err(SendError(payload));
         }
         let sequence = state.next_sequence;
@@ -118,6 +120,12 @@ impl EventBus {
         drop(state);
         self.shared.changed.notify_waiters();
         Ok(count)
+    }
+
+    /// Reject future sends and wake receivers, preserving their unread events.
+    pub(crate) fn close(&self) {
+        self.shared.state.lock().unwrap().closed = true;
+        self.shared.changed.notify_waiters();
     }
 }
 
@@ -180,7 +188,7 @@ impl EventReceiver {
             state.reclaim();
             return Ok(payload);
         }
-        if state.senders == 0 {
+        if state.closed || state.senders == 0 {
             Err(TryRecvError::Closed)
         } else {
             Err(TryRecvError::Empty)

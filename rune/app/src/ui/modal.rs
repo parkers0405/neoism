@@ -25,6 +25,7 @@ pub enum Action {
     CancelConnect,
     /// Remove the server or system awaiting confirmation.
     ConfirmRemove,
+    CopyServerInvite,
 }
 
 pub struct Button {
@@ -41,6 +42,13 @@ pub struct Modal {
 }
 
 impl Modal {
+    pub fn fast_server_ready(name: &str, invite: &str) -> Self {
+        Self { title: "Fast Server ready".into(),
+            body: format!("{name}\n\nInvite a collaborator with this link and your password:\n\n{invite}\n\nClick the link to copy the invite.\nStop hosting ends this temporary session; project files are kept."),
+            buttons: vec![Button { label: "Copy invite".into(), key: "Enter".into(), action: Action::CopyServerInvite },
+                Button { label: "Close".into(), key: "Esc".into(), action: Action::Close }], selected: 0 }
+    }
+
     pub fn unsaved(tab: u64, title: &str, can_save: bool) -> Self {
         let mut buttons = vec![Button { label: "Keep editing".into(), key: "Esc".into(), action: Action::Close }];
         if can_save { buttons.push(Button { label: "Save and close".into(), key: String::new(), action: Action::SaveTab(tab) }); }
@@ -71,6 +79,18 @@ impl Modal {
 }
 
 impl App {
+    fn activate_modal_action(&mut self, action: Action, tx: &mut Tx) {
+        if action == Action::CopyServerInvite {
+            if let Some(invite) = self.server.ready_invite.clone() {
+                tx.copy(invite.clone());
+                self.clipboard = Some(invite);
+                if let Some(modal) = &mut self.modal {
+                    if let Some(button) = modal.buttons.iter_mut().find(|b| b.action == action) { button.label = "Invite copied".into(); }
+                }
+            }
+        } else { self.run_modal_action(action); }
+    }
+
     pub fn run_modal_action(&mut self, action: Action) {
         self.modal = None;
         match action {
@@ -79,6 +99,7 @@ impl App {
             Action::SaveTab(id) => self.save_and_close(id),
             Action::CancelConnect => self.cancel_connect(),
             Action::ConfirmRemove => self.confirm_remove(),
+            Action::CopyServerInvite => {},
         }
     }
 
@@ -90,7 +111,7 @@ impl App {
         if cancels { self.cancel_connect(); }
     }
 
-    pub fn modal_key(&mut self, event: &KeyEvent) -> bool {
+    pub fn modal_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
         let Some(modal) = &mut self.modal else { return false };
         let count = modal.buttons.len().max(1);
         match event.key {
@@ -99,7 +120,7 @@ impl App {
             Key::Down | Key::Tab => modal.selected = (modal.selected + 1) % count,
             Key::Enter => {
                 let action = modal.buttons.get(modal.selected).map_or(Action::Close, |b| b.action);
-                self.run_modal_action(action);
+                self.activate_modal_action(action, tx);
             }
             _ => {}
         }
@@ -113,6 +134,13 @@ pub fn view(app: &App) -> El {
     let s = app.ty.scale();
     let mut body = col().w_full().mt(10.0 * s);
     for line in modal.body.lines() {
+        let invite = modal.buttons.iter().any(|b| b.action == Action::CopyServerInvite) && app.server.ready_invite.as_deref() == Some(line);
+        if invite {
+            body = body.child(el().w_full().min_h(LINE_H * s).center_y()
+                .child(text(line.to_owned()).font(app.ty.sized(BODY).lh(LINE_H * s)).color(rgb(p.accent)).wrap().w_full())
+                .on_press_tx(|a: &mut App, tx: &mut Tx| a.activate_modal_action(Action::CopyServerInvite, tx)));
+            continue;
+        }
         // A long line wraps inside the card (on the same 19 pt lines) instead of running out of it.
         body = body.child(el().w_full().min_h(LINE_H * s).center_y()
             .child(text(line.to_owned()).font(app.ty.sized(BODY).lh(LINE_H * s)).color(rgb(p.dim)).wrap().w_full()));
@@ -125,7 +153,7 @@ pub fn view(app: &App) -> El {
             .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT })
             .child(text(button.label.clone()).font(app.ty.sized(ACTION)).color(rgb(p.fg)))
             .child(text(button.key.clone()).font(app.ty.sized(BODY)).color(rgb(p.muted)))
-            .on_press(move |a: &mut App| a.run_modal_action(action)));
+            .on_press_tx(move |a: &mut App, tx: &mut Tx| a.activate_modal_action(action, tx)));
     }
     let card = col().key("modal").w((WIDTH * s).min(app.window[0] - 16.0)).padding(PAD * s).radius(RADIUS * s)
         .fill(rgb(p.bg)).border(1.0, rgb(p.border))
@@ -144,4 +172,4 @@ pub fn view(app: &App) -> El {
 }
 
 /// Swallow keys while a modal is open (the caller routes them here first).
-pub fn keys(app: &mut App, event: &KeyEvent, _tx: &mut Tx) -> bool { app.modal_key(event) }
+pub fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool { app.modal_key(event, tx) }

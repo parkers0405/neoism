@@ -119,6 +119,8 @@ pub(crate) use agent_tool_registry::{
 };
 use anyhow::Context;
 pub use app_router::app;
+mod embedded;
+pub use embedded::{EmbeddedAgent, EmbeddedOptions};
 #[cfg(test)]
 use command_routes::{command_arguments, expand_command_template};
 pub use management::ManagementPolicy;
@@ -303,7 +305,7 @@ pub async fn listen_with_gui(
     services: neoism_agent_service_api::AgentServices,
     gui: Option<gui::GuiRoot>,
 ) -> anyhow::Result<SocketAddr> {
-    listen_impl(options, services, gui, None).await
+    listen_impl(options, services, gui, None, std::future::pending()).await
 }
 
 /// Serve the API using an already-bound socket without releasing its reservation.
@@ -313,8 +315,47 @@ pub async fn listen_with_listener(
     services: neoism_agent_service_api::AgentServices,
     listener: TcpListener,
 ) -> anyhow::Result<SocketAddr> {
-    listen_impl(options, services, None, Some(listener)).await
+    listen_impl(
+        options,
+        services,
+        None,
+        Some(listener),
+        std::future::pending(),
+    )
+    .await
 }
+
+/// Stop accepting requests and retire all state before releasing this server generation.
+pub async fn listen_with_shutdown(
+    options: ServerOptions,
+    services: neoism_agent_service_api::AgentServices,
+    listener: Option<TcpListener>,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> anyhow::Result<SocketAddr> {
+    listen_impl(options, services, None, listener, shutdown).await
+}
+
+/// Standalone HTTP/browser hosting with an application-owned shutdown signal.
+pub async fn listen_with_gui_and_shutdown(
+    options: ServerOptions,
+    services: neoism_agent_service_api::AgentServices,
+    gui: Option<gui::GuiRoot>,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> anyhow::Result<SocketAddr> {
+    listen_impl(options, services, gui, None, shutdown).await
+}
+
+/// A replacement server must not open the database after incomplete retirement.
+#[derive(Debug)]
+pub struct AgentShutdownError;
+
+impl std::fmt::Display for AgentShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("agent state could not be safely retired")
+    }
+}
+
+impl std::error::Error for AgentShutdownError {}
 
 fn validate_listener_address(actual: SocketAddr, expected: SocketAddr) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -329,6 +370,7 @@ async fn listen_impl(
     services: neoism_agent_service_api::AgentServices,
     gui: Option<gui::GuiRoot>,
     listener: Option<TcpListener>,
+    shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> anyhow::Result<SocketAddr> {
     if services.workspace_worker.is_some() && gui.is_some() {
         anyhow::bail!(
@@ -399,28 +441,7 @@ async fn listen_impl(
         Some(root) => gui::with_gui(api, root.for_listener(actual)),
         None => api,
     };
-    // Keep small streamed updates responsive on direct remote TCP connections.
-    let server = std::future::IntoFuture::into_future(
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .tcp_nodelay(true),
-    );
-    let result = if let Some(worker) = &state.services().workspace_worker {
-        tokio::select! {
-            result = server => result,
-            result = workspace_worker::wait_for_shutdown(worker) => {
-                result?;
-                Ok(())
-            },
-        }
-    } else {
-        server.await
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(30), state.shutdown())
-        .await
-        .map_err(|_| anyhow::anyhow!("agent shutdown exceeded its deadline"))??;
+    let result = serve_agent(listener, app, state, shutdown).await;
     tracing::warn!(
         target: "neoism_agent::perf",
         listen_addr = %actual,
@@ -430,6 +451,52 @@ async fn listen_impl(
     );
     result?;
     Ok(actual)
+}
+
+async fn serve_agent(
+    listener: TcpListener,
+    app: axum::Router,
+    state: AppState,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> anyhow::Result<()> {
+    // Keep small streamed updates responsive on direct remote TCP connections.
+    let (stop_server, server_stopping) = tokio::sync::oneshot::channel();
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .tcp_nodelay(true)
+        .with_graceful_shutdown(async {
+            let _ = server_stopping.await;
+        }),
+    );
+    tokio::pin!(server);
+    let worker_stopping = async {
+        if let Some(worker) = &state.services().workspace_worker {
+            workspace_worker::wait_for_shutdown(worker).await
+        } else {
+            std::future::pending().await
+        }
+    };
+    let (result, server_finished) = tokio::select! {
+        result = &mut server => (result.map_err(anyhow::Error::from), true),
+        result = worker_stopping => (result, false),
+        _ = shutdown => (Ok(()), false),
+    };
+    let _ = stop_server.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        state.shutdown().await?;
+        if !server_finished {
+            server.await?;
+        }
+        anyhow::Ok(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("agent shutdown exceeded its deadline"))
+    .and_then(|result| result)
+    .context(AgentShutdownError)?;
+    result
 }
 
 #[cfg(test)]
@@ -451,6 +518,67 @@ mod reserved_listener_tests {
         ).is_err());
         // Validation must not release or replace the caller's bound socket.
         assert!(TcpListener::bind(actual).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_retires_streams_and_state_before_reopening_database() {
+        let root = std::env::temp_dir().join(format!(
+            "neoism-server-retirement-{}",
+            neoism_agent_core::Id::ascending(neoism_agent_core::IdKind::Event)
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let database = root.join("agent.db");
+        let state = AppState::open_database(&database).await.unwrap();
+        let old_state = std::sync::Arc::downgrade(&state.inner);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = app_router::app_with_cors(state.clone(), &[]);
+        let (stop, stopping) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_agent(listener, app, state, async {
+            let _ = stopping.await;
+        }));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut stream = client
+            .get(format!("http://{address}/v2/events"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        client
+            .post(format!("http://{address}/v2/sessions"))
+            .query(&[("directory", root.to_str().unwrap())])
+            .json(&serde_json::json!({"title": "before restart"}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        stop.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("retirement must close the live event stream")
+            .unwrap()
+            .unwrap();
+        while stream.chunk().await.unwrap().is_some() {}
+        assert!(
+            old_state.upgrade().is_none(),
+            "old state must not survive retirement"
+        );
+        let replacement = AppState::open_database(&database).await.unwrap();
+        replacement
+            .publish_persisted(neoism_agent_core::EventPayload::new(
+                "session.updated",
+                serde_json::json!({"sessionID": "replacement"}),
+            ))
+            .await
+            .unwrap();
+        replacement.shutdown().await.unwrap();
+        drop(replacement);
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]

@@ -28,7 +28,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let Some(session_id) = session else {
         return col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg)).items_center().justify_center()
             .on_layout(move |a: &mut App, r| { a.rects.insert(format!("agent-area:{tab_id}"), r); })
-            .child(wordmark::view(app, &wordmark::host_key("agent", tab_id), 470.5_f32.min((available - 32.0).max(16.0))))
+            .child(wordmark::view(app, &wordmark::host_key("agent", tab_id), 640.0_f32.min((available - 32.0).max(16.0))))
             .child(el().h(47.0))
             .child(composer(app, 845.0_f32.min((available - 24.0).max(16.0))).key("agent-composer-shell"));
     };
@@ -41,7 +41,10 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     // viewports either side) are built, so a scroll frame or a streamed delta costs the rows on
     // screen, not the whole history (`virtual_rows`; heights are measured as rows mount).
     // The activity line: a running turn, a sub-agent still at work, or background tasks.
-    let activity = app.activity.is_some() && app.activity_state(session_id).is_some();
+    // Reserve the status band with the optimistic bubble, not in a second layout after
+    // the server acknowledges the send.
+    let activity = (app.activity.is_some() && app.activity_state(session_id).is_some())
+        || session.is_some_and(|s| s.activity_reveal.is_some());
     // A sub-agent's conversation is read, not written to: no input bar under it.
     let child = app.families.is_child(session_id);
     let rows_key: RowsKey = (session.map_or(0, |s| s.structure), messages.len(), live_from, activity);
@@ -124,7 +127,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let pinned = match (app.activity.as_ref().filter(|_| app.activity_pinned), composer_top(app, tab_id), app.rects.get(&format!("agent-area:{tab_id}"))) {
         (Some(activity), Some(card_top), Some(area)) => {
             let top = card_top - area[1] - app.activity_row_height() - 6.0;
-            col().key("activity-pinned").pin(Some(pad), Some(top.max(0.0)), Some(pad), None).child(activity.view(app))
+            col().key("activity-pinned").instant_changes().pin(Some(pad), Some(top.max(0.0)), Some(pad), None).child(activity.view(app))
         }
         _ => el(),
     };
@@ -229,8 +232,9 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
     let messages = session.messages.as_slice();
     match item {
         // Pinned above the composer, the line keeps its room here so text never runs under it.
-        RowItem::Activity if app.activity_pinned => el().key("activity").w_full().h(app.activity_row_height()),
-        RowItem::Activity => app.activity.as_ref().map_or_else(el, |activity| activity.view(app)),
+        RowItem::Activity if app.activity_pinned || app.activity.is_none() =>
+            el().key("activity").w_full().h(app.activity_row_height()).instant_changes(),
+        RowItem::Activity => app.activity.as_ref().map_or_else(el, |activity| activity.view(app).instant_changes()),
         RowItem::Group(start, end) => match messages.get(start..end) {
             Some(members) => tool_row(app, session_id, session, tab_id, members, || match tools::group_at(messages, start) {
                 Some((_, group)) => tools::row(app, &group),
@@ -304,13 +308,16 @@ fn user_row(app: &App, session_id: &str, session: &super::Session, message: &His
             .on_layout_tx(move |a: &mut App, r: [f32; 4], tx: &mut Tx| {
                 tx.live_only();
                 let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
-                let bottom = composer_top(a, tab_id).unwrap_or(view[1] + view[3]);
+                // The entire bubble must clear the pinned status band, not just peek out of
+                // the composer. Otherwise the line appears through the bubble's send spring.
+                let bottom = composer_top(a, tab_id).unwrap_or(view[1] + view[3]) - 6.0 - a.activity_row_height();
                 let Some(session) = a.sessions.get_mut(&sid) else { return };
-                if r[3] > 26.0 && r[1] + 26.0 < bottom && r[1] + r[3] > view[1]
-                    && let Some((id, visible)) = &mut session.activity_reveal
-                    && *id == mid && visible.is_none()
-                {
-                    *visible = Some(std::time::Instant::now());
+                if let Some((id, visible)) = &mut session.activity_reveal && *id == mid {
+                    if r[3] > 26.0 && r[1] + r[3] <= bottom + 1.0 {
+                        visible.get_or_insert_with(std::time::Instant::now);
+                    } else {
+                        *visible = None;
+                    }
                 }
                 let top = r[1] - view[1] + session.scroll.get().0;
                 session.question_tops.insert(mid.clone(), top.max(0.0));
@@ -469,7 +476,7 @@ fn timeline_width(app: &App) -> f32 {
     830.0
 }
 
-fn markdown_style(app: &App) -> MarkdownStyle {
+pub(crate) fn markdown_style(app: &App) -> MarkdownStyle {
     let p = app.pal;
     MarkdownStyle::neutral(true)
         .text(rgb(p.fg))
@@ -501,7 +508,7 @@ fn markdown_style(app: &App) -> MarkdownStyle {
 }
 
 /// Code blocks: a header with the language and Copy, then numbered lines (`reference/06`).
-fn code_frame(app: &App) -> impl Fn(El, &CodeFrame<'_>) -> El + 'static {
+pub(crate) fn code_frame(app: &App) -> impl Fn(El, &CodeFrame<'_>) -> El + 'static {
     let p = *app.pal;
     let ty = app.ty;
     move |code: El, frame: &CodeFrame<'_>| {
@@ -531,11 +538,33 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let key = format!("msg:{}", message.id);
     match message.kind {
         HistoryMessageKind::User => super::user::view(app, &message.id, &message.text, &message.attachments, message.author.as_deref(), timeline_width(app))
-            .key(key).pt(26.0),
-        HistoryMessageKind::Reasoning => col().key(key).w_full().pt(24.0).gap(10.0)
-            .child(text(if message.title.is_empty() { "Thinking".to_owned() } else { message.title.clone() })
-                .w_full().wrap().font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85)).selectable(true).selection_color(selection_color(app)))
-            .child(text(first_line(&message.text)).w_full().wrap().font(app.ty.body().italic()).color(rgb(p.dim)).selectable(true).selection_color(selection_color(app))),
+            .key(key).pt(26.0).arrives_whole(),
+        HistoryMessageKind::Reasoning => {
+            let font = app.ty.sized(13.0);
+            let style = markdown_style(app).text(rgb(p.dim)).muted(rgb(p.dim)).body_font(font)
+                .heading_font(1, font).heading_font(2, font).heading_font(3, font).heading_font(4, font)
+                .code_block_font(font);
+            let mut body = col().key(key).w_full().pt(24.0).gap(10.0);
+            if streaming { body = body.instant_changes(); }
+            let (title, reasoning) = reasoning_parts(message);
+            body = body.child(text(title.to_owned())
+                .w_full().wrap().font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85))
+                .selectable(true).selection_color(selection_color(app)));
+            let pieces = prose::chunks(reasoning);
+            let last = pieces.len().saturating_sub(1);
+            let look = (p as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits());
+            for (index, (piece, _)) in pieces.into_iter().enumerate() {
+                if piece.trim().is_empty() { continue; }
+                let arriving = streaming && index == last;
+                body = body.child(rune::memo(format!("reasoning:{}:{index}", message.id), (piece, look, arriving), || {
+                    Markdown::new(piece.to_owned()).streaming(arriving).reveal(0.0)
+                        .code_frame(code_frame(app)).selectable(true)
+                        .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
+                        .render(&style).selection_group(false)
+                }));
+            }
+            body
+        },
         HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tools::row(app, message),
         HistoryMessageKind::Compaction => compaction_divider(app, message, "Compacted"),
         // Bound notices to six source lines before layout: `max_lines`
@@ -547,10 +576,10 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
         // (a blank line) above where the text will start.
         HistoryMessageKind::Assistant if message.text.trim().is_empty() && message.attachments.is_empty() => el().key(key).w_full().h(0.0),
         HistoryMessageKind::Assistant => {
-            let revision = match &app.active_tab().kind {
+            let revision = (app.inline_images_version(), match &app.active_tab().kind {
                 crate::tabs::TabKind::Agent { session: Some(id) } => app.sessions.get(id).and_then(|s| s.message_versions.get(&message.id)).copied().unwrap_or(0),
                 _ => 0,
-            };
+            });
             // A wide table's scroll bar holds above the composer: only a reply with a table is
             // built from where that is.
             let foot = if message.text.contains('|') { transcript_foot(app, app.active_tab().id) } else { 0.0 };
@@ -583,7 +612,15 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                         let last_piece = pieces.len() - 1;
                         for (k, (piece, space)) in pieces.into_iter().enumerate() {
                             let arriving = streaming && n == last_segment && k == last_piece;
-                            let block = rune::memo(format!("md:{n}:{k}"), (piece, look, arriving), || Markdown::new(piece.to_owned())
+                            let block = rune::memo(format!("md:{n}:{k}"), (piece, look, arriving, revision.0), || {
+                                let images = app.markdown_images(piece);
+                                Markdown::new(piece.to_owned())
+                                 .images(move |src| images.get(src).cloned())
+                                 .image_frame(|image, frame| {
+                                     let src = frame.src.to_owned();
+                                     let name = if frame.alt.is_empty() { "Image preview" } else { frame.alt }.to_owned();
+                                     image.on_press(move |app: &mut App| app.preview_inline_image(&src, &name))
+                                 })
                                 .highlights(prose::highlights(piece, p))
                                 .streaming(arriving)
                                 // Words land at full ink: a per-word fade kept the newest line half
@@ -596,7 +633,8 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                                 .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
                                 .render(&style)
                                 // One selection spans the whole transcript, not just this block.
-                                .selection_group(false));
+                                .selection_group(false)
+                            });
                             // The column's own gap is 14; a heading is owed more above it.
                             body = body.child(if space > BLOCK_GAP { col().w_full().pt(space - BLOCK_GAP).child(block) } else { block });
                         }
@@ -611,6 +649,11 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             }, &session_id, &format!("msg:{}", message.id), tab_id))
         }
     }
+}
+
+fn reasoning_parts(message: &HistoryMessage) -> (&str, &str) {
+    let title = message.title.trim();
+    (if title.is_empty() { "Thinking" } else { title }, message.text.as_str())
 }
 
 /// The space between a reply's blocks (prose, tables, images).
@@ -674,11 +717,6 @@ impl Meta for El {
     }
 }
 
-fn first_line(text: &str) -> String {
-    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").trim_matches('*').to_owned()
-}
-
-
 impl App {
     /// Follow a transcript link: a web or mail link opens in the default browser, anything else
     /// is a file in the workspace (absolute, or relative to it), with an optional line.
@@ -717,8 +755,58 @@ fn file_link(url: &str) -> Option<(String, Option<u32>)> {
 }
 
 #[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    #[test]
+    fn acknowledging_a_visible_send_does_not_move_the_bubble() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        let mut app = App::new();
+        app.load_fixture("send", "Send", include_str!("../../fixtures/tools-timeline.json"));
+        let mut rt = rune::Runtime::new(app, |a: &App, cx: &mut rune::Cx<App>| {
+            pane(a, Some("send"), cx)
+        }, (1252.0, 674.0), rune::Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        rt.update(|a, _| {
+            a.sessions.get_mut("send").unwrap().shown = true;
+            a.submit_prompt("send", "A smoothly sent message".into());
+        });
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        let before = rt.elements().iter().find(|e| e.text.as_deref() == Some("A smoothly sent message")).unwrap().rect;
+        rt.update(|a, _| {
+            a.apply_agent(M::CatalogActivity { session_id: "send".into(), activity: "running".into() });
+            a.tick_activity();
+        });
+        for _ in 0..120 {
+            rt.frame(1.0 / 120.0);
+            let rect = rt.elements().iter().find(|e| e.text.as_deref() == Some("A smoothly sent message")).unwrap().rect;
+            assert!((rect[1] - before[1]).abs() < 1.0, "status acknowledgement moved the bubble: {before:?} -> {rect:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod reasoning_tests {
     use super::*;
+
+    #[test]
+    fn thinking_label_stays_above_the_reasoning_heading() {
+        let mut app = App::new();
+        app.load_fixture("thinking", "Thinking", "[]");
+        let m: HistoryMessage = serde_json::from_value(serde_json::json!({
+            "id":"reasoning", "role":"Assistant", "kind":"Reasoning", "title":"Thinking",
+            "text":"Updating fixture live state"
+        })).unwrap();
+        app.sessions.get_mut("thinking").unwrap().messages.push(m);
+        let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
+            col().w_full().child(message_row(a, &a.sessions["thinking"].messages[0], false))
+        }, (720.0, 300.0), rune::Env::new(true, 1.0));
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let elements = rt.elements();
+        let label = elements.iter().find(|e| e.text.as_deref() == Some("Thinking")).unwrap();
+        let heading = elements.iter().find(|e| e.text.as_deref() == Some("Updating fixture live state")).unwrap();
+        assert!(heading.rect[1] >= label.rect[1] + label.rect[3] + 7.0, "the heading stays below its Thinking label");
+    }
 
     #[test]
     fn reasoning_wraps_to_the_available_width_without_overlapping() {
@@ -726,14 +814,17 @@ mod reasoning_tests {
         for width in [720.0, 320.0] {
             let mut app = App::new();
             app.load_fixture("thinking", "Thinking", include_str!("../../fixtures/thinking-timeline.json"));
+            app.sessions.get_mut("thinking").unwrap().messages[0].text.push_str("\n\nThe second paragraph remains visible after the reasoning preview.");
             let message = &app.sessions["thinking"].messages[0];
-            let (title, body) = (message.title.clone(), first_line(&message.text));
+            let (title, body) = (message.title.clone(), message.text.lines().next().unwrap().to_owned());
             let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
                 col().w_full().h_full().instant_changes()
                     .child(message_row(a, &a.sessions["thinking"].messages[0], true))
             }, (width, 1200.0), rune::Env::new(true, 1.0));
             for _ in 0..3 { rt.frame(1.0 / 120.0); }
             let elements = rt.elements();
+            assert!(elements.iter().any(|e| e.text.as_deref() == Some("The second paragraph remains visible after the reasoning preview.")),
+                "reasoning must retain paragraphs beyond the old first-line preview");
             let title = elements.iter().find(|e| e.text.as_deref() == Some(&title)).unwrap();
             let body = elements.iter().find(|e| e.text.as_deref() == Some(&body)).unwrap();
             for element in [title, body] {

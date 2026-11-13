@@ -12,7 +12,7 @@ const GRID: f32 = 31.25;
 const SETTLE: f32 = 0.2;
 /// Seven rows, leftmost cell in bit 6. Manually sampled at cell centres from
 /// the original SVG paths (nonzero winding, including E/O counters).
-const MASKS: [[u8; 7]; 6] = [
+pub(super) const MASKS: [[u8; 7]; 6] = [
     [0, 0, 0b1111110, 0b1100011, 0b1100011, 0b1100011, 0b1100011],
     [0, 0, 0b0111110, 0b1100011, 0b1111111, 0b1100000, 0b0111110],
     [0, 0, 0b0111110, 0b1100011, 0b1100011, 0b1100011, 0b0111110],
@@ -141,8 +141,7 @@ impl WordmarkAnimation {
     /// Restart immediately, choosing the next effect even if already playing.
     pub fn replay(&mut self, now: f64) {
         self.effect = Some(self.choose_effect());
-        self.duration =
-            1.7 + (self.random() as f64 / (u32::MAX as f64 + 1.0) * 0.8) as f32;
+        self.duration = 1.7 + (self.random() as f64 / (u32::MAX as f64 + 1.0) * 0.8) as f32;
         self.started = Some(now);
     }
 
@@ -418,7 +417,7 @@ type Point = [f32; 2];
 /// alpha at x=10 is 153/255, confirming fractional SVG edge coverage.
 /// Thus its SVG-space bounds are [0,602.5,1495,241.25], NOT the tight
 /// [0,603.652546,1494.478,239.596183] geometric bounds. Retain this padding.
-fn map_point(local: Point, letter: usize, layer: [f32; 3], rect: [f32; 4]) -> Point {
+pub(super) fn map_point(local: Point, letter: usize, layer: [f32; 3], rect: [f32; 4]) -> Point {
     // Use f64 until the final renderer coordinate: subtracting a late letter's
     // strip origin in f32 needlessly loses precision near the glyph edges.
     let global_x = LETTER_X[letter] + layer[0] as f64 + local[0] as f64;
@@ -452,6 +451,24 @@ fn tile_corners(t: Tile, s: Sample) -> [Point; 4] {
 impl AnimationFrame {
     pub fn show_original(&self) -> bool {
         self.tail
+    }
+
+    /// Attach decoration geometry to a foreground pixel using exactly its click-effect sample.
+    pub(super) fn attached_quad(&self, letter: usize, row: usize, column: usize, corners: [Point; 4], rect: [f32; 4]) -> Option<([Point; 4], f32)> {
+        if letter >= MASKS.len() || row >= 7 || column >= 7 || !self.progress.is_finite() { return None; }
+        let tile = Tile::new(letter, row, column);
+        let s = sample(self.effect, self.progress, tile);
+        let alpha = clamp(s.opacity) * clamp(self.tail_opacity);
+        if alpha <= 0.0 { return None; }
+        let center = [tile.x + GRID / 2.0, tile.y + GRID / 2.0];
+        let (sin, cos) = s.rotation.to_radians().sin_cos();
+        let mapped = corners.map(|p| {
+            let x = (p[0] - center[0]) * s.sx;
+            let y = (p[1] - center[1]) * s.sy;
+            map_point([center[0] + s.dx + cos * x - sin * y, center[1] + s.dy + sin * x + cos * y],
+                letter, [0.0, 0.0, 1.0], rect)
+        });
+        mapped.iter().flatten().all(|v| v.is_finite()).then_some((mapped, alpha))
     }
 
     /// The three shadow layers and two front-layer sparks of one letter as quads in the
@@ -499,6 +516,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn attached_flames_follow_the_visible_foreground_pixels_in_every_effect() {
+        let rect = [12.0, 20.0, 100.0, 96.0];
+        let tile = Tile::new(0, 2, 0);
+        let corners = tile_corners(tile, Sample::default());
+        let mut checked = 0;
+        for effect in Effect::ALL {
+            let frame = AnimationFrame { effect, progress: 0.35, tail_opacity: 1.0, tail: false };
+            let Some((attached, alpha)) = frame.attached_quad(0, 2, 0, corners, rect) else { continue };
+            let mut follows_pixel = false;
+            frame.letter_quads(0, rect, |quad, opacity| {
+                if (opacity - alpha).abs() < 0.001 && quad.iter().flatten().zip(attached.iter().flatten())
+                    .all(|(a, b)| (a - b).abs() < 0.001) { follows_pixel = true; }
+            });
+            assert!(follows_pixel, "flames detached from the foreground in {effect:?}");
+            checked += 1;
+        }
+        assert!(checked > 8);
+    }
+
+    #[test]
     fn every_effect_settles_back_to_the_artwork() {
         let mut animation = WordmarkAnimation::default();
         for _ in 0..Effect::ALL.len() {
@@ -516,7 +553,7 @@ mod tests {
     fn bag_plays_all_fifteen_before_repeating() {
         let mut animation = WordmarkAnimation::default();
         let mut seen = Vec::new();
-        for _ in 0..15 {
+        for _ in 0..Effect::ALL.len() {
             animation.replay(0.0);
             seen.push(animation.frame(0.1).unwrap().effect);
         }

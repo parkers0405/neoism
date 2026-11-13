@@ -216,7 +216,12 @@ impl App {
     /// Tinkering (sub-agent tasks → Sub-agents working), otherwise Crafting.
     pub fn activity_state(&self, session_id: &str) -> Option<State> {
         if self.sessions.get(session_id).is_some_and(|s| s.compacting) { return Some(State::Compacting); }
-        let background = (self.background_count(session_id) > 0).then_some(State::Background);
+        // A new window sees catalog activity before the per-family task snapshot. Show the
+        // confirmed work immediately, but leave the exact count to that snapshot.
+        let root = self.families.root_of(session_id);
+        let catalog_background = self.thread_activity.get(root).map(|activity| activity == "background")
+            .unwrap_or_else(|| self.threads.iter().find(|t| t.session_id == root).is_some_and(|t| self.activity_of(t) == "background"));
+        let background = (catalog_background || self.background_count(session_id) > 0).then_some(State::Background);
         let Some(session) = self.sessions.get(session_id).filter(|_| self.session_live(session_id)) else { return background };
         let from = session.live_from.unwrap_or(0);
         let running = |s: &str| matches!(s, "" | "running" | "pending");
@@ -258,7 +263,7 @@ impl App {
     /// The transcript is scrolled to its end and overflows its view (`activity_geometry`'s
     /// `following`): the activity line then holds the bottom row instead of riding the content.
     pub fn activity_follows_end(&self, session_id: &str) -> bool {
-        let Some(session) = self.sessions.get(session_id).filter(|_| self.session_live(session_id)) else { return false };
+        let Some(session) = self.sessions.get(session_id).filter(|_| self.activity_state(session_id).is_some()) else { return false };
         let (offset, max) = session.scroll.get();
         max > 1.0 && max - offset <= 2.0 && crate::ui::follow::wheel_base(session.wheel_target, offset) == offset
     }
@@ -277,10 +282,13 @@ impl App {
         let background = session.as_deref().map_or(0, |id| self.background_count(id));
         let queued = session.as_deref().and_then(|id| self.sessions.get(id)).map_or(0, |s| s.queued_prompts);
         let id = session.as_deref().unwrap_or_default();
-        // The timer counts from the turn's start, which the conversation holds: the line comes
-        // and goes (another tab, a wait on sub-agents) without the clock starting over. Work
-        // with no turn of its own (background tasks) keeps the line's clock while it stands.
-        let turn = self.turn_started(id)
+        // Keep the background clock by family, not in the disposable on-screen activity line.
+        // A server snapshot replaces this fallback with the oldest running job's real start.
+        let start = if state == Some(State::Background) {
+            let root = self.families.root_of(id).to_owned();
+            Some(*self.background_started.entry(root).or_insert_with(Instant::now))
+        } else { self.turn_started(id) };
+        let turn = start
             .or_else(|| self.activity.as_ref().filter(|a| a.session == id).map(|a| a.turn))
             .unwrap_or_else(Instant::now);
         let structure = match (state, &mut self.activity) {
@@ -301,18 +309,17 @@ impl App {
                 true
             }
         };
-        let mut revealed = true;
+        let mut opacity = 1.0;
         if let Some(session) = self.sessions.get_mut(id)
-            && let Some((prompt, visible)) = &session.activity_reveal
+            && let Some((_, visible)) = &session.activity_reveal
         {
-            // Keep the row's space, but let the bubble paint first. A reply already arriving
-            // takes precedence; only the initial idle-send indicator is staggered.
-            let responding = session.messages.last().is_some_and(|m| m.id != *prompt && m.kind != HistoryMessageKind::User);
-            revealed = responding || visible.is_some_and(|at| at.elapsed() >= std::time::Duration::from_millis(80));
-            if revealed { session.activity_reveal = None; }
+            // Keep the row's space while the send spring clears its band, then fade the
+            // indicator in. A fast reply must not expose it through the moving bubble either.
+            opacity = visible.map_or(0.0, |at| (at.elapsed().as_secs_f32() / 0.06).clamp(0.0, 1.0));
+            if opacity >= 1.0 && self.activity.is_some() { session.activity_reveal = None; }
         }
         if let Some(activity) = &self.activity {
-            activity.opacity.set(if revealed { 1.0 } else { 0.0 });
+            activity.opacity.set(opacity);
             activity.tick(self.pal, self.ty.scale());
         }
         // Following the end of an overflowing transcript, the line pins above the composer.
@@ -326,6 +333,196 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attaching_to_a_catalogued_run_restores_activity_before_history_arrives() {
+        use neoism_protocol::agent::{AgentServerMessage as M, ContentKind, HistoryMessage, ThreadSummary};
+        use serde_json::json;
+        // Both initial sidebar snapshots and later catalog events can precede opening the tab.
+        for catalog_event in [false, true] {
+            let mut app = App::new();
+            let thread: ThreadSummary = serde_json::from_value(json!({
+                "session_id": "remote", "title": "Remote run", "catalog_activity": "running", "busy": true
+            })).unwrap();
+            if catalog_event { app.apply_agent(M::CatalogActivity { session_id: "remote".into(), activity: "running".into() }); }
+            else { app.apply_agent(M::ThreadList { threads: vec![thread], requested_cursor: None, next_cursor: None }); }
+            assert!(!app.sessions.contains_key("remote"));
+            app.open_conversation("remote");
+            app.tick_activity();
+            assert_eq!(app.activity.as_ref().map(|a| a.state), Some(State::Generating));
+            let message = |id: &str, kind: &str, role: &str| -> HistoryMessage {
+                serde_json::from_value(json!({"id": id, "kind": kind, "role": role, "text": id})).unwrap()
+            };
+            app.apply_agent(M::HistoryChunk { session_id: "remote".into(), next_cursor: None,
+                messages: vec![message("old-prompt", "User", "User"), message("old-tool", "Tool", "Assistant"),
+                    message("old-reply", "Assistant", "Assistant"), message("prompt", "User", "User"), message("thought", "Reasoning", "Assistant")] });
+            assert_eq!(app.sessions["remote"].live_from, Some(3), "only the current turn's trace is live");
+            app.tick_activity();
+            assert_eq!(app.activity.as_ref().map(|a| a.state), Some(State::Thinking));
+            app.apply_agent(M::ContentDelta { session_id: "remote".into(), message_id: "reply".into(),
+                parent_message_id: None, kind: ContentKind::Text, text: "Still writing".into() });
+            app.tick_activity();
+            assert_eq!(app.activity.as_ref().map(|a| a.state), Some(State::Generating));
+            app.apply_agent(M::CatalogActivity { session_id: "remote".into(), activity: "idle".into() });
+            // A late semantic event must not resurrect a turn the catalog ended.
+            app.apply_agent(M::StreamingState { session_id: "remote".into(), state: neoism_protocol::agent::StreamingState::Thinking, label: None });
+            app.tick_activity();
+            assert!(app.activity.is_none());
+        }
+    }
+
+    #[test]
+    fn an_attach_snapshot_starts_activity_but_a_waiting_queue_does_not() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        let mut app = App::new();
+        app.open_conversation("remote");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        app.apply_agent(M::QueueUpdate { session_id: "remote".into(), count: 0, preview: None, started_at: Some(now - 60_000) });
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().map(|a| a.state), Some(State::Generating));
+        assert!((60..62).contains(&app.activity.as_ref().unwrap().turn.elapsed().as_secs()));
+        app.apply_agent(M::SessionIdle { session_id: "remote".into() });
+        app.apply_agent(M::QueueUpdate { session_id: "remote".into(), count: 1, preview: None, started_at: None });
+        app.tick_activity();
+        assert!(app.activity.is_none());
+    }
+
+    #[test]
+    fn background_timer_survives_tab_switches_with_or_without_a_snapshot() {
+        use neoism_protocol::agent::{AgentServerMessage as M, BackgroundJobRuntime};
+        for snapshot in [false, true] {
+            let mut app = App::new();
+            app.apply_agent(M::CatalogActivity { session_id: "background".into(), activity: "background".into() });
+            app.open_conversation("background");
+            if snapshot {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                app.apply_agent(M::BackgroundTasksUpdated { session_id: "background".into(), epoch: "jobs".into(), revision: 1,
+                    tasks: vec![BackgroundJobRuntime { job_id: "job".into(), session_id: "background".into(), started_at: now - 90_000 }] });
+            }
+            app.tick_activity();
+            let started = app.activity.as_ref().unwrap().turn;
+            if snapshot { assert!((90..92).contains(&started.elapsed().as_secs()), "use job age, not time on screen"); }
+            app.open_conversation("other");
+            app.tick_activity();
+            assert!(app.activity.is_none());
+            app.view_session("background");
+            app.tick_activity();
+            assert_eq!(app.activity.as_ref().unwrap().turn, started, "switching tabs must not restart the timer");
+        }
+    }
+
+    #[test]
+    fn background_timer_follows_current_jobs_and_ignores_stale_snapshots() {
+        use neoism_protocol::agent::{AgentServerMessage as M, BackgroundJobRuntime};
+        let mut app = App::new();
+        app.apply_agent(M::CatalogActivity { session_id: "background".into(), activity: "background".into() });
+        app.open_conversation("background");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let update = |revision, age| M::BackgroundTasksUpdated { session_id: "background".into(), epoch: "jobs".into(), revision,
+            tasks: vec![BackgroundJobRuntime { job_id: format!("job-{revision}"), session_id: "background".into(), started_at: now - age }] };
+        app.apply_agent(update(1, 120_000));
+        app.tick_activity();
+        assert!((120..122).contains(&app.activity.as_ref().unwrap().turn.elapsed().as_secs()));
+        app.apply_agent(update(2, 30_000));
+        app.tick_activity();
+        let current = app.activity.as_ref().unwrap().turn;
+        assert!((30..32).contains(&current.elapsed().as_secs()), "finished older jobs no longer own the clock");
+        app.apply_agent(update(1, 120_000));
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().turn, current);
+        app.apply_agent(M::BackgroundTasksUpdated { session_id: "background".into(), epoch: "jobs".into(), revision: 3, tasks: vec![] });
+        app.apply_agent(M::CatalogActivity { session_id: "background".into(), activity: "idle".into() });
+        app.tick_activity();
+        assert!(app.activity.is_none());
+        app.apply_agent(M::CatalogActivity { session_id: "background".into(), activity: "background".into() });
+        app.tick_activity();
+        assert!(app.activity.as_ref().unwrap().turn > current, "a later run gets a fresh fallback clock");
+    }
+
+    #[test]
+    fn a_new_window_shows_catalog_background_before_the_task_snapshot() {
+        use neoism_protocol::agent::{AgentRuntimeSnapshot, AgentServerMessage as M, BackgroundJobRuntime};
+        for catalog_event in [false, true] {
+            let mut app = App::new();
+            if catalog_event {
+                app.apply_agent(M::CatalogActivity { session_id: "restored".into(), activity: "background".into() });
+            } else {
+                app.apply_agent(M::ThreadList { threads: vec![serde_json::from_value(serde_json::json!({
+                    "session_id": "restored", "title": "Background work", "catalog_activity": "background"
+                })).unwrap()], requested_cursor: None, next_cursor: None });
+            }
+            app.open_conversation("restored");
+            app.tick_activity();
+            assert_eq!(app.activity.as_ref().unwrap().state, State::Background);
+            assert_eq!(app.activity.as_ref().unwrap().background, 0, "do not guess a task count from the catalog");
+            assert!(!app.session_live("restored"), "background work is not a foreground turn");
+
+            app.apply_agent(M::RuntimeSnapshot { session_id: "restored".into(), snapshot: AgentRuntimeSnapshot {
+                root_session_id: "restored".into(), running_background_tasks: Some(vec![BackgroundJobRuntime {
+                    job_id: "job".into(), session_id: "restored".into(), started_at: 1,
+                }]), background_jobs_epoch: Some("jobs".into()), background_jobs_revision: Some(1), ..Default::default()
+            } });
+            assert!(app.tick_activity().1, "landing the count remeasures the activity row");
+            assert_eq!(app.activity.as_ref().unwrap().state, State::Background);
+            assert_eq!(app.activity.as_ref().unwrap().background, 1);
+            app.apply_agent(M::BackgroundTasksUpdated { session_id: "restored".into(), epoch: "jobs".into(), revision: 2, tasks: vec![] });
+            app.apply_agent(M::CatalogActivity { session_id: "restored".into(), activity: "idle".into() });
+            app.tick_activity();
+            assert!(app.activity.is_none(), "finished work clears the restored indicator");
+        }
+    }
+
+    #[test]
+    fn restored_background_work_pins_without_a_foreground_turn() {
+        use neoism_protocol::agent::{AgentRuntimeSnapshot, AgentServerMessage as M, BackgroundJobRuntime};
+        let mut app = App::new();
+        app.load_fixture("restored", "Restored conversation", "[]");
+        app.apply_agent(M::CatalogActivity { session_id: "restored".into(), activity: "background".into() });
+        app.apply_agent(M::RuntimeSnapshot {
+            session_id: "restored".into(),
+            snapshot: AgentRuntimeSnapshot {
+                root_session_id: "restored".into(),
+                running_background_tasks: Some(vec![BackgroundJobRuntime {
+                    job_id: "job".into(), session_id: "restored".into(), started_at: 1,
+                }]),
+                ..Default::default()
+            },
+        });
+        assert!(!app.session_live("restored"));
+        app.sessions["restored"].scroll.set((500.0, 500.0));
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().state, State::Background);
+        assert!(app.activity_pinned, "hydrated background work pins just like a live turn");
+
+        app.sessions["restored"].scroll.set((250.0, 500.0));
+        app.tick_activity();
+        assert!(!app.activity_pinned, "reading older messages keeps the indicator in the transcript");
+        app.sessions["restored"].scroll.set((500.0, 500.0));
+        app.tick_activity();
+        assert!(app.activity_pinned);
+
+        app.apply_agent(M::CatalogActivity { session_id: "restored".into(), activity: "idle".into() });
+        app.tick_activity();
+        assert!(app.activity.is_none());
+        assert!(!app.activity_pinned, "completed work cannot leave a pinned indicator behind");
+    }
+
+    #[test]
+    fn a_late_acknowledgement_keeps_the_reserved_status_band() {
+        use std::time::Duration;
+        let mut app = App::new();
+        app.load_fixture("send", "Send", "[]");
+        app.submit_prompt("send", "Hello".into());
+        app.sessions.get_mut("send").unwrap().activity_reveal.as_mut().unwrap().1 =
+            Some(Instant::now() - Duration::from_millis(100));
+        app.tick_activity();
+        assert!(app.activity.is_none());
+        assert!(app.sessions["send"].activity_reveal.is_some(), "keep space until the server acknowledges the turn");
+        app.set_streaming("send", true);
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 1.0);
+        assert!(app.sessions["send"].activity_reveal.is_none());
+    }
 
     #[test]
     fn idle_send_reveals_activity_just_after_its_bubble_without_relayout() {
@@ -345,8 +542,12 @@ mod tests {
         *visible = Some(Instant::now() + Duration::from_secs(1));
         app.tick_activity();
         assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 0.0);
-        app.sessions.get_mut("send").unwrap().activity_reveal.as_mut().unwrap().1 = Some(Instant::now() - Duration::from_millis(100));
+        app.sessions.get_mut("send").unwrap().activity_reveal.as_mut().unwrap().1 = Some(Instant::now() - Duration::from_millis(20));
         assert!(!app.tick_activity().1, "reveal only repaints the live opacity");
+        let opacity = app.activity.as_ref().unwrap().opacity.get();
+        assert!(opacity > 0.0 && opacity < 1.0);
+        app.sessions.get_mut("send").unwrap().activity_reveal.as_mut().unwrap().1 = Some(Instant::now() - Duration::from_millis(70));
+        assert!(!app.tick_activity().1);
         assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 1.0);
         assert_eq!(app.activity_row_height(), height);
         assert!(app.sessions["send"].activity_reveal.is_none());
@@ -357,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fast_reply_or_idle_cancels_the_initial_activity_delay() {
+    fn a_fast_reply_waits_for_the_bubble_but_idle_cancels_the_reveal() {
         use neoism_protocol::agent::{AgentServerMessage as M, ContentKind};
         let mut app = App::new();
         app.load_fixture("send", "Send", "[]");
@@ -366,8 +567,8 @@ mod tests {
         app.apply_agent(M::ContentDelta { session_id: "send".into(), message_id: "reply".into(),
             text: "Hi".into(), kind: ContentKind::Text, parent_message_id: None });
         app.tick_activity();
-        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 1.0);
-        assert!(app.sessions["send"].activity_reveal.is_none());
+        assert_eq!(app.activity.as_ref().unwrap().opacity.get(), 0.0);
+        assert!(app.sessions["send"].activity_reveal.is_some());
         app.set_streaming("send", false);
         app.submit_prompt("send", "Again".into());
         app.apply_agent(M::SessionIdle { session_id: "send".into() });
@@ -459,9 +660,31 @@ mod tests {
     }
 
     #[test]
+    fn live_status_tracks_the_operation_and_returns_to_crafting() {
+        let mut app = App::new();
+        app.load_fixture("work", "Work", "[]");
+        app.set_streaming("work", true);
+        assert_eq!(app.activity_state("work"), Some(State::Generating));
+        for tool in ["read", "grep", "bash", "apply_patch", "custom_tool"] {
+            let message = serde_json::from_value(serde_json::json!({
+                "id": "operation", "role": "Assistant", "kind": "Tool", "tool": tool,
+                "title": "Checking behavior", "text": "", "status": "running"
+            })).unwrap();
+            app.sessions.get_mut("work").unwrap().messages = vec![message];
+            app.tick_activity();
+            assert_eq!(app.activity.as_ref().unwrap().state, State::Working);
+            app.sessions.get_mut("work").unwrap().messages[0].status = "completed".into();
+            assert_eq!(app.activity_state("work"), Some(State::Generating));
+        }
+        app.sessions.get_mut("work").unwrap().messages[0].kind = HistoryMessageKind::Reasoning;
+        assert_eq!(app.activity_state("work"), Some(State::Thinking));
+    }
+
+    #[test]
     fn labels_and_elapsed() {
         assert_eq!(State::Generating.label(), "Crafting");
         assert_eq!(State::Thinking.label(), "Pondering");
+        assert_eq!(State::Working.label(), "Tinkering");
         assert_eq!(format_elapsed(4.24), "4.2s");
         assert_eq!(format_elapsed(61.0), "1m 1s");
     }

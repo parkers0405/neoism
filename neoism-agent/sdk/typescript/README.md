@@ -35,6 +35,45 @@ Unknown events and plugin payloads remain `unknown` and are preserved. The HTTP
 transport resumes with `Last-Event-ID`, deduplicates by durable event ID, and
 reconnects with bounded exponential backoff.
 
+## Native in-process hosting
+
+`@neoism/sdk-node` can own the existing Rust Agent runtime through a Node-API addon. It returns the same typed client used for HTTP, without a listening socket, child server process, or replacement agent loop. Native code is loaded only when `createEmbeddedNeoism()` is called; ordinary network-client imports do not require an addon.
+
+Build the matching host-platform artifact from this SDK workspace:
+
+```sh
+npm run build
+npm run native:build
+npm run test:embedded
+```
+
+The native build currently packages a development artifact for the build machine at `packages/node/native/<platform>-<arch>/neoism_agent.node`. The application and native library must target the same OS/architecture and compatible system libraries. This is source-build support, not a claim of published cross-platform prebuilt packages. `nativeModule` can select an explicit trusted addon path. Loading native modules executes trusted code in the application's process.
+
+```ts
+import { createEmbeddedNeoism } from "@neoism/sdk-node";
+
+const host = await createEmbeddedNeoism({
+  database: "/persistent/company/agent.db",
+  // token: process.env.NEOISM_AGENT_TOKEN,
+});
+try {
+  const session = await host.client.sessions.create({ directory: "/workspace" });
+  console.log(session.id);
+} finally {
+  await host.close();
+}
+```
+
+The host also supports `Symbol.asyncDispose` for `await using` in compatible TypeScript applications. It requires a Node runtime with Fetch/Web Streams, `AbortSignal.any`, and async-disposal symbols. Requests use the existing authentication middleware; embedding is not an authorization bypass. The native adapter uses local/native `AgentServices`, not an implicitly tenant-isolated shared profile. Keep one active host per database and close it before replacement.
+
+Responses are pulled in chunks up to 64 KiB; each host admits at most 64 active exchanges and request bodies are limited to 16 MiB. Consume or cancel response bodies to release exchanges. Abort propagates across the native boundary, and closing the host aborts owned request/event subscriptions. API-level prompt admission remains server-owned: cancelling a fetch is not the same as aborting a session run. WebSocket upgrades still require the network transport.
+
+`host.client` exposes the existing generated operations, plugins, sessions, approvals, and SSE parser. `host.fetch` is confined to `http://neoism.embedded.invalid` and never falls back to network access. Binary artifact data is transported without JSON/base64 conversion. The native bridge has its own checked ABI version; it does not introduce a new HTTP API version.
+
+Pass `config` to supply an immutable host-owned Agent configuration instead of local config discovery. Supply it again on reopen; this option is not a sandbox or a replacement for native credential services. The addon ABI is version 2; rebuild older development artifacts before using this entry.
+
+Claimed model turns resume from saved history on reopen, with a durable limit of ten restart attempts. Recovery is at-least-once, not exactly-once tool execution. This remains native Node embedding, not a browser/Workerd/Wasm profile. See the [hosting documentation](../../../vendor/neoism-docs/content/Hosting/Embedding.md) for lifecycle and recovery boundaries.
+
 ## Optional capabilities
 
 Agent Server features supplied by plugins remain optional at runtime even

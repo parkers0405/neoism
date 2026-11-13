@@ -7,15 +7,18 @@ mod activity;
 mod anchor;
 pub mod attach;
 mod composer;
+mod composer_tokens;
 pub(crate) mod prompts;
 #[path = "../../../../neoism-frontend/shared/src/panels/agent_pane/question_policy.rs"]
 mod question_policy;
 pub(crate) mod family;
 mod header;
+mod history;
 mod projects;
 mod prose;
 mod resync;
 mod sidebar;
+pub(crate) use sidebar::loader;
 mod table;
 mod ticks;
 pub mod slash;
@@ -36,7 +39,7 @@ use crate::daemon::Family;
 use crate::tabs::TabKind;
 use neoism_protocol::agent::{
     AgentClientMessage, AgentServerMessage, HistoryMessage, HistoryMessageKind, PromptDelivery,
-    Role, StreamingState, ThreadSummary,
+    Role, StreamingState, ThreadSummary, TodoItem,
 };
 use serde_json::{Value, json};
 
@@ -120,6 +123,11 @@ pub struct Session {
     pub viewport_h: f32,
     pub width: f32,
     pub messages: Vec<HistoryMessage>,
+    /// A live snapshot is authoritative, including an explicitly empty checklist.
+    /// Until one arrives, reopened sessions project their most recent persisted checklist.
+    pub todos: Option<Vec<TodoItem>>,
+    pub goal: Option<slash::Goal>,
+    history_edits: history::Edits,
     /// Lazy, bounded to loaded rows. Length catches append-only callers (echoes/notices);
     /// same-length replacements and reorders must call `invalidate_message_positions`.
     message_positions: Option<(usize, std::collections::HashMap<String, usize>)>,
@@ -156,6 +164,19 @@ pub struct Session {
 }
 
 impl Session {
+    /// GPUiX `session-todos.ts` semantics: do not revive work after a clear.
+    pub fn session_todos(&self) -> &[TodoItem] {
+        if let Some(todos) = &self.todos { return todos; }
+        for message in self.messages.iter().rev() {
+            if !message.todos.is_empty() || message.id == "todos-snapshot"
+                || ["todowrite", "todo_write", "todo"].iter().any(|name| message.tool.eq_ignore_ascii_case(name))
+            {
+                return &message.todos;
+            }
+        }
+        &[]
+    }
+
     fn invalidate_message_positions(&mut self) {
         self.message_positions = None;
         self.part_order_cache = None;
@@ -176,8 +197,22 @@ impl Session {
         self.message_positions.as_ref().unwrap().1.get(id).copied()
     }
 
-    fn upsert_message(&mut self, message: HistoryMessage) {
+    fn upsert_message(&mut self, mut message: HistoryMessage) {
         if let Some(at) = self.message_position(&message.id) {
+            let existing = &self.messages[at];
+            // User text and image parts share their parent ID but arrive independently.
+            // An image-only update must not erase the caption (or earlier photos).
+            if existing.kind == HistoryMessageKind::User && message.kind == HistoryMessageKind::User {
+                if message.text.trim().is_empty() { message.text = existing.text.clone(); }
+                if message.author.is_none() { message.author = existing.author.clone(); }
+                let mut attachments = existing.attachments.clone();
+                for attachment in std::mem::take(&mut message.attachments) {
+                    if !attachments.iter().any(|a| a.url == attachment.url && a.mime == attachment.mime && a.filename == attachment.filename) {
+                        attachments.push(attachment);
+                    }
+                }
+                message.attachments = attachments;
+            }
             self.messages[at] = message;
         } else {
             insert_new(&mut self.messages, message);
@@ -368,6 +403,12 @@ impl App {
 
     /// Fetch a session's newest page and follow its stream, once.
     fn load_session(&mut self, session_id: &str) {
+        // The catalog may arrive before this transcript exists (joining/SSH or reopening a
+        // closed tab). No new busy event is required for a turn already in flight.
+        let running = self.thread_activity.get(session_id).map(|activity| activity == "running")
+            .unwrap_or_else(|| self.threads.iter().find(|t| t.session_id == session_id).is_some_and(|t| self.activity_of(t) == "running"));
+        self.sessions.entry(session_id.into()).or_default();
+        if running { self.set_streaming(session_id, true); }
         let session = self.sessions.entry(session_id.into()).or_default();
         if session.loaded {
             // Loaded before the window was away and not caught up since: now it is wanted.
@@ -486,12 +527,17 @@ impl App {
         }
     }
 
-    fn update_background_jobs(&mut self, root: String, count: usize, epoch: Option<&str>, revision: Option<u64>) {
+    fn update_background_jobs(&mut self, root: String, tasks: &[neoism_protocol::agent::BackgroundJobRuntime], epoch: Option<&str>, revision: Option<u64>) {
         if let (Some(epoch), Some(revision)) = (epoch, revision) {
             if self.background_job_versions.get(&root).is_some_and(|(old, rev)| old == epoch && *rev > revision) { return; }
             self.background_job_versions.insert(root.clone(), (epoch.to_owned(), revision));
         }
-        self.background_jobs.insert(root, count);
+        if tasks.is_empty() {
+            self.background_started.remove(&root);
+        } else if let Some(started) = tasks.iter().filter_map(|task| activity::instant_from_epoch_millis(task.started_at)).min() {
+            self.background_started.insert(root.clone(), started);
+        }
+        self.background_jobs.insert(root, tasks.len());
     }
 
     /// Whether any conversation the sidebar lists is at work (its loader is turning).
@@ -618,6 +664,7 @@ impl App {
         let (attachments, echo) = self.take_attachments(session_id);
         let message_id = format!("msg_rune_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
         let session = self.sessions.entry(session_id.into()).or_default();
+        session.clear_history_redo();
         let echo = HistoryMessage {
             id: message_id.clone(),
             role: Role::User,
@@ -693,8 +740,15 @@ impl App {
         // the typed snapshot. Both describe waiting work, not messages already consumed.
         let queue = match &message {
             AgentServerMessage::QueueUpdate { session_id, count, started_at, .. } => {
+                let started = started_at.and_then(activity::instant_from_epoch_millis);
+                // Attach hydration carries a live run's start time, not another StreamingState.
+                // A queue count alone is only waiting work and must not start a loader.
+                if started.is_some() {
+                    self.sessions.entry(session_id.clone()).or_default();
+                    self.set_streaming(session_id, true);
+                }
                 let session = self.sessions.entry(session_id.clone()).or_default();
-                match started_at.and_then(activity::instant_from_epoch_millis) {
+                match started {
                     Some(started) => session.turn_started = Some(started),
                     None if !session.streaming => session.turn_started = None,
                     None => {}
@@ -740,10 +794,10 @@ impl App {
             && let Some(jobs) = &snapshot.running_background_tasks
         {
             let root = if snapshot.root_session_id.is_empty() { self.families.root_of(session_id).to_owned() } else { snapshot.root_session_id.clone() };
-            if !root.is_empty() { self.update_background_jobs(root, jobs.len(), snapshot.background_jobs_epoch.as_deref(), snapshot.background_jobs_revision); }
+            if !root.is_empty() { self.update_background_jobs(root, jobs, snapshot.background_jobs_epoch.as_deref(), snapshot.background_jobs_revision); }
         }
         if let AgentServerMessage::BackgroundTasksUpdated { session_id, epoch, revision, tasks } = &message {
-            self.update_background_jobs(self.families.root_of(session_id).to_owned(), tasks.len(), Some(epoch), Some(*revision));
+            self.update_background_jobs(self.families.root_of(session_id).to_owned(), tasks, Some(epoch), Some(*revision));
         }
         // The daemon found its stream from the agent again: what was said in between is in
         // the history only.
@@ -764,8 +818,12 @@ impl App {
         }
         // Session idle ends a turn, not a child's task lifecycle: a follow-up may already be
         // queued. Only the family/lifecycle events above finish the sidebar child.
+        if let Some(changed) = self.apply_goal_event(&message) { return changed; }
         if self.apply_slash_event(&message) { return true; }
         match message {
+            AgentServerMessage::TodoUpdate { session_id, todos } => {
+                self.sessions.entry(session_id).or_default().todos = Some(todos);
+            }
             AgentServerMessage::ThreadList { threads, requested_cursor, .. } => {
                 // A refreshed catalog is newer evidence than a cached activity event. In
                 // particular, recover from a missed idle event instead of keeping its loader
@@ -801,6 +859,8 @@ impl App {
                 }
             }
             AgentServerMessage::HistoryChunk { session_id, messages, next_cursor } => {
+                // A read started before an edit cannot resurrect the removed turn.
+                if self.sessions.get(&session_id).is_some_and(|s| !s.history_edits.pending.is_empty()) { return false; }
                 // Task cards name their child sessions; seed the family so it can be walked.
                 if !self.families.is_child(&session_id) && self.families.seed_from_history(&session_id, &messages) { self.fold_streams(); }
                 self.prefetching.remove(&session_id);
@@ -846,6 +906,9 @@ impl App {
                     // order (a reply's empty text part ahead of its thinking) take it.
                     if merge_head(&mut session.messages, messages) { session.structure += 1; }
                     session.invalidate_message_positions();
+                    if !session.loaded && session.streaming && session.live_anchor.is_none() {
+                        session.live_from = Some(session.messages.iter().rposition(|m| m.kind == HistoryMessageKind::User).unwrap_or(0));
+                    }
                     session.rebase_live();
                     if !session.loaded { session.older_cursor = next_cursor; self.settle_pending = true; }
                     session.loaded = true;
@@ -855,11 +918,16 @@ impl App {
                 // The next sub-agent chat waiting to be fetched ahead.
                 self.preload_family_history();
             }
+            AgentServerMessage::SessionHistoryEdited { session_id, error, messages, next_cursor } => {
+                self.agent_history_edited(&session_id, error, messages, next_cursor);
+            }
             AgentServerMessage::MessageUpdated { session_id, mut message, parent_message_id } => {
                 let session = self.sessions.entry(session_id).or_default();
                 let part = message.id.clone();
                 session.pending_prompts.remove(&message.id);
                 settle_task_card(&self.families, &mut message, session.streaming);
+                let previous = session.message_position(&message.id).map(|at| &session.messages[at]);
+                self.tools.completion_bump(previous, &message, self.ty.scale());
                 let rebase = session.message_position(&message.id)
                     .is_none_or(|at| session.messages[at].kind != message.kind);
                 session.note_message(&message);
@@ -946,6 +1014,7 @@ impl App {
                     thread.busy = false;
                 }
                 self.background_jobs.clear();
+                self.background_started.clear();
                 self.background_job_versions.clear();
                 self.families.catalog_reset();
                 self.settle_task_cards();
@@ -1095,6 +1164,27 @@ pub(crate) fn title_case(model: &str) -> String {
 mod message_lookup_tests {
     use super::*;
     use neoism_protocol::agent::ContentKind;
+
+    #[test]
+    fn user_image_parts_keep_caption_and_all_photos_until_history_refresh() {
+        let mut session = Session::default();
+        let caption: HistoryMessage = serde_json::from_value(json!({
+            "id":"prompt", "role":"User", "kind":"User", "text":"Look at these photos"
+        })).unwrap();
+        session.upsert_message(caption.clone());
+        for filename in ["one.png", "two.png", "one.png"] {
+            let image = serde_json::from_value(json!({
+                "id":"prompt", "role":"User", "kind":"User", "text":"",
+                "attachments":[{"filename":filename, "url":format!("file:///tmp/{filename}"), "mime":"image/png"}]
+            })).unwrap();
+            session.upsert_message(image);
+            assert_eq!(session.messages[0].text, caption.text);
+        }
+        session.upsert_message(caption);
+        assert_eq!(session.messages.len(), 1);
+        let photos: Vec<_> = session.messages[0].attachments.iter().map(|a| a.filename.as_str()).collect();
+        assert_eq!(photos, ["one.png", "two.png"]);
+    }
 
     fn row(id: &str, text: &str) -> HistoryMessage {
         serde_json::from_value(json!({"id":id,"role":"Assistant","kind":"Assistant","text":text})).unwrap()

@@ -1,7 +1,7 @@
 {
   "name": "@neoism/sdk-node",
   "version": "0.7.100",
-  "description": "Node.js compatibility entry point for the Neoism SDK",
+  "description": "Node.js Neoism SDK with optional in-process native hosting",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -19,7 +19,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "native"
   ],
   "dependencies": {
     "@neoism/sdk-core": "0.7.100",

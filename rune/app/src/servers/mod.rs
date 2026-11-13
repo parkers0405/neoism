@@ -27,11 +27,41 @@ use std::time::Duration;
 /// How long a selected server gets to finish its handshake (`waitForConnection`).
 const HANDSHAKE: Duration = Duration::from_secs(10);
 
-/// Temporary servers this window owns: Fast Servers it hosts and invites it joined.
+/// Process-owned temporary servers, shared by all Rune windows. Switching targets or closing
+/// one window must not revoke a shareable invite; application exit calls `shutdown`.
 #[derive(Default)]
 struct Store {
     fast: HashMap<String, crate::fast_servers::FastHost>,
     joins: HashMap<String, Selection>,
+}
+
+impl Store {
+    fn add_host(&mut self, host: crate::fast_servers::FastHost) -> Selection {
+        let selection = fast_selection(&host);
+        self.fast.insert(host.id.clone(), host);
+        selection
+    }
+
+    fn remove_temporary(&mut self, id: &str) -> bool {
+        if let Some(mut host) = self.fast.remove(id) {
+            host.stop();
+            return true;
+        }
+        self.joins.remove(id).is_some()
+    }
+
+    fn temporary_entries(&mut self) -> Vec<ServerEntry> {
+        // `is_running` survives relay reconnects and zero connected clients. Only terminal
+        // failure/explicit stop withdraws the row; dropping the guard reaps its worker.
+        self.fast.retain(|_, host| host.is_running());
+        self.fast.values().map(|host| ServerEntry {
+            id: host.id.clone(), name: host.name.clone(), address: host.endpoint.clone(),
+            temporary: true, hosted: true, online: Some(true),
+        }).chain(self.joins.values().map(|join| ServerEntry {
+            id: join.id.clone(), name: join.name.clone(), address: join.endpoint.clone(),
+            temporary: true, hosted: false, online: None,
+        })).collect()
+    }
 }
 
 static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
@@ -47,7 +77,7 @@ pub struct ServerEntry {
     pub address: String,
     pub temporary: bool,
     pub hosted: bool,
-    /// A Fast Server this window hosts: whether its tunnel still runs.
+    /// A Fast Server this process hosts: whether its tunnel still runs.
     pub online: Option<bool>,
 }
 
@@ -85,18 +115,12 @@ fn saved_entries() -> Result<Vec<SavedServer>, String> {
     serde_json::from_value(data.get("servers").cloned().unwrap_or_else(|| json!([]))).map_err(|e| e.to_string())
 }
 
-/// Saved servers (not the agent API's), then this window's Fast hosts and joins.
+/// Saved servers (not the agent API's), then this process's live Fast hosts and joins.
 pub fn list() -> Vec<ServerEntry> {
     let mut out: Vec<ServerEntry> = saved_entries().unwrap_or_default().into_iter().filter(|s| !s.agent_api).map(|s| ServerEntry {
         id: s.id, name: s.name, address: s.endpoint, temporary: false, hosted: s.hosted.is_some(), online: None,
     }).collect();
-    let store = store();
-    for host in store.fast.values() {
-        out.push(ServerEntry { id: host.id.clone(), name: host.name.clone(), address: host.endpoint.clone(), temporary: true, hosted: true, online: Some(host.is_running()) });
-    }
-    for join in store.joins.values() {
-        out.push(ServerEntry { id: join.id.clone(), name: join.name.clone(), address: join.endpoint.clone(), temporary: true, hosted: false, online: None });
-    }
+    out.extend(store().temporary_entries());
     out
 }
 
@@ -230,9 +254,7 @@ pub fn run(operation: Operation) -> Result<Selection, String> {
         Operation::HostFast { directory, name, password } => {
             let agent = local_agent_server().unwrap_or_else(|| "http://127.0.0.1:4096".into());
             let hosted = crate::fast_servers::create_fast_server(directory, optional(&name).map(str::to_owned), optional(&password).map(str::to_owned), agent)?;
-            let selection = fast_selection(&hosted);
-            store().fast.insert(hosted.id.clone(), hosted);
-            Ok(selection)
+            Ok(store().add_host(hosted))
         }
         Operation::Host { directory, name, password } => {
             let directory = std::fs::canonicalize(expand_home(&directory)?).map_err(|_| "Project folder does not exist")?;
@@ -263,11 +285,7 @@ fn rehost(id: &str) -> Result<Selection, String> {
 
 /// Forget a server: stop a Fast host or leave a join; a saved server hosted here stops too.
 pub fn remove(id: &str) -> Result<(), String> {
-    {
-        let mut store = store();
-        if let Some(mut fast) = store.fast.remove(id) { fast.stop(); return Ok(()); }
-        if store.joins.remove(id).is_some() { return Ok(()); }
-    }
+    if store().remove_temporary(id) { return Ok(()); }
     let mut registry = registry()?;
     let hosted = registry.hosted_spec(id);
     registry.remove(id).map_err(|e| e.to_string())?;
@@ -280,7 +298,7 @@ pub fn invite(id: &str) -> Result<String, String> {
     resolve(id)?.invite.ok_or_else(|| "This server has no Fast Server invite".into())
 }
 
-/// Stop every Fast Server this window hosts (on quit).
+/// Stop every Fast Server this process hosts (on application exit, not individual window close).
 pub fn shutdown() {
     let hosts: Vec<_> = store().fast.drain().map(|(_, h)| h).collect();
     for mut host in hosts { host.stop_and_wait(); }
@@ -366,6 +384,59 @@ pub fn dial(selection: Selection) -> Result<Connected, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_host_is_listed_without_clients_until_its_worker_ends() {
+        let mut store = Store::default();
+        let (host, ended) = crate::fast_servers::test_owned_host();
+        let selected = store.add_host(host);
+        let entries = store.temporary_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], ServerEntry {
+            id: selected.id.clone(), name: selected.name.clone(), address: selected.endpoint.clone(),
+            temporary: true, hosted: true, online: Some(true),
+        });
+        assert!(selected.invite.is_some());
+        // Listing repeatedly (with no attached clients) must not revoke the invite.
+        assert_eq!(store.temporary_entries(), entries);
+        ended.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while store.fast[&selected.id].is_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(store.temporary_entries().is_empty());
+        assert!(!store.fast.contains_key(&selected.id));
+    }
+
+    #[test]
+    fn stopped_fast_host_is_pruned_without_forgetting_guest_invites() {
+        let mut store = Store::default();
+        let (host, _ended) = crate::fast_servers::test_owned_host();
+        let selected = store.add_host(host);
+        let join = Selection { id: "guest".into(), temporary: true, ..Selection::default() };
+        store.joins.insert(join.id.clone(), join.clone());
+        store.fast.get_mut(&selected.id).unwrap().stop_and_wait();
+        let entries = store.temporary_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, join.id);
+        assert!(!entries[0].hosted);
+        assert!(store.fast.is_empty());
+    }
+
+    #[test]
+    fn removing_fast_host_withdraws_row_and_signals_owned_worker() {
+        let mut store = Store::default();
+        let (host, ended) = crate::fast_servers::test_owned_host();
+        let selected = store.add_host(host);
+        assert!(store.remove_temporary(&selected.id));
+        assert!(store.temporary_entries().is_empty());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !ended.is_closed() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(ended.is_closed(), "removed host's worker must receive shutdown");
+        assert!(!store.remove_temporary(&selected.id));
+    }
 
     /// Registry tests run against a scratch config home, never the user's.
     fn scratch() -> tempfile::TempDir {

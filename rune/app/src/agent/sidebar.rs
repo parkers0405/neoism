@@ -416,7 +416,7 @@ pub fn conversations(app: &App) -> El {
 
 /// The four-square orbit a running conversation turns (`draw_status_spinner`): the same live
 /// squares the tool cards ride (`tools::Spinner`), so every loader is in step and none commits.
-fn loader(app: &App, color: u32) -> El {
+pub(crate) fn loader(app: &App, color: u32) -> El {
     let s = app.ty.scale();
     let mut spinner = el().w(10.0 * s).h(10.0 * s);
     for (square, alpha) in app.tools.spinner.squares() {

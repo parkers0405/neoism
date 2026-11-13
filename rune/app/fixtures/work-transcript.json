@@ -1,0 +1,15 @@
+[
+  {"id":"work-user","role":"User","kind":"User","text":"Check the restored conversation and fix its background indicator."},
+  {"id":"work-intro","role":"Assistant","kind":"Assistant","text":"I will trace the restored state, then check the pinning condition."},
+  {"id":"work-reasoning","role":"Assistant","kind":"Reasoning","title":"Inspecting the restored conversation","text":"The background job is present in the snapshot, but there may be no foreground turn.\n\nThe indicator should follow the **activity state**, not depend on whether this window sent the prompt."},
+  {"id":"work-read","role":"Assistant","kind":"Tool","tool":"read","title":"Read(src/agent/activity.rs)","text":"Activity state and pinning helpers","status":"completed"},
+  {"id":"work-empty-text","role":"Assistant","kind":"Assistant","text":""},
+  {"id":"work-empty-reasoning","role":"Assistant","kind":"Reasoning","title":"Thinking","text":""},
+  {"id":"work-grep","role":"Assistant","kind":"Tool","tool":"grep","title":"Grep(activity_follows_end)","text":"src/agent/activity.rs:183","status":"completed"},
+  {"id":"work-list","role":"Assistant","kind":"Tool","tool":"list","title":"List(src/agent)","text":"activity.rs\ntimeline.rs\nmod.rs","status":"completed"},
+  {"id":"work-heading-a","role":"Assistant","kind":"Reasoning","title":"Thinking","text":"**Updating shell label mapping**"},
+  {"id":"work-heading-b","role":"Assistant","kind":"Reasoning","title":"Thinking","text":"Updating command output headers"},
+  {"id":"work-finding","role":"Assistant","kind":"Assistant","text":"The row exists, but bottom-pinning still requires a foreground turn. I will use the same activity state for both."},
+  {"id":"work-edit","role":"Assistant","kind":"Tool","tool":"apply_patch","title":"Update src/agent/activity.rs","text":"Updated the pinning condition","detail":"*** Begin Patch\n*** Update File: src/agent/activity.rs\n@@\n-foreground_turn\n+activity_state.is_some()\n*** End Patch","status":"completed"},
+  {"id":"work-test","role":"Assistant","kind":"Tool","tool":"bash","title":"Run activity regression tests","text":"cargo test activity","detail":"running activity regression tests","status":"running"}
+]

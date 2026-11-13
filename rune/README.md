@@ -154,6 +154,14 @@ Shown on Welcome/Home (`splash` kind) and on new `Alt+A` agent tabs (`agent` kin
   31.25-unit pixel grid (`MASKS`), then settles back to the artwork. A startup animation plays once; reduced motion
   disables hover motion and effects.
 
+Wordmark clicks retain all fifteen original effects on both Home and agent wordmarks. Pixel flames are a persistent decoration, independent of the click rotation: `appearance.wordmark-fire` defaults to `true` and can be disabled using the "Wordmark flames" settings toggle. The first-party renderer builds seeded geometric plumes with tapered, moving colour cores; no third-party fire code or assets are used. Hover, shimmer, glow and original splash positioning remain unchanged. Reduced motion disables flames and click effects. Home shortcut hints use the active theme's accent colour. Render the flame layer without changing saved settings using `--scene welcome-fire --snap /tmp/neoism-splash-fire.png --at 1`.
+
+The shared `ui::fire::PixelFire` effect accepts a top-edge outline (one optional row per pixel column), a stable seed, a five-colour palette and an animation rate. Construct it once, then call `paint` on any Rune `Shape` used by a `canvas`, with an origin, cell size, clock and opacity. A flat edge uses `[Some(0); N]`; shaped glyphs supply their top occupied rows. Callers own visibility, reduced motion, redraw scheduling and replay/fade duration, so idle or hidden effects do not keep the app rendering.
+
+During click effects, wordmark flames attach to their source foreground pixels using the same sampled translation, rotation, scale and opacity as the original animation. The flame canvas keeps the flying-piece bounds through click, settle and idle, so it never starts a separate layout animation at the handoff. This self-animated subtree uses `instant_changes` to prevent a second implicit spring on the returning artwork; the original procedural effects and live hover/shimmer still drive its motion. The flame clock never restarts on a click.
+
+Fire palettes: Neoism Dark and Neoism Light retain the classic red/orange/yellow/ivory colours. Other themes derive the five flame colours from their background, accent, magenta, cyan and foreground. Palette selection happens at paint time, so switching themes does not rebuild or restart the cached simulation. New uses should pass `ui::fire::colors(app.pal)` unless they intentionally need a custom palette.
+
 Port the masks, letter origins and effect algorithms directly; `wordmark_animation.rs` is already plain Rust with
 no Sugarloaf dependency in its math.
 
@@ -282,6 +290,14 @@ The build helper selects Rune's pinned toolchain and keeps build output in `${XD
 Use `--list-scenes` for reproducible surfaces, `--tree` for element/accessibility inspection, and `--trace`
 for per-frame geometry. Native windows do not replay `--script` in the pinned Rune version; the native checker
 sends actual input to its own focused test window.
+
+The agent composer uses native blue atomic pills for selected skills, image/file anchors and substantial pasted text (more than 1,000 characters or 10 lines). A compact `[pasted N chars]` expands to the original text when sent; paste payloads and skill pills survive draft recovery. Backspace/Delete remove a pill as one item, and Undo restores it. Type `$` to search the skills catalog at the cursor and use Enter or Tab to insert a skill. `/tasks` opens the current conversation's live task list above the composer with the timeline's Markdown styling. Headless scenes: `tasks`, `tasks-empty`, `tasks-long`, `composer-tokens`, and `skills-mention`.
+
+`/goals` opens the current conversation's persistent goal in the same above-composer panel, with Markdown content, lifecycle status, a live elapsed timer and any completion/blocker summary. `/goal` and its set/pause/resume/clear commands are unchanged. Age is wall-clock time since the server's persisted `created` timestamp (paused time is included and labelled); complete/blocked goals use their last `updated` timestamp instead of continuing to tick. Headless scenes: `goals`, `goals-paused`, `goals-complete`, and `goals-empty`.
+
+Chat Markdown image previews (`![description](path)`) load local absolute paths, workspace-relative paths, `file://` URLs and inline image data URLs through Rune's image cache. File reads and decoding run off the UI thread; completed decodes invalidate memoized Markdown so placeholders become pictures. Click a picture to open the existing image viewer. This is native-local loading, not a filesystem-serving HTTP endpoint; remote-host paths and web image URLs are not fetched. Use `--scene timeline-inline-image` to check the surface headlessly.
+
+Sent photos sit above and outside the text bubble. Multiple photos form a fanned stack; horizontal trackpad swipes (or Shift+wheel) cycle every photo without scrolling the transcript sideways. Click the stack to open the selected photo full-window, then use horizontal swipes, Left/Right, or the viewer arrows to browse the set. Escape, the close button, or the backdrop dismisses the viewer. `--scene agent-attach` checks a single photo; set `NEOISM_RUNE_PHOTO_STACK=1` for four photos.
 
 ## Validation and remaining migration work
 

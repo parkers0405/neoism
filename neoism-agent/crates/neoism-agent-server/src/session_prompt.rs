@@ -74,6 +74,11 @@ pub(crate) async fn append_prompt_admission(
     create_stub_reply: bool,
     admission: Option<(&str, bool, &str)>,
 ) -> Result<MessageWithParts, ApiError> {
+    if state.is_retired() {
+        return Err(ApiError::conflict("Agent is shutting down"));
+    }
+    let restarting = admission.is_some_and(|(id, _, _)| id.starts_with("restart:"));
+    let mut recovery_request = request.clone();
     let queued_request = admission.map(|_| request.clone());
     let admission_guard = state
         .inner
@@ -197,12 +202,15 @@ pub(crate) async fn append_prompt_admission(
         info.agent = Some(agent_name.clone());
     }
     let message_id = message_id.unwrap_or_else(|| Id::ascending(IdKind::Message));
+    recovery_request.message_id = Some(message_id.clone());
     let parent_message_id = message_id.clone();
     let model = model
         .or_else(|| info.model.as_ref().map(user_model_from_model_ref))
         .or_else(|| agent_info.model.as_ref().map(user_model_from_model_ref))
         .unwrap_or_else(default_user_model);
     let reply_model = model.clone();
+    recovery_request.model = Some(reply_model.clone());
+    recovery_request.agent = Some(agent_info.name.clone());
     info.model = Some(model_ref_from_user_model(&reply_model));
     let request_system = system.filter(|system| !system.trim().is_empty());
     let starts_top_level_execution =
@@ -301,7 +309,7 @@ pub(crate) async fn append_prompt_admission(
             ),
         )
         .await?;
-    let user_message = MessageWithParts {
+    let mut user_message = MessageWithParts {
         info: MessageInfo::User(user),
         parts,
     };
@@ -323,7 +331,8 @@ pub(crate) async fn append_prompt_admission(
         .get_message(&session_id_text, &message_id.to_string())
         .await?
     {
-        if same_user_prompt(&existing, &user_message)
+        if (restarting && matches!(existing.info, MessageInfo::User(_)))
+            || same_user_prompt(&existing, &user_message)
             || (resume_saved_admission
                 && same_runtime_user_prompt(&existing, &user_message))
         {
@@ -340,6 +349,11 @@ pub(crate) async fn append_prompt_admission(
                 }
                 return Ok(existing);
             }
+            if restarting {
+                // The recovery admission is server-owned. Reuse the committed
+                // message rather than rerendering it under changed host config.
+                user_message = existing;
+            }
         } else {
             return Err(ApiError::conflict(format!(
                 "message {} already exists with different prompt content",
@@ -347,6 +361,9 @@ pub(crate) async fn append_prompt_admission(
             )));
         }
     } else {
+        if restarting {
+            return Err(ApiError::conflict("Restart message no longer exists"));
+        }
         let message_event = EventPayload::new(
             event_type::MESSAGE_UPDATED,
             json!({ "sessionID": session_id, "info": user_message.info }),
@@ -513,6 +530,13 @@ pub(crate) async fn append_prompt_admission(
     let run_id = run.id.clone();
     let cancellation = run.cancel.clone();
     let mut run_guard = SessionRunGuard::new(state, &session_id_text, &run_id);
+    {
+        let _execution_admission = crate::execution_activity::admission_guard(state, &session_id_text).await;
+        if cancellation.load(Ordering::SeqCst) {
+            return Err(ApiError::conflict("Session aborted"));
+        }
+        state.claim_prompt_run(&session_id_text, &run_id, &recovery_request).await?;
+    }
     // Safe handoff boundary: never replay model/tool work using a retained row.
     // A failure here drops the run guard and leaves initialization recoverable.
     if let Some((id, _, delivery)) = admission {
@@ -577,7 +601,7 @@ pub(crate) async fn append_prompt_admission(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if !subtask_parts.is_empty() {
+    if !subtask_parts.is_empty() && !restarting {
         run_parent_subtasks(
             state,
             &info,
@@ -643,6 +667,12 @@ pub(crate) async fn append_prompt_admission(
         plugin_snapshot.config().experimental.batch_tool,
     );
     drop(history);
+    if restarting {
+        provider_messages.push(ProviderMessage::text(
+            ProviderRole::User,
+            "The server restarted during this turn. Continue from the saved conversation without repeating completed work. An interrupted tool may have produced an external effect before its result was saved; check its outcome before retrying it.",
+        ));
+    }
     let step_limit = agent_info
         .steps
         .filter(|steps| *steps > 0)

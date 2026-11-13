@@ -1,7 +1,7 @@
-//! Generated from `neoism-frontend/gpuix/src/design/generated.ts` (the shipping theme table).
+//! Generated from the shared Rust theme catalogs by `rune/generate-palettes.py`.
 //! Regenerate rather than editing by hand.
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub name: &'static str,
     pub bg: u32,
@@ -34,7 +34,8 @@ pub struct Palette {
 }
 
 pub const PALETTES: &[Palette] = &[
-    Palette { name: "pastel_dark", bg: 0x000000, fg: 0xe8e8e8, surface: 0x1a1a1a, hover: 0x1f1f1f, border: 0x1c1c1c, muted: 0x5a5a5a, dim: 0xb0b0b0, accent: 0xe8e8e8, folder: 0x7ebae4, red: 0xef8891, green: 0x9fe8c3, yellow: 0xfbdf90, blue: 0x99aee5, magenta: 0xc2a2e3, cyan: 0xb5c3ea, white: 0xb5bcc9, black: 0x000000, syn_comment: 0x7a7a7a, syn_string: 0x9fe8c3, syn_number: 0xeda685, syn_keyword: 0xc2a2e3, syn_statement: 0xc2a2e3, syn_func: 0x99aee5, syn_type: 0xfbdf90, syn_property: 0x99aee5, syn_constructor: 0xb5c3ea, syn_special: 0xef8891 },
+    Palette { name: "neoism_dark", bg: 0x000000, fg: 0xe8e8e8, surface: 0x1a1a1a, hover: 0x1f1f1f, border: 0x1c1c1c, muted: 0x5a5a5a, dim: 0xb0b0b0, accent: 0xe8e8e8, folder: 0x7ebae4, red: 0xef8891, green: 0x9fe8c3, yellow: 0xfbdf90, blue: 0x99aee5, magenta: 0xc2a2e3, cyan: 0xb5c3ea, white: 0xb5bcc9, black: 0x000000, syn_comment: 0x7a7a7a, syn_string: 0x9fe8c3, syn_number: 0xeda685, syn_keyword: 0xc2a2e3, syn_statement: 0xc2a2e3, syn_func: 0x99aee5, syn_type: 0xfbdf90, syn_property: 0x99aee5, syn_constructor: 0xb5c3ea, syn_special: 0xef8891 },
+    Palette { name: "neoism_light", bg: 0xfafafa, fg: 0x54555b, surface: 0xdadadb, hover: 0xd4d4d5, border: 0xe2e2e2, muted: 0xb0b0b1, dim: 0xa2a2a3, accent: 0x5e5f65, folder: 0x6c6c6c, red: 0xd84a3d, green: 0x50a14f, yellow: 0xc18401, blue: 0x4078f2, magenta: 0xa28dcd, cyan: 0x0b8ec6, white: 0x54555b, black: 0xefeff0, syn_comment: 0xb0b0b1, syn_string: 0x50a14f, syn_number: 0xd75f00, syn_keyword: 0xa626a4, syn_statement: 0xa626a4, syn_func: 0x4078f2, syn_type: 0xc18401, syn_property: 0xd84a3d, syn_constructor: 0x0070a8, syn_special: 0x986801 },
     Palette { name: "nvchad_one", bg: 0x1e222a, fg: 0xabb2bf, surface: 0x282c34, hover: 0x353b45, border: 0x31353d, muted: 0x565c64, dim: 0x6f737b, accent: 0x61afef, folder: 0x61afef, red: 0xe06c75, green: 0x98c379, yellow: 0xe7c787, blue: 0x61afef, magenta: 0xc678dd, cyan: 0x56b6c2, white: 0xabb2bf, black: 0x1e222a, syn_comment: 0x565c64, syn_string: 0x98c379, syn_number: 0xd19a66, syn_keyword: 0xc678dd, syn_statement: 0xe06c75, syn_func: 0x61afef, syn_type: 0xe5c07b, syn_property: 0xe06c75, syn_constructor: 0x56b6c2, syn_special: 0xbe5046 },
     Palette { name: "tokyo_night", bg: 0x1a1b26, fg: 0xc0caf5, surface: 0x24283b, hover: 0x292e42, border: 0x3b4261, muted: 0x565f89, dim: 0xa9b1d6, accent: 0x7aa2f7, folder: 0x7aa2f7, red: 0xf7768e, green: 0x9ece6a, yellow: 0xe0af68, blue: 0x7aa2f7, magenta: 0xbb9af7, cyan: 0x7dcfff, white: 0xc0caf5, black: 0x11121d, syn_comment: 0x565f89, syn_string: 0x9ece6a, syn_number: 0xff9e64, syn_keyword: 0x7aa2f7, syn_statement: 0xbb9af7, syn_func: 0x7aa2f7, syn_type: 0x2ac3de, syn_property: 0x73daca, syn_constructor: 0x7dcfff, syn_special: 0xe0af68 },
     Palette { name: "catppuccin_mocha", bg: 0x1e1e2e, fg: 0xcdd6f4, surface: 0x313244, hover: 0x45475a, border: 0x585b70, muted: 0x6c7086, dim: 0xa6adc8, accent: 0xcba6f7, folder: 0x89b4fa, red: 0xf38ba8, green: 0xa6e3a1, yellow: 0xf9e2af, blue: 0x89b4fa, magenta: 0xcba6f7, cyan: 0x89dceb, white: 0xcdd6f4, black: 0x11111b, syn_comment: 0x6c7086, syn_string: 0xa6e3a1, syn_number: 0xfab387, syn_keyword: 0x89b4fa, syn_statement: 0xcba6f7, syn_func: 0xf9e2af, syn_type: 0x94e2d5, syn_property: 0x89dceb, syn_constructor: 0x89dceb, syn_special: 0xf5c2e7 },

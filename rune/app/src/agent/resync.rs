@@ -37,7 +37,10 @@ impl App {
             self.composer.prompts.reconnect();
             // Whatever was asked on the old socket and not answered never will be: an older
             // page still marked as on its way would never be asked for again.
-            for session in self.sessions.values_mut() { session.loading_older = false; }
+            for session in self.sessions.values_mut() {
+                session.loading_older = false;
+                session.reset_history_edits();
+            }
             let lost: Vec<String> = self.prefetching.iter().filter(|id| self.sessions.contains_key(*id)).cloned().collect();
             for id in lost { self.prefetching.remove(&id); }
         }

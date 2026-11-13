@@ -38,7 +38,7 @@ impl IdeThemeName {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            IdeThemeName::PastelDark => "pastel_dark",
+            IdeThemeName::PastelDark => "neoism_dark",
             IdeThemeName::NvChadOne => "nvchad_one",
             IdeThemeName::TokyoNight => "tokyo_night",
             IdeThemeName::CatppuccinMocha => "catppuccin_mocha",
@@ -48,6 +48,7 @@ impl IdeThemeName {
 
     pub fn from_str(name: &str) -> Self {
         match name {
+            "neoism_light" => IdeThemeName::Custom("neoism_light"),
             "nvchad_one" => IdeThemeName::NvChadOne,
             "tokyo_night" => IdeThemeName::TokyoNight,
             "catppuccin_mocha" => IdeThemeName::CatppuccinMocha,
@@ -174,7 +175,8 @@ pub fn replace_custom_ide_themes(themes: Vec<(String, String, IdeTheme)>) {
     for (name, description, mut theme) in themes {
         // Builtin names always win: silently shadowing `tokyo_night`
         // with a file would make the picker ambiguous.
-        if IdeThemeName::ALL.iter().any(|b| b.as_str() == name)
+        if matches!(name.as_str(), "pastel_dark" | "neoism_light")
+            || IdeThemeName::ALL.iter().any(|b| b.as_str() == name)
             || nvchad_ide_theme(&name).is_some()
         {
             continue;
@@ -225,6 +227,8 @@ pub fn all_ide_theme_names() -> Vec<String> {
         .iter()
         .map(|name| name.as_str().to_string())
         .collect();
+    // Like the bundled NvChad palettes, this is represented by a Custom name.
+    names.insert(1, "neoism_light".to_string());
     names.extend(
         nvchad_themes::THEMES
             .iter()
@@ -254,7 +258,9 @@ pub fn parse_theme_hex(value: &str) -> Option<u32> {
 impl IdeTheme {
     pub fn by_name(name: &str) -> Self {
         match name {
-            "pastel_dark" => Self::pastel_dark(),
+            // Keep the shipped persisted ID as an alias, not a second selectable theme.
+            "neoism_dark" | "pastel_dark" => Self::pastel_dark(),
+            "neoism_light" => Self { name: IdeThemeName::Custom("neoism_light"), ..nvchad_ide_theme("one_light").expect("shipped One Light palette") },
             "nvchad_one" => Self::nvchad_one(),
             "tokyo_night" => Self::tokyo_night(),
             "catppuccin_mocha" => Self::catppuccin_mocha(),

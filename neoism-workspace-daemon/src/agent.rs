@@ -339,13 +339,17 @@ fn spawn_agent_server_supervisor(
                 // left alone; a bind failure cannot give us ownership of it.
                 let services = services.clone();
                 let listener = reserved_listener.take();
+                let (stop_server, server_stopping) = tokio::sync::oneshot::channel();
                 let mut task = tokio::spawn(async move {
-                    match listener {
-                        Some(listener) => {
-                            neoism_agent_server::listen_with_listener(options, services, listener).await
-                        }
-                        None => neoism_agent_server::listen(options, services).await,
-                    }
+                    neoism_agent_server::listen_with_shutdown(
+                        options,
+                        services,
+                        listener,
+                        async {
+                            let _ = server_stopping.await;
+                        },
+                    )
+                    .await
                 });
                 let monitor = async {
                     let mut health = AgentHealthDeadline::new(tokio::time::Instant::now());
@@ -365,12 +369,28 @@ fn spawn_agent_server_supervisor(
                 };
                 match monitor.await {
                     Some(result) => {
+                        if result.is_err()
+                            || result.as_ref().is_ok_and(|result| {
+                                result.as_ref().is_err_and(|error| {
+                                    error.is::<neoism_agent_server::AgentShutdownError>()
+                                })
+                            })
+                        {
+                            tracing::error!(target: "neoism_workspace_daemon::agent", "Agent retirement failed; exiting daemon instead of reopening a possibly live database");
+                            std::process::exit(1);
+                        }
                         log_agent_server_exit("supervision", result);
                     }
                     None => {
-                        task.abort();
-                        let _ = task.await;
-                        tracing::warn!(target: "neoism_workspace_daemon::agent", "owned embedded Neoism Agent health deadline exceeded; retrying");
+                        tracing::warn!(target: "neoism_workspace_daemon::agent", "owned embedded Neoism Agent health deadline exceeded; retiring before retry");
+                        let _ = stop_server.send(());
+                        match tokio::time::timeout(Duration::from_secs(35), &mut task).await {
+                            Ok(Ok(Ok(_))) => {}
+                            result => {
+                                tracing::error!(target: "neoism_workspace_daemon::agent", ?result, "Agent retirement failed; exiting daemon instead of reopening a possibly live database");
+                                std::process::exit(1);
+                            }
+                        }
                     }
                 }
             }

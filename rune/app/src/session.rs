@@ -47,10 +47,19 @@ pub struct SavedWorkspace {
 pub enum SavedTab {
     Home { #[serde(default)] draft: String },
     Terminal { #[serde(default)] draft: String },
-    Agent { session: Option<String>, #[serde(default)] draft: String },
+    Agent { session: Option<String>, #[serde(default)] draft: String, #[serde(default, skip_serializing_if = "Vec::is_empty")] pills: Vec<SavedPill> },
     Editor { path: String },
     Database { path: String },
     GitDiff,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct SavedPill {
+    start: usize,
+    end: usize,
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -119,7 +128,11 @@ pub fn capture_workspace(name: &str, cwd: &str, tabs: &[Tab], active: usize, lay
         match &t.kind {
             TabKind::Home => SavedTab::Home { draft },
             TabKind::Terminal => SavedTab::Terminal { draft },
-            TabKind::Agent { session } => SavedTab::Agent { session: session.clone(), draft },
+            TabKind::Agent { session } => SavedTab::Agent {
+                session: session.clone(), draft,
+                pills: t.draft.pills().filter(|(_, id)| id.starts_with("paste:") || id.starts_with("skill:"))
+                    .map(|(r, id)| SavedPill { start: r.start, end: r.end, id: id.into(), payload: t.pastes.get(id).cloned() }).collect(),
+            },
             TabKind::Editor { path } => SavedTab::Editor { path: path.clone() },
             TabKind::Database { path } => SavedTab::Database { path: path.clone() },
             TabKind::GitDiff => SavedTab::GitDiff,
@@ -198,10 +211,11 @@ impl App {
         self.layout = Layout::default();
         let mut ids = Vec::with_capacity(saved.tabs.len());
         for tab in saved.tabs {
+            let pills = match &tab { SavedTab::Agent { pills, .. } => pills.clone(), _ => Vec::new() };
             let (kind, draft) = match tab {
                 SavedTab::Home { draft } => (TabKind::Home, draft),
                 SavedTab::Terminal { draft } => (TabKind::Terminal, draft),
-                SavedTab::Agent { session, draft } => (TabKind::Agent { session }, draft),
+                SavedTab::Agent { session, draft, .. } => (TabKind::Agent { session }, draft),
                 SavedTab::Editor { path } => {
                     self.open_file(&path, None);
                     if let Some(text) = saved.unsaved.get(&path) {
@@ -225,7 +239,11 @@ impl App {
             let session = match &kind { TabKind::Agent { session: Some(id) } => Some(id.clone()), _ => None };
             self.open_tab(kind);
             if let Some(session) = session { self.load_session_history(&session); }
-            if let Some(tab) = self.tabs.last_mut() { tab.draft.replace_text(&draft); }
+            if let Some(tab) = self.tabs.last_mut() {
+                tab.draft.replace_text(&draft);
+                tab.draft.set_marks(pills.iter().map(|p| rune::MarkRange { start: p.start, end: p.end, mark: rune::Mark::Pill(p.id.clone()) }).collect());
+                tab.pastes = pills.into_iter().filter_map(|p| p.payload.map(|payload| (p.id, payload))).collect();
+            }
             ids.push(self.tabs.last().map(|t| t.id));
         }
         if self.tabs.is_empty() { self.open_tab(TabKind::Home); }
@@ -300,7 +318,7 @@ mod tests {
         assert_eq!(panes[0].tabs, vec![10, 11]);
         assert_eq!(panes[0].active, 1);
         assert_eq!(layout.focused().tabs, vec![12]);
-        let tabs: Vec<Tab> = [10, 11, 12].iter().map(|id| Tab { id: *id, kind: TabKind::Home, draft: rune::TextEdit::new(""), pending_prompt: None, selection: None }).collect();
+        let tabs: Vec<Tab> = [10, 11, 12].iter().map(|id| Tab { id: *id, kind: TabKind::Home, draft: rune::TextEdit::new(""), pastes: Default::default(), pending_prompt: None, selection: None }).collect();
         let back = capture_workspace("w", "/", &tabs, 2, &layout, None, BTreeMap::new());
         assert_eq!(back.layout, saved);
     }
@@ -332,6 +350,42 @@ mod tests {
         assert_eq!(fresh.workspaces.len(), 2);
         assert_eq!(fresh.workspace_active, 1);
         assert_eq!(fresh.capture_session(), saved);
+    }
+
+    #[test]
+    fn compact_paste_payload_and_skill_pills_survive_session_restore() {
+        let mut app = App::new();
+        app.open_tab(TabKind::Agent { session: None });
+        app.insert_skill_pill("review", None);
+        let payload = "restored pasted text\n".repeat(100);
+        assert!(app.paste_composer_text(&payload));
+        let visible = app.active_tab().draft.text.clone();
+        let expanded = app.expanded_composer_text(app.active);
+        let raw = serde_json::to_string(&app.capture_session()).unwrap();
+        let mut fresh = App::new();
+        fresh.restore_session(serde_json::from_str(&raw).unwrap());
+        assert_eq!(fresh.active_tab().draft.text, visible);
+        assert_eq!(fresh.active_tab().draft.pills().count(), 2);
+        assert_eq!(fresh.expanded_composer_text(fresh.active), expanded);
+    }
+
+    #[test]
+    fn restored_home_has_a_block_terminal_before_the_daemon_connects() {
+        let mut app = App::new();
+        app.open_tab(TabKind::Agent { session: None });
+        app.open_tab(TabKind::Agent { session: None });
+        let home = app.tabs[0].id;
+        app.select_tab(home);
+        let saved = app.capture_session();
+        let mut fresh = App::new();
+        fresh.restore_session(saved);
+        assert!(fresh.daemon.is_none());
+        assert_eq!(fresh.active_tab().kind, TabKind::Home);
+        assert_eq!(fresh.layout.focused().active_tab(), Some(fresh.active_tab().id));
+        let term = fresh.terminals.get(&fresh.active_tab().id).expect("restored Home shell");
+        assert!(!term.raw(), "Home starts as blocks, not an empty PTY grid");
+        assert!(!term.grid);
+        assert!(term.shell.session.is_none());
     }
 
     #[test]

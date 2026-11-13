@@ -9,6 +9,8 @@ pub enum SlashAction {
     OpenModelPicker,
     OpenConnectPicker,
     OpenUsagePicker,
+    OpenTasksPicker,
+    OpenGoalsPicker,
     ApplyThinking(String),
     OpenThinkingPicker,
     ApplyAgent(String),
@@ -61,6 +63,8 @@ pub fn plan(text: &str) -> SlashAction {
         "/model" | "/models" => first().map_or(OpenModelPicker, ApplyModel),
         "/connect" => OpenConnectPicker,
         "/usage" => OpenUsagePicker,
+        "/tasks" => OpenTasksPicker,
+        "/goals" => OpenGoalsPicker,
         "/think" | "/reasoning" => first().map_or(OpenThinkingPicker, ApplyThinking),
         "/agent" | "/agents" => first().map_or(OpenAgentPicker, ApplyAgent),
         "/sessions" | "/session" => first().map_or(OpenSessionsPicker, SwitchSession),
@@ -124,6 +128,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("/model", "Switch model", "modal"),
     cmd("/connect", "Connect a provider (OAuth or API key)", "modal"),
     cmd("/usage", "View Codex account usage and reset times", "modal"),
+    cmd("/tasks", "View this conversation's task list", "modal"),
+    cmd("/goals", "View the current goal and elapsed time", "modal"),
     cmd("/think", "Set reasoning effort", "modal"),
     cmd("/agent", "Switch agent", "modal"),
     cmd("/compact", "Compact session context", "server"),
@@ -171,6 +177,8 @@ mod tests {
         assert_eq!(plan("/skill info"), SlashAction::ShowSkillUsage);
         assert_eq!(plan("/goal pause"), SlashAction::PauseGoal);
         assert_eq!(plan("/goal ship it"), SlashAction::SetGoal("ship it".into()));
+        assert_eq!(plan("/tasks"), SlashAction::OpenTasksPicker);
+        assert_eq!(plan("/goals"), SlashAction::OpenGoalsPicker);
         assert_eq!(plan("/comapction"), SlashAction::CompactSession);
         assert_eq!(plan("/amen"), SlashAction::Effect(Effect::Praise));
         assert_eq!(plan("/review a b"), SlashAction::RunServerCommand { command: "review".into(), args: "a b".into() });
@@ -182,6 +190,6 @@ mod tests {
         for row in COMMANDS {
             assert!(!matches!(plan(row.title), SlashAction::RunServerCommand { .. } | SlashAction::Noop), "{}", row.title);
         }
-        assert_eq!(COMMANDS.len(), 33);
+        assert_eq!(COMMANDS.len(), 35);
     }
 }

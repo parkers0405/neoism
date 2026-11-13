@@ -58,33 +58,28 @@ pub fn view(app: &App, id: &str, message: &str, attachments: &[neoism_protocol::
     let max_w = max_width(width, s);
     let pad = pad_x(width, s);
     let radius = 22.0 * s;
-    // Images sit at the top of the bubble (`render_user_message`); their `[imageN]` anchors
-    // leave the text.
-    let strip = super::attach::message_strip(app, id, attachments, (max_w - 2.0 * pad).max(1.0));
+    let strip = super::attach::message_strip(app, id, attachments, max_w.max(1.0));
     let message = if strip.is_some() { super::attach::display_text(message) } else { message.to_owned() };
-    let mut body = col().max_w(max_w).shrink().px(pad).py(PAD_Y * s).radius(radius).fill(blue).gap(14.0 * s);
-    let body_has_strip = strip.is_some();
-    if let Some(strip) = strip { body = body.child(row().w_full().justify_end().child(strip)); }
+    // A decoded image can change size after mounting. Keep a definite wrapping width and
+    // do not let its caption shrink vertically or inherit animated layout changes.
+    let mut content = col().w(max_w).items_end().gap(8.0 * s).instant_changes();
+    if let Some(strip) = strip { content = content.child(strip); }
     if !message.is_empty() || attachments.is_empty() {
-        let has_strip = body_has_strip;
-        body = body.child(text(message).font(app.ty.sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap().w_full_if(has_strip)
+        let body = col().max_w(max_w).px(pad).py(PAD_Y * s).radius(radius).fill(blue)
+            .child(text(message).max_w((max_w - 2.0 * pad).max(1.0))
+            .font(app.ty.sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap()
             // White over the blue bubble: the accent highlight would vanish into it.
             .selectable(true).selection_color(Color::WHITE.alpha(0.3)));
+        content = content.child(col().max_w(max_w)
+            .child(tail(s, blue).pin(None, None, Some(-3.0 * s), Some(-5.0 * s)))
+            .child(body));
     }
-    // The tail hangs off the body's lower-right corner; it overlaps the capsule's own rounding.
-    let bubble = el().shrink()
-        .child(tail(s, blue).pin(None, None, Some(-3.0 * s), Some(-5.0 * s)))
-        .child(body);
     let (seed, _label) = crate::ui::orb::identity(author, &app.local_name);
     let orb = ORB * s;
     row().w_full().justify_end().items_end().pb(TAIL_H * s)
-        .child(bubble)
+        .child(content)
         .child(row().w(lane).justify_end().child(app.orbs.view(&seed, orb.min(lane * 0.7))))
 }
-
-/// `w_full` only beside an image strip: alone, the text hugs its own width.
-trait FullIf { fn w_full_if(self, on: bool) -> Self; }
-impl FullIf for El { fn w_full_if(self, on: bool) -> El { if on { self.w_full() } else { self } } }
 
 #[cfg(test)]
 mod tests {

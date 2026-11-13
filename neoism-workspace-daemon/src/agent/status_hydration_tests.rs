@@ -107,6 +107,110 @@ fn catalog_activity_newer_list_wins_per_row_over_older_response() {
 }
 
 #[tokio::test]
+async fn switch_thread_initial_stream_retry_hydrates_background_without_blocking_output() {
+    use axum::response::IntoResponse;
+    use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let stream_attempts = attempts.clone();
+    let runtime_attempts = attempts.clone();
+    let status_fetched = Arc::new(tokio::sync::Notify::new());
+    let release_status = Arc::new(tokio::sync::Notify::new());
+    let fetched_handler = status_fetched.clone();
+    let release_handler = release_status.clone();
+    let app = axum::Router::new()
+        .route("/v2/health", axum::routing::get(|| async {
+            axum::Json(json!({"healthy":true,"version":"test","providerCredentialStore":"test"}))
+        }))
+        .route("/v2/sessions/root", axum::routing::get(|| async { axum::Json(json!({"id":"root"})) }))
+        .route("/v2/events", axum::routing::get(move || {
+            let attempt = stream_attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                let events = [
+                    json!({"type":"message.part.delta","data":{
+                        "sessionID":"root","messageID":"message","partID":"part","field":"text","delta":"Live output"
+                    }}),
+                    json!({"type":"question.asked","data":{
+                        "id":"live-question","sessionID":"root","questions":[{"question":"Proceed?"}]
+                    }}),
+                ].map(|value| Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(value.to_string())));
+                axum::response::Sse::new(futures::stream::iter(events).chain(futures::stream::pending())).into_response()
+            }
+        }))
+        .route("/v2/sessions/status", axum::routing::get(move || {
+            let fetched = fetched_handler.clone();
+            let release = release_handler.clone();
+            async move {
+                fetched.notify_one();
+                release.notified().await;
+                axum::Json(json!({}))
+            }
+        }))
+        .route("/v2/sessions/root/runtime", axum::routing::get(move || {
+            assert_eq!(runtime_attempts.load(Ordering::SeqCst), 2, "hydrate only after successful subscription");
+            async {
+                axum::Json(json!({
+                    "rootSessionId":"root", "familyRevision":9, "branches":[],
+                    "backgroundJobsEpoch":"server-a", "backgroundJobsRevision":7,
+                    "runningBackgroundTasks":[{"jobId":"job-1","sessionId":"root","startedAt":123}]
+                }))
+            }
+        }))
+        .route("/v2/sessions/root/todos", axum::routing::get(|| async { axum::Json(json!([])) }))
+        .route("/v2/interactions/questions", axum::routing::get(|| async { axum::Json(json!([])) }))
+        .route("/v2/interactions/permissions", axum::routing::get(|| async { axum::Json(json!([])) }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (tx, mut rx) = reply_queue::channel();
+    let mut session = AgentSession::spawn(Some("test".into()), String::new(), tx);
+    let inner = Arc::get_mut(&mut session.inner).unwrap();
+    inner.agent_server = format!("http://{address}");
+    inner.agent_http = reqwest::Client::builder().no_proxy().build().unwrap();
+    dispatcher::dispatch(&session, AgentClientMessage::SwitchThread { session_id: "root".into() });
+
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        status_fetched.notified().await;
+        let (mut switched, mut output, mut runtime, mut todos, mut baseline, mut question) =
+            (false, false, false, false, false, false);
+        while !(switched && output && runtime && todos && question) {
+            match rx.recv().await.unwrap() {
+                AgentServerMessage::ThreadSwitched { session_id } => { assert_eq!(session_id, "root"); switched = true; }
+                AgentServerMessage::ContentDelta { text, .. } => { assert_eq!(text, "Live output"); output = true; }
+                AgentServerMessage::RuntimeSnapshot { session_id, snapshot } => {
+                    assert_eq!(session_id, "root");
+                    assert!(snapshot.branches_authoritative);
+                    assert_eq!(snapshot.family_revision, 9);
+                    assert_eq!(snapshot.background_jobs_epoch.as_deref(), Some("server-a"));
+                    assert_eq!(snapshot.background_jobs_revision, Some(7));
+                    let jobs = snapshot.running_background_tasks.unwrap();
+                    assert_eq!(jobs.len(), 1, "restore the running background count without a live jobs event");
+                    assert_eq!(jobs[0].job_id, "job-1");
+                    runtime = true;
+                }
+                AgentServerMessage::TodoUpdate { todos: items, .. } => { assert!(items.is_empty()); todos = true; }
+                AgentServerMessage::QuestionsUpdated { .. } => baseline = true,
+                AgentServerMessage::QuestionAsked { request, .. } => {
+                    assert!(baseline, "release live questions after interaction hydration, without waiting for status");
+                    assert_eq!(request["id"], "live-question");
+                    question = true;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }).await;
+    release_status.notify_one();
+    events::stop_event_stream(&session.inner, "root");
+    server.abort();
+    result.expect("initial retry must restore background count and forward output/interactions while status is pending");
+}
+
+#[tokio::test]
 async fn attaching_stream_forwards_output_while_interactions_are_loading() {
     use futures::StreamExt;
     let fetched = Arc::new(tokio::sync::Notify::new());

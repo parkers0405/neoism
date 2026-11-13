@@ -165,6 +165,26 @@ fn option_value(text: &str, kind: ConfigValueKind) -> Value {
     parse_value(text, kind).unwrap_or_else(|| Value::String(text.to_owned()))
 }
 
+/// Installed daemons may predate this decoration or its current default.
+fn with_wordmark_fire_fallback(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigDescriptor> {
+    if let Some(d) = descriptors.iter_mut().find(|d| d.path == "appearance.wordmark-fire") {
+        d.default = json!(true);
+    } else {
+        descriptors.push(ConfigDescriptor {
+            path: "appearance.wordmark-fire".into(),
+            label: "Wordmark flames".into(),
+            description: "Show persistent pixel fire on NEOISM logos in Home and Agent tabs without changing click effects.".into(),
+            value_kind: ConfigValueKind::Boolean,
+            default: json!(true),
+            static_suggestions: Vec::new(), runtime_suggestions: Vec::new(), options: Vec::new(),
+            provider: None, constraints: ConfigConstraints::default(), accepted_kinds: Vec::new(),
+            extensible: false, category: ConfigCategory::Appearance, control: ConfigControl::Toggle,
+            settings_visible: true,
+        });
+    }
+    descriptors
+}
+
 /// How a value shows in a field or dropdown.
 pub fn display(value: &Value) -> String {
     match value {
@@ -247,6 +267,11 @@ impl Settings {
     }
 
     pub fn string_at(&self, row: &Row) -> String {
+        if row.path == "appearance.theme" {
+            let name = self.value(&row.path).and_then(Value::as_str).unwrap_or("neoism_dark");
+            let name = if name == "pastel_dark" { "neoism_dark" } else { name };
+            return crate::palette::theme_display_name(name);
+        }
         self.value(&row.path).map(display).unwrap_or_else(|| if row.default.is_null() { String::new() } else { display(&row.default) })
     }
 
@@ -254,9 +279,13 @@ impl Settings {
     pub fn options(&self, row: &Row) -> Vec<(String, Value)> {
         let mut options: Vec<(String, Value)> = row.options.iter().map(|o| (option_label(o), o.value.clone())).collect();
         if row.path == "appearance.theme" {
+            for (label, value) in &mut options {
+                if value.as_str() == Some("pastel_dark") { *value = json!("neoism_dark"); }
+                if let Some(name) = value.as_str() { *label = crate::palette::theme_display_name(name); }
+            }
             for palette in crate::ui::theme::PALETTES {
                 if !options.iter().any(|(_, v)| v.as_str() == Some(palette.name)) {
-                    options.push((palette.name.to_owned(), json!(palette.name)));
+                    options.push((crate::palette::theme_display_name(palette.name), json!(palette.name)));
                 }
             }
         }
@@ -293,6 +322,23 @@ impl Settings {
 }
 
 impl App {
+    /// Config has no push subscription. Fetch on the daemon thread at most once a second,
+    /// including while Settings is closed; never read or parse the file on a frame.
+    pub(crate) fn poll_config_reload(&mut self, tx: &mut rune::Tx) {
+        let interval = std::time::Duration::from_secs(1);
+        let now = std::time::Instant::now();
+        let elapsed = self.config_poll_at.map(|at| now.duration_since(at));
+        if elapsed.is_none_or(|elapsed| elapsed >= interval) {
+            if let Some(daemon) = &self.daemon {
+                daemon.send(Family::Config, json!("GetConfig"));
+            }
+            self.config_poll_at = Some(now);
+            tx.wake_after(interval);
+        } else if let Some(elapsed) = elapsed {
+            tx.wake_after(interval.saturating_sub(elapsed));
+        }
+    }
+
     /// Open the page and ask the daemon for values and schema.
     pub fn open_settings(&mut self) {
         self.menu = None;
@@ -313,12 +359,15 @@ impl App {
 
     pub(crate) fn apply_config_reply(&mut self, request_id: u64, message: &Value) {
         self.apply_config_document_reply(request_id, message);
-        if let Some(config) = message.get("Config") { self.keybindings = config["value"]["keybinds"]["keys"].clone(); }
+        if let Some(config) = message.get("Config") {
+            self.keybindings = config["value"]["keybinds"]["keys"].clone();
+            self.wordmark.fire_enabled = crate::config::wordmark_fire(&config["value"]);
+        }
         let Some(settings) = &mut self.settings else { return };
         if let Some(config) = message.get("Config") {
             settings.values = config["value"].clone();
         } else if let Some(schema) = message.get("ConfigSchema") {
-            if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(descriptors); }
+            if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(with_wordmark_fire_fallback(descriptors)); }
         }
     }
 
@@ -329,6 +378,7 @@ impl App {
         match path {
             "appearance.theme" => if let Some(name) = value.as_str() { self.apply_theme(name); return },
             "appearance.fonts.size" => if let Some(size) = value.as_f64() { self.ty.size = (size as f32).clamp(8.0, 40.0); },
+            "appearance.wordmark-fire" => self.wordmark.fire_enabled = value.as_bool().unwrap_or(true),
             "ui.window.background-image" | "ui.window.background-image-disabled" => {}
             _ => {}
         }
@@ -445,6 +495,67 @@ mod tests {
             "path": path, "label": path.rsplit('.').next().unwrap(), "description": "", "value_kind": kind,
             "default": null, "extensible": false, "category": category, "control": control,
         })).unwrap()
+    }
+
+    #[test]
+    fn wordmark_fire_fallback_supports_old_schema_without_duplicating_new_schema() {
+        let fallback = with_wordmark_fire_fallback(Vec::new());
+        assert_eq!(fallback.len(), 1);
+        let d = &fallback[0];
+        assert_eq!(d.path, "appearance.wordmark-fire");
+        assert_eq!(d.label, "Wordmark flames");
+        assert_eq!(d.default, json!(true));
+        assert_eq!(d.category, ConfigCategory::Appearance);
+        assert_eq!(d.control, ConfigControl::Toggle);
+        assert!(d.settings_visible);
+        let mut canonical = fallback.clone();
+        canonical[0].description = "daemon description".into();
+        assert_eq!(with_wordmark_fire_fallback(canonical.clone()), canonical);
+        let mut old_default = canonical.clone();
+        old_default[0].default = json!(false);
+        assert_eq!(with_wordmark_fire_fallback(old_default), canonical);
+        let mut settings = Settings::default();
+        settings.set_descriptors(fallback);
+        assert_eq!(settings.rows[0].control, Control::Toggle);
+        assert!(settings.bool_at(&settings.rows[0]));
+    }
+
+    #[test]
+    fn wordmark_fire_toggle_and_reload_apply_without_settings_open() {
+        let mut app = App::new();
+        app.settings = Some(Settings::default());
+        app.apply_config_reply(0, &json!({"ConfigSchema": {"descriptors": []}}));
+        app.wordmark.fire_enabled = true;
+        app.toggle_setting(0);
+        assert!(!app.wordmark.fire_enabled);
+        assert_eq!(app.settings.as_ref().unwrap().value("appearance.wordmark-fire"), Some(&json!(false)));
+        app.toggle_setting(0);
+        assert!(app.wordmark.fire_enabled);
+        app.settings = None;
+        for enabled in [true, false] {
+            app.apply_config_reply(0, &json!({"Config": {"value": {"appearance": {"wordmark-fire": enabled}}}}));
+            assert_eq!(app.wordmark.fire_enabled, enabled);
+        }
+        app.wordmark.fire_enabled = false;
+        app.apply_config_reply(0, &json!({"Config": {"value": {}}}));
+        assert!(app.wordmark.fire_enabled, "removing the override restores default on");
+    }
+
+    #[test]
+    fn theme_settings_use_canonical_names_without_duplicate_legacy_default() {
+        let mut s = Settings::default();
+        let mut d = descriptor("appearance.theme", ConfigCategory::Appearance, ConfigControl::Select, ConfigValueKind::String);
+        d.static_suggestions = vec!["pastel_dark".into(), "neoism_dark".into(), "one_light".into()];
+        s.set_descriptors(vec![d]);
+        s.set_local("appearance.theme", json!("pastel_dark"));
+        let row = &s.rows[0];
+        assert_eq!(s.string_at(row), "Neoism Dark");
+        let options = s.options(row);
+        assert_eq!(options.iter().filter(|(label, _)| label == "Neoism Dark").count(), 1);
+        assert!(options.contains(&("Neoism Light".into(), json!("neoism_light"))));
+        assert!(options.contains(&("One Light".into(), json!("one_light"))));
+        assert!(options.contains(&("Pastel Dark".into(), json!("pastelDark"))));
+        assert!(!options.iter().any(|(_, value)| value.as_str() == Some("pastel_dark")));
     }
 
     #[test]

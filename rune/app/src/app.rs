@@ -206,6 +206,7 @@ pub struct App {
     /// Background tasks still running, by family root (`RuntimeSnapshot.running_background_tasks`).
     pub background_job_versions: HashMap<String, (String, u64)>,
     pub background_jobs: std::collections::HashMap<String, usize>,
+    pub background_started: HashMap<String, std::time::Instant>,
     pub header_hover: Option<crate::agent::HeaderStep>,
     /// Branch and line counts from the daemon's Git `RepoStatus` watch.
     pub git: Option<crate::ui::status::GitSummary>,
@@ -262,6 +263,7 @@ pub struct App {
     pub model: String,
     pub effort: String,
     pub wordmark: Wordmark,
+    pub(crate) config_poll_at: Option<std::time::Instant>,
     pub fps: Option<u32>,
     /// The FPS pill's reading: live text, so a new reading never re-runs the views.
     pub fps_live: rune::LiveText,
@@ -278,6 +280,8 @@ pub struct App {
 impl App {
     pub fn new() -> App {
         let config = crate::config::load();
+        let mut wordmark = Wordmark::default();
+        wordmark.fire_enabled = config.wordmark_fire;
         let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
         let home = crate::startup::home();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
@@ -312,7 +316,8 @@ impl App {
             agent: "Build".into(),
             model: crate::agent::title_case(config.model.as_deref().unwrap_or("openai/gpt-6.1-sol")),
             effort: crate::agent::title_case(config.variant.as_deref().unwrap_or("medium")),
-            wordmark: Wordmark::default(),
+            wordmark,
+            config_poll_at: None,
             fps: None,
             fps_live: rune::LiveText::new(""),
             fps_at: None,
@@ -371,7 +376,7 @@ impl App {
             agent_sent: Default::default(),
             prefetching: Default::default(),
             family_rows: 0,
-            background_job_versions: Default::default(), background_jobs: Default::default(),
+            background_job_versions: Default::default(), background_jobs: Default::default(), background_started: Default::default(),
             header_hover: None,
             // The local branch until the daemon's Git watch reports counts.
             git: crate::config::git_branch().map(|branch| crate::ui::status::GitSummary { branch, ..Default::default() }),
@@ -399,6 +404,14 @@ impl App {
                 applied && !delta
             }
             Inbound::Crdt { request_id, message } => self.apply_crdt(request_id, *message),
+            Inbound::Reply { family, request_id, message } if family == "Config" && message.get("Config").is_some() => {
+                let value = &message["Config"]["value"];
+                let changed = self.wordmark.fire_enabled != crate::config::wordmark_fire(value)
+                    || self.keybindings != value["keybinds"]["keys"]
+                    || self.settings.as_ref().is_some_and(|settings| settings.values != *value);
+                self.apply_config_reply(request_id, &message);
+                changed
+            }
             event => { self.apply(event); true }
         }
     }
@@ -509,6 +522,8 @@ impl App {
         if snapshot.workspace_root != self.cwd { return; }
         if snapshot.error.is_some() { return; }
         self.tree.apply_git(&snapshot);
+        self.git_panel.repo_root = snapshot.repo_root.clone();
+        self.refresh_editor_git_bases();
         self.git = snapshot.branch.filter(|_| snapshot.repo_root.is_some()).map(|branch| GitSummary {
             branch,
             added: snapshot.files.iter().map(|f| u64::from(f.additions)).sum(),

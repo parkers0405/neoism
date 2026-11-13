@@ -14,6 +14,7 @@ pub const WIDTH: f32 = 300.0;
 
 #[derive(Default)]
 pub struct State {
+    pub(crate) repo_root: Option<String>,
     pub open: bool,
     pub message: TextEdit,
     files: Vec<GitFileChange>,
@@ -82,6 +83,7 @@ impl App {
     }
 
     pub fn git_disconnected(&mut self) {
+        for buffer in self.buffers.values_mut() { buffer.git = Default::default(); }
         if let Some(pending) = self.git_panel.pending.take() {
             self.git_panel.error = Some(if matches!(pending.kind, Operation::Commit(_)) {
                 "Connection lost during commit. Check repository status before retrying."
@@ -92,6 +94,7 @@ impl App {
     }
 
     pub fn git_connected(&mut self) {
+        self.refresh_editor_git_bases();
         if self.git_panel.open { self.refresh_git_panel(); }
         if self.git_panel.review_open() { self.load_git_review(); }
     }
@@ -171,6 +174,7 @@ impl App {
     }
 
     pub fn apply_git_panel(&mut self, message: GitServerMessage, request_id: u64) {
+        if self.apply_editor_git(&message, request_id) { return; }
         // Watch events are scoped independently from request/reply traffic. Never accept a
         // previous workspace's broadcast, even if it arrives after its panel was reset.
         if let GitServerMessage::RepoStatus { token, snapshot } = &message {

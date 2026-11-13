@@ -52,6 +52,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.context.is_some(), || super::context::menu_view(app))
         .child_if(app.prompt.is_some(), || super::context::prompt_view(app))
         .child_if(app.settings.is_some(), || crate::settings::view(app))
+        .child_if(app.server.progress().is_some(), || crate::servers::flow::progress_view(app))
         .child_if(app.cursor.placed() && cursor_in_overlay(app), || cursor_quad(app))
         .child(app.heartbeat.view())
 }

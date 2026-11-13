@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::mcp::McpConfig;
 use crate::session::ModelRef;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfigDocument {
     #[serde(default, rename = "$schema")]
@@ -71,11 +71,9 @@ pub struct AgentConfigDocument {
     pub mcp_enabled: BTreeMap<String, bool>,
     #[serde(default)]
     pub permission: BTreeMap<String, Value>,
-    /// `neoism --dangerously-skip-permissions`, as a config key: every
-    /// permission that would ASK is auto-allowed instead (explicit
-    /// `"deny"` rules still deny). Applied by injecting a `"*": "allow"`
-    /// base rule during config normalization.
-    #[serde(default)]
+    /// Auto-allow permission prompts by default; explicit `"deny"` rules still
+    /// deny. Set to false to require approval for ASK operations.
+    #[serde(default = "default_skip_permissions")]
     pub dangerously_skip_permissions: bool,
     #[serde(default)]
     pub tools: BTreeMap<String, bool>,
@@ -85,6 +83,49 @@ pub struct AgentConfigDocument {
     pub experimental: ExperimentalConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
+}
+
+fn default_skip_permissions() -> bool {
+    true
+}
+
+impl Default for AgentConfigDocument {
+    fn default() -> Self {
+        Self {
+            schema: Default::default(),
+            shell: Default::default(),
+            disabled_providers: Default::default(),
+            enabled_providers: Default::default(),
+            provider: Default::default(),
+            model: Default::default(),
+            variant: Default::default(),
+            text_verbosity: Default::default(),
+            small_model: Default::default(),
+            image_model: Default::default(),
+            video_model: Default::default(),
+            default_agent: Default::default(),
+            agent: Default::default(),
+            mode: Default::default(),
+            command: Default::default(),
+            plugins: Default::default(),
+            skills: Default::default(),
+            watcher: Default::default(),
+            share: Default::default(),
+            autoshare: Default::default(),
+            autoupdate: Default::default(),
+            username: Default::default(),
+            formatter: Default::default(),
+            lsp: Default::default(),
+            mcp: Default::default(),
+            mcp_enabled: Default::default(),
+            permission: Default::default(),
+            dangerously_skip_permissions: default_skip_permissions(),
+            tools: Default::default(),
+            instructions: Default::default(),
+            experimental: Default::default(),
+            compaction: Default::default(),
+        }
+    }
 }
 
 impl AgentConfigDocument {
@@ -664,12 +705,22 @@ mod tests {
             "dangerously_skip_permissions",
         ] {
             let config: AgentConfigDocument =
-                serde_json::from_value(json!({ key: true })).unwrap();
+                serde_json::from_value(json!({ key: false })).unwrap();
             assert!(
-                !config.dangerously_skip_permissions,
+                config.dangerously_skip_permissions,
                 "legacy key {key} must be ignored"
             );
         }
+    }
+
+    #[test]
+    fn skip_permissions_defaults_on_but_can_be_disabled() {
+        assert!(AgentConfigDocument::default().dangerously_skip_permissions);
+        let empty: AgentConfigDocument = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.dangerously_skip_permissions);
+        let explicit: AgentConfigDocument =
+            serde_json::from_value(json!({ "dangerouslySkipPermissions": false })).unwrap();
+        assert!(!explicit.dangerously_skip_permissions);
     }
 
     #[test]

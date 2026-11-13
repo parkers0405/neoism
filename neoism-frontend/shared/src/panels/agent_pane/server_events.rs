@@ -858,6 +858,10 @@ pub fn apply_agent_event_to_pane_with_history_kind(
 
         // -- Maintenance -----------------------------------------
         AgentServerMessage::ThreadSearchResult { .. } => {}
+        // Rune owns these optimistic edits; legacy clients use UndoSession/RedoSession.
+        AgentServerMessage::SessionHistoryEdited { .. } => {}
+        // The current-goal panel is owned by the Rune client.
+        AgentServerMessage::GoalSnapshot { .. } => {}
         AgentServerMessage::Pong => {
             // Connection-health probe — no UI mutation needed.
         }
@@ -1413,6 +1417,8 @@ pub fn agent_event_session_id(
         AgentServerMessage::ThreadCreated { session_id, .. }
         | AgentServerMessage::ThreadSwitched { session_id, .. }
         | AgentServerMessage::HistoryChunk { session_id, .. }
+        | AgentServerMessage::SessionHistoryEdited { session_id, .. }
+        | AgentServerMessage::GoalSnapshot { session_id, .. }
         | AgentServerMessage::SessionEvent { session_id, .. }
         | AgentServerMessage::MessageUpdated { session_id, .. }
         | AgentServerMessage::PartRemoved { session_id, .. }

@@ -25,7 +25,10 @@ impl App {
             let draft = &self.tabs[i].draft;
             if draft.anchor != draft.focus || self.selection.copy.selected.is_some() { return false; }
             if !draft.text.is_empty() {
+                let tab = self.tabs[i].id;
                 self.tabs[i].draft.clear();
+                self.tabs[i].pastes.clear();
+                self.attach.pending.remove(&tab);
                 self.composer_changed();
                 return true;
             }
@@ -122,11 +125,11 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder("Ask anything", rgb(p.dim))
         .color(rgb(p.fg)).w_full().min_h(26.0)
+        .pill_colors(rgb(p.blue).alpha(0.2), Some(rgb(p.blue)))
         .on_edit(move |s: &mut App| { s.select_tab(tab_id); s.composer_edit() })
         .on_input_change(move |s: &mut App, _: &mut Tx| { s.select_tab(tab_id); if !s.pending_prompt_changed() { s.composer_changed(); } })
         .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.timeline_jump_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
-        // An image on the clipboard attaches; text pastes as usual.
-        .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_image(content) })
+        .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_composer(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_pending_prompt() && !s.submit_command(tx) { s.submit(); } });
     // Chips and their `/model` `/agent` `/think` aliases open the same pickers.
     // In a narrow split the chips give way (labels truncate) instead of widening the card.

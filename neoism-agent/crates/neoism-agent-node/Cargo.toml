@@ -1,0 +1,24 @@
+[package]
+name = "neoism-agent-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Node-API binding for the existing Neoism Agent runtime"
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+axum.workspace = true
+futures.workspace = true
+napi = { version = "2.16", default-features = false, features = ["napi8", "tokio_rt"] }
+napi-derive = "2.16"
+neoism-agent-server.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[build-dependencies]
+napi-build = "2"

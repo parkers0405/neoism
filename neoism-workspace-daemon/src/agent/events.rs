@@ -283,10 +283,22 @@ async fn run_event_stream_inner(
                 kind: STREAM_RESUMED.to_owned(),
                 properties: Value::Object(Default::default()),
             });
-            push_session_running_state(inner.clone(), session_id.clone()).await;
-            push_runtime_snapshot(inner.clone(), session_id.clone()).await;
-            push_todo_snapshot(inner.clone(), session_id.clone()).await;
         }
+        // Every successful subscription needs a baseline, including the first
+        // connection after failed attempts (and SwitchThread without ResumeStream).
+        // Poll it alongside live output, independently of interaction hydration:
+        // slow status/runtime/todo reads must not delay buffered questions.
+        let runtime_hydration = async {
+            if !catalog {
+                tokio::join!(
+                    push_session_running_state(inner.clone(), session_id.clone()),
+                    push_runtime_snapshot(inner.clone(), session_id.clone()),
+                    push_todo_snapshot(inner.clone(), session_id.clone()),
+                );
+            }
+        };
+        tokio::pin!(runtime_hydration);
+        let mut runtime_hydrated = catalog;
         // Subscribe before hydrating, but do not hold live output behind REST.
         // Only interaction edges wait for their baseline so a delayed empty
         // snapshot cannot erase a question/permission received during attach.
@@ -318,6 +330,9 @@ async fn run_event_stream_inner(
                                 for event in pending_interactions.drain(..) {
                                     inner.status_evidence.forward(&inner.tx, &session_id, event);
                                 }
+                            }
+                            _ = &mut runtime_hydration, if !runtime_hydrated => {
+                                runtime_hydrated = true;
                             }
                             chunk = stream.next() => return chunk,
                         }

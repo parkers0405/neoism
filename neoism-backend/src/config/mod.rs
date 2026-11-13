@@ -104,6 +104,9 @@ pub struct Appearance {
     /// Play one random splash animation when a new terminal or agent tab opens.
     #[serde(default, rename = "splash-auto-animate")]
     pub splash_auto_animate: bool,
+    /// Persistent pixel fire on Home and Agent logos, independent of click effects.
+    #[serde(default = "default_bool_true", rename = "wordmark-fire")]
+    pub wordmark_fire: bool,
     /// Subtle pixel stars behind the Agent composer.
     #[serde(default = "default_bool_true", rename = "agent-stars")]
     pub agent_stars: bool,
@@ -147,6 +150,7 @@ impl Default for Appearance {
             fonts: FontConfig::default(),
             line_height: default_line_height(),
             splash_auto_animate: false,
+            wordmark_fire: true,
             agent_stars: true,
             mashup_pack: None,
             mashup_baseline: None,
@@ -1627,6 +1631,7 @@ mod tests {
         assert_eq!(config.developer, Developer::default());
         assert!(!config.renderer.disable_unfocused_render);
         assert_eq!(config.appearance.theme, default_neoism_theme());
+        assert!(config.appearance.wordmark_fire);
         assert!(config.ui.status_fps);
         assert!(config.editor.format_on_save);
         assert!(!config.editor.git_blame);
@@ -1634,6 +1639,31 @@ mod tests {
         assert!(!config.editor.git_blame_hide_on_scroll);
         assert!(!config.editor.minimap);
         assert!(config.editor.markdown.spellcheck);
+    }
+
+    #[test]
+    fn wordmark_fire_is_grouped_default_on_and_round_trips() {
+        assert!(Appearance::default().wordmark_fire);
+        assert!(parse(r#"{"appearance":{}}"#).appearance.wordmark_fire);
+        for enabled in [false, true] {
+            let text = serde_json::json!({"appearance": {"wordmark-fire": enabled}}).to_string();
+            let config = parse(&text);
+            assert_eq!(config.appearance.wordmark_fire, enabled);
+            let saved = serde_json::to_value(config).unwrap();
+            assert_eq!(saved["appearance"]["wordmark-fire"], enabled);
+            assert!(saved.get("wordmark-fire").is_none());
+            assert_eq!(parse(&saved.to_string()).appearance.wordmark_fire, enabled);
+        }
+        let mut document = "{\n// keep the user's comment\n\"appearance\": {}\n}".to_owned();
+        for enabled in [true, false] {
+            document = settings_content_after_updates(
+                &document,
+                &[("appearance.wordmark-fire", serde_json::json!(enabled))],
+            ).unwrap();
+            assert!(document.contains("// keep the user's comment"));
+            assert_eq!(parse(&document).appearance.wordmark_fire, enabled);
+        }
+        assert!(serde_json::from_str::<Config>(r#"{"appearance":{"wordmark-fire":"yes"}}"#).is_err());
     }
 
     #[test]

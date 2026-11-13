@@ -10,6 +10,8 @@ pub enum Kind {
     /// The `/` menu; its query is the composer text itself.
     Slash,
     Usage,
+    Tasks,
+    Goals,
     Model,
     Agent,
     Thinking,
@@ -118,6 +120,15 @@ pub struct Picker {
     pub limit: std::cell::Cell<usize>,
     /// Trackpad distance not yet worth a whole row.
     pub wheel: f32,
+    pub usage: super::usage::Usage,
+    pub usage_error: Option<String>,
+    pub usage_scroll: f32,
+    pub usage_max_scroll: std::cell::Cell<f32>,
+    /// `$query` completion leaves keyboard focus in the composer.
+    pub mention: Option<std::ops::Range<usize>>,
+    pub goal_error: Option<String>,
+    pub goal_request: Option<String>,
+    pub goal_second: u64,
 }
 
 pub const MAX_ROWS: usize = 8;
@@ -130,6 +141,10 @@ impl Picker {
             kind, title: title.into(), placeholder: "Search".into(), query, rows: Vec::new(), filtered: Vec::new(),
             selected: 0, top: 0, loading: false, activity: None, provider: None, last_provider: None,
             limit: std::cell::Cell::new(MAX_ROWS), wheel: 0.0,
+            usage: super::usage::Usage::default(), usage_error: None, usage_scroll: 0.0,
+            usage_max_scroll: std::cell::Cell::new(0.0),
+            mention: None,
+            goal_error: None, goal_request: None, goal_second: 0,
         };
         picker.replace(rows);
         picker

@@ -174,7 +174,7 @@ pub fn default_theme() -> String {
 
 #[inline]
 pub fn default_neoism_theme() -> String {
-    String::from("pastel_dark")
+    String::from("neoism_dark")
 }
 
 #[inline]
@@ -246,7 +246,7 @@ pub fn default_config_file_content() -> String {
 {
     // ── [appearance] — theming + typography ───────────────────────
     // "appearance": {
-    //     "theme": "tokyo_night",    // IDE theme: pastel_dark | nvchad_one | tokyo_night | catppuccin_mocha
+    //     "theme": "neoism_dark",   // IDE theme: neoism_dark | neoism_light | nvchad_one | tokyo_night | catppuccin_mocha
     //     "palette": "lucario",      // terminal color file in themes/<name>.json
     //     "line-height": 1.2,
     //     "splash-auto-animate": false, // one random logo animation per new terminal or agent tab; clicks always animate

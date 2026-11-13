@@ -293,7 +293,12 @@ pub(crate) async fn question_reply(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
     Json(reply): Json<QuestionReplyRequest>,
-) -> Json<bool> {
+) -> Result<Json<bool>, ApiError> {
+    // The durable compare-and-set chooses the winner before any live waiter is
+    // consumed. A failed commit must leave the question answerable.
+    if !state.inner.store.resolve_interaction(&request_id, "answered", json!(reply)).await? {
+        return Ok(Json(true));
+    }
     let removed = state.inner.questions.write().await.remove(&request_id);
     let pending = state
         .inner
@@ -301,21 +306,6 @@ pub(crate) async fn question_reply(
         .write()
         .await
         .remove(&request_id);
-    let durable_resolved = match state
-        .inner
-        .store
-        .resolve_interaction(&request_id, "answered", json!(reply))
-        .await
-    {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            tracing::warn!(request_id, %error, "failed to persist question resolution");
-            false
-        }
-    };
-    if !durable_resolved && pending.is_none() && removed.is_none() {
-        return Json(true);
-    }
     if let Some(pending) = pending {
         let _ = pending.sender.send(Ok(reply.answers.clone()));
     }
@@ -324,13 +314,16 @@ pub(crate) async fn question_reply(
         json!({ "sessionId": removed.as_ref().map(|request| &request.session_id),
             "requestID": request_id, "reply": reply, "info": removed }),
     ));
-    Json(true)
+    Ok(Json(true))
 }
 
 pub(crate) async fn question_reject(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
-) -> Json<bool> {
+) -> Result<Json<bool>, ApiError> {
+    if !state.inner.store.resolve_interaction(&request_id, "rejected", json!({ "rejected": true })).await? {
+        return Ok(Json(true));
+    }
     let removed = state.inner.questions.write().await.remove(&request_id);
     let pending = state
         .inner
@@ -338,21 +331,6 @@ pub(crate) async fn question_reject(
         .write()
         .await
         .remove(&request_id);
-    let durable_resolved = match state
-        .inner
-        .store
-        .resolve_interaction(&request_id, "rejected", json!({ "rejected": true }))
-        .await
-    {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            tracing::warn!(request_id, %error, "failed to persist question rejection");
-            false
-        }
-    };
-    if !durable_resolved && pending.is_none() && removed.is_none() {
-        return Json(true);
-    }
     if let Some(pending) = pending {
         let _ = pending
             .sender
@@ -363,7 +341,7 @@ pub(crate) async fn question_reject(
         json!({ "sessionId": removed.as_ref().map(|request| &request.session_id),
             "requestID": request_id, "info": removed }),
     ));
-    Json(true)
+    Ok(Json(true))
 }
 
 pub(crate) async fn cancel_session_interactions(state: &AppState, session_id: &str) {
@@ -600,14 +578,16 @@ mod tests {
         add_session(&fixture.state, "child", "tenant-a", "workspace-a").await;
         for action in ["reply", "reject", "cancel", "abort"] {
             add_pending(&fixture.state, action, "child").await;
+            let request = fixture.state.inner.questions.read().await[action].clone();
+            fixture.state.inner.store.save_question_request(&request).await.unwrap();
             let mut events = fixture.state.subscribe();
             match action {
                 "reply" => {
-                    question_reply(State(fixture.state.clone()), Path(action.into()),
-                        Json(QuestionReplyRequest { answers: vec![vec!["yes".into()]] })).await;
+                    let _ = question_reply(State(fixture.state.clone()), Path(action.into()),
+                        Json(QuestionReplyRequest { answers: vec![vec!["yes".into()]] })).await.unwrap();
                 }
                 "reject" => {
-                    question_reject(State(fixture.state.clone()), Path(action.into())).await;
+                    let _ = question_reject(State(fixture.state.clone()), Path(action.into())).await.unwrap();
                 }
                 "abort" => {
                     crate::session_actions::abort_session_run(&fixture.state, "child").await;
@@ -625,6 +605,60 @@ mod tests {
             assert_eq!(event.properties["requestID"], action);
             assert_eq!(event.properties["info"]["sessionId"], "child");
         }
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn question_reply_and_reject_deliver_only_the_durable_winner() {
+        let fixture = Fixture::new().await;
+        add_session(&fixture.state, "session", "local", "workspace").await;
+        add_pending(&fixture.state, "race", "session").await;
+        let request = fixture.state.inner.questions.read().await["race"].clone();
+        fixture.state.inner.store.save_question_request(&request).await.unwrap();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        fixture.state.inner.question_waiters.write().await.insert("race".into(), crate::state::QuestionPending { sender });
+        let (answered, rejected) = tokio::join!(
+            question_reply(State(fixture.state.clone()), Path("race".into()), Json(QuestionReplyRequest { answers: vec![vec!["yes".into()]] })),
+            question_reject(State(fixture.state.clone()), Path("race".into())),
+        );
+        assert!(answered.unwrap().0);
+        assert!(rejected.unwrap().0);
+        let delivered = receiver.await.unwrap();
+        let path = fixture.root.join("agent.db");
+        let db = turso::Builder::new_local(path.to_str().unwrap()).experimental_index_method(true).build().await.unwrap();
+        let connection = db.connect().unwrap();
+        let mut rows = connection.query("SELECT state FROM interaction_requests WHERE id = 'race'", ()).await.unwrap();
+        let outcome = rows.next().await.unwrap().unwrap().get::<String>(0).unwrap();
+        assert_eq!(delivered.is_ok(), outcome == "answered");
+        assert!(!fixture.state.inner.questions.read().await.contains_key("race"));
+        drop(rows);
+        drop(connection);
+        drop(db);
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn failed_question_commit_preserves_the_pending_waiter() {
+        let fixture = Fixture::new().await;
+        add_session(&fixture.state, "session", "local", "workspace").await;
+        add_pending(&fixture.state, "pending", "session").await;
+        let request = fixture.state.inner.questions.read().await["pending"].clone();
+        fixture.state.inner.store.save_question_request(&request).await.unwrap();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        fixture.state.inner.question_waiters.write().await.insert("pending".into(), crate::state::QuestionPending { sender });
+        let path = fixture.root.join("agent.db");
+        let db = turso::Builder::new_local(path.to_str().unwrap()).experimental_index_method(true).build().await.unwrap();
+        let connection = db.connect().unwrap();
+        connection.execute("ALTER TABLE interaction_requests RENAME TO unavailable_interactions", ()).await.unwrap();
+        assert!(question_reply(State(fixture.state.clone()), Path("pending".into()), Json(QuestionReplyRequest { answers: vec![vec!["yes".into()]] })).await.is_err());
+        assert!(question_reject(State(fixture.state.clone()), Path("pending".into())).await.is_err());
+        assert!(fixture.state.inner.questions.read().await.contains_key("pending"));
+        assert!(matches!(receiver.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+        connection.execute("ALTER TABLE unavailable_interactions RENAME TO interaction_requests", ()).await.unwrap();
+        let _ = question_reply(State(fixture.state.clone()), Path("pending".into()), Json(QuestionReplyRequest { answers: vec![vec!["yes".into()]] })).await.unwrap();
+        assert_eq!(receiver.await.unwrap().unwrap(), vec![vec!["yes".to_string()]]);
+        drop(connection);
+        drop(db);
         fixture.finish().await;
     }
 

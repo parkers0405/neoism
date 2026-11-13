@@ -120,6 +120,10 @@ async fn abort_session_run_impl(
     reconcile_completion: bool,
 ) -> bool {
     let admission = crate::execution_activity::admission_guard(state, session_id).await;
+    if let Err(error) = state.inner.store.cancel_prompt_claim(session_id).await {
+        tracing::error!(%error, session_id, "failed to durably cancel restart claim");
+        return false;
+    }
     let removed_compact = state
         .inner
         .store

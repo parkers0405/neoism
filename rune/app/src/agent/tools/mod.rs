@@ -1,7 +1,5 @@
-//! Tool calls in the agent transcript, drawn as GPUiX's shared painter drew them
-//! (`agent_pane/view/tool_message/*`): a 30 pt header (status dot or orbiting spinner, service
-//! symbol, compact title, `+/-` counts, status, disclosure) over an optional body: output text,
-//! read-group children, per-file diff accordions, a checklist, or a shell transcript.
+//! Lightweight inline tool transcript: mixed context calls collapse into a context row;
+//! other operations keep individual headers, output, per-file diffs and shell interactions.
 //!
 //! Geometry is the original's, in points × `Type::scale()`, measured from the row's left edge,
 //! which sits 18 pt left of assistant text (`ASSISTANT_TEXT_PAD_LEFT`).
@@ -18,6 +16,9 @@ mod todos;
 pub use group::{group_at, group_end, visible};
 pub use icons::Icons;
 
+/// Shared with the activity line so its context label uses exactly the grouping vocabulary.
+pub fn context_tool(tool: &str) -> bool { group::read_family(tool).is_some() }
+
 use crate::app::App;
 use crate::ui::theme::{Palette, rgb};
 use neoism_protocol::agent::HistoryMessage;
@@ -29,8 +30,8 @@ use text::Text;
 const TEXT_PAD_LEFT: f32 = 18.0;
 /// The row runs this far past the right edge of assistant text (its 30 pt right margin).
 const TEXT_PAD_RIGHT: f32 = 30.0;
-const HEADER_H: f32 = 30.0;
-const GROUP_BODY_Y: f32 = 36.0;
+const HEADER_H: f32 = 22.0;
+const GROUP_BODY_Y: f32 = 26.0;
 const BODY_ROW_H: f32 = 20.0;
 const BODY_MAX_ROWS: usize = 12;
 /// Width of the transcript text column before the first layout reports it.
@@ -39,6 +40,7 @@ const FALLBACK_TEXT_WIDTH: f32 = 860.0;
 /// Expansion, child selection and the measured column, kept across frames.
 #[derive(Default)]
 pub struct ToolState {
+    completion_bumps: HashMap<String, rune::Live<[f32; 2]>>,
     expanded: HashSet<String>,
     selected_child: HashMap<String, String>,
     /// Assistant text width, from the latest tool row layout.
@@ -84,6 +86,17 @@ impl Spinner {
 }
 
 impl ToolState {
+    pub fn completion_bump(&mut self, previous: Option<&HistoryMessage>, next: &HistoryMessage, scale: f32) {
+        if !matches!(next.kind, neoism_protocol::agent::HistoryMessageKind::Tool | neoism_protocol::agent::HistoryMessageKind::Subtask) { return; }
+        if is_running(&next.status) {
+            self.completion_bumps.entry(next.id.clone()).or_insert_with(|| rune::Live::new([0.0, 0.0]));
+        } else if matches!(next.status.as_str(), "completed" | "success" | "done")
+            && previous.is_some_and(|old| is_running(&old.status)) {
+            let offset = self.completion_bumps.entry(next.id.clone()).or_insert_with(|| rune::Live::new([0.0, 0.0]));
+            offset.pulse([0.0, -2.0 * scale], [0.0, 0.0], std::time::Duration::from_millis(100));
+        }
+    }
+
     pub fn expanded(&self, id: &str) -> bool { self.expanded.contains(id) }
 
     /// What cached tool rows were built from, besides their messages.
@@ -114,7 +127,7 @@ pub fn animating(messages: &[HistoryMessage], live_from: usize) -> bool {
     })
 }
 
-fn is_running(status: &str) -> bool { matches!(status, "running" | "streaming") }
+fn is_running(status: &str) -> bool { matches!(status, "pending" | "running" | "streaming") }
 
 impl App {
     /// Whether the open conversation shows a running tool (its spinner needs frames).
@@ -157,7 +170,7 @@ pub fn row(app: &App, message: &HistoryMessage) -> El {
     let (body, height) = card::message(&cx, message, false);
     // The measured outer width is the assistant text width; the row hangs past it on both sides.
     // Spaced by padding, not margin: a virtual row's top margin is dropped from its height.
-    col().key(format!("tool:{}", message.id)).w_full().pt(cx.pt(18.0))
+    col().key(format!("tool:{}", message.id)).w_full().pt(cx.pt(24.0))
         .child(el().w_full().h(height)
             .on_layout_tx(|a: &mut App, [_, _, w, _]: [f32; 4], tx: &mut Tx| {
                 if (a.tools.text_width - w).abs() > 0.5 { a.tools.text_width = w; a.tools.epoch += 1; } else { tx.live_only(); }
@@ -181,9 +194,8 @@ fn compact_title(title: &str) -> String {
 
 fn accent(p: &Palette, status: &str) -> u32 {
     match status {
-        "error" | "interrupted" => p.red,
-        "completed" => p.green,
-        _ => p.yellow,
+        "error" | "failed" | "interrupted" | "stopped" | "aborted" | "cancelled" | "canceled" => p.red,
+        _ => p.muted,
     }
 }
 
@@ -226,6 +238,52 @@ mod tests {
         let epoch = tools.epoch();
         tools.expand("b");
         assert!(tools.epoch() > epoch);
+    }
+
+    #[test]
+    fn completion_bumps_only_a_live_successful_transition() {
+        let mut tools = ToolState::default();
+        let pending: HistoryMessage = serde_json::from_value(serde_json::json!({
+            "id":"bump", "role":"Assistant", "kind":"Tool", "tool":"bash", "status":"pending"
+        })).unwrap();
+        let mut completed = pending.clone();
+        completed.status = "completed".into();
+        tools.completion_bump(None, &completed, 1.0);
+        assert!(tools.completion_bumps.is_empty(), "history does not bounce");
+        tools.completion_bump(None, &pending, 1.0);
+        let mut app = App::new();
+        app.tools = tools;
+        let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
+            el().w_full().h_full().child(el().key("bump-probe").w(18.0).h(18.0).absolute(20.0, 20.0)
+                .live_offset(a.tools.completion_bumps["bump"].smooth(rune::Spring::new(0.18, 0.12))))
+        }, (100.0, 100.0), rune::Env::new(true, 1.0));
+        for _ in 0..30 { rt.frame(1.0 / 60.0); }
+        rt.update(|a, _| a.tools.completion_bump(Some(&pending), &completed, 1.0));
+        let mut min_y = 20.0_f32;
+        for _ in 0..90 {
+            rt.frame(1.0 / 60.0);
+            min_y = min_y.min(rt.presented("bump-probe").unwrap().0[1]);
+        }
+        assert!(min_y < 19.5 && min_y > 17.0, "the icon makes a small upward bump: {min_y}");
+        assert!((rt.presented("bump-probe").unwrap().0[1] - 20.0).abs() < 0.1);
+        rt.update(|a, _| a.tools.completion_bump(Some(&completed), &completed, 1.0));
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+            assert!((rt.presented("bump-probe").unwrap().0[1] - 20.0).abs() < 0.1, "duplicate completion does not replay");
+        }
+    }
+
+    #[test]
+    fn pending_and_executing_tools_share_the_animation_lifecycle() {
+        let mut message: HistoryMessage = serde_json::from_value(serde_json::json!({
+            "id":"tool", "role":"Assistant", "kind":"Tool", "tool":"bash", "status":"pending"
+        })).unwrap();
+        for status in ["pending", "running", "streaming"] {
+            message.status = status.into();
+            assert!(animating(std::slice::from_ref(&message), 0));
+        }
+        message.status = "completed".into();
+        assert!(!animating(&[message], 0));
     }
 
     #[test]

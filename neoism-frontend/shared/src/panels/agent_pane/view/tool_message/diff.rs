@@ -98,14 +98,6 @@ fn edit_diff_sections(message: &impl AgentToolMessage) -> Option<Vec<ToolDiffSec
                 );
             }
             attach_section_diagnostics(&mut sections, metadata);
-            if let Some(notice) = value["compositionNotice"].as_str().filter(|s| !s.trim().is_empty()) {
-                let rows = notice.lines().map(|text| ParsedDiffRow {
-                    kind: DiffLineKind::Context, text: text.to_owned(), old_line: None, new_line: None,
-                }).collect();
-                let mut section = section_from_rows("Audit notice".into(), rows);
-                section.link_target.clear();
-                sections.push(section);
-            }
         }
     }
 

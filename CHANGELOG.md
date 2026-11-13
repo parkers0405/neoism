@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.150] - 2026-11-13
+
+### Rune and Agent update
+
+- Refines Agent activity, history restoration and editing, attachments, tool cards, composer context accounting, and goal/task/plan/usage panels in the native Rune frontend.
+- Adds editor Git integration, server/settings improvements, Neoism Dark and Light themes, and configurable first-party wordmark flames with reduced-motion support.
+- Improves Agent run handoff, cancellation, recovery, streaming and event-writer ownership, with matching daemon and wire-protocol changes.
+- Adds listener-free Rust embedding and optional native Node.js SDK hosting using the existing Agent engine, plus shared embedding, Docker and Durable Objects documentation. The npm native binding is a separate build, not an automatically published desktop asset.
+
+All three desktop platforms build from the same stable tag. Automated checks do not claim exhaustive manual GUI, provider or cross-device validation. Existing database backup and downgrade cautions remain applicable.
+
 ## [0.7.149] - 2026-11-12
 
 ### Stable Rune frontend

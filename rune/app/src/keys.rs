@@ -14,6 +14,9 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.context.is_some() { return app.context_key(event); }
     if app.form.is_some() { return app.form_key(event, tx); }
     if app.browser.is_some() { return app.browser_key(event, tx) || shortcut(app, event, tx); }
+    if app.composer.picker.as_ref().is_some_and(|p| matches!(p.kind, crate::agent::slash::Kind::Usage | crate::agent::slash::Kind::Tasks | crate::agent::slash::Kind::Goals)) {
+        return app.picker_key(event, tx);
+    }
     if app.focus == Focus::Content && app.prompt_key(event) { return true; }
     if shortcut(app, event, tx) { return true; }
     if app.diag_popup.is_some() && app.diag_popup_key(event) { return true; }

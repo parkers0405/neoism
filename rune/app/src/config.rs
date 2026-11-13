@@ -11,6 +11,7 @@ pub struct Config {
     pub theme: String,
     pub font_size: f32,
     pub font_weight: f32,
+    pub wordmark_fire: bool,
     pub model: Option<String>,
     pub variant: Option<String>,
 }
@@ -39,13 +40,49 @@ pub fn load() -> Config {
         .and_then(|s| serde_json::from_str(&strip_comments(&s)).ok())
         .unwrap_or(Value::Null);
     let appearance = value.get("appearance").unwrap_or(&value);
-    let theme = appearance["theme"].as_str().or(value["theme"].as_str()).unwrap_or("pastel_dark").to_owned();
+    let theme = theme_id(&value).to_owned();
     let font_size = appearance["fonts"]["size"].as_f64().or(value["fonts"]["size"].as_f64()).unwrap_or(DEFAULT_FONT_SIZE as f64) as f32;
     let font_weight = appearance["fonts"]["weight"].as_f64().unwrap_or(400.0) as f32;
     let model = value["agent"]["model"].as_str().map(str::to_owned);
     let variant = value["agent"]["variant"].as_str().map(str::to_owned);
     let display_name = value["presence"]["display-name"].as_str().map(str::to_owned);
-    Config { display_name, theme, font_size, font_weight, model, variant }
+    Config { display_name, theme, font_size, font_weight, wordmark_fire: wordmark_fire(&value), model, variant }
+}
+
+/// Flames default on; an explicit grouped false disables them.
+pub fn wordmark_fire(value: &Value) -> bool {
+    value["appearance"]["wordmark-fire"].as_bool().unwrap_or(true)
+}
+
+/// Canonicalize the legacy default in memory; never rewrite the user's config on load.
+fn theme_id(value: &Value) -> &str {
+    let name = value["appearance"]["theme"].as_str().or(value["theme"].as_str()).unwrap_or("neoism_dark");
+    if name == "pastel_dark" { "neoism_dark" } else { name }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wordmark_fire_defaults_on_and_reads_persisted_booleans() {
+        for value in [Value::Null, serde_json::json!({}), serde_json::json!({"appearance": {}}), serde_json::json!({"appearance": {"wordmark-fire": "true"}})] {
+            assert!(wordmark_fire(&value));
+        }
+        for enabled in [false, true] {
+            assert_eq!(wordmark_fire(&serde_json::json!({"appearance": {"wordmark-fire": enabled}})), enabled);
+        }
+    }
+
+    #[test]
+    fn theme_defaults_and_persisted_ids() {
+        assert_eq!(theme_id(&Value::Null), "neoism_dark");
+        for name in ["pastel_dark", "neoism_dark", "neoism_light", "pastelDark", "one_light"] {
+            let expected = if name == "pastel_dark" { "neoism_dark" } else { name };
+            assert_eq!(theme_id(&serde_json::json!({"appearance": {"theme": name}})), expected);
+            assert_eq!(theme_id(&serde_json::json!({"theme": name})), expected);
+        }
+    }
 }
 
 /// JSONC: drop `//` and `/* */` comments outside strings.

@@ -138,18 +138,20 @@ async fn abandon_session_run(
     }
 
     let error = json!({ "message": reason });
-    if let Err(store_error) = state
-        .inner
-        .store
-        .finish_run(run_id, "interrupted", Some(error))
-        .await
-    {
-        tracing::warn!(
-            %store_error,
-            %session_id,
-            %run_id,
-            "failed to persist abandoned run interruption"
-        );
+    if !state.is_retired() {
+        if let Err(store_error) = state
+            .inner
+            .store
+            .finish_run(run_id, "interrupted", Some(error))
+            .await
+        {
+            tracing::warn!(
+                %store_error,
+                %session_id,
+                %run_id,
+                "failed to persist abandoned run interruption"
+            );
+        }
     }
     if state
         .inner
@@ -170,11 +172,13 @@ pub(crate) async fn try_finish_session_run(
 ) -> anyhow::Result<()> {
     // Durable state goes first. Cancellation or an I/O error leaves in-memory
     // ownership intact so a cleanup guard can retry the exact same run.
-    state
-        .inner
-        .store
-        .finish_run(run_id, "completed", None)
-        .await?;
+    if !state.is_retired() {
+        state
+            .inner
+            .store
+            .finish_run(run_id, "completed", None)
+            .await?;
+    }
     crate::session_move::apply_pending_session_move(state, session_id).await;
     if !state
         .inner

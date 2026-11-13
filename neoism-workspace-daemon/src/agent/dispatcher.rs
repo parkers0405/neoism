@@ -98,6 +98,14 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                 handle_list_threads(inner, directory, limit, cursor).await;
             });
         }
+        AgentClientMessage::GetGoal {
+            session_id,
+            request_id,
+        } => {
+            tokio::spawn(async move {
+                handle_get_goal(inner, session_id, request_id).await;
+            });
+        }
         AgentClientMessage::GetHistory {
             session_id,
             cursor,
@@ -109,22 +117,20 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
         }
         AgentClientMessage::ResumeStream { session_id } => {
             let started = start_event_stream(&inner, &session_id);
-            // Pending interactions are hydrated by the stream task after its
-            // tail subscription is established, including on reconnect.
-            tokio::spawn(async move {
-                // Also surface whether the session is mid-run right now,
-                // so an attach during a live turn shows the activity
-                // indicator instead of looking idle.
-                push_session_running_state(inner.clone(), session_id.clone()).await;
-                push_runtime_snapshot(inner.clone(), session_id.clone()).await;
-                push_todo_snapshot(inner.clone(), session_id.clone()).await;
-                // An idempotent resume still needs a baseline for its client;
-                // a newly started stream hydrates after subscribing instead.
-                if !started {
+            // New streams hydrate after subscribing, including after failed
+            // connection attempts. An idempotent resume still needs an explicit
+            // baseline for the newly attached client of the existing stream.
+            if !started {
+                tokio::spawn(async move {
+                    tokio::join!(
+                        push_session_running_state(inner.clone(), session_id.clone()),
+                        push_runtime_snapshot(inner.clone(), session_id.clone()),
+                        push_todo_snapshot(inner.clone(), session_id.clone()),
+                    );
                     push_pending_questions(inner.clone(), session_id.clone()).await;
                     push_pending_permissions(inner, session_id).await;
-                }
-            });
+                });
+            }
         }
         AgentClientMessage::StopStream { session_id } => {
             stop_event_stream(&inner, &session_id);
@@ -191,6 +197,26 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
         AgentClientMessage::UndoSession { session_id } => {
             tokio::spawn(async move {
                 handle_session_history(inner, session_id, "undo", "undo").await;
+            });
+        }
+        AgentClientMessage::EditSessionHistory { session_id, redo } => {
+            tokio::spawn(async move {
+                let action = if redo { "redo" } else { "undo" };
+                let error = post_no_body(&inner, &format!("/v2/sessions/{session_id}/{action}"))
+                    .await.err().map(|err| err.to_string());
+                let page = if error.is_none() {
+                    match fetch_history(&inner, &session_id, None, Some(200)).await {
+                        Ok(page) => Some(page),
+                        Err(err) => { emit_error(&inner.tx, err); None }
+                    }
+                } else { None };
+                let (messages, next_cursor) = match page {
+                    Some((messages, cursor)) => (Some(messages), cursor),
+                    None => (None, None),
+                };
+                let _ = inner.tx.send(AgentServerMessage::SessionHistoryEdited {
+                    session_id, error, messages, next_cursor,
+                });
             });
         }
         AgentClientMessage::RedoSession { session_id } => {

@@ -131,9 +131,10 @@ pub fn config_descriptors() -> Vec<D> {
             "Theme",
             "IDE theme for chrome, editor, and terminal.",
             Kind::String,
-            json!("pastel_dark"),
+            json!("neoism_dark"),
             &[
-                "pastel_dark",
+                "neoism_dark",
+                "neoism_light",
                 "nvchad_one",
                 "tokyo_night",
                 "catppuccin_mocha",
@@ -246,6 +247,17 @@ pub fn config_descriptors() -> Vec<D> {
             "appearance.agent-stars",
             "Agent stars",
             "Show gently drifting pixel stars behind the Agent input. Reduced motion keeps the stars still.",
+            Kind::Boolean,
+            json!(true),
+            &[],
+            false,
+            C::Appearance,
+            Control::Toggle,
+        ),
+        d(
+            "appearance.wordmark-fire",
+            "Wordmark flames",
+            "Show persistent pixel fire on NEOISM logos in Home and Agent tabs without changing click effects.",
             Kind::Boolean,
             json!(true),
             &[],
@@ -1565,6 +1577,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![json!("bottom"), json!("top"), json!("flow")]
         );
+    }
+
+    #[test]
+    fn wordmark_fire_is_a_visible_default_on_appearance_toggle() {
+        let rows = config_descriptors();
+        let row = rows.iter().find(|row| row.path == "appearance.wordmark-fire").unwrap();
+        assert_eq!(row.label, "Wordmark flames");
+        assert_eq!(row.value_kind, Kind::Boolean);
+        assert_eq!(row.default, json!(true));
+        assert_eq!(row.category, C::Appearance);
+        assert_eq!(row.control, Control::Toggle);
+        assert!(row.settings_visible);
+        assert!(row.description.contains("without changing click effects"));
     }
 
     #[test]

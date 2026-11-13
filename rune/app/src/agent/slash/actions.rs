@@ -15,14 +15,14 @@ use serde_json::Value;
 
 impl App {
     /// The conversation the active agent tab shows.
-    fn active_session(&self) -> Option<String> {
+    pub(super) fn active_session(&self) -> Option<String> {
         match &self.active_tab().kind {
             TabKind::Agent { session } => session.clone(),
             TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => None,
         }
     }
 
-    fn agent_send(&self, message: Client) {
+    pub(super) fn agent_send(&self, message: Client) {
         #[cfg(test)]
         self.agent_sent.borrow_mut().push(serde_json::to_string(&message).unwrap_or_default());
         if let Some(daemon) = &self.daemon { daemon.agent(&message); }
@@ -51,6 +51,21 @@ impl App {
 
     /// The `/` menu follows the composer while its text is a bare command being typed.
     pub fn composer_changed(&mut self) {
+        let mention = super::super::composer_tokens::skill_query(&self.tabs[self.active].draft).map(|(r, q)| (r, q.to_owned()));
+        if let Some(picker) = self.composer.picker.as_mut().filter(|p| p.mention.is_some()) {
+            if let Some((range, query)) = mention {
+                picker.mention = Some(range);
+                picker.set_query(&query);
+            } else { self.composer.picker = None; }
+            return;
+        }
+        if self.composer.picker.is_none() {
+            if let Some((range, query)) = mention {
+                self.open_skill_picker(Some(range));
+                if let Some(picker) = &mut self.composer.picker { picker.set_query(&query); }
+                return;
+            }
+        }
         let text = self.active_tab().draft.text.clone();
         let typing_command = text.starts_with('/') && !text.contains(char::is_whitespace);
         match &mut self.composer.picker {
@@ -71,7 +86,17 @@ impl App {
     /// Keys the composer routes here first. True when the `/` menu used it.
     pub fn agent_composer_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
         if self.has_prompt() { return self.prompt_key(event); }
-        let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Slash) else { return false };
+        let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Slash || p.mention.is_some()) else { return false };
+        if picker.mention.is_some() {
+            match event.key {
+                Key::Up => { tx.animated(); picker.step(-1); }
+                Key::Down => { tx.animated(); picker.step(1); }
+                Key::Enter | Key::Tab if !event.mods.shift => self.accept_picker_row(None, tx),
+                Key::Escape => self.close_prompt_picker(),
+                _ => return false,
+            }
+            return true;
+        }
         match event.key {
             // Keys arrive through a text field (an instant commit): the slide must animate.
             Key::Up => { tx.animated(); picker.step(-1) }
@@ -98,9 +123,10 @@ impl App {
     /// A submitted composer line that is a command runs here instead of being sent.
     pub fn submit_command(&mut self, tx: &mut Tx) -> bool {
         let i = self.active;
-        let text = self.tabs[i].draft.text.trim().to_owned();
-        if !text.starts_with('/') { return false; }
+        if !self.tabs[i].draft.text.trim().starts_with('/') { return false; }
+        let text = self.expanded_composer_text(i).trim().to_owned();
         self.tabs[i].draft.clear();
+        self.tabs[i].pastes.clear();
         self.composer.picker = None;
         self.run_slash(&text, tx);
         true
@@ -154,19 +180,18 @@ impl App {
                 self.composer.picker = Some(Picker::new(Kind::Subagent, "Subagent sessions", rows));
             }
             SlashAction::OpenSkillPicker | SlashAction::ShowSkills => {
-                self.composer.picker = Some(Picker::loading(Kind::Skill, "Skills"));
-                self.agent_send(Client::ListSkills { directory: Some(self.cwd.clone()) });
+                self.open_skill_picker(None);
             }
             SlashAction::ShowSkill(name) => self.notice("Skill", format!("Skill {name}")),
             SlashAction::ShowSkillUsage => self.notice("Skill", "Usage: /skill info <name>"),
-            SlashAction::InsertSkillMention(name) => self.insert_into_composer(&format!("${name} ")),
+            SlashAction::InsertSkillMention(name) => self.insert_skill_pill(&name, None),
             SlashAction::CompactSession => {
                 let Some(session_id) = need_session(self) else { return };
                 let request_id = Some(self.composer.request_id("compact"));
                 self.agent_send(Client::Compact { session_id, request_id });
             }
-            SlashAction::UndoSession => if let Some(session_id) = need_session(self) { self.agent_send(Client::UndoSession { session_id }); },
-            SlashAction::RedoSession => if let Some(session_id) = need_session(self) { self.agent_send(Client::RedoSession { session_id }); },
+            SlashAction::UndoSession => if let Some(session_id) = need_session(self) { self.edit_agent_history(&session_id, false); },
+            SlashAction::RedoSession => if let Some(session_id) = need_session(self) { self.edit_agent_history(&session_id, true); },
             SlashAction::AbortSession => if let Some(session_id) = need_session(self) { self.agent_send(Client::CancelInflight { session_id }); },
             SlashAction::HandleQueue(action) => if let Some(session_id) = need_session(self) { self.agent_send(Client::HandleQueue { session_id, action }); },
             SlashAction::ShowPermissions => if let Some(session_id) = need_session(self) { self.agent_send(Client::ShowPermissions { session_id }); },
@@ -187,6 +212,8 @@ impl App {
                 }
             }
             SlashAction::OpenUsagePicker => self.open_usage(),
+            SlashAction::OpenTasksPicker => self.open_tasks(),
+            SlashAction::OpenGoalsPicker => self.open_goals(),
             SlashAction::OpenDirectoryPicker => self.open_directory_picker(),
             SlashAction::ToggleInputHelp => {
                 self.composer.hints_hidden = !self.composer.hints_hidden;
@@ -214,11 +241,12 @@ impl App {
         let _ = tx;
     }
 
-    fn insert_into_composer(&mut self, text: &str) {
-        let i = self.active;
-        let draft = &mut self.tabs[i].draft;
-        let next = format!("{}{text}", draft.text);
-        draft.replace_text(&next);
+    fn open_skill_picker(&mut self, mention: Option<std::ops::Range<usize>>) {
+        let mut picker = Picker::loading(Kind::Skill, "Skills");
+        picker.query.focused = mention.is_none();
+        picker.mention = mention;
+        self.focus_picker(picker);
+        self.agent_send(Client::ListSkills { directory: Some(self.cwd.clone()) });
     }
 
     // -- selections ----------------------------------------------------------------------
@@ -250,7 +278,7 @@ impl App {
 
     pub(super) fn focus_picker(&mut self, picker: Picker) {
         let i = self.active;
-        self.tabs[i].draft.focused = picker.kind == Kind::Slash;
+        self.tabs[i].draft.focused = picker.kind == Kind::Slash || picker.mention.is_some();
         self.composer.picker = Some(picker);
     }
 
@@ -336,6 +364,7 @@ impl App {
         let Some(picker) = self.composer.picker.as_mut() else { return };
         if let Some(index) = index { picker.selected = index; }
         let kind = picker.kind;
+        if kind == Kind::Usage { self.open_usage(); return; }
         if kind.is_entry() {
             let text = picker.query.text.trim().to_owned();
             return self.submit_entry(kind, text);
@@ -361,8 +390,14 @@ impl App {
             Kind::Thinking => { self.set_thinking(row.value); self.close_prompt_picker(); }
             Kind::Session => { self.close_prompt_picker(); self.open_conversation(&row.value); }
             Kind::Usage => { if row.value == "refresh" { self.open_usage(); } },
+            Kind::Tasks | Kind::Goals => {},
             Kind::Subagent => { self.close_prompt_picker(); self.view_session(&row.value); }
-            Kind::Skill => { self.close_prompt_picker(); self.insert_into_composer(&format!("${} ", row.value)); }
+            Kind::Skill => {
+                let inline = picker.mention.is_some();
+                let range = if inline { super::super::composer_tokens::skill_query(&self.tabs[self.active].draft).map(|(r, _)| r) } else { None };
+                self.close_prompt_picker();
+                if !inline || range.is_some() { self.insert_skill_pill(&row.value, range); }
+            }
             Kind::Mcp => self.open_mcp_actions(&row.value),
             Kind::McpActions => self.run_mcp_action(&row.value),
             Kind::Connect => self.choose_connect_provider(&row.value),
@@ -457,6 +492,20 @@ impl App {
     /// A picker key from its own query field.
     pub fn picker_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
         let Some(picker) = self.composer.picker.as_mut() else { return false };
+        if matches!(picker.kind, Kind::Usage | Kind::Tasks | Kind::Goals) {
+            match event.key {
+                Key::Enter if picker.kind == Kind::Usage => self.open_usage(),
+                Key::Enter if picker.kind == Kind::Goals => self.open_goals(),
+                Key::Escape => self.close_prompt_picker(),
+                Key::Up | Key::Down => {
+                    let delta = if event.key == Key::Down { 60.0 } else { -60.0 } * self.ty.scale();
+                    picker.usage_scroll = (picker.usage_scroll + delta).clamp(0.0, picker.usage_max_scroll.get());
+                    tx.animated();
+                }
+                _ => {},
+            }
+            return true;
+        }
         match event.key {
             // Keys arrive through a text field (an instant commit): the slide must animate.
             Key::Up => { tx.animated(); picker.step(-1) }

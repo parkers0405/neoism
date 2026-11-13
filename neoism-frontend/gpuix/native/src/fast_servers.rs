@@ -34,9 +34,12 @@ use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 const FAST_STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Retain this guard across transient disconnects; remove/drop it on explicit
-/// leave/stop. Call `stop_and_wait()` BEFORE application `process::exit`, which skips Drop.
+/// host removal/stop. Call `stop_and_wait()` BEFORE application `process::exit`, which skips Drop.
 /// `token` authenticates the LOCAL filtered ingress, not the daemon itself.
 /// No secret field implements Debug or Serialize.
+/// The owning application process retains this guard, not the private daemon or shared Agent.
+/// Client disconnects/idle time never revoke an invite; only explicit stop, owner exit or a
+/// terminal daemon/ingress/tunnel failure does. The shared Agent is never owned or stopped here.
 pub struct FastHost {
     pub id: String,
     pub endpoint: String,
@@ -50,6 +53,37 @@ pub struct FastHost {
     alive: Arc<AtomicBool>,
 }
 pub type FastServer = FastHost;
+
+struct MarkStopped(Arc<AtomicBool>);
+impl Drop for MarkStopped {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// A deterministic owned worker, without public provisioning or a real daemon. Both shutdown
+/// and simulated terminal exit use the production liveness guard and FastHost teardown.
+#[cfg(test)]
+pub(crate) fn test_owned_host() -> (FastHost, oneshot::Sender<()>) {
+    let (shutdown, receiver) = oneshot::channel();
+    let (ended, exit) = oneshot::channel();
+    let alive = Arc::new(AtomicBool::new(true));
+    let worker_alive = alive.clone();
+    let worker = std::thread::spawn(move || {
+        let _stopped = MarkStopped(worker_alive);
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+            tokio::select! { _ = receiver => {}, _ = exit => {} }
+        });
+    });
+    (FastHost {
+        id: format!("fast-{}", uuid::Uuid::new_v4()),
+        endpoint: "ws://127.0.0.1:12345/session".into(),
+        public_url: "https://example.com/invite".into(),
+        token: "test-token".into(), name: "Test host".into(), directory: String::new(),
+        shutdown: Some(shutdown), worker: Some(worker), cleanup: None, alive,
+    }, ended)
+}
+
 impl FastHost {
     /// True during transient relay reconnect; false after stop, daemon exit or
     /// permanently stopped tunnel. No UI-thread I/O or locks.
@@ -138,8 +172,6 @@ pub fn create_fast_server(
     let worker = std::thread::Builder::new()
         .name("neoism-fast-host".into())
         .spawn(move || {
-            struct MarkStopped(Arc<AtomicBool>);
-            impl Drop for MarkStopped { fn drop(&mut self) { self.0.store(false, Ordering::Release); } }
             let _stopped = MarkStopped(worker_alive.clone());
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)

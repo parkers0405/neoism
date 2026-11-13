@@ -573,12 +573,59 @@ pub(crate) fn model_label_from_value(model: &Value) -> Option<String> {
     Some(format!("{provider}/{id}"))
 }
 
+pub(crate) async fn handle_get_goal(
+    inner: Arc<AgentInner>,
+    session_id: String,
+    request_id: String,
+) {
+    let (goal, error) = match http_get_json(
+        &inner,
+        &format!("/v2/plugins/dev.neoism.goals/{}", percent_encode(&session_id)),
+    )
+    .await
+    {
+        Ok(value) => match value.get("goal") {
+            Some(Value::Null) => (None, None),
+            Some(goal) if goal.is_object() => (Some(goal.clone()), None),
+            Some(_) => (
+                None,
+                Some("Invalid goal response: expected an object or null in `goal`".to_string()),
+            ),
+            None => (
+                None,
+                Some("Invalid goal response: missing `goal` field".to_string()),
+            ),
+        },
+        Err(error) => (None, Some(format!("Failed to load goal: {error}"))),
+    };
+    let _ = inner.tx.send(AgentServerMessage::GoalSnapshot {
+        session_id,
+        request_id,
+        goal,
+        error,
+    });
+}
+
 pub(crate) async fn handle_get_history(
     inner: Arc<AgentInner>,
     session_id: String,
     cursor: Option<String>,
     limit: Option<u32>,
 ) {
+    match fetch_history(&inner, &session_id, cursor.as_deref(), limit).await {
+        Ok((messages, next_cursor)) => {
+            let _ = inner.tx.send(AgentServerMessage::HistoryChunk { session_id, messages, next_cursor });
+        }
+        Err(err) => emit_error(&inner.tx, err),
+    }
+}
+
+pub(crate) async fn fetch_history(
+    inner: &AgentInner,
+    session_id: &str,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<(Vec<HistoryMessage>, Option<String>), String> {
     // `order=desc` matches the
     // desktop's `fetch_session_messages` — without it a long session
     // returns its OLDEST messages and the recent conversation never
@@ -589,11 +636,11 @@ pub(crate) async fn handle_get_history(
     let take = limit.unwrap_or(80).clamp(1, 200);
     let mut path =
         format!("/v2/sessions/{session_id}/messages?order=desc&limit={take}&slim=true");
-    if let Some(cursor) = cursor.as_deref().filter(|cursor| !cursor.is_empty()) {
+    if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
         path.push_str("&cursor=");
         path.push_str(&percent_encode(cursor));
     }
-    match http_get_json(&inner, &path).await {
+    match http_get_json(inner, &path).await {
         Ok(value) => {
             let items = value
                 .as_array()
@@ -602,13 +649,9 @@ pub(crate) async fn handle_get_history(
                 .unwrap_or_default();
             let next_cursor = history_next_cursor(&items, take as usize);
             let messages = history_messages_from_response(&items);
-            let _ = inner.tx.send(AgentServerMessage::HistoryChunk {
-                session_id,
-                messages,
-                next_cursor,
-            });
+            Ok((messages, next_cursor))
         }
-        Err(err) => emit_error(&inner.tx, err),
+        Err(err) => Err(err.to_string()),
     }
 }
 

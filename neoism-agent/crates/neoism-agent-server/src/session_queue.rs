@@ -655,6 +655,10 @@ pub(crate) async fn drain_prompt_queue(state: AppState, session_id: String) {
     let mut no_reply_completion = None;
     loop {
         wait_until_session_not_running(&state, &session_id).await;
+        if state.is_retired() {
+            state.inner.session_coordinator.park_failed_worker(&session_id).await;
+            return;
+        }
         let compact = match state.inner.store.pending_compact_id(&session_id).await {
             Ok(compact) => compact,
             Err(error) => {

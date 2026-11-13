@@ -108,9 +108,11 @@ fn go_to_line(query: &str, lines: usize) -> Option<usize> {
     Some(n.clamp(1, lines.max(1)))
 }
 
-/// `nvchad_one` is "One Dark"; everything else title-cases its id.
+/// Preserve upstream labels and the legacy default alias; otherwise title-case the id.
 pub fn theme_display_name(name: &str) -> String {
     if name == "nvchad_one" { return "One Dark".into(); }
+    if name == "pastel_dark" { return "Neoism Dark".into(); }
+    if name == "pastelDark" { return "Pastel Dark".into(); }
     name.split(['_', '-']).filter(|p| !p.is_empty()).map(|part| {
         let mut chars = part.chars();
         chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
@@ -466,7 +468,7 @@ impl App {
         let colors = self.terminal_colors();
         for term in self.terminals.values_mut() { term.set_colors(&colors); }
         if let Some(images) = &self.images { self.wordmark.load(images, self.pal.fg); }
-        self.set_setting("appearance.theme", json!(name));
+        self.set_setting("appearance.theme", json!(self.pal.name));
     }
 }
 
@@ -555,8 +557,8 @@ mod tests {
     #[test]
     fn themes_keep_curated_order_then_filter() {
         let mut picker = Picker::new(Mode::Themes);
-        let names: Vec<String> = picker.rows().iter().take(4).map(|r| r.title.clone()).collect();
-        assert_eq!(names, ["Pastel Dark", "One Dark", "Tokyo Night", "Catppuccin Mocha"]);
+        let names: Vec<String> = picker.rows().iter().take(5).map(|r| r.title.clone()).collect();
+        assert_eq!(names, ["Neoism Dark", "Neoism Light", "One Dark", "Tokyo Night", "Catppuccin Mocha"]);
         picker.query.replace_text("tokyo");
         assert_eq!(picker.rows()[0].title, "Tokyo Night");
     }

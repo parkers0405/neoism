@@ -1000,21 +1000,12 @@ async fn flush_pending_tool_calls(
             QueuedToolResult { call, result }
         });
     }
-    let mut updated_parts = Vec::new();
     while let Some(result) = pending.next().await {
         let parts = apply_queued_tool_result(ctx, result).await?;
-        for part in parts {
-            // Do not make a fast tool wait behind the slowest parallel call
-            // before the UI can show its result. The authoritative message is
-            // still persisted once below after the whole batch settles.
-            ctx.state.publish_live(EventPayload::new(
-                event_type::MESSAGE_PART_UPDATED,
-                json!({ "sessionID": ctx.session_id, "part": part, "time": now_millis() }),
-            ));
-            updated_parts.push(part);
-        }
+        // A completed effect must not remain durably "running" while a sibling
+        // waits for approval or remote IO. Save each result before announcing it.
+        persist_queued_tool_results(ctx, parts).await?;
     }
-    persist_queued_tool_results(ctx, updated_parts).await?;
     Ok(())
 }
 
@@ -1079,8 +1070,7 @@ async fn apply_queued_tool_result(
             {
                 // Completion application is serial in flush_pending_tool_calls.
                 // Also hold the live-message lock across lookup/admission/update:
-                // stored history alone misses earlier parallel completions until
-                // persist_queued_tool_results writes the whole settled batch.
+                // overlay any concurrent progress not yet in the stored message.
                 let mut history = ctx
                     .state
                     .inner
@@ -1210,6 +1200,78 @@ mod tests {
         provider_event_finishes_stream, provider_stream_timeout_is_retryable,
         ProviderStreamEvent, ProviderStreamStepState,
     };
+
+    #[tokio::test]
+    async fn completed_tool_is_durable_while_parallel_sibling_is_blocked() {
+        use super::*;
+        use neoism_agent_core::{AssistantMessage, AssistantPath, CompletedTime, MessageInfo, SessionInfo, TokenUsage};
+        use axum::{body::{to_bytes, Body}, http::Request};
+        use tower::ServiceExt;
+        let root = std::env::temp_dir().join(format!("neoism-tool-checkpoint-{}", Id::ascending(IdKind::Event)));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = AppState::open_database(root.join("agent.db")).await.unwrap();
+        let response = crate::app(state.clone()).oneshot(Request::builder().method("POST")
+            .uri(format!("/v2/sessions?directory={}", root.display()))
+            .header("content-type", "application/json").body(Body::from("{}")).unwrap()).await.unwrap();
+        let session: SessionInfo = serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+        let assistant = Id::ascending(IdKind::Message);
+        let mut message = MessageWithParts {
+            info: MessageInfo::Assistant(AssistantMessage {
+                id: assistant.clone(), session_id: session.id.clone(), parent_id: Id::ascending(IdKind::Message),
+                time: CompletedTime { created: now_millis(), streamed: None, completed: None },
+                mode: "build".into(), agent: "build".into(),
+                path: AssistantPath { cwd: root.display().to_string(), root: root.display().to_string() },
+                cost: 0.0, tokens: TokenUsage::default(), model_id: "stub".into(), provider_id: "neoism".into(),
+                finish: None, error: None, provider_replay: None,
+            }), parts: Vec::new(),
+        };
+        let mut stream = ProviderStreamStepState::new("neoism".into(), "stub".into());
+        let fast = Id::ascending(IdKind::Part);
+        let slow = Id::ascending(IdKind::Part);
+        for (call, part) in [("fast", &fast), ("slow", &slow)] {
+            set_tool_running(&mut message.parts, part.clone(), &session.id, &assistant,
+                call.into(), "read".into(), json!({}));
+        }
+        state.inner.store.append_message(session.id.as_str(), &message).await.unwrap();
+        let live = Arc::new(tokio::sync::Mutex::new(message));
+        let directory = root.display().to_string();
+        let snapshot = state.plugin_snapshot(&directory).await;
+        let model = UserModel { provider_id: "neoism".into(), model_id: "stub".into(), connection_id: None, variant: None };
+        let tools = HashMap::new();
+        let ctx = ProviderStreamEventContext {
+            state: &state, session_id: &session.id, session_id_text: session.id.as_str(), run_id: "test-run",
+            assistant_id: &assistant, text_part_id: &fast, live_message: &live, directory: &directory,
+            model: &model, model_id: "stub", provider_tools: &tools, tool_permissions: &[], plugin_snapshot: &snapshot,
+            max_steps_reached: false, recover_context_overflow: false,
+        };
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        stream.tool_tasks.push_back((QueuedToolCall { id: "fast".into(), part_id: fast.clone(), name: "read".into(), input: json!({}) },
+            tokio::spawn(async { Ok(crate::tool::ToolExecutionResult { title: "fast".into(), output: "saved effect".into(), metadata: None }) })));
+        stream.tool_tasks.push_back((QueuedToolCall { id: "slow".into(), part_id: slow.clone(), name: "read".into(), input: json!({}) },
+            tokio::spawn(async move {
+                wait.await.map_err(|error| error.to_string())?;
+                Ok(crate::tool::ToolExecutionResult { title: "slow".into(), output: "later".into(), metadata: None })
+            })));
+        let observe = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let saved = state.inner.store.list_messages(session.id.as_str()).await.unwrap();
+                    if saved.iter().flat_map(|m| &m.parts).any(|p| matches!(p, Part::Tool(t) if t.id == fast && matches!(&t.state, ToolState::Completed { .. }))) {
+                        assert!(saved.iter().flat_map(|m| &m.parts).any(|p| matches!(p, Part::Tool(t) if t.id == slow && matches!(&t.state, ToolState::Running { .. }))));
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await.expect("fast completion must commit before the slow task is released");
+            release.send(()).unwrap();
+        };
+        let (flushed, ()) = tokio::join!(flush_pending_tool_calls(&ctx, &mut stream), observe);
+        flushed.unwrap();
+        drop(snapshot);
+        state.shutdown().await.unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn tool_batch_is_shared_within_response_and_distinct_between_steps() {

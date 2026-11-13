@@ -34,6 +34,33 @@ pub(crate) use cli_http::{
 };
 pub(crate) use model_ref::split_model_ref;
 
+async fn termination_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            Ok(signal) => signal,
+            Err(error) => {
+                eprintln!("cannot install termination handler; retiring server: {error}");
+                return;
+            }
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    eprintln!("interrupt handler failed: {error}");
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        eprintln!("interrupt handler failed; retiring server: {error}");
+    }
+}
+
 const DEFAULT_SERVER: &str = "http://127.0.0.1:4096";
 pub(crate) const RESET: &str = "\x1b[0m";
 pub(crate) const BOLD: &str = "\x1b[1m";
@@ -450,13 +477,18 @@ async fn main() -> anyhow::Result<()> {
                 port,
                 cors,
             };
-            if web {
-                let root = neoism_agent_server::gui::GuiRoot::discover()?;
-                neoism_agent_server::listen_with_gui(options, services, Some(root))
-                    .await?;
+            let gui = if web {
+                Some(neoism_agent_server::gui::GuiRoot::discover()?)
             } else {
-                neoism_agent_server::listen(options, services).await?;
-            }
+                None
+            };
+            neoism_agent_server::listen_with_gui_and_shutdown(
+                options,
+                services,
+                gui,
+                termination_signal(),
+            )
+            .await?;
         }
         Command::Web {
             server,

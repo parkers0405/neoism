@@ -36,13 +36,14 @@ impl App {
             // An image into the agent composer attaches (`attach_clipboard_image`).
             let field = a.focused_field_mut().map(|f| f as *const TextEdit);
             let composing = a.tabs.get(a.active).is_some_and(|t| field == Some(&t.draft as *const TextEdit));
-            if composing && a.paste_image(&content) { return; }
+            if composing && a.paste_composer(&content) { return; }
             let text = content.text().to_owned();
             if text.is_empty() { return; }
             match a.focused_field_mut() {
                 Some(field) => { field.paste(&text); }
                 None => a.paste_content(&text),
             }
+            if composing { a.composer_changed(); }
         });
     }
 

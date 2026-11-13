@@ -11,7 +11,7 @@ pub fn message(cx: &Cx, m: &HistoryMessage, child: bool) -> (El, f32) {
     if m.tool == "user_shell" {
         return shell::card(cx, m);
     }
-    if m.composition_children.is_empty() {
+    if m.tool == "tool_group" || m.composition_children.is_empty() {
         return single(cx, m, child);
     }
     let (root, root_h) = single(cx, m, child);
@@ -19,12 +19,7 @@ pub fn message(cx: &Cx, m: &HistoryMessage, child: bool) -> (El, f32) {
     let mut height = root_h;
     let mut rows = vec![root];
     for c in &m.composition_children {
-        // A lone read/search child reads as a one-item group, keeping its own identity.
-        let compact = group::read_family(&c.tool).map(|_| HistoryMessage {
-            id: c.id.clone(), title: c.title.clone(), status: c.status.clone(), mcp: c.mcp.clone(),
-            ..group::read_group(std::slice::from_ref(c))
-        });
-        let (row, h) = message(&inner, compact.as_ref().unwrap_or(c), true);
+        let (row, h) = message(&inner, c, true);
         rows.push(row.absolute(cx.pt(20.0), height));
         height += h;
     }
@@ -33,7 +28,7 @@ pub fn message(cx: &Cx, m: &HistoryMessage, child: bool) -> (El, f32) {
     (stack, height)
 }
 
-fn single(cx: &Cx, m: &HistoryMessage, child: bool) -> (El, f32) {
+fn single(cx: &Cx, m: &HistoryMessage, _child: bool) -> (El, f32) {
     let state = &cx.app.tools;
     if group::is_todos(m) {
         if m.todos.is_empty() { return (el(), 0.0); }
@@ -55,7 +50,7 @@ fn single(cx: &Cx, m: &HistoryMessage, child: bool) -> (El, f32) {
     let counts = (edit && !sections.is_empty()).then(|| {
         (sections.iter().map(|s| u64::from(s.additions)).sum::<u64>(), sections.iter().map(|s| u64::from(s.deletions)).sum::<u64>())
     }).filter(|(a, d)| *a > 0 || *d > 0);
-    let disclosure = !inline_files && (edit || child || m.tool == "compose");
+    let disclosure = !inline_files;
     let mut row = header(cx, m, Header { counts, disclosure, clickable: !inline_files, expanded });
     let mut h = cx.pt(HEADER_H);
     if deferred || (!expanded && !inline_files) {
@@ -89,10 +84,14 @@ struct Header {
 fn header(cx: &Cx, m: &HistoryMessage, spec: Header) -> El {
     let (p, w) = (cx.p, cx.w);
     let mut row = el().w(w).h(cx.pt(HEADER_H));
-    row = row.child(indicator(cx, m));
-    row = row.child(symbol(cx, m));
+    row = row.child(indicator(cx, m).key("tool-status").instant_changes());
+    let mut icon = symbol(cx, m).key("tool-symbol").instant_changes();
+    if let Some(offset) = cx.app.tools.completion_bumps.get(&m.id) {
+        icon = icon.live_offset(offset.smooth(rune::Spring::new(0.18, 0.12)));
+    }
+    row = row.child(icon);
 
-    let status = if m.status == "completed" { "" } else { m.status.as_str() };
+    let status = if matches!(m.status.as_str(), "completed" | "success" | "done") { "" } else { m.status.as_str() };
     let status_w = if status.is_empty() { 0.0 } else { width(status, cx.pt(12.0)) + cx.pt(12.0) };
     let disclosure_w = if spec.disclosure { cx.pt(18.0) } else { 0.0 };
     let counts: Vec<(String, u32)> = spec.counts.map(|(a, d)| {
@@ -102,8 +101,8 @@ fn header(cx: &Cx, m: &HistoryMessage, spec: Header) -> El {
     let available = (w - cx.pt(66.0) - status_w - disclosure_w).max(0.0);
     let show_counts = !counts.is_empty() && available >= counts_w + cx.pt(36.0);
     let title_avail = available - if show_counts { counts_w } else { 0.0 };
-    let title = if diff::is_streaming_patch_tool(&m.tool) { "Apply patch".to_owned() } else { compact_title(&m.title) };
-    let title = cx.text(title, 15.5).fit(title_avail).color(cx.color(p.fg));
+    let title = header_title(m);
+    let title = cx.text(title, 14.0).fit(title_avail).color(cx.color(p.dim));
     let title_w = title.width();
     let text_x = cx.pt(42.0);
     row = row.child(title.at(text_x, cx.pt(2.0)));
@@ -138,13 +137,46 @@ fn header(cx: &Cx, m: &HistoryMessage, spec: Header) -> El {
     row.child(hit)
 }
 
-/// A status dot, the orbiting four-square spinner while running, or `↳` on a follow-up task.
+fn header_title(m: &HistoryMessage) -> String {
+    if diff::is_streaming_patch_tool(&m.tool) { return "Apply patch".into(); }
+    match m.tool.as_str() {
+        "bash" => "Bash".into(),
+        "shell" => "Shell".into(),
+        "background_task" => "Background Task".into(),
+        "background_task_result" => "Background Task Result".into(),
+        _ => compact_title(&m.title),
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn shell_and_background_headers_show_only_the_tool_name() {
+        let mut m: HistoryMessage = serde_json::from_value(serde_json::json!({
+            "id":"shell", "role":"Assistant", "kind":"Tool", "tool":"bash", "status":"running",
+            "title":"Bash(cargo test --some-long-argument)", "text":"cargo test --some-long-argument",
+            "detail":"{\"command\":\"cargo test --some-long-argument\",\"description\":\"Check activity behavior\"}"
+        })).unwrap();
+        assert_eq!(header_title(&m), "Bash");
+        m.tool = "background_task".into();
+        assert_eq!(header_title(&m), "Background Task");
+        m.tool = "bash".into();
+        m.status = "completed".into();
+        m.text = "Check activity behavior".into();
+        m.detail = "Check activity behavior\n8 tests passed".into();
+        assert_eq!(header_title(&m), "Bash");
+    }
+}
+
+/// The orbiting four-square spinner while running, or `↳` on a follow-up task.
 fn indicator(cx: &Cx, m: &HistoryMessage) -> El {
     let title = m.title.trim();
     if m.tool == "task" && (title == "Follow-up" || title.starts_with("Follow-up(")) {
         return cx.text("\u{21b3}", 15.5).color(cx.color(cx.p.muted)).at(cx.pt(1.0), cx.pt(2.0));
     }
-    if matches!(m.status.as_str(), "running" | "streaming") {
+    if super::is_running(&m.status) {
         let mut spinner = el().w(cx.pt(16.0)).h(cx.pt(20.0)).absolute(0.0, 0.0);
         // Each square rides its live orbit offset (`Spinner::tick`) from the orbit's centre.
         for (square, alpha) in cx.app.tools.spinner.squares() {
@@ -153,8 +185,7 @@ fn indicator(cx: &Cx, m: &HistoryMessage) -> El {
         }
         return spinner;
     }
-    let d = cx.pt(7.0);
-    el().w(d).h(d).radius(d / 2.0).fill(cx.color(accent(cx.p, &m.status))).absolute(cx.pt(3.5), cx.pt(7.0))
+    el()
 }
 
 /// Position on a square orbit of half-size `half`; one lap per unit of `t`.
@@ -175,7 +206,7 @@ pub(super) fn orbit(t: f32, half: f32) -> (f32, f32) {
 /// tool's glyph.
 fn symbol(cx: &Cx, m: &HistoryMessage) -> El {
     let icons = &cx.app.tools.icons;
-    let image_slot = |image: &rune::Image| el().w(cx.pt(18.0)).h(cx.pt(18.0)).pixels(image.pixels()).absolute(cx.pt(20.0), cx.pt(2.0));
+    let image_slot = |image: &rune::Image| el().w(cx.pt(18.0)).h(cx.pt(18.0)).pixels(image.pixels()).absolute(cx.pt(20.0), 0.0);
     if m.tool == "task" {
         if let Some(image) = icons.agent(m.agent_kind.as_deref()) { return image_slot(image); }
     }
@@ -183,14 +214,14 @@ fn symbol(cx: &Cx, m: &HistoryMessage) -> El {
     let glyph = if mcp {
         if let Some(value) = &m.mcp {
             return crate::agent::mcp::view(cx.app, value["server"].as_str().unwrap_or_default(), &value["presentation"], cx.pt(18.0))
-                .key(format!("mcp-tool-icon:{}", m.id)).absolute(cx.pt(20.0), cx.pt(2.0));
+                .key(format!("mcp-tool-icon:{}", m.id)).absolute(cx.pt(20.0), 0.0);
         }
         "\u{f1e6}"
     } else {
         let tool = if m.tool == "tool_group" { m.title.split_once('(').map_or(m.tool.as_str(), |(t, _)| t) } else { m.tool.as_str() };
         tool_symbol(tool)
     };
-    el().w(cx.pt(18.0)).h(cx.pt(22.0)).center().absolute(cx.pt(20.0), 0.0)
+    el().w(cx.pt(18.0)).h(cx.pt(22.0)).center().absolute(cx.pt(20.0), -cx.pt(2.0))
         .child(cx.text(glyph, 15.5).color(cx.color(cx.p.muted)).el())
 }
 
@@ -207,25 +238,26 @@ pub fn tool_symbol(tool: &str) -> &'static str {
     }
 }
 
-/// Up to twelve wrapped output rows at 58 pt (indented lines at 76 pt, muted), then
-/// `... +N lines`. Height includes the 26 pt header gap.
+/// A bounded output preview keeps even very large tool payloads cheap to expand.
 fn output(cx: &Cx, m: &HistoryMessage) -> (El, f32) {
     let body = if m.detail.trim().is_empty() { m.text.as_str() } else { m.detail.as_str() };
     let size = cx.pt(13.0);
     let wrap_w = (cx.w - cx.pt(100.0)).max(cx.pt(40.0));
     let mut rows: Vec<(String, bool)> = Vec::new();
-    let limited: String = body.split_inclusive('\n').take(BODY_MAX_ROWS).collect();
-    for line in limited.lines() {
-        if rows.len() >= BODY_MAX_ROWS { break; }
+    let mut truncated = false;
+    let command = matches!(m.tool.as_str(), "bash" | "shell" | "background_task" | "background_task_result")
+        .then_some(m.title.as_str()).filter(|title| !title.trim().is_empty());
+    for line in command.into_iter().flat_map(str::lines).chain(body.lines()) {
+        if rows.len() >= BODY_MAX_ROWS { truncated = true; break; }
         let nested = line.starts_with("  ");
         let line = if nested { line.trim() } else { line.trim_end() };
-        for part in text::wrap(line, wrap_w, size, BODY_MAX_ROWS - rows.len()) {
+        for part in text::wrap(line, wrap_w, size, BODY_MAX_ROWS - rows.len() + 1) {
+            if rows.len() >= BODY_MAX_ROWS { truncated = true; break; }
             rows.push((part, nested));
         }
+        if truncated { break; }
     }
     if rows.is_empty() { rows.push((String::new(), false)); }
-    let total_lines = body.lines().take(BODY_MAX_ROWS + 1).count().max(1);
-    let extra = total_lines.saturating_sub(BODY_MAX_ROWS);
     let mut out = el().w(cx.w).h(0.0).absolute(0.0, 0.0);
     let mut y = cx.pt(26.0);
     for (line, nested) in &rows {
@@ -233,14 +265,26 @@ fn output(cx: &Cx, m: &HistoryMessage) -> (El, f32) {
         out = out.child(Text::new(line.clone(), size, cx.app).color(cx.color(color)).at(x, y));
         y += cx.pt(BODY_ROW_H);
     }
-    if extra > 0 {
-        out = out.child(Text::new(format!("... +{extra} lines"), size, cx.app).color(cx.color(cx.p.fg)).at(cx.pt(58.0), y));
+    if truncated {
+        out = out.child(cx.text("More output omitted", 13.0).color(cx.color(cx.p.muted)).at(cx.pt(58.0), y));
     }
-    (out, cx.pt(28.0) + (rows.len() + usize::from(extra > 0)) as f32 * cx.pt(BODY_ROW_H))
+    (out, cx.pt(28.0) + (rows.len() + usize::from(truncated)) as f32 * cx.pt(BODY_ROW_H))
 }
 
 /// A read group's children (`key\tlabel` rows are selectable and preview their output).
 fn group_children(cx: &Cx, m: &HistoryMessage) -> (El, f32) {
+    if !m.composition_children.is_empty() {
+        let inner = cx.narrower(cx.pt(28.0));
+        let mut out = el().w(cx.w);
+        let mut y = cx.pt(GROUP_BODY_Y);
+        for original in &m.composition_children {
+            let operation = HistoryMessage { title: group::read_label(original), ..original.clone() };
+            let (row, height) = message(&inner, &operation, true);
+            out = out.child(row.absolute(cx.pt(28.0), y));
+            y += height;
+        }
+        return (out.h(y), y);
+    }
     let size = cx.pt(13.0);
     let row_h = cx.pt(BODY_ROW_H);
     let body_x = cx.pt(58.0);

@@ -160,6 +160,9 @@ impl RouteHandler for GoalRoute {
                 GoalRouteAction::Get => self.host.load(session_id).await?,
                 GoalRouteAction::Clear => self.host.save(session_id, None).await?,
                 GoalRouteAction::Set => {
+                    // Goal state is independent of prompt admission. Clients that
+                    // start/resume work must also submit a prompt with their
+                    // selected model/agent; saving alone must not start a second run.
                     let request: SetGoalRequest = serde_json::from_value(request.body)
                         .map_err(|error| PluginRuntimeError::new(error.to_string()))?;
                     if request.text.trim().is_empty() {

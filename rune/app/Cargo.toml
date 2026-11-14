@@ -17,6 +17,7 @@ path = "src/main.rs"
 frame-profile = ["rune/frame-profile"]
 
 [dependencies]
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "wgsl"] }
 rune = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb" }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb", features = ["markdown"] }
 neoism-protocol = { path = "../../neoism-protocol" }
@@ -67,3 +68,11 @@ opt-level = 2
 [patch.crates-io]
 # Wayland: an unchanged IME cursor rectangle is not committed every frame (see vendor/winit-compat/README.md).
 winit = { path = "../../vendor/winit-compat/winit-0.30.13" }
+
+[patch."https://github.com/anomalyco/rune"]
+# Pinned upstream plus direct-touch arbitration fixes (see ../vendor/rune/NEOISM.md).
+rune = { path = "../vendor/rune/crates/rune" }
+rune-motion = { path = "../vendor/rune/crates/rune-motion" }
+rune-staging = { path = "../vendor/rune/crates/rune-staging" }
+rune-taffy = { path = "../vendor/rune/crates/rune-taffy" }
+procwatch = { path = "../vendor/rune/crates/procwatch" }

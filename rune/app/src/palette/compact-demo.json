@@ -1,0 +1,9 @@
+[
+  {"t": 0.1, "type": "key", "name": "p", "cmd": true},
+  {"t": 1.0, "type": "type", "text": "?"},
+  {"t": 2.0, "type": "key", "name": "Backspace"},
+  {"t": 2.8, "type": "type", "text": "theme"},
+  {"t": 4.0, "type": "key", "name": "Escape"},
+  {"t": 4.5, "type": "key", "name": "s", "cmd": true},
+  {"t": 5.5, "type": "type", "text": "?"}
+]

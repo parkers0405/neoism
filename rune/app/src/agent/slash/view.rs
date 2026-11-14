@@ -1,7 +1,7 @@
 //! The inline picker card (`widgets/inline_picker.rs`) and the skit layer. The card locks to
 //! the composer card's width and x and sits 6 pt above it: a 54 pt header (bold 13 pt title,
 //! `esc`, the query row), then up to eight 46 pt rows (bold 14 pt title, 12 pt description,
-//! 11 pt footer on the right), the selected one on a hover fill with an accent bar.
+//! 11 pt footer on the right), the selected one on a rounded hover fill.
 
 use super::effects::{self, Op};
 use super::logos;
@@ -20,6 +20,10 @@ const CURSOR_SPRING: rune::Spring = rune::Spring::new(0.188, 0.0);
 const RADIUS: f32 = 14.0;
 /// Geist Mono advances 0.6 em; used to wrap activity text and right-align footers.
 const ADVANCE: f32 = 0.6;
+
+#[cfg(test)]
+#[path = "view_tests.rs"]
+mod tests;
 
 fn width_of(text: &str, size: f32) -> f32 { text.chars().count() as f32 * size * ADVANCE }
 
@@ -85,6 +89,7 @@ pub fn picker_card(app: &App) -> El {
     let y = (cy - height - 6.0 * s).max(top);
 
     let mut card = el().key("prompt-picker").w(cw).h(height).fill(rgb(p.bg)).radius(RADIUS * s).border(s, rgb(p.border))
+        .transition(rune::Transition::none())
         .clip_rounded(RADIUS * s)
         .on_press(|_: &mut App| {})
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
@@ -101,36 +106,41 @@ pub fn picker_card(app: &App) -> El {
             true
         });
 
+    // Header changes land together, including the input's nested text/placeholder. Do not
+    // extend this scope to the card: its list and highlight own independent offset springs.
+    let mut header = el().key("picker-header").w(cw).h(header_h)
+        .transition(rune::Transition::none()).instant_changes();
     let header_icon = picker.kind == Kind::McpActions;
     if header_icon {
         if let Some(name) = app.composer.mcp_server.as_ref() {
-            card = card.child(row_icon(app, Icon::Mcp(name.clone()), 18.0 * s).key("mcp-header-icon").absolute(14.0 * s, 6.0 * s));
+            header = header.child(row_icon(app, Icon::Mcp(name.clone()), 18.0 * s).key("mcp-header-icon").absolute(14.0 * s, 6.0 * s));
         }
     }
     let title_x = if header_icon { 40.0 } else { 14.0 } * s;
     // Header: title and esc; then the query row, or the activity in its place.
-    card = card
+    header = header
         .child(text(picker.title.clone()).font(mono(13.0 * s, true)).color(rgb(p.fg)).truncate().w(cw - title_x - 48.0 * s).absolute(title_x, 9.0 * s))
         .child(text("esc").font(mono(12.0 * s, false)).color(rgb(p.muted)).absolute(cw - 14.0 * s - width_of("esc", 12.0 * s), 9.0 * s)
             .on_press(|a: &mut App| { if !a.picker_back() { a.close_prompt_picker(); } }));
     if let Some(a) = &picker.activity {
         let x = if a.busy { 32.0 } else { 14.0 } * s;
         for (i, line) in activity.iter().enumerate() {
-            card = card.child(text(line.clone()).font(mono(13.0 * s, false)).color(rgb(p.fg)).absolute(x, (31.0 + i as f32 * 18.0) * s));
+            header = header.child(text(line.clone()).font(mono(13.0 * s, false)).color(rgb(p.fg)).absolute(x, (31.0 + i as f32 * 18.0) * s));
         }
         if a.busy {
-            card = card.child(el().w(4.0 * s).h(4.0 * s).radius(s).fill(rgb(p.fg)).absolute(17.0 * s, 35.5 * s));
+            header = header.child(el().w(4.0 * s).h(4.0 * s).radius(s).fill(rgb(p.fg)).absolute(17.0 * s, 35.5 * s));
         }
         if let Some(url) = a.url.clone() {
             let link_y = header_h - if a.show_input { 22.0 * s } else { 0.0 } - 24.0 * s;
-            card = card.child(text("Open sign-in page").font(mono(12.0 * s, false)).color(rgb(p.accent)).absolute(14.0 * s, link_y + 3.0 * s)
+            header = header.child(text("Open sign-in page").font(mono(12.0 * s, false)).color(rgb(p.accent)).absolute(14.0 * s, link_y + 3.0 * s)
                 .on_press(move |_: &mut App| { let _ = crate::cli::open_external(&url); }));
         }
     }
     if picker.activity.as_ref().is_none_or(|a| a.show_input) {
         let query_y = if picker.activity.is_some() { header_h - 22.0 * s } else { 31.0 * s };
-        card = card.child(query_row(app, picker, cw - 28.0 * s).absolute(14.0 * s, query_y));
+        header = header.child(query_row(app, picker, cw - 28.0 * s).absolute(14.0 * s, query_y));
     }
+    card = card.child(header);
 
     // Rows: a clipped viewport whose content slides by whole rows on the list spring as the
     // window moves, and one highlight gliding between rows on the cursor spring (the original
@@ -146,14 +156,14 @@ pub fn picker_card(app: &App) -> El {
         .transition(rune::Transition::none());
     if rows.get(picker.selected).is_some_and(|r| !r.header) {
         content = content.child(el().key("picker-highlight").w(cw).h(row_h).absolute(0.0, 0.0)
+            .transition(rune::Transition::none())
             .offset(0.0, picker.selected as f32 * row_h).offset_motion(CURSOR_SPRING)
-            .child(el().w(cw - 12.0 * s).h(row_h - 6.0 * s).radius(9.0 * s).fill(rgb(p.hover)).absolute(6.0 * s, 3.0 * s))
-            .child(el().w(3.0 * s).h(row_h - 18.0 * s).radius(2.0 * s).fill(rgb(p.accent)).absolute(10.0 * s, 9.0 * s)));
+            .child(el().transition(rune::Transition::none()).w(cw - 12.0 * s).h(row_h - 6.0 * s).radius(9.0 * s).fill(rgb(p.hover)).absolute(6.0 * s, 3.0 * s)));
     }
     let span = first.saturating_sub(visible * 2)..(first + visible * 3).min(rows.len());
     for (index, row) in rows.iter().enumerate().skip(span.start).take(span.len()) {
         let mut item = el().key(format!("picker-row:{index}")).w(cw).h(row_h).absolute(0.0, index as f32 * row_h)
-            .transition(rune::Transition::none());
+            .transition(rune::Transition::none()).instant_changes();
         if row.header {
             if !row.title.is_empty() {
                 let x = if row.icon.is_some() { 48.0 } else { 22.0 } * s;
@@ -196,22 +206,23 @@ pub fn picker_card(app: &App) -> El {
     }
     if !rows.is_empty() {
         card = card.child(el().key("picker-list").w(cw).h(visible as f32 * row_h).absolute(0.0, header_h)
-            .clip_rounded(0.0).motion(rune::Spring::NONE).child(content));
+            .transition(rune::Transition::none()).clip_rounded(0.0).motion(rune::Spring::NONE).child(content));
     }
     if rows.is_empty() && visible > 0 {
         if picker.loading {
             for i in 0..visible {
                 let w = (cw - 44.0 * s) * [0.42, 0.6, 0.35][i % 3];
-                card = card.child(el().w(w).h(10.0 * s).radius(5.0 * s).fill(rgb(p.surface)).absolute(22.0 * s, header_h + i as f32 * ROW_H * s + 18.0 * s));
+                card = card.child(el().transition(rune::Transition::none()).w(w).h(10.0 * s).radius(5.0 * s).fill(rgb(p.surface)).absolute(22.0 * s, header_h + i as f32 * ROW_H * s + 18.0 * s));
             }
         } else if picker.activity.is_none() {
-            card = card.child(text("No results").font(mono(13.0 * s, false)).color(rgb(p.muted)).absolute(22.0 * s, header_h + (ROW_H - 14.0) * 0.5 * s));
+            card = card.child(text("No results").transition(rune::Transition::none()).instant_changes().font(mono(13.0 * s, false)).color(rgb(p.muted)).absolute(22.0 * s, header_h + (ROW_H - 14.0) * 0.5 * s));
         }
     }
 
     let scrim = el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .on_press(|a: &mut App| a.close_prompt_picker());
-    let layer = el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+        .transition(rune::Transition::none())
+        .on_press(|a: &mut App| a.dismiss_prompt_picker());
+    let layer = el().key("prompt-picker-layer").transition(rune::Transition::none()).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
     let layer = if picker.kind == Kind::Slash || picker.mention.is_some() { layer } else { layer.child(scrim) };
     layer.child(card.absolute(cx, y))
 }

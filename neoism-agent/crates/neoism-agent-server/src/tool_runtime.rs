@@ -644,11 +644,8 @@ async fn execute_stateful_tool_call(
         }
         "complete_goal" => {
             ensure_tool_permission(permissions, "complete_goal", "*")?;
-            let status = match string_arg(&input, "status").as_deref() {
-                Some("blocked") => neoism_agent_core::GoalStatus::Blocked,
-                _ => neoism_agent_core::GoalStatus::Complete,
-            };
-            let summary = string_arg(&input, "summary").unwrap_or_default();
+            let status = validate_goal_completion(&input)?;
+            let summary = string_arg(&input, "summary").expect("validated summary");
             let mut info = state
                 .inner
                 .store
@@ -770,6 +767,48 @@ async fn execute_stateful_tool_call(
             }))
         }
         _ => Ok(None),
+    }
+}
+
+fn validate_goal_completion(input: &Value) -> Result<neoism_agent_core::GoalStatus, String> {
+    use neoism_agent_core::GoalStatus;
+    let status = match input.get("status").and_then(Value::as_str) {
+        Some("complete") => GoalStatus::Complete,
+        Some("blocked") => GoalStatus::Blocked,
+        _ => return Err("complete_goal requires an explicit status: complete or blocked. The goal remains active.".into()),
+    };
+    if input
+        .get("summary")
+        .and_then(Value::as_str)
+        .is_none_or(|text| text.trim().is_empty())
+    {
+        return Err("complete_goal requires a non-empty summary of the entire result or the concrete blocker. The goal remains active.".into());
+    }
+    Ok(status)
+}
+
+#[cfg(test)]
+mod goal_completion_tests {
+    use super::*;
+
+    #[test]
+    fn goal_completion_rejects_implicit_or_unsupported_completion() {
+        for input in [
+            json!({"summary":"Only finished X"}),
+            json!({"status":"done", "summary":"Done"}),
+            json!({"status":"complete", "summary":" "}),
+        ] {
+            assert!(validate_goal_completion(&input).is_err());
+        }
+    }
+
+    #[test]
+    fn goal_completion_accepts_explicit_results_without_extra_audit_fields() {
+        assert_eq!(
+            validate_goal_completion(&json!({"status":"complete", "summary":"Implemented and verified the entire goal."})).unwrap(),
+            neoism_agent_core::GoalStatus::Complete
+        );
+        assert_eq!(validate_goal_completion(&json!({"status":"blocked", "summary":"Deployment needs credentials which only the user can supply."})).unwrap(), neoism_agent_core::GoalStatus::Blocked);
     }
 }
 

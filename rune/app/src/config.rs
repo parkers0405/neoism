@@ -11,7 +11,10 @@ pub struct Config {
     pub theme: String,
     pub font_size: f32,
     pub font_weight: f32,
+    pub font_families: (String, String),
     pub wordmark_fire: bool,
+    pub liquid_glass_cursor: bool,
+    pub liquid_glass_selection: bool,
     pub model: Option<String>,
     pub variant: Option<String>,
 }
@@ -46,12 +49,21 @@ pub fn load() -> Config {
     let model = value["agent"]["model"].as_str().map(str::to_owned);
     let variant = value["agent"]["variant"].as_str().map(str::to_owned);
     let display_name = value["presence"]["display-name"].as_str().map(str::to_owned);
-    Config { display_name, theme, font_size, font_weight, wordmark_fire: wordmark_fire(&value), model, variant }
+    Config { display_name, theme, font_size, font_weight, font_families: crate::ui::fonts::configured(&value), wordmark_fire: wordmark_fire(&value), liquid_glass_cursor: liquid_glass_cursor(&value), liquid_glass_selection: liquid_glass_selection(&value), model, variant }
 }
 
 /// Flames default on; an explicit grouped false disables them.
 pub fn wordmark_fire(value: &Value) -> bool {
     value["appearance"]["wordmark-fire"].as_bool().unwrap_or(true)
+}
+
+/// Liquid glass is opt-in, including when an older daemon omits the setting.
+pub fn liquid_glass_cursor(value: &Value) -> bool {
+    value["appearance"]["effects"]["liquid-glass-cursor"].as_bool().unwrap_or(false)
+}
+
+pub fn liquid_glass_selection(value: &Value) -> bool {
+    value["appearance"]["effects"]["liquid-glass-selection"].as_bool().unwrap_or(false)
 }
 
 /// Canonicalize the legacy default in memory; never rewrite the user's config on load.
@@ -63,6 +75,24 @@ fn theme_id(value: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_is_independent_and_defaults_off() {
+        assert!(!liquid_glass_selection(&Value::Null));
+        assert!(!liquid_glass_selection(&serde_json::json!({"appearance":{"effects":{"liquid-glass-cursor":true}}})));
+        assert!(!liquid_glass_selection(&serde_json::json!({"appearance":{"effects":{"liquid-glass-selection":"true"}}})));
+        assert!(liquid_glass_selection(&serde_json::json!({"appearance":{"effects":{"liquid-glass-selection":true}}})));
+    }
+
+    #[test]
+    fn liquid_glass_cursor_defaults_off_and_reads_persisted_booleans() {
+        for value in [Value::Null, serde_json::json!({}), serde_json::json!({"appearance": {"effects": {}}}), serde_json::json!({"appearance": {"effects": {"liquid-glass-cursor": "true"}}})] {
+            assert!(!liquid_glass_cursor(&value));
+        }
+        for enabled in [false, true] {
+            assert_eq!(liquid_glass_cursor(&serde_json::json!({"appearance": {"effects": {"liquid-glass-cursor": enabled}}})), enabled);
+        }
+    }
 
     #[test]
     fn wordmark_fire_defaults_on_and_reads_persisted_booleans() {

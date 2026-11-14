@@ -60,6 +60,9 @@ const GREP_DEBOUNCE: Duration = Duration::from_millis(220);
 const MIN_GREP_CHARS: usize = 2;
 
 impl Finder {
+    pub fn expanded(&self) -> bool { crate::palette::compact::expanded(&self.query.text) }
+
+    fn search_query(&self) -> &str { crate::palette::compact::query(&self.query.text) }
     fn new(mode: Mode) -> Finder {
         let mut query = TextEdit::new("");
         query.focused = true;
@@ -134,6 +137,7 @@ impl App {
 
     /// Open the selected (or clicked) hit and close the finder.
     pub fn accept_finder(&mut self, index: Option<usize>) {
+        if self.finder.as_ref().is_some_and(|f| !f.expanded()) { return; }
         if let Some(f) = &mut self.finder {
             if f.due.is_some() || f.loading { f.accept_pending = index.is_none(); return; }
         }
@@ -151,7 +155,7 @@ impl App {
         finder.due = None;
         finder.request += 1;
         let req_id = finder.request;
-        let query = finder.query.text.trim().to_owned();
+        let query = finder.search_query().to_owned();
         let message = match finder.mode {
             Mode::Files => SearchClientMessage::SearchFiles {
                 req_id, query, cwd: String::new(),
@@ -182,11 +186,13 @@ impl App {
             return;
         }
         let Some(finder) = &mut self.finder else { return };
+        // The input already changed, even if its debounced request has not been sent yet.
+        if finder.due.is_some() { return; }
         let (req_id, hits) = match message {
             SearchServerMessage::SearchFilesResult { req_id, hits } => (req_id, hits.into_iter().map(|h| Hit::File { path: h.path }).collect::<Vec<_>>()),
             SearchServerMessage::SearchGrepResult { req_id, hits } => (req_id, hits.into_iter().map(|h| Hit::Grep { path: h.path, line: h.line, text: h.text }).collect()),
             SearchServerMessage::SearchGitChangesResult { req_id, hits } => {
-                let query = finder.query.text.trim().to_lowercase();
+                let query = finder.search_query().to_lowercase();
                 (req_id, hits.into_iter().filter(|h| query.is_empty() || h.path.to_lowercase().contains(&query))
                     .map(|h| Hit::Git { path: h.path, status: h.status, line: h.line, text: h.text }).collect())
             }
@@ -247,6 +253,25 @@ pub fn git_marker(status: SearchGitStatus) -> &'static str {
 #[cfg(test)]
 mod fast_submit_tests {
     use super::*;
+
+    #[test]
+    fn old_results_do_not_replace_the_list_while_the_next_query_is_debouncing() {
+        let mut app = App::new();
+        app.open_finder(Mode::Files);
+        app.finder_tick(Instant::now() + Duration::from_secs(1));
+        app.finder.as_mut().unwrap().hits = vec![Hit::File { path: "keep.txt".into() }];
+        app.finder.as_mut().unwrap().query = TextEdit::new("wanted");
+        app.finder_edited();
+        app.apply_search(serde_json::from_value(serde_json::json!({"SearchFilesResult": {
+            "req_id": 1, "hits": [{"path":"stale.txt","score":0}]
+        }})).unwrap());
+        assert_eq!(app.finder.as_ref().unwrap().hits[0].path(), "keep.txt");
+        app.finder_tick(Instant::now() + Duration::from_secs(1));
+        app.apply_search(serde_json::from_value(serde_json::json!({"SearchFilesResult": {
+            "req_id": 2, "hits": [{"path":"wanted.txt","score":0}]
+        }})).unwrap());
+        assert_eq!(app.finder.as_ref().unwrap().hits[0].path(), "wanted.txt");
+    }
 
     #[test]
     fn enter_waits_for_the_typed_query_instead_of_opening_a_stale_hit() {

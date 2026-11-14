@@ -1,0 +1,6 @@
+[
+  {"t": 0.3, "type": "key", "name": "p"},
+  {"t": 0.75, "type": "key", "name": "u"},
+  {"t": 1.0, "type": "key", "name": "r"},
+  {"t": 2.0, "type": "mark", "name": "end"}
+]

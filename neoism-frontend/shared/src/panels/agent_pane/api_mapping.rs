@@ -904,6 +904,14 @@ fn message_blocks_with_start(
         let Some(MessageInfo::User(user)) = info else {
             return Vec::new();
         };
+        let goal_notices = || {
+            parts.iter()
+                .filter(|part| {
+                    part.get("type").and_then(Value::as_str) == Some("tool")
+                        && part.get("tool").and_then(Value::as_str) == Some("goal_started")
+                })
+                .filter_map(part_block)
+        };
         let text = parts
             .iter()
             .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
@@ -925,7 +933,7 @@ fn message_blocks_with_start(
             .filter_map(image_from_part)
             .collect::<Vec<_>>();
         if text.is_empty() && images.is_empty() {
-            return Vec::new();
+            return goal_notices().collect();
         }
         let system = user.system.as_deref().unwrap_or("");
         if is_background_task_completion(system, &id) {
@@ -934,7 +942,8 @@ fn message_blocks_with_start(
             // completion card (NOT a user bubble, and not a hidden system
             // notice) so the card the live event painted survives every
             // history refresh under the same identity.
-            return vec![background_completion_card(&id, &text)];
+            return std::iter::once(background_completion_card(&id, &text))
+                .chain(goal_notices()).collect();
         }
         let message = if is_subtask_completion_text(system, &id, &text) {
             agent_message_system("Subagent", text)
@@ -952,7 +961,7 @@ fn message_blocks_with_start(
         // message) → `None`, and the renderer falls back to the local
         // presence name / "You".
         message.author = user.author.clone();
-        return vec![message];
+        return std::iter::once(message).chain(goal_notices()).collect();
     }
 
     if role == "assistant" && is_compaction_summary_message(parts) {
@@ -1224,6 +1233,55 @@ fn is_compaction_summary_message(parts: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_started_notice_has_same_system_identity_live_and_history() {
+        let part = json!({
+            "id": "prt_goal_started_msg-user", "messageId": "msg-user",
+            "sessionId": "ses_test", "type": "tool", "tool": "goal_started",
+            "metadata": {"transcriptOnly": true},
+            "state": {"status": "completed", "title": "Goal Started",
+                "input": {}, "output": "ship it", "time": {"start": 12, "end": 12}}
+        });
+        let live = part_block(&part).unwrap();
+        let history = message_blocks_from_response(&[json!({
+            "info": canonical_user_info(json!({})),
+            "parts": [{"id": "text", "type": "text", "text": "ship it"}, part]
+        })], false);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].kind, NeoismAgentMessageKind::User);
+        assert_eq!(history[0].id, "msg-user");
+        for notice in [&live, &history[1]] {
+            assert_eq!(notice.id, "prt_goal_started_msg-user");
+            assert_eq!(notice.kind, NeoismAgentMessageKind::System);
+            assert_eq!(notice.title, "Goal Started");
+            assert_eq!(notice.text, "ship it");
+            assert_eq!(notice.tool, "goal_started");
+            assert_eq!(notice.status, "completed");
+        }
+        // A marker-only user envelope must not disappear on hydration either.
+        let only_notice = message_blocks(&json!({
+            "info": canonical_user_info(json!({})), "parts": [part]
+        }));
+        assert_eq!(only_notice.len(), 1);
+        assert_eq!(only_notice[0].id, live.id);
+    }
+
+    #[test]
+    fn goal_started_notice_requires_completed_transcript_confirmation() {
+        let mut part = json!({"id": "notice", "type": "tool", "tool": "goal_started",
+            "metadata": {"transcriptOnly": true},
+            "state": {"status": "pending", "title": "Goal Started", "output": "ship"}});
+        for status in ["pending", "running", "error"] {
+            part["state"]["status"] = json!(status);
+            assert!(part_block(&part).is_none());
+        }
+        part["state"]["status"] = json!("completed");
+        part["metadata"] = json!({});
+        assert!(part_block(&part).is_none());
+        part["state"]["metadata"] = json!({"transcriptOnly": true});
+        assert_eq!(part_block(&part).unwrap().title, "Goal Started");
+    }
 
     #[test]
     fn terminal_error_message_shapes_and_empty_fallback() {
@@ -2951,6 +3009,9 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
             agent_message_subtask(format!("Agent({name})"), format!("@{name}"))
         }),
         "subtask" => Some(subtask_block(part)),
+        "tool" if part.get("tool").and_then(Value::as_str) == Some("goal_started") => {
+            goal_started_block(part)
+        }
         "tool" => Some(tool_block(part)),
         "file"
             if part
@@ -3033,6 +3094,23 @@ pub fn part_block(part: &Value) -> Option<NeoismAgentMessage> {
         id
     };
     Some(message)
+}
+
+fn goal_started_block(part: &Value) -> Option<NeoismAgentMessage> {
+    let state = part.get("state")?;
+    if state.get("status").and_then(Value::as_str) != Some("completed")
+        || !(part.pointer("/metadata/transcriptOnly").and_then(Value::as_bool) == Some(true)
+            || state.pointer("/metadata/transcriptOnly").and_then(Value::as_bool) == Some(true))
+    {
+        return None;
+    }
+    let mut notice = agent_message_system(
+        "Goal Started",
+        state.get("output").and_then(Value::as_str).unwrap_or_default(),
+    );
+    notice.tool = "goal_started".to_string();
+    notice.status = "completed".to_string();
+    Some(notice)
 }
 
 fn image_from_part(part: &Value) -> Option<NeoismAgentImage> {

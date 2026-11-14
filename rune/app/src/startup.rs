@@ -101,6 +101,7 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 }
 
 static FILES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+static FRESH_WINDOW: OnceLock<bool> = OnceLock::new();
 
 /// Take the command line's choices: the daemon to use, the folder to open in, the files.
 pub fn apply(launch: &Launch) {
@@ -108,7 +109,10 @@ pub fn apply(launch: &Launch) {
     if let Some(url) = &launch.daemon { unsafe { std::env::set_var("NEOISM_GPUIX_DAEMON_URL", url) }; }
     if let Some(dir) = directory(launch) { let _ = std::env::set_current_dir(dir); }
     let _ = FILES.set(launch.files.clone());
+    let _ = FRESH_WINDOW.set(launch.new_window || launch.working_dir.is_some() || !launch.files.is_empty());
 }
+
+pub fn fresh_window() -> bool { FRESH_WINDOW.get().copied().unwrap_or(false) }
 
 /// The files named on the command line, to open once the first workspace exists.
 pub fn files() -> &'static [PathBuf] { FILES.get().map_or(&[], Vec::as_slice) }

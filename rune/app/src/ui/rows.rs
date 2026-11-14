@@ -62,12 +62,17 @@ pub fn view(key: &str, reset: &str, width: f32, row_h: f32, visible: usize, top:
         .transition(rune::Transition::none());
     if let Some(selected) = selected.filter(|s| *s < count) {
         content = content.child(el().key("highlight").w(width).h(row_h).radius(radius).fill(highlight)
-            .absolute(0.0, 0.0).offset(0.0, selected as f32 * row_h).offset_motion(CURSOR_SPRING));
+            .absolute(0.0, 0.0).offset(0.0, selected as f32 * row_h).offset_motion(CURSOR_SPRING)
+            .transition(rune::Transition::none()));
     }
     for (index, row) in rows {
-        content = content.child(row.absolute(0.0, index as f32 * row_h).transition(rune::Transition::none()));
+        // Suppress descendant entrances and text swaps too, not just the row's own fade.
+        // Keep this below content/highlight: making either spring owner instant would snap navigation.
+        content = content.child(row.absolute(0.0, index as f32 * row_h)
+            .transition(rune::Transition::none()).instant_changes());
     }
-    el().key(key.to_owned()).w(width).h(visible.max(1) as f32 * row_h).clip_rounded(0.0).motion(rune::Spring::NONE).child(content)
+    el().key(key.to_owned()).w(width).h(visible.max(1) as f32 * row_h).clip_rounded(0.0)
+        .motion(rune::Spring::NONE).transition(rune::Transition::none()).child(content)
 }
 
 /// The list's slide as GPUiX drew it (`list_scroll_residual`): when the window's top row moves,
@@ -117,6 +122,108 @@ impl Residual {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_mounts_draw_descendants_immediately_but_navigation_keeps_springs() {
+        use rune::{Cx, Env, Runtime, row, text};
+
+        #[derive(Default)]
+        struct State { open: bool, query: String, top: usize, selected: usize, revision: usize }
+
+        fn scene(s: &State, _: &mut Cx<State>) -> El {
+            let mut root = col().w(320.0).h(240.0).child(text("Existing content"));
+            if s.open {
+                let rows = span(s.top, 4, 20).map(|i| {
+                    (i, row().key(format!("row:{i}")).w(320.0).h(30.0)
+                        .child(text("*").key(format!("icon:{i}")))
+                        .child(col().child(text(format!("{} result {i} v{}", s.query, s.revision))
+                            .key(format!("label:{i}")))))
+                }).collect();
+                root = root.child(view("results", &s.query, 320.0, 30.0, 4, s.top,
+                    Some(s.selected), Color::WHITE, 0.0, 20, rows));
+            }
+            root
+        }
+
+        fn fully_drawn(rt: &Runtime<State>) {
+            let elements = rt.elements();
+            let mut labels = 0;
+            let mut icons = 0;
+            for e in &elements {
+                assert!(!e.exiting, "old query must disappear immediately: {e:?}");
+                if e.visible[2] <= 0.0 || e.visible[3] <= 0.0 { continue; }
+                assert!((e.opacity - 1.0).abs() < 0.001, "visible content must not fade: {e:?}");
+                assert!(!e.revealing, "visible text must be complete: {e:?}");
+                match e.key.as_deref() {
+                    Some(k) if k.starts_with("label:") => labels += 1,
+                    Some(k) if k.starts_with("icon:") => icons += 1,
+                    _ => {},
+                }
+            }
+            assert!(labels >= 4 && icons >= 4, "must inspect visible nested labels and icons");
+        }
+
+        fn y(rt: &Runtime<State>, key: &str) -> f32 {
+            rt.elements().iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).unwrap().rect[1]
+        }
+
+        fn settle(rt: &mut Runtime<State>) {
+            for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        }
+
+        let mut rt = Runtime::new(State::default(), scene, (320.0, 240.0), Env::new(true, 1.0));
+        settle(&mut rt);
+        // Mount after the first paint, not on Rune's automatically instant initial frame.
+        rt.update(|s, _| s.open = true);
+        rt.frame(1.0 / 120.0);
+        fully_drawn(&rt);
+
+        for query in ["a", "ab", "abc", ""] {
+            // Arrow navigation changes only the highlight and must glide, not teleport.
+            settle(&mut rt);
+            let before = y(&rt, "highlight");
+            rt.update(|s, _| s.selected += 1);
+            rt.frame(1.0 / 120.0);
+            let first = y(&rt, "highlight");
+            settle(&mut rt);
+            let after = y(&rt, "highlight");
+            assert!(after > before + 29.0);
+            assert!(first < after - 1.0, "arrow highlight must spring");
+
+            let before = y(&rt, "row:3");
+            rt.update(|s, _| {
+                let (top, selected) = wheel(&mut 0.0, -60.0, 30.0, s.top, s.selected, 20, 4, 1);
+                s.top = top;
+                s.selected = selected;
+            });
+            rt.frame(1.0 / 120.0);
+            let first = y(&rt, "row:3");
+            fully_drawn(&rt);
+            settle(&mut rt);
+            let after = y(&rt, "row:3");
+            assert!(after < before - 59.0);
+            assert!(first > after + 1.0, "wheel content must spring");
+
+            // Reset during active motion; neither spring may carry over to the new query.
+            rt.update(|s, _| { s.top += 1; s.selected += 1; });
+            rt.frame(1.0 / 120.0);
+            rt.update(|s, _| { s.query = query.into(); s.top = 0; s.selected = 0; });
+            rt.frame(1.0 / 120.0);
+            fully_drawn(&rt);
+            assert!((y(&rt, "highlight") - y(&rt, "row:0")).abs() < 0.01);
+            let first = y(&rt, "row:0");
+            for _ in 0..24 {
+                rt.frame(1.0 / 120.0);
+                fully_drawn(&rt);
+                assert!((y(&rt, "row:0") - first).abs() < 0.01, "query must reset the list spring");
+                assert!((y(&rt, "highlight") - first).abs() < 0.01, "query must reset the cursor spring");
+            }
+            // A result label can also change in place without remounting its keyed row.
+            rt.update(|s, _| s.revision += 1);
+            rt.frame(1.0 / 120.0);
+            fully_drawn(&rt);
+        }
+    }
 
     #[test]
     fn the_residual_jumps_a_row_and_settles() {

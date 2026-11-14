@@ -125,10 +125,10 @@ impl App {
                 self.open_tree_path(&target, &path, is_dir);
                 None
             }
-            (Target::Tree { directory, .. }, Command::NewFile | Command::NewFolder) => Some(Prompt {
-                title: if command == Command::NewFile { "New File" } else { "New Folder" }.into(),
+            (Target::Tree { directory, notes, .. }, Command::NewFile | Command::NewFolder) => Some(Prompt {
+                title: if command == Command::NewFolder { "New Folder" } else if *notes { "New Note" } else { "New File" }.into(),
                 body: format!("Create in {}", if directory.is_empty() { self.tree_root_label(&target) } else { directory.clone() }),
-                meta: String::new(), accept: "Create", input: field(""), target, command }),
+                meta: String::new(), accept: "Create", input: field(if *notes && command == Command::NewFile { "Untitled.md" } else { "" }), target, command }),
             (Target::Tree { path: Some(path), .. }, Command::Rename) => Some(Prompt {
                 title: "Rename".into(), body: format!("Rename \u{201c}{path}\u{201d}."), meta: String::new(), accept: "Rename",
                 input: field(file_name(path)), target, command }),

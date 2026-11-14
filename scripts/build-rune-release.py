@@ -111,7 +111,8 @@ def build_ghostty():
         tools.mkdir(parents=True, exist_ok=True)
         # Windows ships bsdtar, which also extracts the verified ZIP archive.
         run('tar', '-xf', archive, '--strip-components=1', '-C', tools)
-    run(zig, 'build', '-Demit-lib-vt', '-Doptimize=ReleaseFast', cwd=source)
+    # The bundle uses the shared library, not the optional Xcode-only XCFramework.
+    run(zig, 'build', '-Demit-lib-vt', '-Demit-xcframework=false', '-Doptimize=ReleaseFast', cwd=source)
     built = source / 'zig-out' / ('bin' if SYSTEM == 'windows' else 'lib') / GHOSTTY
     shutil.copy2(built, output)
     stamp.write_text(canonical)

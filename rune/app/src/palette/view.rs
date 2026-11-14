@@ -27,6 +27,7 @@ impl App {
     /// The selected row's settled rect (the list's window plus whole rows), so the cursor aims
     /// where the row lands instead of chasing it through the slide.
     pub fn palette_row_rect(&self, picker: &Picker) -> Option<[f32; 4]> {
+        if !picker.expanded() { return None; }
         let list = self.rects.get(LIST_KEY)?;
         let row_h = row_height(picker.mode) * self.ty.scale();
         let slot = picker.selected.checked_sub(picker.top)?;
@@ -37,9 +38,10 @@ impl App {
     /// band (`command_palette::scroll_pixels`); trackpads also step by whole rows.
     fn palette_wheel(&mut self, e: &rune::WheelEvent, tx: &mut Tx) -> bool {
         if e.dy == 0.0 { return false; }
+        let capacity = super::compact::rows(self, MAX_ROWS);
         let Some(picker) = &mut self.picker else { return false };
         let count = picker.rows().len();
-        let visible = count.min(MAX_ROWS);
+        let visible = count.min(if picker.mode == Mode::Commands { capacity } else { MAX_ROWS });
         let row_h = row_height(picker.mode) * self.ty.scale();
         let (top, selected) = crate::ui::rows::wheel(&mut picker.wheel, e.dy, row_h, picker.top, picker.selected, count, visible, SCROLL_OFF_ROWS);
         if (top, selected) == (picker.top, picker.selected) { return true; }
@@ -70,13 +72,14 @@ pub fn view(app: &App) -> El {
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
         .key("picker-query")
-        // One cursor: the window's block cursor (on the selected row, or here when the list is
-        // empty) stands in for Rune's thin caret, as in the composer.
+        .autofocus()
+        // Commands keep the window cursor at Rune's real insertion point, not on a result.
         .caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .placeholder(match picker.mode {
             Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...",
             Mode::Systems => "Search systems...", Mode::Servers => "Search servers...", Mode::SystemSettings => "",
-            Mode::Commands | Mode::Directories => "Type a command..." }, rgb(p.muted))
+            Mode::Commands => "Type a command… · ? all",
+            Mode::Directories => "Type a command..." }, rgb(p.dim))
         .color(rgb(p.fg)).w_full()
         .on_edit(|a: &mut App| &mut a.picker.as_mut().expect("picker open").query)
         .on_input_change(|a: &mut App, _: &mut Tx| {
@@ -87,19 +90,23 @@ pub fn view(app: &App) -> El {
         .on_submit(|a: &mut App, tx: &mut Tx| a.accept_picker(None, tx));
     let field = if themes {
         row().w_full().h(INPUT_H * s).px(10.0 * s).center_y().radius(3.0 * s).fill(rgb(p.surface)).child(input)
+    } else if picker.mode == Mode::Commands {
+        row().w_full().h(48.0 * s).px(18.0 * s).center_y()
+            .child(input.grow(1.0).shrink())
     } else {
-        row().w_full().h(INPUT_H * s).px(10.0 * s).center_y().child(input)
+        row().w_full().h(if picker.mode == Mode::Commands { 48.0 * s } else { INPUT_H * s }).px(14.0 * s).center_y().child(input)
     };
     // Settings have no query: the field stays mounted (it owns the keys) but takes no room.
     let field = if picker.mode == Mode::SystemSettings { field.h(0.0).clip_rounded(0.0) } else { field };
     let mut header = col().w_full().padding(if themes { 6.0 * s } else { 0.0 })
-        .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.surface));
+        .transition(rune::Transition::none()).instant_changes()
+        .border_sides([0.0, 0.0, if picker.expanded() { 1.0 } else { 0.0 }, 0.0], rgb(p.border));
     match picker.mode {
         Mode::Systems | Mode::Servers => header = header.child(categories(app, picker.mode, width)),
         Mode::SystemSettings => header = header.child(settings_header(app, picker, width)),
         _ => {}
     }
-    let header = header.child(field);
+    let header = header.child(field.on_layout(|a: &mut App, rect| { a.rects.insert("picker-query-clip".into(), rect); }));
 
     let list = list(app, picker, &rows, if themes { (THEME_LIST_WIDTH * s).min(width * 0.45) } else { width });
     let body = if themes {
@@ -109,22 +116,35 @@ pub fn view(app: &App) -> El {
             _ if picker.mode == Mode::Themes => preview(app, palette(p.name)),
             _ => el(),
         };
-        row().w_full()
+        row().w_full().transition(rune::Transition::none())
             .child(list.border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.surface)))
             .child(card.grow(1.0).shrink())
     } else {
         list
     };
 
+    let body = if picker.mode == Mode::Commands {
+        col().key("command-expansion").h(if picker.expanded() { rows.len().clamp(1, super::compact::rows(app, MAX_ROWS)) as f32 * ROW_H * s + 4.0 * s } else { 0.0 })
+            .clip_rounded(0.0).motion(super::compact::motion()).child(body)
+    } else { body };
     let dialog = col().key("picker").w(width).fill(rgb(p.bg)).motion(rune::Spring::NONE)
+        .preserve_focus_on_press(true)
+        .transition(rune::Transition::none())
         .corners([8.0 * s, 8.0 * s, 0.0, 0.0])
         .border(2.0 * s, rgb(p.surface))
         .clip_rounded(8.0 * s)
         .on_press(|_: &mut App| {})
         .child(header)
         .child(body);
+    // Confirmation dialogs and other overlays above the palette must own their input.
+    let front = app.finder.is_none() && app.browser.is_none() && app.form.is_none()
+        && app.modal.is_none() && app.menu.is_none() && app.context.is_none()
+        && app.prompt.is_none() && app.attach.preview.is_none();
+    let dialog = if front { dialog.modal(true, |a: &mut App| a.picker = None).on_key(keys) } else { dialog.disabled(true) };
+    let dialog = if picker.mode == Mode::Commands { super::compact::surface(dialog, app, picker.expanded()) } else { dialog };
     col().key("picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).items_center()
-        .pt(CHROME_TOP + MARGIN_TOP * s)
+        .transition(rune::Transition::none())
+        .pt(if picker.mode == Mode::Commands { super::compact::top(app) } else { CHROME_TOP + MARGIN_TOP * s })
         .on_press(|a: &mut App| a.picker = None)
         .child(dialog)
 }
@@ -175,6 +195,8 @@ fn settings_header(app: &App, picker: &Picker, width: f32) -> El {
 }
 
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
+    if app.picker.as_ref().is_some_and(|p| p.mode == Mode::Commands) && super::compact::editing_key(event) { return false; }
     let mode = app.picker.as_ref().map(|p| p.mode);
     let empty = app.picker.as_ref().is_some_and(|p| p.query.text.is_empty());
     match event.key {
@@ -192,23 +214,129 @@ fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
         // The query field makes its commits instant; list moves glide like the original's springs.
         Key::Up => { tx.animated(); app.move_picker(-1); true }
         Key::Down => { tx.animated(); app.move_picker(1); true }
+        Key::Enter => { app.accept_picker(None, tx); true }
         _ => crate::keys::shortcut(app, event, tx),
     }
 }
 
 pub(crate) fn row_height(mode: Mode) -> f32 { if mode == Mode::SystemSettings { SETTING_ROW_H } else { ROW_H } }
 
+#[cfg(test)]
+mod compact_keyboard_tests {
+    use super::*;
+    #[test]
+    fn compact_commands_filter_show_all_accept_and_escape() {
+        let mut app = App::new();
+        app.open_picker(Mode::Commands);
+        let all = app.picker.as_ref().unwrap().rows().len();
+        let mut tx = Tx::default();
+        app.accept_picker(None, &mut tx);
+        assert!(app.picker.is_some(), "empty input must not execute a hidden command");
+        let key = |key| KeyEvent { key, mods: Default::default() };
+        app.picker.as_mut().unwrap().query.replace_text("?");
+        assert_eq!(app.picker.as_ref().unwrap().query.text, "?");
+        assert_eq!(app.picker.as_ref().unwrap().rows().len(), all);
+        keys(&mut app, &key(Key::Down), &mut tx);
+        assert_eq!(app.picker.as_ref().unwrap().selected, 1);
+        keys(&mut app, &key(Key::Up), &mut tx);
+        assert_eq!(app.picker.as_ref().unwrap().selected, 0);
+        let p = app.picker.as_mut().unwrap();
+        p.query.replace_text("theme");
+        assert!(!p.rows().is_empty() && p.rows().len() < all);
+        app.accept_picker(None, &mut tx);
+        assert_eq!(app.picker.as_ref().unwrap().mode, Mode::Themes);
+        keys(&mut app, &key(Key::Escape), &mut tx);
+        assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn server_picker_keeps_search_focus_through_categories_hover_and_keyboard_navigation() {
+        use rune::{Cx, Env, Runtime};
+        let mut app = App::new();
+        app.ty.size = 14.0;
+        app.window = [800.0, 600.0];
+        let mut rt = Runtime::new(app, |a: &App, cx: &mut Cx<App>| {
+            a.cursor.caret_line.set(cx.caret("server-test"));
+            col().key("server-test").w_full().h_full()
+                .child(rune::text_input(&a.tabs[a.active].draft, a.ty.sized(14.0)).key("behind")
+                    .on_edit(|a: &mut App| &mut a.tabs[a.active].draft))
+                .child(el().key("open-servers").size(120.0, 32.0).on_press(|a: &mut App| {
+                    a.open_picker(Mode::Servers);
+                    crate::palette::systems_fixture(a);
+                }))
+                .child(view(a))
+                .child(crate::ui::modal::view(a))
+        }, (800.0, 600.0), Env::new(true, 1.0));
+        rt.on_key = Some(crate::keys::on_key);
+        fn settle(rt: &mut Runtime<App>) { for _ in 0..80 { rt.frame(1.0 / 120.0); } }
+        fn point(rt: &Runtime<App>, key: &str) -> (f32, f32) {
+            let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).unwrap().rect;
+            (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0)
+        }
+        fn click(rt: &mut Runtime<App>, key: &str) {
+            let (x, y) = point(rt, key);
+            rt.pointer_move(x, y); rt.pointer_down(x, y); rt.pointer_up(x, y); settle(rt);
+        }
+        let press = |rt: &mut Runtime<App>, key| {
+            rt.key(KeyEvent { key, mods: Default::default() }); settle(rt);
+        };
+        settle(&mut rt);
+        click(&mut rt, "open-servers");
+        press(&mut rt, Key::Down);
+        assert_eq!(rt.state.picker.as_ref().unwrap().selected, 1);
+        rt.update(|a, _| {
+            let caret = a.cursor_target().expect("the search has the measured caret");
+            let clip = a.rects["picker-query-clip"];
+            assert!(caret[1] >= clip[1] && caret[1] + caret[3] <= clip[1] + clip[3] + 0.1);
+        });
+        click(&mut rt, "palette-category:0");
+        rt.update(|a, _| crate::palette::systems_fixture(a)); settle(&mut rt);
+        press(&mut rt, Key::Down);
+        assert_eq!(rt.state.picker.as_ref().unwrap().selected, 1);
+        press(&mut rt, Key::Enter);
+        assert_eq!(rt.state.picker.as_ref().unwrap().mode, Mode::SystemSettings);
+        press(&mut rt, Key::Escape);
+        assert_eq!(rt.state.picker.as_ref().unwrap().mode, Mode::Systems, "Escape in settings returns to Systems before dismissing the picker");
+        click(&mut rt, "palette-category:1");
+        rt.update(|a, _| crate::palette::systems_fixture(a)); settle(&mut rt);
+        let (x, y) = point(&rt, "picker-row:1");
+        rt.pointer_move(x, y); settle(&mut rt);
+        assert_eq!(rt.state.picker.as_ref().unwrap().selected, 1, "hover selects the row");
+        press(&mut rt, Key::Up);
+        assert_eq!(rt.state.picker.as_ref().unwrap().selected, 0, "a resting pointer does not steal keyboard selection");
+        press(&mut rt, Key::Text("Team".into()));
+        assert_eq!(rt.state.picker.as_ref().unwrap().query.text, "Team", "category clicks must not blur the search");
+        assert!(rt.state.tabs[rt.state.active].draft.text.is_empty(), "typing must not leak behind the modal");
+        rt.update(|a, _| a.modal = Some(crate::ui::modal::Modal::notice("Confirm", "Test overlay")));
+        settle(&mut rt);
+        press(&mut rt, Key::Escape);
+        assert!(rt.state.modal.is_none() && rt.state.picker.is_some(), "Escape dismisses the top dialog, not its underlying picker: modal={}, picker={}", rt.state.modal.is_some(), rt.state.picker.is_some());
+        rt.update(|a, _| a.modal = Some(crate::ui::modal::Modal::notice("Confirm", "Test overlay")));
+        settle(&mut rt);
+        let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("modal") && !e.exiting).unwrap().rect;
+        let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] - 34.0);
+        rt.pointer_move(x, y); rt.pointer_down(x, y); rt.pointer_up(x, y); settle(&mut rt);
+        assert!(rt.state.modal.is_none() && rt.state.picker.is_some(), "the picker must not trap clicks meant for a dialog above it");
+        press(&mut rt, Key::Escape);
+        assert!(rt.state.picker.is_none(), "Escape works without refocusing by clicking");
+    }
+}
+
 fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
     let s = app.ty.scale();
     let p = app.pal;
+    if rows.is_empty() && picker.mode == Mode::Commands {
+        return row().w(width).h(ROW_H * s).px(14.0 * s).center_y()
+            .child(text("No matching commands").font(app.ty.sized(13.0)).color(rgb(p.dim)));
+    }
     let row_h = row_height(picker.mode);
-    let visible = rows.len().clamp(if picker.mode == Mode::SystemSettings { 0 } else { 1 }, MAX_ROWS);
+    let capacity = if picker.mode == Mode::Commands { super::compact::rows(app, MAX_ROWS) } else { MAX_ROWS };
+    let visible = rows.len().clamp(if picker.mode == Mode::SystemSettings { 0 } else { 1 }, capacity);
     let span = crate::ui::rows::span(picker.top, visible, rows.len());
     let mut built = Vec::with_capacity(span.len());
     for (index, item) in rows.iter().enumerate().skip(span.start).take(span.len()) {
-        let selected = index == picker.selected;
         if item.look != super::Look::default() {
-            built.push((index, rich_row(app, picker, index, item, selected)));
+            built.push((index, rich_row(app, picker, index, item)));
             continue;
         }
         let mut line = row().key(format!("picker-row:{index}")).w_full().h(row_h * s).px(10.0 * s).gap(8.0 * s).center_y()
@@ -223,7 +351,8 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
         }
         line = line.child(text(item.title.clone()).font(app.ty.sized(13.0)).color(rgb(p.fg)).truncate().grow(1.0).shrink());
         if !item.shortcut.is_empty() {
-            line = line.child(text(crate::startup::keys_label(item.shortcut).into_owned()).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().shrink());
+            let hint = match item.target { Target::Command(action) => app.command_hint(action, item.shortcut), _ => crate::startup::keys_label(item.shortcut).into_owned() };
+            line = line.child(text(hint).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().shrink());
         }
         built.push((index, line));
     }
@@ -236,17 +365,16 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
 }
 
 /// A Systems/Servers/settings row (`render.rs`): a status dot for servers, the title, the
-/// address/state detail 16 pt after it, a 3 pt green stripe on the window's own server and an
-/// accent one on a selected server; "+ Add" rows centre their title; settings rows carry two
+/// address/state detail 16 pt after it, a green/red stripe for this window's connection;
+/// selection has its own list highlight. "+ Add" rows centre their title; settings rows carry two
 /// description lines and the Active switch.
-fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selected: bool) -> El {
+fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row) -> El {
     use super::systems::ServerStatus;
     let p = app.pal;
     let s = app.ty.scale();
     let look = &item.look;
     let row_h = row_height(picker.mode) * s;
-    // Hover moves the selection, which adds or drops the stripe: the row's contents land at
-    // once instead of re-pairing and sliding.
+    // Row contents land at once; only the independent selection highlight glides.
     let mut line = row().key(format!("picker-row:{index}")).w_full().h(row_h).px(10.0 * s).center_y()
         .instant_changes()
         .radius(3.0 * s)
@@ -256,7 +384,7 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selecte
             if let Some(picker) = a.picker.as_mut().filter(|p| p.selected != index) { picker.selected = index; }
         })
         .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker(Some(index), tx));
-    let stripe = if look.current { Some(p.green) } else if selected && look.dot.is_some() { Some(p.accent) } else { None };
+    let stripe = look.dot.map(|_| if look.current { p.green } else { p.red });
     if let Some(color) = stripe {
         line = line.child(el().w(3.0 * s).h((row_h - 6.0 * s).max(2.0 * s)).absolute(0.0, 3.0 * s).fill(rgb(color)));
     }
@@ -283,7 +411,7 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row, selecte
         });
         let mut text_col = col().grow(1.0).shrink().h_full().pt(6.0 * s).gap(2.0 * s)
             .child(title)
-            .child(text(crate::startup::keys_label(item.shortcut).into_owned()).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).wrap().max_lines(2));
+            .child(text(match item.target { Target::Command(action) => app.command_hint(action, item.shortcut), _ => crate::startup::keys_label(item.shortcut).into_owned() }).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).wrap().max_lines(2));
         if toggle.is_some() { text_col = text_col.mr(12.0 * s); }
         line = line.items_start().child(text_col);
         if let Some(toggle) = toggle { line = line.child(el().h_full().center().child(toggle)); }

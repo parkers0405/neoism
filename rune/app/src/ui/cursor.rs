@@ -117,6 +117,11 @@ impl Default for Trail {
 impl Trail {
     pub fn quad(&self) -> [[f32; 2]; 4] { self.corners.map(|c| c.pos) }
 
+    /// Actual travel velocity for optical highlights, not another geometry spring.
+    pub fn velocity(&self) -> [f32; 2] {
+        self.corners.iter().fold([0.0; 2], |v, c| [v[0] - c.x.velocity * 0.25, v[1] - c.y.velocity * 0.25])
+    }
+
     /// Carry the cursor with what scrolled under it: the target and every corner move by
     /// `by` at once, at rest or mid-trail, and no new trail starts.
     pub fn shift(&mut self, by: [f32; 2]) {
@@ -199,6 +204,11 @@ impl Trail {
 /// The one window cursor (`ChromeFocusCursor` + `ComposerCaret`): it sits on the focused tab,
 /// workspace or sidebar row, and trails into the text caret when focus returns to content.
 pub struct Cursor {
+    pub liquid_glass: bool,
+    /// Backend ownership, not target visibility. Change via `set_native_glass`.
+    pub native_glass: bool,
+    /// This tick's scroll displacement, separate from animated keyboard movement.
+    pub carry_delta: f32,
     /// Rune's caret line for the focused field, as the last view read it, and its font size.
     pub caret_line: std::cell::Cell<Option<[f32; 4]>>,
     pub caret_font: std::cell::Cell<f32>,
@@ -213,8 +223,8 @@ pub struct Cursor {
     pub clip: Option<[f32; 4]>,
     epoch: Instant,
     pub visible: bool,
-    /// The blink, as the block's live opacity: a half period repaints the block without
-    /// re-running the views.
+    /// Ordinary block opacity: blink gated by placement and renderer ownership.
+    /// Also silences an already-mounted block before its replacement view commits.
     pub blink: rune::Live<f32>,
     /// Where the views last built the block (its quad's top-left corner), the quad's shape
     /// from there, and how far it has travelled since without changing shape: a live offset,
@@ -240,12 +250,25 @@ struct Drawn {
 
 impl Default for Cursor {
     fn default() -> Cursor {
-        Cursor { caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, move_clip: None, clip: None, epoch: Instant::now(), visible: false, blink: rune::Live::new(1.0),
+        Cursor { liquid_glass: false, native_glass: false, carry_delta: 0.0, caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, move_clip: None, clip: None, epoch: Instant::now(), visible: false, blink: rune::Live::new(1.0),
             base: [0.0; 2], shape: None, offset: rune::Live::new([0.0, 0.0]), riding: None, resting: None }
     }
 }
 
 impl Cursor {
+    /// Renderer ownership is independent of whether this layout has a target yet.
+    /// Hide even an already-mounted Rune quad before native encoding can begin.
+    pub fn set_native_glass(&mut self, active: bool) -> bool {
+        let changed = self.native_glass != active;
+        self.native_glass = active;
+        self.sync_opacity();
+        changed
+    }
+
+    fn sync_opacity(&self) {
+        self.blink.set(if self.visible && self.placed() && !self.native_glass { 1.0 } else { 0.0 });
+    }
+
     /// Record the clip after a tick: a new move remembers the clip it started from.
     pub fn track_clip(&mut self, clip: Option<[f32; 4]>, moved: bool) {
         if moved { self.move_clip = self.clip; }
@@ -261,6 +284,7 @@ impl Cursor {
             _ => 0.0,
         };
         self.riding = key.map(|(key, offset)| (key.to_owned(), offset));
+        self.carry_delta = rode;
         if rode == 0.0 { return; }
         self.trail.shift([0.0, rode]);
         if let Some(shown) = &mut self.shown { shown[1] += rode; }
@@ -308,6 +332,7 @@ impl Cursor {
         let Some(target) = target else {
             self.hidden_at.get_or_insert(now);
             self.visible = false;
+            self.sync_opacity();
             return None;
         };
         // Gone for longer than a frame or two: the cursor reappears in place, not trailing.
@@ -321,9 +346,10 @@ impl Cursor {
             if fresh { self.trail.snap(); }
             self.shown = Some(target);
         }
+        if self.liquid_glass && crate::glass_cursor::reduce_motion() { self.trail.snap(); }
         let moving = self.trail.tick(now);
         self.visible = self.trail.blink_visible(now, self.epoch);
-        self.blink.set(if self.visible { 1.0 } else { 0.0 });
+        self.sync_opacity();
         Some(if moving { Duration::ZERO } else { self.trail.next_blink(now, self.epoch) })
     }
 }
@@ -346,6 +372,32 @@ pub fn block_for_caret(line: [f32; 4], font_size: f32) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optical_quad_keeps_independent_corners_through_diagonal_turn_and_scroll() {
+        let mut trail = Trail::default();
+        let mut now = Instant::now();
+        trail.target([20.0, 30.0, 9.0, 20.0]);
+        trail.tick(now);
+        for target in [[180.0, 160.0, 9.0, 20.0], [60.0, 240.0, 3.0, 24.0]] {
+            trail.target(target);
+            trail.tick(now);
+            now += Duration::from_millis(8);
+            trail.tick(now);
+            let q = trail.quad();
+            assert!((q[0][1] - q[1][1]).abs() > 0.1 || (q[0][0] - q[3][0]).abs() > 0.1,
+                "diagonal/turning shape must not be an axis-aligned rect: {q:?}");
+            let velocity = trail.velocity();
+            assert_ne!(velocity, [0.0; 2]);
+            trail.shift([0.0, -0.375]);
+            assert_eq!(trail.quad(), q.map(|p| [p[0], p[1] - 0.375]));
+            assert_eq!(trail.velocity(), velocity, "scroll does not inject spring energy");
+        }
+        for _ in 0..120 { now += Duration::from_millis(8); trail.tick(now); }
+        assert_eq!(trail.quad(), [[60.0, 239.625], [63.0, 239.625], [63.0, 263.625], [60.0, 263.625]]);
+        assert_eq!(trail.velocity(), [0.0; 2]);
+        assert!(!trail.animating());
+    }
 
     #[test]
     fn trail_settles_on_its_target() {

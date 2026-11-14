@@ -13,6 +13,7 @@ pub enum Kind {
     Tasks,
     Goals,
     Model,
+    ModelAccount,
     Agent,
     Thinking,
     Mcp,

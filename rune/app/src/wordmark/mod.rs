@@ -288,6 +288,65 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
 mod tests {
     use super::*;
     #[test]
+    fn empty_submit_replays_only_the_active_welcome_wordmark() {
+        use crate::tabs::TabKind;
+        let mut app = App::new();
+        let home = host_key("splash", app.active_tab().id);
+        app.submit();
+        assert!(app.wordmark.hosts[&home].animation.frame(0.1).is_some());
+
+        app.open_tab(TabKind::Agent { session: None });
+        let agent = host_key("agent", app.active_tab().id);
+        app.tabs[app.active].draft.replace_text("hello");
+        assert!(!app.replay_empty_wordmark());
+        assert!(!app.wordmark.hosts.contains_key(&agent));
+        app.tabs[app.active].draft.clear();
+        app.submit();
+        assert!(app.wordmark.hosts[&agent].animation.frame(0.1).is_some());
+        assert!(matches!(app.active_tab().kind, TabKind::Agent { session: None }));
+
+        app.open_tab(TabKind::Terminal);
+        assert!(!app.replay_empty_wordmark());
+        app.load_fixture("existing", "Existing chat", "[]");
+        assert!(!app.replay_empty_wordmark());
+    }
+
+    #[test]
+    fn unfocused_enter_replays_the_logo_without_stealing_other_focus_or_modified_enter() {
+        use crate::app::Focus;
+        use rune::{Key, KeyEvent, Mods, Tx};
+        let mut app = App::new();
+        app.tabs[app.active].draft.focused = false;
+        app.focus = Focus::Content;
+        let key = host_key("splash", app.active_tab().id);
+        let enter = KeyEvent { key: Key::Enter, mods: Mods::default() };
+        let mut tx = Tx::default();
+        app.focus = Focus::Sidebar;
+        assert!(!crate::keys::on_key(&mut app, &enter, &mut tx));
+        app.focus = Focus::Content;
+        let shifted = KeyEvent { key: Key::Enter, mods: Mods { shift: true, ..Default::default() } };
+        assert!(!crate::keys::on_key(&mut app, &shifted, &mut tx));
+        assert!(!app.wordmark.hosts.contains_key(&key));
+        assert!(crate::keys::on_key(&mut app, &enter, &mut tx));
+        assert!(app.wordmark.hosts[&key].animation.frame(0.1).is_some());
+        app.splash.hidden.insert(app.active_tab().id);
+        assert!(!crate::keys::on_key(&mut app, &enter, &mut tx));
+    }
+
+    #[test]
+    fn terminal_prompts_and_just_started_commands_never_replay_the_logo() {
+        let mut app = App::new();
+        let tab = app.active_tab().id;
+        let term = app.terminals.get_mut(&tab).unwrap();
+        term.shell.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07read answer\r\n\x1b]133;C\x07Press Enter to continue", None);
+        term.sync();
+        assert!(!app.replay_empty_wordmark());
+        app.terminals.get_mut(&tab).unwrap().grid = true;
+        assert!(!app.replay_empty_wordmark());
+        assert!(!app.wordmark.hosts.contains_key(&host_key("splash", tab)));
+    }
+
+    #[test]
     fn both_wordmarks_keep_the_original_click_rotation_with_flames_enabled() {
         for kind in ["splash", "agent"] {
             let mut mark = Wordmark::default();

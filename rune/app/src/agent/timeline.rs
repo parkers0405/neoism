@@ -356,8 +356,8 @@ impl App {
 
     /// A wheel or trackpad delta over a conversation's transcript.
     pub fn timeline_wheel(&mut self, session_id: &str, mut e: WheelEvent, line_h: f32, tx: &mut Tx) -> bool {
-        // GPUiX's readingScrollY applies a fixed 2x gain only to vertical trackpad input.
-        if e.precise && !e.mods.shift && e.dx.abs() <= e.dy.abs() { e.dy *= 2.0; }
+        // Keep native macOS finger/momentum distances 1:1; retain GPUiX's reading gain elsewhere.
+        if !cfg!(target_os = "macos") && e.precise && !e.mods.shift && e.dx.abs() <= e.dy.abs() { e.dy *= 2.0; }
         if std::env::var_os("NEOISM_RUNE_TRACE_WHEEL").is_some() { eprintln!("wheel timeline dy={} precise={} phase={:?}", e.dy, e.precise, e.phase); }
         // Shift turns a wheel sideways: a wide table under the pointer takes it (`table.rs`).
         if e.mods.shift && !e.precise { return false; }
@@ -488,10 +488,11 @@ pub(crate) fn markdown_style(app: &App) -> MarkdownStyle {
         // `code_frame` draws the card; the kit's own block is bare so numbers line up with rows.
         .code_block(Color::TRANSPARENT, Color::TRANSPARENT)
         .code_block_padding(0.0, 0.0)
-        .body_font(app.ty.body())
-        .heading_font(1, app.ty.heading(1))
-        .heading_font(2, app.ty.heading(2))
-        .heading_font(3, app.ty.heading(3))
+        .body_font(app.ty.chat_body())
+        .heading_font(1, app.ty.chat_heading(1))
+        .heading_font(2, app.ty.chat_heading(2))
+        .heading_font(3, app.ty.chat_heading(3))
+        // Preserve Geist Mono's existing weight, advance and line boxes for code.
         .code_block_font(app.ty.body())
         .inline_code_font(1.0, app.ty.weight)
         .inline_code_pad(0.0)
@@ -540,15 +541,15 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
         HistoryMessageKind::User => super::user::view(app, &message.id, &message.text, &message.attachments, message.author.as_deref(), timeline_width(app))
             .key(key).pt(26.0).arrives_whole(),
         HistoryMessageKind::Reasoning => {
-            let font = app.ty.sized(13.0);
+            let font = app.ty.chat_sized(13.0);
             let style = markdown_style(app).text(rgb(p.dim)).muted(rgb(p.dim)).body_font(font)
                 .heading_font(1, font).heading_font(2, font).heading_font(3, font).heading_font(4, font)
-                .code_block_font(font);
+                .code_block_font(app.ty.sized(13.0));
             let mut body = col().key(key).w_full().pt(24.0).gap(10.0);
             if streaming { body = body.instant_changes(); }
             let (title, reasoning) = reasoning_parts(message);
             body = body.child(text(title.to_owned())
-                .w_full().wrap().font(app.ty.body().italic()).color(rgb(p.yellow).alpha(0.85))
+                .w_full().wrap().font(app.ty.chat_body().italic()).color(rgb(p.yellow).alpha(0.85))
                 .selectable(true).selection_color(selection_color(app)));
             let pieces = prose::chunks(reasoning);
             let last = pieces.len().saturating_sub(1);
@@ -567,6 +568,17 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
         },
         HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tools::row(app, message),
         HistoryMessageKind::Compaction => compaction_divider(app, message, "Compacted"),
+        HistoryMessageKind::System if message.title == "Goal Started" => {
+            let mut label = text("Goal Started").font(app.ty.small()).color(rgb(p.green));
+            if let Some(notice) = app.active_session().and_then(|id| app.sessions.get(&id))
+                .and_then(|session| session.goal_notice.as_ref()).filter(|notice| notice.id == message.id) {
+                label = label.live_text(&notice.label);
+            }
+            row().key(key).w_full().py(20.0).gap(14.0).center_y()
+                .child(el().grow(1.0).h(1.0).fill(rgb(p.border)))
+                .child(label)
+                .child(el().grow(1.0).h(1.0).fill(rgb(p.border)))
+        },
         // Bound notices to six source lines before layout: `max_lines`
         // alone leaves a many-paragraph text its full height, which breaks narrow transcripts.
         HistoryMessageKind::System => text(message.text.lines().take(6).collect::<Vec<_>>().join("\n")).key(key)

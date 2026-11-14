@@ -3,7 +3,7 @@
 //! the whole pane for Ghostty's grid (`grid.rs`).
 
 use super::composer::{Menu, MenuKind, typed_prefix};
-use super::splash::{MENU, layout};
+use super::splash::{MENU, layout_with_bindings};
 use super::{Block, Cells, Terminal};
 use crate::app::App;
 use crate::ghostty::Row;
@@ -26,6 +26,9 @@ pub fn view(app: &App) -> El {
     let tab_id = tab.id;
     let Some(term) = app.terminals.get(&tab_id) else { return el() };
     let pane = col().key(format!("home-pane:{tab_id}")).w_full().h_full().fill(app.surface(p.bg))
+        .on_selection_change(|a: &mut App, change: &rune::SelectionChange, tx: &mut Tx| {
+            if let Some(text) = a.selection.copy.change(change, tx) { a.copied_selection = Some(text); }
+        })
         .on_layout(move |a: &mut App, [_, _, w, h]: [f32; 4]| {
             if let Some(term) = a.terminals.get_mut(&tab_id) { term.area = [w, h]; }
         });
@@ -163,11 +166,12 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
             .pin(None, Some(row_h * 1.1), Some(cells.inset), None));
     }
     for (index, line) in command.iter().enumerate() {
-        header = header.child(text((*line).to_owned()).key(format!("command:{index}")).selectable(true).font(ink(app, 1.0, None)).color(rgb(p.fg))
+        header = header.child(text((*line).to_owned()).key(format!("command:{index}")).selectable(true)
+            .selection_color(crate::ui::selection::highlight(rgb(p.accent))).font(ink(app, 1.0, None)).color(rgb(p.fg))
             .absolute(cells.inset, row_h * (2.19 + index as f32)));
     }
     if !block.background && term.toolbar_block() == Some(block.id) {
-        header = header.child(actions(app, term, block, home, width).key("actions"));
+        header = header.child(actions(app, term, block, home, width));
     }
     if let Some(query) = filtering {
         header = header.child(filter_row(app, tab_id, block_id, query, lines.len(), block.lines.len()).key("filter")
@@ -213,7 +217,7 @@ fn block_view(app: &App, term: &Terminal, block: &Block, home: &str) -> El {
 pub(crate) fn action_button(app: &App, key: String, icon: Icon, active: bool, color: Option<u32>) -> El {
     let p = app.pal;
     let s = app.ty.scale();
-    let ink = color.unwrap_or(if active { p.accent } else { p.fg });
+    let ink = color.unwrap_or(if active || icon == Icon::More { p.accent } else { p.fg });
     el().key(key).w(ACTION * s).h(ACTION * s).radius(5.0 * s).center()
         .fill(if active { rgb(p.fg).alpha(0.085 * 0.5) } else { Color::TRANSPARENT })
         .hover(rgb(p.fg).alpha(0.085))
@@ -230,7 +234,6 @@ fn actions(app: &App, term: &Terminal, block: &Block, home: &str, width: f32) ->
     let header_w = directory_label(&block.cwd, home).chars().count() as f32 * cells.cell * 0.9 + cells.inset;
     let filtering = term.filter.as_ref().is_some_and(|(f, _)| *f == id);
     row().key(format!("block-actions:{tab_id}:{id}")).gap(4.0 * s).padding(4.0 * s).radius(4.0 * s)
-        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("block-actions:{tab_id}:{id}"), r); })
         .fill(if header_w > width - 76.0 * s { rgb(app.pal.bg) } else { Color::TRANSPARENT })
         // Its menu is anchored here: once the toolbar scrolls out of view the menu closes rather
         // than losing its anchor.
@@ -288,16 +291,10 @@ fn block_menu(app: &App, term: &Terminal) -> Option<El> {
         ("Use command", BlockAction::Reuse),
         (if term.collapsed.contains(&id) { "Expand output" } else { "Collapse output" }, BlockAction::Collapse),
     ];
-    // Right-aligned 2 pt under the block's toolbar (its rect from the last layout), above it
-    // when the window has no room below.
-    let anchor = app.rects.get(&format!("block-actions:{tab_id}:{id}")).copied()?;
-    let (w, h) = (190.0 * s, items.len() as f32 * 30.0 * s + 8.0 * s);
-    let x = (anchor[0] + anchor[2] - w).clamp(8.0, (app.window[0] - w - 8.0).max(8.0));
-    let below = anchor[1] + anchor[3] + 2.0 * s;
-    let y = if below + h <= app.window[1] - 8.0 { below } else { (anchor[1] - 2.0 * s - h).max(8.0) };
-    let mut menu = col().key(format!("block-action-menu:{tab_id}:{id}")).w(w).padding(4.0 * s)
+    // Anchor to the presented toolbar, including its sticky-header and scroll transforms.
+    let mut menu = col().key(format!("block-action-menu:{tab_id}:{id}")).w(190.0 * s).padding(4.0 * s)
         .fill(rgb(p.surface)).border(1.0, rgb(p.border)).radius(5.0 * s)
-        .absolute(x, y);
+        .anchored(format!("block-actions:{tab_id}:{id}"), rune::Side::Bottom, rune::Align::End, 2.0 * s);
     for (index, (label, action)) in items.into_iter().enumerate() {
         menu = menu.child(row().key(format!("block-menu:{tab_id}:{id}:{index}")).w_full().h(30.0 * s).pl(8.0 * s).center_y()
             .radius(3.0 * s).hover(rgb(p.hover))
@@ -367,7 +364,9 @@ pub fn rows_view(app: &App, rows: &[Row], cells: Cells, lift: impl Fn(u32) -> u3
         }
         layer = layer.child(rune::canvas(shape).key("grid-fills").w(width).h(height.max(cells.row)).absolute(0.0, 0.0));
     }
-    layer.child(text(body).key("grid-text").selectable(selectable).spans(spans).font(ink(app, 1.0, None)).color(rgb(app.pal.fg)).absolute(0.0, 0.0))
+    layer.child(text(body).key("grid-text").selectable(selectable)
+        .selection_color(crate::ui::selection::highlight(rgb(app.pal.accent)))
+        .spans(spans).font(ink(app, 1.0, None)).color(rgb(app.pal.fg)).absolute(0.0, 0.0))
 }
 
 /// `blockOutputForeground`: on dark themes, blend ink toward white until it reaches 4.5:1.
@@ -410,7 +409,7 @@ fn splash(app: &App) -> El {
     // The Home pane insets its splash by 40 x 8 pt a side (`HomeTerminalView`, 80 x 16 total).
     let s = app.ty.scale();
     let (inset_x, inset_y) = (40.0 * s, 8.0 * s);
-    let Some(g) = layout(width - 2.0 * inset_x, height - 2.0 * inset_y, app.ty.size, s) else { return area };
+    let Some(g) = layout_with_bindings(width - 2.0 * inset_x, height - 2.0 * inset_y, app.ty.size, s, &app.keybindings) else { return area };
     let [x, y, w, _] = g.wordmark;
     area = area.child(wordmark::view(app, &wordmark::host_key("splash", tab), w).absolute(inset_x + x, inset_y + y)
         .on_visible(move |a: &mut App, visible: bool, _: &mut Tx| {
@@ -425,7 +424,7 @@ fn splash(app: &App) -> El {
             .fill(if hovered { rgb(p.hover).alpha(0.95) } else { Color::TRANSPARENT })
             .child(el().w(g.icon_slot).center().child(text(item.icon).font(TextStyle::new(g.icon_font, 400.0).family(NERD)).color(ink)))
             .child(text(item.label).font(TextStyle::new(g.label_font, 700.0).mono()).color(ink).ml(g.label_gap).grow(1.0).truncate().shrink())
-            .child(text(format!("[{}]", crate::startup::keys_label(item.keys))).font(TextStyle::new(g.key_font, 700.0).mono()).color(rgb(p.accent)))
+            .child(text(format!("[{}]", app.binding_hint(item.keys))).font(TextStyle::new(g.key_font, 700.0).mono()).color(rgb(p.accent)))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
                 if inside { a.splash.hover = Some((tab, index)); } else if a.splash.hover == Some((tab, index)) { a.splash.hover = None; }
             })
@@ -534,6 +533,84 @@ mod tests {
     use super::*;
     use rune::{Cx, Env, Runtime};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn terminal_command_and_output_drags_use_shared_selection_copy() {
+        for (key, expected) in [("command:0", "echo selectable"), ("grid-text", "selectable output")] {
+            let mut app = App::new();
+            app.open_tab(crate::tabs::TabKind::Terminal);
+            app.fixture_blocks(&[("echo selectable", &["selectable output"], 0)]);
+            let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| view(a), (800.0, 600.0), Env::new(true, 1.0));
+            for _ in 0..120 { rt.frame(1.0 / 120.0); }
+            let rect = rt.elements().iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect;
+            let y = rect[1] + rect[3] / 2.0;
+            rt.pointer_down(rect[0] + 1.0, y);
+            rt.frame(1.0 / 120.0);
+            rt.pointer_move(rect[0] + rect[2] - 1.0, y);
+            rt.frame(1.0 / 120.0);
+            assert!(rt.state.selection.copy.dragging(), "{key}: drag must select text");
+            rt.pointer_up(rect[0] + rect[2] - 1.0, y);
+            rt.frame(1.0 / 120.0);
+            assert_eq!(rt.state.copied_selection.as_deref(), Some(expected), "{key}");
+        }
+    }
+
+    #[test]
+    fn terminal_input_and_non_mouse_tracking_grid_allow_drag_selection() {
+        let mut app = App::new();
+        app.open_tab(crate::tabs::TabKind::Terminal);
+        let tab = app.active_tab().id;
+        app.tabs[app.active].draft.replace_text("editable command");
+        let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| view(a), (800.0, 600.0), Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        let rect = rt.elements().iter().find(|e| e.key.as_deref() == Some(&format!("terminal-command:{tab}"))).unwrap().rect;
+        let y = rect[1] + rect[3] / 2.0;
+        rt.pointer_down(rect[0] + 1.0, y);
+        rt.pointer_move(rect[0] + 100.0, y);
+        rt.pointer_up(rect[0] + 100.0, y);
+        rt.frame(1.0 / 120.0);
+        assert!(!rt.state.active_tab().draft.selected().is_empty());
+
+        rt.update(move |a, _| {
+            let term = a.terminals.get_mut(&tab).unwrap();
+            term.grid = true;
+            term.shell.feed(b"\x1b[2J\x1b[Hselectable grid", None);
+            term.sync();
+        });
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        let rect = rt.elements().iter().find(|e| e.key.as_deref() == Some("grid-text")).unwrap().rect;
+        let y = rect[1] + Cells::of(&rt.state).row / 2.0;
+        rt.pointer_down(rect[0] + 1.0, y);
+        rt.frame(1.0 / 120.0);
+        rt.pointer_move(rect[0] + 15.0 * Cells::of(&rt.state).cell, y);
+        rt.frame(1.0 / 120.0);
+        rt.pointer_up(rect[0] + 15.0 * Cells::of(&rt.state).cell, y);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.copied_selection.as_deref(), Some("selectable grid"));
+    }
+
+    #[test]
+    fn block_menu_tracks_the_sticky_toolbar_at_the_bottom_of_long_output() {
+        let mut app = App::new();
+        app.open_tab(crate::tabs::TabKind::Terminal);
+        app.fixture_blocks(&[("long command", &vec!["output"; 80], 0)]);
+        let tab = app.active_tab().id;
+        app.terminals.get_mut(&tab).unwrap().selected = Some(9000);
+        let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| {
+            el().w_full().h_full().child(view(a)).child(block_menu_overlay(a))
+        }, (800.0, 600.0), Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        let key = format!("block-more:{tab}:9000");
+        let trigger = rt.elements().iter().find(|e| e.key.as_deref() == Some(&key)).unwrap().rect;
+        let (x, y) = (trigger[0] + trigger[2] / 2.0, trigger[1] + trigger[3] / 2.0);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        let elements = rt.elements();
+        let anchor = elements.iter().find(|e| e.key.as_deref() == Some(&format!("block-actions:{tab}:9000"))).unwrap().rect;
+        let menu = elements.iter().find(|e| e.key.as_deref() == Some(&format!("block-action-menu:{tab}:9000"))).unwrap().rect;
+        assert!((menu[1] - anchor[1] - anchor[3] - 2.0 * rt.state.ty.scale()).abs() < 1.0, "anchor {anchor:?}, menu {menu:?}");
+    }
 
     #[test]
     fn completion_keeps_the_block_tail_near_the_viewport_bottom() {

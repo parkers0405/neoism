@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-service-api"
-version = "0.7.151"
+version = "0.7.152"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -2214,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.151"
+version = "0.7.152"
 dependencies = [
  "serde",
  "serde_json",
@@ -2259,6 +2259,7 @@ dependencies = [
  "url",
  "uuid",
  "web-time",
+ "wgpu",
  "yrs",
 ]
 
@@ -3137,7 +3138,6 @@ dependencies = [
 [[package]]
 name = "procwatch"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
 dependencies = [
  "libc",
 ]
@@ -3538,7 +3538,6 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3638,12 +3637,10 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
 dependencies = [
  "wgpu",
 ]
@@ -3651,7 +3648,6 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=e970367bd7d2a51e2e7d58e2978ea32eac7780cb#e970367bd7d2a51e2e7d58e2978ea32eac7780cb"
 dependencies = [
  "taffy",
 ]

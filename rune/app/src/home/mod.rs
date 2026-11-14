@@ -60,7 +60,7 @@ pub struct Cells {
 impl Cells {
     pub fn of(app: &App) -> Cells {
         let size = app.ty.size;
-        Cells { cell: size * 0.6, row: size * 1.3, inset: 16.0 * app.ty.scale() }
+        Cells { cell: app.ty.advance(), row: size * 1.3, inset: 16.0 * app.ty.scale() }
     }
 
     /// Pixel cell size for Ghostty's size reports and mouse encoding.
@@ -162,7 +162,7 @@ impl App {
         self.send_pty(PtyClient::PtyInput { session_id: session_id.into(), bytes: bytes.to_vec() });
     }
 
-    fn active_terminal(&self) -> Option<&Terminal> {
+    pub(crate) fn active_terminal(&self) -> Option<&Terminal> {
         let tab = self.active_tab();
         if !matches!(tab.kind, TabKind::Home | TabKind::Terminal) { return None; }
         self.terminals.get(&tab.id)

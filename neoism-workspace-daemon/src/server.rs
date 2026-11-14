@@ -91,6 +91,140 @@ fn resolve_request_workspace_root(
         .map_err(|err| format!("workspace_root cannot be resolved: {root}: {err}"))
 }
 
+/// Files-only exception to the existing-root policy. All other service planes
+/// retain resolve_request_workspace_root's strict existing-directory contract.
+async fn resolve_files_workspace_root(
+    root: Option<&str>,
+    message: &FilesClientMessage,
+    advertised_roots: impl IntoIterator<Item = StdPathBuf>,
+) -> Result<StdPathBuf, String> {
+    match resolve_request_workspace_root(root) {
+        Ok(root) => Ok(root),
+        Err(error) => {
+            files_handler::create_uncreated_notes_root(root, message, advertised_roots)
+                .await?
+                .ok_or(error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod notes_root_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn uncreated_notes_root_first_file_and_folder() {
+        for is_dir in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let notes = temporary.path().join("Vaults").join("Default");
+            let advertised = vec![notes.clone()];
+            let list = FilesClientMessage::ListDir { path: String::new() };
+            assert!(resolve_files_workspace_root(notes.to_str(), &list, advertised.clone()).await.is_err());
+            assert!(matches!(files_handler::uncreated_notes_listing(notes.to_str(), &list, advertised.clone()),
+                Some(FilesServerMessage::DirListing { entries, .. }) if entries.is_empty()));
+            assert!(!notes.exists(), "browse must not create the vault");
+            let name = if is_dir { "New folder" } else { "Untitled.md" };
+            let create = if is_dir {
+                FilesClientMessage::CreateDir { dir: String::new(), name: name.into() }
+            } else {
+                FilesClientMessage::CreateFile { dir: String::new(), name: name.into() }
+            };
+            let root = resolve_files_workspace_root(notes.to_str(), &create, advertised).await.unwrap();
+            assert_eq!(root, crate::path::canonicalize(&notes).unwrap());
+            let replies = files_handler::handle_with_root(&root, create).await;
+            assert!(matches!(replies.as_slice(), [FilesServerMessage::FileCreated { path, is_dir: actual }] if path == name && *actual == is_dir));
+            assert!(notes.join(name).exists());
+            // Once materialized, the ordinary resolver/handlers own all I/O;
+            // no advertised-root exception is required any more.
+            let root = resolve_files_workspace_root(notes.to_str(), &list, []).await.unwrap();
+            let replies = files_handler::handle_with_root(&root, list).await;
+            assert!(matches!(replies.as_slice(), [FilesServerMessage::DirListing { entries, .. }] if entries.len() == 1));
+            if !is_dir {
+                let replies = files_handler::handle_with_root(&root, FilesClientMessage::WriteFile {
+                    path: name.into(), bytes: b"hello".to_vec(),
+                }).await;
+                assert!(matches!(replies.as_slice(), [FilesServerMessage::FileWritten { bytes_written: 5, .. }]));
+                assert_eq!(std::fs::read(notes.join(name)).unwrap(), b"hello");
+            } else {
+                let create = FilesClientMessage::CreateFile { dir: name.into(), name: "nested.md".into() };
+                let root = resolve_files_workspace_root(notes.to_str(), &create, []).await.unwrap();
+                let replies = files_handler::handle_with_root(&root, create).await;
+                assert!(matches!(replies.as_slice(), [FilesServerMessage::FileCreated { is_dir: false, .. }]));
+                assert!(notes.join(name).join("nested.md").is_file());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn uncreated_notes_root_rejects_other_io_and_escapes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notes = temporary.path().join("Default");
+        let advertised = vec![notes.clone()];
+        let create = FilesClientMessage::CreateFile { dir: String::new(), name: "Untitled.md".into() };
+        let unknown = temporary.path().join("unknown");
+        assert!(resolve_files_workspace_root(unknown.to_str(), &create, advertised.clone()).await.is_err());
+        assert!(!unknown.exists());
+        assert!(resolve_files_workspace_root(notes.join("child").to_str(), &create, advertised.clone()).await.is_err());
+        assert!(resolve_files_workspace_root(notes.to_str(), &create, []).await.is_err());
+        let mut denied = vec![
+            FilesClientMessage::ListDir { path: "child".into() },
+            FilesClientMessage::ReadFile { path: "Untitled.md".into() },
+            FilesClientMessage::Stat { path: String::new() },
+            FilesClientMessage::WriteFile { path: "Untitled.md".into(), bytes: vec![] },
+            FilesClientMessage::Delete { path: String::new() },
+            FilesClientMessage::Rename { from: "a".into(), to: "b".into() },
+            FilesClientMessage::CreateFile { dir: "child".into(), name: "Untitled.md".into() },
+            FilesClientMessage::CreateDir { dir: "../outside".into(), name: "folder".into() },
+        ];
+        for name in ["", ".", "..", "../escape", "child/note.md", "child\\note.md"] {
+            denied.push(FilesClientMessage::CreateFile { dir: String::new(), name: name.into() });
+            denied.push(FilesClientMessage::CreateDir { dir: String::new(), name: name.into() });
+        }
+        denied.push(FilesClientMessage::CreateFile {
+            dir: String::new(), name: temporary.path().join("escape").to_string_lossy().into_owned(),
+        });
+        for message in denied {
+            assert!(resolve_files_workspace_root(notes.to_str(), &message, advertised.clone()).await.is_err(), "{message:?}");
+            assert!(!notes.exists(), "invalid I/O must not materialize the vault");
+        }
+        std::fs::write(&notes, "not a directory").unwrap();
+        assert!(resolve_files_workspace_root(notes.to_str(), &create, advertised).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uncreated_notes_root_rejects_dangling_symlinks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let outside = temporary.path().join("outside");
+        let link = temporary.path().join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        for notes in [link.clone(), link.join("Default")] {
+            let create = FilesClientMessage::CreateFile { dir: String::new(), name: "Untitled.md".into() };
+            assert!(resolve_files_workspace_root(notes.to_str(), &create, [notes.clone()]).await.is_err());
+            assert!(!outside.exists());
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn uncreated_notes_root_matches_windows_wire_separators() {
+        let temporary = tempfile::tempdir().unwrap();
+        let notes = temporary.path().join("Vaults").join("Default");
+        let wire_root = notes.to_str().unwrap().replace('\\', "/");
+        let create = FilesClientMessage::CreateFile {
+            dir: String::new(),
+            name: "Untitled.md".into(),
+        };
+        let root = resolve_files_workspace_root(Some(&wire_root), &create, [notes.clone()])
+            .await
+            .unwrap();
+        assert_eq!(root, crate::path::canonicalize(&notes).unwrap());
+        let replies = files_handler::handle_with_root(&root, create).await;
+        assert!(matches!(replies.as_slice(), [FilesServerMessage::FileCreated { is_dir: false, .. }]));
+        assert!(notes.join("Untitled.md").is_file());
+    }
+}
+
 /// Bundle of state passed into every handler. Cheap to clone.
 ///
 #[derive(Clone)]

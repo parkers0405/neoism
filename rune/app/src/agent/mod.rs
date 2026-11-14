@@ -4,6 +4,7 @@
 pub mod mcp;
 
 mod activity;
+pub(crate) use activity::flames as activity_flames;
 mod anchor;
 pub mod attach;
 mod composer;
@@ -19,8 +20,9 @@ mod prose;
 mod resync;
 mod sidebar;
 pub(crate) use sidebar::loader;
-mod table;
+pub(crate) mod table;
 mod ticks;
+mod typography;
 pub mod slash;
 mod user;
 pub mod timeline;
@@ -127,6 +129,7 @@ pub struct Session {
     /// Until one arrives, reopened sessions project their most recent persisted checklist.
     pub todos: Option<Vec<TodoItem>>,
     pub goal: Option<slash::Goal>,
+    pub goal_notice: Option<slash::GoalNotice>,
     history_edits: history::Edits,
     /// Lazy, bounded to loaded rows. Length catches append-only callers (echoes/notices);
     /// same-length replacements and reorders must call `invalidate_message_positions`.
@@ -654,7 +657,7 @@ impl App {
             directory: Some(self.cwd.clone()),
             agent: Some(self.composer.selection.agent.clone()).filter(|a| !a.is_empty()),
             model: Some(self.composer.selection.model.clone()).filter(|m| !m.is_empty()),
-            connection_id: None,
+            connection_id: self.composer.selection.connection_id.clone(),
             external_provider: None,
             thinking: Some(self.composer.selection.thinking.clone()).filter(|t| !t.is_empty()),
         });
@@ -701,7 +704,7 @@ impl App {
             attachments,
             mode: Some(self.composer.selection.agent.clone()).filter(|a| !a.is_empty()),
             model: Some(self.composer.selection.model.clone()).filter(|m| !m.is_empty()),
-            connection_id: None,
+            connection_id: self.composer.selection.connection_id.clone(),
             thinking: Some(self.composer.selection.thinking.clone()).filter(|t| !t.is_empty()),
             delivery: PromptDelivery::Steer,
         });
@@ -818,6 +821,7 @@ impl App {
         }
         // Session idle ends a turn, not a child's task lifecycle: a follow-up may already be
         // queued. Only the family/lifecycle events above finish the sidebar child.
+        self.goal_celebration.observe(&message);
         if let Some(changed) = self.apply_goal_event(&message) { return changed; }
         if self.apply_slash_event(&message) { return true; }
         match message {
@@ -848,7 +852,13 @@ impl App {
                     self.send_agent(AgentClientMessage::SwitchThread { session_id: session_id.clone() });
                     self.stream_owner.insert(session_id.clone(), session_id.clone());
                     self.send_agent(AgentClientMessage::ResumeStream { session_id: session_id.clone() });
-                    self.submit_prompt(&session_id, prompt);
+                    if prompt.starts_with('/') {
+                        if !self.send_new_goal(&session_id, &prompt) {
+                            self.send_agent(AgentClientMessage::SlashCommand { session_id, text: prompt });
+                        }
+                    } else {
+                        self.submit_prompt(&session_id, prompt);
+                    }
                 }
                 self.refresh_threads();
             }
@@ -924,8 +934,22 @@ impl App {
             AgentServerMessage::MessageUpdated { session_id, mut message, parent_message_id } => {
                 let session = self.sessions.entry(session_id).or_default();
                 let part = message.id.clone();
+                // Pruning old outputs emits tool updates too. History may not contain those
+                // parts (settled traces are omitted or paged out); they are not new live rows.
+                // Known parts still update in place, and history pages own historical inserts.
+                if message.kind == HistoryMessageKind::Tool && message.created_at > 0
+                    && session.message_position(&message.id).is_none()
+                    && session.messages.iter().rev().find(|m| m.kind == HistoryMessageKind::User && m.created_at > 0)
+                        .is_some_and(|prompt| message.created_at < prompt.created_at)
+                {
+                    return false;
+                }
                 session.pending_prompts.remove(&message.id);
                 settle_task_card(&self.families, &mut message, session.streaming);
+                let previous = session.message_position(&message.id).map(|at| &session.messages[at]);
+                if previous.is_none() && message.kind == HistoryMessageKind::System && message.title == "Goal Started" {
+                    session.goal_notice = Some(slash::GoalNotice::new(message.id.clone()));
+                }
                 let previous = session.message_position(&message.id).map(|at| &session.messages[at]);
                 self.tools.completion_bump(previous, &message, self.ty.scale());
                 let rebase = session.message_position(&message.id)
@@ -1477,6 +1501,51 @@ mod cache_tests {
 
     fn tool(id: &str, status: &str, detail: &str) -> HistoryMessage {
         serde_json::from_value(json!({"id": id, "role": "Assistant", "kind": "Tool", "tool": "bash", "title": "Bash", "status": status, "detail": detail})).unwrap()
+    }
+
+    #[test]
+    fn old_tool_updates_do_not_append_to_the_live_tail_after_a_send() {
+        let mut app = App::new();
+        let prompt = |id: &str, at: u64| -> HistoryMessage {
+            serde_json::from_value(json!({"id": id, "role": "User", "kind": "User", "text": id, "created_at": at})).unwrap()
+        };
+        let mut known = tool("known-old-tool", "completed", "original");
+        known.created_at = 110;
+        let session = app.sessions.entry("s".into()).or_default();
+        session.loaded = true;
+        session.messages = vec![prompt("old-prompt", 100), known.clone(), prompt("last-prompt", 200)];
+        session.live_from = Some(2);
+        session.live_anchor = Some("last-prompt".into());
+        app.submit_prompt("s", "next question".into());
+        app.set_streaming("s", true);
+        let before = app.sessions["s"].messages.clone();
+        let update = |app: &mut App, message: HistoryMessage| app.apply_agent(AgentServerMessage::MessageUpdated {
+            session_id: "s".into(), message, parent_message_id: Some("old-step".into()),
+        });
+        // Pruning fans out updates for old parts absent from the loaded, settled history.
+        for i in 0..10 {
+            let mut old = tool(&format!("pruned-{i}"), "completed", "pruned output");
+            old.created_at = 120 + i;
+            assert!(!update(&mut app, old));
+        }
+        assert_eq!(app.sessions["s"].messages, before);
+        // An old part already loaded is updated, not dropped or moved to the tail.
+        known.detail = "updated output".into();
+        update(&mut app, known.clone());
+        assert_eq!(app.sessions["s"].messages[1], known);
+        // A current tool can first arrive already completed; a missing timestamp is not
+        // evidence of an old part either. Both must still become visible live rows.
+        for (id, at) in [("current-tool", 300), ("untimed-tool", 0)] {
+            let mut current = tool(id, "completed", "current output");
+            current.created_at = at;
+            update(&mut app, current);
+        }
+        let session = &app.sessions["s"];
+        let shown: Vec<_> = session.messages.iter().enumerate()
+            .filter(|(i, m)| tools::visible(m, *i, session.live_from.unwrap()))
+            .filter(|(_, m)| m.kind == HistoryMessageKind::Tool)
+            .map(|(_, m)| m.id.as_str()).collect();
+        assert_eq!(shown, ["current-tool", "untimed-tool"]);
     }
 
     #[test]

@@ -46,8 +46,9 @@ pub fn view(app: &App, term: &Terminal) -> El {
             let (col, row) = cell_at(e.x, e.y);
             a.grid_wheel(tab_id, steps, col, row);
             true
-        })
-        .on_drag(move |a: &mut App, d: &mut Drag, _: &mut Tx| {
+        });
+    if term.shell.mouse_tracking() {
+        grid = grid.on_drag(move |a: &mut App, d: &mut Drag, _: &mut Tx| {
             let action = match d.phase {
                 Phase::Down => MouseAction::Press,
                 Phase::Move => MouseAction::Motion,
@@ -56,5 +57,6 @@ pub fn view(app: &App, term: &Terminal) -> El {
             let (col, row) = cell_at(d.x, d.y);
             a.grid_mouse(tab_id, action, col, row);
         });
+    }
     el().w_full().h_full().pl(inset).pr(inset).child(grid)
 }

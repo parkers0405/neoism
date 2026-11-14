@@ -5,6 +5,7 @@
 pub mod keybinds;
 pub mod rebind;
 pub mod view;
+mod fonts;
 
 pub use view::view;
 
@@ -165,6 +166,40 @@ fn option_value(text: &str, kind: ConfigValueKind) -> Value {
     parse_value(text, kind).unwrap_or_else(|| Value::String(text.to_owned()))
 }
 
+/// Installed daemons may predate the liquid-glass cursor.
+fn with_liquid_glass_cursor_fallback(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigDescriptor> {
+    if !descriptors.iter().any(|d| d.path == "appearance.effects.liquid-glass-cursor") {
+        descriptors.push(ConfigDescriptor {
+            path: "appearance.effects.liquid-glass-cursor".into(),
+            label: "Liquid glass cursor".into(),
+            description: "Use native Liquid Glass for the app-wide keyboard cursor on macOS 26+. Other platforms keep the normal cursor.".into(),
+            value_kind: ConfigValueKind::Boolean,
+            default: json!(false),
+            static_suggestions: Vec::new(), runtime_suggestions: Vec::new(), options: Vec::new(),
+            provider: None, constraints: ConfigConstraints::default(), accepted_kinds: Vec::new(),
+            extensible: false, category: ConfigCategory::Appearance, control: ConfigControl::Toggle,
+            settings_visible: true,
+        });
+    }
+    descriptors
+}
+
+fn with_liquid_glass_selection_fallback(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigDescriptor> {
+    if !descriptors.iter().any(|d| d.path == "appearance.effects.liquid-glass-selection") {
+        descriptors.push(ConfigDescriptor {
+            path: "appearance.effects.liquid-glass-selection".into(),
+            label: "Liquid glass selection".into(),
+            description: "A sliding glass pill behind the active rail panel. Independent of the keyboard cursor; accessibility and unsupported renderers use a solid indicator.".into(),
+            value_kind: ConfigValueKind::Boolean, default: json!(false),
+            static_suggestions: Vec::new(), runtime_suggestions: Vec::new(), options: Vec::new(),
+            provider: None, constraints: ConfigConstraints::default(), accepted_kinds: Vec::new(),
+            extensible: false, category: ConfigCategory::Appearance, control: ConfigControl::Toggle,
+            settings_visible: true,
+        });
+    }
+    descriptors
+}
+
 /// Installed daemons may predate this decoration or its current default.
 fn with_wordmark_fire_fallback(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigDescriptor> {
     if let Some(d) = descriptors.iter_mut().find(|d| d.path == "appearance.wordmark-fire") {
@@ -230,7 +265,7 @@ impl Default for Settings {
 impl Settings {
     /// Visible schema rows: settings-visible, no wildcard paths, ordered by category then label.
     pub fn set_descriptors(&mut self, descriptors: Vec<ConfigDescriptor>) {
-        self.rows = descriptors.into_iter()
+        self.rows = fonts::descriptors(descriptors).into_iter()
             .filter(|d| d.settings_visible && !d.path.split('.').any(|seg| seg == "*"))
             .map(Row::from_descriptor)
             .collect();
@@ -362,12 +397,15 @@ impl App {
         if let Some(config) = message.get("Config") {
             self.keybindings = config["value"]["keybinds"]["keys"].clone();
             self.wordmark.fire_enabled = crate::config::wordmark_fire(&config["value"]);
+            self.cursor.liquid_glass = crate::config::liquid_glass_cursor(&config["value"]);
+            self.liquid_glass_selection = crate::config::liquid_glass_selection(&config["value"]);
+            self.set_font_families(crate::ui::fonts::configured(&config["value"]));
         }
         let Some(settings) = &mut self.settings else { return };
         if let Some(config) = message.get("Config") {
             settings.values = config["value"].clone();
         } else if let Some(schema) = message.get("ConfigSchema") {
-            if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(with_wordmark_fire_fallback(descriptors)); }
+            if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(with_liquid_glass_selection_fallback(with_liquid_glass_cursor_fallback(with_wordmark_fire_fallback(descriptors)))); }
         }
     }
 
@@ -378,7 +416,17 @@ impl App {
         match path {
             "appearance.theme" => if let Some(name) = value.as_str() { self.apply_theme(name); return },
             "appearance.fonts.size" => if let Some(size) = value.as_f64() { self.ty.size = (size as f32).clamp(8.0, 40.0); },
+            "appearance.fonts.weight" => if let Some(weight) = value.as_f64() { self.ty.weight = (weight as f32).clamp(100.0, 900.0); },
+            "appearance.chat-font-family" | "appearance.fonts.family" => {
+                if let Some(name) = value.as_str().map(str::trim).filter(|name| !name.is_empty()) {
+                    let mut families = self.font_families.clone();
+                    if path == "appearance.chat-font-family" { families.0 = name.to_owned(); } else { families.1 = name.to_owned(); }
+                    self.set_font_families(families);
+                }
+            }
             "appearance.wordmark-fire" => self.wordmark.fire_enabled = value.as_bool().unwrap_or(true),
+            "appearance.effects.liquid-glass-cursor" => self.cursor.liquid_glass = value.as_bool().unwrap_or(false),
+            "appearance.effects.liquid-glass-selection" => self.liquid_glass_selection = value.as_bool().unwrap_or(false),
             "ui.window.background-image" | "ui.window.background-image-disabled" => {}
             _ => {}
         }
@@ -490,11 +538,65 @@ impl App {
 mod tests {
     use super::*;
 
+    #[test]
+    fn liquid_glass_selection_schema_and_live_apply_are_independent() {
+        let descriptors = with_liquid_glass_selection_fallback(Vec::new());
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].default, json!(false));
+        assert_eq!(with_liquid_glass_selection_fallback(descriptors.clone()), descriptors);
+        let mut app = App::new();
+        app.cursor.liquid_glass = true;
+        app.write_setting("appearance.effects.liquid-glass-selection", json!(true));
+        assert!(app.liquid_glass_selection);
+        assert!(app.cursor.liquid_glass);
+        for enabled in [false, true] {
+            app.apply_config_reply(0, &json!({"Config":{"value":{"appearance":{"effects":{"liquid-glass-selection":enabled}}}}}));
+            assert_eq!(app.liquid_glass_selection, enabled);
+        }
+        app.apply_config_reply(0, &json!({"Config":{"value":{}}}));
+        assert!(!app.liquid_glass_selection);
+    }
+
     fn descriptor(path: &str, category: ConfigCategory, control: ConfigControl, kind: ConfigValueKind) -> ConfigDescriptor {
         serde_json::from_value(json!({
             "path": path, "label": path.rsplit('.').next().unwrap(), "description": "", "value_kind": kind,
             "default": null, "extensible": false, "category": category, "control": control,
         })).unwrap()
+    }
+
+    #[test]
+    fn liquid_glass_cursor_fallback_is_default_off_and_does_not_duplicate_schema() {
+        let fallback = with_liquid_glass_cursor_fallback(Vec::new());
+        assert_eq!(fallback.len(), 1);
+        let d = &fallback[0];
+        assert_eq!(d.path, "appearance.effects.liquid-glass-cursor");
+        assert_eq!(d.default, json!(false));
+        assert_eq!(d.value_kind, ConfigValueKind::Boolean);
+        assert_eq!(d.control, ConfigControl::Toggle);
+        assert!(d.settings_visible);
+        assert_eq!(with_liquid_glass_cursor_fallback(fallback.clone()), fallback);
+    }
+
+    #[test]
+    fn liquid_glass_cursor_toggle_and_reload_apply_without_settings_open() {
+        let mut app = App::new();
+        app.daemon = None;
+        app.settings = Some(Settings::default());
+        app.apply_config_reply(0, &json!({"ConfigSchema": {"descriptors": []}}));
+        let index = app.settings.as_ref().unwrap().rows.iter().position(|row| row.path == "appearance.effects.liquid-glass-cursor").unwrap();
+        app.cursor.liquid_glass = false;
+        app.toggle_setting(index);
+        assert!(app.cursor.liquid_glass);
+        assert_eq!(app.settings.as_ref().unwrap().value("appearance.effects.liquid-glass-cursor"), Some(&json!(true)));
+        app.toggle_setting(index);
+        assert!(!app.cursor.liquid_glass);
+        app.settings = None;
+        for enabled in [true, false, true] {
+            app.apply_config_reply(0, &json!({"Config": {"value": {"appearance": {"effects": {"liquid-glass-cursor": enabled}}}}}));
+            assert_eq!(app.cursor.liquid_glass, enabled);
+        }
+        app.apply_config_reply(0, &json!({"Config": {"value": {}}}));
+        assert!(!app.cursor.liquid_glass, "removing the override restores default off");
     }
 
     #[test]
@@ -526,10 +628,11 @@ mod tests {
         app.settings = Some(Settings::default());
         app.apply_config_reply(0, &json!({"ConfigSchema": {"descriptors": []}}));
         app.wordmark.fire_enabled = true;
-        app.toggle_setting(0);
+        let index = app.settings.as_ref().unwrap().rows.iter().position(|row| row.path == "appearance.wordmark-fire").unwrap();
+        app.toggle_setting(index);
         assert!(!app.wordmark.fire_enabled);
         assert_eq!(app.settings.as_ref().unwrap().value("appearance.wordmark-fire"), Some(&json!(false)));
-        app.toggle_setting(0);
+        app.toggle_setting(index);
         assert!(app.wordmark.fire_enabled);
         app.settings = None;
         for enabled in [true, false] {

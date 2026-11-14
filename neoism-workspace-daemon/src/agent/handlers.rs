@@ -838,6 +838,7 @@ pub(crate) async fn handle_submit_prompt(
     thinking: Option<String>,
     delivery: neoism_protocol::agent::PromptDelivery,
 ) {
+    let goal_arguments = super::goals::command_arguments(&text).map(str::to_string);
     let mut body = serde_json::Map::new();
     let mut parts = vec![json!({ "type": "text", "text": text })];
     for attachment in attachments {
@@ -884,6 +885,21 @@ pub(crate) async fn handle_submit_prompt(
                 }),
             );
         }
+    }
+    if let Some(arguments) = goal_arguments {
+        emit_command_result(
+            &inner,
+            Some(session_id.clone()),
+            "Goal",
+            super::goals::execute_with_prompt(
+                &inner,
+                &session_id,
+                &arguments,
+                Some(Value::Object(body)),
+            )
+            .await,
+        );
+        return;
     }
     if let Err(err) = http_post_json(
         &inner,
@@ -2111,6 +2127,15 @@ pub(crate) async fn handle_slash_command(
     text: String,
 ) {
     let trimmed = text.trim();
+    if let Some(arguments) = super::goals::command_arguments(trimmed) {
+        emit_command_result(
+            &inner,
+            Some(session_id.clone()),
+            "Goal",
+            super::goals::execute(&inner, &session_id, arguments).await,
+        );
+        return;
+    }
     if trimmed == "/cd" || trimmed.starts_with("/cd ") {
         let directory = trimmed.strip_prefix("/cd").unwrap_or_default().trim();
         if directory.is_empty() {

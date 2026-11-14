@@ -257,7 +257,7 @@ impl PromptService for RuntimePrompts {
                 .and_then(serde_json::Value::as_str)
                 .map(|value| format!("Active agent instructions for this run:\n{}", value.trim()))
                 .unwrap_or_default(),
-            "active-goal-continuation" => "Continue working toward the active persistent goal. Do not stop just because one batch of work is done; keep going until the goal is genuinely accomplished. When it is fully done, call the complete_goal tool (status=complete) with a thorough summary instead of replying with plain text. If you are truly stuck and need the user, call complete_goal with status=blocked and explain exactly what you need.".into(),
+            "active-goal-continuation" => "Continue working toward the ENTIRE original persistent goal, not just the last batch or a convenient subset. A reply saying 'only X is done', 'Y remains', or 'next steps' is a progress update, not completion: do those remaining steps now. Before complete_goal(status=complete), review every requirement and perform the necessary verification. Never mark incomplete or unverified requirements done or silently narrow the goal. Use status=blocked only for a concrete external dependency you cannot resolve, explaining what you tried and exactly what the user must supply. Time spent, task size, and more work remaining are not blockers.".into(),
             other => return Err(PluginRuntimeError::new(format!("unknown prompt {other}"))),
         };
         Ok(RenderedPrompt {
@@ -275,7 +275,7 @@ fn goal_context(goal: &SessionGoal) -> Option<String> {
     let mut content = match goal.status {
         GoalStatus::Complete => unreachable!(),
         GoalStatus::Blocked => format!("Persistent goal for this session (currently marked BLOCKED). Re-evaluate whether the latest message unblocks you.\n\nGoal: {text}"),
-        GoalStatus::Active => format!("Persistent goal for this session. Keep working toward it across every turn, even if the latest message does not restate it. If a request conflicts with the goal, flag the conflict before proceeding. When the goal is fully accomplished, call the complete_goal tool (status=complete); if blocked, call it with status=blocked.\n\nGoal: {text}"),
+        GoalStatus::Active => format!("Persistent goal for this session. Keep working toward it across every turn, even if the latest message does not restate it. The goal means the ENTIRE original scope, not a convenient subset. If a request conflicts with the goal, flag the conflict before proceeding. Partial progress or finishing one batch is not completion. While actionable work remains, keep doing it instead of handing the user a list of next steps. Before complete_goal(status=complete), review every original requirement and verify the results. Do not silently reduce scope or treat unrun necessary checks as success. Use status=blocked only for a concrete external dependency preventing useful progress; explain what you tried and exactly what the user must provide. More work remaining is not a blocker.\n\nGoal: {text}"),
     };
     if !goal.summary.trim().is_empty() {
         content.push_str(&format!(

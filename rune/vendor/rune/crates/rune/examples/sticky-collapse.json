@@ -1,0 +1,6 @@
+[
+  {"t": 0.15, "type": "scroll", "key": "scroll", "dy": -120, "dur": 0.4},
+  {"t": 0.8, "type": "tap", "key": "hdr-0"},
+  {"t": 1.8, "type": "tap", "key": "hdr-0"},
+  {"t": 3.0, "type": "mark", "name": "end"}
+]

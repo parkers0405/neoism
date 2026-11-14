@@ -307,6 +307,9 @@ pub struct State {
     collab: crate::collab::Collab,
 }
 impl State {
+    /// Positive availability evidence without swapping a parked workspace into App.
+    pub(crate) fn server_connected(&self) -> bool { matches!(self.connection, Connection::Connected) }
+
     /// This parked workspace as recovery data (`session.rs`).
     pub(crate) fn capture(&self) -> crate::session::SavedWorkspace {
         crate::session::capture_workspace(&self.workspace_name, &self.cwd, &self.tabs, self.active, &self.layout,
@@ -637,9 +640,7 @@ impl App {
     fn finish_workspace_close(&mut self) {
         if self.workspaces.len() == 1 {
             // Closing the last workspace on purpose leaves nothing to reopen next time.
-            // (Never from a unit test: `qall` there would delete the user's own session file.)
-            if crate::session::enabled() && !cfg!(test) { let _ = std::fs::remove_file(crate::session::path()); }
-            self.session_writer = Default::default();
+            self.forget_session();
             self.session_closed = true;
             self.quit_requested = true;
             return;
@@ -752,6 +753,16 @@ impl App {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn parked_socket_is_positive_server_availability_evidence() {
+        let mut app = crate::app::App::new();
+        app.connection = crate::app::Connection::Connected;
+        let mut state = super::State::from_app(app);
+        assert!(state.server_connected());
+        state.connection = crate::app::Connection::Disconnected("client disconnected".into());
+        assert!(!state.server_connected());
+    }
+
+    #[test]
     fn git_panel_belongs_to_its_workspace() {
         let mut app = crate::app::App::new();
         crate::git::fixture(&mut app, false);
@@ -789,6 +800,7 @@ mod tests {
         app.open_tab(crate::tabs::TabKind::Agent { session: None });
         app.composer.selection = crate::agent::slash::Selection {
             model: "openai/gpt-6.1-sol".into(), agent: "build".into(), thinking: "high".into(),
+            connection_id: None,
         };
         app.sync_chips();
         let first = (app.model.clone(), app.agent.clone(), app.effort.clone());
@@ -796,6 +808,7 @@ mod tests {
         app.open_tab(crate::tabs::TabKind::Agent { session: None });
         app.composer.selection = crate::agent::slash::Selection {
             model: "openrouter/anthropic/claude".into(), agent: "plan".into(), thinking: "medium".into(),
+            connection_id: None,
         };
         app.sync_chips();
         let second = (app.model.clone(), app.agent.clone(), app.effort.clone());

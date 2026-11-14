@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.152" date="2026-11-14">
+      <description>
+        <p>Native touch input, fonts and keybindings, Agent goals and activity, connection feedback, compact navigation, and workspace improvements.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.152</url>
+    </release>
     <release version="0.7.151" date="2026-11-13">
       <description>
         <p>Remote and headless provider authentication, scoped MCP OAuth callbacks, secure CLI token handling, Docker headless defaults, and isolated hosting validation tooling.</p>

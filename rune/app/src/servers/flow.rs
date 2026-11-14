@@ -17,6 +17,44 @@ enum Outcome {
     Connected(Connected),
 }
 
+#[cfg(test)]
+mod celebration_tests {
+    use super::*;
+    #[test]
+    fn connection_success_consumed_once_errors_cancel_and_reconnect_silent() {
+        for system in [None, Some("ssh-id".to_owned())] {
+            let mut app = App::new();
+            let selection = Selection { id: "test-remote".into(), system, ..Selection::default() };
+            app.server.link.current = Some(selection.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.server.pending = Some(Pending { id: selection.id.clone(), rx, draft: None });
+            app.poll_server();
+            assert!(!app.connection_celebration.active());
+            assert!(tx.send(Ok(Outcome::Connected(Connected { selection,
+                target: Some(crate::daemon::Target { url: "ws://127.0.0.1:1".into(), auth_token: None, pairing_token: None }),
+                workspace: None, tunnel: None }))).is_ok());
+            app.poll_server();
+            assert!(app.connection_celebration.active());
+            app.connection_celebration.cancel();
+            app.poll_server();
+            app.server.link.answered();
+            app.poll_tunnel();
+            assert!(!app.connection_celebration.active());
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.server.pending = Some(Pending { id: "failed".into(), rx, draft: None });
+            assert!(tx.send(Err("denied".into())).is_ok());
+            app.poll_server();
+            assert!(!app.connection_celebration.active());
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.server.pending = Some(Pending { id: "cancelled".into(), rx, draft: None });
+            app.cancel_connect();
+            assert!(tx.send(Err("late".into())).is_err());
+            app.poll_server();
+            assert!(!app.connection_celebration.active());
+        }
+    }
+}
+
 struct Pending {
     /// The server or `system:<id>` being connected (the Systems list shows it Connecting).
     id: String,
@@ -75,11 +113,13 @@ pub struct ServerState {
     pub confirm: Option<Confirm>,
     pub ready_invite: Option<String>,
     list_check: Option<std::time::Instant>,
+    availability: super::availability::Availability,
     progress_hidden: bool,
     progress: Option<(String, String)>,
 }
 
 impl ServerState {
+    pub(crate) fn observed_online(&self, address: &str) -> Option<bool> { self.availability.online(address) }
     pub fn current_id(&self) -> &str { self.link.current.as_ref().map_or("local", |s| s.id.as_str()) }
     /// Whether the active workspace is on another server.
     pub fn remote(&self) -> bool { self.link.current.is_some() }
@@ -115,6 +155,7 @@ impl App {
     /// nowhere. The same recipe is dialed again (`SelectedSshReconnect`) and the connection
     /// pointed at the new tunnel; the remote daemon and everything it runs were never down.
     pub(crate) fn tunnel_lost(&mut self) {
+        self.connection_celebration.cancel();
         let link = &mut self.server.link;
         let Some(tunnel) = link.tunnel.as_mut() else { return };
         let redial = link.redial.get_or_insert_with(Redial::default);
@@ -188,8 +229,13 @@ impl App {
     pub fn poll_server(&mut self) -> bool {
         self.poll_tunnel();
         let checking = self.picker.as_ref().is_some_and(|p| p.mode == crate::palette::Mode::Servers);
+        if !checking { self.server.availability.close(); }
         let changed = if checking && self.server.list_check.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1)) {
             self.server.list_check = Some(std::time::Instant::now());
+            let addresses = self.picker.as_ref().unwrap().servers.iter()
+                // Fast ingress intentionally has no public /health route.
+                .filter(|s| !s.temporary).map(|s| s.address.clone()).collect();
+            self.server.availability.poll(addresses, self.waker.clone());
             self.refresh_server_picker()
         } else { false };
         let Some(pending) = &self.server.pending else { return changed };
@@ -204,7 +250,9 @@ impl App {
             Ok(Outcome::Connected(connected)) => {
                 let invite = draft.as_ref().filter(|d| d.host && d.fast).and(connected.selection.invite.clone());
                 let name = connected.selection.name.clone();
+                let celebrate = connected.target.is_some(); // Local selection isn't a handshake.
                 self.switch_connection(connected);
+                if celebrate { self.connection_celebration.confirmed(); }
                 if let Some(invite) = invite {
                     self.picker = None;
                     self.modal = Some(Modal::fast_server_ready(&name, &invite));

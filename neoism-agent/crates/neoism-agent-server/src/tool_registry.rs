@@ -526,21 +526,21 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
         tool(
             ToolOwner::Goals, owner,
             "complete_goal",
-            "Mark the active persistent goal complete (or blocked) so the agent stops continuing automatically. Call this when the goal is fully accomplished, or when you cannot make further progress without the user.",
+            "Mark the persistent goal complete only when the ENTIRE original goal is accomplished and verified. Partial progress or one finished batch is not completion; keep working while actionable work remains. Use blocked only for a concrete dependency requiring the user, explaining exactly what is needed. More work remaining is not a blocker.",
             json!({
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
                         "enum": ["complete", "blocked"],
-                        "description": "Use \"complete\" when the goal is fully done, or \"blocked\" when you cannot proceed without help. Defaults to \"complete\"."
+                        "description": "Required explicit decision: complete only when the entire goal is verified done; blocked only when a concrete external dependency prevents further useful work."
                     },
                     "summary": {
                         "type": "string",
-                        "description": "A thorough summary of what was accomplished (for complete) or exactly what is blocking you and what you need (for blocked)."
+                        "description": "A non-empty summary covering the entire goal (complete), or the concrete blocker, what was attempted, and exactly what the user must provide (blocked)."
                     }
                 },
-                "required": ["summary"]
+                "required": ["status", "summary"]
             }),
             stateful_handler,
         ),

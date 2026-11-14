@@ -1,0 +1,18 @@
+[package]
+workspace = "../.."
+name = "rune-motion"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Rune's animation runtime: analytic springs, retargetable tracks, presence, layout and matched-geometry animation, driven by a render thread."
+publish = false
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+
+[lints]
+workspace = true

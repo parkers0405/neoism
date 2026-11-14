@@ -6,6 +6,7 @@ pub mod feather;
 pub mod fire;
 pub mod fps;
 pub mod follow;
+pub mod fonts;
 pub mod icons;
 pub mod marquee;
 pub mod context;

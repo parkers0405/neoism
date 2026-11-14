@@ -37,6 +37,9 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     }
     let m = event.mods;
     match (&event.key, app.focus) {
+        (Key::Enter, Focus::Content) if !m.ctrl && !m.alt && !m.shift && !m.logo
+            && app.focused_field_mut().is_none() && app.picker.is_none() && app.finder.is_none()
+            && app.composer.picker.is_none() && app.menu.is_none() => app.replay_empty_wordmark(),
         (Key::Enter, Focus::Workspaces(index)) => {
             if index == app.workspaces.len() { app.new_workspace(); } else { app.select_workspace(index); }
             true
@@ -55,18 +58,19 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
-/// Window shortcuts. Text fields route their keys here first (`on_input_key`), so Alt chords
-/// never type into the composer.
+/// Window shortcuts, shared with text fields through `on_input_key`. macOS app commands
+/// use Command. Option+arrows retain the app-wide focus ladder, and Option+Shift
+/// arrows reorder the active tab unless the workspace strip has focus.
 pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
     if app.capture_binding(event) { return true; }
     // Super+V / Super+C, as the desktop binds them (fields keep their own Ctrl chords).
     let m = event.mods;
-    if m.logo && !m.ctrl && !m.alt {
+    if m.logo && !m.ctrl && !m.alt && !m.shift {
         let letter = match &event.key { Key::Text(t) => t.to_lowercase(), Key::Command(c) => c.to_ascii_lowercase().to_string(), _ => String::new() };
         match letter.as_str() {
             "v" => { app.paste_chord(tx); return true; }
-            "c" => { app.copy_chord(tx); return true; }
+            "c" => { if app.copy_chord(tx) || !cfg!(target_os = "macos") { return true; } }
             _ => {}
         }
     }
@@ -82,9 +86,15 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.menu.is_some() && app.menu_key(event) { return true; }
     if app.bound_shortcut(event, tx) { return true; }
     let m = event.mods;
+    let mac = cfg!(target_os = "macos");
     let alt_only = m.alt && !m.ctrl && !m.shift && !m.logo;
-    if m.alt && m.shift && !m.logo && matches!(event.key, Key::Left | Key::Right) {
-        app.move_chrome_tab(event.key == Key::Right, m.ctrl || matches!(app.focus, Focus::Workspaces(_)));
+    // Keep the original app-wide navigation on every platform. The macOS chord is
+    // an additional alias, not a replacement (independent of cursor material).
+    let focus_chord = alt_only || (mac && m.logo && m.ctrl && !m.alt && !m.shift);
+    let alt_move = m.alt && m.shift && !m.logo;
+    let move_chord = alt_move || (mac && m.logo && m.ctrl && m.shift && !m.alt);
+    if move_chord && matches!(event.key, Key::Left | Key::Right) {
+        app.move_chrome_tab(event.key == Key::Right, (alt_move && m.ctrl) || matches!(app.focus, Focus::Workspaces(_)));
         tx.animated();
         return true;
     }
@@ -119,24 +129,22 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if m.ctrl && m.alt && !m.shift && !m.logo {
         if let Some(direction) = arrow(&event.key) { app.nudge_split(direction); return true; }
     }
-    if alt_only {
+    let workspace_chord = if mac { m.logo && !m.ctrl && !m.alt && !m.shift } else { alt_only };
+    if workspace_chord {
+        let text = match &event.key { Key::Text(t) => t.clone(), Key::Command(c) => c.to_string(), _ => String::new() };
+        if let Ok(n) = text.parse::<usize>() { if (1..=9).contains(&n) { app.select_workspace(n - 1); return true; } }
+    }
+    if alt_only && !mac {
         if let Key::Text(t) = &event.key {
-            if let Ok(n) = t.parse::<usize>() { if (1..=9).contains(&n) { app.select_workspace(n - 1); return true; } }
-            match t.to_lowercase().as_str() {
-                "a" => { app.open_tab(TabKind::Agent { session: None }); return true; }
-                "t" => { app.open_tab(TabKind::Terminal); return true; }
-                "d" => { app.open_file_browser(crate::browser::Mode::ChooseDirectory); return true; }
-                "c" => {
-                    app.toggle_conversations();
-                    return true;
-                }
-                "p" => { app.open_picker(crate::palette::Mode::Commands); return true; }
-                "s" => { app.open_finder(crate::finder::Mode::Files); return true; }
-                "e" => { app.toggle_file_tree(); return true; }
-                "n" => { app.toggle_tree(crate::app::Sidebar::Notes); return true; }
-                _ => {}
+            // Preserve the extra terminal alias on other platforms. App letter chords
+            // otherwise belong to the configured catalogue, not Option on macOS.
+            if t.eq_ignore_ascii_case("t") {
+                app.open_tab(TabKind::Terminal);
+                return true;
             }
         }
+    }
+    if focus_chord {
         match event.key {
             Key::Up => { focus_up(app); return true; }
             Key::Down => { focus_down(app); return true; }
@@ -232,8 +240,9 @@ fn focus_down(app: &mut App) {
 }
 
 /// Left/Right on a tab row steps with wrapping through the focused pane's tabs and its `+` slot
-/// (`Buffers(tabs.len())`); `Alt+Left` from the first tab enters the sidebar; in content
-/// `Alt+Left/Right` moves between panes, and past the leftmost pane into the sidebar.
+/// (`Buffers(tabs.len())`); focus-left from the first tab enters the sidebar; in content
+/// focus-left/right moves between panes, and past the leftmost pane into the sidebar.
+/// Focus chords use Alt+arrows everywhere, with Ctrl+Cmd+arrows also on macOS.
 fn focus_step(app: &mut App, previous: bool) {
     let plus = app.tabs.len();
     let mut slots = app.pane_tab_indices();
@@ -287,8 +296,6 @@ impl App {
         if self.attach.preview.is_some() { return None; }
         use crate::ui::cursor::tab_bar;
         let scale = 1.0;
-        // An open finder or palette parks the cursor on its selected row; the query field keeps
-        // its own line caret (`selected_cursor_rect`: a 0.6 em block left of the row's text).
         if self.menu.is_some() { return self.rects.get("menu-row").map(|r| crate::ui::menu::cursor_rect(self, *r)); }
         if self.settings.is_some() {
             let settings = self.settings.as_ref()?;
@@ -296,8 +303,19 @@ impl App {
             return self.rects.get(&format!("settings-control:{index}")).map(|r| crate::settings::view::cursor_rect(self, *r));
         }
         if self.browser.is_some() { return self.rects.get("browser-row").filter(|_| self.browser.as_ref().is_some_and(|b| b.selected.is_some())).map(|r| crate::tree::view::cursor_rect(self, *r)); }
-        let row = if let Some(finder) = &self.finder { self.finder_row_rect(finder).map(|r| (r, 14.0, 13.0)) }
-            else if self.project_menu.is_some() { self.project_menu_row_rect().map(|r| (r, 14.0, 13.0)) }
+        // Search and commands own the insertion caret. Result navigation only changes their
+        // highlight; it must never steal the cursor from the editable query (including IME).
+        if self.finder.is_some() || self.picker.as_ref().is_some_and(|p| matches!(p.mode,
+            crate::palette::Mode::Commands | crate::palette::Mode::Systems | crate::palette::Mode::Servers)) {
+            let clip = self.cursor_clip()?;
+            let line = self.cursor.caret_line.get()?;
+            // During initial focus transfer Rune can still report the underlying editor's
+            // caret. Wait for the query's measured caret rather than drawing that stale one.
+            if line[0] < clip[0] - 1.0 || line[0] > clip[0] + clip[2] + 1.0
+                || line[1] < clip[1] - 1.0 || line[1] + line[3] > clip[1] + clip[3] + 1.0 { return None; }
+            return Some(crate::ui::cursor::block_for_caret(line, self.ty.sized(14.0).size));
+        }
+        let row = if self.project_menu.is_some() { self.project_menu_row_rect().map(|r| (r, 14.0, 13.0)) }
             else if let Some(picker) = &self.picker { self.palette_row_rect(picker).map(|r| (r, 10.0, 13.0)) }
             else { None };
         if let Some((r, pad_x, font)) = row {
@@ -332,9 +350,13 @@ impl App {
     /// cell scrolled out of view never paints over the tab bar, breadcrumb or status line.
     pub fn cursor_clip(&self) -> Option<[f32; 4]> {
         if self.menu.is_some() || self.settings.is_some() { return None; }
-        if self.finder.is_some() { return self.rects.get("finder-results").copied(); }
+        if self.finder.is_some() { return self.rects.get("finder-query-clip").copied(); }
         if self.browser.is_some() { return self.rects.get(crate::browser::view::LIST_KEY).copied(); }
-        if self.picker.is_some() { return self.rects.get("picker-results").copied(); }
+        if let Some(picker) = &self.picker {
+            return self.rects.get(if matches!(picker.mode, crate::palette::Mode::Commands | crate::palette::Mode::Systems | crate::palette::Mode::Servers) {
+                "picker-query-clip"
+            } else { "picker-results" }).copied();
+        }
         if self.project_menu.is_some() { return self.project_menu_clip(); }
         match self.focus {
             Focus::Buffers(_) => self.rects.get(&format!("pane-tab-strip:{}", self.layout.focus)).copied(),
@@ -402,11 +424,108 @@ mod tests {
     fn ctrl(key: Key) -> KeyEvent { KeyEvent { key, mods: Mods { ctrl: true, cmd: true, ..Mods::default() } } }
 
     #[test]
+    fn alt_arrows_move_app_wide_cursor_with_glass_on_and_off() {
+        use crate::ui::tab_drag::Source;
+        for glass in [false, true] {
+            let mut app = App::new();
+            app.keybindings = serde_json::json!([]);
+            app.cursor.liquid_glass = glass;
+            app.workspaces.push(crate::workspace::Entry { id: "test".into(), title: "Test".into(), server: None, state: None });
+            app.sidebar = Some(crate::app::Sidebar::Files);
+            app.apply_dir_listing("", &serde_json::json!([{"name":"file.rs", "is_dir":false}]));
+            app.rects.insert(Source::Buffer(app.active_tab().id).rect_key(), [320.0, 40.0, 160.0, 32.0]);
+            app.rects.insert(Source::Workspace(app.workspaces[app.workspace_active].id.clone()).rect_key(), [55.0, 0.0, 160.0, 32.0]);
+            app.rects.insert(format!("pane-new:{}", app.layout.focus), [480.0, 40.0, 32.0, 32.0]);
+            app.rects.insert("tree-row".into(), [55.0, 100.0, 240.0, 26.0]);
+            app.focus = Focus::Content;
+            app.sync_field_focus();
+            app.cursor.caret_line.set(Some([500.0, 400.0, 1.0, 22.0]));
+            let active = app.active;
+            let workspace = app.workspace_active;
+            let mut previous = None;
+            for (key, expected) in [
+                (Key::Up, Focus::Buffers(active)),
+                (Key::Up, Focus::Workspaces(workspace)),
+                (Key::Down, Focus::Buffers(active)),
+                (Key::Right, Focus::Buffers(app.tabs.len())),
+                (Key::Left, Focus::Buffers(active)),
+                (Key::Left, Focus::Sidebar),
+                (Key::Right, Focus::Content),
+                (Key::Left, Focus::Sidebar),
+            ] {
+                let event = KeyEvent { key, mods: Mods { alt: true, ..Default::default() } };
+                assert!(on_key(&mut app, &event, &mut Tx::default()), "glass={glass}, {event:?}");
+                app.sync_field_focus();
+                assert_eq!(app.focus, expected, "glass={glass}");
+                let target = app.cursor_target().expect("every focus zone has an app-wide target");
+                assert_ne!(previous, Some(target), "focus change must move the optical/fallback destination");
+                previous = Some(target);
+                app.cursor.tick(Some(target), std::time::Instant::now());
+                assert!(app.cursor.placed());
+                assert!(crate::ui::chrome::glass_cursor_allowed(&app));
+            }
+        }
+    }
+
+    #[test]
     fn ctrl_chords_read_as_letters_however_they_arrive() {
         assert_eq!(ctrl_letter(&ctrl(Key::Command('d'))), Some('d'));
         assert_eq!(ctrl_letter(&ctrl(Key::Text("U".into()))), Some('u'));
         assert_eq!(ctrl_letter(&ctrl(Key::Text("\u{4}".into()))), Some('d'));
         assert_eq!(ctrl_letter(&KeyEvent { key: Key::Command('d'), mods: Mods::default() }), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_focus_alias_is_preserved() {
+        let mut app = App::new();
+        app.keybindings = serde_json::json!([]);
+        app.focus = Focus::Content;
+        let alias = KeyEvent { key: Key::Up, mods: Mods { logo: true, ctrl: true, cmd: true, ..Default::default() } };
+        assert!(shortcut(&mut app, &alias, &mut Tx::default()));
+        assert_eq!(app.focus, Focus::Buffers(app.active));
+    }
+
+    #[test]
+    fn alt_shift_arrows_reorder_active_buffer_tabs_from_content_sidebar_and_strip() {
+        let mut app = App::new();
+        app.keybindings = serde_json::json!([]);
+        let home = app.active_tab().id;
+        app.open_file("shortcut.rs", None);
+        let editor = app.active_tab().id;
+        for focus in [Focus::Content, Focus::Sidebar, Focus::Buffers(app.active)] {
+            app.focus = focus;
+            for (key, order) in [(Key::Left, vec![editor, home]), (Key::Right, vec![home, editor])] {
+                let event = KeyEvent { key, mods: Mods { alt: true, shift: true, ..Default::default() } };
+                assert!(on_key(&mut app, &event, &mut Tx::default()));
+                assert_eq!(app.layout.focused().tabs, order);
+                assert_eq!(app.active_tab().id, editor);
+                assert_eq!(app.focus, focus);
+            }
+        }
+    }
+
+    #[test]
+    fn alt_shift_arrows_reorder_workspaces_and_ctrl_forces_the_workspace_strip() {
+        let mut app = App::new();
+        app.keybindings = serde_json::json!([]);
+        let first = app.workspace_id.clone();
+        app.new_workspace();
+        let second = app.workspace_id.clone();
+        app.focus = Focus::Workspaces(app.workspace_active);
+        for (key, order) in [(Key::Left, vec![second.clone(), first.clone()]), (Key::Right, vec![first.clone(), second.clone()])] {
+            let event = KeyEvent { key, mods: Mods { alt: true, shift: true, ..Default::default() } };
+            assert!(on_key(&mut app, &event, &mut Tx::default()));
+            assert_eq!(app.workspaces.iter().map(|w| w.id.clone()).collect::<Vec<_>>(), order);
+            assert_eq!(app.workspace_id, second);
+            assert_eq!(app.focus, Focus::Workspaces(app.workspace_active));
+        }
+        app.focus = Focus::Content;
+        let event = KeyEvent { key: Key::Left, mods: Mods { alt: true, shift: true, ctrl: true, cmd: true, ..Default::default() } };
+        assert!(on_key(&mut app, &event, &mut Tx::default()));
+        assert_eq!(app.workspaces.iter().map(|w| w.id.clone()).collect::<Vec<_>>(), vec![second.clone(), first]);
+        assert_eq!(app.workspace_id, second);
+        assert_eq!(app.focus, Focus::Content);
     }
 
     #[test]

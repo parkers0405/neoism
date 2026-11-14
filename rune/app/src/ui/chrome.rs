@@ -34,9 +34,11 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(body)
         .child(super::status::view(app))
         .child(super::tab_drag::overlay(app))
+        .child(crate::goal_celebration::view(app))
+        .child(crate::connection_celebration::view(app))
         // The cursor sits with what it marks: on a tab, a tree row or a caret it goes under the
         // popups (LSP cards, the slash picker, modals) instead of showing through them.
-        .child_if(app.cursor.placed() && !cursor_in_overlay(app), || cursor_quad(app))
+        .child_if(app.cursor.placed() && !app.cursor.native_glass && !cursor_in_overlay(app), || cursor_quad(app))
         .child(agent::overlay(app))
         .child(crate::editor::lsp_view::overlay(app))
         .child(crate::home::block_menu_overlay(app))
@@ -53,7 +55,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.prompt.is_some(), || super::context::prompt_view(app))
         .child_if(app.settings.is_some(), || crate::settings::view(app))
         .child_if(app.server.progress().is_some(), || crate::servers::flow::progress_view(app))
-        .child_if(app.cursor.placed() && cursor_in_overlay(app), || cursor_quad(app))
+        .child_if(app.cursor.placed() && !app.cursor.native_glass && cursor_in_overlay(app), || cursor_quad(app))
         .child(app.heartbeat.view())
 }
 
@@ -79,6 +81,60 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
 /// project menu): then it's drawn over them; otherwise under every popup.
 fn cursor_in_overlay(app: &App) -> bool {
     app.picker.is_some() || app.finder.is_some() || app.browser.is_some() || app.menu.is_some() || app.settings.is_some() || app.project_menu.is_some()
+}
+
+#[cfg(target_os = "macos")]
+pub fn glass_cursor_allowed(app: &App) -> bool {
+    if app.context.is_some() || app.prompt.is_some() || app.modal.is_some() || app.form.is_some()
+        || app.diag_popup.is_some() || app.tab_drag.is_some() || app.tree_dnd.is_some()
+        || app.server.progress().is_some() { return false; }
+    // Slash/mention suggestions sit above the composer; other composer pickers own
+    // the focused query field themselves. Neither needs to cover that field's caret.
+    cursor_in_overlay(app) || (app.terminals.get(&app.active_tab().id).is_none_or(|t| t.more.is_none())
+        // lsp_view::overlay only mounts while Content owns focus. Its remembered
+        // popup state must not force ordinary cursors on tabs/workspaces/sidebar.
+        && (app.focus != crate::app::Focus::Content
+            || app.active_buffer().is_none_or(|b| b.lsp.hover.is_none() && b.lsp.completion.is_none())))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn glass_cursor_hidden_editor_popup_does_not_override_tab_or_workspace_material() {
+    use crate::app::Focus;
+    let mut app = App::new();
+    app.open_file("cursor-test.rs", None);
+    app.apply_opened_file("cursor-test.rs", b"let value = 1;\n");
+    let editor = app.active_tab().id;
+    app.buffers.get_mut("cursor-test.rs").unwrap().lsp.hover = Some(crate::editor::lsp::Hover {
+        seq: 7, text: Some("A visible hover".into()), anchor: None,
+    });
+    app.focus = Focus::Content;
+    assert!(!glass_cursor_allowed(&app), "a genuinely visible popup retains ordering fallback");
+    for focus in [Focus::Buffers(app.active), Focus::Workspaces(0), Focus::Sidebar] {
+        app.focus = focus;
+        assert!(glass_cursor_allowed(&app), "hidden popup cannot disable glass for {focus:?}");
+    }
+    app.open_tab(crate::tabs::TabKind::Agent { session: None });
+    app.select_tab(editor);
+    app.focus = Focus::Buffers(app.active);
+    assert!(glass_cursor_allowed(&app), "selecting a tab can restore stored popup state, not popup visibility");
+    app.new_workspace();
+    app.select_workspace(0);
+    assert!(glass_cursor_allowed(&app), "workspace restoration retains chrome focus and glass");
+    app.focus = Focus::Content;
+    assert!(!glass_cursor_allowed(&app), "returning to the editor restores real popup ordering");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn glass_cursor_stays_enabled_for_composer_pickers() {
+    use crate::agent::slash::{Kind, Picker};
+    let mut app = App::new();
+    assert!(glass_cursor_allowed(&app));
+    for kind in [Kind::Slash, Kind::Model] {
+        app.composer.picker = Some(Picker::new(kind, "Search", Vec::new()));
+        assert!(glass_cursor_allowed(&app), "the focused composer/query caret must stay glass");
+    }
 }
 
 /// The trailing cursor in the accent colour.
@@ -146,10 +202,17 @@ fn rail(app: &App) -> El {
     };
     let grow = |key: &'static str, child: El| el().center().child(child)
         .scale(if hovered(key) { RAIL_HOVER_SCALE } else { 1.0 }).scale_motion(RAIL_SPRING);
+    // Paint-only shared hover washes precede the single optical slot. The original
+    // buttons still own input and foreground, so glass samples the wash but never a glyph.
+    let keys = ["topbar-menu", "toggle-files", "toggle-notes", "toggle-conversations", "open-finder", "open-servers"];
+    let washes = keys.into_iter().enumerate().map(|(i, key)| {
+        el().key(format!("rail-wash-{key}")).absolute(0.0, 6.5 + i as f32 * 51.5)
+            .w(RAIL_W).h(51.5).hover(rgb(p.hover)).hover_group_shared(key)
+    });
     let button = |key: &'static str, g: &'static str, active: bool, press: fn(&mut App)| {
         el().key(key).w(RAIL_W).h(51.5).center()
             .child(grow(key, icon(app, g, 2.0, if active { rgb(p.fg) } else { rgb(p.dim) })))
-            .hover(rgb(p.hover))
+            .hover_group_shared(key)
             .press_scale(RAIL_PRESS_SCALE)
             .on_hover_change(track(key))
             .on_press(press)
@@ -157,13 +220,15 @@ fn rail(app: &App) -> El {
     let servers = el().key("open-servers").w(RAIL_W).h(51.5).center()
         .child(grow("open-servers", icon(app, glyph::SERVERS, 1.9, rgb(p.dim))))
         .child(el().w(6.0).h(6.0).radius(3.0).fill(rgb(p.green)).absolute(38.0, 13.0))
-        .hover(rgb(p.hover))
+        .hover_group_shared("open-servers")
         .press_scale(RAIL_PRESS_SCALE)
         .on_hover_change(track("open-servers"))
         // The server button opens Systems (`TopBarAction::OpenSystems`).
         .on_press(|s: &mut App| s.open_picker(crate::palette::Mode::Systems));
     col().key("activity-rail").w(RAIL_W).h_full().pt(6.5).fill(rgb(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
+        .children(washes)
+        .child(crate::glass_selection::view(app))
         .child(button("topbar-menu", glyph::MENU, app.menu.is_some(), |s| s.toggle_menu())
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("topbar-menu".into(), r); }))
         // A click opens the panel beside what has the keyboard; only Alt+E / Alt+N move it in.
@@ -176,6 +241,41 @@ fn rail(app: &App) -> El {
         .child(servers)
         // Everyone in a shared workspace, this user first (`collab::view`).
         .children(crate::collab::view::rail(app))
+}
+
+#[cfg(test)]
+mod rail_selection_tests {
+    use super::*;
+
+    #[test]
+    fn one_selection_slides_above_hover_and_below_foreground_then_rests() {
+        let mut app = App::new();
+        app.liquid_glass_selection = true;
+        app.glass_selection_policy = (true, false);
+        app.sidebar = Some(Sidebar::Files);
+        let mut rt = rune::Runtime::new(app, |a, _| rail(a), (RAIL_W, 500.0), rune::Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        rt.pointer_move(27.75, 135.25);
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        let lens = |rt: &rune::Runtime<App>| {
+            let slots: Vec<_> = rt.instances.iter().enumerate().filter(|(_, i)| i.params[1] == rune::render::KIND_EFFECT).collect();
+            assert_eq!(slots.len(), 1, "one persistent selection, never one per button");
+            (slots[0].0, slots[0].1.rect)
+        };
+        let (index, before) = lens(&rt);
+        assert!(rt.instances[..index].iter().any(|i| i.rect[2] > 50.0 && (i.rect[3] - 51.5).abs() < 2.0 && i.fill[3] > 0.0), "hover wash must be in the optical backdrop");
+        assert!(rt.instances[index + 1..].iter().any(|i| i.params[1] == rune::render::KIND_GLYPH), "original foreground glyphs follow the glass");
+        rt.pointer_down(27.75, 135.25);
+        rt.pointer_up(27.75, 135.25);
+        rt.frame(0.08);
+        assert_eq!(rt.state.sidebar, Some(Sidebar::Notes), "paint-only hover washes cannot intercept the original button");
+        let (_, moving) = lens(&rt);
+        for _ in 0..180 { rt.frame(1.0 / 120.0); }
+        let (_, settled) = lens(&rt);
+        assert!(moving[1] > before[1] && moving[1] < settled[1], "selection must slide, not teleport: {before:?} -> {moving:?} -> {settled:?}");
+        rt.frame(0.5);
+        assert_eq!(lens(&rt).1, settled, "no idle optical motion");
+    }
 }
 
 fn sidebar(app: &App) -> El {

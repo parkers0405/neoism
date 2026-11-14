@@ -22,7 +22,7 @@ pub fn visible(message: &HistoryMessage, index: usize, live_from: usize) -> bool
     }
     match message.kind {
         HistoryMessageKind::Compaction | HistoryMessageKind::User | HistoryMessageKind::Assistant => true,
-        HistoryMessageKind::System => tool == "location_notice",
+        HistoryMessageKind::System => tool == "location_notice" || message.title == "Goal Started",
         HistoryMessageKind::Reasoning | HistoryMessageKind::Tool | HistoryMessageKind::Subtask => index >= live_from,
     }
 }

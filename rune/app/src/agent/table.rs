@@ -29,6 +29,40 @@ const RAIL_H: f32 = 5.0;
 const THUMB_MIN: f32 = 30.0;
 const END_REVEAL: f32 = 14.0;
 
+/// Keep diagonal noise from changing axes halfway through a trackpad gesture or its coast.
+#[derive(Default)]
+pub struct ScrollGesture {
+    key: String,
+    horizontal: Option<bool>,
+    pending: [f32; 2],
+    last: Option<std::time::Instant>,
+}
+
+impl ScrollGesture {
+    fn wheel(&mut self, key: &str, mut e: WheelEvent, now: std::time::Instant) -> Option<(bool, WheelEvent)> {
+        if !e.precise { return Some((e.mods.shift, e)); }
+        let fresh = e.phase == rune::GesturePhase::Began || self.key != key
+            || (!e.momentum && self.last.is_some_and(|last| now.duration_since(last).as_millis() > 180));
+        if fresh {
+            self.key = key.to_owned();
+            self.horizontal = None;
+            self.pending = [0.0; 2];
+        }
+        self.last = Some(now);
+        if self.horizontal.is_none() {
+            self.pending[0] += e.dx;
+            self.pending[1] += e.dy;
+            // Gather a few points before choosing an axis; initial contact can be noisy.
+            if self.pending[0].abs().max(self.pending[1].abs()) < 3.0 { return None; }
+            self.horizontal = Some(self.pending[0].abs() > self.pending[1].abs());
+            [e.dx, e.dy] = std::mem::take(&mut self.pending);
+        }
+        let horizontal = self.horizontal.unwrap();
+        if horizontal { e.dy = 0.0; } else { e.dx = 0.0; }
+        Some((horizontal, e))
+    }
+}
+
 /// The thumb for a `viewport` wide view of `content`: (its width, how far it travels along a
 /// `track` wide rail), as `markdown_horizontal_scrollbar_geometry` sizes it.
 fn thumb(track: f32, viewport: f32, content: f32, s: f32) -> (f32, f32) {
@@ -113,7 +147,9 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
         for (c, w) in widths.iter().enumerate() {
             let text = cells.get(c).cloned().unwrap_or_default();
             let color = if r == 0 { p.muted } else if looks_like_file_ref(&text) { p.blue } else { p.fg };
-            let cell_style = style.clone().text(rgb(color));
+            // Column budgets above use Geist Mono's advance, not the chat prose face.
+            let cell_style = style.clone().text(rgb(color)).body_font(app.ty.body())
+                .heading_font(1, app.ty.heading(1)).heading_font(2, app.ty.heading(2)).heading_font(3, app.ty.heading(3));
             let mut cell = col().w(*w).px(CELL_PAD_X * s).py(ROW_PAD_Y * s).min_h(LINE_H * s + 2.0 * ROW_PAD_Y * s)
                 .child(Markdown::new(text.clone()).highlights(super::prose::highlights(&text, p)).selectable(true)
                     // A link in a cell opens like one in prose: the browser, or the file.
@@ -152,11 +188,16 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             // The wheel is turning over this table: its bar shows, whatever hover says.
             a.table_active = Some((wheel_key.clone(), std::time::Instant::now()));
-            let sideways = if e.precise { e.dx.abs() > e.dy.abs() } else { e.mods.shift };
+            let Some((sideways, e)) = a.table_gesture.wheel(&wheel_key, e, std::time::Instant::now()) else {
+                tx.live_only();
+                return true;
+            };
             if !sideways { return a.timeline_wheel(&session, e, line_h, tx); }
+            a.scrollers.stop(&format!("conversation:{session}"));
             let delta = if e.dx.abs() > e.dy.abs() { e.dx } else { e.dy };
             let source = source.clone();
-            a.scrollers.sideways(&wheel_key, if e.precise { delta * 2.0 } else { delta }, e.precise, 3.0 * line_h, std::rc::Rc::new(move || source.get()), tx);
+            let delta = if e.precise && !cfg!(target_os = "macos") { delta * 2.0 } else { delta };
+            a.scrollers.sideways(&wheel_key, &e, delta, 3.0 * line_h, std::rc::Rc::new(move || source.get()), tx);
             tx.live_only();
             true
         })
@@ -212,6 +253,38 @@ pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn horizontal_gesture_swallows_vertical_noise_through_momentum() {
+        let mut gesture = ScrollGesture::default();
+        let now = std::time::Instant::now();
+        let start = WheelEvent::new(12.0, 2.0).precise(true).phase(rune::GesturePhase::Began);
+        let (horizontal, e) = gesture.wheel("table", start, now).unwrap();
+        assert!(horizontal);
+        assert_eq!(e.dy, 0.0);
+        let mut coast = WheelEvent::new(1.0, 8.0).precise(true);
+        coast.momentum = true;
+        let (horizontal, e) = gesture.wheel("table", coast, now + std::time::Duration::from_millis(200)).unwrap();
+        assert!(horizontal);
+        assert_eq!((e.dx, e.dy), (1.0, 0.0));
+        let vertical = WheelEvent::new(1.0, 10.0).precise(true).phase(rune::GesturePhase::Began);
+        let (horizontal, e) = gesture.wheel("table", vertical, now + std::time::Duration::from_millis(210)).unwrap();
+        assert!(!horizontal);
+        assert_eq!((e.dx, e.dy), (0.0, 10.0));
+    }
+
+    #[test]
+    fn small_deltas_accumulate_and_unphased_gestures_reset_after_idle() {
+        let mut gesture = ScrollGesture::default();
+        let now = std::time::Instant::now();
+        assert!(gesture.wheel("table", WheelEvent::new(1.0, 0.5).precise(true), now).is_none());
+        let (horizontal, e) = gesture.wheel("table", WheelEvent::new(3.0, 0.5).precise(true), now).unwrap();
+        assert!(horizontal);
+        assert_eq!((e.dx, e.dy), (4.0, 0.0));
+        let (horizontal, e) = gesture.wheel("table", WheelEvent::new(0.5, 5.0).precise(true), now + std::time::Duration::from_millis(200)).unwrap();
+        assert!(!horizontal);
+        assert_eq!((e.dx, e.dy), (0.0, 5.0));
+    }
 
     #[test]
     fn tables_split_out_of_prose() {

@@ -43,6 +43,7 @@ pub struct Tree {
     /// The note or folder being created (its folder, name, and whether it is a folder), until
     /// the daemon says it exists.
     creating: Option<(String, String, bool)>,
+    create_request: Option<u64>,
     /// The row to put the selection on once its folder's listing arrives.
     select_after: Option<String>,
 }
@@ -97,7 +98,14 @@ impl Tree {
     fn own(&self, path: &str) -> Option<String> {
         let path = path.trim_end_matches('/');
         match &self.root {
-            Some(root) => path.strip_prefix(root.as_str()).map(|rest| rest.trim_start_matches('/').to_owned()),
+            Some(root) => {
+                let windows = root.starts_with("\\\\") || root.as_bytes().get(1) == Some(&b':');
+                let root = if windows { root.replace('\\', "/") } else { root.clone() };
+                let path = if windows { path.replace('\\', "/") } else { path.to_owned() };
+                let root = root.trim_end_matches('/');
+                let rest = path.trim_end_matches('/').strip_prefix(root)?;
+                if rest.is_empty() { Some(String::new()) } else { rest.strip_prefix('/').map(str::to_owned) }
+            }
             None if crate::startup::absolute(path) => None,
             None => Some(match path.trim_start_matches("./") { "." => String::new(), rest => rest.to_owned() }),
         }
@@ -129,6 +137,11 @@ fn free_name(taken: &HashSet<String>, stem: &str, ext: &str) -> String {
 /// root of the workspace's drive never does, whatever daemon version is asked.
 fn default_vault_probe(cwd: &str) -> String {
     let bytes = cwd.as_bytes();
+    if cwd.starts_with("\\\\") || cwd.starts_with("//") {
+        let normalized = cwd.replace('\\', "/");
+        let mut parts = normalized.trim_start_matches('/').split('/');
+        if let (Some(server), Some(share)) = (parts.next(), parts.next()) { return format!("//{server}/{share}/"); }
+    }
     if cwd.starts_with('/') { return "/".to_owned(); }
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' { return format!("{}\\", &cwd[..2]); }
     cwd.to_owned()
@@ -176,8 +189,11 @@ impl App {
 
     /// The connection came back: whatever was asked on the old one is asked again on demand.
     pub(crate) fn tree_reconnected(&mut self) {
-        self.tree.requested.clear();
-        self.notes.requested.clear();
+        for tree in [&mut self.tree, &mut self.notes] {
+            tree.requested.clear();
+            tree.creating = None;
+            tree.create_request = None;
+        }
     }
 
     /// `Alt+E` / `Alt+N` and the rail buttons: show a tree sidebar (focused) or hide it.
@@ -211,6 +227,7 @@ impl App {
     }
 
     pub(crate) fn apply_notes_vault(&mut self, dir: &str) {
+        let dir = if dir.starts_with("\\\\") || dir.as_bytes().get(1) == Some(&b':') { dir.replace('\\', "/") } else { dir.to_owned() };
         self.notes.root = Some(dir.trim_end_matches('/').to_owned());
         self.list_dir(Sidebar::Notes, "");
     }
@@ -239,7 +256,7 @@ impl App {
     /// selected row, else at the vault's root. A name already taken gets a number. The note
     /// opens once the daemon has made it.
     pub fn notes_create(&mut self, folder: bool) {
-        let Some(root) = self.notes.root.clone() else { return };
+        if self.notes.root.is_none() || self.notes.creating.is_some() { return; }
         let tree = &self.notes;
         let dir = match tree.rows().get(tree.selected) {
             Some(row) if row.entry.is_dir && tree.open.contains(&row.path) => row.path.clone(),
@@ -248,22 +265,33 @@ impl App {
         };
         let taken: HashSet<String> = tree.listings.get(&dir).into_iter().flatten().map(|e| e.name.to_lowercase()).collect();
         let name = free_name(&taken, if folder { "New Folder" } else { "Untitled" }, if folder { "" } else { ".md" });
-        let kind = if folder { "CreateDir" } else { "CreateFile" };
-        if let Some(daemon) = &self.daemon {
-            daemon.send_scoped(Family::Files, serde_json::json!({ kind: {"dir": dir, "name": name} }), &root);
-        }
-        self.notes.creating = Some((dir, name, folder));
+        self.tree_create(true, &dir, &name, folder);
     }
 
     /// Make `name` in `dir` of a tree (the right-click menu's New File / New Folder).
     pub(crate) fn tree_create(&mut self, notes: bool, dir: &str, name: &str, folder: bool) {
         let sidebar = if notes { Sidebar::Notes } else { Sidebar::Files };
         let Some(root) = self.tree_root(notes) else { return };
+        if self.tree_of(sidebar).creating.is_some() { return; }
+        let name = if notes && !folder && !name.to_ascii_lowercase().ends_with(".md") { format!("{name}.md") } else { name.to_owned() };
         let kind = if folder { "CreateDir" } else { "CreateFile" };
-        if let Some(daemon) = &self.daemon {
-            daemon.send_scoped(Family::Files, serde_json::json!({ kind: {"dir": dir, "name": name} }), &root);
+        let request = self.daemon.as_ref().map(|daemon| daemon.request(Family::Files, serde_json::json!({ kind: {"dir": dir, "name": name} }), Some(root)));
+        let tree = self.tree_of(sidebar);
+        tree.create_request = request;
+        tree.creating = Some((dir.to_owned(), name, folder));
+    }
+
+    pub(crate) fn tree_creation_error(&mut self, request_id: u64, error: &str) -> bool {
+        for sidebar in [Sidebar::Notes, Sidebar::Files] {
+            let tree = self.tree_of(sidebar);
+            if tree.create_request != Some(request_id) { continue; }
+            tree.create_request = None;
+            let Some((dir, name, folder)) = tree.creating.take() else { continue };
+            let path = tree.open_path(&join(&dir, &name));
+            self.modal = Some(crate::ui::modal::Modal::notice(if folder { "Could not create folder" } else { "Could not create file" }, &format!("{path}\n\n{error}")));
+            return true;
         }
-        self.tree_of(sidebar).creating = Some((dir.to_owned(), name.to_owned(), folder));
+        false
     }
 
     /// The folder a tree's requests are scoped to: the vault, or the workspace.
@@ -314,6 +342,11 @@ impl App {
             let Some((dir, name, folder)) = tree.creating.clone() else { continue };
             if join(&dir, &name) != path || folder != is_dir { continue; }
             tree.creating = None;
+            tree.create_request = None;
+            // Reserve the acknowledged name before a second click, even if listing is in flight.
+            let mut entries = tree.listings.get(&dir).cloned().unwrap_or_default();
+            if !entries.iter().any(|e| e.name == name) { entries.push(Entry { name, is_dir }); }
+            tree.set_listing(dir.clone(), entries);
             tree.requested.remove(&dir);
             tree.select_after = Some(path.to_owned());
             if !dir.is_empty() { tree.open.insert(dir.clone()); }
@@ -414,6 +447,11 @@ mod tests {
         let files = Tree::default();
         assert_eq!(notes.own("/vault"), Some(String::new()));
         assert_eq!(notes.own("/vault/a"), Some("a".into()));
+        assert_eq!(notes.own("/vault-other/a"), None);
+        let windows = Tree { root: Some("C:\\Users\\me\\Notes".into()), ..Default::default() };
+        assert_eq!(windows.own("C:/Users/me/Notes/Ideas"), Some("Ideas".into()));
+        assert_eq!(windows.own("C:\\Users\\me\\Notes\\Ideas"), Some("Ideas".into()));
+        assert_eq!(windows.own("C:/Users/me/Notes-other/Ideas"), None);
         assert_eq!(notes.own("src"), None);
         assert_eq!(files.own("src"), Some("src".into()));
         assert_eq!(files.own("/vault/a"), None);
@@ -453,10 +491,61 @@ mod tests {
     }
 
     #[test]
+    fn notes_creation_is_markdown_and_failures_allow_retry() {
+        let mut app = App::new();
+        app.apply_notes_vault("C:\\Users\\me\\Notes");
+        assert_eq!(app.notes.root.as_deref(), Some("C:/Users/me/Notes"));
+        app.tree_create(true, "Ideas", "Agenda", false);
+        assert_eq!(app.notes.creating, Some(("Ideas".into(), "Agenda.md".into(), false)));
+        app.notes.create_request = Some(42);
+        assert!(!app.tree_creation_error(41, "unrelated"));
+        assert!(app.notes.creating.is_some());
+        assert!(app.tree_creation_error(42, "Permission denied"));
+        assert!(app.notes.creating.is_none());
+        assert!(app.modal.as_ref().unwrap().body.contains("C:/Users/me/Notes/Ideas/Agenda.md"));
+        app.tree_create(true, "Ideas", "Existing.MD", false);
+        assert_eq!(app.notes.creating.as_ref().unwrap().1, "Existing.MD");
+        app.apply_file_created("Ideas/Existing.MD", false);
+        app.tree_create(true, "", "New Folder", true);
+        assert_eq!(app.notes.creating, Some((String::new(), "New Folder".into(), true)));
+        app.apply_file_created("New Folder", true);
+        app.tree_create(false, "", "plain-file", false);
+        assert_eq!(app.tree.creating.as_ref().unwrap().1, "plain-file", "the workspace file tree stays general purpose");
+    }
+
+    #[test]
+    fn notes_header_buttons_create_notes_and_folders_and_reserve_acknowledged_names() {
+        let mut app = App::new();
+        app.sidebar = Some(Sidebar::Notes);
+        app.apply_notes_vault("/vault");
+        app.apply_dir_listing("/vault", &serde_json::json!([]));
+        let mut rt = rune::Runtime::new(app, |a, _| super::view::view(a), (300.0, 600.0), rune::Env::new(true, 1.0));
+        rt.frame(1.0);
+        let click = |rt: &mut rune::Runtime<App>, key: &str| {
+            let [x, y, w, h] = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect;
+            rt.pointer_down(x + w / 2.0, y + h / 2.0);
+            rt.pointer_up(x + w / 2.0, y + h / 2.0);
+            rt.frame(1.0 / 60.0);
+        };
+        click(&mut rt, "notes-new-note");
+        assert_eq!(rt.state.notes.creating.as_ref().unwrap().1, "Untitled.md");
+        click(&mut rt, "notes-new-note");
+        assert_eq!(rt.state.notes.creating.as_ref().unwrap().1, "Untitled.md", "a pending click must not queue a duplicate");
+        rt.update(|a, _| a.apply_file_created("Untitled.md", false));
+        assert!(rt.state.tabs.iter().any(|t| t.kind == crate::tabs::TabKind::Editor { path: "/vault/Untitled.md".into() }));
+        click(&mut rt, "notes-new-note");
+        assert_eq!(rt.state.notes.creating.as_ref().unwrap().1, "Untitled 2.md", "acknowledged names are reserved before the next listing");
+        rt.update(|a, _| a.apply_file_created("Untitled 2.md", false));
+        click(&mut rt, "notes-new-folder");
+        assert_eq!(rt.state.notes.creating, Some((String::new(), "New Folder".into(), true)));
+    }
+
+    #[test]
     fn notes_ask_for_the_default_vault_whatever_the_project_links() {
         assert_eq!(default_vault_probe("/home/me/projects/linked"), "/");
         assert_eq!(default_vault_probe("C:\\Users\\me\\linked"), "C:\\");
         assert_eq!(default_vault_probe("d:/work"), "d:\\");
+        assert_eq!(default_vault_probe("\\\\server\\share\\project"), "//server/share/");
         // A remote home not resolved yet is asked as it stands.
         assert_eq!(default_vault_probe("~"), "~");
     }

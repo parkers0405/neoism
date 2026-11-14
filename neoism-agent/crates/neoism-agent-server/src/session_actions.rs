@@ -3274,11 +3274,7 @@ pub(crate) async fn session_command(
         .as_ref()
         .and_then(|command| command.template.as_deref())
         .map(|template| expand_command_template(template, &request.arguments))
-        .unwrap_or_else(|| {
-            format!("/{} {}", request.command, request.arguments)
-                .trim()
-                .to_string()
-        });
+        .unwrap_or_else(|| command_fallback_text(&request.command, &request.arguments));
     let model = command
         .as_ref()
         .and_then(|command| command.model.as_deref())
@@ -3351,6 +3347,27 @@ pub(crate) async fn session_command(
     )
     .await?;
     Ok(Json(response))
+}
+
+fn command_fallback_text(command: &str, arguments: &str) -> String {
+    // Desktop slash dispatch can supply the slash (and inline arguments),
+    // whereas API callers normally supply just the command name.
+    format!("/{} {}", command.trim().trim_start_matches('/'), arguments)
+        .trim()
+        .to_string()
+}
+
+#[cfg(test)]
+mod command_fallback_tests {
+    use super::command_fallback_text;
+
+    #[test]
+    fn command_echo_has_exactly_one_slash() {
+        assert_eq!(command_fallback_text("goal", "ship it"), "/goal ship it");
+        assert_eq!(command_fallback_text("/goal ship it", ""), "/goal ship it");
+        assert_eq!(command_fallback_text(" /goal ", "ship it"), "/goal ship it");
+        assert_eq!(command_fallback_text("//goal", ""), "/goal");
+    }
 }
 
 pub(crate) async fn session_shell(

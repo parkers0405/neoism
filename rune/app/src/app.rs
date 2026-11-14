@@ -19,7 +19,49 @@ use std::collections::{HashMap, VecDeque};
 pub enum Connection {
     Connecting,
     Connected,
+    Reconnecting { since: std::time::Instant, visible: bool },
     Disconnected(String),
+}
+
+impl Connection {
+    fn disconnected(&mut self, reason: String, now: std::time::Instant) {
+        match self {
+            Self::Connected => *self = Self::Reconnecting { since: now, visible: false },
+            Self::Reconnecting { .. } => {},
+            _ => *self = Self::Disconnected(reason),
+        }
+    }
+
+    /// Schedule one redraw when recovery stops being a brief interruption.
+    pub fn reconnect_notice(&mut self, now: std::time::Instant) -> (Option<std::time::Duration>, bool) {
+        let Self::Reconnecting { since, visible } = self else { return (None, false) };
+        if *visible { return (None, false); }
+        let remaining = std::time::Duration::from_secs(10).saturating_sub(now.saturating_duration_since(*since));
+        if !remaining.is_zero() { return (Some(remaining), false); }
+        *visible = true;
+        (None, true)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn reconnects_stay_quiet_until_a_continuous_outage_lasts_ten_seconds() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let mut connection = Connection::Connected;
+    connection.disconnected("Connection reset by peer".into(), now);
+    assert_eq!(connection.reconnect_notice(now), (Some(Duration::from_secs(10)), false));
+    connection.disconnected("Retry failed".into(), now + Duration::from_secs(8));
+    assert_eq!(connection.reconnect_notice(now + Duration::from_secs(9)), (Some(Duration::from_secs(1)), false));
+    assert_eq!(connection.reconnect_notice(now + Duration::from_secs(10)), (None, true));
+    assert_eq!(connection.reconnect_notice(now + Duration::from_secs(11)), (None, false));
+    connection = Connection::Connected;
+    assert_eq!(connection.reconnect_notice(now + Duration::from_secs(12)), (None, false));
+    connection.disconnected("Another interruption".into(), now + Duration::from_secs(13));
+    assert_eq!(connection.reconnect_notice(now + Duration::from_secs(13)), (Some(Duration::from_secs(10)), false));
+    let mut initial = Connection::Connecting;
+    initial.disconnected("Authentication failed".into(), now);
+    assert_eq!(initial, Connection::Disconnected("Authentication failed".into()));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +127,9 @@ pub struct App {
     pub table_offsets: std::cell::RefCell<HashMap<String, rune::Live<[f32; 2]>>>,
     pub table_hover: Option<String>,
     pub table_active: Option<(String, std::time::Instant)>,
+    pub table_gesture: crate::agent::table::ScrollGesture,
+    pub font_families: (String, String),
+    pub fonts_dirty: bool,
     /// The table the views were last built for.
     pub table_seen: Option<String>,
     /// When the conversation list and defaults were last asked for again after a catalog reset.
@@ -275,6 +320,10 @@ pub struct App {
     /// Home block terminals by tab id, and the tabs whose `CreatePty` is still in flight.
     pub terminals: HashMap<u64, Terminal>,
     pub pending_pty: VecDeque<u64>,
+    pub liquid_glass_selection: bool,
+    pub glass_selection_policy: (bool, bool),
+    pub goal_celebration: crate::goal_celebration::Celebration,
+    pub connection_celebration: crate::connection_celebration::Celebration,
 }
 
 impl App {
@@ -282,10 +331,17 @@ impl App {
         let config = crate::config::load();
         let mut wordmark = Wordmark::default();
         wordmark.fire_enabled = config.wordmark_fire;
+        let mut cursor = crate::ui::cursor::Cursor::default();
+        cursor.liquid_glass = config.liquid_glass_cursor;
         let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
         let home = crate::startup::home();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
+            liquid_glass_selection: config.liquid_glass_selection,
+            glass_selection_policy: (false, false),
+            goal_celebration: Default::default(),
+            connection_celebration: Default::default(),
+            table_gesture: Default::default(),
             marquee: Default::default(), workspaces: Vec::new(), workspace_active: 0, workspace_id: crate::workspace::new_id(), workspace_ready: false, agent_resync_due: false, workspace_closing: None, quit_requested: false, selection: Default::default(), copied_selection: None, rail_hover: None, scrollers: Default::default(), activity_pinned: false, field_synced: false, settle_pending: false, heartbeat: Default::default(), question_hover: None, mode_pill: Default::default(), chip_scramble: Default::default(), chip_scramble_moving: false, star_twinkle: std::array::from_fn(|_| rune::Live::new(0.5)), table_offsets: Default::default(), table_hover: None, table_active: None, table_seen: None, catalog_asked: None, esc_at: None, palette_category_hover: None, session_writer: Default::default(), session_closed: false, resources_closed: false, closing_connections: Vec::new(), tab_hover: None, workspace_hover: None, chrome_reveal: Vec::new(), strip_target: None, chrome_scroll: Default::default(), tab_drag: None, suppress_tab_press: false,
             diag_popup: None,
             copy_feedback: Vec::new(),
@@ -297,7 +353,9 @@ impl App {
             images: None,
             connection: Connection::Connecting,
             pal: palette(&config.theme),
-            ty: Type { size: config.font_size, weight: config.font_weight },
+            ty: Type { size: config.font_size, weight: config.font_weight, code_family: crate::ui::fonts::code_family(&config.font_families.1) },
+            font_families: config.font_families,
+            fonts_dirty: true,
             workspace_name: if cwd == home { "~".into() } else { workspace_name },
             cwd,
             threads: Vec::new(),
@@ -366,7 +424,7 @@ impl App {
             peer_blink: rune::Live::new(1.0),
             orbs: Default::default(),
             waker: None,
-            cursor: Default::default(),
+            cursor,
             rects: HashMap::new(),
             families: Default::default(),
             thread_activity: Default::default(),
@@ -407,6 +465,8 @@ impl App {
             Inbound::Reply { family, request_id, message } if family == "Config" && message.get("Config").is_some() => {
                 let value = &message["Config"]["value"];
                 let changed = self.wordmark.fire_enabled != crate::config::wordmark_fire(value)
+                    || self.cursor.liquid_glass != crate::config::liquid_glass_cursor(value)
+                    || self.liquid_glass_selection != crate::config::liquid_glass_selection(value)
                     || self.keybindings != value["keybinds"]["keys"]
                     || self.settings.as_ref().is_some_and(|settings| settings.values != *value);
                 self.apply_config_reply(request_id, &message);
@@ -439,8 +499,8 @@ impl App {
             }
         }
         match event {
-            // A retry keeps saying why the last attempt failed (the status line shows it).
-            Inbound::Connecting => if !matches!(self.connection, Connection::Disconnected(_)) { self.connection = Connection::Connecting },
+            // Retrying must not reset the quiet window or hide an initial connection failure.
+            Inbound::Connecting => if matches!(self.connection, Connection::Connecting | Connection::Connected) { self.connection = Connection::Connecting },
             Inbound::Connected { again } => {
                 self.connection = Connection::Connected;
                 self.workspace_ready = false;
@@ -454,7 +514,7 @@ impl App {
             // The lid opened on a connection that survived it: nothing was lost on the way
             // here, but the agent behind the daemon may have moved on meanwhile.
             Inbound::Woke => self.agent_resync(false),
-            Inbound::Disconnected(reason) => { self.connection = Connection::Disconnected(reason); self.tunnel_lost(); self.git_disconnected(); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
+            Inbound::Disconnected(reason) => { self.goal_celebration.cancel(); self.connection.disconnected(reason, std::time::Instant::now()); self.tunnel_lost(); self.git_disconnected(); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
             Inbound::Agent(message) => { self.apply_agent(*message); }
             Inbound::Crdt { request_id, message } => { self.apply_crdt(request_id, *message); }
             Inbound::Editor(message) => self.apply_editor_message(*message),
@@ -471,6 +531,7 @@ impl App {
             }
             Inbound::Reply { family, message, request_id } if family == "Files" => {
                 if self.root_probe_reply(request_id, &message) { return; }
+                if let Some(error) = message["Error"]["message"].as_str() && self.tree_creation_error(request_id, error) { return; }
                 self.apply_files(&message);
                 if let Some(listing) = message.get("DirListing") {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);

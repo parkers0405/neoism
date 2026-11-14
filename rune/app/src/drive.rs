@@ -15,6 +15,7 @@
 //! - `touch:<points per second>:<seconds>`: trackpad deltas at 120 Hz; negative scrolls down
 //! - `keys:<text>:<per second>`: type `text` into the focused surface, a character at a time
 //!   (`jjjj` walks a file's cursor, as a held key does)
+//! - `alt:<up|down|left|right>`: dispatch an app-wide focus chord and log its target/material
 //! - `prompt:<text>`: send `text` from the active composer (a real prompt)
 //! - `stream:<file>:<seconds>`: stream the file's text into the active conversation as a
 //!   reply, through the reducer the daemon's deltas take (nothing is sent to the daemon)
@@ -48,6 +49,7 @@ enum Step {
     Wheel { rate: f64, seconds: f64 },
     Touch { speed: f64, seconds: f64 },
     Keys { text: Vec<char>, rate: f64 },
+    Alt(rune::Key),
     Prompt(String),
     /// Host a server on a folder, as submitting the Host form does.
     Host(String),
@@ -55,6 +57,7 @@ enum Step {
     JoinServer(String),
     Fixture(String),
     Sidebar,
+    Rail(crate::app::Sidebar),
     Stream { text: String, bounds: Vec<usize>, seconds: f64 },
     Live,
     Hold,
@@ -92,12 +95,14 @@ impl Drive {
                 "wheel" => { let (rate, seconds) = pair()?; Step::Wheel { rate, seconds } }
                 "touch" => { let (speed, seconds) = pair()?; Step::Touch { speed, seconds } }
                 "keys" => { let (text, rate) = rest.rsplit_once(':')?; Step::Keys { text: text.chars().collect(), rate: rate.parse().ok()? } }
+                "alt" => Step::Alt(match rest { "up" => rune::Key::Up, "down" => rune::Key::Down, "left" => rune::Key::Left, "right" => rune::Key::Right, "e" | "n" | "c" => rune::Key::Text(rest.into()), _ => return None }),
                 "prompt" => Step::Prompt(rest.to_owned()),
                 "host" => Step::Host(rest.to_owned()),
                 "system" => Step::JoinSystem(rest.to_owned()),
                 "server" => Step::JoinServer(rest.to_owned()),
                 "fixture" => Step::Fixture(std::fs::read_to_string(rest).ok()?),
                 "sidebar" => Step::Sidebar,
+                "rail" => Step::Rail(match rest { "files" => crate::app::Sidebar::Files, "notes" => crate::app::Sidebar::Notes, "agent" => crate::app::Sidebar::Conversations, _ => return None }),
                 "stream" => {
                     let (path, seconds) = rest.rsplit_once(':')?;
                     let text = std::fs::read_to_string(path).ok()?;
@@ -140,12 +145,14 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Wheel { rate, seconds } => format!("wheel:{rate}:{seconds}"),
                 Step::Touch { speed, seconds } => format!("touch:{speed}:{seconds}"),
                 Step::Keys { text, rate } => format!("keys:{}:{rate}", text.len()),
+                Step::Alt(key) => format!("alt:{key:?}"),
                 Step::Prompt(_) => "prompt".to_owned(),
                 Step::Host(_) => "host".to_owned(),
                 Step::JoinSystem(_) => "join-system".to_owned(),
                 Step::JoinServer(_) => "join-server".to_owned(),
                 Step::Fixture(_) => "fixture".to_owned(),
                 Step::Sidebar => "sidebar".to_owned(),
+                Step::Rail(panel) => format!("rail:{panel:?}"),
                 Step::Stream { seconds, .. } => format!("stream:{seconds}"),
                 Step::Live => "live".to_owned(),
                 Step::Hold => "hold".to_owned(),
@@ -182,7 +189,22 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 }
                 (due < text.len()).then(|| ((drive.sent + 1) as f64 / rate - elapsed).max(0.0))
             }
+            Step::Alt(key) => {
+                let event = rune::KeyEvent { key: key.clone(), mods: rune::Mods { alt: true, ..Default::default() } };
+                let handled = crate::keys::on_key(app, &event, tx);
+                changed |= handled;
+                eprintln!("[drive] focus={:?} handled={handled} target={:?} glass={} native={}", app.focus, app.cursor_target(), app.cursor.liquid_glass, app.cursor.native_glass);
+                None
+            }
             Step::Wait(seconds) => (elapsed < *seconds).then(|| seconds - elapsed),
+            Step::Rail(panel) => {
+                match panel {
+                    crate::app::Sidebar::Files | crate::app::Sidebar::Notes => app.click_tree(*panel),
+                    crate::app::Sidebar::Conversations => { app.toggle_conversations(); }
+                }
+                changed = true;
+                None
+            }
             Step::Wheel { rate, seconds } | Step::Touch { speed: rate, seconds } => {
                 let precise = matches!(step, Step::Touch { .. });
                 let (hz, dy) = if precise { (TOUCH_HZ, (*rate / TOUCH_HZ) as f32) } else { (rate.abs(), 40.0 * rate.signum() as f32) };
@@ -342,14 +364,17 @@ mod tests {
             unsafe { std::env::remove_var("NEOISM_RUNE_DRIVE") };
             drive
         };
-        let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; mark:end; quit").unwrap();
+        let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; alt:up; alt:invalid; mark:end; quit").unwrap();
         let names: Vec<&str> = drive.steps.iter().map(|step| match step {
+            Step::Rail(_) => "rail",
             Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
             Step::Prompt(_) => "prompt", Step::Host(_) => "host",
+            Step::Alt(_) => "alt",
             Step::JoinSystem(_) => "system", Step::JoinServer(_) => "server", Step::Fixture(_) => "fixture", Step::Sidebar => "sidebar", Step::Stream { .. } => "stream", Step::Live => "live",
             Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::TreeMenu(_) => "treemenu", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
-        assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "mark", "quit"]);
+        assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "alt", "mark", "quit"]);
+        assert!(matches!(&drive.steps[6], Step::Alt(rune::Key::Up)));
         assert!(matches!(&drive.steps[2], Step::Wheel { rate, seconds } if *rate == -30.0 && *seconds == 2.0));
         // A prompt keeps its colons.
         assert!(matches!(&drive.steps[4], Step::Prompt(text) if text == "say hi: now"));

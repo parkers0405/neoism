@@ -13,9 +13,7 @@ use rune::{Color, El, Key, KeyEvent, Tx, col, el, row, text};
 const WIDTH: f32 = 480.0;
 const WIDE: f32 = 880.0;
 const HEIGHT: f32 = 460.0;
-const MARGIN_TOP: f32 = 80.0;
 const PAD: f32 = 4.0;
-const RADIUS: f32 = 8.0;
 const STROKE: f32 = 2.25;
 const LIST_RATIO: f32 = 0.55;
 const INPUT_H: f32 = 40.0;
@@ -27,6 +25,7 @@ const LIST_KEY: &str = "finder-results";
 impl App {
     /// The selected hit's settled rect, so the cursor aims where the row lands.
     pub fn finder_row_rect(&self, finder: &Finder) -> Option<[f32; 4]> {
+        if !finder.expanded() { return None; }
         let list = self.rects.get(LIST_KEY)?;
         let row_h = ROW_H * self.ty.scale();
         let slot = finder.selected.checked_sub(finder.top)?;
@@ -63,7 +62,6 @@ const PREVIEW_LINE_H: f32 = 20.0;
 const PREVIEW_PAD: f32 = 12.0;
 const PREVIEW_LINES: usize = 64;
 /// The pane tab rows above the content the finder is placed in.
-const CHROME_TOP: f32 = 60.0;
 
 fn rows_fit(s: f32, wide: bool) -> usize {
     let by_height = (((HEIGHT - PAD * 2.0 - INPUT_H) * s - 1.0) / (ROW_H * s)).floor().max(1.0) as usize;
@@ -86,46 +84,51 @@ pub fn view(app: &App) -> El {
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
         .key("finder-query")
-        // One cursor: the window's block cursor (on the selected row, or here when the list is
-        // empty) stands in for Rune's thin caret, as in the composer.
+        // One cursor: the window's block cursor follows Rune's actual insertion caret.
         .caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
-        .placeholder(format!("{prefix}{}", finder.placeholder()), rgb(p.muted))
+        .placeholder(format!("{prefix}{} · ? all", finder.placeholder()), rgb(p.dim))
         .color(rgb(p.fg)).grow(1.0).shrink()
         .on_edit(|a: &mut App| &mut a.finder.as_mut().expect("finder open").query)
         .on_input_change(|a: &mut App, _: &mut Tx| a.finder_edited())
         .on_input_key(keys)
         .on_submit(|a: &mut App, _: &mut Tx| a.accept_finder(None));
     let header = row().w(list_w).h(INPUT_H * s).px(INPUT_PAD_X * s).gap(10.0 * s).center_y()
+        .on_layout(|a: &mut App, rect| { a.rects.insert("finder-query-clip".into(), rect); })
+        .transition(rune::Transition::none()).instant_changes()
         .child(input)
         .child(text(finder.badge()).font(app.ty.sized(INPUT_FONT * 0.92)).color(rgb(p.muted)));
 
-    let visible = rows_fit(s, wide);
+    let visible = crate::palette::compact::rows(app, rows_fit(s, wide));
     let shown = finder.hits.len().clamp(1, visible) as f32;
     let list = list(app, finder, list_w, shown as usize).h(shown * ROW_H * s + 4.0 * s);
-    let mut body = row().w_full();
+    let mut body = row().w_full().transition(rune::Transition::none());
     body = body.child(list);
     if wide && !finder.hits.is_empty() {
         body = body
             .child(el().w(1.0).h_full().fill(rgb(p.border)))
-            .child(preview(app, finder).grow(1.0).h((HEIGHT * 0.55 * s).max(shown * ROW_H * s)));
+            .child(preview(app, finder).grow(1.0).h((HEIGHT * 0.55 * s).max(shown * ROW_H * s))
+                .transition(rune::Transition::none()).instant_changes());
     }
 
-    let dialog = col().key("finder").w(width).fill(rgb(p.bg)).motion(rune::Spring::NONE)
-        .corners([RADIUS * s, RADIUS * s, 0.0, 0.0])
-        .border(stroke, rgb(p.surface))
-        .clip_rounded(RADIUS * s)
+    let dialog = col().key("finder").w(width)
+        .transition(rune::Transition::none())
         .padding(stroke + PAD * s)
         .on_press(|_: &mut App| {})
         .child(header)
-        .child(el().w_full().h(1.0).fill(rgb(p.border)))
-        .child(body.mt(4.0 * s));
+        .child(col().key("finder-expansion").h(if finder.expanded() { shown * ROW_H * s + 9.0 * s } else { 0.0 })
+            .clip_rounded(0.0).motion(crate::palette::compact::motion())
+            .child(el().w_full().h(1.0).fill(rgb(p.border)))
+            .child(body.mt(4.0 * s)));
+    let dialog = crate::palette::compact::surface(dialog, app, finder.expanded());
     col().key("finder-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).items_center()
-        .pt(CHROME_TOP + MARGIN_TOP * s)
+        .transition(rune::Transition::none())
+        .pt(crate::palette::compact::top(app))
         .on_press(|a: &mut App| a.finder = None)
         .child(dialog)
 }
 
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if crate::palette::compact::editing_key(event) { return false; }
     match event.key {
         Key::Escape => { app.finder = None; true }
         // The query field makes its commits instant; list moves glide like the original's springs.
@@ -141,8 +144,8 @@ fn list(app: &App, finder: &Finder, width: f32, visible: usize) -> El {
     let s = app.ty.scale();
     let rows = col().w(width);
     if finder.hits.is_empty() {
-        let hint = if finder.loading { "Searching..." } else if let Some(error) = &finder.error { error.as_str() } else if finder.query.text.trim().is_empty() && finder.mode == Mode::Grep { "Start typing to search" } else { "No matches" };
-        return rows.child(row().h(ROW_H * s).transition(rune::Transition::none()).px(INPUT_PAD_X * s).center_y().child(text(hint.to_owned()).font(app.ty.sized(ROW_FONT)).color(rgb(p.muted))));
+        let hint = if finder.loading || finder.due.is_some() { "Searching..." } else if let Some(error) = &finder.error { error.as_str() } else if finder.query.text.trim().is_empty() && finder.mode == Mode::Grep { "Start typing to search" } else { "No matches" };
+        return rows.transition(rune::Transition::none()).instant_changes().child(row().h(ROW_H * s).transition(rune::Transition::none()).px(INPUT_PAD_X * s).center_y().child(text(hint.to_owned()).font(app.ty.sized(ROW_FONT)).color(rgb(p.muted))));
     }
     let span = crate::ui::rows::span(finder.top, visible, finder.hits.len());
     let mut built = Vec::with_capacity(span.len());
@@ -209,3 +212,33 @@ fn short_path(path: &str) -> String {
 }
 
 fn collapse_whitespace(text: &str) -> String { text.split_whitespace().collect::<Vec<_>>().join(" ") }
+
+#[cfg(test)]
+mod compact_keyboard_tests {
+    use super::*;
+    #[test]
+    fn compact_finder_empty_enter_arrows_accept_escape() {
+        let mut app = App::new();
+        app.open_finder(Mode::Files);
+        app.accept_finder(None);
+        assert!(app.finder.is_some());
+        let mut tx = Tx::default();
+        let key = |key| KeyEvent { key, mods: Default::default() };
+        let f = app.finder.as_mut().unwrap();
+        f.query.replace_text("?");
+        assert_eq!(f.query.text, "?");
+        assert_eq!(f.search_query(), "");
+        f.due = None;
+        f.hits = vec![Hit::File { path: "one.rs".into() }, Hit::File { path: "two.rs".into() }];
+        keys(&mut app, &key(Key::Down), &mut tx);
+        assert_eq!(app.finder.as_ref().unwrap().selected, 1);
+        keys(&mut app, &key(Key::Up), &mut tx);
+        assert_eq!(app.finder.as_ref().unwrap().selected, 0);
+        app.accept_finder(None);
+        assert!(app.finder.is_none());
+        assert!(app.buffers.keys().any(|p| p.ends_with("one.rs")));
+        app.open_finder(Mode::Files);
+        keys(&mut app, &key(Key::Escape), &mut tx);
+        assert!(app.finder.is_none());
+    }
+}

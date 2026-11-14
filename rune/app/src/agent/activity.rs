@@ -5,11 +5,14 @@
 //! timer follows. Every glyph is a live binding, so the animation never re-runs a view.
 
 use crate::app::App;
-use crate::ui::theme::{PIXEL, Palette, rgb};
+use crate::ui::fire;
+use crate::ui::theme::{Palette, rgb};
 use neoism_protocol::agent::HistoryMessageKind;
-use rune::tok::TextStyle;
-use rune::{Color, El, Live, LiveText, el, row, text};
+use rune::{Color, El, Live, LiveText, Pixels, el, row, text};
+use std::cell::Cell;
 use std::time::Instant;
+
+pub(crate) mod flames;
 
 const SCRAMBLE: &[u8] = b"|/-\\+!?>?<%#=@*~&^$";
 const LINE_H: f32 = 26.0;
@@ -63,6 +66,8 @@ struct Glyph {
     shown: LiveText,
     offset: Live<[f32; 2]>,
     color: Live<Color>,
+    flames: Pixels,
+    fire_frame: Cell<Option<(char, u32, [u32; 5])>>,
 }
 
 struct Dot {
@@ -111,13 +116,14 @@ impl Activity {
     pub fn new(session: &str, state: State, turn: Instant) -> Activity {
         let glyphs = state.label().chars().map(|target| Glyph {
             target, shown: LiveText::new(target.to_string()), offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE),
+            flames: Pixels::new(), fire_frame: Cell::new(None),
         }).collect();
         let dots = (0..3).map(|_| Dot { offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE) }).collect();
         Activity { session: session.to_owned(), state, background: 0, queued: 0, glyphs, dots, time: LiveText::new(""), opacity: Live::new(1.0), changed: Instant::now(), turn }
     }
 
     /// Advance every glyph, dot and the timer to `now` (seconds on the frame clock).
-    pub fn tick(&self, p: &Palette, scale: f32) {
+    pub fn tick(&self, p: &Palette, scale: f32, flames: bool) {
         let now = Instant::now();
         let time = self.turn.elapsed().as_secs_f32() + 1000.0;
         let transition = now.duration_since(self.changed).as_secs_f32();
@@ -127,10 +133,18 @@ impl Activity {
         let motion = time * 3.0;
         let (drift_x, drift_y) = (motion.sin() * 1.8 * scale, (motion * 0.72).cos() * 0.8 * scale);
         let mut trailing = accent;
+        let colors = fire::colors(p);
         for (i, glyph) in self.glyphs.iter().enumerate() {
             let locked = transition >= (i as f32 + 1.0) * (0.7 / count as f32);
             let shown = if locked || glyph.target == ' ' { glyph.target } else { SCRAMBLE[((time * 44.0) as usize + i * 5) % SCRAMBLE.len()] as char };
             glyph.shown.set(shown.to_string());
+            let frame = (shown, (time * 16.0) as u32, colors);
+            // One tiny live texture per letter: flames follow its wave without rebuilding views.
+            if flames && glyph.fire_frame.get() != Some(frame) && let Some(fire) = flames::glyph(shown) {
+                glyph.fire_frame.set(Some(frame));
+                // Supersample whole cells so texture filtering keeps the small pixel edges crisp.
+                glyph.flames.set(40, 88, flames::rgba(fire, time, colors));
+            }
             // Colour: a wave and a pulse between the accent and the text colour.
             let (speed, spread) = if locked { (3.4, 0.62) } else { (8.2, 0.91) };
             let wave = (time * speed + i as f32 * spread).sin() * 0.5 + 0.5;
@@ -167,7 +181,9 @@ impl Activity {
         let p = app.pal;
         let s = app.ty.scale();
         let size = 12.0 * s;
-        let word = TextStyle::new(size, 400.0).family(PIXEL);
+        // Match the font's one-em ascent so outline rows and visible ink share an origin.
+        let word = flames::font(size);
+        let flames = app.wordmark.fire_enabled && std::env::var("NEOISM_REDUCED_MOTION").as_deref() != Ok("1");
         let layer = |glyph: &Glyph, dx: f32, ink: Option<Color>| {
             let mut t = text(glyph.target.to_string()).font(word).live_text(&glyph.shown).absolute(dx, dx);
             t = match ink { Some(ink) => t.color(ink), None => t.live_text_color(&glyph.color) };
@@ -179,6 +195,11 @@ impl Activity {
             letters = letters.child(el().w(size).h(size).live_offset(&glyph.offset)
                 .child(layer(glyph, 3.5 * s, Some(rgb(p.bg).alpha(210.0 / 255.0))))
                 .child(layer(glyph, 1.75 * s, Some(rgb(p.dim).alpha(240.0 / 255.0))))
+                .children((flames && glyph.target != ' ').then(|| {
+                    // Overlap the hot root by half a pixel cell, rather than leaving a seam.
+                    el().pixels(&glyph.flames).absolute(-size / 8.0, -12.5 * size / 8.0)
+                        .w(size * 10.0 / 8.0).h(size * 22.0 / 8.0)
+                }))
                 .child(layer(glyph, 0.0, None)));
         }
         let dot_font = app.ty.sized_bold(14.0);
@@ -320,7 +341,7 @@ impl App {
         }
         if let Some(activity) = &self.activity {
             activity.opacity.set(opacity);
-            activity.tick(self.pal, self.ty.scale());
+            activity.tick(self.pal, self.ty.scale(), self.wordmark.fire_enabled && std::env::var("NEOISM_REDUCED_MOTION").as_deref() != Ok("1"));
         }
         // Following the end of an overflowing transcript, the line pins above the composer.
         let pinned = self.activity.is_some() && session.as_deref().is_some_and(|id| self.activity_follows_end(id));

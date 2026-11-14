@@ -191,8 +191,8 @@ pub fn stop_stack(
 
 pub fn relaunch(executable: &Path) -> Result<(), Error> {
     let mut command = Command::new(executable);
+    // A normal launch restores the saved window; --new-window deliberately starts fresh.
     command
-        .arg("--new-window")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -360,6 +360,6 @@ mod tests {
         while !marker.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(fs::read_to_string(marker).unwrap(), "--new-window");
+        assert_eq!(fs::read_to_string(marker).unwrap(), "");
     }
 }

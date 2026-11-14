@@ -63,6 +63,7 @@ pub struct Type {
     pub size: f32,
     /// The configured UI weight (`appearance.fonts.weight`, 700 on the reference machine).
     pub weight: f32,
+    pub code_family: Family,
 }
 
 impl Type {
@@ -72,10 +73,12 @@ impl Type {
     pub fn sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), self.weight).mono() }
     pub fn sized_bold(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 800.0).mono() }
     pub fn icon_sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 400.0).family(NERD) }
-    /// Code in the editor: Geist Mono with its programming ligatures (`=>` as `⇒`), which Rune
-    /// switches off for styles marked `.mono()`; the app's sans family is Geist Mono too.
+    /// Use a named mono face so Rune keeps programming ligatures enabled in the editor.
     pub fn code(self) -> TextStyle {
-        TextStyle::new(self.size, self.weight)
+        TextStyle::new(self.size, self.weight).family(self.code_family)
+    }
+    pub fn advance(self) -> f32 {
+        rune::text::measure("m", &[], self.code(), None).0.max(1.0)
     }
     pub fn body(self) -> TextStyle {
         TextStyle::new(self.size, self.weight).mono().lh(self.size * 1.45)

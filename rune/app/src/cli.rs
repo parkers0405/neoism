@@ -16,7 +16,7 @@ Open Neoism in PATH (a folder becomes the workspace, a file opens in it).
 
 Options:
       --working-dir <DIR>   Open DIR as the workspace
-      --new-window          Open another window
+      --new-window          Open a fresh, independent window (do not restore tabs)
       --daemon <URL>        Connect to this workspace daemon instead of the local one
   -V, --version             Print the version
   -h, --help                Print this help
@@ -28,6 +28,7 @@ Commands:
 /// What the window should open, from the arguments.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Launch {
+    pub new_window: bool,
     pub working_dir: Option<PathBuf>,
     pub files: Vec<PathBuf>,
     pub daemon: Option<String>,
@@ -63,7 +64,7 @@ pub fn parse(args: &[String]) -> Command_ {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--new-window" => {}
+            "--new-window" => launch.new_window = true,
             "--working-dir" => launch.working_dir = iter.next().map(PathBuf::from),
             "--daemon" => launch.daemon = iter.next().cloned(),
             other if other.starts_with("--working-dir=") => launch.working_dir = Some(PathBuf::from(&other["--working-dir=".len()..])),
@@ -217,8 +218,8 @@ mod tests {
     fn a_launch_takes_its_folder_files_and_daemon_and_passes_the_rest_on() {
         let here = std::env::temp_dir();
         let dir = here.to_string_lossy().into_owned();
-        // The updater relaunches with --new-window; the Windows shell passes --working-dir.
-        assert_eq!(parse(&args(&["--new-window"])), Command_::Launch(Launch::default()));
+        // The Windows shell passes --working-dir.
+        assert_eq!(parse(&args(&["--new-window"])), Command_::Launch(Launch { new_window: true, ..Launch::default() }));
         assert_eq!(parse(&args(&["--working-dir", &dir])), Command_::Launch(Launch { working_dir: Some(here.clone()), ..Launch::default() }));
         assert_eq!(parse(&args(&[&format!("--working-dir={dir}")])), Command_::Launch(Launch { working_dir: Some(here.clone()), ..Launch::default() }));
         // A folder is the workspace; anything else is a file to open in it.

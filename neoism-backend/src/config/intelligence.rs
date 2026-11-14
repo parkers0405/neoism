@@ -178,6 +178,27 @@ pub fn config_descriptors() -> Vec<D> {
             Control::FontFamily,
         ),
         d(
+            "appearance.chat-font-family",
+            "Chat font family",
+            "Agent chat prose font. Independent of terminal, editor, and code fonts.",
+            Kind::String,
+            json!("Geist"),
+            &[
+                "Geist",
+                "Helvetica Neue",
+                "Arial",
+                "Helvetica",
+                "Verdana",
+                "Trebuchet MS",
+                "Segoe UI",
+                "DejaVu Sans",
+                "Geist Mono",
+            ],
+            true,
+            C::Appearance,
+            Control::FontFamily,
+        ),
+        d(
             "appearance.fonts.size",
             "Font size",
             "Terminal and editor font size.",
@@ -280,6 +301,28 @@ pub fn config_descriptors() -> Vec<D> {
             "appearance.effects.custom-mouse-cursor",
             "Custom mouse cursor",
             "Render Neoism's own pointer.",
+            Kind::Boolean,
+            json!(false),
+            &[],
+            false,
+            C::Appearance,
+            Control::Toggle,
+        ),
+        d(
+            "appearance.effects.liquid-glass-cursor",
+            "Liquid glass cursor",
+            "Use native Liquid Glass for the app-wide keyboard cursor on macOS 26+. Other platforms keep the normal cursor.",
+            Kind::Boolean,
+            json!(false),
+            &[],
+            false,
+            C::Appearance,
+            Control::Toggle,
+        ),
+        d(
+            "appearance.effects.liquid-glass-selection",
+            "Liquid glass selection",
+            "A sliding glass pill behind the active rail panel. Independent of the keyboard cursor; accessibility and unsupported renderers use a solid indicator.",
             Kind::Boolean,
             json!(false),
             &[],
@@ -1428,6 +1471,7 @@ fn enrich_runtime_suggestions(rows: &mut [D]) {
     let agents = installed_agents();
     for row in rows {
         let (provider, values) = if row.path == "appearance.fonts.family"
+            || row.path == "appearance.chat-font-family"
             || row.path.starts_with("appearance.fonts.") && row.path.ends_with(".family")
         {
             (Some(Provider::SystemFonts), fonts.clone())
@@ -1593,6 +1637,17 @@ mod tests {
     }
 
     #[test]
+    fn liquid_glass_cursor_is_a_visible_default_off_appearance_toggle() {
+        let rows = config_descriptors();
+        let row = rows.iter().find(|row| row.path == "appearance.effects.liquid-glass-cursor").unwrap();
+        assert_eq!(row.value_kind, Kind::Boolean);
+        assert_eq!(row.default, json!(false));
+        assert_eq!(row.category, C::Appearance);
+        assert_eq!(row.control, Control::Toggle);
+        assert!(row.settings_visible);
+    }
+
+    #[test]
     fn background_fit_and_position_descriptors_are_explicit_for_all_platforms() {
         let rows = config_descriptors();
         for prefix in [
@@ -1638,6 +1693,40 @@ mod tests {
                 assert_eq!(row.constraints.step, Some(0.05));
                 assert_eq!(row.settings_visible, prefix == "ui.window");
             }
+        }
+    }
+
+    #[test]
+    fn chat_font_family_is_extensible_and_enriched_with_system_fonts() {
+        let rows = config_descriptors();
+        let chat = rows
+            .iter()
+            .find(|row| row.path == "appearance.chat-font-family")
+            .unwrap();
+        let code = rows
+            .iter()
+            .find(|row| row.path == "appearance.fonts.family")
+            .unwrap();
+        assert_eq!(chat.default, json!("Geist"));
+        assert_eq!(chat.value_kind, Kind::String);
+        assert_eq!(chat.category, C::Appearance);
+        assert_eq!(chat.control, Control::FontFamily);
+        assert!(chat.settings_visible);
+        assert!(chat.extensible);
+        assert_eq!(chat.provider, Some(Provider::SystemFonts));
+        assert_eq!(chat.runtime_suggestions, code.runtime_suggestions);
+        for family in ["Geist", "Helvetica Neue", "Arial", "Geist Mono"] {
+            assert!(chat.static_suggestions.iter().any(|value| value == family));
+            assert!(chat
+                .options
+                .iter()
+                .any(|option| option.value == json!(family)));
+        }
+        for family in &chat.runtime_suggestions {
+            assert!(chat
+                .options
+                .iter()
+                .any(|option| option.value == json!(family)));
         }
     }
 

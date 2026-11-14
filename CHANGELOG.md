@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.152] - 2026-11-14
+
+### Native input, Agent goals, and workspace polish
+
+- Adds native touch-input arbitration, configurable fonts and keybindings, refined scrolling and selection, and macOS glass cursor rendering with fallback behavior on other platforms.
+- Refines Agent activity, goal lifecycle and completion feedback, slash commands, tool presentation, and conversation controls.
+- Improves workspace file handling, server availability and connection feedback, compact finder/palette layouts, and Linux updater restart handling.
+- Vendors the pinned Rune input/rendering patches and their required upstream GPU assets for reproducible release builds.
+
+This stable release includes the current workspace source batch. No local test suite was run for this release; the existing GitHub platform build and packaging checks remain in place. Each successful platform publishes independently, without waiting for the other platforms. Existing database backup and downgrade cautions remain applicable.
+
 ## [0.7.151] - 2026-11-13
 
 ### Remote authentication and Docker hosting

@@ -1,8 +1,8 @@
 //! Window recovery (GPUiX's `session-store.ts`): every workspace's tabs, split tree, composer
 //! drafts, sidebar and unsaved editor text survive a restart. The snapshot is written
-//! atomically next to the other Neoism state, at most once a second and only when it changed;
-//! startup rebuilds the workspaces from it before the daemon connects, so each one registers
-//! with its restored root.
+//! atomically next to the other Neoism state, at most once a second and only when it changed.
+//! Each live window exclusively claims its own snapshot; a normal launch restores the newest
+//! unclaimed window, while --new-window starts fresh. Old clean snapshots are bounded on disk.
 //!
 //! Terminals come back as fresh shells in the same tabs (their programs do not survive the
 //! app); conversations reload their history; files reopen from disk with any unsaved text
@@ -14,10 +14,13 @@ use crate::tabs::{Tab, TabKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::path::Path;
+use std::fs::{File, OpenOptions};
 use std::time::{Duration, Instant};
 
 const VERSION: u32 = 1;
 const INTERVAL: Duration = Duration::from_secs(1);
+const RECENT_WINDOWS: usize = 20;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Saved {
@@ -69,7 +72,7 @@ pub enum SavedNode {
     Split { horizontal: bool, children: Vec<SavedNode>, ratios: Vec<f32> },
 }
 
-/// Where the snapshot lives: `NEOISM_RUNE_STATE_PATH`, else `$XDG_STATE_HOME/neoism/rune/session.json`.
+/// Legacy snapshot and recovery namespace: additional windows live in `session.windows/`.
 pub fn path() -> PathBuf {
     if let Some(path) = std::env::var_os("NEOISM_RUNE_STATE_PATH") { return path.into(); }
     let base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from)
@@ -83,13 +86,12 @@ pub fn enabled() -> bool {
         || (std::env::var_os("NEOISM_RUNE_OFFLINE").is_none() && std::env::var_os("NEOISM_RUNE_NO_RESTORE").is_none())
 }
 
-pub fn read() -> Option<Saved> {
-    let saved: Saved = serde_json::from_slice(&std::fs::read(path()).ok()?).ok()?;
+fn read(path: &Path) -> Option<Saved> {
+    let saved: Saved = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     (saved.version == VERSION && !saved.workspaces.is_empty()).then_some(saved)
 }
 
-fn write(raw: &str) -> std::io::Result<()> {
-    let path = path();
+fn write(path: &Path, raw: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
     let next = path.with_extension(format!("json.{}.next", std::process::id()));
     std::fs::write(&next, raw)?;
@@ -98,11 +100,90 @@ fn write(raw: &str) -> std::io::Result<()> {
     std::fs::rename(next, path)
 }
 
+/// Disk recovery is not a live daemon workspace. Locks are held for the window lifetime,
+/// and released by the OS even after a crash. The index lock serializes claiming and pruning.
+struct Recovery {
+    path: PathBuf,
+    _lock: File,
+}
+
+fn lock_file(path: &Path) -> std::io::Result<File> {
+    let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; file.set_permissions(std::fs::Permissions::from_mode(0o600))?; }
+    Ok(file)
+}
+
+impl Saved {
+    fn has_unsaved_work(&self) -> bool {
+        self.workspaces.iter().any(|w| !w.unsaved.is_empty() || w.tabs.iter().any(|tab| match tab {
+            SavedTab::Home { draft } | SavedTab::Terminal { draft } | SavedTab::Agent { draft, .. } => !draft.is_empty(),
+            _ => false,
+        }))
+    }
+}
+
+impl Recovery {
+    fn open(base: &Path, fresh: bool) -> std::io::Result<(Self, Option<Saved>)> {
+        let dir = base.with_extension("windows");
+        std::fs::create_dir_all(&dir)?;
+        let index = lock_file(&dir.join("index.lock"))?;
+        index.lock()?;
+        let mut paths = vec![base.to_path_buf()]; // Migrate the shipped single-window snapshot in place.
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "json") { paths.push(path.clone()); }
+            // Explicitly closed windows leave only a lock file. Reap it under the index
+            // lock, but never unlink a lock that a live window still owns.
+            if path.extension().is_some_and(|ext| ext == "lock") && path.file_name().is_some_and(|n| n != "index.lock")
+                && !path.with_extension("json").exists() {
+                let lock = lock_file(&path)?;
+                if lock.try_lock().is_ok() {
+                    drop(lock);
+                    std::fs::remove_file(path)?;
+                }
+            }
+        }
+        paths.sort_by_key(|path| std::cmp::Reverse(std::fs::metadata(path).and_then(|m| m.modified()).ok()));
+        let mut selected = None;
+        let mut clean = 0;
+        for path in paths {
+            let lock_path = path.with_extension("lock");
+            let lock = lock_file(&lock_path)?;
+            match lock.try_lock() {
+                Ok(()) => {},
+                Err(std::fs::TryLockError::WouldBlock) => continue,
+                Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            }
+            let Some(saved) = read(&path) else { continue };
+            if !fresh && selected.is_none() {
+                selected = Some((Self { path, _lock: lock }, Some(saved)));
+                continue;
+            }
+            // Never age out drafts or unsaved files. Active windows were skipped above.
+            if !saved.has_unsaved_work() {
+                clean += 1;
+                if clean >= RECENT_WINDOWS {
+                    std::fs::remove_file(&path)?;
+                    drop(lock);
+                    std::fs::remove_file(lock_path)?;
+                }
+            }
+        }
+        if let Some(selected) = selected { return Ok(selected); }
+        let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+        let lock = lock_file(&path.with_extension("lock"))?;
+        lock.lock()?;
+        Ok((Self { path, _lock: lock }, None))
+    }
+}
+
 /// Throttles writes and skips unchanged snapshots.
 #[derive(Default)]
 pub struct Writer {
     last: String,
     at: Option<Instant>,
+    recovery: Option<Recovery>,
 }
 
 /// Capture one workspace from its parts (the active one lives on `App`, the rest in parked state).
@@ -144,9 +225,29 @@ pub fn capture_workspace(name: &str, cwd: &str, tabs: &[Tab], active: usize, lay
 }
 
 impl App {
+    pub fn recover_session(&mut self, fresh: bool) {
+        if !enabled() { return; }
+        match Recovery::open(&path(), fresh) {
+            Ok((recovery, saved)) => {
+                self.session_writer.recovery = Some(recovery);
+                if let Some(saved) = saved { self.restore_session(saved); }
+            }
+            Err(error) => eprintln!("neoism-rune: could not claim window recovery: {error}"),
+        }
+    }
+
+    pub(crate) fn forget_session(&mut self) {
+        if let Some(recovery) = &self.session_writer.recovery {
+            let _ = std::fs::remove_file(&recovery.path);
+        }
+    }
+
     /// Unsaved text of the active workspace's loaded, dirty buffers.
     pub(crate) fn unsaved_buffers(buffers: &std::collections::HashMap<String, crate::editor::Buffer>) -> BTreeMap<String, String> {
-        buffers.iter().filter(|(_, b)| b.loaded && b.dirty()).map(|(path, b)| (path.clone(), b.doc.lines.join("\n"))).collect()
+        buffers.iter().filter_map(|(path, b)| {
+            let text = b.recovered.clone().or_else(|| b.dirty().then(|| b.doc.lines.join("\n")))?;
+            Some((path.clone(), text))
+        }).collect()
     }
 
     pub fn capture_session(&self) -> Saved {
@@ -170,7 +271,7 @@ impl App {
     /// call returns how long until the window opens again, so the caller can wake then and the
     /// last change before going idle is still written.
     pub fn save_session(&mut self, force: bool) -> Option<Duration> {
-        if !enabled() { return None; }
+        if !enabled() || self.session_closed || self.session_writer.recovery.is_none() { return None; }
         if let Some(wait) = self.session_writer.at.map(|at| INTERVAL.saturating_sub(at.elapsed())).filter(|w| !force && !w.is_zero()) {
             return Some(wait);
         }
@@ -180,7 +281,7 @@ impl App {
         if saved.workspaces.is_empty() { return None; }
         let Ok(raw) = serde_json::to_string(&saved) else { return None };
         if raw == self.session_writer.last { return None; }
-        match write(&raw) {
+        match write(&self.session_writer.recovery.as_ref().unwrap().path, &raw) {
             Ok(()) => self.session_writer.last = raw,
             Err(error) => eprintln!("neoism-rune: could not save the session: {error}"),
         }
@@ -305,6 +406,81 @@ impl crate::workspace::State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_windows_are_never_restored_or_overwritten_and_closed_windows_recover() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("session.json");
+        let mut app = App::new();
+        app.open_tab(TabKind::Agent { session: Some("remember-me".into()) });
+        app.tabs.last_mut().unwrap().draft.replace_text("unfinished prompt");
+        let raw = serde_json::to_string(&app.capture_session()).unwrap();
+        write(&base, &raw).unwrap();
+        let (first, saved) = Recovery::open(&base, false).unwrap();
+        assert_eq!(saved.unwrap(), app.capture_session(), "legacy recovery is retained");
+        let (second, saved) = Recovery::open(&base, false).unwrap();
+        assert!(saved.is_none(), "a live window must not be cloned");
+        assert_ne!(first.path, second.path);
+        write(&second.path, &serde_json::to_string(&App::new().capture_session()).unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(&first.path).unwrap(), raw);
+        let first_path = first.path.clone();
+        drop(first); // Also models the OS releasing a crashed process's lock.
+        let (reopened, saved) = Recovery::open(&base, false).unwrap();
+        assert_eq!(reopened.path, first_path);
+        assert_eq!(saved.unwrap(), app.capture_session());
+        drop(reopened);
+        let (fresh, saved) = Recovery::open(&base, true).unwrap();
+        assert!(saved.is_none(), "--new-window ignores closed recovery too");
+        assert_ne!(fresh.path, first_path);
+    }
+
+    #[test]
+    fn repeated_fresh_windows_bound_clean_recovery_but_preserve_unsaved_work() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("session.json");
+        let mut app = App::new();
+        app.open_file("edited.rs", None);
+        app.buffers.get_mut("edited.rs").unwrap().recovered = Some("unsaved edit".into());
+        let (protected, _) = Recovery::open(&base, true).unwrap();
+        let protected_path = protected.path.clone();
+        write(&protected.path, &serde_json::to_string(&app.capture_session()).unwrap()).unwrap();
+        drop(protected);
+        let clean = serde_json::to_string(&App::new().capture_session()).unwrap();
+        for _ in 0..(RECENT_WINDOWS * 3) {
+            let (window, _) = Recovery::open(&base, true).unwrap();
+            write(&window.path, &clean).unwrap();
+        }
+        let entries: Vec<_> = std::fs::read_dir(base.with_extension("windows")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert!(entries.iter().filter(|p| p.extension().is_some_and(|e| e == "json")).count() <= RECENT_WINDOWS + 1);
+        assert!(entries.len() <= (RECENT_WINDOWS + 1) * 2 + 1, "lock files must be bounded too");
+        let saved = read(&protected_path).expect("unsaved recovery is never pruned");
+        assert_eq!(saved.workspaces[0].unsaved["edited.rs"], "unsaved edit");
+        assert!(saved.has_unsaved_work());
+        app.open_tab(TabKind::Agent { session: None });
+        app.tabs.last_mut().unwrap().draft.replace_text("draft");
+        app.buffers.clear();
+        assert!(app.capture_session().has_unsaved_work(), "drafts alone prevent eviction");
+    }
+
+    #[test]
+    fn explicit_close_removes_only_its_snapshot_and_orphan_locks_are_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("session.json");
+        let (first, _) = Recovery::open(&base, true).unwrap();
+        let (second, _) = Recovery::open(&base, true).unwrap();
+        let raw = serde_json::to_string(&App::new().capture_session()).unwrap();
+        write(&first.path, &raw).unwrap();
+        write(&second.path, &raw).unwrap();
+        let lock_path = first.path.with_extension("lock");
+        let mut app = App::new();
+        app.session_writer.recovery = Some(first);
+        app.forget_session();
+        assert!(read(&second.path).is_some());
+        drop(app);
+        let (_next, _) = Recovery::open(&base, true).unwrap();
+        assert!(!lock_path.exists());
+        assert!(read(&second.path).is_some());
+    }
 
     #[test]
     fn a_split_tree_round_trips_through_tab_indices() {

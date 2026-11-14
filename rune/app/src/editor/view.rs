@@ -29,7 +29,7 @@ const BEAM_WIDTH: f32 = 0.15;
 pub const YANK_FLASH_SECS: f32 = 0.28;
 
 pub fn line_height(app: &App) -> f32 { (app.ty.size * 1.55).round() }
-pub fn advance(app: &App) -> f32 { app.ty.size * 0.6 }
+pub fn advance(app: &App) -> f32 { app.ty.advance() }
 
 pub fn scroll_key(workspace: &str, path: &str) -> String { format!("editor:{workspace}:{path}") }
 
@@ -415,7 +415,7 @@ fn code(app: &App, buffer: &Buffer) -> El {
             move |a: &App, i| a.buffers.get(&path).map_or_else(el, |b| cached_row(a, b, i)))
         .virtual_rows_version(0u64);
     let tab = app.active_tab().id;
-    let rows = rows.on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| { a.select_tab(tab); a.editor_drag(d, tx); })
+    let rows = rows.touch_drag_after_hold().on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| { a.select_tab(tab); a.editor_drag(d, tx); })
         .on_pointer_move_local(move |a: &mut App, p, tx| {
             if a.active_tab().id != tab { return; }
             if let Some((line, col)) = hit_window(a, p.window_x, p.window_y, true) {

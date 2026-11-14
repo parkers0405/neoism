@@ -99,6 +99,9 @@ pub struct Appearance {
     pub palette: String,
     #[serde(default = "FontConfig::default")]
     pub fonts: FontConfig,
+    /// Agent chat prose font, independent of terminal/editor and code fonts.
+    #[serde(rename = "chat-font-family", default = "default_chat_font_family")]
+    pub chat_font_family: String,
     #[serde(rename = "line-height", default = "default_line_height")]
     pub line_height: f32,
     /// Play one random splash animation when a new terminal or agent tab opens.
@@ -148,6 +151,7 @@ impl Default for Appearance {
             theme: default_neoism_theme(),
             palette: String::default(),
             fonts: FontConfig::default(),
+            chat_font_family: default_chat_font_family(),
             line_height: default_line_height(),
             splash_auto_animate: false,
             wordmark_fire: true,
@@ -162,6 +166,10 @@ impl Default for Appearance {
             adaptive_colors: None,
         }
     }
+}
+
+fn default_chat_font_family() -> String {
+    "Geist".into()
 }
 
 /// `[editor]` — the built-in code + markdown editor.
@@ -1756,6 +1764,42 @@ mod tests {
         // A key placed at the wrong level (bare root) is ignored, not honored.
         let misplaced = parse(r#"{ "display-name": "parker" }"#);
         assert_eq!(misplaced.presence.display_name, None);
+    }
+
+    #[test]
+    fn chat_font_family_defaults_and_roundtrips_independently() {
+        for content in ["{}", r#"{"appearance": {"fonts": {"family": "Iosevka"}}}"#] {
+            assert_eq!(parse(content).appearance.chat_font_family, "Geist");
+        }
+        assert_eq!(Appearance::default().chat_font_family, "Geist");
+        assert!(
+            validate_config_document(r#"{"appearance":{"chat-font-family":42}}"#)
+                .is_err()
+        );
+
+        for family in ["Helvetica Neue", "Geist Mono", "Custom Chat Font"] {
+            let content = settings_content_after_updates(
+                r#"{
+                    // preserve code font and comments
+                    "appearance": { "fonts": { "family": "Iosevka" } }
+                }"#,
+                &[("appearance.chat-font-family", serde_json::json!(family))],
+            )
+            .unwrap();
+            validate_config_document(&content).unwrap();
+            assert!(content.contains("preserve code font and comments"));
+            let config = deserialize_config(&content).unwrap();
+            assert_eq!(config.appearance.chat_font_family, family);
+            assert_eq!(config.appearance.fonts.family.as_deref(), Some("Iosevka"));
+            let serialized = serde_json::to_value(&config).unwrap();
+            assert_eq!(serialized["appearance"]["chat-font-family"], family);
+            let reloaded: Config = serde_json::from_value(serialized).unwrap();
+            assert_eq!(reloaded.appearance.chat_font_family, family);
+            assert_eq!(
+                reloaded.appearance.fonts.family,
+                config.appearance.fonts.family
+            );
+        }
     }
 
     #[test]

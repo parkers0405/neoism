@@ -2,6 +2,7 @@
 //! (`reference/14`, `23`, `24`). One query field, a ranked list, keyboard and pointer selection.
 
 mod backgrounds;
+pub(crate) mod compact;
 pub(crate) mod commands;
 pub(crate) mod systems;
 pub(crate) mod view;
@@ -120,6 +121,9 @@ pub fn theme_display_name(name: &str) -> String {
 }
 
 impl Picker {
+    pub fn expanded(&self) -> bool {
+        self.mode != Mode::Commands || compact::expanded(&self.query.text)
+    }
     /// Move the window so the selection sits inside its band (after a jump or a reset).
     pub fn reveal(&mut self) {
         let count = self.rows().len();
@@ -140,7 +144,7 @@ impl Picker {
 
     /// Ranked rows for the current query; ties keep catalog order.
     pub fn rows(&self) -> Vec<Row> {
-        let query = self.query.text.trim();
+        let query = if self.mode == Mode::Commands { compact::query(&self.query.text) } else { self.query.text.trim() };
         if self.mode == Mode::Commands {
             if let Some(line) = self.editor_lines.and_then(|lines| go_to_line(query, lines)) {
                 return vec![Row { icon: Some(commands::Service::Neoism.icon()), title: format!("neoism: Go to Line {line}"),
@@ -321,15 +325,17 @@ impl App {
     }
 
     pub fn move_picker(&mut self, delta: isize) {
+        let visible = compact::rows(self, view::MAX_ROWS);
         let Some(picker) = &mut self.picker else { return };
         let count = picker.rows().len();
         if count == 0 { return; }
         picker.selected = (picker.selected as isize + delta).rem_euclid(count as isize) as usize;
-        picker.top = crate::ui::rows::follow_top(picker.selected, count, count.min(view::MAX_ROWS), picker.top, view::SCROLL_OFF_ROWS);
+        picker.top = crate::ui::rows::follow_top(picker.selected, count, count.min(if picker.mode == Mode::Commands { visible } else { view::MAX_ROWS }), picker.top, view::SCROLL_OFF_ROWS);
     }
 
     /// Run the selected (or clicked) row and close the picker.
     pub fn accept_picker(&mut self, index: Option<usize>, tx: &mut Tx) {
+        if self.picker.as_ref().is_some_and(|p| !p.expanded()) { return; }
         // Systems rows open their settings inside the palette rather than closing it.
         if let Some(picker) = &self.picker {
             match picker.rows().get(index.unwrap_or(picker.selected)).map(|r| r.target) {

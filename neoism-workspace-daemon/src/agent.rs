@@ -837,6 +837,7 @@ impl AgentInner {
 
 pub(crate) mod dispatcher;
 pub(crate) mod events;
+mod goals;
 pub(crate) mod handlers;
 pub(crate) mod http;
 pub(crate) mod turn;

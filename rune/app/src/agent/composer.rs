@@ -81,6 +81,25 @@ mod interrupt_tests {
     use super::*;
 
     #[test]
+    fn send_button_dispatches_goal_through_correlated_goal_admission() {
+        let mut app = App::new();
+        app.load_fixture("goal-click", "Goal", "[]");
+        app.composer.selection.model = "local/one".into();
+        app.tabs[app.active].draft.replace_text("/goal ship it");
+        let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| composer(a, 700.0),
+            (800.0, 400.0), rune::Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        let rect = rt.elements().iter().find(|element| element.key.as_deref() == Some("composer-send")).unwrap().rect;
+        let (x, y) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 120.0);
+        let sent = rt.state.agent_sent.borrow();
+        assert!(sent.iter().any(|message| message.contains("SubmitPrompt") && message.contains("/goal ship it")));
+        assert!(!sent.iter().any(|message| message.contains("SlashCommand")));
+    }
+
+    #[test]
     fn one_escape_interrupts_the_run_without_clearing_its_queued_steers_or_draft() {
         use crate::daemon::{Daemon, Target};
         use std::time::Duration;
@@ -117,7 +136,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
     let tab = app.active_tab();
     let tab_id = tab.id;
     let streaming = !app.has_prompt() && matches!(&tab.kind, TabKind::Agent { session: Some(id) } if app.sessions.get(id).is_some_and(|s| s.streaming));
-    let input = rune::text_input(&tab.draft, app.ty.composer())
+    let input = rune::text_input(&tab.draft, app.ty.chat_composer())
         // Keys through this field (list arrows, wheel-free navigation) commit animated: without
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
@@ -147,13 +166,13 @@ pub fn composer(app: &App, max_w: f32) -> El {
     let send = el().key("composer-send").w(36.0).h(36.0).radius(8.0).center()
         .fill(if streaming { rgb(p.fg) } else { rgb(p.muted).alpha(0.6) })
         .child(icon(app, if streaming { glyph::STOP } else { glyph::ARROW_UP }, 0.9, if streaming { rgb(p.bg) } else { rgb(p.fg) }))
-        .on_press(move |s: &mut App| {
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| {
             s.select_tab(tab_id);
             if s.submit_pending_prompt() { return; }
             let i = s.active;
             match s.tabs[i].kind.clone() {
                 TabKind::Agent { session: Some(id) } if s.sessions.get(&id).is_some_and(|x| x.streaming) => s.stop(&id),
-                _ => s.submit(),
+                _ => if !s.submit_command(tx) { s.submit(); },
             }
         });
     // The paperclip: a button the send button's size, its glyph as large as the chips' text.

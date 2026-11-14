@@ -18,4 +18,27 @@ fn main() {
     });
     let version = std::env::var("NEOISM_VERSION").ok().or(from_workspace).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
     println!("cargo:rustc-env=NEOISM_VERSION={version}");
+    build_glass_cursor();
+}
+
+fn build_glass_cursor() {
+    println!("cargo:rerun-if-changed=native/GlassCursor.swift");
+    println!("cargo:rerun-if-changed=native/GlassOptics.swift");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") { return; }
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+        "aarch64" => "arm64", "x86_64" => "x86_64", other => panic!("unsupported macOS architecture: {other}"),
+    };
+    let status = std::process::Command::new("xcrun").args(["swiftc", "-parse-as-library", "-O", "-emit-library", "-static",
+        "-target", &format!("{arch}-apple-macosx13.0"), "-module-name", "NeoismGlassCursor",
+        "native/GlassCursor.swift", "native/GlassOptics.swift", "-o"]).arg(out.join("libNeoismGlassCursor.a")).status().expect("Optical cursor requires Xcode and swiftc");
+    assert!(status.success(), "Swift/Metal optical cursor compilation failed");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-search=native=/usr/lib/swift");
+    println!("cargo:rustc-link-lib=static=NeoismGlassCursor");
+    println!("cargo:rustc-link-lib=dylib=swiftCore");
+    println!("cargo:rustc-link-lib=framework=AppKit");
+    println!("cargo:rustc-link-lib=framework=QuartzCore");
+    println!("cargo:rustc-link-lib=framework=Metal");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }

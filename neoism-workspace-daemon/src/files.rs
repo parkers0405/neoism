@@ -502,6 +502,92 @@ async fn delete(root: &Path, rel: String) -> Vec<FilesServerMessage> {
     }
 }
 
+/// Materialize only an explicitly advertised, absent vault on a valid first
+/// top-level create. Do not turn arbitrary missing workspace roots into writable
+/// directories, or create anything for reads, writes, or invalid child paths.
+pub(crate) async fn create_uncreated_notes_root(
+    root: Option<&str>,
+    message: &FilesClientMessage,
+    advertised_roots: impl IntoIterator<Item = PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    let (FilesClientMessage::CreateFile { dir, name }
+    | FilesClientMessage::CreateDir { dir, name }) = message
+    else {
+        return Ok(None);
+    };
+    let Some(root) = root.map(Path::new) else {
+        return Ok(None);
+    };
+    if !dir.is_empty()
+        || !root.is_absolute()
+        || !matches!(root.try_exists(), Ok(false))
+        || !advertised_roots
+            .into_iter()
+            .any(|advertised| advertised == root)
+    {
+        return Ok(None);
+    }
+    validate_name(name)?;
+    if name.contains(['/', '\\'])
+        || !matches!(
+            Path::new(name).components().next(),
+            Some(Component::Normal(_))
+        )
+        || Path::new(name).components().count() != 1
+        || root
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err("first notes creation requires a single child name".into());
+    }
+    resolve_path(root, name)?;
+
+    // Resolve the existing ancestor before creating the missing suffix. In
+    // particular, try_exists alone would mistake a dangling symlink for an
+    // absent vault. Never follow one while materializing the vault.
+    let mut ancestor = root;
+    let mut suffix = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    return Err("notes vault ancestor is not a directory".into());
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                suffix.push(ancestor.file_name().ok_or("invalid notes vault root")?);
+                ancestor = ancestor.parent().ok_or("invalid notes vault parent")?;
+            }
+            Err(error) => return Err(format!("resolve notes vault: {error}")),
+        }
+    }
+    let mut canonical = crate::path::canonicalize(ancestor)
+        .map_err(|error| format!("resolve notes vault ancestor: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("notes vault ancestor is not a directory".into());
+    }
+    for component in suffix.into_iter().rev() {
+        canonical.push(component);
+        // create_dir (not create_dir_all) refuses a symlink inserted into the
+        // missing suffix. Concurrent legitimate first creates remain valid.
+        match fs::create_dir(&canonical).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(&canonical)
+                    .map_err(|error| format!("stat notes vault: {error}"))?;
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err("notes vault creation encountered a non-directory".into());
+                }
+            }
+            Err(error) => return Err(format!("create notes vault: {error}")),
+        }
+    }
+    crate::path::canonicalize(&canonical)
+        .map(Some)
+        .map_err(|error| format!("resolve created notes vault: {error}"))
+}
+
 /// A newly advertised default vault is deliberately created only on first
 /// note creation. Browsing that exact root should show the empty notes state.
 /// Arbitrary missing roots, nested reads and writes retain normal validation.
@@ -513,10 +599,12 @@ pub(crate) fn uncreated_notes_listing(
     let FilesClientMessage::ListDir { path } = message else {
         return None;
     };
-    if !path.is_empty() {
+    let root = Path::new(root?);
+    // Notes tree requests use the absolute root to route replies to the right
+    // sidebar. Permit that exact path, but never an absent child or traversal.
+    if !path.is_empty() && (!Path::new(path).is_absolute() || Path::new(path) != root) {
         return None;
     }
-    let root = Path::new(root?);
     if !root.is_absolute() || !matches!(root.try_exists(), Ok(false)) {
         return None;
     }
@@ -727,6 +815,26 @@ mod tests {
         );
         assert!(!notes.exists(), "browsing must retain lazy vault creation");
         assert!(uncreated_notes_listing(root, &list, []).is_none());
+        let absolute = FilesClientMessage::ListDir {
+            path: notes.to_string_lossy().into_owned(),
+        };
+        assert!(matches!(
+            uncreated_notes_listing(root, &absolute, [notes.clone()]),
+            Some(FilesServerMessage::DirListing { path, entries })
+                if Some(path.as_str()) == root && entries.is_empty()
+        ));
+        assert!(uncreated_notes_listing(root, &absolute, []).is_none());
+        let unknown_root = temporary.path().join("Unknown");
+        let unknown = FilesClientMessage::ListDir {
+            path: unknown_root.to_string_lossy().into_owned(),
+        };
+        assert!(uncreated_notes_listing(unknown_root.to_str(), &unknown, [notes.clone()]).is_none());
+        let absolute_child = FilesClientMessage::ListDir {
+            path: notes.join("child").to_string_lossy().into_owned(),
+        };
+        assert!(uncreated_notes_listing(root, &absolute_child, [notes.clone()]).is_none());
+        assert!(!notes.exists(), "absolute browsing must not create the vault");
+        assert!(!unknown_root.exists());
         assert!(uncreated_notes_listing(
             root,
             &FilesClientMessage::ListDir {

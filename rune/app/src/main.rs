@@ -17,6 +17,10 @@ mod drive;
 mod editor;
 mod finder;
 mod ghostty;
+mod glass_cursor;
+mod glass_selection;
+mod goal_celebration;
+mod connection_celebration;
 mod home;
 mod keys;
 mod palette;
@@ -57,10 +61,15 @@ mod ui;
 mod workspace;
 mod wordmark;
 
+#[cfg(test)]
+mod touch_tests;
+
 use rune::{AppSpec, ImageCache, KeyEvent, Tx};
 use app::App;
 
 pub const FONTS: &[&[u8]] = &[
+    // Reuse the repository's licensed Geist Sans asset; embed it for offline releases.
+    include_bytes!("../../../neoism-paint/src/font/resources/Geist/Geist-Variable.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Regular.otf"),
     include_bytes!("../assets/fonts/GeistMono-Bold.otf"),
     include_bytes!("../assets/fonts/GeistMono-Italic.otf"),
@@ -83,8 +92,8 @@ fn setup(app: &mut App, waker: rune::Waker) {
         app.daemon = Some(daemon);
         app.inbox = Some(inbox);
     }
-    // Reopen the last window's workspaces before the daemon handshake registers them.
-    if session::enabled() && let Some(saved) = session::read() { app.restore_session(saved); }
+    // Claim recovery before reading it: another live window must never be copied or overwritten.
+    app.recover_session(startup::fresh_window());
     // `neoism file.rs`: the files named on the command line open in the first workspace.
     for file in startup::files() { app.open_file(&file.to_string_lossy(), None); }
 }
@@ -125,8 +134,15 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     macro_rules! wake { ($name:expr, $d:expr) => {{ let d = $d; if *TRACE_POLL { wakes.push(($name, d)); } tx.wake_after(d); }} }
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
     let changed = drive::tick(app, clock, tx) | replay::tick(app, clock, tx) | app.poll_usage();
+    let changed = changed | glass_selection::poll(app, tx);
+    let changed = changed | goal_celebration::poll(app, tx);
+    let changed = changed | connection_celebration::poll(app, tx);
     let (inbound_changed, inbound_pending) = app.drain();
-    let changed = changed | inbound_changed | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
+    let (reconnect_wait, reconnect_changed) = app.connection.reconnect_notice(std::time::Instant::now());
+    if let Some(wait) = reconnect_wait { wake!("reconnect-notice", wait); }
+    let changed = changed | reconnect_changed;
+    let fonts_changed = app.sync_font_families(tx);
+    let changed = changed | inbound_changed | fonts_changed | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
     let (goal_wait, goal_changed) = app.goals_tick();
     if let Some(wait) = goal_wait { wake!("goal-age", wait); }
     let changed = changed | goal_changed;
@@ -241,12 +257,13 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // while it runs; a poll wake alone is held to a 16.7 ms timer on Linux, i.e. 60 fps.
     let per_frame = gliding || list_sliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || external_landing || mode_changing
         || wordmark_moving || animating || busy || skit || edge_scrolling || marquee_moving;
-    app.keep_vsync(per_frame);
     let clip = app.cursor_clip();
     app.cursor.track_clip(clip, app.cursor.trail.moved_at != moved_at);
     // The blink is a live opacity and travel a live offset: only the block appearing, leaving,
     // changing shape (a trail) or clip re-runs the views (`Cursor::place`).
-    let caret_changed = app.cursor.place(clip.filter(|_| !app.cursor.crossing()));
+    let glass_changed = glass_cursor::update(app, target);
+    app.keep_vsync(per_frame || glass_cursor::animating());
+    let caret_changed = (app.cursor.place(clip.filter(|_| !app.cursor.crossing())) && !app.cursor.native_glass) | glass_changed;
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     // While animating, the pill shows the presentation rate; at rest it holds the last one.
     // At most twice a second, and through the pill's live text: only its first reading mounts
@@ -289,7 +306,7 @@ fn main() {
     startup::apply(&launch);
     let spec = AppSpec::<App> {
         fonts: FONTS,
-        families: ("Geist Mono", "Geist Mono"),
+        families: ("Geist", "Geist Mono"),
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
@@ -339,6 +356,10 @@ fn main() {
             ("tasks-long", |s| s.fixture_tasks("long")),
             ("goals", |s| s.fixture_goals("active")),
             ("goals-paused", |s| s.fixture_goals("paused")),
+            ("goal-celebration", goal_celebration::fixture),
+            ("connected", connection_celebration::fixture),
+            ("connected-light", |s| { s.pal = ui::theme::palette("neoism_light"); connection_celebration::fixture(s); }),
+            ("goal-celebration-light", |s| { s.pal = ui::theme::palette("neoism_light"); goal_celebration::fixture(s); }),
             ("goals-complete", |s| s.fixture_goals("complete")),
             ("goals-empty", |s| s.fixture_goals("empty")),
             ("goals-loading", |s| s.fixture_goals("loading")),
@@ -390,6 +411,17 @@ fn main() {
                 }
             }),
             ("sidebar", |s| s.sidebar = Some(app::Sidebar::Conversations)),
+            ("model-accounts", |s| {
+                use neoism_protocol::agent::{AgentServerMessage as M, ModelInfo, ProviderInfo, ProviderConnectionInfo};
+                s.load_fixture("model-accounts", "Choose a model account", "[]");
+                s.apply_agent(M::ProviderCatalog { providers: vec![ProviderInfo { id: "openai".into(), name: "OpenAI".into(),
+                    models: vec![ModelInfo { id: "gpt-6.1-sol".into(), name: "GPT-6.1 Sol".into(), context_limit: None }] }],
+                    catalog_status: None, request_id: None });
+                s.run_slash("/model openai/gpt-6.1-sol", &mut rune::Tx::default());
+                s.apply_agent(M::ConnectConnections { provider: "openai".into(), connections: ["Personal", "Work"].iter().enumerate().map(|(i, label)| ProviderConnectionInfo {
+                    provider_id: "openai".into(), connection_id: format!("account-{i}"), label: (*label).into(), auth_type: "oauth".into(), is_default: i == 0,
+                }).collect() });
+            }),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });
                 let i = s.active;
@@ -506,6 +538,12 @@ fn main() {
                 let tab = s.active_tab().id;
                 s.toggle_block_filter(tab, 9001);
                 if let Some(term) = s.terminals.get_mut(&tab) { term.filter.as_mut().unwrap().1.replace_text("rs"); }
+            }),
+            ("terminal-actions-themed", |s| {
+                s.pal = ui::theme::palette("catppuccin_mocha");
+                s.fixture_blocks(&TERMINAL_FIXTURE);
+                let tab = s.active_tab().id;
+                if let Some(term) = s.terminals.get_mut(&tab) { term.hovered = Some(9002); term.more = Some(9002); }
             }),
             // A second terminal next to Home: Home keeps the directory until the star moves it.
             // A full-screen program with coloured rows (status bar, selection, panels).
@@ -714,6 +752,15 @@ fn main() {
             ("tree-git", tree::git::fixture),
             // A live turn mid-stream: the animated "Crafting . . ." status line.
             ("streaming", replay::start),
+            ("streaming-fire-themed", |s| {
+                s.pal = ui::theme::palette("catppuccin_mocha");
+                s.wordmark.fire_enabled = true;
+                replay::start(s);
+            }),
+            ("streaming-no-fire", |s| {
+                s.wordmark.fire_enabled = false;
+                replay::start(s);
+            }),
             ("optimistic-send", |s| {
                 s.load_fixture("fixture-send", "Optimistic send", "[]");
                 s.submit_prompt("fixture-send", "Show my message before Crafting appears.".into());
@@ -776,6 +823,9 @@ fn main() {
                 s.apply_agent(M::BackgroundTasksUpdated { session_id: "compact".into(), epoch: "fixture".into(), revision: 1,
                     tasks: vec![BackgroundJobRuntime { job_id: "job".into(), session_id: "compact".into(), started_at: 1 }] });
                 s.sidebar = Some(app::Sidebar::Conversations);
+            }),
+            ("goal-started", |s| {
+                s.load_fixture("goal-started", "Working toward a goal", r#"[{"id":"goal-start","role":"System","kind":"System","title":"Goal Started","text":"Ship the native composer"},{"id":"reply","role":"Assistant","kind":"Assistant","text":"I will verify the composer and fix the goal workflow."}]"#);
             }),
             ("activity", |s| {
                 s.load_fixture("fixture-activity", "Frame Pacing in Rust", include_str!("../fixtures/code-timeline.json"));
@@ -854,8 +904,11 @@ fn main() {
     // The app draws its own title band: macOS keeps its traffic lights in it and Windows its
     // caption buttons; on Linux the compositor's frame stays and there is no band.
     let mut app = rune::App::new(spec).titlebar(rune::Titlebar::new(ui::chrome::TITLEBAR_H)).init(App::new)
+        .compositor(glass_selection::Compositor::default())
         .on_close(|app, _| app.close_window_resources())
         .on_quit(|app, _| app.close_window_resources());
+    #[cfg(target_os = "macos")]
+    { app = app.on_window(glass_cursor::attach); }
     // Encoded frame callbacks measure submission cadence only. They are not compositor
     // presentation timestamps and cannot establish missed-vblank parity (see rune/README.md).
     let trace = std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1");

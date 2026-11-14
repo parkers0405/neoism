@@ -3,8 +3,9 @@
 //!
 //! - A mouse wheel notch moves three lines on a critically damped glide (0.39 s response, the
 //!   terminal's), and consecutive notches extend the same motion.
-//! - Trackpad pixels apply directly and inject bounded, continuously decaying momentum,
-//!   matching GPUiX's timeline physics. Reading surfaces apply their fixed gain before this.
+//! - Trackpad pixels apply directly. On macOS the OS alone supplies momentum: both finger
+//!   and momentum events move only their reported distance, with no extra coast. Elsewhere
+//!   bounded, continuously decaying momentum retains GPUiX's timeline physics and surface gain.
 //!
 //! The motion is stepped on the frame clock and placed with `Tx::scroll_to_instant` relative
 //! to where the view is each frame, so it animates even while a composer holds focus (Rune
@@ -20,7 +21,9 @@ const NOTCH: f32 = 40.0;
 /// The notch glide's response (2π/ω).
 const NOTCH_RESPONSE: f32 = 0.39;
 /// GPUiX's precision-trackpad velocity injection, bound, decay and stop threshold.
+#[cfg(not(target_os = "macos"))]
 const TRACKPAD_INJECTION: f32 = 7.0;
+#[cfg(not(target_os = "macos"))]
 const TRACKPAD_MAX: f32 = 2800.0;
 const TRACKPAD_TAU: f32 = 0.28;
 const TRACKPAD_STOP: f32 = 50.0;
@@ -64,12 +67,20 @@ impl Scroller {
             let offset = (self.offset(reported) + self.pending).clamp(0.0, max);
             let d = -e.dy;
             self.pending += (offset + d).clamp(0.0, max) - offset;
-            // Include queued movement in the edge check: an event burst at an end must not
-            // build hidden velocity or eat the first movement back in the other direction.
-            if (d > 0.0 && offset < max - 0.5) || (d < 0.0 && offset > 0.5) {
-                self.coast = (self.coast + d * TRACKPAD_INJECTION).clamp(-TRACKPAD_MAX, TRACKPAD_MAX);
-            } else {
-                self.coast = 0.0;
+            // AppKit already sends the decaying momentum deltas. Adding a coast to either
+            // finger or momentum events would move beyond the native distance, even before
+            // release. No phase/idle timer may synthesize a second tail on macOS.
+            #[cfg(target_os = "macos")]
+            { self.coast = 0.0; }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Include queued movement in the edge check: an event burst at an end must not
+                // build hidden velocity or eat the first movement back in the other direction.
+                if (d > 0.0 && offset < max - 0.5) || (d < 0.0 && offset > 0.5) {
+                    self.coast = (self.coast + d * TRACKPAD_INJECTION).clamp(-TRACKPAD_MAX, TRACKPAD_MAX);
+                } else {
+                    self.coast = 0.0;
+                }
             }
         } else {
             self.coast = 0.0;
@@ -161,11 +172,15 @@ impl Scrollers {
     }
 
     /// A sideways delta for a horizontal view (a wide table), in points along it: the same
-    /// glide and trackpad momentum as a vertical one, placed on `x`.
-    pub fn sideways(&mut self, key: &str, delta: f32, precise: bool, notch_px: f32, source: Source, tx: &mut Tx) {
+    /// platform scroll policy as a vertical one, placed on `x`. Keep the original event's
+    /// phase, momentum and modifiers when remapping its selected axis.
+    pub fn sideways(&mut self, key: &str, e: &WheelEvent, delta: f32, notch_px: f32, source: Source, tx: &mut Tx) {
         if delta == 0.0 { return; }
         if !self.across.contains(key) { self.across.insert(key.to_owned()); }
-        self.wheel(key, &WheelEvent::new(0.0, delta).precise(precise), notch_px, source);
+        let mut remapped = *e;
+        remapped.dx = 0.0;
+        remapped.dy = delta;
+        self.wheel(key, &remapped, notch_px, source);
         tx.wake_after(std::time::Duration::ZERO);
     }
 
@@ -194,7 +209,7 @@ impl Scrollers {
     /// Stop a view's motion (the app moved it itself: a jump, following new output).
     pub fn stop(&mut self, key: &str) { self.views.remove(key); }
 
-    /// Step every moving view one frame. Returns whether any still moves.
+    /// Step every moving view one frame. Returns whether any moved or still moves.
     pub fn step(&mut self, clock: f64, tx: &mut Tx) -> bool {
         let mut any = false;
         let Scrollers { views, owned, moves, across } = self;
@@ -208,7 +223,9 @@ impl Scrollers {
                 None => {}
             }
             let moving = scroller.moving();
-            any |= moving;
+            // Precise macOS deltas have no synthetic tail, but their placements
+            // still need the display heartbeat, especially in an otherwise idle editor.
+            any |= moving || to.is_some();
             moving
         });
         any
@@ -237,6 +254,15 @@ mod tests {
 
     fn source(offset: f32) -> Source { Rc::new(move || (offset, 10_000.0)) }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_direct_trackpad_step_keeps_vsync_warm_without_a_second_tail() {
+        let mut scrollers = Scrollers::default();
+        scrollers.wheel("code", &WheelEvent::new(0.0, -6.0).precise(true), 60.0, source(1000.0));
+        assert!(scrollers.step(0.0, &mut Tx::default()), "placing a precise delta is motion even without synthetic momentum");
+        assert!(!scrollers.step(1.0 / 120.0, &mut Tx::default()), "no new input must not synthesize a second tail");
+    }
+
     #[test]
     fn a_notch_glides_three_lines_and_settles() {
         let mut s = Scroller::default();
@@ -263,6 +289,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn trackpad_glides_without_waiting_for_release_and_stops_without_a_tail() {
         let mut s = Scroller { clock: Some(0.0), ..Scroller::default() };
@@ -278,6 +305,7 @@ mod tests {
         assert_eq!(s.step(2.0), None);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn trackpad_velocity_is_bounded() {
         let mut s = Scroller { clock: Some(0.0), ..Scroller::default() };
@@ -305,7 +333,10 @@ mod tests {
         }
         s.wheel(&WheelEvent::new(0.0, -10.0).precise(true), 60.0, source(0.0));
         assert_eq!(s.step(0.0), Some(10.0));
+        #[cfg(not(target_os = "macos"))]
         assert!(s.step(1.0 / 120.0).unwrap() > 10.0);
+        #[cfg(target_os = "macos")]
+        assert_eq!(s.step(1.0 / 120.0), None);
     }
 
     #[test]
@@ -328,14 +359,66 @@ mod tests {
     fn a_sideways_delta_glides_like_a_vertical_one() {
         let mut scrollers = Scrollers::default();
         let mut tx = Tx::default();
-        scrollers.sideways("table", -80.0, true, 60.0, source(100.0), &mut tx);
+        let e = WheelEvent::new(-80.0, 0.0).precise(true);
+        scrollers.sideways("table", &e, e.dx, 60.0, source(100.0), &mut tx);
         assert!(scrollers.across.contains("table"));
-        // The fingers' distance lands at once and momentum carries on after it.
+        // The fingers' distance lands at once; only non-macOS adds momentum.
         assert_eq!(scrollers.views["table"].pending, 80.0);
-        assert!(scrollers.step(1.0 / 144.0, &mut tx));
-        assert!(scrollers.views["table"].coast > 0.0);
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(scrollers.step(1.0 / 144.0, &mut tx));
+            assert!(scrollers.views["table"].coast > 0.0);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(scrollers.step(1.0 / 144.0, &mut tx));
+            assert!(!scrollers.views.contains_key("table"));
+            assert!(!scrollers.step(2.0 / 144.0, &mut tx));
+        }
         // No delta, no motion (a gesture's release event).
-        scrollers.sideways("other", 0.0, true, 60.0, source(0.0), &mut tx);
+        scrollers.sideways("other", &e, 0.0, 60.0, source(0.0), &mut tx);
         assert!(!scrollers.views.contains_key("other"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_trackpad_finger_and_os_momentum_move_only_the_reported_distance() {
+        let mut s = Scroller::default();
+        let mut offset = 1000.0;
+        for (frame, (dy, phase, momentum)) in [
+            (-80.0, rune::GesturePhase::Began, false),
+            (-40.0, rune::GesturePhase::Moved, false),
+            (0.0, rune::GesturePhase::Ended, false),
+            (-20.0, rune::GesturePhase::Moved, true),
+            (-5.0, rune::GesturePhase::Moved, true),
+            (0.0, rune::GesturePhase::Ended, true),
+        ].into_iter().enumerate() {
+            let mut e = WheelEvent::new(0.0, dy).precise(true).phase(phase);
+            e.momentum = momentum;
+            s.wheel(&e, 60.0, source(offset));
+            let to = s.step(frame as f64 / 120.0);
+            if dy == 0.0 { assert_eq!(to, None); }
+            else { offset -= dy; assert_eq!(to, Some(offset)); }
+            assert_eq!(s.coast, 0.0);
+            assert!(!s.moving());
+            assert_eq!(s.step((frame as f64 + 0.5) / 120.0), None);
+        }
+        assert_eq!(offset, 1145.0);
+        assert_eq!(s.step(10.0), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_precise_input_cancels_notch_glide_and_keeps_offsets_bounded() {
+        let mut s = Scroller::default();
+        s.wheel(&WheelEvent::new(0.0, -40.0), 60.0, source(9990.0));
+        assert!(s.moving());
+        s.wheel(&WheelEvent::new(0.0, -80.0).precise(true), 60.0, source(9990.0));
+        assert_eq!(s.step(0.0), Some(10_000.0));
+        assert!(!s.moving());
+        assert_eq!(s.step(1.0), None);
+        s.wheel(&WheelEvent::new(0.0, 20_000.0).precise(true), 60.0, source(10_000.0));
+        assert_eq!(s.step(2.0), Some(0.0));
+        assert!(!s.moving());
     }
 }

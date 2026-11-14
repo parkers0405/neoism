@@ -47,18 +47,19 @@ pub struct MenuItem {
     pub action: MenuAction,
     pub icon: &'static str,
     pub label: &'static str,
+    /// Config action name, resolved for display and measurement using the live bindings.
     pub keys: &'static str,
 }
 
 pub const MENU: [MenuItem; 8] = [
-    MenuItem { action: MenuAction::ChangeDirectory, icon: "\u{f07b}", label: "Change Directory", keys: "Alt + D" },
-    MenuItem { action: MenuAction::Notes, icon: "\u{f15c}", label: "Notes", keys: "Alt + N" },
-    MenuItem { action: MenuAction::FileTree, icon: "\u{f07b}", label: "Open file tree", keys: "Alt + E" },
-    MenuItem { action: MenuAction::Agent, icon: "\u{f135}", label: "Neoism Agent", keys: "Alt + A" },
-    MenuItem { action: MenuAction::Search, icon: "\u{f002}", label: "Search", keys: "Alt + S" },
-    MenuItem { action: MenuAction::AgentPanel, icon: "\u{f0674}", label: "Agent panel", keys: "Alt + C" },
-    MenuItem { action: MenuAction::CommandPalette, icon: "\u{f0c9}", label: "Command palette", keys: "Alt + P" },
-    MenuItem { action: MenuAction::NewTerminal, icon: "\u{f120}", label: "New Terminal", keys: "Alt + T" },
+    MenuItem { action: MenuAction::ChangeDirectory, icon: "\u{f07b}", label: "Change Directory", keys: "changedirectory" },
+    MenuItem { action: MenuAction::Notes, icon: "\u{f15c}", label: "Notes", keys: "toggleneoismnotes" },
+    MenuItem { action: MenuAction::FileTree, icon: "\u{f07b}", label: "Open file tree", keys: "togglefiletree" },
+    MenuItem { action: MenuAction::Agent, icon: "\u{f135}", label: "Neoism Agent", keys: "openagent" },
+    MenuItem { action: MenuAction::Search, icon: "\u{f002}", label: "Search", keys: "searchfiles" },
+    MenuItem { action: MenuAction::AgentPanel, icon: "\u{f0674}", label: "Agent panel", keys: "toggleconversations" },
+    MenuItem { action: MenuAction::CommandPalette, icon: "\u{f0c9}", label: "Command palette", keys: "opencommandpalette" },
+    MenuItem { action: MenuAction::NewTerminal, icon: "\u{f120}", label: "New Terminal", keys: "createworkspaceterminaltab" },
 ];
 
 /// Everything the splash view places, in points relative to the splash area.
@@ -124,16 +125,20 @@ fn adapt(rows: usize) -> Option<Bands> {
 
 fn text_width(text: &str, font: f32) -> f32 { text.chars().count() as f32 * font * MONO_ADVANCE }
 
-fn widest_button(s: f32) -> f32 {
+fn widest_button(s: f32, bindings: &serde_json::Value) -> f32 {
     MENU.iter().map(|item| {
         PAD * s + ICON_SLOT * s + LABEL_GAP * s + text_width(item.label, LABEL_FONT * s)
-            + KEY_GAP * s + text_width(&format!("[{}]", crate::startup::keys_label(item.keys)), KEY_FONT * s) + PAD * s
+            + KEY_GAP * s + text_width(&format!("[{}]", crate::settings::rebind::hint(bindings, item.keys)), KEY_FONT * s) + PAD * s
     }).fold(0.0, f32::max)
 }
 
 /// Lay the splash out in a `width` x `height` area for the configured font size and UI scale.
 /// Below the full menu's 24 column / 6 row floor, retain a compact wordmark.
 pub fn layout(width: f32, height: f32, font_size: f32, ui_scale: f32) -> Option<Geometry> {
+    layout_with_bindings(width, height, font_size, ui_scale, &serde_json::Value::Null)
+}
+
+pub fn layout_with_bindings(width: f32, height: f32, font_size: f32, ui_scale: f32, bindings: &serde_json::Value) -> Option<Geometry> {
     let cell_h = font_size * 1.3;
     let cols = (width / (font_size * 0.6)).floor() as usize;
     let bands = adapt((height / cell_h).floor() as usize);
@@ -160,7 +165,7 @@ pub fn layout(width: f32, height: f32, font_size: f32, ui_scale: f32) -> Option<
     let max_menu_w = (width - side_pad * 2.0).max(1.0);
 
     let mut s = ui_scale.max(0.1) * layout_scale;
-    let base_widest = widest_button(s);
+    let base_widest = widest_button(s, bindings);
     let grid_w = COLUMNS as f32 * base_widest + (COLUMNS - 1) as f32 * COLUMN_GAP * s;
     let columns = if max_menu_w < grid_w * 0.75 { 1 } else { COLUMNS };
     let rows = MENU.len().div_ceil(columns);

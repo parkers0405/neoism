@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/rune", "crates/rune-motion", "crates/rune-staging", "crates/rune-taffy", "crates/procwatch"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"

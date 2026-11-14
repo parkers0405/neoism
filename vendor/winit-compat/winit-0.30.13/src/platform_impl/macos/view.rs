@@ -5,16 +5,123 @@ use std::ptr;
 
 use objc2::rc::{Retained, WeakId};
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{declare_class, msg_send_id, mutability, sel, ClassType, DeclaredClass};
+use objc2::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSApplication, NSCursor, NSEvent, NSEventPhase, NSResponder, NSTextInputClient,
-    NSTrackingRectTag, NSView, NSViewFrameDidChangeNotification,
+    NSApplication, NSCursor, NSEvent, NSEventPhase, NSGestureRecognizer,
+    NSGestureRecognizerDelegate, NSGestureRecognizerState, NSResponder, NSTextInputClient,
+    NSTouchPhase, NSTouchType, NSTouchTypeMask, NSTrackingRectTag, NSView,
+    NSViewFrameDidChangeNotification,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
     NSMutableAttributedString, NSNotFound, NSNotificationCenter, NSObject, NSObjectProtocol,
     NSPoint, NSRange, NSRect, NSSize, NSString, NSUInteger,
 };
+
+#[derive(Default)]
+struct DirectTouchState {
+    pending: RefCell<VecDeque<(Retained<NSEvent>, TouchPhase)>>,
+    contacts: RefCell<Vec<Retained<AnyObject>>>,
+    location: Cell<NSPoint>,
+}
+
+// macOS 27 delivers display contacts only to gesture recognizers, not NSView's
+// responder callbacks. Rune needs raw contacts (including taps and hold timing),
+// so a pan recognizer, which starts only after movement, is not sufficient here.
+declare_class!(
+    struct WinitDirectTouchRecognizer;
+
+    unsafe impl ClassType for WinitDirectTouchRecognizer {
+        #[inherits(NSObject)]
+        type Super = NSGestureRecognizer;
+        type Mutability = mutability::MainThreadOnly;
+        const NAME: &'static str = "WinitDirectTouchRecognizer";
+    }
+
+    impl DeclaredClass for WinitDirectTouchRecognizer {
+        type Ivars = DirectTouchState;
+    }
+
+    unsafe impl WinitDirectTouchRecognizer {
+        #[method(touchesBeganWithEvent:)]
+        fn touches_began(&self, event: &NSEvent) {
+            self.track(event, TouchPhase::Started);
+        }
+
+        #[method(touchesMovedWithEvent:)]
+        fn touches_moved(&self, event: &NSEvent) {
+            self.track(event, TouchPhase::Moved);
+        }
+
+        #[method(touchesEndedWithEvent:)]
+        fn touches_ended(&self, event: &NSEvent) {
+            self.track(event, TouchPhase::Ended);
+        }
+
+        #[method(touchesCancelledWithEvent:)]
+        fn touches_cancelled(&self, event: &NSEvent) {
+            self.track(event, TouchPhase::Cancelled);
+        }
+
+        #[method(locationInView:)]
+        fn location_in_view(&self, view: Option<&NSView>) -> NSPoint {
+            let point = self.ivars().location.get();
+            view.map_or(point, |view| view.convertPoint_fromView(point, None))
+        }
+
+        #[method(reset)]
+        fn reset(&self) {
+            unsafe { let _: () = msg_send![super(self), reset]; }
+            self.ivars().pending.borrow_mut().clear();
+            self.ivars().contacts.borrow_mut().clear();
+            self.ivars().location.set(NSPoint::new(0.0, 0.0));
+        }
+    }
+);
+
+impl WinitDirectTouchRecognizer {
+    fn track(&self, event: &NSEvent, phase: TouchPhase) {
+        unsafe {
+            let Some(view) = self.view() else { return };
+            let ns_phase = match phase {
+                TouchPhase::Started => NSTouchPhase::Began,
+                TouchPhase::Moved => NSTouchPhase::Moved,
+                TouchPhase::Ended => NSTouchPhase::Ended,
+                TouchPhase::Cancelled => NSTouchPhase::Cancelled,
+            };
+            let touches = event.touchesMatchingPhase_inView(ns_phase, Some(&view));
+            let mut contacts = self.ivars().contacts.borrow_mut();
+            for touch in touches.iter().filter(|touch| touch.r#type() == NSTouchType::Direct) {
+                let identity = touch.identity();
+                let index = contacts.iter().position(|known| msg_send![&**known, isEqual: &*identity]);
+                match (index, phase) {
+                    (None, TouchPhase::Started) => contacts.push(identity),
+                    (Some(index), TouchPhase::Ended | TouchPhase::Cancelled) => { contacts.remove(index); },
+                    _ => {},
+                }
+                self.ivars().location.set(touch.locationInView(None));
+            }
+            let remaining = contacts.len();
+            drop(contacts);
+            // Actions run on the next run-loop turn. Preserve every phase, including
+            // a short tap's start/end, if AppKit coalesces state notifications.
+            let event_copy = Retained::retain(event as *const NSEvent as *mut NSEvent).unwrap();
+            self.ivars().pending.borrow_mut().push_back((event_copy, phase));
+            self.setState(match phase {
+                TouchPhase::Started => {
+                    // Additional fingers update an already-active recognizer.
+                    let state: NSGestureRecognizerState = msg_send![self, state];
+                    if state == NSGestureRecognizerState::Possible {
+                        NSGestureRecognizerState::Began
+                    } else { NSGestureRecognizerState::Changed }
+                },
+                TouchPhase::Ended if remaining == 0 => NSGestureRecognizerState::Ended,
+                TouchPhase::Cancelled if remaining == 0 => NSGestureRecognizerState::Cancelled,
+                _ => NSGestureRecognizerState::Changed,
+            });
+        }
+    }
+}
 
 use super::app_state::ApplicationDelegate;
 use super::cursor::{default_cursor, invisible_cursor};
@@ -26,7 +133,7 @@ use super::window::WinitWindow;
 use super::DEVICE_ID;
 use crate::dpi::{LogicalPosition, LogicalSize};
 use crate::event::{
-    DeviceEvent, ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, TouchPhase,
+    DeviceEvent, ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, Touch, TouchPhase,
     WindowEvent,
 };
 use crate::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey};
@@ -118,6 +225,9 @@ pub struct ViewState {
     ime_size: Cell<NSSize>,
     modifiers: Cell<Modifiers>,
     phys_modifiers: RefCell<HashMap<Key, ModLocationMask>>,
+    // Compare retained identity objects with isEqual:, not NSTouch snapshot pointers or hashes.
+    direct_touches: RefCell<Vec<(Retained<AnyObject>, u64, NSPoint)>>,
+    next_touch_id: Cell<u64>,
     tracking_rect: Cell<Option<NSTrackingRectTag>>,
     ime_state: Cell<ImeState>,
     input_source: RefCell<String>,
@@ -581,6 +691,7 @@ declare_class!(
         #[method(mouseDown:)]
         fn mouse_down(&self, event: &NSEvent) {
             trace_scope!("mouseDown:");
+            self.trace_touch_input("mouse-down", Some(event));
             self.mouse_motion(event);
             self.mouse_click(event, ElementState::Pressed);
         }
@@ -588,6 +699,7 @@ declare_class!(
         #[method(mouseUp:)]
         fn mouse_up(&self, event: &NSEvent) {
             trace_scope!("mouseUp:");
+            self.trace_touch_input("mouse-up", Some(event));
             self.mouse_motion(event);
             self.mouse_click(event, ElementState::Released);
         }
@@ -629,6 +741,7 @@ declare_class!(
 
         #[method(mouseDragged:)]
         fn mouse_dragged(&self, event: &NSEvent) {
+            self.trace_touch_input("mouse-dragged", Some(event));
             self.mouse_motion(event);
         }
 
@@ -659,9 +772,40 @@ declare_class!(
             });
         }
 
+        #[method(handleDirectTouch:)]
+        fn handle_direct_touch(&self, recognizer: &WinitDirectTouchRecognizer) {
+            let pending = std::mem::take(&mut *recognizer.ivars().pending.borrow_mut());
+            for (event, phase) in pending {
+                let ns_phase = match phase {
+                    TouchPhase::Started => NSTouchPhase::Began,
+                    TouchPhase::Moved => NSTouchPhase::Moved,
+                    TouchPhase::Ended => NSTouchPhase::Ended,
+                    TouchPhase::Cancelled => NSTouchPhase::Cancelled,
+                };
+                self.direct_touch_event(&event, ns_phase, phase);
+            }
+            // AppKit can cancel recognition without a fresh raw touch callback,
+            // for example when disabling a recognizer or recovering a stuck one.
+            let state: NSGestureRecognizerState = unsafe { msg_send![recognizer, state] };
+            if state == NSGestureRecognizerState::Cancelled {
+                let contacts = std::mem::take(&mut *self.ivars().direct_touches.borrow_mut());
+                for (_, id, point) in contacts {
+                    self.queue_event(WindowEvent::Touch(Touch {
+                        device_id: DEVICE_ID,
+                        phase: TouchPhase::Cancelled,
+                        location: LogicalPosition::new(point.x, point.y).to_physical(self.scale_factor()),
+                        force: None,
+                        id,
+                    }));
+                }
+                self.trace_touch_input("recognizer-cancelled", None);
+            }
+        }
+
         #[method(scrollWheel:)]
         fn scroll_wheel(&self, event: &NSEvent) {
             trace_scope!("scrollWheel:");
+            self.trace_touch_input("scroll-wheel", Some(event));
 
             self.mouse_motion(event);
 
@@ -781,7 +925,30 @@ declare_class!(
             self.ivars().accepts_first_mouse
         }
     }
+
+    unsafe impl NSGestureRecognizerDelegate for WinitView {
+        #[allow(non_snake_case)]
+        #[method(gestureRecognizer:shouldAttemptToRecognizeWithEvent:)]
+        unsafe fn gestureRecognizer_shouldAttemptToRecognizeWithEvent(
+            &self, _recognizer: &NSGestureRecognizer, _event: &NSEvent,
+        ) -> bool {
+            // This delegate is installed only on our direct-contact bridge.
+            false
+        }
+
+        #[allow(non_snake_case)]
+        #[method(gestureRecognizer:shouldReceiveTouch:)]
+        unsafe fn gestureRecognizer_shouldReceiveTouch(
+            &self, _recognizer: &NSGestureRecognizer, touch: &objc2_app_kit::NSTouch,
+        ) -> bool {
+            unsafe { touch.r#type() == NSTouchType::Direct }
+        }
+    }
 );
+
+// NSView already conforms to NSObject. Registering it again inside declare_class!
+// conflicts with the conformance inherited through NSTextInputClient.
+unsafe impl NSObjectProtocol for WinitView {}
 
 impl WinitView {
     pub(super) fn new(
@@ -798,6 +965,8 @@ impl WinitView {
             ime_size: Default::default(),
             modifiers: Default::default(),
             phys_modifiers: Default::default(),
+            direct_touches: Default::default(),
+            next_touch_id: Cell::new(0),
             tracking_rect: Default::default(),
             ime_state: Default::default(),
             input_source: Default::default(),
@@ -809,6 +978,16 @@ impl WinitView {
             option_as_alt: Cell::new(option_as_alt),
         });
         let this: Retained<Self> = unsafe { msg_send_id![super(this), init] };
+
+        unsafe {
+            let recognizer = mtm.alloc::<WinitDirectTouchRecognizer>().set_ivars(DirectTouchState::default());
+            let recognizer: Retained<WinitDirectTouchRecognizer> = msg_send_id![super(recognizer), initWithTarget: &*this, action: sel!(handleDirectTouch:)];
+            recognizer.setAllowedTouchTypes(NSTouchTypeMask::Direct);
+            recognizer.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*this)));
+            recognizer.setDelaysPrimaryMouseButtonEvents(true);
+            this.addGestureRecognizer(&recognizer);
+        }
+        this.trace_touch_input("direct-recognizer-installed", None);
 
         this.setPostsFrameChangedNotifications(true);
         let notification_center = unsafe { NSNotificationCenter::defaultCenter() };
@@ -1046,6 +1225,61 @@ impl WinitView {
         self.queue_event(WindowEvent::ModifiersChanged(self.ivars().modifiers.get()));
     }
 
+    fn direct_touch_event(&self, event: &NSEvent, ns_phase: NSTouchPhase, phase: TouchPhase) {
+        self.trace_touch_input(match phase {
+            TouchPhase::Started => "touch-started",
+            TouchPhase::Moved => "touch-moved",
+            TouchPhase::Ended => "touch-ended",
+            TouchPhase::Cancelled => "touch-cancelled",
+        }, Some(event));
+        let touches = unsafe { event.touchesMatchingPhase_inView(ns_phase, Some(self)) };
+        for touch in touches.iter() {
+            // type/locationInView: were introduced after the original trackpad API.
+            // Never synthesize a screen position from normalizedPosition or the cursor.
+            if !touch.respondsToSelector(sel!(type))
+                || !touch.respondsToSelector(sel!(locationInView:))
+                || unsafe { touch.r#type() } != NSTouchType::Direct
+            {
+                continue;
+            }
+
+            let identity = unsafe { touch.identity() };
+            let point = unsafe { touch.locationInView(Some(self)) };
+            let id = {
+                let mut active = self.ivars().direct_touches.borrow_mut();
+                let index = active.iter().position(|(known, ..)| unsafe {
+                    msg_send![&**known, isEqual: &*identity]
+                });
+                match (index, phase) {
+                    (Some(index), TouchPhase::Ended | TouchPhase::Cancelled) => {
+                        active.remove(index).1
+                    },
+                    (Some(index), _) => {
+                        active[index].2 = point;
+                        active[index].1
+                    },
+                    (None, TouchPhase::Started) => {
+                        let id = self.ivars().next_touch_id.get();
+                        self.ivars().next_touch_id.set(id.wrapping_add(1));
+                        active.push((identity, id, point));
+                        id
+                    },
+                    // Do not deliver an orphaned move/end without a matching start.
+                    (None, _) => continue,
+                }
+            };
+            // This NSView is flipped, so locationInView: already has the same
+            // top-left logical origin as mouse_motion. Apply the backing scale once.
+            self.queue_event(WindowEvent::Touch(Touch {
+                device_id: DEVICE_ID,
+                phase,
+                location: LogicalPosition::new(point.x, point.y).to_physical(self.scale_factor()),
+                force: None,
+                id,
+            }));
+        }
+    }
+
     fn mouse_click(&self, event: &NSEvent, button_state: ElementState) {
         let button = mouse_button(event);
 
@@ -1056,6 +1290,50 @@ impl WinitView {
             state: button_state,
             button,
         });
+    }
+
+    /// Opt-in, bounded native pointer diagnostics. Never records text or keyboard events.
+    fn trace_touch_input(&self, label: &str, event: Option<&NSEvent>) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::{Mutex, OnceLock};
+        static TRACE: OnceLock<Option<Mutex<(std::fs::File, usize)>>> = OnceLock::new();
+        let Some(trace) = TRACE.get_or_init(|| {
+            let path = std::env::var_os("NEOISM_TOUCH_TRACE")?;
+            let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path).ok()?;
+            Some(Mutex::new((file, 0)))
+        }) else { return };
+        let Ok(mut trace) = trace.lock() else { return };
+        let (file, count) = &mut *trace;
+        if *count >= 1024 { return; }
+        *count += 1;
+        let allowed = unsafe { self.allowedTouchTypes() };
+        let active = self.ivars().direct_touches.borrow().len();
+        if let Some(event) = event {
+            if label.starts_with("touch-") {
+                let touches = unsafe { event.touchesMatchingPhase_inView(NSTouchPhase::Any, None) };
+                let mut direct = 0;
+                let mut indirect = 0;
+                let mut located = 0;
+                for touch in touches.iter() {
+                    if touch.respondsToSelector(sel!(type)) && unsafe { touch.r#type() } == NSTouchType::Direct {
+                        direct += 1;
+                        if touch.respondsToSelector(sel!(locationInView:)) { located += 1; }
+                    }
+                    else { indirect += 1; }
+                }
+                let local = unsafe { event.touchesMatchingPhase_inView(NSTouchPhase::Any, Some(self)) }.iter().count();
+                let _ = writeln!(file, "pid={} label={label} type={:?} time={:.4} direct={direct} indirect={indirect} local={local} located={located} active={active} allowed={allowed:?}",
+                    std::process::id(), unsafe { event.r#type() }, unsafe { event.timestamp() });
+            } else {
+                // Apple does not associate an NSTouch set with a mouse event.
+                let point = unsafe { event.locationInWindow() };
+                let _ = writeln!(file, "pid={} label={label} type={:?} subtype={:?} time={:.4} x={:.1} y={:.1} active={active} allowed={allowed:?}",
+                    std::process::id(), unsafe { event.r#type() }, unsafe { event.subtype() }, unsafe { event.timestamp() }, point.x, point.y);
+            }
+        } else {
+            let _ = writeln!(file, "pid={} label={label} active={active} allowed={allowed:?}", std::process::id());
+        }
     }
 
     fn mouse_motion(&self, event: &NSEvent) {

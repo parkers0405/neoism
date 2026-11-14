@@ -158,7 +158,7 @@ impl App {
     pub fn submit(&mut self) {
         let index = self.active;
         let text = self.expanded_composer_text(index).trim().to_owned();
-        if text.is_empty() { return; }
+        if text.is_empty() { self.replay_empty_wordmark(); return; }
         if matches!(self.tabs[index].kind, TabKind::Agent { .. }) {
             if let Some(command) = CloseCommand::parse(&text) {
                 self.tabs[index].draft.clear();
@@ -166,6 +166,7 @@ impl App {
                 return;
             }
         }
+        if matches!(self.tabs[index].kind, TabKind::Agent { .. }) && self.gate_agent_send() { return; }
         self.prepare_composer_submit(index);
         self.tabs[index].draft.clear();
         self.tabs[index].pastes.clear();
@@ -185,6 +186,20 @@ impl App {
         } else {
             self.close_tab(self.active);
         }
+    }
+
+    /// Empty Enter on a welcome surface behaves like clicking its logo, never starting a chat.
+    pub(crate) fn replay_empty_wordmark(&mut self) -> bool {
+        if !self.expanded_composer_text(self.active).trim().is_empty() { return false; }
+        let tab = self.active_tab();
+        let kind = match tab.kind {
+            TabKind::Home if self.splash_on_screen() && self.terminals.get(&tab.id).is_none_or(|t| !t.direct() && !t.shell.busy()) => "splash",
+            TabKind::Agent { session: None } => "agent",
+            _ => return false,
+        };
+        let key = crate::wordmark::host_key(kind, tab.id);
+        self.wordmark.replay(&key);
+        true
     }
 
     /// Animate every visible pane's wordmark using the exact key its view draws.

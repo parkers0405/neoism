@@ -1,0 +1,14 @@
+[package]
+workspace = "../.."
+name = "rune-staging"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Per-frame GPU uploads through reused staging memory, shared by Rune's renderers."
+
+[dependencies]
+wgpu = { version = "30", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

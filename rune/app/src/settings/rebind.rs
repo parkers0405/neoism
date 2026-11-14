@@ -19,6 +19,9 @@ fn action(name: &str) -> Option<Action> {
         "resetfontsize" => Action::ResetFontSize,
         "quit" => Action::Quit,
         "togglegitdiffpanel" => Action::ToggleGitPanel,
+        "searchfiles" => Action::SearchFiles,
+        "openagent" => Action::OpenAgent,
+        "toggleconversations" => Action::ToggleConversations,
         _ => return None,
     })
 }
@@ -27,6 +30,8 @@ pub fn supported(name: &str) -> bool {
         || matches!(
             name,
             "opencommandpalette"
+                | "togglefiletree"
+                | "changedirectory"
                 | "toggleneoismnotes"
                 | "openconfigeditor"
                 | "createworkspaceterminaltab"
@@ -57,6 +62,11 @@ fn binding<'a>(values: &'a Value, def: &'a KeybindDef) -> (&'a str, &'a str) {
             )
         })
         .unwrap_or_else(|| default(def))
+}
+pub fn hint(values: &Value, name: &str) -> String {
+    let Some(def) = KEYBINDS.iter().find(|d| d.action == name) else { return String::new() };
+    let (mods, key) = binding(values, def);
+    if key.is_empty() { String::new() } else { super::keybinds::format_combo(mods, key) }
 }
 fn chord(event: &KeyEvent) -> Option<(String, String)> {
     let key = match &event.key {
@@ -104,6 +114,19 @@ fn same(a: (&str, &str), b: (&str, &str)) -> bool {
     !a.1.is_empty() && a.1.eq_ignore_ascii_case(b.1) && mods(a.0) == mods(b.0)
 }
 impl App {
+    /// Resolve hints through the same configured binding as dispatch and Settings.
+    pub fn binding_hint(&self, name: &str) -> String {
+        hint(&self.keybindings, name)
+    }
+
+    pub fn command_hint(&self, target: Action, fallback: &str) -> String {
+        let def = KEYBINDS.iter().find(|d| action(d.action) == Some(target));
+        match def {
+            Some(def) => self.binding_hint(def.action),
+            None => crate::startup::keys_label(fallback).into_owned(),
+        }
+    }
+
     pub fn start_rebind(&mut self, index: usize) {
         if !KEYBINDS.get(index).is_some_and(|d| supported(d.action)) {
             return;
@@ -184,6 +207,8 @@ impl App {
                         self.open_picker(crate::palette::Mode::Commands)
                     }
                     "toggleneoismnotes" => self.toggle_tree(crate::app::Sidebar::Notes),
+                    "togglefiletree" => self.toggle_file_tree(),
+                    "changedirectory" => self.open_file_browser(crate::browser::Mode::ChooseDirectory),
                     "openconfigeditor" => self.open_config_editor(),
                     "createworkspaceterminaltab" => {
                         self.open_tab(TabKind::Terminal);
@@ -216,6 +241,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use crate::app::Sidebar;
     #[test]
     fn modifier_order_and_overrides() {
         assert!(same(("control | shift", "T"), ("shift|control", "t")));
@@ -226,5 +253,72 @@ mod tests {
             .unwrap();
         let values = json!([{"action":def.action,"with":"control","key":"p"}]);
         assert_eq!(binding(&values, def), ("control", "p"));
+        assert_eq!(hint(&values, def.action), super::super::keybinds::format_combo("control", "p"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn command_a_opens_an_agent_tab() {
+        let mut app = App::new();
+        app.keybindings = json!([]);
+        let count = app.tabs.len();
+        let event = KeyEvent { key: Key::Command('a'), mods: rune::Mods { logo: true, ..Default::default() } };
+        assert!(crate::keys::shortcut(&mut app, &event, &mut Tx::default()));
+        assert_eq!(app.tabs.len(), count + 1);
+        assert!(matches!(app.active_tab().kind, TabKind::Agent { session: None }));
+    }
+
+    #[test]
+    fn mac_app_defaults_match_panels_and_preserve_other_editing_chords() {
+        for (name, mods, key) in [
+            ("openagent", "super", "a"),
+            ("toggleconversations", "super", "c"),
+            ("togglefiletree", "super", "e"),
+            ("toggleneoismnotes", "super", "n"),
+            ("searchfiles", "super", "s"),
+            ("opencommandpalette", "super", "p"),
+            ("createworkspaceterminaltab", "super", "t"),
+            ("splitright", "super", "d"),
+            ("splitdown", "super | shift", "d"),
+        ] {
+            let def = KEYBINDS.iter().find(|d| d.action == name).unwrap();
+            assert!(supported(name));
+            assert!(same((def.mac_mods, def.mac_key), (mods, key)), "{name}");
+        }
+        let defs: Vec<_> = KEYBINDS.iter().filter(|d| supported(d.action) && !d.mac_key.is_empty() && !matches!(d.action, "copy" | "paste")).collect();
+        for (i, def) in defs.iter().enumerate() {
+            for key in ["v", "x", "z"] {
+                assert!(!same((def.mac_mods, def.mac_key), ("super", key)), "{}", def.action);
+            }
+            for other in &defs[i + 1..] {
+                assert!(!same((def.mac_mods, def.mac_key), (other.mac_mods, other.mac_key)), "{} / {}", def.action, other.action);
+            }
+        }
+        for (name, key) in [("openagent", "a"), ("toggleconversations", "c"), ("searchfiles", "s"), ("opencommandpalette", "p")] {
+            let def = KEYBINDS.iter().find(|d| d.action == name).unwrap();
+            assert_eq!((def.other_mods, def.other_key), ("alt", key));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn command_panels_need_no_shift_and_selected_text_still_copies() {
+        let mut app = App::new();
+        app.keybindings = json!([]);
+        for (key, sidebar) in [('e', Sidebar::Files), ('c', Sidebar::Conversations), ('n', Sidebar::Notes)] {
+            let event = KeyEvent { key: Key::Command(key), mods: rune::Mods { logo: true, ..Default::default() } };
+            assert!(crate::keys::shortcut(&mut app, &event, &mut Tx::default()));
+            assert_eq!(app.sidebar, Some(sidebar));
+            assert!(crate::keys::shortcut(&mut app, &event, &mut Tx::default()));
+            assert_eq!(app.sidebar, None);
+        }
+        app.tabs[app.active].draft.replace_text("copy me");
+        app.tabs[app.active].draft.focused = true;
+        app.tabs[app.active].draft.anchor = 0;
+        app.tabs[app.active].draft.focus = "copy me".len();
+        let event = KeyEvent { key: Key::Command('c'), mods: rune::Mods { logo: true, ..Default::default() } };
+        assert!(crate::keys::shortcut(&mut app, &event, &mut Tx::default()));
+        assert_eq!(app.clipboard.as_deref(), Some("copy me"));
+        assert_eq!(app.sidebar, None);
     }
 }

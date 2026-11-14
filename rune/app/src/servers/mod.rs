@@ -14,6 +14,7 @@
 
 pub mod form;
 pub mod flow;
+mod availability;
 
 use crate::daemon::Target;
 use neoism_agent_service_api::server_registry::{HostedServerSpec, SavedServer, ServerRegistry, registry_directory};
@@ -77,7 +78,9 @@ pub struct ServerEntry {
     pub address: String,
     pub temporary: bool,
     pub hosted: bool,
-    /// A Fast Server this process hosts: whether its tunnel still runs.
+    /// Independent service-liveness evidence, not whether a window selected it.
+    /// Currently only owned Fast hosts supply this (worker alive, including relay
+    /// reconnects); saved servers and guest invites are unobserved, not offline.
     pub online: Option<bool>,
 }
 
@@ -420,6 +423,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, join.id);
         assert!(!entries[0].hosted);
+        assert_eq!(entries[0].online, None, "an invite alone is not availability evidence");
         assert!(store.fast.is_empty());
     }
 

@@ -25,7 +25,9 @@ impl SystemStatus {
     }
 }
 
-/// `ServerIndicatorStatus`: only the server this window uses has a live status.
+/// Server availability, independent of which target this window has selected.
+/// Unknown is intentional: a saved address or a failed client connection does not
+/// establish whether the service itself is online or offline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerStatus {
     Online,
@@ -68,13 +70,28 @@ pub struct Server {
     pub name: String,
     pub address: String,
     pub local: bool,
-    /// The server this window is connected to.
+    /// This window's current workspace has a live connection to this server.
+    /// Merely selecting a target (including while reconnecting) is not enough.
     pub active: bool,
+    /// Availability evidence, not selection or keyboard/hover state.
     pub status: ServerStatus,
     /// A Fast Server hosted here or joined (not saved).
     pub temporary: bool,
     /// Hosted on this machine.
     pub hosted: bool,
+}
+
+/// A successful live socket proves availability. Otherwise retain independent
+/// service evidence (e.g. an owned Fast host), never infer offline from a client
+/// disconnect, nor online from registry metadata or an in-flight dial.
+fn server_indicators(current: bool, connection: &Connection, online: Option<bool>) -> (bool, ServerStatus) {
+    let connected = current && matches!(connection, Connection::Connected);
+    let status = match (connected, online) {
+        (true, _) | (false, Some(true)) => ServerStatus::Online,
+        (false, Some(false)) => ServerStatus::Offline,
+        (false, None) => ServerStatus::Unknown,
+    };
+    (connected, status)
 }
 
 /// A server row's buttons (`PaletteServerEntry::controls`).
@@ -177,25 +194,23 @@ impl crate::app::App {
         out
     }
 
-    /// Local Server, then the saved servers and this window's temporary ones; the one this
-    /// window uses carries the live connection state.
+    /// Local Server, then saved and process-owned temporary servers. Availability
+    /// and this workspace's actual connection are separate indicators.
     pub fn palette_servers(&self) -> Vec<Server> {
-        let live = match &self.connection {
-            Connection::Connected => ServerStatus::Online,
-            Connection::Connecting => ServerStatus::Connecting,
-            Connection::Disconnected(_) => ServerStatus::Offline,
-        };
         let current = self.server.current_id().to_owned();
-        let connecting = self.server.connecting().map(str::to_owned);
-        let status = |id: &str, online: Option<bool>| if id == current { live }
-            else if connecting.as_deref() == Some(id) { ServerStatus::Connecting }
-            else if online == Some(false) { ServerStatus::Offline } else { ServerStatus::Unknown };
+        let observed = |id: &str, address: &str, online: Option<bool>| {
+            let parked_online = self.workspaces.iter().any(|entry| entry.server.as_deref().unwrap_or("local") == id
+                && entry.state.as_ref().is_some_and(|state| state.server_connected()));
+            if parked_online { Some(true) } else { self.server.observed_online(address).or(online) }
+        };
         let address = crate::daemon::public_endpoint().unwrap_or_else(|| "This computer".into());
-        let mut out = vec![Server { id: "local".into(), name: "Local Server".into(), address, local: true, active: current == "local",
-            status: status("local", None), temporary: false, hosted: false }];
-        out.extend(crate::servers::list().into_iter().map(|s| Server {
-            active: s.id == current, status: status(&s.id, s.online), id: s.id, name: s.name, address: s.address, local: false,
-            temporary: s.temporary, hosted: s.hosted,
+        let (active, status) = server_indicators(current == "local", &self.connection, observed("local", &address, None));
+        let mut out = vec![Server { id: "local".into(), name: "Local Server".into(), address, local: true, active,
+            status, temporary: false, hosted: false }];
+        out.extend(crate::servers::list().into_iter().map(|s| {
+            let (active, status) = server_indicators(s.id == current, &self.connection, observed(&s.id, &s.address, s.online));
+            Server { active, status, id: s.id, name: s.name, address: s.address, local: false,
+                temporary: s.temporary, hosted: s.hosted }
         }));
         out
     }
@@ -231,8 +246,34 @@ mod tests {
 
     #[test]
     fn local_server_is_listed_first_and_active() {
-        let app = crate::app::App::new();
+        let mut app = crate::app::App::new();
+        app.connection = Connection::Connected;
         let servers = app.palette_servers();
         assert!(servers[0].local && servers[0].active);
+        assert_eq!(servers[0].status, ServerStatus::Online);
+        app.connection = Connection::Disconnected("transport lost".into());
+        let servers = app.palette_servers();
+        assert!(!servers[0].active);
+        assert_eq!(servers[0].status, ServerStatus::Unknown);
+    }
+
+    #[test]
+    fn server_availability_is_independent_of_window_connection() {
+        let states = [Connection::Connected, Connection::Connecting,
+            Connection::Reconnecting { since: std::time::Instant::now(), visible: true },
+            Connection::Disconnected("unreachable from this client".into())];
+        for connection in &states {
+            // Neither selecting another server nor an in-flight dial erases host evidence.
+            assert_eq!(server_indicators(false, connection, Some(true)), (false, ServerStatus::Online));
+            assert_eq!(server_indicators(false, connection, Some(false)), (false, ServerStatus::Offline));
+            assert_eq!(server_indicators(false, connection, None), (false, ServerStatus::Unknown));
+            if matches!(connection, Connection::Connected) {
+                assert_eq!(server_indicators(true, connection, None), (true, ServerStatus::Online));
+            } else {
+                assert_eq!(server_indicators(true, connection, Some(true)), (false, ServerStatus::Online));
+                assert_eq!(server_indicators(true, connection, Some(false)), (false, ServerStatus::Offline));
+                assert_eq!(server_indicators(true, connection, None), (false, ServerStatus::Unknown));
+            }
+        }
     }
 }

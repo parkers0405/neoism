@@ -79,6 +79,7 @@ pub fn view(app: &App) -> El {
                 a.focus = Focus::Sidebar;
                 a.tree_activate(Some(index));
             })
+            .touch_drag_after_hold()
             .on_drag(move |a: &mut App, d: &mut rune::Drag, tx: &mut rune::Tx| a.tree_drag(index, d, tx))
             .on_secondary_press(move |a: &mut App, at: rune::PointerPress, _: &mut rune::Tx| a.open_tree_context(Some(index), [at.x, at.y]));
         if let Some(shiver) = landing { line = line.live_offset(shiver); }

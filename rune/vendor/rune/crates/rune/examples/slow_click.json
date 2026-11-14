@@ -1,0 +1,5 @@
+[
+  {"t": 0.3, "type": "click", "key": "save"},
+  {"t": 0.6, "type": "click", "key": "sort"},
+  {"t": 1.0, "type": "mark", "name": "end"}
+]

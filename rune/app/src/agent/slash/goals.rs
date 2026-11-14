@@ -2,10 +2,36 @@
 use super::{Kind, Picker};
 use crate::{agent::timeline, app::App, tabs::TabKind, ui::theme::rgb};
 use neoism_protocol::agent::{AgentClientMessage as Client, AgentServerMessage as Server};
-use rune::{El, Tx, col, el, text};
+use rune::{El, LiveText, Tx, col, el, text};
 use rune_kit::markdown::Markdown;
 use serde::Deserialize;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// A finite, live-bound reveal. Loaded history stays at rest; only a new server notice animates.
+pub(crate) struct GoalNotice {
+    pub id: String,
+    pub label: LiveText,
+    started: Instant,
+}
+
+impl GoalNotice {
+    pub fn new(id: String) -> Self {
+        let reduced = std::env::var("NEOISM_REDUCED_MOTION").as_deref() == Ok("1") || crate::glass_cursor::reduce_motion();
+        let started = Instant::now() - if reduced { Duration::from_secs(1) } else { Duration::ZERO };
+        Self { id, label: LiveText::new("Goal Started"), started }
+    }
+
+    fn tick(&self) -> bool {
+        let elapsed = self.started.elapsed().as_secs_f32();
+        let progress = (elapsed / 0.7).clamp(0.0, 1.0);
+        let symbols = b"#@%&*+?/~=";
+        self.label.set("Goal Started".chars().enumerate().map(|(index, target)| {
+            if target == ' ' || progress >= (index + 1) as f32 / 12.0 { target }
+            else { symbols[((elapsed * 30.0) as usize + index * 3) % symbols.len()] as char }
+        }).collect::<String>());
+        progress < 1.0
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct Goal {
@@ -82,6 +108,29 @@ pub(super) fn view(app: &App, composer: [f32; 4]) -> El {
 }
 
 impl App {
+    pub(crate) fn send_new_goal(&mut self, session: &str, command: &str) -> bool {
+        // Mirror daemon goals::command_arguments/execute, preserving internal whitespace
+        // (the slash menu's plan normalizes it and does not model all server aliases).
+        let Some(rest) = command.trim().strip_prefix("/goal") else { return false };
+        if !rest.is_empty() && !rest.starts_with(char::is_whitespace) { return false; }
+        let args = rest.trim();
+        let (verb, tail) = args.split_once(char::is_whitespace)
+            .map(|(verb, tail)| (verb.to_ascii_lowercase(), tail.trim()))
+            .unwrap_or((args.to_ascii_lowercase(), ""));
+        if tail.is_empty() && matches!(verb.as_str(), "" | "show" | "read" | "status" | "clear" | "off" | "pause" | "resume" | "set") { return false; }
+        let message_id = format!("msg_goal_{}", uuid::Uuid::new_v4());
+        self.goal_celebration.arm(session, if verb == "set" { tail } else { args }, &message_id);
+        // Existing daemon goal-aware admission path, NOT an ordinary model prompt.
+        // Keep selected session defaults, just as SlashCommand did. No optimistic echo.
+        self.agent_send(Client::SubmitPrompt {
+            session_id: session.into(), message_id, text: command.into(),
+            author: None, attachments: Vec::new(), mode: None, model: None,
+            connection_id: None, thinking: None,
+            delivery: neoism_protocol::agent::PromptDelivery::Queue,
+        });
+        true
+    }
+
     pub fn open_goals(&mut self) {
         let mut picker = Picker::new(Kind::Goals, "Current goal", Vec::new());
         if let Some(session_id) = self.active_session() {
@@ -134,13 +183,16 @@ impl App {
 
     /// One-second text updates only while this panel has a running wall-clock age.
     pub(crate) fn goals_tick(&mut self) -> (Option<Duration>, bool) {
+        let animation = self.active_session().and_then(|id| self.sessions.get(&id))
+            .and_then(|session| session.goal_notice.as_ref()).is_some_and(GoalNotice::tick);
+        let animation_wait = animation.then_some(Duration::from_millis(16));
         let running = self.active_session().and_then(|id| self.sessions.get(&id)).and_then(|s| s.goal.as_ref())
             .is_some_and(|goal| goal.created != 0 && !goal.terminal());
-        let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Goals && running) else { return (None, false) };
+        let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Goals && running) else { return (animation_wait, false) };
         let now = now_ms();
         let changed = picker.goal_second != now / 1000;
         picker.goal_second = now / 1000;
-        (Some(Duration::from_millis(1000 - now % 1000)), changed)
+        (Some(animation_wait.unwrap_or(Duration::from_millis(1000 - now % 1000))), changed)
     }
 
     pub(crate) fn fixture_goals(&mut self, state: &str) {
@@ -164,6 +216,25 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_start_notice_is_visible_after_the_turn_and_duplicate_events_do_not_reanimate() {
+        let mut app = App::new();
+        app.load_fixture("goal-start", "Goal", "[]");
+        let message: neoism_protocol::agent::HistoryMessage = serde_json::from_value(serde_json::json!({
+            "id":"notice", "role":"System", "kind":"System", "title":"Goal Started", "text":"Ship it"
+        })).unwrap();
+        assert!(crate::agent::tools::visible(&message, 0, usize::MAX));
+        let event = Server::MessageUpdated { session_id:"goal-start".into(), message, parent_message_id:None };
+        app.apply_agent(event.clone());
+        let started = app.sessions["goal-start"].goal_notice.as_ref().unwrap().started;
+        assert!(app.goals_tick().0.is_some());
+        app.apply_agent(event);
+        assert_eq!(app.sessions["goal-start"].goal_notice.as_ref().unwrap().started, started);
+        app.sessions.get_mut("goal-start").unwrap().goal_notice.as_mut().unwrap().started -= Duration::from_secs(1);
+        assert_eq!(app.goals_tick(), (None, false));
+        assert_eq!(app.sessions["goal-start"].messages.len(), 1);
+    }
 
     #[test]
     fn age_uses_persisted_creation_and_terminal_goals_stop_at_updated() {

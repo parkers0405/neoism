@@ -15,7 +15,7 @@ use serde_json::Value;
 
 impl App {
     /// The conversation the active agent tab shows.
-    pub(super) fn active_session(&self) -> Option<String> {
+    pub(crate) fn active_session(&self) -> Option<String> {
         match &self.active_tab().kind {
             TabKind::Agent { session } => session.clone(),
             TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => None,
@@ -48,6 +48,20 @@ impl App {
     }
 
     // -- the composer --------------------------------------------------------------------
+
+    /// Route onboarding without consuming any part of the draft or queuing an agent turn.
+    /// Missing metadata is not evidence against a restored/custom model; the server remains
+    /// authoritative in that case. Empty selections always require an explicit model choice.
+    pub(crate) fn gate_agent_send(&mut self) -> bool {
+        let model = &self.composer.selection.model;
+        if self.composer.usable_model(model) || (!model.is_empty() && !self.composer.catalog_ready) { return false; }
+        if self.composer.catalog_ready && self.composer.providers.is_empty() {
+            self.open_connect();
+        } else {
+            self.open_selection(Kind::Model);
+        }
+        true
+    }
 
     /// The `/` menu follows the composer while its text is a bare command being typed.
     pub fn composer_changed(&mut self) {
@@ -125,6 +139,7 @@ impl App {
         let i = self.active;
         if !self.tabs[i].draft.text.trim().starts_with('/') { return false; }
         let text = self.expanded_composer_text(i).trim().to_owned();
+        if matches!(plan(&text), SlashAction::SetGoal(_) | SlashAction::ResumeGoal) && self.gate_agent_send() { return true; }
         self.tabs[i].draft.clear();
         self.tabs[i].pastes.clear();
         self.composer.picker = None;
@@ -153,7 +168,7 @@ impl App {
                 let found = self.composer.providers.iter().flat_map(|p| p.models.iter().map(move |m| format!("{}/{}", p.id, m.id)))
                     .find(|id| *id == model || id.ends_with(&format!("/{model}")));
                 match found {
-                    Some(id) => self.set_model(id),
+                    Some(id) => self.choose_model(id),
                     None => self.notice("Model", "Model not found. Use /model to choose a server model"),
                 }
             }
@@ -203,11 +218,18 @@ impl App {
                 if answer.trim().is_empty() { self.notice("Question", "Usage: /answer <text>"); } else { self.agent_send(Client::HandleAnswer { session_id, answer }); }
             },
             SlashAction::HandleReject(request_id) => if let Some(session_id) = need_session(self) { self.agent_send(Client::HandleReject { session_id, request_id }); },
+            SlashAction::SetGoal(_) if session.is_none() => {
+                self.create_thread(self.active, text.to_owned());
+            }
             SlashAction::ToggleSkipPermissions | SlashAction::ShowGoal | SlashAction::SetGoal(_) | SlashAction::ClearGoal
             | SlashAction::PauseGoal | SlashAction::ResumeGoal | SlashAction::ChangeDirectory(_) => {
                 // Server-side plugins; the daemon forwards the command text.
                 match session.clone() {
-                    Some(session_id) => self.agent_send(Client::SlashCommand { session_id, text: text.to_owned() }),
+                    Some(session_id) => {
+                        if !self.send_new_goal(&session_id, text) {
+                            self.agent_send(Client::SlashCommand { session_id, text: text.to_owned() });
+                        }
+                    },
                     None => self.notice("Commands", "Open a conversation first"),
                 }
             }
@@ -260,7 +282,10 @@ impl App {
                 let rows = catalog::model_root(&catalog, &selection.model, &self.composer.recent_models);
                 let current = selection.model.split_once('/').map(|(p, _)| p).unwrap_or_default().to_owned();
                 let mut picker = Picker::new(Kind::Model, "Select model", rows).placeholder("Search recent models or providers").select_value(&current);
-                picker.loading = self.composer.providers.is_empty();
+                picker.loading = !self.composer.catalog_received;
+                if self.composer.catalog_received && !self.composer.catalog_ready {
+                    picker.activity = Some(Activity { status: "Model catalog pending or unavailable".into(), body: "Refresh the model picker to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });
+                }
                 let request_id = self.composer.request_id("models");
                 self.agent_send(Client::ListModelCatalog { request_id, directory: Some(self.cwd.clone()) });
                 picker
@@ -285,20 +310,52 @@ impl App {
     /// Close any picker and give the composer its focus back.
     pub fn close_prompt_picker(&mut self) {
         self.composer.picker = None;
+        self.composer.pending_model = None;
         self.composer.connect = None;
         self.composer.mcp_server = None;
+        self.composer.mcp_authorizing = false;
+        self.composer.mcp_refresh_requested = false;
         let i = self.active;
         self.tabs[i].draft.focused = true;
     }
 
+    fn choose_model(&mut self, model: String) {
+        let Some((provider, _)) = model.split_once('/') else {
+            self.set_model(model);
+            return self.close_prompt_picker();
+        };
+        let provider_id = provider.to_owned();
+        self.composer.pending_model = Some((model, self.active_tab().id, self.active_session()));
+        self.focus_picker(Picker::loading(Kind::ModelAccount, "Choose an account"));
+        self.agent_send(Client::ConnectListConnections { provider_id });
+    }
+
     fn set_model(&mut self, model: String) {
+        self.set_model_account(model, None);
+    }
+
+    fn set_model_account(&mut self, model: String, connection_id: Option<String>) {
+        if let Some((provider, _)) = model.split_once('/') {
+            if let Some(id) = &connection_id { self.composer.account_choices.insert(provider.into(), id.clone()); }
+        }
+        if self.composer.usable_model(&model) && self.composer.first_model_choice.is_none() {
+            self.composer.first_model_choice = Some(model.clone());
+            // The daemon atomically writes only when absent; never replace an explicit
+            // preference, even if it is temporarily disconnected or no longer in metadata.
+            self.agent_send(Client::PersistConfigChoice { directory: Some(self.cwd.clone()), model: Some(model.clone()), thinking: None });
+            if self.composer.configured_default.is_none() {
+                self.composer.defaults.model = model.clone();
+                self.composer.configured_default = Some(model.clone());
+            }
+        }
         self.composer.recent_models.retain(|m| *m != model);
         self.composer.recent_models.insert(0, model.clone());
         self.composer.recent_models.truncate(8);
         self.composer.selection.model = model.clone();
+        self.composer.selection.connection_id = connection_id.clone();
         if let Some(session_id) = self.active_session() {
             let thinking = Some(self.composer.selection.thinking.clone()).filter(|t| !t.is_empty());
-            self.agent_send(Client::SetModel { session_id, model, connection_id: None, thinking });
+            self.agent_send(Client::SetModel { session_id, model, connection_id, thinking });
         }
         self.remember_composer_selection();
         self.sync_chips();
@@ -340,7 +397,7 @@ impl App {
         let session = session.clone();
         self.composer.selection = selection;
         self.composer.selection_owner = Some(owner);
-        self.composer.picker = None;
+        if !self.authentication_picker_open() { self.composer.picker = None; self.composer.pending_model = None; }
         self.sync_chips();
         // The conversation's own settings come back with the switch. A sub-agent has no input
         // bar, and switching the daemon to it binds a second stream to it beside its
@@ -373,8 +430,12 @@ impl App {
         match kind {
             Kind::Slash => {
                 let i = self.active;
-                self.tabs[i].draft.clear();
                 self.composer.picker = None;
+                if row.value == "/goal" {
+                    self.tabs[i].draft.replace_text("/goal ");
+                    return;
+                }
+                self.tabs[i].draft.clear();
                 self.run_slash(&row.value, tx);
             }
             Kind::Model => {
@@ -383,7 +444,13 @@ impl App {
                 if on_providers && !row.value.is_empty() && !row.value.contains('/') {
                     return self.open_provider_models(&row.value, &row.title);
                 }
-                self.set_model(row.value);
+                self.choose_model(row.value);
+            }
+            Kind::ModelAccount => {
+                let Some((model, tab, session)) = self.composer.pending_model.clone() else { return };
+                if tab != self.active_tab().id || session != self.active_session() { return self.close_prompt_picker(); }
+                if row.value == RETRY { return self.choose_model(model); }
+                self.set_model_account(model, Some(row.value));
                 self.close_prompt_picker();
             }
             Kind::Agent => { self.set_agent(row.value); self.close_prompt_picker(); }
@@ -525,6 +592,8 @@ impl App {
         let mut picker = Picker::new(Kind::Mcp, "MCP servers", rows);
         picker.loading = true;
         self.composer.mcp_server = None;
+        self.composer.mcp_authorizing = false;
+        self.composer.mcp_refresh_requested = false;
         self.focus_picker(picker);
         self.agent_send(Client::ShowMcp { directory: Some(self.cwd.clone()) });
     }
@@ -549,6 +618,8 @@ impl App {
             "logout" => (Client::McpRemoveAuth { name: name.clone(), directory }, "Logging out of"),
             _ => return,
         };
+        self.composer.mcp_authorizing = matches!(action["action"].as_str(), Some("authenticate" | "connect"));
+        self.composer.mcp_refresh_requested = false;
         self.agent_send(message);
         if let Some(picker) = self.composer.picker.as_mut() {
             picker.activity = Some(Activity { body: format!("{body} {name}"), status: "Working".into(), busy: true, show_input: false, url: None });
@@ -608,6 +679,11 @@ impl App {
         let (Some(provider), Some(account)) = (flow.provider.clone(), flow.connection.clone()) else { return };
         match action {
             "select" => {
+                self.composer.account_choices.insert(provider.id.clone(), account.connection_id.clone());
+                let model = self.composer.selection.model.clone();
+                if model.starts_with(&format!("{}/", provider.id)) {
+                    self.set_model_account(model, Some(account.connection_id.clone()));
+                }
                 self.close_prompt_picker();
                 self.notice("Account", format!("Using {}.", account.label));
             }
@@ -748,7 +824,9 @@ impl App {
     /// only for the slash system.
     pub(crate) fn apply_slash_event(&mut self, message: &Server) -> bool {
         match message {
-            Server::ProviderCatalog { providers, .. } => {
+            Server::ProviderCatalog { providers, catalog_status, .. } => {
+                self.composer.catalog_received = true;
+                self.composer.catalog_ready = catalog_status.as_ref().and_then(|s| s["state"].as_str()).is_none_or(|s| s == "ready");
                 self.composer.providers = providers.clone();
                 if let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Model) {
                     let catalog = catalog::models(providers);
@@ -758,6 +836,10 @@ impl App {
                         None => catalog::model_root(&catalog, &selection.model, &self.composer.recent_models),
                     };
                     picker.replace(rows);
+                    picker.activity = None;
+                    if !self.composer.catalog_ready {
+                        picker.activity = Some(Activity { status: "Model catalog pending or unavailable".into(), body: "Refresh the model picker to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });
+                    }
                 }
                 true
             }
@@ -786,13 +868,14 @@ impl App {
                 }
                 true
             }
-            Server::ProviderState { session_id, model, provider_id, agent, thinking, authoritative, .. } => {
+            Server::ProviderState { session_id, model, provider_id, connection_id, agent, thinking, authoritative, .. } => {
                 let s = self.sessions.entry(session_id.clone()).or_default().selection.get_or_insert_with(Default::default);
                 if let Some(model) = model {
                     let provider = provider_id.clone().unwrap_or_default();
                     s.model = if provider.is_empty() || model.starts_with(&format!("{provider}/")) { model.clone() } else { format!("{provider}/{model}") };
                 }
                 if let Some(agent) = agent { s.agent = agent.clone(); }
+                if connection_id.is_some() || *authoritative { s.connection_id = connection_id.clone(); }
                 if let Some(thinking) = thinking { s.thinking = thinking.clone(); } else if *authoritative { s.thinking.clear(); }
                 let selection = s.clone();
                 if self.active_session().as_deref() == Some(session_id.as_str()) {
@@ -804,17 +887,26 @@ impl App {
             Server::McpCatalog { status, .. } => {
                 if let Some(servers) = status.as_object() { for entry in servers.values() { self.mcp_icons.prepare(entry); } }
                 self.composer.mcp_status = status.clone();
+                self.refresh_mcp_activity();
                 if let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Mcp) {
                     picker.replace(catalog::mcp_servers(status));
                     picker.activity = None;
                 }
                 true
             }
-            Server::McpChanged { .. } => {
-                if self.composer.picker.as_ref().is_some_and(|p| matches!(p.kind, Kind::Mcp | Kind::McpActions)) { self.open_mcp(); }
+            Server::McpChanged { name } => {
+                if self.composer.mcp_authorizing {
+                    if name.is_empty() || self.current_mcp_picker(Some(name)) {
+                        self.composer.mcp_refresh_requested = true;
+                        self.agent_send(Client::ShowMcp { directory: Some(self.cwd.clone()) });
+                    }
+                } else if self.current_mcp_picker(None) { self.open_mcp(); }
                 true
             }
             Server::McpOauthUrl { name, url } => {
+                if !self.current_mcp_picker(Some(name)) || !self.composer.picker.as_ref().is_some_and(|p| p.activity.as_ref().is_some_and(|a| a.busy)) { return true; }
+                self.composer.mcp_authorizing = true;
+                self.composer.mcp_refresh_requested = false;
                 open_in_browser(url);
                 if let Some(picker) = self.composer.picker.as_mut() {
                     picker.activity = Some(Activity { body: format!("Authorize {name} in your browser."), status: "Waiting for authorization".into(), busy: true, show_input: false, url: Some(url.clone()) });
@@ -822,6 +914,9 @@ impl App {
                 true
             }
             Server::McpFailed { name, error } => {
+                if !self.current_mcp_picker(name.as_deref()) { return true; }
+                self.composer.mcp_authorizing = false;
+                self.composer.mcp_refresh_requested = false;
                 if let Some(picker) = self.composer.picker.as_mut() {
                     picker.activity = Some(Activity { body: error.clone(), status: format!("{} failed", name.as_deref().unwrap_or("MCP")), busy: false, show_input: false, url: None });
                     picker.loading = false;
@@ -847,6 +942,26 @@ impl App {
                 true
             }
             Server::ConnectConnections { provider, connections } => {
+                if self.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::ModelAccount && p.loading) {
+                    let Some((model, tab, session)) = self.composer.pending_model.clone() else { return true };
+                    if tab != self.active_tab().id || session != self.active_session() { self.close_prompt_picker(); return true; }
+                    if model.split_once('/').map(|(p, _)| p) != Some(provider.as_str()) { return true; }
+                    if connections.len() <= 1 {
+                        self.set_model_account(model, connections.first().map(|c| c.connection_id.clone()));
+                        self.close_prompt_picker();
+                    } else {
+                        let current = self.composer.selection.model.starts_with(&format!("{provider}/"))
+                            .then_some(self.composer.selection.connection_id.as_ref()).flatten()
+                            .or_else(|| self.composer.account_choices.get(provider))
+                            .filter(|id| connections.iter().any(|c| &c.connection_id == *id))
+                            .cloned().or_else(|| connections.iter().find(|c| c.is_default).map(|c| c.connection_id.clone()));
+                        let mut rows = vec![Row::header(model)];
+                        rows.extend(connections.iter().map(|c| Row::new(c.label.clone(), c.auth_type.clone(), if c.is_default { "default" } else { "account" }, c.connection_id.clone())
+                            .current(current.as_ref() == Some(&c.connection_id))));
+                        self.focus_picker(Picker::new(Kind::ModelAccount, "Choose an account", rows).select_value(current.as_deref().unwrap_or_default()));
+                    }
+                    return true;
+                }
                 let Some(flow) = self.composer.connect.as_mut() else { return true };
                 if flow.provider.as_ref().map(|p| p.id.as_str()) != Some(provider.as_str()) { return true; }
                 flow.connections = connections.clone();
@@ -888,7 +1003,15 @@ impl App {
                 }
                 true
             }
-            Server::ConnectFailed { provider, error } => { self.connect_finished(provider, Err(error.clone())); true }
+            Server::ConnectFailed { provider, error } => {
+                if self.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::ModelAccount)
+                    && self.composer.pending_model.as_ref().is_some_and(|(m, _, _)| m.split_once('/').is_some_and(|(p, _)| p == provider)) {
+                    let mut picker = Picker::new(Kind::ModelAccount, "Choose an account", vec![Row::new("Retry", "", "", RETRY)]);
+                    picker.activity = Some(Activity { body: error.clone(), status: "Accounts unavailable".into(), busy: false, show_input: false, url: None });
+                    self.focus_picker(picker);
+                } else { self.connect_finished(provider, Err(error.clone())); }
+                true
+            }
             Server::Notice { session_id, title, body, .. } => {
                 if self.active_session().as_deref() == Some(session_id.as_str()) { self.notice(title, body.clone()); }
                 true
@@ -933,6 +1056,207 @@ pub(crate) fn open_in_browser(url: &str) {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+    fn accounts(count: usize) -> Server {
+        Server::ConnectConnections { provider: "local".into(), connections: (0..count).map(|i| neoism_protocol::agent::ProviderConnectionInfo {
+            provider_id: "local".into(), connection_id: format!("account-{i}"), label: format!("Account {i}"), auth_type: "oauth".into(), is_default: i == 0,
+        }).collect() }
+    }
+
+    #[test]
+    fn model_accounts_prompt_before_applying_and_follow_new_conversations() {
+        let mut app = onboarding_app();
+        onboarding_catalog(&mut app, "ready", &["one"]);
+        app.run_slash("/model local/one", &mut Tx::default());
+        assert!(app.composer.selection.model.is_empty());
+        app.apply_slash_event(&accounts(2));
+        let picker = app.composer.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, Kind::ModelAccount);
+        assert_eq!(picker.selected_row().unwrap().value, "account-0");
+        let index = picker.rows().iter().position(|r| r.value == "account-1").unwrap();
+        app.accept_picker_row(Some(index), &mut Tx::default());
+        assert_eq!(app.composer.selection.connection_id.as_deref(), Some("account-1"));
+        assert!(app.composer.picker.is_none());
+        app.tabs[app.active].draft.replace_text("Hello");
+        app.submit();
+        app.apply_agent(serde_json::from_value(serde_json::json!({"ThreadCreated":{"session_id":"account-chat"}})).unwrap());
+        let sent: Vec<Client> = app.agent_sent.borrow().iter().map(|s| serde_json::from_str(s).unwrap()).collect();
+        assert!(sent.iter().any(|m| matches!(m, Client::CreateThread { connection_id: Some(id), .. } if id == "account-1")));
+        assert!(sent.iter().any(|m| matches!(m, Client::SubmitPrompt { connection_id: Some(id), .. } if id == "account-1")));
+        assert!(!sent.iter().any(|m| matches!(m, Client::ConnectSetDefault { .. })));
+        app.choose_model("local/one".into());
+        app.apply_slash_event(&accounts(2));
+        assert_eq!(app.composer.picker.as_ref().unwrap().selected_row().unwrap().value, "account-1");
+    }
+
+    #[test]
+    fn model_accounts_zero_or_one_apply_directly_and_switch_existing_conversation() {
+        for count in [0, 1] {
+            let mut app = onboarding_app();
+            app.load_fixture("existing-account", "Existing", "[]");
+            app.choose_model("local/one".into());
+            app.apply_slash_event(&accounts(count));
+            let expected = (count == 1).then(|| "account-0".to_owned());
+            assert_eq!(app.composer.selection.model, "local/one");
+            assert_eq!(app.composer.selection.connection_id, expected);
+            assert!(app.composer.picker.is_none());
+            assert!(app.agent_sent.borrow().iter().map(|s| serde_json::from_str::<Client>(s).unwrap())
+                .any(|m| matches!(m, Client::SetModel { connection_id, .. } if connection_id == expected)));
+        }
+    }
+
+    #[test]
+    fn model_accounts_cancel_and_late_replies_do_not_change_selection() {
+        let mut app = onboarding_app();
+        app.set_model_account("other/old".into(), Some("old-account".into()));
+        let before = app.composer.selection.clone();
+        app.choose_model("local/one".into());
+        app.picker_key(&KeyEvent { key: Key::Escape, mods: Default::default() }, &mut Tx::default());
+        app.apply_slash_event(&accounts(2));
+        assert_eq!(app.composer.selection, before);
+        assert!(app.composer.picker.is_none());
+        app.choose_model("local/one".into());
+        app.open_tab(TabKind::Agent { session: None });
+        let other = app.composer.selection.clone();
+        app.apply_slash_event(&accounts(1));
+        assert_eq!(app.composer.selection, other);
+        assert!(app.composer.picker.is_none());
+    }
+
+    #[test]
+    fn model_accounts_failure_can_retry_without_losing_the_model() {
+        let mut app = onboarding_app();
+        app.choose_model("local/one".into());
+        app.apply_slash_event(&Server::ConnectFailed { provider: "local".into(), error: "Offline".into() });
+        assert!(!app.composer.picker.as_ref().unwrap().loading);
+        app.accept_picker_row(None, &mut Tx::default());
+        assert!(app.composer.picker.as_ref().unwrap().loading);
+        app.apply_slash_event(&accounts(1));
+        assert_eq!(app.composer.selection.model, "local/one");
+        assert_eq!(app.composer.selection.connection_id.as_deref(), Some("account-0"));
+    }
+
+    #[test]
+    fn connect_account_selection_applies_and_server_state_restores_it() {
+        let mut app = onboarding_app();
+        app.load_fixture("existing-account", "Existing", "[]");
+        app.set_model("local/one".into());
+        app.open_connect();
+        app.apply_slash_event(&Server::ConnectProviderCatalog { providers: serde_json::json!({"all":[{"id":"local","name":"Local"}]}), auth: serde_json::json!({}), request_id: None });
+        app.choose_connect_provider("local");
+        app.apply_slash_event(&accounts(2));
+        app.choose_account("account-1");
+        app.run_account_action("select");
+        assert_eq!(app.composer.selection.connection_id.as_deref(), Some("account-1"));
+        let mut state = provider("existing-account", "local", "one", None);
+        if let Server::ProviderState { connection_id, .. } = &mut state { *connection_id = Some("account-0".into()); }
+        app.apply_slash_event(&state);
+        assert_eq!(app.composer.selection.connection_id.as_deref(), Some("account-0"));
+        app.apply_slash_event(&provider("existing-account", "local", "one", None));
+        assert!(app.composer.selection.connection_id.is_none(), "authoritative state clears a removed account");
+    }
+
+    #[test]
+    fn goal_picker_replaces_the_slash_and_leaves_room_for_the_description() {
+        let mut app = App::new();
+        app.open_tab(TabKind::Agent { session: None });
+        app.tabs[app.active].draft.replace_text("/goal");
+        app.composer_changed();
+        let index = app.composer.picker.as_ref().unwrap().rows().iter().position(|row| row.value == "/goal").unwrap();
+        app.accept_picker_row(Some(index), &mut Tx::default());
+        assert_eq!(app.active_tab().draft.text, "/goal ");
+        assert!(app.composer.picker.is_none());
+        assert!(app.active_tab().pending_prompt.is_none());
+    }
+
+    #[test]
+    fn goal_on_a_new_tab_creates_a_conversation_without_losing_the_command() {
+        let mut app = onboarding_app();
+        app.composer.selection.model = "local/one".into();
+        app.tabs[app.active].draft.replace_text("/goal ship it");
+        assert!(app.submit_command(&mut Tx::default()));
+        assert_eq!(app.active_tab().pending_prompt.as_deref(), Some("/goal ship it"));
+        assert!(app.agent_sent.borrow().iter().any(|message| message.contains("CreateThread")));
+        app.apply_agent(serde_json::from_value(serde_json::json!({"ThreadCreated":{"session_id":"new-goal"}})).unwrap());
+        let sent = app.agent_sent.borrow();
+        assert!(sent.iter().any(|message| message.contains("SubmitPrompt") && message.contains("/goal ship it")));
+        assert!(!sent.iter().any(|message| message.contains("SlashCommand")));
+    }
+
+    fn onboarding_app() -> App {
+        let mut app = App::new();
+        app.composer = super::super::Composer::new(None, None);
+        app.open_tab(TabKind::Agent { session: None });
+        app.agent_sent.borrow_mut().clear();
+        app
+    }
+    fn onboarding_catalog(app: &mut App, state: &str, models: &[&str]) {
+        let providers = if models.is_empty() { vec![] } else { vec![neoism_protocol::agent::ProviderInfo {
+            id: "local".into(), name: "Local".into(), models: models.iter().map(|id| neoism_protocol::agent::ModelInfo { id: (*id).into(), name: (*id).into(), context_limit: None }).collect(),
+        }] };
+        app.apply_slash_event(&Server::ProviderCatalog { providers, catalog_status: Some(serde_json::json!({"state":state})), request_id: None });
+    }
+    #[test]
+    fn onboarding_send_preserves_draft_attachments_and_never_queues_a_turn() {
+        let mut app = onboarding_app();
+        onboarding_catalog(&mut app, "ready", &[]);
+        let tab = app.active_tab().id;
+        app.tabs[app.active].draft.replace_text("Explain [file1]");
+        app.tabs[app.active].pastes.insert("paste".into(), "saved paste".into());
+        app.attach.pending.insert(tab, vec![crate::agent::attach::Attached { token: "[file1]".into(), name: "a.txt".into(), mime: "text/plain".into(), bytes: std::sync::Arc::from(&b"abc"[..]) }]);
+        let sessions = app.sessions.len();
+        app.submit();
+        assert_eq!(app.composer.picker.as_ref().unwrap().kind, Kind::Connect);
+        assert_eq!(app.active_tab().draft.text, "Explain [file1]");
+        assert_eq!(app.active_tab().pastes.len(), 1);
+        assert_eq!(app.attach.pending[&tab][0].bytes.as_ref(), b"abc");
+        assert!(app.active_tab().pending_prompt.is_none());
+        assert_eq!(app.sessions.len(), sessions);
+        assert!(!app.agent_sent.borrow().iter().any(|m| m.contains("CreateThread") || m.contains("SubmitPrompt")));
+        onboarding_catalog(&mut app, "ready", &["one"]);
+        app.set_model("local/one".into());
+        assert!(app.active_tab().pending_prompt.is_none(), "login/model selection never auto-sends");
+        app.close_prompt_picker();
+        app.submit();
+        assert_eq!(app.active_tab().pending_prompt.as_deref(), Some("Explain [file1]"));
+        assert_eq!(app.agent_sent.borrow().iter().filter(|m| m.contains("CreateThread")).count(), 1, "only a fresh user Send starts the conversation");
+    }
+    #[test]
+    fn onboarding_catalog_uncertainty_does_not_reject_restored_models() {
+        let mut app = onboarding_app();
+        for state in ["loading", "retryable-error"] {
+            onboarding_catalog(&mut app, state, &[]);
+            app.composer.selection.model = "custom/restored".into();
+            assert!(!app.gate_agent_send());
+            app.composer.selection.model.clear();
+            assert!(app.gate_agent_send());
+            assert_eq!(app.composer.picker.as_ref().unwrap().kind, Kind::Model);
+        }
+        onboarding_catalog(&mut app, "ready", &["one"]);
+        assert!(app.composer.picker.as_ref().unwrap().activity.is_none(), "ready data clears a previous catalog warning");
+        app.composer.selection.model = "disconnected/old".into();
+        assert!(app.gate_agent_send());
+        assert_eq!(app.composer.picker.as_ref().unwrap().kind, Kind::Model);
+        app.composer.selection.model = "local/one".into();
+        assert!(!app.gate_agent_send(), "local models need no OAuth account");
+    }
+    #[test]
+    fn onboarding_first_usable_explicit_choice_is_default_not_later_choices() {
+        let mut app = onboarding_app();
+        onboarding_catalog(&mut app, "ready", &["one", "two"]);
+        app.set_model("unknown/not-usable".into());
+        assert!(!app.agent_sent.borrow().iter().any(|m| m.contains("PersistConfigChoice")));
+        app.set_model("local/one".into());
+        app.set_model("local/two".into());
+        assert_eq!(app.composer.defaults.model, "local/one");
+        assert_eq!(app.agent_sent.borrow().iter().filter(|m| m.contains("PersistConfigChoice")).count(), 1);
+        app.open_tab(TabKind::Agent { session: None });
+        assert_eq!(app.composer.selection.model, "local/one");
+        // A restarted client receives the persisted preference via its normal constructor.
+        app.composer = super::super::Composer::new(Some("local/two"), None);
+        onboarding_catalog(&mut app, "ready", &["one", "two"]);
+        app.set_model("local/one".into());
+        assert_eq!(app.composer.defaults.model, "local/two");
+    }
     fn provider(id: &str, provider: &str, model: &str, thinking: Option<&str>) -> Server {
         Server::ProviderState { session_id: id.into(), authoritative: true, provider_id: Some(provider.into()),
             model: Some(model.into()), connection_id: None, agent: Some("build".into()), thinking: thinking.map(str::to_owned), context_limit: Some(200000) }

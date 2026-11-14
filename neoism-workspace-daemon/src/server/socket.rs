@@ -989,15 +989,26 @@ pub(crate) async fn handle_socket(
                     let root =
                         match resolve_request_workspace_root(workspace_root.as_deref()) {
                             Ok(root) => root,
-                            Err(error) => {
-                                let message = files_handler::uncreated_notes_listing(
-                                    workspace_root.as_deref(), &message,
-                                    workspace_manager.list_host_workspaces(None).into_iter()
-                                        .filter_map(|workspace| workspace.notes_vault_dir),
-                                ).unwrap_or(FilesServerMessage::Error { message: error });
-                                let resp = ServiceServerMessage::FilesReply { request_id, message };
-                                let _ = send_json(&mut sink, &resp).await;
-                                continue;
+                            Err(_) => {
+                                // ResolveNotesVault advertises the default even
+                                // without an open host workspace. Consult vault
+                                // metadata only on the missing/invalid-root path.
+                                let notes_roots = workspace_manager.list_host_workspaces(None).into_iter()
+                                    .filter_map(|workspace| workspace.notes_vault_dir)
+                                    .chain(std::iter::once(
+                                        neoism_workspace_index::default_notes_workspace().notes_workspace_dir(),
+                                    )).collect::<Vec<_>>();
+                                match resolve_files_workspace_root(workspace_root.as_deref(), &message, notes_roots.clone()).await {
+                                    Ok(root) => root,
+                                    Err(error) => {
+                                        let message = files_handler::uncreated_notes_listing(
+                                            workspace_root.as_deref(), &message, notes_roots,
+                                        ).unwrap_or(FilesServerMessage::Error { message: error });
+                                        let resp = ServiceServerMessage::FilesReply { request_id, message };
+                                        let _ = send_json(&mut sink, &resp).await;
+                                        continue;
+                                    }
+                                }
                             }
                         };
                     // Watch only directories the tree actually lists, and

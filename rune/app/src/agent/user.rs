@@ -67,7 +67,7 @@ pub fn view(app: &App, id: &str, message: &str, attachments: &[neoism_protocol::
     if !message.is_empty() || attachments.is_empty() {
         let body = col().max_w(max_w).px(pad).py(PAD_Y * s).radius(radius).fill(blue)
             .child(text(message).max_w((max_w - 2.0 * pad).max(1.0))
-            .font(app.ty.sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap()
+            .font(app.ty.chat_sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap()
             // White over the blue bubble: the accent highlight would vanish into it.
             .selectable(true).selection_color(Color::WHITE.alpha(0.3)));
         content = content.child(col().max_w(max_w)

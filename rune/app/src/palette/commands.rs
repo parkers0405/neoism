@@ -70,7 +70,7 @@ const fn cmd(title: &'static str, shortcut: &'static str, action: Action, servic
 }
 
 pub const COMMANDS: &[Command] = &[
-    cmd("New Tab", "Ctrl+Shift+T terminal tab", Action::NewTab, Service::Neoism),
+    cmd("New Tab", "", Action::NewTab, Service::Neoism),
     cmd("New Workspace", "Ctrl+Shift+W", Action::NewWorkspace, Service::Neoism),
     cmd("Close Tab", "Cmd+W", Action::CloseTab, Service::Neoism),
     cmd("Close Workspace", "qall", Action::CloseWorkspace, Service::Neoism),

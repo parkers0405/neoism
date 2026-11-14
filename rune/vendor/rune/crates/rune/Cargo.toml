@@ -1,0 +1,310 @@
+[package]
+workspace = "../.."
+name = "rune"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["accessibility", "dbus", "embedded-fonts", "metal-backend", "ogg-audio", "svg"]
+# On web, bundle Inter (Regular, Medium, SemiBold) and IBM Plex Mono as built-in fallback fonts.
+# Disable when AppSpec::fonts supplies the app's own fonts to omit the bytes from the wasm.
+# Native builds always bundle Inter.
+embedded-fonts = []
+# Fall back to WebGL2 on wasm32 when WebGPU is unavailable.
+webgl = ["wgpu/webgl"]
+# Headless benchmark instrumentation; ordinary builds contain no phase clocks.
+frame-profile = ["dep:procwatch"]
+# Native Open, Save and folder dialogs: rfd on macOS and Windows, the XDG desktop portal over zbus on Linux.
+native-file-dialog = ["dep:rfd", "dbus"]
+hot = ["dep:subsecond", "dep:dioxus-devtools"]
+# macOS: let an overlay set its element's cursor while its app isn't frontmost. macOS ignores
+# `[NSCursor set]` from a background app; this sets WindowServer's private per-connection
+# `SetsCursorInBackground` property, looked up at run time. Private API: App Store review may
+# reject an app built with it. Off, the lookup isn't compiled in, and a non-key overlay's
+# cursor shows only while its app is frontmost.
+macos-background-cursor = []
+# macOS: play Ogg (Vorbis, Opus) and WebM/Matroska audio, which AVFoundation can't read, by
+# decoding it in Rust (symphonia, opuscule) and handing AVPlayer the PCM. Off, those clips
+# fail at once with a clear message.
+ogg-audio = ["dep:symphonia", "dep:opuscule"]
+# SVG and SVGZ images (`ImageCache::svg`, `file`, `load_mime`, and `load` on sniffed SVG bytes), and
+# scalable Linux app icons, rasterized by resvg. Off, those images resolve to `Image::error`.
+svg = ["dep:resvg"]
+# AVIF images (`ImageCache::load` on AVIF bytes), decoded natively by rav1d, a Rust port of
+# dav1d; an animated AVIF shows its first frame. Building it for x86 needs NASM on the PATH for
+# rav1d's assembly. Off, AVIF bytes resolve to `Image::error`. No effect on web, where the
+# browser decodes AVIF.
+avif = ["dep:avif-decode"]
+# Linux desktop services over D-Bus (zbus, with a tokio runtime on each service's thread): the
+# desktop's light or dark preference (the Settings portal), the system tray (`Tray`), global
+# shortcuts on Wayland (the GlobalShortcuts portal) and, with `native-file-dialog`, the
+# FileChooser portal. Off, neither crate is compiled: a window winit gives no theme draws dark,
+# `Tray::new` returns `TrayError::Unsupported` on Linux and a Wayland session's global shortcuts
+# return `ShortcutError::Unsupported`; X11 shortcuts keep working. No effect on other platforms.
+dbus = ["dep:zbus", "dep:tokio", "dep:futures-util"]
+# macOS and iOS: Rune's native Metal backend (research/34). Mac apps draw with it by default; an
+# app opts out with `App::gpu_backend(GpuBackend::Wgpu)`, or a launch with `RUNE_GPU_BACKEND=wgpu`,
+# and an app built with `default-features = false` draws with wgpu unless it adds this feature.
+# iOS apps keep wgpu unless they choose `GpuBackend::Metal`. It plugs in through wgpu's `custom`
+# backend, which Rune turns on for Apple targets alone. No effect on other platforms: its crates
+# are Apple-only dependencies.
+metal-backend = ["dep:objc2-quartz-core", "dep:parking_lot", "dep:raw-window-metal", "dep:wgpu-naga-bridge"]
+# Every window and overlay exposes its elements to the OS accessibility API through AccessKit:
+# UI Automation on Windows, NSAccessibility on macOS, AT-SPI on Linux (README, "Accessibility").
+# Nothing is built until an assistive client asks. Off, the platform adapters aren't compiled;
+# `Runtime::accessibility_tree` and `--tree` still report the tree.
+accessibility = ["dep:accesskit_windows", "dep:accesskit_macos", "dep:accesskit_unix"]
+# Use upstream `taffy::TaffyTree` instead of `rune_taffy::LayoutStore` for A/B benchmarks and parity checks.
+baseline-taffy = ["rune-taffy/baseline-taffy"]
+
+[dependencies]
+# The accessibility tree's types; the platform adapters below come with `accessibility`.
+accesskit = "0.25.2"
+procwatch = { path = "../procwatch", optional = true }
+subsecond = { version = "=0.7.10", optional = true }
+dioxus-devtools = { version = "=0.7.10", optional = true }
+rune-motion = { path = "../rune-motion" }
+rune-staging = { path = "../rune-staging" }
+rune-taffy = { path = "../rune-taffy" }
+# Allow backend patch fixes; headless pixel equivalence guards the precompiled Metal path.
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+# Keep Wayland client-side frames/buttons without the title font's ab_glyph/ttf-parser.
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
+taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
+parley = { version = "0.12", default-features = false, features = ["std"] }
+swash = "0.2.10"
+bytemuck = { version = "1.25", features = ["derive"] }
+png = "0.18"
+serde = "1"
+serde_json = "1"
+portable-atomic = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+blake3 = "1"
+rustc-hash = "2"
+zeroize = "1.8"
+half = "2"
+unicode-segmentation = "1.13"
+# Bidi classes for `Direction::Auto` (Parley already builds it, with its data).
+icu_properties = { version = "2.3", default-features = false, features = ["compiled_data"] }
+resvg = { version = "0.45", default-features = false, optional = true }
+
+[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+# The thread CPU clock for frame profiles and debug builds' stall warnings.
+libc = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "1"
+# JPEG, GIF, WebP, BMP and ICO decoding; a web build hands them to the browser's codecs instead.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+avif-decode = { version = "3", optional = true }
+# Installed fonts by family name (`text::system_fonts::installed_family_files`): fontique's
+# DirectWrite, CoreText and fontconfig backends, in a collection apart from the app's, which
+# keeps system fonts off. Fontconfig opens at run time, so a build needs no headers for it.
+fontique = { version = "0.12", default-features = false, features = ["std", "system", "fontconfig-dlopen"] }
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+
+# Pasted images on Windows and Linux; macOS reads the pasteboard's PNG or TIFF itself.
+[target.'cfg(any(target_os = "windows", all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))))'.dependencies]
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control", "image-data"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+wgpu = { version = "30", default-features = false, features = ["webgpu"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "CssStyleDeclaration", "MediaQueryList", "console"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+rfd = { version = "0.17", optional = true, default-features = false }
+
+# Metal on macOS and iOS: video and present timing on macOS, and the `metal-backend` feature on both.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-video = { package = "objc2", version = "0.6" }
+objc2-core-foundation = "0.3"
+objc2-metal = "0.3"
+objc2-quartz-core = { version = "0.3.2", optional = true, default-features = false, features = ["std", "bitflags", "CALayer", "CAMetalLayer", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal"] }
+parking_lot = { version = "0.12", optional = true }
+raw-window-metal = { version = "1.1", optional = true }
+wgpu-naga-bridge = { version = "~30.0.1", optional = true }
+# wgpu's `custom` backend, which `metal-backend` plugs into, on Apple targets alone: off them,
+# wgpu's calls dispatch to one backend with no branch.
+wgpu = { version = "~30.0.1", default-features = false, features = ["custom"] }
+objc2-foundation-video = { package = "objc2-foundation", version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSError", "NSObject", "NSRange", "NSString", "NSURL", "NSURLConnection", "NSURLRequest", "NSURLResponse"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accesskit_macos = { version = "0.27.2", optional = true }
+# Names for the interaction watchdog's stack samples (`tooling::interaction::stack`).
+rustc-demangle = "0.1"
+wgpu-hal = { version = "~30.0.1", default-features = false }
+wgpu-core = { version = "~30.0.1", default-features = false }
+objc2 = "0.5.2"
+block2 = "0.5"
+objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSAttributedString", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSRange", "NSValue", "NSProcessInfo", "NSString", "NSThread", "NSURL", "NSUserDefaults"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSButton", "NSCell", "NSControl", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSGraphicsContext", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSAttributedString", "NSSpellChecker"] }
+objc2-core-video = { version = "0.3", features = ["CVPixelBufferIOSurface", "objc2-io-surface"] }
+# Unused by name: its default features give IOSurfaceRef the CF `Type` impl objc2-core-video needs.
+objc2-io-surface = "0.3"
+block2-metal = { package = "block2", version = "0.6" }
+# Video playback (`Video`): AVPlayer, its video output and the poster/headless image generator.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVAsset", "AVAssetImageGenerator", "AVAssetTrack", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+# Ogg and WebM audio (`ogg-audio`): pure-Rust demuxers and decoders.
+symphonia = { version = "0.5.5", optional = true, default-features = false, features = ["ogg", "vorbis", "mkv"] }
+opuscule = { version = "0.2.2", optional = true }
+
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", features = ["shape", "xinput", "randr", "allow-unsafe-code", "dl-libxcb"] }
+xkbcommon = "0.9"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# D3D12 shared textures for `NativeSurface` (`native_surface::windows`), on wgpu-hal's version.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_System_Com"] }
+accesskit_windows = { version = "0.35.2", optional = true }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# AT-SPI over D-Bus on its own async-io thread, started only when the desktop's accessibility bus is on.
+accesskit_unix = { version = "0.24.1", optional = true }
+libc = "0.2"
+libloading = "0.8"
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"], optional = true }
+futures-util = { version = "0.3", optional = true }
+
+[target.'cfg(all(not(target_vendor = "apple"), not(target_arch = "wasm32")))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"] }
+
+[dev-dependencies]
+# The HLSL wgpu generates, for the precompiled uber shader (`render/dxbc_tests.rs`).
+log = "0.4"
+# Live buffer counts (`Device::get_internal_counters`) for the upload tests.
+wgpu = { version = "~30.0.1", default-features = false, features = ["counters"] }
+# Thread and process CPU clocks in the overlay cost example.
+libc = "0.2"
+
+# A UI Automation client for `tests/accessibility_windows.rs`.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility"] }
+
+# A GPU-free device whose surfaces refuse every configuration, for `window::configure`'s test.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+wgpu = { version = "~30.0.1", default-features = false, features = ["noop"] }
+
+[[example]]
+name = "metal_dispatch"
+required-features = ["metal-backend"]
+
+[[example]]
+name = "tree_swap"
+required-features = ["frame-profile"]
+
+[[example]]
+name = "cache_pan_zoom"
+required-features = ["frame-profile"]
+
+[[example]]
+name = "pinch_bench"
+required-features = ["frame-profile"]
+
+[[example]]
+name = "long_note"
+required-features = ["frame-profile"]
+
+[[example]]
+name = "taffy_adapter_bench"
+required-features = ["frame-profile"]
+
+[[example]]
+name = "scroll_commits"
+required-features = ["frame-profile"]
+
+[[test]]
+name = "macos_appearance_kvo"
+harness = false
+
+[[test]]
+name = "launcher_wakes"
+harness = false
+
+[[test]]
+name = "overlay_gpu_lifecycle"
+harness = false
+
+[[test]]
+name = "overlay_soak"
+harness = false
+
+[[test]]
+name = "macos_window_corners"
+harness = false
+
+[[test]]
+name = "accessibility_macos"
+harness = false
+
+[[test]]
+name = "accessibility_windows"
+harness = false
+
+[[test]]
+name = "secondary_window"
+harness = false
+
+[[test]]
+name = "macos_overlay_source"
+harness = false
+
+[[test]]
+name = "open_activates"
+harness = false
+
+[[test]]
+name = "shortcut_layout_macos"
+harness = false
+
+[[test]]
+name = "default_menu_macos"
+harness = false
+
+[[test]]
+name = "menu_key_equivalent_macos"
+harness = false
+
+[[test]]
+name = "macos_drag_out"
+harness = false
+
+[[test]]
+name = "macos_overlay_drag_out"
+harness = false
+
+[[test]]
+name = "macos_overlay_cursor"
+harness = false
+required-features = ["macos-background-cursor"]
+
+[[test]]
+name = "popup_menu_macos"
+harness = false
+
+[[test]]
+name = "video_gui"
+harness = false
+
+[[test]]
+name = "help_macos"
+harness = false
+
+[lints]
+workspace = true

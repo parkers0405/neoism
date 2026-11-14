@@ -3164,6 +3164,69 @@ fn provider_credential_scope(
     }
 }
 
+/// Called only after the provider accepts generation. The notice belongs to the
+/// existing user turn, never a new unanswered user turn or fake model tool call.
+/// Its deterministic part ID dedupes steps, retries, and restart recovery.
+pub(crate) async fn publish_goal_started_notice(
+    state: &AppState,
+    session_id: &str,
+    prompt_id: &str,
+) -> anyhow::Result<()> {
+    let Some(session) = state.inner.store.get_session(session_id).await? else {
+        return Ok(());
+    };
+    let Some(goal) = session.goal().filter(|goal| goal.is_active()) else {
+        return Ok(());
+    };
+    let Some(mut message) = state.inner.store.get_message(session_id, prompt_id).await?
+    else {
+        return Ok(());
+    };
+    let MessageInfo::User(user) = &message.info else {
+        return Ok(());
+    };
+    let id = Id::parse(IdKind::Part, format!("prt_goal_started_{prompt_id}"))?;
+    if message
+        .parts
+        .iter()
+        .any(|part| matches!(part, Part::Tool(tool) if tool.id == id))
+    {
+        return Ok(());
+    }
+    let now = now_millis();
+    let metadata = json!({ "transcriptOnly": true });
+    let part = Part::Tool(neoism_agent_core::ToolPart {
+        id,
+        session_id: session.id.clone(),
+        message_id: user.id.clone(),
+        tool: "goal_started".to_string(),
+        call_id: format!("notice_goal_started_{prompt_id}"),
+        state: ToolState::Completed {
+            input: json!({}),
+            output: goal.text,
+            metadata: metadata.clone(),
+            title: "Goal Started".to_string(),
+            time: neoism_agent_core::PartTime {
+                start: now,
+                end: Some(now),
+            },
+        },
+        metadata: Some(metadata),
+    });
+    message.parts.push(part.clone());
+    state
+        .update_message_with_event(
+            session_id,
+            &message,
+            EventPayload::new(
+                event_type::MESSAGE_PART_UPDATED,
+                json!({ "sessionID": session_id, "part": part, "time": now }),
+            ),
+        )
+        .await?;
+    Ok(())
+}
+
 async fn run_provider_stream_step_with_retry(
     provider: &Arc<dyn neoism_agent_plugin_api::ProviderService>,
     ctx: &ProviderStreamEventContext<'_>,
@@ -3236,6 +3299,31 @@ async fn run_provider_stream_step_with_retry(
             }
         };
 
+        // This is confirmation from the provider, not an optimistic goal save
+        // or queue admission. Retries and subsequent steps dedupe durably.
+        if !cancellation.load(Ordering::SeqCst)
+            && crate::agent_tool_registry::plugin_present(
+                ctx.plugin_snapshot,
+                neoism_agent_builtins::plugin::goals::ID,
+            )
+        {
+            let prompt_id = {
+                let message = ctx.live_message.lock().await;
+                match &message.info {
+                    MessageInfo::Assistant(assistant) => assistant.parent_id.clone(),
+                    MessageInfo::User(user) => user.id.clone(),
+                }
+            };
+            if let Err(error) = publish_goal_started_notice(
+                ctx.state,
+                ctx.session_id_text,
+                prompt_id.as_str(),
+            )
+            .await
+            {
+                tracing::warn!(%error, "failed to persist goal-start notice");
+            }
+        }
         let provider_stream = crate::provider::ProviderStream {
             provider_id: provider_stream.provider_id,
             model_id: provider_stream.model_id,

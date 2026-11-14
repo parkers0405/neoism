@@ -1652,6 +1652,287 @@ async fn deleting_child_cleans_runtime_without_deleting_root_execution() {
 }
 
 #[tokio::test]
+async fn goal_started_notice_is_durable_deduped_and_transcript_only() {
+    use crate::session_prompt::publish_goal_started_notice;
+    use neoism_agent_builtins::plugin::goals;
+
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-goal-start-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let mut session = store_test_session(&session_id, now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+    let prompt = store_test_message(&session_id, now_millis(), "ship");
+    let prompt_id = message_id_of(&prompt);
+    state
+        .inner
+        .store
+        .append_message(session_id.as_str(), &prompt)
+        .await
+        .unwrap();
+    // No active goal means no confirmation, even if generation starts.
+    publish_goal_started_notice(&state, session_id.as_str(), &prompt_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .inner
+            .store
+            .get_message(session_id.as_str(), &prompt_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .parts
+            .len(),
+        1
+    );
+
+    let mut goal = goals::set(None, "ship", false, 1).unwrap();
+    session.set_goal(&goal);
+    state.inner.store.update_session(&session).await.unwrap();
+    for _ in 0..2 {
+        publish_goal_started_notice(&state, session_id.as_str(), &prompt_id)
+            .await
+            .unwrap();
+    }
+    // Research and pause are not new starts.
+    goal.updated += 1;
+    session.set_goal(&goal);
+    state.inner.store.update_session(&session).await.unwrap();
+    publish_goal_started_notice(&state, session_id.as_str(), &prompt_id)
+        .await
+        .unwrap();
+    goal = goals::set(Some(goal), "ship", true, 3).unwrap();
+    session.set_goal(&goal);
+    state.inner.store.update_session(&session).await.unwrap();
+    publish_goal_started_notice(&state, session_id.as_str(), &prompt_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .inner
+            .store
+            .list_messages(session_id.as_str())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let resumed = store_test_message(&session_id, now_millis(), "resume");
+    let resumed_id = message_id_of(&resumed);
+    state
+        .inner
+        .store
+        .append_message(session_id.as_str(), &resumed)
+        .await
+        .unwrap();
+    publish_goal_started_notice(&state, session_id.as_str(), &resumed_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .inner
+            .store
+            .get_message(session_id.as_str(), &resumed_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .parts
+            .len(),
+        1,
+        "a paused goal must not produce a start notice"
+    );
+    goal = goals::set(Some(goal), "ship", false, 4).unwrap();
+    session.set_goal(&goal);
+    state.inner.store.update_session(&session).await.unwrap();
+    publish_goal_started_notice(&state, session_id.as_str(), &resumed_id)
+        .await
+        .unwrap();
+    state.shutdown().await.unwrap();
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    publish_goal_started_notice(&state, session_id.as_str(), &resumed_id)
+        .await
+        .unwrap();
+    let messages = state
+        .inner
+        .store
+        .list_messages(session_id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(
+        messages.len(),
+        2,
+        "resume gets one new notice, reload gets none"
+    );
+    for message in &messages {
+        assert!(matches!(&message.info, MessageInfo::User(_)));
+        assert_eq!(message.parts.len(), 2);
+        let Part::Tool(notice) = &message.parts[1] else {
+            unreachable!()
+        };
+        assert_eq!(notice.tool, "goal_started");
+        assert!(notice.id.as_str().starts_with("prt_goal_started_"));
+        assert_eq!(notice.metadata.as_ref().unwrap()["transcriptOnly"], true);
+        assert!(
+            matches!(&notice.state, ToolState::Completed { title, output, .. }
+            if title == "Goal Started" && output == "ship")
+        );
+    }
+    for projected in [
+        crate::message_model::provider_messages(&messages),
+        crate::message_model::compaction_provider_messages(&messages),
+    ] {
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].content, "ship");
+        assert_eq!(projected[1].content, "resume");
+        assert!(projected
+            .iter()
+            .all(|message| message.tool_calls.is_empty()));
+    }
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn goal_set_and_resume_are_metadata_only_and_do_not_echo_commands() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-goal-admission-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    cleanup_sqlite_files(&path);
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let session = store_test_session(&session_id, now_millis());
+    state.inner.store.insert_session(&session).await.unwrap();
+    let app = app(state.clone());
+    let mut previous_updated = 0;
+
+    // Pausing and resuming use the same setter, not a separate resume route.
+    for paused in [false, true, false] {
+        let response: Value = response_json(
+            app.clone()
+                .oneshot(request(
+                    Method::POST,
+                    &format!("/v2/plugins/dev.neoism.goals/{session_id}"),
+                    Some(json!({ "text": "ship it", "paused": paused })),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response["goal"]["text"], "ship it");
+        assert_eq!(response["goal"]["status"], "active");
+        assert_eq!(response["goal"]["paused"].as_bool(), Some(paused));
+        let updated = response["goal"]["updated"].as_u64().unwrap();
+        assert!(updated > previous_updated);
+        previous_updated = updated;
+        assert_eq!(
+            state
+                .inner
+                .store
+                .queued_prompt_count(session_id.as_str())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            state
+                .inner
+                .store
+                .list_messages(session_id.as_str())
+                .await
+                .unwrap()
+                .is_empty(),
+            "goal metadata must not generate a command echo or optimistic start notice"
+        );
+    }
+    let stored = state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.goal().unwrap().is_active());
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn goal_completion_requires_an_explicit_decision() {
+    let path = std::env::temp_dir().join(format!(
+        "neoism-agent-goal-audit-{}.turso.db",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let session_id = neoism_agent_core::new_session_id();
+    let mut session = store_test_session(&session_id, now_millis());
+    session.set_goal(
+        &neoism_agent_builtins::plugin::goals::set(
+            None,
+            "Finish X and Y",
+            false,
+            now_millis(),
+        )
+        .unwrap(),
+    );
+    state.inner.store.insert_session(&session).await.unwrap();
+    let input = json!({
+        "summary":"Only X is finished; Y remains."
+    });
+    let message_id = Id::ascending(IdKind::Message);
+    let call = |input| {
+        crate::tool_runtime::execute_tool_call_with_permission_wait(
+            &state,
+            &session_id,
+            &message_id,
+            "/tmp",
+            vec![PermissionRule {
+                permission: "*".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            }],
+            "goal-audit",
+            "complete_goal",
+            input,
+        )
+    };
+    assert!(call(input).await.unwrap_err().contains("explicit status"));
+    assert!(state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .unwrap()
+        .unwrap()
+        .goal()
+        .unwrap()
+        .is_active());
+    let input = json!({
+        "status":"complete", "summary":"X and Y implemented and verified."
+    });
+    let result = call(input).await.unwrap();
+    assert_eq!(result.title, "Goal complete");
+    assert_eq!(
+        state
+            .inner
+            .store
+            .get_session(session_id.as_str())
+            .await
+            .unwrap()
+            .unwrap()
+            .goal()
+            .unwrap()
+            .status,
+        neoism_agent_core::GoalStatus::Complete
+    );
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn setting_a_new_goal_reopens_a_completed_goal() {
     let path = std::env::temp_dir().join(format!(
         "neoism-agent-goal-replacement-{}.turso.db",

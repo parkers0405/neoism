@@ -248,6 +248,7 @@ pub fn view(app: &App) -> El {
         use crate::app::Connection;
         // Only a failure that lasts is said: connecting takes a moment on every start.
         let notice = match &app.connection {
+            Connection::Reconnecting { visible: true, .. } => Some((" Reconnecting to server...".to_owned(), p.muted)),
             Connection::Disconnected(reason) if reason == crate::daemon::STARTING => Some((format!(" {reason}"), p.yellow)),
             Connection::Disconnected(reason) => Some((format!(" {}", reason.chars().take(72).collect::<String>()), p.red)),
             _ => None,

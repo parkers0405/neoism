@@ -106,6 +106,8 @@ video so agents can read the motion without playing it. Extract any frame with
 - **Fonts**: UI and code in the configured family (`~/.config/neoism/config.json`, default Geist Mono 15);
   icons from Cascadia Code NF (`neoism-paint/src/font/resources/CascadiaCode`); "Pinned", "Recent", "Crafting"
   and the wordmark style use Press Start 2P (`neoism-paint/src/font/resources/PressStart2P`).
+  Chat prose, user bubbles and composer input deliberately use proportional Geist Sans at regular weight, with bold Markdown headings/emphasis. The existing licensed variable font in `neoism-paint/src/font/resources/Geist` is embedded in the app, without a runtime download. Chat-only styles live in `app/src/agent/typography.rs`; inline/fenced code, editor, terminals, tool grids, tables and composer chips retain their monospaced styles and metrics.
+  Settings > Appearance separates **Chat font family** (`appearance.chat-font-family`, default `Geist`) from **Monospace font family** (`appearance.fonts.family`, default `Geist Mono` in Rune). Both offer bundled and installed families, apply without restarting, and persist through the daemon. Chat changes leave code and fixed-width UI alone; monospace changes update those surfaces and their editor/terminal cell widths. Icon and pixel-art fonts stay fixed.
 - **Chrome**: 55 px activity rail (menu, files, notes, agent, search, servers with green dot); workspace tab row
   (folder icon + name, close, `+`); pane tab row (icon, title, close, `+`, active tab brighter); status line with
   mode pill (`NORMAL`/`AGENT`/`TERMINAL`), cwd pill, git branch chip, LSP chip, position, FPS pill.
@@ -132,9 +134,12 @@ Window focus moves between zones: `sidebar`, `content`, `buffers` (pane tabs), `
   the hover surface. Content focus shows the normal text caret (block in Normal mode, beam in Insert).
 - Each workspace remembers its last focus zone and restores it when re-activated.
 - `Ctrl+Shift+Left/Right` selects the previous/next buffer tab; `Alt+1..9` selects workspaces.
+- `Alt+Shift+Left/Right` reorders the active pane tab from content, sidebar or tab-strip focus; it reorders workspace tabs only when the workspace strip has focus. On macOS, Ctrl+Cmd+Shift+Left/Right is an additional reorder alias. `Ctrl+Alt+Shift+Left/Right` explicitly reorders the active workspace without first focusing its strip.
 
 Text cursors: editor and composer carets use the trail cursor below; carets blink with a hold while typing
 (`DEFAULT_BLINK_PERIOD_MS`). The terminal composer shows inline completion ghost text after the caret.
+
+The opt-in `appearance.effects.liquid-glass-cursor` uses a live optical Metal lens on macOS with Rune's default native Metal backend. Swift encodes magnification, dispersive edges and velocity-responsive highlights into Rune's own presentation command buffer; there is no SwiftUI overlay or captured window image. Other platforms, headless rendering, explicitly selected wgpu, reduced transparency/increased contrast, and occluding popups keep the ordinary Rune cursor. Reduced motion snaps the native lens. See [`app/native/README.md`](app/native/README.md) for the GPU-copy distinction, resource contract and verification commands.
 
 ## NEOISM wordmark
 
@@ -162,6 +167,8 @@ During click effects, wordmark flames attach to their source foreground pixels u
 
 Fire palettes: Neoism Dark and Neoism Light retain the classic red/orange/yellow/ivory colours. Other themes derive the five flame colours from their background, accent, magenta, cyan and foreground. Palette selection happens at paint time, so switching themes does not rebuild or restart the cached simulation. New uses should pass `ui::fire::colors(app.pal)` unless they intentionally need a custom palette.
 
+The agent activity labels (Crafting, Pondering, Tinkering and the other running states) carry smaller versions of the same flames, attached to each moving letter's visible top outline from the bundled Press Start 2P font, including lowercase heights, side bearings and scrambling punctuation. The hot roots overlap the glyph edge instead of floating above its layout box. They share the wordmark flame toggle, reduced-motion policy and theme palette. Cached live pixel textures advance at 16 Hz (or when a scrambling glyph changes) without rebuilding the status view.
+
 Port the masks, letter origins and effect algorithms directly; `wordmark_animation.rs` is already plain Rust with
 no Sugarloaf dependency in its math.
 
@@ -177,6 +184,7 @@ Exact constants from the shared Rust code; reproduce them with Rune springs or t
 - **Agent timeline, trackpad** (`state/timeline.rs`, `scroll_timeline_pixels`): pixels apply 1:1 immediately and
   inject `delta x 7` into a velocity clamped to +-2800 px/s; velocity decays exponentially with tau 0.28 s and stops
   below 50 px/s. Holding an edge does not build velocity. Touch flings clamp to +-6000 px/s.
+  Rune on macOS deliberately uses native precision scrolling instead: finger and OS momentum deltas apply 1:1, without the reading gain or an additional synthesized coast. Mouse-notch springs and other platforms retain their existing behavior. Edges remain clamped; elastic overscroll is not implemented.
 - **Follow bottom**: streaming keeps the transcript pinned to the newest content through the same spring; scrolling
   up releases the latch; returning within 1 px of the bottom re-latches.
 - **Ctrl+U/Ctrl+D**: half a viewport, through the same spring.
@@ -191,6 +199,8 @@ Exact constants from the shared Rust code; reproduce them with Rune springs or t
   offsets the content so scrolling is pixel smooth (`shared/src/terminal_scroll_state.rs`). New output follows the
   bottom unless the user scrolled away; layout changes keep the anchored block in place.
 - **Overlays** (palette, pickers, finder, menus): a notch is `3 rows`, trackpad pixels 1:1.
+- **Wide chat tables**: precision gestures choose one axis after the first 3 points and keep it through momentum. Horizontal gestures consume vertical noise instead of moving the transcript; a new vertical gesture still scrolls the transcript normally. Trackpads without explicit gesture boundaries reset the lock after 180 ms without finger input.
+- **Direct touchscreen input**: a finger swipe scrolls agent prose/code and editor/Markdown documents without selecting or copying text. Tree rows scroll on a normal swipe; holding still for 500 ms before dragging allows the existing file/folder move gesture. This is a deliberate hold, not a hardware-pressure requirement. Mouse text selection, mouse file dragging, and direct touch dragging on sliders/scrollbars are unchanged. Rune's shared input patch is tracked under `vendor/rune`; see `vendor/rune/NEOISM.md` for the upstream pin and local changes.
 - **Ambient**: composer starfield twinkles continuously; "Crafting" status word and scanner animate on a wall clock
   (not model time); user orb animates while visible; streaming text reveals word by word.
 
@@ -202,6 +212,10 @@ MCP OAuth and provider "connect" flows finish in the user's browser on pages ser
 and stay unchanged. The Rune app must: open the URL from `ConnectOauthUrl` / `McpOauthUrl` in the system browser,
 show the pending state in the provider/MCP modal, and react to `ConnectFinished`, `ConnectFailed`, `McpChanged`
 and `McpFailed` events.
+
+Connection/MCP cards are deliberate workflows: clicking the background, moving/resizing the window, changing focus, or restoring the composer owner must not dismiss their input or pending authorization state. Escape/back, Cancel, and Done remain explicit exits. MCP catalog changes refresh a pending authorization in place; unrelated or late OAuth/error events cannot overwrite a different picker. Slash-picker rows and header contents update immediately on search edits, while keyboard/wheel list and cursor motion retain their springs.
+
+Sending an agent message without an available model opens provider connection or model selection before consuming the draft, pastes, or attachments and before creating a conversation/turn. Authentication or model selection does not automatically send that draft. The first explicitly selected available model is offered to the daemon as the user's default using its write-if-absent configuration path; existing explicit defaults are preserved and subsequent selections remain conversation-specific. A loading/failed catalog is not evidence that an existing restored/custom model is unavailable.
 
 ## Data and performance rules
 
@@ -277,6 +291,8 @@ window mid-reply (the app stopped, its link gone dark) and compares the transcri
 with, row for row, against the same conversation opened fresh.
 
 ## Running
+
+Window recovery is independent from live daemon state. `neoism --new-window` opens fresh tabs; a normal launch restores the most recently saved closed local window, never one still open in another process. Explicit directory/file launches also start independently so recovery cannot override the requested project. Each window holds an OS lock on its own recovery snapshot in `$XDG_STATE_HOME/neoism/rune/session.windows/` (the old `session.json` remains readable). Closing a window saves its tabs, splits, drafts and unsaved text, then releases its daemon resources; reopening starts fresh shells and reloads conversation history. Explicitly closing the last workspace forgets only that window's recovery. Startup keeps at most 20 clean closed-window snapshots, plus active windows and any snapshots containing unsaved edits or drafts; protected recovery is never automatically evicted. These disk snapshots do not keep hidden tabs or shells running. Linked-window synchronization is separate and is not implied by sharing a daemon or directory.
 
 ```sh
 rune/app/build.sh build --release

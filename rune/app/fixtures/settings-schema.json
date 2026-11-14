@@ -1,5 +1,19 @@
 [
   {
+    "path": "appearance.fonts.family",
+    "label": "Font family",
+    "description": "Font used by terminal and editor.",
+    "value_kind": "string",
+    "default": "Geist Mono",
+    "static_suggestions": ["Geist Mono", "Cascadia Code NF", "Menlo"],
+    "runtime_suggestions": [],
+    "options": [],
+    "extensible": true,
+    "category": "appearance",
+    "control": {"kind": "font_family"},
+    "settings_visible": true
+  },
+  {
     "path": "terminal.copy-on-select",
     "label": "Copy on select",
     "description": "Copy terminal selections to the clipboard.",

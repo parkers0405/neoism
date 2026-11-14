@@ -463,14 +463,7 @@ impl App {
             }
             Inbound::Crdt { request_id, message } => self.apply_crdt(request_id, *message),
             Inbound::Reply { family, request_id, message } if family == "Config" && message.get("Config").is_some() => {
-                let value = &message["Config"]["value"];
-                let changed = self.wordmark.fire_enabled != crate::config::wordmark_fire(value)
-                    || self.cursor.liquid_glass != crate::config::liquid_glass_cursor(value)
-                    || self.liquid_glass_selection != crate::config::liquid_glass_selection(value)
-                    || self.keybindings != value["keybinds"]["keys"]
-                    || self.settings.as_ref().is_some_and(|settings| settings.values != *value);
-                self.apply_config_reply(request_id, &message);
-                changed
+                self.apply_config_reply(request_id, &message)
             }
             event => { self.apply(event); true }
         }
@@ -564,7 +557,7 @@ impl App {
                 if let Some(dir) = message["NotesVaultResolved"]["notes_vault_dir"].as_str() { self.apply_notes_vault(dir); }
             }
             Inbound::Database { request_id, message } => self.apply_database_reply(request_id, message),
-            Inbound::Reply { family, message, request_id } if family == "Config" => self.apply_config_reply(request_id, &message),
+            Inbound::Reply { family, message, request_id } if family == "Config" => { self.apply_config_reply(request_id, &message); }
             Inbound::Reply { family, message, .. } if family == "Editor" => self.apply_editor_reply(message),
             Inbound::Reply { .. } => {}
         }

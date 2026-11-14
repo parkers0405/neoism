@@ -52,6 +52,16 @@
   </categories>
 
   <releases>
+    <release version="0.7.153" date="2026-11-14">
+      <description>
+        <p>Restores Option+1..9 workspace switching on macOS using physical number-row keys because Option produces symbols; retains the Cmd+1..9 alias.</p>
+        <p>Preserves the local glass cursor when joining remote servers or SSH systems instead of replacing it with the remote configuration default.</p>
+        <p>Fixes Agent informational cards swallowing tab-reordering shortcuts and forwards shortcuts from question-answer fields.</p>
+        <p>Includes all changes from the cancelled v0.7.152 batch, which published no public desktop assets: native input, fonts and keybindings, Agent goals and activity, workspace and connection improvements, Linux updater restart handling, and vendored Rune patches and GPU assets.</p>
+        <p>Focused macOS keyboard and cursor-configuration checks passed, not the full suite. The existing incremental platform release workflow is unchanged.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.153</url>
+    </release>
     <release version="0.7.152" date="2026-11-14">
       <description>
         <p>Native touch input, fonts and keybindings, Agent goals and activity, connection feedback, compact navigation, and workspace improvements.</p>

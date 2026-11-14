@@ -392,21 +392,32 @@ impl App {
         self.open_config_editor();
     }
 
-    pub(crate) fn apply_config_reply(&mut self, request_id: u64, message: &Value) {
+    pub(crate) fn apply_config_reply(&mut self, request_id: u64, message: &Value) -> bool {
         self.apply_config_document_reply(request_id, message);
         if let Some(config) = message.get("Config") {
-            self.keybindings = config["value"]["keybinds"]["keys"].clone();
-            self.wordmark.fire_enabled = crate::config::wordmark_fire(&config["value"]);
-            self.cursor.liquid_glass = crate::config::liquid_glass_cursor(&config["value"]);
-            self.liquid_glass_selection = crate::config::liquid_glass_selection(&config["value"]);
-            self.set_font_families(crate::ui::fonts::configured(&config["value"]));
+            let mut value = config["value"].clone();
+            // The cursor renders on this machine, not the server hosting the workspace.
+            if self.server.remote() {
+                value["appearance"]["effects"]["liquid-glass-cursor"] = json!(self.cursor.liquid_glass);
+            }
+            let changed = self.wordmark.fire_enabled != crate::config::wordmark_fire(&value)
+                || self.cursor.liquid_glass != crate::config::liquid_glass_cursor(&value)
+                || self.liquid_glass_selection != crate::config::liquid_glass_selection(&value)
+                || self.keybindings != value["keybinds"]["keys"]
+                || self.settings.as_ref().is_some_and(|settings| settings.values != value);
+            self.keybindings = value["keybinds"]["keys"].clone();
+            self.wordmark.fire_enabled = crate::config::wordmark_fire(&value);
+            self.cursor.liquid_glass = crate::config::liquid_glass_cursor(&value);
+            self.liquid_glass_selection = crate::config::liquid_glass_selection(&value);
+            self.set_font_families(crate::ui::fonts::configured(&value));
+            if let Some(settings) = &mut self.settings { settings.values = value; }
+            return changed;
         }
-        let Some(settings) = &mut self.settings else { return };
-        if let Some(config) = message.get("Config") {
-            settings.values = config["value"].clone();
-        } else if let Some(schema) = message.get("ConfigSchema") {
+        let Some(settings) = &mut self.settings else { return true };
+        if let Some(schema) = message.get("ConfigSchema") {
             if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(with_liquid_glass_selection_fallback(with_liquid_glass_cursor_fallback(with_wordmark_fire_fallback(descriptors)))); }
         }
+        true
     }
 
     /// Write one setting, mirror it locally, and apply what the app shows live.
@@ -597,6 +608,32 @@ mod tests {
         }
         app.apply_config_reply(0, &json!({"Config": {"value": {}}}));
         assert!(!app.cursor.liquid_glass, "removing the override restores default off");
+    }
+
+    #[test]
+    fn liquid_glass_cursor_survives_remote_server_and_system_config_reloads() {
+        for system in [None, Some("ssh-system".to_owned())] {
+            let mut app = App::new();
+            app.cursor.liquid_glass = true;
+            let local = app.workspace_active;
+            let mut link = crate::servers::flow::Link::default();
+            link.current = Some(crate::servers::Selection { id: "remote".into(), system, ..Default::default() });
+            app.open_workspace(crate::workspace::Opening { id: "remote-workspace".into(), title: "Remote".into(), cwd: "~".into(), target: None, link });
+            app.settings = Some(Settings::default());
+            for value in [json!({}), json!({"appearance":{"effects":{"liquid-glass-cursor":false}}})] {
+                let reply = json!({"Config":{"value":value}});
+                app.apply_config_reply(0, &reply);
+                assert!(app.cursor.liquid_glass);
+                assert_eq!(app.settings.as_ref().unwrap().value("appearance.effects.liquid-glass-cursor"), Some(&json!(true)));
+                assert!(!app.apply_inbound(crate::daemon::Inbound::Reply { family: "Config".into(), request_id: 0, message: reply }), "unchanged remote polling must not redraw");
+            }
+            app.cursor.liquid_glass = false;
+            app.apply_config_reply(0, &json!({"Config":{"value":{"appearance":{"effects":{"liquid-glass-cursor":true}}}}}));
+            assert!(!app.cursor.liquid_glass, "a remote server cannot opt the local renderer in either");
+            app.select_workspace(local);
+            app.apply_config_reply(0, &json!({"Config":{"value":{"appearance":{"effects":{"liquid-glass-cursor":true}}}}}));
+            assert!(app.cursor.liquid_glass, "local configuration still controls the material");
+        }
     }
 
     #[test]

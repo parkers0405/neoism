@@ -569,7 +569,7 @@ impl App {
                     picker.usage_scroll = (picker.usage_scroll + delta).clamp(0.0, picker.usage_max_scroll.get());
                     tx.animated();
                 }
-                _ => {},
+                _ => return crate::keys::shortcut(self, event, tx),
             }
             return true;
         }

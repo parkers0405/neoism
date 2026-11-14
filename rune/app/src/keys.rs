@@ -129,10 +129,18 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if m.ctrl && m.alt && !m.shift && !m.logo {
         if let Some(direction) = arrow(&event.key) { app.nudge_split(direction); return true; }
     }
-    let workspace_chord = if mac { m.logo && !m.ctrl && !m.alt && !m.shift } else { alt_only };
+    let workspace_chord = alt_only || (mac && m.logo && !m.ctrl && !m.alt && !m.shift);
     if workspace_chord {
+        // Option+digits produce symbols on macOS; workspace slots follow the number row.
+        use rune::PhysicalKeyCode as Code;
+        let physical = match tx.physical_key() {
+            Some(Code::Digit1) => Some(1), Some(Code::Digit2) => Some(2), Some(Code::Digit3) => Some(3),
+            Some(Code::Digit4) => Some(4), Some(Code::Digit5) => Some(5), Some(Code::Digit6) => Some(6),
+            Some(Code::Digit7) => Some(7), Some(Code::Digit8) => Some(8), Some(Code::Digit9) => Some(9),
+            _ => None,
+        };
         let text = match &event.key { Key::Text(t) => t.clone(), Key::Command(c) => c.to_string(), _ => String::new() };
-        if let Ok(n) = text.parse::<usize>() { if (1..=9).contains(&n) { app.select_workspace(n - 1); return true; } }
+        if let Some(n) = physical.or_else(|| text.parse::<usize>().ok()) { if (1..=9).contains(&n) { app.select_workspace(n - 1); return true; } }
     }
     if alt_only && !mac {
         if let Key::Text(t) = &event.key {
@@ -475,6 +483,18 @@ mod tests {
         assert_eq!(ctrl_letter(&KeyEvent { key: Key::Command('d'), mods: Mods::default() }), None);
     }
 
+    #[test]
+    fn alt_numbers_switch_workspaces_without_typing_into_the_composer() {
+        let mut app = App::new();
+        app.new_workspace();
+        for n in [1, 2, 1] {
+            let event = KeyEvent { key: Key::Text(n.to_string().into()), mods: Mods { alt: true, ..Default::default() } };
+            assert!(shortcut(&mut app, &event, &mut Tx::default()));
+            assert_eq!(app.workspace_active, n - 1);
+            assert!(app.active_tab().draft.text.is_empty());
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_focus_alias_is_preserved() {
@@ -501,6 +521,53 @@ mod tests {
                 assert_eq!(app.layout.focused().tabs, order);
                 assert_eq!(app.active_tab().id, editor);
                 assert_eq!(app.focus, focus);
+            }
+        }
+    }
+
+    #[test]
+    fn alt_shift_reorders_tabs_through_focused_agent_and_code_controls() {
+        use crate::agent::slash::{Kind, Picker};
+        use rune::{Env, Runtime};
+        for surface in ["home", "agent", "question", "usage", "tasks", "goals", "code", "insert"] {
+            let mut app = App::new();
+            app.window = [1000.0, 700.0];
+            app.keybindings = serde_json::json!([]);
+            let home = app.active_tab().id;
+            match surface {
+                "home" => { app.open_tab(TabKind::Home); }
+                "code" | "insert" => {
+                    app.open_file("reorder.rs", None);
+                    app.apply_opened_file("reorder.rs", b"let value = 1;\n");
+                    if surface == "insert" { app.buffers.get_mut("reorder.rs").unwrap().doc.mode = crate::editor::Mode::Insert; }
+                }
+                _ => {
+                    app.load_fixture("reorder", "Reorder", "[]");
+                    if surface == "question" {
+                        app.apply_agent(neoism_protocol::agent::AgentServerMessage::QuestionAsked {
+                            session_id: "reorder".into(), request: serde_json::json!({"id":"question", "questions":[{"question":"Which environment?"}]}),
+                        });
+                    } else if let Some(kind) = match surface { "usage" => Some(Kind::Usage), "tasks" => Some(Kind::Tasks), "goals" => Some(Kind::Goals), _ => None } {
+                        app.composer.picker = Some(Picker::new(kind, "Details", Vec::new()));
+                    }
+                }
+            }
+            let active = app.active_tab().id;
+            app.sync_field_focus();
+            let mut rt = Runtime::new(app, crate::ui::chrome::root, (1000.0, 700.0), Env::new(true, 1.0));
+            rt.on_key = Some(on_key);
+            for _ in 0..30 { rt.frame(1.0 / 120.0); }
+            if surface == "question" {
+                let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("agent-prompt-answer") && !e.exiting).unwrap().rect;
+                let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+                rt.pointer_move(x, y); rt.pointer_down(x, y); rt.pointer_up(x, y);
+                for _ in 0..30 { rt.frame(1.0 / 120.0); }
+            }
+            for (key, order) in [(Key::Left, vec![active, home]), (Key::Right, vec![home, active])] {
+                rt.key(KeyEvent { key, mods: Mods { alt: true, shift: true, ..Default::default() } });
+                for _ in 0..30 { rt.frame(1.0 / 120.0); }
+                assert_eq!(rt.state.layout.focused().tabs, order, "reorder blocked by {surface}");
+                assert_eq!(rt.state.active_tab().id, active, "reorder changed selection in {surface}");
             }
         }
     }

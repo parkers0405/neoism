@@ -133,7 +133,7 @@ Window focus moves between zones: `sidebar`, `content`, `buffers` (pane tabs), `
 - Focus indicator: a white bar caret drawn inside the focused tab/button, left of its icon; the `+` button also gets
   the hover surface. Content focus shows the normal text caret (block in Normal mode, beam in Insert).
 - Each workspace remembers its last focus zone and restores it when re-activated.
-- `Ctrl+Shift+Left/Right` selects the previous/next buffer tab; `Alt+1..9` selects workspaces.
+- `Ctrl+Shift+Left/Right` selects the previous/next buffer tab; `Alt+1..9` selects workspaces on every platform, including Option on macOS. The physical number row is used so Option-generated symbols do not interfere; macOS also accepts `Cmd+1..9`.
 - `Alt+Shift+Left/Right` reorders the active pane tab from content, sidebar or tab-strip focus; it reorders workspace tabs only when the workspace strip has focus. On macOS, Ctrl+Cmd+Shift+Left/Right is an additional reorder alias. `Ctrl+Alt+Shift+Left/Right` explicitly reorders the active workspace without first focusing its strip.
 
 Text cursors: editor and composer carets use the trail cursor below; carets blink with a hold while typing

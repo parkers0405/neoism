@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.153] - 2026-11-14
+
+### macOS workspace shortcuts, remote cursor preference, and native input improvements
+
+- Restores Option+1..9 workspace switching on macOS using physical number-row keys, because Option produces symbols instead of digit characters; retains Cmd+1..9 as an alias.
+- Fixes Alt+Shift+Left/Right tab reordering being swallowed by Agent Usage/Tasks/Goals cards and question-answer fields, with focused-input coverage for Home, Agent, and code tabs.
+- Preserves the local glass cursor when joining a server or SSH system, instead of allowing remote configuration defaults to replace it with the ordinary cursor. Remote Settings reflects the effective material, and unchanged config polling does not request redraws.
+- Includes all changes from the cancelled v0.7.152 batch: native touch-input arbitration, configurable fonts and keybindings, scrolling and selection refinements, macOS glass cursor rendering with fallback behavior elsewhere, Agent goals and activity, conversation controls, workspace and connection polish, Linux updater restart handling, and pinned vendored Rune input/rendering patches and required GPU assets.
+
+The v0.7.152 release was cancelled and published no public desktop assets. Focused macOS checks passed in `rune/app`: `./build.sh test --locked keys::tests` (8 passed, including eight real-input tab-reordering states) and `./build.sh test --locked liquid_glass -- --nocapture` (5 passed), with the final remote cursor regression rerun through inbound config dispatch (1 passed). These are focused keyboard and configuration checks, not a full-suite run or exhaustive GUI, provider, touch-device, or cross-platform validation. The existing incremental platform release workflow is unchanged: each successful platform publishes independently. Existing database backup and downgrade cautions remain applicable.
+
 ## [0.7.152] - 2026-11-14
 
 ### Native input, Agent goals, and workspace polish

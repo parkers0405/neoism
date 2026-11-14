@@ -230,7 +230,7 @@ pub fn card(app: &App) -> El {
             .placeholder("Type an answer or choose an option", rgb(palette.muted)).color(rgb(palette.fg))
             .on_edit(|a: &mut App| { let i = a.prompt_index().unwrap(); &mut a.composer.prompts.pending[i].edit })
             .on_input_change(|a: &mut App, _: &mut Tx| a.prompt_changed())
-            .on_input_key(|a: &mut App, e: &KeyEvent, _: &mut Tx| a.prompt_key(e))
+            .on_input_key(|a: &mut App, e: &KeyEvent, tx: &mut Tx| a.prompt_key(e) || crate::keys::shortcut(a, e, tx))
             .absolute(14.0 * s, 31.0 * s));
     }
     for (index, (label, description)) in rows.into_iter().enumerate().skip(first).take(visible) {

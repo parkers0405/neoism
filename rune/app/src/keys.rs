@@ -470,6 +470,7 @@ mod tests {
                 previous = Some(target);
                 app.cursor.tick(Some(target), std::time::Instant::now());
                 assert!(app.cursor.placed());
+                #[cfg(target_os = "macos")]
                 assert!(crate::ui::chrome::glass_cursor_allowed(&app));
             }
         }

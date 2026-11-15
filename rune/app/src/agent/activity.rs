@@ -177,6 +177,12 @@ impl Activity {
         });
     }
 
+    fn top_padding(&self, app: &App) -> f32 {
+        let streaming = app.sessions.get(&self.session).is_some_and(|session| session.streaming);
+        let flames = app.wordmark.fire_enabled && std::env::var("NEOISM_REDUCED_MOTION").as_deref() != Ok("1");
+        18.0 + if streaming && flames { 4.0 * app.ty.scale() } else { 0.0 }
+    }
+
     pub fn view(&self, app: &App) -> El {
         let p = app.pal;
         let s = app.ty.scale();
@@ -228,7 +234,7 @@ impl Activity {
             text(format!("\u{2570}\u{2500} {} background {noun} running", self.background)).font(app.ty.sized(13.0)).color(rgb(p.muted))
                 .h(LINE_H * s).pl(3.3 * s)
         });
-        rune::col().key("activity").w_full().pt(18.0).live_opacity(&self.opacity).child(line).children(queued).children(background)
+        rune::col().key("activity").w_full().pt(self.top_padding(app)).live_opacity(&self.opacity).child(line).children(queued).children(background)
     }
 }
 
@@ -292,7 +298,7 @@ impl App {
     /// The row the activity line takes (its top margin and line).
     pub fn activity_row_height(&self) -> f32 {
         let lines = self.activity.as_ref().map_or(1, |a| 1 + usize::from(a.queued > 0) + usize::from(a.background > 0));
-        18.0 + LINE_H * self.ty.scale() * lines as f32
+        self.activity.as_ref().map_or(18.0, |a| a.top_padding(self)) + LINE_H * self.ty.scale() * lines as f32
     }
 
     /// Keep the activity line in step with the active conversation. Returns whether it

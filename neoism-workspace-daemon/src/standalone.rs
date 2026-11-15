@@ -345,6 +345,10 @@ where
         }
         Err(error) => return Err(error.into()),
     };
+    // Process environment must be finalized before watch_parent or Tokio starts threads.
+    #[cfg(target_os = "macos")]
+    crate::shell_environment::initialize_tool_path();
+
     if let Some(parent) = cli.temporary_parent_pid {
         crate::temporary::watch_parent(parent)?;
     }

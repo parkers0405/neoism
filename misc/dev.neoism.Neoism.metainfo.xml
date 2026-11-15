@@ -52,6 +52,15 @@
   </categories>
 
   <releases>
+    <release version="0.7.154" date="2026-11-14">
+      <description>
+        <p>Fixes Linux keyboard-test compilation by restricting a macOS-only glass-cursor assertion to macOS while retaining keyboard navigation coverage on all platforms.</p>
+        <p>Improves macOS tool discovery for Finder-launched processes with bounded login-shell PATH recovery before threads start and a tool-directory fallback.</p>
+        <p>Adds top spacing to streamed Agent activity only while wordmark flames are active, respecting reduced-motion settings.</p>
+        <p>Focused verification is reported separately. Independent per-platform publishing is unchanged; existing v0.7.153 macOS and Windows downloads remain intact.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.154</url>
+    </release>
     <release version="0.7.153" date="2026-11-14">
       <description>
         <p>Restores Option+1..9 workspace switching on macOS using physical number-row keys because Option produces symbols; retains the Cmd+1..9 alias.</p>

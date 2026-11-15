@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.154] - 2026-11-14
+
+### Linux test compilation, macOS tool discovery, and streamed activity spacing
+
+- Fixes Linux keyboard-test compilation by gating a macOS-only glass-cursor assertion to macOS; keyboard navigation coverage remains enabled on all platforms. The v0.7.153 Linux application binary compiled successfully, but test compilation failed on that assertion.
+- Recovers the login-shell PATH for Finder-launched macOS processes using a bounded shell invocation before threads start, with a tool-directory fallback to improve tool discovery.
+- Adds extra top padding to streamed Agent activity only while wordmark flames are active, respecting reduced-motion settings.
+
+This stable release includes the current workspace changes. Focused macOS verification passed for keyboard navigation (8 checks), Agent activity (13 checks), and daemon shell-environment recovery (3 checks), compiling the application and daemon test targets. Linux validation runs in the new GitHub job; the prior CI compiler error was fixed directly, but no local Linux runner or full-suite validation is claimed. Independent per-platform publishing is unchanged, and existing v0.7.153 macOS and Windows downloads remain intact. Existing database backup and downgrade cautions remain applicable.
+
 ## [0.7.153] - 2026-11-14
 
 ### macOS workspace shortcuts, remote cursor preference, and native input improvements

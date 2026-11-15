@@ -7,6 +7,7 @@ All notable user-facing changes to Neoism are documented here.
 ### Linux release validation and input/layout regressions
 
 - Validation-only release workflow mode for full application `cargo test --locked --release`, without release creation, desktop assets, or uploads.
+- Installs Mesa's software Vulkan driver on Linux CI for the offscreen scroll-image integration test instead of skipping rendering coverage.
 - Reserves flame clearance before an optimistic Agent send is acknowledged, preventing the visible message bubble from shifting when the activity indicator appears.
 - Keeps sub-threshold touch jitter a tap on release instead of turning it into text selection or editor Visual mode.
 - Uses platform-appropriate Select All modifiers and sub-pixel floating-point tolerances in the affected input/layout regression tests.

@@ -131,7 +131,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libfontconfig1-dev libfreetype-dev libgbm-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libwayland-dev libasound2-dev libvulkan-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config libfontconfig1-dev libfreetype-dev libgbm-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev libwayland-dev libasound2-dev libvulkan-dev mesa-vulkan-drivers
       # The app is its own workspace on the toolchain Rune pins (rune/app/rust-toolchain.toml).
       - name: Install the app's Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal

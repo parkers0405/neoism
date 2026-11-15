@@ -52,6 +52,14 @@
   </categories>
 
   <releases>
+    <release version="0.7.155" date="2026-11-14">
+      <description>
+        <p>Linux release validation and input/layout regression work covering floating-point comparisons, Select All test modifiers, acknowledgement-bubble positioning, and repeated-touch tap selections.</p>
+        <p>Validation-only workflow mode runs full application release-profile tests without creating a release or uploading assets. Verification is pending; no passing-test claim is made.</p>
+        <p>Normal independent per-platform publishing remains unchanged.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.155</url>
+    </release>
     <release version="0.7.154" date="2026-11-14">
       <description>
         <p>Fixes Linux keyboard-test compilation by restricting a macOS-only glass-cursor assertion to macOS while retaining keyboard navigation coverage on all platforms.</p>

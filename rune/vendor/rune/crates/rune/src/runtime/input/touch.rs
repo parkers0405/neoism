@@ -130,8 +130,10 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         if !pan { self.begin_touch_drag(); }
-        // A pan cancelled the press, so its release clicks nothing.
-        let (x, y) = if pan { f.origin } else { (x, y) };
+        // A pending tap never crossed TOUCH_SLOP. Release at its press point:
+        // pointer_up otherwise turns even sub-slop finger jitter into a mouse
+        // selection/custom-drag Move. A pan cancelled the press, so it clicks nothing.
+        let (x, y) = if f.mode == Mode::Drag { (x, y) } else { f.origin };
         if f.mode == Mode::Drag { self.pointer_move(x, y); }
         self.pointer_up(x, y);
         // No hover is left under a lifted finger.

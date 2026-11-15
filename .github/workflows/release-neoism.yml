@@ -10,6 +10,10 @@ on:
       source_ref:
         description: Exact source commit to build (nightly dispatcher pins this)
         type: string
+      validate_only:
+        description: Run release-mode app tests without creating or publishing a release
+        type: boolean
+        default: false
       platform:
         description: Build all platforms, or retry one platform after a fix
         type: choice
@@ -54,19 +58,23 @@ jobs:
           GH_REPO: ${{ github.repository }}
           REQUESTED_TAG: ${{ inputs.release_tag }}
           REQUESTED_PLATFORM: ${{ inputs.platform || 'all' }}
+          VALIDATE_ONLY: ${{ inputs.validate_only || false }}
         run: |
           tag="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           [[ "$tag" == "v$version" ]] || { echo 'Release tag must match the checkout version'; exit 1; }
           # Stable artifacts must all come from their tag. A nightly platform
           # retry may build a fix from this branch; each asset records its SHA.
-          if [[ "$tag" != *-nightly.* ]]; then
+          # Validation may check an untagged candidate, but cannot publish assets.
+          if [[ "$VALIDATE_ONLY" != true && "$tag" != *-nightly.* ]]; then
             [[ "$GITHUB_REF" == "refs/tags/$tag" ]] || exit 1
             [[ "$GITHUB_SHA" == "$(git rev-parse HEAD)" ]] || exit 1
           fi
-          flags=()
-          if [[ "$tag" == *-* ]]; then flags+=(--prerelease --latest=false); else flags+=(--prerelease=false --latest); fi
-          gh release view "$tag" || gh release create "$tag" --verify-tag --draft --generate-notes "${flags[@]}"
+          if [[ "$VALIDATE_ONLY" != true ]]; then
+            flags=()
+            if [[ "$tag" == *-* ]]; then flags+=(--prerelease --latest=false); else flags+=(--prerelease=false --latest); fi
+            gh release view "$tag" || gh release create "$tag" --verify-tag --draft --generate-notes "${flags[@]}"
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -87,7 +95,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     concurrency:
-      group: nightly-${{ needs.prepare.outputs.tag }}-${{ matrix.platform }}
+      group: ${{ inputs.validate_only && 'validate' || 'nightly' }}-${{ needs.prepare.outputs.tag }}-${{ matrix.platform }}
       # An explicit single-platform retry supersedes that platform's obsolete
       # attempt without interrupting the other jobs in its original run.
       cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' && inputs.platform == matrix.platform }}
@@ -138,6 +146,7 @@ jobs:
           shared-key: neoism-release-${{ matrix.asset }}
           cache-on-failure: true
       - uses: actions/cache/restore@v4
+        if: ${{ !inputs.validate_only }}
         id: service-cache
         with:
           path: target/release
@@ -172,9 +181,9 @@ jobs:
           printf 'Cache scope: %s\nApp cache: %s\nService cache: %s\n' "$GITHUB_REF" "${APP_CACHE:-MISS (cold build)}" "${SERVICE_CACHE:-MISS (cold build)}" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Build, test, and package the app and services
         id: bundle
-        run: python scripts/build-rune-release.py
+        run: python scripts/build-rune-release.py ${{ inputs.validate_only && '--test-app-only' || '' }}
       - name: Build and validate Windows MSI and updater transactions
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !inputs.validate_only
         shell: pwsh
         run: |
           dotnet tool install --global wix --version 5.0.2
@@ -190,6 +199,7 @@ jobs:
           path: windows-validation/
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.validate_only }}
         with:
           name: neoism-${{ matrix.asset }}
           path: |
@@ -200,6 +210,7 @@ jobs:
       # Each job publishes immediately. There is deliberately no all-platform
       # success barrier, and GitHub's rerun-failed-jobs retains successful legs.
       - name: Publish this platform as soon as it is ready
+        if: ${{ !inputs.validate_only }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

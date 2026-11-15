@@ -186,25 +186,42 @@ fn holding_then_dragging_text_selects_instead_of_scrolling() {
 }
 
 fn tap(surface: Surface) {
+    tap_with_jitter(surface, 2.0, 2.0);
+}
+
+fn tap_with_jitter(surface: Surface, dx: f32, dy: f32) {
         let mut rig = Rig::new(surface);
         let (x, y) = rig.point();
         let before = rig.offset();
         rig.rt.touch(1, TouchPhase::Started, x, y, 1.0);
         rig.rt.frame(1.0 / 120.0);
         rig.clean();
-        rig.rt.touch(1, TouchPhase::Moved, x + 2.0, y + 2.0, 1.02);
+        rig.rt.touch(1, TouchPhase::Moved, x + dx, y + dy, 1.02);
         rig.rt.frame(1.0 / 120.0);
-        rig.rt.touch(1, TouchPhase::Ended, x + 2.0, y + 2.0, 1.05);
+        rig.clean();
+        rig.rt.touch(1, TouchPhase::Ended, x + dx, y + dy, 1.05);
         rig.rt.frame(1.0 / 120.0);
         rig.clean();
         assert!((rig.offset() - before).abs() < 1.0);
         assert!(!rig.rt.touching());
+        assert!(!rig.rt.pressing());
 }
 
 #[test] fn code_tap() { tap(Surface::Code); }
 #[test] fn markdown_tap() { tap(Surface::MarkdownFile); }
 #[test] fn prose_tap() { tap(Surface::Prose); }
 #[test] fn fenced_code_tap() { tap(Surface::FencedCode); }
+
+#[test]
+fn sub_threshold_tap_jitter_does_not_become_a_selection_on_release() {
+    // Nearly eight points can cross a glyph/row boundary, but is still a tap.
+    // Exercise both axes and directions against actual text, not an empty target.
+    for surface in [Surface::Code, Surface::MarkdownFile, Surface::Prose, Surface::FencedCode] {
+        for (dx, dy) in [(7.5, 0.0), (-7.5, 0.0), (0.0, 7.5), (0.0, -7.5)] {
+            tap_with_jitter(surface, dx, dy);
+        }
+    }
+}
 
 fn cancelled_pan(surface: Surface) {
     let mut rig = Rig::new(surface);

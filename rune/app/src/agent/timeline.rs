@@ -772,8 +772,18 @@ mod send_tests {
 
     #[test]
     fn acknowledging_a_visible_send_does_not_move_the_bubble() {
+        for flames in [false, true] {
+            for size in [14.0, 20.0] {
+                acknowledging_send(flames, size);
+            }
+        }
+    }
+
+    fn acknowledging_send(flames: bool, size: f32) {
         use neoism_protocol::agent::AgentServerMessage as M;
         let mut app = App::new();
+        app.wordmark.fire_enabled = flames;
+        app.ty.size = size;
         app.load_fixture("send", "Send", include_str!("../../fixtures/tools-timeline.json"));
         let mut rt = rune::Runtime::new(app, |a: &App, cx: &mut rune::Cx<App>| {
             pane(a, Some("send"), cx)
@@ -786,13 +796,15 @@ mod send_tests {
         for _ in 0..120 { rt.frame(1.0 / 120.0); }
         let before = rt.elements().iter().find(|e| e.text.as_deref() == Some("A smoothly sent message")).unwrap().rect;
         rt.update(|a, _| {
+            let reserved = a.activity_row_height();
             a.apply_agent(M::CatalogActivity { session_id: "send".into(), activity: "running".into() });
             a.tick_activity();
+            assert!((a.activity_row_height() - reserved).abs() < 0.001, "acknowledgement must use the optimistic status reservation");
         });
         for _ in 0..120 {
             rt.frame(1.0 / 120.0);
             let rect = rt.elements().iter().find(|e| e.text.as_deref() == Some("A smoothly sent message")).unwrap().rect;
-            assert!((rect[1] - before[1]).abs() < 1.0, "status acknowledgement moved the bubble: {before:?} -> {rect:?}");
+            assert!((rect[1] - before[1]).abs() < 1.0, "status acknowledgement moved the bubble (flames={flames}, size={size}): {before:?} -> {rect:?}");
         }
     }
 }

@@ -11,6 +11,8 @@ bundle: the four executables by name, `web/index.html`, `web/agent-gui/index.htm
 `web/app/manifest.json`, `web/native/` (libraries and the update helper) and
 `resources/docs`. `NEOISM_RELEASE_DIST` moves the staging directory (the Windows MSI
 scripts read the default one).
+
+`--test-app-only` runs the complete release-mode app suite without services or packaging.
 """
 import hashlib
 import json
@@ -151,8 +153,9 @@ def main():
     # `--reuse-services` packages the services already in target/release (a local dry run of
     # the layout); a release always builds and tests them here.
     reuse_services = '--reuse-services' in sys.argv[1:]
+    test_app_only = '--test-app-only' in sys.argv[1:]
     ghostty = build_ghostty()
-    if not reuse_services:
+    if not reuse_services and not test_app_only:
         # Shell argument forwarding and process ownership on the actual host, before the long builds.
         run('cargo', 'test', '--locked', '--release', '-p', 'teletypewriter', 'macos_exec_tests', '--lib')
         run('cargo', 'test', '--locked', '--release', '-p', 'neoism-terminal-pty', '--test', 'process_lifecycle')
@@ -163,6 +166,9 @@ def main():
     # A dry run keeps the developer's own release profile, so it reuses their build.
     rune_env = {**(os.environ if reuse_services else ENV), 'GIT_HASH': commit, 'CARGO_TARGET_DIR': str(RUNE_TARGET)}
     rune_env.pop('RUSTUP_TOOLCHAIN', None)
+    if test_app_only:
+        run('cargo', 'test', '--locked', '--release', cwd=RUNE, env=rune_env)
+        return
     run('cargo', 'build', '--locked', '--release', cwd=RUNE, env=rune_env)
     if SYSTEM == 'linux' and not reuse_services:
         run('cargo', 'test', '--locked', '--release', cwd=RUNE, env=rune_env)

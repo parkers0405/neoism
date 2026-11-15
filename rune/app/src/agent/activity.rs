@@ -177,12 +177,6 @@ impl Activity {
         });
     }
 
-    fn top_padding(&self, app: &App) -> f32 {
-        let streaming = app.sessions.get(&self.session).is_some_and(|session| session.streaming);
-        let flames = app.wordmark.fire_enabled && std::env::var("NEOISM_REDUCED_MOTION").as_deref() != Ok("1");
-        18.0 + if streaming && flames { 4.0 * app.ty.scale() } else { 0.0 }
-    }
-
     pub fn view(&self, app: &App) -> El {
         let p = app.pal;
         let s = app.ty.scale();
@@ -234,7 +228,7 @@ impl Activity {
             text(format!("\u{2570}\u{2500} {} background {noun} running", self.background)).font(app.ty.sized(13.0)).color(rgb(p.muted))
                 .h(LINE_H * s).pl(3.3 * s)
         });
-        rune::col().key("activity").w_full().pt(self.top_padding(app)).live_opacity(&self.opacity).child(line).children(queued).children(background)
+        rune::col().key("activity").w_full().pt(app.activity_top_padding(&self.session)).live_opacity(&self.opacity).child(line).children(queued).children(background)
     }
 }
 
@@ -295,10 +289,22 @@ impl App {
         max > 1.0 && max - offset <= 2.0 && crate::ui::follow::wheel_base(session.wheel_target, offset) == offset
     }
 
-    /// The row the activity line takes (its top margin and line).
+    fn activity_top_padding(&self, session_id: &str) -> f32 {
+        // An optimistic send must reserve the flame clearance before streaming is acknowledged.
+        // Otherwise replacing the empty status band with Crafting moves the preceding bubble.
+        let foreground = self.sessions.get(session_id).is_some_and(|s| s.streaming || s.activity_reveal.is_some());
+        let flames = self.wordmark.fire_enabled && std::env::var("NEOISM_REDUCED_MOTION").as_deref() != Ok("1");
+        18.0 + if foreground && flames { 4.0 * self.ty.scale() } else { 0.0 }
+    }
+
+    /// The row the activity line takes (its top margin and line), including an optimistic send's reservation.
     pub fn activity_row_height(&self) -> f32 {
         let lines = self.activity.as_ref().map_or(1, |a| 1 + usize::from(a.queued > 0) + usize::from(a.background > 0));
-        self.activity.as_ref().map_or(18.0, |a| a.top_padding(self)) + LINE_H * self.ty.scale() * lines as f32
+        let session = self.activity.as_ref().map(|a| a.session.as_str()).or_else(|| match &self.active_tab().kind {
+            crate::tabs::TabKind::Agent { session } => session.as_deref(),
+            _ => None,
+        });
+        session.map_or(18.0, |id| self.activity_top_padding(id)) + LINE_H * self.ty.scale() * lines as f32
     }
 
     /// Keep the activity line in step with the active conversation. Returns whether it
@@ -605,6 +611,32 @@ mod tests {
     }
 
     #[test]
+    fn optimistic_status_reserves_the_acknowledged_height_through_reveal() {
+        for flames in [false, true] {
+            for size in [14.0, 20.0] {
+                let mut app = App::new();
+                app.wordmark.fire_enabled = flames;
+                app.ty.size = size;
+                app.load_fixture("send", "Send", "[]");
+                app.submit_prompt("send", "Hello".into());
+                app.tick_activity();
+                assert!(app.activity.is_none());
+                let reserved = app.activity_row_height();
+                app.set_streaming("send", true);
+                app.tick_activity();
+                assert!((app.activity_row_height() - reserved).abs() < 0.001, "acknowledgement preserves the reserved band");
+                // Runtime::frame advances springs, not Instant: finish the wall-clock reveal
+                // explicitly so optimized test speed cannot leave this transition untested.
+                app.sessions.get_mut("send").unwrap().activity_reveal.as_mut().unwrap().1 =
+                    Some(Instant::now() - std::time::Duration::from_millis(100));
+                app.tick_activity();
+                assert!(app.sessions["send"].activity_reveal.is_none());
+                assert!((app.activity_row_height() - reserved).abs() < 0.001, "finishing the reveal preserves the reserved band");
+            }
+        }
+    }
+
+    #[test]
     fn queue_snapshots_update_the_activity_and_reserved_space_per_conversation() {
         use neoism_protocol::agent::AgentServerMessage as M;
         let mut app = App::new();
@@ -620,7 +652,9 @@ mod tests {
         app.apply_agent(update("active", 1));
         assert!(app.tick_activity().1);
         assert_eq!(app.activity.as_ref().unwrap().queued, 1);
-        assert_eq!(app.activity_row_height(), base + extra);
+        // (padding + line) + line and padding + 2 * line can round differently in f32.
+        // A thousandth of a logical pixel admits that rounding, not a visible spacing change.
+        assert!((app.activity_row_height() - (base + extra)).abs() < 0.001, "one queued row reserves one line");
         let revision = app.sessions["active"].structure;
         app.apply_agent(update("active", 1));
         assert!(!app.tick_activity().1);
@@ -630,7 +664,7 @@ mod tests {
             properties: serde_json::json!({"queue": {"count": 2}, "action": "enqueued"}) });
         app.tick_activity();
         assert_eq!(app.activity.as_ref().unwrap().queued, 2);
-        assert_eq!(app.activity_row_height(), base + extra);
+        assert!((app.activity_row_height() - (base + extra)).abs() < 0.001, "multiple queued prompts still reserve one line");
         app.apply_agent(update("other", 8));
         assert!(!app.tick_activity().1);
         assert_eq!(app.activity.as_ref().unwrap().queued, 2);
@@ -638,7 +672,7 @@ mod tests {
         app.apply_agent(update("active", 0));
         app.tick_activity();
         assert_eq!(app.activity.as_ref().unwrap().queued, 0);
-        assert_eq!(app.activity_row_height(), base);
+        assert!((app.activity_row_height() - base).abs() < 0.001, "emptying the queue releases its line");
         app.apply_agent(M::SessionIdle { session_id: "active".into() });
         app.tick_activity();
         app.apply_agent(update("active", 1));

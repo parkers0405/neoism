@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.155] - 2026-11-14
+
+### Linux release validation and input/layout regressions
+
+- Validation-only release workflow mode for full application `cargo test --locked --release`, without release creation, desktop assets, or uploads.
+- Reserves flame clearance before an optimistic Agent send is acknowledged, preventing the visible message bubble from shifting when the activity indicator appears.
+- Keeps sub-threshold touch jitter a tap on release instead of turning it into text selection or editor Visual mode.
+- Uses platform-appropriate Select All modifiers and sub-pixel floating-point tolerances in the affected input/layout regression tests.
+
+Prepared before Linux validation so the tested commit can be the tagged commit. Focused macOS debug/release checks passed for touch input (35 tests), activity (14 tests), and acknowledged message positioning. The full Linux release-mode suite must pass in validation-only mode before this candidate is tagged; final validation results are reported separately. Normal independent per-platform publishing remains unchanged. Existing database backup and downgrade cautions remain applicable.
+
 ## [0.7.154] - 2026-11-14
 
 ### Linux test compilation, macOS tool discovery, and streamed activity spacing

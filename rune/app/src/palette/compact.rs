@@ -120,7 +120,8 @@ mod tests {
             });
             // Replace through real editing, not a query setter, then test selection navigation.
             let mut mods = rune::Mods::default();
-            mods.logo = true;
+            mods.logo = cfg!(target_os = "macos");
+            mods.ctrl = !cfg!(target_os = "macos");
             mods.cmd = true;
             rt.key(KeyEvent { key: Key::Command('a'), mods });
             settle(&mut rt);

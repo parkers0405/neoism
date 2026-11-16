@@ -90,7 +90,7 @@ pub fn reduce_motion() -> bool {
 pub fn update(app: &mut App, target: Option<[f32; 4]>) -> bool {
     #[cfg(target_os = "macos")]
     {
-        let clip = app.cursor_clip().filter(|_| !app.cursor.crossing()).unwrap_or([0.0, 0.0, app.window[0], app.window[1]]);
+        let clip = app.cursor_clip().unwrap_or([0.0, 0.0, app.window[0], app.window[1]]);
         // A final native pass cannot sit between Rune draw calls. Preserve popup occlusion
         // by using Rune's ordinary cursor whenever an underlying caret has popups over it.
         let enabled = app.cursor.liquid_glass && crate::ui::chrome::glass_cursor_allowed(app);

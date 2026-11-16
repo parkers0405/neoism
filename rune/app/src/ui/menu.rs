@@ -124,6 +124,7 @@ pub fn view(app: &App) -> El {
     el().key("menu-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .on_press(|a: &mut App| a.menu = None)
         .child(col().key("app-menu").w(WIDTH * s).h(height).radius(RADIUS * s).fill(rgb(panel_bg(p)))
+            .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("app-menu".into(), r); })
             .border(s.max(1.0), rgb(p.border))
             .on_press(|_: &mut App| {})
             .absolute(x, y)
@@ -138,4 +139,3 @@ pub fn cursor_rect(app: &App, row: [f32; 4]) -> [f32; 4] {
     let h = (row[3] - 6.0 * s).max(font).min(row[3]);
     [row[0] + (ITEM_PAD_X * s - w - 2.0 * s).max(0.0), row[1] + (row[3] - h) / 2.0, w, h]
 }
-

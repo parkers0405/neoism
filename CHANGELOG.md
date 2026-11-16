@@ -2,6 +2,19 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.156] - 2026-11-16
+
+### Cursor boundaries, touch controls, and editor consistency
+
+- Clips the cursor and native glass lens to the viewport, including focus changes through the file tree, Settings, and menus.
+- Makes tab and workspace close targets available to touch before hover, without closing on drag or cancellation.
+- Refreshes cached Files and Notes directory listings on scoped watch `Changed` events from external writers while preserving expanded directories.
+- Treats available language servers as initializing rather than incorrectly reporting them as missing.
+- Uses shaped fractional text advances and includes the font epoch and code font family in measurement memoization to prevent editor caret and hit-testing drift on long lines.
+- Uses Option for default application panel shortcuts on macOS and Alt elsewhere, preserving Command-based editing chords.
+
+All 65 focused macOS checks passed for keyboard navigation, shortcut rebinding, editor geometry, LSP status, tree refresh, and touch input. This candidate is prepared before full exact-SHA Linux release-mode validation so the validated commit can be tagged; Linux results and actual platform outputs are reported separately. Independent per-platform publishing remains unchanged. Existing database backup and downgrade cautions remain applicable.
+
 ## [0.7.155] - 2026-11-14
 
 ### Linux release validation and input/layout regressions

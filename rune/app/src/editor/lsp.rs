@@ -420,7 +420,7 @@ impl App {
                 let warming = servers.iter().any(|s| {
                     matches!(
                         state(&s.state).as_str(),
-                        "ready" | "initializing" | "starting" | "indexing"
+                        "available" | "ready" | "initializing" | "starting" | "indexing"
                     )
                 });
                 buffer.lsp.status = Some(if active {
@@ -806,6 +806,25 @@ fn query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn available_server_is_not_reported_missing() {
+        let mut app = App::new();
+        let path = "/project/example.ts";
+        app.buffers.insert(path.into(), Buffer::new(path.into(), "/project".into(), None));
+        for (state, expected) in [("available", Status::Initializing), ("connected", Status::Active), ("error", Status::Missing)] {
+            app.apply_editor_message(EditorServerMessage::LspSnapshot {
+                surface_id: Some(surface_of(path)),
+                file_path: Some(path.into()),
+                filetype: "typescript".into(),
+                servers: vec![serde_json::from_value(serde_json::json!({
+                    "name": "TypeScript", "binary": "typescript-language-server",
+                    "filetype": "typescript", "state": state
+                })).unwrap()],
+            });
+            assert_eq!(app.buffers[path].lsp.status, Some(expected));
+        }
+    }
 
     #[test]
     fn snippets_lose_their_stops() {

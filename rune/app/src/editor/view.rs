@@ -293,7 +293,7 @@ fn cached_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     crate::collab::view::line_marks(app, buffer.shared.as_ref().map(|s| s.buffer_id.as_str()), index, line).hash(&mut text);
     let version = (
         (text.finish(), m.cols, m.gutter_w.to_bits(), buffer.lsp.diagnostics_rev),
-        (app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits()),
+        (app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), rune::text::font_epoch(), app.ty.code_family),
         (index == doc.cursor_line, selection_on_line(doc, index), buffer.search_highlight.as_deref(), flash),
     );
     rune::memo(format!("code:{}:{}:{row_index}", app.active_tab().id, buffer.path), version, || code_row(app, buffer, row_index))
@@ -497,6 +497,37 @@ pub(super) fn hit(app: &App, x: f32, y: f32) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_cursor_and_hits_match_shaped_text_on_long_lines() {
+        let _families = rune::text::with_families("Geist", "Geist Mono");
+        let _fonts = rune::text::TextSystem::new(crate::FONTS, ("Geist", "Geist Mono"));
+        for path in ["alignment.rs", "alignment.md"] {
+            let mut app = App::new();
+            app.ty.size = 15.25;
+            app.ty.code_family = crate::ui::fonts::code_family("Geist Mono");
+            app.open_file(path, None);
+            let source = "m".repeat(100);
+            app.apply_opened_file(path, source.as_bytes());
+            app.active_buffer_mut().unwrap().view_rect = Some([55.0, 84.0, 2000.0, 500.0]);
+            for mode in [Mode::Normal, Mode::Insert] {
+                let b = app.active_buffer_mut().unwrap();
+                b.doc.mode = mode;
+                b.doc.cursor_col = 80;
+                let b = app.active_buffer().unwrap();
+                let m = Metrics::of(&app, b);
+                let shaped = rune::text::advance(&source[..80], app.ty.code());
+                let caret = cursor_rect(&app, b).unwrap();
+                let expected_x = b.view_rect.unwrap()[0] + m.gutter_w + shaped;
+                assert!((caret[0] - expected_x).abs() < 0.1,
+                    "{path} {mode:?}: caret {} vs shaped text {expected_x}", caret[0]);
+                assert_eq!(hit_window(&app, expected_x + m.adv * 0.1, caret[1] + m.line_h * 0.5, false), Some((0, 80)));
+            }
+            let doc = &mut app.active_buffer_mut().unwrap().doc;
+            doc.type_text("X");
+            assert_eq!(doc.lines[0], format!("{}X{}", &source[..80], &source[80..]));
+        }
+    }
 
     #[test]
     fn pointer_positions_follow_viewport_scroll_and_unicode_wraps() {

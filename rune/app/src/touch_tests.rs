@@ -8,6 +8,48 @@ use rune::{Cx, El, Env, Runtime, TouchPhase};
 enum Surface { Code, MarkdownFile, Prose, FencedCode }
 
 #[test]
+fn finger_tab_close_requires_a_tap_not_a_drag_or_cancel() {
+    for (workspace, gesture) in [false, true].into_iter().flat_map(|workspace| {
+        ["tap", "close-drag", "tab-drag", "cancel"].map(|gesture| (workspace, gesture))
+    }) {
+        let mut app = App::new();
+        if workspace { app.new_workspace(); } else { app.open_tab(crate::tabs::TabKind::Home); }
+        let tab = app.active_tab().id;
+        let workspace_id = app.workspace_id.clone();
+        let tab_key = if workspace { format!("workspace-tab:{workspace_id}") } else { format!("pane-tab:{tab}") };
+        let close_key = if workspace { format!("workspace-close:{}", app.workspace_active) } else { format!("pane-close:{tab}") };
+        let mut rt = Runtime::new(app, crate::ui::chrome::root, (1000.0, 700.0), Env::new(true, 2.0));
+        for _ in 0..30 { rt.frame(1.0 / 120.0); }
+        let (x, y) = rt.find(&tab_key).unwrap();
+        rt.pointer_move(x, y);
+        rt.frame(1.0 / 120.0);
+        let (x, y) = rt.find(if gesture == "tab-drag" { &tab_key } else { &close_key }).unwrap();
+        rt.pointer_leave();
+        rt.frame(1.0 / 120.0);
+        rt.touch(1, TouchPhase::Started, x, y, 1.0);
+        rt.frame(1.0 / 120.0);
+        if gesture.ends_with("drag") {
+            rt.touch(1, TouchPhase::Moved, x - 60.0, y, 1.02);
+            rt.frame(1.0 / 120.0);
+            if gesture == "tab-drag" { assert!(rt.state.tab_drag.is_some(), "tab body must still drag"); }
+            // Returning to the X must not re-arm a close after the finger has dragged.
+            rt.touch(1, TouchPhase::Moved, x, y, 1.04);
+            rt.frame(1.0 / 120.0);
+        }
+        let phase = if gesture == "cancel" { TouchPhase::Cancelled } else { TouchPhase::Ended };
+        rt.touch(1, phase, x + 1.0, y + 1.0, 1.05);
+        for _ in 0..30 { rt.frame(1.0 / 120.0); }
+        if workspace {
+            assert_eq!(rt.state.workspaces.iter().any(|w| w.id == workspace_id), gesture != "tap", "workspace {gesture}");
+        } else {
+            assert_eq!(rt.state.tabs.iter().any(|t| t.id == tab), gesture != "tap", "buffer {gesture}");
+        }
+        assert!(rt.state.tab_drag.is_none(), "no gesture may leave a tab drag active after release");
+        assert!(rt.state.modal.is_none(), "a drag must not request closing an unsaved tab");
+    }
+}
+
+#[test]
 fn a_finger_pan_keeps_the_frame_clock_running_until_release() {
     for terminal in [TouchPhase::Ended, TouchPhase::Cancelled] {
         let mut rt = Runtime::new((), |_: &(), _: &mut Cx<()>| {

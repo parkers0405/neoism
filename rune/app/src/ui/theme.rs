@@ -78,7 +78,9 @@ impl Type {
         TextStyle::new(self.size, self.weight).family(self.code_family)
     }
     pub fn advance(self) -> f32 {
-        rune::text::measure("m", &[], self.code(), None).0.max(1.0)
+        // Layout measurement rounds up to whole points; repeating that rounded width
+        // makes the editor grid drift away from the shaped text on long lines.
+        rune::text::advance("m", self.code()).max(1.0)
     }
     pub fn body(self) -> TextStyle {
         TextStyle::new(self.size, self.weight).mono().lh(self.size * 1.45)

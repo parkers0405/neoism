@@ -543,6 +543,7 @@ impl App {
                 }
                 if let Some(paths) = message["Changed"]["paths"].as_array() {
                     let paths: Vec<String> = paths.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect();
+                    self.apply_tree_watch_changed(message["Changed"]["root"].as_str().unwrap_or_default(), &paths);
                     self.apply_files_changed(&paths);
                 }
                 if let Some(file) = message.get("FileContent") {

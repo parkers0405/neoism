@@ -52,6 +52,15 @@
   </categories>
 
   <releases>
+    <release version="0.7.156" date="2026-11-16">
+      <description>
+        <p>Clips the cursor and native glass lens to the viewport across focus changes, and makes touch close targets available before hover without closing on drag or cancellation.</p>
+        <p>Refreshes scoped Files and Notes directory listings for external writers while preserving expanded directories, initializes available language servers correctly, and prevents long-line editor caret and hit-testing drift with shaped fractional advances and font-aware memoization.</p>
+        <p>Uses Option for default application panel shortcuts on macOS and Alt elsewhere while preserving Command-based editing chords.</p>
+        <p>All 65 focused macOS checks passed. Full Linux release-mode validation precedes tagging; its results and actual platform outputs are reported separately. Independent per-platform publishing remains unchanged.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.156</url>
+    </release>
     <release version="0.7.155" date="2026-11-14">
       <description>
         <p>Linux release validation and input/layout regression work covering floating-point comparisons, Select All test modifiers, acknowledgement-bubble positioning, and repeated-touch tap selections.</p>

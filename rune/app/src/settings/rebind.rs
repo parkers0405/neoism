@@ -258,11 +258,12 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn command_a_opens_an_agent_tab() {
+    fn alt_a_opens_an_agent_tab() {
         let mut app = App::new();
         app.keybindings = json!([]);
+        assert_eq!(app.binding_hint("openagent"), "Option A");
         let count = app.tabs.len();
-        let event = KeyEvent { key: Key::Command('a'), mods: rune::Mods { logo: true, ..Default::default() } };
+        let event = KeyEvent { key: Key::Text("a".into()), mods: rune::Mods { alt: true, ..Default::default() } };
         assert!(crate::keys::shortcut(&mut app, &event, &mut Tx::default()));
         assert_eq!(app.tabs.len(), count + 1);
         assert!(matches!(app.active_tab().kind, TabKind::Agent { session: None }));
@@ -271,13 +272,17 @@ mod tests {
     #[test]
     fn mac_app_defaults_match_panels_and_preserve_other_editing_chords() {
         for (name, mods, key) in [
-            ("openagent", "super", "a"),
-            ("toggleconversations", "super", "c"),
-            ("togglefiletree", "super", "e"),
-            ("toggleneoismnotes", "super", "n"),
-            ("searchfiles", "super", "s"),
-            ("opencommandpalette", "super", "p"),
-            ("createworkspaceterminaltab", "super", "t"),
+            ("createtab", "control | shift", "w"),
+            ("openagent", "alt", "a"),
+            ("toggleconversations", "alt", "c"),
+            ("togglefiletree", "alt", "e"),
+            ("toggleneoismnotes", "alt", "n"),
+            ("searchfiles", "alt", "s"),
+            ("opencommandpalette", "alt", "p"),
+            ("createworkspaceterminaltab", "alt", "t"),
+            ("changedirectory", "alt", "d"),
+            ("togglegitdiffpanel", "alt", "g"),
+            ("openconfigeditor", "alt", ","),
             ("splitright", "super", "d"),
             ("splitdown", "super | shift", "d"),
         ] {
@@ -302,11 +307,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn command_panels_need_no_shift_and_selected_text_still_copies() {
+    fn alt_panels_need_no_shift_and_command_selected_text_still_copies() {
         let mut app = App::new();
         app.keybindings = json!([]);
         for (key, sidebar) in [('e', Sidebar::Files), ('c', Sidebar::Conversations), ('n', Sidebar::Notes)] {
-            let event = KeyEvent { key: Key::Command(key), mods: rune::Mods { logo: true, ..Default::default() } };
+            let event = KeyEvent { key: Key::Text(key.to_string()), mods: rune::Mods { alt: true, ..Default::default() } };
             assert!(crate::keys::shortcut(&mut app, &event, &mut Tx::default()));
             assert_eq!(app.sidebar, Some(sidebar));
             assert!(crate::keys::shortcut(&mut app, &event, &mut Tx::default()));

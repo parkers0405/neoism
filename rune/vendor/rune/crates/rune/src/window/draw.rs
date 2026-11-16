@@ -311,7 +311,7 @@ impl<S: 'static> Host<S> {
         if let Some(trace) = self.trace.as_mut() {
             // A frame count keeps the trace redrawing while idle, as below.
             let continuous = !self.idle || self.args.frames.is_some();
-            let timing = crate::tooling::FrameTiming { target_ms, drawable, continuous };
+            let timing = crate::tooling::FrameTiming { target_ms, drawable, continuous, refresh_hz: display_hz(l) };
             trace.frame_timed(rt, (submitted - self.trace_start.unwrap()).as_secs_f64() * 1000.0,
                 now.elapsed().as_secs_f64() * 1000.0, timing);
             self.trace_frames += 1;

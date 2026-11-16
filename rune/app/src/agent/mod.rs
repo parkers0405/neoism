@@ -95,6 +95,8 @@ pub struct Session {
     pub structure: u64,
     /// The transcript's row list as last computed (`Session::row_items`).
     pub rows: std::cell::RefCell<Option<(timeline::RowsKey, std::rc::Rc<Vec<timeline::RowItem>>)>>,
+    /// User-question row indices, rebuilt with `rows`, not on scroll callbacks.
+    pub question_rows: std::cell::RefCell<std::rc::Rc<Vec<usize>>>,
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
     /// The wheel or trackpad glide's target and when it was set (`follow::wheel_base`).
     pub wheel_target: Option<(f32, std::time::Instant)>,
@@ -120,6 +122,8 @@ pub struct Session {
     pub question_tops: std::collections::HashMap<String, f32>,
     /// The question rail's lit tick, and the transcript viewport's height.
     pub rail_active: Option<usize>,
+    /// Mounted tick colors and their inactive colors; selection changes publish only two fills.
+    pub rail_colors: std::cell::RefCell<Vec<(rune::Live<rune::Color>, rune::Color)>>,
     /// The transcript is scrolled away from its end: the jump-to-latest button shows.
     pub away: bool,
     pub viewport_h: f32,

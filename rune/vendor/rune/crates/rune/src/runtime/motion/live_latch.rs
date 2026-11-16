@@ -74,6 +74,11 @@ impl<S: 'static> Runtime<S> {
             {
                 let seen = &mut node.cold.live_text_seen;
                 if let Some(text) = live.read(seen) && spec.source_text() != &*text {
+                    // A retained tree can be measured again without rebuilding its view.
+                    // Live publications must never replace its authored intrinsic size.
+                    if node.cold.live_text_placeholder.is_none() {
+                        node.cold.live_text_placeholder = Some(spec.clone());
+                    }
                     spec.replace_content(text.to_string());
                     spec.apply_case();
                     node.text_layout = Some(self.text.layout_live(&spec.content, spec.style, self.env.scale));

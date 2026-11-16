@@ -103,7 +103,7 @@ fn native_traces_add_target_and_present_times_without_changing_other_fields() {
             if timed { trace.record_presents(source.clone(), start); }
             for k in 0..3u64 {
                 rt.frame(1.0 / 120.0);
-                let timing = FrameTiming { target_ms: timed.then_some(k as f64 * 8.333), drawable: timed.then_some(k + 1), continuous: k > 0 };
+                let timing = FrameTiming { target_ms: timed.then_some(k as f64 * 8.333), drawable: timed.then_some(k + 1), continuous: k > 0, refresh_hz: timed.then_some(120.0) };
                 trace.frame_timed(&mut rt, k as f64 * 8.0, 0.0, timing);
                 let at = start + std::time::Duration::from_micros(20_000 + k * 8_333);
                 source.0.lock().unwrap().push((k + 1, Some(at)));
@@ -118,7 +118,7 @@ fn native_traces_add_target_and_present_times_without_changing_other_fields() {
     let strip = |text: &str| -> Vec<Value> {
         text.lines().map(|l| {
             let mut v: Value = serde_json::from_str(l).unwrap();
-            for key in ["target_ms", "present_ms", "present_dt_ms"] { v.as_object_mut().unwrap().remove(key); }
+            for key in ["target_ms", "present_ms", "present_dt_ms", "refresh_hz"] { v.as_object_mut().unwrap().remove(key); }
             if let Some(q) = v.get_mut("quality") { q["cpu_ms"] = 0.into(); }
             v
         }).collect()
@@ -130,6 +130,7 @@ fn native_traces_add_target_and_present_times_without_changing_other_fields() {
     assert_eq!(frames[1]["target_ms"], 8.333);
     assert_eq!(frames[1]["present_ms"], 28.333);
     assert_eq!(frames[1]["present_dt_ms"], 8.333);
+    assert_eq!(frames[1]["refresh_hz"], 120.0);
     let summary = crate::frame::present_time::Summary::of_trace(&timed).unwrap();
     assert_eq!((summary.frames, summary.presented, summary.bunched, summary.missed), (3, 3, 0, 0));
     assert!(crate::frame::present_time::Summary::of_trace(&plain).is_none());

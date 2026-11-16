@@ -267,17 +267,17 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     // At most twice a second, and through the pill's live text: only its first reading mounts
     // the pill (a view run); later readings repaint the label without re-running anything or
     // moving the pill chain (the label is three digits wide).
-    let fps = ui::fps::rate().or(app.fps);
     let due = app.fps_at.is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(500));
-    let fps_moved = fps.is_some() && app.fps != fps && due;
-    let fps_changed = fps_moved && app.fps.is_none();
-    if fps_moved {
+    let mut fps_changed = false;
+    if due {
+        let meter = app.fps_meter.borrow();
+        let fps = meter.rate(std::time::Instant::now());
+        let presented = meter.is_presented();
+        fps_changed = app.fps.is_some() != fps.is_some() || app.fps_presented != presented;
         app.fps = fps;
+        app.fps_presented = presented;
         app.fps_at = Some(std::time::Instant::now());
         app.fps_live.set(ui::status::fps_label(fps.unwrap_or(0)));
-    }
-    if fps.is_some() && app.fps != fps && !due {
-        wake!("fps", std::time::Duration::from_millis(500).saturating_sub(app.fps_at.map_or(std::time::Duration::ZERO, |at| at.elapsed())));
     }
     let images_changed = app.inline_images_changed();
     let rerun = images_changed || animating || changed || tree_drag_changed || table_changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
@@ -901,20 +901,26 @@ fn main() {
     rune::set_app_id(Box::leak(app_id.into_boxed_str()));
     // The app draws its own title band: macOS keeps its traffic lights in it and Windows its
     // caption buttons; on Linux the compositor's frame stays and there is no band.
-    let mut app = rune::App::new(spec).titlebar(rune::Titlebar::new(ui::chrome::TITLEBAR_H)).init(App::new)
+    let fps_meter = std::rc::Rc::new(std::cell::RefCell::new(ui::fps::Meter::default()));
+    let state_meter = fps_meter.clone();
+    let mut app = rune::App::new(spec).titlebar(rune::Titlebar::new(ui::chrome::TITLEBAR_H)).init(move || {
+        let mut state = App::new();
+        state.fps_meter = state_meter;
+        state
+    })
         .compositor(glass_selection::Compositor::default())
         .on_close(|app, _| app.close_window_resources())
         .on_quit(|app, _| app.close_window_resources());
     #[cfg(target_os = "macos")]
     { app = app.on_window(glass_cursor::attach); }
-    // Encoded frame callbacks measure submission cadence only. They are not compositor
-    // presentation timestamps and cannot establish missed-vblank parity (see rune/README.md).
+    // The callback exposes a window-local asynchronous Metal feedback handle. Only the
+    // explicitly labelled fallback counts drawn submissions, never unchanged/skipped frames.
     let trace = std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1");
     let origin = std::time::Instant::now();
     app = app.on_frame_encoded(move |frame| {
         #[cfg(feature = "frame-profile")]
         if trace { ui::fps::profile_frame(frame); }
-        ui::fps::record(frame.at());
+        fps_meter.borrow_mut().record(frame);
         if trace {
             // `mono_us` is CLOCK_MONOTONIC, the clock Wayland presentation feedback reports in;
             // `work_us` runs from this frame's poll to the end of its encode (the UI thread's

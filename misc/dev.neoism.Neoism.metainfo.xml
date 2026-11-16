@@ -52,6 +52,15 @@
   </categories>
 
   <releases>
+    <release version="0.7.157" date="2026-11-16">
+      <description>
+        <p>Adds presentation timestamp and frame-pacing instrumentation and improves window-local FPS status, distinguishing completed presentations from submission fallback.</p>
+        <p>Refines idle and streaming Agent scheduling and pinned timeline presentation, including live question-rail highlights without view rebuilds.</p>
+        <p>Fixes Rune live-value remounting, scroll anchors, and text layout with regression coverage.</p>
+        <p>No local tests were run for this release. Existing GitHub checks remain unchanged, with no preflight or test gate before tagging. Linux, macOS, and Windows each publish independently.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.157</url>
+    </release>
     <release version="0.7.156" date="2026-11-16">
       <description>
         <p>Clips the cursor and native glass lens to the viewport across focus changes, and makes touch close targets available before hover without closing on drag or cancellation.</p>

@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.157] - 2026-11-16
+
+### Frame pacing, Agent scheduling, and Rune presentation
+
+- Adds presentation timestamp and frame-pacing instrumentation, with window-local FPS status based on completed presentations where available and explicitly labeled submissions elsewhere.
+- Refines idle and streaming Agent scheduling and pinned timeline presentation; updates question-rail highlights through live values without rebuilding the view.
+- Fixes Rune live-value remounting, scroll anchors, and text layout, preserving authored text measurement and adding regression coverage.
+
+This stable release includes the current workspace changes. No local tests were run for this release; existing GitHub checks remain unchanged, with no preflight or test gate before tagging. Linux x86-64, macOS ARM64, and Windows x86-64 each publish independently without waiting for the other platforms. Existing database backup and downgrade cautions remain applicable.
+
 ## [0.7.156] - 2026-11-16
 
 ### Cursor boundaries, touch controls, and editor consistency

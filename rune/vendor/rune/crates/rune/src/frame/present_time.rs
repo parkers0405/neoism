@@ -14,6 +14,29 @@ use std::sync::Arc;
 use std::time::Duration;
 use crate::time::Instant;
 
+/// A window's actual presentation feedback, independent of trace collection. Clones refer
+/// to the same window, never to a process-wide counter. Reading does not schedule work.
+#[derive(Clone, Debug, Default)]
+pub struct PresentationFeedback(Arc<std::sync::Mutex<VecDeque<Instant>>>);
+
+impl PresentationFeedback {
+    /// Up to 256 most recent actual presentation timestamps, in chronological order.
+    /// Metal callbacks may arrive out of order or in a burst; callback arrival times and
+    /// display-link targets are not substituted. Skipped drawables are not included.
+    /// The history is non-destructive, so reading it cannot consume trace feedback.
+    pub fn timestamps(&self) -> Vec<Instant> {
+        self.0.lock().unwrap().iter().copied().collect()
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn record(&self, at: Instant) {
+        let mut times = self.0.lock().unwrap();
+        let index = times.partition_point(|t| *t <= at);
+        times.insert(index, at);
+        if times.len() > 256 { times.pop_front(); }
+    }
+}
+
 /// A drawable's sequence number and when it reached the screen, or `None` when the system
 /// skipped it.
 pub(crate) type Presented = (u64, Option<Instant>);
@@ -129,82 +152,10 @@ impl Presents {
     }
 }
 
-/// Percentiles of a sample, nearest rank.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Spread {
-    pub p50: f64,
-    pub p95: f64,
-    pub max: f64,
-}
-
-impl Spread {
-    fn of(mut values: Vec<f64>) -> Option<Spread> {
-        if values.is_empty() { return None; }
-        values.sort_by(f64::total_cmp);
-        let rank = |p: f64| values[((p * values.len() as f64).ceil() as usize).clamp(1, values.len()) - 1];
-        Some(Spread { p50: rank(0.5), p95: rank(0.95), max: values[values.len() - 1] })
-    }
-}
-
-/// Present cadence over a trace.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Summary {
-    pub hz: f64,
-    pub frames: usize,
-    /// Frames with a present time.
-    pub presented: usize,
-    /// Frames the system skipped (`present_ms: null`).
-    pub skipped: usize,
-    /// Present-to-present intervals between frames drawn back to back.
-    pub interval: Option<Spread>,
-    /// Intervals under [`BUNCHED_MS`]: frames that reached the screen together.
-    pub bunched: usize,
-    /// Intervals over 1.5 refresh periods: a refresh showed nothing new.
-    pub missed: usize,
-    /// Present time minus the display link's target.
-    pub lag: Option<Spread>,
-}
-
-pub(crate) const BUNCHED_MS: f64 = 2.0;
-
-impl Summary {
-    /// Summarizes a trace's text. `None` for traces without present times, including every
-    /// trace written before they existed.
-    pub(crate) fn of_trace(text: &str) -> Option<Summary> {
-        let mut lines = text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
-        let header = lines.next()?;
-        let hz = header["hz"].as_f64().filter(|hz| *hz > 0.0).unwrap_or(60.0);
-        let (mut frames, mut presented, mut skipped, mut timed) = (0, 0, 0, false);
-        let (mut intervals, mut lags) = (Vec::new(), Vec::new());
-        for frame in lines.filter(|l| l.get("t").is_some()) {
-            frames += 1;
-            let Some(present) = frame.get("present_ms") else { continue };
-            timed = true;
-            let Some(present) = present.as_f64() else { skipped += 1; continue };
-            presented += 1;
-            if let Some(dt) = frame["present_dt_ms"].as_f64() { intervals.push(dt); }
-            if let Some(target) = frame["target_ms"].as_f64() { lags.push(present - target); }
-        }
-        if !timed { return None; }
-        let missed_ms = 1.5 * 1000.0 / hz;
-        Some(Summary {
-            hz, frames, presented, skipped,
-            bunched: intervals.iter().filter(|dt| **dt < BUNCHED_MS).count(),
-            missed: intervals.iter().filter(|dt| **dt > missed_ms).count(),
-            interval: Spread::of(intervals),
-            lag: Spread::of(lags),
-        })
-    }
-}
-
-impl std::fmt::Display for Summary {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let spread = |s: Option<Spread>| s.map_or("none".into(), |s| format!("p50 {:.2} p95 {:.2} max {:.2} ms", s.p50, s.p95, s.max));
-        write!(f, "present: {} frames, {} presented, {} skipped at {:.0} Hz; interval {}; {} bunched (<{} ms), {} missed (>{:.2} ms); lag {}",
-            self.frames, self.presented, self.skipped, self.hz, spread(self.interval), self.bunched, BUNCHED_MS,
-            self.missed, 1.5 * 1000.0 / self.hz, spread(self.lag))
-    }
-}
+mod summary;
+pub(crate) use summary::Summary;
+#[cfg(test)]
+use summary::Spread;
 
 /// How long a finished trace waits for its last frames' present times.
 pub(crate) const SETTLE: Duration = Duration::from_millis(150);
@@ -214,8 +165,8 @@ pub(crate) mod metal {
     //! Present times from a CAMetalLayer. wgpu acquires and presents the drawable itself and
     //! exposes neither, so the traced window's layer becomes an instance of a subclass of its
     //! own class whose `nextDrawable` adds a Metal presented handler to each drawable it
-    //! returns. Only that layer changes, only while tracing or while a transparent window with
-    //! a shadow needs to know when its frames land (`macos_window_shape`), and it gets its
+    //! returns. Only that layer changes, while tracing, reporting encoded frames, or while a
+    //! transparent window's shadow needs feedback (`macos_window_shape`), and it gets its
     //! class back when the hook drops.
 
     use super::{Presented, Source};
@@ -252,6 +203,7 @@ pub(crate) mod metal {
         /// `(seq, presentedTime)`: host seconds, 0 for a skipped drawable. Kept only while tracing.
         presented: Mutex<Vec<(u64, f64)>>,
         untraced: bool,
+        pub(crate) feedback: super::PresentationFeedback,
         /// The newest drawable that reached the screen.
         on_screen: AtomicU64,
         /// Wake the main run loop when a drawable reaches the screen.
@@ -259,7 +211,7 @@ pub(crate) mod metal {
     }
 
     impl Log {
-        /// A log that only tracks which drawable is on screen, for a window that isn't traced.
+        /// A log without the trace queue. Feedback stays bounded even when nobody reads it.
         pub(crate) fn untraced() -> Self { Log { untraced: true, ..Default::default() } }
 
         /// The drawable the last `nextDrawable` returned, once.
@@ -275,6 +227,18 @@ pub(crate) mod metal {
 
         /// While on, each drawable that reaches the screen wakes the main run loop.
         pub(crate) fn watch(&self, on: bool) { self.watch.store(on, Ordering::Release); }
+
+        fn record_presented(&self, seq: u64, at: f64) {
+            let valid = at.is_finite() && at > 0.0;
+            if !self.untraced { self.presented.lock().unwrap().push((seq, if valid { at } else { 0.0 })); }
+            if valid {
+                // SAFETY: CACurrentMediaTime has no preconditions. Translate the actual
+                // host timestamp, not the time this asynchronous callback arrived.
+                self.feedback.record(instant_at(Instant::now(), unsafe { CACurrentMediaTime() }, at));
+                self.on_screen.fetch_max(seq, Ordering::AcqRel);
+                if self.watch.load(Ordering::Acquire) { wake_main(); }
+            }
+        }
     }
 
     impl Source for Log {
@@ -315,11 +279,7 @@ pub(crate) mod metal {
             let handler = block2_metal::RcBlock::new(move |d: NonNull<ProtocolObject<dyn MTLDrawable>>| {
                 // SAFETY: Metal passes the presented drawable for the handler's duration.
                 let at = unsafe { d.as_ref() }.presentedTime();
-                if !log.untraced { log.presented.lock().unwrap().push((seq, at)); }
-                if at > 0.0 {
-                    log.on_screen.fetch_max(seq, Ordering::AcqRel);
-                    if log.watch.load(Ordering::Acquire) { wake_main(); }
-                }
+                log.record_presented(seq, at);
             });
             // SAFETY: nextDrawable returns a CAMetalDrawable, which conforms to MTLDrawable;
             // Metal copies the block.
@@ -407,6 +367,31 @@ pub(crate) mod metal {
 
     #[cfg(test)]
     #[test]
+    fn untraced_feedback_uses_presented_time_and_does_not_enable_wakes() {
+        let log = Log::untraced();
+        for (i, at) in [0.0, -1.0, f64::NAN, f64::INFINITY].into_iter().enumerate() {
+            log.record_presented(i as u64 + 1, at);
+        }
+        assert!(log.feedback.timestamps().is_empty());
+        assert_eq!(log.on_screen(), 0);
+        // SAFETY: CACurrentMediaTime has no preconditions.
+        let host_now = unsafe { CACurrentMediaTime() };
+        // Back-to-back callbacks reporting presentations a quarter-second apart.
+        log.record_presented(6, host_now - 0.25);
+        log.record_presented(5, host_now - 0.5);
+        let times = log.feedback.timestamps();
+        assert_eq!(times.len(), 2);
+        assert!((times[1].duration_since(times[0]).as_secs_f64() - 0.25).abs() < 0.005);
+        assert_eq!(log.on_screen(), 6);
+        assert!(!log.watch.load(Ordering::Acquire));
+        let mut trace = Vec::new();
+        log.take(&mut trace);
+        assert!(trace.is_empty());
+        assert_eq!(log.feedback.timestamps(), times);
+    }
+
+    #[cfg(test)]
+    #[test]
     fn host_time_maps_onto_instants() {
         let now = Instant::now();
         assert_eq!(instant_at(now, 100.0, 100.008), now + Duration::from_millis(8));
@@ -418,6 +403,23 @@ pub(crate) mod metal {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn feedback_is_bounded_ordered_window_local_and_non_destructive() {
+        let feedback = PresentationFeedback::default();
+        let reader = feedback.clone();
+        let other_window = PresentationFeedback::default();
+        let start = Instant::now();
+        let writer = std::thread::spawn(move || {
+            // A delayed callback can arrive behind newer presentations.
+            for i in (0..300).rev() { feedback.record(start + Duration::from_millis(i)); }
+        });
+        writer.join().unwrap();
+        let expected: Vec<_> = (44..300).map(|i| start + Duration::from_millis(i)).collect();
+        assert_eq!(reader.timestamps(), expected);
+        assert_eq!(reader.timestamps(), expected);
+        assert!(other_window.timestamps().is_empty());
+    }
 
     #[derive(Default)]
     struct Fake(Mutex<Vec<Presented>>);

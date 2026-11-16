@@ -168,9 +168,11 @@ impl<S: 'static> Host<S> {
         let resamples = crate::platform::macos::window_shape::resamples(&window, self.options.transparent);
         #[cfg(target_os = "macos")]
         let hook_log = self.present_log.clone()
-            .or_else(|| resamples.then(|| Arc::new(crate::frame::present_time::metal::Log::untraced())));
+            .or_else(|| (resamples || self.frame_reports.wanted()).then(|| Arc::new(crate::frame::present_time::metal::Log::untraced())));
         #[cfg(target_os = "macos")]
         let present = hook_log.clone().and_then(|log| crate::frame::present_time::metal::LayerHook::attach(&surface, log));
+        #[cfg(target_os = "macos")]
+        self.frame_reports.set_presentation_feedback(hook_log.as_ref().filter(|_| present.is_some()).map(|log| log.feedback.clone()));
         #[cfg(target_os = "macos")]
         let shadow = hook_log.filter(|_| resamples && present.is_some())
             .and_then(|log| crate::platform::macos::window_shape::Shadow::new(&window, log, visible || launcher));

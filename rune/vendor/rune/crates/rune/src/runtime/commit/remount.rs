@@ -58,7 +58,9 @@ impl<S: 'static> Runtime<S> {
             return false;
         }
         if !self.nodes.iter().all(|n| {
-            relayout::reusable(n) && n.text.as_ref().is_none_or(|t| !t.redacted && t.live.is_none())
+            // Live text keeps its authored measurement spec separately from its sampled
+            // content; moving the node also retains the source and its sampling token.
+            relayout::reusable(n) && n.text.as_ref().is_none_or(|t| !t.redacted)
         }) {
             return false;
         }

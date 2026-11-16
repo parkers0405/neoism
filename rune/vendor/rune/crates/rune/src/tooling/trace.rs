@@ -35,6 +35,8 @@ pub(crate) struct FrameTiming {
     pub drawable: Option<u64>,
     /// The previous frame asked for this one right away (it wasn't idle).
     pub continuous: bool,
+    /// Current display-link/monitor cadence, not playback FPS or measured presentation rate.
+    pub refresh_hz: Option<f64>,
 }
 
 pub(super) fn r2(v: f32) -> f64 {
@@ -56,7 +58,10 @@ impl Trace {
             "type": "header", "launch": "rune", "width": size.0, "height": size.1,
             "hz": fps, "scale": scale, "platform": "rune", "units": "pt", "clock": clock,
         });
-        if clock == "wall" { header["timestamp"] = "cpu-submit".into(); }
+        if clock == "wall" {
+            header["timestamp"] = "cpu-submit".into();
+            header["hz_source"] = "initial-display; per-frame refresh_hz takes precedence".into();
+        }
         let _ = writeln!(out, "{header}");
         Trace { out, ids: HashMap::new(), described: HashMap::new(), states: HashMap::new(), scrolled: HashMap::new(), effects: HashMap::new(),
             goals: HashMap::new(), channels: Default::default(), path: path.clone(), all: false, presents: None, surface: None }
@@ -265,6 +270,9 @@ impl Trace {
         self.channels.write_json(&mut line);
         if let Some(target) = timing.target_ms {
             line.push_str(&format!(r#","target_ms":{target}"#));
+        }
+        if let Some(hz) = timing.refresh_hz.filter(|hz| hz.is_finite() && *hz > 0.0) {
+            line.push_str(&format!(r#", "refresh_hz":{hz}"#));
         }
         if let Some(presents) = self.presents.as_mut() {
             presents.push(line, timing.drawable, timing.continuous, &mut self.out);

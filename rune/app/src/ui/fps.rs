@@ -1,36 +1,163 @@
-//! The status line's FPS: frames the window actually encoded in the last second (GPUiX's
-//! `measuredFrameRate`). Fed from `on_frame_encoded`, read on the UI thread in `poll`.
+//! Window-local completed-sample throughput, not the median CPU encode spacing. The badge
+//! reads actual Metal feedback where available; elsewhere it explicitly labels submissions.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-static FRAMES: Mutex<VecDeque<Instant>> = Mutex::new(VecDeque::new());
 const WINDOW: Duration = Duration::from_secs(1);
+const WARMUP: Duration = Duration::from_millis(250);
 
-pub fn record(at: Instant) {
-    let mut frames = FRAMES.lock().unwrap();
-    frames.push_back(at);
-    while frames.front().is_some_and(|t| at.duration_since(*t) > WINDOW) { frames.pop_front(); }
+#[derive(Default)]
+pub struct Meter {
+    presented: Option<rune::PresentationFeedback>,
+    submitted: VecDeque<Instant>,
 }
 
-/// Gaps longer than this are the window resting or a slow ambient tick (the 30 Hz orbs, a
-/// caret blink), not slow frames: only runs of continuous motion count, so the pill reads the
-/// display rate a scroll or glide gets (a missed vblank at 144 Hz is 13.9 ms, still counted).
-const REST_GAP: Duration = Duration::from_millis(25);
+impl Meter {
+    pub fn record(&mut self, frame: &rune::FrameEncoded) {
+        if self.is_presented() != frame.presentation_feedback().is_some() { self.submitted.clear(); }
+        self.presented = frame.presentation_feedback().cloned();
+        self.submission(frame.outcome(), frame.at());
+    }
 
-/// The rate the window presents at while it animates: one over the median spacing of the
-/// last second's consecutive frames, so a glide that runs on every 120 Hz vblank reads 120
-/// even though the window then rests. `None` until a short burst has been drawn.
-pub fn rate() -> Option<u32> {
-    let now = Instant::now();
-    let frames = FRAMES.lock().unwrap();
-    let mut gaps: Vec<Duration> = frames.iter().filter(|t| now.duration_since(**t) <= WINDOW).collect::<Vec<_>>()
-        .windows(2).map(|w| w[1].duration_since(*w[0])).filter(|gap| *gap <= REST_GAP && !gap.is_zero()).collect();
-    if gaps.len() < 4 { return None; }
-    gaps.sort();
-    let median = gaps[gaps.len() / 2].as_secs_f64();
-    Some((1.0 / median).round() as u32)
+    fn submission(&mut self, outcome: rune::FrameOutcome, at: Instant) {
+        if self.presented.is_none() && outcome == rune::FrameOutcome::Drawn {
+            self.submitted.push_back(at);
+            if self.submitted.len() > 256 { self.submitted.pop_front(); }
+        }
+    }
+
+    pub fn is_presented(&self) -> bool { self.presented.is_some() }
+
+    pub fn rate(&self, now: Instant) -> Option<u32> {
+        match &self.presented {
+            Some(feedback) => rate(&feedback.timestamps(), now),
+            None => rate(&self.submitted.iter().copied().collect::<Vec<_>>(), now),
+        }
+    }
+}
+
+/// Completed intervals / elapsed presentation time, ending at the latest reported sample.
+/// Callback delivery lag is not an unfinished "missed" interval. Keep the predecessor of
+/// the trailing one-second boundary, so a real gap crossing it is included in full (the
+/// measured span can therefore exceed one second). No median or long-gap filtering.
+/// Before 250 ms of completed history, don't extrapolate a burst. A sample at least one
+/// second old reads zero on the next natural poll, without scheduling work. Until then
+/// retain the completed rate; a stall lowers it once the next presentation closes the gap.
+fn rate(frames: &[Instant], now: Instant) -> Option<u32> {
+    let last = *frames.last()?;
+    if now.saturating_duration_since(last) >= WINDOW { return Some(0); }
+    let cutoff = last.checked_sub(WINDOW).unwrap_or(frames[0]);
+    let first = frames.partition_point(|at| *at <= cutoff).saturating_sub(1);
+    let elapsed = last.saturating_duration_since(frames[first]);
+    if elapsed < WARMUP { return None; }
+    // N timestamps enclose N-1 intervals; the baseline itself is not another frame.
+    let count = frames.len() - first - 1;
+    Some((count as f64 / elapsed.as_secs_f64()).round() as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn regular(start: Instant, hz: u32) -> Vec<Instant> {
+        (0..=hz).map(|i| start + Duration::from_secs_f64(i as f64 / hz as f64)).collect()
+    }
+
+    #[test]
+    fn actual_rate_is_not_clamped_to_a_target() {
+        let start = Instant::now();
+        for hz in [30, 60, 90, 120, 144, 240] {
+            assert_eq!(rate(&regular(start, hz), start + WINDOW), Some(hz));
+        }
+    }
+
+    #[test]
+    fn callback_lag_does_not_lower_uniform_completed_120hz() {
+        let start = Instant::now();
+        let frames = regular(start, 120);
+        for lag_ms in [0, 8, 16, 25, 100, 999] {
+            assert_eq!(rate(&frames, start + WINDOW + Duration::from_millis(lag_ms)), Some(120));
+        }
+        // Startup also counts completed intervals, not time spent awaiting callbacks.
+        assert_eq!(rate(&frames[..31], start + WARMUP + Duration::from_millis(16)), Some(120));
+    }
+
+    #[test]
+    fn first_boundary_is_a_baseline_not_an_extra_frame() {
+        let start = Instant::now();
+        assert_eq!(rate(&[start, start + WARMUP], start + WARMUP), Some(4));
+        let frames: Vec<_> = (0..=240).map(|i| start + Duration::from_secs_f64(i as f64 / 120.0)).collect();
+        assert_eq!(rate(&frames, start + WINDOW * 2 + Duration::from_millis(16)), Some(120));
+    }
+
+    #[test]
+    fn reported_stalls_lower_completed_throughput_without_filtering() {
+        let start = Instant::now();
+        let frames = regular(start, 120);
+        let stalled: Vec<_> = frames.iter().copied().filter(|at| {
+            let t = at.duration_since(start).as_secs_f64();
+            !(t > 0.5 && t <= 0.75)
+        }).collect();
+        assert_eq!(rate(&stalled, start + WINDOW), Some(90));
+        // An unfinished gap is not treated as missed just because callbacks are pending.
+        assert_eq!(rate(&frames[..61], start + WINDOW), Some(120));
+        let mut closed = frames[..61].to_vec();
+        closed.push(start + WINDOW);
+        assert_eq!(rate(&closed, start + WINDOW + Duration::from_millis(16)), Some(61));
+        // A >1s gap straddles the window boundary. Keep its predecessor, don't restart
+        // at the new burst and report a misleading 120 again.
+        let mut resumed = frames;
+        resumed.extend(regular(start + WINDOW * 3, 120).into_iter().take(31));
+        assert_eq!(rate(&resumed, start + WINDOW * 3 + WARMUP), Some(14)); // 31 / 2.25s
+    }
+
+    #[test]
+    fn burst_is_counted_over_elapsed_time_not_its_median_gap() {
+        let start = Instant::now();
+        let mut frames = vec![start];
+        frames.extend((0..60).map(|i| start + Duration::from_millis(900) + Duration::from_micros(i * 100)));
+        assert_eq!(rate(&frames, start + WINDOW), Some(66)); // 60 / 0.9059s, not the 0.1ms median
+        assert_eq!(rate(&frames[1..], start + Duration::from_millis(910)), None);
+    }
+
+    #[test]
+    fn idle_and_resume_are_throughput_not_inferred_refresh_rate() {
+        let start = Instant::now();
+        assert_eq!(rate(&[], start), None);
+        assert_eq!(rate(&[start], start), None);
+        assert_eq!(rate(&[start], start + WINDOW), Some(0));
+        assert_eq!(rate(&[start], start + WINDOW * 2), Some(0));
+        let steady = regular(start, 120);
+        assert_eq!(rate(&steady, start + WINDOW * 2 - Duration::from_nanos(1)), Some(120));
+        assert_eq!(rate(&steady, start + WINDOW * 2), Some(0));
+        let mut frames = vec![start];
+        frames.extend(regular(start + WINDOW * 2, 120).into_iter().take(31));
+        assert_eq!(rate(&frames, start + WINDOW * 2 + WARMUP), Some(14)); // 31 / 2.25s
+        assert_eq!(rate(&frames, start + WINDOW * 4), Some(0));
+        // Once the idle gap is outside the completed window, continuous motion is 120.
+        frames.extend(regular(start + WINDOW * 2, 120).into_iter().skip(31));
+        assert_eq!(rate(&frames, start + WINDOW * 3 + Duration::from_millis(16)), Some(120));
+    }
+
+    #[test]
+    fn fallback_counts_only_drawn_and_never_replaces_available_feedback() {
+        let start = Instant::now();
+        let mut meter = Meter::default();
+        for i in 0..300 {
+            let at = start + Duration::from_millis(i);
+            meter.submission(rune::FrameOutcome::Unchanged, at);
+            meter.submission(rune::FrameOutcome::Skipped, at);
+        }
+        assert!(meter.submitted.is_empty());
+        for i in 0..300 { meter.submission(rune::FrameOutcome::Drawn, start + Duration::from_millis(i)); }
+        assert_eq!(meter.submitted.len(), 256);
+        assert!(meter.rate(start + WINDOW).is_some());
+        meter.presented = Some(rune::PresentationFeedback::default());
+        assert_eq!(meter.rate(start + WINDOW), None);
+        assert_eq!(Meter::default().rate(start + WINDOW), None); // another window
+    }
 }
 
 /// The last poll: when it started, how long it ran and whether it re-ran the views. Read by

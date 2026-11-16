@@ -49,6 +49,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let child = app.families.is_child(session_id);
     let rows_key: RowsKey = (session.map_or(0, |s| s.structure), messages.len(), live_from, activity);
     let items = session.map_or_else(Default::default, |s| s.row_items(rows_key));
+    let question_rows = session.map_or_else(Default::default, |s| s.question_rows.borrow().clone());
     let (key_items, build_items, visible_items) = (items.clone(), items.clone(), items.clone());
     let (key_id, build_id, visible_id) = (session_id.to_owned(), session_id.to_owned(), session_id.to_owned());
     // The scroll view runs on under the pinned composer: the rows end `foot` points above its
@@ -66,7 +67,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         // The keys only change with the row list: a commit that leaves it alone (a reply's
         // text growing, the caret moving) doesn't ask every row for its key again.
         .virtual_rows_version(rows_key)
-        .on_visible_rows(move |a: &mut App, range: std::ops::Range<usize>| a.timeline_rows_visible(&visible_id, &visible_items, range))
+        .on_visible_rows(move |a: &mut App, range: std::ops::Range<usize>| a.timeline_rows_visible(&visible_id, &visible_items, &question_rows, range))
         // The rows move on every frame of a scroll; only a new width re-runs the views.
         .on_layout_tx(move |a: &mut App, [_, _, w, _]: [f32; 4], tx: &mut Tx| {
             let width = (w - 2.0 * pad).max(0.0);
@@ -194,6 +195,10 @@ impl super::Session {
     pub fn row_items(&self, key: RowsKey) -> std::rc::Rc<Vec<RowItem>> {
         if let Some((cached, items)) = &*self.rows.borrow() && *cached == key { return items.clone(); }
         let items = std::rc::Rc::new(row_items(&self.messages, key.2, key.3));
+        *self.question_rows.borrow_mut() = std::rc::Rc::new(items.iter().enumerate().filter_map(|(row, item)| match item {
+            RowItem::Message(i) if self.messages[*i].kind == HistoryMessageKind::User => Some(row),
+            _ => None,
+        }).collect());
         *self.rows.borrow_mut() = Some((key, items.clone()));
         items
     }
@@ -376,24 +381,20 @@ impl App {
 
     /// The rows in view changed: load the older page when the first row shows, and light the
     /// question rail's tick for the question in view. Returns whether the view must re-run.
-    fn timeline_rows_visible(&mut self, session_id: &str, items: &[RowItem], range: std::ops::Range<usize>) -> bool {
+    fn timeline_rows_visible(&mut self, session_id: &str, items: &[RowItem], rows: &[usize], range: std::ops::Range<usize>) -> bool {
         // Only while someone scrolls up toward it (`request_older` checks): parked at the top,
         // nothing loads by itself.
         if range.start == 0 { self.request_older(session_id); }
         let Some(session) = self.sessions.get_mut(session_id) else { return false };
         let (offset, max) = session.scroll.get();
-        let rows: Vec<usize> = items.iter().enumerate().filter_map(|(row, item)| match item {
-            RowItem::Message(i) if session.messages.get(*i).is_some_and(|m| m.kind == HistoryMessageKind::User) => Some(row),
-            _ => None,
-        }).collect();
-        session.visible_questions = rows.iter().filter(|r| range.contains(r)).filter_map(|r| match items[*r] {
+        let first = rows.partition_point(|r| *r < range.start);
+        session.visible_questions = rows[first..].iter().take_while(|r| **r < range.end).filter_map(|r| match items[*r] {
             RowItem::Message(i) => session.messages.get(i).map(|m| m.id.clone()),
             _ => None,
         }).collect();
-        let active = super::ticks::active_index(&rows, range, max - offset <= 1.0);
-        if session.rail_active == active { return false; }
-        session.rail_active = active;
-        true
+        let active = super::ticks::active_index(rows, range, max - offset <= 1.0);
+        session.set_rail_active(active, rgb(self.pal.fg).alpha(0.9));
+        false
     }
 }
 

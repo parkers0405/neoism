@@ -23,6 +23,8 @@ pub(crate) struct NodeCold {
     /// The run a cell measures and draws from (see `El::advance_in`).
     pub(super) run_layout: Option<Rc<crate::text::RunLayout>>,
     pub(super) live_text_seen: Option<u128>,
+    /// Authored measurement spec, retained before live sampling replaces the painted content.
+    pub(super) live_text_placeholder: Option<crate::cold::SharedBox<TextSpec>>,
     pub(super) looping: Option<Box<rune_motion::LoopSpec>>,
     pub(super) opacity_motion: Option<Box<rune_motion::Anim>>,
     pub(super) lead: Option<(Spring, Spring)>,
@@ -61,6 +63,7 @@ impl crate::cold::Empty for NodeCold {
         live: Vec::new(),
         run_layout: None,
         live_text_seen: None,
+        live_text_placeholder: None,
         looping: None,
         opacity_motion: None,
         lead: None,

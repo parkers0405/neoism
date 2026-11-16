@@ -332,7 +332,7 @@ pub(super) fn compute_layout(taffy: &mut LayoutEngine, root: SlotId, room: Size<
     taffy.compute_layout(root, room, |inputs, ctx, style| {
         taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, avail| {
             let Some(i) = ctx else { return Size::ZERO };
-            let spec = nodes[i].text.as_ref().unwrap();
+            let spec = nodes[i].live_text_placeholder.as_ref().or(nodes[i].text.as_ref()).unwrap();
             // `known` is the border box; `avail` is already the content box (known or styled
             // size, clamped, less padding and border), which is what `lay_out_text` wraps at.
             let w = if spec.wrap {

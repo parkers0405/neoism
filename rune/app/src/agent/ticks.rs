@@ -78,24 +78,36 @@ impl Rail {
 /// view, else the one above the view. `rows` are the questions' row indices in order.
 impl App {
     /// Reaching the end lights the last question even when no row entered or left the window
-    /// on the way (short answers, questions close together). Returns whether it changed.
+    /// on the way (short answers, questions close together). Live fills need no view rebuild.
     pub fn rail_follow_bottom(&mut self) -> bool {
         let crate::tabs::TabKind::Agent { session: Some(id) } = self.active_tab().kind.clone() else { return false };
         let Some(session) = self.sessions.get_mut(&id) else { return false };
         let (offset, max) = session.scroll.get();
         if max - offset > 1.0 { return false; }
-        let questions = session.messages.iter().filter(|m| m.kind == neoism_protocol::agent::HistoryMessageKind::User).count();
+        // A changed transcript is indexed by its next view build. Do not scan history here.
+        if !session.rows.borrow().as_ref().is_some_and(|(key, _)| key.0 == session.structure && key.1 == session.messages.len()) { return false; }
+        let questions = session.question_rows.borrow().len();
         let last = questions.checked_sub(1);
         if last.is_none() || session.rail_active == last { return false; }
-        session.rail_active = last;
-        true
+        session.set_rail_active(last, rgb(self.pal.fg).alpha(0.9));
+        false
     }
 }
 
 pub fn active_index(rows: &[usize], visible: std::ops::Range<usize>, at_bottom: bool) -> Option<usize> {
     if at_bottom { return rows.len().checked_sub(1); }
-    if let Some(i) = rows.iter().position(|r| visible.contains(r)) { return Some(i); }
-    rows.iter().rposition(|r| *r < visible.start)
+    let next = rows.partition_point(|r| *r < visible.start);
+    if rows.get(next).is_some_and(|r| *r < visible.end) { Some(next) } else { next.checked_sub(1) }
+}
+
+impl super::Session {
+    pub(super) fn set_rail_active(&mut self, active: Option<usize>, color: Color) {
+        if self.rail_active == active { return; }
+        let colors = self.rail_colors.borrow();
+        if let Some((live, idle)) = self.rail_active.and_then(|i| colors.get(i)) { live.set(*idle); }
+        if let Some((live, _)) = active.and_then(|i| colors.get(i)) { live.set(color); }
+        self.rail_active = active;
+    }
 }
 
 /// `compact_question_preview`: the message's plain text (Markdown dropped) on one line.
@@ -188,20 +200,26 @@ pub fn view(app: &App, session_id: &str, view: [f32; 4], pane: [f32; 4], gutter:
     let p = app.pal;
     let questions = app.questions(session_id);
     let Some(rail) = Rail::new([view[0] + view[2] - gutter, view[1], gutter, view[3]], s, questions.len()) else { return el() };
-    let session = app.sessions.get(session_id);
-    let active = session.and_then(|s| s.rail_active);
+    let Some(session) = app.sessions.get(session_id) else { return el() };
+    let active = session.rail_active;
     let hovered = app.question_hover.as_ref().filter(|(id, _)| id == session_id).map(|(_, i)| *i);
     let local = |r: [f32; 4]| (r[0] - pane[0], r[1] - pane[1]);
 
     // Every tick is keyed, so widening under the pointer never re-pairs one with another.
     let mut layer = el().key(format!("question-rail:{session_id}")).w_full().h_full().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .instant_changes();
+    let mut colors = session.rail_colors.borrow_mut();
+    colors.truncate(rail.count);
     for index in 0..rail.count {
         let r = rail.tick_rect(index, hovered);
-        let color = if active == Some(index) { rgb(p.fg).alpha(0.9) }
-            else { rgb(p.muted).alpha(if hovered == Some(index) { 0.75 } else { 0.35 }) };
+        let idle = rgb(p.muted).alpha(if hovered == Some(index) { 0.75 } else { 0.35 });
+        let color = if active == Some(index) { rgb(p.fg).alpha(0.9) } else { idle };
+        if colors.len() == index { colors.push((rune::Live::new(color), idle)); }
+        let (live, inactive) = &mut colors[index];
+        *inactive = idle;
+        live.set(color);
         let (x, y) = local(r);
-        layer = layer.child(el().key(format!("tick:{index}")).w(r[2]).h(r[3]).fill(color).absolute(x, y));
+        layer = layer.child(el().key(format!("tick:{index}")).w(r[2]).h(r[3]).fill(color).live_fill(&*live).absolute(x, y));
     }
     // The hit area is the track; pointer motion picks the tick, press or drag jumps to it.
     let (tx_, ty_) = local(rail.track);
@@ -297,6 +315,51 @@ mod tests {
         assert_eq!(active_index(&rows, 2..6, false), Some(1));
         assert_eq!(active_index(&rows, 5..8, false), Some(1));
         assert_eq!(active_index(&rows, 8..12, false), Some(2));
+        assert_eq!(active_index(&rows, 4..4, false), Some(0));
+        assert_eq!(active_index(&[], 0..3, false), None);
+    }
+
+    #[test]
+    fn the_question_highlight_moves_without_rebuilding_the_view() {
+        let mut app = App::new();
+        app.load_fixture("rail", "Rail", r#"[
+            {"id":"q1","role":"User","kind":"User","text":"First"},
+            {"id":"a1","role":"Assistant","kind":"Assistant","text":"Answer"},
+            {"id":"q2","role":"User","kind":"User","text":"Second"},
+            {"id":"q3","role":"User","kind":"User","text":"Third"}
+        ]"#);
+        let session = app.sessions.get_mut("rail").unwrap();
+        session.row_items((session.structure, session.messages.len(), usize::MAX, false));
+        assert_eq!(session.question_rows.borrow().as_slice(), [0, 2, 3]);
+        session.rail_active = Some(0);
+        let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
+            view(a, "rail", [0.0, 0.0, 400.0, 200.0], [0.0, 0.0, 400.0, 200.0], 30.0)
+        }, (400.0, 200.0), rune::Env::new(true, 1.0));
+        for _ in 0..3 { rt.frame(1.0 / 120.0); }
+        let fill = |rt: &rune::Runtime<App>, key: &str| {
+            let rect = rt.presented(key).unwrap().0;
+            rt.instances.iter().find(|i| i.rect.iter().zip(rect).all(|(a, b)| (a - b).abs() < 1.0) && i.fill[3] > 0.0)
+                .unwrap_or_else(|| panic!("no painted tick at {rect:?}")).fill
+        };
+        let lit = fill(&rt, "tick:0");
+        let idle = fill(&rt, "tick:1");
+        assert_ne!(lit, idle);
+        let commits = rt.stats.commits;
+        rt.update_if(|a, _| {
+            a.sessions.get_mut("rail").unwrap().set_rail_active(Some(1), rgb(a.pal.fg).alpha(0.9));
+            false
+        });
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.stats.commits, commits);
+        assert_eq!(fill(&rt, "tick:0"), idle);
+        assert_eq!(fill(&rt, "tick:1"), lit);
+
+        // Removing/replacing history also updates question positions, not just appended rows.
+        let session = rt.state.sessions.get_mut("rail").unwrap();
+        session.messages.remove(0);
+        session.structure += 1;
+        session.row_items((session.structure, session.messages.len(), usize::MAX, false));
+        assert_eq!(session.question_rows.borrow().as_slice(), [1, 2]);
     }
 
     #[test]

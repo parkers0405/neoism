@@ -507,6 +507,8 @@ impl<S: 'static> App<S> {
     /// every frame on its virtual clock as `Drawn`, with wall-clock instants and `refresh_hz` at
     /// its `--fps`, so an app's own meter reads its build and encode costs there too. Overlays,
     /// multi-window headless runs and the web never call it.
+    /// On macOS Metal, reports also expose bounded per-surface actual presentation feedback
+    /// via `FrameEncoded::presentation_feedback`, without waking or rendering for feedback.
     pub fn on_frame_encoded(mut self, f: impl FnMut(&crate::FrameEncoded) + 'static) -> Self {
         self.on_frame_encoded = Some(Box::new(f));
         self

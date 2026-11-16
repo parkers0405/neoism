@@ -12,7 +12,7 @@
 //! - `wait:<seconds>`
 //! - `wheel:<notches per second>:<seconds>`: mouse-wheel notches over the active
 //!   conversation or file; a negative rate scrolls down
-//! - `touch:<points per second>:<seconds>`: trackpad deltas at 120 Hz; negative scrolls down
+//! - `touch:<points per second>:<seconds>`: continuous trackpad motion sampled on polls; negative scrolls down
 //! - `keys:<text>:<per second>`: type `text` into the focused surface, a character at a time
 //!   (`jjjj` walks a file's cursor, as a held key does)
 //! - `alt:<up|down|left|right>`: dispatch an app-wide focus chord and log its target/material
@@ -75,11 +75,13 @@ pub struct Drive {
     /// When the current step started (frame clock) and how many deltas it has sent.
     started: Option<f64>,
     sent: u64,
+    /// Elapsed precision-scroll time already delivered, independent of timer/display phase.
+    sampled: f64,
     /// The conversation `hold` remembered.
     held: Option<String>,
 }
 
-/// Trackpad deltas arrive at about this rate.
+/// Request samples while the scripted touch is active; the display owns actual frame timing.
 const TOUCH_HZ: f64 = 120.0;
 
 impl Drive {
@@ -122,8 +124,15 @@ impl Drive {
                 _ => return None,
             })
         }).collect();
-        (!steps.is_empty()).then_some(Drive { steps, started: None, sent: 0, held: None })
+        (!steps.is_empty()).then_some(Drive { steps, started: None, sent: 0, sampled: 0.0, held: None })
     }
+}
+
+fn touch_delta(speed: f64, seconds: f64, elapsed: f64, sampled: &mut f64) -> f32 {
+    let through = elapsed.clamp(0.0, seconds.max(0.0));
+    let delta = (through - *sampled).max(0.0) * speed;
+    *sampled = sampled.max(through);
+    delta as f32
 }
 
 fn active_session(app: &App) -> Option<String> {
@@ -207,13 +216,21 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
             }
             Step::Wheel { rate, seconds } | Step::Touch { speed: rate, seconds } => {
                 let precise = matches!(step, Step::Touch { .. });
-                let (hz, dy) = if precise { (TOUCH_HZ, (*rate / TOUCH_HZ) as f32) } else { (rate.abs(), 40.0 * rate.signum() as f32) };
-                let due = (elapsed.min(*seconds) * hz) as u64;
+                // Quantizing a continuous gesture to floor(elapsed * 120) causes zero/double
+                // steps when the poll clock crosses the synthetic clock's phase. Preserve
+                // distance at the actual sample time instead; real input is unchanged.
+                let (dy, count) = if precise {
+                    (touch_delta(*rate, *seconds, elapsed, &mut drive.sampled), 1)
+                } else {
+                    let due = (elapsed.min(*seconds) * rate.abs()) as u64;
+                    let count = due.saturating_sub(drive.sent);
+                    drive.sent = due;
+                    (40.0 * rate.signum() as f32, count)
+                };
                 let line_h = crate::editor::view::line_height(app);
                 let file = match &app.active_tab().kind { TabKind::Editor { path } => Some(path.clone()), _ => None };
                 let chat = active_session(app);
-                while drive.sent < due {
-                    drive.sent += 1;
+                for _ in 0..count {
                     let e = WheelEvent::new(0.0, dy).precise(precise);
                     match (&file, &chat) {
                         _ if app.active_tab().kind == TabKind::GitDiff => { app.git_review_wheel(&e, tx); }
@@ -222,7 +239,8 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                         _ => {}
                     }
                 }
-                (elapsed < *seconds).then(|| ((drive.sent + 1) as f64 / hz - elapsed).max(0.0))
+                (elapsed < *seconds).then(|| if precise { (seconds - elapsed).min(1.0 / TOUCH_HZ) }
+                    else { ((drive.sent + 1) as f64 / rate.abs() - elapsed).max(0.0) })
             }
             Step::Prompt(text) => {
                 let index = app.active;
@@ -344,7 +362,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         };
         match remaining {
             Some(wait) => { tx.wake_after(Duration::from_secs_f64(wait)); break; }
-            None => { drive.steps.pop_front(); drive.started = None; drive.sent = 0; }
+            None => { drive.steps.pop_front(); drive.started = None; drive.sent = 0; drive.sampled = 0.0; }
         }
     }
     if !drive.steps.is_empty() { app.drive = Some(drive); }
@@ -354,6 +372,24 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuous_touch_does_not_alternate_zero_and_double_steps_at_clock_boundaries() {
+        let mut sampled = 0.0;
+        let mut distance = 0.0;
+        for frame in 1..=120 {
+            let elapsed = frame as f64 / 120.0 + if frame % 2 == 0 { 0.0001 } else { -0.0001 };
+            let delta = touch_delta(700.0, 1.0, elapsed, &mut sampled);
+            assert!((5.6..6.1).contains(&delta), "uneven synthetic motion: {delta}");
+            distance += delta;
+        }
+        assert!((distance - 700.0).abs() < 0.01);
+        assert_eq!(touch_delta(700.0, 1.0, 1.5, &mut sampled), 0.0);
+        // A delayed poll preserves the elapsed distance; the end does not overshoot.
+        sampled = 0.0;
+        assert_eq!(touch_delta(-700.0, 1.0, 0.5, &mut sampled), -350.0);
+        assert_eq!(touch_delta(-700.0, 1.0, 1.5, &mut sampled), -350.0);
+    }
 
     #[test]
     fn a_script_parses_into_its_steps_and_skips_what_it_cannot_read() {

@@ -83,6 +83,27 @@ fn without_a_hook_nothing_is_timed_or_counted() {
     assert!(reports.0.is_none());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn feedback_is_available_independently_of_outcome_and_never_faked_from_targets() {
+    let (log, hook) = logging();
+    let mut reports = FrameReports::<()>::new(Some(hook), Some("main"));
+    let target = Instant::now() + Duration::from_millis(8);
+    reports.drawn(reports.stamp(), Some(target), Instant::now(), 0.0);
+    reports.set_presentation_feedback(Some(crate::PresentationFeedback::default()));
+    reports.drawn(reports.stamp(), Some(target), Instant::now(), 0.0);
+    reports.unchanged(Some(target));
+    reports.skipped();
+    reports.set_presentation_feedback(None); // an unsupported replacement surface
+    reports.skipped();
+    let log = log.borrow();
+    assert!(log[0].presentation_feedback().is_none());
+    for frame in &log[1..4] {
+        assert!(frame.presentation_feedback().unwrap().timestamps().is_empty());
+    }
+    assert!(log[4].presentation_feedback().is_none());
+}
+
 #[test]
 fn a_window_spec_keeps_its_app_s_hook_until_it_sets_its_own() {
     fn spec() -> AppSpec<()> { AppSpec::new("test", (100.0, 100.0), || (), |_, _| crate::el()) }

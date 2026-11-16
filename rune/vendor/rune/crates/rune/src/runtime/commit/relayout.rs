@@ -330,6 +330,13 @@ pub(super) fn lay_out_text_in_place(text: &mut TextSystem, n: &mut Node, scale: 
 /// Lays `n`'s text out at its content width `w`.
 pub(super) fn lay_out_text(text: &mut TextSystem, n: &mut Node, w: f32, scale: f32) {
     let Some(spec) = &n.text else { return };
+    // Sampling already replaced this node's placeholder. Rebuild its painted run exactly
+    // as latch_live does, without caching every published value. The retained seen token
+    // means an unchanged source will not lay it out again at the end of this frame.
+    if n.live_text_placeholder.is_some() {
+        n.text_layout = Some(text.layout_live(&spec.content, spec.style, scale));
+        return;
+    }
     // A cell of a run draws from the run's layout (and keeps it cached) instead of its own.
     let run = spec.advance_in.as_ref().map(|(run, at)| (text.run_layout(run, spec.style, scale), *at));
     if let Some((r, _)) = run.filter(|(r, at)| r.x(*at).is_some()) {

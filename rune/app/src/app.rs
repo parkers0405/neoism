@@ -310,6 +310,8 @@ pub struct App {
     pub wordmark: Wordmark,
     pub(crate) config_poll_at: Option<std::time::Instant>,
     pub fps: Option<u32>,
+    pub fps_presented: bool,
+    pub fps_meter: std::rc::Rc<std::cell::RefCell<crate::ui::fps::Meter>>,
     /// The FPS pill's reading: live text, so a new reading never re-runs the views.
     pub fps_live: rune::LiveText,
     /// When the FPS pill last changed (it refreshes at most twice a second).
@@ -377,6 +379,8 @@ impl App {
             wordmark,
             config_poll_at: None,
             fps: None,
+            fps_presented: false,
+            fps_meter: Default::default(),
             fps_live: rune::LiveText::new(""),
             fps_at: None,
             mcp_icons: Default::default(),

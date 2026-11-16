@@ -259,7 +259,8 @@ pub fn view(app: &App) -> El {
     }
     if let Some(fps) = app.fps {
         // The reading is live text in a three-digit slot: a new one repaints the label only.
-        pills.push(Pill { icon: ("FPS".into(), None), icon_bg: p.cyan, text: vec![(fps_label(fps), p.cyan)], live: Some(&app.fps_live) });
+        let metric = if app.fps_presented { "FPS" } else { "SUB" };
+        pills.push(Pill { icon: (metric.into(), None), icon_bg: p.cyan, text: vec![(fps_label(fps), p.cyan)], live: Some(&app.fps_live) });
     }
     let widths: Vec<(f32, f32)> = pills.iter().enumerate().map(|(i, pill)| {
         let icon_w = if pill.icon.1.is_some() { m.icon_w() } else { m.text_w(&pill.icon.0) };

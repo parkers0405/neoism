@@ -141,19 +141,19 @@ fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
             TabKind::Editor { path } => app.buffers.get(path).is_some_and(crate::editor::Buffer::dirty),
             _ => false,
         };
+        // Keep the close hit target alive before hover so a finger's first tap can close it.
+        let mut close = el().key(format!("pane-close:{tab_id}")).w(18.0).h(18.0).center()
+            .on_press(move |a: &mut App| {
+                if let Some(index) = a.tabs.iter().position(|t| t.id == tab_id) { a.close_tab(index); }
+            });
         if modified && app.tab_hover != Some(tab_id) {
             // Unsaved: a yellow dot in a soft halo takes the close glyph's place (`buffer_tabs`).
-            item = item.child(el().w(18.0).h(18.0).center()
-                .child(el().w(12.0).h(12.0).radius(6.0).center().fill(rgb(p.yellow).alpha(0.22))
-                    .child(el().w(8.0).h(8.0).radius(4.0).fill(rgb(p.yellow)))));
+            close = close.child(el().w(12.0).h(12.0).radius(6.0).center().fill(rgb(p.yellow).alpha(0.22))
+                .child(el().w(8.0).h(8.0).radius(4.0).fill(rgb(p.yellow))));
         } else if app.tab_hover == Some(tab_id) {
-            item = item.child(el().key(format!("pane-close:{tab_id}")).w(18.0).h(18.0).center()
-                .child(icon(app, glyph::CLOSE, 0.6, rgb(p.red)))
-                .on_press(move |a: &mut App| {
-                    if let Some(index) = a.tabs.iter().position(|t| t.id == tab_id) { a.close_tab(index); }
-                }));
+            close = close.child(icon(app, glyph::CLOSE, 0.6, rgb(p.red)));
         }
-        if !modified && app.tab_hover != Some(tab_id) { item = item.child(el().w(18.0).h(18.0)); }
+        item = item.child(close);
         tabs = tabs.child(app.tab_slide(crate::ui::tab_drag::Source::Buffer(tab_id), item));
     }
     // The dragged tab is previewed in another pane: its stand-in stays in this strip.

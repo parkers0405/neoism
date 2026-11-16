@@ -158,10 +158,8 @@ fn cursor_quad(app: &App) -> El {
         .child_if(glyph.is_some(), || text(glyph.clone().unwrap_or_default())
             .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0));
     // Inside a scroll view the block is clipped to it (its trail too), never over the chrome.
-    // Only a move between focus zones (Alt+Up from the composer to the tabs, a tab back down
-    // into the tree) crosses the chrome unclipped, like the original's window-wide canvas; a
-    // move inside one view (scrolling the cursor off it) stays clipped to it.
-    let clip = app.cursor_clip().filter(|_| !app.cursor.crossing());
+    // Focus changes must not let the trail paint over headers or neighbouring surfaces either.
+    let clip = app.cursor_clip();
     // A blink is one frame on, one off: the default enter/exit fade would repaint the window
     // for 0.2 s of every 0.53 s half period while the cursor sits still.
     match clip {
@@ -326,9 +324,9 @@ fn workspace_tabs(app: &App) -> El {
             .fill(rgb(if active { p.bg } else { p.surface })).corners([6.0, 6.0, 0.0, 0.0])
             .child(icon(app, if remote { glyph::CLOUD } else { glyph::FOLDER }, 1.25, rgb(p.folder)))
             .child(app.title(&title_key, title, app.ty.tab(), rgb(if active { p.fg } else { p.dim }), Some(180.0)))
-            .child_if(!hovered, || el().w(18.0).h(20.0))
-            .child_if(hovered, || el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center()
-                .child(icon(app, glyph::CLOSE, 0.6, rgb(p.red)))
+            // Touch has no prior hover: retain the hit target, only hide the glyph.
+            .child(el().key(format!("workspace-close:{index}")).w(18.0).h(20.0).center()
+                .child_if(hovered, || icon(app, glyph::CLOSE, 0.6, rgb(p.red)))
                 .on_press(move |a: &mut App| {
                     if let Some(index) = a.workspaces.iter().position(|w| w.id == close_identity) { a.close_workspace(index); }
                 }))

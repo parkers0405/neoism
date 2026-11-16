@@ -245,7 +245,6 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let riding = app.cursor_riding();
     app.cursor.carry(riding.as_ref().map(|(key, offset)| (key.as_str(), *offset)));
     let target = app.cursor_target();
-    let moved_at = app.cursor.trail.moved_at;
     let cursor_wake = app.cursor.tick(target, std::time::Instant::now());
     if let Some(delay) = cursor_wake { wake!("cursor", delay); }
     if std::env::var_os("NEOISM_RUNE_TRACE_CURSOR").is_some() {
@@ -258,12 +257,11 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let per_frame = gliding || list_sliding || cursor_wake == Some(std::time::Duration::ZERO) || flashing || external_landing || mode_changing
         || wordmark_moving || animating || busy || skit || edge_scrolling || marquee_moving;
     let clip = app.cursor_clip();
-    app.cursor.track_clip(clip, app.cursor.trail.moved_at != moved_at);
     // The blink is a live opacity and travel a live offset: only the block appearing, leaving,
     // changing shape (a trail) or clip re-runs the views (`Cursor::place`).
     let glass_changed = glass_cursor::update(app, target);
     app.keep_vsync(per_frame || glass_cursor::animating());
-    let caret_changed = (app.cursor.place(clip.filter(|_| !app.cursor.crossing())) && !app.cursor.native_glass) | glass_changed;
+    let caret_changed = (app.cursor.place(clip) && !app.cursor.native_glass) | glass_changed;
     // Refresh the FPS pill when the measured rate moves; check again as old frames age out.
     // While animating, the pill shows the presentation rate; at rest it holds the last one.
     // At most twice a second, and through the pill's live text: only its first reading mounts

@@ -139,6 +139,8 @@ Window focus moves between zones: `sidebar`, `content`, `buffers` (pane tabs), `
 Text cursors: editor and composer carets use the trail cursor below; carets blink with a hold while typing
 (`DEFAULT_BLINK_PERIOD_MS`). The terminal composer shows inline completion ghost text after the caret.
 
+Row and editor cursors stay clipped to their active viewport, including while focus changes. The file tree and settings headers, menu bounds and neighbouring chrome must never be crossed by either the ordinary caret or the native glass lens.
+
 The opt-in `appearance.effects.liquid-glass-cursor` uses a live optical Metal lens on macOS with Rune's default native Metal backend. Swift encodes magnification, dispersive edges and velocity-responsive highlights into Rune's own presentation command buffer; there is no SwiftUI overlay or captured window image. Other platforms, headless rendering, explicitly selected wgpu, reduced transparency/increased contrast, and occluding popups keep the ordinary Rune cursor. Reduced motion snaps the native lens. See [`app/native/README.md`](app/native/README.md) for the GPU-copy distinction, resource contract and verification commands.
 
 ## NEOISM wordmark

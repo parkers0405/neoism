@@ -312,6 +312,32 @@ impl App {
         tree.select_after = Some(to.to_owned());
     }
 
+    /// Watch pushes cover external writers too (agent tools, shells and other windows).
+    /// Refresh cached directories without treating an ordinary edit as a deleted folder.
+    pub(crate) fn apply_tree_watch_changed(&mut self, root: &str, paths: &[String]) {
+        for sidebar in [Sidebar::Files, Sidebar::Notes] {
+            let scope = if sidebar == Sidebar::Notes {
+                let Some(root) = self.notes.root.clone() else { continue };
+                root
+            } else { self.cwd.clone() };
+            let owner = Tree { root: Some(scope), ..Default::default() };
+            if owner.own(root).as_deref() != Some("") { continue; }
+            let changed: Vec<String> = paths.iter().filter_map(|path| {
+                owner.own(path).or_else(|| {
+                    (!crate::startup::absolute(path)).then(|| path.trim_start_matches("./").to_owned())
+                })
+            }).collect();
+            let tree = self.tree_of(sidebar);
+            let dirs: Vec<String> = tree.listings.keys().filter(|dir| {
+                changed.iter().any(|path| {
+                    let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+                    path.is_empty() || *dir == path || dir.as_str() == parent || dir.starts_with(&format!("{path}/"))
+                })
+            }).cloned().collect();
+            for dir in dirs { self.list_dir(sidebar, &dir); }
+        }
+    }
+
     /// `Renamed` / `Deleted`: the folders that held the entry are listed again, in whichever
     /// tree shows them (a path does not say which tree asked; listing both costs a request).
     pub(crate) fn apply_tree_changed(&mut self, paths: &[&str]) {
@@ -439,6 +465,37 @@ mod tests {
         let rows = tree.rows();
         assert_eq!(rows[2].path, "src/main.rs");
         assert_eq!(rows[2].depth, 1);
+    }
+
+    #[test]
+    fn watch_push_refreshes_cached_tree_without_reopening_workspace() {
+        for root in ["/project", "C:\\project"] {
+            let mut app = App::new();
+            app.cwd = root.into();
+            app.notes.root = Some("/vault".into());
+            app.apply_dir_listing("", &serde_json::json!([{"name":"src", "is_dir":true}]));
+            app.apply_dir_listing("src", &serde_json::json!([{"name":"old.rs", "is_dir":false}]));
+            app.apply_dir_listing("/vault", &serde_json::json!([]));
+            app.tree.open.insert("src".into());
+            app.apply(crate::daemon::Inbound::Reply {
+                family: "Files".into(), request_id: 0,
+                message: serde_json::json!({"Changed": {"root": root, "paths": [format!("{root}/src/old.rs"), format!("{root}/new-folder")]}}),
+            });
+            assert!(app.tree.requested.contains(""), "new root entries trigger a listing");
+            assert!(app.tree.requested.contains("src"), "external child changes trigger a listing");
+            assert!(app.tree.open.contains("src"), "watch bursts preserve expanded folders");
+            assert!(app.notes.requested.is_empty(), "another root must not refresh notes");
+            app.apply_dir_listing("", &serde_json::json!([{"name":"src", "is_dir":true}, {"name":"new-folder", "is_dir":true}]));
+            app.apply_dir_listing("src", &serde_json::json!([{"name":"new.rs", "is_dir":false}]));
+            let paths: Vec<String> = app.tree.rows().into_iter().map(|r| r.path).collect();
+            assert_eq!(paths, ["new-folder", "src", "src/new.rs"]);
+            assert!(app.tree.requested.is_empty());
+            app.apply_tree_watch_changed("/other-project", &["/other-project/file.rs".into()]);
+            assert!(app.tree.requested.is_empty());
+            app.apply_tree_watch_changed("/vault", &["/vault/New Note.md".into()]);
+            assert!(app.notes.requested.contains(""));
+            assert!(app.tree.requested.is_empty());
+        }
     }
 
     #[test]

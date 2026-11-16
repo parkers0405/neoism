@@ -110,21 +110,21 @@ pub const KEYBINDS: &[KeybindDef] = &[
         "opencommandpalette",
         "Command palette",
         KeyGroup::Global,
-        "super",
+        "alt",
         "p",
         "alt",
         "p",
     ),
-    kb("searchfiles", "Search files", KeyGroup::Global, "super", "s", "alt", "s"),
-    kb("openagent", "Open agent", KeyGroup::Global, "super", "a", "alt", "a"),
-    kb("togglefiletree", "Toggle file tree", KeyGroup::Global, "super", "e", "alt", "e"),
-    kb("toggleconversations", "Conversations", KeyGroup::Global, "super", "c", "alt", "c"),
-    kb("changedirectory", "Change directory", KeyGroup::Global, "super", "o", "alt", "d"),
+    kb("searchfiles", "Search files", KeyGroup::Global, "alt", "s", "alt", "s"),
+    kb("openagent", "Open agent", KeyGroup::Global, "alt", "a", "alt", "a"),
+    kb("togglefiletree", "Toggle file tree", KeyGroup::Global, "alt", "e", "alt", "e"),
+    kb("toggleconversations", "Conversations", KeyGroup::Global, "alt", "c", "alt", "c"),
+    kb("changedirectory", "Change directory", KeyGroup::Global, "alt", "d", "alt", "d"),
     kb(
         "toggleneoismnotes",
         "Toggle notes panel",
         KeyGroup::Global,
-        "super",
+        "alt",
         "n",
         "alt",
         "n",
@@ -133,7 +133,7 @@ pub const KEYBINDS: &[KeybindDef] = &[
         "togglegitdiffpanel",
         "Toggle Git panel",
         KeyGroup::Global,
-        "super | shift",
+        "alt",
         "g",
         "alt",
         "g",
@@ -142,7 +142,7 @@ pub const KEYBINDS: &[KeybindDef] = &[
         "createtab",
         "New workspace",
         KeyGroup::Global,
-        "super | shift",
+        "control | shift",
         "w",
         "control | shift",
         "w",
@@ -151,7 +151,7 @@ pub const KEYBINDS: &[KeybindDef] = &[
         "createworkspaceterminaltab",
         "New terminal tab",
         KeyGroup::Global,
-        "super",
+        "alt",
         "t",
         "control | shift",
         "t",
@@ -277,7 +277,7 @@ pub const KEYBINDS: &[KeybindDef] = &[
         "openconfigeditor",
         "Open config file",
         KeyGroup::Global,
-        "super",
+        "alt",
         ",",
         "alt",
         ",",
@@ -394,7 +394,7 @@ pub fn format_combo(mods: &str, key: &str) -> String {
             }
             "alt" | "option" => {
                 if mac {
-                    "⌥"
+                    "Option"
                 } else {
                     "Alt"
                 }

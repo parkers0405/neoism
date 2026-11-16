@@ -217,10 +217,6 @@ pub struct Cursor {
     /// When the target went away: a brief gap (focus moving into a field whose caret is not
     /// measured yet) keeps the trail, so it still travels from where it was.
     hidden_at: Option<Instant>,
-    /// The scroll view the cursor was clipped to when its current move began, and the one it
-    /// is in now: a move between two (a focus-zone change) crosses the chrome unclipped.
-    pub move_clip: Option<[f32; 4]>,
-    pub clip: Option<[f32; 4]>,
     epoch: Instant,
     pub visible: bool,
     /// Ordinary block opacity: blink gated by placement and renderer ownership.
@@ -250,7 +246,7 @@ struct Drawn {
 
 impl Default for Cursor {
     fn default() -> Cursor {
-        Cursor { liquid_glass: false, native_glass: false, carry_delta: 0.0, caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, move_clip: None, clip: None, epoch: Instant::now(), visible: false, blink: rune::Live::new(1.0),
+        Cursor { liquid_glass: false, native_glass: false, carry_delta: 0.0, caret_line: Default::default(), caret_font: std::cell::Cell::new(15.0), trail: Trail::default(), shown: None, hidden_at: None, epoch: Instant::now(), visible: false, blink: rune::Live::new(1.0),
             base: [0.0; 2], shape: None, offset: rune::Live::new([0.0, 0.0]), riding: None, resting: None }
     }
 }
@@ -267,12 +263,6 @@ impl Cursor {
 
     fn sync_opacity(&self) {
         self.blink.set(if self.visible && self.placed() && !self.native_glass { 1.0 } else { 0.0 });
-    }
-
-    /// Record the clip after a tick: a new move remembers the clip it started from.
-    pub fn track_clip(&mut self, clip: Option<[f32; 4]>, moved: bool) {
-        if moved { self.move_clip = self.clip; }
-        self.clip = clip;
     }
 
     /// The cursor sits in the scrolled surface `key`, now at `offset`. When that surface has
@@ -314,9 +304,6 @@ impl Cursor {
         self.offset.set([0.0, 0.0]);
         true
     }
-
-    /// Whether the move in flight is crossing from one clip region to another.
-    pub fn crossing(&self) -> bool { self.trail.animating() && self.move_clip != self.clip }
 
     /// Whether there is a cursor to draw (lit or in its blink's dark half).
     pub fn placed(&self) -> bool { self.shown.is_some() && self.hidden_at.is_none() }

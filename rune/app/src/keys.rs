@@ -58,8 +58,8 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
-/// Window shortcuts, shared with text fields through `on_input_key`. macOS app commands
-/// use Command. Option+arrows retain the app-wide focus ladder, and Option+Shift
+/// Window shortcuts, shared with text fields through `on_input_key`. App panel commands
+/// use Alt on every platform. Option+arrows retain the app-wide focus ladder, and Option+Shift
 /// arrows reorder the active tab unless the workspace strip has focus.
 pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
@@ -357,7 +357,8 @@ impl App {
     /// The scroll view the cursor's target lives in: the cursor is clipped to it, so a row or
     /// cell scrolled out of view never paints over the tab bar, breadcrumb or status line.
     pub fn cursor_clip(&self) -> Option<[f32; 4]> {
-        if self.menu.is_some() || self.settings.is_some() { return None; }
+        if self.menu.is_some() { return self.rects.get("app-menu").copied(); }
+        if let Some(settings) = &self.settings { return self.rects.get(&crate::settings::view::scroll_key(settings)).copied(); }
         if self.finder.is_some() { return self.rects.get("finder-query-clip").copied(); }
         if self.browser.is_some() { return self.rects.get(crate::browser::view::LIST_KEY).copied(); }
         if let Some(picker) = &self.picker {
@@ -430,6 +431,28 @@ mod tests {
     use rune::Mods;
 
     fn ctrl(key: Key) -> KeyEvent { KeyEvent { key, mods: Mods { ctrl: true, cmd: true, ..Mods::default() } } }
+
+    #[test]
+    fn cursor_clip_follows_tree_menu_and_settings_viewports() {
+        let mut app = App::new();
+        app.sidebar = Some(crate::app::Sidebar::Files);
+        app.focus = Focus::Sidebar;
+        let tree_clip = [55.0, 66.0, 300.0, 400.0];
+        app.rects.insert("file-tree-rows".into(), tree_clip);
+        // A selected row can scroll above the header; its caret must keep the list's clip.
+        app.rects.insert("tree-row".into(), [55.0, 20.0, 300.0, 26.0]);
+        assert_eq!(app.cursor_clip(), Some(tree_clip));
+        app.toggle_menu();
+        let menu_clip = [55.0, 30.0, 196.0, 138.0];
+        app.rects.insert("app-menu".into(), menu_clip);
+        assert_eq!(app.cursor_clip(), Some(menu_clip));
+        app.menu = None;
+        app.open_settings();
+        let settings_clip = [240.0, 94.0, 600.0, 400.0];
+        let key = crate::settings::view::scroll_key(app.settings.as_ref().unwrap());
+        app.rects.insert(key, settings_clip);
+        assert_eq!(app.cursor_clip(), Some(settings_clip));
+    }
 
     #[test]
     fn alt_arrows_move_app_wide_cursor_with_glass_on_and_off() {

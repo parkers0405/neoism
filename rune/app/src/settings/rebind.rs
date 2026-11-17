@@ -231,8 +231,10 @@ impl App {
             return true;
         }
         // An overridden default must not fall through to the old hardcoded shortcut.
+        // Font zoom also has conventional app-wide aliases, after explicit bindings win.
         KEYBINDS.iter().any(|d| {
             supported(d.action)
+                && !matches!(d.action, "increasefontsize" | "decreasefontsize" | "resetfontsize")
                 && same(default(d), (&mods, &key))
                 && !same(binding(&self.keybindings, d), default(d))
         })

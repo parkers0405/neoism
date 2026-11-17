@@ -62,6 +62,7 @@ impl Metrics {
 /// Soft-wrapped rows of one line (an empty line still takes a row).
 /// The columns lines wrap at once the view has a width (0 before), for row-wise j/k.
 pub fn wrap_cols(app: &App, buffer: &Buffer) -> usize {
+    if super::markdown::enabled(buffer) { return 0; }
     if buffer.view_rect.is_none() { return 0; }
     Metrics::of(app, buffer).cols
 }
@@ -82,7 +83,7 @@ pub fn view(app: &App) -> El {
     } else if !buffer.loaded {
         col().w_full().grow(1.0)
     } else {
-        code(app, buffer)
+        if super::markdown::enabled(buffer) { super::markdown::view(app, buffer) } else { code(app, buffer) }
     };
     let mut page = col().key("editor").w_full().h_full().fill(app.surface(p.bg))
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("editor-page".into(), r); })
@@ -142,21 +143,18 @@ fn breadcrumb(app: &App, path: &str) -> El {
 
 /// The last message (`"x" written`, `E37: …`).
 fn command_line(app: &App, buffer: &Buffer) -> Option<El> {
+    // Pending Vim and leader keys are input state, not a message or a layout row.
+    let message = buffer.message.as_ref()?;
     let p = app.pal;
     let m = Metrics::of(app, buffer);
     let font = app.ty.code().lh(m.line_h);
     let line = row().key("editor-command").w_full().h(m.line_h).px(m.adv).center_y();
-    // Keys of an unfinished command (`2d`, `"a`, `ci`) sit at the right, as vim's showcmd.
-    let pending = buffer.doc.vim.pending.showcmd();
-    if buffer.message.is_none() && pending.is_empty() { return None; }
-    let message = buffer.message.clone().unwrap_or_default();
     let error = message.starts_with('E') && message[1..].starts_with(|c: char| c.is_ascii_digit());
     Some(line
-        .child(text(message).font(font).color(rgb(if error { p.red } else { p.dim })).grow(1.0).truncate().shrink())
-        .child(text(pending).font(font).color(rgb(p.muted))))
+        .child(text(message.clone()).font(font).color(rgb(if error { p.red } else { p.dim })).grow(1.0).truncate().shrink()))
 }
 
-fn syntax_color(p: &Palette, kind: Syntax) -> Option<u32> {
+pub(super) fn syntax_color(p: &Palette, kind: Syntax) -> Option<u32> {
     Some(match kind {
         Syntax::Keyword => p.syn_keyword,
         Syntax::String | Syntax::Regex => p.syn_string,
@@ -177,7 +175,7 @@ fn syntax_color(p: &Palette, kind: Syntax) -> Option<u32> {
 /// Bytes of line `index` inside the visual selection, end exclusive. Charwise selections are
 /// inclusive of the cursor's char (the range an operator takes), linewise ones cover the
 /// line, and a block covers the same display columns on every line.
-fn selection_on_line(doc: &Document, index: usize) -> Option<(usize, usize)> {
+pub(super) fn selection_on_line(doc: &Document, index: usize) -> Option<(usize, usize)> {
     if doc.mode != Mode::Visual { return None; }
     let anchor = doc.visual_anchor?;
     let cursor = doc.cursor();
@@ -443,6 +441,7 @@ fn code(app: &App, buffer: &Buffer) -> El {
 /// coordinates (wrapped rows counted). Read from the document rather than the last layout, so a
 /// follow issued before the next frame already aims at the right place.
 pub fn cursor_row_y(app: &App, buffer: &Buffer) -> (f32, f32) {
+    if super::markdown::enabled(buffer) { return super::markdown::cursor_row_y(app, buffer); }
     let m = Metrics::of(app, buffer);
     let cached = layout(buffer, m.cols);
     let line = buffer.doc.cursor_line.min(buffer.doc.lines.len().saturating_sub(1));
@@ -455,6 +454,7 @@ pub fn cursor_row_y(app: &App, buffer: &Buffer) -> (f32, f32) {
 /// never leave a stale layout rectangle over another line or over the chrome.
 pub fn cursor_rect(app: &App, buffer: &Buffer) -> Option<[f32; 4]> {
     if buffer.prompt.is_some() { return buffer.cursor_rect; }
+    if super::markdown::enabled(buffer) { return super::markdown::cursor_rect(app, buffer); }
     let rect = buffer.view_rect?;
     let m = Metrics::of(app, buffer);
     let cached = layout(buffer, m.cols);
@@ -474,7 +474,7 @@ pub(super) fn hit_window(app: &App, x: f32, y: f32, hover: bool) -> Option<(usiz
     let local_x = x - rect[0];
     let local_y = y - rect[1] + buffer.scroll.get().0;
     if hover && (x < rect[0] || x >= rect[0] + rect[2] || y < rect[1] || y >= rect[1] + rect[3]
-        || local_x < Metrics::of(app, buffer).gutter_w) { return None; }
+        || (!super::markdown::enabled(buffer) && local_x < Metrics::of(app, buffer).gutter_w)) { return None; }
     let pos = hit(app, local_x, local_y)?;
     if hover && buffer.doc.lines[pos.0].get(pos.1..)?.chars().next().is_none_or(char::is_whitespace) { return None; }
     Some(pos)
@@ -483,6 +483,7 @@ pub(super) fn hit_window(app: &App, x: f32, y: f32, hover: bool) -> Option<(usiz
 /// Hit testing shares the exact cached visual rows used by rendering and following.
 pub(super) fn hit(app: &App, x: f32, y: f32) -> Option<(usize, usize)> {
     let buffer = app.active_buffer()?;
+    if super::markdown::enabled(buffer) { return super::markdown::hit(app, buffer, x, y); }
     let m = Metrics::of(app, buffer);
     let cached = layout(buffer, m.cols);
     let target = ((y / m.line_h).floor().max(0.0) as usize).min(cached.rows.len().checked_sub(1)?);
@@ -499,10 +500,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pending_prefixes_keep_editor_viewport_and_caret_stable() {
+        for path in ["prefix.rs", "prefix.md"] {
+            let mut app = App::new();
+            app.open_file(path, None);
+            app.apply_opened_file(path, b"first line\nsecond line\n");
+            let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| view(a),
+                (900.0, 600.0), rune::Env::new(true, 1.0));
+            for _ in 0..4 { rt.frame(1.0 / 120.0); }
+            let viewport = rt.state.active_buffer().unwrap().view_rect.unwrap();
+            let caret_y = cursor_rect(&rt.state, rt.state.active_buffer().unwrap()).unwrap()[1];
+            let key = |rt: &mut rune::Runtime<App>, key: rune::Key| {
+                rt.update(|a, tx| {
+                    assert!(a.editor_key(&rune::KeyEvent { key, mods: Default::default() }, tx));
+                });
+                for _ in 0..4 { rt.frame(1.0 / 120.0); }
+            };
+            key(&mut rt, rune::Key::Text("y".into()));
+            let buffer = rt.state.active_buffer().unwrap();
+            assert_eq!(buffer.doc.vim.pending.showcmd(), "y");
+            assert_eq!(buffer.view_rect.unwrap(), viewport, "{path}: pending y resized viewport");
+            assert_eq!(cursor_rect(&rt.state, buffer).unwrap()[1], caret_y, "{path}: pending y moved caret");
+            assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("editor-command")));
+            key(&mut rt, rune::Key::Text("y".into()));
+            assert!(rt.state.active_buffer().unwrap().doc.vim.pending.is_empty());
+            assert_eq!(rt.state.clipboard.as_deref(), Some("first line\n"), "yy still yanks");
+
+            key(&mut rt, rune::Key::Text(" ".into()));
+            assert!(rt.state.active_buffer().unwrap().leader_pending);
+            assert_eq!(rt.state.active_buffer().unwrap().view_rect.unwrap(), viewport);
+            assert_eq!(cursor_rect(&rt.state, rt.state.active_buffer().unwrap()).unwrap()[1], caret_y);
+            assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("editor-command")));
+            key(&mut rt, rune::Key::Escape);
+            for prompt in ["/", "?", ":"] {
+                key(&mut rt, rune::Key::Text(prompt.into()));
+                assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("buffer-search-dialog")));
+                key(&mut rt, rune::Key::Escape);
+            }
+            for message in ["\"prefix\" written", "E37: No write since last change"] {
+                rt.update(|a, _| a.active_buffer_mut().unwrap().message = Some(message.into()));
+                rt.frame(1.0 / 120.0);
+                assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("editor-command")));
+            }
+        }
+    }
+
+    #[test]
     fn editor_cursor_and_hits_match_shaped_text_on_long_lines() {
         let _families = rune::text::with_families("Geist", "Geist Mono");
         let _fonts = rune::text::TextSystem::new(crate::FONTS, ("Geist", "Geist Mono"));
-        for path in ["alignment.rs", "alignment.md"] {
+        for path in ["alignment.rs"] {
             let mut app = App::new();
             app.ty.size = 15.25;
             app.ty.code_family = crate::ui::fonts::code_family("Geist Mono");

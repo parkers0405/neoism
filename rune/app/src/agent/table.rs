@@ -39,7 +39,7 @@ pub struct ScrollGesture {
 }
 
 impl ScrollGesture {
-    fn wheel(&mut self, key: &str, mut e: WheelEvent, now: std::time::Instant) -> Option<(bool, WheelEvent)> {
+    pub(crate) fn wheel(&mut self, key: &str, mut e: WheelEvent, now: std::time::Instant) -> Option<(bool, WheelEvent)> {
         if !e.precise { return Some((e.mods.shift, e)); }
         let fresh = e.phase == rune::GesturePhase::Began || self.key != key
             || (!e.momentum && self.last.is_some_and(|last| now.duration_since(last).as_millis() > 180));
@@ -65,9 +65,23 @@ impl ScrollGesture {
 
 /// The thumb for a `viewport` wide view of `content`: (its width, how far it travels along a
 /// `track` wide rail), as `markdown_horizontal_scrollbar_geometry` sizes it.
-fn thumb(track: f32, viewport: f32, content: f32, s: f32) -> (f32, f32) {
+pub(crate) fn thumb(track: f32, viewport: f32, content: f32, s: f32) -> (f32, f32) {
     let w = (track * (viewport / content)).clamp((THUMB_MIN * s).min(track), track);
     (w, (track - w).max(0.0))
+}
+
+pub(crate) fn column_widths(rows: &[Vec<String>], width: f32, s: f32, advance: f32) -> Vec<f32> {
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let mut widths: Vec<f32> = (0..columns).map(|c| {
+        let longest = rows.iter().filter_map(|r| r.get(c)).map(|t| t.chars().count()).max().unwrap_or(0);
+        (longest as f32 * advance + 28.0 * s).clamp(MIN_COLUMN * s, MAX_COLUMN * s)
+    }).collect();
+    let total: f32 = widths.iter().sum();
+    if total < width {
+        let extra = (width - total) / columns as f32;
+        for w in &mut widths { *w += extra; }
+    }
+    widths
 }
 
 /// A run of assistant markdown: prose (rendered as markdown) or a pipe table.
@@ -127,18 +141,10 @@ fn looks_like_file_ref(cell: &str) -> bool {
 pub fn view(app: &App, rows: &[Vec<String>], width: f32, style: &MarkdownStyle, scroll_key: String, _foot: f32, session: &str) -> El {
     let p = app.pal;
     let s = app.ty.scale();
-    let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
     let advance = app.ty.size * 0.6;
     // Content widths (monospace), clamped, then stretched to fill a small table's viewport.
-    let mut widths: Vec<f32> = (0..columns).map(|c| {
-        let longest = rows.iter().filter_map(|r| r.get(c)).map(|t| t.chars().count()).max().unwrap_or(0);
-        (longest as f32 * advance + 28.0 * s).clamp(MIN_COLUMN * s, MAX_COLUMN * s)
-    }).collect();
+    let widths = column_widths(rows, width, s, advance);
     let total: f32 = widths.iter().sum();
-    if total < width {
-        let extra = (width - total) / columns as f32;
-        for w in &mut widths { *w += extra; }
-    }
     let border = rgb(p.fg);
     let mut grid = col().border(1.0 * s, border);
     for (r, cells) in rows.iter().enumerate() {

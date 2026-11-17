@@ -107,9 +107,9 @@ pub struct Mark {
     /// The rainbow preset's step, so its rows repaint as the hue turns.
     rainbow: Option<u32>,
     /// The caret's byte column on this line, and whether it is an insert beam.
-    caret: Option<(usize, bool)>,
+    pub(crate) caret: Option<(usize, bool)>,
     /// The selected bytes of this line, and whether the selection runs on past its end.
-    band: Option<(usize, usize, bool)>,
+    pub(crate) band: Option<(usize, usize, bool)>,
 }
 
 /// Other people's carets and selections on line `index` of the buffer whose shared document

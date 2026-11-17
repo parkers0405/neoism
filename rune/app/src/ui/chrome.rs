@@ -149,6 +149,8 @@ fn cursor_quad(app: &App) -> El {
     let quad = rune::canvas(rune::Shape::new().view_box(w, h).fill(points, rgb(app.pal.accent))).w(w).h(h);
     // Settled on an editor cell, the block shows its character in the background colour.
     let glyph = app.editor_cursor_glyph().filter(|_| !app.cursor.trail.animating());
+    let cursor_font = app.active_buffer().filter(|b| crate::editor::markdown::enabled(b) && b.prompt.is_none())
+        .map_or_else(|| app.ty.code(), |b| crate::editor::markdown::cursor_font(app, b));
     // Mounted while placed and blinking by a live opacity: a half period repaints the block
     // alone. Re-running the views for it cost a whole commit twice a second, a missed refresh
     // whenever something else was moving.
@@ -156,7 +158,7 @@ fn cursor_quad(app: &App) -> El {
         .live_opacity(&app.cursor.blink).live_offset(&app.cursor.offset).instant_changes()
         .child(quad)
         .child_if(glyph.is_some(), || text(glyph.clone().unwrap_or_default())
-            .font(app.ty.code().lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0));
+            .font(cursor_font.lh(h)).color(rgb(app.pal.bg)).absolute(0.0, 0.0));
     // Inside a scroll view the block is clipped to it (its trail too), never over the chrome.
     // Focus changes must not let the trail paint over headers or neighbouring surfaces either.
     let clip = app.cursor_clip();

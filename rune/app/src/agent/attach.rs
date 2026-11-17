@@ -156,24 +156,29 @@ impl App {
     }
 
     pub fn markdown_images(&self, source: &str) -> HashMap<String, rune::Image> {
-        let Some(cache) = self.images.as_ref() else { return HashMap::new() };
         let mut result = HashMap::new();
         for event in pulldown_cmark::Parser::new(source) {
             let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) = event else { continue };
             let src = dest_url.to_string();
-            let Some(path) = inline_path(&src, &self.cwd).or_else(|| src.starts_with("data:image/").then(|| src.clone())) else { continue };
-            let key = format!("inline:{path}");
-            let cached = self.attach.images.borrow().get(&key).cloned();
-            let image = if let Some(image) = cached { image } else {
-                let image = if path.starts_with("data:") { history_bytes(&path).map(|bytes| cache.load(bytes)) }
-                    else { Some(cache.file(&path, 1024.0, 2.0)) };
-                if let Some(image) = &image { self.attach.inline_pending.borrow_mut().push(image.clone()); }
-                self.attach.images.borrow_mut().insert(key, image.clone());
-                image
-            };
-            if let Some(image) = image { result.insert(src, image); }
+            if let Some(image) = self.markdown_image_at(&src, &self.cwd) { result.insert(src, image); }
         }
         result
+    }
+
+    /// Shared note-body/cover loader. `base_dir` is the note's directory, never the
+    /// process cwd. Rune performs file reads and image decoding on its worker;
+    /// completion uses the same poll/version lifecycle as agent inline images.
+    /// Unsupported network schemes return None (no implicit network requests).
+    pub fn markdown_image_at(&self, src: &str, base_dir: &str) -> Option<rune::Image> {
+        let cache = self.images.as_ref()?;
+        let path = inline_path(src, base_dir).or_else(|| src.starts_with("data:image/").then(|| src.to_owned()))?;
+        let key = format!("inline:{path}");
+        if let Some(image) = self.attach.images.borrow().get(&key) { return image.clone(); }
+        let image = if path.starts_with("data:") { history_bytes(&path).map(|bytes| cache.load(bytes)) }
+            else { Some(cache.file(&path, 1024.0, 2.0)) };
+        if let Some(image) = &image { self.attach.inline_pending.borrow_mut().push(image.clone()); }
+        self.attach.images.borrow_mut().insert(key, image.clone());
+        image
     }
 
     pub fn preview_inline_image(&mut self, src: &str, name: &str) {
@@ -315,14 +320,31 @@ fn thumb(app: &App, image: Option<rune::Image>, size: f32) -> El {
 }
 
 fn inline_path(src: &str, cwd: &str) -> Option<String> {
+    // Normalize the base before URL joining: otherwise a trailing `..` is
+    // treated as a directory name when a relative image also climbs a level.
+    use std::path::{Component, Path, PathBuf};
+    let mut base = PathBuf::new();
+    for part in Path::new(cwd).components() {
+        match part {
+            Component::CurDir => {},
+            Component::ParentDir if base.file_name().is_some_and(|n| n != "..") => { base.pop(); },
+            Component::ParentDir if !base.has_root() => base.push(".."),
+            Component::ParentDir => {},
+            _ => base.push(part.as_os_str()),
+        }
+    }
     let path = if src.starts_with("file:") {
         url::Url::parse(src).ok()?.to_file_path().ok()?
     } else {
         // Web URLs and other schemes must never become local filesystem paths.
         if src.contains(':') && !std::path::Path::new(src).is_absolute() { return None; }
-        std::path::PathBuf::from(src)
+        // Markdown destinations may percent-encode spaces/non-ASCII filenames.
+        // URL joining is lexical and performs no filesystem or network work.
+        if let Ok(url) = url::Url::from_directory_path(&base) {
+            url.join(src).ok()?.to_file_path().ok()?
+        } else { std::path::PathBuf::from(src) }
     };
-    Some(if path.is_absolute() { path } else { std::path::Path::new(cwd).join(path) }.to_string_lossy().into_owned())
+    Some(if path.is_absolute() { path } else { base.join(path) }.to_string_lossy().into_owned())
 }
 
 /// The composer's attachment strip: a 64 pt thumbnail (or the file's name) and a × per
@@ -505,6 +527,11 @@ mod tests {
         let absolute = root.join("preview.png").to_string_lossy().into_owned();
         assert_eq!(inline_path(&absolute, cwd), Some(absolute.clone()));
         assert_eq!(inline_path("images/preview.png", cwd), Some(root.join("images/preview.png").to_string_lossy().into_owned()));
+        let dotted = root.join("notes").join("..");
+        assert_eq!(inline_path("images/preview.png", dotted.to_str().unwrap()),
+            Some(root.join("images/preview.png").to_string_lossy().into_owned()));
+        assert_eq!(inline_path("../preview.png", dotted.to_str().unwrap()),
+            Some(root.parent().unwrap().join("preview.png").to_string_lossy().into_owned()));
         let spaced = root.join("a b.png");
         let url = url::Url::from_file_path(&spaced).unwrap();
         assert_eq!(inline_path(url.as_str(), cwd), Some(spaced.to_string_lossy().into_owned()));

@@ -473,6 +473,33 @@ mod tests {
     }
 
     #[test]
+    fn markdown_replicas_merge_raw_markup_and_preserve_remote_caret() {
+        let raw = "# Shared\n\n**hé😀llo**\n| a | b |\n| --- | --- |\n";
+        let hub = Hub::new(raw);
+        let (mut a, mut da) = open(&hub, 1024, raw);
+        let (mut b, mut db) = open(&hub, 2048, raw);
+        db.set_cursor(Pos { line: 2, col: "**hé😀".len() });
+        da.set_cursor(Pos { line: 0, col: 0 });
+        da.type_text("intro\n");
+        let echo = hub.accept(&a.flush(&mut da));
+        deliver(&mut a, &mut da, &echo);
+        deliver(&mut b, &mut db, &echo);
+        assert_eq!(db.cursor(), Pos { line: 3, col: "**hé😀".len() });
+        // Concurrent edits retain both the rendered prose's source and the table syntax.
+        db.type_text("REMOTE");
+        da.set_cursor(Pos { line: 4, col: 2 });
+        da.type_text("LOCAL");
+        let (from_a, from_b) = (a.flush(&mut da), b.flush(&mut db));
+        let (echo_a, echo_b) = (hub.accept(&from_a), hub.accept(&from_b));
+        deliver(&mut a, &mut da, &echo_b); deliver(&mut a, &mut da, &echo_a);
+        deliver(&mut b, &mut db, &echo_a); deliver(&mut b, &mut db, &echo_b);
+        assert_eq!(da.text_for_disk(), db.text_for_disk());
+        assert_eq!(da.text_for_disk(), hub.doc.text());
+        assert!(da.text_for_disk().contains("**hé😀REMOTEllo**"));
+        assert!(da.text_for_disk().contains("| LOCALa | b |"));
+    }
+
+    #[test]
     fn undo_reverts_only_this_users_edits() {
         let hub = Hub::new("alpha beta\n");
         let (mut a, mut da) = open(&hub, 1024, "alpha beta\n");

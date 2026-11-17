@@ -31,6 +31,8 @@ pub(crate) use atlas_fill::QueuedFill;
 mod case;
 mod color_icon;
 mod cursor;
+mod geometry;
+pub use geometry::{Geometry, geometry, geometry_with};
 mod decorations;
 mod families;
 pub(crate) mod full_faces;

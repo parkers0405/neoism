@@ -15,6 +15,7 @@ pub struct Mouse {
 }
 struct Selection {
     point: [f32; 2],
+    link: Option<(Pos, u64, [f32; 2])>,
     anchor: (Pos, Pos),
     clicks: u32,
 }
@@ -48,17 +49,50 @@ fn span(line: &str, col: usize) -> (usize, usize) {
 impl App {
     pub fn editor_drag(&mut self, d: &Drag, tx: &mut Tx) {
         if d.phase == Phase::Up {
+            let link = self.active_buffer().and_then(|b| {
+                let (pos, revision, start) = b.mouse.drag.as_ref()?.link?;
+                (b.doc.revision == revision && b.doc.mode == Mode::Normal
+                    && (d.window_point()[0] - start[0]).abs() < 4.0
+                    && (d.window_point()[1] - start[1]).abs() < 4.0).then_some(pos)
+            });
             if let Some(b) = self.active_buffer_mut() {
                 b.mouse.drag = None;
+                b.mouse.tick = None;
+            }
+            // Rune consumes Escape while the pointer is held, delivering a cancelled
+            // release instead of AppSpec::on_key. Complete the same Vim transition here.
+            if d.cancelled() {
+                self.editor_key(&rune::KeyEvent { key: rune::Key::Escape, mods: Default::default() }, tx);
+            } else if let Some(pos) = link
+                && super::markdown::link_pointer_target(self, d.window_point()) == Some(pos) {
+                super::markdown::link_click(self, pos);
             }
             return;
         }
         let point = d.window_point();
+        if d.phase == Phase::Down && super::markdown::checkbox_press(self, point) {
+            if let Some(b) = self.active_buffer_mut() {
+                b.mouse.drag = None;
+                b.mouse.tick = None;
+            }
+            return;
+        }
+        // A control press did not start a text selection. Its subsequent moves
+        // must not steal focus or extend a pre-existing visual selection.
+        if d.phase != Phase::Down
+            && self.active_buffer().is_none_or(|b| b.mouse.drag.is_none())
+        {
+            return;
+        }
         let Some((line, col)) = view::hit_window(self, point[0], point[1], false) else {
             return;
         };
         self.focus = crate::app::Focus::Content;
         if d.phase == Phase::Down {
+            let link = (d.clicks == 1).then(|| super::markdown::link_pointer_target(self, point)).flatten();
+            // This is an app-owned editor, not a Rune TextEdit. A previously focused
+            // composer/query must not retain native keyboard ownership after this click.
+            tx.blur();
             self.editor_click(line, col, false);
             let Some(b) = self.active_buffer_mut() else {
                 return;
@@ -80,6 +114,7 @@ impl App {
             }
             b.mouse.drag = Some(Selection {
                 point: d.window_point(),
+                link: link.map(|pos| (pos, b.doc.revision, point)),
                 anchor,
                 clicks: d.clicks,
             });

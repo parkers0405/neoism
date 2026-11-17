@@ -87,6 +87,7 @@ impl App {
     pub fn place_conversations(&mut self, tx: &mut Tx) {
         let now = Instant::now();
         for step in self.scrollers.take_moves() {
+            if crate::editor::markdown::place_table_scroll(self, &step) { continue; }
             let Some(id) = step.key.strip_prefix("conversation:").map(str::to_owned) else {
                 tx.scroll_to_instant(step.key, 0.0, step.to);
                 continue;

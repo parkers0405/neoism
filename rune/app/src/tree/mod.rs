@@ -313,11 +313,12 @@ impl App {
     pub(crate) fn tree_move_path(&mut self, notes: bool, from: &str, to: &str) {
         let Some(root) = self.tree_root(notes) else { return };
         if from == to || from.is_empty() || to.is_empty() { return; }
-        let Some(daemon) = self.daemon.clone() else { return };
-        if !self.prepare_editor_rename(&root, from, to) { return; }
-        let request = daemon.request(Family::Files, serde_json::json!({"Rename": {"from": from, "to": to}}), Some(root.clone()));
-        let sidebar = if notes { Sidebar::Notes } else { Sidebar::Files };
-        self.tree_of(sidebar).renames.insert(request, (root, from.into(), to.into()));
+        if let Some(daemon) = self.daemon.clone() {
+            if !self.prepare_editor_rename(&root, from, to) { return; }
+            let request = daemon.request(Family::Files, serde_json::json!({"Rename": {"from": from, "to": to}}), Some(root.clone()));
+            let sidebar = if notes { Sidebar::Notes } else { Sidebar::Files };
+            self.tree_of(sidebar).renames.insert(request, (root, from.into(), to.into()));
+        }
         let tree = if notes { &mut self.notes } else { &mut self.tree };
         // Where it lands is shown (its folder opened) and it keeps the selection.
         let folder = to.rsplit_once('/').map_or("", |(dir, _)| dir);

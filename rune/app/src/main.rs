@@ -637,6 +637,46 @@ fn main() {
                 s.open_file("README.md", None);
                 s.apply_opened_file("README.md", include_bytes!("../../README.md"));
             }),
+            ("md-code-card", |s| {
+                s.open_file("code-cards.md", None);
+                s.apply_opened_file("code-cards.md", b"## Editable code cards\n\nThe deadline branch also preserves input fairness:\n\n```typescript\nif (kind === \"deadline\" || kind === \"yield-frame\") {\n  timer = setTimeout(\n    enqueue,\n    kind === \"yield-frame\" ? 0 : Math.max(0, delay)\n  );\n  delayed.add(timer);\n}\nelse enqueue();\n```\n\n| Item | Result |\n| --- | --- |\n| Code | Editable |\n\n```rust\nlet greeting = \"hello, world\";\n```\n");
+            }),
+            ("md-interactions", |s| {
+                let mut source = String::from("| Item | Owner | Status | Details | Source | Updated | Notes | Result |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+                for i in 0..120 {
+                    source.push_str(&format!("| Row {i} | Neoism | Ready | Editable **Markdown** with native Rune cells | src/editor/markdown/table.rs | Today | Trackpad, Shift-wheel and draggable scrollbar | Passed |\n"));
+                }
+                source.push_str("\n## Tasks\n\n- [ ] Click without moving the caret\n- [] Shorthand checkbox\n- [x] Completed task\n");
+                s.open_file("md-interactions.md", None);
+                s.apply_opened_file("md-interactions.md", source.as_bytes());
+            }),
+            ("md-images", |s| {
+                let base = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/splash");
+                let path = format!("{base}/images.md");
+                s.open_file(&path, None);
+                let path = s.active_buffer().unwrap().path.clone();
+                s.apply_opened_file(&path, b"# Inline images\nProse before ![Neoism](neoism-wordmark.png) and after stays editable.\n\n![[neoism-wordmark.png|260]]\n\n![Missing image](missing.png)\n\n`![code stays source](not-loaded.png)`\n");
+                // Fixture only: wait for deterministic headless pixels. Interactive
+                // rendering never waits for the worker.
+                if s.images.is_none() { s.images = Some(ImageCache::new(std::sync::Arc::new(|| {}))); }
+                if let Some(image) = s.markdown_image_at("neoism-wordmark.png", base) { let _ = image.wait(); }
+                if let Some(image) = s.markdown_image_at("missing.png", base) { let _ = image.wait(); }
+                s.inline_images_changed();
+            }),
+            ("md-page", |s| {
+                let base = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+                let cover = "../neoism-frontend/shared/assets/illuminated/public-domain/reusable-art/N.jpg";
+                let path = format!("{base}/field-notes.md");
+                let source = format!("---\ntitle: Field notes\nicon: 🦊\ncover: {cover}\ntags: [rune, notes, images]\nstatus: Draft\n---\n\n## An illustrated page\n\nA cover, icon and title are optional. The properties above are still the same editable YAML.\n\n![[app/assets/splash/neoism-wordmark.png|320]]\n\nThe text, image source and metadata share the existing document and undo history.\n");
+                s.open_file(&path, None);
+                let path = s.active_buffer().unwrap().path.clone();
+                s.apply_opened_file(&path, source.as_bytes());
+                if s.images.is_none() { s.images = Some(ImageCache::new(std::sync::Arc::new(|| {}))); }
+                for src in [cover, "app/assets/splash/neoism-wordmark.png"] {
+                    if let Some(image) = s.markdown_image_at(src, base) { image.wait().expect("page fixture image must decode"); }
+                }
+                s.inline_images_changed();
+            }),
             ("external-edit", |s| editor::external_edit::fixture(s, false)),
             ("external-edit-md", |s| editor::external_edit::fixture(s, true)),
             ("editor-git", |s| editor::git::fixture(s, false)),

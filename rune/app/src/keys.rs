@@ -85,6 +85,22 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     // An open menu owns its navigation keys before anything else.
     if app.menu.is_some() && app.menu_key(event) { return true; }
     if app.bound_shortcut(event, tx) { return true; }
+    // Keep the app-wide zoom aliases even when the saved font bindings use Super.
+    // A typed '+' includes Shift on most layouts; it is still the zoom-in chord.
+    if (m.ctrl || m.cmd || m.logo) && !m.alt {
+        let key = match &event.key {
+            Key::Command(c) => c.to_string(),
+            Key::Text(text) => text.clone(),
+            _ => String::new(),
+        };
+        let action = match key.as_str() {
+            "=" | "+" => Some(crate::palette::commands::Action::IncreaseFontSize),
+            "-" => Some(crate::palette::commands::Action::DecreaseFontSize),
+            "0" => Some(crate::palette::commands::Action::ResetFontSize),
+            _ => None,
+        };
+        if let Some(action) = action { app.run_action(action, tx); return true; }
+    }
     let m = event.mods;
     let mac = cfg!(target_os = "macos");
     let alt_only = m.alt && !m.ctrl && !m.shift && !m.logo;
@@ -431,6 +447,58 @@ mod tests {
     use rune::Mods;
 
     fn ctrl(key: Key) -> KeyEvent { KeyEvent { key, mods: Mods { ctrl: true, cmd: true, ..Mods::default() } } }
+
+    #[test]
+    fn command_zoom_accepts_shifted_plus_and_preserves_markdown_insert_state() {
+        for primary in [Mods { logo: true, ..Default::default() }, Mods { cmd: true, ..Default::default() }, Mods { ctrl: true, ..Default::default() }] {
+            let mut app = App::new();
+            app.keybindings = serde_json::json!([
+                {"action":"increasefontsize", "with":"super", "key":"="},
+                {"action":"decreasefontsize", "with":"super", "key":"-"}
+            ]);
+            app.ty.size = 14.0;
+            app.open_file("zoom.md", None);
+            app.apply_opened_file("zoom.md", b"# Zoom heading\neditable text\n");
+            app.buffers.get_mut("zoom.md").unwrap().doc.mode = crate::editor::Mode::Insert;
+            app.buffers.get_mut("zoom.md").unwrap().doc.cursor_line = 1;
+            let mut runtime = rune::Runtime::new(app, crate::ui::chrome::root,
+                (800.0, 500.0), rune::Env::new(true, 1.0));
+            runtime.on_key = Some(crate::on_key);
+            for _ in 0..3 { runtime.frame(1.0 / 60.0); }
+            let height = |rt: &rune::Runtime<App>| rt.elements().into_iter().find(|e| e.text.as_deref() == Some("Zoom heading")).unwrap().rect[3];
+            let before = height(&runtime);
+            let plus = KeyEvent { key: Key::Command('+'), mods: Mods { shift: true, ..primary } };
+            runtime.key(plus);
+            for _ in 0..3 { runtime.frame(1.0 / 60.0); }
+            assert_eq!(runtime.state.ty.size, 15.0);
+            assert!(height(&runtime) > before, "the rendered Markdown must reflow, not just the chrome");
+            let minus = KeyEvent { key: Key::Command('-'), mods: primary };
+            runtime.key(minus.clone());
+            runtime.frame(1.0 / 60.0);
+            assert_eq!(runtime.state.ty.size, 14.0, "after frame: {minus:?}");
+            let buffer = runtime.state.active_buffer().unwrap();
+            assert_eq!(buffer.doc.mode, crate::editor::Mode::Insert);
+            assert_eq!(buffer.doc.cursor_line, 1);
+            assert_eq!(buffer.doc.text_for_disk(), "# Zoom heading\neditable text\n");
+            assert!(!buffer.dirty());
+        }
+    }
+
+    #[test]
+    fn zoom_aliases_do_not_take_plain_text_or_override_explicit_bindings() {
+        let mut app = App::new();
+        app.ty.size = 14.0;
+        app.keybindings = serde_json::json!([
+            {"action":"togglefiletree", "with":"control", "key":"-"}
+        ]);
+        for mods in [Mods::default(), Mods { alt: true, logo: true, ..Default::default() }] {
+            assert!(!shortcut(&mut app, &KeyEvent { key: Key::Text("+".into()), mods }, &mut Tx::default()));
+            assert_eq!(app.ty.size, 14.0);
+        }
+        assert!(shortcut(&mut app, &ctrl(Key::Command('-')), &mut Tx::default()));
+        assert_eq!(app.ty.size, 14.0);
+        assert_eq!(app.sidebar, Some(crate::app::Sidebar::Files));
+    }
 
     #[test]
     fn cursor_clip_follows_tree_menu_and_settings_viewports() {

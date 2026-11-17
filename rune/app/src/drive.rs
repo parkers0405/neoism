@@ -13,6 +13,9 @@
 //! - `wheel:<notches per second>:<seconds>`: mouse-wheel notches over the active
 //!   conversation or file; a negative rate scrolls down
 //! - `touch:<points per second>:<seconds>`: continuous trackpad motion sampled on polls; negative scrolls down
+//! - `tablewheel:<notches per second>:<seconds>` / `tabletouch:<points per second>:<seconds>`:
+//!   horizontal wheel/trackpad motion over the active Markdown file's table at source line 0;
+//!   negative scrolls right (the `md-interactions` fixture starts with this table)
 //! - `keys:<text>:<per second>`: type `text` into the focused surface, a character at a time
 //!   (`jjjj` walks a file's cursor, as a held key does)
 //! - `alt:<up|down|left|right>`: dispatch an app-wide focus chord and log its target/material
@@ -32,7 +35,8 @@
 //! - `mark:<name>`
 //! - `quit`
 //!
-//! The deltas enter where Rune's wheel handler does (`App::timeline_wheel`), so everything
+//! The deltas enter the real host wheel handlers (`App::timeline_wheel`, `App::editor_wheel`,
+//! or `editor::markdown::table_wheel`), so everything
 //! after input dispatch is the real path.
 
 use crate::app::App;
@@ -48,6 +52,8 @@ enum Step {
     Wait(f64),
     Wheel { rate: f64, seconds: f64 },
     Touch { speed: f64, seconds: f64 },
+    TableWheel { rate: f64, seconds: f64 },
+    TableTouch { speed: f64, seconds: f64 },
     Keys { text: Vec<char>, rate: f64 },
     Alt(rune::Key),
     Prompt(String),
@@ -96,6 +102,8 @@ impl Drive {
                 "wait" => Step::Wait(rest.parse().ok()?),
                 "wheel" => { let (rate, seconds) = pair()?; Step::Wheel { rate, seconds } }
                 "touch" => { let (speed, seconds) = pair()?; Step::Touch { speed, seconds } }
+                "tablewheel" => { let (rate, seconds) = pair()?; Step::TableWheel { rate, seconds } }
+                "tabletouch" => { let (speed, seconds) = pair()?; Step::TableTouch { speed, seconds } }
                 "keys" => { let (text, rate) = rest.rsplit_once(':')?; Step::Keys { text: text.chars().collect(), rate: rate.parse().ok()? } }
                 "alt" => Step::Alt(match rest { "up" => rune::Key::Up, "down" => rune::Key::Down, "left" => rune::Key::Left, "right" => rune::Key::Right, "e" | "n" | "c" => rune::Key::Text(rest.into()), _ => return None }),
                 "prompt" => Step::Prompt(rest.to_owned()),
@@ -153,6 +161,8 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Wait(s) => format!("wait:{s}"),
                 Step::Wheel { rate, seconds } => format!("wheel:{rate}:{seconds}"),
                 Step::Touch { speed, seconds } => format!("touch:{speed}:{seconds}"),
+                Step::TableWheel { rate, seconds } => format!("tablewheel:{rate}:{seconds}"),
+                Step::TableTouch { speed, seconds } => format!("tabletouch:{speed}:{seconds}"),
                 Step::Keys { text, rate } => format!("keys:{}:{rate}", text.len()),
                 Step::Alt(key) => format!("alt:{key:?}"),
                 Step::Prompt(_) => "prompt".to_owned(),
@@ -214,8 +224,10 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 changed = true;
                 None
             }
-            Step::Wheel { rate, seconds } | Step::Touch { speed: rate, seconds } => {
-                let precise = matches!(step, Step::Touch { .. });
+            Step::Wheel { rate, seconds } | Step::Touch { speed: rate, seconds }
+            | Step::TableWheel { rate, seconds } | Step::TableTouch { speed: rate, seconds } => {
+                let precise = matches!(step, Step::Touch { .. } | Step::TableTouch { .. });
+                let table = matches!(step, Step::TableWheel { .. } | Step::TableTouch { .. });
                 // Quantizing a continuous gesture to floor(elapsed * 120) causes zero/double
                 // steps when the poll clock crosses the synthetic clock's phase. Preserve
                 // distance at the actual sample time instead; real input is unchanged.
@@ -231,8 +243,10 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 let file = match &app.active_tab().kind { TabKind::Editor { path } => Some(path.clone()), _ => None };
                 let chat = active_session(app);
                 for _ in 0..count {
-                    let e = WheelEvent::new(0.0, dy).precise(precise);
+                    let mut e = if table && precise { WheelEvent::new(dy, 0.0) } else { WheelEvent::new(0.0, dy) }.precise(precise);
+                    if table && !precise { e.mods.shift = true; }
                     match (&file, &chat) {
+                        _ if table => { crate::editor::markdown::table_wheel(app, 0, e, tx); }
                         _ if app.active_tab().kind == TabKind::GitDiff => { app.git_review_wheel(&e, tx); }
                         (Some(path), _) => { app.editor_wheel(path, e, tx); }
                         (_, Some(id)) => { app.timeline_wheel(id, e, line_h, tx); }
@@ -400,16 +414,19 @@ mod tests {
             unsafe { std::env::remove_var("NEOISM_RUNE_DRIVE") };
             drive
         };
-        let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; alt:up; alt:invalid; mark:end; quit").unwrap();
+        let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; alt:up; alt:invalid; mark:end; tablewheel:-12:2; tabletouch:700:3; quit").unwrap();
         let names: Vec<&str> = drive.steps.iter().map(|step| match step {
             Step::Rail(_) => "rail",
             Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
+            Step::TableWheel { .. } => "tablewheel", Step::TableTouch { .. } => "tabletouch",
             Step::Prompt(_) => "prompt", Step::Host(_) => "host",
             Step::Alt(_) => "alt",
             Step::JoinSystem(_) => "system", Step::JoinServer(_) => "server", Step::Fixture(_) => "fixture", Step::Sidebar => "sidebar", Step::Stream { .. } => "stream", Step::Live => "live",
             Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::TreeMenu(_) => "treemenu", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
-        assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "alt", "mark", "quit"]);
+        assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "alt", "mark", "tablewheel", "tabletouch", "quit"]);
+        assert!(matches!(&drive.steps[8], Step::TableWheel { rate, seconds } if *rate == -12.0 && *seconds == 2.0));
+        assert!(matches!(&drive.steps[9], Step::TableTouch { speed, seconds } if *speed == 700.0 && *seconds == 3.0));
         assert!(matches!(&drive.steps[6], Step::Alt(rune::Key::Up)));
         assert!(matches!(&drive.steps[2], Step::Wheel { rate, seconds } if *rate == -30.0 && *seconds == 2.0));
         // A prompt keeps its colons.

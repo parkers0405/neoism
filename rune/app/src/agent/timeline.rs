@@ -520,12 +520,21 @@ pub(crate) fn code_frame(app: &App) -> impl Fn(El, &CodeFrame<'_>) -> El + 'stat
             numbers = numbers.child(text(n.to_string()).font(ty.body()).color(rgb(p.muted)));
         }
         let source = frame.source.to_owned();
-        col().w_full().radius(14.0).fill(rgb(p.surface).alpha(0.35)).border(1.0, rgb(p.border)).clip_rounded(14.0)
-            .child(row().w_full().h(38.0).pl(22.0).pr(12.0).center_y().justify_between().fill(rgb(p.surface).alpha(0.55))
-                .child(text(frame.language.unwrap_or("text").to_owned()).font(ty.small()).color(rgb(p.yellow)))
-                .child(copy_button(&p, ty, source)))
+        code_surface(&p)
+            .child(code_header(&p, ty, frame.language.unwrap_or("text"), source))
             .child(row().w_full().px(22.0).py(12.0).child(numbers).child(code.grow(1.0)))
     }
+}
+
+/// Shared with editable Markdown. Keep the card chrome and native Copy feedback identical.
+pub(crate) fn code_surface(p: &crate::ui::theme::Palette) -> El {
+    col().w_full().radius(14.0).fill(rgb(p.surface).alpha(0.35)).border(1.0, rgb(p.border)).clip_rounded(14.0)
+}
+
+pub(crate) fn code_header(p: &crate::ui::theme::Palette, ty: crate::ui::theme::Type, language: &str, source: String) -> El {
+    row().w_full().h(38.0).pl(22.0).pr(12.0).center_y().justify_between().fill(rgb(p.surface).alpha(0.55))
+        .child(text(language.to_owned()).font(ty.small()).color(rgb(p.yellow)))
+        .child(copy_button(p, ty, source))
 }
 
 fn compaction_divider(app: &App, message: &HistoryMessage, label: &str) -> El {

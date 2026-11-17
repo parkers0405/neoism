@@ -7,11 +7,14 @@
 pub mod document;
 pub mod input;
 mod mouse;
+#[cfg(test)]
+mod native_input_tests;
 mod completion;
 pub mod lsp;
 pub mod diag_popup;
 pub mod lsp_view;
 pub mod view;
+pub(crate) mod markdown;
 pub(crate) mod vim;
 mod vim_apply;
 mod wrap;
@@ -54,6 +57,7 @@ pub struct Buffer {
     pub lsp: lsp::BufferLsp,
     pub mouse: mouse::Mouse,
     pub code_cache: view::CodeCache,
+    pub markdown_cache: markdown::Cache,
     pub view_rect: Option<[f32; 4]>,
     pub cursor_rect: Option<[f32; 4]>,
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
@@ -99,6 +103,7 @@ impl Buffer {
             lsp: lsp::BufferLsp::default(),
             mouse: mouse::Mouse::default(),
             code_cache: Default::default(),
+            markdown_cache: Default::default(),
             external_edit: None,
             git: Default::default(),
             view_rect: None, cursor_rect: None, scroll: Default::default(), wheel_target: None, jump_spring: None, kept_scroll: 0.0, shown: false, restoring: 0, search_origin: None, search_highlight: None, shared: None,
@@ -208,6 +213,7 @@ impl App {
             return;
         }
         buffer.code_cache.clear();
+        buffer.markdown_cache.clear();
         buffer.doc = Document::from_text(&text);
         if let Some(recovered) = buffer.recovered.take() {
             // The disk text stays the saved baseline, so the recovered edits read as unsaved.
@@ -337,12 +343,20 @@ impl App {
         let clipboard = self.clipboard.clone();
         let Some(buffer) = self.active_buffer_mut() else { return false };
         if !buffer.loaded || buffer.error.is_some() { return false; }
+        if key == Key::Esc {
+            // Escape belongs to the Vim document too, not just the completion popup.
+            // Stop edge scrolling before any prompt/LSP handler can return early.
+            buffer.mouse = mouse::Mouse::default();
+            buffer.lsp.dismiss();
+        }
         buffer.message = None;
         if key == Key::Ctrl('s') {
             // Ctrl+S saves from any mode, as the original's editor does.
             self.save_active();
             return true;
         }
+        if markdown::table_arrow(self, event) || markdown::before_key(self, key, event.mods.shift) { return true; }
+        let Some(buffer) = self.active_buffer_mut() else { return false };
         // Resolve on a clone so `fp` and named-register pastes retain Vim semantics.
         if matches!(key, Key::Char('p' | 'P')) && buffer.prompt.is_none() && buffer.doc.mode != Mode::Insert {
             let Key::Char(c) = key else { unreachable!() };
@@ -373,7 +387,7 @@ impl App {
             tx.scroll_to_with(super::editor::lsp_view::HOVER_SCROLL_KEY, 0.0, target, view::SCROLL_SPRING);
             return true;
         }
-        if self.lsp_key_before(&key) { return true; }
+        if key != Key::Esc && self.lsp_key_before(&key) { return true; }
         let Some(buffer) = self.active_buffer_mut() else { return false };
         let before = (buffer.doc.cursor(), buffer.doc.revision);
         let was_inserting = buffer.doc.mode == Mode::Insert;
@@ -384,6 +398,7 @@ impl App {
         if searching.is_some() && key == Key::Enter && let Some(origin) = buffer.search_origin { buffer.doc.set_cursor(origin); }
         let outcome = buffer.doc.key(key, &mut buffer.prompt, clipboard.as_deref());
         buffer.search_step(searching, key);
+        markdown::normalize(buffer);
         if (buffer.doc.cursor(), buffer.doc.revision) != before || std::mem::take(&mut buffer.doc.follow_cursor) {
             self.editor_follow = true;
         }
@@ -496,6 +511,7 @@ impl App {
             || self.settings.is_some() || self.modal.is_some();
         if overlay { return None; }
         let buffer = self.active_buffer().filter(|b| b.loaded && b.prompt.is_none() && b.doc.mode != Mode::Insert)?;
+        if markdown::enabled(buffer) { return markdown::cursor_glyph(self, buffer); }
         let ch = buffer.doc.lines.get(buffer.doc.cursor_line)?.get(buffer.doc.cursor_col..)?.chars().next()?;
         (!ch.is_whitespace()).then(|| ch.to_string())
     }
@@ -516,6 +532,7 @@ impl App {
     /// Place the cursor from a click at `(line, byte col)`; a drag extends a visual selection.
     pub fn editor_click(&mut self, line: usize, col: usize, drag: bool) {
         let Some(buffer) = self.active_buffer_mut() else { return };
+        buffer.markdown_cache.clear_vertical_goal();
         buffer.prompt = None;
         buffer.lsp.dismiss();
         let doc = &mut buffer.doc;
@@ -534,10 +551,13 @@ impl App {
         } else if doc.mode == Mode::Visual {
             doc.mode = Mode::Normal;
             doc.visual_anchor = None;
+            doc.vim.visual_linewise = false;
+            doc.vim.visual_block = false;
         }
         doc.set_cursor(pos);
         if doc.mode == Mode::Normal { doc.snap_normal_cursor(); }
         doc.clear_vertical_goal();
+        markdown::normalize(buffer);
     }
 }
 
@@ -575,6 +595,7 @@ impl App {
             buffer.message = Some(format!("\"{}\" written", document["display_path"].as_str().unwrap_or("config.json")));
         } else if !buffer.loaded {
             buffer.code_cache.clear();
+            buffer.markdown_cache.clear();
         buffer.doc = Document::from_text(document["content"].as_str().unwrap_or_default());
             buffer.loaded = true;
         }
@@ -616,6 +637,7 @@ impl App {
         // Until the view has laid out once there is no height to aim within; try next frame.
         let Some(view) = self.active_buffer().and_then(|b| b.view_rect) else { return };
         let Some(buffer) = self.active_buffer().filter(|b| b.loaded) else { return };
+        markdown::follow_horizontal(self, buffer);
         let key = view::scroll_key(&self.workspace_id, &buffer.path);
         let (row_y, content_h) = view::cursor_row_y(self, buffer);
         let offset = buffer.scroll.get().0;

@@ -85,7 +85,24 @@ fn valid_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
+fn valid_note_path(path: &str) -> bool {
+    !crate::startup::absolute(path) && !path.contains(['\\', '\0'])
+        && path.split('/').all(valid_name)
+}
+
 impl App {
+    /// Keyboard actions on the selected row use the same captured target and dialogs as clicks.
+    pub(crate) fn tree_prompt(&mut self, command: Command) {
+        let Some(tree) = self.active_tree() else { return };
+        let index = (tree.selected < tree.rows().len()).then_some(tree.selected);
+        self.open_tree_context(index, [0.0, 0.0]);
+        if let Some(index) = self.context.as_ref().and_then(|menu| menu.items.iter().position(|item| *item == command)) {
+            self.run_context(index);
+        } else {
+            self.context = None;
+        }
+    }
+
     /// Right-click on a tree row (`index`) or on the tree's blank space (`None`).
     pub fn open_tree_context(&mut self, index: Option<usize>, at: [f32; 2]) {
         let Some(sidebar) = self.sidebar.filter(|s| matches!(s, Sidebar::Files | Sidebar::Notes)) else { return };
@@ -118,7 +135,7 @@ impl App {
         let Some(menu) = self.context.take() else { return };
         let Some(command) = menu.items.get(index).copied() else { return };
         let target = menu.target;
-        let field = |value: &str| { let mut edit = TextEdit::new(value); edit.focused = true; Some(edit) };
+        let field = |value: &str| { let mut edit = TextEdit::new(value); edit.anchor = 0; edit.focused = true; Some(edit) };
         self.prompt = match (&target, command) {
             (Target::Tree { path: Some(path), is_dir, .. }, Command::Open) => {
                 let (path, is_dir) = (path.clone(), *is_dir);
@@ -128,7 +145,8 @@ impl App {
             (Target::Tree { directory, notes, .. }, Command::NewFile | Command::NewFolder) => Some(Prompt {
                 title: if command == Command::NewFolder { "New Folder" } else if *notes { "New Note" } else { "New File" }.into(),
                 body: format!("Create in {}", if directory.is_empty() { self.tree_root_label(&target) } else { directory.clone() }),
-                meta: String::new(), accept: "Create", input: field(if *notes && command == Command::NewFile { "Untitled.md" } else { "" }), target, command }),
+                meta: if *notes { "Use / for nested paths; end with / to create a folder.".into() } else { String::new() },
+                accept: "Create", input: field(if *notes && command == Command::NewFile { "Untitled.md" } else { "" }), target, command }),
             (Target::Tree { path: Some(path), .. }, Command::Rename) => Some(Prompt {
                 title: "Rename".into(), body: format!("Rename \u{201c}{path}\u{201d}."), meta: String::new(), accept: "Rename",
                 input: field(file_name(path)), target, command }),
@@ -177,8 +195,10 @@ impl App {
         let value = prompt.input.as_ref().map(|edit| edit.text.trim().to_owned()).unwrap_or_default();
         match (&prompt.target, prompt.command) {
             (Target::Tree { notes, directory, .. }, Command::NewFile | Command::NewFolder) => {
-                if !valid_name(&value) { self.prompt = Some(prompt); return; }
-                self.tree_create(*notes, directory, &value, prompt.command == Command::NewFolder);
+                let folder = prompt.command == Command::NewFolder || (*notes && value.ends_with('/'));
+                let name = if *notes { value.trim_end_matches('/') } else { &value };
+                if !(if *notes { valid_note_path(name) } else { valid_name(name) }) { self.prompt = Some(prompt); return; }
+                self.tree_create(*notes, directory, name, folder);
             }
             (Target::Tree { notes, path: Some(path), .. }, Command::Rename) => {
                 if !valid_name(&value) { self.prompt = Some(prompt); return; }
@@ -318,6 +338,83 @@ mod tests {
     }
 
     fn key(key: Key) -> KeyEvent { KeyEvent { key, mods: Default::default() } }
+
+    #[test]
+    fn notes_shortcuts_open_captured_dialogs_and_accept_safe_nested_paths() {
+        let mut app = App::new();
+        app.sidebar = Some(Sidebar::Notes);
+        app.focus = crate::app::Focus::Sidebar;
+        app.notes.root = Some("/vault".into());
+        app.apply_dir_listing("/vault", &serde_json::json!([{"name":"Agenda.md", "is_dir":false}]));
+        for (letter, command, title) in [("e", Command::Rename, "Rename"), ("d", Command::Delete, "Delete?"), ("a", Command::NewFile, "New Note")] {
+            assert!(crate::keys::on_key(&mut app, &key(Key::Text(letter.into())), &mut Tx::default()));
+            assert!(app.context.is_none());
+            let prompt = app.prompt.as_ref().unwrap();
+            assert_eq!(prompt.command, command);
+            assert_eq!(prompt.title, title);
+            assert!(matches!(&prompt.target, Target::Tree { notes:true, path:Some(path), .. } if path == "Agenda.md"));
+            app.context_prompt_key(&key(Key::Escape));
+            assert!(app.prompt.is_none());
+        }
+        app.tree_prompt(Command::NewFile);
+        for name in ["../escape", "Ideas/../escape", "/outside", "C:/outside", "Ideas\\escape", "", "./", "Ideas//Meeting"] {
+            app.prompt.as_mut().unwrap().input.as_mut().unwrap().replace_text(name);
+            app.accept_prompt();
+            assert!(app.prompt.is_some(), "invalid path {name:?} must keep the dialog open");
+        }
+        app.prompt.as_mut().unwrap().input.as_mut().unwrap().replace_text("Ideas/Projects/");
+        app.accept_prompt();
+        assert!(app.prompt.is_none());
+        app.apply_file_created("Ideas/Projects", true);
+        assert!(app.notes.open.contains("Ideas"));
+        assert!(app.active_buffer().is_none(), "a trailing slash creates a folder, not a note");
+        // Empty vaults can also create at the root.
+        app.apply_dir_listing("/vault", &serde_json::json!([]));
+        app.tree_prompt(Command::NewFile);
+        app.prompt.as_mut().unwrap().input.as_mut().unwrap().replace_text("Research/Meeting");
+        app.accept_prompt();
+        app.apply_file_created("Research/Meeting.md", false);
+        assert_eq!(app.active_buffer().unwrap().path, "/vault/Research/Meeting.md");
+        assert!(app.notes.open.contains("Research"));
+    }
+
+    #[test]
+    fn native_notes_rename_dialog_takes_typing_and_escape_returns_to_sidebar() {
+        let mut app = App::new();
+        app.sidebar = Some(Sidebar::Notes);
+        app.focus = crate::app::Focus::Sidebar;
+        app.notes.root = Some("/vault".into());
+        app.apply_dir_listing("/vault", &serde_json::json!([{"name":"Agenda.md", "is_dir":false}]));
+        app.tabs.iter_mut().for_each(|t| t.draft.focused = false);
+        let mut rt = rune::Runtime::new(app, crate::ui::chrome::root, (900.0, 600.0), rune::Env::new(true, 1.0));
+        rt.on_key = Some(crate::on_key);
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+        rt.key(key(Key::Text("e".into())));
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+        assert_eq!(rt.state.prompt.as_ref().unwrap().command, Command::Rename);
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("context-prompt-field")));
+        rt.key(key(Key::Text("x".into())));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.prompt.as_ref().unwrap().input.as_ref().unwrap().text, "x");
+        if let Some(path) = std::env::var_os("NEOISM_RUNE_NOTES_PROMPT_PNG") {
+            for _ in 0..90 { rt.frame(1.0 / 60.0); }
+            use rune::render::{Gpu, Offscreen, Renderer, OFFSCREEN_FORMAT};
+            let gpu = Gpu::headless();
+            let target = Offscreen::with_format(&gpu.device, 900, 600, OFFSCREEN_FORMAT);
+            let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (900, 600));
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            renderer.draw(&mut enc, &target.view, [0.0, 0.0, 0.0, 1.0]);
+            target.copy(&mut enc);
+            renderer.submit(&gpu.queue, enc);
+            rune::render::write_png(std::path::Path::new(&path), 900, 600, &target.read(&gpu.device)).unwrap();
+        }
+        rt.key(key(Key::Escape));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.prompt.is_none());
+        assert_eq!(rt.state.focus, crate::app::Focus::Sidebar);
+        assert_eq!(rt.state.notes.rows()[rt.state.notes.selected].path, "Agenda.md");
+    }
 
     #[test]
     fn a_row_and_blank_space_offer_what_they_can_do() {

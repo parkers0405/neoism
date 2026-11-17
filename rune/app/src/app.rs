@@ -534,7 +534,7 @@ impl App {
                     self.apply_dir_listing(listing["path"].as_str().unwrap_or_default(), &listing["entries"]);
                 }
                 if let Some(renamed) = message.get("Renamed") {
-                    self.apply_tree_changed(&[renamed["from"].as_str().unwrap_or_default(), renamed["to"].as_str().unwrap_or_default()]);
+                    self.apply_tree_renamed(request_id, renamed["from"].as_str().unwrap_or_default(), renamed["to"].as_str().unwrap_or_default());
                 }
                 if let Some(deleted) = message.get("Deleted") {
                     self.apply_tree_changed(&[deleted["path"].as_str().unwrap_or_default()]);

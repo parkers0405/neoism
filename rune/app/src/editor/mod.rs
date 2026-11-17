@@ -7,6 +7,7 @@
 pub mod document;
 pub mod input;
 mod mouse;
+mod rename;
 #[cfg(test)]
 mod native_input_tests;
 mod completion;
@@ -44,6 +45,7 @@ pub struct Buffer {
     /// The lines a `WriteFile` in flight carries; they become the saved baseline on success.
     pub(crate) saving: Option<Vec<String>>,
     pub(crate) saving_request: Option<u64>,
+    pub(crate) renaming: bool,
     close_after_save: Option<u64>,
     /// A transient note under the code (`"file.rs" written`, errors).
     pub message: Option<String>,
@@ -96,7 +98,7 @@ pub const CONFIG_DOCUMENT: &str = "config.json";
 impl Buffer {
     fn new(path: String, scope: String, line: Option<u32>) -> Buffer {
         Buffer {
-            path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, leader_pending: false, saving: None, saving_request: None, close_after_save: None, message: None,
+            path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, leader_pending: false, saving: None, saving_request: None, renaming: false, close_after_save: None, message: None,
             initial_line: line.map(|l| l.saturating_sub(1) as usize),
             recovered: None,
             config: None,
@@ -200,6 +202,7 @@ impl App {
     }
 
     pub(crate) fn apply_opened_file(&mut self, path: &str, bytes: &[u8]) {
+        let visible = self.active_buffer().is_some_and(|b| b.path == path);
         let Some(buffer) = self.buffers.get_mut(path) else { return };
         if bytes.iter().take(8192).any(|b| *b == 0) {
             buffer.error = Some("Binary file".into());
@@ -209,7 +212,23 @@ impl App {
         let text = String::from_utf8_lossy(bytes);
         if buffer.loaded {
             // A refresh after an on-disk change: only a clean buffer takes it.
-            if !buffer.doc.is_dirty() { buffer.doc.replace_from_disk(&text); }
+            if !buffer.doc.is_dirty() {
+                let delta = crate::collab::doc::diff(&buffer.doc.text_for_disk(), &text);
+                let follow = buffer.doc.follow_cursor;
+                buffer.doc.replace_from_disk(&text);
+                buffer.doc.follow_cursor = follow;
+                if let Some(delta) = delta {
+                    if let Some(old) = buffer.external_edit.take() { old.tick(false, old.revision); }
+                    if visible {
+                        let first = text[..delta.start].bytes().filter(|&b| b == b'\n').count()
+                            .min(buffer.doc.lines.len().saturating_sub(1));
+                        let last = (first + delta.inserted.bytes().filter(|&b| b == b'\n').count())
+                            .saturating_sub(usize::from(delta.inserted.ends_with('\n')))
+                            .min(buffer.doc.lines.len().saturating_sub(1)).max(first);
+                        buffer.external_edit = Some(external_edit::Flash::new(first, last, buffer.doc.revision));
+                    }
+                }
+            }
             return;
         }
         buffer.code_cache.clear();
@@ -462,7 +481,7 @@ impl App {
             return;
         };
         let Some(buffer) = self.active_buffer_mut() else { return };
-        if !buffer.loaded || buffer.error.is_some() || buffer.saving.is_some() { return; }
+        if !buffer.loaded || buffer.error.is_some() || buffer.saving.is_some() || buffer.renaming { return; }
         let text = buffer.doc.text_for_disk();
         if let Some(config) = &buffer.config {
             if !config.writable {

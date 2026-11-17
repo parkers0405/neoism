@@ -16,6 +16,10 @@ const CRDT_BROADCAST_CAPACITY: usize = 512;
 #[path = "close_tests.rs"]
 mod close_tests;
 
+#[cfg(test)]
+#[path = "rename_tests.rs"]
+mod rename_tests;
+
 #[derive(Clone)]
 pub struct CrdtSyncHub {
     buffers: CrdtBufferRegistry,
@@ -24,6 +28,9 @@ pub struct CrdtSyncHub {
     operation: Arc<Mutex<()>>,
     leases: Arc<Mutex<HashMap<CrdtBufferId, HashSet<(u64, String)>>>>,
     unknown_owners: Arc<Mutex<HashSet<CrdtBufferId>>>,
+    /// Retired identities must not be reseeded from a stale client's cache.
+    /// A successful disk-backed open (e.g. after explicit CreateFile) revives one.
+    renamed_ids: Arc<Mutex<HashSet<CrdtBufferId>>>,
     /// Last text observed on disk for every file-backed CRDT buffer.
     ///
     /// Agent tools and other external processes write files directly,
@@ -61,6 +68,7 @@ impl CrdtSyncHub {
             operation: Arc::new(Mutex::new(())),
             leases: Arc::new(Mutex::new(HashMap::new())),
             unknown_owners: Arc::new(Mutex::new(HashSet::new())),
+            renamed_ids: Arc::new(Mutex::new(HashSet::new())),
             disk_texts: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(HashMap::new())),
             peer_state_vectors: Arc::new(Mutex::new(HashMap::new())),
@@ -97,8 +105,18 @@ impl CrdtSyncHub {
     ) -> CrdtServerMessage {
         let _guard = self.operation.lock();
         let buffer_id = buffer_id.into();
-        self.unknown_owners.lock().insert(buffer_id.clone());
-        self.open_buffer_while_guarded(buffer_id, initial_text.as_ref())
+        let reply = self.open_buffer_while_guarded(buffer_id.clone(), initial_text.as_ref());
+        if matches!(&reply, CrdtServerMessage::Snapshot { .. }) {
+            self.unknown_owners.lock().insert(buffer_id);
+        }
+        reply
+    }
+
+    fn renamed_error(&self, buffer_id: &str) -> Option<CrdtServerMessage> {
+        self.renamed_ids.lock().contains(buffer_id).then(|| CrdtServerMessage::Error {
+            buffer_id: Some(buffer_id.to_owned()),
+            message: "document was renamed; reopen at its current path".into(),
+        })
     }
 
     fn open_buffer_while_guarded(
@@ -109,6 +127,13 @@ impl CrdtSyncHub {
         // The file itself is fresher than a pane/cache used to compose
         // OpenBuffer. This also establishes the disk baseline on first open.
         let disk_text = read_file_backing(&buffer_id);
+        if disk_text.is_some() {
+            // The name exists again: explicit file creation followed by open
+            // establishes a new identity, rather than reviving the old replica.
+            self.renamed_ids.lock().remove(&buffer_id);
+        } else if let Some(error) = self.renamed_error(&buffer_id) {
+            return error;
+        }
         let seed = disk_text
             .as_deref()
             .unwrap_or_else(|| initial_text.as_ref());
@@ -189,12 +214,14 @@ impl CrdtSyncHub {
                     Err(_) => break,
                 }
             }
-            self.leases
-                .lock()
-                .entry(buffer_id.clone())
-                .or_default()
-                .insert((connection, owner_id));
-            let reply = self.open_buffer_while_guarded(buffer_id, &initial_text);
+            let reply = self.open_buffer_while_guarded(buffer_id.clone(), &initial_text);
+            if matches!(&reply, CrdtServerMessage::Snapshot { .. }) {
+                self.leases
+                    .lock()
+                    .entry(buffer_id)
+                    .or_default()
+                    .insert((connection, owner_id));
+            }
             (vec![reply], pending)
         } else {
             (self.handle_socket_message(connection, message), Vec::new())
@@ -239,6 +266,10 @@ impl CrdtSyncHub {
                 initial_text,
             } => {
                 let _guard = self.operation.lock();
+                let reply = self.open_buffer_while_guarded(buffer_id.clone(), initial_text);
+                if !matches!(&reply, CrdtServerMessage::Snapshot { .. }) {
+                    return vec![reply];
+                }
                 if let Some(connection) = connection {
                     self.leases
                         .lock()
@@ -248,10 +279,7 @@ impl CrdtSyncHub {
                 } else {
                     self.unknown_owners.lock().insert(buffer_id.clone());
                 }
-                return vec![self.open_buffer_while_guarded(
-                    buffer_id.clone(),
-                    initial_text,
-                )];
+                return vec![reply];
             }
             CrdtClientMessage::CloseBuffer { buffer_id, owner_id } => {
                 let evicted = connection.is_some_and(|connection| {
@@ -277,6 +305,9 @@ impl CrdtSyncHub {
         };
         if let Some(id) = consumer {
             let _guard = self.operation.lock();
+            if let Some(error) = self.renamed_error(id) {
+                return vec![error];
+            }
             let owned = connection.zip(owner_id).is_some_and(|(connection, owner)| {
                 self.leases.lock().get(id).is_some_and(|owners| {
                     owners.contains(&(connection, owner.to_string()))
@@ -483,6 +514,9 @@ impl CrdtSyncHub {
     /// identical to the old "save my buffer" (the doc IS their buffer).
     pub fn save_buffer(&self, buffer_id: &str) -> CrdtServerMessage {
         let _guard = self.operation.lock();
+        if let Some(error) = self.renamed_error(buffer_id) {
+            return error;
+        }
         let Some(path) = crate::crdt::crdt_path_for_buffer_id(buffer_id) else {
             return CrdtServerMessage::Error {
                 buffer_id: Some(buffer_id.to_string()),
@@ -528,6 +562,124 @@ impl CrdtSyncHub {
                 message: format!("save failed for {path}: {err}"),
             },
         }
+    }
+
+    /// Rename on a blocking worker, serialized with edits, opens and saves.
+    /// Move the existing Yrs replica (never reseed it), including its disk
+    /// baseline and ownership. Old IDs deliberately have no save authority.
+    pub fn guarded_rename(
+        &self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> Result<(), String> {
+        let _guard = self.operation.lock();
+        // Resolve existing ancestors too: an absent file below a symlinked
+        // parent can still have a live replica/baseline at its canonical ID.
+        fn identity(path: &std::path::Path) -> std::path::PathBuf {
+            if let Ok(path) = crate::path::canonicalize(path) {
+                return path;
+            }
+            match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => identity(parent).join(name),
+                _ => path.to_path_buf(),
+            }
+        }
+        let source_path = identity(source);
+        let destination_path = identity(destination);
+        let metadata = std::fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+        let is_dir = metadata.is_dir()
+            || (metadata.is_symlink() && std::fs::metadata(source).is_ok_and(|m| m.is_dir()));
+        let mut buffers = self.buffers.inner.lock();
+        let mut moves = Vec::new();
+        for id in buffers.keys() {
+            let Some(path) = super::crdt_path_for_buffer_id(id) else {
+                continue;
+            };
+            let lexical = std::path::Path::new(path);
+            let path = identity(lexical);
+            // Lexical descendants include missing dirty files and symlinks
+            // whose targets are outside the moved directory.
+            let suffix = if lexical == source || (is_dir && lexical.starts_with(source)) {
+                lexical.strip_prefix(source).ok()
+            } else if path == source_path || (is_dir && path.starts_with(&source_path)) {
+                path.strip_prefix(&source_path).ok()
+            } else {
+                None
+            };
+            if let Some(suffix) = suffix {
+                let target = if suffix.as_os_str().is_empty() {
+                    destination.to_path_buf()
+                } else {
+                    destination.join(suffix)
+                };
+                moves.push((id.clone(), super::crdt_buffer_id_for_path(&target)));
+            } else if lexical == destination
+                || (is_dir && lexical.starts_with(destination))
+                || path == destination_path
+                || (is_dir && path.starts_with(&destination_path))
+            {
+                return Err(format!("rename refused: target has a live collaborative document: {id}"));
+            }
+        }
+        let mut targets = HashSet::new();
+        for (old, new) in &moves {
+            if !targets.insert(new.clone()) || (old != new && buffers.contains_key(new)) {
+                return Err("rename refused: collaborative document identity collision".into());
+            }
+        }
+        // Renaming a symlink does not relocate its target. Do not silently
+        // rebind an open target replica as though the target itself had moved.
+        if !moves.is_empty() && metadata.is_symlink() {
+            return Err("rename refused: open collaborative symlink target; rename the target instead".into());
+        }
+        if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(source, destination).map_err(|e| e.to_string())?;
+        let mut renamed = self.renamed_ids.lock();
+        for (old, new) in &moves {
+            if old != new {
+                renamed.insert(old.clone());
+                renamed.remove(new);
+            }
+        }
+        drop(renamed);
+        for (old, new) in &moves {
+            let mut buffer = buffers
+                .remove(old)
+                .expect("rename preflight held registry lock");
+            buffer.id = new.clone();
+            buffers.insert(new.clone(), buffer);
+        }
+        drop(buffers);
+        fn rekey<T>(map: &mut HashMap<String, T>, moves: &[(String, String)]) {
+            for (old, new) in moves {
+                if let Some(value) = map.remove(old) {
+                    map.insert(new.clone(), value);
+                }
+            }
+        }
+        rekey(&mut self.leases.lock(), &moves);
+        rekey(&mut self.disk_texts.lock(), &moves);
+        rekey(&mut self.peer_state_vectors.lock(), &moves);
+        rekey(&mut self.compaction.lock(), &moves);
+        let mut presence = self.presence.lock();
+        rekey(&mut presence, &moves);
+        for (_, new) in &moves {
+            if let Some(peers) = presence.get_mut(new) {
+                for peer in peers.values_mut() {
+                    peer.buffer_id = new.clone();
+                }
+            }
+        }
+        drop(presence);
+        let mut unknown = self.unknown_owners.lock();
+        for (old, new) in moves {
+            if unknown.remove(&old) {
+                unknown.insert(new);
+            }
+        }
+        Ok(())
     }
 
     /// Fold an external filesystem write (agent tool, formatter, shell, etc.)

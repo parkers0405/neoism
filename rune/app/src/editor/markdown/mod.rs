@@ -464,8 +464,10 @@ fn row_view(app: &App, buffer: &Buffer, i: usize) -> El {
     let selected = super::view::selection_on_line(&buffer.doc, entry.line);
     let table_layout = layout.table(entry.line);
     let peers = presence::marks(app, buffer, entry.line);
+    let flash = buffer.external_edit.as_ref().filter(|f| (f.first..=f.last).contains(&entry.line));
     let version = (entry.row.hash, entry.line, selected, buffer.search_highlight.clone(), buffer.doc.cursor_line == entry.line, buffer.doc.mode == Mode::Insert,
-        table_layout.map(|t| Rc::as_ptr(&t.scroll) as usize), peers.clone(), layout.card(entry.line).map(|c| c.range.start));
+        table_layout.map(|t| Rc::as_ptr(&t.scroll) as usize), peers.clone(), layout.card(entry.line).map(|c| c.range.start),
+        flash.map(|f| (f.first, f.last, f.revision)));
     rune::memo(format!("md-row:{}:{}:{i}", app.active_tab().id, buffer.path), version, || {
         let p = app.pal;
         let s = app.ty.scale();
@@ -476,6 +478,10 @@ fn row_view(app: &App, buffer: &Buffer, i: usize) -> El {
         let mut visual = el().w(table.map_or(layout.width, |t| t.width)).h(entry.row.height);
         if let Some(image) = &entry.row.image {
             visual = visual.child(image::view(app, image));
+        }
+        if let Some(flash) = flash {
+            visual = visual.child(el().key("external-edit").absolute(0.0, 0.0).w_full().h(entry.row.height)
+                .fill(rgb(p.accent).alpha(0.30)).live_opacity(&flash.opacity).live_offset(&flash.offset));
         }
         if let Some(table) = table {
             let mut x = 0.0;
@@ -747,6 +753,34 @@ mod tests {
         app.apply_opened_file("/notes/test.md", raw.as_bytes());
         app.active_buffer_mut().unwrap().view_rect = Some([20.0, 30.0, 620.0, 380.0]);
         app
+    }
+
+    #[test]
+    fn external_edit_landing_mounts_on_cached_rows_and_keeps_reader_state() {
+        let mut rt = rune::Runtime::new(app("# Title\n\nSome **prose**\n\n| head |\n| --- |\n| cell |\n"), |a, _| {
+            el().size(620.0, 380.0).child(view(a, a.active_buffer().unwrap()))
+        }, (620.0, 380.0), rune::Env::new(true, 1.0));
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+        let count = |rt: &rune::Runtime<App>| rt.elements().iter().filter(|e| e.key.as_deref() == Some("external-edit")).count();
+        assert_eq!(count(&rt), 0);
+        // Mount after a plain row has already been memoized; repeat on a table row.
+        for line in [2, 6] {
+            rt.update(|a, _| {
+                let b = a.active_buffer_mut().unwrap();
+                b.external_edit = Some(super::super::external_edit::Flash::new(line, line, b.doc.revision));
+            });
+            for _ in 0..4 { rt.frame(1.0 / 60.0); }
+            assert!(count(&rt) > 0, "the landing must reach the native render tree");
+            assert_eq!(rt.state.active_buffer().unwrap().doc.cursor_line, 0);
+            assert!(!rt.state.active_buffer().unwrap().doc.follow_cursor);
+            rt.update(|a, _| {
+                let f = a.active_buffer_mut().unwrap().external_edit.as_mut().unwrap();
+                f.started -= std::time::Duration::from_secs(1);
+                assert!(!a.external_edit_tick());
+            });
+            for _ in 0..4 { rt.frame(1.0 / 60.0); }
+            assert_eq!(count(&rt), 0);
+        }
     }
 
     #[test]

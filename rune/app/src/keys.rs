@@ -194,7 +194,7 @@ pub fn ctrl_letter(event: &KeyEvent) -> Option<char> {
 
 /// Tree navigation while the file tree has focus.
 fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
-    if event.mods.alt { return false; }
+    if event.mods.alt || event.mods.logo { return false; }
     let pending_g = std::mem::take(&mut app.pending_g);
     let count = app.tree_count.take();
     let page = app.tree_page_rows();
@@ -220,6 +220,10 @@ fn tree_key(app: &mut App, event: &KeyEvent) -> bool {
         Key::Left => app.tree_collapse(),
         Key::Escape => app.focus = Focus::Content,
         Key::Text(t) => match t.as_str() {
+            "e" | "d" | "a" if app.sidebar == Some(crate::app::Sidebar::Notes) => {
+                use crate::ui::context::Command;
+                app.tree_prompt(match t.as_str() { "e" => Command::Rename, "d" => Command::Delete, _ => Command::NewFile });
+            }
             "k" => app.tree_move(-times),
             "j" => app.tree_move(times),
             "l" | "o" => app.tree_activate(None),

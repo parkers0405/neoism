@@ -44,6 +44,7 @@ pub struct Tree {
     /// the daemon says it exists.
     creating: Option<(String, String, bool)>,
     create_request: Option<u64>,
+    renames: HashMap<u64, (String, String, String)>,
     /// The row to put the selection on once its folder's listing arrives.
     select_after: Option<String>,
 }
@@ -273,17 +274,26 @@ impl App {
         let sidebar = if notes { Sidebar::Notes } else { Sidebar::Files };
         let Some(root) = self.tree_root(notes) else { return };
         if self.tree_of(sidebar).creating.is_some() { return; }
+        let (dir, name) = match name.rsplit_once('/') {
+            Some((parent, name)) => (join(dir, parent), name),
+            None => (dir.to_owned(), name),
+        };
         let name = if notes && !folder && !name.to_ascii_lowercase().ends_with(".md") { format!("{name}.md") } else { name.to_owned() };
         let kind = if folder { "CreateDir" } else { "CreateFile" };
         let request = self.daemon.as_ref().map(|daemon| daemon.request(Family::Files, serde_json::json!({ kind: {"dir": dir, "name": name} }), Some(root)));
         let tree = self.tree_of(sidebar);
         tree.create_request = request;
-        tree.creating = Some((dir.to_owned(), name, folder));
+        tree.creating = Some((dir, name, folder));
     }
 
     pub(crate) fn tree_creation_error(&mut self, request_id: u64, error: &str) -> bool {
         for sidebar in [Sidebar::Notes, Sidebar::Files] {
             let tree = self.tree_of(sidebar);
+            if let Some((root, from, _)) = tree.renames.remove(&request_id) {
+                self.cancel_editor_rename(&root, &from);
+                self.modal = Some(crate::ui::modal::Modal::notice("Rename failed", error));
+                return true;
+            }
             if tree.create_request != Some(request_id) { continue; }
             tree.create_request = None;
             let Some((dir, name, folder)) = tree.creating.take() else { continue };
@@ -302,14 +312,27 @@ impl App {
     /// Rename or move `from` to `to` (both relative to the tree's root).
     pub(crate) fn tree_move_path(&mut self, notes: bool, from: &str, to: &str) {
         let Some(root) = self.tree_root(notes) else { return };
-        if let Some(daemon) = &self.daemon {
-            daemon.send_scoped(Family::Files, serde_json::json!({"Rename": {"from": from, "to": to}}), &root);
-        }
+        if from == to || from.is_empty() || to.is_empty() { return; }
+        let Some(daemon) = self.daemon.clone() else { return };
+        if !self.prepare_editor_rename(&root, from, to) { return; }
+        let request = daemon.request(Family::Files, serde_json::json!({"Rename": {"from": from, "to": to}}), Some(root.clone()));
+        let sidebar = if notes { Sidebar::Notes } else { Sidebar::Files };
+        self.tree_of(sidebar).renames.insert(request, (root, from.into(), to.into()));
         let tree = if notes { &mut self.notes } else { &mut self.tree };
         // Where it lands is shown (its folder opened) and it keeps the selection.
         let folder = to.rsplit_once('/').map_or("", |(dir, _)| dir);
         if !folder.is_empty() { tree.open.insert(folder.to_owned()); }
         tree.select_after = Some(to.to_owned());
+    }
+
+    pub(crate) fn apply_tree_renamed(&mut self, request: u64, from: &str, to: &str) {
+        for sidebar in [Sidebar::Files, Sidebar::Notes] {
+            if let Some((root, old, new)) = self.tree_of(sidebar).renames.remove(&request) {
+                self.apply_editor_renamed(&root, &old, &new);
+                break;
+            }
+        }
+        self.apply_tree_changed(&[from, to]);
     }
 
     /// Watch pushes cover external writers too (agent tools, shells and other windows).
@@ -373,11 +396,18 @@ impl App {
             let mut entries = tree.listings.get(&dir).cloned().unwrap_or_default();
             if !entries.iter().any(|e| e.name == name) { entries.push(Entry { name, is_dir }); }
             tree.set_listing(dir.clone(), entries);
-            tree.requested.remove(&dir);
             tree.select_after = Some(path.to_owned());
-            if !dir.is_empty() { tree.open.insert(dir.clone()); }
             let file = tree.open_path(path);
-            self.list_dir(sidebar, &dir);
+            // Nested creation may have made every parent: expose and refresh the whole chain.
+            let mut parent = dir.as_str();
+            loop {
+                let tree = self.tree_of(sidebar);
+                tree.requested.remove(parent);
+                if !parent.is_empty() { tree.open.insert(parent.to_owned()); }
+                self.list_dir(sidebar, parent);
+                if parent.is_empty() { break; }
+                parent = parent.rsplit_once('/').map_or("", |(dir, _)| dir);
+            }
             if !is_dir { self.open_file(&file, None); }
             return;
         }
@@ -568,6 +598,49 @@ mod tests {
         app.apply_file_created("New Folder", true);
         app.tree_create(false, "", "plain-file", false);
         assert_eq!(app.tree.creating.as_ref().unwrap().1, "plain-file", "the workspace file tree stays general purpose");
+    }
+
+    #[test]
+    fn nested_notes_and_folders_reveal_all_created_parents() {
+        let mut app = App::new();
+        app.notes.root = Some("/vault".into());
+        app.sidebar = Some(Sidebar::Notes);
+        app.apply_dir_listing("/vault", &serde_json::json!([]));
+        app.tree_create(true, "", "Ideas/Projects/Meeting", false);
+        assert_eq!(app.notes.creating, Some(("Ideas/Projects".into(), "Meeting.md".into(), false)));
+        app.apply_file_created("Ideas/Projects/Meeting.md", false);
+        assert!(app.notes.open.contains("Ideas"));
+        assert!(app.notes.open.contains("Ideas/Projects"));
+        assert_eq!(app.active_buffer().unwrap().path, "/vault/Ideas/Projects/Meeting.md");
+        app.apply_dir_listing("/vault", &serde_json::json!([{"name":"Ideas", "is_dir":true}]));
+        app.apply_dir_listing("/vault/Ideas", &serde_json::json!([{"name":"Projects", "is_dir":true}]));
+        assert_eq!(app.notes.rows()[app.notes.selected].path, "Ideas/Projects/Meeting.md");
+        let active = app.active;
+        app.tree_create(true, "Ideas", "Archive/2026", true);
+        assert_eq!(app.notes.creating, Some(("Ideas/Archive".into(), "2026".into(), true)));
+        app.apply_file_created("Ideas/Archive/2026", true);
+        assert!(app.notes.open.contains("Ideas/Archive"));
+        assert_eq!(app.active, active, "creating a folder does not open an editor");
+    }
+
+    #[test]
+    fn rename_ack_and_error_use_the_requests_vault_not_the_current_sidebar() {
+        let mut app = App::new();
+        app.open_file("/vault/Agenda.md", None);
+        app.apply_opened_file("/vault/Agenda.md", b"keep this text\n");
+        assert!(app.prepare_editor_rename("/vault", "Agenda.md", "Planning.md"));
+        app.notes.renames.insert(42, ("/vault".into(), "Agenda.md".into(), "Planning.md".into()));
+        app.notes.root = Some("/other-vault".into());
+        app.sidebar = Some(Sidebar::Files);
+        app.apply_tree_renamed(42, "Agenda.md", "Planning.md");
+        assert_eq!(app.active_buffer().unwrap().path, "/vault/Planning.md");
+        assert_eq!(app.active_buffer().unwrap().doc.lines, ["keep this text"]);
+        assert!(app.prepare_editor_rename("/vault", "Planning.md", "Failed.md"));
+        app.notes.renames.insert(43, ("/vault".into(), "Planning.md".into(), "Failed.md".into()));
+        assert!(app.tree_creation_error(43, "Permission denied"));
+        assert_eq!(app.active_buffer().unwrap().path, "/vault/Planning.md");
+        assert!(!app.active_buffer().unwrap().renaming);
+        assert!(!app.buffers.contains_key("/vault/Failed.md"));
     }
 
     #[test]

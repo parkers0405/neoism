@@ -1047,7 +1047,7 @@ pub(crate) async fn handle_socket(
                         });
                         continue;
                     }
-                    for message in files_handler::handle_with_root(&root, message).await {
+                    for message in files_handler::handle_with_hub(&root, message, &crdt).await {
                         let resp = ServiceServerMessage::FilesReply {
                             request_id,
                             message,
@@ -2183,7 +2183,8 @@ pub(crate) async fn handle_socket(
                 let _ = send_json(&mut sink, &denial).await;
                 continue;
             }
-            let responses = files_handler::handle(msg).await;
+            let responses =
+                files_handler::handle_with_hub(&files_handler::workspace_root(), msg, &crdt).await;
             for resp in responses {
                 if let Err(err) = send_json(&mut sink, &resp).await {
                     tracing::warn!(error = %err, "websocket send error");

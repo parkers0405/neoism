@@ -52,6 +52,14 @@
   </categories>
 
   <releases>
+    <release version="0.7.158" date="2026-11-17">
+      <description>
+        <p>Holds a steady 120 frames a second in Agent conversations on 120 Hz Macs: fixes a frame pacing rule that skipped every other refresh once a frame took more than about 3.7 ms.</p>
+        <p>Streams long replies in independently cached pieces and draws long code blocks in slabs, so streaming cost no longer grows with the reply.</p>
+        <p>Adds a macOS frame-pacing check based on actual presentation times, with scripted hand-on-trackpad scrolling.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.158</url>
+    </release>
     <release version="0.7.157" date="2026-11-16">
       <description>
         <p>Adds presentation timestamp and frame-pacing instrumentation and improves window-local FPS status, distinguishing completed presentations from submission fallback.</p>

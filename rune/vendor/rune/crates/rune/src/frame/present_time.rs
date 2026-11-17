@@ -230,6 +230,8 @@ pub(crate) mod metal {
 
         fn record_presented(&self, seq: u64, at: f64) {
             let valid = at.is_finite() && at > 0.0;
+            static TRACE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("RUNE_TRACE_GPU").is_some());
+            if *TRACE { eprintln!("[rune-shown] seq={seq} at={at:.6}"); }
             if !self.untraced { self.presented.lock().unwrap().push((seq, if valid { at } else { 0.0 })); }
             if valid {
                 // SAFETY: CACurrentMediaTime has no preconditions. Translate the actual

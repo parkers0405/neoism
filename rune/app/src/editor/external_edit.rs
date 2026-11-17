@@ -110,6 +110,11 @@ mod tests {
         app.editor_follow = false;
         let active = app.active;
         let focus = app.focus;
+        let b = app.buffers.get_mut("note.md").unwrap();
+        b.doc.cursor_line = 2;
+        b.doc.cursor_col = 1;
+        b.doc.follow_cursor = false;
+        b.scroll.set((120.0, 300.0, 100.0));
         let send = |app: &mut crate::app::App, value: &str| {
             let update = hub.apply_local_edit(CrdtTextEdit::Insert { index: 4, content: value.into() }).unwrap();
             app.apply_crdt(0, In::Sync { envelope: CrdtSyncEnvelope { buffer_id: "test-note".into(), origin_client_id: update.origin_client_id, update_v1: update.update_v1, state_vector_v1: update.state_vector_v1 } });
@@ -123,6 +128,10 @@ mod tests {
         assert_eq!(app.active, active);
         assert_eq!(app.focus, focus);
         assert!(!app.editor_follow);
+        let b = &app.buffers["note.md"];
+        assert_eq!((b.doc.cursor_line, b.doc.cursor_col), (2, 1));
+        assert_eq!(b.scroll.get(), (120.0, 300.0, 100.0));
+        assert!(!b.doc.follow_cursor);
         app.open_file("a.rs", None);
         assert!(!app.external_edit_tick());
         assert!(app.buffers["note.md"].external_edit.is_none());
@@ -131,5 +140,48 @@ mod tests {
         app.open_file("note.md", None);
         assert!(!app.external_edit_tick());
         assert!(app.buffers["note.md"].external_edit.is_none());
+    }
+
+    #[test]
+    fn disk_edits_animate_without_following_and_leave_dirty_buffers_alone() {
+        for path in ["code.rs", "note.md"] {
+            let mut app = crate::app::App::new();
+            app.open_file(path, None);
+            app.apply_opened_file(path, b"one\ntwo\nthree\n");
+            assert!(app.active_buffer().unwrap().external_edit.is_none());
+            app.editor_follow = false;
+            let active = app.active;
+            let focus = app.focus;
+            let b = app.active_buffer_mut().unwrap();
+            b.doc.cursor_line = 2;
+            b.doc.cursor_col = 1;
+            b.doc.follow_cursor = false;
+            b.scroll.set((120.0, 300.0, 100.0));
+            app.apply_opened_file(path, b"one\nchanged\nthree\n");
+            let b = app.active_buffer().unwrap();
+            assert_eq!(b.doc.lines[1], "changed");
+            let flash = b.external_edit.as_ref().unwrap();
+            assert_eq!((flash.first, flash.last), (1, 1));
+            assert_eq!((b.doc.cursor_line, b.doc.cursor_col), (2, 1));
+            assert_eq!(b.scroll.get(), (120.0, 300.0, 100.0));
+            assert!(!b.doc.follow_cursor);
+            assert!(!b.dirty());
+            assert_eq!(app.active, active);
+            assert_eq!(app.focus, focus);
+            assert!(!app.editor_follow);
+            app.active_buffer_mut().unwrap().external_edit = None;
+            app.apply_opened_file(path, b"one\nchanged\nthree\n");
+            assert!(app.active_buffer().unwrap().external_edit.is_none(), "an echo is not an edit");
+            app.active_buffer_mut().unwrap().doc.lines[1] = "unsaved".into();
+            app.active_buffer_mut().unwrap().doc.mark_edited();
+            app.apply_opened_file(path, b"one\nother\nthree\n");
+            assert_eq!(app.active_buffer().unwrap().doc.lines[1], "unsaved");
+            assert!(app.active_buffer().unwrap().external_edit.is_none());
+            let b = app.active_buffer_mut().unwrap();
+            b.doc.mark_saved_lines(b.doc.lines.clone());
+            app.open_file("other.rs", None);
+            app.apply_opened_file(path, b"one\nhidden\nthree\n");
+            assert!(app.buffers[path].external_edit.is_none());
+        }
     }
 }

@@ -224,11 +224,25 @@ impl App {
         self.crdt_send(&acquire);
     }
 
+    pub(crate) fn collab_retarget(&mut self, path: &str) {
+        let Some(buffer) = self.buffers.get_mut(path) else { return };
+        let id = Self::buffer_id(&buffer.host_path());
+        let Some(binding) = buffer.shared.as_mut() else { return };
+        self.collab.known.remove(&binding.buffer_id);
+        binding.buffer_id = id.clone();
+        self.collab.known.insert(id);
+        // Keep the same replica and undo manager; replay in-flight edits under the new id.
+        let out = binding.reconnect(&mut buffer.doc);
+        for message in &out { self.crdt_send(message); }
+        self.collab.focus = None;
+    }
+
     /// Per frame: send what was typed since the last frame, and carry out undo and redo.
     pub(crate) fn collab_flush(&mut self) -> bool {
         let mut out = Vec::new();
         let mut changed = false;
         for buffer in self.buffers.values_mut() {
+            if buffer.renaming { continue; }
             let Some(binding) = buffer.shared.as_mut() else { continue };
             let before = buffer.doc.revision;
             out.extend(binding.flush(&mut buffer.doc));
@@ -291,9 +305,14 @@ impl App {
         let visible = self.active_buffer().is_some_and(|b| b.path == key);
         let buffer = self.buffers.get_mut(&key).expect("found above");
         let own_save = request_id != 0 && buffer.saving_request == Some(request_id);
-        if own_save && matches!(message, In::Error { .. }) {
-            // The daemon cannot write this document (no disk baseline yet): write the file itself.
-            self.write_file(&key);
+        if own_save && let In::Error { message, .. } = &message {
+            // Only an unbacked new document needs the local-write fallback. A missing lease
+            // or renamed identity must never turn a rejected save into recreating the old file.
+            if message.contains("file identity has no successfully read disk baseline") {
+                self.write_file(&key);
+            } else {
+                self.editor_save_error(Some(request_id), message);
+            }
             return true;
         }
         let binding = buffer.shared.as_mut().expect("found above");

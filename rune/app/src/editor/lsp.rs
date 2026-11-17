@@ -282,6 +282,15 @@ impl App {
         self.editor_send(&scope, &message);
     }
 
+    /// Replace the old path's subscription without closing or releasing the live buffer.
+    pub(crate) fn lsp_retarget(&mut self, old: &str, new: &str) {
+        let Some(buffer) = self.buffers.get_mut(new) else { return };
+        buffer.lsp = BufferLsp::default();
+        let scope = buffer.scope.clone();
+        self.editor_send(&scope, &EditorClientMessage::CloseLspBuffer { surface_id: Some(surface_of(old)) });
+        self.lsp_sync(new);
+    }
+
     /// The tab closed: stop this surface's subscription.
     pub(crate) fn lsp_close(&mut self, path: &str) {
         let Some(buffer) = self.buffers.get_mut(path) else {

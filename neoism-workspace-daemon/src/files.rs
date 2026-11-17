@@ -142,6 +142,32 @@ pub async fn handle(msg: FilesClientMessage) -> Vec<FilesServerMessage> {
 }
 
 /// Dispatch a single client files message against an explicit workspace root.
+/// Production entry point: renames must share the CRDT document/disk gate.
+pub async fn handle_with_hub(
+    root: &Path,
+    msg: FilesClientMessage,
+    hub: &crate::crdt::sync::CrdtSyncHub,
+) -> Vec<FilesServerMessage> {
+    if let FilesClientMessage::Rename { from, to } = msg {
+        let src = match listing_identity_path(root, &from) {
+            Ok(path) => path,
+            Err(error) => return err(error),
+        };
+        let dst = match listing_identity_path(root, &to) {
+            Ok(path) => path,
+            Err(error) => return err(error),
+        };
+        let hub = hub.clone();
+        return match tokio::task::spawn_blocking(move || hub.guarded_rename(&src, &dst)).await {
+            Ok(Ok(())) => vec![FilesServerMessage::Renamed { from, to }],
+            Ok(Err(error)) => err(format!("rename {from} -> {to}: {error}")),
+            Err(error) => err(format!("rename worker failed: {error}")),
+        };
+    }
+    handle_with_root(root, msg).await
+}
+
+/// Files-only dispatch for callers without an authoritative document hub.
 pub async fn handle_with_root(
     root: &Path,
     msg: FilesClientMessage,

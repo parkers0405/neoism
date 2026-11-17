@@ -288,6 +288,7 @@ impl QueueInterface for MetalQueue {
             value = self.0.stamp(&mut st, &cb, Vec::new());
         }
         let drawable = ProtocolObject::<dyn MTLDrawable>::from_ref(&**drawable);
+        gpu_trace(&cb);
         if output.transaction {
             cb.commit();
             cb.waitUntilScheduled();
@@ -298,4 +299,22 @@ impl QueueInterface for MetalQueue {
         }
         st.frames.push_back(value);
     }
+}
+
+/// `RUNE_TRACE_GPU=1`: when each frame's command buffer was committed and when the GPU ran
+/// it, in host seconds (the clock of `presentedTime`), as `[rune-gpu]` on stderr.
+fn gpu_trace(cb: &ProtocolObject<dyn MTLCommandBuffer>) {
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("RUNE_TRACE_GPU").is_some());
+    if !*ON { return }
+    #[link(name = "QuartzCore", kind = "framework")]
+    unsafe extern "C" { fn CACurrentMediaTime() -> f64; }
+    // SAFETY: no preconditions.
+    let committed = unsafe { CACurrentMediaTime() };
+    let handler = block2_metal::RcBlock::new(move |cb: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        // SAFETY: Metal passes the completed buffer for the handler's duration.
+        let cb = unsafe { cb.as_ref() };
+        eprintln!("[rune-gpu] commit={committed:.6} start={:.6} end={:.6}", cb.GPUStartTime(), cb.GPUEndTime());
+    });
+    // SAFETY: Metal copies the block.
+    unsafe { cb.addCompletedHandler(block2_metal::RcBlock::as_ptr(&handler)); }
 }

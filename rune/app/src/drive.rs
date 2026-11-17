@@ -16,6 +16,9 @@
 //! - `tablewheel:<notches per second>:<seconds>` / `tabletouch:<points per second>:<seconds>`:
 //!   horizontal wheel/trackpad motion over the active Markdown file's table at source line 0;
 //!   negative scrolls right (the `md-interactions` fixture starts with this table)
+//! - `hand:<seconds>[:<flick|read|fight>[:<seed>]]`: on macOS, scroll as a hand on the trackpad
+//!   does (`native/HumanScroll.swift`): real scroll events with finger and momentum phases,
+//!   posted to the app's own event queue on their own clock, through AppKit and winit
 //! - `keys:<text>:<per second>`: type `text` into the focused surface, a character at a time
 //!   (`jjjj` walks a file's cursor, as a held key does)
 //! - `alt:<up|down|left|right>`: dispatch an app-wide focus chord and log its target/material
@@ -30,6 +33,8 @@
 //!   `hover:chat` rests it on the sidebar row with the longest title
 //! - `child`: open the first sub-agent at work under the active conversation (waits a minute for one)
 //! - `treemenu:<row>`: open the right-click menu on that row of the showing file or notes tree
+//! - `threads`: log the listed conversations (id, pinned, title)
+//! - `dump:<file>`: write the active conversation's loaded rows to a file as text
 //! - `rows`: log the active conversation's id and rows (kind, id, text length, text hash)
 //! - `watch:<seconds>`: log the held (or active) conversation's scroll offset every frame
 //! - `mark:<name>`
@@ -54,6 +59,7 @@ enum Step {
     Touch { speed: f64, seconds: f64 },
     TableWheel { rate: f64, seconds: f64 },
     TableTouch { speed: f64, seconds: f64 },
+    Hand { seconds: f64, profile: i32, seed: u64 },
     Keys { text: Vec<char>, rate: f64 },
     Alt(rune::Key),
     Prompt(String),
@@ -71,6 +77,8 @@ enum Step {
     Hover(Option<usize>),
     Child,
     Rows,
+    Threads,
+    Dump(String),
     Watch(f64),
     Mark(String),
     Quit,
@@ -104,6 +112,12 @@ impl Drive {
                 "touch" => { let (speed, seconds) = pair()?; Step::Touch { speed, seconds } }
                 "tablewheel" => { let (rate, seconds) = pair()?; Step::TableWheel { rate, seconds } }
                 "tabletouch" => { let (speed, seconds) = pair()?; Step::TableTouch { speed, seconds } }
+                "hand" => {
+                    let mut parts = rest.split(':');
+                    let seconds = parts.next()?.parse().ok()?;
+                    let profile = match parts.next() { None | Some("mixed") => 0, Some("flick") => 1, Some("read") => 2, Some("fight") => 3, _ => return None };
+                    Step::Hand { seconds, profile, seed: parts.next().map_or(Some(7), |seed| seed.parse().ok())? }
+                }
                 "keys" => { let (text, rate) = rest.rsplit_once(':')?; Step::Keys { text: text.chars().collect(), rate: rate.parse().ok()? } }
                 "alt" => Step::Alt(match rest { "up" => rune::Key::Up, "down" => rune::Key::Down, "left" => rune::Key::Left, "right" => rune::Key::Right, "e" | "n" | "c" => rune::Key::Text(rest.into()), _ => return None }),
                 "prompt" => Step::Prompt(rest.to_owned()),
@@ -126,6 +140,8 @@ impl Drive {
                 "watch" => Step::Watch(rest.parse().ok()?),
                 "child" => Step::Child,
                 "rows" => Step::Rows,
+                "threads" => Step::Threads,
+                "dump" => Step::Dump(rest.to_owned()),
                 "treemenu" => Step::TreeMenu(rest.parse().ok()?),
                 "mark" => Step::Mark(rest.to_owned()),
                 "quit" => Step::Quit,
@@ -135,6 +151,16 @@ impl Drive {
         (!steps.is_empty()).then_some(Drive { steps, started: None, sent: 0, sampled: 0.0, held: None })
     }
 }
+
+#[cfg(target_os = "macos")]
+fn human_scroll(seconds: f64, seed: u64, profile: i32) {
+    unsafe extern "C" { fn neoism_human_scroll(seconds: f64, seed: u64, profile: i32); }
+    // SAFETY: called on the main thread (the poll); the Swift side only reads its arguments.
+    unsafe { neoism_human_scroll(seconds, seed, profile) }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn human_scroll(_: f64, _: u64, _: i32) {}
 
 fn touch_delta(speed: f64, seconds: f64, elapsed: f64, sampled: &mut f64) -> f32 {
     let through = elapsed.clamp(0.0, seconds.max(0.0));
@@ -163,6 +189,7 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Touch { speed, seconds } => format!("touch:{speed}:{seconds}"),
                 Step::TableWheel { rate, seconds } => format!("tablewheel:{rate}:{seconds}"),
                 Step::TableTouch { speed, seconds } => format!("tabletouch:{speed}:{seconds}"),
+                Step::Hand { seconds, profile, seed } => format!("hand:{seconds}:{profile}:{seed}"),
                 Step::Keys { text, rate } => format!("keys:{}:{rate}", text.len()),
                 Step::Alt(key) => format!("alt:{key:?}"),
                 Step::Prompt(_) => "prompt".to_owned(),
@@ -180,6 +207,8 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 Step::Watch(s) => format!("watch:{s}"),
                 Step::Child => "child".to_owned(),
                 Step::Rows => "rows".to_owned(),
+                Step::Threads => "threads".to_owned(),
+                Step::Dump(_) => "dump".to_owned(),
                 Step::TreeMenu(row) => format!("treemenu:{row}"),
                 Step::Mark(name) => format!("mark:{name}"),
                 Step::Quit => "quit".to_owned(),
@@ -216,6 +245,10 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 None
             }
             Step::Wait(seconds) => (elapsed < *seconds).then(|| seconds - elapsed),
+            Step::Hand { seconds, profile, seed } => {
+                if fresh { human_scroll(*seconds, *seed, *profile); }
+                (elapsed < *seconds).then(|| seconds - elapsed)
+            }
             Step::Rail(panel) => {
                 match panel {
                     crate::app::Sidebar::Files | crate::app::Sidebar::Notes => app.click_tree(*panel),
@@ -359,6 +392,17 @@ pub fn tick(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
                 }
                 None
             }
+            Step::Threads => {
+                for thread in &app.threads { eprintln!("[drive] thread {} pinned={} {}", thread.session_id, thread.pinned, thread.title); }
+                None
+            }
+            Step::Dump(path) => {
+                if let Some(session) = active_session(app).and_then(|id| app.sessions.get(&id)) {
+                    let text: String = session.messages.iter().map(|m| format!("=== {:?} {} {}\n{}\n\n", m.kind, m.id, m.title, m.text)).collect();
+                    if let Err(error) = std::fs::write(path, text) { eprintln!("[drive] dump failed: {error}"); }
+                }
+                None
+            }
             Step::Watch(seconds) => {
                 let (offset, end) = drive.held.clone().or_else(|| active_session(app)).and_then(|id| app.sessions.get(&id).map(|s| s.scroll.get())).unwrap_or_default();
                 eprintln!("[drive] watching t={elapsed:.4} offset={offset:.1} end={end:.1}");
@@ -414,19 +458,21 @@ mod tests {
             unsafe { std::env::remove_var("NEOISM_RUNE_DRIVE") };
             drive
         };
-        let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; alt:up; alt:invalid; mark:end; tablewheel:-12:2; tabletouch:700:3; quit").unwrap();
+        let drive = parse("ready; wait:1.5; wheel:-30:2; touch:900:1; prompt:say hi: now; live; bogus; alt:up; alt:invalid; mark:end; tablewheel:-12:2; tabletouch:700:3; hand:2:flick:42; quit").unwrap();
         let names: Vec<&str> = drive.steps.iter().map(|step| match step {
             Step::Rail(_) => "rail",
             Step::Ready => "ready", Step::Wait(_) => "wait", Step::Wheel { .. } => "wheel", Step::Touch { .. } => "touch", Step::Keys { .. } => "keys",
             Step::TableWheel { .. } => "tablewheel", Step::TableTouch { .. } => "tabletouch",
+            Step::Hand { .. } => "hand",
             Step::Prompt(_) => "prompt", Step::Host(_) => "host",
             Step::Alt(_) => "alt",
             Step::JoinSystem(_) => "system", Step::JoinServer(_) => "server", Step::Fixture(_) => "fixture", Step::Sidebar => "sidebar", Step::Stream { .. } => "stream", Step::Live => "live",
-            Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::TreeMenu(_) => "treemenu", Step::Mark(_) => "mark", Step::Quit => "quit",
+            Step::Hold => "hold", Step::Tab(_) => "tab", Step::Hover(_) => "hover", Step::Watch(_) => "watch", Step::Child => "child", Step::Rows => "rows", Step::Threads => "threads", Step::Dump(_) => "dump", Step::TreeMenu(_) => "treemenu", Step::Mark(_) => "mark", Step::Quit => "quit",
         }).collect();
-        assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "alt", "mark", "tablewheel", "tabletouch", "quit"]);
+        assert_eq!(names, ["ready", "wait", "wheel", "touch", "prompt", "live", "alt", "mark", "tablewheel", "tabletouch", "hand", "quit"]);
         assert!(matches!(&drive.steps[8], Step::TableWheel { rate, seconds } if *rate == -12.0 && *seconds == 2.0));
         assert!(matches!(&drive.steps[9], Step::TableTouch { speed, seconds } if *speed == 700.0 && *seconds == 3.0));
+        assert!(matches!(&drive.steps[10], Step::Hand { seconds, profile, seed } if *seconds == 2.0 && *profile == 1 && *seed == 42));
         assert!(matches!(&drive.steps[6], Step::Alt(rune::Key::Up)));
         assert!(matches!(&drive.steps[2], Step::Wheel { rate, seconds } if *rate == -30.0 && *seconds == 2.0));
         // A prompt keeps its colons.

@@ -10,7 +10,7 @@ use crate::wordmark;
 use neoism_protocol::agent::{HistoryMessage, HistoryMessageKind};
 use rune::{Color, Cx, El, ScrollSpec, Tx, WheelEvent, col, el, row, text};
 use rune_kit::markdown::{CodeFrame, Markdown, MarkdownStyle};
-use rune_kit::syntax::Syntax;
+use rune_kit::syntax::{Syntax, SyntaxTheme};
 
 pub const COLUMN_PAD_X: f32 = 102.0;
 /// The composer's height over the transcript's foot before its first layout reports it, and
@@ -509,6 +509,98 @@ pub(crate) fn markdown_style(app: &App) -> MarkdownStyle {
         .list(18.0, 6.0)
 }
 
+/// The colours `markdown_style` gives code, for code drawn outside the kit (`code_slabs`).
+fn syntax_theme(p: &crate::ui::theme::Palette) -> SyntaxTheme {
+    SyntaxTheme::from_kit(&rune_kit::Kit::neutral(true))
+        .with(Syntax::Keyword, rgb(p.syn_keyword))
+        .with(Syntax::String, rgb(p.syn_string))
+        .with(Syntax::Number, rgb(p.syn_number))
+        .with(Syntax::Comment, rgb(p.syn_comment))
+        .with(Syntax::Type, rgb(p.syn_type))
+        .with(Syntax::Function, rgb(p.syn_func))
+        .with(Syntax::Property, rgb(p.syn_property))
+        .with(Syntax::Punctuation, rgb(p.syn_special))
+}
+
+/// Lines per slab of a long code block.
+const SLAB_LINES: usize = 32;
+
+/// A long fenced code block (`prose::Cut::Code`: the fence's own lines, closed or still
+/// arriving), drawn as the kit and `code_frame` draw one, in slabs of `SLAB_LINES` lines.
+///
+/// As one text a block is shaped whole each time it changes: a 900 line file streaming in
+/// was 20 ms of every update by its end, a third of the frames it should have shown. Each
+/// slab is a text of its own, cached by what it draws, so an update shapes the last slab only.
+/// The lexer runs over the whole block (0.1 to 0.6 ms per thousand lines, cached by the kit
+/// until the text changes), so a comment or string that crosses slabs keeps its colour; a line
+/// still arriving draws plain until it ends, as the kit draws it.
+fn code_slabs(app: &App, id: &str, source: &str, arriving: bool, revision: impl std::hash::Hash + Copy) -> El {
+    let p = *app.pal;
+    let ty = app.ty;
+    let mut lines = source.split_inclusive('\n');
+    let opening = lines.next().unwrap_or_default();
+    let language = prose::line_language(opening);
+    let marker = { let t = opening.trim_start(); &t[..t.len() - t.trim_start_matches(['`', '~']).len()] };
+    let body = &source[opening.len()..];
+    // The closing fence, if it has arrived, is the last line.
+    let closed = body.rfind('\n').map(|end| body[..end].rfind('\n').map_or(0, |start| start + 1)).filter(|start| !marker.is_empty() && body[*start..].trim().starts_with(marker) && body[*start..].trim().trim_start_matches(['`', '~']).is_empty());
+    let last_line = body.rfind('\n').map_or(0, |end| end + 1);
+    let closed = closed.or_else(|| (!marker.is_empty() && body[last_line..].trim().starts_with(marker) && body[last_line..].trim().trim_start_matches(['`', '~']).is_empty() && !body[last_line..].trim().is_empty()).then_some(last_line));
+    let code = match closed { Some(end) => body[..end].strip_suffix('\n').unwrap_or(&body[..end]), None => body };
+    let open = closed.is_none() && arriving;
+    // Colour runs up to the last complete line while the block is still arriving.
+    let coloured = if open { code.rfind('\n').map_or(0, |end| end + 1) } else { code.len() };
+    let highlights = match language {
+        Some(lang) if rune_kit::syntax::known(lang) => rune_kit::syntax::highlight(Some(lang), &code[..coloured]),
+        _ => std::rc::Rc::from(Vec::new()),
+    };
+    let theme = syntax_theme(&p);
+    // Blank lines that end the block are drawn, as the kit draws them, but not numbered.
+    let shown = code;
+    let numbered = code.trim_end_matches('\n').lines().count().max(1);
+    let total = shown.split('\n').count();
+    let digits = numbered.to_string().len();
+    let look = (app.pal as *const _ as usize, ty.size.to_bits(), ty.weight.to_bits(), timeline_width(app).to_bits());
+    let selection = selection_color(app);
+    let mut slabs = col().w_full();
+    let (mut at, mut line, mut first_highlight) = (0, 1, 0);
+    let slab_count = total.div_ceil(SLAB_LINES);
+    for index in 0..slab_count {
+        // This slab's lines, without the newline that ends its last one.
+        let rest = &shown[at..];
+        let end = rest.match_indices('\n').nth(SLAB_LINES - 1).map_or(rest.len(), |(i, _)| i);
+        let slab = &rest[..end];
+        let range = at..at + end;
+        let count = slab.split('\n').count();
+        while highlights.get(first_highlight).is_some_and(|(r, _)| r.end <= range.start) { first_highlight += 1; }
+        let settled = !open || index + 1 < slab_count;
+        let (first_line, from) = (line, first_highlight);
+        let (highlights, theme) = (highlights.clone(), &theme);
+        let key = (slab, look, first_line, digits, numbered.min(first_line + count), settled, coloured.clamp(range.start, range.end) - range.start, revision);
+        slabs = slabs.child(rune::memo(format!("{id}:{index}"), key, move || {
+            let numbers: String = (first_line..(first_line + count).min(numbered + 1)).map(|n| format!("{n:>digits$}")).collect::<Vec<_>>().join("\n");
+            let within: Vec<_> = highlights[from..].iter().take_while(|(r, _)| r.start < range.end)
+                .map(|(r, paint)| (r.start.max(range.start) - range.start..r.end.min(range.end) - range.start, *paint)).collect();
+            let mut code = rune::rich(slab.to_owned(), theme.spans(&within, 0)).font(ty.body()).color(rgb(p.fg)).reveal(0.0)
+                .selectable(true).selection_color(selection).w_full();
+            // A copy across the block's edges leaves a blank line, as the kit's block does.
+            if index == 0 || index + 1 == slab_count {
+                code = code.copy_breaks(if index == 0 { 2 } else { 1 }, if index + 1 == slab_count { 2 } else { 1 });
+            }
+            row().w_full()
+                .child(el().pr(18.0).child(text(numbers).font(ty.body()).color(rgb(p.muted))))
+                .child(col().grow(1.0).child(code))
+        }));
+        at = (range.end + 1).min(shown.len());
+        line += count;
+    }
+    col().w_full().radius(14.0).fill(rgb(p.surface).alpha(0.35)).border(1.0, rgb(p.border)).clip_rounded(14.0)
+        .child(row().w_full().h(38.0).pl(22.0).pr(12.0).center_y().justify_between().fill(rgb(p.surface).alpha(0.55))
+            .child(text(language.unwrap_or("text").to_owned()).font(ty.small()).color(rgb(p.yellow)))
+            .child(copy_button(&p, ty, code.to_owned())))
+        .child(row().w_full().px(22.0).py(12.0).child(slabs))
+}
+
 /// Code blocks: a header with the language and Copy, then numbered lines (`reference/06`).
 pub(crate) fn code_frame(app: &App) -> impl Fn(El, &CodeFrame<'_>) -> El + 'static {
     let p = *app.pal;
@@ -564,16 +656,24 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             let pieces = prose::chunks(reasoning);
             let last = pieces.len().saturating_sub(1);
             let look = (p as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits());
-            for (index, (piece, _)) in pieces.into_iter().enumerate() {
+            // The pieces stack as one text: 10 above a heading's (this column's gap, as before),
+            // the kit's own block margin above one cut at a paragraph.
+            let mut thought = col().w_full();
+            let mut first = true;
+            for (index, piece) in pieces.into_iter().enumerate() {
+                let (piece, space) = (piece.text, if piece.cut == prose::Cut::Heading { 10.0 } else { piece.space });
                 if piece.trim().is_empty() { continue; }
                 let arriving = streaming && index == last;
-                body = body.child(rune::memo(format!("reasoning:{}:{index}", message.id), (piece, look, arriving), || {
+                let block = rune::memo(format!("reasoning:{}:{index}", message.id), (piece, look, arriving), || {
                     Markdown::new(piece.to_owned()).streaming(arriving).reveal(0.0)
                         .code_frame(code_frame(app)).selectable(true)
                         .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
                         .render(&style).selection_group(false)
-                }));
+                });
+                thought = thought.child(if first { block } else { col().w_full().pt(space).child(block) });
+                first = false;
             }
+            body = body.child(thought);
             body
         },
         HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tools::row(app, message),
@@ -632,9 +732,15 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                     super::table::Segment::Text(text) => {
                         let pieces = prose::chunks(text);
                         let last_piece = pieces.len() - 1;
-                        for (k, (piece, space)) in pieces.into_iter().enumerate() {
+                        // The pieces stack as the one document they are, each owed its own space.
+                        let mut prose_column = col().w_full();
+                        for (k, prose::Piece { text: piece, space, cut }) in pieces.into_iter().enumerate() {
                             let arriving = streaming && n == last_segment && k == last_piece;
-                            let block = rune::memo(format!("md:{n}:{k}"), (piece, look, arriving, revision.0), || {
+                            let block = if cut == prose::Cut::Code {
+                                // Its slabs are memos of their own, keyed by what each draws.
+                                code_slabs(app, &format!("code:{n}:{k}"), piece, arriving, revision.0)
+                            } else {
+                              rune::memo(format!("md:{n}:{k}"), (piece, look, arriving, revision.0), || {
                                 let images = app.markdown_images(piece);
                                 Markdown::new(piece.to_owned())
                                  .images(move |src| images.get(src).cloned())
@@ -656,10 +762,11 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                                 .render(&style)
                                 // One selection spans the whole transcript, not just this block.
                                 .selection_group(false)
-                            });
-                            // The column's own gap is 14; a heading is owed more above it.
-                            body = body.child(if space > BLOCK_GAP { col().w_full().pt(space - BLOCK_GAP).child(block) } else { block });
+                              })
+                            };
+                            prose_column = prose_column.child(if k > 0 && space > 0.0 { col().w_full().pt(space).child(block) } else { block });
                         }
+                        body = body.child(prose_column);
                     }
                 }
             }

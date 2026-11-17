@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.158] - 2026-11-17
+
+### A steady 120 frames a second in Agent conversations
+
+- Fixes the macOS frame pacing rule that skipped every other display refresh whenever a frame took more than about 3.7 ms: a tick is now skipped only when the previous frame actually overran its slot. A conversation that needed 4 ms a frame drew at 64 frames a second and now holds 120; frames hold 120 up to about 6 ms of work.
+- Streams long replies in independently cached pieces cut at paragraphs as well as headings, with unchanged spacing, so each update costs what its last piece costs instead of growing with the section.
+- Draws long code blocks (48 lines or more) in 32-line slabs with highlighting computed across the whole block. A 900-line file streaming in went from about 37 frames a second by its end to 120.
+- Adds a macOS frame-pacing check that measures actual Metal presentation times, with a scripted hand-on-trackpad scroll (finger and momentum phases, flicks, reading drags, reversals) delivered through the real input path, and diagnostics for display-link ticks and GPU timing.
+
+Measured on an M5 Pro at 1728x1050 against real conversations: idle, hand scrolling through paged history, live tool rows, three streaming cases and a 150-second real model turn editing files while being scrolled all held 120 with zero to one missed refresh. All 592 macOS unit tests and the GPU scroll-image test pass when run serially. Linux and Windows are validated by the release build itself; Linux x86-64, macOS ARM64, and Windows x86-64 each publish independently. Existing database backup and downgrade cautions remain applicable.
+
 ## [0.7.157] - 2026-11-16
 
 ### Frame pacing, Agent scheduling, and Rune presentation

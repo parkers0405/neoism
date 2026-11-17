@@ -124,6 +124,8 @@ fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     #[cfg(feature = "frame-profile")]
     ui::fps::profile_start();
     let rerun = poll_frame(app, clock, tx);
+    static BURN: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| std::env::var("NEOISM_RUNE_BURN_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+    while (started.elapsed().as_micros() as u64) < *BURN { std::hint::spin_loop(); }
     ui::fps::polled(started, rerun);
     rerun
 }
@@ -957,11 +959,27 @@ fn main() {
     // explicitly labelled fallback counts drawn submissions, never unchanged/skipped frames.
     let trace = std::env::var("NEOISM_RUNE_FRAME_TRACE").as_deref() == Ok("1");
     let origin = std::time::Instant::now();
+    // Presentation timestamps already written to the trace (callbacks can land out of order,
+    // so only those at least 100 ms older than the newest are final).
+    let mut traced_present: Option<std::time::Instant> = None;
     app = app.on_frame_encoded(move |frame| {
         #[cfg(feature = "frame-profile")]
         if trace { ui::fps::profile_frame(frame); }
         fps_meter.borrow_mut().record(frame);
         if trace {
+            // `[rune-present]`: when each drawable actually reached the screen (Metal
+            // `presentedTime`), on the clock `[drive]` marks and `[rune-frame]` use.
+            if let Some(feedback) = frame.presentation_feedback() {
+                let times = feedback.timestamps();
+                if let Some(newest) = times.last().copied() {
+                    let settled = newest.checked_sub(std::time::Duration::from_millis(100)).unwrap_or(newest);
+                    let after = traced_present;
+                    for at in times.into_iter().filter(|at| *at <= settled && after.is_none_or(|last| *at > last)) {
+                        eprintln!("[rune-present] mono_us={}", ui::fps::monotonic_us(at));
+                        traced_present = Some(at);
+                    }
+                }
+            }
             // `mono_us` is CLOCK_MONOTONIC, the clock Wayland presentation feedback reports in;
             // `work_us` runs from this frame's poll to the end of its encode (the UI thread's
             // share of the frame), `poll_us` is the poll alone.

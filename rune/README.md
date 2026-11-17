@@ -257,6 +257,19 @@ Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.
   (`Cursor::carry`) and travels on a live offset (`Cursor::place`), so scrolling under it
   commits nothing. Code rows are memos keyed by their own content (`editor/view.rs`,
   `cached_row`).
+- On macOS a frame starts on its display-link tick, which runs just after the system's cut-off for
+  the refresh before, so the frame has nearly the whole period (about 6.5 ms of UI-thread work
+  on a 120 Hz panel, the GPU's own 2 to 3 ms aside). A tick is skipped only when the frame before
+  was submitted after that tick ran, that is, when it overran its own slot
+  (`vendor/rune/.../platform/display_link.rs`, `permits`). The earlier rule also skipped any
+  tick less than half a period after the last submission: every frame over about 3.7 ms cost
+  the next refresh, and a transcript that needed 4 ms a frame drew at 64 frames a second.
+- A reply is cut into pieces at paragraphs too, not only headings, once a piece holds 1.2 KB
+  (`prose::chunks`), with the kit's own collapsed margins between them, and a fenced code
+  block of 48 lines or more is drawn in slabs of 32 lines (`timeline::code_slabs`), each a
+  memo keyed by its own text. A text is shaped whole whenever it changes: as one element a
+  900 line file streaming in cost 20 ms of every update by its end (37 frames a second), and
+  40 KB of prose with no heading 7 ms. Both now cost what their last piece costs.
 - A transcript is scrolled by holding one of its rows (`Tx::scroll_key_to`, `agent/anchor.rs`),
   never by an absolute offset: Rune works a held row out again after an older page lands and
   its rows are measured, and applies an offset as it was. Older history is asked for three
@@ -366,6 +379,28 @@ python3 rune/scripts/check-live-pacing.py --session <conversation id> \
 python3 rune/scripts/check-live-pacing.py --session <conversation id> \
   --drive "ready;wait:2;live;wait:1;mark:stream;stream:/path/to/reply.md:10;mark:end;quit"
 ```
+
+On macOS the same check is `check-live-pacing-macos.py` (no compositor needed; the window must
+stay visible, since macOS presents nothing for a covered one, and the report says so when it
+was). The trace adds `[rune-present]`, each drawable's Metal `presentedTime`, and the report
+gives missed refreshes and what the FPS badge would have read. The `hand:<seconds>` step
+scrolls as a hand on the trackpad does (`app/native/HumanScroll.swift`): real precise-scroll
+`NSEvent`s with finger and momentum phases, runs of flicks, slow reading drags, reversals
+and pauses, made on their own jittered clock and handed to the window's view, so they take
+winit's and Rune's real input path and land between frames wherever they land.
+
+```sh
+python3 rune/scripts/check-live-pacing-macos.py --session <conversation id> --size 1728x1050 \
+  --drive "ready;wait:2;mark:hand;hand:15;mark:live;live;wait:1;mark:livehand;hand:12:fight;mark:stream;stream:/path/reply.md:12;mark:end;quit"
+# A real turn in a scratch project, scrolled by hand while the model edits files:
+python3 rune/scripts/check-live-pacing-macos.py --cwd /path/to/scratch --timeout 220 \
+  --drive "ready;wait:3;prompt:<a task that edits files and writes a long summary>;wait:4;mark:run;hand:150;mark:end;quit"
+```
+
+`NEOISM_RUNE_BURN_US=<n>` makes every poll take at least that long, to find how much work a
+frame can hold before refreshes are missed (120 held to 6 ms on an M5 Pro at 1728x1050).
+`RUNE_TRACE_TICKS=1` prints what each display-link tick was taken as, and `RUNE_TRACE_GPU=1`
+when each frame was committed, ran on the GPU and reached the screen.
 
 `NEOISM_RUNE_FRAME_TRACE=1` prints each frame's `work_us` (elapsed wall time from poll start to encode end) and whether the poll requested a view rebuild; `NEOISM_RUNE_TRACE_POLL=1` names those requests. Rune can also commit independently of the poll, for example when scrolling changes the virtual row window. `RUNE_COMMIT_BUDGET_MS=N` prints Rune's own breakdown of commits over `N` ms.
 

@@ -1,5 +1,5 @@
-//! Native spelling, independent of Rune's platform spell checker (a Linux noop).
-//! Dictionary loading, tokenization and suggestions run on one bounded worker.
+//! Markdown spelling on one bounded worker: Rune's native checker on macOS,
+//! shared dictionary checking elsewhere (Rune's Linux checker is a noop).
 
 #[path = "../../../../../neoism-frontend/shared/src/editor/markdown/spellcheck.rs"]
 mod dictionary;
@@ -195,6 +195,49 @@ fn invalidate() {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn check_words(text: &str) -> Vec<Word> {
+    let eligible = dictionary::spellcheck_words(text);
+    // Keep the entire eligible prose together for native language detection.
+    // Mask code, paths and identifiers without shifting any UTF-8 byte offsets.
+    let mut prose = vec![b' '; text.len()];
+    for word in &eligible {
+        if word.text.len() <= MAX_WORD_BYTES
+            && dictionary::normalized_spellcheck_word(word.text).is_some()
+        {
+            let range = word.start..word.start + word.text.len();
+            prose[range.clone()].copy_from_slice(&text.as_bytes()[range]);
+        }
+    }
+    let prose = String::from_utf8(prose).expect("whole UTF-8 words or ASCII spaces");
+    let mut checked = HashMap::<&str, Vec<String>>::new();
+    rune::spell::misspelled(&prose)
+        .iter()
+        .filter_map(|&(start, end)| {
+            let word = text.get(start..end).filter(|word| !word.is_empty())?;
+            let candidate = eligible.iter().find(|candidate| {
+                candidate.start <= start && end <= candidate.start + candidate.text.len()
+            })?;
+            if candidate.text.len() > MAX_WORD_BYTES
+                || dictionary::normalized_spellcheck_word(candidate.text).is_none()
+                || dictionary::is_spelling_word_overridden(candidate.text)
+                || dictionary::is_spelling_word_overridden(word)
+            {
+                return None;
+            }
+            // Only native-reported typos reach here: the incomplete static
+            // lexicon must never veto a native-valid inflection or modern word.
+            let suggestions = checked.entry(word).or_insert_with(|| rune::spell::suggest(word));
+            Some(Word {
+                range: start..end,
+                text: word.to_owned(),
+                suggestions: suggestions.clone(),
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
 fn check_words(text: &str) -> Vec<Word> {
     // Repeated words only pay for dictionary suggestion search once per line.
     let mut checked = HashMap::<&str, Option<Vec<String>>>::new();
@@ -325,5 +368,28 @@ mod tests {
         let words = wait(&state, "ordinary zzzzzordinary words");
         assert!(!words.iter().any(|word| word.text == "ordinary"));
         assert!(words.iter().any(|word| word.text == "zzzzzordinary"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_accepts_english_inflections_on_the_worker() {
+        let state = State::default();
+        let text = "The developers rendered the documents, wrapping and scrolling through updated paragraphs. It doesn’t change what we’re writing.";
+        assert!(wait(&state, text).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_native_typo_ranges_preserve_unicode_and_prose_exclusions() {
+        let state = State::default();
+        let text = "😀 “recieve” the documents and recieve replies. `mispelled` person@example.com cache_key64";
+        let words = wait(&state, text);
+        let typos: Vec<_> = words.iter().filter(|word| word.text == "recieve").collect();
+        assert_eq!(typos.len(), 2, "{words:?}");
+        for word in typos {
+            assert_eq!(&text[word.range.clone()], "recieve");
+            assert!(word.suggestions.iter().any(|word| word == "receive"));
+        }
+        assert!(!words.iter().any(|word| word.text == "mispelled"));
     }
 }

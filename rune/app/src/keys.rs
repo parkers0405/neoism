@@ -110,7 +110,7 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     let alt_move = m.alt && m.shift && !m.logo;
     let move_chord = alt_move || (mac && m.logo && m.ctrl && m.shift && !m.alt);
     if move_chord && matches!(event.key, Key::Left | Key::Right) {
-        app.move_chrome_tab(event.key == Key::Right, (alt_move && m.ctrl) || matches!(app.focus, Focus::Workspaces(_)));
+        app.move_chrome_tab(event.key == Key::Right, (alt_move && m.ctrl) || matches!(app.focus, Focus::Workspaces(_)), tx);
         tx.animated();
         return true;
     }
@@ -619,6 +619,38 @@ mod tests {
                 assert_eq!(app.focus, focus);
             }
         }
+    }
+
+    #[test]
+    fn alt_shift_recovers_when_a_workspace_switch_interrupts_a_tab_drag() {
+        use rune::{Env, Runtime};
+        let mut app = App::new();
+        app.window = [1000.0, 700.0];
+        let home = app.active_tab().id;
+        app.open_file("drag.rs", None);
+        let editor = app.active_tab().id;
+        app.new_workspace();
+        app.select_workspace(0);
+        let mut rt = Runtime::new(app, crate::ui::chrome::root, (1000.0, 700.0), Env::new(true, 1.0));
+        rt.on_key = Some(on_key);
+        for _ in 0..30 { rt.frame(1.0 / 120.0); }
+        let (x, y) = rt.find(&format!("pane-tab:{editor}")).unwrap();
+        rt.pointer_down(x, y);
+        rt.frame(1.0 / 120.0);
+        let move_left = || KeyEvent { key: Key::Left, mods: Mods { alt: true, shift: true, ..Default::default() } };
+        rt.key(move_left());
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.layout.focused().tabs, [home, editor], "a held drag still owns tab movement");
+
+        rt.update(|app, _| app.select_workspace(1));
+        rt.frame(1.0 / 120.0);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 120.0);
+        rt.update(|app, _| app.select_workspace(0));
+        rt.frame(1.0 / 120.0);
+        rt.key(move_left());
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.layout.focused().tabs, [editor, home], "the shortcut must recover without another drag");
     }
 
     #[test]

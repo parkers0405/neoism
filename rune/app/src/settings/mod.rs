@@ -200,6 +200,22 @@ fn with_liquid_glass_selection_fallback(mut descriptors: Vec<ConfigDescriptor>) 
     descriptors
 }
 
+fn with_markdown_spellcheck(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigDescriptor> {
+    if let Some(d) = descriptors.iter_mut().find(|d| d.path == "editor.markdown.spellcheck") {
+        d.default = json!(false);
+    } else {
+        descriptors.push(ConfigDescriptor {
+            path: "editor.markdown.spellcheck".into(), label: "Markdown spell check".into(),
+            description: "Opt in to spelling underlines and correction menus in Markdown. Uses the native spelling checker on macOS.".into(),
+            value_kind: ConfigValueKind::Boolean, default: json!(false),
+            static_suggestions: Vec::new(), runtime_suggestions: Vec::new(), options: Vec::new(),
+            provider: None, constraints: ConfigConstraints::default(), accepted_kinds: Vec::new(),
+            extensible: false, category: ConfigCategory::Editor, control: ConfigControl::Toggle, settings_visible: true,
+        });
+    }
+    descriptors
+}
+
 /// Installed daemons may predate this decoration or its current default.
 fn with_wordmark_fire_fallback(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigDescriptor> {
     if let Some(d) = descriptors.iter_mut().find(|d| d.path == "appearance.wordmark-fire") {
@@ -403,19 +419,21 @@ impl App {
             let changed = self.wordmark.fire_enabled != crate::config::wordmark_fire(&value)
                 || self.cursor.liquid_glass != crate::config::liquid_glass_cursor(&value)
                 || self.liquid_glass_selection != crate::config::liquid_glass_selection(&value)
+                || self.markdown_spellcheck != crate::config::markdown_spellcheck(&value)
                 || self.keybindings != value["keybinds"]["keys"]
                 || self.settings.as_ref().is_some_and(|settings| settings.values != value);
             self.keybindings = value["keybinds"]["keys"].clone();
             self.wordmark.fire_enabled = crate::config::wordmark_fire(&value);
             self.cursor.liquid_glass = crate::config::liquid_glass_cursor(&value);
             self.liquid_glass_selection = crate::config::liquid_glass_selection(&value);
+            self.set_markdown_spellcheck(crate::config::markdown_spellcheck(&value));
             self.set_font_families(crate::ui::fonts::configured(&value));
             if let Some(settings) = &mut self.settings { settings.values = value; }
             return changed;
         }
         let Some(settings) = &mut self.settings else { return true };
         if let Some(schema) = message.get("ConfigSchema") {
-            if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(with_liquid_glass_selection_fallback(with_liquid_glass_cursor_fallback(with_wordmark_fire_fallback(descriptors)))); }
+            if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(with_markdown_spellcheck(with_liquid_glass_selection_fallback(with_liquid_glass_cursor_fallback(with_wordmark_fire_fallback(descriptors))))); }
         }
         true
     }
@@ -438,6 +456,7 @@ impl App {
             "appearance.wordmark-fire" => self.wordmark.fire_enabled = value.as_bool().unwrap_or(true),
             "appearance.effects.liquid-glass-cursor" => self.cursor.liquid_glass = value.as_bool().unwrap_or(false),
             "appearance.effects.liquid-glass-selection" => self.liquid_glass_selection = value.as_bool().unwrap_or(false),
+            "editor.markdown.spellcheck" => self.set_markdown_spellcheck(value.as_bool().unwrap_or(false)),
             "ui.window.background-image" | "ui.window.background-image-disabled" => {}
             _ => {}
         }
@@ -608,6 +627,27 @@ mod tests {
         }
         app.apply_config_reply(0, &json!({"Config": {"value": {}}}));
         assert!(!app.cursor.liquid_glass, "removing the override restores default off");
+    }
+
+    #[test]
+    fn markdown_spelling_toggle_and_reload_use_the_opt_in_default() {
+        let mut app = App::new();
+        app.set_markdown_spellcheck(false);
+        app.settings = Some(Settings::default());
+        app.apply_config_reply(0, &json!({"ConfigSchema":{"descriptors":[]}}));
+        let index = app.settings.as_ref().unwrap().rows.iter().position(|row| row.path == "editor.markdown.spellcheck").unwrap();
+        assert_eq!(app.settings.as_ref().unwrap().rows[index].default, json!(false));
+        app.toggle_setting(index);
+        assert!(app.markdown_spellcheck);
+        app.toggle_setting(index);
+        assert!(!app.markdown_spellcheck);
+        app.settings = None;
+        for enabled in [true, false, true] {
+            assert!(app.apply_config_reply(0, &json!({"Config":{"value":{"editor":{"markdown":{"spellcheck":enabled}}}}})));
+            assert_eq!(app.markdown_spellcheck, enabled);
+        }
+        app.apply_config_reply(0, &json!({"Config":{"value":{}}}));
+        assert!(!app.markdown_spellcheck);
     }
 
     #[test]

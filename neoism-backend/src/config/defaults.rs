@@ -265,7 +265,7 @@ pub fn default_config_file_content() -> String {
     //     "git-blame-hide-on-scroll": false, // true = hide until 150ms after scrolling settles
     //     "format-on-save": true,    // run the LSP formatter before every save
     //     "minimap": true,
-    //     "markdown": { "spellcheck": true },
+    //     "markdown": { "spellcheck": false },
     // },
 
     // ── [terminal] — the terminal emulator ────────────────────────

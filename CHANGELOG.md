@@ -2,6 +2,18 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.159] - 2026-11-19
+
+### Native Markdown, Mermaid, and Notes
+
+- Ships the native Markdown editor with live preview, source editing, tables, checkboxes, code cards, images, block dragging, collaboration and presence.
+- Adds bounded native Mermaid previews in notes and agent replies, Markdown section-fragment navigation, and opt-in spelling corrections with a Settings toggle and native macOS support.
+- Improves Notes creation and renaming, preserves live buffers and undo across renames, and highlights external edits without taking focus.
+- Updates editor wrapping, caret and diagnostic layout, sidebar presentation, and recovery from interrupted tab drags.
+- Completes MCP connections after browser authorization and refreshes tools and connection-dialog completion states.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.158] - 2026-11-17
 
 ### A steady 120 frames a second in Agent conversations

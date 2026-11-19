@@ -98,6 +98,13 @@ fn valid_note_path(path: &str) -> bool {
 }
 
 impl App {
+    pub(crate) fn set_markdown_spellcheck(&mut self, enabled: bool) {
+        self.markdown_spellcheck = enabled;
+        if !enabled && self.context.as_ref().is_some_and(|menu| matches!(menu.target, Target::Spelling(_))) {
+            self.context = None;
+        }
+    }
+
     pub(crate) fn open_spelling_context(&mut self, target: crate::editor::markdown::spelling::WordTarget, at: [f32; 2]) {
         let mut items: Vec<_> = (0..target.suggestions.len()).map(Command::SpellingReplace).collect();
         items.extend([Command::SpellingIgnore, Command::SpellingLearn]);

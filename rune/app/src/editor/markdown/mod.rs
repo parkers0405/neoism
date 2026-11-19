@@ -64,6 +64,7 @@ pub fn enabled(buffer: &Buffer) -> bool {
 }
 
 pub(crate) fn spelling_changed(app: &App) -> bool {
+    if !app.markdown_spellcheck { return false; }
     let Some(buffer) = app.active_buffer().filter(|b| enabled(b)) else { return false };
     let cache = &buffer.markdown_cache;
     let epoch = cache.spelling.epoch();
@@ -657,7 +658,7 @@ pub fn view(app: &App, buffer: &Buffer) -> El {
                 }
                 content
             })
-        .virtual_rows_version(buffer.markdown_cache.spelling.epoch());
+        .virtual_rows_version(app.markdown_spellcheck.then(|| buffer.markdown_cache.spelling.epoch()));
     let tab = app.active_tab().id;
     let rows = rows.touch_drag_after_hold().on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| {
         a.select_tab(tab);

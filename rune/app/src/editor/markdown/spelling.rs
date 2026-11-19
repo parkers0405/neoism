@@ -30,6 +30,7 @@ fn prose(line: &Line) -> String {
 }
 
 pub(super) fn words(app: &App, buffer: &Buffer, line: usize) -> Vec<Word> {
+    if !app.markdown_spellcheck { return Vec::new(); }
     let projected = parsed(buffer);
     let Some(projected) = projected.get(line) else { return Vec::new() };
     let text = prose(projected);
@@ -50,14 +51,14 @@ pub(super) fn decorate(app: &App, mut visual: El, piece: &Piece, height: f32, wo
     let scale = app.ty.scale();
     for word in words {
         if word.range.end <= piece.source[0] || word.range.start >= *piece.source.last().unwrap() { continue; }
-        for [x, _, w, _] in piece.geometry.range_rects(piece.selected(word.range.clone())) {
+        for (index, [x, _, w, _]) in piece.geometry.range_rects(piece.selected(word.range.clone())).into_iter().enumerate() {
             if w <= 0.0 { continue; }
             let color = rgb(app.pal.red);
             let steps = (w / (2.0 * scale)).ceil() as usize;
             let points: Vec<_> = (0..=steps).map(|i| [(i as f32 * 2.0 * scale).min(w),
                 if i % 2 == 0 { scale } else { 2.0 * scale }]).collect();
             visual = visual.child(rune::canvas(rune::Shape::new().view_box(w, 3.0 * scale)
-                .stroke(points, scale.max(1.0), color)).key("spelling-underline")
+                .stroke(points, scale.max(1.0), color)).key(format!("spelling-underline:{}:{}:{index}", piece.source[0], word.range.start))
                 .absolute(piece.x + x, height - 3.0 * scale).w(w).h(3.0 * scale));
         }
     }
@@ -65,6 +66,7 @@ pub(super) fn decorate(app: &App, mut visual: El, piece: &Piece, height: f32, wo
 }
 
 pub(crate) fn open(app: &mut App, at: [f32; 2]) {
+    if !app.markdown_spellcheck { return; }
     let Some(buffer) = app.active_buffer().filter(|b| enabled(b)) else { return };
     let Some(rect) = buffer.view_rect else { return };
     let Some((line, col)) = super::super::view::hit_window(app, at[0], at[1], false) else { return };
@@ -83,7 +85,7 @@ pub(crate) fn open(app: &mut App, at: [f32; 2]) {
 }
 
 pub(crate) fn apply(app: &mut App, target: &WordTarget, command: Command) {
-    if app.active_tab().id != target.tab { return; }
+    if !app.markdown_spellcheck || app.active_tab().id != target.tab { return; }
     let Some(buffer) = app.active_buffer_mut().filter(|b| b.path == target.path
         && b.doc.revision == target.revision && enabled(b)) else { return };
     if buffer.doc.lines.get(target.line).and_then(|s| s.get(target.range.clone())) != Some(target.word.as_str()) { return; }
@@ -133,6 +135,7 @@ mod tests {
     fn spelling_projects_prose_and_table_words_without_touching_markup_or_code() {
         let raw = "**mispelled** `mispelled` [mispelled](https://mispelled.example)\n\n| mispelled | `mispelled` |\n| --- | --- |\n| text | text |\n\n```mermaid\nmispelled\n```\n";
         let mut app = super::super::tests::app(raw);
+        app.markdown_spellcheck = true;
         let found = finish(&app, 0);
         assert_eq!(found.len(), 1);
         assert_eq!(&raw[found[0].range.clone()], "mispelled");
@@ -156,6 +159,7 @@ mod tests {
     fn native_spelling_right_click_correction_and_undo() {
         let raw = "# Spelling\n\nA **mispelled** word.\n\n| Heading | Notes |\n| --- | --- |\n| mispelled | `mispelled` |\n";
         let mut app = super::super::tests::app(raw);
+        app.markdown_spellcheck = true;
         app.window = [900.0, 600.0];
         let mut rt = rune::Runtime::with_text(app, crate::ui::chrome::root, (900.0, 600.0), rune::Env::new(true, 1.0),
             rune::text::TextSystem::new(crate::FONTS, ("Geist", "Geist Mono")));
@@ -165,7 +169,7 @@ mod tests {
         assert!(super::super::spelling_changed(&rt.state), "worker completion requests a production view commit");
         rt.update(|_, _| {});
         for _ in 0..4 { rt.frame(1.0 / 60.0); }
-        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("spelling-underline")));
+        assert!(rt.elements().iter().any(|e| e.key.as_deref().is_some_and(|k| k.starts_with("spelling-underline:"))));
         let b = rt.state.active_buffer().unwrap();
         let laid = layout(&rt.state, b);
         let entry = laid.rows.iter().find(|e| e.line == 2).unwrap();
@@ -197,5 +201,43 @@ mod tests {
         assert!(buffer.doc.lines[2].contains("**misspelled**"));
         assert!(buffer.doc.undo());
         assert_eq!(buffer.doc.text_for_disk(), raw);
+    }
+
+    #[test]
+    fn native_spelling_requires_opt_in_and_turning_off_removes_cached_marks_and_actions() {
+        let raw = "A **mispelled** word and a _recieve_ typo.\n";
+        let mut app = super::super::tests::app(raw);
+        app.markdown_spellcheck = false;
+        app.window = [900.0, 600.0];
+        let mut rt = rune::Runtime::with_text(app, crate::ui::chrome::root, (900.0, 600.0), rune::Env::new(true, 1.0),
+            rune::text::TextSystem::new(crate::FONTS, ("Geist", "Geist Mono")));
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+        let marks = |rt: &rune::Runtime<App>| rt.elements().into_iter().filter_map(|e| e.key)
+            .filter(|key| key.starts_with("spelling-underline:")).collect::<Vec<_>>();
+        assert!(marks(&rt).is_empty());
+        assert!(words(&rt.state, rt.state.active_buffer().unwrap(), 0).is_empty());
+        assert!(!super::super::spelling_changed(&rt.state));
+        rt.update(|a, _| a.write_setting("editor.markdown.spellcheck", serde_json::json!(true)));
+        let found = finish(&rt.state, 0);
+        rt.update(|_, _| {});
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+        let keys = marks(&rt);
+        assert!(keys.len() >= 2);
+        assert_eq!(keys.iter().collect::<std::collections::HashSet<_>>().len(), keys.len());
+        let buffer = rt.state.active_buffer().unwrap();
+        let target = WordTarget { path: buffer.path.clone(), tab: rt.state.active_tab().id, revision: buffer.doc.revision,
+            line: 0, range: found[0].range.clone(), word: found[0].text.clone(), suggestions: found[0].suggestions.clone() };
+        rt.update(|a, _| {
+            a.open_spelling_context(target.clone(), [30.0, 30.0]);
+            a.write_setting("editor.markdown.spellcheck", serde_json::json!(false));
+            apply(a, &target, Command::SpellingReplace(0));
+        });
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+        assert!(marks(&rt).is_empty());
+        assert!(rt.state.context.is_none());
+        assert!(words(&rt.state, rt.state.active_buffer().unwrap(), 0).is_empty());
+        let buffer = rt.state.active_buffer().unwrap();
+        assert_eq!(buffer.doc.text_for_disk(), raw);
+        assert!(!buffer.dirty());
     }
 }

@@ -267,6 +267,14 @@ pub fn global_spellcheck_dictionary_path() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Whether Neoism's session ignore list or custom dictionary accepts this word.
+/// Does not consult the system word list or infer that unknown words are typos;
+/// native spell checkers can use this without overriding their own verdicts.
+pub fn is_spelling_word_overridden(word: &str) -> bool {
+    normalized_spellcheck_word(word)
+        .is_some_and(|normalized| spellcheck_override_contains(&normalized))
+}
+
 fn spellcheck_override_contains(word: &str) -> bool {
     spellcheck_overrides().read().is_ok_and(|overrides| {
         overrides.dictionary.contains(word) || overrides.ignored.contains(word)
@@ -396,14 +404,22 @@ mod tests {
     }
 
     #[test]
+    fn native_override_lookup_does_not_use_the_static_lexicon() {
+        assert!(!is_spelling_word_overridden("zzzzzsessionoverride"));
+        assert!(ignore_spelling_word("zzzzzsessionoverride"));
+        assert!(is_spelling_word_overridden("Zzzzzsessionoverride’s"));
+    }
+
+    #[test]
     fn custom_dictionary_write_is_deduplicated_and_normalized() {
         let dir = tempfile::tempdir().expect("temporary dictionary directory");
         let path = dir.path().join("dictionary.txt");
-        let word = format!("neoismcustomword{}", std::process::id());
+        let word = "neoismcustomdictionaryword".to_owned();
 
         assert!(add_spelling_word_to_dictionary_at(&path, &word).unwrap());
         assert!(!add_spelling_word_to_dictionary_at(&path, &word).unwrap());
         assert_eq!(std::fs::read_to_string(path).unwrap(), format!("{word}\n"));
         assert!(spellcheck_override_contains(&word));
+        assert!(is_spelling_word_overridden(&word));
     }
 }

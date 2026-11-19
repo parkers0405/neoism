@@ -576,9 +576,9 @@ pub fn config_descriptors() -> Vec<D> {
         d(
             "editor.markdown.spellcheck",
             "Markdown spell check",
-            "Underline misspelled words in Markdown editors.",
+            "Opt in to spelling underlines and correction menus in Markdown editors.",
             Kind::Boolean,
-            json!(true),
+            json!(false),
             &[],
             false,
             C::Editor,

@@ -52,6 +52,13 @@
   </categories>
 
   <releases>
+    <release version="0.7.159" date="2026-11-19">
+      <description>
+        <p>Native Markdown editor with live preview, collaborative Notes, tables, images, block dragging, Mermaid diagrams, section links, and optional spelling corrections.</p>
+        <p>Improves rename preservation, external-edit highlights, editor wrapping and interrupted tab drags; completes MCP server connections after browser authorization.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.159</url>
+    </release>
     <release version="0.7.158" date="2026-11-17">
       <description>
         <p>Holds a steady 120 frames a second in Agent conversations on 120 Hz Macs: fixes a frame pacing rule that skipped every other refresh once a frame took more than about 3.7 ms.</p>

@@ -224,13 +224,13 @@ impl Default for EditorConfig {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct MarkdownEditorConfig {
     /// Show spelling underlines and spelling actions in Markdown surfaces.
-    #[serde(default = "default_bool_true")]
+    #[serde(default)]
     pub spellcheck: bool,
 }
 
 impl Default for MarkdownEditorConfig {
     fn default() -> Self {
-        Self { spellcheck: true }
+        Self { spellcheck: false }
     }
 }
 
@@ -1646,7 +1646,21 @@ mod tests {
         assert_eq!(config.editor.git_blame_delay_ms, 0);
         assert!(!config.editor.git_blame_hide_on_scroll);
         assert!(!config.editor.minimap);
-        assert!(config.editor.markdown.spellcheck);
+        assert!(!config.editor.markdown.spellcheck);
+    }
+
+    #[test]
+    fn markdown_spellcheck_is_opt_in_in_defaults_and_serialization() {
+        for source in ["{}", r#"{"editor":{}}"#, r#"{"editor":{"markdown":{}}}"#] {
+            let config: Config = serde_json::from_str(source).unwrap();
+            assert!(!config.editor.markdown.spellcheck);
+        }
+        for enabled in [false, true] {
+            let value = serde_json::json!({"editor":{"markdown":{"spellcheck":enabled}}});
+            let config: Config = serde_json::from_value(value).unwrap();
+            assert_eq!(config.editor.markdown.spellcheck, enabled);
+            assert_eq!(serde_json::to_value(config).unwrap()["editor"]["markdown"]["spellcheck"], enabled);
+        }
     }
 
     #[test]

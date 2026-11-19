@@ -6,6 +6,9 @@ use std::time::Duration;
 use crate::Tx;
 
 impl Tx {
+    /// Whether the runtime still holds a pointer press when the handler runs.
+    pub fn pointer_pressed(&self) -> bool { self.pointer_pressed }
+
     /// From a drag handler: while this press stays held, send the handler the pointer again as
     /// a [`Phase::Move`](crate::Phase::Move) after `delay`, moved or not. [`Tx::drag_repeat`]
     /// tells that move from the hand's. Ask again from the repeat, with the repeat interval, to

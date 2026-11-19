@@ -149,8 +149,11 @@ fn default_languages(available: &[String], preferred: &[String]) -> Vec<String> 
 /// The current generation, for a thread's checkers to know when to start over.
 pub(crate) fn generation() -> u64 { GENERATION.load(Ordering::Relaxed) }
 
-/// The byte ranges of `text`'s misspelled words, checked once per text.
-pub(crate) fn misspelled(text: &str) -> Ranges {
+/// The UTF-8 byte ranges `(start, end)` of `text`'s misspelled words, checked once
+/// per text on the calling thread. May be called from a background worker; the
+/// returned `Rc` stays on that thread. macOS identifies the text's language;
+/// unsupported platforms return no ranges.
+pub fn misspelled(text: &str) -> Rc<Vec<(usize, usize)>> {
     if text.trim().is_empty() {
         return Rc::default();
     }
@@ -184,7 +187,8 @@ pub(crate) fn misspelled_at(text: &str, at: usize) -> Option<(usize, usize)> {
 }
 
 /// The checker's suggestions for misspelled `word`, best first.
-pub(crate) fn suggest(word: &str) -> Vec<String> {
+/// May be called from a background worker. Returns at most five suggestions.
+pub fn suggest(word: &str) -> Vec<String> {
     let mut found = platform::suggest(word);
     found.retain(|s| s != word);
     found.truncate(MAX_SUGGESTIONS);

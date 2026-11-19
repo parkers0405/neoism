@@ -15,6 +15,7 @@ pub struct Config {
     pub wordmark_fire: bool,
     pub liquid_glass_cursor: bool,
     pub liquid_glass_selection: bool,
+    pub markdown_spellcheck: bool,
     pub model: Option<String>,
     pub variant: Option<String>,
 }
@@ -49,7 +50,7 @@ pub fn load() -> Config {
     let model = value["agent"]["model"].as_str().map(str::to_owned);
     let variant = value["agent"]["variant"].as_str().map(str::to_owned);
     let display_name = value["presence"]["display-name"].as_str().map(str::to_owned);
-    Config { display_name, theme, font_size, font_weight, font_families: crate::ui::fonts::configured(&value), wordmark_fire: wordmark_fire(&value), liquid_glass_cursor: liquid_glass_cursor(&value), liquid_glass_selection: liquid_glass_selection(&value), model, variant }
+    Config { display_name, theme, font_size, font_weight, font_families: crate::ui::fonts::configured(&value), wordmark_fire: wordmark_fire(&value), liquid_glass_cursor: liquid_glass_cursor(&value), liquid_glass_selection: liquid_glass_selection(&value), markdown_spellcheck: markdown_spellcheck(&value), model, variant }
 }
 
 /// Flames default on; an explicit grouped false disables them.
@@ -66,6 +67,10 @@ pub fn liquid_glass_selection(value: &Value) -> bool {
     value["appearance"]["effects"]["liquid-glass-selection"].as_bool().unwrap_or(false)
 }
 
+pub fn markdown_spellcheck(value: &Value) -> bool {
+    value["editor"]["markdown"]["spellcheck"].as_bool().unwrap_or(false)
+}
+
 /// Canonicalize the legacy default in memory; never rewrite the user's config on load.
 fn theme_id(value: &Value) -> &str {
     let name = value["appearance"]["theme"].as_str().or(value["theme"].as_str()).unwrap_or("neoism_dark");
@@ -75,6 +80,15 @@ fn theme_id(value: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_spelling_only_accepts_explicit_true() {
+        for value in [Value::Null, serde_json::json!({}), serde_json::json!({"editor":{"markdown":{}}}),
+            serde_json::json!({"editor":{"markdown":{"spellcheck":"true"}}}), serde_json::json!({"editor":{"markdown":{"spellcheck":false}}})] {
+            assert!(!markdown_spellcheck(&value));
+        }
+        assert!(markdown_spellcheck(&serde_json::json!({"editor":{"markdown":{"spellcheck":true}}})));
+    }
 
     #[test]
     fn selection_is_independent_and_defaults_off() {

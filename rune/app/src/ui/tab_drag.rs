@@ -87,8 +87,12 @@ impl App {
         true
     }
 
-    pub fn move_chrome_tab(&mut self, forward: bool, workspace: bool) {
-        if self.tab_drag.is_some() { return; }
+    pub fn move_chrome_tab(&mut self, forward: bool, workspace: bool, tx: &Tx) {
+        if self.tab_drag.is_some() {
+            if tx.pointer_pressed() { return; }
+            // The pressed tab can unmount before it receives Up (e.g. on a workspace switch).
+            self.tab_drag = None;
+        }
         if workspace {
             let index = match self.focus { Focus::Workspaces(i) => i, _ => self.workspace_active };
             let Some(next) = (if forward { index.checked_add(1) } else { index.checked_sub(1) }) else { return };
@@ -311,7 +315,7 @@ mod tests {
         assert!(app.reorder_buffer_tab(home, agent, true));
         assert_eq!(app.layout.focused().tabs, vec![editor, agent, home]);
         assert_eq!(app.active_tab().id, agent);
-        app.move_chrome_tab(false, false);
+        app.move_chrome_tab(false, false, &Tx::default());
         assert_eq!(app.layout.focused().tabs, vec![agent, editor, home]);
         app.split(crate::panes::Axis::Horizontal);
         let other = app.active_tab().id;

@@ -327,6 +327,7 @@ pub struct App {
     pub terminals: HashMap<u64, Terminal>,
     pub pending_pty: VecDeque<u64>,
     pub liquid_glass_selection: bool,
+    pub markdown_spellcheck: bool,
     pub glass_selection_policy: (bool, bool),
     pub goal_celebration: crate::goal_celebration::Celebration,
     pub connection_celebration: crate::connection_celebration::Celebration,
@@ -344,6 +345,7 @@ impl App {
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let mut app = App {
             liquid_glass_selection: config.liquid_glass_selection,
+            markdown_spellcheck: config.markdown_spellcheck,
             glass_selection_policy: (false, false),
             goal_celebration: Default::default(),
             connection_celebration: Default::default(),

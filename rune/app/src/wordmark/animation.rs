@@ -420,10 +420,13 @@ type Point = [f32; 2];
 pub(super) fn map_point(local: Point, letter: usize, layer: [f32; 3], rect: [f32; 4]) -> Point {
     // Use f64 until the final renderer coordinate: subtracting a late letter's
     // strip origin in f32 needlessly loses precision near the glyph edges.
-    let global_x = LETTER_X[letter] + layer[0] as f64 + local[0] as f64;
+    // The six original artwork slots have slightly different subpixel origins. New glyphs
+    // use the first slot's local coordinates while retaining their own animation index.
+    let slot = if letter < LETTER_X.len() {letter} else {0};
+    let global_x = LETTER_X[slot] + layer[0] as f64 + local[0] as f64;
     let global_y = SVG_BASELINE + layer[1] as f64 + local[1] as f64;
     let strip_width = PNG_WIDTH / 6.0;
-    let local_x = (global_x * SVG_TO_PNG - letter as f64 * strip_width) / strip_width;
+    let local_x = (global_x * SVG_TO_PNG - slot as f64 * strip_width) / strip_width;
     let local_y = (global_y * SVG_TO_PNG - PNG_CROP_Y) / PNG_HEIGHT;
     [
         (rect[0] as f64 + local_x * rect[2] as f64) as f32,
@@ -455,7 +458,7 @@ impl AnimationFrame {
 
     /// Attach decoration geometry to a foreground pixel using exactly its click-effect sample.
     pub(super) fn attached_quad(&self, letter: usize, row: usize, column: usize, corners: [Point; 4], rect: [f32; 4]) -> Option<([Point; 4], f32)> {
-        if letter >= MASKS.len() || row >= 7 || column >= 7 || !self.progress.is_finite() { return None; }
+        if row >= 7 || column >= 7 || !self.progress.is_finite() { return None; }
         let tile = Tile::new(letter, row, column);
         let s = sample(self.effect, self.progress, tile);
         let alpha = clamp(s.opacity) * clamp(self.tail_opacity);
@@ -475,8 +478,12 @@ impl AnimationFrame {
     /// coordinates of `rect` (the letter's current idle slice, hover and shimmer included),
     /// with the alpha (0-1) each is drawn at. Same order and alpha as the original's
     /// `draw_letter`, which handed the same quads to Sugarloaf as triangles.
-    pub fn letter_quads(&self, letter_index: usize, rect: [f32; 4], mut quad: impl FnMut([Point; 4], f32)) {
-        if letter_index >= MASKS.len() || !(rect[2] > 0.0 && rect[3] > 0.0) || !self.progress.is_finite() {
+    pub fn letter_quads(&self, letter_index: usize, rect: [f32; 4], quad: impl FnMut([Point; 4], f32)) {
+        if let Some(mask)=MASKS.get(letter_index) { self.glyph_quads(letter_index,mask,rect,quad); }
+    }
+
+    pub fn glyph_quads(&self, letter_index:usize, mask:&[u8;7], rect:[f32;4], mut quad:impl FnMut([Point;4],f32)) {
+        if !(rect[2] > 0.0 && rect[3] > 0.0) || !self.progress.is_finite() {
             return;
         }
         let mut paint = |corners: [Point; 4], alpha: f32, layer: [f32; 3]| {
@@ -490,7 +497,7 @@ impl AnimationFrame {
             }
         };
         for (layer_index, layer) in LAYERS.into_iter().enumerate() {
-            for (row, mask) in MASKS[letter_index].iter().enumerate() {
+            for (row, mask) in mask.iter().enumerate() {
                 for column in 0..7 {
                     if mask & (1 << (6 - column)) == 0 {
                         continue;

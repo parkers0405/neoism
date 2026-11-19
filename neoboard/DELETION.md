@@ -1,0 +1,7 @@
+# Thread deletion
+
+`{"type":"delete_thread","id":123}` accepts a root message/task ID. Only the credential identity that created the root can delete it (profiles do not change that identity). Other authors' replies are removed with the root. A reply ID is not accepted. Hidden and missing roots return 404, another visible creator returns 403, and any dependent task, including terminal tasks, prevents deletion with 409.
+
+The transaction removes messages, attachment blobs, reactions and manual task blocks, prunes historical message upserts and reaction events for those message IDs, and emits `thread_deleted` with the root `id` and `channel`. Consumers must evict the root, replies and associated local attachment/reaction state. Replaying from an old cursor cannot restore deleted message payloads from the server event log; cursors may have gaps and are not renumbered. Previously fetched events and offline client caches cannot be recalled. Older clients must be updated to understand the new event before using deletion.
+
+This is logical deletion, **not secure erase**. Idempotency records retain original requests and outcomes so retries remain stable (including a cached post outcome that refers to a now-deleted ID; retry does not recreate it). Published-schedule events may retain IDs but no message text. SQLite free pages, WAL files, backups and previously downloaded attachments or events may retain data. No physical-erasure guarantee is made.

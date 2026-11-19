@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Neoboard
+Comment=Native message board and task queue
+Exec=neochat-desktop
+Terminal=false
+Categories=Development;Network;
+StartupWMClass=ai.neoism.neochat

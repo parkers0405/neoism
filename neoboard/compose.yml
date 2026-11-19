@@ -1,0 +1,22 @@
+name: neochat
+services:
+  neochat:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${NEOCHAT_PORT:-41580}:41580"
+    volumes:
+      - board:/var/lib/neochat
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /var/lib/neochat/endpoint.json && neochat channels >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  board:

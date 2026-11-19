@@ -24,7 +24,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(col().grow(1.0).shrink().h_full()
             .child(workspace_tabs(app))
             .child(crate::panes::view(app, cx)))
-        .child_if(app.git_panel.open, || crate::git::view(app));
+        .child_if(app.git_panel.open, || super::sidebar::view(app, "git", crate::git::view(app), crate::git::WIDTH * app.ty.scale(), 180.0, super::sidebar::chrome_max(app), true));
     track_caret(app, cx);
     col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
         .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
@@ -279,10 +279,12 @@ mod rail_selection_tests {
 }
 
 fn sidebar(app: &App) -> El {
-    match app.sidebar {
-        Some(Sidebar::Files | Sidebar::Notes) => crate::tree::view(app).w(SIDEBAR_W),
-        _ => agent::conversations(app).w(SIDEBAR_W),
-    }
+    let (key, content) = match app.sidebar {
+        Some(Sidebar::Files) => ("files", crate::tree::view(app)),
+        Some(Sidebar::Notes) => ("notes", crate::tree::view(app)),
+        _ => ("conversations", agent::conversations(app)),
+    };
+    super::sidebar::view(app, key, content, SIDEBAR_W, 180.0, super::sidebar::chrome_max(app), false)
 }
 
 /// A vertical wheel over an overflowing tab strip scrolls it sideways (a horizontal wheel or

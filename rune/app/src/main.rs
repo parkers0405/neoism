@@ -23,6 +23,7 @@ mod goal_celebration;
 mod connection_celebration;
 mod home;
 mod keys;
+mod mermaid;
 mod palette;
 mod replay;
 mod panes;
@@ -221,6 +222,8 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let external_landing = app.external_edit_tick();
     if external_landing { wake!("external-edit", std::time::Duration::ZERO); }
     let mouse_changed = app.editor_mouse_tick(tx);
+    let diagrams_changed = app.mermaid_cache.poll();
+    let spelling_changed = editor::markdown::spelling_changed(app);
     // Edited buffers re-sync to the language servers once typing settles.
     if let Some(delay) = app.lsp_tick() { wake!("lsp", delay); }
     if flashing { wake!("flash", std::time::Duration::ZERO); }
@@ -282,7 +285,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
         app.fps_live.set(ui::status::fps_label(fps.unwrap_or(0)));
     }
     let images_changed = app.inline_images_changed();
-    let rerun = images_changed || animating || changed || tree_drag_changed || table_changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
+    let rerun = spelling_changed || diagrams_changed || images_changed || animating || changed || tree_drag_changed || table_changed || scroll_restoring || family_changed || shared_changed || presence_changed || stream_due || fps_changed || caret_changed || focus_changed || panes_changed || skit || activity_changed || flashing || mouse_changed || mode_changing || rail_bottom;
     // `NEOISM_RUNE_TRACE_POLL=1`: which term re-ran the views (each is a full view run).
     if *TRACE_POLL && (rerun || !wakes.is_empty()) {
         let terms = [("animating", animating), ("changed", changed), ("stream", stream_due), ("fps", fps_changed), ("caret", caret_changed),
@@ -627,6 +630,11 @@ fn main() {
                 s.sidebar = Some(app::Sidebar::Files);
             }),
             // Large, wrapped file in a narrow split: scrolling must only mount visible rows.
+            ("editor-wrap", |s| {
+                s.open_file("src/wrapping.ts", None);
+                s.apply_opened_file("src/wrapping.ts", include_bytes!("../assets/fixtures/wrapping.ts"));
+                s.buffers.get_mut("src/wrapping.ts").unwrap().doc.cursor_col = 130;
+            }),
             ("editor-stress", |s| {
                 s.open_file("left.rs", None);
                 s.apply_opened_file("left.rs", b"// Adjacent pane stays independent.\n");
@@ -681,6 +689,8 @@ fn main() {
             }),
             ("external-edit", |s| editor::external_edit::fixture(s, false)),
             ("external-edit-md", |s| editor::external_edit::fixture(s, true)),
+            ("mermaid", |s| ui::mermaid::fixture(s, false)),
+            ("md-mermaid", |s| ui::mermaid::fixture(s, true)),
             ("editor-git", |s| editor::git::fixture(s, false)),
             ("editor-git-md", |s| editor::git::fixture(s, true)),
             ("sidebar-long", |s| {

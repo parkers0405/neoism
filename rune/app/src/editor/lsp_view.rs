@@ -60,15 +60,49 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-/// The status pill's state and the error / warning counts for the active editor.
+/// The status pill's state and error / warning counts for the active code editor.
 pub fn status(app: &App) -> Option<(Option<Status>, usize, usize)> {
-    let buffer = app.active_buffer().filter(|b| b.loaded)?;
+    let buffer = app
+        .active_buffer()
+        .filter(|b| b.loaded && !super::markdown::enabled(b))?;
     let lsp = &buffer.lsp;
     Some((
         lsp.status,
         lsp.count(Severity::Error),
         lsp.count(Severity::Warn),
     ))
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_hides_lsp_status_and_diagnostic_counts() {
+        for extension in ["md", "markdown", "mdown", "MD", "MarkDown", "MDown", "rs"] {
+            let mut app = App::new();
+            let path = format!("status-check.{extension}");
+            app.open_file(&path, None);
+            app.apply_opened_file(&path, b"example\n");
+            for state in [None, Some(Status::Initializing), Some(Status::Active), Some(Status::Missing)] {
+                let buffer = app.active_buffer_mut().unwrap();
+                buffer.lsp.status = state;
+                buffer.lsp.diagnostics = [Severity::Error, Severity::Warn]
+                    .into_iter()
+                    .map(|severity| Diagnostic {
+                        line: 0,
+                        col: 0,
+                        end_line: 0,
+                        end_col: 1,
+                        severity,
+                        message: "diagnostic".into(),
+                    })
+                    .collect();
+                let expected = (extension == "rs").then_some((state, 1, 1));
+                assert_eq!(status(&app), expected, "{extension}: {state:?}");
+            }
+        }
+    }
 }
 
 /// Diagnostic marks for one wrapped row of line `index`: underline bars under the marked bytes,

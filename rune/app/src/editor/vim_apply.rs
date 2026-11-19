@@ -346,7 +346,7 @@ impl Document {
     /// a wrapped line's continuation is a row of its own, and the on-screen column holds.
     /// Returns false when wrapping is unknown or off, for the plain line step.
     fn vim_move_visual(&mut self, delta: isize) -> bool {
-        use super::wrap::{TAB_DISPLAY_WIDTH as TAB, WrapSegment, byte_for_display_col, wrap_segments};
+        use super::wrap::{TAB_DISPLAY_WIDTH as TAB, WrapSegment, wrap_segments};
         if self.wrap_cols == 0 { return false; }
         let cols = self.wrap_cols;
         let rows = |line: &str| -> Vec<WrapSegment> {
@@ -355,7 +355,7 @@ impl Document {
             s
         };
         let here = rows(&self.lines[self.cursor_line]);
-        let at = here.iter().position(|s| self.cursor_col < s.byte_end).unwrap_or(here.len() - 1);
+        let at = here.iter().position(|s| s.contains_caret(self.cursor_col, self.lines[self.cursor_line].len())).unwrap_or(here.len() - 1);
         let seg = here[at];
         let goal = self.goal_visual_col.unwrap_or_else(|| seg.visual_col(seg.source_col_for_byte(&self.lines[self.cursor_line], self.cursor_col, TAB)));
         let (line, seg) = if delta > 0 {
@@ -371,15 +371,12 @@ impl Document {
             return true;
         };
         let text = &self.lines[line];
-        let byte = byte_for_display_col(text, seg.source_col_at_visual(goal), TAB).clamp(seg.byte_start, seg.byte_end);
-        // A continuation row ends where the next begins: stay on this row's last character.
-        let last_row = seg.byte_end >= text.len();
-        let byte = if !last_row && byte >= seg.byte_end { prev_char_boundary(text, seg.byte_end) } else { byte };
+        let byte = seg.byte_at_visual(text, goal, TAB);
         self.cursor_line = line;
         self.cursor_col = byte;
         self.goal_visual_col = Some(goal);
         if self.mode == Mode::Normal && !text.is_empty() && self.cursor_col >= text.len() {
-            self.cursor_col = prev_char_boundary(text, text.len());
+            self.cursor_col = seg.byte_at_visual(text, seg.visual_col(seg.source_end_col).saturating_sub(1), TAB);
         }
         true
     }

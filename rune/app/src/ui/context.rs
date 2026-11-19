@@ -26,13 +26,14 @@ pub enum Target {
     /// where a new file lands: the row when it is a folder, else its folder.
     Tree { notes: bool, path: Option<String>, is_dir: bool, directory: String },
     Chat { session: String, title: String, pinned: bool },
+    Spelling(crate::editor::markdown::spelling::WordTarget),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Command { Open, NewFile, NewFolder, Rename, Delete, Pin, RenameChat, DeleteChat }
+pub enum Command { Open, NewFile, NewFolder, Rename, Delete, Pin, RenameChat, DeleteChat, SpellingReplace(usize), SpellingIgnore, SpellingLearn }
 
 impl Command {
-    fn label(self, target: &Target) -> &'static str {
+    fn label(self, target: &Target) -> &str {
         match self {
             Command::Open => "Edit / Open",
             Command::NewFile => "New File",
@@ -42,6 +43,9 @@ impl Command {
             Command::Pin => if matches!(target, Target::Chat { pinned: true, .. }) { "Unpin Chat" } else { "Pin Chat" },
             Command::RenameChat => "Rename Chat",
             Command::DeleteChat => "Delete Chat",
+            Command::SpellingReplace(index) => match target { Target::Spelling(word) => word.suggestions.get(index).map_or("", String::as_str), _ => "" },
+            Command::SpellingIgnore => "Ignore Word",
+            Command::SpellingLearn => "Add to Dictionary",
         }
     }
 
@@ -53,6 +57,9 @@ impl Command {
             Command::Rename | Command::RenameChat => 'r',
             Command::Delete | Command::DeleteChat => 'd',
             Command::Pin => 'p',
+            Command::SpellingReplace(index) => char::from_digit(index as u32 + 1, 10).unwrap_or(' '),
+            Command::SpellingIgnore => 'i',
+            Command::SpellingLearn => 'a',
         }
     }
 }
@@ -91,6 +98,11 @@ fn valid_note_path(path: &str) -> bool {
 }
 
 impl App {
+    pub(crate) fn open_spelling_context(&mut self, target: crate::editor::markdown::spelling::WordTarget, at: [f32; 2]) {
+        let mut items: Vec<_> = (0..target.suggestions.len()).map(Command::SpellingReplace).collect();
+        items.extend([Command::SpellingIgnore, Command::SpellingLearn]);
+        self.context = Some(Menu { at, target: Target::Spelling(target), items, selected: 0 });
+    }
     /// Keyboard actions on the selected row use the same captured target and dialogs as clicks.
     pub(crate) fn tree_prompt(&mut self, command: Command) {
         let Some(tree) = self.active_tree() else { return };
@@ -135,6 +147,10 @@ impl App {
         let Some(menu) = self.context.take() else { return };
         let Some(command) = menu.items.get(index).copied() else { return };
         let target = menu.target;
+        if let Target::Spelling(word) = &target {
+            crate::editor::markdown::spelling::apply(self, word, command);
+            return;
+        }
         let field = |value: &str| { let mut edit = TextEdit::new(value); edit.anchor = 0; edit.focused = true; Some(edit) };
         self.prompt = match (&target, command) {
             (Target::Tree { path: Some(path), is_dir, .. }, Command::Open) => {

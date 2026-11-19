@@ -400,6 +400,28 @@ fn publish_catalog_changed(state: &AppState, directory: &str, name: &str) {
     ));
 }
 
+/// Finish browser authorization in the same workspace/tenant snapshot as the attempt.
+pub(crate) async fn connect_after_auth(
+    directory: &str,
+    name: &str,
+    auth_store: &McpAuthStore,
+    state: AppState,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
+) -> anyhow::Result<McpStatus> {
+    let config = snapshot
+        .config()
+        .mcp
+        .get(name)
+        .ok_or_else(|| anyhow!("MCP server {name} is not configured"))?;
+    let result = connect_config_inner(
+        directory, name, config, auth_store, state.clone(), snapshot.mcp()?,
+    )
+    .await;
+    // Even a failed/unchanged runtime must release clients waiting on browser auth.
+    publish_catalog_changed(&state, directory, name);
+    result
+}
+
 async fn connect_config_inner(
     directory: &str,
     name: &str,

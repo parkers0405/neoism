@@ -51,6 +51,8 @@ pub struct Buffer {
     pub message: Option<String>,
     /// Line to put the cursor on once the text arrives.
     initial_line: Option<usize>,
+    /// Section to visit after an asynchronous Markdown file load.
+    initial_anchor: Option<String>,
     /// Unsaved text from the last session, laid over the file once it loads.
     pub recovered: Option<String>,
     /// Set for the daemon's `config.json` document: saved through `Config` with this revision.
@@ -100,6 +102,7 @@ impl Buffer {
         Buffer {
             path, scope, doc: Document::from_text(""), loaded: false, error: None, prompt: None, leader_pending: false, saving: None, saving_request: None, renaming: false, close_after_save: None, message: None,
             initial_line: line.map(|l| l.saturating_sub(1) as usize),
+            initial_anchor: None,
             recovered: None,
             config: None,
             lsp: lsp::BufferLsp::default(),
@@ -173,7 +176,14 @@ impl App {
         let relative = std::path::Path::new(path).strip_prefix(&self.cwd).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_owned());
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Editor { path: relative.clone() }) {
             self.select_tab(self.tabs[index].id);
+            if let Some(buffer) = self.buffers.get_mut(&relative) {
+                buffer.initial_anchor = None;
+            }
             if let (Some(line), Some(buffer)) = (line, self.buffers.get_mut(&relative)) {
+                if !buffer.loaded {
+                    buffer.initial_line = Some(line.saturating_sub(1) as usize);
+                    return;
+                }
                 buffer.doc.set_cursor(vim::Pos { line: line.saturating_sub(1) as usize, col: 0 });
                 buffer.doc.follow_cursor = true;
                 self.editor_follow = true;
@@ -192,6 +202,19 @@ impl App {
         let parent = relative.rsplit_once('/').map_or("", |(dir, _)| dir);
         if let Some(daemon) = &self.daemon {
             daemon.send_scoped(Family::Files, serde_json::json!({"ListDir": {"path": parent}}), &scope);
+        }
+    }
+
+    pub(crate) fn open_file_anchor(&mut self, path: &str, anchor: Option<&str>) {
+        self.open_file(path, None);
+        let Some(buffer) = self.active_buffer_mut() else { return };
+        if !markdown::enabled(buffer) { return; }
+        buffer.initial_line = None;
+        buffer.initial_anchor = anchor.filter(|s| !s.is_empty()).map(str::to_owned);
+        if buffer.loaded {
+            if let Some(anchor) = buffer.initial_anchor.take() {
+                if markdown::links::jump(buffer, &anchor) { self.editor_follow = true; }
+            }
         }
     }
 
@@ -245,6 +268,9 @@ impl App {
             let col = vim::vim_first_non_blank(buffer.doc.lines.get(line).map_or("", String::as_str));
             buffer.doc.set_cursor(vim::Pos { line, col });
             self.editor_follow = true;
+        }
+        if let Some(anchor) = buffer.initial_anchor.take() {
+            if markdown::links::jump(buffer, &anchor) && visible { self.editor_follow = true; }
         }
         self.lsp_sync(&opened);
         self.collab_bind(&opened);

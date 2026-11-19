@@ -22,7 +22,9 @@ fn owner(layout: &Layout, line: usize, source: usize) -> Option<(usize, usize)> 
             if start > source && after.is_none_or(|(_, _, best)| start < best) { after = Some((i, j, start)); }
         }
     }
-    before.or(after).map(|(i, j, _)| (i, j))
+    before.or(after).map(|(i, j, _)| (i, j)).or_else(|| {
+        layout.diagrams.iter().find(|d| d.range.contains(&line)).map(|d| (d.row, 0))
+    })
 }
 
 fn project(mark: &Mark, piece: &Piece, owns_caret: bool, newline: bool) -> Mark {
@@ -65,6 +67,26 @@ pub(super) fn decorate(app: &App, mut visual: El, layout: &Layout, i: usize, mar
 mod tests {
     use super::*;
     use neoism_protocol::crdt::{CrdtCursorPosition as PeerCursor, CrdtPeerPresence as PeerPresence, CrdtPresenceColor as PresenceColor};
+
+    #[test]
+    fn diagram_hidden_unicode_positions_share_local_and_presence_anchor_until_insert() {
+        let mut app = super::super::tests::app("```mermaid\nflowchart TD\nA[hé😀] --> B[世界]\n```\n");
+        for mode in [Mode::Normal, Mode::Visual, Mode::Insert] {
+            for line in 0..4 {
+                let raw = app.active_buffer().unwrap().doc.lines[line].clone();
+                for byte in raw.char_indices().map(|(byte, _)| byte).chain(std::iter::once(raw.len())) {
+                    let b = app.active_buffer_mut().unwrap();
+                    b.doc.mode = mode; b.doc.cursor_line = line; b.doc.cursor_col = byte;
+                    let b = app.active_buffer().unwrap();
+                    let laid = layout(&app, b);
+                    let (i, j) = owner(&laid, line, byte).unwrap();
+                    let (entry, piece) = cursor_entry(&laid, b).unwrap();
+                    assert!(std::ptr::eq(entry, &laid.rows[i]));
+                    assert!(std::ptr::eq(piece, &laid.rows[i].row.pieces[j]));
+                }
+            }
+        }
+    }
 
     fn mark(source: &str, byte: usize) -> Mark {
         let mut app = App::new();

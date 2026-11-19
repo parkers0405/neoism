@@ -250,7 +250,10 @@ fn surface_of(path: &str) -> String {
 
 impl Buffer {
     fn lsp_enabled(&self) -> bool {
-        self.loaded && self.error.is_none() && self.config.is_none()
+        self.loaded
+            && self.error.is_none()
+            && self.config.is_none()
+            && !super::markdown::enabled(self)
     }
 }
 
@@ -815,6 +818,19 @@ fn query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_does_not_attach_to_lsp() {
+        for extension in ["md", "markdown", "mdown", "MD", "MarkDown", "MDown", "rs"] {
+            let mut buffer = Buffer::new(
+                format!("/project/example.{extension}"),
+                "/project".into(),
+                None,
+            );
+            buffer.loaded = true;
+            assert_eq!(buffer.lsp_enabled(), extension == "rs", "{extension}");
+        }
+    }
 
     #[test]
     fn available_server_is_not_reported_missing() {

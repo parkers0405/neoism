@@ -486,10 +486,8 @@ pub fn chunks(source: &str) -> Vec<Piece<'_>> {
                 (space, cut) = (above, kind);
             }
             after_code = false;
-            if opens_fence && top_level && content && !line_language(line).is_some_and(|lang| ["diff", "patch", "mermaid"].iter().any(|own| lang.eq_ignore_ascii_case(own))) {
-                fence_at = gap(12.0).map(|space| (offset, space, 0));
-            } else if opens_fence && top_level && !content {
-                fence_at = Some((offset, 0.0, 0));
+            if opens_fence && top_level && !line_language(line).is_some_and(|lang| ["diff", "patch", "mermaid"].iter().any(|own| lang.eq_ignore_ascii_case(own))) {
+                fence_at = if content { gap(12.0).map(|space| (offset, space, 0)) } else { Some((offset, 0.0, 0)) };
             }
             below = if heading {
                 Below::Heading(match level { 1 => 12.0, 2 => 10.0, _ => 8.0 })
@@ -542,7 +540,7 @@ pub fn chunks(source: &str) -> Vec<Piece<'_>> {
 
 /// A fence line's language: the first word of its info string.
 pub fn line_language(line: &str) -> Option<&str> {
-    line.trim_start().trim_start_matches(['`', '~']).split_whitespace().next()
+    line.trim_start().trim_start_matches(['`', '~']).split(|c: char| c.is_whitespace() || c == ',').find(|s| !s.is_empty())
 }
 
 /// Whether `line`, unindented and after a blank line, can only be the start of a paragraph: it
@@ -650,6 +648,12 @@ mod tests {
         // A short block, a diff, a diagram and a fence inside a list stay with the prose.
         for block in [format!("```rust\n{}```", "x\n".repeat(SLAB_FROM - 1)), format!("```diff\n{code}```"), format!("```mermaid\n{code}```"), format!("- item\n\n  ```rust\n{}  ```", "  x\n".repeat(SLAB_FROM + 5))] {
             assert!(chunks(&format!("Text.\n\n{block}\n\nDone.\n")).iter().all(|piece| piece.cut != Cut::Code));
+        }
+        for lang in ["mermaid", "MERMAID", "mermaid,title=chart", "diff", "patch"] {
+            for closer in ["", "```\n"] {
+                let source = format!("```{lang}\n{code}{closer}");
+                assert!(chunks(&source).iter().all(|piece| piece.cut != Cut::Code), "specialized {lang} frame must not become slabs, even without preceding prose");
+            }
         }
         // A reply that is one long block; and one under a heading (the heading's own 12).
         assert_eq!(chunks(&format!("```rust\n{code}```\n"))[0].cut, Cut::Code);

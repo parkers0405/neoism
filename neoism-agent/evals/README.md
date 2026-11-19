@@ -2,6 +2,8 @@
 
 An offline-first pilot comparing the **real Neoism harness** with Claude Code. `--suite smoke` selects three plumbing/calibration tasks. `--suite repository` selects ten larger multi-file Python mini-projects; two attempts per setup produce a 40-trial comparison. These are private synthetic tasks, not real upstream issues or a recognized public benchmark. Scores describe this suite, not a universal product ranking.
 
+See [BENCHMARK_AUDIT.md](BENCHMARK_AUDIT.md) for the public benchmark shortlist, cloned upstream revisions, credential-free Terminal-Bench calibration and source-level latency investigation. It does not claim a completed Neoism-versus-OpenCode or Codex comparison.
+
 ## Contestants
 
 | Setup | Harness | Model |

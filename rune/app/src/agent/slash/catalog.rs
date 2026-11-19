@@ -132,6 +132,7 @@ pub fn mcp_servers(status: &Value) -> Vec<Row> {
         let not_started = error == "MCP client runtime is not connected yet";
         let (description, footer, dot) = match status {
             "connected" => ("Available to Neoism".to_owned(), "connected", Status::Good),
+            "disconnected" => ("Ready to connect".to_owned(), "disconnected", Status::Muted),
             "disabled" if oauth => ("Click to authenticate with OAuth".to_owned(), "needs auth", Status::Warning),
             "disabled" => ("Disabled in configuration".to_owned(), "disabled", Status::Muted),
             "needs_auth" => ("Click to authenticate with OAuth".to_owned(), "needs auth", Status::Warning),
@@ -294,6 +295,20 @@ mod tests {
         let entry: Value = serde_json::from_str(&rows[0].value).unwrap();
         let titles: Vec<String> = mcp_actions(&entry).into_iter().map(|r| r.title).collect();
         assert_eq!(titles, ["Disable", "Connect"]);
+    }
+
+    #[test]
+    fn disconnected_mcp_is_neutral_but_real_errors_remain_visible() {
+        let rows = mcp_servers(&json!({
+            "idle": {"status": {"status": "disconnected"}},
+            "broken": {"status": {"status": "failed", "error": "Connection refused"}}
+        }));
+        let idle = rows.iter().find(|r| r.title == "idle").unwrap();
+        assert_eq!(idle.footer, "disconnected");
+        assert_eq!(idle.status, Some(Status::Muted));
+        let broken = rows.iter().find(|r| r.title == "broken").unwrap();
+        assert_eq!(broken.footer, "failed");
+        assert!(broken.description.contains("Connection refused"));
     }
 
     #[test]

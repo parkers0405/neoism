@@ -126,16 +126,27 @@ async fn worker_browser_mcp_callback_is_state_bound_without_bearer_or_directory_
     std::fs::create_dir_all(workspace.join(".agent")).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let token_url = format!("http://{}/token", listener.local_addr().unwrap());
+    let mcp_url = format!("http://{}/mcp", listener.local_addr().unwrap());
     let token_server = tokio::spawn(async move {
         axum::serve(listener, axum::Router::new().route("/token", axum::routing::post(|body: String| async move {
             let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
             assert_eq!(form["code_verifier"], "private-pkce-verifier");
             assert_eq!(form["redirect_uri"], "https://gateway.example/workspaces/workspace-a/callback");
             axum::Json(json!({"access_token": "worker-secret", "token_type": "Bearer"}))
+        })).route("/mcp", axum::routing::post(|headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| async move {
+            assert_eq!(headers["authorization"], "Bearer worker-secret");
+            let result = match body["method"].as_str().unwrap_or_default() {
+                "initialize" => json!({"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "test", "version": "1"}}),
+                "tools/list" => json!({"tools": []}),
+                "resources/list" => json!({"resources": []}),
+                "prompts/list" => json!({"prompts": []}),
+                _ => json!({}),
+            };
+            axum::Json(json!({"jsonrpc": "2.0", "id": body["id"], "result": result}))
         }))).await.unwrap();
     });
     std::fs::write(workspace.join(".agent/agent.json"), serde_json::to_vec(&json!({
-        "mcp": {"remote": {"type": "remote", "url": "https://mcp.example/mcp", "oauth": {
+        "mcp": {"remote": {"type": "remote", "url": mcp_url, "oauth": {
             "clientId": "client", "authorizationUrl": "https://auth.example/authorize", "tokenUrl": token_url
         }}}
     })).unwrap()).unwrap();
@@ -144,7 +155,7 @@ async fn worker_browser_mcp_callback_is_state_bound_without_bearer_or_directory_
     let services = services(&root, &binding);
     let store = services.mcp_credentials.clone();
     let scope = CredentialScope { tenant_id: binding.tenant_id().into(), workspace_id: Some(binding.workspace_id().into()) };
-    let connection = McpConnectionRef { connection_id: "remote".into(), server_url: "https://mcp.example/mcp".into() };
+    let connection = McpConnectionRef { connection_id: "remote".into(), server_url: mcp_url };
     let attempt = McpOAuthAttempt {
         scope: scope.clone(), connection: connection.clone(), state: "browser-state".into(),
         code_verifier: "private-pkce-verifier".into(),
@@ -153,7 +164,8 @@ async fn worker_browser_mcp_callback_is_state_bound_without_bearer_or_directory_
     };
     store.put_attempt(attempt.clone()).await.unwrap();
     let state = AppState::open_database_with_services(root.join("agent.db"), services).await.unwrap();
-    let app = crate::app_router::app(state);
+    let mut events = state.subscribe();
+    let app = crate::app_router::app(state.clone());
     for scopes in [&["agent:use"][..], &["workspace:admin"][..]] {
         let response = app.clone().oneshot(signed_for(
             &key, &binding, binding.root(), scopes, Method::GET,
@@ -174,6 +186,11 @@ async fn worker_browser_mcp_callback_is_state_bound_without_bearer_or_directory_
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    let snapshot = state.try_plugin_snapshot_for_tenant(&scope.tenant_id, workspace.to_str().unwrap()).await.unwrap();
+    let auth = crate::mcp_auth::McpAuthStore::from_services(state.services(), scope.clone(), true).unwrap();
+    let statuses = crate::mcp::status_with_snapshot(workspace.to_str().unwrap(), &auth, &state, &snapshot).await;
+    assert_eq!(statuses["remote"], neoism_agent_core::McpStatus::Connected);
+    assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|e| e.kind == neoism_agent_core::event_type::MCP_TOOLS_CHANGED && e.properties["server"] == "remote"));
     assert_eq!(store.get(&scope, &connection).await.unwrap().unwrap().tokens.unwrap().access_token, "worker-secret");
     assert!(store.get(&CredentialScope::local(), &connection).await.is_err());
     assert_eq!(app.clone().oneshot(request(Method::GET, path, None)).await.unwrap().status(), StatusCode::BAD_REQUEST);

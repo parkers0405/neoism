@@ -42,7 +42,7 @@ pub fn view(app: &App) -> El {
         .child(header(app, settings, s))
         .child(el().w_full().h(s).fill(rgb(p.border)))
         .child(row().w_full().grow(1.0).shrink().min_h(0.0)
-            .child_if(!compact, || sidebar(app, settings, s))
+            .child_if(!compact, || crate::ui::sidebar::view(app, "settings", sidebar(app, settings, s), SIDEBAR_W * s, 160.0 * s, (win_w - 2.0 * margin - 320.0 * s).min(360.0 * s), false))
             .child_if(!compact, || el().w(s).h_full().fill(rgb(p.border)))
             .child(content(app, settings, s)));
     // The scrim dims whatever is behind the page.

@@ -342,22 +342,10 @@ impl App {
 
     /// Wheel over the raw grid: mouse reports when the program tracks the mouse, arrow keys on
     /// the alternate screen in alternate-scroll mode (as terminals do), else nothing.
-    pub fn grid_wheel(&mut self, tab_id: u64, steps: i32, col: u16, row: u16) {
+    pub fn grid_wheel(&mut self, tab_id: u64, event: rune::WheelEvent, row_height: f32, col: u16, row: u16) {
         let Some(term) = self.terminals.get_mut(&tab_id) else { return };
+        let bytes = term.grid_wheel_bytes(event, row_height, col, row);
         let Some(session_id) = term.shell.session.clone() else { return };
-        let button = if steps > 0 { MouseButton::WheelUp } else { MouseButton::WheelDown };
-        let mut bytes = Vec::new();
-        for _ in 0..steps.unsigned_abs().min(200) {
-            let report = term.shell.encode_mouse(&MouseInput { action: MouseAction::Press, button: Some(button), col, row, ctrl: false, alt: false });
-            match report {
-                Some(report) => bytes.extend(report),
-                None if term.shell.alt() && term.shell.alternate_scroll() => {
-                    let key = if steps > 0 { "up" } else { "down" };
-                    bytes.extend(term.shell.encode_key(&crate::ghostty::KeyInput { key, text: "", shift: false, ctrl: false, alt: false, logo: false }));
-                }
-                None => break,
-            }
-        }
         self.pty_input(&session_id, &bytes);
     }
 

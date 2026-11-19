@@ -606,6 +606,7 @@ impl App {
     }
 
     fn run_mcp_action(&mut self, value: &str) {
+        if value == DONE { return self.close_prompt_picker(); }
         let Ok(action) = serde_json::from_str::<Value>(value) else { return };
         let name = action["name"].as_str().unwrap_or_default().to_owned();
         let directory = Some(self.cwd.clone());
@@ -791,6 +792,7 @@ impl App {
 
     fn connect_finished(&mut self, provider_id: &str, ok: Result<(), String>) {
         let Some(flow) = self.composer.connect.as_mut() else { return };
+        if !flow.waiting || flow.provider.as_ref().is_none_or(|p| p.id != provider_id) { return; }
         let name = flow.provider.as_ref().filter(|p| p.id == provider_id).map(|p| p.name.clone()).unwrap_or_else(|| provider_id.to_owned());
         flow.waiting = false;
         match ok {

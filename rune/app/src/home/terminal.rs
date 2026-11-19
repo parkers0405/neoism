@@ -21,6 +21,7 @@ pub struct Terminal {
     pub scroll: Rc<Cell<(f32, f32)>>,
     /// Where notched wheel input is gliding the blocks to.
     pub wheel_target: Option<f32>,
+    pub(super) grid_wheel: super::grid::GridWheel,
     /// When the current submission or command started (for `LONG_RUNNING`).
     pub busy_since: Option<Instant>,
     /// The block under the pointer, and the one clicked (tinted, as GPUiX selects).
@@ -84,6 +85,7 @@ impl Terminal {
             area: [0.0; 2],
             scroll: Rc::default(),
             wheel_target: None,
+            grid_wheel: Default::default(),
             busy_since: None,
             hovered: None,
             selected: None,
@@ -108,6 +110,7 @@ impl Terminal {
         }
         let busy = busy || was != self.program;
         let raw = self.raw();
+        self.sync_grid_wheel();
         if raw && (output || self.screen.is_none()) {
             self.screen = self.shell.screen();
         } else if !raw {

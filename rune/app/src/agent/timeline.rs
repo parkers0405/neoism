@@ -618,15 +618,29 @@ pub(crate) fn code_frame(app: &App) -> impl Fn(El, &CodeFrame<'_>) -> El + 'stat
     }
 }
 
+fn diagram_frame(app: &App, frames: std::collections::HashMap<usize, El>) -> impl Fn(El, &CodeFrame<'_>) -> El + 'static {
+    let code = code_frame(app);
+    move |body, frame| {
+        if let Some(diagram) = frames.get(&frame.index) { return diagram.clone(); }
+        code(body, frame)
+    }
+}
+
 /// Shared with editable Markdown. Keep the card chrome and native Copy feedback identical.
 pub(crate) fn code_surface(p: &crate::ui::theme::Palette) -> El {
     col().w_full().radius(14.0).fill(rgb(p.surface).alpha(0.35)).border(1.0, rgb(p.border)).clip_rounded(14.0)
 }
 
 pub(crate) fn code_header(p: &crate::ui::theme::Palette, ty: crate::ui::theme::Type, language: &str, source: String) -> El {
+    code_header_with_action(p, ty, language, source, None)
+}
+
+pub(crate) fn code_header_with_action(p: &crate::ui::theme::Palette, ty: crate::ui::theme::Type, language: &str, source: String, action: Option<El>) -> El {
+    let mut controls = row().center_y().gap(4.0);
+    if let Some(action) = action { controls = controls.child(action); }
     row().w_full().h(38.0).pl(22.0).pr(12.0).center_y().justify_between().fill(rgb(p.surface).alpha(0.55))
         .child(text(language.to_owned()).font(ty.small()).color(rgb(p.yellow)))
-        .child(copy_button(p, ty, source))
+        .child(controls.child(copy_button(p, ty, source)))
 }
 
 fn compaction_divider(app: &App, message: &HistoryMessage, label: &str) -> El {
@@ -639,6 +653,27 @@ fn compaction_divider(app: &App, message: &HistoryMessage, label: &str) -> El {
 fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let p = app.pal;
     let key = format!("msg:{}", message.id);
+    // Some providers project code parts as raw text plus a language, not a fence.
+    // Their completion boundary is the stream state, rather than Markdown syntax.
+    if matches!(message.kind, HistoryMessageKind::Assistant | HistoryMessageKind::Reasoning)
+        && message.output_kind == Some(neoism_protocol::agent::HistoryOutputKind::Code)
+        && message.lang.trim().eq_ignore_ascii_case("mermaid") {
+        let chart = if streaming {
+            // Keep growing code parts in the existing bounded shaping slabs until done.
+            let revision = app.active_session().and_then(|id| app.sessions.get(&id))
+                .and_then(|s| s.message_versions.get(&message.id)).copied().unwrap_or(0);
+            code_slabs(app, &key, &format!("```mermaid\n{}", message.text), true, revision)
+        } else {
+            crate::ui::mermaid::card(app, &key, &message.text, timeline_width(app))
+        };
+        let row = col().key(key).w_full().pt(24.0).child(chart).child_meta(app, message);
+        // Assistant rows normally report from their memo; this specialized frame bypasses it.
+        return if message.kind == HistoryMessageKind::Assistant {
+            let session = app.active_session().unwrap_or_default();
+            tracked(row, &session, &format!("msg:{}", message.id), app.active_tab().id)
+        } else { row };
+    }
+    let diagrams = if crate::ui::mermaid::contains_fence(&message.text) { (app.mermaid_cache.epoch(), app.mermaid_view_version) } else { (0, 0) };
     match message.kind {
         HistoryMessageKind::User => super::user::view(app, &message.id, &message.text, &message.attachments, message.author.as_deref(), timeline_width(app))
             .key(key).pt(26.0).arrives_whole(),
@@ -655,7 +690,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                 .selectable(true).selection_color(selection_color(app)));
             let pieces = prose::chunks(reasoning);
             let last = pieces.len().saturating_sub(1);
-            let look = (p as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits());
+            let look = (p as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), diagrams);
             // The pieces stack as one text: 10 above a heading's (this column's gap, as before),
             // the kit's own block margin above one cut at a paragraph.
             let mut thought = col().w_full();
@@ -665,8 +700,9 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                 if piece.trim().is_empty() { continue; }
                 let arriving = streaming && index == last;
                 let block = rune::memo(format!("reasoning:{}:{index}", message.id), (piece, look, arriving), || {
-                    Markdown::new(piece.to_owned()).streaming(arriving).reveal(0.0)
-                        .code_frame(code_frame(app)).selectable(true)
+                    let (rendered, diagrams) = crate::ui::mermaid::prepare(app, piece, &format!("reasoning:{}:{index}", message.id), timeline_width(app));
+                    Markdown::new(rendered.into_owned()).streaming(arriving).reveal(0.0)
+                        .code_frame(diagram_frame(app, diagrams)).selectable(true)
                         .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
                         .render(&style).selection_group(false)
                 });
@@ -708,7 +744,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             // The table the wheel is over shows its bar: this message's, if it is one of its own.
             let wheeled = app.table_active.as_ref().map(|(key, _)| key.as_str())
                 .filter(|key| key.starts_with(&format!("table-x:{}:{}:", app.active_tab().id, message.id))).map(str::to_owned);
-            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming, foot.to_bits(), wheeled, app.table_hover.clone());
+            let version = (revision, app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), streaming, foot.to_bits(), wheeled, app.table_hover.clone(), diagrams);
             let tab_id = app.active_tab().id;
             let memo_key = format!("assistant:{tab_id}:{}", message.id);
             let session_id = match &app.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => id.clone(), _ => String::new() };
@@ -740,9 +776,11 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                                 // Its slabs are memos of their own, keyed by what each draws.
                                 code_slabs(app, &format!("code:{n}:{k}"), piece, arriving, revision.0)
                             } else {
-                              rune::memo(format!("md:{n}:{k}"), (piece, look, arriving, revision.0), || {
+                              let diagram_version = if crate::ui::mermaid::contains_fence(piece) { diagrams } else { (0, 0) };
+                              rune::memo(format!("md:{n}:{k}"), (piece, look, arriving, revision.0, diagram_version), || {
                                 let images = app.markdown_images(piece);
-                                Markdown::new(piece.to_owned())
+                                let (rendered, diagrams) = crate::ui::mermaid::prepare(app, piece, &format!("message:{}:{n}:{k}", message.id), timeline_width(app));
+                                Markdown::new(rendered.into_owned())
                                  .images(move |src| images.get(src).cloned())
                                  .image_frame(|image, frame| {
                                      let src = frame.src.to_owned();
@@ -754,7 +792,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                                 // Words land at full ink: a per-word fade kept the newest line half
                                 // transparent the whole time a reply streamed.
                                 .reveal(0.0)
-                                .code_frame(code_frame(app))
+                                 .code_frame(diagram_frame(app, diagrams))
                                 .selectable(true)
                                 // Links show a hand and open on click: web links in the browser, file
                                 // links (`path`, `path:12`, `path#L12`, `file://…`) in the editor.
@@ -794,7 +832,7 @@ const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1400);
 /// A code block's Copy button: a press puts `source` on the clipboard and the label
 /// cross-fades to a green "Copied" for a moment. The two labels ride live opacities, so the
 /// feedback repaints the button alone (the block sits inside its reply's cached row).
-fn copy_button(p: &crate::ui::theme::Palette, ty: crate::ui::theme::Type, source: String) -> El {
+pub(crate) fn copy_button(p: &crate::ui::theme::Palette, ty: crate::ui::theme::Type, source: String) -> El {
     let fade = rune::Spring::new(0.18, 0.0);
     let (idle, done) = (rune::Live::new(1.0_f32), rune::Live::new(0.0_f32));
     let label = |word: &str, color: Color, shown: &rune::Live<f32>| text(word.to_owned()).font(ty.small()).color(color)
@@ -848,7 +886,7 @@ impl Meta for El {
 
 impl App {
     /// Follow a transcript link: a web or mail link opens in the default browser, anything else
-    /// is a file in the workspace (absolute, or relative to it), with an optional line.
+    /// is a file in the workspace, with an optional line or Markdown section.
     pub fn open_link(&mut self, url: &str) {
         let url = url.trim();
         // Tests: report the link instead of opening it.
@@ -857,30 +895,39 @@ impl App {
             super::slash::actions::open_in_browser(url);
             return;
         }
-        let Some((path, line)) = file_link(url) else { return };
-        let path = if std::path::Path::new(&path).is_absolute() { path } else { format!("{}/{}", self.cwd.trim_end_matches('/'), path.trim_start_matches("./")) };
-        self.open_file(&path, line);
+        let Some((path, line, anchor)) = file_link(url) else { return };
+        let path = crate::editor::markdown::links::normalize(&std::path::Path::new(&self.cwd).join(path));
+        if let Some(anchor) = anchor {
+            self.open_file_anchor(&path.to_string_lossy(), Some(&anchor));
+        } else {
+            self.open_file(&path.to_string_lossy(), line);
+        }
     }
 }
 
-/// `path`, `path:12`, `path:12:3`, `path#L12` or `file:///path…` → (path, line).
-fn file_link(url: &str) -> Option<(String, Option<u32>)> {
+/// Local links carry a line reference or a decoded Markdown section, never a literal `#` suffix.
+fn file_link(url: &str) -> Option<(String, Option<u32>, Option<String>)> {
     let url = url.strip_prefix("file://").unwrap_or(url);
     if url.is_empty() || url.contains("://") || url.starts_with('#') { return None; }
-    let url = url.replace("%20", " ");
-    if let Some((path, anchor)) = url.split_once("#L") {
-        let line = anchor.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse().ok());
-        return Some((path.to_owned(), line));
-    }
+    // Split before decoding: `%23` belongs to the filename, not the fragment.
+    let (url, anchor) = url.split_once('#').map_or((url, None), |(p, a)| (p, Some(crate::editor::markdown::links::decode(a))));
+    let url = crate::editor::markdown::links::decode(url);
+    let line = anchor.as_deref().and_then(|a| a.strip_prefix('L')).and_then(|a| {
+        let (start, end) = a.split_once("-L").map_or((a, None), |(s, e)| (s, Some(e)));
+        if end.is_some_and(|e| e.is_empty() || !e.chars().all(|c| c.is_ascii_digit())) { return None; }
+        start.parse::<u32>().ok()
+    });
+    if line.is_some() { return Some((url, line, None)); }
     let mut parts = url.rsplitn(3, ':').collect::<Vec<_>>();
     parts.reverse();
     let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    Some(match parts.as_slice() {
+    let (path, line) = match parts.as_slice() {
         [path, line, col] if numeric(line) && numeric(col) => ((*path).to_owned(), line.parse().ok()),
         [head, a, b] if numeric(b) => (format!("{head}:{a}"), b.parse().ok()),
         [path, line] if numeric(line) => ((*path).to_owned(), line.parse().ok()),
         _ => (url.clone(), None),
-    })
+    };
+    Some((path, line, anchor.filter(|a| !a.is_empty())))
 }
 
 #[cfg(test)]
@@ -983,6 +1030,65 @@ mod reasoning_tests {
 #[cfg(test)]
 mod link_tests {
     use super::file_link;
+    use crate::app::App;
+
+    #[test]
+    fn native_agent_links_open_sections_in_prose_and_tables_without_losing_edits() {
+        for (table, loaded) in [(false, false), (true, true)] {
+            let mut app = App::new();
+            app.cwd = "/workspace".into();
+            let raw = format!("# Start\n\n{}\n## **Hé 世界**\n\n## Repeat\n\n## Repeat\n", "paragraph\n\n".repeat(45));
+            if loaded {
+                app.open_file("notes/a#b.md", None);
+                app.apply_opened_file("notes/a#b.md", raw.as_bytes());
+                let buffer = app.buffers.get_mut("notes/a#b.md").unwrap();
+                buffer.doc.lines.push("unsaved note".into());
+                buffer.doc.mark_edited();
+                buffer.kept_scroll = 300.0;
+            }
+            let expected_text = if loaded { app.buffers["notes/a#b.md"].doc.text_for_disk() } else { raw.clone() };
+            let body = if table {
+                "| Reference |\n| --- |\n| [Section](notes/a%23b.md#H%C3%A9%20%E4%B8%96%E7%95%8C) |"
+            } else { "See [Section](notes/a%23b.md#H%C3%A9%20%E4%B8%96%E7%95%8C)." };
+            let fixture = serde_json::json!([{"id":"reference", "role":"Assistant", "kind":"Assistant", "text":body}]);
+            app.load_fixture("references", "References", &fixture.to_string());
+            let mut rt = rune::Runtime::with_text(app, crate::ui::chrome::root, (900.0, 600.0), rune::Env::new(true, 1.0),
+                rune::text::TextSystem::new(crate::FONTS, ("Geist", "Geist Mono")));
+            rt.on_key = Some(crate::on_key);
+            rt.poll = Some(crate::poll);
+            for _ in 0..60 { rt.frame(1.0 / 60.0); }
+            let link = rt.elements().into_iter().find(|e| e.role == "link" && e.text.as_deref() == Some("Section")).expect("agent link");
+            let x = link.rect[0] + link.rect[2] * 0.5;
+            let y = link.rect[1] + link.rect[3] * 0.5;
+            rt.pointer_down(x, y); rt.pointer_up(x, y);
+            for _ in 0..4 { rt.frame(1.0 / 60.0); }
+            let buffer = rt.state.active_buffer().unwrap_or_else(|| panic!("native agent link opens an editor: table={table}, link={link:?}"));
+            assert_eq!(buffer.path, "notes/a#b.md");
+            assert_eq!(buffer.loaded, loaded);
+            if !loaded {
+                rt.update(|a, _| a.apply_opened_file("notes/a#b.md", raw.as_bytes()));
+            }
+            for _ in 0..90 { rt.frame(1.0 / 60.0); }
+            let buffer = rt.state.active_buffer().unwrap();
+            let expected = buffer.doc.lines.iter().position(|s| s == "## **Hé 世界**").unwrap();
+            assert_eq!(buffer.doc.cursor_line, expected);
+            assert_eq!(buffer.dirty(), loaded);
+            assert_eq!(buffer.doc.text_for_disk(), expected_text);
+            assert!(buffer.scroll.get().0 > 0.0, "section is revealed below the initial viewport");
+            if let Some(path) = std::env::var_os("NEOISM_RUNE_SECTION_PNG").filter(|_| !table) {
+                use rune::render::{Gpu, Offscreen, Renderer, OFFSCREEN_FORMAT};
+                let gpu = Gpu::headless();
+                let target = Offscreen::with_format(&gpu.device, 900, 600, OFFSCREEN_FORMAT);
+                let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+                renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (900, 600));
+                renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+                let mut enc = gpu.device.create_command_encoder(&Default::default());
+                renderer.draw(&mut enc, &target.view, [0.0, 0.0, 0.0, 1.0]);
+                target.copy(&mut enc); renderer.submit(&gpu.queue, enc);
+                rune::render::write_png(std::path::Path::new(&path), 900, 600, &target.read(&gpu.device)).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn the_jump_button_shows_past_a_line_and_stays_until_the_end() {
@@ -996,11 +1102,14 @@ mod link_tests {
 
     #[test]
     fn file_links_carry_their_line() {
-        assert_eq!(file_link("src/main.rs"), Some(("src/main.rs".into(), None)));
-        assert_eq!(file_link("src/main.rs:42"), Some(("src/main.rs".into(), Some(42))));
-        assert_eq!(file_link("src/main.rs:42:7"), Some(("src/main.rs".into(), Some(42))));
-        assert_eq!(file_link("/abs/a.rs#L9-L12"), Some(("/abs/a.rs".into(), Some(9))));
-        assert_eq!(file_link("file:///abs/a.rs"), Some(("/abs/a.rs".into(), None)));
+        assert_eq!(file_link("src/main.rs"), Some(("src/main.rs".into(), None, None)));
+        assert_eq!(file_link("src/main.rs:42"), Some(("src/main.rs".into(), Some(42), None)));
+        assert_eq!(file_link("src/main.rs:42:7"), Some(("src/main.rs".into(), Some(42), None)));
+        assert_eq!(file_link("/abs/a.rs#L9-L12"), Some(("/abs/a.rs".into(), Some(9), None)));
+        assert_eq!(file_link("file:///abs/a.rs"), Some(("/abs/a.rs".into(), None, None)));
+        assert_eq!(file_link("notes/a%23b.md#H%C3%A9%20%E4%B8%96%E7%95%8C"), Some(("notes/a#b.md".into(), None, Some("Hé 世界".into()))));
+        assert_eq!(file_link("guide.md#Limits"), Some(("guide.md".into(), None, Some("Limits".into()))));
+        assert_eq!(file_link("guide.md#L2-install"), Some(("guide.md".into(), None, Some("L2-install".into()))));
         assert_eq!(file_link("ftp://x"), None);
     }
 }

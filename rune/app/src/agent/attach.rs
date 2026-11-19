@@ -140,6 +140,13 @@ fn history_bytes(url: &str) -> Option<Vec<u8>> {
 }
 
 impl App {
+    pub(crate) fn preview_rendered_diagram(&mut self, image: rune::Image) {
+        let key = "mermaid-preview".to_owned();
+        self.attach.images.borrow_mut().insert(key.clone(), Some(image));
+        self.attach.preview_gallery.clear();
+        self.attach.preview = Some(Preview { key, name: "Mermaid diagram".into() });
+    }
+
     /// A decode changes Markdown's placeholder into an image, including inside memoized rows.
     pub fn inline_images_changed(&self) -> bool {
         let mut pending = self.attach.inline_pending.borrow_mut();

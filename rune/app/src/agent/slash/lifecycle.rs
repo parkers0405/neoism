@@ -27,12 +27,27 @@ impl App {
         let Some(row) = catalog::mcp_servers(&self.composer.mcp_status).into_iter()
             .find(|r| serde_json::from_str::<serde_json::Value>(&r.value).ok().is_some_and(|v| v["name"] == name)) else { return };
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(&row.value) else { return };
-        if entry["connected"].as_bool() != Some(true) { return; }
+        let state = &self.composer.mcp_status[name];
+        let state = state.get("status").filter(|s| s.is_object()).unwrap_or(state);
+        let connected = entry["connected"].as_bool() == Some(true);
         self.composer.mcp_authorizing = false;
-        picker.replace(catalog::mcp_actions(&entry));
+        picker.query.clear();
+        let mut rows = catalog::mcp_actions(&entry);
+        rows.insert(0, super::picker::Row::new("Done", "", "", catalog::DONE));
+        picker.replace(rows);
         if let Some(activity) = &mut picker.activity {
-            activity.body = format!("{name} connected.");
-            activity.status = "Connected".into();
+            let (status, body) = if connected {
+                ("Connected", format!("{name} connected. You can use its tools now."))
+            } else {
+                match state["status"].as_str() {
+                    Some("failed") => ("Connection failed", state["error"].as_str().unwrap_or("Unable to connect to the MCP server.").to_owned()),
+                    Some("needs_auth" | "needs_client_registration") => ("Authorization required", format!("{name} still needs authorization. Try connecting again.")),
+                    Some("disabled") => ("Disabled", format!("{name} is disabled. Enable it to connect.")),
+                    _ => ("Not connected", format!("{name} is not connected. Choose Connect to retry.")),
+                }
+            };
+            activity.body = body;
+            activity.status = status.into();
             activity.busy = false;
             activity.url = None;
         }
@@ -111,6 +126,25 @@ mod tests {
         app.apply_slash_event(&Server::McpCatalog { status: json!({"pending-mcp": {"status": {"status": "connected"}, "runtimeConnected": true}}), directory: None });
         assert!(!app.composer.mcp_authorizing);
         assert_eq!(app.composer.picker.as_ref().unwrap().activity.as_ref().unwrap().status, "Connected");
+        if let Some(path) = std::env::var_os("NEOISM_RUNE_MCP_CONNECTED_PNG") {
+            use rune::render::{Gpu, Offscreen, Renderer, OFFSCREEN_FORMAT};
+            let mut rt = Runtime::new(app, crate::ui::chrome::root, (1252.0, 674.0), Env::new(true, 1.0));
+            for _ in 0..30 { rt.frame(1.0 / 60.0); }
+            let gpu = Gpu::headless();
+            let target = Offscreen::with_format(&gpu.device, 1252, 674, OFFSCREEN_FORMAT);
+            let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (1252, 674));
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            renderer.draw(&mut enc, &target.view, [0.0, 0.0, 0.0, 1.0]);
+            target.copy(&mut enc);
+            renderer.submit(&gpu.queue, enc);
+            rune::render::write_png(std::path::Path::new(&path), 1252, 674, &target.read(&gpu.device)).unwrap();
+            rt.state.accept_picker_row(Some(0), &mut Tx::default());
+            assert!(rt.state.composer.picker.is_none());
+            return;
+        }
+        app.accept_picker_row(Some(0), &mut Tx::default());
+        assert!(app.composer.picker.is_none());
     }
 
     #[test]
@@ -133,5 +167,38 @@ mod tests {
         app.apply_slash_event(&Server::McpFailed { name: Some("pending-mcp".into()), error: "late failure".into() });
         assert!(app.composer.picker.as_ref().unwrap().activity.is_none());
         assert!(!app.picker_key(&KeyEvent { key: Key::Backspace, mods: Default::default() }, &mut Tx::default()));
+    }
+
+    #[test]
+    fn mcp_completion_stops_waiting_on_runtime_failure_and_can_be_dismissed() {
+        let mut app = app(Kind::McpActions);
+        app.apply_slash_event(&Server::McpChanged { name: "pending-mcp".into() });
+        app.apply_slash_event(&Server::McpCatalog { status: json!({"pending-mcp": {
+            "status": {"status": "failed", "error": "Server unavailable"}, "runtimeConnected": false
+        }}), directory: None });
+        let activity = app.composer.picker.as_ref().unwrap().activity.as_ref().unwrap();
+        assert!(!activity.busy);
+        assert_eq!(activity.status, "Connection failed");
+        assert_eq!(activity.body, "Server unavailable");
+        app.accept_picker_row(Some(0), &mut Tx::default());
+        assert!(app.composer.picker.is_none());
+    }
+
+    #[test]
+    fn provider_success_is_not_overwritten_by_late_or_unrelated_failures() {
+        let mut app = app(Kind::Connect);
+        app.composer.connect = Some(ConnectFlow {
+            waiting: true,
+            provider: Some(catalog::ConnectProvider { id: "openai".into(), name: "OpenAI".into(), connected: false }),
+            method: Some(catalog::AuthMethod { index: 0, label: "OAuth".into(), api: false }),
+            ..Default::default()
+        });
+        app.apply_slash_event(&Server::ConnectFailed { provider: "other".into(), error: "Unrelated failure".into() });
+        assert!(app.composer.connect.as_ref().unwrap().waiting);
+        app.apply_slash_event(&Server::ConnectFinished { provider: "openai".into(), connection_id: None });
+        app.apply_slash_event(&Server::ConnectFailed { provider: "openai".into(), error: "Late failure".into() });
+        let activity = app.composer.picker.as_ref().unwrap().activity.as_ref().unwrap();
+        assert_eq!(activity.status, "Connected");
+        assert!(!activity.busy);
     }
 }

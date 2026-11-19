@@ -227,6 +227,9 @@ pub struct App {
     pub orbs: crate::ui::orb::Orbs,
     /// Wakes the UI thread (poll) from views and background work.
     pub waker: Option<rune::Waker>,
+    pub mermaid_cache: crate::mermaid::Cache,
+    pub mermaid_sources: std::collections::HashSet<String>,
+    pub mermaid_view_version: u64,
     /// The window cursor: focus bar on chrome, block caret in fields, one trail between them.
     pub cursor: crate::ui::cursor::Cursor,
     /// Laid-out rects of focusable chrome (`pane-tab:N`, `workspace-tab:N`), for the cursor.
@@ -297,6 +300,7 @@ pub struct App {
     pub field_tab: Option<u64>,
     pub next_tab: u64,
     pub sidebar: Option<Sidebar>,
+    pub sidebar_widths: std::collections::HashMap<&'static str, f32>,
     /// The `/` commands, the pickers above the composer, and the model/agent/effort choice.
     pub composer: crate::agent::slash::Composer,
     /// Composer attachments and the image preview (`agent::attach`).
@@ -369,6 +373,7 @@ impl App {
             field_tab: None,
             next_tab: 1,
             sidebar: None,
+            sidebar_widths: Default::default(),
             attach: Default::default(),
             composer_attach_hover: None,
             composer: crate::agent::slash::Composer::new(config.model.as_deref(), config.variant.as_deref()),
@@ -428,6 +433,9 @@ impl App {
             peer_blink: rune::Live::new(1.0),
             orbs: Default::default(),
             waker: None,
+            mermaid_cache: Default::default(),
+            mermaid_sources: Default::default(),
+            mermaid_view_version: 0,
             cursor,
             rects: HashMap::new(),
             families: Default::default(),

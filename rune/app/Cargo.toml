@@ -25,6 +25,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 dirs = "6"
+# Pure native Markdown dictionary helpers (no legacy UI dependency).
+typos-dict = "0.13"
+unicase = "2.9"
 png = "0.17"
 base64 = "0.22"
 libloading = "0.8"
@@ -55,6 +58,11 @@ thiserror = "2"
 yrs = { version = "0.26", features = ["sync"] }
 web-time = "1.1"
 tracing = "0.1"
+# Explicit native SVG closure. Cytoscape enables architecture layouts; ELK is omitted
+# (larger closure / EPL notices); the standard dagre path remains available.
+merman = { version = "=0.10.0", default-features = false, features = ["all-diagrams", "svg", "layout-cytoscape", "native-fonts", "system-fonts"] }
+resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
+ttf-parser = { version = "=0.25.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

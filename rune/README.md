@@ -276,6 +276,22 @@ Lessons from the GPUiX frame investigation (`docs/gpuix-live-rendering-baseline.
   viewports before the reader reaches its start, while they head up; nothing stops, waits or
   moves when it lands.
 
+## Markdown spelling
+
+Local links in agent replies, tables and task/goal cards accept Markdown section fragments such as `docs/guide.md#installation` in addition to existing line references. Relative agent links resolve from the workspace; links inside notes resolve from the source document. Percent-encoded paths/headings, rendered heading text, Unicode and repeated-heading suffixes are supported. A pending section belongs to the destination buffer and is applied when its asynchronous load completes, without stealing focus back from a later tab selection or replacing unsaved text.
+
+Markdown documents do not attach to language servers or show LSP status/diagnostic pills. Visible prose and table text have native red spelling squiggles; right-click a marked word for corrections, Ignore Word, or Add to Dictionary. Corrections preserve source markup and undo, and reject actions captured before an intervening edit or tab change. Code, link spans, frontmatter and diagram source are excluded. Checking and suggestions use one bounded background worker and cached results, with completion-driven redraws rather than an idle timer. Neoism's shared custom dictionary is retained; without a system word dictionary, checking conservatively recognizes known typos instead of flagging arbitrary names. Individual lines over 16 KiB are skipped.
+
+## Mermaid diagrams
+
+Closed `mermaid` fences render natively in agent replies and Markdown notes. Replies provide Source, Copy and a larger image view; language-tagged Mermaid code parts also render when complete. In notes, Edit beside Copy reveals the original fence in Insert mode, and Preview returns to the chart without saving or discarding edits. Entering Insert anywhere in a diagram still reveals its source. Rendering never rewrites the document or its undo/presence coordinates. Incomplete streamed fences and code parts remain literal. Errors retain readable, editable/copyable source instead of drawing a misleading partial chart.
+
+The pinned native Merman engine runs on a lazy, bounded background worker, not inside Rune's layout, paint or input callbacks. Source and theme identify cached, prepared images; scrolling, cursor motion and zoom reuse them. Notes admit render jobs only for mounted virtual tiles, not every offscreen fence in a long document. Completions wake the window once and invalidate diagram-bearing views, not unrelated documents. There is no browser, JavaScript runtime, network request, shell renderer or idle animation timer. Fonts are prepared on the worker, and unresolved glyph coverage is reported rather than silently replacing labels with missing-glyph boxes.
+
+Preview limits are deliberate: 32 KiB source, 512 model items, constrained layout work, 2 MiB SVG, 4 megapixels and a 4096-pixel raster side. The operation has a cooperative two-second deadline; the final bounded rasterizer is not forcibly interrupted. The cache retains up to 32 entries and 64 MiB of prepared outputs, excluding bounded in-flight work and images retained by visible views or the larger preview. Unsupported syntax, missing fonts or resource-limit failures keep the source available. Native Mermaid compatibility is not a claim of pixel-identical browser Mermaid support for every extension or custom directive.
+
+Focused verification uses `cd rune/app && ./build.sh test -j 4 --bin neoism-rune mermaid:: -- --test-threads=1`. The explicitly ignored `ui::mermaid::tests::cached_chart_frame_diagnostic` renders chat and notes fixtures and prints warm native-frame CPU measurements; use `NEOISM_RUNE_OFFLINE=1 NEOISM_RUNE_MERMAID_PNG=/tmp/neoism-mermaid` with `--ignored --nocapture`. These CPU diagnostics do not replace live presentation-timestamp checks for a 120 Hz pacing claim.
+
 ## Sleep, wake and lost connections
 
 Closing the lid must cost nothing: on opening it, every conversation (and every sub-agent) is

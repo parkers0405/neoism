@@ -250,17 +250,20 @@ pub(crate) async fn mcp_auth_callback(
     let directory = scoped_directory(&state, query.directory, &headers)?;
     let plugins = state.refreshed_plugin_snapshot(&directory).await;
     let store = auth_store(&state, claims.as_deref())?;
+    mcp::auth_callback_with_config(
+        &plugins.config().mcp,
+        &directory,
+        &name,
+        &request.code,
+        None,
+        &store,
+    )
+    .await
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
     Ok(Json(
-        mcp::auth_callback_with_config(
-            &plugins.config().mcp,
-            &directory,
-            &name,
-            &request.code,
-            None,
-            &store,
-        )
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?,
+        mcp::connect_after_auth(&directory, &name, &store, state.clone(), &plugins)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?,
     ))
 }
 
@@ -310,6 +313,16 @@ pub(crate) async fn mcp_auth_callback_get(
     )
     .await
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let status = mcp::connect_after_auth(&directory, &name, &auth_store, state.clone(), &plugins)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if status != McpStatus::Connected {
+        let detail = match status {
+            McpStatus::Failed { error } | McpStatus::NeedsClientRegistration { error } => error,
+            _ => "Return to Neoism to check the server status and retry connecting.".into(),
+        };
+        return Err(ApiError::bad_request(format!("OAuth authorization completed, but the MCP server is not connected. {detail}")));
+    }
     Ok(Html(neoism_agent_service_api::browser_pages::mcp_connected()))
 }
 

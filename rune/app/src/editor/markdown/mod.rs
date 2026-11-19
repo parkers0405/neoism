@@ -2,7 +2,7 @@
 //! Insert reveals only the caret's source line. Tables remain a grid in every mode.
 mod parse;
 mod edit;
-mod links;
+pub(crate) mod links;
 pub(super) use links::{pointer_target as link_pointer_target, click as link_click};
 mod table;
 mod checkbox;
@@ -11,6 +11,9 @@ mod presence;
 mod code;
 mod page;
 mod image;
+mod mermaid;
+mod spellcheck;
+pub(crate) mod spelling;
 pub(crate) use table::table_wheel;
 pub(crate) use table::place as place_table_scroll;
 
@@ -31,6 +34,8 @@ pub struct Cache {
     vertical_goal: Cell<Option<VerticalGoal>>,
     tables: RefCell<HashMap<usize, Rc<table::Scroll>>>,
     drag: drag::State,
+    spelling: spellcheck::State,
+    spelling_seen: Cell<u64>,
 }
 struct Parsed {
     revision: u64,
@@ -38,6 +43,7 @@ struct Parsed {
     tables: Vec<Range<usize>>,
     blocks: Rc<Vec<Range<usize>>>,
     page: Option<Rc<page::Page>>,
+    mermaid: Vec<mermaid::Fence>,
 }
 impl Cache {
     pub fn clear(&self) { self.parsed.borrow_mut().take(); self.layout.borrow_mut().take(); self.vertical_goal.set(None); self.tables.borrow_mut().clear(); }
@@ -57,6 +63,13 @@ pub fn enabled(buffer: &Buffer) -> bool {
     buffer.language().is_some_and(|ext| ["md", "markdown", "mdown"].iter().any(|md| ext.eq_ignore_ascii_case(md)))
 }
 
+pub(crate) fn spelling_changed(app: &App) -> bool {
+    let Some(buffer) = app.active_buffer().filter(|b| enabled(b)) else { return false };
+    let cache = &buffer.markdown_cache;
+    let epoch = cache.spelling.epoch();
+    cache.spelling_seen.replace(epoch) != epoch
+}
+
 fn parsed(buffer: &Buffer) -> Rc<Vec<Line>> {
     let mut slot = buffer.markdown_cache.parsed.borrow_mut();
     if let Some(parsed) = slot.as_ref().filter(|p| p.revision == buffer.doc.revision) {
@@ -70,7 +83,8 @@ fn parsed(buffer: &Buffer) -> Rc<Vec<Line>> {
     let lines = Rc::new(lines);
     let tables = edit::tables(&buffer.doc.lines);
     let blocks = Rc::new(drag::blocks(&buffer.doc.lines, &lines, &tables));
-    *slot = Some(Parsed { revision: buffer.doc.revision, lines: lines.clone(), tables, blocks, page });
+    let mermaid = mermaid::fences(&buffer.doc.lines, &lines);
+    *slot = Some(Parsed { revision: buffer.doc.revision, lines: lines.clone(), tables, blocks, page, mermaid });
     lines
 }
 
@@ -123,7 +137,7 @@ struct Entry {
     row: Rc<VisualRow>,
 }
 struct Layout {
-    version: (u64, Option<usize>, u32, TextStyle, u64, usize, usize),
+    version: (u64, Option<usize>, u32, TextStyle, u64, usize, usize, usize),
     rows: Vec<Entry>,
     height: f32,
     left: f32,
@@ -133,6 +147,7 @@ struct Layout {
     cards: Vec<code::Card>,
     page: Option<Rc<page::Page>>,
     page_height: f32,
+    diagrams: Vec<mermaid::Diagram>,
 }
 
 impl Layout {
@@ -228,13 +243,27 @@ fn layout(app: &App, buffer: &Buffer) -> Rc<Layout> {
     let width = (viewport - 64.0 * s).min(900.0 * s).max(40.0);
     let left = ((viewport - width) * 0.5).max(12.0 * s);
     let reveal = (buffer.doc.mode == Mode::Insert).then_some(buffer.doc.cursor_line);
-    let version = (buffer.doc.revision, reveal, viewport.to_bits(), app.ty.code(), rune::text::font_epoch(), app.pal as *const _ as usize, app.inline_images_version());
+    let lines = parsed(buffer);
+    let diagram_version = if buffer.markdown_cache.parsed.borrow().as_ref().unwrap().mermaid.is_empty() { 0 } else { app.mermaid_cache.epoch() };
+    let version = (buffer.doc.revision, reveal, viewport.to_bits(), app.ty.code(), rune::text::font_epoch(), app.pal as *const _ as usize, app.inline_images_version(), diagram_version);
     let mut slot = buffer.markdown_cache.layout.borrow_mut();
     if let Some(cached) = slot.as_ref().filter(|c| c.version == version) { return cached.clone(); }
     let mut old = slot.take().map_or_else(HashMap::new, |l| l.shapes.clone());
-    let lines = parsed(buffer);
     let page = buffer.markdown_cache.parsed.borrow().as_ref().unwrap().page.clone();
-    let mut cards = code::cards(app, buffer, &lines);
+    let mut diagrams = Vec::new();
+    let mut editing_diagram = None;
+    {
+        let parsed = buffer.markdown_cache.parsed.borrow();
+        for fence in &parsed.as_ref().unwrap().mermaid {
+            if reveal.is_some_and(|line| fence.range.contains(&line)) {
+                editing_diagram = Some(fence.range.clone());
+                continue;
+            }
+            let entry = app.mermaid_cache.cached(&fence.source, app.pal).unwrap_or(crate::mermaid::Entry::Pending);
+            diagrams.push(mermaid::Diagram { range: fence.range.clone(), entry, row: 0, source: fence.source.clone() });
+        }
+    }
+    let mut cards = code::cards(app, buffer, &lines, &diagrams);
     let ranges = buffer.markdown_cache.parsed.borrow().as_ref().unwrap().tables.clone();
     buffer.markdown_cache.tables.borrow_mut().retain(|start, _| ranges.iter().any(|range| range.start == *start));
     let mut tables: Vec<_> = ranges.into_iter().map(|range| table::Table::new(app, buffer, range, width)).collect();
@@ -243,6 +272,21 @@ fn layout(app: &App, buffer: &Buffer) -> Rc<Layout> {
     let page_height = page.as_ref().map_or(0.0, |p| p.height(app, width));
     let mut y = 24.0 * s + page_height;
     for (index, preview) in lines.iter().enumerate() {
+        let diagram_index = diagrams.partition_point(|d| d.range.end <= index);
+        if let Some(diagram) = diagrams.get_mut(diagram_index).filter(|d| d.range.contains(&index)) {
+            // Ready/pending replaces the fence; errors add a diagnostic above the
+            // original editable code card, so invalid source is never lost.
+            let failed = matches!(diagram.entry, crate::mermaid::Entry::Failed(_));
+            if index == diagram.range.start {
+                let height = crate::ui::mermaid::height(&diagram.entry, width, s) + if failed { 0.0 } else { 38.0 };
+                let anchor = pieces(app, &raw_line("", Kind::Prose), width, 0.0);
+                let hash = index as u64 ^ (version.7 as u64).rotate_left(32) ^ height.to_bits() as u64 ^ version.0.rotate_left(16);
+                diagram.row = rows.len();
+                rows.push(Entry { line: index, y, row: Rc::new(VisualRow { pieces: anchor, height, first: true, hash, image: None }) });
+                y += height + 12.0 * s;
+            }
+            if !failed { continue; }
+        }
         let card_index = cards.partition_point(|c| c.range.end <= index);
         let card = cards.get(card_index).filter(|c| c.range.contains(&index));
         let inset = card.as_ref().map_or(0.0, |c| c.inset);
@@ -256,10 +300,11 @@ fn layout(app: &App, buffer: &Buffer) -> Rc<Layout> {
         let table_index = tables.partition_point(|t| t.range.end <= index);
         let table = tables.get_mut(table_index).filter(|t| t.range.contains(&index));
         let raw = &buffer.doc.lines[index];
-        let revealed = (reveal == Some(index) && table.is_none()).then(|| raw_line(raw, preview.kind.clone()));
+        let source_reveal = reveal == Some(index) || editing_diagram.as_ref().is_some_and(|r| r.contains(&index));
+        let revealed = (source_reveal && table.is_none()).then(|| raw_line(raw, preview.kind.clone()));
         let display = revealed.as_ref().unwrap_or(preview);
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        (raw, reveal == Some(index) && table.is_none(), width.to_bits(), app.ty.size.to_bits(), app.ty.weight.to_bits(), app.ty.code_family, rune::text::font_epoch(), app.pal as *const _ as usize, format!("{:?}", preview.kind)).hash(&mut hash);
+        (raw, source_reveal && table.is_none(), width.to_bits(), app.ty.size.to_bits(), app.ty.weight.to_bits(), app.ty.code_family, rune::text::font_epoch(), app.pal as *const _ as usize, format!("{:?}", preview.kind)).hash(&mut hash);
         if matches!(preview.kind, Kind::Frontmatter) {
             (&preview.text, &preview.source, format!("{:?}", preview.marks)).hash(&mut hash);
         }
@@ -350,7 +395,7 @@ fn layout(app: &App, buffer: &Buffer) -> Rc<Layout> {
         }
     }
     let tile_h = tile_height(app);
-    let result = Rc::new(Layout { version, rows, height: ((y + 96.0 * s) / tile_h).ceil() * tile_h, left, width, shapes, tables, cards, page, page_height });
+    let result = Rc::new(Layout { version, rows, height: ((y + 96.0 * s) / tile_h).ceil() * tile_h, left, width, shapes, tables, cards, page, page_height, diagrams });
     *slot = Some(result.clone());
     result
 }
@@ -402,12 +447,20 @@ fn cursor_entry<'a>(layout: &'a Layout, buffer: &Buffer) -> Option<(&'a Entry, &
             }
         }
     }
-    before.or(after)
+    before.or(after).or_else(|| {
+        let diagram = layout.diagrams.iter().find(|d| d.range.contains(&line))?;
+        let entry = &layout.rows[diagram.row];
+        Some((entry, &entry.row.pieces[0]))
+    })
 }
 
 pub fn cursor_row_y(app: &App, buffer: &Buffer) -> (f32, f32) {
     let layout = layout(app, buffer);
-    (cursor_entry(&layout, buffer).map_or(24.0 * app.ty.scale(), |(e, _)| e.y), layout.height)
+    (cursor_entry(&layout, buffer).map_or(24.0 * app.ty.scale(), |(e, _)| e.y + diagram_offset(&layout, e)), layout.height)
+}
+
+fn diagram_offset(layout: &Layout, entry: &Entry) -> f32 {
+    if layout.diagrams.iter().any(|d| std::ptr::eq(&layout.rows[d.row], entry)) { 38.0 } else { 0.0 }
 }
 
 pub fn cursor_rect(app: &App, buffer: &Buffer) -> Option<[f32; 4]> {
@@ -417,12 +470,15 @@ pub fn cursor_rect(app: &App, buffer: &Buffer) -> Option<[f32; 4]> {
     let byte = piece.visible(buffer.doc.cursor_col);
     let x = piece.x_at(byte);
     let next = piece.text[byte..].graphemes(true).next().map_or(x + piece.font.size * 0.55, |g| piece.x_at(byte + g.len()));
-    let width = if buffer.doc.mode == Mode::Insert { 2.0 } else { (next - x).abs().max(2.0) };
+    // Narrow glyphs and collapsed whitespace stops must not turn the Normal block into a beam.
+    let width = if buffer.doc.mode == Mode::Insert { 2.0 } else { (next - x).abs().max(piece.font.size * 0.55).max(2.0) };
     let x = if buffer.doc.mode != Mode::Insert { x.min(next) } else { x };
     let offset = layout.table(entry.line).map_or(0.0, table::Table::offset);
     let x = layout.left + piece.x + x - offset;
     if layout.table(entry.line).is_some() && (x < layout.left || x + width > layout.left + layout.width) { return None; }
-    Some([rect[0] + x, rect[1] + entry.y - buffer.scroll.get().0, width, entry.row.height])
+    let diagram_offset = diagram_offset(&layout, entry);
+    let height = if diagram_offset > 0.0 { piece.font.line_px() } else { entry.row.height };
+    Some([rect[0] + x, rect[1] + entry.y + diagram_offset - buffer.scroll.get().0, width, height])
 }
 
 pub fn cursor_font(app: &App, buffer: &Buffer) -> TextStyle {
@@ -449,6 +505,9 @@ pub fn hit(app: &App, buffer: &Buffer, x: f32, y: f32) -> Option<(usize, usize)>
     let layout = layout(app, buffer);
     let i = layout.rows.partition_point(|r| r.y <= y).saturating_sub(1);
     let entry = layout.rows.get(i)?;
+    if let Some(diagram) = layout.diagrams.iter().find(|d| d.row == i) {
+        return Some(((diagram.range.start + 1).min(diagram.range.end - 1), 0));
+    }
     let entry = if entry.row.pieces.is_empty() {
         layout.rows.iter().filter(|e| !e.row.pieces.is_empty())
             .min_by(|a, b| (a.y - y).abs().total_cmp(&(b.y - y).abs()))?
@@ -461,14 +520,39 @@ pub fn hit(app: &App, buffer: &Buffer, x: f32, y: f32) -> Option<(usize, usize)>
 fn row_view(app: &App, buffer: &Buffer, i: usize) -> El {
     let layout = layout(app, buffer);
     let Some(entry) = layout.rows.get(i) else { return el() };
+    if let Some(diagram) = layout.diagrams.iter().find(|d| d.row == i) {
+        // Only mounted virtual tiles admit work; opening a long note must not render
+        // every offscreen chart or churn a bounded cache continuously.
+        let requested;
+        let diagram = if matches!(diagram.entry, crate::mermaid::Entry::Pending) {
+            requested = mermaid::Diagram { range: diagram.range.clone(), source: diagram.source.clone(), row: diagram.row,
+                entry: app.mermaid_cache.request(&diagram.source, app.pal, app.waker.clone()) };
+            &requested
+        } else { diagram };
+        let peers = mermaid::marks(app, buffer, diagram);
+        let selected = buffer.doc.mode == Mode::Visual && buffer.doc.selection_range()
+            .is_some_and(|(a, b)| a.line < diagram.range.end && b.line >= diagram.range.start);
+        let flash = buffer.external_edit.as_ref().filter(|f| f.first < diagram.range.end && f.last >= diagram.range.start);
+        return rune::memo(format!("md-diagram:{}:{}:{i}", app.active_tab().id, buffer.path),
+            (entry.row.hash, layout.width.to_bits(), app.ty.body(), app.pal as *const _ as usize, peers.clone(), selected, flash.map(|f| (f.first, f.last, f.revision))),
+            || {
+                let visual = mermaid::view(app, buffer, diagram, layout.width, peers, selected);
+                if let Some(flash) = flash {
+                    visual.child(el().key("external-edit").absolute(0.0, 0.0).w(layout.width).h(entry.row.height)
+                        .fill(rgb(app.pal.accent).alpha(0.30)).live_opacity(&flash.opacity).live_offset(&flash.offset))
+                } else { visual }
+            });
+    }
     let selected = super::view::selection_on_line(&buffer.doc, entry.line);
     let table_layout = layout.table(entry.line);
     let peers = presence::marks(app, buffer, entry.line);
     let flash = buffer.external_edit.as_ref().filter(|f| (f.first..=f.last).contains(&entry.line));
+    let spelling = spelling::words(app, buffer, entry.line);
     let version = (entry.row.hash, entry.line, selected, buffer.search_highlight.clone(), buffer.doc.cursor_line == entry.line, buffer.doc.mode == Mode::Insert,
         table_layout.map(|t| Rc::as_ptr(&t.scroll) as usize), peers.clone(), layout.card(entry.line).map(|c| c.range.start),
         flash.map(|f| (f.first, f.last, f.revision)));
-    rune::memo(format!("md-row:{}:{}:{i}", app.active_tab().id, buffer.path), version, || {
+    let spelling_version: Vec<_> = spelling.iter().map(|word| word.range.clone()).collect();
+    rune::memo(format!("md-row:{}:{}:{i}", app.active_tab().id, buffer.path), (version, spelling_version), || {
         let p = app.pal;
         let s = app.ty.scale();
         let preview = parsed(buffer);
@@ -520,6 +604,7 @@ fn row_view(app: &App, buffer: &Buffer, i: usize) -> El {
             }
             visual = visual.child(rune::rich(piece.text.clone(), piece.spans.clone()).font(piece.font).color(rgb(p.fg)).wrap_anywhere()
                 .absolute(piece.x, 0.0).w(piece.width).h(entry.row.height));
+            visual = spelling::decorate(app, visual, piece, entry.row.height, &spelling);
             if let Kind::Task { checked, marker } = kind && !revealed
                 && let Some((byte, ch)) = piece.text.char_indices().find(|&(i, ch)| ch == '☐' && piece.source[i] == marker - 1) {
                 for [x, _, w, _] in piece.geometry.range_rects(byte..byte + ch.len_utf8()) {
@@ -572,12 +657,16 @@ pub fn view(app: &App, buffer: &Buffer) -> El {
                 }
                 content
             })
-        .virtual_rows_version(0u64);
+        .virtual_rows_version(buffer.markdown_cache.spelling.epoch());
     let tab = app.active_tab().id;
     let rows = rows.touch_drag_after_hold().on_drag(move |a: &mut App, d: &mut Drag, tx: &mut Tx| {
         a.select_tab(tab);
         if drag::event(a, d, tx) { return; }
         a.editor_drag(d, tx);
+    }).on_secondary_press(move |a: &mut App, at: rune::PointerPress, tx: &mut Tx| {
+        a.select_tab(tab);
+        tx.blur();
+        spelling::open(a, [at.x, at.y]);
     });
     let mirror = buffer.scroll.clone();
     let path = buffer.path.clone();
@@ -753,6 +842,62 @@ mod tests {
         app.apply_opened_file("/notes/test.md", raw.as_bytes());
         app.active_buffer_mut().unwrap().view_rect = Some([20.0, 30.0, 620.0, 380.0]);
         app
+    }
+
+    #[test]
+    fn normal_cursor_stays_a_block_on_list_markers_spaces_and_empty_lines() {
+        let raw = "- item\n  - nested\n- \ntext  \n  \n\n**bold** and i\n# Heading\n";
+        let mut app = app(raw);
+        for mode in [Mode::Normal, Mode::Visual, Mode::Insert] {
+            for (line, text) in raw.lines().enumerate() {
+                for col in text.char_indices().map(|(byte, _)| byte).chain(std::iter::once(text.len())) {
+                    let b = app.active_buffer_mut().unwrap();
+                    b.doc.mode = mode;
+                    b.doc.cursor_line = line;
+                    b.doc.cursor_col = col;
+                    let b = app.active_buffer().unwrap();
+                    let rect = cursor_rect(&app, b).unwrap();
+                    assert!(rect.iter().all(|n| n.is_finite()));
+                    if mode == Mode::Insert {
+                        assert_eq!(rect[2], 2.0, "Insert retains its beam at {line}:{col}");
+                    } else {
+                        let minimum = cursor_font(&app, b).size * 0.55;
+                        assert!(rect[2] >= minimum, "{mode:?} cursor became thin at {line}:{col}: {rect:?}");
+                    }
+                    assert_eq!(b.doc.mode, mode);
+                    assert_eq!(b.doc.text_for_disk(), raw);
+                }
+            }
+        }
+        if let Some(path) = std::env::var_os("NEOISM_RUNE_CURSOR_WHITESPACE_PNG") {
+            let b = app.active_buffer_mut().unwrap();
+            b.doc.mode = Mode::Normal;
+            b.doc.cursor_line = 2;
+            b.doc.cursor_col = 1;
+            let mut rt = rune::Runtime::with_text(app, crate::ui::chrome::root, (900.0, 600.0), rune::Env::new(true, 1.0),
+                rune::text::TextSystem::new(crate::FONTS, ("Geist", "Geist Mono")));
+            let now = std::time::Instant::now();
+            for frame in 0..40 {
+                rt.update(|a, _| {
+                    let target = a.cursor_target();
+                    a.cursor.tick(target, now + std::time::Duration::from_millis(frame * 8));
+                    let clip = a.cursor_clip();
+                    a.cursor.place(clip);
+                });
+                rt.frame(1.0 / 120.0);
+            }
+            use rune::render::{Gpu, Offscreen, Renderer, OFFSCREEN_FORMAT};
+            let gpu = Gpu::headless();
+            let target = Offscreen::with_format(&gpu.device, 900, 600, OFFSCREEN_FORMAT);
+            let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (900, 600));
+            renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            renderer.draw(&mut enc, &target.view, [0.0, 0.0, 0.0, 1.0]);
+            target.copy(&mut enc);
+            renderer.submit(&gpu.queue, enc);
+            rune::render::write_png(std::path::Path::new(&path), 900, 600, &target.read(&gpu.device)).unwrap();
+        }
     }
 
     #[test]

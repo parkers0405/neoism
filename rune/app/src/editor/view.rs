@@ -292,7 +292,7 @@ fn cached_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
     let version = (
         (text.finish(), m.cols, m.gutter_w.to_bits(), buffer.lsp.diagnostics_rev),
         (app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), rune::text::font_epoch(), app.ty.code_family),
-        (index == doc.cursor_line, selection_on_line(doc, index), buffer.search_highlight.as_deref(), flash),
+        (index == doc.cursor_line, index == doc.cursor_line && segment.contains_caret(doc.cursor_col, line.len()), selection_on_line(doc, index), buffer.search_highlight.as_deref(), flash),
     );
     rune::memo(format!("code:{}:{}:{row_index}", app.active_tab().id, buffer.path), version, || code_row(app, buffer, row_index))
 }
@@ -328,7 +328,7 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
             }
             k += 1;
         }
-    let current = index == doc.cursor_line;
+    let current = index == doc.cursor_line && segment.contains_caret(doc.cursor_col, line.len());
     let selected = selection_on_line(doc, index);
             let x_of = |byte: usize| m.gutter_w + segment.visual_col(segment.source_col_for_byte(line, byte, TAB)) as f32 * adv;
             let mut visual = row().w_full().h(line_h).fill(if current && selected.is_none() { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT });
@@ -371,10 +371,12 @@ fn code_row(app: &App, buffer: &Buffer, row_index: usize) -> El {
                 if from < to { visual = visual.child(el().key("yank-flash").w((x_of(to) - x_of(from)).max(adv)).h(line_h).absolute(x_of(from), 0.0).fill(color)); }
             }
             let gutter = if first {
-                text(format!("{}", index + 1)).font(if current { app.ty.bold().lh(line_h) } else { font })
-                    .color(rgb(if current { p.fg } else { p.muted }))
+                text(format!("{}", index + 1)).font(if index == doc.cursor_line { app.ty.bold().lh(line_h) } else { font })
+                    .color(rgb(if index == doc.cursor_line { p.fg } else { p.muted }))
             } else {
-                text("\u{21b3}").font(font).color(rgb(p.muted))
+                // A soft break is not a source newline. Keep the gutter quiet,
+                // as VS Code does by default, rather than repeat an arrow per row.
+                text("").font(font).color(rgb(p.muted))
             };
             let piece_spans: Vec<Span> = spans.iter().filter_map(|span| {
                 let (a, b) = ((span.start as usize).max(segment.byte_start), (span.end as usize).min(segment.byte_end));
@@ -446,7 +448,7 @@ pub fn cursor_row_y(app: &App, buffer: &Buffer) -> (f32, f32) {
     let cached = layout(buffer, m.cols);
     let line = buffer.doc.cursor_line.min(buffer.doc.lines.len().saturating_sub(1));
     let first = cached.first[line];
-    let within = cached.rows[first..].iter().position(|&(i, seg, _, last)| i == line && (buffer.doc.cursor_col < seg.byte_end || last)).unwrap_or(0);
+    let within = cached.rows[first..].iter().position(|&(i, seg, _, _)| i == line && seg.contains_caret(buffer.doc.cursor_col, buffer.doc.lines[line].len())).unwrap_or(0);
     ((first + within) as f32 * m.line_h, (cached.rows.len() + 4) as f32 * m.line_h)
 }
 
@@ -487,17 +489,88 @@ pub(super) fn hit(app: &App, x: f32, y: f32) -> Option<(usize, usize)> {
     let m = Metrics::of(app, buffer);
     let cached = layout(buffer, m.cols);
     let target = ((y / m.line_h).floor().max(0.0) as usize).min(cached.rows.len().checked_sub(1)?);
-    let &(index, segment, _, last) = cached.rows.get(target)?;
+    let &(index, segment, _, _) = cached.rows.get(target)?;
     let line = &buffer.doc.lines[index];
     let visual_col = ((x - m.gutter_w) / m.adv).max(0.0) as usize;
-    let byte = byte_for_display_col(line, segment.source_col_at_visual(visual_col), TAB);
-    let end = if last { segment.byte_end } else { super::vim::prev_char_boundary(line, segment.byte_end) };
-    Some((index, byte.clamp(segment.byte_start, end.max(segment.byte_start))))
+    Some((index, segment.byte_at_visual(line, visual_col, TAB)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_caret_hits_and_vertical_movement_share_visual_rows() {
+        let mut app = App::new();
+        app.open_file("wrap.rs", None);
+        let source = "\tcall(alpha, nested(beta, gamma), \"words with e\u{301} and 👩‍💻 and 世界 inside strings\", delta, epsilon);";
+        app.apply_opened_file("wrap.rs", source.as_bytes());
+        app.active_buffer_mut().unwrap().view_rect = Some([0.0, 0.0, 260.0, 600.0]);
+        let b = app.active_buffer().unwrap();
+        let m = Metrics::of(&app, b);
+        let geometry = layout(b, m.cols);
+        assert!(geometry.rows.len() > 3);
+        for (row, &(_, seg, _, _)) in geometry.rows.iter().enumerate() {
+            let doc = &mut app.active_buffer_mut().unwrap().doc;
+            doc.cursor_col = seg.byte_start;
+            assert_eq!(cursor_row_y(&app, app.active_buffer().unwrap()).0, row as f32 * m.line_h);
+            let caret = cursor_rect(&app, app.active_buffer().unwrap()).unwrap();
+            assert_eq!(hit(&app, caret[0] + 0.1, caret[1] + 1.0), Some((0, seg.byte_start)));
+            // Clicking the synthetic indent stays at the continuation start.
+            assert_eq!(hit(&app, m.gutter_w, row as f32 * m.line_h + 1.0), Some((0, seg.byte_start)));
+            let end = hit(&app, 10_000.0, row as f32 * m.line_h + 1.0).unwrap().1;
+            assert!(seg.contains_caret(end, source.len()));
+            assert!(unicode_segmentation::UnicodeSegmentation::grapheme_indices(source, true).any(|(byte, _)| byte == end) || end == source.len());
+        }
+        let doc = &mut app.active_buffer_mut().unwrap().doc;
+        doc.wrap_cols = m.cols;
+        doc.set_cursor(super::super::vim::Pos { line: 0, col: 0 });
+        // j/k go through the same segments, retaining the screen-column goal
+        // even when it falls in the continuation's synthetic indentation.
+        for row in 1..geometry.rows.len() {
+            app.editor_key(&rune::KeyEvent { key: rune::Key::Text("j".into()), mods: Default::default() }, &mut Tx::default());
+            assert_eq!(app.active_buffer().unwrap().doc.cursor_col, geometry.rows[row].1.byte_start);
+        }
+        for row in (0..geometry.rows.len() - 1).rev() {
+            app.editor_key(&rune::KeyEvent { key: rune::Key::Text("k".into()), mods: Default::default() }, &mut Tx::default());
+            assert_eq!(app.active_buffer().unwrap().doc.cursor_col, geometry.rows[row].1.byte_start);
+        }
+        assert!(Rc::ptr_eq(&geometry, &layout(app.active_buffer().unwrap(), m.cols)), "movement/hits must not rebuild layout");
+    }
+
+    /// CPU-only control, not presentation pacing. Run explicitly on an otherwise
+    /// idle machine; no flaky wall-clock threshold in the normal test suite.
+    #[test]
+    #[ignore]
+    fn wrapped_scroll_cpu_budget() {
+        let _fonts = rune::text::TextSystem::new(crate::FONTS, ("Geist", "Geist Mono"));
+        let mut app = App::new();
+        app.open_file("stress.rs", None);
+        let source = (0..20_000).map(|i| format!("    let item_{i} = call(\"long quoted words with Unicode 世界 and greedy wrapping\", nested(alpha, beta, gamma));\n")).collect::<String>();
+        app.apply_opened_file("stress.rs", source.as_bytes());
+        let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| view(a), (600.0, 674.0), rune::Env::new(true, 1.0));
+        for _ in 0..8 { rt.frame(1.0 / 120.0); }
+        let cols = Metrics::of(&rt.state, rt.state.active_buffer().unwrap()).cols;
+        let cached = layout(rt.state.active_buffer().unwrap(), cols);
+        let mut samples = Vec::new();
+        let mut high_water = 0.0_f32;
+        for i in 0..720 {
+            let started = std::time::Instant::now();
+            rt.update(|a, tx| {
+                a.editor_wheel("stress.rs", WheelEvent::new(0.0, if i < 360 { -20.0 } else { 20.0 }).precise(true), tx);
+                // This editor-only runtime has no app::animate heartbeat: step
+                // the production scrollers explicitly, or this measures idle.
+                a.scrollers.step(i as f64 / 120.0, tx);
+            });
+            rt.frame(1.0 / 120.0);
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            high_water = high_water.max(rt.state.active_buffer().unwrap().scroll.get().0);
+            assert!(Rc::ptr_eq(&cached, &layout(rt.state.active_buffer().unwrap(), cols)));
+        }
+        assert!(high_water > 5000.0, "the control must really scroll, not time idle frames: {high_water}");
+        samples.sort_by(f64::total_cmp);
+        eprintln!("wrapped-scroll CPU only: 20000 lines, 720 frames, travel={high_water:.1}px; p50={:.3} p95={:.3} p99={:.3} max={:.3} ms; >8.333ms={}; mounted elements={}", samples[360], samples[684], samples[712], samples[719], samples.iter().filter(|&&ms| ms > 1000.0 / 120.0).count(), rt.elements().len());
+    }
 
     #[test]
     fn pending_prefixes_keep_editor_viewport_and_caret_stable() {

@@ -141,7 +141,7 @@ pub fn view(app: &App) -> El {
         .child(rows);
     let body = col().grow(1.0).shrink().h_full().child(toolbar).child(list);
     let middle = row().w_full().grow(1.0).shrink().min_h(0.0)
-        .child_if(!narrow, || side)
+        .child_if(!narrow, || crate::ui::sidebar::view(app, "browser", side, SIDEBAR_W * s, 120.0 * s, (w - 280.0 * s).min(360.0 * s), false))
         .child(body);
 
     // Footer: an error on the left, Cancel and the mode's action on the right.

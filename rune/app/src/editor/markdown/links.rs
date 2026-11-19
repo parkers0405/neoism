@@ -102,7 +102,7 @@ pub(super) fn at(raw: &str, col: usize) -> Option<String> {
     link_at(raw, col).map(|link| link.target)
 }
 
-fn decode(raw: &str) -> String {
+pub(crate) fn decode(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -122,7 +122,7 @@ fn decode(raw: &str) -> String {
 }
 
 /// Lexical normalization only: no filesystem reads or canonicalization.
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {
@@ -173,9 +173,9 @@ fn heading(lines: &[String], anchor: &str) -> Option<usize> {
     None
 }
 
-fn jump(app: &mut App, anchor: &str) {
-    let Some(buffer) = app.active_buffer_mut() else { return; };
-    let Some(row) = heading(&buffer.doc.lines, anchor) else { return; };
+pub(in crate::editor) fn jump(buffer: &mut crate::editor::Buffer, anchor: &str) -> bool {
+    if !super::enabled(buffer) { return false; }
+    let Some(row) = heading(&buffer.doc.lines, anchor) else { return false; };
     buffer.doc.end_insert_group();
     buffer.doc.break_undo_group();
     buffer.doc.clear_vertical_goal();
@@ -183,7 +183,13 @@ fn jump(app: &mut App, anchor: &str) {
     buffer.doc.cursor_col = 0;
     buffer.doc.follow_cursor = true;
     buffer.doc.vim.clear_pending();
-    app.editor_follow = true;
+    buffer.markdown_cache.clear_vertical_goal();
+    // A deliberate section jump takes priority over restoring this tab's old scroll.
+    buffer.kept_scroll = 0.0;
+    buffer.restoring = 0;
+    buffer.wheel_target = None;
+    buffer.jump_spring = None;
+    true
 }
 
 /// Normal Enter: consume a link before the host attempts a task toggle. Returns
@@ -210,16 +216,7 @@ fn follow_at(app: &mut App, line: usize, col: usize) -> bool {
         return true;
     }
     let (path, anchor) = destination(&buffer.path, &buffer.scope, &link.target, link.wiki);
-    if link.target.starts_with('#') {
-        if let Some(anchor) = anchor { jump(app, &anchor); }
-        return true;
-    }
-    app.open_file(&path, None);
-    // Already-loaded targets can jump immediately. New asynchronous file loads
-    // need a host-owned pending anchor; do not introduce another document state.
-    if app.active_buffer().is_some_and(|buffer| buffer.loaded) {
-        if let Some(anchor) = anchor { jump(app, &anchor); }
-    }
+    app.open_file_anchor(&path, anchor.as_deref());
     true
 }
 
@@ -375,5 +372,32 @@ mod tests {
         assert_eq!(heading(&lines, "repeat-1"), Some(5));
         assert_eq!(heading(&lines, "closed"), Some(6));
         assert_eq!(heading(&lines, "ignored"), None);
+    }
+
+    #[test]
+    fn section_survives_async_file_load_and_newer_navigation_wins() {
+        let mut rt = runtime("[other](other.md#repeat-1)\n");
+        let at = glyph_point(&rt.state, 0, "other");
+        rt.pointer_down(at[0], at[1]); rt.pointer_up(at[0], at[1]);
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+        let buffer = rt.state.active_buffer().unwrap();
+        assert_eq!(buffer.path, "/notes/other.md");
+        assert!(!buffer.loaded);
+        let raw = "# Repeat\n\nfirst\n\n# Repeat\n\nsecond\n";
+        rt.state.apply_opened_file("/notes/other.md", raw.as_bytes());
+        assert_eq!(rt.state.active_buffer().unwrap().doc.cursor_line, 4);
+        assert_eq!(rt.state.active_buffer().unwrap().doc.text_for_disk(), raw);
+        assert!(!rt.state.active_buffer().unwrap().dirty());
+
+        rt.state.open_file_anchor("/notes/pending.md", Some("repeat-1"));
+        rt.state.open_file("/notes/pending.md", Some(3));
+        rt.state.apply_opened_file("/notes/pending.md", raw.as_bytes());
+        assert_eq!(rt.state.active_buffer().unwrap().doc.cursor_line, 2, "later line navigation cancels the pending section");
+
+        rt.state.open_file_anchor("/notes/background.md", Some("repeat-1"));
+        rt.state.open_file("/notes/other.md", None);
+        rt.state.apply_opened_file("/notes/background.md", raw.as_bytes());
+        assert_eq!(rt.state.active_buffer().unwrap().path, "/notes/other.md");
+        assert_eq!(rt.state.buffers["/notes/background.md"].doc.cursor_line, 4);
     }
 }

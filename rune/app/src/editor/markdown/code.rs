@@ -157,7 +157,7 @@ mod tests {
     }
 }
 
-pub(super) fn cards(app: &App, buffer: &Buffer, lines: &[Line]) -> Vec<Card> {
+pub(super) fn cards(app: &App, buffer: &Buffer, lines: &[Line], diagrams: &[mermaid::Diagram]) -> Vec<Card> {
     let mut result = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -167,6 +167,8 @@ pub(super) fn cards(app: &App, buffer: &Buffer, lines: &[Line]) -> Vec<Card> {
         while i < lines.len() && matches!(lines[i].kind, Kind::Code { .. }) { i += 1; }
         let end = i;
         if i < lines.len() && matches!(lines[i].kind, Kind::Fence) { i += 1; }
+        let diagram = diagrams.get(diagrams.partition_point(|d| d.range.end <= start));
+        if diagram.is_some_and(|d| d.range == (start..i) && !matches!(d.entry, crate::mermaid::Entry::Failed(_))) { continue; }
         let raw = buffer.doc.lines[start].trim_start();
         let language = raw.trim_start_matches(['`', '~']).split_whitespace().next().unwrap_or("text").to_owned();
         let digits = end.saturating_sub(start + 1).max(1).to_string();
@@ -179,6 +181,7 @@ pub(super) fn cards(app: &App, buffer: &Buffer, lines: &[Line]) -> Vec<Card> {
         let mut ink = vec![Vec::new(); body.len()];
         // Highlight the entire fence, as chat does, so multiline strings/comments
         // keep their state. Distribute tokens, not repeated scans per source line.
+        if language != "mermaid" {
         for (range, paint) in rune_kit::syntax::highlight(Some(&language), &source).iter() {
             let color = match paint {
                 rune_kit::syntax::Paint::Kind(kind) => super::super::view::syntax_color(app.pal, *kind).map(rgb),
@@ -193,6 +196,7 @@ pub(super) fn cards(app: &App, buffer: &Buffer, lines: &[Line]) -> Vec<Card> {
                 let b = range.end.min(start + body[n].len()).saturating_sub(start);
                 if a < b { ink[n].push(Span::new(a, b).color(color)); }
             }
+        }
         }
         result.push(Card { range: start..i, top: 0.0, bottom: 0.0, inset: 22.0 + number_width + 18.0, language, end, ink });
     }
@@ -212,7 +216,11 @@ impl Card {
         // Match the chat Copy payload: body only, with its terminating newline.
         let mut source = buffer.doc.lines[self.range.start + 1..self.end].join("\n");
         if self.end > self.range.start + 1 { source.push('\n'); }
-        surface
-            .child(code_header(app.pal, app.ty, &self.language, source))
+        let header = if mermaid::language(&self.language) {
+            let editing = buffer.doc.mode == Mode::Insert && self.range.contains(&buffer.doc.cursor_line);
+            crate::agent::timeline::code_header_with_action(app.pal, app.ty, &self.language, source,
+                Some(mermaid::edit_button(app, buffer, self.range.start, editing)))
+        } else { code_header(app.pal, app.ty, &self.language, source) };
+        surface.child(header)
     }
 }

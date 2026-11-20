@@ -63,7 +63,8 @@ pub(super) async fn auth(command: AuthCommand) -> anyhow::Result<()> {
         } => {
             let server = normalize_server(&server);
             let client = reqwest::Client::new();
-            let method = if browser { 0 } else { 1 };
+            // The Codex browser and device-code methods follow "Sign in with ChatGPT".
+            let method = if browser { 1 } else { 2 };
             let authorization = response_json(
                 client
                     .post(format!("{server}/v2/providers/openai/oauth/authorize"))

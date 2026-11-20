@@ -10,6 +10,8 @@ use tokio::sync::RwLock;
 use crate::auth_store::AuthStore;
 use crate::ProviderOAuthPending;
 
+#[path = "provider_auth_chatgpt.rs"]
+mod provider_auth_chatgpt;
 #[path = "provider_auth_copilot.rs"]
 mod provider_auth_copilot;
 #[path = "provider_auth_methods.rs"]
@@ -23,6 +25,7 @@ mod provider_auth_xai;
 
 #[cfg(test)]
 use crate::provider_auth_browser::openai_browser_callback_outcome;
+pub(crate) use provider_auth_chatgpt::refresh_chatgpt;
 use provider_auth_copilot::{authorize_github_copilot, poll_github_copilot};
 use provider_auth_methods::{provider_metadata, provider_methods, select_method};
 use provider_auth_openai::{
@@ -75,6 +78,16 @@ pub async fn authorize(
             Ok(None)
         }
         ProviderAuthMethodKind::OAuth => {
+            if provider_id == "openai" && method.label == provider_auth_chatgpt::METHOD_LABEL {
+                return provider_auth_chatgpt::authorize_chatgpt(
+                    provider_id,
+                    pending_key,
+                    auth_store,
+                    pending,
+                )
+                .await
+                .map(Some);
+            }
             if provider_id == "openai" && method.label.contains("browser") {
                 if inputs.get("headless").is_some_and(|value| value == "true") {
                     return authorize_openai_headless(pending_key, pending).await.map(Some);
@@ -144,6 +157,9 @@ pub async fn callback(
             })
         }
         ProviderAuthMethodKind::OAuth => {
+            if provider_id == "openai" && method.label == provider_auth_chatgpt::METHOD_LABEL {
+                return provider_auth_chatgpt::exchange_chatgpt(pending_key, pending).await;
+            }
             if provider_id == "openai" && method.label.contains("browser") {
                 let device_fallback = matches!(
                     pending.read().await.get(pending_key),
@@ -171,6 +187,7 @@ pub async fn callback(
                     expires: 0,
                     account_id: None,
                     enterprise_url: None,
+                    client_id: None,
                 });
             }
             anyhow::bail!("OAuth token is required for provider {provider_id}")

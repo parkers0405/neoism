@@ -121,6 +121,7 @@ pub(super) async fn poll_github_copilot(
                 expires: 0,
                 account_id: None,
                 enterprise_url,
+                client_id: None,
             });
         }
         match response.error.as_deref() {

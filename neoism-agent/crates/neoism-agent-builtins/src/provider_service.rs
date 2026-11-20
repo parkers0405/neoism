@@ -524,12 +524,14 @@ fn into_credential(info: AuthInfo) -> neoism_agent_service_api::ProviderCredenti
             expires,
             account_id,
             enterprise_url,
+            client_id,
         } => neoism_agent_service_api::ProviderCredential::OAuth {
             refresh,
             access,
             expires,
             account_id,
             enterprise_url,
+            client_id,
         },
         AuthInfo::WellKnown { key, token } => {
             neoism_agent_service_api::ProviderCredential::WellKnown { key, token }
@@ -608,6 +610,7 @@ mod tests {
                     expires: 1,
                     account_id: Some("test-account".into()),
                     enterprise_url: None,
+                    client_id: None,
                 },
             )
             .await
@@ -696,6 +699,7 @@ mod tests {
                     expires: u64::MAX,
                     account_id: Some("synthetic-account".into()),
                     enterprise_url: None,
+                    client_id: None,
                 },
                 set_default: true,
             })
@@ -786,6 +790,7 @@ mod tests {
                     expires: 0,
                     account_id: None,
                     enterprise_url: None,
+                    client_id: None,
                 },
                 set_default: false,
             })

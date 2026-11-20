@@ -118,8 +118,13 @@ async fn fetch_usage(
         .await
         .map_err(|_| "Unable to read OpenAI account credentials")?
         .ok_or("OpenAI account is no longer connected")?;
-    if !matches!(credential, AuthInfo::OAuth { .. }) {
-        return Err("ChatGPT usage is unavailable for this authentication type");
+    match &credential {
+        AuthInfo::OAuth { client_id: None, .. } => {}
+        // Plan usage comes from the Codex service, which a token-sharing sign-in cannot call.
+        AuthInfo::OAuth { .. } => {
+            return Err("ChatGPT usage is unavailable with Sign in with ChatGPT")
+        }
+        _ => return Err("ChatGPT usage is unavailable for this authentication type"),
     }
     let (access, account_id) = openai_oauth_credentials(client, auth, credential)
         .await
@@ -320,6 +325,7 @@ mod tests {
             expires: u64::MAX,
             account_id: Some("exact-account".into()),
             enterprise_url: None,
+            client_id: None,
         };
         let stale = AuthInfo::OAuth {
             refresh: "stale-refresh".into(),
@@ -327,6 +333,7 @@ mod tests {
             expires: 1,
             account_id: Some("exact-account".into()),
             enterprise_url: None,
+            client_id: None,
         };
         let summary = store
             .create(CreateProviderConnection {
@@ -339,6 +346,7 @@ mod tests {
                     expires: u64::MAX,
                     account_id: Some("exact-account".into()),
                     enterprise_url: None,
+                    client_id: None,
                 },
                 set_default: false,
             })

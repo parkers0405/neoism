@@ -42,6 +42,8 @@ pub(super) fn provider_methods(provider: &ProviderInfo) -> Vec<ProviderAuthMetho
     }
     let mut methods = Vec::new();
     if provider.id == "openai" {
+        // First: it needs no fixed callback port and no device-code setting on the account.
+        methods.push(oauth_method(super::provider_auth_chatgpt::METHOD_LABEL, None));
         methods.push(oauth_method("ChatGPT Pro/Plus (browser)", None));
         methods.push(oauth_method("ChatGPT Pro/Plus (headless)", None));
     }

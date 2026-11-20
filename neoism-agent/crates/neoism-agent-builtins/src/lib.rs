@@ -33,6 +33,15 @@ pub enum ProviderOAuthPending {
         state: String,
         receiver: Arc<Mutex<Option<oneshot::Receiver<Result<String, String>>>>>,
     },
+    OpenAiChatGpt {
+        issuer: String,
+        redirect_uri: String,
+        code_verifier: String,
+        nonce: String,
+        /// The client an existing connection registered; a first sign-in learns it on the callback.
+        client_id: Option<String>,
+        receiver: Arc<Mutex<Option<oneshot::Receiver<Result<(String, Option<String>), String>>>>>,
+    },
     OpenAiHeadless {
         issuer: String,
         device_auth_id: String,

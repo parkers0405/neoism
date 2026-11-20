@@ -201,7 +201,7 @@ impl OpenAiClient {
             let _refresh = refresh;
             let mut identity = identity;
             let fetched = async {
-                let (access, account_id) = openai_oauth_credentials_at(
+                let (access, account_id, _) = openai_oauth_credentials_at(
                     &client, &auth_store, auth, &REFRESH_LOCK, &issuer, Duration::from_secs(15),
                 ).await?;
                 // Refresh rotates the bearer token. Publish under the persisted
@@ -763,6 +763,7 @@ mod tests {
             expires,
             account_id: Some("account-a".into()),
             enterprise_url: None,
+            client_id: None,
         }
     }
 
@@ -1042,6 +1043,39 @@ mod tests {
         assert_eq!(access, "synthetic-access");
         tokio::fs::remove_file(path).await.unwrap();
         server.abort();
+    }
+
+    #[test]
+    fn chatgpt_shared_request_targets_the_platform_api_with_session_headers_and_zstd() {
+        let request: ProviderGenerationRequest = serde_json::from_value(json!({
+            "providerId":"openai", "modelId":"gpt-test", "messages":[],
+            "sessionId":"child", "cacheAffinity":"root",
+            "headers": {"Session-Id": "caller-chosen", "x-extra": "kept"}
+        }))
+        .unwrap();
+        let http = chatgpt_shared_request(
+            &reqwest::Client::new(),
+            "https://example.invalid/v1/responses",
+            "shared-token",
+            &request,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let header = |name: &str| {
+            let values = http.headers().get_all(name).iter().collect::<Vec<_>>();
+            assert_eq!(values.len(), 1, "{name} is sent exactly once");
+            values[0].to_str().unwrap().to_string()
+        };
+        assert_eq!(header("authorization"), "Bearer shared-token");
+        assert_eq!(header("session-id"), "root");
+        assert_eq!(header("thread-id"), "child");
+        assert_eq!(header("x-client-request-id"), "child");
+        assert_eq!(header("x-extra"), "kept");
+        assert_eq!(header("content-encoding"), "zstd");
+        assert!(http.headers().get("chatgpt-account-id").is_none());
+        let body = zstd::decode_all(http.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), responses_body(&request));
     }
 
     #[test]
@@ -1498,6 +1532,59 @@ fn codex_request(
     http
 }
 
+/// Models a "Sign in with ChatGPT" plan serves through the platform API (opencode's list of
+/// the same; fast tiers are modes of these wire IDs).
+pub(super) const CHATGPT_SHARED_MODELS: [&str; 11] = [
+    "gpt-5.5",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
+];
+
+/// A "Sign in with ChatGPT" request: the platform Responses API with the shared-plan token.
+/// It carries the Codex client's session headers, from which ChatGPT derives prompt-cache
+/// affinity, and a zstd body: this sign-in rejects uncompressed bodies over about 1 MiB.
+fn chatgpt_shared_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    access: &str,
+    request: &ProviderGenerationRequest,
+) -> anyhow::Result<reqwest::RequestBuilder> {
+    const SESSION_HEADERS: [&str; 3] = ["session-id", "thread-id", "x-client-request-id"];
+    let body = serde_json::to_vec(&responses_body(request))?;
+    let mut http = client
+        .post(endpoint)
+        .bearer_auth(access)
+        .header("accept", "text/event-stream")
+        .header("content-type", "application/json")
+        .header("content-encoding", "zstd")
+        .header("user-agent", neoism_user_agent());
+    for (name, value) in &request.headers {
+        if !SESSION_HEADERS.iter().any(|header| name.eq_ignore_ascii_case(header)) {
+            http = http.header(name, value);
+        }
+    }
+    if let Some(session) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
+        let affinity = request
+            .cache_affinity
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(session);
+        http = http
+            .header("session-id", affinity)
+            .header("thread-id", session)
+            .header("x-client-request-id", session);
+    }
+    Ok(http.body(zstd::encode_all(body.as_slice(), 3)?))
+}
+
 fn openai_oauth_responses_stream(
     client: OpenAiClient,
     auth_store: AuthStore,
@@ -1508,16 +1595,21 @@ fn openai_oauth_responses_stream(
         let auth = auth.ok_or_else(|| anyhow::anyhow!(
             "OpenAI OAuth Responses stream requested without OAuth credentials"
         ))?;
-        let (access, account_id) = openai_oauth_credentials(&client.client, &auth_store, auth).await?;
+        let (access, account_id, token_sharing) =
+            openai_oauth_session(&client.client, &auth_store, auth).await?;
 
         yield ProviderStreamEvent::Start;
         yield ProviderStreamEvent::StartStep;
 
-        let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_RESPONSES_URL")
-            .unwrap_or_else(|_| CODEX_RESPONSES_ENDPOINT.to_string());
-        let request_builder = codex_request(
-            &client.client, &endpoint, &access, account_id.as_deref(), &request,
-        );
+        let request_builder = if token_sharing {
+            let endpoint = std::env::var("NEOISM_AGENT_OPENAI_RESPONSES_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1/responses".to_string());
+            chatgpt_shared_request(&client.client, &endpoint, &access, &request)?
+        } else {
+            let endpoint = std::env::var("NEOISM_AGENT_OPENAI_CODEX_RESPONSES_URL")
+                .unwrap_or_else(|_| CODEX_RESPONSES_ENDPOINT.to_string());
+            codex_request(&client.client, &endpoint, &access, account_id.as_deref(), &request)
+        };
 
         let response = request_builder
             .send()
@@ -1559,11 +1651,28 @@ fn openai_oauth_responses_stream(
     })
 }
 
+/// The access token and account for the Codex ChatGPT service. A "Sign in with ChatGPT"
+/// credential cannot call that service, so callers that need it are told to reconnect.
 pub(super) async fn openai_oauth_credentials(
     client: &reqwest::Client,
     auth_store: &AuthStore,
     auth: AuthInfo,
 ) -> anyhow::Result<(String, Option<String>)> {
+    let (access, account_id, token_sharing) =
+        openai_oauth_session(client, auth_store, auth).await?;
+    anyhow::ensure!(
+        !token_sharing,
+        "This is unavailable with Sign in with ChatGPT; connect OpenAI with a Codex sign-in or an API key"
+    );
+    Ok((access, account_id))
+}
+
+/// The current access token, its Codex account, and whether it is a token-sharing credential.
+async fn openai_oauth_session(
+    client: &reqwest::Client,
+    auth_store: &AuthStore,
+    auth: AuthInfo,
+) -> anyhow::Result<(String, Option<String>, bool)> {
     // Refresh tokens rotate. Usage polling and generation can race with the
     // same expired snapshot; serialize refreshes and re-read the exact scoped
     // connection before exchanging a token. Never refresh a stale snapshot.
@@ -1587,16 +1696,17 @@ async fn openai_oauth_credentials_at(
     refresh_lock: &tokio::sync::Mutex<()>,
     issuer: &str,
     timeout: Duration,
-) -> anyhow::Result<(String, Option<String>)> {
+) -> anyhow::Result<(String, Option<String>, bool)> {
     if let AuthInfo::OAuth {
         access,
         account_id,
         expires,
+        client_id,
         ..
     } = &auth
     {
         if !should_refresh_oauth(*expires) {
-            return Ok((access.clone(), account_id.clone()));
+            return Ok((access.clone(), account_id.clone(), client_id.is_some()));
         }
     } else {
         anyhow::bail!("OpenAI OAuth credentials are required")
@@ -1614,33 +1724,39 @@ async fn openai_oauth_credentials_at(
         expires,
         account_id,
         enterprise_url,
+        client_id,
     } = auth
     else {
         anyhow::bail!("OpenAI OAuth credentials are required")
     };
     if !should_refresh_oauth(expires) {
-        return Ok((access, account_id));
+        return Ok((access, account_id, client_id.is_some()));
     }
-    let refreshed = refresh_openai_oauth_at(
-        client,
-        issuer,
-        timeout,
-        &refresh,
-        account_id,
-        enterprise_url,
-    )
-    .await?;
+    let refreshed = match &client_id {
+        // A token-sharing credential refreshes against the client it registered.
+        Some(client_id) => {
+            crate::provider_auth::refresh_chatgpt(client, issuer, timeout, &refresh, client_id)
+                .await?
+        }
+        None => {
+            refresh_openai_oauth_at(client, issuer, timeout, &refresh, account_id, enterprise_url)
+                .await?
+        }
+    };
     // Keep serialization through persistence of the rotated token. Do not
     // wrap exchange + credential mutation in one timeout/retry: cancellation
     // after a successful exchange must not blindly re-use the old token.
     auth_store.set("openai", refreshed.clone()).await?;
     let AuthInfo::OAuth {
-        access, account_id, ..
+        access,
+        account_id,
+        client_id,
+        ..
     } = refreshed
     else {
-        unreachable!("refresh_openai_oauth returns OAuth auth")
+        unreachable!("refresh returns OAuth auth")
     };
-    Ok((access, account_id))
+    Ok((access, account_id, client_id.is_some()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1700,6 +1816,7 @@ async fn refresh_openai_oauth_at(
             .saturating_add(response.expires_in.unwrap_or(3_600) * 1_000),
         account_id,
         enterprise_url,
+        client_id: None,
     })
 }
 

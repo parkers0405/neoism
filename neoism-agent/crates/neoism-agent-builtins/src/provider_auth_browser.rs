@@ -259,7 +259,7 @@ pub(super) fn openai_browser_callback_outcome(
     }
 }
 
-async fn write_http_response(
+pub(super) async fn write_http_response(
     stream: &mut tokio::net::TcpStream,
     status: &str,
     body: &str,
@@ -279,7 +279,7 @@ fn html_error(error: &str) -> String {
     neoism_agent_service_api::browser_pages::provider_authorization_failed(error)
 }
 
-fn parse_query(query: &str) -> BTreeMap<String, String> {
+pub(super) fn parse_query(query: &str) -> BTreeMap<String, String> {
     query
         .split('&')
         .filter(|part| !part.is_empty())

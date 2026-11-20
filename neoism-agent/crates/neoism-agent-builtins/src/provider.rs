@@ -109,6 +109,15 @@ impl ProviderRegistry {
         let Some(auth @ AuthInfo::OAuth { .. }) = auth_store.get("openai").await? else {
             return Ok((OpenAiModelAccess::Api, None));
         };
+        if let AuthInfo::OAuth { client_id: Some(client_id), .. } = &auth {
+            // "Sign in with ChatGPT" has no account catalog to discover: offer the models the
+            // shared plan serves, billed to the plan rather than per token.
+            let models = provider_openai::CHATGPT_SHARED_MODELS
+                .iter()
+                .map(|id| (id.to_string(), Default::default()))
+                .collect();
+            return Ok((OpenAiModelAccess::Codex(models), Some(format!("chatgpt:{client_id}"))));
+        }
         // Use the exact discovery auth snapshot; a second read can race rotation.
         let identity = provider_openai::codex_discovery_identity(&auth);
         let access = match self.openai.codex_models(auth_store, auth).await {

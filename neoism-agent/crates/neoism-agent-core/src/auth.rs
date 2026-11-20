@@ -21,6 +21,11 @@ pub enum AuthInfo {
         account_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         enterprise_url: Option<String>,
+        /// The client OpenAI issued to this install by "Sign in with ChatGPT". Its presence
+        /// marks a token-sharing credential, which refreshes and sends requests differently
+        /// from a Codex one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     WellKnown {
         key: String,

@@ -24,6 +24,7 @@ fn openai_methods_offer_chatgpt_oauth_before_api_key() {
             .map(|method| method.label.as_str())
             .collect::<Vec<_>>(),
         vec![
+            "Sign in with ChatGPT",
             "ChatGPT Pro/Plus (browser)",
             "ChatGPT Pro/Plus (headless)",
             "Manually enter API Key"
@@ -31,7 +32,8 @@ fn openai_methods_offer_chatgpt_oauth_before_api_key() {
     );
     assert!(matches!(methods[0].kind, ProviderAuthMethodKind::OAuth));
     assert!(matches!(methods[1].kind, ProviderAuthMethodKind::OAuth));
-    assert!(matches!(methods[2].kind, ProviderAuthMethodKind::Api));
+    assert!(matches!(methods[2].kind, ProviderAuthMethodKind::OAuth));
+    assert!(matches!(methods[3].kind, ProviderAuthMethodKind::Api));
     assert!(methods[0].prompts.is_none());
     assert!(methods[1].prompts.is_none());
 }

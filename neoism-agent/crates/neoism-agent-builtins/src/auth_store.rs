@@ -139,12 +139,14 @@ fn into_credential(info: AuthInfo) -> ProviderCredential {
             expires,
             account_id,
             enterprise_url,
+            client_id,
         } => ProviderCredential::OAuth {
             refresh,
             access,
             expires,
             account_id,
             enterprise_url,
+            client_id,
         },
         AuthInfo::WellKnown { key, token } => {
             ProviderCredential::WellKnown { key, token }
@@ -160,12 +162,14 @@ fn from_credential(info: ProviderCredential) -> AuthInfo {
             expires,
             account_id,
             enterprise_url,
+            client_id,
         } => AuthInfo::OAuth {
             refresh,
             access,
             expires,
             account_id,
             enterprise_url,
+            client_id,
         },
         ProviderCredential::WellKnown { key, token } => {
             AuthInfo::WellKnown { key, token }

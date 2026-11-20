@@ -364,6 +364,7 @@ fn openai_auth_from_token_response(token_response: OpenAiTokenResponse) -> AuthI
         ),
         account_id,
         enterprise_url: None,
+        client_id: None,
     }
 }
 
@@ -420,7 +421,7 @@ mod tests {
         };
         // Clients still submit the browser method they originally selected.
         let auth = super::super::callback(
-            "openai", "attempt", &serde_json::json!(0), None, &[provider], &pending,
+            "openai", "attempt", &serde_json::json!(1), None, &[provider], &pending,
         ).await.unwrap();
         assert!(matches!(auth, AuthInfo::OAuth { access, refresh, .. }
             if access == "access" && refresh == "refresh"));

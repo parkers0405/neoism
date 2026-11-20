@@ -261,6 +261,7 @@ fn xai_auth_from_token(token: XaiTokenResponse) -> AuthInfo {
             .saturating_add(token.expires_in.unwrap_or(3_600).saturating_mul(1_000)),
         account_id: None,
         enterprise_url: None,
+        client_id: None,
     }
 }
 

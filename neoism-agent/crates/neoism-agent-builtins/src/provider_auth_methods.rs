@@ -42,10 +42,11 @@ pub(super) fn provider_methods(provider: &ProviderInfo) -> Vec<ProviderAuthMetho
     }
     let mut methods = Vec::new();
     if provider.id == "openai" {
-        // First: it needs no fixed callback port and no device-code setting on the account.
         methods.push(oauth_method(super::provider_auth_chatgpt::METHOD_LABEL, None));
-        methods.push(oauth_method("ChatGPT Pro/Plus (browser)", None));
-        methods.push(oauth_method("ChatGPT Pro/Plus (headless)", None));
+        if openai_codex_methods_offered() {
+            methods.push(oauth_method("ChatGPT Pro/Plus (browser)", None));
+            methods.push(oauth_method("ChatGPT Pro/Plus (headless)", None));
+        }
     }
     if !provider.env.is_empty() || provider.id == "openai" {
         methods.push(ProviderAuthMethod {
@@ -161,6 +162,14 @@ pub(super) fn github_copilot_prompts() -> Vec<ProviderAuthPrompt> {
             }),
         },
     ]
+}
+
+/// The Codex browser and device-code sign-ins are hidden: OpenAI gates device codes behind
+/// an account setting and the browser one needs a fixed port. Existing Codex connections keep
+/// working; `NEOISM_AGENT_OPENAI_CODEX_AUTH=1` offers the methods again, for example on a
+/// remote daemon that cannot receive a loopback callback.
+fn openai_codex_methods_offered() -> bool {
+    cfg!(test) || std::env::var("NEOISM_AGENT_OPENAI_CODEX_AUTH").is_ok_and(|value| value == "1")
 }
 
 pub(super) fn select_method(

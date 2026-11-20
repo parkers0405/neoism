@@ -63,8 +63,9 @@ pub(super) async fn auth(command: AuthCommand) -> anyhow::Result<()> {
         } => {
             let server = normalize_server(&server);
             let client = reqwest::Client::new();
-            // The Codex browser and device-code methods follow "Sign in with ChatGPT".
-            let method = if browser { 1 } else { 2 };
+            // "Sign in with ChatGPT" is OpenAI's only offered sign-in; it always uses the browser.
+            let _ = browser;
+            let method = 0;
             let authorization = response_json(
                 client
                     .post(format!("{server}/v2/providers/openai/oauth/authorize"))

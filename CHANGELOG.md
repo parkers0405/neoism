@@ -2,10 +2,11 @@
 
 All notable user-facing changes to Neoism are documented here.
 
-## [0.7.160] - 2026-11-20
+## [0.7.161] - 2026-11-20
 
-### Signed macOS builds and steadier long Agent conversations
+### Sign in with ChatGPT, signed macOS builds, and steadier long Agent conversations
 
+- Adds **Sign in with ChatGPT** for OpenAI: it opens in the browser, needs no device code or fixed port, and uses your ChatGPT plan. It replaces the Codex browser and device-code sign-ins, which OpenAI now gates behind an account setting; existing Codex connections keep working.
 - Signs the macOS app and disk image with a Developer ID and notarizes them with Apple, so Gatekeeper opens a downloaded Neoism without a warning and macOS privacy permissions stay attached across updates.
 - Keeps the Agent working after a long conversation is compacted: the summary of earlier work is now background, so its old goal, constraints, and next steps no longer override what you ask for next.
 - Stops the Agent from ending a turn to wait on delegated work that it never started.

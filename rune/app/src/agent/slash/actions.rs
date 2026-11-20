@@ -744,9 +744,10 @@ impl App {
         let Ok(index) = value.parse::<usize>() else { return };
         let methods = flow.methods.get(&provider.id).cloned().unwrap_or_default();
         let Some(mut method) = methods.iter().find(|m| m.index == index).cloned() else { return };
-        // Desktop parity: browser OAuth for OpenAI (and xAI) runs the headless variant.
-        let wants_headless = (provider.id == "openai" && method.label.to_lowercase().contains("browser"))
-            || (provider.id == "xai" && !method.api && !method.label.contains("Headless"));
+        // xAI's browser OAuth runs its headless variant. OpenAI's does not: device codes only work
+        // for accounts that enabled them in ChatGPT security settings, so the browser method must
+        // stay a real browser sign-in and the device-code method an explicit choice.
+        let wants_headless = provider.id == "xai" && !method.api && !method.label.contains("Headless");
         if wants_headless {
             if let Some(headless) = methods.iter().find(|m| m.label.to_lowercase().contains("headless")) { method = headless.clone(); }
         }

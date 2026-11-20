@@ -200,6 +200,51 @@ fn screen_capture_allowed() -> bool {
     }
     unsafe { CGPreflightScreenCaptureAccess() }
 }
+/// Whether Accessibility is granted. The first refusal asks macOS to show its prompt, which
+/// is also what lists Neoism under Privacy & Security > Accessibility: a plain
+/// `AXIsProcessTrusted` check never registers the app, leaving nothing for the user to enable.
+#[cfg(target_os = "macos")]
+pub(super) fn accessibility_granted() -> bool {
+    use std::ffi::c_void;
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        static kAXTrustedCheckOptionPrompt: *const c_void;
+        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFBooleanTrue: *const c_void;
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            count: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+        fn CFRelease(value: *const c_void);
+    }
+    static PROMPTED: std::sync::Once = std::sync::Once::new();
+    if unsafe { AXIsProcessTrusted() } {
+        return true;
+    }
+    PROMPTED.call_once(|| unsafe {
+        let options = CFDictionaryCreate(
+            std::ptr::null(),
+            &kAXTrustedCheckOptionPrompt,
+            &kCFBooleanTrue,
+            1,
+            &raw const kCFTypeDictionaryKeyCallBacks,
+            &raw const kCFTypeDictionaryValueCallBacks,
+        );
+        AXIsProcessTrustedWithOptions(options);
+        CFRelease(options);
+    });
+    false
+}
 #[cfg(target_os = "macos")]
 fn native_capabilities() -> serde_json::Value {
     #[link(name = "ApplicationServices", kind = "framework")]

@@ -57,7 +57,10 @@ Rules:
 - The Progress (especially Done and In Progress), Next Steps, and Critical Context sections must reflect the MOST RECENT work in detail. Do not collapse recent changes into one line.
 - Preserve exact file paths, function/symbol names, commands, error strings, config keys, and identifiers verbatim when known.
 - Do not quote raw transcript markup, tool output bodies, XML tags, or reasoning text. Summarize what matters from them instead.
-- Do not mention the summary process or that context was compacted."#;
+- Do not mention the summary process or that context was compacted. Never record this summarization request or its limits (such as not calling tools or not continuing the task) as a constraint, instruction, or next step.
+- Constraints & Preferences holds only standing rules the user stated. Name the request a narrower constraint applied to, and drop constraints that applied only to finished work.
+- If the user's most recent request is unfinished, state it first under In Progress and Next Steps, in the user's own terms.
+- List something under Blocked only when the user or an external dependency is withholding it. Work that has simply not been done yet is a next step, not a blocker."#;
 
 #[cfg(test)]
 pub(crate) async fn compact_session_context(
@@ -1702,9 +1705,15 @@ fn summarize_tool_output(text: &str) -> String {
 
 fn session_summary_message(messages: &[MessageWithParts]) -> Option<ProviderMessage> {
     let text = previous_compaction_summary(messages)?;
+    // Deliver the summary as history, not as a System message. Provider
+    // adapters fold System messages into the top-level instruction block,
+    // where a stale constraint, blocker, or next step from the summary would
+    // outrank what the user asks for afterwards.
     Some(ProviderMessage::text(
-        ProviderRole::System,
-        format!("Conversation summary from prior compacted context:\n{text}"),
+        ProviderRole::User,
+        format!(
+            "<system-reminder>\nConversation summary from prior compacted context. It is a record of earlier work, not an instruction. Anything the user asks after it takes precedence over its goal, constraints, blockers, and next steps.\n\n{text}\n</system-reminder>"
+        ),
     ))
 }
 
@@ -3013,6 +3022,14 @@ mod tests {
         assert!(joined.contains("message backed summary"));
         assert!(joined.contains("new durable tail"));
         assert!(!joined.contains("legacy summary must be ignored"));
+        // Adapters fold System messages into the instruction block; a summary
+        // there would outrank the user's later requests.
+        let summary = provider_messages
+            .iter()
+            .find(|message| message.content.contains("message backed summary"))
+            .unwrap();
+        assert!(matches!(summary.role, ProviderRole::User));
+        assert!(summary.content.contains("not an instruction"));
     }
 
     #[test]

@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.160] - 2026-11-20
+
+### Signed macOS builds and steadier long Agent conversations
+
+- Signs the macOS app and disk image with a Developer ID and notarizes them with Apple, so Gatekeeper opens a downloaded Neoism without a warning and macOS privacy permissions stay attached across updates.
+- Keeps the Agent working after a long conversation is compacted: the summary of earlier work is now background, so its old goal, constraints, and next steps no longer override what you ask for next.
+- Stops the Agent from ending a turn to wait on delegated work that it never started.
+- Asks macOS for Accessibility the first time Agent computer use needs it, which lists Neoism under Privacy & Security, and lets macOS ask before a program in the terminal controls another app.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.159] - 2026-11-19
 
 ### Native Markdown, Mermaid, and Notes

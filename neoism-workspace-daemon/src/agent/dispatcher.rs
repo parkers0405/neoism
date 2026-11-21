@@ -21,6 +21,9 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
         }
 
         // -- Layer 2: agent-server proxy ---------------------------
+        AgentClientMessage::ForkThread { session_id, message_id } => {
+            tokio::spawn(async move { handle_fork_thread(inner, session_id, message_id).await });
+        }
         AgentClientMessage::CreateThread {
             title,
             directory,

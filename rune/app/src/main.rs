@@ -428,6 +428,7 @@ fn main() {
                 }).collect() });
             }),
             ("model-menu", |s| { s.load_fixture("model-menu", "Model menu", "[]"); s.run_slash("/model openai/gpt-6.2-sol", &mut rune::Tx::default()); s.open_model_menu(); }),
+            ("reply-strip", |s| { s.load_fixture("reply", "Reply strip", include_str!("../fixtures/mcp-timeline.json")); s.reply_to_message("reply", "Hi! What are you working on? I can help with code, answer questions, or review a change."); }),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });
                 let i = s.active;

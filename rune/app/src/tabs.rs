@@ -172,7 +172,14 @@ impl App {
         self.tabs[index].pastes.clear();
         match self.tabs[index].kind.clone() {
             TabKind::Home | TabKind::Terminal => self.run_command(index, text),
-            TabKind::Agent { session: Some(session_id) } => self.submit_prompt(&session_id, text),
+            TabKind::Agent { session: Some(session_id) } => {
+                // A reply quotes what it answers, so the model sees which part is meant.
+                let text = match self.reply_to.take_if(|(session, _)| *session == session_id) {
+                    Some((_, quoted)) => format!("> {quoted}\n\n{text}"),
+                    None => text,
+                };
+                self.submit_prompt(&session_id, text)
+            }
             TabKind::Agent { session: None } => self.create_thread(index, text),
             TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => {}
         }

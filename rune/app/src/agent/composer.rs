@@ -209,7 +209,19 @@ pub fn composer(app: &App, max_w: f32) -> El {
             .child_opt(app.context_label().map(|label| text(label).key("context").font(app.ty.small()).color(rgb(p.muted)).mr(18.0)))
             .child(text("/").key("slash").font(app.ty.small()).color(rgb(p.fg)))
             .child(text("commands").key("commands").font(app.ty.small()).color(rgb(p.muted))));
-    let column = col().w_full().max_w(max_w).child(card);
+    // "Replying to …": a strip tucked behind the card's top edge, with a way out of it.
+    let session = match &app.active_tab().kind { TabKind::Agent { session: Some(id) } => Some(id.as_str()), _ => None };
+    let replying = app.reply_to.as_ref().filter(|(reply, _)| Some(reply.as_str()) == session).map(|(_, quoted)| {
+        row().key("composer-reply").h(40.0).mx(22.0).mb(-10.0).pb(10.0).px(14.0).gap(10.0).center_y()
+            .fill(rgb(p.bg).mix(rgb(p.surface), 0.5)).corners([14.0, 14.0, 0.0, 0.0]).border(1.0, rgb(p.border))
+            .child(text("\u{f045a}").font(app.ty.icon_sized(13.0)).color(rgb(p.muted)))
+            .child(text("Replying to").font(app.ty.sans(13.0, 500.0)).color(rgb(p.fg)))
+            .child(text(quoted.clone()).font(app.ty.sans(13.0, 400.0)).color(rgb(p.muted)).truncate().grow(1.0).shrink())
+            .child(el().key("composer-reply-close").w(22.0).h(22.0).radius(6.0).center().hover(rgb(p.fg).alpha(0.1))
+                .child(text("\u{f0156}").font(app.ty.icon_sized(13.0)).color(rgb(p.dim)))
+                .on_press(|a: &mut App| a.reply_to = None))
+    });
+    let column = col().w_full().max_w(max_w).child_opt(replying).child(card);
     if app.composer.hints_hidden { column } else { column.child(row().w_full().px(28.0).child(footer)) }
 }
 

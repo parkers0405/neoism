@@ -424,6 +424,20 @@ impl App {
         self.thread_activity.insert(session_id.to_owned(), activity.to_owned());
     }
 
+    /// "Reply" under an answer: the next prompt in that conversation quotes it.
+    pub fn reply_to_message(&mut self, session_id: &str, text: &str) {
+        let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+        let excerpt: String = line.chars().take(240).collect();
+        if excerpt.is_empty() { return; }
+        self.reply_to = Some((session_id.to_owned(), excerpt));
+        self.focus = crate::app::Focus::Content;
+    }
+
+    /// "Fork" under an answer: a new conversation holding this one up to that answer.
+    pub fn fork_at(&mut self, session_id: &str, message_id: &str) {
+        self.send_agent(AgentClientMessage::ForkThread { session_id: session_id.to_owned(), message_id: Some(message_id.to_owned()) });
+    }
+
     /// A conversation in the open panel is at work: its status mark needs frames.
     pub fn sidebar_working(&self) -> bool {
         self.sidebar == Some(crate::app::Sidebar::Conversations)
@@ -898,6 +912,10 @@ impl App {
         match message {
             AgentServerMessage::TodoUpdate { session_id, todos } => {
                 self.sessions.entry(session_id).or_default().todos = Some(todos);
+            }
+            AgentServerMessage::ThreadForked { session_id, .. } => {
+                self.refresh_threads();
+                self.open_conversation(&session_id);
             }
             AgentServerMessage::SessionProjects { catalog_identity, items, pinned_sessions, .. } => self.apply_session_projects(&catalog_identity, items, pinned_sessions),
             AgentServerMessage::SessionProjectsChanged => if self.conversations_dashboard() { self.refresh_catalog(); },

@@ -96,6 +96,13 @@ pub enum AgentClientMessage {
     DeleteThread {
         session_id: String,
     },
+    /// Copy a session up to and including `message_id` (the whole session when `None`) into
+    /// a new one. The reply is [`AgentServerMessage::ThreadForked`].
+    ForkThread {
+        session_id: String,
+        #[serde(default)]
+        message_id: Option<String>,
+    },
     /// List sessions known to the agent-server. The reply is
     /// [`AgentServerMessage::ThreadList`].
     ListThreads {
@@ -583,6 +590,11 @@ pub enum AgentServerMessage {
     },
 
     // -- Session lifecycle --------------------------------------------
+    /// Reply to [`AgentClientMessage::ForkThread`]: the new session and the one it came from.
+    ThreadForked {
+        session_id: String,
+        source_session_id: String,
+    },
     /// Acknowledge a [`AgentClientMessage::CreateThread`] with the
     /// agent-server-assigned id and the session metadata it picked.
     ThreadCreated {

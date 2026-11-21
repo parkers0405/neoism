@@ -214,6 +214,8 @@ pub struct App {
     pub thread_paging: crate::agent::ThreadPaging,
     /// Conversations that finished while off screen and have not been opened since.
     pub finished: std::collections::HashSet<String>,
+    /// The reply being answered in particular: its conversation, and its opening words.
+    pub reply_to: Option<(String, String)>,
     /// The conversations panel's keyboard stop above the list (New chat or the directory row).
     pub conv_header: Option<crate::agent::ConvHeader>,
     /// The conversations panel's project dropdown, while open.
@@ -444,6 +446,7 @@ impl App {
             catalog: Default::default(),
             thread_paging: Default::default(),
             finished: Default::default(),
+            reply_to: None,
             conv_header: None,
             project_menu: None,
             project_add: None,

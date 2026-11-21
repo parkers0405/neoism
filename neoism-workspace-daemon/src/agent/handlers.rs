@@ -3,6 +3,20 @@ use neoism_protocol::agent::HistoryAttachment;
 
 // -- Session lifecycle ------------------------------------------------------
 
+pub(crate) async fn handle_fork_thread(inner: Arc<AgentInner>, session_id: String, message_id: Option<String>) {
+    let mut body = serde_json::Map::new();
+    if let Some(message_id) = message_id { body.insert("messageId".into(), Value::String(message_id)); }
+    let path = format!("/v2/sessions/{}/fork", percent_encode(&session_id));
+    let message = match http_post_json(&inner, &path, &Value::Object(body)).await {
+        Ok(value) => match value.get("id").and_then(Value::as_str) {
+            Some(id) => AgentServerMessage::ThreadForked { session_id: id.to_owned(), source_session_id: session_id },
+            None => AgentServerMessage::Error { message: "The agent server did not return the forked conversation.".into() },
+        },
+        Err(error) => AgentServerMessage::Error { message: format!("Could not fork the conversation: {error}") },
+    };
+    let _ = inner.tx.send(message);
+}
+
 pub(crate) async fn handle_create_thread(
     inner: Arc<AgentInner>,
     title: Option<String>,

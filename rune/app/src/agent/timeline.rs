@@ -878,9 +878,21 @@ impl Meta for El {
         // The daemon sends the finished footer in `status`: `Build · GPT-6.1 Sol · 1m 1s · 33.1 tok/s`.
         let Some((agent, rest)) = message.status.split_once(" · ") else { return self };
         let p = app.pal;
+        let s = app.ty.scale();
+        // Copy, Fork and Reply under the line, quiet until the pointer is on them.
+        let action = |key: &'static str, glyph: &'static str, label: &'static str| row().key(key).h(24.0 * s).px(7.0 * s).gap(5.0 * s).radius(6.0 * s).center_y()
+            .hover(rgb(p.fg).alpha(0.08)).cursor(rune::Cursor::Pointer)
+            .child(text(glyph).font(app.ty.icon_sized(12.5)).color(rgb(p.muted)))
+            .child(text(label).font(app.ty.sans(12.0, 500.0)).color(rgb(p.muted)));
+        let session = match &app.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => id.clone(), _ => String::new() };
+        let (copied, replied, fork_session, fork_message, reply_session) = (message.text.clone(), message.text.clone(), session.clone(), message.id.clone(), session);
         self.child(row().gap(0.0).mt(4.0)
             .child(text(agent.to_owned()).font(app.ty.body()).color(rgb(p.blue)))
             .child(text(format!(" · {rest}")).font(app.ty.body()).color(rgb(p.muted))))
+            .child(row().key(format!("reply-actions:{}", message.id)).gap(2.0 * s).mt(6.0 * s).ml(-7.0 * s)
+                .child(action("copy", "\u{f018f}", "Copy").on_press_tx(move |_: &mut App, tx: &mut rune::Tx| tx.copy(copied.clone())))
+                .child(action("fork", "\u{f062c}", "Fork").on_press(move |a: &mut App| a.fork_at(&fork_session, &fork_message)))
+                .child(action("reply", "\u{f045a}", "Reply").on_press(move |a: &mut App| a.reply_to_message(&reply_session, &replied))))
     }
 }
 

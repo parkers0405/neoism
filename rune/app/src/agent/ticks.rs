@@ -1,5 +1,5 @@
 //! The question rail (`agent_pane/question_rail.rs`, `view/timeline/render.rs`): one tick per
-//! user question in the transcript's right gutter, evenly spaced (not proportional to answer
+//! user question in the transcript's left gutter, evenly spaced (not proportional to answer
 //! length), the tick for the question in view lit, ticks near the pointer widening, and the
 //! hovered question previewed in a blue chat bubble to the rail's left. Pressing or dragging on
 //! the rail brings that question to the top of the view.
@@ -35,7 +35,7 @@ pub struct Rail {
 }
 
 impl Rail {
-    /// In the gutter right of the transcript column; `None` under two questions or no room.
+    /// In the gutter beside the transcript column; `None` under two questions or no room.
     pub fn new([x, y, w, h]: [f32; 4], s: f32, count: usize) -> Option<Rail> {
         if count < 2 || ![x, y, w, h, s].iter().all(|v| v.is_finite()) || s <= 0.0 || w < 6.0 * s || h < 4.0 * s {
             return None;
@@ -151,14 +151,15 @@ pub fn preview_lines(text: &str, width: f32, max_lines: usize, measure: impl Fn(
     lines
 }
 
-/// `question_preview_rect`: left of the track, centred on the tick, kept inside the pane.
+/// `question_preview_rect`: right of the track (the rail sits in the left gutter), centred on
+/// the tick, kept inside the pane.
 fn preview_rect(pane: [f32; 4], rail: &Rail, index: usize, height: f32, s: f32) -> Option<[f32; 4]> {
-    let right = (rail.track[0] - 6.0 * s).min(pane[0] + pane[2]);
-    let width = (right - pane[0] - 4.0 * s).min(PREVIEW_MAX_W * s);
+    let left = (rail.track[0] + rail.track[2] + 6.0 * s).max(pane[0]);
+    let width = (pane[0] + pane[2] - left - 4.0 * s).min(PREVIEW_MAX_W * s);
     let height = height.min(pane[3]);
     if width < 40.0 * s || height < 30.0 * s { return None; }
     let top = (rail.tick_y(index) - height * 0.5).clamp(pane[1], pane[1] + pane[3] - height);
-    Some([right - width, top, width, height])
+    Some([left, top, width, height])
 }
 
 impl App {
@@ -194,12 +195,13 @@ impl App {
 }
 
 /// The rail and its preview over a conversation pane, placed in window points from the
-/// transcript `view` and the `pane` it sits in; `gutter` is the transcript's right padding.
+/// transcript `view` and the `pane` it sits in; `gutter` is the transcript's side padding (the
+/// rail sits in the left one).
 pub fn view(app: &App, session_id: &str, view: [f32; 4], pane: [f32; 4], gutter: f32) -> El {
     let s = app.ty.scale();
     let p = app.pal;
     let questions = app.questions(session_id);
-    let Some(rail) = Rail::new([view[0] + view[2] - gutter, view[1], gutter, view[3]], s, questions.len()) else { return el() };
+    let Some(rail) = Rail::new([view[0], view[1], gutter, view[3]], s, questions.len()) else { return el() };
     let Some(session) = app.sessions.get(session_id) else { return el() };
     let active = session.rail_active;
     let hovered = app.question_hover.as_ref().filter(|(id, _)| id == session_id).map(|(_, i)| *i);
@@ -264,7 +266,6 @@ fn preview(app: &App, session_id: &str, questions: &[Question], rail: &Rail, ind
     let fitted = (lines.iter().map(|l| measure(l)).fold(0.0_f32, f32::max) + 24.0 * s).clamp(40.0 * s, provisional[2]);
     let height = 22.0 * s + PREVIEW_LINE * s * lines.len() as f32;
     let mut rect = preview_rect(pane, rail, index, height, s)?;
-    rect[0] += rect[2] - fitted;
     rect[2] = fitted;
     let (body_w, body_h) = (rect[2] - 4.0 * s, rect[3] - 6.0 * s);
     let tail_scale = (0.82 * s).min(body_w / 44.0).min(body_h / 44.0);

@@ -143,4 +143,14 @@ pub mod glyph {
     pub const EDIT: &str = "\u{f044}";
     pub const OPENAI: &str = "\u{e7cf}";
     pub const SIDEBAR: &str = "\u{f0db}";
+    // Line icons (Material Design outlines) for the modern panels.
+    pub const SEARCH_LINE: &str = "\u{f0349}";
+    pub const FILTER: &str = "\u{f0236}";
+    pub const COMPOSE: &str = "\u{f090c}";
+    pub const FOLDER_LINE: &str = "\u{f0256}";
+    pub const FOLDER_OPEN_LINE: &str = "\u{f0dcf}";
+    pub const FOLDER_PLUS_LINE: &str = "\u{f0b9d}";
+    pub const NO_PROJECT: &str = "\u{f0485}";
+    pub const CHECK: &str = "\u{f0e1e}";
+    pub const PIN: &str = "\u{f0931}";
 }

@@ -79,7 +79,7 @@ pub fn view(app: &App) -> El {
     let list_w = if wide && !finder.hits.is_empty() { (inner_w * LIST_RATIO).floor() } else { inner_w };
 
     let prefix = match finder.mode { Mode::Files => "", Mode::Grep => "/ ", Mode::Git => "git " };
-    let input = rune::text_input(&finder.query, app.ty.sized(INPUT_FONT))
+    let input = rune::text_input(&finder.query, app.ty.chat_sized(INPUT_FONT))
         // Keys through this field (list arrows, wheel-free navigation) commit animated: without
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
@@ -96,7 +96,7 @@ pub fn view(app: &App) -> El {
         .on_layout(|a: &mut App, rect| { a.rects.insert("finder-query-clip".into(), rect); })
         .transition(rune::Transition::none()).instant_changes()
         .child(input)
-        .child(text(finder.badge()).font(app.ty.sized(INPUT_FONT * 0.92)).color(rgb(p.muted)));
+        .child(text(finder.badge()).font(app.ty.chat_sized(INPUT_FONT * 0.92)).color(rgb(p.muted)));
 
     let visible = crate::palette::compact::rows(app, rows_fit(s, wide));
     let shown = finder.hits.len().clamp(1, visible) as f32;
@@ -145,7 +145,7 @@ fn list(app: &App, finder: &Finder, width: f32, visible: usize) -> El {
     let rows = col().w(width);
     if finder.hits.is_empty() {
         let hint = if finder.loading || finder.due.is_some() { "Searching..." } else if let Some(error) = &finder.error { error.as_str() } else if finder.query.text.trim().is_empty() && finder.mode == Mode::Grep { "Start typing to search" } else { "No matches" };
-        return rows.transition(rune::Transition::none()).instant_changes().child(row().h(ROW_H * s).transition(rune::Transition::none()).px(INPUT_PAD_X * s).center_y().child(text(hint.to_owned()).font(app.ty.sized(ROW_FONT)).color(rgb(p.muted))));
+        return rows.transition(rune::Transition::none()).instant_changes().child(row().h(ROW_H * s).transition(rune::Transition::none()).px(INPUT_PAD_X * s).center_y().child(text(hint.to_owned()).font(app.ty.chat_sized(ROW_FONT)).color(rgb(p.muted))));
     }
     let span = crate::ui::rows::span(finder.top, visible, finder.hits.len());
     let mut built = Vec::with_capacity(span.len());
@@ -157,7 +157,7 @@ fn list(app: &App, finder: &Finder, width: f32, visible: usize) -> El {
             // Only a moving pointer selects: hits sliding under a resting pointer keep the selection.
             .on_pointer_move(move |a: &mut App, _| if a.finder.as_ref().is_some_and(|f| f.selected != index) { a.select_finder(index) })
             .on_press(move |a: &mut App| a.accept_finder(Some(index)));
-        let font = app.ty.sized(ROW_FONT);
+        let font = app.ty.chat_sized(ROW_FONT);
         line = match hit {
             Hit::File { .. } => line
                 .child(text(name.to_owned()).font(font).color(rgb(p.fg)).ml(8.0 * s).shrink().truncate())
@@ -183,7 +183,7 @@ fn preview(app: &App, finder: &Finder) -> El {
     let s = app.ty.scale();
     let Some(hit) = finder.selected_hit() else { return el() };
     let Some((_, lines)) = finder.preview.as_ref().filter(|(path, _)| path == hit.path()) else {
-        return col().padding(PREVIEW_PAD * s).child(text("Loading preview...").font(app.ty.sized(ROW_FONT)).color(rgb(p.muted)));
+        return col().padding(PREVIEW_PAD * s).child(text("Loading preview...").font(app.ty.chat_sized(ROW_FONT)).color(rgb(p.muted)));
     };
     let target = hit.line().unwrap_or(1).max(1) as usize;
     let start = target.saturating_sub(PREVIEW_LINES / 4).max(1);

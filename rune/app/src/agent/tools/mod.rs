@@ -60,10 +60,28 @@ pub struct ToolState {
 /// tool call.)
 pub struct Spinner {
     squares: [rune::Live<[f32; 2]>; 4],
+    /// The same four squares on a diamond, the bright one chasing round it (background work).
+    chase: [rune::Live<[f32; 2]>; 4],
+    /// The diamond drawing in to its centre and back out (compacting).
+    squeeze: [rune::Live<[f32; 2]>; 4],
 }
 
 impl Default for Spinner {
-    fn default() -> Spinner { Spinner { squares: std::array::from_fn(|_| rune::Live::new([0.0, 0.0])) } }
+    fn default() -> Spinner {
+        let spinner = Spinner {
+            squares: std::array::from_fn(|_| rune::Live::new([0.0, 0.0])),
+            chase: std::array::from_fn(|_| rune::Live::new([0.0, 0.0])),
+            squeeze: std::array::from_fn(|_| rune::Live::new([0.0, 0.0])),
+        };
+        // At rest the patterns hold their first frame instead of a pile at the centre.
+        spinner.tick(0.0, 1.0);
+        spinner
+    }
+}
+
+/// The four points of the status diamond: top, right, bottom, left.
+pub(crate) fn diamond(radius: f32) -> [[f32; 2]; 4] {
+    [[0.0, -radius], [radius, 0.0], [0.0, radius], [-radius, 0.0]]
 }
 
 impl Spinner {
@@ -77,6 +95,21 @@ impl Spinner {
             let (dx, dy) = card::orbit((step - trail as f32) / 8.0, 3.0 * scale);
             square.set([dx, dy]);
         }
+        let points = diamond(3.5 * scale);
+        // One point every quarter second: the trail follows the lead round the diamond.
+        let turn = (clock * 4.0).floor() as usize;
+        for (trail, square) in self.chase.iter().enumerate() { square.set(points[(turn + 4 - trail) % 4]); }
+        // In and out in four steps a second.
+        let reach = [1.0, 0.62, 0.24, 0.62][(clock * 4.5).floor() as usize % 4];
+        for (square, point) in self.squeeze.iter().zip(points) { square.set([point[0] * reach, point[1] * reach]); }
+    }
+
+    pub(crate) fn chase(&self) -> impl Iterator<Item = (&rune::Live<[f32; 2]>, f32)> {
+        self.chase.iter().zip([1.0, 0.6, 0.35, 0.18])
+    }
+
+    pub(crate) fn squeeze(&self) -> impl Iterator<Item = (&rune::Live<[f32; 2]>, f32)> {
+        self.squeeze.iter().zip([1.0; 4])
     }
 
     /// The squares, brightest first, with their opacities.

@@ -8,6 +8,11 @@ impl Type {
         TextStyle::new(points * self.scale(), 400.0)
     }
 
+    /// Proportional UI text at a weight: the modern panels' labels and titles.
+    pub fn sans(self, points: f32, weight: f32) -> TextStyle {
+        TextStyle::new(points * self.scale(), weight)
+    }
+
     pub fn chat_body(self) -> TextStyle {
         TextStyle::new(self.size, 400.0).lh(self.size * 1.45)
     }

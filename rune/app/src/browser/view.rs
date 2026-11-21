@@ -44,12 +44,12 @@ pub fn view(app: &App) -> El {
     let w = (WIDTH * s).min(app.window[0] - 2.0 * MARGIN * s).max(1.0);
     let h = ((HEADER_H + TOOLBAR_H + FOOTER_H + ROW_H * ROWS) * s).min(app.window[1] - 2.0 * MARGIN * s).max(1.0);
     let wash = |a: f32| rgb(p.fg).alpha(a);
-    let font = app.ty.sized(FONT);
+    let font = app.ty.chat_sized(FONT);
 
     // Header: the mode's title.
     let header = row().w_full().h(HEADER_H * s).px(PAD_X * s).center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
-        .child(text(b.mode.title()).font(app.ty.sized_bold(FONT + 1.0)).color(rgb(p.fg)));
+        .child(text(b.mode.title()).font(app.ty.sans(FONT + 1.0, 600.0)).color(rgb(p.fg)));
 
     // Places.
     let mut side = col().w(SIDEBAR_W * s).h_full().pt(4.0 * s).fill(rgb(p.black));
@@ -69,7 +69,7 @@ pub fn view(app: &App) -> El {
         el().key(key).w(CONTROL_H * s).h(CONTROL_H * s).center().radius(5.0 * s).fill(wash(0.04)).hover(wash(0.07))
             .opacity(if enabled { 1.0 } else { 0.4 })
             .on_press(move |a: &mut App| { if let Some(b) = &mut a.browser { act(b); } })
-            .child(text(glyph).font(app.ty.sized(FONT + 2.0)).color(rgb(p.muted)))
+            .child(text(glyph).font(app.ty.chat_sized(FONT + 2.0)).color(rgb(p.muted)))
     };
     // The path field: edit it and press Enter to go there (`~` works).
     let path_input = {
@@ -115,7 +115,7 @@ pub fn view(app: &App) -> El {
             line = line.child(text(size_label(size)).font(app.ty.sized(11.0)).color(rgb(p.muted)).w(66.0 * s));
         }
         if entry.is_dir {
-            line = line.child(text("\u{203a}").font(app.ty.sized(FONT + 2.0)).color(rgb(p.muted)).mr(4.0 * s));
+            line = line.child(text("\u{203a}").font(app.ty.chat_sized(FONT + 2.0)).color(rgb(p.muted)).mr(4.0 * s));
         }
         if selected {
             line = line.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("browser-row".into(), r); });
@@ -155,7 +155,7 @@ pub fn view(app: &App) -> El {
     };
     let footer = row().w_full().h(FOOTER_H * s).px(PAD_X * s).gap(8.0 * s).center_y()
         .border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border))
-        .child(text(b.error.clone().unwrap_or_default()).font(app.ty.sized(11.0)).color(rgb(p.red)).truncate().grow(1.0).shrink())
+        .child(text(b.error.clone().unwrap_or_default()).font(app.ty.chat_sized(11.0)).color(rgb(p.red)).truncate().grow(1.0).shrink())
         .child(button("browser-cancel", "Cancel", false, true, |a| a.browser = None))
         .child(button("browser-accept", b.mode.action(), true, b.can_accept(), |a| a.browser_accept()));
 

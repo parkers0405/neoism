@@ -174,6 +174,7 @@ impl App {
     }
 
     pub fn apply_git_panel(&mut self, message: GitServerMessage, request_id: u64) {
+        if self.apply_project_reply(&message, request_id) { return; }
         if self.apply_editor_git(&message, request_id) { return; }
         // Watch events are scoped independently from request/reply traffic. Never accept a
         // previous workspace's broadcast, even if it arrives after its panel was reset.

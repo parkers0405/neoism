@@ -1,7 +1,7 @@
 //! Centered pickers: the `Alt+P` command palette and the theme picker with its live preview card
 //! (`reference/14`, `23`, `24`). One query field, a ranked list, keyboard and pointer selection.
 
-mod backgrounds;
+pub(crate) mod backgrounds;
 pub(crate) mod compact;
 pub(crate) mod commands;
 pub(crate) mod systems;
@@ -423,7 +423,7 @@ impl App {
         }
     }
 
-    fn set_setting(&self, key: &str, value: serde_json::Value) {
+    pub(crate) fn set_setting(&self, key: &str, value: serde_json::Value) {
         if let Some(daemon) = &self.daemon { daemon.send(Family::Config, json!({"SetSetting": {"key": key, "value": value}})); }
     }
 
@@ -436,7 +436,9 @@ impl App {
     /// Persist a background choice (`ui.window.background-image[-disabled]`).
     pub fn apply_background(&mut self, choice: &backgrounds::Choice) {
         let image = match choice {
-            backgrounds::Choice::Image(path) => json!({"path": path, "opacity": 1.0, "blur": 0.0, "fit": "cover", "position-x": 0.5, "position-y": 0.5}),
+            // A new picture keeps the opacity and fit already chosen.
+            backgrounds::Choice::Image(path) => json!({"path": path, "opacity": if self.wallpaper.active() { self.wallpaper.opacity } else { 1.0 },
+                "blur": if self.wallpaper.active() { self.wallpaper.blur } else { 0.0 }, "fit": if self.wallpaper.active() && !self.wallpaper.cover { "contain" } else { "cover" }, "position-x": 0.5, "position-y": 0.5}),
             _ => serde_json::Value::Null,
         };
         self.set_setting("ui.window.background-image-disabled", json!(*choice == backgrounds::Choice::None));
@@ -454,6 +456,22 @@ impl App {
         let (queue, wake, path) = (self.decoded_previews.clone(), self.waker.clone(), path.to_owned());
         std::thread::spawn(move || {
             if let Some(pixels) = backgrounds::decode(&path) { queue.lock().unwrap().push((path, pixels)); }
+            if let Some(wake) = wake { wake(); }
+        });
+        None
+    }
+
+    /// A background picture as the window shows it: plain, or blurred by `blur` source pixels
+    /// (whole pixels, so a slider settles on a handful of cached pictures).
+    pub fn background_image(&self, path: &std::path::Path, blur: f32) -> Option<rune::Image> {
+        let sigma = blur.round();
+        if sigma < 1.0 { return self.background_preview(path); }
+        let key = std::path::PathBuf::from(format!("{}#blur={sigma}", path.display()));
+        if let Some(image) = self.background_previews.borrow().get(&key) { return image.clone(); }
+        self.background_previews.borrow_mut().insert(key.clone(), None);
+        let (queue, wake, path) = (self.decoded_previews.clone(), self.waker.clone(), path.to_owned());
+        std::thread::spawn(move || {
+            if let Some(pixels) = backgrounds::decode_blurred(&path, sigma) { queue.lock().unwrap().push((key, pixels)); }
             if let Some(wake) = wake { wake(); }
         });
         None

@@ -85,6 +85,20 @@ pub fn decode(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
     Some((image.width(), image.height(), image.into_raw()))
 }
 
+/// The longest side a picture is blurred at. A blurred picture has no detail to lose, and
+/// blurring it small is quick enough to follow a slider.
+const BLUR_SIDE: u32 = 1280;
+
+/// Decode a picture blurred by `sigma` source pixels (`ui.window.background-image.blur`).
+pub fn decode_blurred(path: &Path, sigma: f32) -> Option<(u32, u32, Vec<u8>)> {
+    let image = image::open(path).ok()?;
+    let longest = image.width().max(image.height()).max(1);
+    let scale = (BLUR_SIDE as f32 / longest as f32).min(1.0);
+    let small = if scale < 1.0 { image.resize(BLUR_SIDE, BLUR_SIDE, image::imageops::FilterType::Triangle) } else { image };
+    let blurred = small.blur((sigma * scale).max(0.1)).into_rgba8();
+    Some((blurred.width(), blurred.height(), blurred.into_raw()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

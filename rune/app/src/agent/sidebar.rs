@@ -3,7 +3,6 @@
 use crate::app::App;
 use crate::tabs::TabKind;
 use crate::ui::theme::{NERD, glyph, rgb};
-use crate::ui::{icon, icons};
 use neoism_protocol::agent::ThreadSummary;
 use rune::tok::TextStyle;
 use rune::{Color, El, ScrollSpec, col, el, row, text};
@@ -13,11 +12,11 @@ fn ago(updated_ms: u64) -> String {
     if updated_ms == 0 || updated_ms > now { return String::new(); }
     let s = (now - updated_ms) / 1000;
     match s {
-        0..=59 => "just now".into(),
-        60..=3599 => format!("{}m ago", s / 60),
-        3600..=86399 => format!("{}h ago", s / 3600),
-        86400..=604799 => format!("{}d ago", s / 86400),
-        _ => format!("{}w ago", s / 604800),
+        0..=59 => "now".into(),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=86399 => format!("{}h", s / 3600),
+        86400..=604799 => format!("{}d", s / 86400),
+        _ => format!("{}w", s / 604800),
     }
 }
 
@@ -31,6 +30,8 @@ const SCROLL_OFF_ROWS: f32 = 3.0;
 pub enum ConvHeader {
     NewChat,
     Projects,
+    /// The folder button: add a project.
+    AddProject,
 }
 
 /// One keyboard stop in the panel: a project folder (dashboard only) or a conversation.
@@ -41,6 +42,8 @@ pub enum ConvRow<'a> {
     /// `last`: no later sibling under the same parent. `through`: the levels above it whose
     /// own line still runs on past this row to a later sibling.
     Child { member: &'a super::family::Member, root: &'a str, nested: bool, last: bool, through: Vec<usize> },
+    /// "Load more" under a project's chats: its next five.
+    More { directory: String },
 }
 
 /// The catalog directory for a workspace root (`workspace_catalog_scope`): the home directory
@@ -59,18 +62,23 @@ fn project_name(directory: &str) -> String {
 }
 
 fn header_rect_key(header: ConvHeader) -> &'static str {
-    match header { ConvHeader::NewChat => "conv-header:new-chat", ConvHeader::Projects => "conv-header:projects" }
+    match header { ConvHeader::NewChat => "conv-header:new-chat", ConvHeader::Projects => "conv-header:projects", ConvHeader::AddProject => "conv-header:add-project" }
 }
 
 impl App {
-    /// The dashboard (`~` or `/`): every project's conversations, grouped by folder.
-    pub fn conversations_dashboard(&self) -> bool { catalog_scope(&self.cwd).is_none() }
+    /// The dashboard (`~`, `/`, or the filter on "All projects"): every project's conversations,
+    /// grouped by folder.
+    pub fn conversations_dashboard(&self) -> bool { self.conv_all || catalog_scope(&self.cwd).is_none() }
 
     /// The panel's rows in order. In a project: pinned, then recent. On the dashboard: pinned
     /// from every project, then a folder per project (`~` first, then most recent activity), each
     /// expanded to its chats unless collapsed (`session_rows`).
     pub fn conversation_rows<'a>(&'a self) -> Vec<ConvRow<'a>> {
-        let (pinned, recent): (Vec<&ThreadSummary>, Vec<&ThreadSummary>) = self.threads.iter().partition(|t| t.pinned);
+        // The search field keeps the chats whose title or project contains it.
+        let needle = self.conv_query.text.trim().to_lowercase();
+        let matches = |t: &&ThreadSummary| needle.is_empty() || t.title.to_lowercase().contains(&needle)
+            || t.directory.as_deref().is_some_and(|d| project_name(d).to_lowercase().contains(&needle));
+        let (pinned, recent): (Vec<&ThreadSummary>, Vec<&ThreadSummary>) = self.threads.iter().filter(matches).partition(|t| t.pinned);
         // A conversation's sub-agents follow it, in the family's order.
         let with_children = |rows: &mut Vec<ConvRow<'a>>, thread: &'a ThreadSummary, nested: bool| {
             rows.push(ConvRow::Thread { thread, nested });
@@ -109,10 +117,11 @@ impl App {
             let label = if !home.is_empty() && directory == home { "~".to_owned() }
                 else if names.get(&project_name(&directory)).copied().unwrap_or(0) > 1 { directory.clone() }
                 else { project_name(&directory) };
-            rows.push(ConvRow::Project { directory, label, open });
+            rows.push(ConvRow::Project { directory: directory.clone(), label, open });
             if open {
                 entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 for thread in entries { with_children(&mut rows, thread, true); }
+                if needle.is_empty() && self.catalog.more_in(&directory) { rows.push(ConvRow::More { directory }); }
             }
         }
         rows
@@ -143,7 +152,8 @@ impl App {
             }
             Some(ConvHeader::Projects) if delta < 0 => { self.conv_header = Some(ConvHeader::NewChat); return; }
             Some(_) => return,
-            None if delta < 0 && (count == 0 || self.conv_selected == 0) => { self.conv_header = Some(ConvHeader::Projects); return; }
+            // Up from the first row goes to the search field.
+            None if delta < 0 && (count == 0 || self.conv_selected == 0) => { self.conv_query.focused = true; return; }
             None => {}
         }
         if count == 0 { return; }
@@ -155,6 +165,30 @@ impl App {
     /// Keys while the conversations panel has focus: walk, open, leave.
     pub fn conversation_key(&mut self, event: &rune::KeyEvent) -> bool {
         use rune::Key;
+        if self.conv_query.focused { return self.conversation_search_key(event); }
+        // The header row reads left to right: search, filter, new chat.
+        if let Some(header) = self.conv_header {
+            if event.mods.ctrl || event.mods.alt { return false; }
+            let text = match &event.key { Key::Text(t) => t.as_str(), _ => "" };
+            match (&event.key, text, header) {
+                (Key::Left, ..) | (_, "h", _) => match header {
+                    ConvHeader::Projects => { self.conv_header = None; self.conv_query.focused = true; }
+                    ConvHeader::AddProject => self.conv_header = Some(ConvHeader::Projects),
+                    ConvHeader::NewChat => self.conv_header = Some(ConvHeader::AddProject),
+                },
+                (Key::Right | Key::Tab, ..) | (_, "l", _) => self.conv_header = Some(if header == ConvHeader::Projects { ConvHeader::AddProject } else { ConvHeader::NewChat }),
+                (Key::Down, ..) | (_, "j", _) => {
+                    self.conv_header = None;
+                    self.conv_selected = 0;
+                    self.conv_follow.request();
+                }
+                (Key::Enter, ..) => self.open_selected_conversation(),
+                (Key::Escape, ..) => self.focus = crate::app::Focus::Content,
+                (Key::Up, ..) | (_, "k", _) => {}
+                _ => return false,
+            }
+            return true;
+        }
         // Ctrl+D / Ctrl+U move half a page (rows are two lines, measured from the first one).
         if let Some(letter @ ('d' | 'u')) = crate::keys::ctrl_letter(event) {
             let row_h = self.rects.get("conv:0").map_or(50.0, |r| r[3].max(1.0));
@@ -178,8 +212,31 @@ impl App {
                 "G" => self.conversation_move(isize::MAX / 2),
                 "g" if pending_g => self.conversation_move(isize::MIN / 2),
                 "g" => self.pending_g = true,
+                "/" => { self.conv_header = None; self.conv_query.focused = true; }
                 _ => return false,
             },
+            _ => return false,
+        }
+        true
+    }
+
+    /// Keys while the search field has the keyboard: Down or Enter step into the results,
+    /// Escape clears the query, then leaves the field. Everything else is typed.
+    pub fn conversation_search_key(&mut self, event: &rune::KeyEvent) -> bool {
+        use rune::Key;
+        match &event.key {
+            Key::Escape if !self.conv_query.text.is_empty() => { self.conv_query = rune::TextEdit::new(""); self.conv_query.focused = true; self.conv_selected = 0; }
+            Key::Escape => self.conv_query.focused = false,
+            Key::Down => { self.conv_query.focused = false; self.conv_header = None; self.conv_selected = 0; self.conv_follow.request(); }
+            // Along the header: Tab, or Right once there is nothing to move through.
+            Key::Tab => { self.conv_query.focused = false; self.conv_header = Some(ConvHeader::Projects); }
+            Key::Right if self.conv_query.text.is_empty() => { self.conv_query.focused = false; self.conv_header = Some(ConvHeader::Projects); }
+            Key::Enter => {
+                self.conv_query.focused = false;
+                self.conv_header = None;
+                let first = self.conversation_rows().iter().position(|r| matches!(r, ConvRow::Thread { .. }));
+                if let Some(first) = first { self.conv_selected = first; self.open_selected_conversation(); }
+            }
             _ => return false,
         }
         true
@@ -193,19 +250,22 @@ impl App {
                 return;
             }
             Some(ConvHeader::Projects) => return self.open_project_menu(),
+            Some(ConvHeader::AddProject) => return self.open_project_add(),
             None => {}
         }
-        enum Pick { Project(String), Thread(String), Child(String, String) }
+        enum Pick { Project(String), Thread(String), Child(String, String), More(String) }
         let pick = match self.conversation_rows().get(self.conv_selected) {
             Some(ConvRow::Project { directory, .. }) => Pick::Project(directory.clone()),
             Some(ConvRow::Thread { thread, .. }) => Pick::Thread(thread.session_id.clone()),
             Some(ConvRow::Child { member, root, .. }) => Pick::Child((*root).to_owned(), member.id.clone()),
+            Some(ConvRow::More { directory }) => Pick::More(directory.clone()),
             None => return,
         };
         match pick {
             Pick::Project(directory) => self.toggle_project(&directory),
             Pick::Thread(id) => self.open_conversation(&id),
             Pick::Child(root, child) => self.open_child(&root, &child),
+            Pick::More(directory) => self.load_more_chats(&directory),
         }
     }
 
@@ -221,20 +281,23 @@ impl App {
         self.conv_follow.apply_span(LIST_KEY, top, row[3], SCROLL_OFF_ROWS * row[3], tx);
     }
 
-    /// The block cursor on the keyboard row: a 0.6 em block in the row's left padding, one
-    /// title line tall.
+    /// The window cursor in the panel: a block in the keyboard card's left padding, one title
+    /// line tall; a block just left of a header button. The search field shows its
+    /// own caret.
     pub fn conversation_cursor(&self) -> Option<[f32; 4]> {
-        let r = match self.conv_header {
-            // Header rows sit outside the scrolled list: their rects are window-space.
-            Some(header) => *self.rects.get(header_rect_key(header))?,
-            None => {
-                let row = self.rects.get(&format!("conv:{}", self.conv_selected))?;
-                [row[0], row[1] - self.conv_follow.scroll.get().0, row[2], row[3]]
-            }
-        };
-        let font = self.ty.body().size;
+        if self.conv_query.focused { return None; }
+        let s = self.ty.scale();
+        if let Some(header) = self.conv_header {
+            // Header buttons sit outside the scrolled list: their rects are window-space.
+            let r = *self.rects.get(header_rect_key(header))?;
+            let (w, h) = ((14.0 * s * 0.6).max(2.0), 14.0 * s * 1.3);
+            return Some([r[0] - w + 1.0 * s, r[1] + (r[3] - h) / 2.0, w, h]);
+        }
+        let row = self.rects.get(&format!("conv:{}", self.conv_selected))?;
+        let r = [row[0], row[1] - self.conv_follow.scroll.get().0, row[2], row[3]];
+        let font = 14.0 * s;
         let (w, h) = ((font * 0.6).max(2.0), font * 1.3);
-        Some([r[0] + (17.0 - w) / 2.0, r[1] + (r[3] - h) / 2.0, w, h])
+        Some([r[0] + ((12.0 * s - w) / 2.0).max(0.0), r[1] + (r[3] - h) / 2.0, w, h])
     }
 
     /// `Alt+C`, the rail button and the splash "Agent panel" entry.
@@ -246,55 +309,85 @@ impl App {
     }
 }
 
-/// `Alt+C` / rail sidebar: New chat, scope, Pinned and Recent (`reference/04-sidebar-conversations.png`).
+/// A square header button: one line icon, the hover surface behind it.
+/// `size` is the glyph's own: the three marks fill their em differently, so each is set to
+/// look the same size as its neighbours.
+fn header_button(app: &App, header: ConvHeader, icon: &'static str, size: f32, active: bool) -> El {
+    let (p, s) = (app.pal, app.ty.scale());
+    let keyboard = app.focus == crate::app::Focus::Sidebar && app.conv_header == Some(header) && !app.conv_query.focused;
+    el().w(26.0 * s).h(26.0 * s).ml(7.0 * s).radius(7.0 * s).center()
+        .fill(if active || keyboard { rgb(p.hover) } else { Color::TRANSPARENT }).hover(rgb(p.hover))
+        .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(header_rect_key(header).into(), r); })
+        .child(text(icon).font(app.ty.icon_sized(size)).color(rgb(if active || keyboard { p.fg } else { p.dim })))
+}
+
+/// The framework a conversation runs in: an external agent's own mark (Claude Code, Codex),
+/// Neoism's for everything Neoism runs itself, whichever model it uses.
+fn framework_mark(app: &App, t: &ThreadSummary, size: f32) -> El {
+    t.external_provider.as_deref().and_then(|p| super::slash::provider_mark_for(app, p, size))
+        .unwrap_or_else(|| crate::ui::neoism_mark(app, size, &format!("thread-mark:{}", t.session_id)))
+}
+
+/// `Alt+C` / rail sidebar: a search field with the project filter and New chat beside it, over
+/// the conversations as cards (project and age on top, the title and its provider below).
 pub fn conversations(app: &App) -> El {
     let p = app.pal;
-    let heading = |label: &'static str| text(label).font(app.ty.pixel(1.2)).color(rgb(p.fg)).ml(16.0).mt(22.0).mb(14.0);
-    let focused = app.focus == crate::app::Focus::Sidebar;
+    let s = app.ty.scale();
+    let meta = app.ty.chat_sized(12.0);
+    let title_font = TextStyle::new(14.0 * s, 600.0);
+    let focused = app.focus == crate::app::Focus::Sidebar && !app.conv_query.focused;
     let keyboard_row = |index: usize, item: El| {
         // Each row's place in the scrolled content (window y plus the scroll at layout time), so
-        // the cursor and follow stay exact while the list glides between layouts.
+        // the follow stays exact while the list glides between layouts.
         item.on_layout(move |a: &mut App, r: [f32; 4]| {
             let offset = a.conv_follow.scroll.get().0;
             a.rects.insert(format!("conv:{index}"), [r[0], r[1] + offset, r[2], r[3]]);
         })
     };
-    // A dashboard project folder (`render_project_row`): chevron in the 14 pt indent, the
-    // tree's folder icon and colour, the name in the readable blue.
+    // A dashboard project folder: chevron, folder and name on one quiet line.
     let project_row = |index: usize, directory: &str, label: &str, open: bool| {
-        let s = app.ty.scale();
         let directory_owned = directory.to_owned();
         let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
-        let chevron = TextStyle::new(8.0 * s, 400.0).family(NERD);
-        let folder = TextStyle::new(13.0 * s, 400.0).family(NERD);
-        keyboard_row(index, row().key(format!("project:{directory}")).w_full().h(30.0 * s).px(17.0).center_y()
+        keyboard_row(index, row().key(format!("project:{directory}")).w_full().h(30.0 * s).px(12.0 * s).mt(6.0 * s).center_y().gap(8.0 * s).radius(8.0 * s)
             .fill(if keyboard { rgb(p.hover) } else { Color::TRANSPARENT }).hover(rgb(p.hover))
-            .child(el().w(14.0 * s).center().child(text(if open { "\u{f078}" } else { "\u{f054}" }).font(chevron).color(rgb(p.muted))))
-            .child(el().w(13.0 * s).center().child(text(if open { icons::FOLDER_OPEN } else { icons::FOLDER_CLOSED }).font(folder).color(rgb(p.folder))))
-            .child(text(label.to_owned()).font(app.ty.body()).color(rgb(p.blue)).ml(8.0 * s).truncate().shrink())
+            .child(text(if open { crate::ui::icons::FOLDER_OPEN } else { crate::ui::icons::FOLDER_CLOSED }).font(app.ty.icon_sized(13.0)).color(rgb(p.folder)))
+            .child(text(label.to_owned()).font(TextStyle::new(12.5 * s, 500.0)).color(rgb(p.dim)).truncate().shrink().grow(1.0))
+            .child(text(if open { "\u{f078}" } else { "\u{f054}" }).font(TextStyle::new(8.0 * s, 400.0).family(NERD)).color(rgb(p.muted)))
             .on_press(move |a: &mut App| a.toggle_project(&directory_owned)))
     };
-    let row_for = |index: usize, t: &ThreadSummary, nested: bool| {
+    let row_for = |index: usize, t: &ThreadSummary| {
         let id = t.session_id.clone();
         // A title cut short slides to show the rest while the pointer is on its row.
-        let (title_key, title_w) = (format!("thread:{}", t.session_id), crate::ui::marquee::natural(&t.title, app.ty.body()));
+        let (title_key, title_w) = (format!("thread:{}", t.session_id), crate::ui::marquee::natural(&t.title, title_font) * 0.86);
         let open = matches!(&app.active_tab().kind, TabKind::Agent { session: Some(s) } if *s == t.session_id);
         let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
-        // Chats under a dashboard folder sit one 18 pt step in.
-        let item = col().key(format!("thread:{}", t.session_id)).w_full().pl(17.0 + if nested { 18.0 * app.ty.scale() } else { 0.0 }).pr(17.0).py(6.0).gap(3.0);
+        let directory = t.directory.as_deref().unwrap_or_default().trim_end_matches('/');
+        let home = crate::startup::home();
+        let project = if directory.is_empty() { None } else if directory == home.trim_end_matches('/') { Some("~".to_owned()) } else { Some(project_name(directory)) };
+        let item = col().key(format!("thread:{}", t.session_id)).w_full()
+            .px(12.0 * s).py(9.0 * s).gap(5.0 * s).radius(9.0 * s);
         let item = keyboard_row(index, item);
-        // A conversation at work turns the loader in the row's trailing slot: the theme's ink
-        // while it runs, red for background work, yellow while it waits on a permission.
-        let activity = app.activity_of(t);
-        let busy = match activity { "running" => Some(p.fg), "background" => Some(p.red), "permission" => Some(p.yellow), _ => None };
-        item.fill(if keyboard { rgb(p.hover) } else if open { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT })
-            .hover(rgb(p.hover))
-            .child(row().w_full().center_y().gap(8.0)
-                .child(crate::ui::neoism_mark(app, app.ty.small().size, &format!("thread-mark:{}", t.session_id)))
-                .child(text("Neoism").font(app.ty.small()).color(rgb(p.dim)).grow(1.0))
-                .child(text(ago(t.updated_at)).font(app.ty.small()).color(rgb(p.muted)).mr(if busy.is_some() { 20.0 } else { 46.0 }))
-                .children(busy.map(|color| loader(app, color).mr(8.0))))
-            .child(app.title(&title_key, t.title.clone(), app.ty.body(), rgb(p.fg), Some(240.0)))
+        // A conversation at work turns the loader beside its age: the theme's ink while it
+        // runs, red for background work, yellow while it waits on a permission.
+        let compacting = app.sessions.get(&t.session_id).is_some_and(|s| s.compacting);
+        let status = match app.activity_of(t) {
+            _ if compacting => Status::Compacting,
+            "running" => Status::Running,
+            "background" => Status::Background,
+            "permission" => Status::NeedsYou,
+            _ if app.finished.contains(&t.session_id) => Status::Finished,
+            _ => Status::Idle,
+        };
+        item.fill(if open { rgb(p.surface).alpha(0.45) } else if keyboard { rgb(p.hover) } else { Color::TRANSPARENT })
+            .hover(if open { rgb(p.surface).alpha(0.45) } else { rgb(p.hover).alpha(0.7) })
+            .child(row().w_full().center_y().gap(6.0 * s)
+                .child(text(project.unwrap_or_else(|| "No project".into())).font(meta).color(rgb(p.muted)).truncate().shrink().grow(1.0))
+                .children(t.pinned.then(|| text(glyph::PIN).font(app.ty.icon_sized(12.0)).color(rgb(p.muted))))
+                // At work (or waiting on you) the mark takes the age's place.
+                .child(if status == Status::Idle { text(ago(t.updated_at)).font(meta).color(rgb(p.muted)) } else { status_mark(app, status) }))
+            .child(row().w_full().center_y().gap(8.0 * s)
+                .child(app.title(&title_key, t.title.clone(), title_font, rgb(p.fg), None).grow(1.0))
+                .child(framework_mark(app, t, 14.0 * s)))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| a.title_hover(&title_key, title_w, inside))
             .on_press({ let id = id.clone(); move |s: &mut App| s.open_conversation(&id) })
             // Right-click: pin, rename or delete the chat (`ui/context.rs`).
@@ -302,20 +395,19 @@ pub fn conversations(app: &App) -> El {
     };
     // A sub-agent under its conversation (`render_subagent_row`): one 24 pt step in per level,
     // joined to the row above by a line that turns in to its title; the last one ends the line.
-    let child_row = |index: usize, m: &super::family::Member, root: &str, nested: bool, last: bool, through: &[usize]| {
-        let s = app.ty.scale();
+    let child_row = |index: usize, m: &super::family::Member, root: &str, last: bool, through: &[usize]| {
         let (root, id) = (root.to_owned(), m.id.clone());
         let viewed = matches!(&app.active_tab().kind, TabKind::Agent { session: Some(session) } if *session == m.id);
         let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
-        let base = 17.0 + if nested { 18.0 * s } else { 0.0 };
+        let base = 12.0 * s;
         let indent = base + 24.0 * s * m.depth as f32;
         // The connector: down from the row above to this row's elbow, then across to the
         // title; on down to the next sibling unless this is the last. A level above whose
         // line has further to go passes straight through.
-        let (stroke, elbow, radius) = ((2.0 * s).round().max(2.0), 29.5 * s, 5.0 * s);
-        let line_x = |depth: usize| base + 24.0 * s * depth as f32 - 19.0 * s;
+        let (stroke, elbow, radius) = ((2.0 * s).round().max(2.0), 27.0 * s, 6.0 * s);
+        let line_x = |depth: usize| base + 24.0 * s * depth as f32 - 17.0 * s;
         let ink = rgb(p.fg).alpha(0.55);
-        let mut lines = vec![el().key("family-line").w(13.0 * s).h(elbow).absolute(line_x(m.depth), 0.0)
+        let mut lines = vec![el().key("family-line").w(11.0 * s).h(elbow).absolute(line_x(m.depth), 0.0)
             .border_sides([0.0, 0.0, stroke, stroke], ink).corners([0.0, 0.0, 0.0, radius])];
         if !last { lines.push(el().key("family-line-on").w(stroke).pin(Some(line_x(m.depth)), Some(elbow - radius), None, Some(0.0)).fill(ink)); }
         for level in through {
@@ -328,81 +420,75 @@ pub fn conversations(app: &App) -> El {
             _ => ("done", Some(p.green)),
         };
         let mark = match app.tools.icons.agent(m.agent.as_deref()) {
-            Some(image) => el().key(format!("child-mark:{}", m.id)).w(app.ty.small().size).h(app.ty.small().size).pixels(image.pixels()),
-            None => crate::ui::neoism_mark(app, app.ty.small().size, &format!("child-mark:{}", m.id)),
+            Some(image) => el().key(format!("child-mark:{}", m.id)).w(13.0 * s).h(13.0 * s).pixels(image.pixels()),
+            None => crate::ui::neoism_mark(app, 13.0 * s, &format!("child-mark:{}", m.id)),
         };
-        let (title_key, title_w) = (format!("child:{}", m.id), crate::ui::marquee::natural(&m.title, app.ty.body()));
+        let (title_key, title_w) = (format!("child:{}", m.id), crate::ui::marquee::natural(&m.title, title_font) * 0.86);
         let status = match dot {
             None => loader(app, p.fg),
-            Some(color) => el().w(10.0 * s).h(10.0 * s).center().child(el().w(7.0 * s).h(7.0 * s).radius(3.5 * s).fill(rgb(color))),
+            Some(color) => el().w(10.0 * s).h(10.0 * s).center().child(el().w(6.0 * s).h(6.0 * s).radius(3.0 * s).fill(rgb(color))),
         };
-        let item = col().key(format!("child:{}", m.id)).w_full().pl(indent).pr(17.0).py(6.0).gap(3.0);
+        let item = col().key(format!("child:{}", m.id)).w_full().pl(indent).pr(12.0 * s).py(8.0 * s).gap(4.0 * s).radius(9.0 * s);
         keyboard_row(index, item)
-            .fill(if keyboard { rgb(p.hover) } else if viewed { rgb(p.surface).alpha(0.6) } else { Color::TRANSPARENT })
-            .hover(rgb(p.hover))
+            .fill(if viewed { rgb(p.surface).alpha(0.45) } else if keyboard { rgb(p.hover) } else { Color::TRANSPARENT })
+            .hover(if viewed { rgb(p.surface).alpha(0.45) } else { rgb(p.hover).alpha(0.7) })
             .children(lines)
-            .child(row().w_full().center_y().gap(8.0)
-                .child(mark)
-                .child(text(m.agent.clone().unwrap_or_else(|| "Sub-agent".into())).font(app.ty.small()).color(rgb(p.dim)).grow(1.0).truncate().shrink())
-                .child(text(label).font(app.ty.small()).color(rgb(p.muted)).mr(20.0))
-                .child(status.mr(8.0)))
-            .child(app.title(&title_key, m.title.clone(), app.ty.body(), rgb(if viewed { p.accent } else { p.fg }), Some(240.0)))
+            .child(row().w_full().center_y().gap(6.0 * s)
+                .child(text(m.agent.clone().unwrap_or_else(|| "Sub-agent".into())).font(meta).color(rgb(p.muted)).grow(1.0).truncate().shrink())
+                .child(text(label).font(meta).color(rgb(p.muted)))
+                .child(status))
+            .child(row().w_full().center_y().gap(8.0 * s)
+                .child(app.title(&title_key, m.title.clone(), title_font, rgb(if viewed { p.accent } else { p.fg }), None).grow(1.0))
+                .child(mark))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| a.title_hover(&title_key, title_w, inside))
             .on_press(move |a: &mut App| a.open_child(&root, &id))
     };
-    // New chat and the directory row: keyboard stops with the list's highlight, and window
-    // rects for the block cursor and the dropdown's anchor.
-    let header_row = |header: ConvHeader| {
-        let keyboard = focused && app.conv_header == Some(header);
-        row().w_full().h(36.0).px(16.0).center_y().radius(6.0)
-            .fill(if keyboard || (header == ConvHeader::Projects && app.project_menu.is_some()) { rgb(p.hover) } else { Color::TRANSPARENT })
-            .hover(rgb(p.hover))
-            .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(header_rect_key(header).into(), r); })
+    // "Load more": a quiet line under a project's chats.
+    let more_row = |index: usize, key: String, label: String, directory: String| {
+        let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
+        keyboard_row(index, row().key(key).w_full().h(28.0 * s).px(12.0 * s).gap(6.0 * s).center_y().radius(8.0 * s)
+            .fill(if keyboard { rgb(p.hover) } else { Color::TRANSPARENT }).hover(rgb(p.hover).alpha(0.7))
+            .child(text(label).font(TextStyle::new(12.0 * s, 500.0)).color(rgb(p.dim)))
+            .child(text("\u{f078}").font(TextStyle::new(7.0 * s, 400.0).family(NERD)).color(rgb(p.muted)))
+            .on_press(move |a: &mut App| a.load_more_chats(&directory)))
     };
     let mirror = app.conv_follow.scroll.clone();
     let notch = 3.0 * crate::editor::view::line_height(app);
-    let mut list = col().w_full();
+    let mut list = col().w_full().px(8.0 * s).pt(4.0 * s).pb(12.0 * s).gap(2.0 * s);
     let rows = app.conversation_rows();
-    let dashboard = app.conversations_dashboard();
-    // Pinned conversations lead the list, each with its sub-agents.
-    let mut pinned = 0;
-    for (index, row) in rows.iter().enumerate() {
-        match row {
-            ConvRow::Thread { thread, .. } if thread.pinned => pinned = index + 1,
-            ConvRow::Child { .. } if pinned == index => pinned = index + 1,
-            _ => break,
-        }
-    }
-    if pinned > 0 { list = list.child(heading("Pinned")); }
+        // Pinned conversations lead the list, marked by a pin on their card rather than a heading.
     for (index, entry) in rows.iter().enumerate() {
-        // In a project the rest are "Recent"; the dashboard's folders head their own chats.
-        if index == pinned && !dashboard { list = list.child(heading("Recent")); }
         list = list.child(match entry {
             ConvRow::Project { directory, label, open } => project_row(index, directory, label, *open),
-            ConvRow::Thread { thread, nested } => row_for(index, thread, *nested),
-            ConvRow::Child { member, root, nested, last, through } => child_row(index, member, root, *nested, *last, through),
+            ConvRow::Thread { thread, .. } => row_for(index, thread),
+            ConvRow::Child { member, root, last, through, .. } => child_row(index, member, root, *last, through),
+            ConvRow::More { directory } => more_row(index, format!("more:{directory}"), if app.catalog.loading(directory) { "Loading\u{2026}".into() } else { "Load more".into() }, directory.clone()),
         });
     }
-    if pinned == rows.len() && !dashboard { list = list.child(heading("Recent")); }
-    col().key("sidebar").h_full().fill(app.surface(p.bg)).border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
-        .child(row().key("sidebar-heading").w_full().h(38.5).px(16.0).center_y()
-            .border_sides([0.0, 0.0, 1.5, 0.0], rgb(p.border))
-            .child(text("Agent").font(app.ty.body()).color(rgb(p.fg))))
-        .child(col().w_full().px(18.0).pt(12.0).gap(4.0)
-            .child(header_row(ConvHeader::NewChat).key("new-chat").gap(16.0)
-                .child(icon(app, glyph::EDIT, 0.9, rgb(p.fg)))
-                .child(text("New chat").font(app.ty.body()).color(rgb(p.fg)))
-                .on_press(|s: &mut App| { s.open_tab(TabKind::Agent { session: None }); s.focus = crate::app::Focus::Content; }))
-            .child(header_row(ConvHeader::Projects).key("project-directory").gap(16.0)
-                .child(icon(app, glyph::FOLDER, 0.9, rgb(p.folder)))
-                .child(text(app.workspace_name.clone()).font(app.ty.body()).color(rgb(p.fg)).grow(1.0).truncate().shrink())
-                .child(icon(app, glyph::CHEVRON_DOWN, 0.8, rgb(p.dim)))
+    if rows.is_empty() {
+        let note = if app.conv_query.text.trim().is_empty() { "No conversations yet" } else { "No matching conversations" };
+        list = list.child(text(note).font(app.ty.chat_sized(13.0)).color(rgb(p.muted)).ml(12.0 * s).mt(14.0 * s));
+    }
+    let search = rune::text_input(&app.conv_query, app.ty.chat_sized(14.0)).key("conversation-search")
+        .caret(rgb(p.fg), crate::ui::cursor::selection(app))
+        .placeholder("Search", rgb(p.muted)).color(rgb(p.fg)).grow(1.0).shrink()
+        .on_edit(|a: &mut App| &mut a.conv_query)
+        .on_input_change(|a: &mut App, _: &mut rune::Tx| { a.conv_selected = 0; })
+        .on_input_key(|a: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx| crate::keys::shortcut(a, e, tx) || a.conversation_search_key(e));
+    col().key("sidebar").h_full().fill(rgb(p.bg)).border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
+        .child(row().key("sidebar-heading").w_full().h(46.0 * s).pl(16.0 * s).pr(10.0 * s).center_y().gap(2.0 * s)
+            .child(text(glyph::SEARCH_LINE).font(app.ty.icon_sized(13.0)).color(rgb(p.muted)).mr(8.0 * s))
+            .child(search)
+            .child(header_button(app, ConvHeader::Projects, glyph::FILTER, 15.0, app.project_menu.is_some()).key("project-directory")
+                // A click opens it where the pointer is; only the keyboard moves the cursor here.
                 .on_press(|s: &mut App| {
-                    s.focus = crate::app::Focus::Sidebar;
-                    s.conv_header = Some(ConvHeader::Projects);
+                    s.conv_query.focused = false;
                     if s.project_menu.is_some() { s.close_project_menu(); } else { s.open_project_menu(); }
                 }))
-            .child(el().w_full().h(1.0).mt(6.0).fill(rgb(p.border))))
+            .child(header_button(app, ConvHeader::AddProject, glyph::FOLDER_PLUS_LINE, 14.5, app.project_add.is_some()).key("add-project")
+                .on_press(|s: &mut App| { s.conv_query.focused = false; s.open_project_add(); }))
+            .child(header_button(app, ConvHeader::NewChat, glyph::COMPOSE, 12.5, false).key("new-chat")
+                .on_press(|s: &mut App| { s.conv_query.focused = false; s.open_tab(TabKind::Agent { session: None }); s.focus = crate::app::Focus::Content; })))
         .child(col().key(LIST_KEY).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false })
             .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
@@ -412,6 +498,39 @@ pub fn conversations(app: &App) -> El {
                 crate::ui::scroll::handle(&mut a.scrollers, LIST_KEY, &e, notch, std::rc::Rc::new(move || { let (o, m, _) = mirror.get(); (o, m) }), tx)
             })
             .child(list))
+}
+
+/// What a conversation is doing, as its card's mark says it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status { Idle, Running, Background, Compacting, NeedsYou, Finished }
+
+/// Four squares in a card's top right corner, in place of its age, while the conversation is
+/// not idle. Waiting on you they sit still on a yellow diamond; finished and not yet opened,
+/// on a white one. At work they move, each kind its own way: the
+/// ink orbit while a reply runs, a red chase round the diamond for background work, a green
+/// draw-in and out while it compacts. All ride the shared live squares (`tools::Spinner`).
+fn status_mark(app: &App, status: Status) -> El {
+    let (p, s) = (app.pal, app.ty.scale());
+    let (size, dot) = (11.0 * s, 2.5 * s);
+    let centre = (size - dot) / 2.0;
+    let mut mark = el().w(size).h(size);
+    let still = |mut mark: El, color: Color| {
+        for [x, y] in super::tools::diamond(3.5 * s) { mark = mark.child(el().w(dot).h(dot).radius(0.5 * s).fill(color).absolute(centre + x, centre + y)); }
+        mark
+    };
+    let live = |mut mark: El, color: u32, squares: &mut dyn Iterator<Item = (&rune::Live<[f32; 2]>, f32)>| {
+        for (square, alpha) in squares { mark = mark.child(el().w(dot).h(dot).radius(0.5 * s).fill(rgb(color).alpha(alpha)).absolute(centre, centre).live_offset(square)); }
+        mark
+    };
+    mark = match status {
+        Status::Idle => mark,
+        Status::NeedsYou => still(mark, rgb(p.yellow)),
+        Status::Finished => still(mark, rgb(p.fg)),
+        Status::Running => live(mark, p.fg, &mut app.tools.spinner.squares()),
+        Status::Background => live(mark, p.red, &mut app.tools.spinner.chase()),
+        Status::Compacting => live(mark, p.green, &mut app.tools.spinner.squeeze()),
+    };
+    mark
 }
 
 /// The four-square orbit a running conversation turns (`draw_status_spinner`): the same live
@@ -632,6 +751,7 @@ mod family_tests {
             ConvRow::Thread { thread, .. } => thread.session_id.clone(),
             ConvRow::Child { member, last, through, .. } => format!("{}:{}{}{:?}", member.id, member.depth, if *last { "L" } else { "-" }, through),
             ConvRow::Project { .. } => "project".into(),
+            ConvRow::More { .. } => "more".into(),
         }).collect::<Vec<_>>();
         // `a1` is the last under `a`, while `a`'s own level runs on through it to `b` and `c`.
         assert_eq!(shape(&app), ["root", "a:1-[]", "a1:2L[1]", "b:1-[]", "c:1L[]", "other"]);

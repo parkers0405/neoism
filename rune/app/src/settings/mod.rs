@@ -19,49 +19,74 @@ use serde_json::{Value, json};
 pub enum Category {
     General,
     Appearance,
-    Editor,
-    Terminal,
-    Ui,
-    Presence,
+    /// The theme gallery: not schema rows, a page of its own.
+    Themes,
+    /// The window wallpaper: gallery, opacity and fit.
+    Backgrounds,
     Keybinds,
+    Editor,
+    /// Markdown and notes settings, kept apart from the code editor's.
+    Markdown,
+    Terminal,
     Agent,
+    Presence,
+    Ui,
     Platform,
     Developer,
 }
 
 impl Category {
-    pub const ALL: [Category; 10] = [
-        Category::General, Category::Appearance, Category::Editor, Category::Terminal, Category::Ui,
-        Category::Presence, Category::Keybinds, Category::Agent, Category::Platform, Category::Developer,
+    /// Sidebar order: the everyday pages, then the grouped ones (`group`).
+    pub const ALL: [Category; 13] = [
+        Category::General, Category::Appearance, Category::Themes, Category::Backgrounds, Category::Keybinds,
+        Category::Editor, Category::Markdown, Category::Terminal,
+        Category::Agent, Category::Presence,
+        Category::Ui, Category::Platform, Category::Developer,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             Category::General => "General",
             Category::Appearance => "Appearance",
+            Category::Themes => "Themes",
+            Category::Backgrounds => "Backgrounds",
+            Category::Keybinds => "Keybindings",
             Category::Editor => "Editor",
+            Category::Markdown => "Markdown",
             Category::Terminal => "Terminal",
-            Category::Ui => "UI",
-            Category::Presence => "Presence",
-            Category::Keybinds => "Keybinds",
             Category::Agent => "Agent",
+            Category::Presence => "Presence",
+            Category::Ui => "Interface",
             Category::Platform => "Platform",
             Category::Developer => "Developer",
         }
     }
 
+    /// The sidebar heading a page sits under; the first four have none.
+    pub fn group(self) -> Option<&'static str> {
+        match self {
+            Category::General | Category::Appearance | Category::Themes | Category::Backgrounds | Category::Keybinds => None,
+            Category::Editor | Category::Markdown | Category::Terminal => Some("Code"),
+            Category::Agent | Category::Presence => Some("Agents"),
+            Category::Ui | Category::Platform | Category::Developer => Some("System"),
+        }
+    }
+
     pub fn icon(self) -> &'static str {
         match self {
-            Category::General => "\u{f013}",
-            Category::Appearance => "\u{f1fc}",
-            Category::Editor => "\u{f044}",
-            Category::Terminal => "\u{f120}",
-            Category::Ui => "\u{f108}",
-            Category::Presence => "\u{f0c0}",
-            Category::Keybinds => "\u{f11c}",
-            Category::Agent => "\u{f06a9}",
-            Category::Platform => "\u{f17a}",
-            Category::Developer => "\u{f188}",
+            Category::General => "\u{f08bb}",
+            Category::Appearance => "\u{f0e0c}",
+            Category::Themes => "\u{f00e3}",
+            Category::Backgrounds => "\u{f0976}",
+            Category::Keybinds => "\u{f097b}",
+            Category::Editor => "\u{f0169}",
+            Category::Markdown => "\u{f0354}",
+            Category::Terminal => "\u{f018d}",
+            Category::Agent => "\u{f167a}",
+            Category::Presence => "\u{f000f}",
+            Category::Ui => "\u{f0379}",
+            Category::Platform => "\u{f0322}",
+            Category::Developer => "\u{f0a30}",
         }
     }
 
@@ -130,7 +155,10 @@ impl Row {
             },
         };
         Row {
-            category: Category::from_protocol(d.category), path: d.path, label: d.label, description: d.description,
+            category: if d.path.starts_with("editor.markdown") { Category::Markdown }
+                // Vim mode shapes the whole app's keys, so it sits with the everyday switches.
+                else if d.path == "editor.vim-mode" { Category::General }
+                else { Category::from_protocol(d.category) }, path: d.path, label: d.label, description: d.description,
             kind: d.value_kind, default: d.default, options, constraints: d.constraints, extensible: d.extensible, control,
         }
     }
@@ -250,6 +278,10 @@ pub fn option_label(option: &ConfigOption) -> String {
     option.label.clone().unwrap_or_else(|| display(&option.value))
 }
 
+/// Settings this app has no use for yet: Mash Up Packs are not shipped, and terminals take
+/// their colours from the app theme rather than a palette of their own.
+const HIDDEN: &[&str] = &["appearance.mashup-pack", "appearance.palette"];
+
 /// The open page's state.
 pub struct Settings {
     pub rows: Vec<Row>,
@@ -268,13 +300,20 @@ pub struct Settings {
     /// The page's scroll (offset, max, viewport), and a keyboard move to reveal.
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32, f32)>>,
     pub reveal: bool,
+    /// The theme card under the pointer: the gallery's large preview shows it.
+    pub theme_hover: Option<&'static str>,
+    /// The Backgrounds gallery: the catalog (read when the page opens), the card under the
+    /// pointer and the choice just made (shown before the daemon's config comes back).
+    pub backgrounds: Vec<crate::palette::backgrounds::Background>,
+    pub background_hover: Option<usize>,
+    pub background_choice: Option<crate::palette::backgrounds::Choice>,
 }
 
 impl Default for Settings {
     fn default() -> Settings {
         let mut search = TextEdit::new("");
         search.focused = true;
-        Settings { rows: Vec::new(), values: Value::Null, category: Category::General, search, focused: 0, dropdown: None, editing: None, loading: true, rebinding: None, binding_error: None, scroll: Default::default(), reveal: false }
+        Settings { rows: Vec::new(), values: Value::Null, category: Category::General, search, focused: 0, dropdown: None, editing: None, loading: true, rebinding: None, binding_error: None, scroll: Default::default(), reveal: false, theme_hover: None, backgrounds: Vec::new(), background_hover: None, background_choice: None }
     }
 }
 
@@ -282,7 +321,7 @@ impl Settings {
     /// Visible schema rows: settings-visible, no wildcard paths, ordered by category then label.
     pub fn set_descriptors(&mut self, descriptors: Vec<ConfigDescriptor>) {
         self.rows = fonts::descriptors(descriptors).into_iter()
-            .filter(|d| d.settings_visible && !d.path.split('.').any(|seg| seg == "*"))
+            .filter(|d| d.settings_visible && !d.path.split('.').any(|seg| seg == "*") && !HIDDEN.contains(&d.path.as_str()))
             .map(Row::from_descriptor)
             .collect();
         let rank = |c: Category| Category::ALL.iter().position(|x| *x == c);
@@ -305,8 +344,51 @@ impl Settings {
         let query = self.search.text.trim().to_lowercase();
         self.rows.iter().enumerate().filter(|(_, r)| {
             let matches = query.is_empty() || r.label.to_lowercase().contains(&query) || r.path.to_lowercase().contains(&query) || r.description.to_lowercase().contains(&query);
-            matches && (!query.is_empty() || r.category == self.category)
+            // The theme and the wallpaper have gallery pages of their own; search still finds them.
+            let paged = r.path == "appearance.theme" || r.path.starts_with("ui.window.background-image");
+            matches && (!query.is_empty() || (r.category == self.category && !paged))
         }).map(|(i, _)| i).collect()
+    }
+
+    /// The heading a row sits under inside its page: fonts together, then the setting's own
+    /// family (`appearance.effects.*` is Effects, `ui.window.*` Window); none for the rest.
+    pub fn section(row: &Row) -> String {
+        let segments: Vec<&str> = row.path.split('.').collect();
+        let title = |segment: &str| {
+            let words = segment.replace('-', " ");
+            let mut chars = words.chars();
+            chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+        };
+        if row.path.contains("font") { return "Fonts".into(); }
+        if row.path.starts_with("agent.model") || row.path.starts_with("agent.smallModel") || row.path.starts_with("agent.default") || row.path.starts_with("agent.reasoning") || row.path.starts_with("agent.textVerbosity") { return "Models".into(); }
+        if row.path.starts_with("editor.git") { return "Git".into(); }
+        if row.path.contains("panel") || row.path.contains("sidebar") || row.path.contains("tray") { return "Panels".into(); }
+        if segments.len() >= 3 { return title(segments[1]); }
+        // A row filed under another family's page (terminal switches on General) says whose it is.
+        let home = match row.category {
+            Category::General => "ui", Category::Appearance => "appearance", Category::Editor | Category::Markdown => "editor",
+            Category::Terminal => "terminal", Category::Agent => "agent", Category::Presence => "presence", Category::Ui => "ui",
+            Category::Developer => "developer", _ => segments[0],
+        };
+        if segments[0] != home { title(segments[0]) } else { String::new() }
+    }
+
+    /// The configured wallpaper as the gallery's choice.
+    pub fn background(&self) -> crate::palette::backgrounds::Choice {
+        use crate::palette::backgrounds::Choice;
+        if let Some(choice) = &self.background_choice { return choice.clone(); }
+        let window = &self.values["ui"]["window"];
+        if window["background-image-disabled"].as_bool() == Some(true) { return Choice::None; }
+        match window["background-image"]["path"].as_str().filter(|p| !p.trim().is_empty()) {
+            Some(path) => {
+                let wanted = std::path::Path::new(path).file_name().map(|n| n.to_owned());
+                self.backgrounds.iter().find_map(|b| match &b.choice {
+                    Choice::Image(image) if image == std::path::Path::new(path) || (image.file_name().map(|n| n.to_owned()) == wanted && wanted.is_some()) => Some(b.choice.clone()),
+                    _ => None,
+                }).unwrap_or(Choice::Image(path.into()))
+            }
+            None => Choice::Inherit,
+        }
     }
 
     pub fn value(&self, path: &str) -> Option<&Value> {
@@ -394,7 +476,9 @@ impl App {
     pub fn open_settings(&mut self) {
         self.menu = None;
         self.picker = None;
-        self.settings = Some(Settings::default());
+        let mut settings = Settings::default();
+        settings.backgrounds = crate::palette::backgrounds::catalog(&crate::config::dir(), crate::config::background_image().as_deref());
+        self.settings = Some(settings);
         if let Some(daemon) = &self.daemon {
             daemon.send(Family::Config, json!("GetConfig"));
             daemon.send(Family::Config, json!("GetConfigSchema"));
@@ -482,11 +566,38 @@ impl App {
                 if let Some(s) = &mut self.settings { s.editing = Some((index, edit)); }
             }
             Control::Action { action, .. } => match *action {
-                "backgrounds:pick" => { self.settings = None; self.open_picker(crate::palette::Mode::Backgrounds); }
+                "backgrounds:pick" => if let Some(s) = &mut self.settings { s.category = Category::Backgrounds; s.search.replace_text(""); s.focused = 0; },
                 _ => {}
             },
             Control::Keybinding => {}
         }
+    }
+
+    /// The Backgrounds gallery: pick a picture, the pack's, or none.
+    pub fn choose_background(&mut self, choice: crate::palette::backgrounds::Choice) {
+        self.apply_background(&choice);
+        if let Some(settings) = &mut self.settings {
+            let image = match &choice {
+                crate::palette::backgrounds::Choice::Image(path) => json!({"path": path, "opacity": self.wallpaper.opacity, "blur": self.wallpaper.blur, "fit": if self.wallpaper.cover { "cover" } else { "contain" }}),
+                _ => Value::Null,
+            };
+            settings.set_local("ui.window.background-image", image);
+            settings.set_local("ui.window.background-image-disabled", json!(choice == crate::palette::backgrounds::Choice::None));
+            settings.background_choice = Some(choice);
+        }
+    }
+
+    /// Change one field of the configured picture (`opacity`, `blur`, `fit`). The window shows it at
+    /// once; `commit` writes it (a slider commits when it is let go).
+    pub fn set_background_field(&mut self, field: &str, value: Value, commit: bool) {
+        let Some(settings) = &mut self.settings else { return };
+        let mut image = settings.values["ui"]["window"]["background-image"].clone();
+        if !image.is_object() || !image["path"].is_string() { return; }
+        image[field] = value;
+        settings.set_local("ui.window.background-image", image.clone());
+        let disabled = settings.values["ui"]["window"]["background-image-disabled"].clone();
+        self.wallpaper = crate::ui::wallpaper::Wallpaper::from_config(&json!({"ui": {"window": {"background-image-disabled": disabled, "background-image": image}}}));
+        if commit { self.set_setting("ui.window.background-image", image); }
     }
 
     pub fn choose_option(&mut self, index: usize, option: usize) {

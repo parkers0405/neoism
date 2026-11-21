@@ -114,7 +114,7 @@ pub fn view(app: &App) -> El {
             .child(row().w_full().h_full().px((ITEM_PAD_X - 4.0) * s).center_y().radius(radius)
                 .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT })
                 .child(el().w(ICON_COL * s).center().child(text(item.icon()).font(TextStyle::new(FONT * s, 400.0).family(NERD)).color(rgb(ink))))
-                .child(text(item.label()).font(app.ty.sized(FONT)).color(rgb(p.fg)).ml(ICON_GAP * s)));
+                .child(text(item.label()).font(app.ty.chat_sized(FONT)).color(rgb(p.fg)).ml(ICON_GAP * s)));
         if selected {
             line = line.on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("menu-row".into(), r); });
         }

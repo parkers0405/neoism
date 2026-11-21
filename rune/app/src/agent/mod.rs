@@ -16,9 +16,11 @@ pub(crate) mod family;
 mod header;
 mod history;
 mod projects;
+mod project_add;
 mod prose;
 mod resync;
-mod sidebar;
+mod catalog;
+pub(crate) mod sidebar;
 pub(crate) use sidebar::loader;
 pub(crate) mod table;
 mod ticks;
@@ -33,6 +35,22 @@ pub use composer::overlay;
 pub use family::Families;
 pub use header::Step as HeaderStep;
 pub use projects::{ProjectMenu, view as project_menu};
+pub use catalog::Catalog;
+pub use project_add::{ProjectAdd, ProjectJob, Source as ProjectSource, view as project_add};
+
+/// Conversations asked for at a time in one project's list.
+const THREAD_PAGE: u32 = 30;
+
+/// Where one project's conversation list has got to (`ListThreads` pages).
+#[derive(Default)]
+pub struct ThreadPaging {
+    scope: std::cell::RefCell<Option<String>>,
+    /// The scope changed: the next head replaces the list outright.
+    fresh: std::cell::Cell<bool>,
+    next: Option<String>,
+    extended: bool,
+    loading: bool,
+}
 pub use sidebar::{ConvHeader, catalog_scope, conversations};
 pub use timeline::pane;
 
@@ -361,8 +379,55 @@ impl App {
     /// The conversation catalog for this root: one project's chats, or every project's at
     /// the `~` / `/` dashboard (`workspace_catalog_scope`).
     pub fn refresh_threads(&self) {
-        let directory = sidebar::catalog_scope(&self.cwd);
-        self.send_agent(AgentClientMessage::ListThreads { directory, limit: Some(50), cursor: None });
+        let directory = if self.conv_all { None } else { sidebar::catalog_scope(&self.cwd) };
+        // Every project at once goes through the catalog, five chats a project.
+        if directory.is_none() { return self.refresh_catalog(); }
+        // Another project's list starts over; the same one refreshes its head in place.
+        if *self.thread_paging.scope.borrow() != directory {
+            *self.thread_paging.scope.borrow_mut() = directory.clone();
+            self.thread_paging.fresh.set(true);
+        }
+        self.send_agent(AgentClientMessage::ListThreads { directory, limit: Some(THREAD_PAGE), cursor: None });
+    }
+
+    /// The list scrolled near its end loads what comes next by itself: a project's older
+    /// conversations, or the next projects on the all-projects view.
+    pub fn conversation_autoload(&mut self) {
+        // The conversation on screen is read, however its tab was reached.
+        if !self.finished.is_empty() && let TabKind::Agent { session: Some(session) } = &self.active_tab().kind && self.finished.contains(session) {
+            let session = session.clone();
+            self.finished.remove(&session);
+        }
+        if self.sidebar != Some(crate::app::Sidebar::Conversations) || !self.conv_query.text.trim().is_empty() { return; }
+        let (offset, max, viewport) = self.conv_follow.scroll.get();
+        if viewport <= 0.0 || max - offset > viewport { return; }
+        if self.conversations_dashboard() {
+            if self.catalog.more_projects() > 0 { self.load_more_projects(); }
+        } else if !self.thread_paging.loading && let Some(cursor) = self.thread_paging.next.clone() {
+            self.thread_paging.loading = true;
+            let directory = sidebar::catalog_scope(&self.cwd);
+            self.send_agent(AgentClientMessage::ListThreads { directory, limit: Some(THREAD_PAGE), cursor: Some(cursor) });
+        }
+    }
+
+    /// Record a conversation's activity. One that goes from working to idle while it is not
+    /// the conversation on screen is finished and unread until it is opened; working again
+    /// clears that. Only changes seen from here on count: nothing is marked from history.
+    pub(crate) fn note_activity(&mut self, session_id: &str, activity: &str) {
+        let was_working = matches!(self.thread_activity.get(session_id).map(String::as_str), Some("running" | "background"));
+        let viewed = matches!(&self.active_tab().kind, TabKind::Agent { session: Some(s) } if s == session_id);
+        if activity != "idle" {
+            self.finished.remove(session_id);
+        } else if was_working && !viewed && !self.families.is_child(session_id) {
+            self.finished.insert(session_id.to_owned());
+        }
+        self.thread_activity.insert(session_id.to_owned(), activity.to_owned());
+    }
+
+    /// A conversation in the open panel is at work: its status mark needs frames.
+    pub fn sidebar_working(&self) -> bool {
+        self.sidebar == Some(crate::app::Sidebar::Conversations)
+            && self.threads.iter().any(|t| !matches!(self.activity_of(t), "idle" | "permission") || self.sessions.get(&t.session_id).is_some_and(|s| s.compacting))
     }
 
     pub(crate) fn agent_connected(&mut self) {
@@ -374,6 +439,8 @@ impl App {
     }
 
     pub fn open_conversation(&mut self, session_id: &str) {
+        // Opening a finished conversation reads it.
+        self.finished.remove(session_id);
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Agent { session: Some(session_id.into()) }) {
             self.select_tab(self.tabs[index].id);
             return;
@@ -832,17 +899,41 @@ impl App {
             AgentServerMessage::TodoUpdate { session_id, todos } => {
                 self.sessions.entry(session_id).or_default().todos = Some(todos);
             }
-            AgentServerMessage::ThreadList { threads, requested_cursor, .. } => {
+            AgentServerMessage::SessionProjects { catalog_identity, items, pinned_sessions, .. } => self.apply_session_projects(&catalog_identity, items, pinned_sessions),
+            AgentServerMessage::SessionProjectsChanged => if self.conversations_dashboard() { self.refresh_catalog(); },
+            AgentServerMessage::ProjectSessionPage { catalog_identity, directory, requested_cursor, threads, next_cursor, .. } => self.apply_project_page(&catalog_identity, &directory, requested_cursor, threads, next_cursor),
+            AgentServerMessage::ProjectSessionPageFailed { catalog_identity, directory, requested_cursor, .. } => self.project_page_failed(&catalog_identity, &directory, requested_cursor),
+            AgentServerMessage::ThreadListFailed { .. } => self.thread_paging.loading = false,
+            AgentServerMessage::ThreadList { threads, requested_cursor, next_cursor } => {
                 // A refreshed catalog is newer evidence than a cached activity event. In
                 // particular, recover from a missed idle event instead of keeping its loader
                 // alive forever. Legacy rows without catalog activity do not replace it.
                 for thread in &threads {
                     if let Some(activity) = &thread.catalog_activity {
                         self.set_streaming(&thread.session_id, activity == "running");
-                        self.thread_activity.insert(thread.session_id.clone(), activity.clone());
+                        self.note_activity(&thread.session_id, activity);
                     }
                 }
-                if requested_cursor.is_none() { self.threads = threads; } else { self.threads.extend(threads); }
+                let paging = &mut self.thread_paging;
+                if requested_cursor.is_some() {
+                    // An older page, asked for as the list neared its end.
+                    paging.loading = false;
+                    paging.extended = true;
+                    paging.next = next_cursor;
+                    self.threads.retain(|t| !threads.iter().any(|n| n.session_id == t.session_id));
+                    self.threads.extend(threads);
+                } else if paging.extended && !paging.fresh.get() {
+                    // A refreshed head keeps the older pages already loaded, and their cursor.
+                    let older: Vec<ThreadSummary> = self.threads.drain(..).filter(|t| !threads.iter().any(|n| n.session_id == t.session_id)).collect();
+                    self.threads = threads;
+                    self.threads.extend(older);
+                } else {
+                    paging.fresh.set(false);
+                    paging.extended = false;
+                    paging.loading = false;
+                    paging.next = next_cursor;
+                    self.threads = threads;
+                }
             }
             AgentServerMessage::ThreadCreated { session_id, .. } => {
                 if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Agent { session: None } && t.pending_prompt.is_some()) {
@@ -1012,7 +1103,7 @@ impl App {
             AgentServerMessage::CatalogActivity { session_id, activity } => {
                 if self.sessions.contains_key(&session_id) { self.set_streaming(&session_id, activity == "running"); }
                 // Every conversation's, loaded or not: the sidebar shows which are at work.
-                self.thread_activity.insert(session_id, activity);
+                self.note_activity(&session_id, &activity);
             }
             // A part was withdrawn (a retried step): its row goes.
             AgentServerMessage::PartRemoved { session_id, part_id } => {

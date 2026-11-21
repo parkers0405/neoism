@@ -173,7 +173,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if animating { wake!("wordmark-effect", std::time::Duration::ZERO); }
     // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap), on live offsets.
     app.tools.clock = clock;
-    if app.running_tools() || app.server.progress().is_some() {
+    if app.running_tools() || app.server.progress().is_some() || app.sidebar_working() || app.project_job.is_some() {
         app.tools.spinner.tick(clock, app.ty.scale());
         wake!("spinner", std::time::Duration::from_millis(45));
     }
@@ -191,6 +191,8 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
+    app.conversation_autoload();
+    if let Some(wait) = app.project_add_tick() { wake!("project-add", wait); }
     let mode_changing = app.tick_mode_pill() | app.tick_chip_scramble();
     // Wheel and trackpad motion on every scroll view, stepped on the frame clock.
     let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx);
@@ -498,6 +500,15 @@ fn main() {
                     settings.set_descriptors(serde_json::from_str(include_str!("../fixtures/settings-schema.json")).expect("settings fixture"));
                 }
             }),
+            ("settings-themes", |s| { s.open_settings(); if let Some(settings) = &mut s.settings { settings.category = settings::Category::Themes; settings.loading = false; } }),
+            ("settings-backgrounds", |s| {
+                s.open_settings();
+                if let Some(settings) = &mut s.settings {
+                    settings.category = settings::Category::Backgrounds;
+                    settings.loading = false;
+                    settings.values = serde_json::json!({"ui": {"window": {"background-image": {"path": "/tmp/none.png", "opacity": 0.6}}}});
+                }
+            }),
             ("keybinds", |s| { s.open_settings(); if let Some(settings) = &mut s.settings { settings.category = settings::Category::Keybinds; settings.loading = false; } }),
             ("database", database::fixture),
             ("editor-splits", |s| {
@@ -596,16 +607,32 @@ fn main() {
             // The `~` dashboard: chats from every project, grouped by folder.
             // The panel's project dropdown under the directory row, over chats from three projects.
             ("projects-menu", |s| {
-                s.threads = [("a", "Neoism Release", "/projects/neoism", 9), ("b", "Swift-Cursor", "/projects/neoism", 7),
-                    ("d", "Rune layout", "/projects/rune", 5), ("e", "Dotfiles", "/projects/dotfiles", 3)]
-                    .iter().map(|(id, title, dir, at)| serde_json::from_value(serde_json::json!({
-                        "session_id": id, "title": title, "directory": dir, "updated_at": 1_700_000_000_000u64 + at * 1000,
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                s.threads = [("a", "Neoism Release", "/projects/neoism", 40, "anthropic/claude"), ("b", "Swift-Cursor", "/projects/neoism", 4_000, "openai/gpt"),
+                    ("d", "Rune layout", "/projects/rune", 90_000, ""), ("e", "Dotfiles", "", 700_000, "google/gemini")]
+                    .iter().map(|(id, title, dir, age, model)| serde_json::from_value(serde_json::json!({
+                        "session_id": id, "title": title, "directory": (!dir.is_empty()).then_some(dir), "updated_at": now.saturating_sub(age * 1000), "model": model,
                     })).unwrap()).collect();
                 s.sidebar = Some(app::Sidebar::Conversations);
                 s.focus = app::Focus::Sidebar;
                 s.tabs.iter_mut().for_each(|t| t.draft.focused = false);
+                if std::env::var_os("NEOISM_RUNE_STATUS_MARKS").is_some() {
+                    // Every status mark at once: running, background, compacting, needs you, idle.
+                    for (id, activity) in [("a", "running"), ("b", "background"), ("e", "permission")] { s.thread_activity.insert(id.into(), activity.into()); }
+                    s.sessions.entry("d".into()).or_default().compacting = true;
+                    s.threads.push(serde_json::from_value(serde_json::json!({"session_id": "f", "title": "Finished chat", "directory": "/projects/rune"})).unwrap());
+                    s.finished.insert("f".into());
+                    return;
+                }
                 s.conv_header = Some(agent::ConvHeader::Projects);
                 s.open_project_menu();
+            }),
+            ("project-add", |s| { s.sidebar = Some(app::Sidebar::Conversations); s.open_project_add(); }),
+            ("project-add-github", |s| {
+                s.sidebar = Some(app::Sidebar::Conversations);
+                s.cwd = "/work/neoism".into();
+                s.open_project_add();
+                if let Some(add) = &mut s.project_add { add.source = Some(agent::ProjectSource::GitHub); add.query.replace_text("anomalyco/rune"); }
             }),
             ("conversations-dashboard", |s| {
                 let home = crate::startup::home();
@@ -617,6 +644,15 @@ fn main() {
                         "session_id": id, "title": title, "directory": dir, "updated_at": 1_700_000_000_000u64 + at * 1000, "pinned": *id == "e",
                     })).unwrap()).collect();
                 s.collapsed_projects.insert("/projects/rune".into());
+                // The catalog's own rows: more chats in neoism, more projects after these.
+                let rest = s.threads.clone();
+                let page: Vec<neoism_protocol::agent::ThreadSummary> = rest.iter().filter(|t| t.directory.as_deref() == Some("/projects/neoism")).cloned().collect();
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::SessionProjects { catalog_identity: "rune-sidebar".into(), generation: 0,
+                    items: (0..15).map(|i| neoism_protocol::agent::SessionProjectSummary { directory: if i == 0 { "/projects/neoism".into() } else { format!("/projects/p{i}") }, updated_ms: 100 - i }).collect(),
+                    pinned_sessions: Vec::new() });
+                s.apply_agent(neoism_protocol::agent::AgentServerMessage::ProjectSessionPage { catalog_identity: "rune-sidebar".into(), directory: "/projects/neoism".into(),
+                    requested_cursor: None, generation: 0, threads: page, next_cursor: Some("next".into()) });
+                s.threads = rest;
                 s.sidebar = Some(app::Sidebar::Conversations);
                 s.focus = app::Focus::Sidebar;
                 s.conv_selected = 1;

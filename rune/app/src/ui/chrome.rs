@@ -43,6 +43,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child(crate::editor::lsp_view::overlay(app))
         .child(crate::home::block_menu_overlay(app))
         .child_if(app.project_menu.is_some(), || agent::project_menu(app))
+        .child_if(app.project_add.is_some(), || agent::project_add(app))
         .child_if(app.diag_popup.is_some(), || crate::editor::diag_popup::view(app))
         .child_if(app.picker.is_some(), || crate::palette::view(app))
         .child_if(app.finder.is_some(), || crate::finder::view(app))
@@ -80,7 +81,7 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
 /// Whether the cursor marks a row inside an overlay (the palette, finder, a menu, settings, the
 /// project menu): then it's drawn over them; otherwise under every popup.
 fn cursor_in_overlay(app: &App) -> bool {
-    app.picker.is_some() || app.finder.is_some() || app.browser.is_some() || app.menu.is_some() || app.settings.is_some() || app.project_menu.is_some()
+    app.picker.is_some() || app.finder.is_some() || app.browser.is_some() || app.menu.is_some() || app.settings.is_some() || app.project_menu.is_some() || app.project_add.is_some()
 }
 
 #[cfg(target_os = "macos")]
@@ -185,11 +186,11 @@ fn titlebar(app: &App, cx: &mut Cx<App>) -> Option<El> {
     let insets = cx.chrome_insets();
     if insets.height <= 0.0 || (insets.leading <= 0.0 && insets.trailing <= 0.0) { return None; }
     cx.caption_color(rgb(p.fg));
-    Some(row().key("titlebar").w_full().h(insets.height).fill(rgb(p.surface)).center_y().window_drag()
+    Some(row().key("titlebar").w_full().h(insets.height).fill(rgb(p.bg)).center_y().window_drag()
         .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
         .pl(insets.leading + 12.0).pr(insets.trailing + 12.0)
         .child(el().grow(1.0))
-        .child(text(app.workspace_name.clone()).font(app.ty.sized(12.0)).color(rgb(p.muted)).truncate().shrink())
+        .child(text(app.workspace_name.clone()).font(app.ty.sans(12.0, 500.0)).color(rgb(p.muted)).truncate().shrink())
         .child(el().grow(1.0)))
 }
 
@@ -229,7 +230,7 @@ fn rail(app: &App) -> El {
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .children(washes)
         .child(crate::glass_selection::view(app))
-        .child(button("topbar-menu", glyph::MENU, app.menu.is_some(), |s| s.toggle_menu())
+        .child(button("topbar-menu", "\u{f013}", app.settings.is_some(), |s| if s.settings.is_some() { s.settings = None } else { s.open_settings() })
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("topbar-menu".into(), r); }))
         // A click opens the panel beside what has the keyboard; only Alt+E / Alt+N move it in.
         .child(button("toggle-files", glyph::FOLDER, app.sidebar == Some(Sidebar::Files), |s| s.click_tree(Sidebar::Files)))

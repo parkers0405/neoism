@@ -406,7 +406,7 @@ fn backgrounds(app: &App, settings: &Settings, s: f32) -> El {
                 Some(image) => thumb.pixels_fit(image.pixels(), rune::SurfaceFit::Fill),
                 None => thumb.center().child(text("Loading\u{2026}").font(app.ty.chat_sized(11.0)).color(rgb(p.muted))),
             },
-            Choice::Inherit => thumb.center().child(icon("\u{f0a1e}", 22.0 * s, p.dim)),
+            Choice::Inherit => thumb,
             Choice::None => thumb.center().child(icon("\u{f0156}", 22.0 * s, p.muted)),
         };
         col().key(format!("background-card:{index}")).w(card_w).radius(12.0 * s).clip_rounded(12.0 * s)
@@ -423,7 +423,8 @@ fn backgrounds(app: &App, settings: &Settings, s: f32) -> El {
             .on_press(move |a: &mut App| a.choose_background(choice.clone()))
     };
     let mut grid = col().w_full().gap(gap);
-    let tiles: Vec<(usize, &crate::palette::backgrounds::Background)> = settings.backgrounds.iter().enumerate().collect();
+    // Mash Up Packs are not shipped, so "use the pack's" is left out of the gallery.
+    let tiles: Vec<(usize, &crate::palette::backgrounds::Background)> = settings.backgrounds.iter().enumerate().filter(|(_, b)| b.choice != Choice::Inherit).collect();
     for chunk in tiles.chunks(columns) {
         let mut cards = row().w_full().gap(gap);
         for (index, b) in chunk { cards = cards.child(tile(*index, b)); }

@@ -634,7 +634,7 @@ impl App {
 
     // -- /connect ------------------------------------------------------------------------
 
-    fn open_connect(&mut self) {
+    pub(crate) fn open_connect(&mut self) {
         self.composer.connect = Some(ConnectFlow { waiting: true, ..ConnectFlow::default() });
         self.focus_picker(Picker::loading(Kind::Connect, "Connect a provider"));
         let request_id = Some(self.composer.request_id("connect"));

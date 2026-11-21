@@ -435,6 +435,7 @@ fn main() {
                     models: vec![ModelInfo { id: "gpt-6.1-sol".into(), name: "GPT-6.1 Sol".into(), context_limit: None }] }],
                     catalog_status: None, request_id: None });
                 s.run_slash("/model openai/gpt-6.1-sol", &mut rune::Tx::default());
+                if std::env::var_os("NEOISM_RUNE_MODEL_MODAL").is_some() { s.composer.card_modal = true; }
                 s.apply_agent(M::ConnectConnections { provider: "openai".into(), connections: ["Personal", "Work"].iter().enumerate().map(|(i, label)| ProviderConnectionInfo {
                     provider_id: "openai".into(), connection_id: format!("account-{i}"), label: (*label).into(), auth_type: "oauth".into(), is_default: i == 0,
                 }).collect() });

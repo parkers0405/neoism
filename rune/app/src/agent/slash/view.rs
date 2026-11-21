@@ -80,19 +80,28 @@ pub fn picker_card(app: &App) -> El {
     let (Some(picker), Some(&composer)) = (app.composer.picker.as_ref(), app.rects.get(&format!("composer-card:{}", app.active_tab().id))) else { return el() };
     let p = app.pal;
     let s = app.ty.scale();
+    // Opened out (the corner arrows in its header), a menu is a modal in the middle of the
+    // window. The `/` list and `$` completion follow the composer's own text and stay put.
+    let can_modal = picker.kind != Kind::Slash && picker.mention.is_none();
+    let modal = can_modal && app.composer.card_modal;
+    let anchored = composer;
+    let composer = if modal {
+        let w = (760.0 * s).min((app.window[0] - 48.0).max(1.0));
+        [(app.window[0] - w) / 2.0, (app.window[1] * 0.78).max(200.0), w, 0.0]
+    } else { composer };
     let [cx, cy, cw, _] = composer;
-    if picker.kind == Kind::Usage { return super::usage::view(app, composer); }
-    if picker.kind == Kind::Tasks { return super::tasks::view(app, composer); }
-    if picker.kind == Kind::Goals { return super::goals::view(app, composer); }
-    if picker.kind == Kind::Model && picker.activity.is_none() { return model_card(app, picker, composer); }
+    if picker.kind == Kind::Usage { return super::usage::view(app, anchored); }
+    if picker.kind == Kind::Tasks { return super::tasks::view(app, anchored); }
+    if picker.kind == Kind::Goals { return super::goals::view(app, anchored); }
+    if picker.kind == Kind::Model && picker.activity.is_none() { return model_card(app, picker, anchored); }
     // As many rows as fit between the agent pane's top (8 pt under its tab row, never over the
     // chrome) and 6 pt above the composer.
-    let top = app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s;
+    let top = if modal { 24.0 } else { app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s };
     let fit = (((cy - top - 6.0 * s - TITLE_H * s) / (ROW_H * s)).floor().max(1.0) as usize).min(MAX_ROWS);
     picker.limit.set(fit);
     let Layout { header_h, activity, visible } = layout(picker, cw, s);
     let height = header_h + visible as f32 * ROW_H * s;
-    let y = (cy - height - 6.0 * s).max(top);
+    let y = if modal { ((app.window[1] - height) / 2.0).max(top) } else { (cy - height - 6.0 * s).max(top) };
 
     // The window's own background, set off by its border and shadow.
     let panel = rgb(p.bg);
@@ -128,9 +137,15 @@ pub fn picker_card(app: &App) -> El {
     let title_x = if header_icon { 40.0 } else { 14.0 } * s;
     // Header: title and esc; then the query row, or the activity in its place.
     header = header
-        .child(text(picker.title.clone()).font(sans(13.0 * s, 600.0)).color(rgb(p.fg)).truncate().w(cw - title_x - 48.0 * s).absolute(title_x, 9.0 * s))
+        .child(text(picker.title.clone()).font(sans(13.0 * s, 600.0)).color(rgb(p.fg)).truncate().w(cw - title_x - 84.0 * s).absolute(title_x, 9.0 * s))
         .child(text("esc").font(mono(12.0 * s, false)).color(rgb(p.muted)).absolute(cw - 14.0 * s - width_of("esc", 12.0 * s), 9.0 * s)
             .on_press(|a: &mut App| { if !a.picker_back() { a.close_prompt_picker(); } }));
+    if can_modal {
+        header = header.child(el().key("picker-expand").w(22.0 * s).h(22.0 * s).radius(6.0 * s).center().hover(rgb(p.fg).alpha(0.1))
+            .absolute(cw - 14.0 * s - width_of("esc", 12.0 * s) - 32.0 * s, 5.0 * s)
+            .child(text(if modal { "\u{f0615}" } else { "\u{f0616}" }).font(TextStyle::new(13.0 * s, 400.0).family(NERD)).color(rgb(p.dim)))
+            .on_press(|a: &mut App| a.composer.card_modal = !a.composer.card_modal));
+    }
     if let Some(a) = &picker.activity {
         let x = if a.busy { 32.0 } else { 14.0 } * s;
         for (i, line) in activity.iter().enumerate() {
@@ -234,6 +249,7 @@ pub fn picker_card(app: &App) -> El {
 
     let scrim = el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .transition(rune::Transition::none())
+        .fill(if modal { Color::BLACK.alpha(0.4) } else { Color::TRANSPARENT })
         .on_press(|a: &mut App| a.dismiss_prompt_picker());
     let layer = el().key("prompt-picker-layer").transition(rune::Transition::none()).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
     let layer = if picker.kind == Kind::Slash || picker.mention.is_some() { layer } else { layer.child(scrim) };

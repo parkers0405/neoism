@@ -645,8 +645,9 @@ impl App {
     pub fn picker_back(&mut self) -> bool {
         let Some(picker) = self.composer.picker.as_mut() else { return false };
         let kind = picker.kind;
+        // A menu opened out as a modal folds back first.
+        if self.composer.card_modal && kind != Kind::Slash { self.composer.card_modal = false; return true; }
         if kind == Kind::Model {
-            if self.composer.card_modal { self.composer.card_modal = false; return true; }
             if !picker.query.text.is_empty() { picker.set_query(""); return true; }
             return false;
         }

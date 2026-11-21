@@ -150,7 +150,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.timeline_jump_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
         .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_composer(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_pending_prompt() && !s.submit_command(tx) { s.submit(); } });
-    // The model at the card's lower left, bare: its provider's mark, its name, a chevron. It
+    // The model at the card's lower right, beside send, bare: its provider's mark, its name, a chevron. It
     // opens the model picker: recents, thinking, providers and connect, in sections.
     let cs = app.ty.scale();
     let model_label = app.model.rsplit_once('/').map_or(app.model.clone(), |(_, name)| name.to_owned());
@@ -194,9 +194,9 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .child_opt(super::attach::composer_strip(app, tab_id))
         .child(input)
         .child(row().key("composer-chip-row").w_full().gap(6.0).center_y()
-            .child(model)
+            .child(attach.ml(-8.0))
             .child(el().grow(1.0))
-            .child(attach)
+            .child(model.mr(8.0))
             .child(send));
     let footer = row().key("composer-footer").grow(1.0).shrink().h(32.0).px(18.0).center_y().justify_between()
         .fill(rgb(p.surface).alpha(0.7)).corners([0.0, 0.0, 12.0, 12.0])

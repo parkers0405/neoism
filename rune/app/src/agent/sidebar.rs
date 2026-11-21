@@ -7,7 +7,7 @@ use neoism_protocol::agent::ThreadSummary;
 use rune::tok::TextStyle;
 use rune::{Color, El, ScrollSpec, col, el, row, text};
 
-fn ago(updated_ms: u64) -> String {
+pub(crate) fn ago(updated_ms: u64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     if updated_ms == 0 || updated_ms > now { return String::new(); }
     let s = (now - updated_ms) / 1000;
@@ -55,7 +55,7 @@ pub fn catalog_scope(root: &str) -> Option<String> {
     (!root.is_empty() && root != home).then(|| root.to_owned())
 }
 
-fn project_name(directory: &str) -> String {
+pub(crate) fn project_name(directory: &str) -> String {
     if directory.is_empty() { return "Other chats".into(); }
     let trimmed = directory.trim_end_matches('/');
     trimmed.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(directory).to_owned()

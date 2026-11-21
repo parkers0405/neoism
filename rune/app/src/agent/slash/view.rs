@@ -209,10 +209,16 @@ pub fn picker_card(app: &App) -> El {
         let title_x = if row.icon.is_some() || grouped { 48.0 } else { 22.0 } * s;
         let footer_w = if row.footer.is_empty() { 0.0 } else { width_of(&row.footer, 11.0 * s) + 22.0 * s + if row.status.is_some() { 12.0 * s } else { 0.0 } };
         let footer_x = cw - footer_w - if row.current { 28.0 * s } else { 0.0 };
-        let title_y = if row.description.is_empty() { 13.0 } else { 5.0 } * s;
-        item = item.child(text(row.title.clone()).font(sans(14.0 * s, 500.0)).color(rgb(p.fg)).truncate()
+        // Conversations read as the sidebar's cards do: the project small on top, the title
+        // in the heavier weight under it.
+        let card = picker.kind == Kind::Session && !row.description.is_empty();
+        let title_y = if card { 21.0 } else if row.description.is_empty() { 13.0 } else { 5.0 } * s;
+        item = item.child(text(row.title.clone()).font(sans(14.0 * s, if card { 600.0 } else { 500.0 })).color(rgb(p.fg)).truncate()
             .max_w((footer_x - title_x - 14.0 * s).max(48.0)).absolute(title_x, title_y));
-        if !row.description.is_empty() {
+        if card {
+            item = item.child(text(row.description.clone()).font(sans(11.5 * s, 400.0)).color(rgb(p.muted)).truncate()
+                .max_w((footer_x - title_x - 12.0 * s).max(48.0)).absolute(title_x, 6.0 * s));
+        } else if !row.description.is_empty() {
             item = item.child(text(row.description.clone()).font(sans(12.0 * s, 400.0)).color(rgb(p.muted)).truncate()
                 .max_w((footer_x - title_x - 12.0 * s).max(48.0)).absolute(title_x, 25.0 * s));
         }

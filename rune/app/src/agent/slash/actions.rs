@@ -4,7 +4,7 @@
 
 use super::catalog::{self, ADD_ACCOUNT, ADD_PROVIDER, DISCONNECT_PROVIDER, DONE, RETRY};
 use super::effects::{self, Effect, Running};
-use super::picker::{Activity, Kind, Picker, Row};
+use super::picker::{Activity, Kind, Picker, Row, Status};
 use super::plan::{COMMANDS, SlashAction, plan};
 use super::ConnectFlow;
 use crate::app::App;
@@ -198,8 +198,24 @@ impl App {
             SlashAction::OpenConnectPicker => self.open_connect(),
             SlashAction::ShowMcp => self.open_mcp(),
             SlashAction::OpenSessionsPicker => {
-                let rows = self.threads.iter().map(|t| Row::new(t.title.clone(), t.directory.clone().unwrap_or_default(), "", t.session_id.clone())
-                    .current(Some(&t.session_id) == session.as_ref())).collect();
+                // As the sidebar lists them: pinned first, the project's name, and what each is
+                // doing (or how long ago it was last touched).
+                let home = crate::startup::home();
+                let mut threads: Vec<&neoism_protocol::agent::ThreadSummary> = self.threads.iter().collect();
+                threads.sort_by_key(|t| !t.pinned);
+                let rows = threads.into_iter().map(|t| {
+                    let directory = t.directory.as_deref().unwrap_or_default().trim_end_matches('/');
+                    let project = if directory.is_empty() { "No project".to_owned() } else if directory == home.trim_end_matches('/') { "~".to_owned() } else { crate::agent::sidebar::project_name(directory) };
+                    let (state, status) = match self.activity_of(t) {
+                        "running" => ("working".to_owned(), Some(Status::Good)),
+                        "background" => ("background".to_owned(), Some(Status::Error)),
+                        "permission" => ("needs you".to_owned(), Some(Status::Warning)),
+                        _ if self.finished.contains(&t.session_id) => ("finished".to_owned(), Some(Status::Muted)),
+                        _ => (crate::agent::sidebar::ago(t.updated_at), None),
+                    };
+                    Row::new(t.title.clone(), if t.pinned { format!("{project}  \u{b7}  pinned") } else { project }, state, t.session_id.clone())
+                        .status(status).current(Some(&t.session_id) == session.as_ref())
+                }).collect();
                 self.composer.picker = Some(Picker::new(Kind::Session, "Sessions", rows).select_value(session.as_deref().unwrap_or_default()));
                 self.refresh_threads();
             }

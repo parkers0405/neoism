@@ -452,6 +452,16 @@ fn main() {
             }),
             ("reply-strip", |s| { s.load_fixture("reply", "Reply strip", include_str!("../fixtures/mcp-timeline.json")); s.reply_to_message("reply", "Hi! What are you working on? I can help with code, answer questions, or review a change."); }),
             ("reply-bubble", |s| s.load_fixture("reply-bubble", "Reply bubble", r#"[{"id":"u1","role":"User","kind":"User","author":"me","title":"","text":"> Six seveeen. Still going strong, huh? This quoted answer is long enough that it has to wrap inside the chip instead of running out past the edge of the bubble it sits in.\n\nhi","status":"","tool":"","output_kind":"Text","lang":"","line_offset":null,"detail":"","todos":[],"usage":null,"created_at":1}]"#)),
+            ("sessions-menu", |s| {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                s.load_fixture("sessions-menu", "Sessions menu", "[]");
+                s.threads = [("a", "Neoism Release", "/projects/neoism", 40, true), ("b", "Swift-Cursor", "/projects/neoism", 4_000, false), ("d", "Rune layout", "/projects/rune", 90_000, false), ("e", "Dotfiles", "", 700_000, false)]
+                    .iter().map(|(id, title, dir, age, pinned)| serde_json::from_value(serde_json::json!({
+                        "session_id": id, "title": title, "directory": (!dir.is_empty()).then_some(dir), "updated_at": now.saturating_sub(age * 1000), "pinned": pinned,
+                    })).unwrap()).collect();
+                s.thread_activity.insert("b".into(), "running".into());
+                s.run_slash("/sessions", &mut rune::Tx::default());
+            }),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });
                 let i = s.active;

@@ -15,7 +15,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.form.is_some() { return app.form_key(event, tx); }
     if app.project_add.is_some() && app.browser.is_none() { app.project_add_key(event); return true; }
     if app.browser.is_some() { return app.browser_key(event, tx) || shortcut(app, event, tx); }
-    if app.composer.picker.as_ref().is_some_and(|p| matches!(p.kind, crate::agent::slash::Kind::Usage | crate::agent::slash::Kind::Tasks | crate::agent::slash::Kind::Goals)) {
+    if app.composer.picker.as_ref().is_some_and(|p| matches!(p.kind, crate::agent::slash::Kind::Usage | crate::agent::slash::Kind::Tasks | crate::agent::slash::Kind::Goals | crate::agent::slash::Kind::Context)) {
         return app.picker_key(event, tx);
     }
     // A picker above the composer owns its list keys even when its query field has lost the

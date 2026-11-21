@@ -206,7 +206,9 @@ pub fn composer(app: &App, max_w: f32) -> El {
         // The context label appears once a conversation reports usage; the group lands at once
         // so `/ commands` never slides to make room for it.
         .child(row().key("composer-footer-right").gap(10.0).center_y().instant_changes()
-            .child_opt(app.context_label().map(|label| text(label).key("context").font(app.ty.small()).color(rgb(p.muted)).mr(18.0)))
+            .child_opt(app.context_label().map(|label| el().key("context").h(24.0).px(8.0).mr(10.0).radius(6.0).center().hover(rgb(p.fg).alpha(0.1)).cursor(rune::Cursor::Pointer)
+                .child(text(label).font(app.ty.small()).color(rgb(p.muted)))
+                .on_press(|a: &mut App| a.toggle_context_panel())))
             .child(text("/").key("slash").font(app.ty.small()).color(rgb(p.fg)))
             .child(text("commands").key("commands").font(app.ty.small()).color(rgb(p.muted))));
     // "Replying to …": a strip tucked behind the card's top edge, with a way out of it.

@@ -92,6 +92,7 @@ pub fn picker_card(app: &App) -> El {
     let [cx, cy, cw, _] = composer;
     if picker.kind == Kind::Usage { return super::usage::view(app, anchored); }
     if picker.kind == Kind::Tasks { return super::tasks::view(app, anchored); }
+    if picker.kind == Kind::Context { return super::context::view(app, anchored); }
     if picker.kind == Kind::Goals { return super::goals::view(app, anchored); }
     if picker.kind == Kind::Model && picker.activity.is_none() { return model_card(app, picker, anchored); }
     // As many rows as fit between the agent pane's top (8 pt under its tab row, never over the
@@ -107,7 +108,8 @@ pub fn picker_card(app: &App) -> El {
     let panel = rgb(p.bg);
     let mut card = el().key("prompt-picker").w(cw).h(height).fill(panel).radius(RADIUS * s).border(1.0, rgb(p.fg).alpha(0.1))
         .shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45))
-        .transition(rune::Transition::none())
+        // The menu grows up out of the composer when it first appears, and shrinks back.
+        .transition(rune::Transition::scale(0.94).combined(rune::Transition::offset(0.0, 14.0 * s)))
         .clip_rounded(RADIUS * s)
         .on_press(|_: &mut App| {})
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
@@ -412,7 +414,7 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
     }
 
     let card = rune::col().key("prompt-picker").w(cw).h(height).fill(rgb(p.bg)).radius(RADIUS * s).border(1.0, rgb(p.fg).alpha(0.1))
-        .shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45)).transition(rune::Transition::none()).clip_rounded(RADIUS * s)
+        .shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45)).transition(rune::Transition::scale(0.94).combined(rune::Transition::offset(0.0, 14.0 * s))).clip_rounded(RADIUS * s)
         .on_press(|_: &mut App| {})
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Notches step a row each; trackpad distance adds up to whole rows.

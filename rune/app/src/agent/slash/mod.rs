@@ -7,6 +7,7 @@
 pub(crate) mod actions;
 mod usage;
 mod tasks;
+mod context;
 mod goals;
 mod panel;
 mod catalog;

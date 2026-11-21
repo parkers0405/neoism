@@ -12,6 +12,8 @@ pub enum Kind {
     Usage,
     Tasks,
     Goals,
+    /// The context window meter, opened from the token count under the composer.
+    Context,
     Model,
     ModelAccount,
     Agent,

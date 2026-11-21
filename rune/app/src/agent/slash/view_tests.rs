@@ -61,7 +61,8 @@ fn exercise(kind: Kind) {
     settle(&mut rt);
     for _ in 0..2 {
         rt.update(move |a, _| a.composer.picker = Some(picker(kind)));
-        rt.frame(DT);
+        // The card itself grows in when it first appears; everything after that is instant.
+        settle(&mut rt);
         fully_drawn(&rt);
         no_query_morph(&rt);
         for query in ["a", "al", "alpha", "model 1", ""] {
@@ -104,8 +105,8 @@ fn exercise(kind: Kind) {
             }
         }
         rt.update(|a, _| a.composer.picker = None);
-        rt.frame(DT);
-        assert!(!rt.elements().iter().any(|e| e.exiting));
+        settle(&mut rt);
+        assert!(!rt.elements().iter().any(|e| e.exiting), "the card has finished shrinking away");
     }
 }
 

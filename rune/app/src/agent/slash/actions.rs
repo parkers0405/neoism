@@ -574,7 +574,7 @@ impl App {
             Kind::Thinking => { self.set_thinking(row.value); self.close_prompt_picker(); }
             Kind::Session => { self.close_prompt_picker(); self.open_conversation(&row.value); }
             Kind::Usage => { if row.value == "refresh" { self.open_usage(); } },
-            Kind::Tasks | Kind::Goals => {},
+            Kind::Tasks | Kind::Goals | Kind::Context => {},
             Kind::Subagent => { self.close_prompt_picker(); self.view_session(&row.value); }
             Kind::Skill => {
                 let inline = picker.mention.is_some();
@@ -700,7 +700,7 @@ impl App {
     /// A picker key from its own query field.
     pub fn picker_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
         let Some(picker) = self.composer.picker.as_mut() else { return false };
-        if matches!(picker.kind, Kind::Usage | Kind::Tasks | Kind::Goals) {
+        if matches!(picker.kind, Kind::Usage | Kind::Tasks | Kind::Goals | Kind::Context) {
             match event.key {
                 Key::Enter if picker.kind == Kind::Usage => self.open_usage(),
                 Key::Enter if picker.kind == Kind::Goals => self.open_goals(),

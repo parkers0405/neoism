@@ -462,6 +462,7 @@ fn main() {
                 s.thread_activity.insert("b".into(), "running".into());
                 s.run_slash("/sessions", &mut rune::Tx::default());
             }),
+            ("context-panel", |s| { s.load_fixture("ctx", "Context panel", include_str!("../fixtures/tools-timeline.json")); s.toggle_context_panel(); }),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });
                 let i = s.active;

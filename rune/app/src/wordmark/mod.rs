@@ -90,20 +90,10 @@ pub struct Wordmark {
     reduced: bool,
 }
 
-/// The letters on a light theme: a cool, clean white (no cream in it).
-pub const LIGHT_TINT: u32 = 0xf6f9ff;
+/// The wordmark on a light theme, at rest and in its click effects: near black.
+pub const LIGHT_TINT: u32 = 0x0b0c0f;
 
-/// The flying pieces of a click effect on a light theme: white would vanish against the page,
-/// so they are drawn near black.
-pub const LIGHT_EFFECT: u32 = 0x0b0c0f;
-
-/// What a click effect's pieces are drawn in for letters tinted `tint`.
-fn effect_tint(tint: u32) -> u32 {
-    if tint != LIGHT_TINT { return tint; }
-    std::env::var("NEOISM_RUNE_WORDMARK_EFFECT").ok().and_then(|hex| u32::from_str_radix(hex.trim_start_matches('#'), 16).ok()).unwrap_or(LIGHT_EFFECT)
-}
-
-/// The wordmark's letter colour for a theme: its ink on dark themes, white on light ones.
+/// The wordmark's colour for a theme: its ink on dark themes, black on light ones.
 pub fn tint_for(pal: &crate::ui::theme::Palette) -> u32 {
     if crate::ui::theme::is_dark(pal.bg) { pal.fg } else { LIGHT_TINT }
 }
@@ -114,25 +104,10 @@ impl Wordmark {
         self.tint = tint;
         let Some((width, height, mut pixels)) = decode(ARTWORK) else { return };
         let [tr, tg, tb] = [(tint >> 16) & 0xff, (tint >> 8) & 0xff, tint & 0xff];
-        let deepen = tint == LIGHT_TINT;
         for px in pixels.chunks_exact_mut(4) {
             px[0] = (px[0] as u32 * tr / 255) as u8;
             px[1] = (px[1] as u32 * tg / 255) as u8;
             px[2] = (px[2] as u32 * tb / 255) as u8;
-        }
-        // The artwork shades its sides with transparency, which a light page washes out. There
-        // the sides are drawn solid instead: the faces white, the sides in two greys of the
-        // letters' own depth, so the wordmark keeps its edges without a drawn outline.
-        if deepen {
-            let dark = [0x23u8, 0x27, 0x30];
-            for px in pixels.chunks_exact_mut(4) {
-                if px[3] < 24 { continue; }
-                let level = (px[3] as f32 / 255.0).powf(1.6);
-                for (channel, floor) in px.iter_mut().zip(dark) {
-                    *channel = (floor as f32 + (*channel as f32 - floor as f32) * level).round() as u8;
-                }
-                px[3] = 255;
-            }
         }
         self.aspect = width as f32 / height as f32;
         self.letters = (0..LETTERS)
@@ -276,7 +251,7 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
     if let Some(frame) = frame {
         // The original's paint bounds: cells may fly well outside the artwork.
         let clip = [-width, -height * 4.0, width * 3.0, height * 9.0];
-        let tint = rgb(effect_tint(mark.tint));
+        let tint = rgb(mark.tint);
         let mut shape = Shape::new().view_box(clip[2], clip[3]);
         for (i, &(rect, _)) in letters.iter().enumerate() {
             frame.letter_quads(i, rect, |quad, alpha| {

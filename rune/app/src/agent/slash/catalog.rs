@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub const ADD_PROVIDER: &str = "action:add-provider";
+/// A thinking level listed in the model picker.
+pub const THINK: &str = "think:";
 pub const ADD_ACCOUNT: &str = "__add_account__";
 pub const DISCONNECT_PROVIDER: &str = "__disconnect__";
 pub const DONE: &str = "__connect_done__";
@@ -55,7 +57,7 @@ pub fn models(providers: &[ProviderInfo]) -> Vec<Row> {
 
 /// The model picker's first screen: up to three recent models (the current one first), then
 /// providers with their model counts, then "Add Provider".
-pub fn model_root(catalog: &[Row], current: &str, recent: &[String]) -> Vec<Row> {
+pub fn model_root(catalog: &[Row], current: &str, recent: &[String], effort: &str) -> Vec<Row> {
     let available: BTreeMap<&str, &Row> = catalog.iter().filter(|r| !r.header).map(|r| (r.value.as_str(), r)).collect();
     let mut out = Vec::new();
     let mut seen = Vec::new();
@@ -67,7 +69,12 @@ pub fn model_root(catalog: &[Row], current: &str, recent: &[String]) -> Vec<Row>
         out.push(Row::new(row.title.clone(), row.section.clone(), if is_current { "selected" } else { "" }, value)
             .current(is_current).icon(provider_id(value).and_then(provider_logo).map(Icon::Provider)));
     }
-    if !out.is_empty() { out.insert(0, Row::header("Recent models")); }
+    if !out.is_empty() { out.insert(0, Row::header("Recent")); }
+    // How hard the model in use thinks, chosen in place (`think:<level>`).
+    if current.contains('/') {
+        out.push(Row::header("Thinking"));
+        out.extend(thinking(current, effort).into_iter().map(|mut row| { row.value = format!("{THINK}{}", row.value); row.footer.clear(); row }));
+    }
     out.push(Row::header("Providers"));
     let mut providers: Vec<(String, String, usize, bool)> = Vec::new();
     for row in catalog.iter().filter(|r| !r.header) {
@@ -81,7 +88,8 @@ pub fn model_root(catalog: &[Row], current: &str, recent: &[String]) -> Vec<Row>
         Row::new(name, "", format!("{count} {}", if count == 1 { "model" } else { "models" }), id.clone())
             .current(current).icon(provider_logo(&id).map(Icon::Provider))
     }));
-    out.push(Row::new("Add Provider", "", "", ADD_PROVIDER).icon(Some(Icon::Glyph("+"))));
+    out.push(Row::header("Connect"));
+    out.push(Row::new("Connect a provider", "Sign in or add an API key", "", ADD_PROVIDER).icon(Some(Icon::Glyph("+"))));
     out
 }
 
@@ -318,12 +326,14 @@ mod tests {
     #[test]
     fn model_root_lists_recent_then_providers() {
         let rows = models(&catalog());
-        let root = model_root(&rows, "openai/gpt-6.1-sol", &["openai/gpt-6.1-sol".into(), "gone/x".into()]);
+        let root = model_root(&rows, "openai/gpt-6.1-sol", &["openai/gpt-6.1-sol".into(), "gone/x".into()], "");
         let titles: Vec<&str> = root.iter().map(|r| r.title.as_str()).collect();
-        assert_eq!(titles, ["Recent models", "GPT-6.1 Sol", "Providers", "OpenAI", "DeepSeek", "Add Provider"]);
+        assert_eq!(titles, ["Recent", "GPT-6.1 Sol", "Thinking", "none", "low", "medium", "high", "xhigh", "Providers", "OpenAI", "DeepSeek", "Connect", "Connect a provider"]);
         assert_eq!(root[1].footer, "selected");
-        assert_eq!(root[3].footer, "2 models");
-        assert!(root[3].current);
+        assert_eq!(root[4].value, "think:low");
+        assert!(root[3].current, "the default level is ticked when none is set");
+        assert_eq!(root[9].footer, "2 models");
+        assert!(root[9].current);
         assert_eq!(provider_models(&rows, "openai", "openai/gpt-5").iter().filter(|r| r.current).count(), 1);
     }
 

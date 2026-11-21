@@ -151,7 +151,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_composer(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_pending_prompt() && !s.submit_command(tx) { s.submit(); } });
     // The model at the card's lower left, bare: its provider's mark, its name, a chevron. It
-    // opens one menu for the model, its thinking and connecting providers.
+    // opens the model picker: recents, thinking, providers and connect, in sections.
     let cs = app.ty.scale();
     let model_label = app.model.rsplit_once('/').map_or(app.model.clone(), |(_, name)| name.to_owned());
     let model = row().key("composer-model").h(30.0 * cs).gap(7.0 * cs).center_y().shrink()
@@ -160,7 +160,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .child(icon(app, glyph::CHEVRON_DOWN, 0.45, rgb(p.muted)))
         .on_press(move |s: &mut App| {
             s.select_tab(tab_id);
-            if s.composer.picker.as_ref().is_some_and(|picker| picker.kind == Kind::ModelMenu) { s.close_prompt_picker(); } else { s.open_model_menu(); }
+            if s.composer.picker.as_ref().is_some_and(|picker| picker.kind == Kind::Model) { s.close_prompt_picker(); } else { s.open_selection(Kind::Model); }
         });
     let send = el().key("composer-send").w(36.0).h(36.0).radius(8.0).center()
         .fill(if streaming { rgb(p.fg) } else { rgb(p.muted).alpha(0.6) })

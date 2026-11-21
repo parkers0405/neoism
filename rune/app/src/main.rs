@@ -427,7 +427,15 @@ fn main() {
                     provider_id: "openai".into(), connection_id: format!("account-{i}"), label: (*label).into(), auth_type: "oauth".into(), is_default: i == 0,
                 }).collect() });
             }),
-            ("model-menu", |s| { s.load_fixture("model-menu", "Model menu", "[]"); s.run_slash("/model openai/gpt-6.2-sol", &mut rune::Tx::default()); s.open_model_menu(); }),
+            ("model-menu", |s| {
+                use neoism_protocol::agent::{AgentServerMessage as M, ModelInfo, ProviderInfo};
+                s.load_fixture("model-menu", "Model menu", "[]");
+                s.apply_agent(M::ProviderCatalog { providers: [("openai", "OpenAI", "gpt-6.2-sol", "GPT-6.2 Sol"), ("anthropic", "Anthropic", "claude-sonnet-5", "Claude Sonnet 5")].iter().map(|(id, name, model, title)| ProviderInfo { id: (*id).into(), name: (*name).into(),
+                    models: vec![ModelInfo { id: (*model).into(), name: (*title).into(), context_limit: None }] }).collect(), catalog_status: None, request_id: None });
+                s.run_slash("/model anthropic/claude-sonnet-5", &mut rune::Tx::default());
+                s.close_prompt_picker();
+                s.open_selection(agent::slash::Kind::Model);
+            }),
             ("reply-strip", |s| { s.load_fixture("reply", "Reply strip", include_str!("../fixtures/mcp-timeline.json")); s.reply_to_message("reply", "Hi! What are you working on? I can help with code, answer questions, or review a change."); }),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });

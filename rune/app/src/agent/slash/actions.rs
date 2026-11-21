@@ -284,9 +284,9 @@ impl App {
         let picker = match kind {
             Kind::Model => {
                 let catalog = catalog::models(&self.composer.providers);
-                let rows = catalog::model_root(&catalog, &selection.model, &self.composer.recent_models);
+                let rows = catalog::model_root(&catalog, &selection.model, &self.composer.recent_models, &selection.thinking);
                 let current = selection.model.split_once('/').map(|(p, _)| p).unwrap_or_default().to_owned();
-                let mut picker = Picker::new(Kind::Model, "Select model", rows).placeholder("Search every model").search_all(mark_current(&catalog, &selection.model)).select_value(&current);
+                let mut picker = Picker::new(Kind::Model, "Select model", rows).placeholder("Search models...").search_all(mark_current(&catalog, &selection.model)).select_value(&current);
                 picker.loading = !self.composer.catalog_received;
                 if self.composer.catalog_received && !self.composer.catalog_ready {
                     picker.activity = Some(Activity { status: "Model catalog pending or unavailable".into(), body: "Refresh the model picker to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });
@@ -445,6 +445,15 @@ impl App {
             }
             Kind::Model => {
                 if row.value == ADD_PROVIDER { return self.open_connect(); }
+                // A thinking level: set it and stay, with the list showing the new choice.
+                if let Some(level) = row.value.strip_prefix(catalog::THINK) {
+                    self.set_thinking(level.to_owned());
+                    let models = catalog::models(&self.composer.providers);
+                    let selection = self.composer.selection.clone();
+                    let rows = catalog::model_root(&models, &selection.model, &self.composer.recent_models, &selection.thinking);
+                    if let Some(picker) = self.composer.picker.as_mut() { picker.replace(rows); }
+                    return;
+                }
                 let on_providers = self.composer.picker.as_ref().is_some_and(|p| p.provider.is_none());
                 if on_providers && !row.value.is_empty() && !row.value.contains('/') {
                     return self.open_provider_models(&row.value, &row.title);
@@ -460,11 +469,6 @@ impl App {
             }
             Kind::Agent => { self.set_agent(row.value); self.close_prompt_picker(); }
             Kind::Thinking => { self.set_thinking(row.value); self.close_prompt_picker(); }
-            Kind::ModelMenu => match row.value.as_str() {
-                "model" => self.open_selection(Kind::Model),
-                "think" => self.open_selection(Kind::Thinking),
-                _ => self.open_connect(),
-            },
             Kind::Session => { self.close_prompt_picker(); self.open_conversation(&row.value); }
             Kind::Usage => { if row.value == "refresh" { self.open_usage(); } },
             Kind::Tasks | Kind::Goals => {},
@@ -638,18 +642,6 @@ impl App {
     }
 
     // -- /connect ------------------------------------------------------------------------
-
-    /// The composer's model button: what model, how hard it thinks, and connecting providers.
-    pub(crate) fn open_model_menu(&mut self) {
-        let model = if self.composer.selection.model.is_empty() { "None selected".to_owned() } else { self.composer.selection.model.clone() };
-        let thinking = if self.composer.selection.thinking.is_empty() { "default".to_owned() } else { self.composer.selection.thinking.clone() };
-        let rows = vec![
-            Row::new("Model", "Choose the model for this conversation", model, "model"),
-            Row::new("Thinking", "How much the model reasons before it answers", thinking, "think"),
-            Row::new("Connect", "Sign in to a provider or add an API key", "", "connect"),
-        ];
-        self.focus_picker(Picker::new(Kind::ModelMenu, "Model", rows).placeholder("Search"));
-    }
 
     pub(crate) fn open_connect(&mut self) {
         self.composer.connect = Some(ConnectFlow { waiting: true, ..ConnectFlow::default() });
@@ -858,7 +850,7 @@ impl App {
                     let selection = &self.composer.selection;
                     let rows = match picker.provider.clone() {
                         Some(provider) => catalog::provider_models(&catalog, &provider, &selection.model),
-                        None => catalog::model_root(&catalog, &selection.model, &self.composer.recent_models),
+                        None => catalog::model_root(&catalog, &selection.model, &self.composer.recent_models, &selection.thinking),
                     };
                     picker.replace(rows);
                     picker.set_search(picker.provider.is_none().then(|| mark_current(&catalog, &selection.model)));

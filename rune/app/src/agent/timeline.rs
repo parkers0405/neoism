@@ -886,10 +886,11 @@ impl Meta for El {
             .child(text(label).font(app.ty.sans(12.0, 500.0)).color(rgb(p.muted)));
         let session = match &app.active_tab().kind { crate::tabs::TabKind::Agent { session: Some(id) } => id.clone(), _ => String::new() };
         let (copied, replied, fork_session, fork_message, reply_session) = (message.text.clone(), message.text.clone(), session.clone(), message.id.clone(), session);
-        self.child(row().gap(0.0).mt(4.0)
+        // The actions show only while the pointer is on the answer.
+        self.hover_group().child(row().gap(0.0).mt(4.0)
             .child(text(agent.to_owned()).font(app.ty.body()).color(rgb(p.blue)))
             .child(text(format!(" · {rest}")).font(app.ty.body()).color(rgb(p.muted))))
-            .child(row().key(format!("reply-actions:{}", message.id)).gap(2.0 * s).mt(6.0 * s).ml(-7.0 * s)
+            .child(row().key(format!("reply-actions:{}", message.id)).gap(2.0 * s).mt(6.0 * s).ml(-7.0 * s).group_opacity(0.0, 1.0)
                 .child(action("copy", "\u{f018f}", "Copy").on_press_tx(move |_: &mut App, tx: &mut rune::Tx| tx.copy(copied.clone())))
                 .child(action("fork", "\u{f062c}", "Fork").on_press(move |a: &mut App| a.fork_at(&fork_session, &fork_message)))
                 .child(action("reply", "\u{f045a}", "Reply").on_press(move |a: &mut App| a.reply_to_message(&reply_session, &replied))))

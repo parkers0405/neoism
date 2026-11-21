@@ -161,7 +161,7 @@ pub(crate) async fn enqueue_prompt_request_with_delivery(
     request: PromptRequest,
     delivery: &str,
 ) -> Result<(bool, usize), ApiError> {
-    if !matches!(delivery, "steer" | "queue" | "continue") {
+    if !matches!(delivery, "steer" | "queue" | "continue" | "if-idle") {
         return Err(ApiError::bad_request(format!(
             "delivery must be steer, queue, or continue, got {delivery}"
         )));
@@ -186,6 +186,22 @@ async fn admit_prompt(
 ) -> Result<(bool, usize), ApiError> {
     let _execution_admission =
         crate::execution_activity::admission_guard(state, session_id).await;
+    // The same guard serializes ordinary prompt/compaction admissions and
+    // run startup. Keep it through the durable enqueue and worker wake.
+    let delivery = if delivery == "if-idle" {
+        if _execution_admission.is_none() {
+            return Err(ApiError::not_found("Session unavailable"));
+        }
+        let (run, worker, _) = state.inner.session_coordinator.queue_identity(session_id).await;
+        if run.is_some() || worker || state.inner.store.queued_prompt_count(session_id).await? != 0
+            || state.inner.store.compaction_queued(session_id).await?
+        {
+            return Err(ApiError::session_not_idle());
+        }
+        "queue"
+    } else {
+        delivery
+    };
     // Give even legacy admissions a stable identity before publishing them.
     // The visible queue can identify its starting row before run claim without
     // mutating or consuming the durable recovery token.

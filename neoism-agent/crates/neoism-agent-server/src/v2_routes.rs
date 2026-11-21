@@ -1121,6 +1121,20 @@ pub(crate) async fn v2_prompt(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Unlike prompt-async, this operation never falls back to queueing behind work.
+pub(crate) async fn v2_prompt_if_idle(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    claims: Option<Extension<crate::caller::CallerClaims>>,
+    Json(mut request): Json<V2PromptRequest>,
+) -> Result<StatusCode, ApiError> {
+    if let Some(Extension(claims)) = claims {
+        bind_authenticated_author(&mut request, &claims);
+    }
+    enqueue_v2_prompt(&state, &session_id, request.into_prompt_request()?, "if-idle").await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn v2_prompt_async(
     State(state): State<AppState>,
     Path(session_id): Path<String>,

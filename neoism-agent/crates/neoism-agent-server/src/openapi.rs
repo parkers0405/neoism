@@ -2251,7 +2251,12 @@ fn apply_authoritative_contract(document: &mut Value) {
     for (suffix, id) in [
         ("prompt", "v2.sessions.prompt"),
         ("prompt-async", "v2.sessions.promptAsync"),
+        ("prompt-if-idle", "v2.sessions.promptIfIdle"),
     ] {
+        let mut responses = empty("204", "Prompt accepted");
+        if suffix == "prompt-if-idle" {
+            responses["412"] = json!({"description": "Session is not idle; no prompt admitted"});
+        }
         add(
             &format!("/v2/sessions/{{session_id}}/{suffix}"),
             "post",
@@ -2260,7 +2265,7 @@ fn apply_authoritative_contract(document: &mut Value) {
                 "sessions",
                 json!([session_id()]),
                 Some(json_request(true, r("PromptRequest"))),
-                empty("204", "Prompt accepted"),
+                responses,
             ),
         );
     }

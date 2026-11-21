@@ -221,6 +221,14 @@ async fn status_hydration_includes_admitted_work_before_worker_start() {
     ).await.expect("POST admission must not wait for worker startup").unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(state.inner.session_coordinator.active_run(session_id).await.is_none());
+    // Another client won after the watcher's idle observation. Even with no
+    // active run yet, conditional admission must not append a second row.
+    let conditional = app.clone().oneshot(request(
+        Method::POST, &format!("/v2/sessions/{session_id}/prompt-if-idle"),
+        Some(json!({"prompt":"do not append behind the primary"})),
+    )).await.unwrap();
+    assert_eq!(conditional.status(), StatusCode::PRECONDITION_FAILED);
+    assert_eq!(state.inner.store.queued_prompt_count(session_id).await.unwrap(), 1);
     // Check normal POST-success hydration, then missing and explicitly stale
     // Idle cache entries. Durable admission must win in all three cases.
     for cache in [None, Some(None), Some(Some(SessionStatus::Idle))] {
@@ -244,6 +252,29 @@ async fn status_hydration_includes_admitted_work_before_worker_start() {
     }
     drop(startup);
     wait_for_stub_queue_settlement(&state, session_id, 1).await;
+    state.inner.store.close().await;
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
+async fn conditional_prompt_race_only_one_admitted() {
+    let path = std::env::temp_dir().join(format!("neoism-idle-race-{}.db", Id::ascending(IdKind::Event)));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let app = app(state.clone());
+    let session: SessionInfo = response_json(app.clone().oneshot(request(Method::POST, "/v2/sessions",
+        Some(json!({"model": {"providerId": "neoism", "id": "stub"}})),
+    )).await.unwrap()).await;
+    let id = session.id.as_str();
+    let startup = state.inner.session_coordinator.prompt_admission_guard(id).await;
+    let submit = |text| app.clone().oneshot(request(Method::POST, &format!("/v2/sessions/{id}/prompt-if-idle"),
+        Some(json!({"prompt": text, "model": {"providerId": "neoism", "modelId": "stub"}}))));
+    let (first, second) = tokio::join!(submit("one"), submit("two"));
+    let mut statuses = [first.unwrap().status().as_u16(), second.unwrap().status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [204, 412]);
+    assert_eq!(state.inner.store.queued_prompt_count(id).await.unwrap(), 1);
+    drop(startup);
+    wait_for_stub_queue_settlement(&state, id, 1).await;
     state.inner.store.close().await;
     cleanup_sqlite_files(&path);
 }

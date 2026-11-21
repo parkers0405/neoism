@@ -60,6 +60,14 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn session_not_idle() -> Self {
+        Self {
+            status: StatusCode::PRECONDITION_FAILED,
+            message: "Session is not idle".into(),
+            classification: Some(("session.not_idle", true)),
+        }
+    }
+
     pub(crate) fn gone(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::GONE,

@@ -42,6 +42,78 @@ fn err(msg: impl Into<String>) -> Vec<GitServerMessage> {
     }]
 }
 
+/// Where a new repository goes: an absolute host path, `~` or `~/…`, with no `..` in it.
+pub(crate) fn repository_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let path = path.trim();
+    let expanded = match path.strip_prefix("~/").or_else(|| (path == "~").then_some("")) {
+        Some(rest) => dirs::home_dir().ok_or("The home directory is unavailable on this host.")?.join(rest),
+        None => std::path::PathBuf::from(path),
+    };
+    if !expanded.is_absolute() { return Err("Give the project's location as a full path.".into()); }
+    if expanded.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err("The project's location cannot contain `..`.".into());
+    }
+    Ok(expanded)
+}
+
+/// A folder that is not there yet, or is there and empty.
+fn free_for_repository(path: &Path) -> Result<(), String> {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => if entries.next().is_some() { Err(format!("{} already exists and is not empty.", path.display())) } else { Ok(()) },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+/// Addresses `git clone` is given: the network transports and `file://`, never an option
+/// or a helper transport (`ext::`, `fd::`).
+fn clone_url_allowed(url: &str) -> bool {
+    let scp_like = !url.contains("://") && url.split_once(':').is_some_and(|(host, path)| {
+        !host.is_empty() && !path.is_empty() && !host.contains('/') && host.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '@'))
+    });
+    // `name::address` is a remote helper (`ext::`, `fd::`), which can run commands.
+    !url.starts_with('-') && !url.contains("::") && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+        && (["https://", "http://", "ssh://", "git://", "file://"].iter().any(|scheme| url.starts_with(scheme)) || scp_like)
+}
+
+fn canonical_reply(path: &Path) -> GitServerMessage {
+    let path = crate::path::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    GitServerMessage::RepositoryReady { path: path.display().to_string() }
+}
+
+/// [`GitClientMessage::CreateRepository`] / [`GitClientMessage::CloneRepository`], off the
+/// socket's ordered git lane: a clone can take minutes and must not hold up status or diffs.
+pub async fn handle_repository(msg: GitClientMessage) -> GitServerMessage {
+    let result = tokio::task::spawn_blocking(move || -> Result<GitServerMessage, String> {
+        match msg {
+            GitClientMessage::CreateRepository { path } => {
+                let path = repository_path(&path)?;
+                free_for_repository(&path)?;
+                std::fs::create_dir_all(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+                run_git(&path, &["init"])?;
+                Ok(canonical_reply(&path))
+            }
+            GitClientMessage::CloneRepository { url, path } => {
+                let url = url.trim().to_owned();
+                if !clone_url_allowed(&url) { return Err("Use an https://, ssh:// or git@host:owner/repo address.".into()); }
+                let path = repository_path(&path)?;
+                free_for_repository(&path)?;
+                let parent = path.parent().ok_or("Give the project's location as a full path.")?;
+                std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+                let target = path.display().to_string();
+                run_git(parent, &["-c", "protocol.ext.allow=never", "clone", "--", &url, &target])?;
+                Ok(canonical_reply(&path))
+            }
+            _ => Err("not a repository request".into()),
+        }
+    }).await;
+    match result {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(message)) => GitServerMessage::Error { message },
+        Err(error) => GitServerMessage::Error { message: format!("git task join error: {error}") },
+    }
+}
+
 /// Dispatch a single git message.
 pub async fn handle(msg: GitClientMessage) -> Vec<GitServerMessage> {
     handle_with_root(workspace_root(), msg).await
@@ -73,6 +145,9 @@ pub async fn handle_with_root(
     }
     if let GitClientMessage::Blame { path } = msg {
         return crate::git_blame::handle(root, path).await;
+    }
+    if matches!(msg, GitClientMessage::CreateRepository { .. } | GitClientMessage::CloneRepository { .. }) {
+        return vec![handle_repository(msg).await];
     }
     if matches!(msg, GitClientMessage::ChangedFiles) {
         let snapshot = crate::git_snapshot::snapshot(root).await;
@@ -289,6 +364,7 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
         }
         GitClientMessage::PullRequest { request } => vec![GitServerMessage::PullRequest { reply: crate::pull_request::handle_at(root, request) }],
         GitClientMessage::Blame { .. } => err("Blame requires async dispatch"),
+        GitClientMessage::CreateRepository { .. } | GitClientMessage::CloneRepository { .. } => err("Repository requests require async dispatch"),
         GitClientMessage::Status => status(&repo),
         GitClientMessage::Diff { path } => diff(&repo, path.as_deref(), root),
         GitClientMessage::Log { max_count } => log(&repo, max_count),
@@ -1152,6 +1228,43 @@ fn log(repo: &Repository, max_count: Option<u32>) -> Vec<GitServerMessage> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn repositories_are_created_and_cloned_only_into_free_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dir.path().join("nested/new-project");
+        let reply = super::handle_repository(GitClientMessage::CreateRepository { path: made.display().to_string() }).await;
+        let GitServerMessage::RepositoryReady { path } = reply else { panic!("{reply:?}") };
+        assert!(std::path::Path::new(&path).join(".git").exists());
+        // Something to clone.
+        std::fs::write(made.join("file"), "hello").unwrap();
+        for args in [&["add", "."][..], &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-m", "first"]] {
+            super::run_git(&made, args).unwrap();
+        }
+        let cloned = dir.path().join("copy");
+        let url = format!("file://{}", made.display());
+        let reply = super::handle_repository(GitClientMessage::CloneRepository { url: url.clone(), path: cloned.display().to_string() }).await;
+        assert!(matches!(reply, GitServerMessage::RepositoryReady { .. }), "{reply:?}");
+        assert_eq!(std::fs::read_to_string(cloned.join("file")).unwrap(), "hello");
+        // A folder with something in it is never taken over.
+        for message in [GitClientMessage::CreateRepository { path: cloned.display().to_string() }, GitClientMessage::CloneRepository { url, path: cloned.display().to_string() }] {
+            let reply = super::handle_repository(message).await;
+            assert!(matches!(&reply, GitServerMessage::Error { message } if message.contains("not empty")), "{reply:?}");
+        }
+        let refuse = |path: &str| super::repository_path(path).is_err();
+        assert!(refuse("relative/place") && refuse("/a/../b") && !refuse("/a/b") && !refuse("~/projects/x"));
+        for url in ["--upload-pack=x", "ext::sh -c x", "ext::sh", "fd::3", "/local/path", "https://x y"] {
+            assert!(!super::clone_url_allowed(url), "{url}");
+        }
+        for url in ["https://github.com/a/b.git", "git@github.com:a/b.git", "ssh://git@host/a/b", "file:///tmp/a"] {
+            assert!(super::clone_url_allowed(url), "{url}");
+        }
+        let free = dir.path().join("refused");
+        let reply = super::handle_repository(GitClientMessage::CloneRepository { url: "ext::sh -c x".into(), path: free.display().to_string() }).await;
+        assert!(matches!(reply, GitServerMessage::Error { .. }) && !free.exists());
+        assert!(GitClientMessage::CreateRepository { path: String::new() }.is_mutation());
+        assert_eq!(required_permission(&GitClientMessage::CloneRepository { url: String::new(), path: String::new() }), Permission::WriteFiles);
+    }
+
     use super::*;
 
     #[test]

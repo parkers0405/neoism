@@ -22,6 +22,7 @@ const SETTINGS_HEADER_H: f32 = 70.0;
 const SHORTCUT_FONT: f32 = 11.0;
 pub(super) const MAX_ROWS: usize = 8;
 const LIST_KEY: &str = "picker-results";
+const PREVIEW_HINT: &str = "\u{2191}\u{2193} preview  \u{b7}  Enter apply";
 
 impl App {
     /// The selected row's settled rect (the list's window plus whole rows), so the cursor aims
@@ -67,7 +68,7 @@ pub fn view(app: &App) -> El {
     // Never wider than the window less 16 pt (`active_rect`).
     let width = (if themes { THEME_WIDTH } else { WIDTH } * s).min((app.window[0] - 16.0).max(1.0));
 
-    let input = rune::text_input(&picker.query, app.ty.sized(14.0))
+    let input = rune::text_input(&picker.query, app.ty.chat_sized(14.0))
         // Keys through this field (list arrows, wheel-free navigation) commit animated: without
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
@@ -112,8 +113,8 @@ pub fn view(app: &App) -> El {
     let body = if themes {
         let card = match rows.get(picker.selected).map(|r| r.target) {
             Some(Target::Background(index)) => background_preview(app, &picker.backgrounds[index]),
-            Some(Target::Theme(name)) => preview(app, palette(name)),
-            _ if picker.mode == Mode::Themes => preview(app, palette(p.name)),
+            Some(Target::Theme(name)) => preview(app, palette(name), PREVIEW_HINT),
+            _ if picker.mode == Mode::Themes => preview(app, palette(p.name), PREVIEW_HINT),
             _ => el(),
         };
         row().w_full().transition(rune::Transition::none())
@@ -161,7 +162,7 @@ fn categories(app: &App, mode: Mode, width: f32) -> El {
         let active = mode == target;
         let hovered = app.palette_category_hover == Some(index);
         let ink = rgb(if active || hovered { p.fg } else { p.dim });
-        let font = if active { app.ty.sized_bold(SHORTCUT_FONT) } else { app.ty.sized(SHORTCUT_FONT) };
+        let font = if active { app.ty.sans(SHORTCUT_FONT, 600.0) } else { app.ty.chat_sized(SHORTCUT_FONT) };
         tabs = tabs.child(row().key(format!("palette-category:{index}")).w(tab_w).h(30.0 * s).px(10.0 * s).gap(8.0 * s).center_y()
             .radius(6.0 * s)
             .fill(if active { rgb(p.hover) } else if hovered { rgb(p.hover).alpha(0.5) } else { Color::TRANSPARENT })
@@ -186,12 +187,12 @@ fn settings_header(app: &App, picker: &Picker, width: f32) -> El {
         .child(row().key("palette-system-back").w(96.0 * s).h(30.0 * s).px(8.0 * s).gap(8.0 * s).center_y().radius(6.0 * s)
             .fill(if hovered { rgb(p.hover) } else { Color::TRANSPARENT })
             .child(el().w(14.0 * s).center().child(text("\u{f060}").font(TextStyle::new(14.0 * s, 400.0).family(NERD)).color(rgb(p.fg))))
-            .child(text("Systems").font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.fg)))
+            .child(text("Systems").font(app.ty.chat_sized(SHORTCUT_FONT)).color(rgb(p.fg)))
             .on_hover_change(|a: &mut App, inside: bool, _: &mut Tx| {
                 if inside { a.palette_category_hover = Some(0); } else if a.palette_category_hover == Some(0) { a.palette_category_hover = None; }
             })
             .on_press(|a: &mut App| a.show_category(Mode::Systems)))
-        .child(text(heading).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.fg)).truncate().mt(7.0 * s).px(8.0 * s).w(width))
+        .child(text(heading).font(app.ty.chat_sized(SHORTCUT_FONT)).color(rgb(p.fg)).truncate().mt(7.0 * s).px(8.0 * s).w(width))
 }
 
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
@@ -327,7 +328,7 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
     let p = app.pal;
     if rows.is_empty() && picker.mode == Mode::Commands {
         return row().w(width).h(ROW_H * s).px(14.0 * s).center_y()
-            .child(text("No matching commands").font(app.ty.sized(13.0)).color(rgb(p.dim)));
+            .child(text("No matching commands").font(app.ty.chat_sized(13.0)).color(rgb(p.dim)));
     }
     let row_h = row_height(picker.mode);
     let capacity = if picker.mode == Mode::Commands { super::compact::rows(app, MAX_ROWS) } else { MAX_ROWS };
@@ -349,7 +350,7 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
         if let Some(icon) = item.icon {
             line = line.child(text(icon).font(app.ty.icon_sized(13.0)).color(rgb(p.dim)));
         }
-        line = line.child(text(item.title.clone()).font(app.ty.sized(13.0)).color(rgb(p.fg)).truncate().grow(1.0).shrink());
+        line = line.child(text(item.title.clone()).font(app.ty.chat_sized(13.0)).color(rgb(p.fg)).truncate().grow(1.0).shrink());
         if !item.shortcut.is_empty() {
             let hint = match item.target { Target::Command(action) => app.command_hint(action, item.shortcut), _ => crate::startup::keys_label(item.shortcut).into_owned() };
             line = line.child(text(hint).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().shrink());
@@ -397,7 +398,7 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row) -> El {
         };
         line = line.child(el().w(13.0 * 0.8 * s).mr(6.0 * s).center().child(text(glyph).font(app.ty.sized(13.0)).color(rgb(color))));
     }
-    let title = text(item.title.clone()).font(app.ty.sized(13.0)).color(rgb(p.fg)).truncate().shrink();
+    let title = text(item.title.clone()).font(app.ty.chat_sized(13.0)).color(rgb(p.fg)).truncate().shrink();
     if look.centered {
         return line.justify_center().child(title);
     }
@@ -411,7 +412,7 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row) -> El {
         });
         let mut text_col = col().grow(1.0).shrink().h_full().pt(6.0 * s).gap(2.0 * s)
             .child(title)
-            .child(text(match item.target { Target::Command(action) => app.command_hint(action, item.shortcut), _ => crate::startup::keys_label(item.shortcut).into_owned() }).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).wrap().max_lines(2));
+            .child(text(match item.target { Target::Command(action) => app.command_hint(action, item.shortcut), _ => crate::startup::keys_label(item.shortcut).into_owned() }).font(app.ty.chat_sized(SHORTCUT_FONT)).color(rgb(p.dim)).wrap().max_lines(2));
         if toggle.is_some() { text_col = text_col.mr(12.0 * s); }
         line = line.items_start().child(text_col);
         if let Some(toggle) = toggle { line = line.child(el().h_full().center().child(toggle)); }
@@ -424,13 +425,13 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row) -> El {
         _ => None,
     };
     let mut line = line.child(title)
-        .child(text(look.detail.clone()).font(app.ty.sized(SHORTCUT_FONT)).color(rgb(p.dim)).ml(16.0 * s).mr(if controls.is_some() { 12.0 * s } else { 24.0 * s }).truncate().shrink());
+        .child(text(look.detail.clone()).font(app.ty.chat_sized(SHORTCUT_FONT)).color(rgb(p.dim)).ml(16.0 * s).mr(if controls.is_some() { 12.0 * s } else { 24.0 * s }).truncate().shrink());
     if let Some((server, controls)) = controls.filter(|(_, c)| !c.is_empty()) {
         line = line.child(el().grow(1.0));
         for control in controls {
             line = line.child(el().key(format!("server-control:{server}:{}", control.label())).w(control.width() * s).h(24.0 * s).ml(6.0 * s).center()
                 .radius(5.0 * s).fill(rgb(p.surface).alpha(0.94)).hover(rgb(p.hover))
-                .child(text(control.label()).font(app.ty.sized(11.0)).color(rgb(p.fg)))
+                .child(text(control.label()).font(app.ty.chat_sized(11.0)).color(rgb(p.fg)))
                 .on_press_tx(move |a: &mut App, tx: &mut Tx| a.server_control(server, control, tx)));
         }
     }
@@ -438,7 +439,7 @@ fn rich_row(app: &App, picker: &Picker, index: usize, item: &super::Row) -> El {
 }
 
 /// The previewed theme drawn in its own colours: name, hint, rule, then a syntax sample.
-fn preview(app: &App, theme: &'static Palette) -> El {
+pub(crate) fn preview(app: &App, theme: &'static Palette, hint: &'static str) -> El {
     let s = app.ty.scale();
     let t = theme;
     let line = |spans: &[(&str, u32)]| {
@@ -458,12 +459,12 @@ fn preview(app: &App, theme: &'static Palette) -> El {
         .child(line(&[("    render", t.syn_func), ("(&", t.fg), ("theme", t.fg), (");", t.fg)]))
         .child(line(&[("}", t.fg)]));
     let hint = row().gap(6.0 * s).center_y()
-        .child(text("\u{2191}\u{2193} preview  \u{b7}  Enter apply").font(app.ty.sized(10.0)).color(rgb(t.muted)));
+        .child(text(hint).font(app.ty.chat_sized(10.0)).color(rgb(t.muted)));
     col().key("theme-preview").mx(6.0 * s).mt(6.0 * s).mb(6.0 * s).px(16.0 * s).pt(12.0 * s).pb(4.0 * s).radius(6.0 * s)
         .fill(rgb(t.bg)).border(1.0 * s, rgb(t.border))
         .child(row().w_full().pb(10.0 * s).center_y().justify_between()
             .border_sides([0.0, 0.0, 1.0, 0.0], rgb(t.border))
-            .child(text(theme_display_name(t.name)).font(app.ty.sized_bold(13.0)).color(rgb(t.fg)))
+            .child(text(theme_display_name(t.name)).font(app.ty.sans(13.0, 600.0)).color(rgb(t.fg)))
             .child(hint))
         .child(code)
 }
@@ -474,21 +475,21 @@ fn background_preview(app: &App, background: &super::backgrounds::Background) ->
     let p = app.pal;
     let s = app.ty.scale();
     let hint = row().gap(6.0 * s).center_y()
-        .child(text("\u{2191}\u{2193} preview  \u{b7}  Enter apply").font(app.ty.sized(10.0)).color(rgb(p.muted)));
+        .child(text("\u{2191}\u{2193} preview  \u{b7}  Enter apply").font(app.ty.chat_sized(10.0)).color(rgb(p.muted)));
     let body = match &background.choice {
-        Choice::Inherit => text("Use inherited background").font(app.ty.sized(10.5)).color(rgb(p.muted)),
-        Choice::None => text("No background image").font(app.ty.sized(10.5)).color(rgb(p.muted)),
+        Choice::Inherit => text("Use inherited background").font(app.ty.chat_sized(10.5)).color(rgb(p.muted)),
+        Choice::None => text("No background image").font(app.ty.chat_sized(10.5)).color(rgb(p.muted)),
         Choice::Image(path) => match app.background_preview(path) {
             Some(image) => el().w_full().h(220.0 * s).radius(6.0 * s).clip_rounded(6.0 * s).pixels(image.pixels()),
-            None => text("Loading preview...").font(app.ty.sized(10.5)).color(rgb(p.muted)),
+            None => text("Loading preview...").font(app.ty.chat_sized(10.5)).color(rgb(p.muted)),
         },
     };
     col().key("background-preview").shrink().clip_rounded(6.0 * s).mx(6.0 * s).mt(6.0 * s).mb(6.0 * s).px(16.0 * s).pt(12.0 * s).pb(12.0 * s).radius(6.0 * s)
         .fill(rgb(p.bg)).border(1.0 * s, rgb(p.border))
         .child(row().w_full().center_y().justify_between()
-            .child(text(background.name.clone()).font(app.ty.sized_bold(13.0)).color(rgb(p.fg)).truncate().shrink())
+            .child(text(background.name.clone()).font(app.ty.sans(13.0, 600.0)).color(rgb(p.fg)).truncate().shrink())
             .child(hint))
-        .child(text(background.description.clone()).font(app.ty.sized(10.5)).color(rgb(p.muted)).mt(8.0 * s))
+        .child(text(background.description.clone()).font(app.ty.chat_sized(10.5)).color(rgb(p.muted)).mt(8.0 * s))
         .child(el().w_full().h(1.0).fill(rgb(p.border)).mt(12.0 * s).mb(14.0 * s))
         .child(body)
 }

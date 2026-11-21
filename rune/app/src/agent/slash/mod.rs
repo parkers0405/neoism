@@ -19,7 +19,7 @@ mod view;
 
 pub use picker::{Kind, Picker};
 pub(crate) use goals::{Goal, GoalNotice};
-pub use view::{effect_layer, picker_card, provider_mark};
+pub use view::{effect_layer, picker_card, provider_mark, provider_mark_for};
 
 use catalog::{AuthMethod, ConnectProvider};
 use neoism_protocol::agent::{AgentInfo, ProviderConnectionInfo, ProviderInfo};

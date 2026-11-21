@@ -163,6 +163,7 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/sessions/:session_id/diff", get(session_diff))
         .route("/v2/sessions/:session_id/undo-tree", get(session_undo_tree))
         .route("/v2/sessions/:session_id/prompt", post(v2_prompt))
+        .route("/v2/sessions/:session_id/prompt-if-idle", post(crate::v2_routes::v2_prompt_if_idle))
         .route(
             "/v2/sessions/:session_id/prompt-async",
             post(v2_prompt_async),

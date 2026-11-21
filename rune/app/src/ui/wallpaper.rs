@@ -1,6 +1,7 @@
 //! The window wallpaper (`ui.window.background-image`; GPUiX `AppGeneration` + `config.ts`): the
 //! theme background, the image over it (cover fit, its opacity, 0.35 when unset), then the app
-//! with page-level surfaces left clear so the image shows through. Cards and chrome stay opaque.
+//! with page-level surfaces left clear so the image shows through. Cards, chrome and the
+//! sidebars stay opaque.
 
 use super::theme::rgb;
 use crate::app::App;
@@ -12,6 +13,10 @@ use std::path::PathBuf;
 pub struct Wallpaper {
     pub path: Option<PathBuf>,
     pub opacity: f32,
+    /// Cover the window (cropping) rather than show the whole image.
+    pub cover: bool,
+    /// Gaussian blur, in source pixels; 0 is sharp.
+    pub blur: f32,
 }
 
 impl Wallpaper {
@@ -27,7 +32,7 @@ impl Wallpaper {
             Some(rest) => dirs::home_dir().map(|h| h.join(rest)).unwrap_or_else(|| PathBuf::from(path)),
             None => PathBuf::from(path),
         };
-        Wallpaper { path: Some(path), opacity }
+        Wallpaper { path: Some(path), opacity, cover: image["fit"].as_str() != Some("contain"), blur: image["blur"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0) as f32 }
     }
 
     pub fn active(&self) -> bool { self.path.is_some() }
@@ -49,9 +54,10 @@ impl App {
 /// The image layer behind the whole window (decoded off the UI thread on first use).
 pub fn view(app: &App) -> El {
     let Some(path) = &app.wallpaper.path else { return el() };
-    let Some(image) = app.background_preview(path) else { return el() };
+    // A blurred picture still decoding shows sharp in the meantime.
+    let Some(image) = app.background_image(path, app.wallpaper.blur).or_else(|| app.background_preview(path)) else { return el() };
     el().key("app-wallpaper").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .pixels_fit(image.pixels(), SurfaceFit::Fill)
+        .pixels_fit(image.pixels(), if app.wallpaper.cover { SurfaceFit::Fill } else { SurfaceFit::Fit })
         .opacity(app.wallpaper.opacity)
 }
 
@@ -63,7 +69,7 @@ mod tests {
     #[test]
     fn config_rules() {
         let set = json!({"ui": {"window": {"background-image": {"path": "/tmp/a.png", "opacity": 0.5}}}});
-        assert_eq!(Wallpaper::from_config(&set), Wallpaper { path: Some("/tmp/a.png".into()), opacity: 0.5 });
+        assert_eq!(Wallpaper::from_config(&set), Wallpaper { path: Some("/tmp/a.png".into()), opacity: 0.5, cover: true, blur: 0.0 });
         let default_opacity = json!({"ui": {"window": {"background-image": {"path": "/tmp/a.png"}}}});
         assert_eq!(Wallpaper::from_config(&default_opacity).opacity, 0.35);
         let disabled = json!({"ui": {"window": {"background-image-disabled": true, "background-image": {"path": "/tmp/a.png"}}}});

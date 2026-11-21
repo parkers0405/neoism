@@ -1112,6 +1112,18 @@ pub(crate) async fn handle_socket(
                         }
                         continue;
                     }
+                    if let GitClientMessage::CreateRepository { path } | GitClientMessage::CloneRepository { path, .. } = &message {
+                        // Off the ordered git lane: a clone can run for minutes. The
+                        // acknowledgement tells the client this daemon knows the request.
+                        let tx = git_blame_tx.clone();
+                        let started = GitServerMessage::RepositoryStarted { path: path.clone() };
+                        tokio::spawn(async move {
+                            if tx.send(ServiceServerMessage::GitReply { request_id, message: started }).is_err() { return; }
+                            let message = git_handler::handle_repository(message).await;
+                            let _ = tx.send(ServiceServerMessage::GitReply { request_id, message });
+                        });
+                        continue;
+                    }
                     if matches!(message, GitClientMessage::Blame { .. }) {
                         let tx = git_blame_tx.clone();
                         tokio::spawn(async move {

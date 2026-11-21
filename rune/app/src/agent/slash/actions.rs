@@ -13,6 +13,11 @@ use neoism_protocol::agent::{AgentClientMessage as Client, AgentServerMessage as
 use rune::{Key, KeyEvent, Tx};
 use serde_json::Value;
 
+/// The whole catalog with the model in use ticked, for the model picker's search.
+fn mark_current(catalog: &[Row], model: &str) -> Vec<Row> {
+    catalog.iter().cloned().map(|row| { let current = !row.header && row.value == model; row.current(current) }).collect()
+}
+
 impl App {
     /// The conversation the active agent tab shows.
     pub(crate) fn active_session(&self) -> Option<String> {
@@ -281,7 +286,7 @@ impl App {
                 let catalog = catalog::models(&self.composer.providers);
                 let rows = catalog::model_root(&catalog, &selection.model, &self.composer.recent_models);
                 let current = selection.model.split_once('/').map(|(p, _)| p).unwrap_or_default().to_owned();
-                let mut picker = Picker::new(Kind::Model, "Select model", rows).placeholder("Search recent models or providers").select_value(&current);
+                let mut picker = Picker::new(Kind::Model, "Select model", rows).placeholder("Search every model").search_all(mark_current(&catalog, &selection.model)).select_value(&current);
                 picker.loading = !self.composer.catalog_received;
                 if self.composer.catalog_received && !self.composer.catalog_ready {
                     picker.activity = Some(Activity { status: "Model catalog pending or unavailable".into(), body: "Refresh the model picker to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });
@@ -839,6 +844,7 @@ impl App {
                         None => catalog::model_root(&catalog, &selection.model, &self.composer.recent_models),
                     };
                     picker.replace(rows);
+                    picker.set_search(picker.provider.is_none().then(|| mark_current(&catalog, &selection.model)));
                     picker.activity = None;
                     if !self.composer.catalog_ready {
                         picker.activity = Some(Activity { status: "Model catalog pending or unavailable".into(), body: "Refresh the model picker to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });

@@ -96,6 +96,20 @@ pub enum GitClientMessage {
     DiffFiles {
         paths: Vec<String>,
     },
+    /// Create `path` with its parents and `git init` it. `path` is an absolute host path or
+    /// `~/…`; it is not tied to the socket's selected workspace. An existing folder must be
+    /// empty. Replies [`GitServerMessage::RepositoryStarted`] at once, then
+    /// [`GitServerMessage::RepositoryReady`] or [`GitServerMessage::Error`].
+    CreateRepository {
+        path: String,
+    },
+    /// `git clone <url> <path>`, with the same path rules and replies as
+    /// [`GitClientMessage::CreateRepository`]. Runs without a terminal: a remote that needs
+    /// a password it cannot get from a credential helper or SSH agent fails with git's error.
+    CloneRepository {
+        url: String,
+        path: String,
+    },
 }
 
 impl GitClientMessage {
@@ -115,6 +129,8 @@ impl GitClientMessage {
                 | GitClientMessage::Pull
                 | GitClientMessage::Push
                 | GitClientMessage::Publish
+                | GitClientMessage::CreateRepository { .. }
+                | GitClientMessage::CloneRepository { .. }
         )
     }
 }
@@ -185,6 +201,14 @@ pub enum GitServerMessage {
     },
     Error {
         message: String,
+    },
+    /// A create or clone was accepted and is running; `path` is where it will land.
+    RepositoryStarted {
+        path: String,
+    },
+    /// A create or clone finished: the repository's canonical host path.
+    RepositoryReady {
+        path: String,
     },
     /// Desktop-parity changed-file list (see
     /// [`GitClientMessage::ChangedFiles`]). Also the reply to every

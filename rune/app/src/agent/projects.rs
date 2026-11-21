@@ -1,26 +1,24 @@
-//! The conversations panel's project dropdown (GPUiX `openProjectPicker` over the shared
-//! `ConversationNavigator` in Projects mode). Anchored 6 pt under the panel's directory row, as
-//! wide as the row within 320–420 pt: a 40 pt "Find a project…" field over a 1 pt rule, then
-//! up to six 32 pt rows. Rows (`conversation_project_rows`): the `~` dashboard, the current
+//! The conversations panel's project filter. A rounded popover anchored 6 pt under the
+//! panel's filter button, 300 pt wide: a "Search projects…" field over an accent rule, then
+//! up to six 46 pt rows, each a name over its path. Rows (`conversation_project_rows`): the `~` dashboard, the current
 //! root, the window's other workspace roots and every project that has chats (most recent
-//! first), then "Add workspace…" on the dashboard. The current one carries a 4 pt dot; the
+//! first), then "Add workspace…" on the dashboard. The current one carries a check badge; the
 //! highlight and the list glide on the navigator's 0.12 s springs. Choosing a row re-roots the
 //! workspace (the dashboard is the home directory).
 
 use crate::app::App;
-use crate::ui::theme::rgb;
+use crate::ui::theme::{glyph, rgb};
 use rune::{Color, El, Key, KeyEvent, Spring, TextEdit, Tx, col, el, row, text};
 
-const ROW_H: f32 = 32.0;
-const INPUT_H: f32 = 40.0;
+const ROW_H: f32 = 46.0;
+const INPUT_H: f32 = 44.0;
 const INPUT_FONT: f32 = 14.0;
-const INPUT_PAD: f32 = 14.0;
-const ROW_FONT: f32 = 13.0;
-const PADDING: f32 = 4.0;
-const SEPARATOR: f32 = 1.0;
+const ROW_FONT: f32 = 14.0;
+const PADDING: f32 = 6.0;
+const SEPARATOR: f32 = 1.5;
 const MAX_ROWS: usize = 6;
-/// `file_tree::FRAME_STROKE`.
-const FRAME_STROKE: f32 = 2.25;
+const WIDTH: f32 = 300.0;
+const RADIUS: f32 = 12.0;
 /// `LIST_SCROLL_ANIMATION_SECONDS` (0.12 s): a critically damped spring, ω = 4 / 0.12.
 const MOTION: Spring = Spring::new(0.188, 0.0);
 const LIST_KEY: &str = "project-menu-rows";
@@ -93,10 +91,10 @@ impl App {
         let home = trimmed(&crate::startup::home());
         let current = trimmed(&self.cwd);
         let mut rows = vec![ProjectRow {
-            value: ALL_PROJECTS.into(), title: "~".into(),
-            description: if home.is_empty() { "Home directory unavailable".into() } else { home.clone() },
-            footer: if home.is_empty() { "Unavailable".into() } else { "Dashboard".into() },
-            current: !home.is_empty() && current == home, disabled: home.is_empty(),
+            value: ALL_PROJECTS.into(), title: "All projects".into(),
+            description: String::new(),
+            footer: if home.is_empty() { "Unavailable".into() } else { String::new() },
+            current: self.conv_all || (!home.is_empty() && current == home), disabled: false,
         }];
         let mut discovered: Vec<(u64, String)> = Vec::new();
         for thread in &self.threads {
@@ -108,11 +106,13 @@ impl App {
         }
         discovered.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         let mut seen = std::collections::HashSet::from([home.clone()]);
-        let paths = std::iter::once(current.clone()).chain(self.window_roots()).chain(discovered.into_iter().map(|(_, d)| d));
+        let paths = std::iter::once(current.clone()).chain(self.window_roots()).chain(discovered.into_iter().map(|(_, d)| d))
+            // Projects the catalog knows of whose chats are not loaded yet.
+            .chain(self.catalog.directories().iter().cloned());
         for path in paths {
             if path.is_empty() || path == "/" || !seen.insert(path.clone()) { continue; }
             let title = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(&path).to_owned();
-            rows.push(ProjectRow { value: format!("project:{path}"), title, description: path.clone(), footer: String::new(), current: path == current, disabled: false });
+            rows.push(ProjectRow { value: format!("project:{path}"), title, description: path.clone(), footer: String::new(), current: !self.conv_all && path == current, disabled: false });
         }
         if self.conversations_dashboard() {
             rows.push(ProjectRow { value: ADD_WORKSPACE.into(), title: "Add workspace…".into(), description: "Choose a project folder".into(), footer: String::new(), current: false, disabled: false });
@@ -135,11 +135,13 @@ impl App {
     pub fn activate_project(&mut self, value: &str) {
         self.project_menu = None;
         if value == ALL_PROJECTS {
-            { let home = crate::startup::home(); if !home.is_empty() { self.set_workspace_root(&home); } }
+            // The filter only: the workspace stays in its own directory.
+            self.conv_all = true;
         } else if value == ADD_WORKSPACE {
             self.open_file_browser(crate::browser::Mode::ChooseDirectory);
         } else if let Some(path) = value.strip_prefix("project:") {
-            self.set_workspace_root(path);
+            self.conv_all = false;
+            if trimmed(path) != trimmed(&self.cwd) { self.set_workspace_root(path); }
         }
         self.conv_selected = 0;
         self.conv_header = None;
@@ -163,42 +165,34 @@ impl App {
         true
     }
 
-    /// The selected row's settled rect, for the window cursor.
-    pub fn project_menu_row_rect(&self) -> Option<[f32; 4]> {
-        let menu = self.project_menu.as_ref()?;
-        let list = self.rects.get(LIST_KEY)?;
-        let row_h = ROW_H * self.ty.scale();
-        let slot = menu.selected.checked_sub(menu.top)?;
-        Some([list[0], list[1] + slot as f32 * row_h, list[2], row_h])
-    }
-
     pub fn project_menu_clip(&self) -> Option<[f32; 4]> { self.rects.get(LIST_KEY).copied() }
 }
 
-/// The dropdown over the window, under the directory row.
+/// The dropdown over the window, under the filter button: a rounded popover with a search
+/// field over an accent rule, then the projects, the current one badged with a check.
 pub fn view(app: &App) -> El {
     let Some(menu) = &app.project_menu else { return el() };
     let Some(anchor) = app.rects.get("conv-header:projects").copied() else { return el() };
     let p = app.pal;
     let s = app.ty.scale();
-    let stroke = (FRAME_STROKE * s).max(2.0);
-    let inset = stroke + PADDING * s;
+    let pad = PADDING * s;
     let rows = menu.visible();
     let visible = rows.len().clamp(1, MAX_ROWS);
     let margin = 8.0 * s;
-    let w = anchor[2].clamp(320.0 * s, 420.0 * s).min((app.window[0] - 2.0 * margin).max(0.0));
-    let header = inset + (INPUT_H + SEPARATOR + PADDING) * s;
-    let h = header + inset + ROW_H * s * visible as f32;
+    let w = (WIDTH * s).min((app.window[0] - 2.0 * margin).max(0.0));
+    let row_h = ROW_H * s;
+    let h = 2.0 + INPUT_H * s + SEPARATOR * s + 2.0 * pad + row_h * visible as f32;
     let x = anchor[0].clamp(margin, (app.window[0] - margin - w).max(margin));
     let y = (anchor[1] + anchor[3] + 6.0 * s).clamp(margin, (app.window[1] - margin - h).max(margin));
-    let body_w = w - 2.0 * inset;
-    let row_h = ROW_H * s;
+    let body_w = w - 2.0 - 2.0 * pad;
+    // The popover sits a shade above the window, the way the hover surface does.
+    let panel = rgb(p.bg).mix(rgb(p.surface), 0.55);
 
-    let input = rune::text_input(&menu.query, app.ty.sized(INPUT_FONT))
+    let input = rune::text_input(&menu.query, app.ty.chat_sized(INPUT_FONT))
         .key("project-menu-query")
-        .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
-        .placeholder("Find a project…", rgb(p.muted))
-        .color(rgb(p.fg)).w_full()
+        .caret(rgb(p.fg), crate::ui::cursor::selection(app))
+        .placeholder("Search projects…", rgb(p.muted))
+        .color(rgb(p.fg)).grow(1.0).shrink()
         .on_edit(|a: &mut App| &mut a.project_menu.as_mut().expect("project menu open").query)
         .on_input_change(|a: &mut App, _: &mut Tx| { if let Some(menu) = a.project_menu.as_mut() { menu.reset_selection(); } })
         .on_input_key(|a: &mut App, e: &KeyEvent, _: &mut Tx| a.project_menu_key(e));
@@ -209,35 +203,40 @@ pub fn view(app: &App) -> El {
     let mut content = col().key(format!("project-menu-content:{reset}")).w(body_w).h(rows.len().max(1) as f32 * row_h)
         .absolute(0.0, 0.0).offset(0.0, -(menu.top as f32) * row_h).offset_motion(MOTION);
     if rows.is_empty() {
-        content = content.child(text("No matching projects").key("empty").font(app.ty.sized(ROW_FONT)).color(rgb(p.muted)).absolute(14.0 * s, 9.5 * s));
+        content = content.child(text("No matching projects").key("empty").font(app.ty.chat_sized(ROW_FONT)).color(rgb(p.muted)).absolute(10.0 * s, 9.0 * s));
     } else {
         if rows.get(menu.selected).is_some_and(|r| !r.disabled) {
-            content = content.child(el().key("highlight").w(body_w).h(row_h).radius(3.0 * s).fill(rgb(p.hover))
+            content = content.child(el().key("highlight").w(body_w).h(row_h).radius(7.0 * s).fill(rgb(p.fg).alpha(0.07))
                 .absolute(0.0, 0.0).offset(0.0, menu.selected as f32 * row_h).offset_motion(MOTION));
         }
         for (index, item) in rows.iter().enumerate() {
             let ink = if item.disabled { rgb(p.muted) } else { rgb(p.fg) };
-            let font = app.ty.sized(ROW_FONT);
-            let has_secondary = !item.description.is_empty() || !item.footer.is_empty();
-            let available = body_w - 28.0 * s;
-            let mut line = row().key(format!("project-row:{}", item.value)).w(body_w).h(row_h).absolute(0.0, index as f32 * row_h)
-                .pl(14.0 * s).pr(14.0 * s).center_y().instant_changes()
-                // The current project's dot sits in the row's left padding.
-                .child(el().key("dot").w(4.0 * s).h(4.0 * s).radius(2.0 * s).absolute(5.0 * s, (row_h - 4.0 * s) / 2.0)
-                    .fill(if item.current { ink } else { Color::TRANSPARENT }))
-                // The title keeps its own width up to its budget (36% beside a path), so a long
-                // path truncates instead of squeezing the name away (monospace: 0.6 em a char).
-                .child({
-                    let budget = if has_secondary { available * 0.36 } else { available };
-                    let natural = item.title.chars().count() as f32 * font.size * 0.6;
-                    text(item.title.clone()).key("title").font(font).color(ink).truncate().max_w(budget).min_w(natural.min(budget))
+            let icon = match item.value.as_str() {
+                ADD_WORKSPACE => glyph::FOLDER_PLUS_LINE,
+                _ => glyph::FOLDER_LINE,
+            };
+            // The current project's badge: a check on the accent, ringed in the panel's colour.
+            let mut mark = el().key("icon").w(18.0 * s).h(18.0 * s).center()
+                .child(match item.value.as_str() {
+                    ADD_WORKSPACE => text(icon).font(app.ty.icon_sized(16.0)).color(rgb(p.dim)),
+                    _ => text(crate::ui::icons::FOLDER_CLOSED).font(app.ty.icon_sized(14.0)).color(rgb(p.folder)),
                 });
-            if !item.footer.is_empty() {
-                line = line.child(text(item.footer.clone()).key("footer").font(font).color(rgb(p.muted)).ml(10.0 * s).truncate().shrink());
+            if item.current {
+                mark = mark.child(el().key("check").w(13.0 * s).h(13.0 * s).radius(6.5 * s).fill(rgb(p.blue)).border(2.0 * s, panel)
+                    .absolute(9.0 * s, 8.0 * s).center()
+                    .child(text(glyph::CHECK).font(app.ty.icon_sized(7.0)).color(rgb(p.bg))));
             }
-            if !item.description.is_empty() {
-                line = line.child(text(item.description.clone()).key("description").font(font).color(rgb(p.muted)).ml(10.0 * s).truncate().shrink());
+            // The name, with its path on a second line under it.
+            let secondary = if item.description.is_empty() { &item.footer } else { &item.description };
+            let mut words = col().grow(1.0).shrink().min_w(0.0).gap(1.0 * s)
+                .child(text(item.title.clone()).key("title").font(app.ty.sans(ROW_FONT, 500.0)).color(ink).truncate());
+            if !secondary.is_empty() {
+                words = words.child(text(secondary.clone()).key("description").font(app.ty.chat_sized(11.5)).color(rgb(p.muted)).truncate());
             }
+            let line = row().key(format!("project-row:{}", item.value)).w(body_w).h(row_h).absolute(0.0, index as f32 * row_h)
+                .px(10.0 * s).gap(10.0 * s).center_y().instant_changes()
+                .child(mark)
+                .child(words);
             let value = item.value.clone();
             let disabled = item.disabled;
             content = content.child(line
@@ -247,7 +246,7 @@ pub fn view(app: &App) -> El {
                 .on_press(move |a: &mut App| if !disabled { a.activate_project(&value) }));
         }
     }
-    let list = el().key(LIST_KEY).w(body_w).h(visible as f32 * row_h).clip_rounded(0.0)
+    let list = el().key(LIST_KEY).w(body_w).h(visible as f32 * row_h).clip_rounded(7.0 * s)
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
         .on_wheel(|a: &mut App, e: rune::WheelEvent, _: &mut Tx| {
             let Some(menu) = a.project_menu.as_mut() else { return false };
@@ -258,17 +257,15 @@ pub fn view(app: &App) -> El {
         })
         .child(content);
 
-    // `draw_modal_frame_top`: the surface-coloured stroke round the top corners, the panel fill.
-    let radius = 8.0 * s;
     let card = col().key("project-menu").w(w).h(h).absolute(x, y)
-        .fill(rgb(p.surface)).corners([radius, radius, 0.0, 0.0]).padding(stroke)
+        .fill(panel).radius(RADIUS * s).border(1.0, rgb(p.fg).alpha(0.1))
+        .shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45))
         .on_press(|_: &mut App| {})
-        .child(col().w_full().grow(1.0).fill(rgb(p.bg)).corners([(radius - stroke).max(0.0), (radius - stroke).max(0.0), 0.0, 0.0])
-            .padding(PADDING * s)
-            .child(row().w_full().h(INPUT_H * s).px(INPUT_PAD * s).center_y().child(input))
-            .child(el().w_full().h(SEPARATOR * s).fill(rgb(p.border)))
-            .child(el().h(PADDING * s))
-            .child(list));
+        .child(row().w_full().h(INPUT_H * s).px(14.0 * s).gap(9.0 * s).center_y()
+            .child(text(glyph::SEARCH_LINE).font(app.ty.icon_sized(14.0)).color(rgb(p.muted)))
+            .child(input))
+        .child(el().h(SEPARATOR * s).mx(pad + 4.0 * s).fill(rgb(p.blue).alpha(0.75)))
+        .child(el().w_full().padding(pad).child(list));
     el().key("project-menu-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .on_press(|a: &mut App| a.close_project_menu())
         .child(card)

@@ -13,6 +13,10 @@ impl App {
         if self.git_panel.open && self.focus == crate::app::Focus::Details && self.git_panel.message.focused {
             return Some(&mut self.git_panel.message);
         }
+        if self.project_add.is_some() { return self.project_add.as_mut().map(|add| &mut add.query); }
+        if self.focus == crate::app::Focus::Sidebar && self.conv_query.focused && self.project_menu.is_none() {
+            return Some(&mut self.conv_query);
+        }
         enum Field { Palette, Finder, Composer, Filter(u64), Draft(usize) }
         let tab = self.active_tab().id;
         let field = if self.picker.as_ref().is_some_and(|p| p.query.focused) { Field::Palette }

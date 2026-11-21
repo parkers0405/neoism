@@ -29,6 +29,10 @@ fn width_of(text: &str, size: f32) -> f32 { text.chars().count() as f32 * size *
 
 fn mono(size: f32, bold: bool) -> TextStyle { TextStyle::new(size, if bold { 700.0 } else { 400.0 }).mono() }
 
+/// The card's words: the proportional UI face. Footers, `esc` and activity logs stay mono
+/// (they are measured to right-align and wrap).
+fn sans(size: f32, weight: f32) -> TextStyle { TextStyle::new(size, weight) }
+
 /// Greedy word wrap at `width` points.
 fn wrap(text: &str, width: f32, size: f32) -> Vec<String> {
     let max = ((width / (size * ADVANCE)).floor() as usize).max(1);
@@ -88,7 +92,10 @@ pub fn picker_card(app: &App) -> El {
     let height = header_h + visible as f32 * ROW_H * s;
     let y = (cy - height - 6.0 * s).max(top);
 
-    let mut card = el().key("prompt-picker").w(cw).h(height).fill(rgb(p.bg)).radius(RADIUS * s).border(s, rgb(p.border))
+    // The window's own background, set off by its border and shadow.
+    let panel = rgb(p.bg);
+    let mut card = el().key("prompt-picker").w(cw).h(height).fill(panel).radius(RADIUS * s).border(1.0, rgb(p.fg).alpha(0.1))
+        .shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45))
         .transition(rune::Transition::none())
         .clip_rounded(RADIUS * s)
         .on_press(|_: &mut App| {})
@@ -119,7 +126,7 @@ pub fn picker_card(app: &App) -> El {
     let title_x = if header_icon { 40.0 } else { 14.0 } * s;
     // Header: title and esc; then the query row, or the activity in its place.
     header = header
-        .child(text(picker.title.clone()).font(mono(13.0 * s, true)).color(rgb(p.fg)).truncate().w(cw - title_x - 48.0 * s).absolute(title_x, 9.0 * s))
+        .child(text(picker.title.clone()).font(sans(13.0 * s, 600.0)).color(rgb(p.fg)).truncate().w(cw - title_x - 48.0 * s).absolute(title_x, 9.0 * s))
         .child(text("esc").font(mono(12.0 * s, false)).color(rgb(p.muted)).absolute(cw - 14.0 * s - width_of("esc", 12.0 * s), 9.0 * s)
             .on_press(|a: &mut App| { if !a.picker_back() { a.close_prompt_picker(); } }));
     if let Some(a) = &picker.activity {
@@ -138,7 +145,10 @@ pub fn picker_card(app: &App) -> El {
     }
     if picker.activity.as_ref().is_none_or(|a| a.show_input) {
         let query_y = if picker.activity.is_some() { header_h - 22.0 * s } else { 31.0 * s };
-        header = header.child(query_row(app, picker, cw - 28.0 * s).absolute(14.0 * s, query_y));
+        // A search glass leads the query, as in the other pickers.
+        header = header
+            .child(text(crate::ui::theme::glyph::SEARCH_LINE).font(TextStyle::new(14.0 * s, 400.0).family(NERD)).color(rgb(p.muted)).absolute(14.0 * s, query_y + 1.0 * s))
+            .child(query_row(app, picker, cw - 50.0 * s).absolute(36.0 * s, query_y));
     }
     card = card.child(header);
 
@@ -158,7 +168,7 @@ pub fn picker_card(app: &App) -> El {
         content = content.child(el().key("picker-highlight").w(cw).h(row_h).absolute(0.0, 0.0)
             .transition(rune::Transition::none())
             .offset(0.0, picker.selected as f32 * row_h).offset_motion(CURSOR_SPRING)
-            .child(el().transition(rune::Transition::none()).w(cw - 12.0 * s).h(row_h - 6.0 * s).radius(9.0 * s).fill(rgb(p.hover)).absolute(6.0 * s, 3.0 * s)));
+            .child(el().transition(rune::Transition::none()).w(cw - 12.0 * s).h(row_h - 4.0 * s).radius(9.0 * s).fill(rgb(p.fg).alpha(0.07)).absolute(6.0 * s, 2.0 * s)));
     }
     let span = first.saturating_sub(visible * 2)..(first + visible * 3).min(rows.len());
     for (index, row) in rows.iter().enumerate().skip(span.start).take(span.len()) {
@@ -167,25 +177,26 @@ pub fn picker_card(app: &App) -> El {
         if row.header {
             if !row.title.is_empty() {
                 let x = if row.icon.is_some() { 48.0 } else { 22.0 } * s;
-                item = item.child(text(row.title.clone()).font(mono(13.5 * s, true)).color(rgb(p.cyan)).truncate().w(cw - x - 22.0 * s).absolute(x, 16.0 * s));
+                item = item.child(text(row.title.clone()).font(sans(11.5 * s, 600.0)).color(rgb(p.muted)).truncate().w(cw - x - 22.0 * s).absolute(x, 20.0 * s));
             }
             content = content.child(item);
             continue;
         }
         if row.current {
-            item = item.child(text("\u{2713}").font(mono(11.0 * s, false)).color(rgb(p.accent)).absolute(cw - 30.0 * s, 15.0 * s));
+            item = item.child(el().w(15.0 * s).h(15.0 * s).radius(7.5 * s).fill(rgb(p.blue)).center().absolute(cw - 34.0 * s, (ROW_H - 15.0) * 0.5 * s)
+                .child(text(crate::ui::theme::glyph::CHECK).font(TextStyle::new(8.0 * s, 400.0).family(NERD)).color(rgb(p.bg))));
         }
         if let Some(icon) = row.icon.clone() {
             item = item.child(row_icon(app, icon, 18.0 * s).key(format!("picker-row-icon:{index}")).absolute(22.0 * s, (ROW_H - 18.0) * 0.5 * s));
         }
         let title_x = if row.icon.is_some() || grouped { 48.0 } else { 22.0 } * s;
         let footer_w = if row.footer.is_empty() { 0.0 } else { width_of(&row.footer, 11.0 * s) + 22.0 * s + if row.status.is_some() { 12.0 * s } else { 0.0 } };
-        let footer_x = cw - footer_w - if row.current { 24.0 * s } else { 0.0 };
+        let footer_x = cw - footer_w - if row.current { 28.0 * s } else { 0.0 };
         let title_y = if row.description.is_empty() { 13.0 } else { 5.0 } * s;
-        item = item.child(text(row.title.clone()).font(mono(14.0 * s, true)).color(rgb(p.fg)).truncate()
+        item = item.child(text(row.title.clone()).font(sans(14.0 * s, 500.0)).color(rgb(p.fg)).truncate()
             .max_w((footer_x - title_x - 14.0 * s).max(48.0)).absolute(title_x, title_y));
         if !row.description.is_empty() {
-            item = item.child(text(row.description.clone()).font(mono(12.0 * s, false)).color(rgb(p.dim)).truncate()
+            item = item.child(text(row.description.clone()).font(sans(12.0 * s, 400.0)).color(rgb(p.muted)).truncate()
                 .max_w((footer_x - title_x - 12.0 * s).max(48.0)).absolute(title_x, 25.0 * s));
         }
         if !row.footer.is_empty() {
@@ -215,7 +226,7 @@ pub fn picker_card(app: &App) -> El {
                 card = card.child(el().transition(rune::Transition::none()).w(w).h(10.0 * s).radius(5.0 * s).fill(rgb(p.surface)).absolute(22.0 * s, header_h + i as f32 * ROW_H * s + 18.0 * s));
             }
         } else if picker.activity.is_none() {
-            card = card.child(text("No results").transition(rune::Transition::none()).instant_changes().font(mono(13.0 * s, false)).color(rgb(p.muted)).absolute(22.0 * s, header_h + (ROW_H - 14.0) * 0.5 * s));
+            card = card.child(text("No results").transition(rune::Transition::none()).instant_changes().font(sans(13.0 * s, 400.0)).color(rgb(p.muted)).absolute(22.0 * s, header_h + (ROW_H - 14.0) * 0.5 * s));
         }
     }
 
@@ -233,17 +244,17 @@ fn query_row(app: &App, picker: &Picker, width: f32) -> El {
     let s = app.ty.scale();
     if picker.mention.is_some() {
         return text(if picker.query.text.is_empty() { "Type a skill name".into() } else { format!("${}", picker.query.text) })
-            .font(mono(13.0 * s, false)).color(rgb(p.blue)).w(width).truncate();
+            .font(sans(13.5 * s, 400.0)).color(rgb(p.blue)).w(width).truncate();
     }
     if picker.kind == Kind::Slash {
         let query = app.active_tab().draft.text.trim_start_matches('/').to_owned();
         return if query.is_empty() {
-            text(picker.placeholder.clone()).font(mono(13.0 * s, false)).color(rgb(p.muted)).ml(5.0 * s)
+            text(picker.placeholder.clone()).font(sans(13.5 * s, 400.0)).color(rgb(p.muted)).ml(5.0 * s)
         } else {
-            text(query).font(mono(13.0 * s, false)).color(rgb(p.fg))
+            text(query).font(sans(13.5 * s, 400.0)).color(rgb(p.fg))
         };
     }
-    let mut input = rune::text_input(&picker.query, mono(13.0 * s, false))
+    let mut input = rune::text_input(&picker.query, sans(13.5 * s, 400.0))
         // Keys through this field (list arrows, wheel-free navigation) commit animated: without
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
@@ -269,6 +280,11 @@ pub fn provider_mark(app: &App, size: f32) -> El {
         Some(index) => row_icon(app, Icon::Provider(index), size),
         None => el(),
     }
+}
+
+/// A provider's mark by its id, for surfaces outside the composer (the conversations panel).
+pub fn provider_mark_for(app: &App, provider: &str, size: f32) -> Option<El> {
+    super::catalog::provider_logo(provider).map(|index| row_icon(app, Icon::Provider(index), size))
 }
 
 fn row_icon(app: &App, icon: Icon, size: f32) -> El {

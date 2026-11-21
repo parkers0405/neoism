@@ -16,10 +16,10 @@ impl KeyGroup {
         // Short + uppercase: these render in the bundled Press Start 2P
         // pixel face (same as the notes / agent section headers).
         match self {
-            KeyGroup::Global => "GLOBAL",
-            KeyGroup::Terminal => "TERMINAL",
-            KeyGroup::Editor => "EDITOR",
-            KeyGroup::Agent => "AGENT",
+            KeyGroup::Global => "Global",
+            KeyGroup::Terminal => "Terminal",
+            KeyGroup::Editor => "Editor",
+            KeyGroup::Agent => "Agent",
         }
     }
 }
@@ -169,8 +169,8 @@ pub const KEYBINDS: &[KeybindDef] = &[
         "closesplitortab",
         "Close tab / split",
         KeyGroup::Global,
-        "super",
-        "w",
+        "",
+        "",
         "",
         "",
     ),

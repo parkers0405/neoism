@@ -10,7 +10,7 @@ use crate::ui::follow::Reveal;
 use rune::{Color, El, ScrollSpec, col, el, row, text};
 
 pub(crate) const ROW_H: f32 = 26.0;
-const PAD_X: f32 = 12.0;
+const PAD_X: f32 = 8.0;
 const INDENT: f32 = 14.0;
 const FONT: f32 = 13.0;
 const ICON_GAP: f32 = 8.0;
@@ -39,7 +39,7 @@ pub fn view(app: &App) -> El {
     let rows = tree.rows();
     let focused = app.focus == Focus::Sidebar;
     let notes = app.sidebar == Some(crate::app::Sidebar::Notes);
-    let mut list = col().w_full();
+    let mut list = col().w_full().px(6.0 * s);
     for (index, item) in rows.iter().enumerate() {
         // While something is dragged: the lifted row dims, the folder it would land in is
         // tinted and shivers (`tree/drag.rs`).
@@ -58,13 +58,13 @@ pub fn view(app: &App) -> El {
         let icon_font = TextStyle::new(FONT * s, 400.0).family(NERD);
         let chevron_font = TextStyle::new((INDENT - 6.0) * s, 400.0).family(NERD);
         let mut line = row().key(format!("tree:{}", item.path)).w_full().h(ROW_H * s)
-            .pl(PAD_X * s + item.depth as f32 * INDENT * s).pr(PAD_X * s).center_y()
+            .pl(PAD_X * s + item.depth as f32 * INDENT * s).pr(PAD_X * s).center_y().radius(6.0 * s)
             .fill(if landing.is_some() { rgb(p.accent).alpha(0.22) } else if selected && focused { rgb(p.hover) } else { Color::TRANSPARENT })
             .hover(rgb(p.hover).alpha(0.5))
             .opacity(if lifted { 0.35 } else { 1.0 })
             .child(el().w(INDENT * s).center().child_opt(chevron.map(|c| text(c).font(chevron_font).color(rgb(p.muted)))))
             .child(el().w(FONT * s).center().child(text(glyph).font(icon_font).color(rgb(icon_color))))
-            .child(text(item.entry.name.clone()).font(app.ty.sized(FONT)).color(rgb(label_color)).ml(ICON_GAP * s).truncate().grow(1.0).shrink())
+            .child(text(item.entry.name.clone()).font(app.ty.chat_sized(FONT)).color(rgb(label_color)).ml(ICON_GAP * s).truncate().grow(1.0).shrink())
             // The people with their cursor in this file, at the row's right end.
             .child_opt((!item.entry.is_dir).then(|| {
                 let path = tree.open_path(&item.path);
@@ -90,12 +90,12 @@ pub fn view(app: &App) -> El {
     }
     let mirror = app.tree_follow.scroll.clone();
     let notch = 3.0 * crate::editor::view::line_height(app);
-    col().key("file-tree").w_full().h_full().fill(app.surface(p.bg))
+    col().key("file-tree").w_full().h_full().fill(rgb(p.bg))
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .child({
             let notes = app.sidebar == Some(crate::app::Sidebar::Notes);
             let mut header = row().w_full().h(HEADER_H * s).pl(16.0 * s).pr(8.0 * s).center_y()
-                .child(text(if notes { "Notes" } else { "File Tree" }).font(app.ty.sized_bold(14.0)).color(rgb(p.fg)));
+                .child(text(if notes { "Notes" } else { "File Tree" }).font(app.ty.sans(13.0, 600.0)).color(rgb(p.fg)));
             // Notes are made here: a new note or a new folder beside the selection.
             if notes && app.notes.root.is_some() {
                 let button = |key: &'static str, glyph: &'static str, folder: bool| el().key(key).w(26.0 * s).h(26.0 * s).radius(6.0 * s).center()

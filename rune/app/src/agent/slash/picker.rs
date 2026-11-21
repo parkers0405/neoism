@@ -107,6 +107,9 @@ pub struct Picker {
     pub placeholder: String,
     pub query: TextEdit,
     rows: Vec<Row>,
+    /// What a typed query searches instead of `rows`: on the model picker's first screen,
+    /// every model of every provider, not only the recents and provider names shown.
+    search: Option<Vec<Row>>,
     filtered: Vec<Row>,
     pub selected: usize,
     /// First visible row of the scrolled window.
@@ -139,7 +142,7 @@ impl Picker {
         let mut query = TextEdit::new("");
         query.focused = kind != Kind::Slash;
         let mut picker = Picker {
-            kind, title: title.into(), placeholder: "Search".into(), query, rows: Vec::new(), filtered: Vec::new(),
+            kind, title: title.into(), placeholder: "Search".into(), query, rows: Vec::new(), search: None, filtered: Vec::new(),
             selected: 0, top: 0, loading: false, activity: None, provider: None, last_provider: None,
             limit: std::cell::Cell::new(MAX_ROWS), wheel: 0.0,
             usage: super::usage::Usage::default(), usage_error: None, usage_scroll: 0.0,
@@ -158,6 +161,11 @@ impl Picker {
     }
 
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Picker { self.placeholder = placeholder.into(); self }
+
+    /// Search `rows` (grouped under their headers) whenever a query is typed.
+    pub fn search_all(mut self, rows: Vec<Row>) -> Picker { self.set_search(Some(rows)); self }
+
+    pub fn set_search(&mut self, rows: Option<Vec<Row>>) { self.search = rows; self.refilter(); }
 
     /// Select the row whose value is `value` (when present), else the first selectable.
     pub fn select_value(mut self, value: &str) -> Picker {
@@ -208,7 +216,7 @@ impl Picker {
         let mut out = Vec::new();
         let mut header: Option<&Row> = None;
         let (mut header_matches, mut emitted) = (false, false);
-        for row in &self.rows {
+        for row in self.search.as_ref().unwrap_or(&self.rows) {
             if row.header {
                 header_matches = row.matches(&words);
                 header = Some(row);

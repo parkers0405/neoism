@@ -273,7 +273,8 @@ impl App {
         let current = b.current.clone();
         b.remember(&current);
         match picked {
-            Picked::Directory(path) => self.change_directory(&path),
+            // Opened from the add-project card: the pick is where the project goes.
+            Picked::Directory(path) => if !self.project_location_picked(&path) { self.change_directory(&path) },
             Picked::Image(path) => { self.attach_images(vec![path]); }
         }
     }

@@ -111,6 +111,58 @@ video so agents can read the motion without playing it. Extract any frame with
 - **Chrome**: 55 px activity rail (menu, files, notes, agent, search, servers with green dot); workspace tab row
   (folder icon + name, close, `+`); pane tab row (icon, title, close, `+`, active tab brighter); status line with
   mode pill (`NORMAL`/`AGENT`/`TERMINAL`), cwd pill, git branch chip, LSP chip, position, FPS pill.
+- **Agent sidebar** (deliberately departs from `04-sidebar-conversations.png`): a search field with the project
+  filter and New chat as icon buttons beside it; conversations are rounded cards with the project and age on top
+  and the title and its model's provider mark below. The filter is a rounded popover ("Search projects…" over an
+  accent rule, the current project badged with a check). `/` focuses the search; Escape clears, then leaves it.
+  There are no Pinned/Recent headings: a pinned card carries a pin beside its age and leads the list.
+  The sidebars, Settings (breadcrumb header, search above the categories), the palette, finder and menus use
+  the proportional chat font (`Type::sans`, titles at 600) and line icons (`glyph::*_LINE`); new panels should
+  follow them. Key hints, paths in previews and code stay monospaced.
+- **Settings** (departs from `27-settings.png`): the rail's top button is a gear that opens it; there is no app
+  menu button. The sidebar holds the search, then General, Appearance, Themes, Keybindings and the grouped pages
+  (Code: Editor, Markdown, Terminal; Agents: Agent, Presence; System: Interface, Platform, Developer), then
+  More (Backgrounds, Database, About). `editor.markdown.*` settings live on Markdown, apart from the code
+  editor's. A page is a title, a summary and rounded cards of rows: name and description left, control right.
+  No window cursor sits on the page; the keyboard row is tinted. Themes is a gallery: the hovered (else current)
+  theme's syntax sample on top, then every theme as a card in its own colours; a click applies it. Scenes:
+  `settings`, `settings-themes`, `settings-backgrounds`, `keybinds`. Cmd+W no longer closes a tab by default
+  (rebindable in Keybindings). Rows inside a page sit under section headings (`Settings::section`: Fonts,
+  Effects, Window, Panels, …). Themes and Backgrounds open with a small mock Neoism window in the theme's
+  colours; Backgrounds draws the picture behind its conversation, with an opacity slider (committed on release),
+  Cover/Contain and the gallery of installed pictures. `ui.window.background-image.fit` is honoured by the window.
+- **All-projects catalog** (`agent/catalog.rs`): on `~` or with the filter on "All projects" the sidebar asks the
+  daemon for the project list (`ListSessionProjects`) and each project's chats five at a time
+  (`ListProjectSessions`). The first twelve projects load at once and the next twelve as the list is scrolled
+  toward its end; "Load more" under a project fetches its next five (the only manual step, a per-project limit).
+  One project's own list pages the same way: thirty chats, then older pages as it nears its end. A refresh keeps what was loaded beyond the first
+  page. `App::threads` stays the flat list (pins, then loaded pages). A single project still uses `ListThreads`.
+  The filter's rows are two lines: the project's name over its path.
+- **Conversation status mark**: four squares in a card's top right, in place of its age, while it is not idle
+  (`sidebar::status_mark`). Still on a yellow diamond when waiting on you; moving while at work, each kind its own pattern on the shared
+  `tools::Spinner` live squares: ink orbit for a running reply, red chase round the diamond for background work,
+  green draw-in and out while compacting. A conversation that goes from working to idle while it is not on
+  screen shows a still white diamond (finished, unread) until it is opened or works again; only changes seen
+  while the app runs count, and the set is not saved (`App::finished`, `note_activity`). `poll` ticks the spinner while the open panel has a conversation at
+  work (`sidebar_working`). `NEOISM_RUNE_STATUS_MARKS=1 --scene projects-menu` shows them all.
+- **Add project** (`agent/project_add.rs`): the folder button between the filter and New chat opens a centred
+  card: a search row with a back arrow, the sources (New project, Local folder, Git URL, GitHub repository) and a
+  footer of key hints. Local folder opens the folder browser. The others ask for a name or address in the same
+  card and send the daemon `Git::CreateRepository` / `Git::CloneRepository`; it answers `RepositoryStarted` at
+  once, then `RepositoryReady` (the workspace moves into the project) or `Error` (shown in the card). A daemon
+  that does not acknowledge within 2.5 s predates the request: the same work then runs as a shell line in the
+  workspace's terminal. New projects go beside the current project, or in `~/projects` from the home directory,
+  or wherever "Change" picks in the folder browser. The daemon refuses a non-empty target, relative paths, `..`
+  and anything but https/http/ssh/git/file or `user@host:path` addresses (never a `name::` helper transport). Scenes: `project-add`,
+  `project-add-github`.
+- **Model picker**: typing on its first screen searches every model of every provider (grouped under the
+  provider's name), not only the recents and providers listed (`Picker::search_all`).
+- **Settings rows**: Vim mode sits on General; `appearance.mashup-pack` and `appearance.palette` are hidden
+  (`settings::HIDDEN`). Backgrounds has a blur slider beside opacity; the window blurs the picture off the UI
+  thread at a reduced size (`backgrounds::decode_blurred`) and shows it sharp until that is ready.
+- **Wallpaper**: the file tree, notes and agent sidebars stay opaque over a background picture; only the
+  conversation, editor and home panes let it through.
+- **Question rail**: the ticks sit in the transcript's left gutter and the hover bubble opens to their right. Scenes: `projects-menu`, `conversations-dashboard`, `family`.
 - **Agent timeline**: transcript column with generous padding; user messages are right-aligned blue bubbles with a
   tail and the animated pixel orb avatar; assistant text is plain on black with inline colored terms; code blocks
   are rounded surface cards; the composer floats over the bottom of the transcript with a starfield inside the card

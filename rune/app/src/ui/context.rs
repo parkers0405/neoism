@@ -297,7 +297,7 @@ pub fn menu_view(app: &App) -> El {
             .on_press(move |a: &mut App| a.run_context(index))
             .child(row().w_full().h_full().px(8.0 * s).center_y().justify_between().radius(radius)
                 .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT })
-                .child(text(item.label(&menu.target)).font(app.ty.sized(FONT)).color(rgb(if matches!(item, Command::Delete | Command::DeleteChat) { p.red } else { p.fg })))
+                .child(text(item.label(&menu.target)).font(app.ty.chat_sized(FONT)).color(rgb(if matches!(item, Command::Delete | Command::DeleteChat) { p.red } else { p.fg })))
                 .child(text(item.hint().to_string()).font(app.ty.sized(FONT)).color(rgb(p.muted)))));
     }
     el().key("context-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
@@ -318,13 +318,13 @@ pub fn prompt_view(app: &App) -> El {
     let mut card = col().key("context-prompt").w((420.0 * s).min(app.window[0] - 16.0)).padding(18.0 * s).radius(13.0 * s).gap(8.0 * s)
         .fill(rgb(p.bg)).border(1.0, rgb(p.border))
         .on_press(|_: &mut App| {})
-        .child(text(prompt.title.clone()).font(app.ty.sized_bold(15.0)).color(rgb(p.fg)))
-        .child(text(prompt.body.clone()).font(app.ty.sized(12.0)).color(rgb(p.dim)).wrap().w_full());
+        .child(text(prompt.title.clone()).font(app.ty.sans(15.0, 600.0)).color(rgb(p.fg)))
+        .child(text(prompt.body.clone()).font(app.ty.chat_sized(12.0)).color(rgb(p.dim)).wrap().w_full());
     if !prompt.meta.is_empty() {
-        card = card.child(text(prompt.meta.clone()).font(app.ty.sized(12.0)).color(rgb(p.muted)).wrap().w_full());
+        card = card.child(text(prompt.meta.clone()).font(app.ty.chat_sized(12.0)).color(rgb(p.muted)).wrap().w_full());
     }
     if let Some(edit) = &prompt.input {
-        let input = rune::text_input(edit, app.ty.sized(13.0)).key("context-prompt-field")
+        let input = rune::text_input(edit, app.ty.chat_sized(13.0)).key("context-prompt-field")
             .placeholder("name".to_owned(), rgb(p.muted)).color(rgb(p.fg)).w_full().single_line()
             .caret(rgb(p.fg), crate::ui::cursor::selection(app))
             .on_edit(|a: &mut App| a.prompt.as_mut().and_then(|prompt| prompt.input.as_mut()).expect("prompt field"))
@@ -334,7 +334,7 @@ pub fn prompt_view(app: &App) -> El {
     }
     let button = |label: &str, key: &str, ink: u32, accept: bool| row().h(30.0 * s).px(12.0 * s).gap(8.0 * s).center_y().radius(6.0 * s)
         .fill(if accept { rgb(p.hover) } else { Color::TRANSPARENT }).hover(rgb(p.hover))
-        .child(text(label.to_owned()).font(app.ty.sized(13.0)).color(rgb(ink)))
+        .child(text(label.to_owned()).font(app.ty.chat_sized(13.0)).color(rgb(ink)))
         .child(text(key.to_owned()).font(app.ty.sized(12.0)).color(rgb(p.muted)))
         .on_press(move |a: &mut App| if accept { a.accept_prompt() } else { a.prompt = None });
     let danger = matches!(prompt.command, Command::Delete | Command::DeleteChat);

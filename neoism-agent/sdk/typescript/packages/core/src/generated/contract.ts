@@ -416,6 +416,7 @@ export interface ApiOperations {
   "v2.sessions.projects": { method: "GET"; path: "/v2/session-projects"; input: { signal?: AbortSignal; }; responses: { "200": { items: Array<{ directory: string; updatedMs: number; }>; pinnedSessions: Array<Session>; }; }; response: { items: Array<{ directory: string; updatedMs: number; }>; pinnedSessions: Array<Session>; }; };
   "v2.sessions.prompt": { method: "POST"; path: "/v2/sessions/{session_id}/prompt"; input: { path: { session_id: string; }; body: PromptRequest; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
   "v2.sessions.promptAsync": { method: "POST"; path: "/v2/sessions/{session_id}/prompt-async"; input: { path: { session_id: string; }; body: PromptRequest; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
+  "v2.sessions.promptIfIdle": { method: "POST"; path: "/v2/sessions/{session_id}/prompt-if-idle"; input: { path: { session_id: string; }; body: PromptRequest; signal?: AbortSignal; }; responses: { "204": void; }; response: void; };
   "v2.sessions.queue.clear": { method: "DELETE"; path: "/v2/sessions/{session_id}/queue"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": SessionQueueMutation; }; response: SessionQueueMutation; };
   "v2.sessions.queue.list": { method: "GET"; path: "/v2/sessions/{session_id}/queue"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": SessionQueueInfo; }; response: SessionQueueInfo; };
   "v2.sessions.queue.pop": { method: "POST"; path: "/v2/sessions/{session_id}/queue/pop"; input: { path: { session_id: string; }; signal?: AbortSignal; }; responses: { "200": SessionQueueMutation; }; response: SessionQueueMutation; };
@@ -624,6 +625,7 @@ export const operationDescriptors = {
   "v2.sessions.projects": {"method":"GET","path":"/v2/session-projects","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.prompt": {"method":"POST","path":"/v2/sessions/{session_id}/prompt","transport":"http","requestMediaType":"application/json","responses":{"204":[]}},
   "v2.sessions.promptAsync": {"method":"POST","path":"/v2/sessions/{session_id}/prompt-async","transport":"http","requestMediaType":"application/json","responses":{"204":[]}},
+  "v2.sessions.promptIfIdle": {"method":"POST","path":"/v2/sessions/{session_id}/prompt-if-idle","transport":"http","requestMediaType":"application/json","responses":{"204":[]}},
   "v2.sessions.queue.clear": {"method":"DELETE","path":"/v2/sessions/{session_id}/queue","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.queue.list": {"method":"GET","path":"/v2/sessions/{session_id}/queue","transport":"http","response":"json","responses":{"200":["application/json"]}},
   "v2.sessions.queue.pop": {"method":"POST","path":"/v2/sessions/{session_id}/queue/pop","transport":"http","response":"json","responses":{"200":["application/json"]}},

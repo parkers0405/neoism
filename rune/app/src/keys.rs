@@ -13,6 +13,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.prompt.is_some() { return app.context_prompt_key(event); }
     if app.context.is_some() { return app.context_key(event); }
     if app.form.is_some() { return app.form_key(event, tx); }
+    if app.project_add.is_some() && app.browser.is_none() { app.project_add_key(event); return true; }
     if app.browser.is_some() { return app.browser_key(event, tx) || shortcut(app, event, tx); }
     if app.composer.picker.as_ref().is_some_and(|p| matches!(p.kind, crate::agent::slash::Kind::Usage | crate::agent::slash::Kind::Tasks | crate::agent::slash::Kind::Goals)) {
         return app.picker_key(event, tx);
@@ -325,11 +326,8 @@ impl App {
         use crate::ui::cursor::tab_bar;
         let scale = 1.0;
         if self.menu.is_some() { return self.rects.get("menu-row").map(|r| crate::ui::menu::cursor_rect(self, *r)); }
-        if self.settings.is_some() {
-            let settings = self.settings.as_ref()?;
-            let index = *settings.visible().get(settings.focused)?;
-            return self.rects.get(&format!("settings-control:{index}")).map(|r| crate::settings::view::cursor_rect(self, *r));
-        }
+        // Settings shows its own focus (the row's tint, the fields' carets).
+        if self.settings.is_some() { return None; }
         if self.browser.is_some() { return self.rects.get("browser-row").filter(|_| self.browser.as_ref().is_some_and(|b| b.selected.is_some())).map(|r| crate::tree::view::cursor_rect(self, *r)); }
         // Search and commands own the insertion caret. Result navigation only changes their
         // highlight; it must never steal the cursor from the editable query (including IME).
@@ -343,8 +341,9 @@ impl App {
                 || line[1] < clip[1] - 1.0 || line[1] + line[3] > clip[1] + clip[3] + 1.0 { return None; }
             return Some(crate::ui::cursor::block_for_caret(line, self.ty.sized(14.0).size));
         }
-        let row = if self.project_menu.is_some() { self.project_menu_row_rect().map(|r| (r, 14.0, 13.0)) }
-            else if let Some(picker) = &self.picker { self.palette_row_rect(picker).map(|r| (r, 10.0, 13.0)) }
+        // The project filter and the add-project card draw their own caret and highlight.
+        if self.project_menu.is_some() || self.project_add.is_some() { return None; }
+        let row = if let Some(picker) = &self.picker { self.palette_row_rect(picker).map(|r| (r, 10.0, 13.0)) }
             else { None };
         if let Some((r, pad_x, font)) = row {
             let s = self.ty.scale();
@@ -419,6 +418,16 @@ impl App {
             self.focus = Focus::Content;
         }
         self.field_synced = true;
+        // A click into the conversations search takes the keyboard to the sidebar; once the
+        // keyboard is elsewhere the field lets go.
+        let conversations = self.sidebar == Some(crate::app::Sidebar::Conversations);
+        if conversations && self.conv_query.focused && !self.conv_query_seen && own.is_none() && clicked.is_none() {
+            self.focus = Focus::Sidebar;
+            self.conv_header = None;
+        } else if self.focus != Focus::Sidebar || !conversations {
+            self.conv_query.focused = false;
+        }
+        self.conv_query_seen = self.conv_query.focused;
         if self.focus != Focus::Details || !self.git_panel.open {
             self.git_panel.message.focused = false;
         }
@@ -430,7 +439,7 @@ impl App {
         if self.block_filter_focused() && self.field_tab.is_none() && self.tabs.get(self.active).is_some_and(|t| t.draft.focused) {
             if let Some(filter) = active_id.and_then(|id| self.terminals.get_mut(&id)).and_then(|t| t.filter.as_mut()) { filter.1.focused = false; }
         }
-        let overlay = self.picker.is_some() || self.finder.is_some() || self.browser.is_some() || self.form.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
+        let overlay = self.project_add.is_some() || self.project_menu.is_some() || self.picker.is_some() || self.finder.is_some() || self.browser.is_some() || self.form.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
             || self.block_filter_focused();
         let prompt_changed = self.sync_prompt_focus(self.focus == Focus::Content && !overlay);
         let want = self.focus == Focus::Content && !overlay && !self.question_prompt() && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff);

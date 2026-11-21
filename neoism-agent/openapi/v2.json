@@ -21898,6 +21898,72 @@
         ]
       }
     },
+    "/v2/sessions/{session_id}/prompt-if-idle": {
+      "post": {
+        "operationId": "v2.sessions.promptIfIdle",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Prompt accepted"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "412": {
+            "description": "Session is not idle; no prompt admitted"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v2/sessions/{session_id}/queue": {
       "delete": {
         "operationId": "v2.sessions.queue.clear",

@@ -243,7 +243,7 @@ pub(crate) fn restricted_route_allowed(method: &axum::http::Method, path: &str) 
             "" => matches!(*method, Method::GET | Method::PATCH | Method::DELETE),
             "/runtime" | "/messages" => *method == Method::GET,
             "/queue" => matches!(*method, Method::GET | Method::DELETE),
-            "/prompt" | "/prompt-async" | "/abort" | "/wait" => *method == Method::POST,
+            "/prompt" | "/prompt-async" | "/prompt-if-idle" | "/abort" | "/wait" => *method == Method::POST,
             _ if suffix.starts_with("/messages/") => *method == Method::GET,
             _ => false,
         };

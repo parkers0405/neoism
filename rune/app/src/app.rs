@@ -202,10 +202,26 @@ pub struct App {
     pub tree_follow: crate::ui::follow::Follow,
     /// The conversations panel's keyboard row and its follow.
     pub conv_selected: usize,
+    /// The conversations panel's search field.
+    pub conv_query: rune::TextEdit,
+    /// The search field was focused at the last `sync_field_focus` (a newly focused one was clicked).
+    pub conv_query_seen: bool,
+    /// The project filter is on "All projects": every project's chats, grouped by folder,
+    /// without leaving the workspace's own directory.
+    pub conv_all: bool,
+    /// The all-projects catalog: projects and their chats, five at a time.
+    pub catalog: crate::agent::Catalog,
+    pub thread_paging: crate::agent::ThreadPaging,
+    /// Conversations that finished while off screen and have not been opened since.
+    pub finished: std::collections::HashSet<String>,
     /// The conversations panel's keyboard stop above the list (New chat or the directory row).
     pub conv_header: Option<crate::agent::ConvHeader>,
     /// The conversations panel's project dropdown, while open.
     pub project_menu: Option<crate::agent::ProjectMenu>,
+    /// The "Add project" card, while open.
+    pub project_add: Option<crate::agent::ProjectAdd>,
+    /// A create or clone the daemon is doing for the card.
+    pub project_job: Option<crate::agent::ProjectJob>,
     pub conv_follow: crate::ui::follow::Follow,
     /// A `g` waiting for its second key (`gg`).
     pub pending_g: bool,
@@ -422,8 +438,16 @@ impl App {
             editor_follow: false,
             tree_follow: Default::default(),
             conv_selected: 0,
+            conv_query: rune::TextEdit::new(""),
+            conv_query_seen: false,
+            conv_all: false,
+            catalog: Default::default(),
+            thread_paging: Default::default(),
+            finished: Default::default(),
             conv_header: None,
             project_menu: None,
+            project_add: None,
+            project_job: None,
             conv_follow: Default::default(),
             pending_g: false,
             tree_count: None,

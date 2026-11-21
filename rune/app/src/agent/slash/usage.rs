@@ -109,7 +109,7 @@ pub(super) fn view(app: &App, composer: [f32; 4]) -> rune::El {
             true
         })
         .child(label(format!("Codex  ·  {} {}", accounts.len(), if accounts.len() == 1 { "account" } else { "accounts" }), cw - 64.0 * s, true, false).absolute(14.0 * s, 12.0 * s))
-        .child(label("esc".into(), 28.0 * s, false, true).absolute(cw - 38.0 * s, 12.0 * s)
+        .child(el().w(22.0 * s).h(22.0 * s).radius(6.0 * s).center().hover(rgb(p.red).alpha(0.15)).child(text("\u{f0156}").font(rune::tok::TextStyle::new(14.0 * s, 400.0).family(crate::ui::theme::NERD)).color(rgb(p.red))).absolute(cw - 34.0 * s, 8.0 * s)
             .on_press(|a: &mut App| a.close_prompt_picker()));
     let mut body = el().w(cw - 2.0 * s).h(body_h).clip_rounded(0.0).absolute(s, header);
     if picker.loading {

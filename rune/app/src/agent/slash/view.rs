@@ -138,11 +138,11 @@ pub fn picker_card(app: &App) -> El {
     // Header: title and esc; then the query row, or the activity in its place.
     header = header
         .child(text(picker.title.clone()).font(sans(13.0 * s, 600.0)).color(rgb(p.fg)).truncate().w(cw - title_x - 84.0 * s).absolute(title_x, 9.0 * s))
-        .child(text("esc").font(mono(12.0 * s, false)).color(rgb(p.muted)).absolute(cw - 14.0 * s - width_of("esc", 12.0 * s), 9.0 * s)
+        .child(el().w(22.0 * s).h(22.0 * s).radius(6.0 * s).center().hover(rgb(p.red).alpha(0.15)).child(text("\u{f0156}").font(rune::tok::TextStyle::new(14.0 * s, 400.0).family(crate::ui::theme::NERD)).color(rgb(p.red))).key("picker-close").absolute(cw - 34.0 * s, 5.0 * s)
             .on_press(|a: &mut App| { if !a.picker_back() { a.close_prompt_picker(); } }));
     if can_modal {
         header = header.child(el().key("picker-expand").w(22.0 * s).h(22.0 * s).radius(6.0 * s).center().hover(rgb(p.fg).alpha(0.1))
-            .absolute(cw - 14.0 * s - width_of("esc", 12.0 * s) - 32.0 * s, 5.0 * s)
+            .absolute(cw - 62.0 * s, 5.0 * s)
             .child(text(if modal { "\u{f0615}" } else { "\u{f0616}" }).font(TextStyle::new(13.0 * s, 400.0).family(NERD)).color(rgb(p.dim)))
             .on_press(|a: &mut App| a.composer.card_modal = !a.composer.card_modal));
     }
@@ -384,7 +384,8 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
             // The corner arrows: open the card out into a modal, or fold it back over the composer.
             .child(el().key("model-card-expand").w(24.0 * s).h(24.0 * s).radius(6.0 * s).center().hover(rgb(p.fg).alpha(0.1))
                 .child(glyph(if modal { "\u{f0615}" } else { "\u{f0616}" }, 14.0, p.dim))
-                .on_press(|a: &mut App| a.composer.card_modal = !a.composer.card_modal)))
+                .on_press(|a: &mut App| a.composer.card_modal = !a.composer.card_modal))
+            .child(el().w(22.0 * s).h(22.0 * s).radius(6.0 * s).center().hover(rgb(p.red).alpha(0.15)).child(text("\u{f0156}").font(rune::tok::TextStyle::new(14.0 * s, 400.0).family(crate::ui::theme::NERD)).color(rgb(p.red))).key("model-card-close").on_press(|a: &mut App| a.close_prompt_picker())))
         .child(el().h(1.0).mx(8.0 * s).mb(6.0 * s).fill(rgb(p.fg).alpha(0.08)));
     if model.is_empty() {
         side = side.child(text("Pick a model first").font(sans(12.5 * s, 400.0)).color(rgb(p.muted)).mx(8.0 * s).mt(8.0 * s));

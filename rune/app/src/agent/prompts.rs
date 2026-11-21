@@ -223,7 +223,7 @@ pub fn card(app: &App) -> El {
         .on_press(|_: &mut App| {})
         .child(text(title).font(font(13.0)).color(rgb(palette.fg)).truncate().w(width - 70.0 * s).absolute(14.0 * s, 9.0 * s));
     let reject_id = identity.clone();
-    card = card.child(text("esc").font(font(12.0)).color(rgb(palette.muted)).absolute(width - 42.0 * s, 9.0 * s)
+    card = card.child(el().w(22.0 * s).h(22.0 * s).radius(6.0 * s).center().hover(rgb(palette.red).alpha(0.15)).child(text("\u{f0156}").font(rune::tok::TextStyle::new(14.0 * s, 400.0).family(crate::ui::theme::NERD)).color(rgb(palette.red))).absolute(width - 34.0 * s, 5.0 * s)
         .on_press(move |a: &mut App| a.reply_prompt(reject_id.clone(), None, true)));
     if p.question.is_some() && !p.responding {
         card = card.child(rune::text_input(&p.edit, font(13.0)).key("agent-prompt-answer").w(width - 28.0 * s)

@@ -491,7 +491,7 @@ impl App {
         self.pal = palette(name);
         let colors = self.terminal_colors();
         for term in self.terminals.values_mut() { term.set_colors(&colors); }
-        if let Some(images) = &self.images { self.wordmark.load(images, self.pal.fg); }
+        if let Some(images) = &self.images { self.wordmark.load(images, crate::wordmark::tint_for(self.pal)); }
         self.set_setting("appearance.theme", json!(self.pal.name));
     }
 }

@@ -83,7 +83,7 @@ pub const FONTS: &[&[u8]] = &[
 fn setup(app: &mut App, waker: rune::Waker) {
     app.waker = Some(waker.clone());
     let images = ImageCache::new(waker.clone());
-    app.wordmark.load(&images, app.pal.fg);
+    app.wordmark.load(&images, wordmark::tint_for(app.pal));
     app.tools.icons.load(&images);
     app.images = Some(images);
     // Headless renders (`--snap`, `--tree`) draw the reference look without a daemon.
@@ -335,7 +335,7 @@ fn main() {
             ("welcome-fire-light", |s| {
                 s.pal = ui::theme::palette("neoism_light");
                 if let Some(images) = &s.images {
-                    s.wordmark.load(images, s.pal.fg);
+                    s.wordmark.load(images, wordmark::tint_for(s.pal));
                     for letter in &s.wordmark.letters { let _ = letter.wait(); }
                 }
                 s.wordmark.fire_enabled = true;
@@ -343,7 +343,7 @@ fn main() {
             ("welcome-fire-themed", |s| {
                 s.pal = ui::theme::palette("catppuccin_mocha");
                 if let Some(images) = &s.images {
-                    s.wordmark.load(images, s.pal.fg);
+                    s.wordmark.load(images, wordmark::tint_for(s.pal));
                     for letter in &s.wordmark.letters { let _ = letter.wait(); }
                 }
                 s.wordmark.fire_enabled = true;

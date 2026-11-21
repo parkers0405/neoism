@@ -90,16 +90,32 @@ pub struct Wordmark {
     reduced: bool,
 }
 
+/// The letters on a light theme: a cool, clean white (no cream in it).
+pub const LIGHT_TINT: u32 = 0xf6f9ff;
+
+/// The wordmark's letter colour for a theme: its ink on dark themes, white on light ones.
+pub fn tint_for(pal: &crate::ui::theme::Palette) -> u32 {
+    if crate::ui::theme::is_dark(pal.bg) { pal.fg } else { LIGHT_TINT }
+}
+
 impl Wordmark {
     pub fn load(&mut self, images: &ImageCache, tint: u32) {
         self.reduced = std::env::var("NEOISM_REDUCED_MOTION").as_deref() == Ok("1");
         self.tint = tint;
         let Some((width, height, mut pixels)) = decode(ARTWORK) else { return };
         let [tr, tg, tb] = [(tint >> 16) & 0xff, (tint >> 8) & 0xff, tint & 0xff];
+        // A white wordmark on a light page is read by its sides: their shading is deepened so
+        // the faces stay white and the letters still stand off the background.
+        let deepen = tint == LIGHT_TINT;
         for px in pixels.chunks_exact_mut(4) {
-            px[0] = (px[0] as u32 * tr / 255) as u8;
-            px[1] = (px[1] as u32 * tg / 255) as u8;
-            px[2] = (px[2] as u32 * tb / 255) as u8;
+            let shade = |v: u8, t: u32| {
+                let level = v as f32 / 255.0;
+                let level = if deepen { level.powf(2.6) } else { level };
+                (level * t as f32).round().min(255.0) as u8
+            };
+            px[0] = shade(px[0], tr);
+            px[1] = shade(px[1], tg);
+            px[2] = shade(px[2], tb);
         }
         self.aspect = width as f32 / height as f32;
         self.letters = (0..LETTERS)

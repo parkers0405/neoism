@@ -126,6 +126,8 @@ pub struct Picker {
     pub limit: std::cell::Cell<usize>,
     /// Trackpad distance not yet worth a whole row.
     pub wheel: f32,
+    /// A drag just scrolled the list: the release that ends it is not a click on a row.
+    pub dragged: bool,
     pub usage: super::usage::Usage,
     pub usage_error: Option<String>,
     pub usage_scroll: f32,
@@ -146,7 +148,7 @@ impl Picker {
         let mut picker = Picker {
             kind, title: title.into(), placeholder: "Search".into(), query, rows: Vec::new(), search: None, filtered: Vec::new(),
             selected: 0, top: 0, loading: false, activity: None, provider: None, last_provider: None,
-            limit: std::cell::Cell::new(MAX_ROWS), wheel: 0.0,
+            limit: std::cell::Cell::new(MAX_ROWS), wheel: 0.0, dragged: false,
             usage: super::usage::Usage::default(), usage_error: None, usage_scroll: 0.0,
             usage_max_scroll: std::cell::Cell::new(0.0),
             mention: None,

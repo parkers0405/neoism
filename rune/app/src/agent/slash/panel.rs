@@ -27,6 +27,16 @@ pub(super) fn view(app: &App, composer: [f32; 4], key: &str, title: String, foot
     let mut card = el().key(format!("{key}-picker")).w(cw).h(height).fill(rgb(p.bg))
         .radius(14.0 * s).border(s, rgb(p.border)).clip_rounded(14.0 * s)
         .on_press(|_: &mut App| {})
+        // A finger dragged over the panel scrolls it, point for point.
+        .on_drag(move |a: &mut App, d: &mut rune::Drag, tx: &mut Tx| {
+            if d.phase == rune::Phase::Down { d.data = 0.0; return; }
+            let moved = d.dy - d.data;
+            d.data = d.dy;
+            if let Some(picker) = a.composer.picker.as_mut().filter(|p| p.kind == kind) {
+                picker.usage_scroll = (picker.usage_scroll - moved).clamp(0.0, picker.usage_max_scroll.get());
+                tx.instant();
+            }
+        })
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             if let Some(picker) = a.composer.picker.as_mut().filter(|p| p.kind == kind) {
                 let delta = if e.precise { -e.dy } else if e.dy < 0.0 { 40.0 * s } else { -40.0 * s };
@@ -51,6 +61,6 @@ pub(super) fn view(app: &App, composer: [f32; 4], key: &str, title: String, foot
             .w((cw - 28.0 * s).max(0.0)).truncate().absolute(14.0 * s, header_h + body_h + 6.0 * s));
     }
     el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).on_press(|a: &mut App| a.close_prompt_picker()))
+        .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).on_drag(|_: &mut App, _: &mut rune::Drag, _: &mut Tx| {}).on_press(|a: &mut App| a.close_prompt_picker()))
         .child(card.absolute(cx, cy - height - 6.0 * s))
 }

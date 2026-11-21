@@ -113,3 +113,37 @@ fn exercise(kind: Kind) {
 // The model picker is its own card now (`model_card`), without the generic list's springs.
 #[test]
 fn connect_query_mounts_are_instant_and_navigation_springs() { exercise(Kind::Connect); }
+#[test]
+fn a_finger_drag_scrolls_the_menu_and_a_tap_still_reaches_a_row() {
+    use rune::TouchPhase;
+    let mut app = App::new();
+    app.ty.size = 14.0;
+    let tab = app.active_tab().id.clone();
+    app.rects.insert(format!("composer-card:{tab}"), [100.0, 600.0, 700.0, 60.0]);
+    app.rects.insert(format!("agent-area:{tab}"), [55.0, 60.0, 845.0, 600.0]);
+    let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| {
+        let root = el().w_full().h_full();
+        if a.composer.picker.is_some() { root.child(picker_card(a)) } else { root }
+    }, (900.0, 674.0), Env::new(true, 1.0));
+    settle(&mut rt);
+    rt.update(|a, _| a.composer.picker = Some(picker(Kind::Connect)));
+    settle(&mut rt);
+    assert_eq!(rt.state.composer.picker.as_ref().unwrap().top, 0);
+    // Drag a finger up four rows' worth over the list: the window moves down the list.
+    let (x, y) = rt.find("picker-row:3").unwrap();
+    rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    rt.frame(DT);
+    for step in 1..=8 {
+        rt.touch(1, TouchPhase::Moved, x, y - step as f32 * ROW_H * 0.5, step as f64 * 0.02);
+        rt.frame(DT);
+    }
+    rt.touch(1, TouchPhase::Ended, x, y - 4.0 * ROW_H, 0.2);
+    settle(&mut rt);
+    assert!(rt.state.composer.picker.as_ref().unwrap().top >= 3, "the drag scrolled the menu: top {}", rt.state.composer.picker.as_ref().unwrap().top);
+    // A mouse press on a row is still that row's, not the card's drag.
+    let top = rt.state.composer.picker.as_ref().unwrap().top;
+    let (x, y) = rt.find(&format!("picker-row:{}", top + 1)).unwrap();
+    rt.pointer_move(x, y);
+    rt.frame(DT);
+    assert_eq!(rt.state.composer.picker.as_ref().unwrap().selected, top + 1, "moving over a row selects it");
+}

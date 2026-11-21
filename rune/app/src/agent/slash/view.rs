@@ -112,6 +112,7 @@ pub fn picker_card(app: &App) -> El {
         .transition(rune::Transition::scale(0.94).combined(rune::Transition::offset(0.0, 14.0 * s)))
         .clip_rounded(RADIUS * s)
         .on_press(|_: &mut App| {})
+        .on_drag(drag_rows(ROW_H * s))
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Notches step a row each; trackpad distance adds up to whole rows. Either way the
             // window slides on the list spring.
@@ -238,7 +239,8 @@ pub fn picker_card(app: &App) -> El {
             .on_pointer_move(move |a: &mut App, _| {
                 if let Some(picker) = a.composer.picker.as_mut().filter(|p| p.selected != pick) { picker.selected = pick; }
             })
-            .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker_row(Some(pick), tx)));
+            .on_drag(drag_rows(ROW_H * s))
+            .on_press_tx(move |a: &mut App, tx: &mut Tx| if tapped(a) { a.accept_picker_row(Some(pick), tx) }));
     }
     if !rows.is_empty() {
         card = card.child(el().key("picker-list").w(cw).h(visible as f32 * row_h).absolute(0.0, header_h)
@@ -258,11 +260,35 @@ pub fn picker_card(app: &App) -> El {
     let scrim = el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .transition(rune::Transition::none())
         .fill(if modal { Color::BLACK.alpha(0.4) } else { Color::TRANSPARENT })
+        .on_drag(swallow_drag)
         .on_press(|a: &mut App| a.dismiss_prompt_picker());
     let layer = el().key("prompt-picker-layer").transition(rune::Transition::none()).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
     let layer = if picker.kind == Kind::Slash || picker.mention.is_some() { layer } else { layer.child(scrim) };
     layer.child(card.absolute(cx, y))
 }
+
+/// A finger (or pointer) dragged over a menu scrolls its rows, a row's height at a time, and
+/// never reaches the transcript behind it.
+fn drag_rows(row_h: f32) -> impl Fn(&mut App, &mut rune::Drag, &mut Tx) + 'static {
+    move |a: &mut App, d: &mut rune::Drag, tx: &mut Tx| {
+        let Some(picker) = a.composer.picker.as_mut() else { return };
+        if d.phase == rune::Phase::Down { d.data = 0.0; picker.dragged = false; return; }
+        if d.dy.abs() > 4.0 { picker.dragged = true; }
+        let steps = ((d.dy - d.data) / row_h.max(1.0)).trunc();
+        if steps == 0.0 { return; }
+        d.data += steps * row_h;
+        picker.scroll(-steps as isize);
+        tx.animated();
+    }
+}
+
+/// A row's press, unless it is the release of a drag that scrolled the list.
+fn tapped(a: &mut App) -> bool {
+    !a.composer.picker.as_mut().is_some_and(|picker| std::mem::take(&mut picker.dragged))
+}
+
+/// A scrim swallows drags, so a pan over the dimmed window does not scroll what is under it.
+fn swallow_drag(_: &mut App, _: &mut rune::Drag, _: &mut Tx) {}
 
 /// The model card: providers down the left as their marks (an add button under them opens the
 /// connect flow), a Favourites tab above them, a search field over the shown provider's models
@@ -372,7 +398,8 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
         }
         content = content.child(item
             .on_pointer_move(move |a: &mut App, _| { if let Some(picker) = a.composer.picker.as_mut().filter(|p| p.selected != index) { picker.selected = index; } })
-            .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker_row(Some(index), tx)));
+            .on_drag(drag_rows(MODEL_H * s))
+            .on_press_tx(move |a: &mut App, tx: &mut Tx| if tapped(a) { a.accept_picker_row(Some(index), tx) }));
     }
     let mut list = el().key("picker-list").w(list_w).h(list_h).clip_rounded(0.0).transition(rune::Transition::none()).motion(rune::Spring::NONE).child(content);
     if rows.is_empty() {
@@ -416,6 +443,7 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
     let card = rune::col().key("prompt-picker").w(cw).h(height).fill(rgb(p.bg)).radius(RADIUS * s).border(1.0, rgb(p.fg).alpha(0.1))
         .shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45)).transition(rune::Transition::scale(0.94).combined(rune::Transition::offset(0.0, 14.0 * s))).clip_rounded(RADIUS * s)
         .on_press(|_: &mut App| {})
+        .on_drag(drag_rows(MODEL_H * s))
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Notches step a row each; trackpad distance adds up to whole rows.
             let Some(picker) = a.composer.picker.as_mut() else { return true };
@@ -431,6 +459,7 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
         .child(rune::row().w(cw).h(body_h).child(strip).child(rune::col().w(list_w).h(body_h).child(search).child(list)).child(side));
     let scrim = el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .fill(if modal { Color::BLACK.alpha(0.4) } else { Color::TRANSPARENT })
+        .on_drag(swallow_drag)
         .on_press(|a: &mut App| a.dismiss_prompt_picker());
     el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).child(scrim).child(card.absolute(cx, y))
 }

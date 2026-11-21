@@ -1992,6 +1992,16 @@
               },
               "requestID": {
                 "type": "string"
+              },
+              "sessionId": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -2069,6 +2079,16 @@
               },
               "requestID": {
                 "type": "string"
+              },
+              "sessionId": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -3700,6 +3720,9 @@
       "ForkSessionRequest": {
         "additionalProperties": false,
         "properties": {
+          "detached": {
+            "type": "boolean"
+          },
           "messageId": {
             "type": "string"
           }

@@ -3983,7 +3983,7 @@ fn authoritative_schemas() -> Value {
         "ImportSessionResponse": { "type": "object", "additionalProperties": false, "required": ["sessionId"], "properties": { "sessionId": { "type": "string" } } },
         "ExportSessionsRequest": { "type": "object", "additionalProperties": false, "required": ["workspaceRoot"], "properties": { "workspaceRoot": { "type": "string" } } },
         "ExportSessionsResponse": { "type": "object", "additionalProperties": false, "required": ["bundles"], "properties": { "bundles": { "type": "array", "items": r("SessionBundle") } } },
-        "ForkSessionRequest": { "type": "object", "additionalProperties": false, "properties": { "messageId": { "type": "string" } } },
+        "ForkSessionRequest": { "type": "object", "additionalProperties": false, "properties": { "messageId": { "type": "string" }, "detached": { "type": "boolean" } } },
         "Todo": { "type": "object", "additionalProperties": false, "required": ["content", "status", "priority"], "properties": { "content": { "type": "string" }, "status": { "type": "string" }, "priority": { "type": "string" } } },
         "VcsFileDiff": { "type": "object", "additionalProperties": false, "required": ["path", "file", "status", "added", "removed", "additions", "deletions", "patch", "hunks"], "properties": {
             "path": { "type": "string" }, "file": { "type": "string" }, "status": { "type": "string" }, "added": { "type": "integer", "minimum": 0 }, "removed": { "type": "integer", "minimum": 0 },

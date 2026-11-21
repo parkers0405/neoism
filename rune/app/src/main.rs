@@ -447,6 +447,7 @@ fn main() {
                 s.open_selection(agent::slash::Kind::Model);
             }),
             ("reply-strip", |s| { s.load_fixture("reply", "Reply strip", include_str!("../fixtures/mcp-timeline.json")); s.reply_to_message("reply", "Hi! What are you working on? I can help with code, answer questions, or review a change."); }),
+            ("reply-bubble", |s| s.load_fixture("reply-bubble", "Reply bubble", r#"[{"id":"u1","role":"User","kind":"User","author":"me","title":"","text":"> Six seveeen. Still going strong, huh?\n\nhi","status":"","tool":"","output_kind":"Text","lang":"","line_offset":null,"detail":"","todos":[],"usage":null,"created_at":1}]"#)),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });
                 let i = s.active;

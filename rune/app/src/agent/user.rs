@@ -65,7 +65,14 @@ pub fn view(app: &App, id: &str, message: &str, attachments: &[neoism_protocol::
     let mut content = col().w(max_w).items_end().gap(8.0 * s).instant_changes();
     if let Some(strip) = strip { content = content.child(strip); }
     if !message.is_empty() || attachments.is_empty() {
-        let body = col().max_w(max_w).px(pad).py(PAD_Y * s).radius(radius).fill(blue)
+        // A reply leads with what it answers (`> …` lines): shown as an inset chip, then the text.
+        let (quoted, message) = split_reply(&message);
+        let mut body = col().max_w(max_w).px(pad).py(PAD_Y * s).gap(8.0 * s).radius(radius).fill(blue);
+        if let Some(quoted) = quoted {
+            body = body.child(el().max_w((max_w - 2.0 * pad).max(1.0)).px(10.0 * s).py(6.0 * s).radius(10.0 * s).fill(Color::BLACK.alpha(0.22))
+                .child(text(quoted).font(app.ty.chat_sized(FONT * 0.93).lh(LINE_H * 0.95 * s)).color(Color::WHITE.alpha(0.78)).wrap().max_lines(3)));
+        }
+        let body = body
             .child(text(message).max_w((max_w - 2.0 * pad).max(1.0))
             .font(app.ty.chat_sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap()
             // White over the blue bubble: the accent highlight would vanish into it.
@@ -81,9 +88,31 @@ pub fn view(app: &App, id: &str, message: &str, attachments: &[neoism_protocol::
         .child(row().w(lane).justify_end().child(app.orbs.view(&seed, orb.min(lane * 0.7))))
 }
 
+/// A sent reply's quote and its own text: the leading `> ` lines, then the rest.
+fn split_reply(message: &str) -> (Option<String>, String) {
+    let mut quoted = Vec::new();
+    let mut rest = message;
+    while let Some(line) = rest.strip_prefix("> ") {
+        let (line, after) = line.split_once('\n').unwrap_or((line, ""));
+        quoted.push(line);
+        rest = after;
+    }
+    let rest = rest.trim_start_matches('\n');
+    if quoted.is_empty() || rest.is_empty() { return (None, message.to_owned()); }
+    (Some(quoted.join(" ")), rest.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_splits_into_its_quote_and_text() {
+        assert_eq!(split_reply("> Six seveeen\n\nhi"), (Some("Six seveeen".into()), "hi".into()));
+        assert_eq!(split_reply("> a\n> b\n\nc\nd"), (Some("a b".into()), "c\nd".into()));
+        assert_eq!(split_reply("plain > text"), (None, "plain > text".into()));
+        assert_eq!(split_reply("> only a quote"), (None, "> only a quote".into()));
+    }
 
     #[test]
     fn widths_follow_the_original_rules() {

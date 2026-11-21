@@ -4,7 +4,9 @@ use neoism_protocol::agent::HistoryAttachment;
 // -- Session lifecycle ------------------------------------------------------
 
 pub(crate) async fn handle_fork_thread(inner: Arc<AgentInner>, session_id: String, message_id: Option<String>) {
+    // A fork made from the chat is a conversation of its own, listed beside its source.
     let mut body = serde_json::Map::new();
+    body.insert("detached".into(), Value::Bool(true));
     if let Some(message_id) = message_id { body.insert("messageId".into(), Value::String(message_id)); }
     let path = format!("/v2/sessions/{}/fork", percent_encode(&session_id));
     let message = match http_post_json(&inner, &path, &Value::Object(body)).await {

@@ -59,7 +59,13 @@ pub(crate) struct SessionUpdateTime {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ForkSessionRequest {
+    /// Copy up to and including this message. A part's id is accepted too and means the
+    /// message that holds it, since clients list a transcript by its parts.
     message_id: Option<MessageId>,
+    /// Make the fork a conversation of its own (no parent), recording where it came from in
+    /// `forkedFrom`. Without it the fork is a child of the session it copies.
+    #[serde(default)]
+    detached: Option<bool>,
 }
 
 pub(crate) async fn session_create(
@@ -1088,6 +1094,14 @@ pub(crate) async fn session_fork(
     let parent = crate::ensure_session(&state, &session_id).await?;
     let now = now_millis();
     let child_id = neoism_agent_core::new_session_id();
+    let request = body.map(|Json(body)| body);
+    let detached = request.as_ref().and_then(|body| body.detached) == Some(true);
+    let mut extra = parent.extra;
+    if detached {
+        extra.insert("forkedFrom".to_string(), json!(parent.id.to_string()));
+        // A conversation of its own is not pinned or archived because its source was.
+        extra.remove("pinned");
+    }
     let child = SessionInfo {
         id: child_id.clone(),
         slug: slug(),
@@ -1095,7 +1109,7 @@ pub(crate) async fn session_fork(
         workspace_id: parent.workspace_id,
         directory: parent.directory,
         path: parent.path,
-        parent_id: Some(parent.id),
+        parent_id: (!detached).then_some(parent.id),
         title: format!("Fork - {}", parent.title),
         agent: parent.agent,
         model: parent.model,
@@ -1107,19 +1121,22 @@ pub(crate) async fn session_fork(
             archived: None,
         },
         permission: parent.permission,
-        extra: parent.extra,
+        extra,
     };
     state.inner.store.insert_session(&child).await?;
-    let cutoff = body.and_then(|Json(body)| body.message_id.map(|id| id.to_string()));
+    let cutoff = request.and_then(|body| body.message_id.map(|id| id.to_string()));
     for message in state.inner.store.list_messages(&session_id).await? {
         let original_id = message_id_of(&message);
+        // The cut-off names the message, or any part inside it.
+        let holds_cutoff = cutoff.as_deref().is_some_and(|cutoff| cutoff == original_id || serde_json::to_value(&message.parts).ok()
+            .and_then(|parts| parts.as_array().map(|parts| parts.iter().any(|part| part["id"].as_str() == Some(cutoff)))).unwrap_or(false));
         let retargeted = retarget_message(message, &child_id);
         state
             .inner
             .store
             .append_message(child_id.as_str(), &retargeted)
             .await?;
-        if cutoff.as_deref() == Some(original_id.as_str()) {
+        if holds_cutoff {
             break;
         }
     }
@@ -1253,6 +1270,59 @@ fn retarget_message(
         }
     }
     message
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use neoism_agent_core::{CreatedTime, TextPart, UserMessage, UserModel};
+
+    fn user_message(session_id: &neoism_agent_core::SessionId, text: &str) -> MessageWithParts {
+        let message_id = Id::ascending(IdKind::Message);
+        MessageWithParts {
+            info: MessageInfo::User(UserMessage {
+                id: message_id.clone(), session_id: session_id.clone(), time: CreatedTime { created: 1 }, agent: "build".to_string(),
+                model: UserModel { provider_id: "neoism".to_string(), model_id: "stub".to_string(), connection_id: None, variant: None },
+                system: None, tools: None, author: None,
+            }),
+            parts: vec![Part::Text(TextPart { id: Id::ascending(IdKind::Part), session_id: session_id.clone(), message_id, text: text.to_string(), synthetic: None, time: None })],
+        }
+    }
+
+    #[tokio::test]
+    async fn a_detached_fork_is_a_root_conversation_cut_at_a_message_or_one_of_its_parts() {
+        let root = std::env::temp_dir().join(format!("neoism-fork-{}", Id::ascending(IdKind::Event)));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = AppState::open_database(root.join("agent.sqlite3")).await.unwrap();
+        let request = CreateSessionRequest { parent_id: None, title: Some("Source".into()), agent: None, model: None, permission: None,
+            workspace_id: None, external_provider: None, external_options: None };
+        let source = create_session_in_directory(&state, root.to_str().unwrap(), request, BTreeMap::new()).await.unwrap();
+        let messages: Vec<MessageWithParts> = ["one", "two", "three"].iter().map(|text| user_message(&source.id, text)).collect();
+        for message in &messages { state.inner.store.append_message(source.id.as_str(), message).await.unwrap(); }
+        let part_of_second = serde_json::to_value(&messages[1].parts).unwrap()[0]["id"].as_str().unwrap().to_owned();
+        let fork = |body: Value| {
+            let state = state.clone();
+            let id = source.id.to_string();
+            async move { session_fork(State(state), Path(id), Some(Json(serde_json::from_value(body).unwrap()))).await.unwrap().0 }
+        };
+        let texts = |state: AppState, id: String| async move {
+            let listed = state.inner.store.list_messages(&id).await.unwrap();
+            serde_json::to_value(&listed).unwrap().as_array().unwrap().iter().map(|m| m["parts"][0]["text"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+        };
+        // Cut at a part of the second message, as a transcript row names it.
+        let detached = fork(json!({"messageId": part_of_second, "detached": true})).await;
+        assert!(detached.parent_id.is_none());
+        assert_eq!(detached.extra["forkedFrom"], source.id.to_string());
+        assert_eq!(texts(state.clone(), detached.id.to_string()).await, ["one", "two"]);
+        // Cut at a message id; without `detached` the fork stays a child, as before.
+        let child = fork(json!({"messageId": message_id_of(&messages[0])})).await;
+        assert_eq!(child.parent_id.as_ref().map(|id| id.to_string()), Some(source.id.to_string()));
+        assert_eq!(texts(state.clone(), child.id.to_string()).await, ["one"]);
+        // No cut-off copies everything; the source is untouched.
+        let whole = fork(json!({"detached": true})).await;
+        assert_eq!(texts(state.clone(), whole.id.to_string()).await, ["one", "two", "three"]);
+        assert_eq!(texts(state.clone(), source.id.to_string()).await, ["one", "two", "three"]);
+    }
 }
 
 #[cfg(test)]

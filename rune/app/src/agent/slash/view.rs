@@ -298,7 +298,7 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
     strip = strip.child(el().grow(1.0)).child(el().key("model-connect").w(38.0 * s).h(38.0 * s).radius(10.0 * s).center()
         .border(1.0, rgb(p.fg).alpha(0.12)).hover(rgb(p.fg).alpha(0.1))
         .child(glyph("\u{f0415}", 16.0, p.dim))
-        .on_press(|a: &mut App| a.open_connect()));
+        .on_press(|a: &mut App| a.connect_from_model_card()));
 
     let side_w = (SIDE * s).min(cw * 0.34);
     let list_w = cw - STRIP * s - side_w;

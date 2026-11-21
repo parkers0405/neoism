@@ -13,6 +13,9 @@ use neoism_protocol::agent::{AgentClientMessage as Client, AgentServerMessage as
 use rune::{Key, KeyEvent, Tx};
 use serde_json::Value;
 
+/// How often a catalog that is not ready is asked for again before giving up.
+const CATALOG_TRIES: u8 = 12;
+
 /// The model card's Favourites tab, in place of a provider id.
 pub(super) const FAVORITES: &str = "\u{2605}favorites";
 
@@ -296,9 +299,9 @@ impl App {
                 let current = selection.model.split_once('/').map(|(p, _)| p).unwrap_or_default().to_owned();
                 let mut picker = Picker::new(Kind::Model, "Select model", rows).placeholder("Search models...").search_all(mark_current(&catalog, &selection.model)).select_value(&current);
                 picker.loading = !self.composer.catalog_received;
-                if self.composer.catalog_received && !self.composer.catalog_ready {
-                    picker.activity = Some(Activity { status: "Model catalog pending or unavailable".into(), body: "Refresh the model picker to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });
-                }
+                // Opening the picker starts the retries afresh; it shows what is known meanwhile.
+                self.composer.catalog_retry = None;
+                picker.loading |= !self.composer.catalog_ready && self.composer.providers.is_empty();
                 let request_id = self.composer.request_id("models");
                 self.agent_send(Client::ListModelCatalog { request_id, directory: Some(self.cwd.clone()) });
                 picker
@@ -323,6 +326,18 @@ impl App {
             .or_else(|| self.composer.providers.iter().find(|p| !p.models.is_empty()).map(|p| p.id.clone()))
     }
 
+    /// Ask for the model catalog again once its retry time comes. Returns how long is left.
+    pub fn catalog_tick(&mut self) -> Option<std::time::Duration> {
+        let (at, tries) = self.composer.catalog_retry?;
+        let now = std::time::Instant::now();
+        if now < at { return Some(at - now); }
+        // Keep the count; the reply sets the next time or clears it.
+        self.composer.catalog_retry = Some((now + std::time::Duration::from_secs(30), tries));
+        let request_id = self.composer.request_id("models");
+        self.agent_send(Client::ListModelCatalog { request_id, directory: Some(self.cwd.clone()) });
+        None
+    }
+
     /// Starred models, read from disk the first time they are asked for.
     pub(super) fn favorite_models(&self) -> Vec<String> {
         self.composer.favorite_models.clone().unwrap_or_else(|| {
@@ -341,6 +356,13 @@ impl App {
         self.composer.favorite_models = Some(favorites);
         // The Favourites tab shows the change at once.
         if self.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::Model && p.provider.as_deref() == Some(FAVORITES)) { self.select_model_provider(FAVORITES); }
+    }
+
+    /// The model card's add button: the connect flow, with Escape leading back to the card.
+    pub(super) fn connect_from_model_card(&mut self) {
+        self.open_connect();
+        self.composer.connect_from_model = true;
+        self.composer.card_modal = false;
     }
 
     /// Show one provider's models in the open model card.
@@ -379,6 +401,7 @@ impl App {
     pub fn close_prompt_picker(&mut self) {
         self.composer.picker = None;
         self.composer.card_modal = false;
+        self.composer.connect_from_model = false;
         self.composer.pending_model = None;
         self.composer.connect = None;
         self.composer.mcp_server = None;
@@ -616,12 +639,34 @@ impl App {
     }
 
     /// Back out one screen (Esc on a nested screen, Backspace on an empty query).
+    /// Escape (and Backspace on an empty query) step back one level where there is one:
+    /// a modal card folds, a typed query clears, a connect step returns to the step before
+    /// it, and the connect flow returns to the model card it was opened from.
     pub fn picker_back(&mut self) -> bool {
         let Some(picker) = self.composer.picker.as_mut() else { return false };
-        match picker.kind {
-            Kind::McpActions => { self.open_mcp(); true }
-            _ => false,
+        let kind = picker.kind;
+        if kind == Kind::Model {
+            if self.composer.card_modal { self.composer.card_modal = false; return true; }
+            if !picker.query.text.is_empty() { picker.set_query(""); return true; }
+            return false;
         }
+        let connect_provider = self.composer.connect.as_ref().and_then(|flow| flow.provider.as_ref().map(|p| p.id.clone()));
+        match kind {
+            Kind::McpActions => self.open_mcp(),
+            Kind::ModelAccount => self.open_selection(Kind::Model),
+            Kind::Connect if self.composer.connect_from_model => {
+                self.composer.connect_from_model = false;
+                self.composer.connect = None;
+                self.open_selection(Kind::Model);
+            }
+            Kind::ConnectAccount => self.open_connect(),
+            Kind::ConnectAccountActions | Kind::ConnectAuth | Kind::ConnectSecret | Kind::ConnectLabel | Kind::ConnectConfirm => match connect_provider {
+                Some(provider) => self.choose_connect_provider(&provider),
+                None => self.open_connect(),
+            },
+            _ => return false,
+        }
+        true
     }
 
     fn open_provider_models(&mut self, provider: &str, name: &str) {
@@ -913,6 +958,16 @@ impl App {
             Server::ProviderCatalog { providers, catalog_status, .. } => {
                 self.composer.catalog_received = true;
                 self.composer.catalog_ready = catalog_status.as_ref().and_then(|s| s["state"].as_str()).is_none_or(|s| s == "ready");
+                // A catalog still being built (or a server that could not be reached) is asked
+                // for again after the wait it names, a bounded number of times.
+                let tries = self.composer.catalog_retry.map_or(0, |(_, tries)| tries);
+                let retrying = !self.composer.catalog_ready && tries < CATALOG_TRIES;
+                self.composer.catalog_retry = retrying.then(|| {
+                    let wait = catalog_status.as_ref().and_then(|s| s["retryAfterMs"].as_u64()).unwrap_or(1000).clamp(250, 5000);
+                    (std::time::Instant::now() + std::time::Duration::from_millis(wait), tries + 1)
+                });
+                // A not-ready reply never throws away models already known.
+                if !self.composer.catalog_ready && providers.is_empty() && !self.composer.providers.is_empty() { return true; }
                 self.composer.providers = providers.clone();
                 if let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Model) {
                     let catalog = catalog::models(providers);
@@ -924,8 +979,12 @@ impl App {
                     picker.replace(rows);
                     picker.set_search(Some(mark_current(&catalog, &selection.model)));
                     picker.activity = None;
-                    if !self.composer.catalog_ready {
-                        picker.activity = Some(Activity { status: "Model catalog pending or unavailable".into(), body: "Refresh the model picker to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });
+                    // Not ready yet: it is asked for again by itself (`catalog_tick`); the card
+                    // shows what there is, or keeps loading. Only a catalog that stays
+                    // unavailable after every try says so.
+                    picker.loading = !self.composer.catalog_ready && providers.is_empty() && retrying;
+                    if !self.composer.catalog_ready && providers.is_empty() && !retrying {
+                        picker.activity = Some(Activity { status: "Model catalog unavailable".into(), body: "The agent server could not list models. Open the picker again to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });
                     }
                 }
                 if self.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::Model && p.provider.is_none())

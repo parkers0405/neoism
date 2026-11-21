@@ -66,12 +66,16 @@ pub struct Composer {
     pub(super) favorite_models: Option<Vec<String>>,
     /// The model card is opened out into a window-centred modal.
     pub card_modal: bool,
+    /// The connect flow was opened from the model card: Escape goes back to it.
+    pub(super) connect_from_model: bool,
     /// Model choice awaiting account discovery, scoped to its originating tab/session.
     pending_model: Option<(String, u64, Option<String>)>,
     account_choices: BTreeMap<String, String>,
     pub(super) providers: Vec<ProviderInfo>,
     /// Only a ready catalog can prove that a selected model is unavailable.
     catalog_ready: bool,
+    /// The catalog was not ready when last asked: ask again at this time, this many tries in.
+    catalog_retry: Option<(std::time::Instant, u8)>,
     catalog_received: bool,
     /// Local explicit preference (unlike ConfigDefaults, which may be an inferred fallback).
     configured_default: Option<String>,

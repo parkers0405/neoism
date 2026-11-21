@@ -653,7 +653,9 @@ impl App {
         let connect_provider = self.composer.connect.as_ref().and_then(|flow| flow.provider.as_ref().map(|p| p.id.clone()));
         match kind {
             Kind::McpActions => self.open_mcp(),
-            Kind::ModelAccount => self.open_selection(Kind::Model),
+            // Back out of choosing an account: the model waiting on it is dropped, so a late
+            // reply cannot select it.
+            Kind::ModelAccount => { self.composer.pending_model = None; self.open_selection(Kind::Model); }
             Kind::Connect if self.composer.connect_from_model => {
                 self.composer.connect_from_model = false;
                 self.composer.connect = None;
@@ -1261,7 +1263,9 @@ mod selection_tests {
         app.picker_key(&KeyEvent { key: Key::Escape, mods: Default::default() }, &mut Tx::default());
         app.apply_slash_event(&accounts(2));
         assert_eq!(app.composer.selection, before);
-        assert!(app.composer.picker.is_none());
+        // Escape steps back to the model card; the late reply opens no account picker.
+        assert_eq!(app.composer.picker.as_ref().map(|p| p.kind), Some(Kind::Model));
+        app.close_prompt_picker();
         app.choose_model("local/one".into());
         app.open_tab(TabKind::Agent { session: None });
         let other = app.composer.selection.clone();

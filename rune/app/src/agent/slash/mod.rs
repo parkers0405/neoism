@@ -62,6 +62,8 @@ pub struct Composer {
     pub selection_owner: Option<(u64, Option<String>)>,
     /// Recently chosen models, newest first.
     pub recent_models: Vec<String>,
+    /// Starred models (`provider/model`), kept across runs (`favorites_path`).
+    pub(super) favorite_models: Option<Vec<String>>,
     /// Model choice awaiting account discovery, scoped to its originating tab/session.
     pending_model: Option<(String, u64, Option<String>)>,
     account_choices: BTreeMap<String, String>,

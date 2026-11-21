@@ -117,6 +117,30 @@ impl Wordmark {
             px[1] = shade(px[1], tg);
             px[2] = shade(px[2], tb);
         }
+        // On a light page the white letters get a dark edge, so they read on any background.
+        if deepen {
+            let (w, h) = (width as usize, height as usize);
+            let solid: Vec<bool> = pixels.chunks_exact(4).map(|px| px[3] > 200).collect();
+            const REACH: isize = 3;
+            for y in 0..h {
+                for x in 0..w {
+                    if solid[y * w + x] { continue; }
+                    let mut nearest = f32::MAX;
+                    for dy in -REACH..=REACH {
+                        for dx in -REACH..=REACH {
+                            let (nx, ny) = (x as isize + dx, y as isize + dy);
+                            if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize || !solid[ny as usize * w + nx as usize] { continue; }
+                            nearest = nearest.min(((dx * dx + dy * dy) as f32).sqrt());
+                        }
+                    }
+                    if nearest > REACH as f32 { continue; }
+                    let edge = (1.0 - (nearest - 2.4).max(0.0)).clamp(0.0, 1.0);
+                    let px = &mut pixels[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                    let alpha = (edge * 235.0) as u8;
+                    px.copy_from_slice(&[0x16, 0x18, 0x1d, alpha.max(px[3])]);
+                }
+            }
+        }
         self.aspect = width as f32 / height as f32;
         self.letters = (0..LETTERS)
             .map(|i| {

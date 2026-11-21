@@ -13,6 +13,14 @@ use neoism_protocol::agent::{AgentClientMessage as Client, AgentServerMessage as
 use rune::{Key, KeyEvent, Tx};
 use serde_json::Value;
 
+/// The model card's Favourites tab, in place of a provider id.
+pub(super) const FAVORITES: &str = "\u{2605}favorites";
+
+fn favorites_path() -> Option<std::path::PathBuf> {
+    let state = std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".local/state")))?;
+    Some(state.join("neoism/rune/model-favorites.json"))
+}
+
 /// The whole catalog with the model in use ticked, for the model picker's search.
 fn mark_current(catalog: &[Row], model: &str) -> Vec<Row> {
     catalog.iter().cloned().map(|row| { let current = !row.header && row.value == model; row.current(current) }).collect()
@@ -315,11 +323,34 @@ impl App {
             .or_else(|| self.composer.providers.iter().find(|p| !p.models.is_empty()).map(|p| p.id.clone()))
     }
 
+    /// Starred models, read from disk the first time they are asked for.
+    pub(super) fn favorite_models(&self) -> Vec<String> {
+        self.composer.favorite_models.clone().unwrap_or_else(|| {
+            favorites_path().and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+        })
+    }
+
+    /// The star on a model row: add it to the favourites, or take it out.
+    pub(super) fn toggle_favorite_model(&mut self, model: &str) {
+        let mut favorites = self.favorite_models();
+        if let Some(at) = favorites.iter().position(|m| m == model) { favorites.remove(at); } else { favorites.push(model.to_owned()); }
+        if let Some(path) = favorites_path() {
+            if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+            let _ = std::fs::write(path, serde_json::to_string(&favorites).unwrap_or_default());
+        }
+        self.composer.favorite_models = Some(favorites);
+        // The Favourites tab shows the change at once.
+        if self.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::Model && p.provider.as_deref() == Some(FAVORITES)) { self.select_model_provider(FAVORITES); }
+    }
+
     /// Show one provider's models in the open model card.
     pub(super) fn select_model_provider(&mut self, provider: &str) {
         let models = catalog::models(&self.composer.providers);
         let current = self.composer.selection.model.clone();
-        let rows = catalog::provider_models(&models, provider, &current);
+        let rows = if provider == FAVORITES {
+            let favorites = self.favorite_models();
+            mark_current(&models, &current).into_iter().filter(|row| !row.header && favorites.contains(&row.value)).collect()
+        } else { catalog::provider_models(&models, provider, &current) };
         let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Model) else { return };
         picker.provider = Some(provider.to_owned());
         picker.replace(rows);
@@ -330,7 +361,7 @@ impl App {
 
     /// Left/Right in the model card: the provider before or after the one shown.
     fn step_model_provider(&mut self, delta: isize) {
-        let ids: Vec<String> = self.composer.providers.iter().filter(|p| !p.models.is_empty()).map(|p| p.id.clone()).collect();
+        let ids: Vec<String> = std::iter::once(FAVORITES.to_owned()).chain(self.composer.providers.iter().filter(|p| !p.models.is_empty()).map(|p| p.id.clone())).collect();
         if ids.is_empty() { return; }
         let shown = self.composer.picker.as_ref().and_then(|p| p.provider.clone());
         let at = shown.and_then(|id| ids.iter().position(|p| *p == id)).unwrap_or(0) as isize;

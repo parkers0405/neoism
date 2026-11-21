@@ -94,8 +94,8 @@ pub struct Wordmark {
 pub const LIGHT_TINT: u32 = 0xf6f9ff;
 
 /// The flying pieces of a click effect on a light theme: white would vanish against the page,
-/// so they take the letters' own side colour.
-pub const LIGHT_EFFECT: u32 = 0x23272f;
+/// so they are drawn near black.
+pub const LIGHT_EFFECT: u32 = 0x0b0c0f;
 
 /// What a click effect's pieces are drawn in for letters tinted `tint`.
 fn effect_tint(tint: u32) -> u32 {

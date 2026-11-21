@@ -128,7 +128,8 @@ impl Activity {
         let time = self.turn.elapsed().as_secs_f32() + 1000.0;
         let transition = now.duration_since(self.changed).as_secs_f32();
         let accent = rgb(self.state.accent(p));
-        let fg = rgb(p.fg);
+        // The word's ink is the wordmark's: the theme's on dark themes, black on light ones.
+        let fg = rgb(crate::wordmark::tint_for(p));
         let count = self.glyphs.len().max(1);
         let motion = time * 3.0;
         let (drift_x, drift_y) = (motion.sin() * 1.8 * scale, (motion * 0.72).cos() * 0.8 * scale);

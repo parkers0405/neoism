@@ -2,6 +2,20 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.162] - 2026-11-21
+
+### Redesigned Agent sidebar, Settings and model picker; add a project; Copy, Fork and Reply
+
+- Redesigns the Agent sidebar: search, project filter, add project and new chat across the top; conversations as cards with their project, age and a status mark for running, background, compacting, waiting on you and finished; five conversations a project with **Load more** on the all-projects view.
+- Adds a project from the sidebar by creating a repository or cloning one from a Git URL or GitHub, done by the workspace daemon.
+- Adds **Copy**, **Fork** and **Reply** under each answer. A fork is a conversation of its own up to that answer; a reply quotes the answer.
+- Replaces the composer's chips with one model button that opens a card of providers, models, favourites and reasoning levels; reasoning levels now follow the model family.
+- Reorganises Settings into grouped pages with Themes and Backgrounds galleries, background opacity, blur and fit, and a separate Markdown page.
+- Opens the context window meter from the token count under the composer, lets composer menus open as modals, and retries a model catalog that is not ready instead of showing an error.
+- Removes the default Cmd+W shortcut for closing a tab.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.161] - 2026-11-20
 
 ### Sign in with ChatGPT, signed macOS builds, and steadier long Agent conversations

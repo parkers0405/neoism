@@ -52,12 +52,12 @@
   </categories>
 
   <releases>
-    <release version="0.7.161" date="2026-11-20">
+    <release version="0.7.162" date="2026-11-21">
       <description>
-        <p>Adds Sign in with ChatGPT for OpenAI, a browser sign-in that needs no device code. The macOS app and disk image are signed with a Developer ID and notarized by Apple.</p>
+        <p>A redesigned Agent sidebar, Settings, model picker and composer; adding a project by creating or cloning a repository; Copy, Fork and Reply under answers. The macOS app and disk image are signed with a Developer ID and notarized by Apple.</p>
         <p>Keeps the Agent working after long conversations are compacted, stops it from waiting on delegated work it never started, and asks macOS for Accessibility when computer use needs it.</p>
       </description>
-      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.161</url>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.162</url>
     </release>
     <release version="0.7.159" date="2026-11-19">
       <description>

@@ -375,12 +375,10 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
     // Reasoning: its own column on the right, a row a level, the one in use ticked.
     let model = &app.composer.selection.model;
     let levels = super::catalog::thinking(model, &app.composer.selection.thinking);
-    let model_name = model.rsplit_once('/').map_or(model.as_str(), |(_, name)| name);
     let mut side = rune::col().key("model-thinking").w(side_w).h(body_h).px(8.0 * s)
         .border_sides([0.0, 0.0, 0.0, 1.0], rgb(p.fg).alpha(0.08))
         .child(rune::row().h(SEARCH_H * s).px(8.0 * s).gap(8.0 * s).center_y()
             .child(text(if model.to_lowercase().contains("claude") { "Thinking" } else { "Reasoning" }).font(sans(13.0 * s, 500.0)).color(rgb(p.dim)).grow(1.0))
-            .child(text(model_name.to_owned()).font(sans(12.0 * s, 400.0)).color(rgb(p.muted)).truncate().shrink())
             // The corner arrows: open the card out into a modal, or fold it back over the composer.
             .child(el().key("model-card-expand").w(24.0 * s).h(24.0 * s).radius(6.0 * s).center().hover(rgb(p.fg).alpha(0.1))
                 .child(glyph(if modal { "\u{f0615}" } else { "\u{f0616}" }, 14.0, p.dim))

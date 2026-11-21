@@ -460,6 +460,11 @@ impl App {
             }
             Kind::Agent => { self.set_agent(row.value); self.close_prompt_picker(); }
             Kind::Thinking => { self.set_thinking(row.value); self.close_prompt_picker(); }
+            Kind::ModelMenu => match row.value.as_str() {
+                "model" => self.open_selection(Kind::Model),
+                "think" => self.open_selection(Kind::Thinking),
+                _ => self.open_connect(),
+            },
             Kind::Session => { self.close_prompt_picker(); self.open_conversation(&row.value); }
             Kind::Usage => { if row.value == "refresh" { self.open_usage(); } },
             Kind::Tasks | Kind::Goals => {},
@@ -633,6 +638,18 @@ impl App {
     }
 
     // -- /connect ------------------------------------------------------------------------
+
+    /// The composer's model button: what model, how hard it thinks, and connecting providers.
+    pub(crate) fn open_model_menu(&mut self) {
+        let model = if self.composer.selection.model.is_empty() { "None selected".to_owned() } else { self.composer.selection.model.clone() };
+        let thinking = if self.composer.selection.thinking.is_empty() { "default".to_owned() } else { self.composer.selection.thinking.clone() };
+        let rows = vec![
+            Row::new("Model", "Choose the model for this conversation", model, "model"),
+            Row::new("Thinking", "How much the model reasons before it answers", thinking, "think"),
+            Row::new("Connect", "Sign in to a provider or add an API key", "", "connect"),
+        ];
+        self.focus_picker(Picker::new(Kind::ModelMenu, "Model", rows).placeholder("Search"));
+    }
 
     pub(crate) fn open_connect(&mut self) {
         self.composer.connect = Some(ConnectFlow { waiting: true, ..ConnectFlow::default() });

@@ -150,24 +150,18 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.timeline_jump_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
         .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_composer(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_pending_prompt() && !s.submit_command(tx) { s.submit(); } });
-    // One quiet pill at the card's lower left: the model, with its provider's mark. The agent
-    // and reasoning choices stay on `/agent` and `/think`. Beside it, a plug opens `/connect`.
+    // The model at the card's lower left, bare: its provider's mark, its name, a chevron. It
+    // opens one menu for the model, its thinking and connecting providers.
     let cs = app.ty.scale();
     let model_label = app.model.rsplit_once('/').map_or(app.model.clone(), |(_, name)| name.to_owned());
-    let model_open = app.composer.picker.as_ref().is_some_and(|picker| picker.kind == Kind::Model);
-    let model = row().key("composer-model").h(30.0 * cs).px(10.0 * cs).gap(7.0 * cs).radius(9.0 * cs).center_y().shrink()
-        .fill(rgb(p.fg).alpha(if model_open { 0.1 } else { 0.05 })).hover(rgb(p.fg).alpha(0.1)).border(1.0, rgb(p.fg).alpha(0.07))
+    let model = row().key("composer-model").h(30.0 * cs).gap(7.0 * cs).center_y().shrink()
         .child(super::slash::provider_mark(app, 14.0 * cs))
-        .child(text(model_label).font(app.ty.sans(13.0, 500.0)).color(rgb(p.fg)).truncate().shrink())
+        .child(text(model_label).font(app.ty.sans(13.5, 500.0)).color(rgb(p.fg)).truncate().shrink())
         .child(icon(app, glyph::CHEVRON_DOWN, 0.45, rgb(p.muted)))
         .on_press(move |s: &mut App| {
             s.select_tab(tab_id);
-            if s.composer.picker.as_ref().is_some_and(|picker| picker.kind == Kind::Model) { s.close_prompt_picker(); } else { s.open_selection(Kind::Model); }
+            if s.composer.picker.as_ref().is_some_and(|picker| picker.kind == Kind::ModelMenu) { s.close_prompt_picker(); } else { s.open_model_menu(); }
         });
-    let connect = el().key("composer-connect").w(30.0 * cs).h(30.0 * cs).radius(9.0 * cs).center()
-        .hover(rgb(p.fg).alpha(0.1))
-        .child(text("\u{f06a5}").font(app.ty.icon_sized(15.0)).color(rgb(p.dim)))
-        .on_press(move |s: &mut App| { s.select_tab(tab_id); s.open_connect(); });
     let send = el().key("composer-send").w(36.0).h(36.0).radius(8.0).center()
         .fill(if streaming { rgb(p.fg) } else { rgb(p.muted).alpha(0.6) })
         .child(icon(app, if streaming { glyph::STOP } else { glyph::ARROW_UP }, 0.9, if streaming { rgb(p.bg) } else { rgb(p.fg) }))
@@ -201,7 +195,6 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .child(input)
         .child(row().key("composer-chip-row").w_full().gap(6.0).center_y()
             .child(model)
-            .child(connect)
             .child(el().grow(1.0))
             .child(attach)
             .child(send));

@@ -13,6 +13,8 @@ pub enum Kind {
     Tasks,
     Goals,
     Model,
+    /// The composer's model button: Model, Thinking and Connect in one short menu.
+    ModelMenu,
     ModelAccount,
     Agent,
     Thinking,

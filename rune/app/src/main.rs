@@ -427,6 +427,7 @@ fn main() {
                     provider_id: "openai".into(), connection_id: format!("account-{i}"), label: (*label).into(), auth_type: "oauth".into(), is_default: i == 0,
                 }).collect() });
             }),
+            ("model-menu", |s| { s.load_fixture("model-menu", "Model menu", "[]"); s.run_slash("/model openai/gpt-6.2-sol", &mut rune::Tx::default()); s.open_model_menu(); }),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });
                 let i = s.active;

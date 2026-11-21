@@ -10,9 +10,9 @@ pub fn active(app: &App) -> Option<usize> {
     if app.finder.is_some() { return Some(4); }
     if app.picker.as_ref().is_some_and(|p| p.mode == crate::palette::Mode::Systems) { return Some(5); }
     match app.sidebar {
-        Some(Sidebar::Files) => Some(1),
-        Some(Sidebar::Notes) => Some(2),
-        Some(Sidebar::Conversations) => Some(3),
+        Some(Sidebar::Files) => Some(0),
+        Some(Sidebar::Notes) => Some(1),
+        Some(Sidebar::Conversations) => Some(2),
         None => None,
     }
 }
@@ -124,7 +124,7 @@ mod tests {
         app.menu = None;
         app.finder = None;
         app.picker = None;
-        for (panel, index) in [(Sidebar::Files, 1), (Sidebar::Notes, 2), (Sidebar::Conversations, 3)] {
+        for (panel, index) in [(Sidebar::Files, 0), (Sidebar::Notes, 1), (Sidebar::Conversations, 2)] {
             app.sidebar = Some(panel);
             for focus in [crate::app::Focus::Content, crate::app::Focus::Sidebar, crate::app::Focus::Workspaces(0)] {
                 app.focus = focus;

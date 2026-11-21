@@ -205,7 +205,7 @@ fn rail(app: &App) -> El {
         .scale(if hovered(key) { RAIL_HOVER_SCALE } else { 1.0 }).scale_motion(RAIL_SPRING);
     // Paint-only shared hover washes precede the single optical slot. The original
     // buttons still own input and foreground, so glass samples the wash but never a glyph.
-    let keys = ["topbar-menu", "toggle-files", "toggle-notes", "toggle-conversations", "open-finder", "open-servers"];
+    let keys = ["toggle-files", "toggle-notes", "toggle-conversations", "open-servers", "topbar-menu"];
     let washes = keys.into_iter().enumerate().map(|(i, key)| {
         el().key(format!("rail-wash-{key}")).absolute(0.0, 6.5 + i as f32 * 51.5)
             .w(RAIL_W).h(51.5).hover(rgb(p.hover)).hover_group_shared(key)

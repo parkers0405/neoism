@@ -301,7 +301,7 @@ impl App {
                 picker.loading = self.composer.agents.is_empty();
                 picker
             }
-            _ => Picker::new(Kind::Thinking, "Reasoning effort", catalog::thinking(&selection.model, &selection.thinking)).select_value(&selection.thinking),
+            _ => Picker::new(Kind::Thinking, if selection.model.to_lowercase().contains("claude") { "Extended thinking" } else { "Reasoning effort" }, catalog::thinking(&selection.model, &selection.thinking)).select_value(&selection.thinking),
         };
         self.focus_picker(picker);
     }

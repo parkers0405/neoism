@@ -40,6 +40,38 @@ pub(crate) fn reasoning_effort(value: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// The `reasoning_effort` a chat-completions provider accepts for `effort`, or `None` to
+/// leave it out. xAI takes it only on `grok-3-mini`, as low or high, and rejects the
+/// request on its other models; Gemini's levels stop at high and have no minimal.
+pub(crate) fn provider_reasoning_effort(provider_id: &str, model_id: &str, effort: &'static str) -> Option<&'static str> {
+    let (provider, model) = (provider_id.to_ascii_lowercase(), model_id.to_ascii_lowercase());
+    if provider == "xai" || provider == "x-ai" || model.contains("grok") {
+        if !model.contains("grok-3-mini") { return None; }
+        return Some(if matches!(effort, "none" | "minimal" | "low") { "low" } else { "high" });
+    }
+    if provider.starts_with("google") || provider == "vertex-ai" || model.contains("gemini") {
+        return Some(match effort { "minimal" => "low", "xhigh" => "high", other => other });
+    }
+    Some(effort)
+}
+
+#[cfg(test)]
+mod reasoning_effort_tests {
+    use super::provider_reasoning_effort as effort;
+
+    #[test]
+    fn each_provider_gets_only_the_levels_it_takes() {
+        assert_eq!(effort("openai", "gpt-5.2", "xhigh"), Some("xhigh"));
+        assert_eq!(effort("xai", "grok-4", "high"), None);
+        assert_eq!(effort("openrouter", "x-ai/grok-code-fast-1", "low"), None);
+        assert_eq!(effort("xai", "grok-3-mini", "medium"), Some("high"));
+        assert_eq!(effort("xai", "grok-3-mini-fast", "minimal"), Some("low"));
+        assert_eq!(effort("google", "gemini-2.5-pro", "xhigh"), Some("high"));
+        assert_eq!(effort("google", "gemini-2.5-flash", "minimal"), Some("low"));
+        assert_eq!(effort("google", "gemini-2.5-flash", "none"), Some("none"));
+    }
+}
+
 pub(super) fn chat_completion_messages(messages: &[ProviderMessage]) -> Vec<Value> {
     messages
         .iter()

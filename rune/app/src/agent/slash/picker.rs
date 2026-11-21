@@ -165,7 +165,16 @@ impl Picker {
     /// Search `rows` (grouped under their headers) whenever a query is typed.
     pub fn search_all(mut self, rows: Vec<Row>) -> Picker { self.set_search(Some(rows)); self }
 
-    pub fn set_search(&mut self, rows: Option<Vec<Row>>) { self.search = rows; self.refilter(); }
+    /// The rows on show may change under the selection (a catalog arriving mid-search): keep
+    /// it on the same value, else the nearest row that can be chosen, and in the window.
+    pub fn set_search(&mut self, rows: Option<Vec<Row>>) {
+        let previous = self.selected_row().map(|r| r.value.clone());
+        self.search = rows;
+        self.refilter();
+        if let Some(i) = previous.and_then(|v| self.filtered.iter().position(|r| !r.header && r.value == v)) { self.selected = i; }
+        self.selected = selectable_near(&self.filtered, self.selected).unwrap_or(0);
+        self.reveal();
+    }
 
     /// Select the row whose value is `value` (when present), else the first selectable.
     pub fn select_value(mut self, value: &str) -> Picker {
@@ -245,7 +254,8 @@ impl Picker {
             };
             match next { Some(i) => index = i, None => break }
         }
-        self.selected = index;
+        // A selection left on a heading (or past the end) by a changed list steps to a row.
+        self.selected = selectable_near(&self.filtered, index).unwrap_or(0);
         self.reveal();
     }
 
@@ -254,6 +264,8 @@ impl Picker {
     /// Keep the selection inside the visible window, showing a header just above it.
     fn reveal(&mut self) {
         let window = self.window();
+        if self.filtered.is_empty() { self.selected = 0; self.top = 0; return; }
+        self.selected = self.selected.min(self.filtered.len() - 1);
         if self.selected < self.top { self.top = self.selected.saturating_sub(usize::from(self.selected > 0 && self.filtered[self.selected - 1].header)); }
         if self.selected >= self.top + window { self.top = self.selected + 1 - window; }
         self.top = self.top.min(self.filtered.len().saturating_sub(window));

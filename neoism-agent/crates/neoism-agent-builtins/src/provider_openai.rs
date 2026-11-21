@@ -407,7 +407,9 @@ impl ProviderRuntime for OpenAiRuntime {
                 .as_ref()
                 .is_none_or(|api| api.npm != "@openrouter/ai-sdk-provider")
             {
-                if let Some(effort) = reasoning_effort(request.variant.as_deref()) {
+                if let Some(effort) = reasoning_effort(request.variant.as_deref())
+                    .and_then(|effort| super::provider_chat_completion::provider_reasoning_effort(&request.provider_id, &request.model_id, effort))
+                {
                     body["reasoning_effort"] = Value::String(effort.to_string());
                 }
             }

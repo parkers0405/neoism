@@ -185,8 +185,8 @@ pub fn view(app: &App) -> El {
     let x = anchor[0].clamp(margin, (app.window[0] - margin - w).max(margin));
     let y = (anchor[1] + anchor[3] + 6.0 * s).clamp(margin, (app.window[1] - margin - h).max(margin));
     let body_w = w - 2.0 - 2.0 * pad;
-    // The popover sits a shade above the window, the way the hover surface does.
-    let panel = rgb(p.bg).mix(rgb(p.surface), 0.55);
+    // The window's own background, set off by its border and shadow.
+    let panel = rgb(p.bg);
 
     let input = rune::text_input(&menu.query, app.ty.chat_sized(INPUT_FONT))
         .key("project-menu-query")

@@ -95,18 +95,46 @@ pub fn provider_models(catalog: &[Row], provider: &str, current: &str) -> Vec<Ro
     }).collect()
 }
 
-/// Reasoning effort, with `ultra` only for models that support it.
+/// What `/think` offers for `model` (`provider/model-id`): each family's own levels, as the
+/// agent server sends them. OpenAI takes an effort (with `ultra` on GPT-5.6); Claude an
+/// extended-thinking budget, off by default; Grok only lets `grok-3-mini` be set, low or
+/// high; Gemini low to high.
 pub fn thinking(model: &str, current: &str) -> Vec<Row> {
-    let mut rows = vec![
-        Row::new("none", "Use model default reasoning", "default", ""),
-        Row::new("low", "Fastest reasoning", "think", "low"),
-        Row::new("medium", "Balanced reasoning", "think", "medium"),
-        Row::new("high", "More reasoning", "think", "high"),
-        Row::new("xhigh", "Maximum reasoning", "think", "xhigh"),
-    ];
-    if model.to_lowercase().contains("gpt-5.6") {
-        rows.push(Row::new("ultra", "Multi-agent reasoning (GPT-5.6)", "think", "ultra"));
-    }
+    let lower = model.to_lowercase();
+    let (provider, id) = lower.split_once('/').unwrap_or(("", lower.as_str()));
+    let default = |detail: &'static str| Row::new("default", detail, "default", "");
+    let rows = if id.contains("claude") || provider == "anthropic" || provider == "claude-code" {
+        vec![
+            Row::new("off", "Answer without extended thinking", "default", ""),
+            Row::new("low", "Think briefly (about 1k tokens)", "thinking", "low"),
+            Row::new("medium", "Think it through (about 2k tokens)", "thinking", "medium"),
+            Row::new("high", "Think hard (about 4k tokens)", "thinking", "high"),
+            Row::new("max", "Think longest (about 8k tokens)", "thinking", "xhigh"),
+        ]
+    } else if id.contains("grok") || provider == "xai" || provider == "x-ai" {
+        if id.contains("grok-3-mini") {
+            vec![default("Let the model decide"), Row::new("low", "Quick reasoning", "think", "low"), Row::new("high", "Deeper reasoning", "think", "high")]
+        } else {
+            vec![default("This Grok model sets its own reasoning; pick a reasoning or fast model in /model")]
+        }
+    } else if id.contains("gemini") || provider.starts_with("google") || provider == "vertex-ai" {
+        vec![
+            default("Let the model decide"),
+            Row::new("low", "Light thinking", "think", "low"),
+            Row::new("medium", "Balanced thinking", "think", "medium"),
+            Row::new("high", "Deep thinking", "think", "high"),
+        ]
+    } else {
+        let mut rows = vec![
+            Row::new("none", "Use model default reasoning", "default", ""),
+            Row::new("low", "Fastest reasoning", "think", "low"),
+            Row::new("medium", "Balanced reasoning", "think", "medium"),
+            Row::new("high", "More reasoning", "think", "high"),
+            Row::new("xhigh", "Maximum reasoning", "think", "xhigh"),
+        ];
+        if id.contains("gpt-5.6") { rows.push(Row::new("ultra", "Multi-agent reasoning (GPT-5.6)", "think", "ultra")); }
+        rows
+    };
     rows.into_iter().map(|r| { let current = r.value == current; r.current(current) }).collect()
 }
 
@@ -254,6 +282,19 @@ pub fn connect_methods(provider: &ConnectProvider, methods: &[AuthMethod]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn think_offers_each_model_familys_own_levels() {
+        let values = |model: &str| thinking(model, "high").into_iter().map(|r| r.value).collect::<Vec<_>>();
+        assert_eq!(values("openai/gpt-5.2"), ["", "low", "medium", "high", "xhigh"]);
+        assert_eq!(values("openai/gpt-5.6").last().unwrap(), "ultra");
+        assert_eq!(values("anthropic/claude-sonnet-4-5"), ["", "low", "medium", "high", "xhigh"]);
+        assert_eq!(thinking("anthropic/claude-sonnet-4-5", "xhigh").last().unwrap().title, "max");
+        assert_eq!(values("xai/grok-3-mini"), ["", "low", "high"]);
+        assert_eq!(values("xai/grok-4"), [""]);
+        assert_eq!(values("google/gemini-2.5-pro"), ["", "low", "medium", "high"]);
+        assert!(thinking("google/gemini-2.5-pro", "high").iter().any(|r| r.current && r.value == "high"));
+    }
     use neoism_protocol::agent::ModelInfo;
 
     fn catalog() -> Vec<ProviderInfo> {

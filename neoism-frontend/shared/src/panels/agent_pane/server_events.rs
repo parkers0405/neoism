@@ -248,6 +248,8 @@ pub fn apply_agent_event_to_pane_with_history_kind(
             }
         }
         AgentServerMessage::SessionProjectsChanged => {}
+        // Only the Rune app asks for a fork.
+        AgentServerMessage::ThreadForked { .. } => {}
         AgentServerMessage::ProjectSessionPage {
             directory,
             requested_cursor,
@@ -1464,6 +1466,7 @@ pub fn agent_event_session_id(
         | AgentServerMessage::PermissionRequest { .. }
         | AgentServerMessage::Error { .. }
         | AgentServerMessage::SessionProjectsChanged
+        | AgentServerMessage::ThreadForked { .. }
         | AgentServerMessage::SessionProjects { .. }
         | AgentServerMessage::SessionProjectsFailed { .. }
         | AgentServerMessage::ProjectSessionPage { .. }

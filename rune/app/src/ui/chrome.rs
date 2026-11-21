@@ -230,16 +230,16 @@ fn rail(app: &App) -> El {
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
         .children(washes)
         .child(crate::glass_selection::view(app))
-        .child(button("topbar-menu", "\u{f013}", app.settings.is_some(), |s| if s.settings.is_some() { s.settings = None } else { s.open_settings() })
-            .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("topbar-menu".into(), r); }))
         // A click opens the panel beside what has the keyboard; only Alt+E / Alt+N move it in.
         .child(button("toggle-files", glyph::FOLDER, app.sidebar == Some(Sidebar::Files), |s| s.click_tree(Sidebar::Files)))
         .child(button("toggle-notes", glyph::FILE, app.sidebar == Some(Sidebar::Notes), |s| s.click_tree(Sidebar::Notes)))
         .child(button("toggle-conversations", glyph::SPARKLES, app.sidebar == Some(Sidebar::Conversations), |s| {
             s.toggle_conversations();
         }))
-        .child(button("open-finder", glyph::SEARCH, false, |a| a.open_finder(crate::finder::Mode::Files)))
         .child(servers)
+        // Settings closes the rail's own buttons.
+        .child(button("topbar-menu", "\u{f013}", app.settings.is_some(), |s| if s.settings.is_some() { s.settings = None } else { s.open_settings() })
+            .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("topbar-menu".into(), r); }))
         // Everyone in a shared workspace, this user first (`collab::view`).
         .children(crate::collab::view::rail(app))
 }
@@ -256,7 +256,7 @@ mod rail_selection_tests {
         app.sidebar = Some(Sidebar::Files);
         let mut rt = rune::Runtime::new(app, |a, _| rail(a), (RAIL_W, 500.0), rune::Env::new(true, 1.0));
         for _ in 0..120 { rt.frame(1.0 / 120.0); }
-        rt.pointer_move(27.75, 135.25);
+        rt.pointer_move(27.75, 83.75);
         for _ in 0..60 { rt.frame(1.0 / 120.0); }
         let lens = |rt: &rune::Runtime<App>| {
             let slots: Vec<_> = rt.instances.iter().enumerate().filter(|(_, i)| i.params[1] == rune::render::KIND_EFFECT).collect();
@@ -266,8 +266,8 @@ mod rail_selection_tests {
         let (index, before) = lens(&rt);
         assert!(rt.instances[..index].iter().any(|i| i.rect[2] > 50.0 && (i.rect[3] - 51.5).abs() < 2.0 && i.fill[3] > 0.0), "hover wash must be in the optical backdrop");
         assert!(rt.instances[index + 1..].iter().any(|i| i.params[1] == rune::render::KIND_GLYPH), "original foreground glyphs follow the glass");
-        rt.pointer_down(27.75, 135.25);
-        rt.pointer_up(27.75, 135.25);
+        rt.pointer_down(27.75, 83.75);
+        rt.pointer_up(27.75, 83.75);
         rt.frame(0.08);
         assert_eq!(rt.state.sidebar, Some(Sidebar::Notes), "paint-only hover washes cannot intercept the original button");
         let (_, moving) = lens(&rt);

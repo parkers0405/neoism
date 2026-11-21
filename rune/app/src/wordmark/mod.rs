@@ -104,41 +104,24 @@ impl Wordmark {
         self.tint = tint;
         let Some((width, height, mut pixels)) = decode(ARTWORK) else { return };
         let [tr, tg, tb] = [(tint >> 16) & 0xff, (tint >> 8) & 0xff, tint & 0xff];
-        // A white wordmark on a light page is read by its sides: their shading is deepened so
-        // the faces stay white and the letters still stand off the background.
         let deepen = tint == LIGHT_TINT;
         for px in pixels.chunks_exact_mut(4) {
-            let shade = |v: u8, t: u32| {
-                let level = v as f32 / 255.0;
-                let level = if deepen { level.powf(2.6) } else { level };
-                (level * t as f32).round().min(255.0) as u8
-            };
-            px[0] = shade(px[0], tr);
-            px[1] = shade(px[1], tg);
-            px[2] = shade(px[2], tb);
+            px[0] = (px[0] as u32 * tr / 255) as u8;
+            px[1] = (px[1] as u32 * tg / 255) as u8;
+            px[2] = (px[2] as u32 * tb / 255) as u8;
         }
-        // On a light page the white letters get a dark edge, so they read on any background.
+        // The artwork shades its sides with transparency, which a light page washes out. There
+        // the sides are drawn solid instead: the faces white, the sides in two greys of the
+        // letters' own depth, so the wordmark keeps its edges without a drawn outline.
         if deepen {
-            let (w, h) = (width as usize, height as usize);
-            let solid: Vec<bool> = pixels.chunks_exact(4).map(|px| px[3] > 200).collect();
-            const REACH: isize = 3;
-            for y in 0..h {
-                for x in 0..w {
-                    if solid[y * w + x] { continue; }
-                    let mut nearest = f32::MAX;
-                    for dy in -REACH..=REACH {
-                        for dx in -REACH..=REACH {
-                            let (nx, ny) = (x as isize + dx, y as isize + dy);
-                            if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize || !solid[ny as usize * w + nx as usize] { continue; }
-                            nearest = nearest.min(((dx * dx + dy * dy) as f32).sqrt());
-                        }
-                    }
-                    if nearest > REACH as f32 { continue; }
-                    let edge = (1.0 - (nearest - 2.4).max(0.0)).clamp(0.0, 1.0);
-                    let px = &mut pixels[(y * w + x) * 4..(y * w + x) * 4 + 4];
-                    let alpha = (edge * 235.0) as u8;
-                    px.copy_from_slice(&[0x16, 0x18, 0x1d, alpha.max(px[3])]);
+            let dark = [0x23u8, 0x27, 0x30];
+            for px in pixels.chunks_exact_mut(4) {
+                if px[3] < 24 { continue; }
+                let level = (px[3] as f32 / 255.0).powf(1.6);
+                for (channel, floor) in px.iter_mut().zip(dark) {
+                    *channel = (floor as f32 + (*channel as f32 - floor as f32) * level).round() as u8;
                 }
+                px[3] = 255;
             }
         }
         self.aspect = width as f32 / height as f32;

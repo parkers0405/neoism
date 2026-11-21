@@ -18,6 +18,15 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.composer.picker.as_ref().is_some_and(|p| matches!(p.kind, crate::agent::slash::Kind::Usage | crate::agent::slash::Kind::Tasks | crate::agent::slash::Kind::Goals)) {
         return app.picker_key(event, tx);
     }
+    // A picker above the composer owns its list keys even when its query field has lost the
+    // keyboard (a click on the card, or a reply that rebuilt the picker): without this the
+    // arrows did nothing until the field was clicked again.
+    if app.focus == Focus::Content && matches!(event.key, Key::Up | Key::Down | Key::Enter | Key::Escape)
+        && !event.mods.ctrl && !event.mods.alt && !event.mods.logo
+        && app.composer.picker.as_ref().is_some_and(|p| p.kind != crate::agent::slash::Kind::Slash && p.mention.is_none())
+    {
+        return app.picker_key(event, tx);
+    }
     if app.focus == Focus::Content && app.prompt_key(event) { return true; }
     if shortcut(app, event, tx) { return true; }
     if app.diag_popup.is_some() && app.diag_popup_key(event) { return true; }
@@ -439,12 +448,20 @@ impl App {
         if self.block_filter_focused() && self.field_tab.is_none() && self.tabs.get(self.active).is_some_and(|t| t.draft.focused) {
             if let Some(filter) = active_id.and_then(|id| self.terminals.get_mut(&id)).and_then(|t| t.filter.as_mut()) { filter.1.focused = false; }
         }
+        // An inline picker's query keeps the keyboard while it is open and nothing over it is.
+        let covered = self.project_add.is_some() || self.project_menu.is_some() || self.picker.is_some() || self.finder.is_some()
+            || self.browser.is_some() || self.form.is_some() || self.modal.is_some() || self.menu.is_some() || self.settings.is_some();
+        let mut refocused = false;
+        if inline_picker && !covered && self.focus == Focus::Content && let Some(picker) = self.composer.picker.as_mut().filter(|p| p.mention.is_none() && !p.query.focused) {
+            picker.query.focused = true;
+            refocused = true;
+        }
         let overlay = self.project_add.is_some() || self.project_menu.is_some() || self.picker.is_some() || self.finder.is_some() || self.browser.is_some() || self.form.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
             || self.block_filter_focused();
         let prompt_changed = self.sync_prompt_focus(self.focus == Focus::Content && !overlay);
         let want = self.focus == Focus::Content && !overlay && !self.question_prompt() && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff);
         let active = self.active;
-        let mut changed = prompt_changed;
+        let mut changed = prompt_changed | refocused;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             let focused = want && index == active;
             if tab.draft.focused != focused { tab.draft.focused = focused; changed = true; }

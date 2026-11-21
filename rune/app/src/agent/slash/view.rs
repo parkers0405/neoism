@@ -249,16 +249,21 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
     const SIDE: f32 = 190.0;
     const MODEL_H: f32 = 40.0;
     let (p, s) = (app.pal, app.ty.scale());
-    let [cx, cy, cw, _] = composer;
-    let top = app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s;
+    // Opened out, the card is a modal in the middle of the window with room for more models.
+    let modal = app.composer.card_modal;
+    let [cx, cy, cw, _] = if modal {
+        let w = (820.0 * s).min((app.window[0] - 48.0).max(1.0));
+        [(app.window[0] - w) / 2.0, app.window[1], w, 0.0]
+    } else { composer };
+    let top = if modal { 24.0 } else { app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s };
     let fit = ((cy - top - 6.0 * s - SEARCH_H * s) / (MODEL_H * s)).floor().max(2.0) as usize;
-    let visible = fit.min(7);
+    let visible = fit.min(if modal { 11 } else { 7 });
     picker.limit.set(visible);
     let list_h = visible as f32 * MODEL_H * s + 8.0 * s;
     let body_h = SEARCH_H * s + list_h;
     let height = body_h;
     let favorites = app.favorite_models();
-    let y = (cy - height - 6.0 * s).max(top);
+    let y = if modal { ((app.window[1] - height) / 2.0).max(top) } else { (cy - height - 6.0 * s).max(top) };
     let glyph = |g: &'static str, size: f32, color: u32| text(g).font(TextStyle::new(size * s, 400.0).family(NERD)).color(rgb(color));
     let mark = |provider: &str, name: &str, size: f32| match super::catalog::provider_logo(provider) {
         Some(index) => row_icon(app, Icon::Provider(index), size * s),
@@ -359,7 +364,11 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
         .border_sides([0.0, 0.0, 0.0, 1.0], rgb(p.fg).alpha(0.08))
         .child(rune::row().h(SEARCH_H * s).px(8.0 * s).gap(8.0 * s).center_y()
             .child(text(if model.to_lowercase().contains("claude") { "Thinking" } else { "Reasoning" }).font(sans(13.0 * s, 500.0)).color(rgb(p.dim)).grow(1.0))
-            .child(text(model_name.to_owned()).font(sans(12.0 * s, 400.0)).color(rgb(p.muted)).truncate().shrink()))
+            .child(text(model_name.to_owned()).font(sans(12.0 * s, 400.0)).color(rgb(p.muted)).truncate().shrink())
+            // The corner arrows: open the card out into a modal, or fold it back over the composer.
+            .child(el().key("model-card-expand").w(24.0 * s).h(24.0 * s).radius(6.0 * s).center().hover(rgb(p.fg).alpha(0.1))
+                .child(glyph(if modal { "\u{f0615}" } else { "\u{f0616}" }, 14.0, p.dim))
+                .on_press(|a: &mut App| a.composer.card_modal = !a.composer.card_modal)))
         .child(el().h(1.0).mx(8.0 * s).mb(6.0 * s).fill(rgb(p.fg).alpha(0.08)));
     if model.is_empty() {
         side = side.child(text("Pick a model first").font(sans(12.5 * s, 400.0)).color(rgb(p.muted)).mx(8.0 * s).mt(8.0 * s));
@@ -398,6 +407,7 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
         })
         .child(rune::row().w(cw).h(body_h).child(strip).child(rune::col().w(list_w).h(body_h).child(search).child(list)).child(side));
     let scrim = el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .fill(if modal { Color::BLACK.alpha(0.4) } else { Color::TRANSPARENT })
         .on_press(|a: &mut App| a.dismiss_prompt_picker());
     el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).child(scrim).child(card.absolute(cx, y))
 }

@@ -216,6 +216,8 @@ pub struct App {
     pub finished: std::collections::HashSet<String>,
     /// The reply being answered in particular: its conversation, and its opening words.
     pub reply_to: Option<(String, String)>,
+    /// A fork asked of the daemon and not yet answered.
+    pub fork_pending: Option<std::time::Instant>,
     /// The conversations panel's keyboard stop above the list (New chat or the directory row).
     pub conv_header: Option<crate::agent::ConvHeader>,
     /// The conversations panel's project dropdown, while open.
@@ -447,6 +449,7 @@ impl App {
             thread_paging: Default::default(),
             finished: Default::default(),
             reply_to: None,
+            fork_pending: None,
             conv_header: None,
             project_menu: None,
             project_add: None,

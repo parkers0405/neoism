@@ -193,6 +193,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     app.conversation_follow(tx);
     app.conversation_autoload();
     if let Some(wait) = app.project_add_tick() { wake!("project-add", wait); }
+    if let Some(wait) = app.fork_tick() { wake!("fork", wait); }
     let mode_changing = app.tick_mode_pill() | app.tick_chip_scramble();
     // Wheel and trackpad motion on every scroll view, stepped on the frame clock.
     let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx);
@@ -445,9 +446,10 @@ fn main() {
                 s.composer.selection.model = "anthropic/claude-sonnet-5".into();
                 s.composer.selection.thinking = "high".into();
                 s.open_selection(agent::slash::Kind::Model);
+                if std::env::var_os("NEOISM_RUNE_MODEL_MODAL").is_some() { s.composer.card_modal = true; }
             }),
             ("reply-strip", |s| { s.load_fixture("reply", "Reply strip", include_str!("../fixtures/mcp-timeline.json")); s.reply_to_message("reply", "Hi! What are you working on? I can help with code, answer questions, or review a change."); }),
-            ("reply-bubble", |s| s.load_fixture("reply-bubble", "Reply bubble", r#"[{"id":"u1","role":"User","kind":"User","author":"me","title":"","text":"> Six seveeen. Still going strong, huh?\n\nhi","status":"","tool":"","output_kind":"Text","lang":"","line_offset":null,"detail":"","todos":[],"usage":null,"created_at":1}]"#)),
+            ("reply-bubble", |s| s.load_fixture("reply-bubble", "Reply bubble", r#"[{"id":"u1","role":"User","kind":"User","author":"me","title":"","text":"> Six seveeen. Still going strong, huh? This quoted answer is long enough that it has to wrap inside the chip instead of running out past the edge of the bubble it sits in.\n\nhi","status":"","tool":"","output_kind":"Text","lang":"","line_offset":null,"detail":"","todos":[],"usage":null,"created_at":1}]"#)),
             ("slash", |s| {
                 s.open_tab(tabs::TabKind::Agent { session: None });
                 let i = s.active;

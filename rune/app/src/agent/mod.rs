@@ -435,7 +435,21 @@ impl App {
 
     /// "Fork" under an answer: a new conversation holding this one up to that answer.
     pub fn fork_at(&mut self, session_id: &str, message_id: &str) {
+        if self.fork_pending.is_some() { return; }
         self.send_agent(AgentClientMessage::ForkThread { session_id: session_id.to_owned(), message_id: Some(message_id.to_owned()) });
+        self.fork_pending = Some(std::time::Instant::now());
+    }
+
+    /// A daemon that predates forking never answers the request: say so rather than leave the
+    /// button looking dead. Returns how long is left to wait.
+    pub fn fork_tick(&mut self) -> Option<std::time::Duration> {
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+        let waited = self.fork_pending?.elapsed();
+        if waited < WAIT { return Some(WAIT - waited); }
+        self.fork_pending = None;
+        self.modal = Some(crate::ui::modal::Modal::notice("Fork is not available yet",
+            "The workspace daemon that is running did not answer the fork request.\n\nIt is older than this build of the app. Forking works once Neoism's daemon is restarted on a version that supports it."));
+        None
     }
 
     /// A conversation in the open panel is at work: its status mark needs frames.
@@ -914,6 +928,7 @@ impl App {
                 self.sessions.entry(session_id).or_default().todos = Some(todos);
             }
             AgentServerMessage::ThreadForked { session_id, .. } => {
+                self.fork_pending = None;
                 self.refresh_threads();
                 self.open_conversation(&session_id);
             }

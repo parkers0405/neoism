@@ -69,8 +69,10 @@ pub fn view(app: &App, id: &str, message: &str, attachments: &[neoism_protocol::
         let (quoted, message) = split_reply(&message);
         let mut body = col().max_w(max_w).px(pad).py(PAD_Y * s).gap(8.0 * s).radius(radius).fill(blue);
         if let Some(quoted) = quoted {
-            body = body.child(el().max_w((max_w - 2.0 * pad).max(1.0)).px(10.0 * s).py(6.0 * s).radius(10.0 * s).fill(Color::BLACK.alpha(0.22))
-                .child(text(quoted).font(app.ty.chat_sized(FONT * 0.93).lh(LINE_H * 0.95 * s)).color(Color::WHITE.alpha(0.78)).wrap().max_lines(3)));
+            // The chip is as wide as its text needs, never wider than the bubble's own text column.
+            let inner = (max_w - 2.0 * pad - 20.0 * s).max(1.0);
+            body = body.child(col().max_w(inner + 20.0 * s).px(10.0 * s).py(6.0 * s).radius(10.0 * s).fill(Color::BLACK.alpha(0.22)).clip_rounded(10.0 * s)
+                .child(text(quoted).max_w(inner).font(app.ty.chat_sized(FONT * 0.93).lh(LINE_H * 0.95 * s)).color(Color::WHITE.alpha(0.78)).wrap().max_lines(3)));
         }
         let body = body
             .child(text(message).max_w((max_w - 2.0 * pad).max(1.0))

@@ -378,6 +378,7 @@ impl App {
     /// Close any picker and give the composer its focus back.
     pub fn close_prompt_picker(&mut self) {
         self.composer.picker = None;
+        self.composer.card_modal = false;
         self.composer.pending_model = None;
         self.composer.connect = None;
         self.composer.mcp_server = None;

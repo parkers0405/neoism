@@ -109,8 +109,6 @@ fn exercise(kind: Kind) {
     }
 }
 
-#[test]
-fn models_query_mounts_are_instant_and_navigation_springs() { exercise(Kind::Model); }
-
+// The model picker is its own card now (`model_card`), without the generic list's springs.
 #[test]
 fn connect_query_mounts_are_instant_and_navigation_springs() { exercise(Kind::Connect); }

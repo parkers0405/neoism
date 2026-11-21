@@ -65,7 +65,7 @@ pub struct Composer {
     /// Model choice awaiting account discovery, scoped to its originating tab/session.
     pending_model: Option<(String, u64, Option<String>)>,
     account_choices: BTreeMap<String, String>,
-    providers: Vec<ProviderInfo>,
+    pub(super) providers: Vec<ProviderInfo>,
     /// Only a ready catalog can prove that a selected model is unavailable.
     catalog_ready: bool,
     catalog_received: bool,

@@ -304,6 +304,38 @@ impl App {
             _ => Picker::new(Kind::Thinking, if selection.model.to_lowercase().contains("claude") { "Extended thinking" } else { "Reasoning effort" }, catalog::thinking(&selection.model, &selection.thinking)).select_value(&selection.thinking),
         };
         self.focus_picker(picker);
+        // The model card opens on the provider of the model in use.
+        if kind == Kind::Model && let Some(provider) = self.default_model_provider() { self.select_model_provider(&provider); }
+    }
+
+    /// The provider the model card shows first: the current model's, else the first listed.
+    fn default_model_provider(&self) -> Option<String> {
+        let listed = |id: &str| self.composer.providers.iter().any(|p| p.id == id && !p.models.is_empty());
+        self.composer.selection.model.split_once('/').map(|(p, _)| p.to_owned()).filter(|p| listed(p))
+            .or_else(|| self.composer.providers.iter().find(|p| !p.models.is_empty()).map(|p| p.id.clone()))
+    }
+
+    /// Show one provider's models in the open model card.
+    pub(super) fn select_model_provider(&mut self, provider: &str) {
+        let models = catalog::models(&self.composer.providers);
+        let current = self.composer.selection.model.clone();
+        let rows = catalog::provider_models(&models, provider, &current);
+        let Some(picker) = self.composer.picker.as_mut().filter(|p| p.kind == Kind::Model) else { return };
+        picker.provider = Some(provider.to_owned());
+        picker.replace(rows);
+        picker.set_search(Some(mark_current(&models, &current)));
+        picker.top = 0;
+        picker.selected = picker.rows().iter().position(|r| r.current).or_else(|| picker.rows().iter().position(|r| !r.header)).unwrap_or(0);
+    }
+
+    /// Left/Right in the model card: the provider before or after the one shown.
+    fn step_model_provider(&mut self, delta: isize) {
+        let ids: Vec<String> = self.composer.providers.iter().filter(|p| !p.models.is_empty()).map(|p| p.id.clone()).collect();
+        if ids.is_empty() { return; }
+        let shown = self.composer.picker.as_ref().and_then(|p| p.provider.clone());
+        let at = shown.and_then(|id| ids.iter().position(|p| *p == id)).unwrap_or(0) as isize;
+        let next = (at + delta).rem_euclid(ids.len() as isize) as usize;
+        self.select_model_provider(&ids[next]);
     }
 
     pub(super) fn focus_picker(&mut self, picker: Picker) {
@@ -373,7 +405,7 @@ impl App {
         self.sync_chips();
     }
 
-    fn set_thinking(&mut self, thinking: String) {
+    pub(super) fn set_thinking(&mut self, thinking: String) {
         self.composer.selection.thinking = thinking.clone();
         if let Some(session_id) = self.active_session() { self.agent_send(Client::SetThinkingMode { session_id, thinking }); }
         self.remember_composer_selection();
@@ -555,7 +587,6 @@ impl App {
     pub fn picker_back(&mut self) -> bool {
         let Some(picker) = self.composer.picker.as_mut() else { return false };
         match picker.kind {
-            Kind::Model if picker.provider.is_some() => { self.open_selection(Kind::Model); true }
             Kind::McpActions => { self.open_mcp(); true }
             _ => false,
         }
@@ -587,6 +618,12 @@ impl App {
             }
             return true;
         }
+        // The model card: Left and Right walk the providers while nothing is typed.
+        if picker.kind == Kind::Model && picker.query.text.is_empty() && matches!(event.key, Key::Left | Key::Right) {
+            self.step_model_provider(if event.key == Key::Right { 1 } else { -1 });
+            return true;
+        }
+        let Some(picker) = self.composer.picker.as_mut() else { return false };
         match event.key {
             // Keys arrive through a text field (an instant commit): the slide must animate.
             Key::Up => { tx.animated(); picker.step(-1) }
@@ -853,12 +890,14 @@ impl App {
                         None => catalog::model_root(&catalog, &selection.model, &self.composer.recent_models, &selection.thinking),
                     };
                     picker.replace(rows);
-                    picker.set_search(picker.provider.is_none().then(|| mark_current(&catalog, &selection.model)));
+                    picker.set_search(Some(mark_current(&catalog, &selection.model)));
                     picker.activity = None;
                     if !self.composer.catalog_ready {
                         picker.activity = Some(Activity { status: "Model catalog pending or unavailable".into(), body: "Refresh the model picker to retry. Your draft is preserved.".into(), busy: false, show_input: false, url: None });
                     }
                 }
+                if self.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::Model && p.provider.is_none())
+                    && let Some(provider) = self.default_model_provider() { self.select_model_provider(&provider); }
                 true
             }
             Server::AgentCatalog { agents } => {

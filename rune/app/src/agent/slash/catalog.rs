@@ -70,11 +70,7 @@ pub fn model_root(catalog: &[Row], current: &str, recent: &[String], effort: &st
             .current(is_current).icon(provider_id(value).and_then(provider_logo).map(Icon::Provider)));
     }
     if !out.is_empty() { out.insert(0, Row::header("Recent")); }
-    // How hard the model in use thinks, chosen in place (`think:<level>`).
-    if current.contains('/') {
-        out.push(Row::header("Thinking"));
-        out.extend(thinking(current, effort).into_iter().map(|mut row| { row.value = format!("{THINK}{}", row.value); row.footer.clear(); row }));
-    }
+    let _ = effort;
     out.push(Row::header("Providers"));
     let mut providers: Vec<(String, String, usize, bool)> = Vec::new();
     for row in catalog.iter().filter(|r| !r.header) {
@@ -328,12 +324,10 @@ mod tests {
         let rows = models(&catalog());
         let root = model_root(&rows, "openai/gpt-6.1-sol", &["openai/gpt-6.1-sol".into(), "gone/x".into()], "");
         let titles: Vec<&str> = root.iter().map(|r| r.title.as_str()).collect();
-        assert_eq!(titles, ["Recent", "GPT-6.1 Sol", "Thinking", "none", "low", "medium", "high", "xhigh", "Providers", "OpenAI", "DeepSeek", "Connect", "Connect a provider"]);
+        assert_eq!(titles, ["Recent", "GPT-6.1 Sol", "Providers", "OpenAI", "DeepSeek", "Connect", "Connect a provider"]);
         assert_eq!(root[1].footer, "selected");
-        assert_eq!(root[4].value, "think:low");
-        assert!(root[3].current, "the default level is ticked when none is set");
-        assert_eq!(root[9].footer, "2 models");
-        assert!(root[9].current);
+        assert_eq!(root[3].footer, "2 models");
+        assert!(root[3].current);
         assert_eq!(provider_models(&rows, "openai", "openai/gpt-5").iter().filter(|r| r.current).count(), 1);
     }
 

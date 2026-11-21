@@ -83,6 +83,7 @@ pub fn picker_card(app: &App) -> El {
     if picker.kind == Kind::Usage { return super::usage::view(app, composer); }
     if picker.kind == Kind::Tasks { return super::tasks::view(app, composer); }
     if picker.kind == Kind::Goals { return super::goals::view(app, composer); }
+    if picker.kind == Kind::Model && picker.activity.is_none() { return model_card(app, picker, composer); }
     // As many rows as fit between the agent pane's top (8 pt under its tab row, never over the
     // chrome) and 6 pt above the composer.
     let top = app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s;
@@ -236,6 +237,128 @@ pub fn picker_card(app: &App) -> El {
     let layer = el().key("prompt-picker-layer").transition(rune::Transition::none()).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
     let layer = if picker.kind == Kind::Slash || picker.mention.is_some() { layer } else { layer.child(scrim) };
     layer.child(card.absolute(cx, y))
+}
+
+/// The model card: providers down the left as their marks (an add button under them opens the
+/// connect flow), a search field over the shown provider's models, and the thinking level as
+/// a segmented bar along the bottom.
+fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
+    const STRIP: f32 = 56.0;
+    const SEARCH_H: f32 = 46.0;
+    const BAR_H: f32 = 56.0;
+    const MODEL_H: f32 = 40.0;
+    let (p, s) = (app.pal, app.ty.scale());
+    let [cx, cy, cw, _] = composer;
+    let top = app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s;
+    let fit = ((cy - top - 6.0 * s - (SEARCH_H + BAR_H) * s) / (MODEL_H * s)).floor().max(2.0) as usize;
+    let visible = fit.min(7);
+    picker.limit.set(visible);
+    let list_h = visible as f32 * MODEL_H * s + 8.0 * s;
+    let body_h = SEARCH_H * s + list_h;
+    let height = body_h + BAR_H * s;
+    let y = (cy - height - 6.0 * s).max(top);
+    let glyph = |g: &'static str, size: f32, color: u32| text(g).font(TextStyle::new(size * s, 400.0).family(NERD)).color(rgb(color));
+    let mark = |provider: &str, name: &str, size: f32| match super::catalog::provider_logo(provider) {
+        Some(index) => row_icon(app, Icon::Provider(index), size * s),
+        None => text(name.chars().next().unwrap_or('?').to_uppercase().to_string()).font(sans(size * 0.8 * s, 600.0)).color(rgb(p.fg)),
+    };
+
+    // Providers: a mark each, the shown one filled with an accent bar; add at the foot.
+    let searching = !picker.query.text.trim().is_empty();
+    let shown = picker.provider.as_deref().filter(|_| !searching);
+    let mut strip = rune::col().key("model-providers").w(STRIP * s).h(body_h).py(8.0 * s).gap(4.0 * s).items_center()
+        .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.fg).alpha(0.08));
+    for provider in app.composer.providers.iter().filter(|provider| !provider.models.is_empty()) {
+        let on = shown == Some(provider.id.as_str());
+        let id = provider.id.clone();
+        strip = strip.child(el().key(format!("model-provider:{}", provider.id)).w(STRIP * s).h(40.0 * s).center()
+            .child(el().w(38.0 * s).h(38.0 * s).radius(10.0 * s).center()
+                .fill(if on { rgb(p.fg).alpha(0.1) } else { Color::TRANSPARENT }).hover(rgb(p.fg).alpha(0.1))
+                .opacity(if on { 1.0 } else { 0.6 })
+                .child(mark(&provider.id, &provider.name, 20.0)))
+            .child(el().w(3.0 * s).h(20.0 * s).radius(1.5 * s).fill(if on { rgb(p.blue) } else { Color::TRANSPARENT }).absolute(STRIP * s - 5.0 * s, 10.0 * s))
+            .on_press(move |a: &mut App| a.select_model_provider(&id)));
+    }
+    strip = strip.child(el().grow(1.0)).child(el().key("model-connect").w(38.0 * s).h(38.0 * s).radius(10.0 * s).center()
+        .border(1.0, rgb(p.fg).alpha(0.12)).hover(rgb(p.fg).alpha(0.1))
+        .child(glyph("\u{f0415}", 16.0, p.dim))
+        .on_press(|a: &mut App| a.open_connect()));
+
+    let list_w = cw - STRIP * s;
+    let search = el().key("picker-header").w(list_w).h(SEARCH_H * s).instant_changes()
+        .child(glyph(crate::ui::theme::glyph::SEARCH_LINE, 14.0, p.muted).absolute(16.0 * s, 15.0 * s))
+        .child(query_row(app, picker, list_w - 60.0 * s).absolute(40.0 * s, 13.0 * s))
+        .child(el().w(list_w - 28.0 * s).h(1.5 * s).fill(rgb(p.blue).alpha(0.75)).absolute(14.0 * s, SEARCH_H * s - 2.0 * s));
+
+    // The provider's models, or every match while searching.
+    let rows = picker.rows();
+    let first = picker.top.min(rows.len().saturating_sub(visible));
+    let mut list = el().key("picker-list").w(list_w).h(list_h).clip_rounded(0.0);
+    for (slot, (index, row)) in rows.iter().enumerate().skip(first).take(visible).enumerate() {
+        let item_y = 6.0 * s + slot as f32 * MODEL_H * s;
+        if row.header {
+            list = list.child(text(row.title.clone()).key(format!("model-head:{index}")).font(sans(11.5 * s, 600.0)).color(rgb(p.muted)).absolute(18.0 * s, item_y + 15.0 * s));
+            continue;
+        }
+        let selected = index == picker.selected;
+        let provider = row.value.split_once('/').map(|(provider, _)| provider).unwrap_or_default();
+        let mut item = el().key(format!("picker-row:{index}")).w(list_w).h(MODEL_H * s).absolute(0.0, item_y)
+            .child(el().w(list_w - 16.0 * s).h(MODEL_H * s - 4.0 * s).radius(8.0 * s).absolute(8.0 * s, 2.0 * s)
+                .fill(if selected { rgb(p.fg).alpha(0.07) } else { Color::TRANSPARENT }))
+            .child(mark(provider, &row.section, 16.0).absolute(18.0 * s, (MODEL_H - 16.0) * 0.5 * s))
+            .child(text(row.title.clone()).font(sans(14.0 * s, 500.0)).color(rgb(p.fg)).truncate().max_w((list_w - 190.0 * s).max(60.0)).absolute(44.0 * s, 10.0 * s));
+        let right = list_w - if row.current { 46.0 * s } else { 20.0 * s };
+        if !row.footer.is_empty() {
+            item = item.child(text(row.footer.clone()).font(mono(11.0 * s, false)).color(rgb(p.muted)).absolute(right - width_of(&row.footer, 11.0 * s), 13.0 * s));
+        }
+        if row.current {
+            item = item.child(glyph(crate::ui::theme::glyph::CHECK, 12.0, p.fg).absolute(list_w - 36.0 * s, 13.0 * s));
+        }
+        list = list.child(item
+            .on_pointer_move(move |a: &mut App, _| { if let Some(picker) = a.composer.picker.as_mut().filter(|p| p.selected != index) { picker.selected = index; } })
+            .on_press_tx(move |a: &mut App, tx: &mut Tx| a.accept_picker_row(Some(index), tx)));
+    }
+    if rows.is_empty() {
+        let note = if picker.loading { "Loading models\u{2026}" } else if app.composer.providers.is_empty() { "No providers yet. Use + to connect one." } else { "No models found" };
+        list = list.child(text(note).font(sans(13.0 * s, 400.0)).color(rgb(p.muted)).absolute(18.0 * s, 16.0 * s));
+    }
+
+    // Thinking: one track, a segment a level, the level in use raised.
+    let model = &app.composer.selection.model;
+    let levels = super::catalog::thinking(model, &app.composer.selection.thinking);
+    let mut bar = rune::row().key("model-thinking").w(cw).h(BAR_H * s).px(16.0 * s).gap(12.0 * s).center_y()
+        .border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.fg).alpha(0.08))
+        .child(text(if model.to_lowercase().contains("claude") { "Thinking" } else { "Reasoning" }).font(sans(13.0 * s, 500.0)).color(rgb(p.dim)));
+    if model.is_empty() {
+        bar = bar.child(text("Pick a model to set how hard it thinks").font(sans(12.5 * s, 400.0)).color(rgb(p.muted)));
+    } else if levels.len() < 2 {
+        bar = bar.child(text(levels.first().map(|r| r.description.clone()).unwrap_or_default()).font(sans(12.5 * s, 400.0)).color(rgb(p.muted)).truncate().shrink());
+    } else {
+        let mut track = rune::row().grow(1.0).h(32.0 * s).padding(3.0 * s).gap(2.0 * s).radius(16.0 * s).fill(rgb(p.fg).alpha(0.06));
+        for level in levels {
+            let value = level.value.clone();
+            let mut name = level.title.clone();
+            if let Some(first) = name.get_mut(0..1) { first.make_ascii_uppercase(); }
+            track = track.child(rune::row().key(format!("think:{}", level.title)).grow(1.0).h_full().radius(13.0 * s).center()
+                .fill(if level.current { rgb(p.fg).alpha(0.16) } else { Color::TRANSPARENT }).hover(rgb(p.fg).alpha(0.1))
+                .child(text(name).font(sans(12.5 * s, if level.current { 600.0 } else { 400.0 })).color(rgb(if level.current { p.fg } else { p.dim })))
+                .on_press(move |a: &mut App| a.set_thinking(value.clone())));
+        }
+        bar = bar.child(track);
+    }
+
+    let card = rune::col().key("prompt-picker").w(cw).h(height).fill(rgb(p.bg)).radius(RADIUS * s).border(1.0, rgb(p.fg).alpha(0.1))
+        .shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45)).transition(rune::Transition::none()).clip_rounded(RADIUS * s)
+        .on_press(|_: &mut App| {})
+        .on_wheel(move |a: &mut App, e: WheelEvent, _: &mut Tx| {
+            if let Some(picker) = a.composer.picker.as_mut() { picker.scroll(if e.dy < 0.0 { 1 } else { -1 }); }
+            true
+        })
+        .child(rune::row().w(cw).h(body_h).child(strip).child(rune::col().w(list_w).h(body_h).child(search).child(list)))
+        .child(bar);
+    let scrim = el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .on_press(|a: &mut App| a.dismiss_prompt_picker());
+    el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).child(scrim).child(card.absolute(cx, y))
 }
 
 /// The header's query row: the composer's own text for `/`, else this picker's field.

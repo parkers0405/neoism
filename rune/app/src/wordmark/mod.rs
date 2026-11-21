@@ -93,6 +93,16 @@ pub struct Wordmark {
 /// The letters on a light theme: a cool, clean white (no cream in it).
 pub const LIGHT_TINT: u32 = 0xf6f9ff;
 
+/// The flying pieces of a click effect on a light theme: white would vanish against the page,
+/// so they take the letters' own side colour.
+pub const LIGHT_EFFECT: u32 = 0x23272f;
+
+/// What a click effect's pieces are drawn in for letters tinted `tint`.
+fn effect_tint(tint: u32) -> u32 {
+    if tint != LIGHT_TINT { return tint; }
+    std::env::var("NEOISM_RUNE_WORDMARK_EFFECT").ok().and_then(|hex| u32::from_str_radix(hex.trim_start_matches('#'), 16).ok()).unwrap_or(LIGHT_EFFECT)
+}
+
 /// The wordmark's letter colour for a theme: its ink on dark themes, white on light ones.
 pub fn tint_for(pal: &crate::ui::theme::Palette) -> u32 {
     if crate::ui::theme::is_dark(pal.bg) { pal.fg } else { LIGHT_TINT }
@@ -266,7 +276,7 @@ pub fn view(app: &App, key: &str, width: f32) -> El {
     if let Some(frame) = frame {
         // The original's paint bounds: cells may fly well outside the artwork.
         let clip = [-width, -height * 4.0, width * 3.0, height * 9.0];
-        let tint = rgb(mark.tint);
+        let tint = rgb(effect_tint(mark.tint));
         let mut shape = Shape::new().view_box(clip[2], clip[3]);
         for (i, &(rect, _)) in letters.iter().enumerate() {
             frame.letter_quads(i, rect, |quad, alpha| {

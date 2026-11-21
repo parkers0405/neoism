@@ -340,6 +340,16 @@ fn main() {
                 }
                 s.wordmark.fire_enabled = true;
             }),
+            ("welcome-fire-light-click", |s| {
+                s.pal = ui::theme::palette("neoism_light");
+                if let Some(images) = &s.images {
+                    s.wordmark.load(images, wordmark::tint_for(s.pal));
+                    for letter in &s.wordmark.letters { let _ = letter.wait(); }
+                }
+                s.wordmark.fire_enabled = true;
+                let key = wordmark::host_key("splash", s.active_tab().id);
+                s.wordmark.replay(&key);
+            }),
             ("welcome-fire-themed", |s| {
                 s.pal = ui::theme::palette("catppuccin_mocha");
                 if let Some(images) = &s.images {

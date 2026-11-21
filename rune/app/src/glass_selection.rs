@@ -6,9 +6,9 @@ use rune::{El, el};
 const MARK: u32 = 0x4e475301;
 
 pub fn active(app: &App) -> Option<usize> {
-    if app.menu.is_some() { return Some(0); }
-    if app.finder.is_some() { return Some(4); }
-    if app.picker.as_ref().is_some_and(|p| p.mode == crate::palette::Mode::Systems) { return Some(5); }
+    // The rail's buttons, top to bottom: files, notes, agent, servers, settings.
+    if app.settings.is_some() { return Some(4); }
+    if app.picker.as_ref().is_some_and(|p| p.mode == crate::palette::Mode::Systems) { return Some(3); }
     match app.sidebar {
         Some(Sidebar::Files) => Some(0),
         Some(Sidebar::Notes) => Some(1),
